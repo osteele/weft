@@ -1,0 +1,8 @@
+# Remote Jobs Configuration
+# Copy this file to ~/.config/remote-jobs/config and fill in your values.
+#
+# Alternatively, export these as environment variables in your shell profile.
+
+# Slack webhook URL for job completion notifications
+# Get one at: https://api.slack.com/messaging/webhooks
+SLACK_WEBHOOK=https://hooks.slack.com/services/XXXXXXXXX/YYYYYYYYYYY/zzzzzzzzzzzzzzzzzzzzzzzz
