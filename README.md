@@ -1,6 +1,6 @@
-# Remote Job Utilities
+# Remote Jobs
 
-Utilities for running persistent tmux sessions on remote hosts that survive SSH disconnections.
+A CLI tool for running persistent tmux sessions on remote hosts that survive SSH disconnections.
 
 ## Problem Solved
 
@@ -9,21 +9,34 @@ When running long-running training jobs or analysis scripts on remote machines v
 - Your network disconnects
 - SSH times out
 
-These utilities use tmux to create persistent sessions that continue running even when you disconnect.
+Remote Jobs uses tmux to create persistent sessions that continue running even when you disconnect.
 
-## Scripts
+## Installation
 
-### run-remote.sh
+```bash
+go install github.com/osteele/remote-jobs@latest
+```
+
+Or build from source:
+```bash
+git clone https://github.com/osteele/remote-jobs
+cd remote-jobs
+go install .
+```
+
+## Commands
+
+### remote-jobs run
 
 Start a persistent tmux session on a remote host.
 
 ```bash
-run-remote.sh [options] <host> <command...>
+remote-jobs run [flags] <host> <command...>
 ```
 
-**Options:**
+**Flags:**
 - `-n, --name NAME`: Session name (default: auto-generated from command)
-- `-C, --directory DIR`: Working directory (default: same path as local cwd)
+- `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job (for logging and queries)
 - `--queue`: Queue job for later instead of running now
 - `--queue-on-fail`: Queue job if connection fails
@@ -31,42 +44,37 @@ run-remote.sh [options] <host> <command...>
 **Examples:**
 ```bash
 # Basic usage (auto-generates session name, uses current directory path)
-~/code/utils/remote-jobs/run-remote.sh cool30 'python train.py'
+remote-jobs run cool30 'python train.py'
 
 # With description (recommended)
-~/code/utils/remote-jobs/run-remote.sh -d "Training GPT-2 with lr=0.001" cool30 'with-gpu python train.py --lr 0.001'
+remote-jobs run -d "Training GPT-2 with lr=0.001" cool30 'with-gpu python train.py --lr 0.001'
 
 # Explicit session name and working directory
-~/code/utils/remote-jobs/run-remote.sh -n train-gpt2 -C /mnt/code/LM2 cool30 'with-gpu python train.py'
+remote-jobs run -n train-gpt2 -C /mnt/code/LM2 cool30 'with-gpu python train.py'
 
 # Queue for later (doesn't start immediately)
-~/code/utils/remote-jobs/run-remote.sh --queue -d "Training run" cool30 'python train.py'
+remote-jobs run --queue -d "Training run" cool30 'python train.py'
 
 # Auto-queue if connection fails
-~/code/utils/remote-jobs/run-remote.sh --queue-on-fail -d "Training run" cool30 'python train.py'
+remote-jobs run --queue-on-fail -d "Training run" cool30 'python train.py'
 ```
 
-The script:
+The command:
 - Archives any existing log file for this session name (renamed with timestamp)
 - Saves job metadata (for restart capability)
 - Creates a detached tmux session on the remote host
-- **Records the job in a local SQLite database** (`~/.config/remote-jobs/jobs.db`)
+- Records the job in a local SQLite database (`~/.config/remote-jobs/jobs.db`)
 - Captures exit code when job completes
 - Sends Slack notification on completion (if configured)
 - Returns immediately (non-blocking)
 - Prints the job ID and instructions for monitoring
 
-### check-jobs.sh
+### remote-jobs check
 
 Check the status of all running tmux sessions on a remote host.
 
 ```bash
-check-jobs.sh <host>
-```
-
-**Example:**
-```bash
-~/code/utilities/remote-jobs/check-jobs.sh cool30
+remote-jobs check <host>
 ```
 
 Shows:
@@ -74,26 +82,16 @@ Shows:
 - Status of each job (RUNNING or FINISHED)
 - Exit code for finished jobs (success ✓ or failure ✗)
 - Last 10 lines of output from each session
-- **Updates the local database** when status changes are detected
-- **Detects dead jobs** that terminated without completing normally
+- Updates the local database when status changes are detected
+- Detects dead jobs that terminated without completing normally
 
-### check-status.sh
+### remote-jobs status
 
 Check the status of a specific job (with database quick-path).
 
 ```bash
-check-status.sh <host> <session-name>
+remote-jobs status <host> <session>
 ```
-
-**Example:**
-```bash
-~/code/utilities/remote-jobs/check-status.sh cool30 train-gpt2
-```
-
-This is faster than `check-jobs.sh` for checking a single job because it:
-- First checks the local database for terminated jobs
-- Only queries the remote host if the job is still running
-- Updates the database if status has changed
 
 **Exit codes:**
 - `0`: Job completed successfully
@@ -101,15 +99,20 @@ This is faster than `check-jobs.sh` for checking a single job because it:
 - `2`: Job is still running
 - `3`: Job not found
 
-### list-jobs.sh
+This is faster than `check` for checking a single job because it:
+- First checks the local database for terminated jobs
+- Only queries the remote host if the job is still running
+- Updates the database if status has changed
+
+### remote-jobs list
 
 Query and search job history from the local database.
 
 ```bash
-list-jobs.sh [options]
+remote-jobs list [flags]
 ```
 
-**Options:**
+**Flags:**
 - `--running`: Show only running jobs
 - `--completed`: Show only completed jobs
 - `--dead`: Show only dead jobs
@@ -122,108 +125,94 @@ list-jobs.sh [options]
 
 **Examples:**
 ```bash
-~/code/utilities/remote-jobs/list-jobs.sh                       # Recent jobs
-~/code/utilities/remote-jobs/list-jobs.sh --running             # Running jobs
-~/code/utilities/remote-jobs/list-jobs.sh --pending             # Pending jobs
-~/code/utilities/remote-jobs/list-jobs.sh --host cool30         # Jobs on cool30
-~/code/utilities/remote-jobs/list-jobs.sh --search training     # Search jobs
-~/code/utilities/remote-jobs/list-jobs.sh --show 42             # Job details
-~/code/utilities/remote-jobs/list-jobs.sh --cleanup 30          # Remove old jobs
+remote-jobs list                       # Recent jobs
+remote-jobs list --running             # Running jobs
+remote-jobs list --pending             # Pending jobs
+remote-jobs list --host cool30         # Jobs on cool30
+remote-jobs list --search training     # Search jobs
+remote-jobs list --show 42             # Job details
+remote-jobs list --cleanup 30          # Remove old jobs
 ```
 
-### view-log.sh
+### remote-jobs log
 
 View the full log file for a job.
 
 ```bash
-view-log.sh <host> <session-name> [--follow|-f] [--lines|-n <N>]
+remote-jobs log <host> <session> [flags]
 ```
+
+**Flags:**
+- `-f, --follow`: Follow log in real-time (like `tail -f`)
+- `-n, --lines N`: Number of lines to show (default: 50)
 
 **Examples:**
 ```bash
-~/code/utilities/remote-jobs/view-log.sh cool30 train-gpt2           # Last 50 lines
-~/code/utilities/remote-jobs/view-log.sh cool30 train-gpt2 -f        # Follow (like tail -f)
-~/code/utilities/remote-jobs/view-log.sh cool30 train-gpt2 -n 100    # Last 100 lines
+remote-jobs log cool30 train-gpt2           # Last 50 lines
+remote-jobs log cool30 train-gpt2 -f        # Follow (like tail -f)
+remote-jobs log cool30 train-gpt2 -n 100    # Last 100 lines
 ```
 
-Also **updates the local database** if the job status has changed.
-
-### restart-job.sh
+### remote-jobs restart
 
 Restart a job using its saved metadata.
 
 ```bash
-restart-job.sh <host> <session-name>
-```
-
-**Example:**
-```bash
-~/code/utilities/remote-jobs/restart-job.sh cool30 train-gpt2
+remote-jobs restart <host> <session>
 ```
 
 This kills the existing session (if any) and starts a new one with the same command and working directory.
 
-### retry-job.sh
+### remote-jobs retry
 
 Retry pending jobs that couldn't start (e.g., due to connection failures).
 
 ```bash
-retry-job.sh <job-id> [--host <new-host>]
-retry-job.sh --list [--host <host>]
-retry-job.sh --all [--host <host>]
-retry-job.sh --delete <job-id>
+remote-jobs retry <job-id> [--host <new-host>]
+remote-jobs retry --list [--host <host>]
+remote-jobs retry --all [--host <host>]
+remote-jobs retry --delete <job-id>
 ```
 
 **Examples:**
 ```bash
-~/code/utilities/remote-jobs/retry-job.sh --list               # List pending jobs
-~/code/utilities/remote-jobs/retry-job.sh 42                   # Retry job #42
-~/code/utilities/remote-jobs/retry-job.sh 42 --host studio     # Retry on different host
-~/code/utilities/remote-jobs/retry-job.sh --all                # Retry all pending jobs
-~/code/utilities/remote-jobs/retry-job.sh --all --host cool30  # Retry pending jobs for cool30
-~/code/utilities/remote-jobs/retry-job.sh --delete 42          # Remove pending job
+remote-jobs retry --list               # List pending jobs
+remote-jobs retry 42                   # Retry job #42
+remote-jobs retry 42 --host studio     # Retry on different host
+remote-jobs retry --all                # Retry all pending jobs
+remote-jobs retry --all --host cool30  # Retry pending jobs for cool30
+remote-jobs retry --delete 42          # Remove pending job
 ```
 
-### cleanup-jobs.sh
+### remote-jobs cleanup
 
 Clean up finished sessions and old log files.
 
 ```bash
-cleanup-jobs.sh <host> [--sessions] [--logs] [--older-than <days>] [--dry-run]
+remote-jobs cleanup <host> [flags]
 ```
+
+**Flags:**
+- `--sessions`: Kill finished sessions only
+- `--logs`: Remove archived log files only
+- `--older-than N`: Only clean items older than N days (default: 7)
+- `--dry-run`: Preview without actually deleting
 
 **Examples:**
 ```bash
-~/code/utilities/remote-jobs/cleanup-jobs.sh cool30                    # Clean both
-~/code/utilities/remote-jobs/cleanup-jobs.sh cool30 --sessions         # Only finished sessions
-~/code/utilities/remote-jobs/cleanup-jobs.sh cool30 --logs --older-than 3  # Logs > 3 days old
-~/code/utilities/remote-jobs/cleanup-jobs.sh cool30 --dry-run          # Preview only
+remote-jobs cleanup cool30                    # Clean both
+remote-jobs cleanup cool30 --sessions         # Only finished sessions
+remote-jobs cleanup cool30 --logs --older-than 3  # Logs > 3 days old
+remote-jobs cleanup cool30 --dry-run          # Preview only
 ```
 
-### kill-job.sh
+### remote-jobs kill
 
 Kill a specific tmux session on a remote host.
 
 ```bash
-kill-job.sh <host> <session-name>
+remote-jobs kill <host> <session>
 ```
-
-**Example:**
-```bash
-~/code/utilities/remote-jobs/kill-job.sh cool30 train-gpt2
-```
-
-## Claude Skills
-
-Claude skills are available in `~/.claude/skills/remote-jobs/` for natural language interaction:
-
-- **start-job**: "Start a job on cool30" or "Run the training script on cool30"
-- **check-jobs**: "Check my jobs on cool30" or "What's running on cool30?"
-- **check-status**: "Is the train-gpt2 job done?" or "Check status of my training job"
-- **list-jobs**: "Show my recent jobs" or "What jobs have I run on cool30?"
-- **view-log**: "Show the log for train-gpt2" or "What's the output of my training job?"
-- **pending-jobs**: "Show pending jobs" or "Queue job for later" or "Retry pending jobs"
-- **kill-job**: "Kill the train-gpt2 job on cool30"
 
 ## Job Database
 
@@ -265,15 +254,12 @@ To receive Slack notifications when jobs complete:
 1. Go to [https://api.slack.com/apps](https://api.slack.com/apps)
 2. Click "Create New App" → "From scratch"
 3. Name your app (e.g., "Remote Jobs") and select your workspace
-4. Configure the app:
-   - **Description**: "Shell utilities for running detached long-running jobs on remote hosts via SSH + tmux"
-   - **Background color**: `#2E7D32`
-5. In the sidebar, click "Incoming Webhooks"
-6. Toggle "Activate Incoming Webhooks" to On
-7. Click "Add New Webhook to Workspace" at the bottom
-8. Select the channel where you want notifications (e.g., #jobs or a DM to yourself)
-9. Click "Allow"
-10. Copy the Webhook URL (starts with `https://hooks.slack.com/services/`)
+4. In the sidebar, click "Incoming Webhooks"
+5. Toggle "Activate Incoming Webhooks" to On
+6. Click "Add New Webhook to Workspace" at the bottom
+7. Select the channel where you want notifications
+8. Click "Allow"
+9. Copy the Webhook URL (starts with `https://hooks.slack.com/services/`)
 
 ### 2. Configure the Webhook
 
@@ -287,8 +273,7 @@ export REMOTE_JOBS_SLACK_WEBHOOK="https://hooks.slack.com/services/T.../B.../...
 **Config file:**
 ```bash
 mkdir -p ~/.config/remote-jobs
-cp config.example ~/.config/remote-jobs/config
-# Edit the file with your webhook URL
+echo "SLACK_WEBHOOK=https://hooks.slack.com/services/..." > ~/.config/remote-jobs/config
 ```
 
 ### What You'll Get
@@ -306,8 +291,8 @@ Notifications include:
 
 ## How It Works
 
-1. **run-remote.sh** creates a detached tmux session via SSH
+1. `remote-jobs run` creates a detached tmux session via SSH
 2. The SSH command returns immediately (non-blocking)
 3. The tmux session continues running on the remote host
 4. You can close your laptop, disconnect, etc.
-5. **check-jobs.sh** or **ssh + tmux attach** lets you check on the job later
+5. `remote-jobs check` or `ssh + tmux attach` lets you check on the job later
