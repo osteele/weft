@@ -18,21 +18,32 @@ These utilities use tmux to create persistent sessions that continue running eve
 Start a persistent tmux session on a remote host.
 
 ```bash
-run-remote.sh [options] <host> <session-name> <working-dir> <command...>
+run-remote.sh [options] <host> <command...>
 ```
 
 **Options:**
+- `-n, --name NAME`: Session name (default: auto-generated from command)
+- `-C, --directory DIR`: Working directory (default: same path as local cwd)
 - `-d, --description TEXT`: Description of the job (for logging and queries)
+- `--queue`: Queue job for later instead of running now
+- `--queue-on-fail`: Queue job if connection fails
 
 **Examples:**
 ```bash
-# Basic usage
-~/code/utilities/remote-jobs/run-remote.sh cool30 train-gpt2 /mnt/nvme3n1/oliver/code/LM2 \
-  'with-gpu python lm_regularization/examples/train_with_all.py --model_name gpt2 --epoch 20 --quick'
+# Basic usage (auto-generates session name, uses current directory path)
+~/code/utils/remote-jobs/run-remote.sh cool30 'python train.py'
 
 # With description (recommended)
-~/code/utilities/remote-jobs/run-remote.sh -d "Training GPT-2 with lr=0.001" cool30 train-gpt2 \
-  /mnt/nvme3n1/oliver/code/LM2 'with-gpu python train.py --lr 0.001'
+~/code/utils/remote-jobs/run-remote.sh -d "Training GPT-2 with lr=0.001" cool30 'with-gpu python train.py --lr 0.001'
+
+# Explicit session name and working directory
+~/code/utils/remote-jobs/run-remote.sh -n train-gpt2 -C /mnt/code/LM2 cool30 'with-gpu python train.py'
+
+# Queue for later (doesn't start immediately)
+~/code/utils/remote-jobs/run-remote.sh --queue -d "Training run" cool30 'python train.py'
+
+# Auto-queue if connection fails
+~/code/utils/remote-jobs/run-remote.sh --queue-on-fail -d "Training run" cool30 'python train.py'
 ```
 
 The script:
@@ -151,24 +162,6 @@ restart-job.sh <host> <session-name>
 ```
 
 This kills the existing session (if any) and starts a new one with the same command and working directory.
-
-### queue-job.sh
-
-Queue a job for later execution without starting it now.
-
-```bash
-queue-job.sh [options] <host> <session-name> <working-dir> <command...>
-```
-
-**Options:**
-- `-d, --description TEXT`: Description of the job
-
-**Example:**
-```bash
-~/code/utilities/remote-jobs/queue-job.sh -d "Training run" cool30 train /mnt/code/LM2 'python train.py'
-```
-
-The job is saved as "pending" and can be started later with `retry-job.sh`.
 
 ### retry-job.sh
 

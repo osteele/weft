@@ -3,15 +3,19 @@
 # Persistent job runner using tmux on remote host
 #
 # Usage:
-#   run-remote.sh [options] <host> <session-name> <working-dir> <command...>
+#   run-remote.sh [options] <host> <command...>
 #
 # Options:
+#   -n, --name NAME         Session name (default: auto-generated from command)
+#   -C, --directory DIR     Working directory (default: same path as local cwd)
 #   -d, --description TEXT  Description of the job (for logging and queries)
+#   --queue                 Queue job for later instead of running now
+#   --queue-on-fail         Queue job if connection fails
 #
 # Examples:
-#   run-remote.sh cool30 train-gpt2 /mnt/nvme3n1/oliver/code/LM2 with-gpu python train.py ...
-#   run-remote.sh -d "Training GPT-2 with new hyperparameters" cool30 train-gpt2 /mnt/code/LM2 python train.py
-#   run-remote.sh cool30 analysis /mnt/nvme3n1/oliver/code/LM2 python scripts/perf_report.py
+#   run-remote.sh cool30 'python train.py'
+#   run-remote.sh -d "Training GPT-2" cool30 'with-gpu python train.py'
+#   run-remote.sh -n train-gpt2 -C /mnt/code/LM2 cool30 'python train.py'
 #
 
 set -euo pipefail
@@ -20,6 +24,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source database functions
 source "$SCRIPT_DIR/db.sh"
+
+# Generate a session name from a command
+# e.g., "python train.py" -> "python-train"
+# e.g., "with-gpu python script.py" -> "python-script"
+generate_session_name() {
+    local cmd="$1"
+    # Skip common prefixes like 'with-gpu'
+    local cleaned
+    cleaned=$(echo "$cmd" | sed -E 's/^(with-gpu|env [^ ]+) //')
+    # Extract first two words, remove file extensions, join with dash
+    echo "$cleaned" | awk '{
+        # Get program name (first word)
+        prog = $1
+        sub(/.*\//, "", prog)  # Remove path
+        # Get first arg (second word)
+        arg = $2
+        sub(/.*\//, "", arg)   # Remove path
+        sub(/\.[^.]+$/, "", arg)  # Remove extension
+        # Remove common flags
+        if (arg ~ /^-/) arg = ""
+        if (arg != "") {
+            print prog "-" arg
+        } else {
+            print prog
+        }
+    }' | tr -cd 'a-zA-Z0-9-' | head -c 30
+}
+
+# Get default working directory (convert local path to remote-friendly path)
+# /Users/osteele/code/LM2 -> ~/code/LM2
+default_working_dir() {
+    local cwd
+    cwd=$(pwd)
+    # Replace home directory with ~
+    echo "$cwd" | sed "s|^$HOME|~|"
+}
 
 # Retry configuration
 MAX_RETRIES=5
@@ -101,26 +141,38 @@ scp_with_retry() {
 }
 
 show_usage() {
-    echo "Usage: $0 [options] <host> <session-name> <working-dir> <command...>"
+    echo "Usage: $0 [options] <host> <command...>"
     echo ""
     echo "Options:"
+    echo "  -n, --name NAME         Session name (default: auto-generated from command)"
+    echo "  -C, --directory DIR     Working directory (default: same path as local cwd)"
     echo "  -d, --description TEXT  Description of the job (for logging and queries)"
     echo "  --queue                 Queue job for later instead of running now"
-    echo "  --queue-on-fail         Queue job if connection fails (instead of failing)"
+    echo "  --queue-on-fail         Queue job if connection fails"
     echo ""
     echo "Examples:"
-    echo "  $0 cool30 train-gpt2 /mnt/nvme3n1/oliver/code/LM2 with-gpu python train.py ..."
-    echo "  $0 -d 'Training run with lr=0.001' cool30 train-gpt2 /mnt/code/LM2 python train.py"
-    echo "  $0 --queue cool30 train /mnt/code/LM2 python train.py  # Queue for later"
-    echo "  $0 cool30 analysis /mnt/nvme3n1/oliver/code/LM2 python analysis.py"
+    echo "  $0 cool30 'python train.py'"
+    echo "  $0 -d 'Training run' cool30 'python train.py --lr 0.001'"
+    echo "  $0 -n train-gpt2 -C /mnt/code/LM2 cool30 'with-gpu python train.py'"
+    echo "  $0 --queue cool30 'python train.py'  # Queue for later"
 }
 
 # Parse optional flags
 DESCRIPTION=""
+SESSION_NAME=""
+WORKING_DIR=""
 QUEUE_ONLY=false
 QUEUE_ON_FAIL=false
 while [ $# -gt 0 ]; do
     case "$1" in
+        -n|--name)
+            SESSION_NAME="$2"
+            shift 2
+            ;;
+        -C|--directory)
+            WORKING_DIR="$2"
+            shift 2
+            ;;
         -d|--description)
             DESCRIPTION="$2"
             shift 2
@@ -148,16 +200,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ $# -lt 4 ]; then
+if [ $# -lt 2 ]; then
     show_usage
     exit 1
 fi
 
 HOST="$1"
-SESSION_NAME="$2"
-WORKING_DIR="$3"
-shift 3
+shift
 COMMAND="$*"
+
+# Set defaults for session name and working directory
+if [ -z "$SESSION_NAME" ]; then
+    SESSION_NAME=$(generate_session_name "$COMMAND")
+fi
+if [ -z "$WORKING_DIR" ]; then
+    WORKING_DIR=$(default_working_dir)
+fi
 
 # Queue-only mode: just save to pending and exit
 if [ "$QUEUE_ONLY" = true ]; then
