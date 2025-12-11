@@ -122,16 +122,59 @@ remote-jobs list [flags]
 - `--limit N`: Limit results (default: 50)
 - `--show ID`: Show detailed info for a specific job
 - `--cleanup DAYS`: Delete jobs older than N days
+- `--sync`: Sync job statuses from remote hosts before listing
 
 **Examples:**
 ```bash
 remote-jobs list                       # Recent jobs
 remote-jobs list --running             # Running jobs
+remote-jobs list --running --sync      # Running jobs (sync first)
 remote-jobs list --pending             # Pending jobs
 remote-jobs list --host cool30         # Jobs on cool30
 remote-jobs list --search training     # Search jobs
 remote-jobs list --show 42             # Job details
 remote-jobs list --cleanup 30          # Remove old jobs
+```
+
+### remote-jobs sync
+
+Sync job statuses from all remote hosts with running jobs.
+
+```bash
+remote-jobs sync [flags]
+```
+
+**Flags:**
+- `-v, --verbose`: Show detailed progress
+
+Automatically finds hosts with running jobs and updates their status in the local database. Connection failures are silently ignored (unreachable hosts are skipped).
+
+**Examples:**
+```bash
+remote-jobs sync              # Sync all hosts
+remote-jobs sync --verbose    # Show progress
+```
+
+### remote-jobs prune
+
+Remove completed and dead jobs from the local database.
+
+```bash
+remote-jobs prune [flags]
+```
+
+**Flags:**
+- `--older-than DURATION`: Only remove jobs older than this (e.g., `7d`, `24h`, `30m`)
+- `--dead-only`: Only remove dead jobs (not completed)
+- `--dry-run`: Preview what would be deleted without actually deleting
+
+**Examples:**
+```bash
+remote-jobs prune                    # Remove all completed/dead jobs
+remote-jobs prune --older-than 7d    # Only jobs older than 7 days
+remote-jobs prune --older-than 24h   # Only jobs older than 24 hours
+remote-jobs prune --dry-run          # Preview deletions
+remote-jobs prune --dead-only        # Only remove dead jobs
 ```
 
 ### remote-jobs log

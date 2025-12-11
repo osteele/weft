@@ -160,16 +160,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Warning: failed to copy notify script: %v\n", err)
 		} else {
 			ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript))
-			notifyCmd = fmt.Sprintf("; REMOTE_JOBS_SLACK_WEBHOOK='%s' '%s' '%s' $EXIT_CODE '%s'",
+			// Note: \$EXIT_CODE escapes the $ for the outer shell layer
+			notifyCmd = fmt.Sprintf("; REMOTE_JOBS_SLACK_WEBHOOK='%s' '%s' '%s' \\$EXIT_CODE '%s'",
 				slackWebhook, remoteNotifyScript, sessionName, host)
 			fmt.Println("Slack notifications: enabled")
 		}
 	}
 
 	// Create the wrapped command
-	// Redirect output to log, capture exit code, optionally notify
+	// Redirect output to log, capture exit code (PIPESTATUS[0] gets the command's exit, not tee's)
+	// Note: $ must be escaped as \$ since command runs inside double quotes via ssh
+	// User command is wrapped in () to ensure all output goes through tee
 	wrappedCommand := fmt.Sprintf(
-		"cd '%s' && %s 2>&1 | tee '%s'; EXIT_CODE=$?; echo $EXIT_CODE > '%s'%s",
+		"cd '%s' && (%s) 2>&1 | tee '%s'; EXIT_CODE=\\${PIPESTATUS[0]}; echo \\$EXIT_CODE > '%s'%s",
 		workingDir, command, logFile, statusFile, notifyCmd)
 
 	// Start tmux session

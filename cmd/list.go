@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -19,6 +20,7 @@ var listCmd = &cobra.Command{
 Examples:
   remote-jobs list                    # Recent jobs
   remote-jobs list --running          # Running jobs only
+  remote-jobs list --running --sync   # Running jobs (sync first)
   remote-jobs list --pending          # Pending jobs
   remote-jobs list --host cool30      # Jobs on cool30
   remote-jobs list --search training  # Search jobs
@@ -36,6 +38,7 @@ var (
 	listLimit     int
 	listShow      int64
 	listCleanup   int
+	listSync      bool
 )
 
 func init() {
@@ -50,6 +53,7 @@ func init() {
 	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
 	listCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	listCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
+	listCmd.Flags().BoolVar(&listSync, "sync", false, "Sync job statuses from remote hosts before listing")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -58,6 +62,13 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	// Optional sync before listing
+	if listSync {
+		if err := performListSync(database); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
+		}
+	}
 
 	// Handle cleanup mode
 	if listCleanup > 0 {
@@ -165,4 +176,35 @@ func printJobs(jobs []*db.Job) error {
 	}
 
 	return w.Flush()
+}
+
+// performListSync runs sync for list --sync flag
+func performListSync(database *sql.DB) error {
+	hosts, err := db.ListUniqueRunningHosts(database)
+	if err != nil {
+		return err
+	}
+
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	var updated int
+	for _, host := range hosts {
+		hostUpdated, err := syncHost(database, host)
+		if err != nil {
+			// Silently skip connection errors, warn on others
+			if !ssh.IsConnectionError(err.Error()) {
+				fmt.Fprintf(os.Stderr, "Warning: error syncing %s: %v\n", host, err)
+			}
+			continue
+		}
+		updated += hostUpdated
+	}
+
+	if updated > 0 {
+		fmt.Printf("(synced %d job status(es))\n", updated)
+	}
+
+	return nil
 }

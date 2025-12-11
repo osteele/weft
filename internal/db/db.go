@@ -256,6 +256,34 @@ func ListRunning(db *sql.DB, host string) ([]*Job, error) {
 	)
 }
 
+// ListAllRunning returns all running jobs across all hosts
+func ListAllRunning(db *sql.DB) ([]*Job, error) {
+	return queryJobs(db,
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		 FROM jobs WHERE status = ? ORDER BY start_time DESC`,
+		StatusRunning,
+	)
+}
+
+// ListUniqueRunningHosts returns all unique hosts with running jobs
+func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ?`, StatusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
 // SearchJobs searches jobs by description or command
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"
@@ -277,6 +305,64 @@ func CleanupOld(db *sql.DB, days int) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// PruneJobs deletes completed and/or dead jobs, optionally filtered by age
+func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
+	var result sql.Result
+	var err error
+
+	if deadOnly {
+		if olderThan != nil {
+			result, err = db.Exec(
+				`DELETE FROM jobs WHERE status = ? AND start_time < ?`,
+				StatusDead, olderThan.Unix(),
+			)
+		} else {
+			result, err = db.Exec(
+				`DELETE FROM jobs WHERE status = ?`,
+				StatusDead,
+			)
+		}
+	} else {
+		if olderThan != nil {
+			result, err = db.Exec(
+				`DELETE FROM jobs WHERE status IN (?, ?) AND start_time < ?`,
+				StatusCompleted, StatusDead, olderThan.Unix(),
+			)
+		} else {
+			result, err = db.Exec(
+				`DELETE FROM jobs WHERE status IN (?, ?)`,
+				StatusCompleted, StatusDead,
+			)
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// ListJobsForPrune returns jobs that would be deleted by prune
+func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, error) {
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status FROM jobs WHERE `
+	var args []interface{}
+
+	if deadOnly {
+		query += `status = ?`
+		args = append(args, StatusDead)
+	} else {
+		query += `status IN (?, ?)`
+		args = append(args, StatusCompleted, StatusDead)
+	}
+
+	if olderThan != nil {
+		query += ` AND start_time < ?`
+		args = append(args, olderThan.Unix())
+	}
+
+	query += ` ORDER BY start_time DESC`
+	return queryJobs(db, query, args...)
 }
 
 func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {

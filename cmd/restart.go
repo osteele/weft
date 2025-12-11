@@ -87,9 +87,11 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, newMetadata)
 	ssh.RunWithRetry(host, metadataCmd)
 
-	// Create the wrapped command
+	// Create the wrapped command (PIPESTATUS[0] gets the command's exit, not tee's)
+	// Note: $ must be escaped as \$ since command runs inside double quotes via ssh
+	// User command is wrapped in () to ensure all output goes through tee
 	wrappedCommand := fmt.Sprintf(
-		"cd '%s' && %s 2>&1 | tee '%s'; EXIT_CODE=$?; echo $EXIT_CODE > '%s'",
+		"cd '%s' && (%s) 2>&1 | tee '%s'; EXIT_CODE=\\${PIPESTATUS[0]}; echo \\$EXIT_CODE > '%s'",
 		workingDir, command, logFile, statusFile)
 
 	// Start tmux session

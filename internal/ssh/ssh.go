@@ -19,7 +19,7 @@ const (
 )
 
 // connectionErrorPattern matches SSH connection errors that should trigger retry
-var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|no route to host|host is unreachable|connection refused|network is unreachable)`)
+var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|no route to host|host is unreachable|connection refused|network is unreachable|could not resolve hostname|name or service not known)`)
 
 // IsConnectionError checks if the error output indicates a connection failure
 func IsConnectionError(output string) bool {
@@ -126,16 +126,52 @@ func CopyToWithRetry(localPath, host, remotePath string) error {
 	return lastErr
 }
 
-// TmuxSessionExists checks if a tmux session exists on the remote host
+// TmuxSessionExists checks if a tmux session exists on the remote host (with retry)
 func TmuxSessionExists(host, sessionName string) (bool, error) {
-	stdout, _, err := RunWithRetry(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo EXISTS || echo NOTEXISTS", sessionName))
+	stdout, stderr, err := RunWithRetry(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))
 	if err != nil {
 		// Check if it's a connection error
-		if IsConnectionError(stdout) {
+		if IsConnectionError(stdout + stderr) {
 			return false, err
 		}
 	}
-	return strings.Contains(stdout, "EXISTS"), nil
+	// Check last line for YES/NO
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	lastLine := ""
+	if len(lines) > 0 {
+		lastLine = strings.TrimSpace(lines[len(lines)-1])
+	}
+	return lastLine == "YES", nil
+}
+
+// TmuxSessionExistsQuick checks if a tmux session exists without retrying (for sync)
+func TmuxSessionExistsQuick(host, sessionName string) (bool, error) {
+	stdout, stderr, err := Run(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))
+	if err != nil {
+		// Check if it's a connection error
+		if IsConnectionError(stdout + stderr) {
+			return false, fmt.Errorf("connection error: %s", strings.TrimSpace(stdout+stderr))
+		}
+	}
+	// Check last line for YES/NO
+	lines := strings.Split(strings.TrimSpace(stdout), "\n")
+	lastLine := ""
+	if len(lines) > 0 {
+		lastLine = strings.TrimSpace(lines[len(lines)-1])
+	}
+	return lastLine == "YES", nil
+}
+
+// ReadRemoteFileQuick reads a file from a remote host without retrying (for sync)
+func ReadRemoteFileQuick(host, path string) (string, error) {
+	stdout, stderr, err := Run(host, fmt.Sprintf("cat '%s' 2>/dev/null || true", path))
+	if err != nil {
+		if IsConnectionError(stdout + stderr) {
+			return "", fmt.Errorf("connection error: %s", strings.TrimSpace(stdout+stderr))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(stdout), nil
 }
 
 // TmuxListSessions lists all tmux sessions on a remote host
