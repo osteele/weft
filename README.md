@@ -104,6 +104,29 @@ This is faster than `check` for checking a single job because it:
 - Only queries the remote host if the job is still running
 - Updates the database if status has changed
 
+### remote-jobs tui
+
+Launch an interactive terminal UI for viewing and managing jobs.
+
+```bash
+remote-jobs tui
+```
+
+The TUI shows a split-screen view with:
+- **Top panel**: Job list with status indicators (colored by status)
+- **Bottom panel**: Log output for selected job
+
+**Keyboard shortcuts:**
+- `↑/↓`: Navigate job list
+- `Enter`: Select job / view logs
+- `Esc`: Clear selection
+- `r`: Restart selected job
+- `k/Delete`: Kill selected job
+- `p`: Prune completed/dead jobs from database
+- `q`: Quit
+
+The TUI automatically syncs job statuses every 15 seconds and refreshes logs for running jobs every 3 seconds.
+
 ### remote-jobs list
 
 Query and search job history from the local database.
