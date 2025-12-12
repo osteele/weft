@@ -225,6 +225,12 @@ func DeletePending(db *sql.DB, id int64) error {
 	return err
 }
 
+// DeleteJob removes a job from the database without touching remote files
+func DeleteJob(db *sql.DB, id int64) error {
+	_, err := db.Exec(`DELETE FROM jobs WHERE id = ?`, id)
+	return err
+}
+
 // GetJob retrieves a job by host and session name (most recent)
 func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
 	row := db.QueryRow(

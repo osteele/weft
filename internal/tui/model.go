@@ -29,6 +29,7 @@ type keyMap struct {
 	Escape  key.Binding
 	Kill    key.Binding
 	Restart key.Binding
+	Remove  key.Binding
 	Prune   key.Binding
 	Suspend key.Binding
 	Quit    key.Binding
@@ -58,6 +59,10 @@ var keys = keyMap{
 	Restart: key.NewBinding(
 		key.WithKeys("r"),
 		key.WithHelp("r", "restart"),
+	),
+	Remove: key.NewBinding(
+		key.WithKeys("x"),
+		key.WithHelp("x", "remove"),
 	),
 	Prune: key.NewBinding(
 		key.WithKeys("p"),
@@ -102,6 +107,11 @@ type jobRestartedMsg struct {
 
 type pruneCompletedMsg struct {
 	count int64
+	err   error
+}
+
+type jobRemovedMsg struct {
+	jobID int64
 	err   error
 }
 
@@ -250,6 +260,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.refreshJobs()
 
+	case jobRemovedMsg:
+		if msg.err != nil {
+			m.errorMessage = fmt.Sprintf("Remove failed: %v", msg.err)
+		} else {
+			m.statusMessage = "Job removed"
+			m.selectedJob = nil
+			m.logContent = ""
+		}
+		return m, m.refreshJobs()
+
 	case tickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startSyncTicker())
@@ -330,6 +350,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case key.Matches(msg, keys.Remove):
+		job := m.getTargetJob()
+		if job == nil {
+			return m, nil
+		}
+		m.statusMessage = "Removing job..."
+		return m, m.removeJob(job)
+
 	case key.Matches(msg, keys.Prune):
 		m.statusMessage = "Pruning completed/dead jobs..."
 		return m, m.pruneJobs()
@@ -405,7 +433,7 @@ func (m Model) renderJobList(height int) string {
 		}
 
 		status := m.formatStatus(job)
-		started := time.Unix(job.StartTime, 0).Format("01/02 15:04")
+		started := formatStartTime(job.StartTime)
 
 		// Show description if available, otherwise truncated command
 		display := job.Description
@@ -435,32 +463,54 @@ func (m Model) renderJobList(height int) string {
 
 func (m Model) renderLogPanel(height int) string {
 	var content string
+	var header string
 
-	if m.selectedJob == nil {
-		content = dimStyle.Render("Select a job and press Enter to view logs")
-	} else if m.logLoading {
-		content = dimStyle.Render("Loading logs...")
-	} else if m.logContent == "" {
-		content = dimStyle.Render("No log content available")
+	// Show details for highlighted job (even without pressing Enter)
+	highlightedJob := m.getTargetJob()
+
+	if highlightedJob == nil {
+		content = dimStyle.Render("No jobs to display")
 	} else {
-		// Take last N lines that fit
-		lines := strings.Split(m.logContent, "\n")
-		maxLines := height - 4
-		if len(lines) > maxLines {
-			lines = lines[len(lines)-maxLines:]
+		// Build job details header
+		job := highlightedJob
+		startTime := time.Unix(job.StartTime, 0)
+		header = fmt.Sprintf("Job %d on %s\n", job.ID, job.Host)
+		header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
+		header += fmt.Sprintf("Dir:     %s\n", job.WorkingDir)
+		header += fmt.Sprintf("Cmd:     %s\n", job.Command)
+		header += "───────────────────────────────────────────────────────────────\n"
+
+		// Only show logs if job is selected (Enter pressed)
+		if m.selectedJob == nil {
+			content = dimStyle.Render("Press Enter to view logs")
+		} else if m.logLoading {
+			content = dimStyle.Render("Loading logs...")
+		} else if m.logContent == "" {
+			content = dimStyle.Render("No log content available")
+		} else {
+			// Take last N lines that fit (account for header lines)
+			lines := strings.Split(m.logContent, "\n")
+			maxLines := height - 10 // Account for borders, header, and padding
+			if len(lines) > maxLines {
+				lines = lines[len(lines)-maxLines:]
+			}
+			content = strings.Join(lines, "\n")
 		}
-		content = strings.Join(lines, "\n")
 	}
 
-	// Title shows selected job info
-	title := "Logs"
-	if m.selectedJob != nil {
-		title = fmt.Sprintf("Logs: job %d@%s", m.selectedJob.ID, m.selectedJob.Host)
+	// Title
+	title := "Details"
+	if highlightedJob == nil {
+		title = "Logs"
 	}
 
-	return logPanelStyle.Width(m.width - 2).Height(height).Render(
-		titleStyle.Render(title) + "\n" + content,
-	)
+	panelContent := titleStyle.Render(title) + "\n"
+	if header != "" {
+		panelContent += header
+	}
+	panelContent += content
+
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
 func (m Model) renderStatusBar() string {
@@ -471,7 +521,7 @@ func (m Model) renderStatusBar() string {
 		left = statusMsgStyle.Render(m.statusMessage)
 	}
 
-	right := helpStyle.Render("↑/↓:nav Enter:logs r:restart k:kill p:prune q:quit")
+	right := helpStyle.Render("↑/↓:nav Enter:logs r:restart k:kill x:remove p:prune q:quit")
 
 	if m.syncing {
 		right = syncingStyle.Render("⟳ ") + right
@@ -491,7 +541,10 @@ func (m Model) formatStatus(job *db.Job) string {
 	case db.StatusRunning:
 		return "● running"
 	case db.StatusCompleted:
-		if job.ExitCode != nil && *job.ExitCode == 0 {
+		if job.ExitCode == nil {
+			return "✓ done"
+		}
+		if *job.ExitCode == 0 {
 			return "✓ done"
 		}
 		return fmt.Sprintf("✗ exit %d", *job.ExitCode)
@@ -785,9 +838,37 @@ func (m Model) pruneJobs() tea.Cmd {
 	}
 }
 
+func (m Model) removeJob(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+	database := m.database
+	return func() tea.Msg {
+		err := db.DeleteJob(database, job.ID)
+		return jobRemovedMsg{jobID: job.ID, err: err}
+	}
+}
+
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
 	return s[:max-1] + "…"
+}
+
+// formatStartTime formats a start time as relative ("2h ago") for recent jobs
+// or as absolute ("01/02 15:04") for older jobs
+func formatStartTime(startTime int64) string {
+	t := time.Unix(startTime, 0)
+	elapsed := time.Since(t)
+
+	if elapsed < 12*time.Hour {
+		if elapsed < time.Minute {
+			return "just now"
+		} else if elapsed < time.Hour {
+			return fmt.Sprintf("%dm ago", int(elapsed.Minutes()))
+		}
+		return fmt.Sprintf("%dh ago", int(elapsed.Hours()))
+	}
+	return t.Format("01/02 15:04")
 }

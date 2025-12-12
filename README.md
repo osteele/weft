@@ -126,6 +126,7 @@ The TUI shows a split-screen view with:
 - `Esc`: Clear selection
 - `r`: Restart highlighted job
 - `k/Delete`: Kill highlighted job
+- `x`: Remove job from database (without deleting remote files)
 - `p`: Prune completed/dead jobs from database
 - `Ctrl-C` or `q`: Quit
 - `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
