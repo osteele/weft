@@ -15,15 +15,17 @@ import (
 )
 
 var logCmd = &cobra.Command{
-	Use:   "log <host> <session>",
+	Use:   "log <job-id> | <host> <session>",
 	Short: "View log output from a remote job",
 	Long: `View the log file for a specific remote job.
 
 Examples:
+  remote-jobs log 25                          # View log for job #25
+  remote-jobs log 25 -f                       # Follow job #25's log
   remote-jobs log cool30 train-gpt2           # Last 50 lines
   remote-jobs log cool30 train-gpt2 -f        # Follow (like tail -f)
   remote-jobs log cool30 train-gpt2 -n 100    # Last 100 lines`,
-	Args: cobra.ExactArgs(2),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: runLog,
 }
 
@@ -40,8 +42,36 @@ func init() {
 }
 
 func runLog(cmd *cobra.Command, args []string) error {
-	host := args[0]
-	sessionName := args[1]
+	var host, sessionName string
+
+	if len(args) == 1 {
+		// Single arg: treat as job ID
+		jobID, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid job ID: %s", args[0])
+		}
+
+		database, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer database.Close()
+
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return fmt.Errorf("get job: %w", err)
+		}
+		if job == nil {
+			return fmt.Errorf("job %d not found", jobID)
+		}
+
+		host = job.Host
+		sessionName = job.SessionName
+	} else {
+		// Two args: host and session
+		host = args[0]
+		sessionName = args[1]
+	}
 
 	logFile := session.LogFile(sessionName)
 
