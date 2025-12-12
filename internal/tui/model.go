@@ -30,6 +30,7 @@ type keyMap struct {
 	Kill    key.Binding
 	Restart key.Binding
 	Prune   key.Binding
+	Suspend key.Binding
 	Quit    key.Binding
 }
 
@@ -61,6 +62,9 @@ var keys = keyMap{
 	Prune: key.NewBinding(
 		key.WithKeys("p"),
 		key.WithHelp("p", "prune"),
+	),
+	Suspend: key.NewBinding(
+		key.WithKeys("ctrl+z"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
@@ -253,6 +257,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
 
+	case key.Matches(msg, keys.Suspend):
+		return m, tea.Suspend
+
 	case key.Matches(msg, keys.Up):
 		if m.selectedIndex > 0 {
 			m.selectedIndex--
@@ -285,16 +292,18 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Kill):
-		if m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
+		job := m.getTargetJob()
+		if job != nil && job.Status == db.StatusRunning {
 			m.statusMessage = "Killing job..."
-			return m, m.killSelectedJob()
+			return m, m.killJob(job)
 		}
 		return m, nil
 
 	case key.Matches(msg, keys.Restart):
-		if m.selectedJob != nil {
+		job := m.getTargetJob()
+		if job != nil {
 			m.statusMessage = "Restarting job..."
-			return m, m.restartSelectedJob()
+			return m, m.restartJob(job)
 		}
 		return m, nil
 
@@ -475,6 +484,17 @@ func (m Model) refreshJobs() tea.Cmd {
 	}
 }
 
+// getTargetJob returns the job to act on - either the selected job or the highlighted job
+func (m Model) getTargetJob() *db.Job {
+	if m.selectedJob != nil {
+		return m.selectedJob
+	}
+	if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
+		return m.jobs[m.selectedIndex]
+	}
+	return nil
+}
+
 func (m Model) fetchSelectedJobLog() tea.Cmd {
 	if m.selectedJob == nil {
 		return nil
@@ -543,27 +563,25 @@ func (m Model) performBackgroundSync() tea.Cmd {
 	}
 }
 
-func (m Model) killSelectedJob() tea.Cmd {
-	if m.selectedJob == nil {
+func (m Model) killJob(job *db.Job) tea.Cmd {
+	if job == nil {
 		return nil
 	}
 
-	job := m.selectedJob
+	database := m.database
 	return func() tea.Msg {
 		err := ssh.TmuxKillSession(job.Host, job.SessionName)
 		if err == nil {
-			db.MarkDead(m.database, job.Host, job.SessionName)
+			db.MarkDead(database, job.Host, job.SessionName)
 		}
 		return jobKilledMsg{jobID: job.ID, err: err}
 	}
 }
 
-func (m Model) restartSelectedJob() tea.Cmd {
-	if m.selectedJob == nil {
+func (m Model) restartJob(job *db.Job) tea.Cmd {
+	if job == nil {
 		return nil
 	}
-
-	job := m.selectedJob
 	database := m.database
 	return func() tea.Msg {
 		// Read metadata from remote

@@ -120,10 +120,11 @@ The TUI shows a split-screen view with:
 - `↑/↓`: Navigate job list
 - `Enter`: Select job / view logs
 - `Esc`: Clear selection
-- `r`: Restart selected job
-- `k/Delete`: Kill selected job
+- `r`: Restart highlighted job
+- `k/Delete`: Kill highlighted job
 - `p`: Prune completed/dead jobs from database
-- `q`: Quit
+- `Ctrl-C` or `q`: Quit
+- `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
 
 The TUI automatically syncs job statuses every 15 seconds and refreshes logs for running jobs every 3 seconds.
 
@@ -279,6 +280,24 @@ Kill a specific tmux session on a remote host.
 ```bash
 remote-jobs kill <host> <session>
 ```
+
+## Configuration
+
+Configuration is stored in `~/.config/remote-jobs/config.yaml`.
+
+### Default Command
+
+By default, running `remote-jobs` with no arguments shows the help message. You can change this to run a different command:
+
+```yaml
+# ~/.config/remote-jobs/config.yaml
+default_command: tui
+```
+
+Valid values for `default_command`:
+- `help` (default): Show help message
+- `tui`: Launch interactive terminal UI
+- `list`: Show job list
 
 ## Job Database
 

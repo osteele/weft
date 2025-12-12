@@ -22,10 +22,11 @@ Keyboard shortcuts:
   Up/Down    Navigate job list
   Enter      Select job / view logs
   Escape     Clear selection
-  r          Restart selected job
-  k/Delete   Kill selected job
+  r          Restart highlighted job
+  k/Delete   Kill highlighted job
   p          Prune completed/dead jobs
-  q          Quit`,
+  Ctrl-C/q   Quit
+  Ctrl-Z     Suspend (resume with 'fg')`,
 	RunE: runTUI,
 }
 
