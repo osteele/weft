@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -93,7 +91,7 @@ func listPendingJobs(database *sql.DB, host string) error {
 
 	fmt.Printf("Pending jobs:\n\n")
 	for _, job := range jobs {
-		fmt.Printf("ID %d: %s on %s\n", job.ID, job.SessionName, job.Host)
+		fmt.Printf("ID %d on %s\n", job.ID, job.Host)
 		fmt.Printf("  Command: %s\n", job.Command)
 		fmt.Printf("  Directory: %s\n", job.WorkingDir)
 		if job.Description != "" {
@@ -118,7 +116,7 @@ func deletePendingJob(database *sql.DB, id int64) error {
 		return fmt.Errorf("delete: %w", err)
 	}
 
-	fmt.Printf("Deleted pending job %d (%s on %s)\n", id, job.SessionName, job.Host)
+	fmt.Printf("Deleted pending job %d on %s\n", id, job.Host)
 	return nil
 }
 
@@ -135,7 +133,7 @@ func retryAllPending(database *sql.DB, host string) error {
 
 	var successes, failures int
 	for _, job := range jobs {
-		fmt.Printf("Retrying job %d (%s on %s)...\n", job.ID, job.SessionName, job.Host)
+		fmt.Printf("Retrying job %d on %s...\n", job.ID, job.Host)
 		if err := startPendingJob(database, job, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "  Failed: %v\n", err)
 			failures++
@@ -166,62 +164,86 @@ func startPendingJob(database *sql.DB, job *db.Job, overrideHost string) error {
 		host = overrideHost
 	}
 
-	// Check if session already exists
-	exists, err := ssh.TmuxSessionExists(host, job.SessionName)
-	if err != nil {
-		return fmt.Errorf("check session: %w", err)
-	}
-	if exists {
-		return fmt.Errorf("session '%s' already exists on %s", job.SessionName, host)
-	}
-
 	// Delete the pending entry
 	if err := db.DeletePending(database, job.ID); err != nil {
 		return fmt.Errorf("delete pending: %w", err)
 	}
 
-	// Create file paths
-	logFile := session.LogFile(job.SessionName)
-	statusFile := session.StatusFile(job.SessionName)
-	metadataFile := session.MetadataFile(job.SessionName)
+	// Create new job record to get ID
+	newJobID, err := db.RecordJobStarting(database, host, job.WorkingDir, job.Command, job.Description)
+	if err != nil {
+		return fmt.Errorf("create job record: %w", err)
+	}
 
-	// Archive any existing log file
-	archiveCmd := fmt.Sprintf("if [ -f '%s' ]; then mv '%s' '%s.$(date +%%Y%%m%%d-%%H%%M%%S).log'; fi",
-		logFile, logFile, strings.TrimSuffix(logFile, ".log"))
-	ssh.RunWithRetry(host, archiveCmd)
+	// Get the new job to access start time
+	newJob, err := db.GetJobByID(database, newJobID)
+	if err != nil || newJob == nil {
+		return fmt.Errorf("get new job: %w", err)
+	}
 
-	// Remove old status file
-	ssh.RunWithRetry(host, fmt.Sprintf("rm -f '%s'", statusFile))
+	// Generate file paths from job ID
+	tmuxSession := session.TmuxSessionName(newJobID)
+	logFile := session.LogFile(newJobID, newJob.StartTime)
+	statusFile := session.StatusFile(newJobID, newJob.StartTime)
+	metadataFile := session.MetadataFile(newJobID, newJob.StartTime)
+
+	// Check if session already exists (shouldn't with new unique IDs)
+	exists, err := ssh.TmuxSessionExists(host, tmuxSession)
+	if err != nil {
+		db.UpdateJobFailed(database, newJobID, err.Error())
+		return fmt.Errorf("check session: %w", err)
+	}
+	if exists {
+		db.UpdateJobFailed(database, newJobID, "session already exists")
+		return fmt.Errorf("session '%s' already exists on %s", tmuxSession, host)
+	}
+
+	// Create log directory on remote
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
+	if _, stderr, err := ssh.RunWithRetry(host, mkdirCmd); err != nil {
+		db.UpdateJobFailed(database, newJobID, fmt.Sprintf("create log dir: %s", stderr))
+		return fmt.Errorf("create log directory: %s", stderr)
+	}
 
 	// Save metadata
-	startTime := time.Now().Unix()
-	metadata := session.FormatMetadata(job.WorkingDir, job.Command, host, job.Description, startTime)
-
+	metadata := session.FormatMetadata(newJobID, job.WorkingDir, job.Command, host, job.Description, newJob.StartTime)
 	metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	ssh.RunWithRetry(host, metadataCmd)
 
-	// Create the wrapped command (PIPESTATUS[0] gets the command's exit, not tee's)
-	// Note: $ must be escaped as \$ since command runs inside double quotes via ssh
-	// User command is wrapped in () to ensure all output goes through tee
+	// Create the wrapped command with better error capture
 	wrappedCommand := fmt.Sprintf(
-		"cd '%s' && (%s) 2>&1 | tee '%s'; EXIT_CODE=\\${PIPESTATUS[0]}; echo \\$EXIT_CODE > '%s'",
-		job.WorkingDir, job.Command, logFile, statusFile)
+		`echo "=== START $(date) ===" > '%s'; `+
+			`echo "job_id: %d" >> '%s'; `+
+			`echo "cd: %s" >> '%s'; `+
+			`echo "cmd: %s" >> '%s'; `+
+			`echo "===" >> '%s'; `+
+			`cd '%s' && (%s) 2>&1 | tee -a '%s'; `+
+			`EXIT_CODE=\${PIPESTATUS[0]}; `+
+			`echo "=== END exit=\$EXIT_CODE $(date) ===" >> '%s'; `+
+			`echo \$EXIT_CODE > '%s'`,
+		logFile,
+		newJobID, logFile,
+		job.WorkingDir, logFile,
+		job.Command, logFile,
+		logFile,
+		job.WorkingDir, job.Command, logFile,
+		logFile,
+		statusFile)
 
 	// Start tmux session
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", job.SessionName, wrappedCommand)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", tmuxSession, wrappedCommand)
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
+		db.UpdateJobFailed(database, newJobID, fmt.Sprintf("start tmux: %s", stderr))
 		return fmt.Errorf("start session: %s", stderr)
 	}
 
-	fmt.Printf("✓ Session '%s' started on %s\n", job.SessionName, host)
-
-	// Record in database
-	jobID, err := db.RecordStart(database, host, job.SessionName, job.WorkingDir, job.Command, startTime, job.Description)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to record job: %v\n", err)
-	} else {
-		fmt.Printf("Job ID: %d\n", jobID)
+	// Mark job as running
+	if err := db.UpdateJobRunning(database, newJobID); err != nil {
+		return fmt.Errorf("update job status: %w", err)
 	}
+
+	fmt.Printf("✓ Job started on %s\n", host)
+	fmt.Printf("Job ID: %d\n", newJobID)
 
 	return nil
 }

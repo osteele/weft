@@ -3,56 +3,23 @@ package session
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
+	"time"
 )
 
-// GenerateName generates a session name from a command
-// e.g., "python train.py" -> "python-train"
-// e.g., "with-gpu python script.py" -> "python-script"
-func GenerateName(command string) string {
-	// Skip common prefixes like 'with-gpu', 'env VAR=value'
-	cleaned := command
-	cleaned = regexp.MustCompile(`^with-gpu\s+`).ReplaceAllString(cleaned, "")
-	cleaned = regexp.MustCompile(`^env\s+\S+\s+`).ReplaceAllString(cleaned, "")
+// LogDir is the directory for job logs on remote hosts
+const LogDir = "~/.cache/remote-jobs/logs"
 
-	parts := strings.Fields(cleaned)
-	if len(parts) == 0 {
-		return "job"
-	}
+// TmuxSessionName returns the tmux session name for a job ID
+func TmuxSessionName(jobID int64) string {
+	return fmt.Sprintf("rj-%d", jobID)
+}
 
-	// Get program name (first word), remove path
-	prog := filepath.Base(parts[0])
-
-	// Get first arg (second word) if it exists and isn't a flag
-	var arg string
-	if len(parts) > 1 && !strings.HasPrefix(parts[1], "-") {
-		arg = filepath.Base(parts[1])
-		// Remove extension
-		if idx := strings.LastIndex(arg, "."); idx > 0 {
-			arg = arg[:idx]
-		}
-	}
-
-	var name string
-	if arg != "" {
-		name = prog + "-" + arg
-	} else {
-		name = prog
-	}
-
-	// Clean to alphanumeric and dash only, max 30 chars
-	name = regexp.MustCompile(`[^a-zA-Z0-9-]`).ReplaceAllString(name, "")
-	if len(name) > 30 {
-		name = name[:30]
-	}
-
-	if name == "" {
-		return "job"
-	}
-
-	return name
+// FileBasename returns the base filename for job files (without extension)
+// Format: {jobID}-{timestamp}
+func FileBasename(jobID int64, startTime int64) string {
+	t := time.Unix(startTime, 0)
+	return fmt.Sprintf("%d-%s", jobID, t.Format("20060102-150405"))
 }
 
 // DefaultWorkingDir returns the current working directory converted to a remote-friendly path
@@ -75,19 +42,66 @@ func DefaultWorkingDir() (string, error) {
 	return cwd, nil
 }
 
-// LogFile returns the log file path for a session
-func LogFile(sessionName string) string {
+// LogFile returns the log file path for a job
+func LogFile(jobID int64, startTime int64) string {
+	return fmt.Sprintf("%s/%s.log", LogDir, FileBasename(jobID, startTime))
+}
+
+// StatusFile returns the status file path for a job
+func StatusFile(jobID int64, startTime int64) string {
+	return fmt.Sprintf("%s/%s.status", LogDir, FileBasename(jobID, startTime))
+}
+
+// MetadataFile returns the metadata file path for a job
+func MetadataFile(jobID int64, startTime int64) string {
+	return fmt.Sprintf("%s/%s.meta", LogDir, FileBasename(jobID, startTime))
+}
+
+// LegacyLogFile returns the old-style log file path for backward compatibility
+func LegacyLogFile(sessionName string) string {
 	return fmt.Sprintf("/tmp/tmux-%s.log", sessionName)
 }
 
-// StatusFile returns the status file path for a session
-func StatusFile(sessionName string) string {
+// LegacyStatusFile returns the old-style status file path for backward compatibility
+func LegacyStatusFile(sessionName string) string {
 	return fmt.Sprintf("/tmp/tmux-%s.status", sessionName)
 }
 
-// MetadataFile returns the metadata file path for a session
-func MetadataFile(sessionName string) string {
+// LegacyMetadataFile returns the old-style metadata file path for backward compatibility
+func LegacyMetadataFile(sessionName string) string {
 	return fmt.Sprintf("/tmp/tmux-%s.meta", sessionName)
+}
+
+// JobLogFile returns the appropriate log file path for a job (handles legacy and new)
+func JobLogFile(jobID int64, startTime int64, sessionName string) string {
+	if sessionName != "" {
+		return LegacyLogFile(sessionName)
+	}
+	return LogFile(jobID, startTime)
+}
+
+// JobStatusFile returns the appropriate status file path for a job (handles legacy and new)
+func JobStatusFile(jobID int64, startTime int64, sessionName string) string {
+	if sessionName != "" {
+		return LegacyStatusFile(sessionName)
+	}
+	return StatusFile(jobID, startTime)
+}
+
+// JobMetadataFile returns the appropriate metadata file path for a job (handles legacy and new)
+func JobMetadataFile(jobID int64, startTime int64, sessionName string) string {
+	if sessionName != "" {
+		return LegacyMetadataFile(sessionName)
+	}
+	return MetadataFile(jobID, startTime)
+}
+
+// JobTmuxSession returns the tmux session name for a job (handles legacy and new)
+func JobTmuxSession(jobID int64, sessionName string) string {
+	if sessionName != "" {
+		return sessionName
+	}
+	return TmuxSessionName(jobID)
 }
 
 // ParseMetadata parses a metadata file content into key-value pairs
@@ -104,8 +118,9 @@ func ParseMetadata(content string) map[string]string {
 }
 
 // FormatMetadata formats metadata as key=value pairs
-func FormatMetadata(workingDir, command, host, description string, startTime int64) string {
+func FormatMetadata(jobID int64, workingDir, command, host, description string, startTime int64) string {
 	var lines []string
+	lines = append(lines, fmt.Sprintf("job_id=%d", jobID))
 	lines = append(lines, fmt.Sprintf("working_dir=%s", workingDir))
 	lines = append(lines, fmt.Sprintf("command=%s", command))
 	lines = append(lines, fmt.Sprintf("start_time=%d", startTime))

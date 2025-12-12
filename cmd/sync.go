@@ -116,7 +116,8 @@ func syncHost(database *sql.DB, host string) (int, error) {
 // syncJob checks and updates a single job's status, returning true if status changed
 func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 	// Check if tmux session still exists (no retry for sync)
-	exists, err := ssh.TmuxSessionExistsQuick(job.Host, job.SessionName)
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	exists, err := ssh.TmuxSessionExistsQuick(job.Host, tmuxSession)
 	if err != nil {
 		return false, err
 	}
@@ -127,7 +128,7 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 	}
 
 	// Session doesn't exist - check for status file (no retry for sync)
-	statusFile := session.StatusFile(job.SessionName)
+	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
 	content, err := ssh.ReadRemoteFileQuick(job.Host, statusFile)
 	if err != nil {
 		return false, err
@@ -137,14 +138,14 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 		// Job completed
 		exitCode, _ := strconv.Atoi(content)
 		endTime := time.Now().Unix()
-		if err := db.RecordCompletion(database, job.Host, job.SessionName, exitCode, endTime); err != nil {
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 
 	// No status file - job died unexpectedly
-	if err := db.MarkDead(database, job.Host, job.SessionName); err != nil {
+	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}
 	return true, nil

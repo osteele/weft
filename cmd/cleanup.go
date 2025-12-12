@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -81,6 +83,12 @@ func runCleanup(cmd *cobra.Command, args []string) error {
 func cleanupFinishedSessions(host string) (int, error) {
 	fmt.Printf("Checking for finished sessions on %s...\n", host)
 
+	database, err := db.Open()
+	if err != nil {
+		return 0, fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
 	// Get list of sessions
 	sessions, err := ssh.TmuxListSessions(host)
 	if err != nil {
@@ -94,9 +102,29 @@ func cleanupFinishedSessions(host string) (int, error) {
 
 	var cleaned int
 	for _, sessionName := range sessions {
-		// Check if session has finished (has status file or no child processes)
-		statusFile := session.StatusFile(sessionName)
-		statusContent, _ := ssh.ReadRemoteFile(host, statusFile)
+		// Try to get job info from database
+		var job *db.Job
+		if strings.HasPrefix(sessionName, "rj-") {
+			if jobID, err := strconv.ParseInt(sessionName[3:], 10, 64); err == nil {
+				job, _ = db.GetJobByID(database, jobID)
+			}
+		} else {
+			job, _ = db.GetJob(database, host, sessionName)
+		}
+
+		// Determine status file path
+		var statusFile string
+		if job != nil {
+			statusFile = session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
+		} else if !strings.HasPrefix(sessionName, "rj-") {
+			// Legacy session without job record
+			statusFile = session.LegacyStatusFile(sessionName)
+		}
+
+		var statusContent string
+		if statusFile != "" {
+			statusContent, _ = ssh.ReadRemoteFile(host, statusFile)
+		}
 
 		panePID, _ := ssh.GetTmuxPanePID(host, sessionName)
 		hasChildren, _ := ssh.HasChildProcesses(host, panePID)

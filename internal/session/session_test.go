@@ -2,68 +2,76 @@ package session
 
 import "testing"
 
-func TestGenerateName(t *testing.T) {
+func TestTmuxSessionName(t *testing.T) {
 	tests := []struct {
-		command  string
+		jobID    int64
 		expected string
 	}{
-		{"python train.py", "python-train"},
-		{"python script.py", "python-script"},
-		{"with-gpu python train.py", "python-train"},
-		{"env CUDA_VISIBLE_DEVICES=0 python train.py", "python-train"},
-		{"python", "python"},
-		{"python -m pytest", "python"},
-		{"/usr/bin/python /path/to/script.py", "python-script"},
-		{"just build", "just-build"},
-		{"cargo test --release", "cargo-test"},
-		{"", "job"},
+		{1, "rj-1"},
+		{42, "rj-42"},
+		{12345, "rj-12345"},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.command, func(t *testing.T) {
-			got := GenerateName(tt.command)
-			if got != tt.expected {
-				t.Errorf("GenerateName(%q) = %q, want %q", tt.command, got, tt.expected)
-			}
-		})
+		got := TmuxSessionName(tt.jobID)
+		if got != tt.expected {
+			t.Errorf("TmuxSessionName(%d) = %q, want %q", tt.jobID, got, tt.expected)
+		}
 	}
 }
 
-func TestGenerateNameMaxLength(t *testing.T) {
-	// Test that very long names get truncated
-	longCommand := "verylongprogramname verylongargumentname"
-	name := GenerateName(longCommand)
-	if len(name) > 30 {
-		t.Errorf("GenerateName(%q) = %q (len=%d), want len <= 30", longCommand, name, len(name))
+func TestFileBasename(t *testing.T) {
+	// Test with a known timestamp: 2024-12-12 21:03:00 UTC
+	startTime := int64(1734040980)
+	got := FileBasename(42, startTime)
+	// The format depends on local timezone, so just check it starts with job ID
+	if got[:3] != "42-" {
+		t.Errorf("FileBasename(42, %d) = %q, want to start with '42-'", startTime, got)
+	}
+	if len(got) != 18 { // "42-20241212-210300"
+		t.Errorf("FileBasename(42, %d) = %q, unexpected length %d", startTime, got, len(got))
 	}
 }
 
 func TestLogFile(t *testing.T) {
-	got := LogFile("train-gpt2")
-	want := "/tmp/tmux-train-gpt2.log"
-	if got != want {
-		t.Errorf("LogFile(%q) = %q, want %q", "train-gpt2", got, want)
+	startTime := int64(1734040980)
+	got := LogFile(42, startTime)
+	// Should contain the log dir and end with .log
+	if got[:len(LogDir)] != LogDir {
+		t.Errorf("LogFile should start with LogDir")
+	}
+	if got[len(got)-4:] != ".log" {
+		t.Errorf("LogFile should end with .log")
 	}
 }
 
 func TestStatusFile(t *testing.T) {
-	got := StatusFile("train-gpt2")
-	want := "/tmp/tmux-train-gpt2.status"
-	if got != want {
-		t.Errorf("StatusFile(%q) = %q, want %q", "train-gpt2", got, want)
+	startTime := int64(1734040980)
+	got := StatusFile(42, startTime)
+	if got[len(got)-7:] != ".status" {
+		t.Errorf("StatusFile should end with .status")
 	}
 }
 
 func TestMetadataFile(t *testing.T) {
-	got := MetadataFile("train-gpt2")
-	want := "/tmp/tmux-train-gpt2.meta"
+	startTime := int64(1734040980)
+	got := MetadataFile(42, startTime)
+	if got[len(got)-5:] != ".meta" {
+		t.Errorf("MetadataFile should end with .meta")
+	}
+}
+
+func TestLegacyLogFile(t *testing.T) {
+	got := LegacyLogFile("train-gpt2")
+	want := "/tmp/tmux-train-gpt2.log"
 	if got != want {
-		t.Errorf("MetadataFile(%q) = %q, want %q", "train-gpt2", got, want)
+		t.Errorf("LegacyLogFile(%q) = %q, want %q", "train-gpt2", got, want)
 	}
 }
 
 func TestParseMetadata(t *testing.T) {
-	content := `working_dir=/mnt/code/LM2
+	content := `job_id=42
+working_dir=/mnt/code/LM2
 command=python train.py
 start_time=1234567890
 host=cool30
@@ -71,6 +79,9 @@ description=Training run`
 
 	result := ParseMetadata(content)
 
+	if result["job_id"] != "42" {
+		t.Errorf("job_id = %q, want %q", result["job_id"], "42")
+	}
 	if result["working_dir"] != "/mnt/code/LM2" {
 		t.Errorf("working_dir = %q, want %q", result["working_dir"], "/mnt/code/LM2")
 	}
@@ -86,9 +97,10 @@ description=Training run`
 }
 
 func TestFormatMetadata(t *testing.T) {
-	content := FormatMetadata("/mnt/code", "python train.py", "cool30", "Test job", 1234567890)
+	content := FormatMetadata(42, "/mnt/code", "python train.py", "cool30", "Test job", 1234567890)
 
 	expected := map[string]string{
+		"job_id":      "42",
 		"working_dir": "/mnt/code",
 		"command":     "python train.py",
 		"host":        "cool30",

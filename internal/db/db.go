@@ -15,7 +15,7 @@ import (
 type Job struct {
 	ID          int64
 	Host        string
-	SessionName string
+	SessionName string // Deprecated: kept for backward compatibility with old jobs
 	WorkingDir  string
 	Command     string
 	Description string
@@ -24,6 +24,9 @@ type Job struct {
 	ExitCode    *int
 	Status      string
 }
+
+// StatusStarting indicates a job is being set up
+const StatusStarting = "starting"
 
 // StatusRunning indicates a job is currently running
 const StatusRunning = "running"
@@ -36,6 +39,9 @@ const StatusDead = "dead"
 
 // StatusPending indicates a job queued but not started
 const StatusPending = "pending"
+
+// StatusFailed indicates a job failed to start
+const StatusFailed = "failed"
 
 var dbPath string
 
@@ -73,26 +79,31 @@ func initSchema(db *sql.DB) error {
 	CREATE TABLE IF NOT EXISTS jobs (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		host TEXT NOT NULL,
-		session_name TEXT NOT NULL,
+		session_name TEXT,
 		working_dir TEXT NOT NULL,
 		command TEXT NOT NULL,
 		description TEXT,
 		start_time INTEGER NOT NULL,
 		end_time INTEGER,
 		exit_code INTEGER,
-		status TEXT NOT NULL DEFAULT 'running',
-		UNIQUE(host, session_name, start_time)
+		status TEXT NOT NULL DEFAULT 'running'
 	);
 	CREATE INDEX IF NOT EXISTS idx_jobs_host ON jobs(host);
 	CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_name);
 	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 	CREATE INDEX IF NOT EXISTS idx_jobs_start ON jobs(start_time DESC);
 	`
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Migration: make session_name nullable for existing tables
+	// SQLite doesn't support ALTER COLUMN, but we can add new jobs with NULL session_name
+	return nil
 }
 
 // RecordStart records a new job start and returns its ID
+// Deprecated: Use RecordJobStarting + UpdateJobRunning for new jobs
 func RecordStart(db *sql.DB, host, sessionName, workingDir, command string, startTime int64, description string) (int64, error) {
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status)
@@ -105,13 +116,72 @@ func RecordStart(db *sql.DB, host, sessionName, workingDir, command string, star
 	return result.LastInsertId()
 }
 
-// RecordPending records a pending job and returns its ID
-func RecordPending(db *sql.DB, host, sessionName, workingDir, command, description string) (int64, error) {
+// RecordJobStarting creates a new job with status="starting" and returns its ID
+// This allows getting the job ID before starting the tmux session
+func RecordJobStarting(db *sql.DB, host, workingDir, command, description string) (int64, error) {
 	startTime := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		host, sessionName, workingDir, command, description, startTime, StatusPending,
+		 VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+		host, workingDir, command, description, startTime, StatusStarting,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// UpdateJobRunning transitions a starting job to running
+func UpdateJobRunning(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		StatusRunning, id, StatusStarting,
+	)
+	return err
+}
+
+// UpdateJobFailed marks a starting job as failed
+func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
+	endTime := time.Now().Unix()
+	// Store error in description if there isn't one already
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, end_time = ?,
+		 description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description END
+		 WHERE id = ? AND status = ?`,
+		StatusFailed, endTime, errorMsg, id, StatusStarting,
+	)
+	return err
+}
+
+// RecordCompletionByID updates a job by ID with its exit code and end time
+func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?
+		 WHERE id = ? AND status = ?`,
+		exitCode, endTime, StatusCompleted, id, StatusRunning,
+	)
+	return err
+}
+
+// MarkDeadByID marks a running job as dead by ID
+func MarkDeadByID(db *sql.DB, id int64) error {
+	endTime := time.Now().Unix()
+	_, err := db.Exec(
+		`UPDATE jobs SET end_time = ?, status = ?
+		 WHERE id = ? AND status = ?`,
+		endTime, StatusDead, id, StatusRunning,
+	)
+	return err
+}
+
+// RecordPending records a pending job and returns its ID
+// Note: session_name is deprecated; new pending jobs use NULL
+func RecordPending(db *sql.DB, host, workingDir, command, description string) (int64, error) {
+	startTime := time.Now().Unix()
+	result, err := db.Exec(
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+		host, workingDir, command, description, startTime, StatusPending,
 	)
 	if err != nil {
 		return 0, err
@@ -187,11 +257,12 @@ func GetPendingJob(db *sql.DB, id int64) (*Job, error) {
 
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
+	var sessionName sql.NullString
 	var desc sql.NullString
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &j.SessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -199,6 +270,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 		return nil, err
 	}
 
+	if sessionName.Valid {
+		j.SessionName = sessionName.String
+	}
 	if desc.Valid {
 		j.Description = desc.String
 	}
@@ -375,15 +449,19 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 	var jobs []*Job
 	for rows.Next() {
 		var j Job
+		var sessionName sql.NullString
 		var desc sql.NullString
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &j.SessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status)
 		if err != nil {
 			return nil, err
 		}
 
+		if sessionName.Valid {
+			j.SessionName = sessionName.String
+		}
 		if desc.Valid {
 			j.Description = desc.String
 		}

@@ -35,7 +35,6 @@ remote-jobs run [flags] <host> <command...>
 ```
 
 **Flags:**
-- `-n, --name NAME`: Session name (default: auto-generated from command)
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job (for logging and queries)
 - `--queue`: Queue job for later instead of running now
@@ -43,14 +42,14 @@ remote-jobs run [flags] <host> <command...>
 
 **Examples:**
 ```bash
-# Basic usage (auto-generates session name, uses current directory path)
+# Basic usage (uses current directory path)
 remote-jobs run cool30 'python train.py'
 
 # With description (recommended)
 remote-jobs run -d "Training GPT-2 with lr=0.001" cool30 'with-gpu python train.py --lr 0.001'
 
-# Explicit session name and working directory
-remote-jobs run -n train-gpt2 -C /mnt/code/LM2 cool30 'with-gpu python train.py'
+# Explicit working directory
+remote-jobs run -C /mnt/code/LM2 cool30 'with-gpu python train.py'
 
 # Queue for later (doesn't start immediately)
 remote-jobs run --queue -d "Training run" cool30 'python train.py'
@@ -60,8 +59,8 @@ remote-jobs run --queue-on-fail -d "Training run" cool30 'python train.py'
 ```
 
 The command:
-- Archives any existing log file for this session name (renamed with timestamp)
-- Saves job metadata (for restart capability)
+- Creates a job ID first, then starts the tmux session as `rj-{id}`
+- Saves job metadata and logs to `~/.cache/remote-jobs/logs/` on the remote host
 - Creates a detached tmux session on the remote host
 - Records the job in a local SQLite database (`~/.config/remote-jobs/jobs.db`)
 - Captures exit code when job completes
@@ -87,10 +86,10 @@ Shows:
 
 ### remote-jobs status
 
-Check the status of a specific job (with database quick-path).
+Check the status of a specific job by ID.
 
 ```bash
-remote-jobs status <host> <session>
+remote-jobs status <job-id>
 ```
 
 **Exit codes:**
@@ -98,6 +97,11 @@ remote-jobs status <host> <session>
 - `1`: Job failed or error
 - `2`: Job is still running
 - `3`: Job not found
+
+**Example:**
+```bash
+remote-jobs status 42    # Check status of job #42
+```
 
 This is faster than `check` for checking a single job because it:
 - First checks the local database for terminated jobs
@@ -181,7 +185,7 @@ remote-jobs sync --verbose    # Show progress
 
 ### remote-jobs prune
 
-Remove completed and dead jobs from the local database.
+Remove completed and dead jobs from the local database and their log files from remote hosts.
 
 ```bash
 remote-jobs prune [flags]
@@ -191,6 +195,7 @@ remote-jobs prune [flags]
 - `--older-than DURATION`: Only remove jobs older than this (e.g., `7d`, `24h`, `30m`)
 - `--dead-only`: Only remove dead jobs (not completed)
 - `--dry-run`: Preview what would be deleted without actually deleting
+- `--keep-files`: Don't delete remote log files (only remove from database)
 
 **Examples:**
 ```bash
@@ -199,6 +204,7 @@ remote-jobs prune --older-than 7d    # Only jobs older than 7 days
 remote-jobs prune --older-than 24h   # Only jobs older than 24 hours
 remote-jobs prune --dry-run          # Preview deletions
 remote-jobs prune --dead-only        # Only remove dead jobs
+remote-jobs prune --keep-files       # Don't delete remote files
 ```
 
 ### remote-jobs log
@@ -206,7 +212,7 @@ remote-jobs prune --dead-only        # Only remove dead jobs
 View the full log file for a job.
 
 ```bash
-remote-jobs log <host> <session> [flags]
+remote-jobs log <job-id> [flags]
 ```
 
 **Flags:**
@@ -215,9 +221,9 @@ remote-jobs log <host> <session> [flags]
 
 **Examples:**
 ```bash
-remote-jobs log cool30 train-gpt2           # Last 50 lines
-remote-jobs log cool30 train-gpt2 -f        # Follow (like tail -f)
-remote-jobs log cool30 train-gpt2 -n 100    # Last 100 lines
+remote-jobs log 42           # Last 50 lines
+remote-jobs log 42 -f        # Follow (like tail -f)
+remote-jobs log 42 -n 100    # Last 100 lines
 ```
 
 ### remote-jobs restart
@@ -225,10 +231,10 @@ remote-jobs log cool30 train-gpt2 -n 100    # Last 100 lines
 Restart a job using its saved metadata.
 
 ```bash
-remote-jobs restart <host> <session>
+remote-jobs restart <job-id>
 ```
 
-This kills the existing session (if any) and starts a new one with the same command and working directory.
+This kills the existing session (if any) and starts a new one with the same command and working directory, creating a new job ID.
 
 ### remote-jobs retry
 
@@ -275,10 +281,15 @@ remote-jobs cleanup cool30 --dry-run          # Preview only
 
 ### remote-jobs kill
 
-Kill a specific tmux session on a remote host.
+Kill a running job.
 
 ```bash
-remote-jobs kill <host> <session>
+remote-jobs kill <job-id>
+```
+
+**Example:**
+```bash
+remote-jobs kill 42    # Kill job #42
 ```
 
 ## Configuration
@@ -302,30 +313,35 @@ Valid values for `default_command`:
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/remote-jobs/jobs.db`. The database records:
-- Host and session name
+- Unique job ID (used to identify tmux sessions as `rj-{id}`)
+- Host
 - Working directory and command
 - Optional description
 - Start time and end time
 - Exit code and status
 
+Log files are stored on remote hosts at `~/.cache/remote-jobs/logs/{id}-{timestamp}.log`.
+
 **Job statuses:**
+- `starting`: Job is being set up (transient state)
 - `running`: Job is currently executing on the remote host
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
 - `pending`: Job queued but not yet started (for later execution)
+- `failed`: Job failed to start (e.g., connection error)
 
 The database is automatically created on first use and updated when checking job status.
 
 ## Manual Monitoring
 
-View last 50 lines of a session:
+View last 50 lines of a session (replace `42` with actual job ID):
 ```bash
-ssh cool30 'tmux capture-pane -t train-gpt2 -p | tail -50'
+ssh cool30 'tmux capture-pane -t rj-42 -p | tail -50'
 ```
 
 Attach to a session interactively:
 ```bash
-ssh cool30 -t 'tmux attach -t train-gpt2'
+ssh cool30 -t 'tmux attach -t rj-42'
 ```
 
 Press `Ctrl+B D` to detach from the session while leaving it running.

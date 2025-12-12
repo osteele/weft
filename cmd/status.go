@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -21,9 +22,9 @@ const (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <host> <session>",
+	Use:   "status <job-id>",
 	Short: "Check the status of a specific job",
-	Long: `Check the status of a specific job with database quick-path.
+	Long: `Check the status of a specific job.
 
 Exit codes:
   0: Job completed successfully
@@ -32,8 +33,8 @@ Exit codes:
   3: Job not found
 
 Example:
-  remote-jobs status cool30 train-gpt2`,
-	Args: cobra.ExactArgs(2),
+  remote-jobs status 42`,
+	Args: cobra.ExactArgs(1),
 	RunE: runStatus,
 }
 
@@ -42,8 +43,10 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	host := args[0]
-	sessionName := args[1]
+	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid job ID: %s", args[0])
+	}
 
 	database, err := db.Open()
 	if err != nil {
@@ -51,14 +54,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Check database first (fast path)
-	job, err := db.GetJob(database, host, sessionName)
+	// Get job from database
+	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
 
 	if job == nil {
-		fmt.Printf("Job '%s' not found in database for host %s\n", sessionName, host)
+		fmt.Printf("Job %d not found\n", jobID)
 		os.Exit(ExitNotFound)
 		return nil
 	}
@@ -69,24 +72,25 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Job is marked as running - verify actual status on remote
-	exists, err := ssh.TmuxSessionExists(host, sessionName)
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	exists, err := ssh.TmuxSessionExists(job.Host, tmuxSession)
 	if err != nil {
 		return fmt.Errorf("check session: %w", err)
 	}
 
 	if !exists {
 		// Session doesn't exist - check for status file
-		statusFile := session.StatusFile(sessionName)
-		content, err := ssh.ReadRemoteFile(host, statusFile)
+		statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
+		content, err := ssh.ReadRemoteFile(job.Host, statusFile)
 		if err != nil {
 			return fmt.Errorf("read status file: %w", err)
 		}
 
 		if content != "" {
 			// Job completed, update database
-			exitCode, _ := strconv.Atoi(content)
+			exitCode, _ := strconv.Atoi(strings.TrimSpace(content))
 			endTime := time.Now().Unix()
-			if err := db.RecordCompletion(database, host, sessionName, exitCode, endTime); err != nil {
+			if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
 			}
 			job.Status = db.StatusCompleted
@@ -94,14 +98,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			job.EndTime = &endTime
 		} else {
 			// No status file - job died unexpectedly
-			if err := db.MarkDead(database, host, sessionName); err != nil {
+			if err := db.MarkDeadByID(database, job.ID); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
 			}
 			job.Status = db.StatusDead
 		}
 	} else {
 		// Session still running - show last few lines of output
-		output, _ := ssh.TmuxCapturePaneOutput(host, sessionName, 5)
+		output, _ := ssh.TmuxCapturePaneOutput(job.Host, tmuxSession, 5)
 		if output != "" {
 			fmt.Println("Last output:")
 			fmt.Println(output)
@@ -112,8 +116,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 func printJobStatus(job *db.Job) error {
+	fmt.Printf("Job ID:   %d\n", job.ID)
 	fmt.Printf("Host:     %s\n", job.Host)
-	fmt.Printf("Session:  %s\n", job.SessionName)
 	fmt.Printf("Status:   %s\n", job.Status)
 
 	if job.Description != "" {

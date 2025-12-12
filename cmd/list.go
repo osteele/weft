@@ -125,7 +125,6 @@ func showJob(database *sql.DB, id int64) error {
 
 	fmt.Printf("Job ID:       %d\n", job.ID)
 	fmt.Printf("Host:         %s\n", job.Host)
-	fmt.Printf("Session:      %s\n", job.SessionName)
 	fmt.Printf("Working Dir:  %s\n", job.WorkingDir)
 	fmt.Printf("Command:      %s\n", job.Command)
 	if job.Description != "" {
@@ -152,7 +151,7 @@ func printJobs(jobs []*db.Job) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tHOST\tSESSION\tSTATUS\tSTARTED\tDESCRIPTION")
+	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tCOMMAND / DESCRIPTION")
 
 	for _, job := range jobs {
 		started := time.Unix(job.StartTime, 0).Format("01/02 15:04")
@@ -166,13 +165,17 @@ func printJobs(jobs []*db.Job) error {
 			}
 		}
 
-		desc := job.Description
-		if len(desc) > 40 {
-			desc = desc[:37] + "..."
+		// Show description if available, otherwise truncated command
+		display := job.Description
+		if display == "" {
+			display = job.Command
+		}
+		if len(display) > 40 {
+			display = display[:37] + "..."
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
-			job.ID, job.Host, job.SessionName, status, started, desc)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
+			job.ID, job.Host, status, started, display)
 	}
 
 	return w.Flush()

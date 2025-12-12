@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -18,7 +19,7 @@ var checkCmd = &cobra.Command{
 	Long: `Check the status of all running tmux sessions on a remote host.
 
 Shows:
-- List of all active tmux sessions
+- List of all active tmux sessions (rj-* pattern)
 - Status of each job (RUNNING or FINISHED)
 - Exit code for finished jobs
 - Last 10 lines of output from each session
@@ -61,7 +62,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\nWarning: %d jobs in database are marked as running but no sessions found.\n", len(runningJobs))
 			fmt.Println("These jobs may have died unexpectedly. Marking as dead...")
 			for _, job := range runningJobs {
-				if err := db.MarkDead(database, host, job.SessionName); err != nil {
+				if err := db.MarkDeadByID(database, job.ID); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to mark job %d as dead: %v\n", job.ID, err)
 				}
 			}
@@ -74,16 +75,41 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	for _, sessionName := range sessions {
 		fmt.Printf("=== %s ===\n", sessionName)
 
+		// Try to parse job ID from session name (rj-{id} pattern)
+		var job *db.Job
+		if strings.HasPrefix(sessionName, "rj-") {
+			if jobID, err := strconv.ParseInt(sessionName[3:], 10, 64); err == nil {
+				job, _ = db.GetJobByID(database, jobID)
+			}
+		} else {
+			// Legacy session - try to look up by session name
+			job, _ = db.GetJob(database, host, sessionName)
+		}
+
 		// Check if job is still running by looking for child processes
 		panePID, _ := ssh.GetTmuxPanePID(host, sessionName)
 		hasChildren, _ := ssh.HasChildProcesses(host, panePID)
 
-		statusFile := session.StatusFile(sessionName)
-		statusContent, _ := ssh.ReadRemoteFile(host, statusFile)
+		// Determine status file path
+		var statusFile string
+		if job != nil {
+			statusFile = session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
+		} else if strings.HasPrefix(sessionName, "rj-") {
+			// New-style session but no job in DB - can't determine status file
+			statusFile = ""
+		} else {
+			// Legacy session without job record
+			statusFile = session.LegacyStatusFile(sessionName)
+		}
+
+		var statusContent string
+		if statusFile != "" {
+			statusContent, _ = ssh.ReadRemoteFile(host, statusFile)
+		}
 
 		if statusContent != "" {
 			// Job has finished
-			exitCode, _ := strconv.Atoi(statusContent)
+			exitCode, _ := strconv.Atoi(strings.TrimSpace(statusContent))
 			if exitCode == 0 {
 				fmt.Printf("Status: FINISHED ✓\n")
 			} else {
@@ -92,8 +118,8 @@ func runCheck(cmd *cobra.Command, args []string) error {
 
 			// Update database
 			endTime := time.Now().Unix()
-			if err := db.RecordCompletion(database, host, sessionName, exitCode, endTime); err != nil {
-				// Might fail if job not in DB, that's ok
+			if job != nil {
+				db.RecordCompletionByID(database, job.ID, exitCode, endTime)
 			}
 		} else if hasChildren {
 			fmt.Printf("Status: RUNNING\n")
@@ -101,13 +127,12 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Status: FINISHED (no status file - may have died)\n")
 
 			// Mark as dead in database
-			if err := db.MarkDead(database, host, sessionName); err != nil {
-				// Might fail if job not in DB, that's ok
+			if job != nil {
+				db.MarkDeadByID(database, job.ID)
 			}
 		}
 
-		// Get job info from database if available
-		job, _ := db.GetJob(database, host, sessionName)
+		// Show job info if available
 		if job != nil {
 			if job.Description != "" {
 				fmt.Printf("Description: %s\n", job.Description)

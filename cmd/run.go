@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -24,14 +23,13 @@ to create robust, long-running processes on remote machines.
 Examples:
   remote-jobs run cool30 'python train.py'
   remote-jobs run -d "Training GPT-2" cool30 'with-gpu python train.py'
-  remote-jobs run -n train-gpt2 -C /mnt/code/LM2 cool30 'python train.py'
+  remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
   remote-jobs run --queue cool30 'python train.py'`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: runRun,
 }
 
 var (
-	runName        string
 	runDir         string
 	runDescription string
 	runQueue       bool
@@ -41,7 +39,6 @@ var (
 func init() {
 	rootCmd.AddCommand(runCmd)
 
-	runCmd.Flags().StringVarP(&runName, "name", "n", "", "Session name (default: auto-generated from command)")
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path)")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "Description of the job")
 	runCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
@@ -53,11 +50,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	command := strings.Join(args[1:], " ")
 
 	// Set defaults
-	sessionName := runName
-	if sessionName == "" {
-		sessionName = session.GenerateName(command)
-	}
-
 	workingDir := runDir
 	if workingDir == "" {
 		var err error
@@ -75,14 +67,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Queue-only mode
 	if runQueue {
-		jobID, err := db.RecordPending(database, host, sessionName, workingDir, command, runDescription)
+		jobID, err := db.RecordPending(database, host, workingDir, command, runDescription)
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
 		}
 
 		fmt.Printf("Job queued with ID: %d\n\n", jobID)
 		fmt.Printf("  Host: %s\n", host)
-		fmt.Printf("  Session: %s\n", sessionName)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
 		if runDescription != "" {
@@ -93,44 +84,57 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Check if session already exists
-	exists, err := ssh.TmuxSessionExists(host, sessionName)
+	// Create job record first to get the ID
+	jobID, err := db.RecordJobStarting(database, host, workingDir, command, runDescription)
+	if err != nil {
+		return fmt.Errorf("create job record: %w", err)
+	}
+
+	// Get the job to access start time
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+
+	// Generate tmux session name and file paths from job ID
+	tmuxSession := session.TmuxSessionName(jobID)
+	logFile := session.LogFile(jobID, job.StartTime)
+	statusFile := session.StatusFile(jobID, job.StartTime)
+	metadataFile := session.MetadataFile(jobID, job.StartTime)
+
+	// Test connection and check if session already exists
+	exists, err := ssh.TmuxSessionExists(host, tmuxSession)
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) && runQueueOnFail {
-			fmt.Println("Connection failed. Queuing job for later...")
-			jobID, err := db.RecordPending(database, host, sessionName, workingDir, command, runDescription)
-			if err != nil {
-				return fmt.Errorf("queue job: %w", err)
-			}
+			// Convert to pending job
+			fmt.Println("Connection failed. Converting to pending job...")
+			db.UpdateJobFailed(database, jobID, "Connection failed, queued for retry")
 			fmt.Printf("Job queued with ID: %d\n\n", jobID)
 			fmt.Printf("To retry when connection is available:\n")
 			fmt.Printf("  remote-jobs retry %d\n", jobID)
 			return nil
 		}
+		// Mark job as failed
+		db.UpdateJobFailed(database, jobID, err.Error())
 		return fmt.Errorf("check session: %w", err)
 	}
 
 	if exists {
-		fmt.Fprintf(os.Stderr, "ERROR: Session '%s' already exists on %s\n", sessionName, host)
-		fmt.Fprintf(os.Stderr, "Attach with: ssh %s -t 'tmux attach -t %s'\n", host, sessionName)
-		fmt.Fprintf(os.Stderr, "Or kill with: remote-jobs kill %s %s\n", host, sessionName)
+		// This shouldn't happen with unique job IDs, but handle it anyway
+		db.UpdateJobFailed(database, jobID, "Session already exists")
+		fmt.Fprintf(os.Stderr, "ERROR: Session '%s' already exists on %s\n", tmuxSession, host)
 		os.Exit(1)
 	}
 
-	// Create file paths
-	logFile := session.LogFile(sessionName)
-	statusFile := session.StatusFile(sessionName)
-	metadataFile := session.MetadataFile(sessionName)
+	// Create log directory on remote
+	logDir := session.LogDir
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
+	if _, stderr, err := ssh.RunWithRetry(host, mkdirCmd); err != nil {
+		db.UpdateJobFailed(database, jobID, fmt.Sprintf("Failed to create log directory: %s", stderr))
+		return fmt.Errorf("create log directory: %s", stderr)
+	}
 
-	// Archive any existing log file
-	archiveCmd := fmt.Sprintf("if [ -f '%s' ]; then mv '%s' '%s.$(date +%%Y%%m%%d-%%H%%M%%S).log'; fi",
-		logFile, logFile, strings.TrimSuffix(logFile, ".log"))
-	ssh.RunWithRetry(host, archiveCmd)
-
-	// Remove old status file
-	ssh.RunWithRetry(host, fmt.Sprintf("rm -f '%s'", statusFile))
-
-	fmt.Printf("Starting persistent session '%s' on %s\n", sessionName, host)
+	fmt.Printf("Starting job %d on %s\n", jobID, host)
 	fmt.Printf("Working directory: %s\n", workingDir)
 	fmt.Printf("Command: %s\n", command)
 	if runDescription != "" {
@@ -139,9 +143,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Log file: %s\n\n", logFile)
 
 	// Save metadata
-	startTime := time.Now().Unix()
-	metadata := session.FormatMetadata(workingDir, command, host, runDescription, startTime)
-
+	metadata := session.FormatMetadata(jobID, workingDir, command, host, runDescription, job.StartTime)
 	metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	if _, _, err := ssh.RunWithRetry(host, metadataCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
@@ -161,42 +163,54 @@ func runRun(cmd *cobra.Command, args []string) error {
 		} else {
 			ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript))
 			// Note: \$EXIT_CODE escapes the $ for the outer shell layer
-			notifyCmd = fmt.Sprintf("; REMOTE_JOBS_SLACK_WEBHOOK='%s' '%s' '%s' \\$EXIT_CODE '%s'",
-				slackWebhook, remoteNotifyScript, sessionName, host)
+			notifyCmd = fmt.Sprintf("; REMOTE_JOBS_SLACK_WEBHOOK='%s' '%s' 'rj-%d' \\$EXIT_CODE '%s'",
+				slackWebhook, remoteNotifyScript, jobID, host)
 			fmt.Println("Slack notifications: enabled")
 		}
 	}
 
-	// Create the wrapped command
-	// Redirect output to log, capture exit code (PIPESTATUS[0] gets the command's exit, not tee's)
-	// Note: $ must be escaped as \$ since command runs inside double quotes via ssh
-	// User command is wrapped in () to ensure all output goes through tee
+	// Create the wrapped command with better error capture
+	// Log start marker, cd info, command, then run with output capture
 	wrappedCommand := fmt.Sprintf(
-		"cd '%s' && (%s) 2>&1 | tee '%s'; EXIT_CODE=\\${PIPESTATUS[0]}; echo \\$EXIT_CODE > '%s'%s",
-		workingDir, command, logFile, statusFile, notifyCmd)
+		`echo "=== START $(date) ===" > '%s'; `+
+			`echo "job_id: %d" >> '%s'; `+
+			`echo "cd: %s" >> '%s'; `+
+			`echo "cmd: %s" >> '%s'; `+
+			`echo "===" >> '%s'; `+
+			`cd '%s' && (%s) 2>&1 | tee -a '%s'; `+
+			`EXIT_CODE=\${PIPESTATUS[0]}; `+
+			`echo "=== END exit=\$EXIT_CODE $(date) ===" >> '%s'; `+
+			`echo \$EXIT_CODE > '%s'%s`,
+		logFile,
+		jobID, logFile,
+		workingDir, logFile,
+		command, logFile,
+		logFile,
+		workingDir, command, logFile,
+		logFile,
+		statusFile, notifyCmd)
 
 	// Start tmux session
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", sessionName, wrappedCommand)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", tmuxSession, wrappedCommand)
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
+		db.UpdateJobFailed(database, jobID, fmt.Sprintf("Failed to start tmux: %s", stderr))
 		return fmt.Errorf("start session: %s", stderr)
 	}
 
-	fmt.Println("✓ Session started successfully")
-
-	// Record in database
-	jobID, err := db.RecordStart(database, host, sessionName, workingDir, command, startTime, runDescription)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to record job in database: %v\n", err)
-	} else {
-		fmt.Printf("Job ID: %d\n", jobID)
+	// Mark job as running
+	if err := db.UpdateJobRunning(database, jobID); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to update job status: %v\n", err)
 	}
 
+	fmt.Println("✓ Session started successfully")
+	fmt.Printf("Job ID: %d\n", jobID)
+
 	fmt.Printf("\nMonitor progress:\n")
-	fmt.Printf("  ssh %s -t 'tmux attach -t %s'  # Attach (Ctrl+B D to detach)\n", host, sessionName)
-	fmt.Printf("  ssh %s 'tmux capture-pane -t %s -p | tail -20'  # View last 20 lines\n", host, sessionName)
-	fmt.Printf("  ssh %s 'tail -f %s'  # Follow log file\n", host, logFile)
+	fmt.Printf("  ssh %s -t 'tmux attach -t %s'  # Attach (Ctrl+B D to detach)\n", host, tmuxSession)
+	fmt.Printf("  remote-jobs log %d  # View log\n", jobID)
+	fmt.Printf("  remote-jobs log %d -f  # Follow log\n", jobID)
 	fmt.Printf("\nCheck status:\n")
-	fmt.Printf("  remote-jobs status %s %s\n", host, sessionName)
+	fmt.Printf("  remote-jobs status %d\n", jobID)
 
 	return nil
 }

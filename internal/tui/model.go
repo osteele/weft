@@ -121,6 +121,11 @@ type Model struct {
 	statusMessage string
 	errorMessage  string
 
+	// Operation state
+	restarting         bool
+	restartingJobName  string
+	pendingSelectJobID int64
+
 	// Layout
 	width  int
 	height int
@@ -174,6 +179,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.jobs = msg.jobs
 			m.errorMessage = ""
+
+			// If there's a pending job selection, find and select it
+			if m.pendingSelectJobID > 0 {
+				for i, job := range m.jobs {
+					if job.ID == m.pendingSelectJobID {
+						m.selectedIndex = i
+						break
+					}
+				}
+				m.pendingSelectJobID = 0
+			}
+
 			// Keep selection in bounds
 			if m.selectedIndex >= len(m.jobs) {
 				m.selectedIndex = len(m.jobs) - 1
@@ -213,11 +230,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshJobs()
 
 	case jobRestartedMsg:
+		m.restarting = false
+		m.restartingJobName = ""
 		if msg.err != nil {
 			m.errorMessage = fmt.Sprintf("Restart failed: %v", msg.err)
-		} else {
-			m.statusMessage = fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID)
+			return m, nil
 		}
+		m.statusMessage = fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID)
+		m.pendingSelectJobID = msg.newJobID
 		return m, m.refreshJobs()
 
 	case pruneCompletedMsg:
@@ -301,8 +321,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Restart):
 		job := m.getTargetJob()
-		if job != nil {
-			m.statusMessage = "Restarting job..."
+		if job != nil && !m.restarting {
+			m.restarting = true
+			m.restartingJobName = fmt.Sprintf("job %d", job.ID)
+			m.statusMessage = ""
+			m.errorMessage = ""
 			return m, m.restartJob(job)
 		}
 		return m, nil
@@ -330,11 +353,39 @@ func (m Model) View() string {
 	logView := m.renderLogPanel(logHeight)
 	statusView := m.renderStatusBar()
 
-	return lipgloss.JoinVertical(
+	mainView := lipgloss.JoinVertical(
 		lipgloss.Left,
 		listView,
 		logView,
 		statusView,
+	)
+
+	// Show modal overlay for long-running operations
+	if m.restarting {
+		return m.renderWithModal(mainView, fmt.Sprintf("Restarting %s...", m.restartingJobName))
+	}
+
+	return mainView
+}
+
+func (m Model) renderWithModal(background, message string) string {
+	// Create modal box
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 3).
+		Background(lipgloss.Color("235")).
+		Foreground(lipgloss.Color("229"))
+
+	modal := modalStyle.Render(message)
+
+	// Place modal centered on screen
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("237")),
 	)
 }
 
@@ -342,8 +393,8 @@ func (m Model) renderJobList(height int) string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf(" %-4s %-10s %-16s %-12s %-12s %s",
-		"ID", "HOST", "SESSION", "STATUS", "STARTED", "DESCRIPTION")
+	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %s",
+		"ID", "HOST", "STATUS", "STARTED", "COMMAND / DESCRIPTION")
 	rows = append(rows, headerStyle.Render(header))
 
 	// Jobs
@@ -355,14 +406,19 @@ func (m Model) renderJobList(height int) string {
 
 		status := m.formatStatus(job)
 		started := time.Unix(job.StartTime, 0).Format("01/02 15:04")
-		desc := job.Description
-		if len(desc) > 25 {
-			desc = desc[:22] + "..."
+
+		// Show description if available, otherwise truncated command
+		display := job.Description
+		if display == "" {
+			display = job.Command
+		}
+		if len(display) > 40 {
+			display = display[:37] + "..."
 		}
 
-		line := fmt.Sprintf(" %-4d %-10s %-16s %-12s %-12s %s",
-			job.ID, truncate(job.Host, 10), truncate(job.SessionName, 16),
-			status, started, desc)
+		line := fmt.Sprintf(" %-4d %-10s %-12s %-12s %s",
+			job.ID, truncate(job.Host, 10),
+			status, started, display)
 
 		if i == m.selectedIndex {
 			line = selectedStyle.Width(m.width - 4).Render(line)
@@ -399,7 +455,7 @@ func (m Model) renderLogPanel(height int) string {
 	// Title shows selected job info
 	title := "Logs"
 	if m.selectedJob != nil {
-		title = fmt.Sprintf("Logs: %s@%s", m.selectedJob.SessionName, m.selectedJob.Host)
+		title = fmt.Sprintf("Logs: job %d@%s", m.selectedJob.ID, m.selectedJob.Host)
 	}
 
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(
@@ -502,7 +558,7 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 
 	job := m.selectedJob
 	return func() tea.Msg {
-		logFile := session.LogFile(job.SessionName)
+		logFile := session.JobLogFile(job.ID, job.StartTime, job.SessionName)
 		// First check if we can connect to the host
 		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -50 '%s' 2>&1", logFile))
 		if err != nil {
@@ -570,9 +626,10 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 
 	database := m.database
 	return func() tea.Msg {
-		err := ssh.TmuxKillSession(job.Host, job.SessionName)
+		tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+		err := ssh.TmuxKillSession(job.Host, tmuxSession)
 		if err == nil {
-			db.MarkDead(database, job.Host, job.SessionName)
+			db.MarkDeadByID(database, job.ID)
 		}
 		return jobKilledMsg{jobID: job.ID, err: err}
 	}
@@ -584,8 +641,8 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		// Read metadata from remote
-		metadataFile := session.MetadataFile(job.SessionName)
+		// Read metadata from remote (for old jobs)
+		metadataFile := session.JobMetadataFile(job.ID, job.StartTime, job.SessionName)
 		content, err := ssh.ReadRemoteFile(job.Host, metadataFile)
 		if err != nil || content == "" {
 			// Fall back to database info
@@ -616,43 +673,71 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 		}
 
 		// Kill existing session if running
-		exists, _ := ssh.TmuxSessionExistsQuick(job.Host, job.SessionName)
+		oldTmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+		exists, _ := ssh.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
 		if exists {
-			ssh.TmuxKillSession(job.Host, job.SessionName)
+			ssh.TmuxKillSession(job.Host, oldTmuxSession)
 		}
 
-		// Create file paths
-		logFile := session.LogFile(job.SessionName)
-		statusFile := session.StatusFile(job.SessionName)
+		// Create new job record to get ID
+		newJobID, err := db.RecordJobStarting(database, job.Host, workingDir, command, description)
+		if err != nil {
+			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("create job record: %w", err)}
+		}
 
-		// Archive any existing log file
-		archiveCmd := fmt.Sprintf("if [ -f '%s' ]; then mv '%s' '%s.$(date +%%Y%%m%%d-%%H%%M%%S).log'; fi",
-			logFile, logFile, strings.TrimSuffix(logFile, ".log"))
-		ssh.Run(job.Host, archiveCmd)
+		// Get the new job to access start time
+		newJob, err := db.GetJobByID(database, newJobID)
+		if err != nil || newJob == nil {
+			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("get new job: %w", err)}
+		}
 
-		// Remove old status file
-		ssh.Run(job.Host, fmt.Sprintf("rm -f '%s'", statusFile))
+		// Generate new file paths from job ID
+		newTmuxSession := session.TmuxSessionName(newJobID)
+		logFile := session.LogFile(newJobID, newJob.StartTime)
+		statusFile := session.StatusFile(newJobID, newJob.StartTime)
+		newMetadataFile := session.MetadataFile(newJobID, newJob.StartTime)
 
-		// Update metadata with new start time
-		startTime := time.Now().Unix()
-		newMetadata := session.FormatMetadata(workingDir, command, job.Host, description, startTime)
-		metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, newMetadata)
+		// Create log directory on remote
+		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
+		if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
+			db.UpdateJobFailed(database, newJobID, fmt.Sprintf("create log dir: %s", stderr))
+			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("create log directory: %s", stderr)}
+		}
+
+		// Save metadata
+		newMetadata := session.FormatMetadata(newJobID, workingDir, command, job.Host, description, newJob.StartTime)
+		metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
 		ssh.Run(job.Host, metadataCmd)
 
-		// Create the wrapped command
+		// Create the wrapped command with better error capture
 		wrappedCommand := fmt.Sprintf(
-			"cd '%s' && (%s) 2>&1 | tee '%s'; EXIT_CODE=\\${PIPESTATUS[0]}; echo \\$EXIT_CODE > '%s'",
-			workingDir, command, logFile, statusFile)
+			`echo "=== START $(date) ===" > '%s'; `+
+				`echo "job_id: %d" >> '%s'; `+
+				`echo "cd: %s" >> '%s'; `+
+				`echo "cmd: %s" >> '%s'; `+
+				`echo "===" >> '%s'; `+
+				`cd '%s' && (%s) 2>&1 | tee -a '%s'; `+
+				`EXIT_CODE=\${PIPESTATUS[0]}; `+
+				`echo "=== END exit=\$EXIT_CODE $(date) ===" >> '%s'; `+
+				`echo \$EXIT_CODE > '%s'`,
+			logFile,
+			newJobID, logFile,
+			workingDir, logFile,
+			command, logFile,
+			logFile,
+			workingDir, command, logFile,
+			logFile,
+			statusFile)
 
 		// Start tmux session
-		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", job.SessionName, wrappedCommand)
+		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", newTmuxSession, wrappedCommand)
 		if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
+			db.UpdateJobFailed(database, newJobID, fmt.Sprintf("start tmux: %s", stderr))
 			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("start session: %s", stderr)}
 		}
 
-		// Record in database
-		newJobID, err := db.RecordStart(database, job.Host, job.SessionName, workingDir, command, startTime, description)
-		if err != nil {
+		// Mark job as running
+		if err := db.UpdateJobRunning(database, newJobID); err != nil {
 			return jobRestartedMsg{oldJobID: job.ID, err: err}
 		}
 
@@ -662,7 +747,8 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 
 // syncJobQuick checks and updates a single job's status (no retry for TUI responsiveness)
 func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
-	exists, err := ssh.TmuxSessionExistsQuick(job.Host, job.SessionName)
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	exists, err := ssh.TmuxSessionExistsQuick(job.Host, tmuxSession)
 	if err != nil {
 		return false, err
 	}
@@ -671,7 +757,7 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 		return false, nil
 	}
 
-	statusFile := session.StatusFile(job.SessionName)
+	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
 	content, err := ssh.ReadRemoteFileQuick(job.Host, statusFile)
 	if err != nil {
 		return false, err
@@ -680,13 +766,13 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	if content != "" {
 		exitCode, _ := strconv.Atoi(content)
 		endTime := time.Now().Unix()
-		if err := db.RecordCompletion(database, job.Host, job.SessionName, exitCode, endTime); err != nil {
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
 		}
 		return true, nil
 	}
 
-	if err := db.MarkDead(database, job.Host, job.SessionName); err != nil {
+	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}
 	return true, nil
