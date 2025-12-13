@@ -26,6 +26,12 @@ func IsConnectionError(output string) bool {
 	return connectionErrorPattern.MatchString(output)
 }
 
+// EscapeForSingleQuotes escapes a string for embedding in single quotes
+// by replacing ' with '\” (end quote, escaped quote, start quote)
+func EscapeForSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
+}
+
 // Run executes an SSH command and returns stdout, stderr, and error
 func Run(host string, command string) (string, string, error) {
 	cmd := exec.Command("ssh", host, command)
@@ -34,6 +40,37 @@ func Run(host string, command string) (string, string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// RunWithTimeout executes an SSH command with a timeout and connection options
+// to prevent hanging on unreachable hosts or password prompts
+func RunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
+	cmd := exec.Command("ssh",
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+		host, command)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// Start the command
+	if err := cmd.Start(); err != nil {
+		return "", "", err
+	}
+
+	// Wait with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		return stdout.String(), stderr.String(), err
+	case <-time.After(timeout):
+		cmd.Process.Kill()
+		return "", "", fmt.Errorf("SSH command timed out after %v", timeout)
+	}
 }
 
 // RunWithRetry executes an SSH command with retry logic for connection failures

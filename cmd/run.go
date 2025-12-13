@@ -144,7 +144,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Save metadata
 	metadata := session.FormatMetadata(jobID, workingDir, command, host, runDescription, job.StartTime)
-	metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
+	// Don't quote path - it contains ~ which needs shell expansion
+	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	if _, _, err := ssh.RunWithRetry(host, metadataCmd); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
 	}
@@ -171,16 +172,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Create the wrapped command with better error capture
 	// Log start marker, cd info, command, then run with output capture
+	// Note: file paths use ~ which must not be quoted to allow expansion
 	wrappedCommand := fmt.Sprintf(
-		`echo "=== START $(date) ===" > '%s'; `+
-			`echo "job_id: %d" >> '%s'; `+
-			`echo "cd: %s" >> '%s'; `+
-			`echo "cmd: %s" >> '%s'; `+
-			`echo "===" >> '%s'; `+
-			`cd '%s' && (%s) 2>&1 | tee -a '%s'; `+
-			`EXIT_CODE=\${PIPESTATUS[0]}; `+
-			`echo "=== END exit=\$EXIT_CODE $(date) ===" >> '%s'; `+
-			`echo \$EXIT_CODE > '%s'%s`,
+		`echo "=== START $(date) ===" > %s; `+
+			`echo "job_id: %d" >> %s; `+
+			`echo "cd: %s" >> %s; `+
+			`echo "cmd: %s" >> %s; `+
+			`echo "===" >> %s; `+
+			`cd '%s' && (%s) 2>&1 | tee -a %s; `+
+			`EXIT_CODE=${PIPESTATUS[0]}; `+
+			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
+			`echo $EXIT_CODE > %s%s`,
 		logFile,
 		jobID, logFile,
 		workingDir, logFile,
@@ -190,8 +192,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		logFile,
 		statusFile, notifyCmd)
 
-	// Start tmux session
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", tmuxSession, wrappedCommand)
+	// Escape single quotes in wrapped command for embedding in single-quoted string
+	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+
+	// Start tmux session - use single quotes to prevent shell expansion
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
 		db.UpdateJobFailed(database, jobID, fmt.Sprintf("Failed to start tmux: %s", stderr))
 		return fmt.Errorf("start session: %s", stderr)

@@ -118,20 +118,22 @@ func runRestart(cmd *cobra.Command, args []string) error {
 
 	// Save metadata
 	newMetadata := session.FormatMetadata(newJobID, workingDir, command, job.Host, description, newJob.StartTime)
-	metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
+	// Don't quote path - it contains ~ which needs shell expansion
+	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
 	ssh.RunWithRetry(job.Host, metadataCmd)
 
 	// Create the wrapped command with better error capture
+	// Note: file paths use ~ which must not be quoted to allow expansion
 	wrappedCommand := fmt.Sprintf(
-		`echo "=== START $(date) ===" > '%s'; `+
-			`echo "job_id: %d" >> '%s'; `+
-			`echo "cd: %s" >> '%s'; `+
-			`echo "cmd: %s" >> '%s'; `+
-			`echo "===" >> '%s'; `+
-			`cd '%s' && (%s) 2>&1 | tee -a '%s'; `+
-			`EXIT_CODE=\${PIPESTATUS[0]}; `+
-			`echo "=== END exit=\$EXIT_CODE $(date) ===" >> '%s'; `+
-			`echo \$EXIT_CODE > '%s'`,
+		`echo "=== START $(date) ===" > %s; `+
+			`echo "job_id: %d" >> %s; `+
+			`echo "cd: %s" >> %s; `+
+			`echo "cmd: %s" >> %s; `+
+			`echo "===" >> %s; `+
+			`cd '%s' && (%s) 2>&1 | tee -a %s; `+
+			`EXIT_CODE=${PIPESTATUS[0]}; `+
+			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
+			`echo $EXIT_CODE > %s`,
 		logFile,
 		newJobID, logFile,
 		workingDir, logFile,
@@ -141,8 +143,11 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		logFile,
 		statusFile)
 
-	// Start tmux session
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", newTmuxSession, wrappedCommand)
+	// Escape single quotes for embedding in single-quoted string
+	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+
+	// Start tmux session - use single quotes to prevent shell expansion
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", newTmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 		db.UpdateJobFailed(database, newJobID, fmt.Sprintf("start tmux: %s", stderr))
 		return fmt.Errorf("start session: %s", stderr)

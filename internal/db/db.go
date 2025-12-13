@@ -175,7 +175,6 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 }
 
 // RecordPending records a pending job and returns its ID
-// Note: session_name is deprecated; new pending jobs use NULL
 func RecordPending(db *sql.DB, host, workingDir, command, description string) (int64, error) {
 	startTime := time.Now().Unix()
 	result, err := db.Exec(

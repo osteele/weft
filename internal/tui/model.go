@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -30,6 +31,7 @@ type keyMap struct {
 	Kill    key.Binding
 	Restart key.Binding
 	Remove  key.Binding
+	NewJob  key.Binding
 	Prune   key.Binding
 	Suspend key.Binding
 	Quit    key.Binding
@@ -63,6 +65,10 @@ var keys = keyMap{
 	Remove: key.NewBinding(
 		key.WithKeys("x"),
 		key.WithHelp("x", "remove"),
+	),
+	NewJob: key.NewBinding(
+		key.WithKeys("n"),
+		key.WithHelp("n", "new job"),
 	),
 	Prune: key.NewBinding(
 		key.WithKeys("p"),
@@ -115,8 +121,21 @@ type jobRemovedMsg struct {
 	err   error
 }
 
+type jobCreatedMsg struct {
+	jobID int64
+	err   error
+}
+
 type tickMsg time.Time
 type logTickMsg time.Time
+
+// Input field indices for new job form
+const (
+	inputHost = iota
+	inputCommand
+	inputDescription
+	inputWorkingDir
+)
 
 // Model is the main TUI state
 type Model struct {
@@ -136,6 +155,12 @@ type Model struct {
 	restartingJobName  string
 	pendingSelectJobID int64
 
+	// New job input mode
+	inputMode   bool
+	inputFocus  int
+	inputs      []textinput.Model
+	creatingJob bool
+
 	// Layout
 	width  int
 	height int
@@ -150,9 +175,37 @@ type Model struct {
 
 // NewModel creates a new TUI model
 func NewModel(database *sql.DB) Model {
+	// Create text inputs for new job form
+	inputs := make([]textinput.Model, 4)
+
+	inputs[inputHost] = textinput.New()
+	inputs[inputHost].Placeholder = "e.g., cool30"
+	inputs[inputHost].Prompt = ""
+	inputs[inputHost].Width = 40
+	inputs[inputHost].CharLimit = 64
+
+	inputs[inputCommand] = textinput.New()
+	inputs[inputCommand].Placeholder = "e.g., python train.py"
+	inputs[inputCommand].Prompt = ""
+	inputs[inputCommand].Width = 40
+	inputs[inputCommand].CharLimit = 512
+
+	inputs[inputDescription] = textinput.New()
+	inputs[inputDescription].Placeholder = "(optional)"
+	inputs[inputDescription].Prompt = ""
+	inputs[inputDescription].Width = 40
+	inputs[inputDescription].CharLimit = 256
+
+	inputs[inputWorkingDir] = textinput.New()
+	inputs[inputWorkingDir].Placeholder = "(optional, defaults to ~)"
+	inputs[inputWorkingDir].Prompt = ""
+	inputs[inputWorkingDir].Width = 40
+	inputs[inputWorkingDir].CharLimit = 256
+
 	return Model{
 		database:      database,
 		selectedIndex: 0,
+		inputs:        inputs,
 	}
 }
 
@@ -181,6 +234,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.inputMode {
+			return m.handleInputKeyPress(msg)
+		}
 		return m.handleKeyPress(msg)
 
 	case jobsRefreshedMsg:
@@ -270,6 +326,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.refreshJobs()
 
+	case jobCreatedMsg:
+		m.creatingJob = false
+		if msg.err != nil {
+			m.errorMessage = fmt.Sprintf("Create failed: %v", msg.err)
+		} else {
+			m.statusMessage = fmt.Sprintf("Job %d started", msg.jobID)
+			m.pendingSelectJobID = msg.jobID
+			// Clear inputs for next time
+			for i := range m.inputs {
+				m.inputs[i].SetValue("")
+			}
+		}
+		return m, m.refreshJobs()
+
 	case tickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startSyncTicker())
@@ -341,14 +411,19 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Restart):
 		job := m.getTargetJob()
-		if job != nil && !m.restarting {
-			m.restarting = true
-			m.restartingJobName = fmt.Sprintf("job %d", job.ID)
-			m.statusMessage = ""
-			m.errorMessage = ""
-			return m, m.restartJob(job)
+		if job == nil {
+			m.errorMessage = "No job selected"
+			return m, nil
 		}
-		return m, nil
+		if m.restarting {
+			m.statusMessage = "Restart already in progress..."
+			return m, nil
+		}
+		m.restarting = true
+		m.restartingJobName = fmt.Sprintf("job %d", job.ID)
+		m.statusMessage = fmt.Sprintf("Restarting job %d...", job.ID)
+		m.errorMessage = ""
+		return m, m.restartJob(job)
 
 	case key.Matches(msg, keys.Remove):
 		job := m.getTargetJob()
@@ -358,12 +433,69 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMessage = "Removing job..."
 		return m, m.removeJob(job)
 
+	case key.Matches(msg, keys.NewJob):
+		m.inputMode = true
+		m.inputFocus = 0
+		m.inputs[inputHost].Focus()
+		m.errorMessage = ""
+		m.statusMessage = ""
+		return m, nil
+
 	case key.Matches(msg, keys.Prune):
 		m.statusMessage = "Pruning completed/dead jobs..."
 		return m, m.pruneJobs()
 	}
 
 	return m, nil
+}
+
+func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Cancel input mode
+		m.inputMode = false
+		m.inputs[m.inputFocus].Blur()
+		return m, nil
+
+	case tea.KeyTab, tea.KeyShiftTab:
+		// Cycle through inputs
+		m.inputs[m.inputFocus].Blur()
+		if msg.Type == tea.KeyShiftTab {
+			m.inputFocus--
+			if m.inputFocus < 0 {
+				m.inputFocus = len(m.inputs) - 1
+			}
+		} else {
+			m.inputFocus++
+			if m.inputFocus >= len(m.inputs) {
+				m.inputFocus = 0
+			}
+		}
+		m.inputs[m.inputFocus].Focus()
+		return m, nil
+
+	case tea.KeyEnter:
+		// Submit if we have required fields
+		host := strings.TrimSpace(m.inputs[inputHost].Value())
+		command := strings.TrimSpace(m.inputs[inputCommand].Value())
+
+		if host == "" || command == "" {
+			m.errorMessage = "Host and command are required"
+			return m, nil
+		}
+
+		// Exit input mode and create job
+		m.inputMode = false
+		m.inputs[m.inputFocus].Blur()
+		m.creatingJob = true
+		m.statusMessage = "Creating job..."
+		return m, m.createJob()
+	}
+
+	// Forward other keys to the focused input
+	var cmd tea.Cmd
+	m.inputs[m.inputFocus], cmd = m.inputs[m.inputFocus].Update(msg)
+	return m, cmd
 }
 
 // View renders the UI
@@ -393,6 +525,15 @@ func (m Model) View() string {
 		return m.renderWithModal(mainView, fmt.Sprintf("Restarting %s...", m.restartingJobName))
 	}
 
+	if m.creatingJob {
+		return m.renderWithModal(mainView, "Creating job...")
+	}
+
+	// Show input form
+	if m.inputMode {
+		return m.renderInputForm(mainView)
+	}
+
 	return mainView
 }
 
@@ -408,6 +549,48 @@ func (m Model) renderWithModal(background, message string) string {
 	modal := modalStyle.Render(message)
 
 	// Place modal centered on screen
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("237")),
+	)
+}
+
+func (m Model) renderInputForm(background string) string {
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Width(60)
+
+	labelStyle := lipgloss.NewStyle().Width(14).Foreground(lipgloss.Color("245"))
+	focusedLabelStyle := lipgloss.NewStyle().Width(14).Foreground(lipgloss.Color("69")).Bold(true)
+
+	var b strings.Builder
+	b.WriteString("New Job\n\n")
+
+	labels := []string{"Host:", "Command:", "Description:", "Working Dir:"}
+	for i, input := range m.inputs {
+		label := labelStyle
+		if i == m.inputFocus {
+			label = focusedLabelStyle
+		}
+		b.WriteString(label.Render(labels[i]))
+		b.WriteString(input.View())
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString("\n")
+	helpText := "Tab: next field • Enter: create job • Esc: cancel"
+	if m.errorMessage != "" {
+		helpText = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.errorMessage)
+	}
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(helpText))
+
+	modal := modalStyle.Render(b.String())
+
 	return lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
@@ -521,7 +704,7 @@ func (m Model) renderStatusBar() string {
 		left = statusMsgStyle.Render(m.statusMessage)
 	}
 
-	right := helpStyle.Render("↑/↓:nav Enter:logs r:restart k:kill x:remove p:prune q:quit")
+	right := helpStyle.Render("↑/↓:nav Enter:logs n:new r:restart k:kill x:remove p:prune q:quit")
 
 	if m.syncing {
 		right = syncingStyle.Render("⟳ ") + right
@@ -613,7 +796,8 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 	return func() tea.Msg {
 		logFile := session.JobLogFile(job.ID, job.StartTime, job.SessionName)
 		// First check if we can connect to the host
-		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -50 '%s' 2>&1", logFile))
+		// Don't quote path - it contains ~ which needs shell expansion
+		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -50 %s 2>&1", logFile))
 		if err != nil {
 			// Check if it's a connection error
 			combined := stdout + stderr
@@ -759,20 +943,22 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 
 		// Save metadata
 		newMetadata := session.FormatMetadata(newJobID, workingDir, command, job.Host, description, newJob.StartTime)
-		metadataCmd := fmt.Sprintf("cat > '%s' << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
+		// Don't quote path - it contains ~ which needs shell expansion
+		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
 		ssh.Run(job.Host, metadataCmd)
 
 		// Create the wrapped command with better error capture
+		// Note: file paths use ~ which must not be quoted to allow expansion
 		wrappedCommand := fmt.Sprintf(
-			`echo "=== START $(date) ===" > '%s'; `+
-				`echo "job_id: %d" >> '%s'; `+
-				`echo "cd: %s" >> '%s'; `+
-				`echo "cmd: %s" >> '%s'; `+
-				`echo "===" >> '%s'; `+
-				`cd '%s' && (%s) 2>&1 | tee -a '%s'; `+
-				`EXIT_CODE=\${PIPESTATUS[0]}; `+
-				`echo "=== END exit=\$EXIT_CODE $(date) ===" >> '%s'; `+
-				`echo \$EXIT_CODE > '%s'`,
+			`echo "=== START $(date) ===" > %s; `+
+				`echo "job_id: %d" >> %s; `+
+				`echo "cd: %s" >> %s; `+
+				`echo "cmd: %s" >> %s; `+
+				`echo "===" >> %s; `+
+				`cd '%s' && (%s) 2>&1 | tee -a %s; `+
+				`EXIT_CODE=${PIPESTATUS[0]}; `+
+				`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
+				`echo $EXIT_CODE > %s`,
 			logFile,
 			newJobID, logFile,
 			workingDir, logFile,
@@ -782,8 +968,11 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 			logFile,
 			statusFile)
 
-		// Start tmux session
-		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c \"%s\"", newTmuxSession, wrappedCommand)
+		// Escape single quotes for embedding in single-quoted string
+		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+
+		// Start tmux session - use single quotes to prevent shell expansion
+		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", newTmuxSession, escapedCommand)
 		if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 			db.UpdateJobFailed(database, newJobID, fmt.Sprintf("start tmux: %s", stderr))
 			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("start session: %s", stderr)}
@@ -846,6 +1035,91 @@ func (m Model) removeJob(job *db.Job) tea.Cmd {
 	return func() tea.Msg {
 		err := db.DeleteJob(database, job.ID)
 		return jobRemovedMsg{jobID: job.ID, err: err}
+	}
+}
+
+func (m Model) createJob() tea.Cmd {
+	database := m.database
+	host := strings.TrimSpace(m.inputs[inputHost].Value())
+	command := strings.TrimSpace(m.inputs[inputCommand].Value())
+	description := strings.TrimSpace(m.inputs[inputDescription].Value())
+	workingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
+
+	if workingDir == "" {
+		workingDir = "~"
+	}
+
+	return func() tea.Msg {
+		timeout := 30 * time.Second
+
+		// Create job record to get ID
+		jobID, err := db.RecordJobStarting(database, host, workingDir, command, description)
+		if err != nil {
+			return jobCreatedMsg{err: fmt.Errorf("create job record: %w", err)}
+		}
+
+		// Get the new job to access start time
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil || job == nil {
+			return jobCreatedMsg{err: fmt.Errorf("get new job: %w", err)}
+		}
+
+		// Generate file paths from job ID
+		tmuxSession := session.TmuxSessionName(jobID)
+		logFile := session.LogFile(jobID, job.StartTime)
+		statusFile := session.StatusFile(jobID, job.StartTime)
+		metadataFile := session.MetadataFile(jobID, job.StartTime)
+
+		// Create log directory on remote
+		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
+		if _, _, err := ssh.RunWithTimeout(host, mkdirCmd, timeout); err != nil {
+			db.UpdateJobFailed(database, jobID, fmt.Sprintf("create log dir: %v", err))
+			return jobCreatedMsg{err: fmt.Errorf("connect to %s: %v", host, err)}
+		}
+
+		// Save metadata
+		metadata := session.FormatMetadata(jobID, workingDir, command, host, description, job.StartTime)
+		// Don't quote path - it contains ~ which needs shell expansion
+		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
+		ssh.RunWithTimeout(host, metadataCmd, timeout)
+
+		// Create the wrapped command with better error capture
+		// Note: file paths use ~ which must not be quoted to allow expansion
+		wrappedCommand := fmt.Sprintf(
+			`echo "=== START $(date) ===" > %s; `+
+				`echo "job_id: %d" >> %s; `+
+				`echo "cd: %s" >> %s; `+
+				`echo "cmd: %s" >> %s; `+
+				`echo "===" >> %s; `+
+				`cd '%s' && (%s) 2>&1 | tee -a %s; `+
+				`EXIT_CODE=${PIPESTATUS[0]}; `+
+				`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
+				`echo $EXIT_CODE > %s`,
+			logFile,
+			jobID, logFile,
+			workingDir, logFile,
+			command, logFile,
+			logFile,
+			workingDir, command, logFile,
+			logFile,
+			statusFile)
+
+		// Escape single quotes for embedding in single-quoted string
+		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+
+		// Start tmux session - use single quotes to prevent shell expansion
+		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
+		if _, _, err := ssh.RunWithTimeout(host, tmuxCmd, timeout); err != nil {
+			db.UpdateJobFailed(database, jobID, fmt.Sprintf("start tmux: %v", err))
+			return jobCreatedMsg{err: fmt.Errorf("start session: %v", err)}
+		}
+
+		// Mark job as running
+		if err := db.UpdateJobRunning(database, jobID); err != nil {
+			return jobCreatedMsg{err: err}
+		}
+
+		return jobCreatedMsg{jobID: jobID}
 	}
 }
 

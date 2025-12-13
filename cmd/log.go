@@ -78,14 +78,16 @@ func runLog(cmd *cobra.Command, args []string) error {
 
 	if logFollow {
 		// Follow mode - use interactive SSH
-		sshCmd := exec.Command("ssh", job.Host, fmt.Sprintf("tail -f '%s'", logFile))
+		// Don't quote path - it contains ~ which needs shell expansion
+		sshCmd := exec.Command("ssh", job.Host, fmt.Sprintf("tail -f %s", logFile))
 		sshCmd.Stdout = os.Stdout
 		sshCmd.Stderr = os.Stderr
 		return sshCmd.Run()
 	}
 
 	// Regular mode - fetch last N lines
-	tailCmd := fmt.Sprintf("tail -%d '%s'", logLines, logFile)
+	// Don't quote path - it contains ~ which needs shell expansion
+	tailCmd := fmt.Sprintf("tail -%d %s", logLines, logFile)
 	stdout, stderr, err := ssh.Run(job.Host, tailCmd)
 	if err != nil {
 		if stderr != "" {

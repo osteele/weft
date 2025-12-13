@@ -124,6 +124,7 @@ The TUI shows a split-screen view with:
 - `↑/↓`: Navigate job list
 - `Enter`: Select job / view logs
 - `Esc`: Clear selection
+- `n`: Create new job (opens input form)
 - `r`: Restart highlighted job
 - `k/Delete`: Kill highlighted job
 - `x`: Remove job from database (without deleting remote files)
