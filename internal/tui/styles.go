@@ -68,4 +68,14 @@ var (
 
 	syncingStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("11"))
+
+	// Host status styles
+	hostOnlineStyle = lipgloss.NewStyle().
+			Foreground(runningColor) // Green
+
+	hostOfflineStyle = lipgloss.NewStyle().
+				Foreground(failedColor) // Red
+
+	hostCheckingStyle = lipgloss.NewStyle().
+				Foreground(pendingColor) // Yellow
 )

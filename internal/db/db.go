@@ -378,6 +378,25 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
+// ListUniqueHosts returns all unique hosts from all jobs
+func ListUniqueHosts(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs ORDER BY host`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
 // SearchJobs searches jobs by description or command
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"

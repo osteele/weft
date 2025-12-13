@@ -16,25 +16,40 @@ import (
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
-// Intervals for background operations
+// Default intervals for background operations
 const (
-	SyncInterval       = 15 * time.Second
-	LogRefreshInterval = 3 * time.Second
+	DefaultSyncInterval        = 15 * time.Second
+	DefaultLogRefreshInterval  = 3 * time.Second
+	DefaultHostRefreshInterval = 30 * time.Second
+)
+
+// ViewMode represents which view is currently active
+type ViewMode int
+
+const (
+	ViewModeJobs ViewMode = iota
+	ViewModeHosts
 )
 
 // Key bindings
 type keyMap struct {
-	Up      key.Binding
-	Down    key.Binding
-	Enter   key.Binding
-	Escape  key.Binding
-	Kill    key.Binding
-	Restart key.Binding
-	Remove  key.Binding
-	NewJob  key.Binding
-	Prune   key.Binding
-	Suspend key.Binding
-	Quit    key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Enter     key.Binding
+	Logs      key.Binding
+	Escape    key.Binding
+	Kill      key.Binding
+	Restart   key.Binding
+	Remove    key.Binding
+	NewJob    key.Binding
+	Prune     key.Binding
+	Suspend   key.Binding
+	Quit      key.Binding
+	HostsView key.Binding
+	JobsView  key.Binding
+	Tab       key.Binding
+	Refresh   key.Binding
+	Sync      key.Binding
 }
 
 var keys = keyMap{
@@ -49,6 +64,10 @@ var keys = keyMap{
 	Enter: key.NewBinding(
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "select"),
+	),
+	Logs: key.NewBinding(
+		key.WithKeys("l"),
+		key.WithHelp("l", "logs"),
 	),
 	Escape: key.NewBinding(
 		key.WithKeys("esc"),
@@ -80,6 +99,26 @@ var keys = keyMap{
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
 		key.WithHelp("q", "quit"),
+	),
+	HostsView: key.NewBinding(
+		key.WithKeys("h"),
+		key.WithHelp("h", "hosts"),
+	),
+	JobsView: key.NewBinding(
+		key.WithKeys("j"),
+		key.WithHelp("j", "jobs"),
+	),
+	Tab: key.NewBinding(
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "switch view"),
+	),
+	Refresh: key.NewBinding(
+		key.WithKeys("R"),
+		key.WithHelp("R", "refresh"),
+	),
+	Sync: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "sync"),
 	),
 }
 
@@ -133,6 +172,18 @@ type jobCreateProgressMsg struct {
 type tickMsg time.Time
 type logTickMsg time.Time
 type createTickMsg time.Time
+type hostRefreshTickMsg time.Time
+
+// Host-related messages
+type hostsLoadedMsg struct {
+	hostNames []string
+	err       error
+}
+
+type hostInfoMsg struct {
+	hostName string
+	info     *Host
+}
 
 // Input field indices for new job form
 const (
@@ -144,10 +195,17 @@ const (
 
 // Model is the main TUI state
 type Model struct {
-	// Data
+	// View mode
+	viewMode ViewMode
+
+	// Jobs data
 	jobs          []*db.Job
 	selectedIndex int
 	selectedJob   *db.Job
+
+	// Hosts data
+	hosts           []*Host
+	selectedHostIdx int
 
 	// UI State
 	logContent    string
@@ -178,10 +236,36 @@ type Model struct {
 	// Background sync state
 	syncing      bool
 	lastSyncTime time.Time
+
+	// Configurable intervals
+	syncInterval        time.Duration
+	logRefreshInterval  time.Duration
+	hostRefreshInterval time.Duration
+}
+
+// ModelOptions contains configuration for the TUI model
+type ModelOptions struct {
+	SyncInterval        time.Duration
+	LogRefreshInterval  time.Duration
+	HostRefreshInterval time.Duration
+}
+
+// DefaultModelOptions returns the default TUI options
+func DefaultModelOptions() ModelOptions {
+	return ModelOptions{
+		SyncInterval:        DefaultSyncInterval,
+		LogRefreshInterval:  DefaultLogRefreshInterval,
+		HostRefreshInterval: DefaultHostRefreshInterval,
+	}
 }
 
 // NewModel creates a new TUI model
 func NewModel(database *sql.DB) Model {
+	return NewModelWithOptions(database, DefaultModelOptions())
+}
+
+// NewModelWithOptions creates a new TUI model with custom options
+func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Create text inputs for new job form
 	inputs := make([]textinput.Model, 4)
 
@@ -210,9 +294,12 @@ func NewModel(database *sql.DB) Model {
 	inputs[inputWorkingDir].CharLimit = 256
 
 	return Model{
-		database:      database,
-		selectedIndex: 0,
-		inputs:        inputs,
+		database:            database,
+		selectedIndex:       0,
+		inputs:              inputs,
+		syncInterval:        opts.SyncInterval,
+		logRefreshInterval:  opts.LogRefreshInterval,
+		hostRefreshInterval: opts.HostRefreshInterval,
 	}
 }
 
@@ -220,8 +307,10 @@ func NewModel(database *sql.DB) Model {
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshJobs(),
+		m.loadHosts(),
 		m.startSyncTicker(),
 		m.startLogTicker(),
+		m.startHostRefreshTicker(),
 	)
 }
 
@@ -366,6 +455,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.startCreateTicker()
 		}
 		return m, nil
+
+	case hostsLoadedMsg:
+		if msg.err != nil {
+			m.errorMessage = fmt.Sprintf("Error loading hosts: %v", msg.err)
+		} else {
+			// Initialize hosts with names, set status to checking
+			var cmds []tea.Cmd
+			for _, name := range msg.hostNames {
+				// Check if host already exists
+				found := false
+				for _, h := range m.hosts {
+					if h.Name == name {
+						found = true
+						break
+					}
+				}
+				if !found {
+					host := &Host{
+						Name:   name,
+						Status: HostStatusChecking,
+					}
+					m.hosts = append(m.hosts, host)
+					cmds = append(cmds, m.fetchHostInfo(name))
+				}
+			}
+			if len(cmds) > 0 {
+				return m, tea.Batch(cmds...)
+			}
+		}
+		return m, nil
+
+	case hostInfoMsg:
+		// Update host info
+		for i, h := range m.hosts {
+			if h.Name == msg.hostName {
+				msg.info.Name = msg.hostName
+				m.hosts[i] = msg.info
+				break
+			}
+		}
+		return m, nil
+
+	case hostRefreshTickMsg:
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.startHostRefreshTicker())
+		// Only refresh hosts if in hosts view
+		if m.viewMode == ViewModeHosts {
+			for _, host := range m.hosts {
+				cmds = append(cmds, m.fetchHostInfo(host.Name))
+			}
+		}
+		return m, tea.Batch(cmds...)
 	}
 
 	return m, nil
@@ -387,27 +528,93 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Suspend):
 		return m, tea.Suspend
 
+	case key.Matches(msg, keys.Tab):
+		// Toggle between views
+		if m.viewMode == ViewModeJobs {
+			m.viewMode = ViewModeHosts
+			// Refresh hosts when switching to hosts view
+			var cmds []tea.Cmd
+			for _, host := range m.hosts {
+				cmds = append(cmds, m.fetchHostInfo(host.Name))
+			}
+			return m, tea.Batch(cmds...)
+		}
+		m.viewMode = ViewModeJobs
+		return m, nil
+
+	case key.Matches(msg, keys.HostsView):
+		if m.viewMode != ViewModeHosts {
+			m.viewMode = ViewModeHosts
+			// Refresh hosts when switching to hosts view
+			var cmds []tea.Cmd
+			for _, host := range m.hosts {
+				cmds = append(cmds, m.fetchHostInfo(host.Name))
+			}
+			return m, tea.Batch(cmds...)
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.JobsView):
+		m.viewMode = ViewModeJobs
+		return m, nil
+
 	case key.Matches(msg, keys.Up):
-		if m.selectedIndex > 0 {
-			m.selectedIndex--
-			m.selectedJob = nil
-			m.logContent = ""
+		if m.viewMode == ViewModeHosts {
+			if m.selectedHostIdx > 0 {
+				m.selectedHostIdx--
+			}
+		} else {
+			if m.selectedIndex > 0 {
+				m.selectedIndex--
+				// If in logs mode, fetch logs for new job
+				if m.selectedJob != nil && len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
+					m.selectedJob = m.jobs[m.selectedIndex]
+					m.logLoading = true
+					return m, m.fetchSelectedJobLog()
+				}
+			}
 		}
 		return m, nil
 
 	case key.Matches(msg, keys.Down):
-		if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs)-1 {
-			m.selectedIndex++
-			m.selectedJob = nil
-			m.logContent = ""
+		if m.viewMode == ViewModeHosts {
+			if len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts)-1 {
+				m.selectedHostIdx++
+			}
+		} else {
+			if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs)-1 {
+				m.selectedIndex++
+				// If in logs mode, fetch logs for new job
+				if m.selectedJob != nil && m.selectedIndex < len(m.jobs) {
+					m.selectedJob = m.jobs[m.selectedIndex]
+					m.logLoading = true
+					return m, m.fetchSelectedJobLog()
+				}
+			}
 		}
 		return m, nil
 
-	case key.Matches(msg, keys.Enter):
-		if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
-			m.selectedJob = m.jobs[m.selectedIndex]
-			m.logLoading = true
-			return m, m.fetchSelectedJobLog()
+	case key.Matches(msg, keys.Refresh):
+		if m.viewMode == ViewModeHosts && len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts) {
+			host := m.hosts[m.selectedHostIdx]
+			host.Status = HostStatusChecking
+			return m, m.fetchHostInfo(host.Name)
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.Logs):
+		if m.viewMode == ViewModeJobs {
+			// Toggle logs mode
+			if m.selectedJob != nil {
+				// Already in logs mode - go back to details
+				m.selectedJob = nil
+				m.logContent = ""
+			} else if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
+				// Enter logs mode
+				m.selectedJob = m.jobs[m.selectedIndex]
+				m.logLoading = true
+				return m, m.fetchSelectedJobLog()
+			}
 		}
 		return m, nil
 
@@ -471,6 +678,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Prune):
 		m.statusMessage = "Pruning completed/dead jobs..."
 		return m, m.pruneJobs()
+
+	case key.Matches(msg, keys.Sync):
+		if m.viewMode == ViewModeJobs && !m.syncing {
+			m.syncing = true
+			m.statusMessage = "Syncing..."
+			return m, m.performBackgroundSync()
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -535,19 +750,35 @@ func (m Model) View() string {
 
 	// Calculate panel heights
 	listHeight := int(float64(m.height) * 0.55)
-	logHeight := int(float64(m.height) * 0.35)
+	detailHeight := int(float64(m.height) * 0.35)
 
-	// Build panels
-	listView := m.renderJobList(listHeight)
-	logView := m.renderLogPanel(logHeight)
-	statusView := m.renderStatusBar()
+	var mainView string
 
-	mainView := lipgloss.JoinVertical(
-		lipgloss.Left,
-		listView,
-		logView,
-		statusView,
-	)
+	if m.viewMode == ViewModeHosts {
+		// Hosts view
+		listView := m.renderHostList(listHeight)
+		detailView := m.renderHostDetail(detailHeight)
+		statusView := m.renderHostsStatusBar()
+
+		mainView = lipgloss.JoinVertical(
+			lipgloss.Left,
+			listView,
+			detailView,
+			statusView,
+		)
+	} else {
+		// Jobs view (default)
+		listView := m.renderJobList(listHeight)
+		logView := m.renderLogPanel(detailHeight)
+		statusView := m.renderStatusBar()
+
+		mainView = lipgloss.JoinVertical(
+			lipgloss.Left,
+			listView,
+			logView,
+			statusView,
+		)
+	}
 
 	// Show modal overlay for long-running operations
 	if m.restarting {
@@ -676,55 +907,139 @@ func (m Model) renderJobList(height int) string {
 }
 
 func (m Model) renderLogPanel(height int) string {
+	// If a job is selected (l pressed), show only logs
+	if m.selectedJob != nil {
+		return m.renderLogsOnly(height)
+	}
+
+	// Otherwise show details for highlighted job
+	return m.renderJobDetails(height)
+}
+
+func (m Model) renderLogsOnly(height int) string {
+	job := m.selectedJob
+	var content string
+
+	if m.logLoading {
+		content = dimStyle.Render("Loading logs...")
+	} else if m.logContent == "" {
+		content = dimStyle.Render("No log content available")
+	} else {
+		// Take last N lines that fit
+		lines := strings.Split(m.logContent, "\n")
+		maxLines := height - 4 // Account for borders, title, and padding
+		if len(lines) > maxLines {
+			lines = lines[len(lines)-maxLines:]
+		}
+		content = strings.Join(lines, "\n")
+	}
+
+	title := fmt.Sprintf("Logs: Job %d on %s", job.ID, job.Host)
+	panelContent := titleStyle.Render(title) + "\n" + content
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+func (m Model) renderJobDetails(height int) string {
 	var content string
 	var header string
 
-	// Show details for highlighted job (even without pressing Enter)
 	highlightedJob := m.getTargetJob()
 
 	if highlightedJob == nil {
 		content = dimStyle.Render("No jobs to display")
 	} else {
-		// Build job details header
 		job := highlightedJob
 		startTime := time.Unix(job.StartTime, 0)
 		header = fmt.Sprintf("Job %d on %s\n", job.ID, job.Host)
 		header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
+
+		// Show timing information based on job status
+		if job.Status == db.StatusRunning {
+			elapsed := time.Since(startTime)
+			header += fmt.Sprintf("Elapsed: %s (running)\n", formatDuration(elapsed))
+		} else if job.EndTime != nil {
+			endTime := time.Unix(*job.EndTime, 0)
+			duration := endTime.Sub(startTime)
+			header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
+			header += fmt.Sprintf("Duration: %s\n", formatDuration(duration))
+		}
+
+		// Show exit status if available
+		if job.Status == db.StatusCompleted && job.ExitCode != nil {
+			if *job.ExitCode == 0 {
+				header += "Exit:    0 (success)\n"
+			} else {
+				header += fmt.Sprintf("Exit:    %d (failed)\n", *job.ExitCode)
+			}
+		} else if job.Status == db.StatusDead {
+			header += "Exit:    killed/crashed\n"
+		} else if job.Status == db.StatusFailed {
+			header += "Exit:    failed to start\n"
+			if job.ErrorMessage != "" {
+				header += fmt.Sprintf("Error:   %s\n", job.ErrorMessage)
+			}
+		}
+
 		header += fmt.Sprintf("Dir:     %s\n", job.WorkingDir)
 		header += fmt.Sprintf("Cmd:     %s\n", job.Command)
-		header += "───────────────────────────────────────────────────────────────\n"
 
-		// Only show logs if job is selected (Enter pressed)
-		if m.selectedJob == nil {
-			content = dimStyle.Render("Press Enter to view logs")
-		} else if m.logLoading {
-			content = dimStyle.Render("Loading logs...")
-		} else if m.logContent == "" {
-			content = dimStyle.Render("No log content available")
-		} else {
-			// Take last N lines that fit (account for header lines)
-			lines := strings.Split(m.logContent, "\n")
-			maxLines := height - 10 // Account for borders, header, and padding
-			if len(lines) > maxLines {
-				lines = lines[len(lines)-maxLines:]
-			}
-			content = strings.Join(lines, "\n")
-		}
+		content = dimStyle.Render("Press l to view logs")
 	}
 
-	// Title
-	title := "Details"
-	if highlightedJob == nil {
-		title = "Logs"
-	}
-
-	panelContent := titleStyle.Render(title) + "\n"
+	panelContent := titleStyle.Render("Details") + "\n"
 	if header != "" {
 		panelContent += header
 	}
 	panelContent += content
 
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+// parseMiB extracts the MiB value from a memory string like "123MiB"
+func parseMiB(mem string) int {
+	mem = strings.TrimSpace(mem)
+	if strings.HasSuffix(mem, "MiB") {
+		numStr := strings.TrimSuffix(mem, "MiB")
+		if mib, err := strconv.Atoi(strings.TrimSpace(numStr)); err == nil {
+			return mib
+		}
+	}
+	return 0
+}
+
+// formatGPUMem formats GPU memory, converting large MiB values to GiB
+func formatGPUMem(mem string) string {
+	mem = strings.TrimSpace(mem)
+	// Try to parse as MiB
+	if strings.HasSuffix(mem, "MiB") {
+		numStr := strings.TrimSuffix(mem, "MiB")
+		if mib, err := strconv.Atoi(strings.TrimSpace(numStr)); err == nil {
+			if mib >= 1024 {
+				gib := float64(mib) / 1024.0
+				return fmt.Sprintf("%.1fGiB", gib)
+			}
+			return fmt.Sprintf("%dMiB", mib)
+		}
+	}
+	return mem
+}
+
+// formatDuration formats a duration in a human-readable form
+func formatDuration(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 func (m Model) renderStatusBar() string {
@@ -735,7 +1050,7 @@ func (m Model) renderStatusBar() string {
 		left = statusMsgStyle.Render(m.statusMessage)
 	}
 
-	right := helpStyle.Render("↑/↓:nav Enter:logs n:new r:restart k:kill x:remove p:prune q:quit")
+	right := helpStyle.Render("↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit")
 
 	if m.syncing {
 		right = syncingStyle.Render("⟳ ") + right
@@ -748,6 +1063,212 @@ func (m Model) renderStatusBar() string {
 	}
 
 	return " " + left + strings.Repeat(" ", gap) + right
+}
+
+func (m Model) renderHostList(height int) string {
+	var rows []string
+
+	// Header
+	header := fmt.Sprintf(" %-12s %-10s %-16s %-8s %s",
+		"HOST", "STATUS", "ARCH", "LOAD", "GPU")
+	rows = append(rows, headerStyle.Render(header))
+
+	if len(m.hosts) == 0 {
+		rows = append(rows, dimStyle.Render(" No hosts found. Run a job first."))
+	} else {
+		// Hosts
+		contentHeight := height - 4 // Account for borders and header
+		for i, host := range m.hosts {
+			if i >= contentHeight {
+				break
+			}
+
+			status := m.formatHostStatus(host)
+			arch := truncate(host.Arch, 16)
+			if arch == "" {
+				arch = "-"
+			}
+			load := host.LoadAvgShort()
+			gpu := host.GPUSummary()
+
+			line := fmt.Sprintf(" %-12s %-10s %-16s %-8s %s",
+				truncate(host.Name, 12), status, arch, load, gpu)
+
+			if i == m.selectedHostIdx {
+				line = selectedStyle.Width(m.width - 4).Render(line)
+			} else {
+				line = m.styleForHostStatus(host.Status).Render(line)
+			}
+
+			rows = append(rows, line)
+		}
+	}
+
+	content := strings.Join(rows, "\n")
+	return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
+}
+
+func (m Model) renderHostDetail(height int) string {
+	var lines []string
+
+	if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+		lines = append(lines, dimStyle.Render("No host selected"))
+	} else {
+		host := m.hosts[m.selectedHostIdx]
+
+		lines = append(lines, fmt.Sprintf("Host: %s", host.Name))
+		statusLine := fmt.Sprintf("Status: %s", host.StatusString())
+		if host.Error != "" {
+			statusLine += fmt.Sprintf(" (%s)", host.Error)
+		}
+		lines = append(lines, statusLine)
+
+		if host.Status == HostStatusOnline {
+			lines = append(lines, "───────────────────────────────────────────────────────────────")
+			if host.Arch != "" {
+				lines = append(lines, fmt.Sprintf("Architecture: %s", host.Arch))
+			}
+			if host.OS != "" {
+				lines = append(lines, fmt.Sprintf("OS Version:   %s", host.OS))
+			}
+			if host.CPUs > 0 {
+				lines = append(lines, fmt.Sprintf("CPUs:         %d", host.CPUs))
+			}
+			if host.MemTotal != "" {
+				memInfo := host.MemTotal
+				if host.MemUsed != "" {
+					memInfo = fmt.Sprintf("%s used / %s total", host.MemUsed, host.MemTotal)
+				}
+				lines = append(lines, fmt.Sprintf("Memory:       %s", memInfo))
+			}
+			if host.LoadAvg != "" {
+				loads := strings.Split(host.LoadAvg, ",")
+				if len(loads) >= 3 && host.CPUs > 0 {
+					load1m := strings.TrimSpace(loads[0])
+					load5m := strings.TrimSpace(loads[1])
+					load15m := strings.TrimSpace(loads[2])
+					// Calculate utilization percentage from 1-minute load
+					if loadVal, err := strconv.ParseFloat(load1m, 64); err == nil {
+						pct := int((loadVal / float64(host.CPUs)) * 100)
+						lines = append(lines, fmt.Sprintf("Load:         %s (1m), %s (5m), %s (15m)  [%d%% utilized]", load1m, load5m, load15m, pct))
+					} else {
+						lines = append(lines, fmt.Sprintf("Load:         %s (1m), %s (5m), %s (15m)", load1m, load5m, load15m))
+					}
+				} else {
+					lines = append(lines, fmt.Sprintf("Load:         %s", host.LoadAvg))
+				}
+			}
+
+			if len(host.GPUs) > 0 {
+				// Show GPU summary header
+				gpuNames := make(map[string]int)
+				for _, gpu := range host.GPUs {
+					gpuNames[gpu.Name]++
+				}
+				if len(gpuNames) == 1 {
+					for name, count := range gpuNames {
+						lines = append(lines, fmt.Sprintf("GPUs:         %d× %s", count, name))
+					}
+				} else {
+					lines = append(lines, fmt.Sprintf("GPUs:         %d", len(host.GPUs)))
+				}
+				// Show per-GPU stats as a table
+				hasStats := false
+				for _, gpu := range host.GPUs {
+					if gpu.Temperature > 0 || gpu.Utilization > 0 || gpu.MemUsed != "" {
+						hasStats = true
+						break
+					}
+				}
+				if hasStats {
+					lines = append(lines, "")
+					lines = append(lines, "ID    TEMP    UTIL   MEM USED / TOTAL")
+					for _, gpu := range host.GPUs {
+						temp := "-"
+						if gpu.Temperature > 0 {
+							temp = fmt.Sprintf("%d°C", gpu.Temperature)
+						}
+						util := "-"
+						if gpu.Utilization > 0 || gpu.MemUsed != "" {
+							util = fmt.Sprintf("%d%%", gpu.Utilization)
+						}
+						mem := "-"
+						if gpu.MemUsed != "" && gpu.MemTotal != "" {
+							usedMiB := parseMiB(gpu.MemUsed)
+							totalMiB := parseMiB(gpu.MemTotal)
+							if totalMiB > 0 {
+								pct := (usedMiB * 100) / totalMiB
+								mem = fmt.Sprintf("%s / %s (%d%%)", formatGPUMem(gpu.MemUsed), formatGPUMem(gpu.MemTotal), pct)
+							} else {
+								mem = fmt.Sprintf("%s / %s", formatGPUMem(gpu.MemUsed), formatGPUMem(gpu.MemTotal))
+							}
+						}
+						lines = append(lines, fmt.Sprintf("%2d   %5s   %5s   %s", gpu.Index, temp, util, mem))
+					}
+				}
+			}
+		}
+
+		if !host.LastCheck.IsZero() {
+			elapsed := time.Since(host.LastCheck).Truncate(time.Second)
+			lines = append(lines, fmt.Sprintf("Last checked: %s ago", elapsed))
+		}
+	}
+
+	// Clip content to fit panel height (account for title, borders, padding)
+	maxLines := height - 4
+	if len(lines) > maxLines && maxLines > 0 {
+		lines = lines[:maxLines]
+	}
+
+	content := strings.Join(lines, "\n")
+	panelContent := titleStyle.Render("Host Details") + "\n" + content
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+func (m Model) renderHostsStatusBar() string {
+	left := ""
+	if m.errorMessage != "" {
+		left = errorStyle.Render(m.errorMessage)
+	} else if m.statusMessage != "" {
+		left = statusMsgStyle.Render(m.statusMessage)
+	}
+
+	right := helpStyle.Render("↑/↓:nav R:refresh j:jobs tab:switch q:quit")
+
+	// Calculate gap
+	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	if gap < 0 {
+		gap = 0
+	}
+
+	return " " + left + strings.Repeat(" ", gap) + right
+}
+
+func (m Model) formatHostStatus(host *Host) string {
+	switch host.Status {
+	case HostStatusOnline:
+		return "● online"
+	case HostStatusOffline:
+		return "○ offline"
+	case HostStatusChecking:
+		return "◐ checking"
+	default:
+		return "? unknown"
+	}
+}
+
+func (m Model) styleForHostStatus(status HostStatus) lipgloss.Style {
+	switch status {
+	case HostStatusOnline:
+		return hostOnlineStyle
+	case HostStatusOffline:
+		return hostOfflineStyle
+	case HostStatusChecking:
+		return hostCheckingStyle
+	default:
+		return lipgloss.NewStyle()
+	}
 }
 
 func (m Model) formatStatus(job *db.Job) string {
@@ -789,13 +1310,13 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 // Commands
 
 func (m Model) startSyncTicker() tea.Cmd {
-	return tea.Tick(SyncInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(m.syncInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
 
 func (m Model) startLogTicker() tea.Cmd {
-	return tea.Tick(LogRefreshInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(m.logRefreshInterval, func(t time.Time) tea.Msg {
 		return logTickMsg(t)
 	})
 }
@@ -810,6 +1331,45 @@ func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
 		jobs, err := db.ListJobs(m.database, "", "", 100)
 		return jobsRefreshedMsg{jobs: jobs, err: err}
+	}
+}
+
+func (m Model) startHostRefreshTicker() tea.Cmd {
+	return tea.Tick(m.hostRefreshInterval, func(t time.Time) tea.Msg {
+		return hostRefreshTickMsg(t)
+	})
+}
+
+func (m Model) loadHosts() tea.Cmd {
+	return func() tea.Msg {
+		hosts, err := db.ListUniqueHosts(m.database)
+		return hostsLoadedMsg{hostNames: hosts, err: err}
+	}
+}
+
+func (m Model) fetchHostInfo(hostName string) tea.Cmd {
+	return func() tea.Msg {
+		host := &Host{
+			Name:      hostName,
+			Status:    HostStatusChecking,
+			LastCheck: time.Now(),
+		}
+
+		// Use short timeout to avoid blocking UI
+		stdout, stderr, err := ssh.RunWithTimeout(hostName, HostInfoCommand, 10*time.Second)
+		if err != nil {
+			host.Status = HostStatusOffline
+			host.Error = strings.TrimSpace(stderr)
+			if host.Error == "" {
+				host.Error = err.Error()
+			}
+			return hostInfoMsg{hostName: hostName, info: host}
+		}
+
+		// Parse the output
+		host = ParseHostInfo(stdout)
+		host.Name = hostName
+		return hostInfoMsg{hostName: hostName, info: host}
 	}
 }
 

@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/tui"
 	"github.com/spf13/cobra"
@@ -35,13 +37,31 @@ func init() {
 }
 
 func runTUI(cmd *cobra.Command, args []string) error {
+	// Load config
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
-	model := tui.NewModel(database)
+	// Build TUI options from config
+	opts := tui.DefaultModelOptions()
+	if cfg.SyncInterval > 0 {
+		opts.SyncInterval = time.Duration(cfg.SyncInterval) * time.Second
+	}
+	if cfg.LogRefreshInterval > 0 {
+		opts.LogRefreshInterval = time.Duration(cfg.LogRefreshInterval) * time.Second
+	}
+	if cfg.HostRefreshInterval > 0 {
+		opts.HostRefreshInterval = time.Duration(cfg.HostRefreshInterval) * time.Second
+	}
+
+	model := tui.NewModelWithOptions(database, opts)
 
 	p := tea.NewProgram(
 		model,

@@ -43,19 +43,19 @@ remote-jobs run [flags] <host> <command...>
 **Examples:**
 ```bash
 # Basic usage (uses current directory path)
-remote-jobs run cool30 'python train.py'
+remote-jobs run deepthought 'python train.py'
 
 # With description (recommended)
-remote-jobs run -d "Training GPT-2 with lr=0.001" cool30 'with-gpu python train.py --lr 0.001'
+remote-jobs run -d "Training GPT-2 with lr=0.001" deepthought 'with-gpu python train.py --lr 0.001'
 
 # Explicit working directory
-remote-jobs run -C /mnt/code/LM2 cool30 'with-gpu python train.py'
+remote-jobs run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
 
 # Queue for later (doesn't start immediately)
-remote-jobs run --queue -d "Training run" cool30 'python train.py'
+remote-jobs run --queue -d "Training run" deepthought 'python train.py'
 
 # Auto-queue if connection fails
-remote-jobs run --queue-on-fail -d "Training run" cool30 'python train.py'
+remote-jobs run --queue-on-fail -d "Training run" deepthought 'python train.py'
 ```
 
 The command:
@@ -116,23 +116,115 @@ Launch an interactive terminal UI for viewing and managing jobs.
 remote-jobs tui
 ```
 
-The TUI shows a split-screen view with:
+The TUI has two views: **Jobs** and **Hosts**.
+
+#### Jobs View (default)
+
+Split-screen with:
 - **Top panel**: Job list with status indicators (colored by status)
-- **Bottom panel**: Log output for selected job
+- **Bottom panel**: Job details or logs
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
+│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
+│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
+│ 50   skynet       ✓ done       yesterday    make build                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Details                                                                      │
+│ Job 52 on deepthought                                                        │
+│ Started: 2025-12-13 10:15:32 (2h ago)                                        │
+│ Elapsed: 2h 14m 23s (running)                                                │
+│ Dir:     ~/code/ml-project                                                   │
+│ Cmd:     python train.py --lr 0.001                                          │
+│ Press l to view logs                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
+```
+
+Press `l` to view logs:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
+│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
+│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
+│ 50   skynet       ✓ done       yesterday    make build                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Logs: Job 52 on deepthought                                                  │
+│ Epoch 45/100: loss=0.0234, acc=0.9812                                        │
+│ Epoch 46/100: loss=0.0229, acc=0.9818                                        │
+│ Epoch 47/100: loss=0.0221, acc=0.9825                                        │
+│ Epoch 48/100: loss=0.0218, acc=0.9831                                        │
+│ ...                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
+```
 
 **Keyboard shortcuts:**
 - `↑/↓`: Navigate job list
-- `Enter`: Select job / view logs
-- `Esc`: Clear selection
+- `l`: Toggle logs view (shows full logs, navigate between jobs while viewing)
+- `s`: Sync job statuses from remote hosts
 - `n`: Create new job (opens input form)
 - `r`: Restart highlighted job
-- `k/Delete`: Kill highlighted job
-- `x`: Remove job from database (without deleting remote files)
+- `k`: Kill highlighted job
 - `p`: Prune completed/dead jobs from database
-- `Ctrl-C` or `q`: Quit
+- `h` or `Tab`: Switch to hosts view
+- `Esc`: Clear selection / exit logs view
+- `q` or `Ctrl-C`: Quit
 - `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
 
-The TUI automatically syncs job statuses every 15 seconds and refreshes logs for running jobs every 3 seconds.
+#### Hosts View
+
+Shows all hosts that have had jobs, with system info and GPU status.
+
+- **Top panel**: Host list with status, architecture, load, and GPU summary
+- **Bottom panel**: Detailed host info including per-GPU stats
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ HOST         STATUS     ARCH             LOAD     GPU                        │
+│ deepthought  ● online   Linux x86_64     2.31     6×GeForce 15%              │
+│ skynet       ● online   Linux x86_64     0.42     2×A100 0%                  │
+│ tardis       ○ offline  -                -        -                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Host Details                                                                 │
+│ Host: deepthought                                                            │
+│ Status: online                                                               │
+│ ───────────────────────────────────────────────────────────────              │
+│ Architecture: Linux x86_64                                                   │
+│ OS Version:   5.15.0-generic                                                 │
+│ CPUs:         32                                                             │
+│ Memory:       45Gi used / 128Gi total                                        │
+│ Load:         2.31 (1m), 1.89 (5m), 1.45 (15m)  [7% utilized]                │
+│ GPUs:         6× NVIDIA GeForce RTX 3090                                     │
+│                                                                              │
+│ ID    TEMP    UTIL   MEM USED / TOTAL                                        │
+│  0    52°C      0%   456MiB / 24.0GiB (2%)                                   │
+│  1    48°C     95%   22.1GiB / 24.0GiB (92%)                                 │
+│  2    45°C      0%   456MiB / 24.0GiB (2%)                                   │
+│ ...                                                                          │
+│ Last checked: 5s ago                                                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓:nav R:refresh j:jobs tab:switch q:quit
+```
+
+**Keyboard shortcuts:**
+- `↑/↓`: Navigate host list
+- `R`: Refresh selected host info
+- `j` or `Tab`: Switch to jobs view
+- `q`: Quit
+
+**Host details include:**
+- Architecture and OS version
+- CPU count and memory usage
+- Load average with CPU utilization percentage
+- GPU table with temperature, utilization, and memory usage
+
+The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 
 ### remote-jobs list
 
@@ -160,7 +252,7 @@ remote-jobs list                       # Recent jobs
 remote-jobs list --running             # Running jobs
 remote-jobs list --running --sync      # Running jobs (sync first)
 remote-jobs list --pending             # Pending jobs
-remote-jobs list --host cool30         # Jobs on cool30
+remote-jobs list --host deepthought         # Jobs on deepthought
 remote-jobs list --search training     # Search jobs
 remote-jobs list --show 42             # Job details
 remote-jobs list --cleanup 30          # Remove old jobs
@@ -253,9 +345,9 @@ remote-jobs retry --delete <job-id>
 ```bash
 remote-jobs retry --list               # List pending jobs
 remote-jobs retry 42                   # Retry job #42
-remote-jobs retry 42 --host studio     # Retry on different host
+remote-jobs retry 42 --host skynet     # Retry on different host
 remote-jobs retry --all                # Retry all pending jobs
-remote-jobs retry --all --host cool30  # Retry pending jobs for cool30
+remote-jobs retry --all --host deepthought  # Retry pending jobs for deepthought
 remote-jobs retry --delete 42          # Remove pending job
 ```
 
@@ -275,10 +367,10 @@ remote-jobs cleanup <host> [flags]
 
 **Examples:**
 ```bash
-remote-jobs cleanup cool30                    # Clean both
-remote-jobs cleanup cool30 --sessions         # Only finished sessions
-remote-jobs cleanup cool30 --logs --older-than 3  # Logs > 3 days old
-remote-jobs cleanup cool30 --dry-run          # Preview only
+remote-jobs cleanup deepthought                    # Clean both
+remote-jobs cleanup deepthought --sessions         # Only finished sessions
+remote-jobs cleanup deepthought --logs --older-than 3  # Logs > 3 days old
+remote-jobs cleanup deepthought --dry-run          # Preview only
 ```
 
 ### remote-jobs kill
@@ -312,6 +404,17 @@ Valid values for `default_command`:
 - `tui`: Launch interactive terminal UI
 - `list`: Show job list
 
+### TUI Polling Intervals
+
+Customize how often the TUI refreshes data:
+
+```yaml
+# ~/.config/remote-jobs/config.yaml
+sync_interval: 15          # Seconds between job status syncs (default: 15)
+log_refresh_interval: 3    # Seconds between log refreshes for running jobs (default: 3)
+host_refresh_interval: 30  # Seconds between host info refreshes in hosts view (default: 30)
+```
+
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/remote-jobs/jobs.db`. The database records:
@@ -338,12 +441,12 @@ The database is automatically created on first use and updated when checking job
 
 View last 50 lines of a session (replace `42` with actual job ID):
 ```bash
-ssh cool30 'tmux capture-pane -t rj-42 -p | tail -50'
+ssh deepthought 'tmux capture-pane -t rj-42 -p | tail -50'
 ```
 
 Attach to a session interactively:
 ```bash
-ssh cool30 -t 'tmux attach -t rj-42'
+ssh deepthought -t 'tmux attach -t rj-42'
 ```
 
 Press `Ctrl+B D` to detach from the session while leaving it running.
