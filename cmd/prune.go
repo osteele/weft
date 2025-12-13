@@ -145,7 +145,8 @@ func deleteJobFiles(job *db.Job) bool {
 	}
 
 	// Build delete command
-	deleteCmd := fmt.Sprintf("rm -f '%s' '%s' '%s' 2>/dev/null", logFile, statusFile, metadataFile)
+	// Note: paths not quoted to allow tilde expansion
+	deleteCmd := fmt.Sprintf("rm -f %s %s %s 2>/dev/null", logFile, statusFile, metadataFile)
 
 	// Try to delete - silently ignore connection errors
 	_, _, err := ssh.Run(job.Host, deleteCmd)

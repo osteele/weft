@@ -126,8 +126,13 @@ type jobCreatedMsg struct {
 	err   error
 }
 
+type jobCreateProgressMsg struct {
+	step string
+}
+
 type tickMsg time.Time
 type logTickMsg time.Time
+type createTickMsg time.Time
 
 // Input field indices for new job form
 const (
@@ -156,10 +161,12 @@ type Model struct {
 	pendingSelectJobID int64
 
 	// New job input mode
-	inputMode   bool
-	inputFocus  int
-	inputs      []textinput.Model
-	creatingJob bool
+	inputMode      bool
+	inputFocus     int
+	inputs         []textinput.Model
+	creatingJob    bool
+	createJobStart time.Time
+	createJobStep  string
 
 	// Layout
 	width  int
@@ -206,13 +213,6 @@ func NewModel(database *sql.DB) Model {
 		database:      database,
 		selectedIndex: 0,
 		inputs:        inputs,
-	}
-}
-
-// Close cleans up resources
-func (m Model) Close() {
-	if m.database != nil {
-		m.database.Close()
 	}
 }
 
@@ -326,17 +326,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.refreshJobs()
 
+	case jobCreateProgressMsg:
+		m.createJobStep = msg.step
+		return m, nil
+
 	case jobCreatedMsg:
 		m.creatingJob = false
+		m.createJobStep = ""
 		if msg.err != nil {
 			m.errorMessage = fmt.Sprintf("Create failed: %v", msg.err)
 		} else {
 			m.statusMessage = fmt.Sprintf("Job %d started", msg.jobID)
 			m.pendingSelectJobID = msg.jobID
-			// Clear inputs for next time
-			for i := range m.inputs {
-				m.inputs[i].SetValue("")
-			}
+			// Keep inputs for easy re-use (user can modify and submit again)
 		}
 		return m, m.refreshJobs()
 
@@ -357,12 +359,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.fetchSelectedJobLog())
 		}
 		return m, tea.Batch(cmds...)
+
+	case createTickMsg:
+		// Only continue ticking if still creating
+		if m.creatingJob {
+			return m, m.startCreateTicker()
+		}
+		return m, nil
 	}
 
 	return m, nil
 }
 
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Allow cancelling job creation with Escape
+	if m.creatingJob && key.Matches(msg, keys.Escape) {
+		m.creatingJob = false
+		m.createJobStep = ""
+		m.statusMessage = "Job creation running in background..."
+		return m, nil
+	}
+
 	switch {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
@@ -379,7 +396,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Down):
-		if m.selectedIndex < len(m.jobs)-1 {
+		if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs)-1 {
 			m.selectedIndex++
 			m.selectedJob = nil
 			m.logContent = ""
@@ -439,6 +456,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputs[inputHost].Focus()
 		m.errorMessage = ""
 		m.statusMessage = ""
+
+		// Pre-populate from highlighted job if inputs are empty
+		job := m.getTargetJob()
+		if job != nil && m.inputs[inputHost].Value() == "" {
+			m.inputs[inputHost].SetValue(job.Host)
+			m.inputs[inputCommand].SetValue(job.Command)
+			// Don't pre-populate description - it may contain error messages from failed jobs
+			// and descriptions are usually different for each job anyway
+			m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
+		}
 		return m, nil
 
 	case key.Matches(msg, keys.Prune):
@@ -488,8 +515,10 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputMode = false
 		m.inputs[m.inputFocus].Blur()
 		m.creatingJob = true
-		m.statusMessage = "Creating job..."
-		return m, m.createJob()
+		m.createJobStart = time.Now()
+		m.createJobStep = "Connecting..."
+		m.statusMessage = ""
+		return m, tea.Batch(m.createJob(), m.startCreateTicker())
 	}
 
 	// Forward other keys to the focused input
@@ -526,7 +555,9 @@ func (m Model) View() string {
 	}
 
 	if m.creatingJob {
-		return m.renderWithModal(mainView, "Creating job...")
+		elapsed := time.Since(m.createJobStart).Truncate(time.Second)
+		msg := fmt.Sprintf("Creating job... %s\n\n%s\n\nPress Esc to dismiss", elapsed, m.createJobStep)
+		return m.renderWithModal(mainView, msg)
 	}
 
 	// Show input form
@@ -766,6 +797,12 @@ func (m Model) startSyncTicker() tea.Cmd {
 func (m Model) startLogTicker() tea.Cmd {
 	return tea.Tick(LogRefreshInterval, func(t time.Time) tea.Msg {
 		return logTickMsg(t)
+	})
+}
+
+func (m Model) startCreateTicker() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return createTickMsg(t)
 	})
 }
 

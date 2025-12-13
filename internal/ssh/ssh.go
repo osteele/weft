@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// execCommand is the function used to create exec.Cmd objects.
+// It can be replaced in tests to capture command arguments.
+var execCommand = exec.Command
+
 const (
 	// MaxRetries is the number of connection retry attempts
 	MaxRetries = 5
@@ -19,7 +23,7 @@ const (
 )
 
 // connectionErrorPattern matches SSH connection errors that should trigger retry
-var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|no route to host|host is unreachable|connection refused|network is unreachable|could not resolve hostname|name or service not known)`)
+var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|operation timed out|no route to host|host is unreachable|connection refused|network is unreachable|could not resolve hostname|name or service not known)`)
 
 // IsConnectionError checks if the error output indicates a connection failure
 func IsConnectionError(output string) bool {
@@ -34,7 +38,7 @@ func EscapeForSingleQuotes(s string) string {
 
 // Run executes an SSH command and returns stdout, stderr, and error
 func Run(host string, command string) (string, string, error) {
-	cmd := exec.Command("ssh", host, command)
+	cmd := execCommand("ssh", host, command)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -59,6 +63,7 @@ func RunWithTimeout(host string, command string, timeout time.Duration) (string,
 	}
 
 	// Wait with timeout
+	// Buffer size 1 prevents goroutine leak if timeout occurs before Wait() completes
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
@@ -69,12 +74,22 @@ func RunWithTimeout(host string, command string, timeout time.Duration) (string,
 		return stdout.String(), stderr.String(), err
 	case <-time.After(timeout):
 		cmd.Process.Kill()
-		return "", "", fmt.Errorf("SSH command timed out after %v", timeout)
+		return "", "", fmt.Errorf("ssh command timed out after %v", timeout)
 	}
 }
 
 // RunWithRetry executes an SSH command with retry logic for connection failures
 func RunWithRetry(host string, command string) (string, string, error) {
+	return RunWithRetryVerbose(host, command, true)
+}
+
+// RunWithRetryQuiet executes an SSH command with retry logic but no stderr output
+func RunWithRetryQuiet(host string, command string) (string, string, error) {
+	return RunWithRetryVerbose(host, command, false)
+}
+
+// RunWithRetryVerbose executes an SSH command with retry logic for connection failures
+func RunWithRetryVerbose(host string, command string, verbose bool) (string, string, error) {
 	var lastOutput, lastStderr string
 	var lastErr error
 
@@ -92,8 +107,10 @@ func RunWithRetry(host string, command string) (string, string, error) {
 		combined := stdout + stderr
 		if IsConnectionError(combined) {
 			if attempt < MaxRetries {
-				fmt.Fprintf(os.Stderr, "Connection failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(combined))
-				fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
+				if verbose {
+					fmt.Fprintf(os.Stderr, "Connection failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(combined))
+					fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
+				}
 				time.Sleep(RetryDelay)
 				continue
 			}
@@ -126,11 +143,16 @@ func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
 
 // CopyTo copies a local file to a remote host using scp
 func CopyTo(localPath, host, remotePath string) error {
-	return CopyToWithRetry(localPath, host, remotePath)
+	return CopyToWithRetryVerbose(localPath, host, remotePath, true)
 }
 
 // CopyToWithRetry copies a local file to a remote host with retry logic
 func CopyToWithRetry(localPath, host, remotePath string) error {
+	return CopyToWithRetryVerbose(localPath, host, remotePath, true)
+}
+
+// CopyToWithRetryVerbose copies a local file to a remote host with retry logic
+func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) error {
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
@@ -148,12 +170,14 @@ func CopyToWithRetry(localPath, host, remotePath string) error {
 
 		if IsConnectionError(output) {
 			if attempt < MaxRetries {
-				fmt.Fprintf(os.Stderr, "SCP failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(output))
-				fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
+				if verbose {
+					fmt.Fprintf(os.Stderr, "SCP failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(output))
+					fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
+				}
 				time.Sleep(RetryDelay)
 				continue
 			}
-			return fmt.Errorf("SCP failed after %d attempts: %s", MaxRetries, strings.TrimSpace(output))
+			return fmt.Errorf("scp failed after %d attempts: %s", MaxRetries, strings.TrimSpace(output))
 		}
 
 		// Non-connection error, don't retry
@@ -200,8 +224,9 @@ func TmuxSessionExistsQuick(host, sessionName string) (bool, error) {
 }
 
 // ReadRemoteFileQuick reads a file from a remote host without retrying (for sync)
+// Note: path is not quoted to allow tilde expansion
 func ReadRemoteFileQuick(host, path string) (string, error) {
-	stdout, stderr, err := Run(host, fmt.Sprintf("cat '%s' 2>/dev/null || true", path))
+	stdout, stderr, err := Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", path))
 	if err != nil {
 		if IsConnectionError(stdout + stderr) {
 			return "", fmt.Errorf("connection error: %s", strings.TrimSpace(stdout+stderr))
@@ -240,14 +265,16 @@ func TmuxCapturePaneOutput(host, sessionName string, lines int) (string, error) 
 }
 
 // ReadRemoteFile reads a file from a remote host
+// Note: path is not quoted to allow tilde expansion
 func ReadRemoteFile(host, path string) (string, error) {
-	stdout, _, err := Run(host, fmt.Sprintf("cat '%s' 2>/dev/null || true", path))
+	stdout, _, err := Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", path))
 	return strings.TrimSpace(stdout), err
 }
 
 // RemoteFileExists checks if a file exists on a remote host
+// Note: path is not quoted to allow tilde expansion
 func RemoteFileExists(host, path string) (bool, error) {
-	stdout, _, err := Run(host, fmt.Sprintf("test -f '%s' && echo EXISTS || echo NOTEXISTS", path))
+	stdout, _, err := Run(host, fmt.Sprintf("test -f %s && echo EXISTS || echo NOTEXISTS", path))
 	if err != nil {
 		return false, err
 	}

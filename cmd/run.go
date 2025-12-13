@@ -106,9 +106,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 	exists, err := ssh.TmuxSessionExists(host, tmuxSession)
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) && runQueueOnFail {
-			// Convert to pending job
-			fmt.Println("Connection failed. Converting to pending job...")
-			db.UpdateJobFailed(database, jobID, "Connection failed, queued for retry")
+			// Convert to pending job so it can be retried later
+			fmt.Println("Connection failed. Queuing job for later...")
+			if err := db.UpdateJobPending(database, jobID); err != nil {
+				return fmt.Errorf("queue job: %w", err)
+			}
 			fmt.Printf("Job queued with ID: %d\n\n", jobID)
 			fmt.Printf("To retry when connection is available:\n")
 			fmt.Printf("  remote-jobs retry %d\n", jobID)
@@ -122,8 +124,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if exists {
 		// This shouldn't happen with unique job IDs, but handle it anyway
 		db.UpdateJobFailed(database, jobID, "Session already exists")
-		fmt.Fprintf(os.Stderr, "ERROR: Session '%s' already exists on %s\n", tmuxSession, host)
-		os.Exit(1)
+		return fmt.Errorf("session '%s' already exists on %s", tmuxSession, host)
 	}
 
 	// Create log directory on remote
@@ -162,7 +163,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := ssh.CopyTo(notifyScript, host, remoteNotifyScript); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to copy notify script: %v\n", err)
 		} else {
-			ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript))
+			if _, stderr, err := ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript)); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to chmod notify script: %s\n", stderr)
+			}
 			// Note: \$EXIT_CODE escapes the $ for the outer shell layer
 			notifyCmd = fmt.Sprintf("; REMOTE_JOBS_SLACK_WEBHOOK='%s' '%s' 'rj-%d' \\$EXIT_CODE '%s'",
 				slackWebhook, remoteNotifyScript, jobID, host)

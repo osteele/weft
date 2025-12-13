@@ -39,6 +39,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
+	defer database.Close()
 
 	model := tui.NewModel(database)
 
@@ -47,17 +48,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		tea.WithAltScreen(),
 	)
 
-	finalModel, err := p.Run()
+	_, err = p.Run()
 	if err != nil {
-		database.Close()
 		return fmt.Errorf("run TUI: %w", err)
-	}
-
-	// Close database after TUI exits
-	if m, ok := finalModel.(tui.Model); ok {
-		m.Close()
-	} else {
-		database.Close()
 	}
 
 	return nil

@@ -13,16 +13,17 @@ import (
 
 // Job represents a remote job record
 type Job struct {
-	ID          int64
-	Host        string
-	SessionName string // Deprecated: kept for backward compatibility with old jobs
-	WorkingDir  string
-	Command     string
-	Description string
-	StartTime   int64
-	EndTime     *int64
-	ExitCode    *int
-	Status      string
+	ID           int64
+	Host         string
+	SessionName  string // Deprecated: kept for backward compatibility with old jobs
+	WorkingDir   string
+	Command      string
+	Description  string
+	ErrorMessage string
+	StartTime    int64
+	EndTime      *int64
+	ExitCode     *int
+	Status       string
 }
 
 // StatusStarting indicates a job is being set up
@@ -97,8 +98,11 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: make session_name nullable for existing tables
-	// SQLite doesn't support ALTER COLUMN, but we can add new jobs with NULL session_name
+	// Migration: add error_message column if it doesn't exist
+	// SQLite supports ALTER TABLE ADD COLUMN
+	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN error_message TEXT`)
+	// Ignore error - column may already exist
+
 	return nil
 }
 
@@ -143,12 +147,19 @@ func UpdateJobRunning(db *sql.DB, id int64) error {
 // UpdateJobFailed marks a starting job as failed
 func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 	endTime := time.Now().Unix()
-	// Store error in description if there isn't one already
+	// Store error in error_message column (not description) for debugging
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, end_time = ?,
-		 description = CASE WHEN description IS NULL OR description = '' THEN ? ELSE description END
-		 WHERE id = ? AND status = ?`,
+		`UPDATE jobs SET status = ?, end_time = ?, error_message = ? WHERE id = ? AND status = ?`,
 		StatusFailed, endTime, errorMsg, id, StatusStarting,
+	)
+	return err
+}
+
+// UpdateJobPending converts a starting job to pending status (for --queue-on-fail)
+func UpdateJobPending(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		StatusPending, id, StatusStarting,
 	)
 	return err
 }
@@ -233,7 +244,7 @@ func DeleteJob(db *sql.DB, id int64) error {
 // GetJob retrieves a job by host and session name (most recent)
 func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
 	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
 		 FROM jobs WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`,
 		host, sessionName,
 	)
@@ -243,7 +254,7 @@ func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
 // GetJobByID retrieves a job by ID
 func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
 		 FROM jobs WHERE id = ?`,
 		id,
 	)
@@ -253,7 +264,7 @@ func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 // GetPendingJob retrieves a pending job by ID
 func GetPendingJob(db *sql.DB, id int64) (*Job, error) {
 	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
 		 FROM jobs WHERE id = ? AND status = ?`,
 		id, StatusPending,
 	)
@@ -264,10 +275,11 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
 	var sessionName sql.NullString
 	var desc sql.NullString
+	var errorMsg sql.NullString
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -280,6 +292,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if desc.Valid {
 		j.Description = desc.String
+	}
+	if errorMsg.Valid {
+		j.ErrorMessage = errorMsg.String
 	}
 	if endTime.Valid {
 		j.EndTime = &endTime.Int64
@@ -294,7 +309,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 
 // ListJobs returns jobs matching the given filters
 func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status FROM jobs WHERE 1=1`
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message FROM jobs WHERE 1=1`
 	args := []interface{}{}
 
 	if status != "" {
@@ -314,7 +329,7 @@ func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
 
 // ListPending returns pending jobs, optionally filtered by host
 func ListPending(db *sql.DB, host string) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status FROM jobs WHERE status = ?`
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message FROM jobs WHERE status = ?`
 	args := []interface{}{StatusPending}
 
 	if host != "" {
@@ -424,7 +439,7 @@ func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 
 // ListJobsForPrune returns jobs that would be deleted by prune
 func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status FROM jobs WHERE `
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message FROM jobs WHERE `
 	var args []interface{}
 
 	if deadOnly {
@@ -456,10 +471,11 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var j Job
 		var sessionName sql.NullString
 		var desc sql.NullString
+		var errorMsg sql.NullString
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg)
 		if err != nil {
 			return nil, err
 		}
@@ -469,6 +485,9 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		}
 		if desc.Valid {
 			j.Description = desc.String
+		}
+		if errorMsg.Valid {
+			j.ErrorMessage = errorMsg.String
 		}
 		if endTime.Valid {
 			j.EndTime = &endTime.Int64

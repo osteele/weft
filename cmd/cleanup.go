@@ -155,27 +155,39 @@ func cleanupFinishedSessions(host string) (int, error) {
 func cleanupOldLogs(host string) (int, error) {
 	fmt.Printf("Checking for old log files on %s (older than %d days)...\n", host, cleanupOlderThan)
 
-	// Find archived log files older than N days
-	// Archived logs have format: /tmp/tmux-*.YYYYMMDD-HHMMSS.log
-	findCmd := fmt.Sprintf("find /tmp -maxdepth 1 -name 'tmux-*.*.log' -mtime +%d 2>/dev/null", cleanupOlderThan)
-	stdout, _, err := ssh.Run(host, findCmd)
-	if err != nil {
-		return 0, err
+	var allFiles []string
+
+	// Find legacy archived log files in /tmp (format: /tmp/tmux-*.YYYYMMDD-HHMMSS.log)
+	legacyFindCmd := fmt.Sprintf("find /tmp -maxdepth 1 -name 'tmux-*.*.log' -mtime +%d 2>/dev/null", cleanupOlderThan)
+	if stdout, _, err := ssh.Run(host, legacyFindCmd); err == nil {
+		for _, file := range strings.Split(strings.TrimSpace(stdout), "\n") {
+			if file != "" {
+				allFiles = append(allFiles, file)
+			}
+		}
 	}
 
-	files := strings.Split(strings.TrimSpace(stdout), "\n")
-	var cleaned int
-
-	for _, file := range files {
-		if file == "" {
-			continue
+	// Find new log files in ~/.cache/remote-jobs/logs
+	// Note: path not quoted to allow tilde expansion
+	newFindCmd := fmt.Sprintf("find ~/.cache/remote-jobs/logs -maxdepth 1 -type f -mtime +%d 2>/dev/null", cleanupOlderThan)
+	if stdout, _, err := ssh.Run(host, newFindCmd); err == nil {
+		for _, file := range strings.Split(strings.TrimSpace(stdout), "\n") {
+			if file != "" {
+				allFiles = append(allFiles, file)
+			}
 		}
+	}
 
+	var cleaned int
+	for _, file := range allFiles {
 		if cleanupDryRun {
 			fmt.Printf("  Would delete: %s\n", file)
 		} else {
 			fmt.Printf("  Deleting: %s\n", file)
-			ssh.Run(host, fmt.Sprintf("rm -f '%s'", file))
+			// Note: path not quoted to allow tilde expansion
+			if _, stderr, err := ssh.Run(host, fmt.Sprintf("rm -f %s", file)); err != nil {
+				fmt.Printf("    Warning: %s\n", strings.TrimSpace(stderr))
+			}
 		}
 		cleaned++
 	}
