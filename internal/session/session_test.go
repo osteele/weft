@@ -1,6 +1,9 @@
 package session
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTmuxSessionName(t *testing.T) {
 	tests := []struct {
@@ -113,5 +116,193 @@ func TestFormatMetadata(t *testing.T) {
 		if got := parsed[key]; got != want {
 			t.Errorf("parsed[%q] = %q, want %q", key, got, want)
 		}
+	}
+}
+
+// TestBuildWrapperCommand_TildeExpansion verifies that tilde paths are NOT quoted,
+// which would prevent shell expansion. This is a critical test to prevent regressions.
+func TestBuildWrapperCommand_TildeExpansion(t *testing.T) {
+	params := WrapperCommandParams{
+		JobID:      42,
+		WorkingDir: "~/code/project",
+		Command:    "python train.py",
+		LogFile:    "~/.cache/remote-jobs/logs/42.log",
+		StatusFile: "~/.cache/remote-jobs/logs/42.status",
+		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+		NotifyCmd:  "",
+	}
+
+	cmd := BuildWrapperCommand(params)
+
+	// CRITICAL: Tilde paths must NOT be single-quoted
+	// Single quotes prevent tilde expansion in bash
+	badPatterns := []struct {
+		pattern string
+		desc    string
+	}{
+		{"'~/code/project'", "working directory with tilde should not be single-quoted"},
+		{"'~/.cache/remote-jobs/logs/42.log'", "log file with tilde should not be single-quoted"},
+		{"'~/.cache/remote-jobs/logs/42.status'", "status file with tilde should not be single-quoted"},
+		{"'~/.cache/remote-jobs/logs/42.pid'", "pid file with tilde should not be single-quoted"},
+	}
+
+	for _, bp := range badPatterns {
+		if strings.Contains(cmd, bp.pattern) {
+			t.Errorf("BuildWrapperCommand: %s\nFound quoted pattern: %s\nCommand: %s", bp.desc, bp.pattern, cmd)
+		}
+	}
+
+	// Verify the paths ARE present (unquoted)
+	goodPatterns := []struct {
+		pattern string
+		desc    string
+	}{
+		{"cd ~/code/project", "working directory should appear unquoted after cd"},
+		{"> ~/.cache/remote-jobs/logs/42.log", "log file should appear unquoted"},
+		{">> ~/.cache/remote-jobs/logs/42.log", "log file should appear unquoted in append"},
+		{"> ~/.cache/remote-jobs/logs/42.status", "status file should appear unquoted"},
+		{"> ~/.cache/remote-jobs/logs/42.pid", "pid file should appear unquoted"},
+	}
+
+	for _, gp := range goodPatterns {
+		if !strings.Contains(cmd, gp.pattern) {
+			t.Errorf("BuildWrapperCommand: %s\nExpected pattern not found: %s\nCommand: %s", gp.desc, gp.pattern, cmd)
+		}
+	}
+}
+
+// TestBuildWrapperCommand_AbsolutePaths verifies that absolute paths work correctly
+func TestBuildWrapperCommand_AbsolutePaths(t *testing.T) {
+	params := WrapperCommandParams{
+		JobID:      99,
+		WorkingDir: "/mnt/data/project",
+		Command:    "make build",
+		LogFile:    "/tmp/job-99.log",
+		StatusFile: "/tmp/job-99.status",
+		PidFile:    "/tmp/job-99.pid",
+		NotifyCmd:  "",
+	}
+
+	cmd := BuildWrapperCommand(params)
+
+	// Absolute paths should appear in the command
+	if !strings.Contains(cmd, "cd /mnt/data/project") {
+		t.Errorf("BuildWrapperCommand: working directory not found\nCommand: %s", cmd)
+	}
+	if !strings.Contains(cmd, "/tmp/job-99.log") {
+		t.Errorf("BuildWrapperCommand: log file not found\nCommand: %s", cmd)
+	}
+}
+
+// TestBuildWrapperCommand_NotifyCmd verifies that notification command is properly appended
+func TestBuildWrapperCommand_NotifyCmd(t *testing.T) {
+	params := WrapperCommandParams{
+		JobID:      42,
+		WorkingDir: "~/code/project",
+		Command:    "python train.py",
+		LogFile:    "~/.cache/remote-jobs/logs/42.log",
+		StatusFile: "~/.cache/remote-jobs/logs/42.status",
+		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+		NotifyCmd:  "; notify-slack.sh rj-42 $EXIT_CODE cool30",
+	}
+
+	cmd := BuildWrapperCommand(params)
+
+	// Notify command should be appended at the end
+	if !strings.HasSuffix(cmd, "; notify-slack.sh rj-42 $EXIT_CODE cool30") {
+		t.Errorf("BuildWrapperCommand: notify command not properly appended\nCommand: %s", cmd)
+	}
+
+	// $EXIT_CODE should NOT be escaped (must expand at runtime)
+	if strings.Contains(cmd, "\\$EXIT_CODE") {
+		t.Errorf("BuildWrapperCommand: $EXIT_CODE should not be escaped\nCommand: %s", cmd)
+	}
+}
+
+// TestBuildWrapperCommand_CommandPreserved verifies that the user command is preserved correctly
+func TestBuildWrapperCommand_CommandPreserved(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"simple", "python train.py"},
+		{"with args", "python train.py --epochs 100 --lr 0.001"},
+		{"with pipe", "cat data.txt | grep error"},
+		{"with redirect", "python train.py > output.txt 2>&1"},
+		{"with env var", "CUDA_VISIBLE_DEVICES=0 python train.py"},
+		{"with semicolon", "echo start; python train.py; echo done"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := WrapperCommandParams{
+				JobID:      1,
+				WorkingDir: "~/code",
+				Command:    tt.command,
+				LogFile:    "~/.cache/remote-jobs/logs/1.log",
+				StatusFile: "~/.cache/remote-jobs/logs/1.status",
+				PidFile:    "~/.cache/remote-jobs/logs/1.pid",
+			}
+
+			cmd := BuildWrapperCommand(params)
+
+			// The command should appear in the wrapper (in the subshell)
+			if !strings.Contains(cmd, tt.command) {
+				t.Errorf("BuildWrapperCommand: command not preserved\nExpected: %s\nCommand: %s", tt.command, cmd)
+			}
+		})
+	}
+}
+
+// TestBuildWrapperCommand_PidCapture verifies PID is captured correctly
+func TestBuildWrapperCommand_PidCapture(t *testing.T) {
+	params := WrapperCommandParams{
+		JobID:      42,
+		WorkingDir: "~/code",
+		Command:    "python train.py",
+		LogFile:    "~/.cache/remote-jobs/logs/42.log",
+		StatusFile: "~/.cache/remote-jobs/logs/42.status",
+		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+	}
+
+	cmd := BuildWrapperCommand(params)
+
+	// Must capture PID with background + $!
+	if !strings.Contains(cmd, "CMD_PID=$!") {
+		t.Errorf("BuildWrapperCommand: PID capture not found\nCommand: %s", cmd)
+	}
+
+	// Must write PID to file
+	if !strings.Contains(cmd, "echo $CMD_PID > ~/.cache/remote-jobs/logs/42.pid") {
+		t.Errorf("BuildWrapperCommand: PID file write not found\nCommand: %s", cmd)
+	}
+
+	// Must wait for the process
+	if !strings.Contains(cmd, "wait $CMD_PID") {
+		t.Errorf("BuildWrapperCommand: wait for PID not found\nCommand: %s", cmd)
+	}
+}
+
+// TestBuildWrapperCommand_ExitCodeCapture verifies exit code is captured correctly
+func TestBuildWrapperCommand_ExitCodeCapture(t *testing.T) {
+	params := WrapperCommandParams{
+		JobID:      42,
+		WorkingDir: "~/code",
+		Command:    "python train.py",
+		LogFile:    "~/.cache/remote-jobs/logs/42.log",
+		StatusFile: "~/.cache/remote-jobs/logs/42.status",
+		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+	}
+
+	cmd := BuildWrapperCommand(params)
+
+	// Must capture exit code from PIPESTATUS (due to tee pipe)
+	if !strings.Contains(cmd, "EXIT_CODE=${PIPESTATUS[0]}") {
+		t.Errorf("BuildWrapperCommand: PIPESTATUS capture not found\nCommand: %s", cmd)
+	}
+
+	// Must write exit code to status file
+	if !strings.Contains(cmd, "echo $EXIT_CODE > ~/.cache/remote-jobs/logs/42.status") {
+		t.Errorf("BuildWrapperCommand: exit code file write not found\nCommand: %s", cmd)
 	}
 }

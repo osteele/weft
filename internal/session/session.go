@@ -57,6 +57,11 @@ func MetadataFile(jobID int64, startTime int64) string {
 	return fmt.Sprintf("%s/%s.meta", LogDir, FileBasename(jobID, startTime))
 }
 
+// PidFile returns the pid file path for a job
+func PidFile(jobID int64, startTime int64) string {
+	return fmt.Sprintf("%s/%s.pid", LogDir, FileBasename(jobID, startTime))
+}
+
 // LegacyLogFile returns the old-style log file path for backward compatibility
 func LegacyLogFile(sessionName string) string {
 	return fmt.Sprintf("/tmp/tmux-%s.log", sessionName)
@@ -96,6 +101,11 @@ func JobMetadataFile(jobID int64, startTime int64, sessionName string) string {
 	return MetadataFile(jobID, startTime)
 }
 
+// JobPidFile returns the pid file path for a job (new jobs only, no legacy support)
+func JobPidFile(jobID int64, startTime int64) string {
+	return PidFile(jobID, startTime)
+}
+
 // JobTmuxSession returns the tmux session name for a job (handles legacy and new)
 func JobTmuxSession(jobID int64, sessionName string) string {
 	if sessionName != "" {
@@ -129,4 +139,44 @@ func FormatMetadata(jobID int64, workingDir, command, host, description string, 
 		lines = append(lines, fmt.Sprintf("description=%s", description))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// WrapperCommandParams contains parameters for building a wrapper command
+type WrapperCommandParams struct {
+	JobID      int64
+	WorkingDir string
+	Command    string
+	LogFile    string
+	StatusFile string
+	PidFile    string
+	NotifyCmd  string // Optional notification command to run after job completes
+}
+
+// BuildWrapperCommand creates the bash command that wraps a job with logging,
+// PID capture, and exit code handling.
+//
+// IMPORTANT: File paths containing ~ must NOT be quoted to allow shell expansion.
+// The working directory is also unquoted to support tilde expansion.
+// This function has unit tests to prevent regressions on quoting behavior.
+func BuildWrapperCommand(params WrapperCommandParams) string {
+	// Note: file paths use ~ which must not be quoted to allow expansion
+	// The command runs in background so we can capture its PID, then we wait for it
+	return fmt.Sprintf(
+		`echo "=== START $(date) ===" > %s; `+
+			`echo "job_id: %d" >> %s; `+
+			`echo "cd: %s" >> %s; `+
+			`echo "cmd: %s" >> %s; `+
+			`echo "===" >> %s; `+
+			`cd %s && { (%s) & CMD_PID=$!; echo $CMD_PID > %s; wait $CMD_PID; } 2>&1 | tee -a %s; `+
+			`EXIT_CODE=${PIPESTATUS[0]}; `+
+			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
+			`echo $EXIT_CODE > %s%s`,
+		params.LogFile,
+		params.JobID, params.LogFile,
+		params.WorkingDir, params.LogFile,
+		params.Command, params.LogFile,
+		params.LogFile,
+		params.WorkingDir, params.Command, params.PidFile, params.LogFile,
+		params.LogFile,
+		params.StatusFile, params.NotifyCmd)
 }

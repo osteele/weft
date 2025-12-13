@@ -482,12 +482,50 @@ mkdir -p ~/.config/remote-jobs
 echo "SLACK_WEBHOOK=https://hooks.slack.com/services/..." > ~/.config/remote-jobs/config
 ```
 
+### 3. Optional: Configure When to Notify
+
+By default, you'll receive notifications for all jobs. You can customize this with environment variables:
+
+**Notification Mode:**
+```bash
+# Notify for all jobs (default)
+export REMOTE_JOBS_SLACK_NOTIFY="all"
+
+# Notify only for failures
+export REMOTE_JOBS_SLACK_NOTIFY="failures"
+
+# Disable notifications
+export REMOTE_JOBS_SLACK_NOTIFY="none"
+```
+
+**Minimum Duration Threshold:**
+```bash
+# Default: 15 seconds - jobs shorter than this won't trigger notifications
+# (Failed jobs always notify regardless of duration)
+
+# Notify for all jobs regardless of duration
+export REMOTE_JOBS_SLACK_MIN_DURATION="0"
+
+# Only notify for jobs longer than 1 minute
+export REMOTE_JOBS_SLACK_MIN_DURATION="60"
+
+# For longer jobs only (5 minutes)
+export REMOTE_JOBS_SLACK_MIN_DURATION="300"
+```
+
+**Verbose Mode:**
+```bash
+# Include working directory and command in notification
+export REMOTE_JOBS_SLACK_VERBOSE="1"
+```
+
 ### What You'll Get
 
 Notifications include:
 - Job name and host
 - Success (✓) or failure (✗) status with exit code
 - Duration
+- (Verbose mode) Working directory and command
 
 ## Requirements
 

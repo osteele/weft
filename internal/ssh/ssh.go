@@ -30,6 +30,44 @@ func IsConnectionError(output string) bool {
 	return connectionErrorPattern.MatchString(output)
 }
 
+// FriendlyError returns a user-friendly error message for SSH failures
+// It hides implementation details like "create log dir" and shows clearer messages
+func FriendlyError(host, stderr string, err error) string {
+	combined := stderr
+	if err != nil {
+		combined += " " + err.Error()
+	}
+
+	// Check for connection errors
+	if IsConnectionError(combined) {
+		return fmt.Sprintf("SSH connection to %s failed", host)
+	}
+
+	// Check for exit status 255 which typically means SSH connection failed
+	if strings.Contains(combined, "exit status 255") {
+		return fmt.Sprintf("SSH connection to %s failed", host)
+	}
+
+	// Check for permission denied
+	if strings.Contains(strings.ToLower(combined), "permission denied") {
+		return fmt.Sprintf("SSH permission denied on %s", host)
+	}
+
+	// Check for host key verification
+	if strings.Contains(strings.ToLower(combined), "host key verification") {
+		return fmt.Sprintf("SSH host key verification failed for %s", host)
+	}
+
+	// Default: return a generic SSH error with host
+	if stderr != "" {
+		return fmt.Sprintf("SSH error on %s: %s", host, strings.TrimSpace(stderr))
+	}
+	if err != nil {
+		return fmt.Sprintf("SSH error on %s: %s", host, err.Error())
+	}
+	return fmt.Sprintf("SSH error on %s", host)
+}
+
 // EscapeForSingleQuotes escapes a string for embedding in single quotes
 // by replacing ' with '\” (end quote, escaped quote, start quote)
 func EscapeForSingleQuotes(s string) string {
@@ -297,4 +335,201 @@ func HasChildProcesses(host, pid string) (bool, error) {
 		return false, err
 	}
 	return strings.Contains(stdout, "YES"), nil
+}
+
+// ProcessStats holds process statistics
+type ProcessStats struct {
+	PID       string
+	Running   bool
+	CPUUser   string // User CPU time (e.g., "1h23m45s")
+	CPUSys    string // System CPU time
+	MemoryRSS string // Resident memory (e.g., "1.2GB")
+	MemoryPct string // Memory percentage
+	GPUs      []ProcessGPU
+	Error     string
+}
+
+// ProcessGPU holds GPU usage for a process
+type ProcessGPU struct {
+	Index   int
+	MemUsed string // e.g., "1234MiB"
+}
+
+// GetProcessStats fetches process statistics from a remote host
+// The pidFile should contain the PID to query
+func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
+	// Build a command that outputs all stats we need in a parseable format
+	// This runs in a single SSH call for efficiency
+	cmd := fmt.Sprintf(`
+		PID=$(cat %s 2>/dev/null)
+		if [ -z "$PID" ]; then
+			echo "PID:NOTFOUND"
+			exit 0
+		fi
+		echo "PID:$PID"
+
+		# Check if process is running
+		if ! kill -0 $PID 2>/dev/null; then
+			echo "RUNNING:NO"
+			exit 0
+		fi
+		echo "RUNNING:YES"
+
+		# Get CPU times from /proc/PID/stat (fields 14=utime, 15=stime in clock ticks)
+		if [ -f /proc/$PID/stat ]; then
+			STAT=$(cat /proc/$PID/stat 2>/dev/null)
+			UTIME=$(echo "$STAT" | awk '{print $14}')
+			STIME=$(echo "$STAT" | awk '{print $15}')
+			CLK_TCK=$(getconf CLK_TCK 2>/dev/null || echo 100)
+			if [ -n "$UTIME" ] && [ -n "$STIME" ]; then
+				UTIME_SEC=$((UTIME / CLK_TCK))
+				STIME_SEC=$((STIME / CLK_TCK))
+				echo "CPU_USER:$UTIME_SEC"
+				echo "CPU_SYS:$STIME_SEC"
+			fi
+		fi
+
+		# Get memory from /proc/PID/status (VmRSS in kB)
+		if [ -f /proc/$PID/status ]; then
+			RSS_KB=$(grep VmRSS /proc/$PID/status 2>/dev/null | awk '{print $2}')
+			if [ -n "$RSS_KB" ]; then
+				echo "MEM_RSS_KB:$RSS_KB"
+			fi
+		fi
+
+		# Get total memory for percentage calculation
+		MEM_TOTAL_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+		if [ -n "$MEM_TOTAL_KB" ]; then
+			echo "MEM_TOTAL_KB:$MEM_TOTAL_KB"
+		fi
+
+		# Get GPU usage from nvidia-smi (if available)
+		nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
+			APP_PID=$(echo "$line" | cut -d',' -f1 | tr -d ' ')
+			if [ "$APP_PID" = "$PID" ]; then
+				GPU_UUID=$(echo "$line" | cut -d',' -f2 | tr -d ' ')
+				GPU_MEM=$(echo "$line" | cut -d',' -f3 | tr -d ' ')
+				# Get GPU index from UUID
+				GPU_IDX=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null | grep "$GPU_UUID" | cut -d',' -f1 | tr -d ' ')
+				echo "GPU:$GPU_IDX:${GPU_MEM}MiB"
+			fi
+		done
+	`, pidFile)
+
+	stdout, _, err := RunWithTimeout(host, cmd, 15*time.Second)
+	if err != nil {
+		return &ProcessStats{Error: err.Error()}, err
+	}
+
+	return parseProcessStats(stdout), nil
+}
+
+// parseProcessStats parses the output of the process stats command
+func parseProcessStats(output string) *ProcessStats {
+	stats := &ProcessStats{}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := parts[0]
+		value := strings.TrimSpace(parts[1])
+
+		switch key {
+		case "PID":
+			if value == "NOTFOUND" {
+				stats.Error = "PID file not found"
+				return stats
+			}
+			stats.PID = value
+		case "RUNNING":
+			stats.Running = value == "YES"
+		case "CPU_USER":
+			stats.CPUUser = formatDuration(value)
+		case "CPU_SYS":
+			stats.CPUSys = formatDuration(value)
+		case "MEM_RSS_KB":
+			stats.MemoryRSS = formatMemoryKB(value)
+		case "MEM_TOTAL_KB":
+			// Calculate percentage if we have RSS
+			if stats.MemoryRSS != "" {
+				stats.MemoryPct = calculateMemoryPct(output)
+			}
+		case "GPU":
+			// Format: GPU:index:memory
+			gpuParts := strings.SplitN(value, ":", 2)
+			if len(gpuParts) == 2 {
+				idx := 0
+				fmt.Sscanf(gpuParts[0], "%d", &idx)
+				stats.GPUs = append(stats.GPUs, ProcessGPU{
+					Index:   idx,
+					MemUsed: gpuParts[1],
+				})
+			}
+		}
+	}
+
+	return stats
+}
+
+// formatDuration converts seconds to a human-readable duration
+func formatDuration(seconds string) string {
+	var sec int
+	if _, err := fmt.Sscanf(seconds, "%d", &sec); err != nil {
+		return seconds
+	}
+
+	if sec < 60 {
+		return fmt.Sprintf("%ds", sec)
+	} else if sec < 3600 {
+		return fmt.Sprintf("%dm%ds", sec/60, sec%60)
+	} else {
+		h := sec / 3600
+		m := (sec % 3600) / 60
+		s := sec % 60
+		return fmt.Sprintf("%dh%dm%ds", h, m, s)
+	}
+}
+
+// formatMemoryKB converts kB to human-readable format
+func formatMemoryKB(kb string) string {
+	var kbVal int
+	if _, err := fmt.Sscanf(kb, "%d", &kbVal); err != nil {
+		return kb + " kB"
+	}
+
+	if kbVal < 1024 {
+		return fmt.Sprintf("%d kB", kbVal)
+	} else if kbVal < 1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(kbVal)/1024)
+	} else {
+		return fmt.Sprintf("%.1f GB", float64(kbVal)/(1024*1024))
+	}
+}
+
+// calculateMemoryPct calculates memory percentage from the output
+func calculateMemoryPct(output string) string {
+	var rssKB, totalKB int
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "MEM_RSS_KB:") {
+			fmt.Sscanf(strings.TrimPrefix(line, "MEM_RSS_KB:"), "%d", &rssKB)
+		} else if strings.HasPrefix(line, "MEM_TOTAL_KB:") {
+			fmt.Sscanf(strings.TrimPrefix(line, "MEM_TOTAL_KB:"), "%d", &totalKB)
+		}
+	}
+
+	if totalKB > 0 {
+		pct := float64(rssKB) * 100 / float64(totalKB)
+		return fmt.Sprintf("%.1f%%", pct)
+	}
+	return ""
 }

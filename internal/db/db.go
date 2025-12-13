@@ -344,7 +344,7 @@ func ListPending(db *sql.DB, host string) ([]*Job, error) {
 // ListRunning returns running jobs for a host
 func ListRunning(db *sql.DB, host string) ([]*Job, error) {
 	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
 		 FROM jobs WHERE status = ? AND host = ? ORDER BY start_time DESC`,
 		StatusRunning, host,
 	)
@@ -353,7 +353,7 @@ func ListRunning(db *sql.DB, host string) ([]*Job, error) {
 // ListAllRunning returns all running jobs across all hosts
 func ListAllRunning(db *sql.DB) ([]*Job, error) {
 	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
 		 FROM jobs WHERE status = ? ORDER BY start_time DESC`,
 		StatusRunning,
 	)
@@ -401,7 +401,7 @@ func ListUniqueHosts(db *sql.DB) ([]string, error) {
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"
 	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
 		 FROM jobs WHERE description LIKE ? OR command LIKE ? ORDER BY start_time DESC LIMIT ?`,
 		pattern, pattern, limit,
 	)

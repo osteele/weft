@@ -108,12 +108,14 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	logFile := session.LogFile(newJobID, newJob.StartTime)
 	statusFile := session.StatusFile(newJobID, newJob.StartTime)
 	newMetadataFile := session.MetadataFile(newJobID, newJob.StartTime)
+	pidFile := session.PidFile(newJobID, newJob.StartTime)
 
 	// Create log directory on remote
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
 	if _, stderr, err := ssh.RunWithRetry(job.Host, mkdirCmd); err != nil {
-		db.UpdateJobFailed(database, newJobID, fmt.Sprintf("create log dir: %s", stderr))
-		return fmt.Errorf("create log directory: %s", stderr)
+		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		db.UpdateJobFailed(database, newJobID, errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	// Save metadata
@@ -122,26 +124,15 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
 	ssh.RunWithRetry(job.Host, metadataCmd)
 
-	// Create the wrapped command with better error capture
-	// Note: file paths use ~ which must not be quoted to allow expansion
-	wrappedCommand := fmt.Sprintf(
-		`echo "=== START $(date) ===" > %s; `+
-			`echo "job_id: %d" >> %s; `+
-			`echo "cd: %s" >> %s; `+
-			`echo "cmd: %s" >> %s; `+
-			`echo "===" >> %s; `+
-			`cd '%s' && (%s) 2>&1 | tee -a %s; `+
-			`EXIT_CODE=${PIPESTATUS[0]}; `+
-			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
-			`echo $EXIT_CODE > %s`,
-		logFile,
-		newJobID, logFile,
-		workingDir, logFile,
-		command, logFile,
-		logFile,
-		workingDir, command, logFile,
-		logFile,
-		statusFile)
+	// Create the wrapped command using the common builder (tested for tilde expansion)
+	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+		JobID:      newJobID,
+		WorkingDir: workingDir,
+		Command:    command,
+		LogFile:    logFile,
+		StatusFile: statusFile,
+		PidFile:    pidFile,
+	})
 
 	// Escape single quotes for embedding in single-quoted string
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
@@ -149,8 +140,9 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	// Start tmux session - use single quotes to prevent shell expansion
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", newTmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
-		db.UpdateJobFailed(database, newJobID, fmt.Sprintf("start tmux: %s", stderr))
-		return fmt.Errorf("start session: %s", stderr)
+		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		db.UpdateJobFailed(database, newJobID, errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	// Mark job as running

@@ -101,6 +101,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	logFile := session.LogFile(jobID, job.StartTime)
 	statusFile := session.StatusFile(jobID, job.StartTime)
 	metadataFile := session.MetadataFile(jobID, job.StartTime)
+	pidFile := session.PidFile(jobID, job.StartTime)
 
 	// Test connection and check if session already exists
 	exists, err := ssh.TmuxSessionExists(host, tmuxSession)
@@ -131,8 +132,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	logDir := session.LogDir
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
 	if _, stderr, err := ssh.RunWithRetry(host, mkdirCmd); err != nil {
-		db.UpdateJobFailed(database, jobID, fmt.Sprintf("Failed to create log directory: %s", stderr))
-		return fmt.Errorf("create log directory: %s", stderr)
+		errMsg := ssh.FriendlyError(host, stderr, err)
+		db.UpdateJobFailed(database, jobID, errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	fmt.Printf("Starting job %d on %s\n", jobID, host)
@@ -166,34 +168,34 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if _, stderr, err := ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript)); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to chmod notify script: %s\n", stderr)
 			}
-			// Note: \$EXIT_CODE escapes the $ for the outer shell layer
-			notifyCmd = fmt.Sprintf("; REMOTE_JOBS_SLACK_WEBHOOK='%s' '%s' 'rj-%d' \\$EXIT_CODE '%s'",
-				slackWebhook, remoteNotifyScript, jobID, host)
+			// $EXIT_CODE is expanded by bash when the command runs
+			// Pass through optional settings
+			envVars := fmt.Sprintf("REMOTE_JOBS_SLACK_WEBHOOK='%s'", slackWebhook)
+			if v := os.Getenv("REMOTE_JOBS_SLACK_VERBOSE"); v == "1" {
+				envVars += " REMOTE_JOBS_SLACK_VERBOSE=1"
+			}
+			if v := os.Getenv("REMOTE_JOBS_SLACK_NOTIFY"); v != "" {
+				envVars += fmt.Sprintf(" REMOTE_JOBS_SLACK_NOTIFY='%s'", v)
+			}
+			if v := os.Getenv("REMOTE_JOBS_SLACK_MIN_DURATION"); v != "" {
+				envVars += fmt.Sprintf(" REMOTE_JOBS_SLACK_MIN_DURATION='%s'", v)
+			}
+			notifyCmd = fmt.Sprintf("; %s '%s' 'rj-%d' $EXIT_CODE '%s' '%s'",
+				envVars, remoteNotifyScript, jobID, host, metadataFile)
 			fmt.Println("Slack notifications: enabled")
 		}
 	}
 
-	// Create the wrapped command with better error capture
-	// Log start marker, cd info, command, then run with output capture
-	// Note: file paths use ~ which must not be quoted to allow expansion
-	wrappedCommand := fmt.Sprintf(
-		`echo "=== START $(date) ===" > %s; `+
-			`echo "job_id: %d" >> %s; `+
-			`echo "cd: %s" >> %s; `+
-			`echo "cmd: %s" >> %s; `+
-			`echo "===" >> %s; `+
-			`cd '%s' && (%s) 2>&1 | tee -a %s; `+
-			`EXIT_CODE=${PIPESTATUS[0]}; `+
-			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
-			`echo $EXIT_CODE > %s%s`,
-		logFile,
-		jobID, logFile,
-		workingDir, logFile,
-		command, logFile,
-		logFile,
-		workingDir, command, logFile,
-		logFile,
-		statusFile, notifyCmd)
+	// Create the wrapped command using the common builder (tested for tilde expansion)
+	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+		JobID:      jobID,
+		WorkingDir: workingDir,
+		Command:    command,
+		LogFile:    logFile,
+		StatusFile: statusFile,
+		PidFile:    pidFile,
+		NotifyCmd:  notifyCmd,
+	})
 
 	// Escape single quotes in wrapped command for embedding in single-quoted string
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
@@ -201,8 +203,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Start tmux session - use single quotes to prevent shell expansion
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
-		db.UpdateJobFailed(database, jobID, fmt.Sprintf("Failed to start tmux: %s", stderr))
-		return fmt.Errorf("start session: %s", stderr)
+		errMsg := ssh.FriendlyError(host, stderr, err)
+		db.UpdateJobFailed(database, jobID, errMsg)
+		return fmt.Errorf("%s", errMsg)
 	}
 
 	// Mark job as running

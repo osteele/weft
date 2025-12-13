@@ -185,6 +185,11 @@ type hostInfoMsg struct {
 	info     *Host
 }
 
+type processStatsMsg struct {
+	jobID int64
+	stats *ssh.ProcessStats
+}
+
 // Input field indices for new job form
 const (
 	inputHost = iota
@@ -212,6 +217,10 @@ type Model struct {
 	logLoading    bool
 	statusMessage string
 	errorMessage  string
+
+	// Process stats for running jobs
+	processStats      *ssh.ProcessStats
+	processStatsJobID int64
 
 	// Operation state
 	restarting         bool
@@ -376,6 +385,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case processStatsMsg:
+		if m.selectedJob != nil && msg.jobID == m.selectedJob.ID {
+			m.processStats = msg.stats
+			m.processStatsJobID = msg.jobID
+		}
+		return m, nil
+
 	case jobKilledMsg:
 		if msg.err != nil {
 			m.errorMessage = fmt.Sprintf("Kill failed: %v", msg.err)
@@ -443,9 +459,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logTickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startLogTicker())
-		// Refresh logs if a running job is selected
+		// Refresh logs and process stats if a running job is selected
 		if m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
 			cmds = append(cmds, m.fetchSelectedJobLog())
+			cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -566,11 +583,27 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			if m.selectedIndex > 0 {
 				m.selectedIndex--
+				// Clear cached process stats when changing jobs
+				m.processStats = nil
+				m.processStatsJobID = 0
 				// If in logs mode, fetch logs for new job
 				if m.selectedJob != nil && len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
 					m.selectedJob = m.jobs[m.selectedIndex]
 					m.logLoading = true
-					return m, m.fetchSelectedJobLog()
+					var cmds []tea.Cmd
+					cmds = append(cmds, m.fetchSelectedJobLog())
+					// Fetch process stats for running jobs
+					if m.selectedJob.Status == db.StatusRunning {
+						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+					}
+					return m, tea.Batch(cmds...)
+				}
+				// Even if not in logs mode, fetch stats for running jobs
+				if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
+					job := m.jobs[m.selectedIndex]
+					if job.Status == db.StatusRunning {
+						return m, m.fetchProcessStats(job)
+					}
 				}
 			}
 		}
@@ -584,11 +617,27 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs)-1 {
 				m.selectedIndex++
+				// Clear cached process stats when changing jobs
+				m.processStats = nil
+				m.processStatsJobID = 0
 				// If in logs mode, fetch logs for new job
 				if m.selectedJob != nil && m.selectedIndex < len(m.jobs) {
 					m.selectedJob = m.jobs[m.selectedIndex]
 					m.logLoading = true
-					return m, m.fetchSelectedJobLog()
+					var cmds []tea.Cmd
+					cmds = append(cmds, m.fetchSelectedJobLog())
+					// Fetch process stats for running jobs
+					if m.selectedJob.Status == db.StatusRunning {
+						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+					}
+					return m, tea.Batch(cmds...)
+				}
+				// Even if not in logs mode, fetch stats for running jobs
+				if m.selectedIndex < len(m.jobs) {
+					job := m.jobs[m.selectedIndex]
+					if job.Status == db.StatusRunning {
+						return m, m.fetchProcessStats(job)
+					}
 				}
 			}
 		}
@@ -613,7 +662,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Enter logs mode
 				m.selectedJob = m.jobs[m.selectedIndex]
 				m.logLoading = true
-				return m, m.fetchSelectedJobLog()
+				var cmds []tea.Cmd
+				cmds = append(cmds, m.fetchSelectedJobLog())
+				// Fetch process stats for running jobs
+				if m.selectedJob.Status == db.StatusRunning {
+					cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+				}
+				return m, tea.Batch(cmds...)
 			}
 		}
 		return m, nil
@@ -983,7 +1038,26 @@ func (m Model) renderJobDetails(height int) string {
 		header += fmt.Sprintf("Dir:     %s\n", job.WorkingDir)
 		header += fmt.Sprintf("Cmd:     %s\n", job.Command)
 
-		content = dimStyle.Render("Press l to view logs")
+		// Show process stats for running jobs
+		if job.Status == db.StatusRunning && m.processStats != nil && m.processStatsJobID == job.ID && m.processStats.Running {
+			header += "\n"
+			header += "Process Stats:\n"
+			if m.processStats.CPUUser != "" || m.processStats.CPUSys != "" {
+				header += fmt.Sprintf("  CPU:    %s user, %s sys\n", m.processStats.CPUUser, m.processStats.CPUSys)
+			}
+			if m.processStats.MemoryRSS != "" {
+				mem := m.processStats.MemoryRSS
+				if m.processStats.MemoryPct != "" {
+					mem += " (" + m.processStats.MemoryPct + ")"
+				}
+				header += fmt.Sprintf("  Memory: %s\n", mem)
+			}
+			if len(m.processStats.GPUs) > 0 {
+				for _, gpu := range m.processStats.GPUs {
+					header += fmt.Sprintf("  GPU %d:  %s\n", gpu.Index, gpu.MemUsed)
+				}
+			}
+		}
 	}
 
 	panelContent := titleStyle.Render("Details") + "\n"
@@ -1424,6 +1498,21 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 	}
 }
 
+func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
+	if job == nil || job.Status != db.StatusRunning {
+		return nil
+	}
+
+	return func() tea.Msg {
+		pidFile := session.JobPidFile(job.ID, job.StartTime)
+		stats, _ := ssh.GetProcessStats(job.Host, pidFile)
+		return processStatsMsg{
+			jobID: job.ID,
+			stats: stats,
+		}
+	}
+}
+
 func (m Model) performBackgroundSync() tea.Cmd {
 	return func() tea.Msg {
 		hosts, err := db.ListUniqueRunningHosts(m.database)
@@ -1534,8 +1623,9 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 		// Create log directory on remote
 		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
 		if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
-			db.UpdateJobFailed(database, newJobID, fmt.Sprintf("create log dir: %s", stderr))
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("create log directory: %s", stderr)}
+			errMsg := ssh.FriendlyError(job.Host, stderr, err)
+			db.UpdateJobFailed(database, newJobID, errMsg)
+			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("%s", errMsg)}
 		}
 
 		// Save metadata
@@ -1544,26 +1634,18 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
 		ssh.Run(job.Host, metadataCmd)
 
-		// Create the wrapped command with better error capture
-		// Note: file paths use ~ which must not be quoted to allow expansion
-		wrappedCommand := fmt.Sprintf(
-			`echo "=== START $(date) ===" > %s; `+
-				`echo "job_id: %d" >> %s; `+
-				`echo "cd: %s" >> %s; `+
-				`echo "cmd: %s" >> %s; `+
-				`echo "===" >> %s; `+
-				`cd '%s' && (%s) 2>&1 | tee -a %s; `+
-				`EXIT_CODE=${PIPESTATUS[0]}; `+
-				`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
-				`echo $EXIT_CODE > %s`,
-			logFile,
-			newJobID, logFile,
-			workingDir, logFile,
-			command, logFile,
-			logFile,
-			workingDir, command, logFile,
-			logFile,
-			statusFile)
+		// Generate pid file path
+		pidFile := session.PidFile(newJobID, newJob.StartTime)
+
+		// Create the wrapped command using the common builder (tested for tilde expansion)
+		wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+			JobID:      newJobID,
+			WorkingDir: workingDir,
+			Command:    command,
+			LogFile:    logFile,
+			StatusFile: statusFile,
+			PidFile:    pidFile,
+		})
 
 		// Escape single quotes for embedding in single-quoted string
 		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
@@ -1571,8 +1653,9 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 		// Start tmux session - use single quotes to prevent shell expansion
 		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", newTmuxSession, escapedCommand)
 		if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
-			db.UpdateJobFailed(database, newJobID, fmt.Sprintf("start tmux: %s", stderr))
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("start session: %s", stderr)}
+			errMsg := ssh.FriendlyError(job.Host, stderr, err)
+			db.UpdateJobFailed(database, newJobID, errMsg)
+			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("%s", errMsg)}
 		}
 
 		// Mark job as running
@@ -1666,12 +1749,14 @@ func (m Model) createJob() tea.Cmd {
 		logFile := session.LogFile(jobID, job.StartTime)
 		statusFile := session.StatusFile(jobID, job.StartTime)
 		metadataFile := session.MetadataFile(jobID, job.StartTime)
+		pidFile := session.PidFile(jobID, job.StartTime)
 
 		// Create log directory on remote
 		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-		if _, _, err := ssh.RunWithTimeout(host, mkdirCmd, timeout); err != nil {
-			db.UpdateJobFailed(database, jobID, fmt.Sprintf("create log dir: %v", err))
-			return jobCreatedMsg{err: fmt.Errorf("connect to %s: %v", host, err)}
+		if _, stderr, err := ssh.RunWithTimeout(host, mkdirCmd, timeout); err != nil {
+			errMsg := ssh.FriendlyError(host, stderr, err)
+			db.UpdateJobFailed(database, jobID, errMsg)
+			return jobCreatedMsg{err: fmt.Errorf("%s", errMsg)}
 		}
 
 		// Save metadata
@@ -1680,35 +1765,25 @@ func (m Model) createJob() tea.Cmd {
 		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 		ssh.RunWithTimeout(host, metadataCmd, timeout)
 
-		// Create the wrapped command with better error capture
-		// Note: file paths use ~ which must not be quoted to allow expansion
-		wrappedCommand := fmt.Sprintf(
-			`echo "=== START $(date) ===" > %s; `+
-				`echo "job_id: %d" >> %s; `+
-				`echo "cd: %s" >> %s; `+
-				`echo "cmd: %s" >> %s; `+
-				`echo "===" >> %s; `+
-				`cd '%s' && (%s) 2>&1 | tee -a %s; `+
-				`EXIT_CODE=${PIPESTATUS[0]}; `+
-				`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
-				`echo $EXIT_CODE > %s`,
-			logFile,
-			jobID, logFile,
-			workingDir, logFile,
-			command, logFile,
-			logFile,
-			workingDir, command, logFile,
-			logFile,
-			statusFile)
+		// Create the wrapped command using the common builder (tested for tilde expansion)
+		wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+			JobID:      jobID,
+			WorkingDir: workingDir,
+			Command:    command,
+			LogFile:    logFile,
+			StatusFile: statusFile,
+			PidFile:    pidFile,
+		})
 
 		// Escape single quotes for embedding in single-quoted string
 		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
 
 		// Start tmux session - use single quotes to prevent shell expansion
 		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
-		if _, _, err := ssh.RunWithTimeout(host, tmuxCmd, timeout); err != nil {
-			db.UpdateJobFailed(database, jobID, fmt.Sprintf("start tmux: %v", err))
-			return jobCreatedMsg{err: fmt.Errorf("start session: %v", err)}
+		if _, stderr, err := ssh.RunWithTimeout(host, tmuxCmd, timeout); err != nil {
+			errMsg := ssh.FriendlyError(host, stderr, err)
+			db.UpdateJobFailed(database, jobID, errMsg)
+			return jobCreatedMsg{err: fmt.Errorf("%s", errMsg)}
 		}
 
 		// Mark job as running
