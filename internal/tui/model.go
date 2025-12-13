@@ -220,6 +220,7 @@ type Model struct {
 
 	// Process stats for running jobs
 	processStats      *ssh.ProcessStats
+	prevProcessStats  *ssh.ProcessStats // Previous sample for CPU% calculation
 	processStatsJobID int64
 
 	// Operation state
@@ -386,9 +387,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case processStatsMsg:
-		if m.selectedJob != nil && msg.jobID == m.selectedJob.ID {
-			m.processStats = msg.stats
-			m.processStatsJobID = msg.jobID
+		// Accept stats for the currently highlighted job (whether in log mode or not)
+		targetJob := m.getTargetJob()
+		if targetJob != nil && msg.jobID == targetJob.ID {
+			// Only update if we got valid stats (Running=true means process check succeeded)
+			// Don't overwrite good stats with failed fetches
+			if msg.stats.Running || m.processStats == nil || m.processStatsJobID != msg.jobID {
+				// Calculate CPU% from delta if we have a previous sample
+				if m.prevProcessStats != nil && m.processStatsJobID == msg.jobID &&
+					msg.stats.Timestamp > m.prevProcessStats.Timestamp && msg.stats.Running {
+					deltaTicks := (msg.stats.CPUUserTicks + msg.stats.CPUSysTicks) -
+						(m.prevProcessStats.CPUUserTicks + m.prevProcessStats.CPUSysTicks)
+					deltaTime := msg.stats.Timestamp - m.prevProcessStats.Timestamp
+					// CPU% = (ticks / (time_seconds * CLK_TCK)) * 100
+					// CLK_TCK is typically 100, so ticks/time gives rough %
+					if deltaTime > 0 {
+						msg.stats.CPUPct = float64(deltaTicks) / float64(deltaTime)
+					}
+				}
+				if msg.stats.Running {
+					m.prevProcessStats = m.processStats
+				}
+				m.processStats = msg.stats
+				m.processStatsJobID = msg.jobID
+			}
 		}
 		return m, nil
 
@@ -459,10 +481,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logTickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startLogTicker())
-		// Refresh logs and process stats if a running job is selected
+		// Refresh logs if in log mode
 		if m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
 			cmds = append(cmds, m.fetchSelectedJobLog())
-			cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+		}
+		// Refresh process stats for highlighted running job (even if not in log mode)
+		targetJob := m.getTargetJob()
+		if targetJob != nil && targetJob.Status == db.StatusRunning {
+			cmds = append(cmds, m.fetchProcessStats(targetJob))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -585,6 +611,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selectedIndex--
 				// Clear cached process stats when changing jobs
 				m.processStats = nil
+				m.prevProcessStats = nil
 				m.processStatsJobID = 0
 				// If in logs mode, fetch logs for new job
 				if m.selectedJob != nil && len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
@@ -619,6 +646,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selectedIndex++
 				// Clear cached process stats when changing jobs
 				m.processStats = nil
+				m.prevProcessStats = nil
 				m.processStatsJobID = 0
 				// If in logs mode, fetch logs for new job
 				if m.selectedJob != nil && m.selectedIndex < len(m.jobs) {
@@ -1006,6 +1034,12 @@ func (m Model) renderJobDetails(height int) string {
 		job := highlightedJob
 		startTime := time.Unix(job.StartTime, 0)
 		header = fmt.Sprintf("Job %d on %s\n", job.ID, job.Host)
+
+		// Show Cmd and Dir first (most useful info)
+		header += fmt.Sprintf("Cmd:     %s\n", job.Command)
+		header += fmt.Sprintf("Dir:     %s\n", job.WorkingDir)
+
+		// Then timing information
 		header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
 
 		// Show timing information based on job status
@@ -1035,26 +1069,44 @@ func (m Model) renderJobDetails(height int) string {
 			}
 		}
 
-		header += fmt.Sprintf("Dir:     %s\n", job.WorkingDir)
-		header += fmt.Sprintf("Cmd:     %s\n", job.Command)
-
-		// Show process stats for running jobs
-		if job.Status == db.StatusRunning && m.processStats != nil && m.processStatsJobID == job.ID && m.processStats.Running {
+		// Show process stats for running jobs (show whatever stats we have for this job)
+		if job.Status == db.StatusRunning && m.processStats != nil && m.processStatsJobID == job.ID {
 			header += "\n"
 			header += "Process Stats:\n"
+
+			// CPU: show % if available, plus user/sys time
 			if m.processStats.CPUUser != "" || m.processStats.CPUSys != "" {
-				header += fmt.Sprintf("  CPU:    %s user, %s sys\n", m.processStats.CPUUser, m.processStats.CPUSys)
+				cpuLine := "  CPU:     "
+				if m.processStats.CPUPct > 0 {
+					cpuLine += fmt.Sprintf("%.0f%% ", m.processStats.CPUPct)
+				}
+				cpuLine += fmt.Sprintf("(%s user, %s sys)\n", m.processStats.CPUUser, m.processStats.CPUSys)
+				header += cpuLine
 			}
+
+			// Memory
 			if m.processStats.MemoryRSS != "" {
 				mem := m.processStats.MemoryRSS
 				if m.processStats.MemoryPct != "" {
 					mem += " (" + m.processStats.MemoryPct + ")"
 				}
-				header += fmt.Sprintf("  Memory: %s\n", mem)
+				header += fmt.Sprintf("  Memory:  %s\n", mem)
 			}
+
+			// Threads
+			if m.processStats.Threads > 0 {
+				header += fmt.Sprintf("  Threads: %d\n", m.processStats.Threads)
+			}
+
+			// GPUs with utilization and memory
 			if len(m.processStats.GPUs) > 0 {
 				for _, gpu := range m.processStats.GPUs {
-					header += fmt.Sprintf("  GPU %d:  %s\n", gpu.Index, gpu.MemUsed)
+					gpuLine := fmt.Sprintf("  GPU %d:   ", gpu.Index)
+					if gpu.Utilization > 0 {
+						gpuLine += fmt.Sprintf("%d%% util, ", gpu.Utilization)
+					}
+					gpuLine += gpu.MemUsed + "\n"
+					header += gpuLine
 				}
 			}
 		}

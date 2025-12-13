@@ -341,18 +341,25 @@ func HasChildProcesses(host, pid string) (bool, error) {
 type ProcessStats struct {
 	PID       string
 	Running   bool
-	CPUUser   string // User CPU time (e.g., "1h23m45s")
-	CPUSys    string // System CPU time
-	MemoryRSS string // Resident memory (e.g., "1.2GB")
-	MemoryPct string // Memory percentage
+	CPUUser   string  // User CPU time (e.g., "1h23m45s")
+	CPUSys    string  // System CPU time
+	CPUPct    float64 // CPU utilization % (requires delta calculation)
+	MemoryRSS string  // Resident memory (e.g., "1.2GB")
+	MemoryPct string  // Memory percentage
+	Threads   int     // Thread count
 	GPUs      []ProcessGPU
 	Error     string
+	// Raw values for CPU% calculation (used by caller to track deltas)
+	CPUUserTicks int64 // Raw user CPU ticks
+	CPUSysTicks  int64 // Raw system CPU ticks
+	Timestamp    int64 // Unix timestamp of measurement
 }
 
 // ProcessGPU holds GPU usage for a process
 type ProcessGPU struct {
-	Index   int
-	MemUsed string // e.g., "1234MiB"
+	Index       int
+	MemUsed     string // e.g., "1234MiB"
+	Utilization int    // GPU utilization % (0-100)
 }
 
 // GetProcessStats fetches process statistics from a remote host
@@ -367,6 +374,7 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 			exit 0
 		fi
 		echo "PID:$PID"
+		echo "TIMESTAMP:$(date +%%s)"
 
 		# Check if process is running
 		if ! kill -0 $PID 2>/dev/null; then
@@ -386,14 +394,21 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 				STIME_SEC=$((STIME / CLK_TCK))
 				echo "CPU_USER:$UTIME_SEC"
 				echo "CPU_SYS:$STIME_SEC"
+				echo "CPU_USER_TICKS:$UTIME"
+				echo "CPU_SYS_TICKS:$STIME"
+				echo "CLK_TCK:$CLK_TCK"
 			fi
 		fi
 
-		# Get memory from /proc/PID/status (VmRSS in kB)
+		# Get memory and thread count from /proc/PID/status
 		if [ -f /proc/$PID/status ]; then
 			RSS_KB=$(grep VmRSS /proc/$PID/status 2>/dev/null | awk '{print $2}')
 			if [ -n "$RSS_KB" ]; then
 				echo "MEM_RSS_KB:$RSS_KB"
+			fi
+			THREADS=$(grep Threads /proc/$PID/status 2>/dev/null | awk '{print $2}')
+			if [ -n "$THREADS" ]; then
+				echo "THREADS:$THREADS"
 			fi
 		fi
 
@@ -403,7 +418,14 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 			echo "MEM_TOTAL_KB:$MEM_TOTAL_KB"
 		fi
 
-		# Get GPU usage from nvidia-smi (if available)
+		# Get GPU utilization (per-GPU)
+		nvidia-smi --query-gpu=index,utilization.gpu --format=csv,noheader,nounits 2>/dev/null | while read line; do
+			GPU_IDX=$(echo "$line" | cut -d',' -f1 | tr -d ' ')
+			GPU_UTIL=$(echo "$line" | cut -d',' -f2 | tr -d ' ')
+			echo "GPU_UTIL:$GPU_IDX:$GPU_UTIL"
+		done
+
+		# Get GPU memory usage from process (if available)
 		nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv,noheader,nounits 2>/dev/null | while read line; do
 			APP_PID=$(echo "$line" | cut -d',' -f1 | tr -d ' ')
 			if [ "$APP_PID" = "$PID" ]; then
@@ -411,7 +433,7 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 				GPU_MEM=$(echo "$line" | cut -d',' -f3 | tr -d ' ')
 				# Get GPU index from UUID
 				GPU_IDX=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader 2>/dev/null | grep "$GPU_UUID" | cut -d',' -f1 | tr -d ' ')
-				echo "GPU:$GPU_IDX:${GPU_MEM}MiB"
+				echo "GPU_MEM:$GPU_IDX:${GPU_MEM}MiB"
 			fi
 		done
 	`, pidFile)
@@ -427,6 +449,8 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 // parseProcessStats parses the output of the process stats command
 func parseProcessStats(output string) *ProcessStats {
 	stats := &ProcessStats{}
+	gpuUtils := make(map[int]int)  // GPU index -> utilization
+	gpuMem := make(map[int]string) // GPU index -> memory used
 
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -449,12 +473,18 @@ func parseProcessStats(output string) *ProcessStats {
 				return stats
 			}
 			stats.PID = value
+		case "TIMESTAMP":
+			fmt.Sscanf(value, "%d", &stats.Timestamp)
 		case "RUNNING":
 			stats.Running = value == "YES"
 		case "CPU_USER":
 			stats.CPUUser = formatDuration(value)
 		case "CPU_SYS":
 			stats.CPUSys = formatDuration(value)
+		case "CPU_USER_TICKS":
+			fmt.Sscanf(value, "%d", &stats.CPUUserTicks)
+		case "CPU_SYS_TICKS":
+			fmt.Sscanf(value, "%d", &stats.CPUSysTicks)
 		case "MEM_RSS_KB":
 			stats.MemoryRSS = formatMemoryKB(value)
 		case "MEM_TOTAL_KB":
@@ -462,18 +492,38 @@ func parseProcessStats(output string) *ProcessStats {
 			if stats.MemoryRSS != "" {
 				stats.MemoryPct = calculateMemoryPct(output)
 			}
-		case "GPU":
-			// Format: GPU:index:memory
+		case "THREADS":
+			fmt.Sscanf(value, "%d", &stats.Threads)
+		case "GPU_UTIL":
+			// Format: GPU_UTIL:index:utilization
+			gpuParts := strings.SplitN(value, ":", 2)
+			if len(gpuParts) == 2 {
+				idx := 0
+				util := 0
+				fmt.Sscanf(gpuParts[0], "%d", &idx)
+				fmt.Sscanf(gpuParts[1], "%d", &util)
+				gpuUtils[idx] = util
+			}
+		case "GPU_MEM":
+			// Format: GPU_MEM:index:memory
 			gpuParts := strings.SplitN(value, ":", 2)
 			if len(gpuParts) == 2 {
 				idx := 0
 				fmt.Sscanf(gpuParts[0], "%d", &idx)
-				stats.GPUs = append(stats.GPUs, ProcessGPU{
-					Index:   idx,
-					MemUsed: gpuParts[1],
-				})
+				gpuMem[idx] = gpuParts[1]
 			}
 		}
+	}
+
+	// Combine GPU utilization and memory into GPU structs
+	// Only add GPUs that have memory usage from our process
+	for idx, mem := range gpuMem {
+		gpu := ProcessGPU{
+			Index:       idx,
+			MemUsed:     mem,
+			Utilization: gpuUtils[idx], // Will be 0 if not found
+		}
+		stats.GPUs = append(stats.GPUs, gpu)
 	}
 
 	return stats

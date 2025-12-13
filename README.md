@@ -134,11 +134,16 @@ Split-screen with:
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ Details                                                                      │
 │ Job 52 on deepthought                                                        │
+│ Cmd:     python train.py --lr 0.001                                          │
+│ Dir:     ~/code/ml-project                                                   │
 │ Started: 2025-12-13 10:15:32 (2h ago)                                        │
 │ Elapsed: 2h 14m 23s (running)                                                │
-│ Dir:     ~/code/ml-project                                                   │
-│ Cmd:     python train.py --lr 0.001                                          │
-│ Press l to view logs                                                         │
+│                                                                              │
+│ Process Stats:                                                               │
+│   CPU:     45% (1h23m user, 5m sys)                                          │
+│   Memory:  2.1 GB (12%)                                                      │
+│   Threads: 24                                                                │
+│   GPU 0:   85% util, 12.5GiB                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
 ```
