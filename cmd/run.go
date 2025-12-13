@@ -157,13 +157,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	notifyCmd := ""
 	slackWebhook := getSlackWebhook()
 	if slackWebhook != "" {
-		// Copy notify script to remote
-		scriptDir := getScriptDir()
-		notifyScript := filepath.Join(scriptDir, "notify-slack.sh")
+		// Write embedded notify script to remote
 		remoteNotifyScript := "/tmp/remote-jobs-notify-slack.sh"
+		writeCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", remoteNotifyScript, string(notifySlackScript))
 
-		if err := ssh.CopyTo(notifyScript, host, remoteNotifyScript); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to copy notify script: %v\n", err)
+		if _, stderr, err := ssh.RunWithRetry(host, writeCmd); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write notify script: %s\n", stderr)
 		} else {
 			if _, stderr, err := ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript)); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to chmod notify script: %s\n", stderr)
@@ -251,23 +250,4 @@ func getSlackWebhook() string {
 	}
 
 	return ""
-}
-
-func getScriptDir() string {
-	// Get the directory where the executable is located
-	exe, err := os.Executable()
-	if err != nil {
-		// Fallback to known location
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "code", "utils", "remote-jobs")
-	}
-
-	// Resolve symlinks
-	exe, err = filepath.EvalSymlinks(exe)
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "code", "utils", "remote-jobs")
-	}
-
-	return filepath.Dir(exe)
 }
