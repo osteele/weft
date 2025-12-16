@@ -447,3 +447,121 @@ User: remote-jobs sync
 - SSH operations use timeouts to prevent UI blocking
 - Failed fetches preserve previous data
 - Background operations continue even if some hosts unreachable
+
+## Queue System
+
+The queue system allows jobs to run sequentially on a remote host without requiring the local machine to stay connected.
+
+### Queue Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                          Local Machine                               │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐    ┌──────────────┐                               │
+│  │  queue add   │───▶│   Database   │  Records job with             │
+│  │              │    │   (SQLite)   │  status="queued"              │
+│  └──────┬───────┘    └──────────────┘                               │
+│         │                                                           │
+│         │ SSH: Append to queue file                                 │
+│         ▼                                                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                         Remote Host                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │ Queue Runner │◀───│  Queue File  │    │   Job Logs           │  │
+│  │ (tmux)       │    │  (.queue)    │    │   (.log, .status)    │  │
+│  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
+│         │                                                           │
+│         │ For each job: run, capture output, notify                 │
+│         ▼                                                           │
+│  ┌──────────────┐                                                   │
+│  │ Slack Notify │                                                   │
+│  │ (on complete)│                                                   │
+│  └──────────────┘                                                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Queue Components
+
+**Queue Runner Script** (`cmd/queue-runner.sh`):
+- Embedded bash script deployed to remote host
+- Runs in a tmux session (`rj-queue-{name}`)
+- Processes jobs from queue file in FIFO order
+- Continues to next job regardless of exit code
+- Handles stop signals gracefully
+
+**Queue File Format** (tab-separated):
+```
+{job_id}\t{working_dir}\t{command}\t{description}
+```
+
+**Queue Status** (`queued`):
+- New job status between `pending` and `running`
+- Indicates job is waiting in a remote queue
+- Transitions to `running` when the queue runner processes it
+
+### Queue File Structure on Remote
+
+```
+~/.cache/remote-jobs/
+├── queue/
+│   ├── {name}.queue        # Queue file (jobs waiting)
+│   ├── {name}.current      # Currently running job ID
+│   ├── {name}.runner.pid   # Runner process ID
+│   └── {name}.stop         # Stop signal file
+├── logs/
+│   ├── {job_id}-{ts}.log   # Job output
+│   ├── {job_id}-{ts}.status # Exit code
+│   └── {job_id}-{ts}.meta  # Metadata
+└── scripts/
+    └── queue-runner.sh     # Deployed runner script
+```
+
+### Queue Command Flow
+
+**Adding a Job:**
+```
+remote-jobs queue add cool30 'python train.py'
+    │
+    ├── 1. Record job in SQLite (status: "queued")
+    ├── 2. SSH: mkdir -p ~/.cache/remote-jobs/queue/
+    └── 3. SSH: echo "job_line" >> ~/.cache/remote-jobs/queue/default.queue
+```
+
+**Starting the Runner:**
+```
+remote-jobs queue start cool30
+    │
+    ├── 1. Check if runner already exists (tmux has-session)
+    ├── 2. Deploy queue-runner.sh to remote
+    ├── 3. Deploy notify-slack.sh if Slack configured
+    └── 4. SSH: tmux new-session -d -s 'rj-queue-default' bash -c 'queue-runner.sh default'
+```
+
+**Runner Processing Loop:**
+```
+queue-runner.sh default
+    │
+    ├── Write PID to runner.pid
+    ├── While not stopped:
+    │   ├── Check for stop signal file
+    │   ├── Read first line from queue file
+    │   ├── Remove line from queue file (atomic)
+    │   ├── Write job ID to .current file
+    │   ├── Execute job, capture to log file
+    │   ├── Write exit code to .status file
+    │   ├── Send Slack notification
+    │   └── Clear .current file
+    └── Exit gracefully
+```
+
+### Queue vs Pending Jobs
+
+| Aspect | Pending (`--queue` flag) | Queued (`queue add`) |
+|--------|--------------------------|----------------------|
+| Where stored | Local DB only | Local DB + remote queue file |
+| Execution | Manual (`retry` command) | Automatic (queue runner) |
+| Ordering | Manual control | FIFO (first in, first out) |
+| Connection needed | Yes, for retry | No, runs independently |
+| Use case | Queue for later manual retry | Sequential execution |

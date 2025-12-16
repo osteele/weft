@@ -391,6 +391,127 @@ remote-jobs kill <job-id>
 remote-jobs kill 42    # Kill job #42
 ```
 
+### remote-jobs queue
+
+Manage job queues for sequential execution on remote hosts.
+
+Jobs added to a queue run one after another without requiring the local machine to stay connected. The queue runner runs in a tmux session on the remote host and processes jobs in FIFO order.
+
+#### remote-jobs queue add
+
+Add a job to a remote queue.
+
+```bash
+remote-jobs queue add [flags] <host> <command...>
+```
+
+**Flags:**
+- `-C, --directory DIR`: Working directory (default: current directory path)
+- `-d, --description TEXT`: Description of the job
+- `--queue NAME`: Queue name (default: "default")
+
+**Examples:**
+```bash
+remote-jobs queue add cool30 'python train.py --epochs 100'
+remote-jobs queue add -d "Training run 1" cool30 'python train.py'
+remote-jobs queue add --queue gpu cool30 'python train.py'
+```
+
+#### remote-jobs queue start
+
+Start the queue runner on a remote host.
+
+```bash
+remote-jobs queue start [flags] <host>
+```
+
+**Flags:**
+- `--queue NAME`: Queue name (default: "default")
+
+The queue runner:
+- Runs in a tmux session (`rj-queue-{name}`)
+- Processes jobs sequentially from the queue file
+- Continues running even when you disconnect
+- Sends Slack notifications (if configured)
+
+**Examples:**
+```bash
+remote-jobs queue start cool30
+remote-jobs queue start --queue gpu cool30
+```
+
+#### remote-jobs queue stop
+
+Stop the queue runner after the current job completes.
+
+```bash
+remote-jobs queue stop [flags] <host>
+```
+
+**Flags:**
+- `--queue NAME`: Queue name (default: "default")
+
+**Examples:**
+```bash
+remote-jobs queue stop cool30
+remote-jobs queue stop --queue gpu cool30
+```
+
+#### remote-jobs queue list
+
+Show jobs waiting in the queue and the currently running job.
+
+```bash
+remote-jobs queue list [flags] <host>
+```
+
+**Flags:**
+- `--queue NAME`: Queue name (default: "default")
+
+**Examples:**
+```bash
+remote-jobs queue list cool30
+remote-jobs queue list --queue gpu cool30
+```
+
+#### remote-jobs queue status
+
+Show the status of the queue runner.
+
+```bash
+remote-jobs queue status [flags] <host>
+```
+
+**Flags:**
+- `--queue NAME`: Queue name (default: "default")
+
+**Examples:**
+```bash
+remote-jobs queue status cool30
+remote-jobs queue status --queue gpu cool30
+```
+
+#### Queue Workflow Example
+
+```bash
+# Start the queue runner (does nothing if already running)
+remote-jobs queue start cool30
+
+# Add jobs to the queue - laptop can disconnect after these commands
+remote-jobs queue add cool30 "python train.py --epochs 100"
+remote-jobs queue add cool30 "python train.py --epochs 200"
+remote-jobs queue add cool30 "python evaluate.py"
+
+# Check queue status (when back online)
+remote-jobs queue status cool30
+
+# View what's in the queue
+remote-jobs queue list cool30
+
+# Stop the queue after current job
+remote-jobs queue stop cool30
+```
+
 ## Configuration
 
 Configuration is stored in `~/.config/remote-jobs/config.yaml`.
@@ -437,7 +558,8 @@ Log files are stored on remote hosts at `~/.cache/remote-jobs/logs/{id}-{timesta
 - `running`: Job is currently executing on the remote host
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
-- `pending`: Job queued but not yet started (for later execution)
+- `pending`: Job queued but not yet started (for later manual execution)
+- `queued`: Job waiting in a remote queue for sequential execution
 - `failed`: Job failed to start (e.g., connection error)
 
 The database is automatically created on first use and updated when checking job status.

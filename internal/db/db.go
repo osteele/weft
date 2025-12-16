@@ -20,6 +20,7 @@ type Job struct {
 	Command      string
 	Description  string
 	ErrorMessage string
+	QueueName    string // Name of the queue this job belongs to (empty for non-queued jobs)
 	StartTime    int64
 	EndTime      *int64
 	ExitCode     *int
@@ -38,8 +39,11 @@ const StatusCompleted = "completed"
 // StatusDead indicates a job terminated unexpectedly
 const StatusDead = "dead"
 
-// StatusPending indicates a job queued but not started
+// StatusPending indicates a job queued but not started (for --queue flag)
 const StatusPending = "pending"
+
+// StatusQueued indicates a job queued for sequential execution
+const StatusQueued = "queued"
 
 // StatusFailed indicates a job failed to start
 const StatusFailed = "failed"
@@ -101,6 +105,10 @@ func initSchema(db *sql.DB) error {
 	// Migration: add error_message column if it doesn't exist
 	// SQLite supports ALTER TABLE ADD COLUMN
 	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN error_message TEXT`)
+	// Ignore error - column may already exist
+
+	// Migration: add queue_name column for queued jobs
+	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN queue_name TEXT`)
 	// Ignore error - column may already exist
 
 	return nil
@@ -199,6 +207,38 @@ func RecordPending(db *sql.DB, host, workingDir, command, description string) (i
 	return result.LastInsertId()
 }
 
+// RecordQueued records a queued job for sequential execution and returns its ID
+func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName string) (int64, error) {
+	startTime := time.Now().Unix()
+	result, err := db.Exec(
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status, queue_name)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
+		host, workingDir, command, description, startTime, StatusQueued, queueName,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// ListQueued returns queued jobs for a host and queue name
+func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
+	return queryJobs(db,
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
+		 FROM jobs WHERE status = ? AND host = ? AND queue_name = ? ORDER BY start_time ASC`,
+		StatusQueued, host, queueName,
+	)
+}
+
+// UpdateQueuedToRunning transitions a queued job to running
+func UpdateQueuedToRunning(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, start_time = ? WHERE id = ? AND status = ?`,
+		StatusRunning, time.Now().Unix(), id, StatusQueued,
+	)
+	return err
+}
+
 // RecordCompletion updates a job with its exit code and end time
 func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTime int64) error {
 	_, err := db.Exec(
@@ -244,7 +284,7 @@ func DeleteJob(db *sql.DB, id int64) error {
 // GetJob retrieves a job by host and session name (most recent)
 func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
 	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
 		 FROM jobs WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`,
 		host, sessionName,
 	)
@@ -254,7 +294,7 @@ func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
 // GetJobByID retrieves a job by ID
 func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
 		 FROM jobs WHERE id = ?`,
 		id,
 	)
@@ -264,7 +304,7 @@ func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 // GetPendingJob retrieves a pending job by ID
 func GetPendingJob(db *sql.DB, id int64) (*Job, error) {
 	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
 		 FROM jobs WHERE id = ? AND status = ?`,
 		id, StatusPending,
 	)
@@ -276,10 +316,11 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var sessionName sql.NullString
 	var desc sql.NullString
 	var errorMsg sql.NullString
+	var queueName sql.NullString
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -296,6 +337,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if errorMsg.Valid {
 		j.ErrorMessage = errorMsg.String
 	}
+	if queueName.Valid {
+		j.QueueName = queueName.String
+	}
 	if endTime.Valid {
 		j.EndTime = &endTime.Int64
 	}
@@ -309,7 +353,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 
 // ListJobs returns jobs matching the given filters
 func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message FROM jobs WHERE 1=1`
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name FROM jobs WHERE 1=1`
 	args := []interface{}{}
 
 	if status != "" {
@@ -329,7 +373,7 @@ func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
 
 // ListPending returns pending jobs, optionally filtered by host
 func ListPending(db *sql.DB, host string) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message FROM jobs WHERE status = ?`
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name FROM jobs WHERE status = ?`
 	args := []interface{}{StatusPending}
 
 	if host != "" {
@@ -344,7 +388,7 @@ func ListPending(db *sql.DB, host string) ([]*Job, error) {
 // ListRunning returns running jobs for a host
 func ListRunning(db *sql.DB, host string) ([]*Job, error) {
 	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
 		 FROM jobs WHERE status = ? AND host = ? ORDER BY start_time DESC`,
 		StatusRunning, host,
 	)
@@ -353,7 +397,7 @@ func ListRunning(db *sql.DB, host string) ([]*Job, error) {
 // ListAllRunning returns all running jobs across all hosts
 func ListAllRunning(db *sql.DB) ([]*Job, error) {
 	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
 		 FROM jobs WHERE status = ? ORDER BY start_time DESC`,
 		StatusRunning,
 	)
@@ -401,7 +445,7 @@ func ListUniqueHosts(db *sql.DB) ([]string, error) {
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"
 	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
 		 FROM jobs WHERE description LIKE ? OR command LIKE ? ORDER BY start_time DESC LIMIT ?`,
 		pattern, pattern, limit,
 	)
@@ -458,7 +502,7 @@ func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 
 // ListJobsForPrune returns jobs that would be deleted by prune
 func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message FROM jobs WHERE `
+	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name FROM jobs WHERE `
 	var args []interface{}
 
 	if deadOnly {
@@ -491,10 +535,11 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var sessionName sql.NullString
 		var desc sql.NullString
 		var errorMsg sql.NullString
+		var queueName sql.NullString
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
 		if err != nil {
 			return nil, err
 		}
@@ -507,6 +552,9 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
+		}
+		if queueName.Valid {
+			j.QueueName = queueName.String
 		}
 		if endTime.Valid {
 			j.EndTime = &endTime.Int64
