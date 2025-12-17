@@ -109,6 +109,8 @@ func TestFormatMetadata(t *testing.T) {
 		"host":        "cool30",
 		"description": "Test job",
 		"start_time":  "1234567890",
+		"display_dir": "/mnt/code",       // No cd prefix, so same as working_dir
+		"display_cmd": "python train.py", // No cd prefix, so same as command
 	}
 
 	parsed := ParseMetadata(content)
@@ -116,6 +118,91 @@ func TestFormatMetadata(t *testing.T) {
 		if got := parsed[key]; got != want {
 			t.Errorf("parsed[%q] = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestFormatMetadataWithCdPrefix(t *testing.T) {
+	// Command with "cd <dir> && <cmd>" pattern
+	content := FormatMetadata(42, "~", "cd ~/code/project && python train.py", "cool30", "", 1234567890)
+
+	expected := map[string]string{
+		"job_id":      "42",
+		"working_dir": "~",
+		"command":     "cd ~/code/project && python train.py",
+		"host":        "cool30",
+		"start_time":  "1234567890",
+		"display_dir": "~/code/project",  // Extracted from cd prefix
+		"display_cmd": "python train.py", // Command after &&
+	}
+
+	parsed := ParseMetadata(content)
+	for key, want := range expected {
+		if got := parsed[key]; got != want {
+			t.Errorf("parsed[%q] = %q, want %q", key, got, want)
+		}
+	}
+
+	// Should not have description key
+	if _, ok := parsed["description"]; ok {
+		t.Errorf("parsed should not have description key when empty")
+	}
+}
+
+func TestParseCdCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmd     string
+		wantCmd string
+		wantDir string
+	}{
+		{
+			name:    "simple cd with &&",
+			cmd:     "cd /foo/bar && python train.py",
+			wantCmd: "python train.py",
+			wantDir: "/foo/bar",
+		},
+		{
+			name:    "cd with tilde",
+			cmd:     "cd ~/code/project && make build",
+			wantCmd: "make build",
+			wantDir: "~/code/project",
+		},
+		{
+			name:    "cd with single-quoted dir",
+			cmd:     "cd '/path/with spaces' && ./run.sh",
+			wantCmd: "./run.sh",
+			wantDir: "/path/with spaces",
+		},
+		{
+			name:    "cd with double-quoted dir",
+			cmd:     `cd "/path/with spaces" && ./run.sh`,
+			wantCmd: "./run.sh",
+			wantDir: "/path/with spaces",
+		},
+		{
+			name:    "no cd prefix",
+			cmd:     "python train.py",
+			wantCmd: "",
+			wantDir: "",
+		},
+		{
+			name:    "cd without &&",
+			cmd:     "cd /foo/bar",
+			wantCmd: "",
+			wantDir: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCmd, gotDir := ParseCdCommand(tt.cmd)
+			if gotCmd != tt.wantCmd {
+				t.Errorf("ParseCdCommand(%q) cmd = %q, want %q", tt.cmd, gotCmd, tt.wantCmd)
+			}
+			if gotDir != tt.wantDir {
+				t.Errorf("ParseCdCommand(%q) dir = %q, want %q", tt.cmd, gotDir, tt.wantDir)
+			}
+		})
 	}
 }
 

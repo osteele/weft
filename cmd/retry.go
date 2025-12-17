@@ -92,8 +92,8 @@ func listPendingJobs(database *sql.DB, host string) error {
 	fmt.Printf("Pending jobs:\n\n")
 	for _, job := range jobs {
 		fmt.Printf("ID %d on %s\n", job.ID, job.Host)
-		fmt.Printf("  Command: %s\n", job.Command)
-		fmt.Printf("  Directory: %s\n", job.WorkingDir)
+		fmt.Printf("  Command: %s\n", job.EffectiveCommand())
+		fmt.Printf("  Directory: %s\n", job.EffectiveWorkingDir())
 		if job.Description != "" {
 			fmt.Printf("  Description: %s\n", job.Description)
 		}

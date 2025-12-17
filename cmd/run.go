@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -24,8 +25,23 @@ Examples:
   remote-jobs run cool30 'python train.py'
   remote-jobs run -d "Training GPT-2" cool30 'with-gpu python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
-  remote-jobs run --queue cool30 'python train.py'`,
-	Args: cobra.MinimumNArgs(2),
+  remote-jobs run --queue cool30 'python train.py'
+  remote-jobs run -f cool30 'python train.py'   # Start and follow log
+  remote-jobs run cool30 --kill 42              # Kill job 42`,
+	Args: func(cmd *cobra.Command, args []string) error {
+		// --kill mode only needs host
+		if runKillJobID > 0 {
+			if len(args) < 1 {
+				return fmt.Errorf("requires host argument")
+			}
+			return nil
+		}
+		// Normal mode needs host + command
+		if len(args) < 2 {
+			return fmt.Errorf("requires host and command arguments")
+		}
+		return nil
+	},
 	RunE: runRun,
 }
 
@@ -34,6 +50,8 @@ var (
 	runDescription string
 	runQueue       bool
 	runQueueOnFail bool
+	runFollow      bool
+	runKillJobID   int64
 )
 
 func init() {
@@ -43,11 +61,24 @@ func init() {
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "Description of the job")
 	runCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
 	runCmd.Flags().BoolVar(&runQueueOnFail, "queue-on-fail", false, "Queue job if connection fails")
+	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
+	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'remote-jobs kill')")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
 	host := args[0]
+
+	// Handle --kill mode
+	if runKillJobID > 0 {
+		return killJob(runKillJobID)
+	}
+
 	command := strings.Join(args[1:], " ")
+
+	// Validate flag combinations
+	if runFollow && runQueue {
+		return fmt.Errorf("--follow cannot be used with --queue")
+	}
 
 	// Set defaults
 	workingDir := runDir
@@ -215,6 +246,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Println("✓ Session started successfully")
 	fmt.Printf("Job ID: %d\n", jobID)
 
+	// If --follow flag is set, tail the log
+	if runFollow {
+		fmt.Printf("\nFollowing log output (Ctrl+C to stop)...\n\n")
+		tailCmd := fmt.Sprintf("tail -n 50 -f %s", logFile)
+		sshCmd := exec.Command("ssh", host, tailCmd)
+		sshCmd.Stdout = os.Stdout
+		sshCmd.Stderr = os.Stderr
+		return sshCmd.Run()
+	}
+
 	fmt.Printf("\nMonitor progress:\n")
 	fmt.Printf("  ssh %s -t 'tmux attach -t %s'  # Attach (Ctrl+B D to detach)\n", host, tmuxSession)
 	fmt.Printf("  remote-jobs log %d  # View log\n", jobID)
@@ -222,6 +263,38 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Printf("\nCheck status:\n")
 	fmt.Printf("  remote-jobs status %d\n", jobID)
 
+	return nil
+}
+
+// killJob kills a job by ID (used by --kill flag)
+func killJob(jobID int64) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	fmt.Printf("Killing job %d on %s...\n", jobID, job.Host)
+
+	if err := ssh.TmuxKillSession(job.Host, tmuxSession); err != nil {
+		return fmt.Errorf("kill session: %w", err)
+	}
+
+	// Mark job as dead in database
+	if err := db.MarkDeadByID(database, jobID); err != nil {
+		fmt.Printf("Warning: failed to update database: %v\n", err)
+	}
+
+	fmt.Println("Job killed")
 	return nil
 }
 

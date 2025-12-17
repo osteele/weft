@@ -125,8 +125,8 @@ func showJob(database *sql.DB, id int64) error {
 
 	fmt.Printf("Job ID:       %d\n", job.ID)
 	fmt.Printf("Host:         %s\n", job.Host)
-	fmt.Printf("Working Dir:  %s\n", job.WorkingDir)
-	fmt.Printf("Command:      %s\n", job.Command)
+	fmt.Printf("Working Dir:  %s\n", job.EffectiveWorkingDir())
+	fmt.Printf("Command:      %s\n", job.EffectiveCommand())
 	if job.Description != "" {
 		fmt.Printf("Description:  %s\n", job.Description)
 	}
@@ -168,7 +168,7 @@ func printJobs(jobs []*db.Job) error {
 		// Show description if available, otherwise truncated command
 		display := job.Description
 		if display == "" {
-			display = job.Command
+			display = job.EffectiveCommand()
 		}
 		if len(display) > 40 {
 			display = display[:37] + "..."

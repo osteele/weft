@@ -570,6 +570,58 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 	return jobs, rows.Err()
 }
 
+// EffectiveWorkingDir returns the actual working directory for display.
+// If the command starts with "cd <dir> &&", returns that directory instead.
+func (j *Job) EffectiveWorkingDir() string {
+	_, dir := j.ParseCdCommand()
+	if dir != "" {
+		return dir
+	}
+	return j.WorkingDir
+}
+
+// EffectiveCommand returns the actual command for display.
+// If the command starts with "cd <dir> &&", returns the command after "&&".
+func (j *Job) EffectiveCommand() string {
+	cmd, _ := j.ParseCdCommand()
+	if cmd != "" {
+		return cmd
+	}
+	return j.Command
+}
+
+// ParseCdCommand checks if the command starts with "cd <dir> &&" pattern.
+// Returns (command_after_and, cd_directory) if pattern matches, or ("", "") if not.
+func (j *Job) ParseCdCommand() (command, dir string) {
+	cmd := strings.TrimSpace(j.Command)
+
+	// Check for "cd " prefix
+	if !strings.HasPrefix(cmd, "cd ") {
+		return "", ""
+	}
+
+	// Find the " && " separator
+	andIdx := strings.Index(cmd, " && ")
+	if andIdx == -1 {
+		return "", ""
+	}
+
+	// Extract the directory from "cd <dir>"
+	cdPart := cmd[3:andIdx] // Skip "cd "
+	dir = strings.TrimSpace(cdPart)
+
+	// Handle quoted directories
+	if (strings.HasPrefix(dir, "'") && strings.HasSuffix(dir, "'")) ||
+		(strings.HasPrefix(dir, "\"") && strings.HasSuffix(dir, "\"")) {
+		dir = dir[1 : len(dir)-1]
+	}
+
+	// Extract the command after " && "
+	command = strings.TrimSpace(cmd[andIdx+4:])
+
+	return command, dir
+}
+
 // FormatDuration formats a duration in human-readable form
 func FormatDuration(seconds int64) string {
 	d := time.Duration(seconds) * time.Second

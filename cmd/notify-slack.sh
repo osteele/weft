@@ -11,10 +11,9 @@
 #   Create ~/.config/remote-jobs/config with: SLACK_WEBHOOK=https://hooks.slack.com/...
 #
 # Environment Variables:
-#   REMOTE_JOBS_SLACK_WEBHOOK     Slack webhook URL (required)
-#   REMOTE_JOBS_SLACK_NOTIFY      When to notify: "all" (default), "failures", "none"
+#   REMOTE_JOBS_SLACK_WEBHOOK       Slack webhook URL (required)
+#   REMOTE_JOBS_SLACK_NOTIFY        When to notify: "all" (default), "failures", "none"
 #   REMOTE_JOBS_SLACK_MIN_DURATION  Minimum job duration in seconds to trigger notification (default: 15)
-#   REMOTE_JOBS_SLACK_VERBOSE=1   Include directory and command in message
 #
 
 set -euo pipefail
@@ -50,8 +49,8 @@ fi
 METADATA_FILE="${METADATA_FILE/#\~/$HOME}"
 
 duration_text=""
-working_dir=""
-command=""
+display_dir=""
+display_cmd=""
 if [ -f "$METADATA_FILE" ]; then
     start_time=$(grep '^start_time=' "$METADATA_FILE" | cut -d= -f2- || true)
     if [ -n "$start_time" ]; then
@@ -61,16 +60,23 @@ if [ -f "$METADATA_FILE" ]; then
         minutes=$(((duration_secs % 3600) / 60))
         seconds=$((duration_secs % 60))
         if [ $hours -gt 0 ]; then
-            duration_text=" (${hours}h ${minutes}m ${seconds}s)"
+            duration_text=" in ${hours}h ${minutes}m ${seconds}s"
         elif [ $minutes -gt 0 ]; then
-            duration_text=" (${minutes}m ${seconds}s)"
+            duration_text=" in ${minutes}m ${seconds}s"
         else
-            duration_text=" (${seconds}s)"
+            duration_text=" in ${seconds}s"
         fi
     fi
-    # Extract working_dir and command for verbose mode
-    working_dir=$(grep '^working_dir=' "$METADATA_FILE" | cut -d= -f2- || true)
-    command=$(grep '^command=' "$METADATA_FILE" | cut -d= -f2- || true)
+    # Extract display_dir and display_cmd (computed by Go code, with cd prefix parsed out)
+    display_dir=$(grep '^display_dir=' "$METADATA_FILE" | cut -d= -f2- || true)
+    display_cmd=$(grep '^display_cmd=' "$METADATA_FILE" | cut -d= -f2- || true)
+    # Fall back to working_dir and command for older metadata files
+    if [ -z "$display_dir" ]; then
+        display_dir=$(grep '^working_dir=' "$METADATA_FILE" | cut -d= -f2- || true)
+    fi
+    if [ -z "$display_cmd" ]; then
+        display_cmd=$(grep '^command=' "$METADATA_FILE" | cut -d= -f2- || true)
+    fi
 fi
 
 # Get notification settings (defaults: notify all, 15s minimum duration)
@@ -111,18 +117,46 @@ else
     status_text="failed with exit code $EXIT_CODE"
 fi
 
-# Build message
-message="$status_emoji Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text"
+# Escape a string for JSON
+# Handles: backslashes, double quotes, newlines, tabs
+# Note: Backticks don't need escaping in JSON
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"        # Escape backslashes first
+    s="${s//\"/\\\"}"        # Escape double quotes
+    s="${s//$'\n'/\\n}"      # Convert newlines to \n
+    s="${s//$'\t'/\\t}"      # Convert tabs to \t
+    printf '%s' "$s"
+}
 
-# Add verbose info if enabled
-if [ "${REMOTE_JOBS_SLACK_VERBOSE:-}" = "1" ]; then
-    if [ -n "$working_dir" ]; then
-        message="$message\n• Directory: \`$working_dir\`"
+# Format value for Slack inline code, handling backticks
+# If value contains backticks, don't use code formatting (Slack can't escape them)
+slack_code() {
+    local s="$1"
+    if [[ "$s" == *'`'* ]]; then
+        # Contains backticks - just use the raw value
+        printf '%s' "$s"
+    else
+        printf '`%s`' "$s"
     fi
-    if [ -n "$command" ]; then
-        message="$message\n• Command: \`$command\`"
-    fi
+}
+
+# Build message using actual newlines (will be escaped for JSON later)
+# Format: :emoji: Job *rj-123* on `host` completed successfully in Xm Ys.
+#         Directory: `~/code/project`
+#         Command: `python train.py`
+message="$status_emoji Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text."
+if [ -n "$display_dir" ]; then
+    dir_formatted=$(slack_code "$display_dir")
+    message="$message"$'\n'"Directory: $dir_formatted"
 fi
+if [ -n "$display_cmd" ]; then
+    cmd_formatted=$(slack_code "$display_cmd")
+    message="$message"$'\n'"Command: $cmd_formatted"
+fi
+
+# Escape the message for JSON
+message=$(json_escape "$message")
 
 # Send Slack notification
 curl -s -X POST -H 'Content-type: application/json' \

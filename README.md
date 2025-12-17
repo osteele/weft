@@ -37,8 +37,10 @@ remote-jobs run [flags] <host> <command...>
 **Flags:**
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job (for logging and queries)
+- `-f, --follow`: Follow log output after starting (Ctrl+C to stop following; job continues)
 - `--queue`: Queue job for later instead of running now
 - `--queue-on-fail`: Queue job if connection fails
+- `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
 
 **Examples:**
 ```bash
@@ -51,11 +53,17 @@ remote-jobs run -d "Training GPT-2 with lr=0.001" deepthought 'with-gpu python t
 # Explicit working directory
 remote-jobs run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
 
+# Start and follow log output
+remote-jobs run -f -d "Training run" deepthought 'python train.py'
+
 # Queue for later (doesn't start immediately)
 remote-jobs run --queue -d "Training run" deepthought 'python train.py'
 
 # Auto-queue if connection fails
 remote-jobs run --queue-on-fail -d "Training run" deepthought 'python train.py'
+
+# Kill a job
+remote-jobs run deepthought --kill 42
 ```
 
 The command:
@@ -317,13 +325,26 @@ remote-jobs log <job-id> [flags]
 **Flags:**
 - `-f, --follow`: Follow log in real-time (like `tail -f`)
 - `-n, --lines N`: Number of lines to show (default: 50)
+- `--from N`: Show lines starting from line N
+- `--to N`: Show lines up to line N
+- `--grep PATTERN`: Filter lines matching pattern
 
 **Examples:**
 ```bash
 remote-jobs log 42           # Last 50 lines
 remote-jobs log 42 -f        # Follow (like tail -f)
 remote-jobs log 42 -n 100    # Last 100 lines
+remote-jobs log 42 --from 100 --to 200  # Lines 100-200
+remote-jobs log 42 --from 500           # From line 500 onwards
+remote-jobs log 42 --to 100             # First 100 lines
+remote-jobs log 42 --grep error         # Lines containing "error"
+remote-jobs log 42 -f --grep epoch      # Follow, filter for "epoch"
 ```
+
+**Notes:**
+- `--from`/`--to` cannot be used with `-n`/`--lines`
+- `--follow` cannot be used with `--to`
+- `--grep` can be combined with any other option
 
 ### remote-jobs restart
 

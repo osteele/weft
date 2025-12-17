@@ -328,7 +328,7 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 			parts := strings.SplitN(line, "\t", 4)
 			if len(parts) >= 3 {
 				jobID := parts[0]
-				command := parts[2]
+				command := parseEffectiveCommand(parts[2])
 				description := ""
 				if len(parts) >= 4 {
 					description = parts[3]
@@ -396,4 +396,18 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// parseEffectiveCommand extracts the command from "cd dir && command" patterns.
+// Returns the command after "&&" if pattern matches, or the original command.
+func parseEffectiveCommand(command string) string {
+	cmd := strings.TrimSpace(command)
+	if !strings.HasPrefix(cmd, "cd ") {
+		return command
+	}
+	andIdx := strings.Index(cmd, " && ")
+	if andIdx == -1 {
+		return command
+	}
+	return strings.TrimSpace(cmd[andIdx+4:])
 }

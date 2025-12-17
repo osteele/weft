@@ -2,6 +2,154 @@ package db
 
 import "testing"
 
+func TestParseCdCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		wantCmd    string
+		wantDir    string
+		wantParsed bool
+	}{
+		{
+			name:       "simple cd with &&",
+			command:    "cd /foo/bar && python train.py",
+			wantCmd:    "python train.py",
+			wantDir:    "/foo/bar",
+			wantParsed: true,
+		},
+		{
+			name:       "cd with tilde",
+			command:    "cd ~/code/project && make build",
+			wantCmd:    "make build",
+			wantDir:    "~/code/project",
+			wantParsed: true,
+		},
+		{
+			name:       "cd with quoted dir",
+			command:    "cd '/path/with spaces' && ./run.sh",
+			wantCmd:    "./run.sh",
+			wantDir:    "/path/with spaces",
+			wantParsed: true,
+		},
+		{
+			name:       "cd with double-quoted dir",
+			command:    `cd "/path/with spaces" && ./run.sh`,
+			wantCmd:    "./run.sh",
+			wantDir:    "/path/with spaces",
+			wantParsed: true,
+		},
+		{
+			name:       "no cd prefix",
+			command:    "python train.py",
+			wantCmd:    "",
+			wantDir:    "",
+			wantParsed: false,
+		},
+		{
+			name:       "cd without &&",
+			command:    "cd /foo/bar",
+			wantCmd:    "",
+			wantDir:    "",
+			wantParsed: false,
+		},
+		{
+			name:       "command with && but no cd",
+			command:    "make build && make test",
+			wantCmd:    "",
+			wantDir:    "",
+			wantParsed: false,
+		},
+		{
+			name:       "whitespace handling",
+			command:    "  cd /foo/bar  &&  python train.py  ",
+			wantCmd:    "python train.py",
+			wantDir:    "/foo/bar",
+			wantParsed: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{Command: tt.command}
+			gotCmd, gotDir := job.ParseCdCommand()
+
+			if tt.wantParsed {
+				if gotCmd != tt.wantCmd {
+					t.Errorf("ParseCdCommand() cmd = %q, want %q", gotCmd, tt.wantCmd)
+				}
+				if gotDir != tt.wantDir {
+					t.Errorf("ParseCdCommand() dir = %q, want %q", gotDir, tt.wantDir)
+				}
+			} else {
+				if gotCmd != "" || gotDir != "" {
+					t.Errorf("ParseCdCommand() = (%q, %q), want empty strings", gotCmd, gotDir)
+				}
+			}
+		})
+	}
+}
+
+func TestEffectiveCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "cd pattern returns command after &&",
+			command: "cd /foo && python train.py",
+			want:    "python train.py",
+		},
+		{
+			name:    "no cd pattern returns original",
+			command: "python train.py",
+			want:    "python train.py",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{Command: tt.command}
+			got := job.EffectiveCommand()
+			if got != tt.want {
+				t.Errorf("EffectiveCommand() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveWorkingDir(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		workingDir string
+		want       string
+	}{
+		{
+			name:       "cd pattern returns dir from cd",
+			command:    "cd /foo && python train.py",
+			workingDir: "~/original",
+			want:       "/foo",
+		},
+		{
+			name:       "no cd pattern returns workingDir",
+			command:    "python train.py",
+			workingDir: "~/original",
+			want:       "~/original",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{Command: tt.command, WorkingDir: tt.workingDir}
+			got := job.EffectiveWorkingDir()
+			if got != tt.want {
+				t.Errorf("EffectiveWorkingDir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		seconds  int64

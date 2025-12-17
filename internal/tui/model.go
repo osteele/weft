@@ -50,6 +50,7 @@ type keyMap struct {
 	Tab       key.Binding
 	Refresh   key.Binding
 	Sync      key.Binding
+	Help      key.Binding
 }
 
 var keys = keyMap{
@@ -90,8 +91,8 @@ var keys = keyMap{
 		key.WithHelp("n", "new job"),
 	),
 	Prune: key.NewBinding(
-		key.WithKeys("p"),
-		key.WithHelp("p", "prune"),
+		key.WithKeys("P"),
+		key.WithHelp("P", "prune"),
 	),
 	Suspend: key.NewBinding(
 		key.WithKeys("ctrl+z"),
@@ -119,6 +120,10 @@ var keys = keyMap{
 	Sync: key.NewBinding(
 		key.WithKeys("s"),
 		key.WithHelp("s", "sync"),
+	),
+	Help: key.NewBinding(
+		key.WithKeys("?"),
+		key.WithHelp("?", "help"),
 	),
 }
 
@@ -246,6 +251,9 @@ type Model struct {
 	// Background sync state
 	syncing      bool
 	lastSyncTime time.Time
+
+	// Help overlay
+	showHelp bool
 
 	// Configurable intervals
 	syncInterval        time.Duration
@@ -472,6 +480,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startSyncTicker())
+		// Always refresh job list to pick up new jobs created elsewhere
+		cmds = append(cmds, m.refreshJobs())
 		if !m.syncing {
 			m.syncing = true
 			cmds = append(cmds, m.performBackgroundSync())
@@ -556,6 +566,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Help overlay - dismiss with ? or Esc
+	if m.showHelp {
+		if key.Matches(msg, keys.Help) || key.Matches(msg, keys.Escape) {
+			m.showHelp = false
+		}
+		return m, nil
+	}
+
+	// Toggle help overlay
+	if key.Matches(msg, keys.Help) {
+		m.showHelp = true
+		return m, nil
+	}
+
 	// Allow cancelling job creation with Escape
 	if m.creatingJob && key.Matches(msg, keys.Escape) {
 		m.creatingJob = false
@@ -863,6 +887,11 @@ func (m Model) View() string {
 		)
 	}
 
+	// Show help overlay
+	if m.showHelp {
+		return m.renderHelpOverlay(mainView)
+	}
+
 	// Show modal overlay for long-running operations
 	if m.restarting {
 		return m.renderWithModal(mainView, fmt.Sprintf("Restarting %s...", m.restartingJobName))
@@ -894,6 +923,84 @@ func (m Model) renderWithModal(background, message string) string {
 	modal := modalStyle.Render(message)
 
 	// Place modal centered on screen
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("237")),
+	)
+}
+
+func (m Model) renderHelpOverlay(background string) string {
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Width(50)
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Width(12) // Cyan, bold
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Keyboard Shortcuts"))
+	b.WriteString("\n\n")
+
+	if m.viewMode == ViewModeJobs {
+		b.WriteString(titleStyle.Render("Jobs View"))
+		b.WriteString("\n")
+		shortcuts := []struct{ key, desc string }{
+			{"↑/↓", "Navigate job list"},
+			{"l", "Toggle logs view"},
+			{"s", "Sync job statuses"},
+			{"n", "New job"},
+			{"r", "Restart job"},
+			{"k", "Kill running job"},
+			{"x", "Remove job from list"},
+			{"P", "Prune completed/dead jobs"},
+			{"h / Tab", "Switch to hosts view"},
+			{"Esc", "Clear selection/messages"},
+		}
+		for _, s := range shortcuts {
+			b.WriteString(keyStyle.Render(s.key))
+			b.WriteString(descStyle.Render(s.desc))
+			b.WriteString("\n")
+		}
+	} else {
+		b.WriteString(titleStyle.Render("Hosts View"))
+		b.WriteString("\n")
+		shortcuts := []struct{ key, desc string }{
+			{"↑/↓", "Navigate host list"},
+			{"R", "Refresh selected host"},
+			{"j / Tab", "Switch to jobs view"},
+		}
+		for _, s := range shortcuts {
+			b.WriteString(keyStyle.Render(s.key))
+			b.WriteString(descStyle.Render(s.desc))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(titleStyle.Render("General"))
+	b.WriteString("\n")
+	generalShortcuts := []struct{ key, desc string }{
+		{"?", "Show/hide this help"},
+		{"q", "Quit"},
+		{"Ctrl+Z", "Suspend (fg to resume)"},
+	}
+	for _, s := range generalShortcuts {
+		b.WriteString(keyStyle.Render(s.key))
+		b.WriteString(descStyle.Render(s.desc))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Press ? or Esc to close"))
+
+	modal := modalStyle.Render(b.String())
+
 	return lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
@@ -966,7 +1073,7 @@ func (m Model) renderJobList(height int) string {
 		// Show description if available, otherwise truncated command
 		display := job.Description
 		if display == "" {
-			display = job.Command
+			display = job.EffectiveCommand()
 		}
 		if len(display) > 40 {
 			display = display[:37] + "..."
@@ -1036,8 +1143,8 @@ func (m Model) renderJobDetails(height int) string {
 		header = fmt.Sprintf("Job %d on %s\n", job.ID, job.Host)
 
 		// Show Cmd and Dir first (most useful info)
-		header += fmt.Sprintf("Cmd:     %s\n", job.Command)
-		header += fmt.Sprintf("Dir:     %s\n", job.WorkingDir)
+		header += fmt.Sprintf("Cmd:     %s\n", job.EffectiveCommand())
+		header += fmt.Sprintf("Dir:     %s\n", job.EffectiveWorkingDir())
 
 		// Then timing information
 		header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
@@ -1121,15 +1228,43 @@ func (m Model) renderJobDetails(height int) string {
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
-// parseMiB extracts the MiB value from a memory string like "123MiB"
+// parseMiB extracts a MiB value from various memory string formats
+// Handles: "123MiB", "80GiB", "16G", "128Gi", "58.5G", etc.
 func parseMiB(mem string) int {
 	mem = strings.TrimSpace(mem)
+
+	// Try MiB suffix first
 	if strings.HasSuffix(mem, "MiB") {
 		numStr := strings.TrimSuffix(mem, "MiB")
 		if mib, err := strconv.Atoi(strings.TrimSpace(numStr)); err == nil {
 			return mib
 		}
 	}
+
+	// Try GiB suffix (convert to MiB)
+	if strings.HasSuffix(mem, "GiB") {
+		numStr := strings.TrimSuffix(mem, "GiB")
+		if gib, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64); err == nil {
+			return int(gib * 1024)
+		}
+	}
+
+	// Try Gi suffix (convert to MiB)
+	if strings.HasSuffix(mem, "Gi") {
+		numStr := strings.TrimSuffix(mem, "Gi")
+		if gib, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64); err == nil {
+			return int(gib * 1024)
+		}
+	}
+
+	// Try G suffix (treat as GB, convert to MiB approximately)
+	if strings.HasSuffix(mem, "G") {
+		numStr := strings.TrimSuffix(mem, "G")
+		if gb, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64); err == nil {
+			return int(gb * 1024) // Approximate GB as GiB for simplicity
+		}
+	}
+
 	return 0
 }
 
@@ -1176,7 +1311,7 @@ func (m Model) renderStatusBar() string {
 		left = statusMsgStyle.Render(m.statusMessage)
 	}
 
-	right := helpStyle.Render("↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit")
+	right := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs s:sync n:new r:restart k:kill P:prune h:hosts")
 
 	if m.syncing {
 		right = syncingStyle.Render("⟳ ") + right
@@ -1251,40 +1386,23 @@ func (m Model) renderHostDetail(height int) string {
 
 		if host.Status == HostStatusOnline {
 			lines = append(lines, "───────────────────────────────────────────────────────────────")
+			if host.Model != "" {
+				lines = append(lines, fmt.Sprintf("Model:        %s", host.Model))
+			}
 			if host.Arch != "" {
 				lines = append(lines, fmt.Sprintf("Architecture: %s", host.Arch))
 			}
 			if host.OS != "" {
 				lines = append(lines, fmt.Sprintf("OS Version:   %s", host.OS))
 			}
+			if host.CPUModel != "" {
+				lines = append(lines, fmt.Sprintf("CPU:          %s", host.CPUModel))
+			}
 			if host.CPUs > 0 {
-				lines = append(lines, fmt.Sprintf("CPUs:         %d", host.CPUs))
-			}
-			if host.MemTotal != "" {
-				memInfo := host.MemTotal
-				if host.MemUsed != "" {
-					memInfo = fmt.Sprintf("%s used / %s total", host.MemUsed, host.MemTotal)
-				}
-				lines = append(lines, fmt.Sprintf("Memory:       %s", memInfo))
-			}
-			if host.LoadAvg != "" {
-				loads := strings.Split(host.LoadAvg, ",")
-				if len(loads) >= 3 && host.CPUs > 0 {
-					load1m := strings.TrimSpace(loads[0])
-					load5m := strings.TrimSpace(loads[1])
-					load15m := strings.TrimSpace(loads[2])
-					// Calculate utilization percentage from 1-minute load
-					if loadVal, err := strconv.ParseFloat(load1m, 64); err == nil {
-						pct := int((loadVal / float64(host.CPUs)) * 100)
-						lines = append(lines, fmt.Sprintf("Load:         %s (1m), %s (5m), %s (15m)  [%d%% utilized]", load1m, load5m, load15m, pct))
-					} else {
-						lines = append(lines, fmt.Sprintf("Load:         %s (1m), %s (5m), %s (15m)", load1m, load5m, load15m))
-					}
-				} else {
-					lines = append(lines, fmt.Sprintf("Load:         %s", host.LoadAvg))
-				}
+				lines = append(lines, fmt.Sprintf("CPU Cores:    %d", host.CPUs))
 			}
 
+			// GPUs (right after CPU info)
 			if len(host.GPUs) > 0 {
 				// Show GPU summary header
 				gpuNames := make(map[string]int)
@@ -1333,6 +1451,44 @@ func (m Model) renderHostDetail(height int) string {
 					}
 				}
 			}
+
+			// Memory (after GPUs)
+			if host.MemTotal != "" {
+				memInfo := host.MemTotal
+				if host.MemUsed != "" {
+					// Calculate utilization percentage
+					usedMiB := parseMiB(host.MemUsed)
+					totalMiB := parseMiB(host.MemTotal)
+					if totalMiB > 0 {
+						pct := (usedMiB * 100) / totalMiB
+						memInfo = fmt.Sprintf("%s used / %s total (%d%%)", host.MemUsed, host.MemTotal, pct)
+					} else {
+						memInfo = fmt.Sprintf("%s used / %s total", host.MemUsed, host.MemTotal)
+					}
+				}
+				lines = append(lines, fmt.Sprintf("Memory:       %s", memInfo))
+			}
+
+			// Load average (labeled: 1m, 5m, 15m)
+			if host.LoadAvg != "" {
+				// Parse load values - handle both comma-separated (Linux) and space-separated (macOS)
+				loadStr := strings.ReplaceAll(host.LoadAvg, ",", " ")
+				loads := strings.Fields(loadStr)
+				if len(loads) >= 3 && host.CPUs > 0 {
+					load1m := loads[0]
+					load5m := loads[1]
+					load15m := loads[2]
+					// Calculate utilization percentage from 1-minute load
+					if loadVal, err := strconv.ParseFloat(load1m, 64); err == nil {
+						pct := int((loadVal / float64(host.CPUs)) * 100)
+						lines = append(lines, fmt.Sprintf("Load (1/5/15m): %s, %s, %s  [%d%% of %d cores]", load1m, load5m, load15m, pct, host.CPUs))
+					} else {
+						lines = append(lines, fmt.Sprintf("Load (1/5/15m): %s, %s, %s", load1m, load5m, load15m))
+					}
+				} else {
+					lines = append(lines, fmt.Sprintf("Load:         %s", host.LoadAvg))
+				}
+			}
 		}
 
 		if !host.LastCheck.IsZero() {
@@ -1360,7 +1516,7 @@ func (m Model) renderHostsStatusBar() string {
 		left = statusMsgStyle.Render(m.statusMessage)
 	}
 
-	right := helpStyle.Render("↑/↓:nav R:refresh j:jobs tab:switch q:quit")
+	right := helpStyle.Render("?:help q:quit ↑/↓:nav R:refresh j:jobs tab:switch")
 
 	// Calculate gap
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2

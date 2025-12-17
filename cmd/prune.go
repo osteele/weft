@@ -83,7 +83,7 @@ func runPrune(cmd *cobra.Command, args []string) error {
 			startTime := time.Unix(job.StartTime, 0)
 			display := job.Description
 			if display == "" {
-				display = job.Command
+				display = job.EffectiveCommand()
 				if len(display) > 30 {
 					display = display[:27] + "..."
 				}

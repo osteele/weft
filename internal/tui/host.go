@@ -33,7 +33,10 @@ type Host struct {
 	Status    HostStatus
 	Arch      string // e.g., "Linux x86_64", "Darwin arm64"
 	OS        string // e.g., "5.15.0-generic"
+	Model     string // e.g., "Mac14,6" or "MacBook Pro (16-inch, 2023)"
 	CPUs      int
+	CPUModel  string // e.g., "Apple M2 Max" or "Intel Core i9-9900K"
+	CPUFreq   string // e.g., "3.2 GHz"
 	MemTotal  string // e.g., "128G"
 	MemUsed   string // e.g., "58G"
 	LoadAvg   string // e.g., "0.5, 0.3, 0.2"
@@ -50,7 +53,31 @@ const HostInfoCommand = `echo "ARCH:$(uname -sm)"; ` +
 	`echo "OS:$(uname -r)"; ` +
 	`echo "CPUS:$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo -)"; ` +
 	`echo "LOAD:$(uptime | sed 's/.*load average[s]*: //')"; ` +
-	`echo "MEM:$(free -h 2>/dev/null | awk '/^Mem:/ {print $2":"$3}' || echo -)"; ` +
+	// Memory: Linux uses free, macOS uses sysctl + vm_stat
+	`if command -v free >/dev/null 2>&1; then ` +
+	`echo "MEM:$(free -h | awk '/^Mem:/ {print $2":"$3}')"; ` +
+	`else ` +
+	// macOS: get total from sysctl, used from vm_stat (active + wired + compressed)
+	`total_gb=$(sysctl -n hw.memsize 2>/dev/null | awk '{printf "%.0f", $1/1024/1024/1024}'); ` +
+	`page_size=$(sysctl -n hw.pagesize 2>/dev/null); ` +
+	`vm_out=$(vm_stat 2>/dev/null); ` +
+	`pages_active=$(echo "$vm_out" | awk '/Pages active/ {gsub(/\./,"",$3); print $3}'); ` +
+	`pages_wired=$(echo "$vm_out" | awk '/Pages wired/ {gsub(/\./,"",$4); print $4}'); ` +
+	`pages_comp=$(echo "$vm_out" | awk '/Pages occupied by compressor/ {gsub(/\./,"",$5); print $5}'); ` +
+	`if [ -n "$pages_active" ] && [ -n "$page_size" ]; then ` +
+	`used_gb=$(( (pages_active + pages_wired + pages_comp) * page_size / 1024 / 1024 / 1024 )); ` +
+	`echo "MEM:${total_gb}G:${used_gb}G"; ` +
+	`else ` +
+	`echo "MEM:${total_gb}G:-"; ` +
+	`fi; ` +
+	`fi; ` +
+	// Model: macOS hw.model
+	`sysctl -n hw.model 2>/dev/null | sed 's/^/MODEL:/' || true; ` +
+	// CPU model: macOS uses brand_string, Linux uses /proc/cpuinfo
+	`(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2) | sed 's/^[[:space:]]*//' | sed 's/^/CPUMODEL:/' || true; ` +
+	// macOS GPU: system_profiler (brief format)
+	`system_profiler SPDisplaysDataType 2>/dev/null | grep -E '(Chipset Model|VRAM|Total Number of Cores|Metal)' | sed 's/^[[:space:]]*/MACGPU:/' || true; ` +
+	// Linux GPU: nvidia-smi
 	`nvidia-smi 2>/dev/null | awk '/^\|[[:space:]]+[0-9]+[[:space:]]+[A-Z]/ { print "GPUNAME:" $0; getline; print "GPUSTAT:" $0 }'`
 
 // ParseHostInfo parses the output of HostInfoCommand into a Host struct
@@ -78,6 +105,10 @@ func ParseHostInfo(output string) *Host {
 				host.Arch = value
 			case "OS":
 				host.OS = value
+			case "MODEL":
+				host.Model = value
+			case "CPUMODEL":
+				host.CPUModel = value
 			case "CPUS":
 				if n, err := strconv.Atoi(value); err == nil {
 					host.CPUs = n
@@ -89,7 +120,14 @@ func ParseHostInfo(output string) *Host {
 				if len(parts) == 2 {
 					host.MemTotal = parts[0]
 					host.MemUsed = parts[1]
+					// Clean up "-" for unused values (macOS doesn't report used)
+					if host.MemUsed == "-" {
+						host.MemUsed = ""
+					}
 				}
+			case "MACGPU":
+				// Parse macOS GPU info lines
+				parseMacGPULine(value, host)
 			case "GPU":
 				gpu := parseGPULine(value)
 				if gpu != nil {
@@ -216,6 +254,32 @@ func parseNvidiaSmiStatsLine(line string, gpu *GPUInfo) {
 				break
 			}
 		}
+	}
+}
+
+// parseMacGPULine parses macOS system_profiler GPU info lines
+// Lines look like: "Chipset Model: Apple M2 Max" or "VRAM (Total): 38 GB"
+func parseMacGPULine(line string, host *Host) {
+	line = strings.TrimSpace(line)
+
+	if strings.HasPrefix(line, "Chipset Model:") {
+		name := strings.TrimSpace(strings.TrimPrefix(line, "Chipset Model:"))
+		// Create new GPU entry
+		gpu := GPUInfo{
+			Index: len(host.GPUs),
+			Name:  name,
+		}
+		host.GPUs = append(host.GPUs, gpu)
+	} else if strings.HasPrefix(line, "VRAM") && len(host.GPUs) > 0 {
+		// VRAM (Total): 38 GB or VRAM (Dynamic, Max): 48 GB
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			host.GPUs[len(host.GPUs)-1].MemTotal = strings.TrimSpace(parts[1])
+		}
+	} else if strings.HasPrefix(line, "Total Number of Cores:") && len(host.GPUs) > 0 {
+		cores := strings.TrimSpace(strings.TrimPrefix(line, "Total Number of Cores:"))
+		// Append core count to GPU name
+		host.GPUs[len(host.GPUs)-1].Name += " (" + cores + " cores)"
 	}
 }
 

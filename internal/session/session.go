@@ -127,6 +127,37 @@ func ParseMetadata(content string) map[string]string {
 	return result
 }
 
+// ParseCdCommand checks if a command starts with "cd <dir> &&" pattern.
+// Returns (command_after_and, cd_directory) if pattern matches, or ("", "") if not.
+func ParseCdCommand(cmd string) (command, dir string) {
+	cmd = strings.TrimSpace(cmd)
+
+	// Check for "cd " prefix
+	if !strings.HasPrefix(cmd, "cd ") {
+		return "", ""
+	}
+
+	// Find the " && " separator
+	andIdx := strings.Index(cmd, " && ")
+	if andIdx == -1 {
+		return "", ""
+	}
+
+	// Extract the directory from "cd <dir>"
+	cdPart := cmd[3:andIdx] // Skip "cd "
+	dir = strings.TrimSpace(cdPart)
+
+	// Handle quoted directories
+	if (strings.HasPrefix(dir, "'") && strings.HasSuffix(dir, "'")) ||
+		(strings.HasPrefix(dir, "\"") && strings.HasSuffix(dir, "\"")) {
+		dir = dir[1 : len(dir)-1]
+	}
+
+	// Extract the command after " && "
+	command = strings.TrimSpace(cmd[andIdx+4:])
+	return command, dir
+}
+
 // FormatMetadata formats metadata as key=value pairs
 func FormatMetadata(jobID int64, workingDir, command, host, description string, startTime int64) string {
 	var lines []string
@@ -138,6 +169,18 @@ func FormatMetadata(jobID int64, workingDir, command, host, description string, 
 	if description != "" {
 		lines = append(lines, fmt.Sprintf("description=%s", description))
 	}
+
+	// Compute display_dir and display_cmd (parsing "cd <dir> && <cmd>" pattern)
+	displayCmd, displayDir := ParseCdCommand(command)
+	if displayCmd != "" {
+		lines = append(lines, fmt.Sprintf("display_dir=%s", displayDir))
+		lines = append(lines, fmt.Sprintf("display_cmd=%s", displayCmd))
+	} else {
+		// No cd prefix, use working_dir and command as-is
+		lines = append(lines, fmt.Sprintf("display_dir=%s", workingDir))
+		lines = append(lines, fmt.Sprintf("display_cmd=%s", command))
+	}
+
 	return strings.Join(lines, "\n")
 }
 
