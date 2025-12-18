@@ -111,6 +111,25 @@ func initSchema(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN queue_name TEXT`)
 	// Ignore error - column may already exist
 
+	// Create hosts table for caching static host information
+	hostsSchema := `
+	CREATE TABLE IF NOT EXISTS hosts (
+		name TEXT PRIMARY KEY,
+		arch TEXT,
+		os_version TEXT,
+		model TEXT,
+		cpu_count INTEGER,
+		cpu_model TEXT,
+		cpu_freq TEXT,
+		mem_total TEXT,
+		gpus_json TEXT,
+		last_updated INTEGER NOT NULL
+	);
+	`
+	if _, err := db.Exec(hostsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -648,6 +667,128 @@ func (j *Job) ParseCdCommand() (command, dir string) {
 	command = strings.TrimSpace(cmd[andIdx+4:])
 
 	return command, dir
+}
+
+// CachedHostInfo represents cached static information about a host
+type CachedHostInfo struct {
+	Name        string
+	Arch        string
+	OSVersion   string
+	Model       string
+	CPUCount    int
+	CPUModel    string
+	CPUFreq     string
+	MemTotal    string
+	GPUsJSON    string // JSON array of GPU info
+	LastUpdated int64  // Unix timestamp
+}
+
+// SaveCachedHostInfo saves or updates cached host information
+func SaveCachedHostInfo(db *sql.DB, info *CachedHostInfo) error {
+	_, err := db.Exec(`
+		INSERT OR REPLACE INTO hosts (name, arch, os_version, model, cpu_count, cpu_model, cpu_freq, mem_total, gpus_json, last_updated)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		info.Name, info.Arch, info.OSVersion, info.Model, info.CPUCount, info.CPUModel, info.CPUFreq, info.MemTotal, info.GPUsJSON, info.LastUpdated,
+	)
+	return err
+}
+
+// LoadCachedHostInfo retrieves cached host information by name
+func LoadCachedHostInfo(db *sql.DB, name string) (*CachedHostInfo, error) {
+	row := db.QueryRow(`
+		SELECT name, arch, os_version, model, cpu_count, cpu_model, cpu_freq, mem_total, gpus_json, last_updated
+		FROM hosts WHERE name = ?`, name)
+
+	var info CachedHostInfo
+	var arch, osVersion, model, cpuModel, cpuFreq, memTotal, gpusJSON sql.NullString
+	var cpuCount sql.NullInt64
+
+	err := row.Scan(&info.Name, &arch, &osVersion, &model, &cpuCount, &cpuModel, &cpuFreq, &memTotal, &gpusJSON, &info.LastUpdated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if arch.Valid {
+		info.Arch = arch.String
+	}
+	if osVersion.Valid {
+		info.OSVersion = osVersion.String
+	}
+	if model.Valid {
+		info.Model = model.String
+	}
+	if cpuCount.Valid {
+		info.CPUCount = int(cpuCount.Int64)
+	}
+	if cpuModel.Valid {
+		info.CPUModel = cpuModel.String
+	}
+	if cpuFreq.Valid {
+		info.CPUFreq = cpuFreq.String
+	}
+	if memTotal.Valid {
+		info.MemTotal = memTotal.String
+	}
+	if gpusJSON.Valid {
+		info.GPUsJSON = gpusJSON.String
+	}
+
+	return &info, nil
+}
+
+// LoadAllCachedHosts retrieves all cached host information
+func LoadAllCachedHosts(db *sql.DB) ([]*CachedHostInfo, error) {
+	rows, err := db.Query(`
+		SELECT name, arch, os_version, model, cpu_count, cpu_model, cpu_freq, mem_total, gpus_json, last_updated
+		FROM hosts ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []*CachedHostInfo
+	for rows.Next() {
+		var info CachedHostInfo
+		var arch, osVersion, model, cpuModel, cpuFreq, memTotal, gpusJSON sql.NullString
+		var cpuCount sql.NullInt64
+
+		err := rows.Scan(&info.Name, &arch, &osVersion, &model, &cpuCount, &cpuModel, &cpuFreq, &memTotal, &gpusJSON, &info.LastUpdated)
+		if err != nil {
+			return nil, err
+		}
+
+		if arch.Valid {
+			info.Arch = arch.String
+		}
+		if osVersion.Valid {
+			info.OSVersion = osVersion.String
+		}
+		if model.Valid {
+			info.Model = model.String
+		}
+		if cpuCount.Valid {
+			info.CPUCount = int(cpuCount.Int64)
+		}
+		if cpuModel.Valid {
+			info.CPUModel = cpuModel.String
+		}
+		if cpuFreq.Valid {
+			info.CPUFreq = cpuFreq.String
+		}
+		if memTotal.Valid {
+			info.MemTotal = memTotal.String
+		}
+		if gpusJSON.Valid {
+			info.GPUsJSON = gpusJSON.String
+		}
+
+		hosts = append(hosts, &info)
+	}
+
+	return hosts, rows.Err()
 }
 
 // FormatDuration formats a duration in human-readable form

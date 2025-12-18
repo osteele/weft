@@ -2,6 +2,7 @@ package tui
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	DefaultSyncInterval        = 15 * time.Second
 	DefaultLogRefreshInterval  = 3 * time.Second
 	DefaultHostRefreshInterval = 30 * time.Second
+	DefaultHostCacheDuration   = 24 * time.Hour // How long cached host info is considered fresh
 )
 
 // ViewMode represents which view is currently active
@@ -273,6 +275,10 @@ type Model struct {
 	syncInterval        time.Duration
 	logRefreshInterval  time.Duration
 	hostRefreshInterval time.Duration
+	hostCacheDuration   time.Duration
+
+	// Host cache tracking - which hosts have been freshly queried this session
+	hostsQueriedThisSession map[string]bool
 }
 
 // ModelOptions contains configuration for the TUI model
@@ -280,6 +286,7 @@ type ModelOptions struct {
 	SyncInterval        time.Duration
 	LogRefreshInterval  time.Duration
 	HostRefreshInterval time.Duration
+	HostCacheDuration   time.Duration // How long cached host info is considered fresh
 }
 
 // DefaultModelOptions returns the default TUI options
@@ -288,6 +295,7 @@ func DefaultModelOptions() ModelOptions {
 		SyncInterval:        DefaultSyncInterval,
 		LogRefreshInterval:  DefaultLogRefreshInterval,
 		HostRefreshInterval: DefaultHostRefreshInterval,
+		HostCacheDuration:   DefaultHostCacheDuration,
 	}
 }
 
@@ -326,12 +334,14 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputWorkingDir].CharLimit = 256
 
 	return Model{
-		database:            database,
-		selectedIndex:       0,
-		inputs:              inputs,
-		syncInterval:        opts.SyncInterval,
-		logRefreshInterval:  opts.LogRefreshInterval,
-		hostRefreshInterval: opts.HostRefreshInterval,
+		database:                database,
+		selectedIndex:           0,
+		inputs:                  inputs,
+		syncInterval:            opts.SyncInterval,
+		logRefreshInterval:      opts.LogRefreshInterval,
+		hostRefreshInterval:     opts.HostRefreshInterval,
+		hostCacheDuration:       opts.HostCacheDuration,
+		hostsQueriedThisSession: make(map[string]bool),
 	}
 }
 
@@ -534,7 +544,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Error loading hosts: %v", msg.err), true)
 		}
-		// Initialize hosts with names, set status to checking
+		// Initialize hosts with names, loading cached data where available
 		var cmds []tea.Cmd
 		for _, name := range msg.hostNames {
 			// Check if host already exists
@@ -546,12 +556,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if !found {
-				host := &Host{
-					Name:   name,
-					Status: HostStatusChecking,
+				// Try to load cached host info
+				var host *Host
+				cachedInfo, err := db.LoadCachedHostInfo(m.database, name)
+				if err == nil && cachedInfo != nil {
+					// Use cached info
+					host = hostFromCachedInfo(cachedInfo)
+					// Check if cache is stale (older than configured duration)
+					cacheAge := time.Since(time.Unix(cachedInfo.LastUpdated, 0))
+					if cacheAge > m.hostCacheDuration {
+						// Cache is stale, mark as checking and fetch fresh
+						host.Status = HostStatusChecking
+						cmds = append(cmds, m.fetchHostInfo(name))
+					}
+					// If cache is fresh, we'll still show it but won't fetch unless user switches to hosts view
+				} else {
+					// No cached info, create empty host and fetch
+					host = &Host{
+						Name:   name,
+						Status: HostStatusChecking,
+					}
+					cmds = append(cmds, m.fetchHostInfo(name))
 				}
 				m.hosts = append(m.hosts, host)
-				cmds = append(cmds, m.fetchHostInfo(name))
 			}
 		}
 		if len(cmds) > 0 {
@@ -568,6 +595,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
+		// Mark host as queried this session
+		m.hostsQueriedThisSession[msg.hostName] = true
 		return m, nil
 
 	case hostRefreshTickMsg:
@@ -576,7 +605,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Only refresh hosts if in hosts view
 		if m.viewMode == ViewModeHosts {
 			for _, host := range m.hosts {
-				cmds = append(cmds, m.fetchHostInfo(host.Name))
+				// Only refresh if:
+				// 1. Host hasn't been queried this session yet, OR
+				// 2. Host is online (to get updated dynamic info like load/memory)
+				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
+					cmds = append(cmds, m.fetchHostInfo(host.Name))
+				}
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -627,10 +661,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Toggle between views
 		if m.viewMode == ViewModeJobs {
 			m.viewMode = ViewModeHosts
-			// Refresh hosts when switching to hosts view
+			// Refresh hosts when switching to hosts view, but only if needed
 			var cmds []tea.Cmd
 			for _, host := range m.hosts {
-				cmds = append(cmds, m.fetchHostInfo(host.Name))
+				// Only refresh if not queried this session or if online (for dynamic data)
+				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
+					cmds = append(cmds, m.fetchHostInfo(host.Name))
+				}
 			}
 			return m, tea.Batch(cmds...)
 		}
@@ -640,10 +677,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.HostsView):
 		if m.viewMode != ViewModeHosts {
 			m.viewMode = ViewModeHosts
-			// Refresh hosts when switching to hosts view
+			// Refresh hosts when switching to hosts view, but only if needed
 			var cmds []tea.Cmd
 			for _, host := range m.hosts {
-				cmds = append(cmds, m.fetchHostInfo(host.Name))
+				// Only refresh if not queried this session or if online (for dynamic data)
+				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
+					cmds = append(cmds, m.fetchHostInfo(host.Name))
+				}
 			}
 			return m, tea.Batch(cmds...)
 		}
@@ -1685,13 +1725,15 @@ func (m Model) startHostRefreshTicker() tea.Cmd {
 }
 
 func (m Model) loadHosts() tea.Cmd {
+	database := m.database
 	return func() tea.Msg {
-		hosts, err := db.ListUniqueHosts(m.database)
+		hosts, err := db.ListUniqueHosts(database)
 		return hostsLoadedMsg{hostNames: hosts, err: err}
 	}
 }
 
 func (m Model) fetchHostInfo(hostName string) tea.Cmd {
+	database := m.database
 	return func() tea.Msg {
 		host := &Host{
 			Name:      hostName,
@@ -1707,12 +1749,30 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 			if host.Error == "" {
 				host.Error = err.Error()
 			}
+			// Load cached info to preserve static data when offline
+			if cachedInfo, loadErr := db.LoadCachedHostInfo(database, hostName); loadErr == nil && cachedInfo != nil {
+				cachedHost := hostFromCachedInfo(cachedInfo)
+				// Preserve static info from cache
+				host.Arch = cachedHost.Arch
+				host.OS = cachedHost.OS
+				host.Model = cachedHost.Model
+				host.CPUs = cachedHost.CPUs
+				host.CPUModel = cachedHost.CPUModel
+				host.CPUFreq = cachedHost.CPUFreq
+				host.MemTotal = cachedHost.MemTotal
+				host.GPUs = cachedHost.GPUs
+			}
 			return hostInfoMsg{hostName: hostName, info: host}
 		}
 
 		// Parse the output
 		host = ParseHostInfo(stdout)
 		host.Name = hostName
+
+		// Save to cache (ignore errors - caching is best effort)
+		cachedInfo := cachedInfoFromHost(host)
+		db.SaveCachedHostInfo(database, cachedInfo)
+
 		return hostInfoMsg{hostName: hostName, info: host}
 	}
 }
@@ -2290,6 +2350,85 @@ func (m Model) createJob() tea.Cmd {
 
 		return jobCreatedMsg{jobID: jobID}
 	}
+}
+
+// hostFromCachedInfo creates a Host from cached database info
+func hostFromCachedInfo(cached *db.CachedHostInfo) *Host {
+	host := &Host{
+		Name:      cached.Name,
+		Status:    HostStatusUnknown, // Will be updated when we query
+		Arch:      cached.Arch,
+		OS:        cached.OSVersion,
+		Model:     cached.Model,
+		CPUs:      cached.CPUCount,
+		CPUModel:  cached.CPUModel,
+		CPUFreq:   cached.CPUFreq,
+		MemTotal:  cached.MemTotal,
+		LastCheck: time.Unix(cached.LastUpdated, 0),
+	}
+
+	// Parse GPUs from JSON
+	if cached.GPUsJSON != "" {
+		var gpus []GPUInfo
+		if err := json.Unmarshal([]byte(cached.GPUsJSON), &gpus); err == nil {
+			host.GPUs = gpus
+		}
+	}
+
+	return host
+}
+
+// cachedInfoFromHost creates a CachedHostInfo from a Host
+func cachedInfoFromHost(host *Host) *db.CachedHostInfo {
+	cached := &db.CachedHostInfo{
+		Name:        host.Name,
+		Arch:        host.Arch,
+		OSVersion:   host.OS,
+		Model:       host.Model,
+		CPUCount:    host.CPUs,
+		CPUModel:    host.CPUModel,
+		CPUFreq:     host.CPUFreq,
+		MemTotal:    host.MemTotal,
+		LastUpdated: time.Now().Unix(),
+	}
+
+	// Encode GPUs to JSON
+	if len(host.GPUs) > 0 {
+		if data, err := json.Marshal(host.GPUs); err == nil {
+			cached.GPUsJSON = string(data)
+		}
+	}
+
+	return cached
+}
+
+// updateHostWithCachedStatic updates a host's dynamic fields while preserving static cached data
+func updateHostWithCachedStatic(host *Host, cached *Host) {
+	// Copy static fields from cached host if current host doesn't have them
+	// This preserves cached static info when we get a partial update
+	if host.Arch == "" {
+		host.Arch = cached.Arch
+	}
+	if host.OS == "" {
+		host.OS = cached.OS
+	}
+	if host.Model == "" {
+		host.Model = cached.Model
+	}
+	if host.CPUs == 0 {
+		host.CPUs = cached.CPUs
+	}
+	if host.CPUModel == "" {
+		host.CPUModel = cached.CPUModel
+	}
+	if host.CPUFreq == "" {
+		host.CPUFreq = cached.CPUFreq
+	}
+	if host.MemTotal == "" {
+		host.MemTotal = cached.MemTotal
+	}
+	// GPUs are static info about what GPUs exist (not utilization)
+	// We always get fresh GPU data when online, so don't merge
 }
 
 func truncate(s string, max int) string {
