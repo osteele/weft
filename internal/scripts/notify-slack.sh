@@ -51,6 +51,7 @@ METADATA_FILE="${METADATA_FILE/#\~/$HOME}"
 duration_text=""
 display_dir=""
 display_cmd=""
+description=""
 if [ -f "$METADATA_FILE" ]; then
     start_time=$(grep '^start_time=' "$METADATA_FILE" | cut -d= -f2- || true)
     if [ -n "$start_time" ]; then
@@ -77,6 +78,8 @@ if [ -f "$METADATA_FILE" ]; then
     if [ -z "$display_cmd" ]; then
         display_cmd=$(grep '^command=' "$METADATA_FILE" | cut -d= -f2- || true)
     fi
+    # Extract description
+    description=$(grep '^description=' "$METADATA_FILE" | cut -d= -f2- || true)
 fi
 
 # Get notification settings (defaults: notify all, 15s minimum duration)
@@ -142,10 +145,15 @@ slack_code() {
 }
 
 # Build message using actual newlines (will be escaped for JSON later)
-# Format: :emoji: Job *rj-123* on `host` completed successfully in Xm Ys.
-#         Directory: `~/code/project`
-#         Command: `python train.py`
-message="$status_emoji Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text."
+# Format with description: :emoji: *Description* (job *rj-123* on `host`) completed successfully in Xm Ys.
+# Format without:          :emoji: Job *rj-123* on `host` completed successfully in Xm Ys.
+#                          Directory: `~/code/project`
+#                          Command: `python train.py`
+if [ -n "$description" ]; then
+    message="$status_emoji *$description* (job *$SESSION_NAME* on \`$HOST\`) $status_text$duration_text."
+else
+    message="$status_emoji Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text."
+fi
 if [ -n "$display_dir" ]; then
     dir_formatted=$(slack_code "$display_dir")
     message="$message"$'\n'"Directory: $dir_formatted"

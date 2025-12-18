@@ -191,6 +191,15 @@ func UpdateJobPending(db *sql.DB, id int64) error {
 	return err
 }
 
+// UpdateJobDescription updates the description for a job
+func UpdateJobDescription(db *sql.DB, id int64, description string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET description = ? WHERE id = ?`,
+		description, id,
+	)
+	return err
+}
+
 // RecordCompletionByID updates a job by ID with its exit code and end time
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(

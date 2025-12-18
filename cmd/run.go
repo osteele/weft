@@ -80,6 +80,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--follow cannot be used with --queue")
 	}
 
+	// Parse "cd /path && command" pattern to extract working directory
+	// Only if -C/--directory wasn't explicitly provided
+	parsedDir, parsedCmd := parseCdPrefix(command)
+	if parsedDir != "" && runDir == "" {
+		command = parsedCmd
+		runDir = parsedDir
+	}
+
 	// Set defaults
 	workingDir := runDir
 	if workingDir == "" {
@@ -296,6 +304,69 @@ func killJob(jobID int64) error {
 
 	fmt.Println("Job killed")
 	return nil
+}
+
+// parseCdPrefix extracts "cd /path && " or "cd /path; " prefix from a command.
+// Returns (directory, remaining_command) if found, or ("", original_command) if not.
+func parseCdPrefix(command string) (dir string, remaining string) {
+	// Match: cd <path> && <rest> or cd <path>; <rest>
+	// Path can be quoted or unquoted, may contain ~
+	trimmed := strings.TrimSpace(command)
+
+	if !strings.HasPrefix(trimmed, "cd ") {
+		return "", command
+	}
+
+	// Skip "cd "
+	rest := trimmed[3:]
+
+	// Find the path - handle quoted and unquoted paths
+	var path string
+	var afterPath string
+
+	if strings.HasPrefix(rest, "'") {
+		// Single-quoted path
+		endQuote := strings.Index(rest[1:], "'")
+		if endQuote == -1 {
+			return "", command
+		}
+		path = rest[1 : endQuote+1]
+		afterPath = rest[endQuote+2:]
+	} else if strings.HasPrefix(rest, "\"") {
+		// Double-quoted path
+		endQuote := strings.Index(rest[1:], "\"")
+		if endQuote == -1 {
+			return "", command
+		}
+		path = rest[1 : endQuote+1]
+		afterPath = rest[endQuote+2:]
+	} else {
+		// Unquoted path - ends at space, &&, or ;
+		for i, c := range rest {
+			if c == ' ' || c == '&' || c == ';' {
+				path = rest[:i]
+				afterPath = rest[i:]
+				break
+			}
+		}
+		if path == "" {
+			// No separator found - just "cd path" with no command after
+			return "", command
+		}
+	}
+
+	// Now look for && or ; separator
+	afterPath = strings.TrimSpace(afterPath)
+	if strings.HasPrefix(afterPath, "&&") {
+		remaining = strings.TrimSpace(afterPath[2:])
+		return path, remaining
+	} else if strings.HasPrefix(afterPath, ";") {
+		remaining = strings.TrimSpace(afterPath[1:])
+		return path, remaining
+	}
+
+	// No valid separator found
+	return "", command
 }
 
 func getSlackWebhook() string {

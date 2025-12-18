@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,25 +37,25 @@ const (
 
 // Key bindings
 type keyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	Enter      key.Binding
-	Logs       key.Binding
-	Escape     key.Binding
-	Kill       key.Binding
-	Restart    key.Binding
-	Remove     key.Binding
-	NewJob     key.Binding
-	Prune      key.Binding
-	Suspend    key.Binding
-	Quit       key.Binding
-	HostsView  key.Binding
-	JobsView   key.Binding
-	Tab        key.Binding
-	Refresh    key.Binding
-	Sync       key.Binding
-	Help       key.Binding
-	StartQueue key.Binding
+	Up          key.Binding
+	Down        key.Binding
+	Enter       key.Binding
+	Logs        key.Binding
+	Escape      key.Binding
+	Kill        key.Binding
+	Restart     key.Binding
+	EditRestart key.Binding
+	Remove      key.Binding
+	NewJob      key.Binding
+	Prune       key.Binding
+	Suspend     key.Binding
+	Quit        key.Binding
+	HostsView   key.Binding
+	JobsView    key.Binding
+	Tab         key.Binding
+	Sync        key.Binding
+	Help        key.Binding
+	StartQueue  key.Binding
 }
 
 var keys = keyMap{
@@ -85,6 +86,10 @@ var keys = keyMap{
 	Restart: key.NewBinding(
 		key.WithKeys("r"),
 		key.WithHelp("r", "restart"),
+	),
+	EditRestart: key.NewBinding(
+		key.WithKeys("R"),
+		key.WithHelp("R", "edit & restart"),
 	),
 	Remove: key.NewBinding(
 		key.WithKeys("x"),
@@ -117,10 +122,6 @@ var keys = keyMap{
 		key.WithKeys("tab"),
 		key.WithHelp("tab", "switch view"),
 	),
-	Refresh: key.NewBinding(
-		key.WithKeys("R"),
-		key.WithHelp("R", "refresh"),
-	),
 	Sync: key.NewBinding(
 		key.WithKeys("s"),
 		key.WithHelp("s", "sync"),
@@ -147,9 +148,10 @@ type syncCompletedMsg struct {
 }
 
 type logFetchedMsg struct {
-	jobID   int64
-	content string
-	err     error
+	jobID     int64
+	content   string
+	err       error
+	connError bool // true if this was a connection error (host unreachable)
 }
 
 type jobKilledMsg struct {
@@ -205,6 +207,11 @@ type hostInfoMsg struct {
 	info     *Host
 }
 
+type queueStatusMsg struct {
+	hostName string
+	info     *QueueStatusInfo
+}
+
 type processStatsMsg struct {
 	jobID int64
 	stats *ssh.ProcessStats
@@ -213,8 +220,8 @@ type processStatsMsg struct {
 // Input field indices for new job form
 const (
 	inputHost = iota
-	inputCommand
 	inputDescription
+	inputCommand
 	inputWorkingDir
 )
 
@@ -234,6 +241,8 @@ type Model struct {
 
 	// UI State
 	logContent   string
+	logStale     bool             // true if showing cached content due to connection error
+	logCache     map[int64]string // cache of last successful log content per job
 	logLoading   bool
 	flashMessage string
 	flashIsError bool
@@ -342,6 +351,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostRefreshInterval:     opts.HostRefreshInterval,
 		hostCacheDuration:       opts.HostCacheDuration,
 		hostsQueriedThisSession: make(map[string]bool),
+		logCache:                make(map[int64]string),
 	}
 }
 
@@ -402,7 +412,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
 		} else if msg.updated > 0 {
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Synced %d job(s)", msg.updated), false), m.refreshJobs())
+			// Silently refresh jobs without flash message
+			return m, m.refreshJobs()
 		}
 		return m, nil
 
@@ -410,8 +421,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logLoading = false
 		if msg.err != nil {
 			m.logContent = fmt.Sprintf("Error: %v", msg.err)
+			m.logStale = false
 		} else if m.selectedJob != nil && msg.jobID == m.selectedJob.ID {
-			m.logContent = msg.content
+			if msg.connError {
+				// Connection error - try to show cached content
+				if cached, ok := m.logCache[msg.jobID]; ok {
+					m.logContent = cached
+					m.logStale = true
+				} else {
+					m.logContent = msg.content // Show "Host X unreachable" message
+					m.logStale = false
+				}
+			} else {
+				// Successful fetch - update cache and show content
+				m.logCache[msg.jobID] = msg.content
+				m.logContent = msg.content
+				m.logStale = false
+			}
 		}
 		return m, nil
 
@@ -488,6 +514,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			flashCmd = m.setFlash("Job removed", false)
 			m.selectedJob = nil
 			m.logContent = ""
+			m.logStale = false
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -506,7 +533,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingSelectJobID = msg.jobID
 			// Keep inputs for easy re-use (user can modify and submit again)
 		}
-		return m, tea.Batch(flashCmd, m.refreshJobs())
+		// Reload hosts in case this job was on a new host
+		return m, tea.Batch(flashCmd, m.refreshJobs(), m.loadHosts())
 
 	case tickMsg:
 		var cmds []tea.Cmd
@@ -568,6 +596,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Cache is stale, mark as checking and fetch fresh
 						host.Status = HostStatusChecking
 						cmds = append(cmds, m.fetchHostInfo(name))
+						cmds = append(cmds, m.fetchQueueStatus(name))
 					}
 					// If cache is fresh, we'll still show it but won't fetch unless user switches to hosts view
 				} else {
@@ -577,6 +606,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Status: HostStatusChecking,
 					}
 					cmds = append(cmds, m.fetchHostInfo(name))
+					cmds = append(cmds, m.fetchQueueStatus(name))
 				}
 				m.hosts = append(m.hosts, host)
 			}
@@ -591,12 +621,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for i, h := range m.hosts {
 			if h.Name == msg.hostName {
 				msg.info.Name = msg.hostName
+				// Preserve queue status when updating host info
+				msg.info.QueueStatus = h.QueueStatus
+				msg.info.QueueRunnerActive = h.QueueRunnerActive
+				msg.info.QueuedJobCount = h.QueuedJobCount
+				msg.info.CurrentQueueJob = h.CurrentQueueJob
+				msg.info.QueueStopPending = h.QueueStopPending
 				m.hosts[i] = msg.info
 				break
 			}
 		}
 		// Mark host as queried this session
 		m.hostsQueriedThisSession[msg.hostName] = true
+		return m, nil
+
+	case queueStatusMsg:
+		// Update queue status for host
+		for i, h := range m.hosts {
+			if h.Name == msg.hostName {
+				m.hosts[i].QueueStatus = QueueCheckChecked
+				m.hosts[i].QueueRunnerActive = msg.info.RunnerActive
+				m.hosts[i].QueuedJobCount = msg.info.QueuedJobCount
+				m.hosts[i].CurrentQueueJob = msg.info.CurrentJob
+				m.hosts[i].QueueStopPending = msg.info.StopPending
+				break
+			}
+		}
 		return m, nil
 
 	case hostRefreshTickMsg:
@@ -610,6 +660,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// 2. Host is online (to get updated dynamic info like load/memory)
 				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
 					cmds = append(cmds, m.fetchHostInfo(host.Name))
+					cmds = append(cmds, m.fetchQueueStatus(host.Name))
 				}
 			}
 		}
@@ -683,6 +734,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Only refresh if not queried this session or if online (for dynamic data)
 				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
 					cmds = append(cmds, m.fetchHostInfo(host.Name))
+					cmds = append(cmds, m.fetchQueueStatus(host.Name))
 				}
 			}
 			return m, tea.Batch(cmds...)
@@ -690,6 +742,20 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.JobsView):
+		// Toggle between jobs and hosts view
+		if m.viewMode == ViewModeJobs {
+			m.viewMode = ViewModeHosts
+			// Refresh hosts when switching to hosts view, but only if needed
+			var cmds []tea.Cmd
+			for _, host := range m.hosts {
+				// Only refresh if not queried this session or if online (for dynamic data)
+				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
+					cmds = append(cmds, m.fetchHostInfo(host.Name))
+					cmds = append(cmds, m.fetchQueueStatus(host.Name))
+				}
+			}
+			return m, tea.Batch(cmds...)
+		}
 		m.viewMode = ViewModeJobs
 		return m, nil
 
@@ -763,12 +829,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case key.Matches(msg, keys.Refresh):
-		if m.viewMode == ViewModeHosts && len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts) {
-			host := m.hosts[m.selectedHostIdx]
-			host.Status = HostStatusChecking
-			return m, m.fetchHostInfo(host.Name)
+	case key.Matches(msg, keys.EditRestart):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
 		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, m.setFlash("No job selected", true)
+		}
+		// Open new job form pre-populated with ALL fields from this job
+		m.inputMode = true
+		m.inputFocus = 0
+		m.inputs[inputHost].Focus()
+		m.flashMessage = ""
+		m.inputs[inputHost].SetValue(job.Host)
+		m.inputs[inputCommand].SetValue(job.Command)
+		m.inputs[inputDescription].SetValue(job.Description)
+		m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
 		return m, nil
 
 	case key.Matches(msg, keys.Logs):
@@ -778,6 +855,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Already in logs mode - go back to details
 				m.selectedJob = nil
 				m.logContent = ""
+				m.logStale = false
 			} else if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
 				// Enter logs mode
 				m.selectedJob = m.jobs[m.selectedIndex]
@@ -796,6 +874,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Escape):
 		m.selectedJob = nil
 		m.logContent = ""
+		m.logStale = false
 		m.flashMessage = ""
 		return m, nil
 
@@ -1009,7 +1088,7 @@ func (m Model) renderHelpOverlay(background string) string {
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Width(12) // Cyan, bold
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))                    // Bright white
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Bold(true)         // Medium gray, bold
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Keyboard Shortcuts"))
@@ -1024,6 +1103,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"s", "Sync job statuses"},
 			{"n", "New job"},
 			{"r", "Restart job"},
+			{"R", "Edit & restart job"},
 			{"k", "Kill running job"},
 			{"S", "Start queue (for queued jobs)"},
 			{"x", "Remove job from list"},
@@ -1041,7 +1121,6 @@ func (m Model) renderHelpOverlay(background string) string {
 		b.WriteString("\n")
 		shortcuts := []struct{ key, desc string }{
 			{"↑/↓", "Navigate host list"},
-			{"R", "Refresh selected host"},
 			{"j / Tab", "Switch to jobs view"},
 		}
 		for _, s := range shortcuts {
@@ -1091,7 +1170,7 @@ func (m Model) renderInputForm(background string) string {
 	var b strings.Builder
 	b.WriteString("New Job\n\n")
 
-	labels := []string{"Host:", "Command:", "Description:", "Working Dir:"}
+	labels := []string{"Host:", "Description:", "Command:", "Working Dir:"}
 	for i, input := range m.inputs {
 		label := labelStyle
 		if i == m.inputFocus {
@@ -1177,6 +1256,7 @@ func (m Model) renderLogPanel(height int) string {
 func (m Model) renderLogsOnly(height int) string {
 	job := m.selectedJob
 	var content string
+	var staleIndicator string
 
 	if m.logLoading {
 		content = dimStyle.Render("Loading logs...")
@@ -1186,14 +1266,26 @@ func (m Model) renderLogsOnly(height int) string {
 		// Take last N lines that fit
 		lines := strings.Split(m.logContent, "\n")
 		maxLines := height - 4 // Account for borders, title, and padding
+		if m.logStale {
+			maxLines -= 1 // Make room for stale indicator
+		}
 		if len(lines) > maxLines {
 			lines = lines[len(lines)-maxLines:]
 		}
-		content = strings.Join(lines, "\n")
+		if m.logStale {
+			// Use slightly dimmer style for stale content (readable but visually distinct)
+			staleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+			content = staleStyle.Render(strings.Join(lines, "\n"))
+		} else {
+			content = strings.Join(lines, "\n")
+		}
 	}
 
 	title := fmt.Sprintf("Logs: Job %d on %s", job.ID, job.Host)
-	panelContent := titleStyle.Render(title) + "\n" + content
+	if m.logStale {
+		staleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render(" (cached - host offline)")
+	}
+	panelContent := titleStyle.Render(title) + staleIndicator + "\n" + content
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
@@ -1414,8 +1506,8 @@ func (m Model) renderHostList(height int) string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf(" %-12s %-10s %-16s %-8s %s",
-		"HOST", "STATUS", "ARCH", "LOAD", "GPU")
+	header := fmt.Sprintf(" %-12s %-10s %-6s %-16s %-5s %-5s",
+		"HOST", "STATUS", "QUEUE", "ARCH", "CPU", "RAM")
 	rows = append(rows, headerStyle.Render(header))
 
 	if len(m.hosts) == 0 {
@@ -1429,15 +1521,16 @@ func (m Model) renderHostList(height int) string {
 			}
 
 			status := m.formatHostStatus(host)
+			queue := host.QueueSummary()
 			arch := truncate(host.Arch, 16)
 			if arch == "" {
 				arch = "-"
 			}
-			load := host.LoadAvgShort()
-			gpu := host.GPUSummary()
+			cpu := host.CPUUtilization()
+			ram := host.RAMUtilization()
 
-			line := fmt.Sprintf(" %-12s %-10s %-16s %-8s %s",
-				truncate(host.Name, 12), status, arch, load, gpu)
+			line := fmt.Sprintf(" %-12s %-10s %-6s %-16s %-5s %-5s",
+				truncate(host.Name, 12), status, queue, arch, cpu, ram)
 
 			if i == m.selectedHostIdx {
 				line = selectedStyle.Width(m.width - 4).Render(line)
@@ -1468,7 +1561,9 @@ func (m Model) renderHostDetail(height int) string {
 		}
 		lines = append(lines, statusLine)
 
-		if host.Status == HostStatusOnline {
+		// Show static info (cached) regardless of online status
+		hasStaticInfo := host.Model != "" || host.Arch != "" || host.OS != "" || host.CPUModel != "" || host.CPUs > 0 || len(host.GPUs) > 0
+		if hasStaticInfo {
 			lines = append(lines, "───────────────────────────────────────────────────────────────")
 			if host.Model != "" {
 				lines = append(lines, fmt.Sprintf("Model:        %s", host.Model))
@@ -1500,12 +1595,14 @@ func (m Model) renderHostDetail(height int) string {
 				} else {
 					lines = append(lines, fmt.Sprintf("GPUs:         %d", len(host.GPUs)))
 				}
-				// Show per-GPU stats as a table
+				// Show per-GPU stats as a table (only when online - these are dynamic)
 				hasStats := false
-				for _, gpu := range host.GPUs {
-					if gpu.Temperature > 0 || gpu.Utilization > 0 || gpu.MemUsed != "" {
-						hasStats = true
-						break
+				if host.Status == HostStatusOnline {
+					for _, gpu := range host.GPUs {
+						if gpu.Temperature > 0 || gpu.Utilization > 0 || gpu.MemUsed != "" {
+							hasStats = true
+							break
+						}
 					}
 				}
 				if hasStats {
@@ -1575,20 +1672,60 @@ func (m Model) renderHostDetail(height int) string {
 			}
 		}
 
-		if !host.LastCheck.IsZero() {
-			elapsed := time.Since(host.LastCheck).Truncate(time.Second)
-			lines = append(lines, fmt.Sprintf("Last checked: %s ago", elapsed))
+		// Queue status section
+		if host.QueueStatus == QueueCheckChecked {
+			lines = append(lines, "")
+			lines = append(lines, "Queue")
+			if host.QueueRunnerActive {
+				lines = append(lines, "  Runner:       Active")
+				if host.CurrentQueueJob != "" {
+					lines = append(lines, fmt.Sprintf("  Current job:  %s", host.CurrentQueueJob))
+				} else {
+					lines = append(lines, "  Current job:  None")
+				}
+				lines = append(lines, fmt.Sprintf("  Jobs waiting: %d", host.QueuedJobCount))
+				if host.QueueStopPending {
+					lines = append(lines, "  Stop pending: Yes")
+				}
+			} else {
+				lines = append(lines, "  Runner:       Stopped")
+			}
 		}
 	}
 
-	// Clip content to fit panel height (account for title, borders, padding)
-	maxLines := height - 4
-	if len(lines) > maxLines && maxLines > 0 {
-		lines = lines[:maxLines]
+	// Build footer with last checked time
+	footerText := ""
+	if len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts) {
+		host := m.hosts[m.selectedHostIdx]
+		if !host.LastCheck.IsZero() {
+			elapsed := time.Since(host.LastCheck).Truncate(time.Second)
+			footerText = fmt.Sprintf("Last checked: %s ago", elapsed)
+		}
+	}
+
+	// Calculate available lines: height - borders(2) - title(1) - footer(1 if present)
+	footerLines := 0
+	if footerText != "" {
+		footerLines = 1
+	}
+	availableLines := height - 4 - footerLines
+
+	// Clip content if needed
+	if len(lines) > availableLines && availableLines > 0 {
+		lines = lines[:availableLines]
+	}
+
+	// Pad with empty lines to push footer to bottom
+	for len(lines) < availableLines {
+		lines = append(lines, "")
 	}
 
 	content := strings.Join(lines, "\n")
 	panelContent := titleStyle.Render("Host Details") + "\n" + content
+	if footerText != "" {
+		panelContent = panelContent + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(footerText)
+	}
+
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
@@ -1727,8 +1864,36 @@ func (m Model) startHostRefreshTicker() tea.Cmd {
 func (m Model) loadHosts() tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
-		hosts, err := db.ListUniqueHosts(database)
-		return hostsLoadedMsg{hostNames: hosts, err: err}
+		// Get hosts from jobs
+		jobHosts, err := db.ListUniqueHosts(database)
+		if err != nil {
+			return hostsLoadedMsg{err: err}
+		}
+
+		// Get hosts from cache
+		cachedHosts, err := db.LoadAllCachedHosts(database)
+		if err != nil {
+			// If cache load fails, just use job hosts
+			return hostsLoadedMsg{hostNames: jobHosts, err: nil}
+		}
+
+		// Merge into unique set
+		hostSet := make(map[string]bool)
+		for _, h := range jobHosts {
+			hostSet[h] = true
+		}
+		for _, h := range cachedHosts {
+			hostSet[h.Name] = true
+		}
+
+		// Convert to sorted slice
+		var hosts []string
+		for h := range hostSet {
+			hosts = append(hosts, h)
+		}
+		sort.Strings(hosts)
+
+		return hostsLoadedMsg{hostNames: hosts, err: nil}
 	}
 }
 
@@ -1777,6 +1942,21 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 	}
 }
 
+func (m Model) fetchQueueStatus(hostName string) tea.Cmd {
+	return func() tea.Msg {
+		// Use short timeout to avoid blocking UI
+		stdout, _, err := ssh.RunWithTimeout(hostName, QueueStatusCommand("default"), 5*time.Second)
+		if err != nil {
+			// On error, return empty status (will show as "-")
+			return queueStatusMsg{hostName: hostName, info: &QueueStatusInfo{}}
+		}
+
+		// Parse the output
+		info := ParseQueueStatus(stdout)
+		return queueStatusMsg{hostName: hostName, info: info}
+	}
+}
+
 // getTargetJob returns the job to act on - either the selected job or the highlighted job
 func (m Model) getTargetJob() *db.Job {
 	if m.selectedJob != nil {
@@ -1822,8 +2002,9 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 			combined := stdout + stderr
 			if ssh.IsConnectionError(combined) {
 				return logFetchedMsg{
-					jobID:   job.ID,
-					content: fmt.Sprintf("Host %s unreachable", job.Host),
+					jobID:     job.ID,
+					content:   fmt.Sprintf("Host %s unreachable", job.Host),
+					connError: true,
 				}
 			}
 			// Other SSH error
@@ -2094,7 +2275,8 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 	exists, err := ssh.TmuxSessionExistsQuick(job.Host, tmuxSession)
 	if err != nil {
-		return false, err
+		// Can't reach host - don't change job status
+		return false, nil
 	}
 
 	if exists {
@@ -2104,7 +2286,8 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
 	content, err := ssh.ReadRemoteFileQuick(job.Host, statusFile)
 	if err != nil {
-		return false, err
+		// Can't reach host - don't change job status
+		return false, nil
 	}
 
 	if content != "" {
@@ -2116,6 +2299,7 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 		return true, nil
 	}
 
+	// Session doesn't exist and no status file - mark as dead
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}
@@ -2170,7 +2354,11 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	statusPattern := session.StatusFilePattern(job.ID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
 	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
-	if err == nil && strings.TrimSpace(stdout) != "" {
+	if err != nil {
+		// Can't reach host - don't change job status
+		return false, nil
+	}
+	if strings.TrimSpace(stdout) != "" {
 		// Job completed - read exit code
 		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
 		endTime := time.Now().Unix()
@@ -2184,7 +2372,11 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	logPattern := session.LogFilePattern(job.ID)
 	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
 	stdout, _, err = ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
-	if err == nil && strings.TrimSpace(stdout) != "" {
+	if err != nil {
+		// Can't reach host - don't change job status
+		return false, nil
+	}
+	if strings.TrimSpace(stdout) != "" {
 		// Log file exists, job is still running
 		return false, nil
 	}
@@ -2194,12 +2386,14 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	currentFile := "~/.cache/remote-jobs/queue/default.current"
 	currentCmd := fmt.Sprintf("cat %s 2>/dev/null", currentFile)
 	stdout, _, err = ssh.RunWithTimeout(job.Host, currentCmd, 5*time.Second)
-	if err == nil {
-		currentJobID := strings.TrimSpace(stdout)
-		if currentJobID == fmt.Sprintf("%d", job.ID) {
-			// Job is currently running
-			return false, nil
-		}
+	if err != nil {
+		// Can't reach host - don't change job status
+		return false, nil
+	}
+	currentJobID := strings.TrimSpace(stdout)
+	if currentJobID == fmt.Sprintf("%d", job.ID) {
+		// Job is currently running
+		return false, nil
 	}
 
 	// Job has no log, no status, and isn't current - mark as dead

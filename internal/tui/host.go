@@ -17,6 +17,15 @@ const (
 	HostStatusOffline
 )
 
+// QueueCheckStatus represents the status of queue info fetching
+type QueueCheckStatus int
+
+const (
+	QueueCheckUnknown QueueCheckStatus = iota
+	QueueCheckChecking
+	QueueCheckChecked
+)
+
 // GPUInfo contains information about a single GPU
 type GPUInfo struct {
 	Index       int
@@ -43,6 +52,13 @@ type Host struct {
 	GPUs      []GPUInfo
 	LastCheck time.Time
 	Error     string // connection error message (not displayed as error)
+
+	// Queue status
+	QueueStatus       QueueCheckStatus // Unknown, Checking, Checked
+	QueueRunnerActive bool             // Whether queue runner tmux session exists
+	QueuedJobCount    int              // Number of jobs waiting in queue
+	CurrentQueueJob   string           // Job ID currently running in queue
+	QueueStopPending  bool             // Whether stop signal file exists
 }
 
 // HostInfoCommand is the SSH command to gather host information
@@ -374,4 +390,130 @@ func (h *Host) LoadAvgShort() string {
 	}
 	parts := strings.SplitN(h.LoadAvg, ",", 2)
 	return strings.TrimSpace(parts[0])
+}
+
+// CPUUtilization returns CPU utilization as a percentage string based on 1-minute load average
+func (h *Host) CPUUtilization() string {
+	if h.LoadAvg == "" || h.CPUs == 0 {
+		return "-"
+	}
+	// Parse 1-minute load average
+	loadStr := strings.ReplaceAll(h.LoadAvg, ",", " ")
+	loads := strings.Fields(loadStr)
+	if len(loads) == 0 {
+		return "-"
+	}
+	loadVal, err := strconv.ParseFloat(loads[0], 64)
+	if err != nil {
+		return "-"
+	}
+	pct := int((loadVal / float64(h.CPUs)) * 100)
+	return fmt.Sprintf("%d%%", pct)
+}
+
+// RAMUtilization returns RAM utilization as a percentage string
+func (h *Host) RAMUtilization() string {
+	if h.MemTotal == "" || h.MemUsed == "" {
+		return "-"
+	}
+	// Parse memory values (handles formats like "128G", "58G", "128Gi", "58Gi", "128GiB")
+	parseMemGB := func(s string) float64 {
+		s = strings.TrimSpace(s)
+		s = strings.TrimSuffix(s, "iB")
+		s = strings.TrimSuffix(s, "i")
+		s = strings.TrimSuffix(s, "B")
+		multiplier := 1.0
+		if strings.HasSuffix(s, "G") {
+			s = strings.TrimSuffix(s, "G")
+			multiplier = 1.0
+		} else if strings.HasSuffix(s, "M") {
+			s = strings.TrimSuffix(s, "M")
+			multiplier = 1.0 / 1024.0
+		} else if strings.HasSuffix(s, "T") {
+			s = strings.TrimSuffix(s, "T")
+			multiplier = 1024.0
+		}
+		val, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0
+		}
+		return val * multiplier
+	}
+
+	total := parseMemGB(h.MemTotal)
+	used := parseMemGB(h.MemUsed)
+	if total == 0 {
+		return "-"
+	}
+	pct := int((used / total) * 100)
+	return fmt.Sprintf("%d%%", pct)
+}
+
+// QueueStatusCommand returns the SSH command to check queue status for a given queue name
+// It outputs structured lines that ParseQueueStatus can parse
+func QueueStatusCommand(queueName string) string {
+	return fmt.Sprintf(
+		`tmux has-session -t 'rj-queue-%s' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; `+
+			`cat ~/.cache/remote-jobs/queue/%s.current 2>/dev/null | head -1 | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
+			`wc -l < ~/.cache/remote-jobs/queue/%s.queue 2>/dev/null | tr -d ' ' | sed 's/^/DEPTH:/' || echo "DEPTH:0"; `+
+			`test -f ~/.cache/remote-jobs/queue/%s.stop && echo "STOP:yes" || echo "STOP:no"`,
+		queueName, queueName, queueName, queueName)
+}
+
+// QueueStatus holds the parsed queue status information
+type QueueStatusInfo struct {
+	RunnerActive   bool
+	QueuedJobCount int
+	CurrentJob     string
+	StopPending    bool
+}
+
+// ParseQueueStatus parses the output of QueueStatusCommand into QueueStatusInfo
+func ParseQueueStatus(output string) *QueueStatusInfo {
+	info := &QueueStatusInfo{}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		if idx := strings.Index(line, ":"); idx > 0 {
+			key := line[:idx]
+			value := strings.TrimSpace(line[idx+1:])
+
+			switch key {
+			case "RUNNER":
+				info.RunnerActive = value == "yes"
+			case "CURRENT":
+				info.CurrentJob = value
+			case "DEPTH":
+				if n, err := strconv.Atoi(value); err == nil {
+					info.QueuedJobCount = n
+				}
+			case "STOP":
+				info.StopPending = value == "yes"
+			}
+		}
+	}
+
+	return info
+}
+
+// QueueSummary returns a brief queue status string for the list view
+func (h *Host) QueueSummary() string {
+	switch h.QueueStatus {
+	case QueueCheckUnknown, QueueCheckChecking:
+		return "-"
+	case QueueCheckChecked:
+		if !h.QueueRunnerActive {
+			return "○"
+		}
+		if h.QueueStopPending {
+			return fmt.Sprintf("■ %d", h.QueuedJobCount)
+		}
+		return fmt.Sprintf("▶ %d", h.QueuedJobCount)
+	default:
+		return "-"
+	}
 }

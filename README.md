@@ -182,26 +182,31 @@ Press `l` to view logs:
 - `s`: Sync job statuses from remote hosts
 - `n`: Create new job (opens input form)
 - `r`: Restart highlighted job
+- `R`: Edit & restart (opens new job form pre-filled with job's parameters)
 - `k`: Kill highlighted job
-- `p`: Prune completed/dead jobs from database
+- `P`: Prune completed/dead jobs from database
+- `S`: Start queue runner (for queued jobs)
+- `x`: Remove job from list
 - `h` or `Tab`: Switch to hosts view
 - `Esc`: Clear selection / exit logs view
 - `q` or `Ctrl-C`: Quit
 - `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
 
+**Log caching:** When a host goes offline, the TUI shows the last successfully fetched log content with a "(cached - host offline)" indicator.
+
 #### Hosts View
 
-Shows all hosts that have had jobs, with system info and GPU status.
+Shows all hosts that have had jobs, with system info, queue status, and resource utilization.
 
-- **Top panel**: Host list with status, architecture, load, and GPU summary
+- **Top panel**: Host list with status, queue runner, architecture, CPU/RAM usage
 - **Bottom panel**: Detailed host info including per-GPU stats
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
-│ HOST         STATUS     ARCH             LOAD     GPU                        │
-│ deepthought  ● online   Linux x86_64     2.31     6×GeForce 15%              │
-│ skynet       ● online   Linux x86_64     0.42     2×A100 0%                  │
-│ tardis       ○ offline  -                -        -                          │
+│ HOST         STATUS     QUEUE    ARCH             CPU     RAM                │
+│ deepthought  ● online   ▶ 3      Linux x86_64     45%     62%                │
+│ skynet       ● online   ○        Linux x86_64     12%     28%                │
+│ tardis       ○ offline  -        Linux x86_64     -       -                  │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ Host Details                                                                 │
@@ -222,20 +227,28 @@ Shows all hosts that have had jobs, with system info and GPU status.
 │ ...                                                                          │
 │ Last checked: 5s ago                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav R:refresh j:jobs tab:switch q:quit
+ ↑/↓:nav j:jobs tab:switch q:quit
 ```
 
 **Keyboard shortcuts:**
 - `↑/↓`: Navigate host list
-- `R`: Refresh selected host info
 - `j` or `Tab`: Switch to jobs view
 - `q`: Quit
+
+**Queue status icons:**
+- `▶ N`: Queue runner active with N jobs queued
+- `■ N`: Queue runner stopping, N jobs queued
+- `○`: No queue runner active
+- `-`: Status unknown (host offline or checking)
 
 **Host details include:**
 - Architecture and OS version
 - CPU count and memory usage
 - Load average with CPU utilization percentage
 - GPU table with temperature, utilization, and memory usage
+- Queue runner status and job count
+
+**Offline hosts:** Host details are cached and persist when a host goes offline. The TUI shows cached information with the "Last checked" timestamp so you can see stale data.
 
 The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 
