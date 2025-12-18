@@ -422,6 +422,34 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
+// ListAllQueued returns all queued jobs across all hosts
+func ListAllQueued(db *sql.DB) ([]*Job, error) {
+	return queryJobs(db,
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
+		 FROM jobs WHERE status = ? ORDER BY start_time ASC`,
+		StatusQueued,
+	)
+}
+
+// ListRecentDeadQueueJobs returns recently-dead jobs that were queue runner jobs
+// These should be re-checked in case they were incorrectly marked as dead
+func ListRecentDeadQueueJobs(db *sql.DB, since int64) ([]*Job, error) {
+	return queryJobs(db,
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
+		 FROM jobs WHERE status = ? AND session_name IS NULL AND end_time > ? ORDER BY start_time ASC`,
+		StatusDead, since,
+	)
+}
+
+// ReviveDeadJob changes a dead job back to running (for incorrectly marked jobs)
+func ReviveDeadJob(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, end_time = NULL WHERE id = ? AND status = ?`,
+		StatusRunning, id, StatusDead,
+	)
+	return err
+}
+
 // ListUniqueHosts returns all unique hosts from all jobs
 func ListUniqueHosts(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM jobs ORDER BY host`)

@@ -9,6 +9,7 @@ var (
 	failedColor    = lipgloss.Color("9")  // Red
 	deadColor      = lipgloss.Color("9")  // Red
 	pendingColor   = lipgloss.Color("11") // Yellow
+	queuedColor    = lipgloss.Color("6")  // Cyan
 	selectedBg     = lipgloss.Color("4")  // Blue
 	borderColor    = lipgloss.Color("8")  // Gray
 
@@ -44,6 +45,9 @@ var (
 
 	pendingStyle = lipgloss.NewStyle().
 			Foreground(pendingColor)
+
+	queuedStyle = lipgloss.NewStyle().
+			Foreground(queuedColor)
 
 	// Text styles
 	headerStyle = lipgloss.NewStyle().

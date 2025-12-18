@@ -62,6 +62,18 @@ func PidFile(jobID int64, startTime int64) string {
 	return fmt.Sprintf("%s/%s.pid", LogDir, FileBasename(jobID, startTime))
 }
 
+// StatusFilePattern returns a glob pattern to find status files for a job ID
+// This is useful for queued jobs where the exact timestamp is unknown
+func StatusFilePattern(jobID int64) string {
+	return fmt.Sprintf("%s/%d-*.status", LogDir, jobID)
+}
+
+// LogFilePattern returns a glob pattern to find log files for a job ID
+// This is useful for queued jobs where the exact timestamp is unknown
+func LogFilePattern(jobID int64) string {
+	return fmt.Sprintf("%s/%d-*.log", LogDir, jobID)
+}
+
 // LegacyLogFile returns the old-style log file path for backward compatibility
 func LegacyLogFile(sessionName string) string {
 	return fmt.Sprintf("/tmp/tmux-%s.log", sessionName)

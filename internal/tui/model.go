@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -33,24 +34,25 @@ const (
 
 // Key bindings
 type keyMap struct {
-	Up        key.Binding
-	Down      key.Binding
-	Enter     key.Binding
-	Logs      key.Binding
-	Escape    key.Binding
-	Kill      key.Binding
-	Restart   key.Binding
-	Remove    key.Binding
-	NewJob    key.Binding
-	Prune     key.Binding
-	Suspend   key.Binding
-	Quit      key.Binding
-	HostsView key.Binding
-	JobsView  key.Binding
-	Tab       key.Binding
-	Refresh   key.Binding
-	Sync      key.Binding
-	Help      key.Binding
+	Up         key.Binding
+	Down       key.Binding
+	Enter      key.Binding
+	Logs       key.Binding
+	Escape     key.Binding
+	Kill       key.Binding
+	Restart    key.Binding
+	Remove     key.Binding
+	NewJob     key.Binding
+	Prune      key.Binding
+	Suspend    key.Binding
+	Quit       key.Binding
+	HostsView  key.Binding
+	JobsView   key.Binding
+	Tab        key.Binding
+	Refresh    key.Binding
+	Sync       key.Binding
+	Help       key.Binding
+	StartQueue key.Binding
 }
 
 var keys = keyMap{
@@ -125,6 +127,10 @@ var keys = keyMap{
 		key.WithKeys("?"),
 		key.WithHelp("?", "help"),
 	),
+	StartQueue: key.NewBinding(
+		key.WithKeys("S"),
+		key.WithHelp("S", "start queue"),
+	),
 }
 
 // Messages
@@ -160,6 +166,12 @@ type pruneCompletedMsg struct {
 	err   error
 }
 
+type queueStartedMsg struct {
+	host    string
+	already bool // true if queue was already running
+	err     error
+}
+
 type jobRemovedMsg struct {
 	jobID int64
 	err   error
@@ -178,6 +190,7 @@ type tickMsg time.Time
 type logTickMsg time.Time
 type createTickMsg time.Time
 type hostRefreshTickMsg time.Time
+type flashExpiredMsg struct{}
 
 // Host-related messages
 type hostsLoadedMsg struct {
@@ -218,10 +231,11 @@ type Model struct {
 	selectedHostIdx int
 
 	// UI State
-	logContent    string
-	logLoading    bool
-	statusMessage string
-	errorMessage  string
+	logContent   string
+	logLoading   bool
+	flashMessage string
+	flashIsError bool
+	flashExpiry  time.Time
 
 	// Process stats for running jobs
 	processStats      *ssh.ProcessStats
@@ -348,29 +362,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case jobsRefreshedMsg:
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Error loading jobs: %v", msg.err)
-		} else {
-			m.jobs = msg.jobs
-			m.errorMessage = ""
+			return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
+		}
+		m.jobs = msg.jobs
 
-			// If there's a pending job selection, find and select it
-			if m.pendingSelectJobID > 0 {
-				for i, job := range m.jobs {
-					if job.ID == m.pendingSelectJobID {
-						m.selectedIndex = i
-						break
-					}
+		// If there's a pending job selection, find and select it
+		if m.pendingSelectJobID > 0 {
+			for i, job := range m.jobs {
+				if job.ID == m.pendingSelectJobID {
+					m.selectedIndex = i
+					break
 				}
-				m.pendingSelectJobID = 0
 			}
+			m.pendingSelectJobID = 0
+		}
 
-			// Keep selection in bounds
-			if m.selectedIndex >= len(m.jobs) {
-				m.selectedIndex = len(m.jobs) - 1
-			}
-			if m.selectedIndex < 0 {
-				m.selectedIndex = 0
-			}
+		// Keep selection in bounds
+		if m.selectedIndex >= len(m.jobs) {
+			m.selectedIndex = len(m.jobs) - 1
+		}
+		if m.selectedIndex < 0 {
+			m.selectedIndex = 0
 		}
 		return m, nil
 
@@ -378,10 +390,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncing = false
 		m.lastSyncTime = time.Now()
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Sync error: %v", msg.err)
+			return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
 		} else if msg.updated > 0 {
-			m.statusMessage = fmt.Sprintf("Synced %d job(s)", msg.updated)
-			return m, m.refreshJobs()
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Synced %d job(s)", msg.updated), false), m.refreshJobs())
 		}
 		return m, nil
 
@@ -423,43 +434,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case jobKilledMsg:
+		var flashCmd tea.Cmd
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Kill failed: %v", msg.err)
+			flashCmd = m.setFlash(fmt.Sprintf("Kill failed: %v", msg.err), true)
 		} else {
-			m.statusMessage = "Job killed"
+			flashCmd = m.setFlash("Job killed", false)
 		}
-		return m, m.refreshJobs()
+		return m, tea.Batch(flashCmd, m.refreshJobs())
 
 	case jobRestartedMsg:
 		m.restarting = false
 		m.restartingJobName = ""
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Restart failed: %v", msg.err)
-			return m, nil
+			return m, m.setFlash(fmt.Sprintf("Restart failed: %v", msg.err), true)
 		}
-		m.statusMessage = fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID)
 		m.pendingSelectJobID = msg.newJobID
-		return m, m.refreshJobs()
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID), false), m.refreshJobs())
 
 	case pruneCompletedMsg:
+		var flashCmd tea.Cmd
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Prune failed: %v", msg.err)
+			flashCmd = m.setFlash(fmt.Sprintf("Prune failed: %v", msg.err), true)
 		} else if msg.count > 0 {
-			m.statusMessage = fmt.Sprintf("Pruned %d job(s)", msg.count)
+			flashCmd = m.setFlash(fmt.Sprintf("Pruned %d job(s)", msg.count), false)
 		} else {
-			m.statusMessage = "No jobs to prune"
+			flashCmd = m.setFlash("No jobs to prune", false)
 		}
-		return m, m.refreshJobs()
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
+	case queueStartedMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Failed to start queue: %v", msg.err), true)
+		} else if msg.already {
+			return m, m.setFlash(fmt.Sprintf("Queue already running on %s", msg.host), false)
+		}
+		return m, m.setFlash(fmt.Sprintf("Queue started on %s", msg.host), false)
 
 	case jobRemovedMsg:
+		var flashCmd tea.Cmd
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Remove failed: %v", msg.err)
+			flashCmd = m.setFlash(fmt.Sprintf("Remove failed: %v", msg.err), true)
 		} else {
-			m.statusMessage = "Job removed"
+			flashCmd = m.setFlash("Job removed", false)
 			m.selectedJob = nil
 			m.logContent = ""
 		}
-		return m, m.refreshJobs()
+		return m, tea.Batch(flashCmd, m.refreshJobs())
 
 	case jobCreateProgressMsg:
 		m.createJobStep = msg.step
@@ -468,14 +488,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobCreatedMsg:
 		m.creatingJob = false
 		m.createJobStep = ""
+		var flashCmd tea.Cmd
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Create failed: %v", msg.err)
+			flashCmd = m.setFlash(fmt.Sprintf("Create failed: %v", msg.err), true)
 		} else {
-			m.statusMessage = fmt.Sprintf("Job %d started", msg.jobID)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d started", msg.jobID), false)
 			m.pendingSelectJobID = msg.jobID
 			// Keep inputs for easy re-use (user can modify and submit again)
 		}
-		return m, m.refreshJobs()
+		return m, tea.Batch(flashCmd, m.refreshJobs())
 
 	case tickMsg:
 		var cmds []tea.Cmd
@@ -511,31 +532,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case hostsLoadedMsg:
 		if msg.err != nil {
-			m.errorMessage = fmt.Sprintf("Error loading hosts: %v", msg.err)
-		} else {
-			// Initialize hosts with names, set status to checking
-			var cmds []tea.Cmd
-			for _, name := range msg.hostNames {
-				// Check if host already exists
-				found := false
-				for _, h := range m.hosts {
-					if h.Name == name {
-						found = true
-						break
-					}
-				}
-				if !found {
-					host := &Host{
-						Name:   name,
-						Status: HostStatusChecking,
-					}
-					m.hosts = append(m.hosts, host)
-					cmds = append(cmds, m.fetchHostInfo(name))
+			return m, m.setFlash(fmt.Sprintf("Error loading hosts: %v", msg.err), true)
+		}
+		// Initialize hosts with names, set status to checking
+		var cmds []tea.Cmd
+		for _, name := range msg.hostNames {
+			// Check if host already exists
+			found := false
+			for _, h := range m.hosts {
+				if h.Name == name {
+					found = true
+					break
 				}
 			}
-			if len(cmds) > 0 {
-				return m, tea.Batch(cmds...)
+			if !found {
+				host := &Host{
+					Name:   name,
+					Status: HostStatusChecking,
+				}
+				m.hosts = append(m.hosts, host)
+				cmds = append(cmds, m.fetchHostInfo(name))
 			}
+		}
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -560,6 +580,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+
+	case flashExpiredMsg:
+		// Only clear if the flash has actually expired (not replaced by a newer one)
+		if !m.flashExpiry.IsZero() && time.Now().After(m.flashExpiry) {
+			m.flashMessage = ""
+			m.flashIsError = false
+			m.flashExpiry = time.Time{}
+		}
+		return m, nil
 	}
 
 	return m, nil
@@ -584,8 +613,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.creatingJob && key.Matches(msg, keys.Escape) {
 		m.creatingJob = false
 		m.createJobStep = ""
-		m.statusMessage = "Job creation running in background..."
-		return m, nil
+		return m, m.setFlash("Job creation running in background...", false)
 	}
 
 	switch {
@@ -728,48 +756,40 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Escape):
 		m.selectedJob = nil
 		m.logContent = ""
-		m.statusMessage = ""
-		m.errorMessage = ""
+		m.flashMessage = ""
 		return m, nil
 
 	case key.Matches(msg, keys.Kill):
 		job := m.getTargetJob()
 		if job != nil && job.Status == db.StatusRunning {
-			m.statusMessage = "Killing job..."
-			return m, m.killJob(job)
+			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
 		}
 		return m, nil
 
 	case key.Matches(msg, keys.Restart):
 		job := m.getTargetJob()
 		if job == nil {
-			m.errorMessage = "No job selected"
-			return m, nil
+			return m, m.setFlash("No job selected", true)
 		}
 		if m.restarting {
-			m.statusMessage = "Restart already in progress..."
-			return m, nil
+			return m, m.setFlash("Restart already in progress...", false)
 		}
 		m.restarting = true
 		m.restartingJobName = fmt.Sprintf("job %d", job.ID)
-		m.statusMessage = fmt.Sprintf("Restarting job %d...", job.ID)
-		m.errorMessage = ""
-		return m, m.restartJob(job)
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Restarting job %d...", job.ID), false), m.restartJob(job))
 
 	case key.Matches(msg, keys.Remove):
 		job := m.getTargetJob()
 		if job == nil {
 			return m, nil
 		}
-		m.statusMessage = "Removing job..."
-		return m, m.removeJob(job)
+		return m, tea.Batch(m.setFlash("Removing job...", false), m.removeJob(job))
 
 	case key.Matches(msg, keys.NewJob):
 		m.inputMode = true
 		m.inputFocus = 0
 		m.inputs[inputHost].Focus()
-		m.errorMessage = ""
-		m.statusMessage = ""
+		m.flashMessage = ""
 
 		// Pre-populate from highlighted job if inputs are empty
 		job := m.getTargetJob()
@@ -783,14 +803,19 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Prune):
-		m.statusMessage = "Pruning completed/dead jobs..."
-		return m, m.pruneJobs()
+		return m, tea.Batch(m.setFlash("Pruning completed/dead jobs...", false), m.pruneJobs())
+
+	case key.Matches(msg, keys.StartQueue):
+		job := m.getTargetJob()
+		if job != nil && job.Status == db.StatusQueued {
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting queue on %s...", job.Host), false), m.startQueue(job.Host))
+		}
+		return m, nil
 
 	case key.Matches(msg, keys.Sync):
 		if m.viewMode == ViewModeJobs && !m.syncing {
 			m.syncing = true
-			m.statusMessage = "Syncing..."
-			return m, m.performBackgroundSync()
+			return m, tea.Batch(m.setFlash("Syncing...", false), m.performBackgroundSync())
 		}
 		return m, nil
 	}
@@ -829,8 +854,7 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		command := strings.TrimSpace(m.inputs[inputCommand].Value())
 
 		if host == "" || command == "" {
-			m.errorMessage = "Host and command are required"
-			return m, nil
+			return m, m.setFlash("Host and command are required", true)
 		}
 
 		// Exit input mode and create job
@@ -839,7 +863,7 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.creatingJob = true
 		m.createJobStart = time.Now()
 		m.createJobStep = "Connecting..."
-		m.statusMessage = ""
+		m.flashMessage = ""
 		return m, tea.Batch(m.createJob(), m.startCreateTicker())
 	}
 
@@ -865,24 +889,28 @@ func (m Model) View() string {
 		// Hosts view
 		listView := m.renderHostList(listHeight)
 		detailView := m.renderHostDetail(detailHeight)
+		flashView := m.renderFlash()
 		statusView := m.renderHostsStatusBar()
 
 		mainView = lipgloss.JoinVertical(
 			lipgloss.Left,
 			listView,
 			detailView,
+			flashView,
 			statusView,
 		)
 	} else {
 		// Jobs view (default)
 		listView := m.renderJobList(listHeight)
 		logView := m.renderLogPanel(detailHeight)
+		flashView := m.renderFlash()
 		statusView := m.renderStatusBar()
 
 		mainView = lipgloss.JoinVertical(
 			lipgloss.Left,
 			listView,
 			logView,
+			flashView,
 			statusView,
 		)
 	}
@@ -941,7 +969,7 @@ func (m Model) renderHelpOverlay(background string) string {
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Width(12) // Cyan, bold
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))                    // Bright white
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Keyboard Shortcuts"))
@@ -957,6 +985,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"n", "New job"},
 			{"r", "Restart job"},
 			{"k", "Kill running job"},
+			{"S", "Start queue (for queued jobs)"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
 			{"h / Tab", "Switch to hosts view"},
@@ -997,16 +1026,15 @@ func (m Model) renderHelpOverlay(background string) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("Press ? or Esc to close"))
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render("Press ? or Esc to close"))
 
 	modal := modalStyle.Render(b.String())
 
+	// Place modal centered
 	return lipgloss.Place(
 		m.width, m.height,
 		lipgloss.Center, lipgloss.Center,
 		modal,
-		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(lipgloss.Color("237")),
 	)
 }
 
@@ -1036,8 +1064,8 @@ func (m Model) renderInputForm(background string) string {
 
 	b.WriteString("\n")
 	helpText := "Tab: next field • Enter: create job • Esc: cancel"
-	if m.errorMessage != "" {
-		helpText = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.errorMessage)
+	if m.flashIsError && m.flashMessage != "" {
+		helpText = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.flashMessage)
 	}
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(helpText))
 
@@ -1303,27 +1331,43 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-func (m Model) renderStatusBar() string {
-	left := ""
-	if m.errorMessage != "" {
-		left = errorStyle.Render(m.errorMessage)
-	} else if m.statusMessage != "" {
-		left = statusMsgStyle.Render(m.statusMessage)
+func (m Model) renderFlash() string {
+	if m.flashMessage == "" {
+		return ""
 	}
 
-	right := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs s:sync n:new r:restart k:kill P:prune h:hosts")
+	// Style for flash message box
+	var style lipgloss.Style
+	if m.flashIsError {
+		style = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15")).  // White text
+			Background(lipgloss.Color("124")). // Dark red background
+			Bold(true).
+			Padding(0, 1)
+	} else {
+		style = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("15")).  // White text
+			Background(lipgloss.Color("240")). // Dark gray background
+			Padding(0, 1)
+	}
+
+	return " " + style.Render(m.flashMessage)
+}
+
+func (m Model) renderStatusBar() string {
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs s:sync n:new r:restart k:kill P:prune h:hosts")
 
 	if m.syncing {
-		right = syncingStyle.Render("⟳ ") + right
+		help = syncingStyle.Render("⟳ ") + help
 	}
 
-	// Calculate gap
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	// Right-align the help text
+	gap := m.width - lipgloss.Width(help) - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return " " + left + strings.Repeat(" ", gap) + right
+	return " " + strings.Repeat(" ", gap) + help
 }
 
 func (m Model) renderHostList(height int) string {
@@ -1509,22 +1553,15 @@ func (m Model) renderHostDetail(height int) string {
 }
 
 func (m Model) renderHostsStatusBar() string {
-	left := ""
-	if m.errorMessage != "" {
-		left = errorStyle.Render(m.errorMessage)
-	} else if m.statusMessage != "" {
-		left = statusMsgStyle.Render(m.statusMessage)
-	}
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav R:refresh j:jobs tab:switch")
 
-	right := helpStyle.Render("?:help q:quit ↑/↓:nav R:refresh j:jobs tab:switch")
-
-	// Calculate gap
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	// Right-align the help text
+	gap := m.width - lipgloss.Width(help) - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return " " + left + strings.Repeat(" ", gap) + right
+	return " " + strings.Repeat(" ", gap) + help
 }
 
 func (m Model) formatHostStatus(host *Host) string {
@@ -1569,6 +1606,12 @@ func (m Model) formatStatus(job *db.Job) string {
 		return "✗ dead"
 	case db.StatusPending:
 		return "○ pending"
+	case db.StatusQueued:
+		return "◆ queued"
+	case db.StatusFailed:
+		return "✗ failed"
+	case db.StatusStarting:
+		return "◐ starting"
 	default:
 		return job.Status
 	}
@@ -1584,9 +1627,28 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 		return deadStyle
 	case db.StatusPending:
 		return pendingStyle
+	case db.StatusQueued:
+		return queuedStyle
+	case db.StatusFailed:
+		return failedStyle
+	case db.StatusStarting:
+		return pendingStyle
 	default:
 		return lipgloss.NewStyle()
 	}
+}
+
+// Flash message duration
+const flashDuration = 3 * time.Second
+
+// setFlash sets a flash message and returns a timer command to clear it
+func (m *Model) setFlash(msg string, isError bool) tea.Cmd {
+	m.flashMessage = msg
+	m.flashIsError = isError
+	m.flashExpiry = time.Now().Add(flashDuration)
+	return tea.Tick(flashDuration, func(t time.Time) tea.Msg {
+		return flashExpiredMsg{}
+	})
 }
 
 // Commands
@@ -1673,8 +1735,26 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 
 	job := m.selectedJob
 	return func() tea.Msg {
-		logFile := session.JobLogFile(job.ID, job.StartTime, job.SessionName)
-		// First check if we can connect to the host
+		var logFile string
+
+		// For jobs without a session name (queued jobs, or jobs started by queue runner),
+		// we need to find the log file by pattern since the timestamp may differ
+		if job.SessionName == "" {
+			// Try to find log file by pattern
+			pattern := session.LogFilePattern(job.ID)
+			findCmd := fmt.Sprintf("ls -t %s 2>/dev/null | head -1", pattern)
+			stdout, _, err := ssh.Run(job.Host, findCmd)
+			if err == nil && strings.TrimSpace(stdout) != "" {
+				logFile = strings.TrimSpace(stdout)
+			} else {
+				// Fall back to the expected path (may not exist)
+				logFile = session.LogFile(job.ID, job.StartTime)
+			}
+		} else {
+			logFile = session.JobLogFile(job.ID, job.StartTime, job.SessionName)
+		}
+
+		// Fetch the log content
 		// Don't quote path - it contains ~ which needs shell expansion
 		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -50 %s 2>&1", logFile))
 		if err != nil {
@@ -1723,12 +1803,14 @@ func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
 
 func (m Model) performBackgroundSync() tea.Cmd {
 	return func() tea.Msg {
+		var updated int
+
+		// Sync running jobs
 		hosts, err := db.ListUniqueRunningHosts(m.database)
 		if err != nil {
 			return syncCompletedMsg{err: err}
 		}
 
-		var updated int
 		for _, host := range hosts {
 			jobs, err := db.ListRunning(m.database, host)
 			if err != nil {
@@ -1741,6 +1823,36 @@ func (m Model) performBackgroundSync() tea.Cmd {
 					continue
 				}
 				if changed {
+					updated++
+				}
+			}
+		}
+
+		// Sync queued jobs (check if they've started or completed)
+		queuedJobs, err := db.ListAllQueued(m.database)
+		if err == nil {
+			for _, job := range queuedJobs {
+				changed, err := syncQueuedJob(m.database, job)
+				if err != nil {
+					continue
+				}
+				if changed {
+					updated++
+				}
+			}
+		}
+
+		// Re-check recently-dead queue runner jobs (may have been incorrectly marked)
+		// Look at jobs marked dead in the last hour
+		oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
+		deadJobs, err := db.ListRecentDeadQueueJobs(m.database, oneHourAgo)
+		if err == nil {
+			for _, job := range deadJobs {
+				revived, err := checkAndReviveDeadJob(m.database, job)
+				if err != nil {
+					continue
+				}
+				if revived {
 					updated++
 				}
 			}
@@ -1875,8 +1987,50 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 	}
 }
 
+// syncQueuedJob checks if a queued job has started or completed
+func syncQueuedJob(database *sql.DB, job *db.Job) (bool, error) {
+	// Look for status files matching this job ID
+	// Pattern: ~/.cache/remote-jobs/logs/{jobID}-*.status
+	statusPattern := session.StatusFilePattern(job.ID)
+
+	// Check if any status file exists (job completed)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		// Job completed - read exit code
+		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
+		endTime := time.Now().Unix()
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Check if log file exists (job is running)
+	logPattern := fmt.Sprintf("~/.cache/remote-jobs/logs/%d-*.log", job.ID)
+	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		// Job has started running - update status
+		if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Job still queued
+	return false, nil
+}
+
 // syncJobQuick checks and updates a single job's status (no retry for TUI responsiveness)
 func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
+	// Jobs without a session name were started by the queue runner
+	// They don't have individual tmux sessions, so use pattern-based file lookup
+	if job.SessionName == "" {
+		return syncQueueRunnerJob(database, job)
+	}
+
+	// Regular jobs have tmux sessions
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 	exists, err := ssh.TmuxSessionExistsQuick(job.Host, tmuxSession)
 	if err != nil {
@@ -1908,10 +2062,145 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	return true, nil
 }
 
+// checkAndReviveDeadJob checks if a dead job is actually still running and revives it
+func checkAndReviveDeadJob(database *sql.DB, job *db.Job) (bool, error) {
+	// Check if log file exists but no status file (job still running)
+	logPattern := session.LogFilePattern(job.ID)
+	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
+	if err != nil {
+		return false, nil // Can't reach host, don't change status
+	}
+
+	if strings.TrimSpace(stdout) == "" {
+		// No log file, check if job is in queue's .current file
+		currentFile := "~/.cache/remote-jobs/queue/default.current"
+		currentCmd := fmt.Sprintf("cat %s 2>/dev/null", currentFile)
+		stdout, _, err = ssh.RunWithTimeout(job.Host, currentCmd, 5*time.Second)
+		if err != nil || strings.TrimSpace(stdout) != fmt.Sprintf("%d", job.ID) {
+			return false, nil // Job is not current, stay dead
+		}
+	}
+
+	// Check if status file exists (job completed, not running)
+	statusPattern := session.StatusFilePattern(job.ID)
+	statusCmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, statusCmd, 5*time.Second)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		// Job has completed, update to completed instead of reviving
+		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
+		endTime := time.Now().Unix()
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Job is running (has log file or is current, but no status file) - revive it
+	if err := db.ReviveDeadJob(database, job.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// syncQueueRunnerJob checks status for jobs started by the queue runner
+// These jobs don't have tmux sessions, so we check for status/log files by pattern
+func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
+	// Check if status file exists (job completed)
+	statusPattern := session.StatusFilePattern(job.ID)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		// Job completed - read exit code
+		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
+		endTime := time.Now().Unix()
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Check if log file exists but no status file (job still running)
+	logPattern := session.LogFilePattern(job.ID)
+	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
+	if err == nil && strings.TrimSpace(stdout) != "" {
+		// Log file exists, job is still running
+		return false, nil
+	}
+
+	// No log file and no status file - check if job is in queue's .current file
+	// This handles the case where job just started and hasn't created log yet
+	currentFile := "~/.cache/remote-jobs/queue/default.current"
+	currentCmd := fmt.Sprintf("cat %s 2>/dev/null", currentFile)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, currentCmd, 5*time.Second)
+	if err == nil {
+		currentJobID := strings.TrimSpace(stdout)
+		if currentJobID == fmt.Sprintf("%d", job.ID) {
+			// Job is currently running
+			return false, nil
+		}
+	}
+
+	// Job has no log, no status, and isn't current - mark as dead
+	if err := db.MarkDeadByID(database, job.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (m Model) pruneJobs() tea.Cmd {
 	return func() tea.Msg {
 		count, err := db.PruneJobs(m.database, false, nil)
 		return pruneCompletedMsg{count: count, err: err}
+	}
+}
+
+func (m Model) startQueue(host string) tea.Cmd {
+	return func() tea.Msg {
+		queueName := "default"
+		runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
+
+		// Check if queue runner is already running
+		exists, err := ssh.TmuxSessionExists(host, runnerSession)
+		if err != nil {
+			return queueStartedMsg{host: host, err: fmt.Errorf("check session: %w", err)}
+		}
+
+		if exists {
+			return queueStartedMsg{host: host, already: true}
+		}
+
+		// Create directories on remote
+		queueDir := "~/.cache/remote-jobs/queue"
+		scriptsDir := "~/.cache/remote-jobs/scripts"
+		mkdirCmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
+		if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
+			return queueStartedMsg{host: host, err: fmt.Errorf("create directories: %s", stderr)}
+		}
+
+		// Deploy queue runner script (embedded in binary)
+		queueRunnerPath := "~/.cache/remote-jobs/scripts/queue-runner.sh"
+		writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
+		if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
+			return queueStartedMsg{host: host, err: fmt.Errorf("write queue runner: %s", stderr)}
+		}
+
+		// Make script executable
+		chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
+		if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
+			return queueStartedMsg{host: host, err: fmt.Errorf("chmod: %s", stderr)}
+		}
+
+		// Start queue runner in tmux
+		runnerCmd := fmt.Sprintf("$HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", queueName)
+		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
+
+		if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
+			return queueStartedMsg{host: host, err: fmt.Errorf("start queue runner: %s", stderr)}
+		}
+
+		return queueStartedMsg{host: host}
 	}
 }
 
