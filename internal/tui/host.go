@@ -34,6 +34,22 @@ type GPUInfo struct {
 	Utilization int    // Percentage
 	MemUsed     string // e.g., "12 MiB"
 	MemTotal    string // e.g., "80 GiB"
+	JobID       int64  // Job using this GPU (0 if unknown/none)
+	JobLabel    string // Short label for job (e.g., "#42 train.py")
+}
+
+// JobGPUUsage tracks GPU usage for a single job
+type JobGPUUsage struct {
+	GPUIndex int
+	MemUsed  string // e.g., "12345" (MiB)
+}
+
+// HostRunningJob represents a job running on a host
+type HostRunningJob struct {
+	ID          int64
+	Description string
+	Command     string
+	GPUs        []JobGPUUsage // GPUs this job is using
 }
 
 // Host represents a remote host with its system information
@@ -59,6 +75,9 @@ type Host struct {
 	QueuedJobCount    int              // Number of jobs waiting in queue
 	CurrentQueueJob   string           // Job ID currently running in queue
 	QueueStopPending  bool             // Whether stop signal file exists
+
+	// Running jobs on this host
+	RunningJobs []HostRunningJob
 }
 
 // HostInfoCommand is the SSH command to gather host information

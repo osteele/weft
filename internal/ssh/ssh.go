@@ -583,3 +583,75 @@ func calculateMemoryPct(output string) string {
 	}
 	return ""
 }
+
+// JobPIDInfo holds job ID and PID file path for GPU mapping
+type JobPIDInfo struct {
+	JobID   int64
+	PIDFile string
+}
+
+// JobGPUMapping holds the result of GPU job mapping
+type JobGPUMapping struct {
+	JobID    int64
+	GPUIndex int
+	MemMiB   int
+}
+
+// GetJobGPUMappings runs the GPU job mapping script and returns the results
+// It takes a list of jobs with their PID files and returns which GPUs each job is using
+func GetJobGPUMappings(host string, script []byte, jobs []JobPIDInfo) ([]JobGPUMapping, error) {
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+
+	// Build arguments: "job_id:pid_file" pairs
+	var args []string
+	for _, job := range jobs {
+		args = append(args, fmt.Sprintf("%d:%s", job.JobID, job.PIDFile))
+	}
+
+	// Write script to remote and execute with arguments
+	remoteScript := "/tmp/remote-jobs-gpu-mapping.sh"
+	writeCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF && chmod +x '%s'",
+		remoteScript, string(script), remoteScript)
+
+	if _, _, err := RunWithTimeout(host, writeCmd, 10*time.Second); err != nil {
+		return nil, fmt.Errorf("write script: %w", err)
+	}
+
+	// Run the script with job arguments
+	runCmd := fmt.Sprintf("'%s' %s", remoteScript, strings.Join(args, " "))
+	stdout, _, err := RunWithTimeout(host, runCmd, 15*time.Second)
+	if err != nil {
+		// Script might fail if no GPUs or no nvidia-smi, that's okay
+		return nil, nil
+	}
+
+	// Parse output: JOB_GPU:job_id:gpu_index:mem_mib
+	var mappings []JobGPUMapping
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "JOB_GPU:") {
+			continue
+		}
+
+		parts := strings.Split(strings.TrimPrefix(line, "JOB_GPU:"), ":")
+		if len(parts) != 3 {
+			continue
+		}
+
+		var jobID int64
+		var gpuIdx, memMiB int
+		fmt.Sscanf(parts[0], "%d", &jobID)
+		fmt.Sscanf(parts[1], "%d", &gpuIdx)
+		fmt.Sscanf(parts[2], "%d", &memMiB)
+
+		mappings = append(mappings, JobGPUMapping{
+			JobID:    jobID,
+			GPUIndex: gpuIdx,
+			MemMiB:   memMiB,
+		})
+	}
+
+	return mappings, nil
+}

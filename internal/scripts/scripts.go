@@ -7,3 +7,6 @@ var QueueRunnerScript []byte
 
 //go:embed notify-slack.sh
 var NotifySlackScript []byte
+
+//go:embed gpu-job-mapping.sh
+var GPUJobMappingScript []byte

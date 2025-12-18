@@ -212,6 +212,11 @@ type queueStatusMsg struct {
 	info     *QueueStatusInfo
 }
 
+type hostJobsGPUMsg struct {
+	hostName    string
+	runningJobs []HostRunningJob
+}
+
 type processStatsMsg struct {
 	jobID int64
 	stats *ssh.ProcessStats
@@ -618,6 +623,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case hostInfoMsg:
 		// Update host info
+		var cmd tea.Cmd
 		for i, h := range m.hosts {
 			if h.Name == msg.hostName {
 				msg.info.Name = msg.hostName
@@ -627,13 +633,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.info.QueuedJobCount = h.QueuedJobCount
 				msg.info.CurrentQueueJob = h.CurrentQueueJob
 				msg.info.QueueStopPending = h.QueueStopPending
+				// Preserve running jobs until new data arrives
+				msg.info.RunningJobs = h.RunningJobs
+				// Preserve LastCheck from previous state if new one is zero (offline)
+				if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
+					msg.info.LastCheck = h.LastCheck
+				}
 				m.hosts[i] = msg.info
 				break
 			}
 		}
 		// Mark host as queried this session
 		m.hostsQueriedThisSession[msg.hostName] = true
-		return m, nil
+		return m, cmd
 
 	case queueStatusMsg:
 		// Update queue status for host
@@ -644,6 +656,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.hosts[i].QueuedJobCount = msg.info.QueuedJobCount
 				m.hosts[i].CurrentQueueJob = msg.info.CurrentJob
 				m.hosts[i].QueueStopPending = msg.info.StopPending
+				break
+			}
+		}
+		return m, nil
+
+	case hostJobsGPUMsg:
+		// Update running jobs and GPU mappings for host
+		for i, h := range m.hosts {
+			if h.Name == msg.hostName {
+				m.hosts[i].RunningJobs = msg.runningJobs
+				// Update GPU table with job info
+				for j := range m.hosts[i].GPUs {
+					m.hosts[i].GPUs[j].JobID = 0
+					m.hosts[i].GPUs[j].JobLabel = ""
+				}
+				for _, job := range msg.runningJobs {
+					for _, gpu := range job.GPUs {
+						for j := range m.hosts[i].GPUs {
+							if m.hosts[i].GPUs[j].Index == gpu.GPUIndex {
+								m.hosts[i].GPUs[j].JobID = job.ID
+								label := fmt.Sprintf("#%d", job.ID)
+								if job.Description != "" {
+									// Truncate description if too long
+									desc := job.Description
+									if len(desc) > 15 {
+										desc = desc[:12] + "..."
+									}
+									label += " " + desc
+								}
+								m.hosts[i].GPUs[j].JobLabel = label
+								break
+							}
+						}
+					}
+				}
 				break
 			}
 		}
@@ -1691,15 +1738,16 @@ func (m Model) renderHostDetail(height int) string {
 				lines = append(lines, "  Runner:       Stopped")
 			}
 		}
+
 	}
 
-	// Build footer with last checked time
+	// Build footer with last successful connection time
 	footerText := ""
 	if len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts) {
 		host := m.hosts[m.selectedHostIdx]
 		if !host.LastCheck.IsZero() {
 			elapsed := time.Since(host.LastCheck).Truncate(time.Second)
-			footerText = fmt.Sprintf("Last checked: %s ago", elapsed)
+			footerText = fmt.Sprintf("Last online: %s ago", elapsed)
 		}
 	}
 
@@ -1901,9 +1949,8 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
 		host := &Host{
-			Name:      hostName,
-			Status:    HostStatusChecking,
-			LastCheck: time.Now(),
+			Name:   hostName,
+			Status: HostStatusChecking,
 		}
 
 		// Use short timeout to avoid blocking UI
@@ -1914,7 +1961,7 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 			if host.Error == "" {
 				host.Error = err.Error()
 			}
-			// Load cached info to preserve static data when offline
+			// Load cached info to preserve static data and LastCheck when offline
 			if cachedInfo, loadErr := db.LoadCachedHostInfo(database, hostName); loadErr == nil && cachedInfo != nil {
 				cachedHost := hostFromCachedInfo(cachedInfo)
 				// Preserve static info from cache
@@ -1926,6 +1973,8 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 				host.CPUFreq = cachedHost.CPUFreq
 				host.MemTotal = cachedHost.MemTotal
 				host.GPUs = cachedHost.GPUs
+				// Preserve LastCheck from cache (last successful connection)
+				host.LastCheck = cachedHost.LastCheck
 			}
 			return hostInfoMsg{hostName: hostName, info: host}
 		}
@@ -1954,6 +2003,56 @@ func (m Model) fetchQueueStatus(hostName string) tea.Cmd {
 		// Parse the output
 		info := ParseQueueStatus(stdout)
 		return queueStatusMsg{hostName: hostName, info: info}
+	}
+}
+
+func (m Model) fetchHostJobsGPU(hostName string) tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		// Get running jobs on this host from database
+		jobs, err := db.GetRunningJobsByHost(database, hostName)
+		if err != nil || len(jobs) == 0 {
+			return hostJobsGPUMsg{hostName: hostName, runningJobs: nil}
+		}
+
+		// Build list of job PID info
+		var jobPIDInfos []ssh.JobPIDInfo
+		for _, job := range jobs {
+			pidFile := session.JobPidFile(job.ID, job.StartTime)
+			jobPIDInfos = append(jobPIDInfos, ssh.JobPIDInfo{
+				JobID:   job.ID,
+				PIDFile: pidFile,
+			})
+		}
+
+		// Get GPU mappings via SSH script
+		mappings, err := ssh.GetJobGPUMappings(hostName, scripts.GPUJobMappingScript, jobPIDInfos)
+		if err != nil {
+			// Don't fail - just return jobs without GPU info
+			mappings = nil
+		}
+
+		// Build mapping from job ID to GPU usage
+		gpuByJob := make(map[int64][]JobGPUUsage)
+		for _, m := range mappings {
+			gpuByJob[m.JobID] = append(gpuByJob[m.JobID], JobGPUUsage{
+				GPUIndex: m.GPUIndex,
+				MemUsed:  fmt.Sprintf("%d", m.MemMiB),
+			})
+		}
+
+		// Build running jobs list with GPU info
+		var runningJobs []HostRunningJob
+		for _, job := range jobs {
+			runningJobs = append(runningJobs, HostRunningJob{
+				ID:          job.ID,
+				Description: job.Description,
+				Command:     job.Command,
+				GPUs:        gpuByJob[job.ID],
+			})
+		}
+
+		return hostJobsGPUMsg{hostName: hostName, runningJobs: runningJobs}
 	}
 }
 

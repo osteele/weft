@@ -225,7 +225,7 @@ Shows all hosts that have had jobs, with system info, queue status, and resource
 │  1    48°C     95%   22.1GiB / 24.0GiB (92%)                                 │
 │  2    45°C      0%   456MiB / 24.0GiB (2%)                                   │
 │ ...                                                                          │
-│ Last checked: 5s ago                                                         │
+│ Updated: 5s ago                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  ↑/↓:nav j:jobs tab:switch q:quit
 ```
@@ -248,7 +248,7 @@ Shows all hosts that have had jobs, with system info, queue status, and resource
 - GPU table with temperature, utilization, and memory usage
 - Queue runner status and job count
 
-**Offline hosts:** Host details are cached and persist when a host goes offline. The TUI shows cached information with the "Last checked" timestamp so you can see stale data.
+**Offline hosts:** Host details are cached and persist when a host goes offline. The "Updated" timestamp shows when the host was last successfully contacted (not the last failed attempt).
 
 The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 

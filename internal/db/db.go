@@ -339,6 +339,21 @@ func GetPendingJob(db *sql.DB, id int64) (*Job, error) {
 	return scanJob(row)
 }
 
+// GetRunningJobsByHost retrieves all running jobs for a specific host
+func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
+	rows, err := db.Query(
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
+		 FROM jobs WHERE host = ? AND status = ? ORDER BY start_time DESC`,
+		host, StatusRunning,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobs(rows)
+}
+
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
 	var sessionName sql.NullString
@@ -377,6 +392,49 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 
 	return &j, nil
+}
+
+// scanJobs scans multiple job rows
+func scanJobs(rows *sql.Rows) ([]*Job, error) {
+	var jobs []*Job
+	for rows.Next() {
+		var j Job
+		var sessionName sql.NullString
+		var desc sql.NullString
+		var errorMsg sql.NullString
+		var queueName sql.NullString
+		var endTime sql.NullInt64
+		var exitCode sql.NullInt64
+
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+		if err != nil {
+			return nil, err
+		}
+
+		if sessionName.Valid {
+			j.SessionName = sessionName.String
+		}
+		if desc.Valid {
+			j.Description = desc.String
+		}
+		if errorMsg.Valid {
+			j.ErrorMessage = errorMsg.String
+		}
+		if queueName.Valid {
+			j.QueueName = queueName.String
+		}
+		if endTime.Valid {
+			j.EndTime = &endTime.Int64
+		}
+		if exitCode.Valid {
+			code := int(exitCode.Int64)
+			j.ExitCode = &code
+		}
+
+		jobs = append(jobs, &j)
+	}
+
+	return jobs, rows.Err()
 }
 
 // ListJobs returns jobs matching the given filters
