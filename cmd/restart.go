@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -11,16 +13,17 @@ import (
 )
 
 var restartCmd = &cobra.Command{
-	Use:   "restart <job-id>",
-	Short: "Restart a job using saved metadata",
-	Long: `Restart a job using its saved metadata or database info.
+	Use:   "restart <job-id>...",
+	Short: "Restart one or more jobs using saved metadata",
+	Long: `Restart jobs using their saved metadata or database info.
 
 This kills the existing session (if any) and starts a new one
-with the same command and working directory. Creates a new job ID.
+with the same command and working directory. Creates a new job ID for each.
 
-Example:
-  remote-jobs restart 42`,
-	Args: cobra.ExactArgs(1),
+Examples:
+  remote-jobs restart 42
+  remote-jobs restart 42 43 44`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: runRestart,
 }
 
@@ -29,24 +32,44 @@ func init() {
 }
 
 func runRestart(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
-	}
-
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
+	var errors []string
+	for i, arg := range args {
+		if i > 0 {
+			fmt.Println("---")
+		}
+
+		jobID, err := strconv.ParseInt(arg, 10, 64)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
+			continue
+		}
+
+		if err := restartSingleJob(database, jobID); err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errors, "; "))
+	}
+	return nil
+}
+
+func restartSingleJob(database *sql.DB, jobID int64) error {
 	// Get job from database
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("not found")
 	}
 
 	// Read metadata from remote (for additional info)

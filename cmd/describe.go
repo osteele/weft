@@ -3,21 +3,20 @@ package cmd
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/spf13/cobra"
 )
 
 var describeCmd = &cobra.Command{
-	Use:   "describe <job-id> <description>",
+	Use:   "describe <job-id> [description]",
 	Short: "Set or update the description of a job",
 	Long: `Set or update the description of an existing job.
 
 Examples:
   remote-jobs describe 42 "Training GPT-2 with lr=0.001"
   remote-jobs describe 42 ""  # Clear description`,
-	Args: cobra.MinimumNArgs(1),
+	Args: cobra.RangeArgs(1, 2),
 	RunE: runDescribe,
 }
 
@@ -31,10 +30,10 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
 
-	// Join remaining args as description (allows unquoted description)
+	// Description is optional second argument
 	description := ""
 	if len(args) > 1 {
-		description = strings.Join(args[1:], " ")
+		description = args[1]
 	}
 
 	database, err := db.Open()

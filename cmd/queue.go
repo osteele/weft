@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -28,6 +29,7 @@ the remote host.
 
 Subcommands:
   add     Add a job to the queue
+  remove  Remove a queued job before it starts
   start   Start the queue runner
   stop    Stop the queue runner after current job
   list    List jobs in the queue
@@ -35,7 +37,7 @@ Subcommands:
 }
 
 var queueAddCmd = &cobra.Command{
-	Use:   "add <host> <command...>",
+	Use:   "add <host> <command>",
 	Short: "Add a job to the queue",
 	Long: `Add a job to a remote queue for sequential execution.
 
@@ -46,7 +48,7 @@ Examples:
   remote-jobs queue add cool30 'python train.py --epochs 100'
   remote-jobs queue add -d "Training run 1" cool30 'python train.py'
   remote-jobs queue add --queue gpu cool30 'python train.py'`,
-	Args: cobra.MinimumNArgs(2),
+	Args: cobra.ExactArgs(2),
 	RunE: runQueueAdd,
 }
 
@@ -108,6 +110,22 @@ Examples:
 	RunE: runQueueStatus,
 }
 
+var queueRemoveCmd = &cobra.Command{
+	Use:   "remove <job-id>...",
+	Short: "Remove one or more queued jobs",
+	Long: `Remove jobs from the queue before they start.
+
+This removes jobs from both the remote queue file and the local database.
+Only works for jobs that haven't started yet (status: queued).
+
+Examples:
+  remote-jobs queue remove 123
+  remote-jobs queue remove 123 124 125
+  remote-jobs queue remove --queue gpu 456`,
+	Args: cobra.MinimumNArgs(1),
+	RunE: runQueueRemove,
+}
+
 var (
 	queueName        string
 	queueDir_        string
@@ -121,9 +139,10 @@ func init() {
 	queueCmd.AddCommand(queueStopCmd)
 	queueCmd.AddCommand(queueListCmd)
 	queueCmd.AddCommand(queueStatusCmd)
+	queueCmd.AddCommand(queueRemoveCmd)
 
 	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd} {
+	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueRemoveCmd} {
 		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
 	}
 
@@ -133,7 +152,7 @@ func init() {
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
 	host := args[0]
-	command := strings.Join(args[1:], " ")
+	command := args[1]
 
 	// Set defaults
 	workingDir := queueDir_
@@ -388,6 +407,67 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nSTOP signal pending - runner will exit after current job")
 	}
 
+	return nil
+}
+
+func runQueueRemove(cmd *cobra.Command, args []string) error {
+	// Open database
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	var errors []string
+	for _, arg := range args {
+		jobID, err := strconv.ParseInt(arg, 10, 64)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
+			continue
+		}
+
+		// Get job from database
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("job %d not found", jobID))
+			continue
+		}
+
+		// Check if job is queued (not yet started)
+		if job.Status != db.StatusQueued {
+			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only remove queued jobs", jobID, job.Status))
+			continue
+		}
+
+		// Determine queue name
+		jobQueueName := job.QueueName
+		if jobQueueName == "" {
+			jobQueueName = queueName // use --queue flag or default
+		}
+
+		// Remove from remote queue file
+		// The queue file format is: job_id\tworking_dir\tcommand\tdescription
+		// We filter out lines starting with this job ID
+		queueFile := fmt.Sprintf("%s/%s.queue", queueDir, jobQueueName)
+		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
+			jobID, queueFile, queueFile, queueFile, queueFile)
+
+		if _, stderr, err := ssh.Run(job.Host, removeCmd); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: job %d: failed to remove from remote queue: %s\n", jobID, stderr)
+		}
+
+		// Delete from local database
+		if err := db.DeleteJob(database, jobID); err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: delete failed: %v", jobID, err))
+			continue
+		}
+
+		fmt.Printf("Job %d removed from queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errors, "; "))
+	}
 	return nil
 }
 

@@ -2467,23 +2467,13 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return true, nil
 	}
 
-	// Check if log file exists but no status file (job still running)
-	logPattern := session.LogFilePattern(job.ID)
-	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
-	stdout, _, err = ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
-	if err != nil {
-		// Can't reach host - don't change job status
-		return false, nil
+	// Check if job is in queue's .current file (actively running right now)
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = "default"
 	}
-	if strings.TrimSpace(stdout) != "" {
-		// Log file exists, job is still running
-		return false, nil
-	}
-
-	// No log file and no status file - check if job is in queue's .current file
-	// This handles the case where job just started and hasn't created log yet
-	currentFile := "~/.cache/remote-jobs/queue/default.current"
-	currentCmd := fmt.Sprintf("cat %s 2>/dev/null", currentFile)
+	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
+	currentCmd := fmt.Sprintf("cat %s 2>/dev/null || true", currentFile)
 	stdout, _, err = ssh.RunWithTimeout(job.Host, currentCmd, 5*time.Second)
 	if err != nil {
 		// Can't reach host - don't change job status
@@ -2495,7 +2485,8 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, nil
 	}
 
-	// Job has no log, no status, and isn't current - mark as dead
+	// Job is not current and has no status file - it's dead
+	// (Either it died mid-execution, or it never started)
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}

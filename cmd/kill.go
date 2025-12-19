@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -11,13 +12,14 @@ import (
 )
 
 var killCmd = &cobra.Command{
-	Use:   "kill <job-id>",
-	Short: "Kill a running job",
-	Long: `Kill a running job by its ID.
+	Use:   "kill <job-id>...",
+	Short: "Kill one or more running jobs",
+	Long: `Kill running jobs by their IDs.
 
-Example:
-  remote-jobs kill 42`,
-	Args: cobra.ExactArgs(1),
+Examples:
+  remote-jobs kill 42
+  remote-jobs kill 42 43 44`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: runKill,
 }
 
@@ -26,37 +28,48 @@ func init() {
 }
 
 func runKill(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
-	}
-
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+	var errors []string
+	for _, arg := range args {
+		jobID, err := strconv.ParseInt(arg, 10, 64)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
+			continue
+		}
+
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		if job == nil {
+			errors = append(errors, fmt.Sprintf("job %d not found", jobID))
+			continue
+		}
+
+		tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+		fmt.Printf("Killing job %d on %s...\n", jobID, job.Host)
+
+		if err := ssh.TmuxKillSession(job.Host, tmuxSession); err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: kill session: %v", jobID, err))
+			continue
+		}
+
+		// Mark job as dead in database
+		if err := db.MarkDeadByID(database, jobID); err != nil {
+			fmt.Printf("Warning: job %d: failed to update database: %v\n", jobID, err)
+		}
+
+		fmt.Printf("Job %d killed\n", jobID)
 	}
 
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	fmt.Printf("Killing job %d on %s...\n", jobID, job.Host)
-
-	if err := ssh.TmuxKillSession(job.Host, tmuxSession); err != nil {
-		return fmt.Errorf("kill session: %w", err)
+	if len(errors) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errors, "; "))
 	}
-
-	// Mark job as dead in database
-	if err := db.MarkDeadByID(database, jobID); err != nil {
-		fmt.Printf("Warning: failed to update database: %v\n", err)
-	}
-
-	fmt.Println("Job killed")
 	return nil
 }

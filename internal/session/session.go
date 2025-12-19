@@ -215,14 +215,17 @@ type WrapperCommandParams struct {
 // This function has unit tests to prevent regressions on quoting behavior.
 func BuildWrapperCommand(params WrapperCommandParams) string {
 	// Note: file paths use ~ which must not be quoted to allow expansion
-	// The command runs in background so we can capture its PID, then we wait for it
+	// The command runs in a subshell that writes its PID then execs bash -c
+	// This ensures the recorded PID is the actual job process, not a wrapper
+	// The command is escaped for use in single quotes passed to bash -c
+	escapedCmd := escapeForBashC(params.Command)
 	return fmt.Sprintf(
 		`echo "=== START $(date) ===" > %s; `+
 			`echo "job_id: %d" >> %s; `+
 			`echo "cd: %s" >> %s; `+
 			`echo "cmd: %s" >> %s; `+
 			`echo "===" >> %s; `+
-			`cd %s && { (%s) & CMD_PID=$!; echo $CMD_PID > %s; wait $CMD_PID; } 2>&1 | tee -a %s; `+
+			`cd %s && { (echo $BASHPID > %s; exec bash -c '%s') & wait $!; } 2>&1 | tee -a %s; `+
 			`EXIT_CODE=${PIPESTATUS[0]}; `+
 			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
 			`echo $EXIT_CODE > %s%s`,
@@ -231,7 +234,13 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 		params.WorkingDir, params.LogFile,
 		params.Command, params.LogFile,
 		params.LogFile,
-		params.WorkingDir, params.Command, params.PidFile, params.LogFile,
+		params.WorkingDir, params.PidFile, escapedCmd, params.LogFile,
 		params.LogFile,
 		params.StatusFile, params.NotifyCmd)
+}
+
+// escapeForBashC escapes a command for use in bash -c '...'
+func escapeForBashC(s string) string {
+	// Replace single quotes with '\'' (end quote, escaped quote, start quote)
+	return strings.ReplaceAll(s, "'", `'\''`)
 }

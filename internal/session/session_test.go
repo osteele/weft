@@ -354,19 +354,19 @@ func TestBuildWrapperCommand_PidCapture(t *testing.T) {
 
 	cmd := BuildWrapperCommand(params)
 
-	// Must capture PID with background + $!
-	if !strings.Contains(cmd, "CMD_PID=$!") {
-		t.Errorf("BuildWrapperCommand: PID capture not found\nCommand: %s", cmd)
-	}
-
-	// Must write PID to file
-	if !strings.Contains(cmd, "echo $CMD_PID > ~/.cache/remote-jobs/logs/42.pid") {
+	// Must write PID to file using $BASHPID (writes before exec so we get the job's PID)
+	if !strings.Contains(cmd, "echo $BASHPID > ~/.cache/remote-jobs/logs/42.pid") {
 		t.Errorf("BuildWrapperCommand: PID file write not found\nCommand: %s", cmd)
 	}
 
-	// Must wait for the process
-	if !strings.Contains(cmd, "wait $CMD_PID") {
-		t.Errorf("BuildWrapperCommand: wait for PID not found\nCommand: %s", cmd)
+	// Must use exec to replace the subshell with the actual command
+	if !strings.Contains(cmd, "exec bash -c") {
+		t.Errorf("BuildWrapperCommand: exec bash -c not found\nCommand: %s", cmd)
+	}
+
+	// Must wait for the background process
+	if !strings.Contains(cmd, "wait $!") {
+		t.Errorf("BuildWrapperCommand: wait not found\nCommand: %s", cmd)
 	}
 }
 

@@ -14,7 +14,7 @@ import (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run [flags] <host> <command...>",
+	Use:   "run [flags] <host> <command>",
 	Short: "Start a persistent tmux session on a remote host",
 	Long: `Start a persistent tmux session on a remote host.
 
@@ -36,9 +36,9 @@ Examples:
 			}
 			return nil
 		}
-		// Normal mode needs host + command
-		if len(args) < 2 {
-			return fmt.Errorf("requires host and command arguments")
+		// Normal mode needs exactly host + command
+		if len(args) != 2 {
+			return fmt.Errorf("requires exactly host and command arguments")
 		}
 		return nil
 	},
@@ -73,7 +73,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return killJob(runKillJobID)
 	}
 
-	command := strings.Join(args[1:], " ")
+	command := args[1]
 
 	// Validate flag combinations
 	if runFollow && runQueue {

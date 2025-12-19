@@ -22,19 +22,20 @@ const (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <job-id>",
-	Short: "Check the status of a specific job",
-	Long: `Check the status of a specific job.
+	Use:   "status <job-id>...",
+	Short: "Check the status of one or more jobs",
+	Long: `Check the status of one or more jobs.
 
-Exit codes:
+Exit codes (single job only):
   0: Job completed successfully
   1: Job failed or error
   2: Job is still running
   3: Job not found
 
-Example:
-  remote-jobs status 42`,
-	Args: cobra.ExactArgs(1),
+Examples:
+  remote-jobs status 42
+  remote-jobs status 42 43 44`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: runStatus,
 }
 
@@ -43,79 +44,101 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
-	}
-
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
-	// Get job from database
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
+	singleJob := len(args) == 1
 
-	if job == nil {
-		fmt.Printf("Job %d not found\n", jobID)
-		os.Exit(ExitNotFound)
-		return nil
-	}
+	for i, arg := range args {
+		if i > 0 {
+			fmt.Println("---")
+		}
 
-	// If job is already marked as completed or dead, use cached result
-	if job.Status == db.StatusCompleted || job.Status == db.StatusDead {
-		return printJobStatus(job)
-	}
-
-	// Job is marked as running - verify actual status on remote
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, err := ssh.TmuxSessionExists(job.Host, tmuxSession)
-	if err != nil {
-		return fmt.Errorf("check session: %w", err)
-	}
-
-	if !exists {
-		// Session doesn't exist - check for status file
-		statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-		content, err := ssh.ReadRemoteFile(job.Host, statusFile)
+		jobID, err := strconv.ParseInt(arg, 10, 64)
 		if err != nil {
-			return fmt.Errorf("read status file: %w", err)
+			fmt.Fprintf(os.Stderr, "Invalid job ID: %s\n", arg)
+			if singleJob {
+				os.Exit(ExitNotFound)
+			}
+			continue
 		}
 
-		if content != "" {
-			// Job completed, update database
-			exitCode, _ := strconv.Atoi(strings.TrimSpace(content))
-			endTime := time.Now().Unix()
-			if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Job %d: %v\n", jobID, err)
+			if singleJob {
+				os.Exit(ExitNotFound)
 			}
-			job.Status = db.StatusCompleted
-			job.ExitCode = &exitCode
-			job.EndTime = &endTime
-		} else {
-			// No status file - job died unexpectedly
-			if err := db.MarkDeadByID(database, job.ID); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
+			continue
+		}
+
+		if job == nil {
+			fmt.Printf("Job %d not found\n", jobID)
+			if singleJob {
+				os.Exit(ExitNotFound)
 			}
-			job.Status = db.StatusDead
+			continue
 		}
-	} else {
-		// Session still running - show last few lines of output
-		output, _ := ssh.TmuxCapturePaneOutput(job.Host, tmuxSession, 5)
-		if output != "" {
-			fmt.Println("Last output:")
-			fmt.Println(output)
+
+		// If job is already marked as completed or dead, use cached result
+		if job.Status == db.StatusCompleted || job.Status == db.StatusDead {
+			printJobStatus(job, singleJob)
+			continue
 		}
+
+		// Job is marked as running - verify actual status on remote
+		tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+		exists, err := ssh.TmuxSessionExists(job.Host, tmuxSession)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Job %d: check session: %v\n", jobID, err)
+			continue
+		}
+
+		if !exists {
+			// Session doesn't exist - check for status file
+			statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
+			content, err := ssh.ReadRemoteFile(job.Host, statusFile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Job %d: read status file: %v\n", jobID, err)
+				continue
+			}
+
+			if content != "" {
+				// Job completed, update database
+				exitCode, _ := strconv.Atoi(strings.TrimSpace(content))
+				endTime := time.Now().Unix()
+				if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
+				}
+				job.Status = db.StatusCompleted
+				job.ExitCode = &exitCode
+				job.EndTime = &endTime
+			} else {
+				// No status file - job died unexpectedly
+				if err := db.MarkDeadByID(database, job.ID); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
+				}
+				job.Status = db.StatusDead
+			}
+		} else if singleJob {
+			// Session still running - show last few lines of output (only for single job)
+			output, _ := ssh.TmuxCapturePaneOutput(job.Host, tmuxSession, 5)
+			if output != "" {
+				fmt.Println("Last output:")
+				fmt.Println(output)
+			}
+		}
+
+		printJobStatus(job, singleJob)
 	}
 
-	return printJobStatus(job)
+	return nil
 }
 
-func printJobStatus(job *db.Job) error {
+func printJobStatus(job *db.Job, exitOnComplete bool) {
 	fmt.Printf("Job ID:   %d\n", job.ID)
 	fmt.Printf("Host:     %s\n", job.Host)
 	fmt.Printf("Status:   %s\n", job.Status)
@@ -141,21 +164,21 @@ func printJobStatus(job *db.Job) error {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
 	}
 
-	// Set exit code based on status
-	switch job.Status {
-	case db.StatusCompleted:
-		if job.ExitCode != nil && *job.ExitCode == 0 {
-			os.Exit(ExitSuccess)
-		} else {
+	// Set exit code based on status (only for single job)
+	if exitOnComplete {
+		switch job.Status {
+		case db.StatusCompleted:
+			if job.ExitCode != nil && *job.ExitCode == 0 {
+				os.Exit(ExitSuccess)
+			} else {
+				os.Exit(ExitFailed)
+			}
+		case db.StatusDead:
 			os.Exit(ExitFailed)
+		case db.StatusRunning:
+			os.Exit(ExitRunning)
+		default:
+			os.Exit(ExitNotFound)
 		}
-	case db.StatusDead:
-		os.Exit(ExitFailed)
-	case db.StatusRunning:
-		os.Exit(ExitRunning)
-	default:
-		os.Exit(ExitNotFound)
 	}
-
-	return nil
 }

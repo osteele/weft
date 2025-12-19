@@ -139,10 +139,13 @@ while true; do
             echo "ERROR: Could not cd to $working_dir" >> "$log_file"
             exit 1
         }
-        eval "$command"
+        # Record PID before exec - after exec, this becomes the command's PID
+        echo $BASHPID > "$pid_file"
+        # Use exec to replace this subshell with the actual command process
+        # This ensures the recorded PID is the job process, not a wrapper
+        exec bash -c "$command"
     ) >> "$log_file" 2>&1 &
     cmd_pid=$!
-    echo $cmd_pid > "$pid_file"
     wait $cmd_pid
     exit_code=$?
     set -e
