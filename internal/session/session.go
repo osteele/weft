@@ -225,8 +225,8 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 			`echo "cd: %s" >> %s; `+
 			`echo "cmd: %s" >> %s; `+
 			`echo "===" >> %s; `+
-			`cd %s && { (echo $BASHPID > %s; exec bash -c '%s') & wait $!; } 2>&1 | tee -a %s; `+
-			`EXIT_CODE=${PIPESTATUS[0]}; `+
+			`cd %s && { (echo $BASHPID > %s; exec bash -c '%s') >> %s 2>&1 & wait $!; }; `+
+			`EXIT_CODE=$?; `+
 			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
 			`echo $EXIT_CODE > %s%s`,
 		params.LogFile,

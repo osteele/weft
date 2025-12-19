@@ -383,9 +383,9 @@ func TestBuildWrapperCommand_ExitCodeCapture(t *testing.T) {
 
 	cmd := BuildWrapperCommand(params)
 
-	// Must capture exit code from PIPESTATUS (due to tee pipe)
-	if !strings.Contains(cmd, "EXIT_CODE=${PIPESTATUS[0]}") {
-		t.Errorf("BuildWrapperCommand: PIPESTATUS capture not found\nCommand: %s", cmd)
+	// Must capture exit code from $? (no tee pipe anymore, direct file redirection)
+	if !strings.Contains(cmd, "EXIT_CODE=$?") {
+		t.Errorf("BuildWrapperCommand: exit code capture not found\nCommand: %s", cmd)
 	}
 
 	// Must write exit code to status file
