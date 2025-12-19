@@ -2106,17 +2106,32 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 					connError: true,
 				}
 			}
+			// Check if log file doesn't exist
+			if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
+				msg := "No log file yet"
+				if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead {
+					msg = "Log file not found (may have been cleaned up)"
+				}
+				return logFetchedMsg{
+					jobID:   job.ID,
+					content: msg,
+				}
+			}
 			// Other SSH error
 			return logFetchedMsg{
 				jobID:   job.ID,
 				content: fmt.Sprintf("Error: %s", strings.TrimSpace(combined)),
 			}
 		}
-		// Check if output indicates file not found
+		// Check if output indicates file not found (for cases where tail doesn't error)
 		if strings.Contains(stdout, "No such file") || strings.Contains(stdout, "cannot open") {
+			msg := "No log file yet"
+			if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead {
+				msg = "Log file not found (may have been cleaned up)"
+			}
 			return logFetchedMsg{
 				jobID:   job.ID,
-				content: "Log file not found (may have been cleaned up)",
+				content: msg,
 			}
 		}
 		return logFetchedMsg{
@@ -2485,8 +2500,32 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, nil
 	}
 
-	// Job is not current and has no status file - it's dead
-	// (Either it died mid-execution, or it never started)
+	// Check if job is still in the queue file (waiting to run)
+	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	grepCmd := fmt.Sprintf("grep -q '^%d	' %s 2>/dev/null && echo yes || echo no", job.ID, queueFile)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, grepCmd, 5*time.Second)
+	if err != nil {
+		return false, nil
+	}
+	if strings.TrimSpace(stdout) == "yes" {
+		// Job is still in queue, waiting to run
+		return false, nil
+	}
+
+	// Check if the job's process is still running (via PID file)
+	pidPattern := session.PidFilePattern(job.ID)
+	pidCmd := fmt.Sprintf("pid=$(cat %s 2>/dev/null); [ -n \"$pid\" ] && ps -p $pid > /dev/null 2>&1 && echo running || echo not_running", pidPattern)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, pidCmd, 5*time.Second)
+	if err != nil {
+		return false, nil
+	}
+	if strings.TrimSpace(stdout) == "running" {
+		// Process is still running, don't mark as dead
+		return false, nil
+	}
+
+	// Job is not current, not in queue, process not running, and has no status file - it's dead
+	// (Either it died mid-execution, or was removed from queue)
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}

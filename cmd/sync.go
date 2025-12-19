@@ -42,14 +42,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Get all unique hosts with running jobs
-	hosts, err := db.ListUniqueRunningHosts(database)
+	// Get all unique hosts with running or queued jobs
+	hosts, err := db.ListUniqueActiveHosts(database)
 	if err != nil {
 		return fmt.Errorf("list hosts: %w", err)
 	}
 
 	if len(hosts) == 0 {
-		fmt.Println("No running jobs to sync")
+		fmt.Println("No active jobs to sync")
 		return nil
 	}
 
@@ -93,9 +93,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// syncHost syncs all running jobs for a host and returns the count of updated jobs
+// syncHost syncs all active jobs (running and queued) for a host and returns the count of updated jobs
 func syncHost(database *sql.DB, host string) (int, error) {
-	jobs, err := db.ListRunning(database, host)
+	jobs, err := db.ListActiveJobs(database, host)
 	if err != nil {
 		return 0, err
 	}
@@ -200,8 +200,32 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, nil
 	}
 
-	// Job is not current and has no status file - it's dead
-	// (Either it died mid-execution, or it never started)
+	// Check if job is still in the queue file (waiting to run)
+	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	grepCmd := fmt.Sprintf("grep -q '^%d	' %s 2>/dev/null && echo yes || echo no", job.ID, queueFile)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, grepCmd, timeout)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(stdout) == "yes" {
+		// Job is still in queue, waiting to run
+		return false, nil
+	}
+
+	// Check if the job's process is still running (via PID file)
+	pidPattern := session.PidFilePattern(job.ID)
+	pidCmd := fmt.Sprintf("pid=$(cat %s 2>/dev/null); [ -n \"$pid\" ] && ps -p $pid > /dev/null 2>&1 && echo running || echo not_running", pidPattern)
+	stdout, _, err = ssh.RunWithTimeout(job.Host, pidCmd, timeout)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(stdout) == "running" {
+		// Process is still running, don't mark as dead
+		return false, nil
+	}
+
+	// Job is not current, not in queue, process not running, and has no status file - it's dead
+	// (Either it died mid-execution, or was removed from queue)
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}

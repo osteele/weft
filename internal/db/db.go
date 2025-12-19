@@ -204,19 +204,19 @@ func UpdateJobDescription(db *sql.DB, id int64, description string) error {
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?
-		 WHERE id = ? AND status = ?`,
-		exitCode, endTime, StatusCompleted, id, StatusRunning,
+		 WHERE id = ? AND status IN (?, ?)`,
+		exitCode, endTime, StatusCompleted, id, StatusRunning, StatusQueued,
 	)
 	return err
 }
 
-// MarkDeadByID marks a running job as dead by ID
+// MarkDeadByID marks a running or queued job as dead by ID
 func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE jobs SET end_time = ?, status = ?
-		 WHERE id = ? AND status = ?`,
-		endTime, StatusDead, id, StatusRunning,
+		 WHERE id = ? AND status IN (?, ?)`,
+		endTime, StatusDead, id, StatusRunning, StatusQueued,
 	)
 	return err
 }
@@ -506,6 +506,34 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 		hosts = append(hosts, host)
 	}
 	return hosts, rows.Err()
+}
+
+// ListUniqueActiveHosts returns unique hosts with running or queued jobs
+func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?)`, StatusRunning, StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
+// ListActiveJobs returns all running and queued jobs for a host
+func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
+	return queryJobs(db,
+		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
+		 FROM jobs WHERE host = ? AND status IN (?, ?) ORDER BY start_time ASC`,
+		host, StatusRunning, StatusQueued,
+	)
 }
 
 // ListAllQueued returns all queued jobs across all hosts
