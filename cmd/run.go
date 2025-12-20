@@ -265,9 +265,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nMonitor progress:\n")
-	fmt.Printf("  ssh %s -t 'tmux attach -t %s'  # Attach (Ctrl+B D to detach)\n", host, tmuxSession)
-	fmt.Printf("  remote-jobs log %d  # View log\n", jobID)
-	fmt.Printf("  remote-jobs log %d -f  # Follow log\n", jobID)
+	fmt.Printf("  remote-jobs log %d      # View log\n", jobID)
+	fmt.Printf("  remote-jobs log %d -f   # Follow log\n", jobID)
 	fmt.Printf("\nCheck status:\n")
 	fmt.Printf("  remote-jobs status %d\n", jobID)
 

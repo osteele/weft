@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -249,6 +250,7 @@ type Model struct {
 	logStale     bool             // true if showing cached content due to connection error
 	logCache     map[int64]string // cache of last successful log content per job
 	logLoading   bool
+	logViewport  viewport.Model
 	flashMessage string
 	flashIsError bool
 	flashExpiry  time.Time
@@ -377,6 +379,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Update viewport dimensions for log scrolling
+		detailHeight := int(float64(m.height) * 0.35)
+		m.logViewport.Width = m.width - 6
+		m.logViewport.Height = detailHeight - 4
 		return m, nil
 
 	case tea.KeyMsg:
@@ -427,6 +433,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.logContent = fmt.Sprintf("Error: %v", msg.err)
 			m.logStale = false
+			m.logViewport.SetContent(m.logContent)
 		} else if m.selectedJob != nil && msg.jobID == m.selectedJob.ID {
 			if msg.connError {
 				// Connection error - try to show cached content
@@ -443,6 +450,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logContent = msg.content
 				m.logStale = false
 			}
+			m.logViewport.SetContent(m.logContent)
+			m.logViewport.GotoBottom()
 		}
 		return m, nil
 
@@ -733,6 +742,16 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.showHelp = false
 		}
 		return m, nil
+	}
+
+	// When in log view, forward scroll keys to viewport
+	if m.selectedJob != nil {
+		switch msg.String() {
+		case "pgup", "pgdown", "home", "end", "ctrl+u", "ctrl+d":
+			var cmd tea.Cmd
+			m.logViewport, cmd = m.logViewport.Update(msg)
+			return m, cmd
+		}
 	}
 
 	// Toggle help overlay
@@ -1305,26 +1324,31 @@ func (m Model) renderLogsOnly(height int) string {
 	var content string
 	var staleIndicator string
 
+	// Calculate viewport dimensions (account for borders, title, padding)
+	viewportHeight := height - 4
+	viewportWidth := m.width - 6 // Account for panel borders and padding
+	if m.logStale {
+		viewportHeight -= 1 // Make room for stale indicator
+	}
+
 	if m.logLoading {
 		content = dimStyle.Render("Loading logs...")
 	} else if m.logContent == "" {
 		content = dimStyle.Render("No log content available")
 	} else {
-		// Take last N lines that fit
-		lines := strings.Split(m.logContent, "\n")
-		maxLines := height - 4 // Account for borders, title, and padding
+		// Create viewport with correct dimensions and content for rendering
+		vp := m.logViewport
+		vp.Width = viewportWidth
+		vp.Height = viewportHeight
+		vp.SetContent(m.logContent)
+
+		// Use viewport for scrollable content
 		if m.logStale {
-			maxLines -= 1 // Make room for stale indicator
-		}
-		if len(lines) > maxLines {
-			lines = lines[len(lines)-maxLines:]
-		}
-		if m.logStale {
-			// Use slightly dimmer style for stale content (readable but visually distinct)
+			// Use slightly dimmer style for stale content
 			staleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-			content = staleStyle.Render(strings.Join(lines, "\n"))
+			content = staleStyle.Render(vp.View())
 		} else {
-			content = strings.Join(lines, "\n")
+			content = vp.View()
 		}
 	}
 
@@ -1332,7 +1356,15 @@ func (m Model) renderLogsOnly(height int) string {
 	if m.logStale {
 		staleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render(" (cached - host offline)")
 	}
-	panelContent := titleStyle.Render(title) + staleIndicator + "\n" + content
+
+	// Show scroll position if there's more content
+	scrollInfo := ""
+	totalLines := strings.Count(m.logContent, "\n") + 1
+	if totalLines > viewportHeight && viewportHeight > 0 {
+		scrollInfo = fmt.Sprintf(" [%d/%d]", m.logViewport.YOffset+viewportHeight, totalLines)
+	}
+
+	panelContent := titleStyle.Render(title) + staleIndicator + scrollInfo + "\n" + content
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
@@ -2095,7 +2127,7 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 
 		// Fetch the log content
 		// Don't quote path - it contains ~ which needs shell expansion
-		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -50 %s 2>&1", logFile))
+		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
 		if err != nil {
 			// Check if it's a connection error
 			combined := stdout + stderr
