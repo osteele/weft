@@ -385,8 +385,8 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 // syncJobQuick is a quick version of syncJob with timeout
 func syncJobQuick(database *sql.DB, job *db.Job, timeout time.Duration) (bool, error) {
 	if job.SessionName == "" {
-		// Queue runner job - skip for fast sync
-		return false, nil
+		// Queue runner job - use optimized check
+		return syncQueueRunnerJobQuick(database, job, timeout)
 	}
 
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
@@ -420,4 +420,78 @@ func syncJobQuick(database *sql.DB, job *db.Job, timeout time.Duration) (bool, e
 		return false, err
 	}
 	return true, nil
+}
+
+// syncQueueRunnerJobQuick is an optimized version for queue runner jobs that combines
+// all status checks into a single SSH command to reduce latency
+func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job, timeout time.Duration) (bool, error) {
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = "default"
+	}
+
+	// Combine all checks into ONE SSH command for fast sync
+	// This checks: status file, .current file, .queue file, and PID file
+	// Returns: exit code (if completed), RUNNING, QUEUED, or DEAD
+	statusPattern := session.StatusFilePattern(job.ID)
+	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
+	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	pidPattern := session.PidFilePattern(job.ID)
+
+	combinedCmd := fmt.Sprintf(`
+		# Check status file (completed?)
+		if [ -f %s ]; then
+			cat %s 2>/dev/null | head -1
+		# Check if currently running in queue
+		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
+			echo RUNNING
+		# Check if waiting in queue
+		elif grep -q '^%d	' %s 2>/dev/null; then
+			echo QUEUED
+		# Check if process still running via PID
+		elif pid=$(cat %s 2>/dev/null) && [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
+			echo RUNNING
+		else
+			echo DEAD
+		fi
+	`, statusPattern, statusPattern,
+		currentFile, currentFile, job.ID,
+		job.ID, queueFile,
+		pidPattern)
+
+	stdout, _, err := ssh.RunWithTimeout(job.Host, combinedCmd, timeout)
+	if err != nil {
+		// Connection error - don't update status
+		return false, nil
+	}
+
+	result := strings.TrimSpace(stdout)
+
+	// Parse result and update database
+	switch result {
+	case "RUNNING", "QUEUED":
+		// Job is still active, no change needed
+		return false, nil
+	case "DEAD":
+		// Job has died unexpectedly
+		if err := db.MarkDeadByID(database, job.ID); err != nil {
+			return false, err
+		}
+		return true, nil
+	case "":
+		// Empty result (shouldn't happen with our logic, but handle gracefully)
+		return false, nil
+	default:
+		// Numeric exit code - job completed
+		exitCode, parseErr := strconv.Atoi(result)
+		if parseErr != nil {
+			// Unexpected output - don't change status
+			return false, nil
+		}
+		endTime := time.Now().Unix()
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 }
