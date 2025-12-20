@@ -286,7 +286,6 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Queue runner '%s' started on %s\n", queueName, host)
 	fmt.Printf("Session: %s\n\n", runnerSession)
 	fmt.Printf("Monitor:\n")
-	fmt.Printf("  ssh %s -t 'tmux attach -t %s'  # Attach (Ctrl+B D to detach)\n", host, runnerSession)
 	fmt.Printf("  remote-jobs queue status %s", host)
 	if queueName != defaultQueueName {
 		fmt.Printf(" --queue %s", queueName)

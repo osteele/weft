@@ -405,7 +405,7 @@ User: remote-jobs sync
 ### Why tmux instead of nohup/screen?
 
 - **Session naming**: tmux allows named sessions that can be queried
-- **Attach/detach**: Easy to attach for debugging
+- **Session persistence**: Sessions survive SSH disconnects
 - **Widely available**: Pre-installed on most Linux servers
 - **Status checking**: Can detect if session is still running
 

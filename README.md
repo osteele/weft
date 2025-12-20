@@ -600,17 +600,17 @@ The database is automatically created on first use and updated when checking job
 
 ## Manual Monitoring
 
-View last 50 lines of a session (replace `42` with actual job ID):
+View last 50 lines of a job's output (replace `42` with actual job ID):
 ```bash
-ssh deepthought 'tmux capture-pane -t rj-42 -p | tail -50'
+remote-jobs log 42
 ```
 
-Attach to a session interactively:
+Follow log output in real-time:
 ```bash
-ssh deepthought -t 'tmux attach -t rj-42'
+remote-jobs log 42 -f
 ```
 
-Press `Ctrl+B D` to detach from the session while leaving it running.
+Press `Ctrl+C` to stop following.
 
 ## Slack Notifications
 
@@ -700,4 +700,4 @@ Notifications include:
 2. The SSH command returns immediately (non-blocking)
 3. The tmux session continues running on the remote host
 4. You can close your laptop, disconnect, etc.
-5. `remote-jobs check` or `ssh + tmux attach` lets you check on the job later
+5. `remote-jobs log` or `remote-jobs status` lets you check on the job later
