@@ -49,6 +49,7 @@ Examples:
   remote-jobs queue add cool30 'python train.py --epochs 100'
   remote-jobs queue add -d "Training run 1" cool30 'python train.py'
   remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
+  remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes
   remote-jobs queue add --queue gpu cool30 'python train.py'`,
 	Args: cobra.ExactArgs(2),
 	RunE: runQueueAdd,
@@ -133,6 +134,8 @@ var (
 	queueDir_        string
 	queueDescription string
 	queueEnvVars     []string
+	queueAfter       int64
+	queueAfterAny    int64
 )
 
 func init() {
@@ -152,6 +155,8 @@ func init() {
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path)")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "Description of the job")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
+	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
+	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
 }
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
@@ -190,14 +195,24 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Append job to queue file
-	// Format: job_id\tworking_dir\tcommand\tdescription\tenv_vars_b64
+	// Format: job_id\tworking_dir\tcommand\tdescription\tenv_vars_b64\tafter_job_id
 	// env_vars_b64 is base64-encoded newline-separated VAR=value pairs
+	// after_job_id is the job ID to wait for (empty if no dependency)
 	queueFile := fmt.Sprintf("%s/%s.queue", remoteQueueDir, queueName)
 	envVarsB64 := ""
 	if len(queueEnvVars) > 0 {
 		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(queueEnvVars, "\n")))
 	}
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s", jobID, workingDir, command, queueDescription, envVarsB64)
+	afterJobStr := ""
+	if queueAfter > 0 && queueAfterAny > 0 {
+		return fmt.Errorf("cannot use both --after and --after-any")
+	}
+	if queueAfter > 0 {
+		afterJobStr = fmt.Sprintf("%d", queueAfter)
+	} else if queueAfterAny > 0 {
+		afterJobStr = fmt.Sprintf("%d:any", queueAfterAny)
+	}
+	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, queueDescription, envVarsB64, afterJobStr)
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 
 	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
@@ -214,6 +229,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	if len(queueEnvVars) > 0 {
 		fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+	}
+	if queueAfter > 0 {
+		fmt.Printf("  After job: %d (will wait for success)\n", queueAfter)
+	}
+	if queueAfterAny > 0 {
+		fmt.Printf("  After job: %d (will wait for completion)\n", queueAfterAny)
 	}
 	fmt.Printf("\nTo start the queue runner (if not already running):\n")
 	fmt.Printf("  remote-jobs queue start %s", host)

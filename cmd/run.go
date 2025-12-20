@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +28,7 @@ Examples:
   remote-jobs run -d "Training GPT-2" cool30 'with-gpu python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
   remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 cool30 'python train.py'
+  remote-jobs run --after 42 cool30 'python eval.py'  # Run after job 42 completes
   remote-jobs run --queue cool30 'python train.py'
   remote-jobs run -f cool30 'python train.py'   # Start and follow log
   remote-jobs run cool30 --kill 42              # Kill job 42`,
@@ -56,6 +59,8 @@ var (
 	runFrom        int64
 	runTimeout     string
 	runEnvVars     []string
+	runAfter       int64
+	runAfterAny    int64
 )
 
 func init() {
@@ -70,6 +75,8 @@ func init() {
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID (replaces retry)")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
+	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
+	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -133,6 +140,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runFollow && runQueue {
 		return fmt.Errorf("--follow cannot be used with --queue")
 	}
+	if runFollow && runAfter > 0 {
+		return fmt.Errorf("--follow cannot be used with --after")
+	}
+	if runFollow && runAfterAny > 0 {
+		return fmt.Errorf("--follow cannot be used with --after-any")
+	}
+	if runAfter > 0 && runAfterAny > 0 {
+		return fmt.Errorf("cannot use both --after and --after-any")
+	}
+
+	// --after and --after-any imply queue mode (job added to remote queue for dependency handling)
+	if runAfter > 0 || runAfterAny > 0 {
+		runQueue = true
+	}
 
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided
@@ -152,8 +173,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Queue-only mode
+	// Queue-only mode (including when --after is used)
 	if runQueue {
+		// When --after or --after-any is specified, use the remote queue system for dependency handling
+		if runAfter > 0 {
+			return runQueueWithDependency(database, host, workingDir, command, runDescription, runEnvVars, runAfter, false)
+		}
+		if runAfterAny > 0 {
+			return runQueueWithDependency(database, host, workingDir, command, runDescription, runEnvVars, runAfterAny, true)
+		}
+
+		// Standard local pending mode (no dependency)
 		jobID, err := db.RecordPending(database, host, workingDir, command, runDescription)
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -431,4 +461,63 @@ func getSlackWebhook() string {
 	}
 
 	return ""
+}
+
+// runQueueWithDependency adds a job to the remote queue with a dependency on another job.
+// This is similar to queue.go's runQueueAdd but called from run.go when --after is used.
+func runQueueWithDependency(database *sql.DB, host, workingDir, command, description string, envVars []string, afterJobID int64, afterAny bool) error {
+	const remoteQueueDir = "~/.cache/remote-jobs/queue"
+	const defaultQueueName = "default"
+
+	// Record job as queued
+	jobID, err := db.RecordQueued(database, host, workingDir, command, description, defaultQueueName)
+	if err != nil {
+		return fmt.Errorf("queue job: %w", err)
+	}
+
+	// Create queue directory on remote
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteQueueDir)
+	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
+		db.DeleteJob(database, jobID)
+		return fmt.Errorf("create queue directory: %s", stderr)
+	}
+
+	// Append job to queue file
+	// Format: job_id\tworking_dir\tcommand\tdescription\tenv_vars_b64\tafter_job_id
+	// after_job_id format: "ID" (wait for success) or "ID:any" (wait for completion)
+	queueFile := fmt.Sprintf("%s/%s.queue", remoteQueueDir, defaultQueueName)
+	envVarsB64 := ""
+	if len(envVars) > 0 {
+		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(envVars, "\n")))
+	}
+	afterJobStr := fmt.Sprintf("%d", afterJobID)
+	if afterAny {
+		afterJobStr = fmt.Sprintf("%d:any", afterJobID)
+	}
+	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, description, envVarsB64, afterJobStr)
+	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
+
+	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
+		db.DeleteJob(database, jobID)
+		return fmt.Errorf("append to queue: %s", stderr)
+	}
+
+	waitType := "succeeds"
+	if afterAny {
+		waitType = "completes"
+	}
+	fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterJobID, waitType)
+	fmt.Printf("  Working dir: %s\n", workingDir)
+	fmt.Printf("  Command: %s\n", command)
+	if description != "" {
+		fmt.Printf("  Description: %s\n", description)
+	}
+	if len(envVars) > 0 {
+		fmt.Printf("  Env vars: %s\n", strings.Join(envVars, ", "))
+	}
+	fmt.Printf("  After job: %d (%s)\n", afterJobID, waitType)
+	fmt.Printf("\nTo start the queue runner (if not already running):\n")
+	fmt.Printf("  remote-jobs queue start %s\n", host)
+
+	return nil
 }

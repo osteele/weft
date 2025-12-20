@@ -43,6 +43,8 @@ remote-jobs run [flags] <host> <command...>
 - `--queue-on-fail`: Queue job if connection fails
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
+- `--after ID`: Start job after another job succeeds (implies `--queue`)
+- `--after-any ID`: Start job after another job completes, success or failure (implies `--queue`)
 - `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
 
 **Examples:**
@@ -67,6 +69,12 @@ remote-jobs run --queue -d "Training run" deepthought 'python train.py'
 
 # Auto-queue if connection fails
 remote-jobs run --queue-on-fail -d "Training run" deepthought 'python train.py'
+
+# Run job after another succeeds (auto-queues)
+remote-jobs run --after 42 deepthought 'python eval.py'
+
+# Run cleanup job after another completes (success or failure)
+remote-jobs run --after-any 42 deepthought 'python cleanup.py'
 
 # Kill a job
 remote-jobs run deepthought --kill 42
@@ -488,6 +496,8 @@ remote-jobs queue add [flags] <host> <command...>
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
+- `--after ID`: Start job after another job succeeds
+- `--after-any ID`: Start job after another job completes (success or failure)
 - `--queue NAME`: Queue name (default: "default")
 
 **Examples:**
@@ -495,6 +505,8 @@ remote-jobs queue add [flags] <host> <command...>
 remote-jobs queue add cool30 'python train.py --epochs 100'
 remote-jobs queue add -d "Training run 1" cool30 'python train.py'
 remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
+remote-jobs queue add --after 42 cool30 'python eval.py'       # Run after job 42 succeeds
+remote-jobs queue add --after-any 42 cool30 'python cleanup.py' # Run after job 42 completes (success or failure)
 remote-jobs queue add --queue gpu cool30 'python train.py'
 ```
 
@@ -592,6 +604,35 @@ remote-jobs queue list cool30
 # Stop the queue after current job
 remote-jobs queue stop cool30
 ```
+
+#### Job Dependencies
+
+You can create job chains where one job runs after another completes:
+
+```bash
+# Start the queue runner
+remote-jobs queue start cool30
+
+# Job 42: Training
+remote-jobs queue add -d "Training" cool30 "python train.py"
+
+# Job 43: Evaluate after training succeeds (waits for job 42)
+remote-jobs queue add --after 42 -d "Evaluation" cool30 "python eval.py"
+
+# Job 44: Generate report after evaluation (waits for job 43)
+remote-jobs queue add --after 43 -d "Report" cool30 "python report.py"
+
+# Job 45: Cleanup runs regardless of whether job 42 succeeded or failed
+remote-jobs queue add --after-any 42 -d "Cleanup" cool30 "python cleanup.py"
+
+# Disconnect laptop - jobs run in sequence on the remote host
+```
+
+**Dependency flags:**
+- `--after ID`: Waits for the job to succeed (exit code 0). Skips if parent fails.
+- `--after-any ID`: Waits for the job to complete (any exit code). Always runs.
+
+Both flags work entirely on the remote host (no laptop connection needed) and can be used with both `queue add` and `run` commands.
 
 ## Configuration
 
