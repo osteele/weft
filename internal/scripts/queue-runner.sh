@@ -7,7 +7,9 @@
 #   queue-runner.sh <queue-name>
 #
 # Queue file format (one job per line, tab-separated):
-#   {job_id}\t{working_dir}\t{command}\t{description}
+#   {job_id}\t{working_dir}\t{command}\t{description}\t{env_vars_b64}
+#
+# env_vars_b64 is base64-encoded newline-separated VAR=value pairs (optional)
 #
 # Files:
 #   ~/.cache/remote-jobs/queue/{queue-name}.queue    - Queue file (jobs waiting)
@@ -80,8 +82,8 @@ while true; do
     tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
     mv "$temp_file" "$QUEUE_FILE"
 
-    # Parse job line (tab-separated: job_id, working_dir, command, description)
-    IFS=$'\t' read -r job_id working_dir command description <<< "$job_line"
+    # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64)
+    IFS=$'\t' read -r job_id working_dir command description env_vars_b64 <<< "$job_line"
 
     if [ -z "$job_id" ] || [ -z "$working_dir" ] || [ -z "$command" ]; then
         echo "Invalid job line, skipping: $job_line"
@@ -126,6 +128,9 @@ while true; do
         echo "job_id: $job_id"
         echo "cd: $working_dir"
         echo "cmd: $command"
+        if [ -n "$env_vars_b64" ]; then
+            echo "env: $(echo "$env_vars_b64" | base64 -d 2>/dev/null | tr '\n' ' ')"
+        fi
         echo "==="
     } > "$log_file"
 
@@ -139,6 +144,14 @@ while true; do
             echo "ERROR: Could not cd to $working_dir" >> "$log_file"
             exit 1
         }
+
+        # Apply environment variables if present (base64 encoded, newline-separated)
+        if [ -n "$env_vars_b64" ]; then
+            while IFS= read -r env_line; do
+                [ -n "$env_line" ] && export "$env_line"
+            done < <(echo "$env_vars_b64" | base64 -d 2>/dev/null)
+        fi
+
         # Record PID before exec - after exec, this becomes the command's PID
         echo $BASHPID > "$pid_file"
         # Use exec to replace this subshell with the actual command process

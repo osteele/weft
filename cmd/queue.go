@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -47,6 +48,7 @@ in FIFO order.
 Examples:
   remote-jobs queue add cool30 'python train.py --epochs 100'
   remote-jobs queue add -d "Training run 1" cool30 'python train.py'
+  remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
   remote-jobs queue add --queue gpu cool30 'python train.py'`,
 	Args: cobra.ExactArgs(2),
 	RunE: runQueueAdd,
@@ -130,6 +132,7 @@ var (
 	queueName        string
 	queueDir_        string
 	queueDescription string
+	queueEnvVars     []string
 )
 
 func init() {
@@ -148,6 +151,7 @@ func init() {
 
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path)")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "Description of the job")
+	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 }
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
@@ -186,9 +190,14 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Append job to queue file
-	// Format: job_id\tworking_dir\tcommand\tdescription
+	// Format: job_id\tworking_dir\tcommand\tdescription\tenv_vars_b64
+	// env_vars_b64 is base64-encoded newline-separated VAR=value pairs
 	queueFile := fmt.Sprintf("%s/%s.queue", remoteQueueDir, queueName)
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s", jobID, workingDir, command, queueDescription)
+	envVarsB64 := ""
+	if len(queueEnvVars) > 0 {
+		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(queueEnvVars, "\n")))
+	}
+	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s", jobID, workingDir, command, queueDescription, envVarsB64)
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 
 	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
@@ -202,6 +211,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Command: %s\n", command)
 	if queueDescription != "" {
 		fmt.Printf("  Description: %s\n", queueDescription)
+	}
+	if len(queueEnvVars) > 0 {
+		fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
 	}
 	fmt.Printf("\nTo start the queue runner (if not already running):\n")
 	fmt.Printf("  remote-jobs queue start %s", host)

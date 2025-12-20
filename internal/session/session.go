@@ -210,8 +210,9 @@ type WrapperCommandParams struct {
 	LogFile    string
 	StatusFile string
 	PidFile    string
-	NotifyCmd  string // Optional notification command to run after job completes
-	Timeout    string // Optional timeout duration (e.g., "2h", "30m")
+	NotifyCmd  string   // Optional notification command to run after job completes
+	Timeout    string   // Optional timeout duration (e.g., "2h", "30m")
+	EnvVars    []string // Optional environment variables (VAR=value format)
 }
 
 // BuildWrapperCommand creates the bash command that wraps a job with logging,
@@ -225,7 +226,15 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 	// The command runs in a subshell that writes its PID then execs bash -c
 	// This ensures the recorded PID is the actual job process, not a wrapper
 	// The command is escaped for use in single quotes passed to bash -c
-	escapedCmd := escapeForBashC(params.Command)
+
+	// Build environment variable prefix if any env vars are specified
+	envPrefix := ""
+	for _, ev := range params.EnvVars {
+		// Each env var is in VAR=value format, export it before the command
+		envPrefix += fmt.Sprintf("export %s; ", escapeForBashC(ev))
+	}
+
+	escapedCmd := envPrefix + escapeForBashC(params.Command)
 
 	// Prepare working directory: replace ~ with $HOME and quote for spaces
 	// This allows both tilde expansion and support for spaces in paths

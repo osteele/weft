@@ -229,6 +229,7 @@ const (
 	inputDescription
 	inputCommand
 	inputWorkingDir
+	inputEnvVars
 )
 
 // Model is the main TUI state
@@ -323,7 +324,7 @@ func NewModel(database *sql.DB) Model {
 // NewModelWithOptions creates a new TUI model with custom options
 func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Create text inputs for new job form
-	inputs := make([]textinput.Model, 4)
+	inputs := make([]textinput.Model, 5)
 
 	inputs[inputHost] = textinput.New()
 	inputs[inputHost].Placeholder = "e.g., cool30"
@@ -348,6 +349,12 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputWorkingDir].Prompt = ""
 	inputs[inputWorkingDir].Width = 40
 	inputs[inputWorkingDir].CharLimit = 256
+
+	inputs[inputEnvVars] = textinput.New()
+	inputs[inputEnvVars].Placeholder = "VAR=value, VAR2=value2 (optional)"
+	inputs[inputEnvVars].Prompt = ""
+	inputs[inputEnvVars].Width = 40
+	inputs[inputEnvVars].CharLimit = 512
 
 	return Model{
 		database:                database,
@@ -1236,7 +1243,7 @@ func (m Model) renderInputForm(background string) string {
 	var b strings.Builder
 	b.WriteString("New Job\n\n")
 
-	labels := []string{"Host:", "Description:", "Command:", "Working Dir:"}
+	labels := []string{"Host:", "Description:", "Command:", "Working Dir:", "Env Vars:"}
 	for i, input := range m.inputs {
 		label := labelStyle
 		if i == m.inputFocus {
@@ -2710,9 +2717,21 @@ func (m Model) createJob() tea.Cmd {
 	command := strings.TrimSpace(m.inputs[inputCommand].Value())
 	description := strings.TrimSpace(m.inputs[inputDescription].Value())
 	workingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
+	envVarsStr := strings.TrimSpace(m.inputs[inputEnvVars].Value())
 
 	if workingDir == "" {
 		workingDir = "~"
+	}
+
+	// Parse env vars (comma-separated VAR=value pairs)
+	var envVars []string
+	if envVarsStr != "" {
+		for _, ev := range strings.Split(envVarsStr, ",") {
+			ev = strings.TrimSpace(ev)
+			if ev != "" {
+				envVars = append(envVars, ev)
+			}
+		}
 	}
 
 	return func() tea.Msg {
@@ -2759,6 +2778,7 @@ func (m Model) createJob() tea.Cmd {
 			LogFile:    logFile,
 			StatusFile: statusFile,
 			PidFile:    pidFile,
+			EnvVars:    envVars,
 		})
 
 		// Escape single quotes for embedding in single-quoted string

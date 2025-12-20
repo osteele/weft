@@ -25,6 +25,7 @@ Examples:
   remote-jobs run cool30 'python train.py'
   remote-jobs run -d "Training GPT-2" cool30 'with-gpu python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
+  remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 cool30 'python train.py'
   remote-jobs run --queue cool30 'python train.py'
   remote-jobs run -f cool30 'python train.py'   # Start and follow log
   remote-jobs run cool30 --kill 42              # Kill job 42`,
@@ -54,6 +55,7 @@ var (
 	runKillJobID   int64
 	runFrom        int64
 	runTimeout     string
+	runEnvVars     []string
 )
 
 func init() {
@@ -67,6 +69,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'remote-jobs kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID (replaces retry)")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
+	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -288,6 +291,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		PidFile:    pidFile,
 		NotifyCmd:  notifyCmd,
 		Timeout:    runTimeout,
+		EnvVars:    runEnvVars,
 	})
 
 	// Escape single quotes in wrapped command for embedding in single-quoted string

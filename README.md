@@ -37,6 +37,7 @@ remote-jobs run [flags] <host> <command...>
 **Flags:**
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job (for logging and queries)
+- `-e, --env VAR=value`: Set environment variable (can be repeated)
 - `-f, --follow`: Follow log output after starting (Ctrl+C to stop following; job continues)
 - `--queue`: Queue job for later instead of running now
 - `--queue-on-fail`: Queue job if connection fails
@@ -57,6 +58,9 @@ remote-jobs run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
 
 # Start and follow log output
 remote-jobs run -f -d "Training run" deepthought 'python train.py'
+
+# Set environment variables
+remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python train.py'
 
 # Queue for later (doesn't start immediately)
 remote-jobs run --queue -d "Training run" deepthought 'python train.py'
@@ -406,6 +410,19 @@ remote-jobs run --timeout 2h cool30 "python train.py"
 remote-jobs run --timeout 30m --from 42      # Retry with timeout
 ```
 
+**Environment variables (`-e, --env`)**:
+```bash
+remote-jobs run -e VAR=value <host> <command>
+```
+
+Set environment variables for the remote job. Can be repeated for multiple variables:
+
+```bash
+remote-jobs run -e CUDA_VISIBLE_DEVICES=0 cool30 "python train.py"
+remote-jobs run -e BATCH_SIZE=32 -e LR=0.001 cool30 "python train.py"
+remote-jobs queue add -e TMPDIR=/mnt/data/tmp cool30 "python train.py"
+```
+
 **Queue for later (`--queue`)**:
 ```bash
 remote-jobs run --queue <host> <command>
@@ -470,12 +487,14 @@ remote-jobs queue add [flags] <host> <command...>
 **Flags:**
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job
+- `-e, --env VAR=value`: Set environment variable (can be repeated)
 - `--queue NAME`: Queue name (default: "default")
 
 **Examples:**
 ```bash
 remote-jobs queue add cool30 'python train.py --epochs 100'
 remote-jobs queue add -d "Training run 1" cool30 'python train.py'
+remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
 remote-jobs queue add --queue gpu cool30 'python train.py'
 ```
 
