@@ -729,3 +729,9 @@ Notifications include:
 3. The tmux session continues running on the remote host
 4. You can close your laptop, disconnect, etc.
 5. `remote-jobs log` or `remote-jobs job status` lets you check on the job later
+
+## Documentation
+
+- [Architecture](docs/architecture.md) - Detailed technical architecture and design
+- [Comparison to SLURM](docs/comparison-to-slurm.md) - How remote-jobs compares to HPC workload managers
+- [Ideas](docs/IDEAS.md) - Future feature ideas and enhancements
