@@ -30,6 +30,13 @@ Examples:
 
 var syncVerbose bool
 
+const (
+	// FastSyncTimeout is used for quick syncs in list/status commands
+	FastSyncTimeout = 2 * time.Second
+	// NormalSyncTimeout is used for explicit sync commands
+	NormalSyncTimeout = 30 * time.Second
+)
+
 func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVarP(&syncVerbose, "verbose", "v", false, "Show detailed progress")
@@ -108,6 +115,14 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		}
 		if changed {
 			updated++
+		}
+	}
+
+	// Execute any deferred operations for this host
+	if err := executeDeferredOperations(database, host); err != nil {
+		// Don't fail the sync if deferred operations fail
+		if syncVerbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to execute deferred operations for %s: %v\n", host, err)
 		}
 	}
 
@@ -226,6 +241,181 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 
 	// Job is not current, not in queue, process not running, and has no status file - it's dead
 	// (Either it died mid-execution, or was removed from queue)
+	if err := db.MarkDeadByID(database, job.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// executeDeferredOperations executes pending operations for a host
+func executeDeferredOperations(database *sql.DB, host string) error {
+	ops, err := db.GetDeferredOperations(database, host)
+	if err != nil {
+		return fmt.Errorf("get deferred operations: %w", err)
+	}
+
+	if len(ops) == 0 {
+		return nil
+	}
+
+	if syncVerbose {
+		fmt.Printf("  %s: executing %d deferred operation(s)\n", host, len(ops))
+	}
+
+	for _, op := range ops {
+		var err error
+		switch op.Operation {
+		case db.OpKillJob:
+			err = executeDeferredKill(host, op)
+		case db.OpRemoveQueued:
+			err = executeDeferredRemoveQueued(host, op)
+		case db.OpMoveFromQueue:
+			err = executeDeferredMoveFrom(host, op)
+		default:
+			err = fmt.Errorf("unknown operation: %s", op.Operation)
+		}
+
+		if err != nil {
+			if syncVerbose {
+				fmt.Fprintf(os.Stderr, "    Warning: operation %s for job %d failed: %v\n",
+					op.Operation, op.JobID, err)
+			}
+			// Continue with other operations
+			continue
+		}
+
+		// Remove completed operation
+		if err := db.DeleteDeferredOperation(database, op.ID); err != nil {
+			if syncVerbose {
+				fmt.Fprintf(os.Stderr, "    Warning: failed to delete deferred operation %d: %v\n",
+					op.ID, err)
+			}
+		} else if syncVerbose {
+			fmt.Printf("    Completed: %s for job %d\n", op.Operation, op.JobID)
+		}
+	}
+
+	return nil
+}
+
+// executeDeferredKill kills a job's tmux session
+func executeDeferredKill(host string, op *db.DeferredOperation) error {
+	tmuxSession := session.TmuxSessionName(op.JobID)
+	return ssh.TmuxKillSession(host, tmuxSession)
+}
+
+// executeDeferredRemoveQueued removes a job from the queue file
+func executeDeferredRemoveQueued(host string, op *db.DeferredOperation) error {
+	queueName := op.QueueName
+	if queueName == "" {
+		queueName = "default"
+	}
+	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", op.JobID, queueFile)
+	_, _, err := ssh.Run(host, removeCmd)
+	return err
+}
+
+// executeDeferredMoveFrom removes a job from the old host's queue file (for job move)
+func executeDeferredMoveFrom(host string, op *db.DeferredOperation) error {
+	queueName := op.QueueName
+	if queueName == "" {
+		queueName = "default"
+	}
+	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", op.JobID, queueFile)
+	_, _, err := ssh.Run(host, removeCmd)
+	return err
+}
+
+// performFastSync performs a quick sync with fast timeout for list/status commands
+// Returns true if sync completed, false if timed out
+func performFastSync(database *sql.DB, verbose bool) bool {
+	hosts, err := db.ListUniqueActiveHosts(database)
+	if err != nil || len(hosts) == 0 {
+		return true
+	}
+
+	// Set fast timeout for SSH operations
+	// We'll use goroutines with a timeout context
+	allCompleted := true
+	for _, host := range hosts {
+		// Try quick sync, but don't wait if it times out
+		done := make(chan bool, 1)
+		go func(h string) {
+			_, err := syncHostWithTimeout(database, h, FastSyncTimeout)
+			done <- (err == nil)
+		}(host)
+
+		select {
+		case <-done:
+			// Sync completed
+		case <-time.After(FastSyncTimeout):
+			// Timed out
+			allCompleted = false
+		}
+	}
+
+	return allCompleted
+}
+
+// syncHostWithTimeout syncs a host with a specific timeout
+func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (int, error) {
+	// This is a simplified version of syncHost that uses quick timeouts
+	jobs, err := db.ListActiveJobs(database, host)
+	if err != nil {
+		return 0, err
+	}
+
+	var updated int
+	for _, job := range jobs {
+		// Use quick check with timeout
+		changed, err := syncJobQuick(database, job, timeout)
+		if err != nil {
+			return updated, err
+		}
+		if changed {
+			updated++
+		}
+	}
+
+	return updated, nil
+}
+
+// syncJobQuick is a quick version of syncJob with timeout
+func syncJobQuick(database *sql.DB, job *db.Job, timeout time.Duration) (bool, error) {
+	if job.SessionName == "" {
+		// Queue runner job - skip for fast sync
+		return false, nil
+	}
+
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	exists, err := ssh.TmuxSessionExistsQuick(job.Host, tmuxSession)
+	if err != nil {
+		return false, err
+	}
+
+	if exists {
+		return false, nil
+	}
+
+	// Session doesn't exist - check for status file
+	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
+	content, err := ssh.ReadRemoteFileQuick(job.Host, statusFile)
+	if err != nil {
+		return false, err
+	}
+
+	if content != "" {
+		exitCode, _ := strconv.Atoi(content)
+		endTime := time.Now().Unix()
+		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// No status file - mark as dead
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}

@@ -180,7 +180,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	remoteQueueDir := queueDir
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteQueueDir)
 	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to create queue directory: %s\n", stderr)
+		// Failed to create directory - delete job from DB and return error
+		db.DeleteJob(database, jobID)
+		return fmt.Errorf("create queue directory: %s", stderr)
 	}
 
 	// Append job to queue file
@@ -190,6 +192,8 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 
 	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
+		// Failed to append to queue - delete job from DB and return error
+		db.DeleteJob(database, jobID)
 		return fmt.Errorf("append to queue: %s", stderr)
 	}
 
@@ -451,11 +455,30 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
 			jobID, queueFile, queueFile, queueFile, queueFile)
 
-		if _, stderr, err := ssh.Run(job.Host, removeCmd); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: job %d: failed to remove from remote queue: %s\n", jobID, stderr)
+		_, stderr, err := ssh.Run(job.Host, removeCmd)
+		if err != nil {
+			if ssh.IsConnectionError(stderr) {
+				// Host unreachable - add deferred operation
+				fmt.Printf("Host %s unreachable, will remove on next sync\n", job.Host)
+				if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, jobID, jobQueueName); err != nil {
+					errors = append(errors, fmt.Sprintf("job %d: failed to add deferred operation: %v", jobID, err))
+					continue
+				}
+				// Mark as dead in database but don't delete the record yet
+				// The deferred operation will complete the removal
+				if err := db.MarkDeadByID(database, jobID); err != nil {
+					errors = append(errors, fmt.Sprintf("job %d: failed to mark as dead: %v", jobID, err))
+					continue
+				}
+				fmt.Printf("Job %d marked for removal on next sync\n", jobID)
+				continue
+			}
+			// Non-connection error - don't remove from DB
+			errors = append(errors, fmt.Sprintf("job %d: failed to remove from remote queue: %s", jobID, strings.TrimSpace(stderr)))
+			continue
 		}
 
-		// Delete from local database
+		// Delete from local database only after successful remote removal
 		if err := db.DeleteJob(database, jobID); err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: delete failed: %v", jobID, err))
 			continue

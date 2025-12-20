@@ -21,7 +21,8 @@ Examples:
 }
 
 func init() {
-	rootCmd.AddCommand(describeCmd)
+	// Removed: Describe command is now only available as `job describe`
+	// rootCmd.AddCommand(describeCmd)
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {

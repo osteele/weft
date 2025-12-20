@@ -40,6 +40,8 @@ remote-jobs run [flags] <host> <command...>
 - `-f, --follow`: Follow log output after starting (Ctrl+C to stop following; job continues)
 - `--queue`: Queue job for later instead of running now
 - `--queue-on-fail`: Queue job if connection fails
+- `--from ID`: Copy settings from existing job ID (allows overriding)
+- `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
 - `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
 
 **Examples:**
@@ -76,42 +78,27 @@ The command:
 - Returns immediately (non-blocking)
 - Prints the job ID and instructions for monitoring
 
-### remote-jobs check
+### remote-jobs job status
 
-Check the status of all running tmux sessions on a remote host.
-
-```bash
-remote-jobs check <host>
-```
-
-Shows:
-- List of all active tmux sessions
-- Status of each job (RUNNING or FINISHED)
-- Exit code for finished jobs (success ✓ or failure ✗)
-- Last 10 lines of output from each session
-- Updates the local database when status changes are detected
-- Detects dead jobs that terminated without completing normally
-
-### remote-jobs status
-
-Check the status of a specific job by ID.
+Check the status of one or more jobs by ID.
 
 ```bash
-remote-jobs status <job-id>
+remote-jobs job status <job-id>...
 ```
 
-**Exit codes:**
+**Exit codes (single job only):**
 - `0`: Job completed successfully
 - `1`: Job failed or error
 - `2`: Job is still running
 - `3`: Job not found
 
-**Example:**
+**Examples:**
 ```bash
-remote-jobs status 42    # Check status of job #42
+remote-jobs job status 42           # Check status of job #42
+remote-jobs job status 42 43 44     # Check multiple jobs
 ```
 
-This is faster than `check` for checking a single job because it:
+This command:
 - First checks the local database for terminated jobs
 - Only queries the remote host if the job is still running
 - Updates the database if status has changed
@@ -252,12 +239,12 @@ Shows all hosts that have had jobs, with system info, queue status, and resource
 
 The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 
-### remote-jobs list
+### remote-jobs job list
 
 Query and search job history from the local database.
 
 ```bash
-remote-jobs list [flags]
+remote-jobs job list [flags]
 ```
 
 **Flags:**
@@ -265,7 +252,7 @@ remote-jobs list [flags]
 - `--completed`: Show only completed jobs
 - `--dead`: Show only dead jobs
 - `--pending`: Show only pending jobs (not yet started)
-- `--host HOST`: Filter by host
+- `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
 - `--limit N`: Limit results (default: 50)
 - `--show ID`: Show detailed info for a specific job
@@ -274,14 +261,14 @@ remote-jobs list [flags]
 
 **Examples:**
 ```bash
-remote-jobs list                       # Recent jobs
-remote-jobs list --running             # Running jobs
-remote-jobs list --running --sync      # Running jobs (sync first)
-remote-jobs list --pending             # Pending jobs
-remote-jobs list --host deepthought         # Jobs on deepthought
-remote-jobs list --search training     # Search jobs
-remote-jobs list --show 42             # Job details
-remote-jobs list --cleanup 30          # Remove old jobs
+remote-jobs job list                          # Recent jobs
+remote-jobs job list --running                # Running jobs
+remote-jobs job list --running --sync         # Running jobs (sync first)
+remote-jobs job list --pending                # Pending jobs
+remote-jobs job list --host deepthought       # Jobs on deepthought
+remote-jobs job list --search training        # Search jobs
+remote-jobs job list --show 42                # Job details
+remote-jobs job list --cleanup 30             # Remove old jobs
 ```
 
 ### remote-jobs sync
@@ -359,35 +346,76 @@ remote-jobs log 42 -f --grep epoch      # Follow, filter for "epoch"
 - `--follow` cannot be used with `--to`
 - `--grep` can be combined with any other option
 
-### remote-jobs restart
+### remote-jobs job restart
 
 Restart a job using its saved metadata.
 
 ```bash
-remote-jobs restart <job-id>
+remote-jobs job restart <job-id>
 ```
 
 This kills the existing session (if any) and starts a new one with the same command and working directory, creating a new job ID.
 
-### remote-jobs retry
+**Note:** For most use cases, `run --from <id>` is more flexible as it allows overriding settings.
 
-Retry pending jobs that couldn't start (e.g., due to connection failures).
+### remote-jobs job move
+
+Move a queued job to a different host.
 
 ```bash
-remote-jobs retry <job-id> [--host <new-host>]
-remote-jobs retry --list [--host <host>]
-remote-jobs retry --all [--host <host>]
-remote-jobs retry --delete <job-id>
+remote-jobs job move <job-id> <new-host>
 ```
+
+This command updates the host for a job that hasn't started yet (status=queued). Useful when you've queued work but want to run it on a different machine.
 
 **Examples:**
 ```bash
-remote-jobs retry --list               # List pending jobs
-remote-jobs retry 42                   # Retry job #42
-remote-jobs retry 42 --host skynet     # Retry on different host
-remote-jobs retry --all                # Retry all pending jobs
-remote-jobs retry --all --host deepthought  # Retry pending jobs for deepthought
-remote-jobs retry --delete 42          # Remove pending job
+remote-jobs job move 42 cool100   # Move job 42 to cool100
+remote-jobs job move 43 studio    # Move job 43 to studio
+```
+
+**Note:** This only works for queued jobs. For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
+
+### Advanced run options
+
+The `run` command supports several advanced options for more control:
+
+**Copy settings from existing job (`--from`)**:
+```bash
+remote-jobs run --from <job-id> [<host>] [<command>]
+```
+
+Copies command, working directory, and description from an existing job. You can override any of these:
+
+```bash
+remote-jobs run --from 42                    # Rerun job 42 with same settings
+remote-jobs run --from 42 cool100            # Rerun on different host
+remote-jobs run --from 42 --timeout 4h       # Rerun with longer timeout
+remote-jobs run --from 42 cool100 "python train.py --epochs 200"  # Override everything
+```
+
+**Timeout (`--timeout`)**:
+```bash
+remote-jobs run --timeout <duration> <host> <command>
+```
+
+Automatically kills the job after the specified duration (e.g., "2h", "30m", "1h30m"):
+
+```bash
+remote-jobs run --timeout 2h cool30 "python train.py"
+remote-jobs run --timeout 30m --from 42      # Retry with timeout
+```
+
+**Queue for later (`--queue`)**:
+```bash
+remote-jobs run --queue <host> <command>
+```
+
+Queues the job without running it immediately (same as `queue add`):
+
+```bash
+remote-jobs run --queue cool30 "python train.py"
+remote-jobs run --queue --from 42            # Queue a copy of job 42
 ```
 
 ### remote-jobs cleanup
@@ -700,4 +728,4 @@ Notifications include:
 2. The SSH command returns immediately (non-blocking)
 3. The tmux session continues running on the remote host
 4. You can close your laptop, disconnect, etc.
-5. `remote-jobs log` or `remote-jobs status` lets you check on the job later
+5. `remote-jobs log` or `remote-jobs job status` lets you check on the job later

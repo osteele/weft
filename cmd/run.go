@@ -52,6 +52,8 @@ var (
 	runQueueOnFail bool
 	runFollow      bool
 	runKillJobID   int64
+	runFrom        int64
+	runTimeout     string
 )
 
 func init() {
@@ -63,17 +65,66 @@ func init() {
 	runCmd.Flags().BoolVar(&runQueueOnFail, "queue-on-fail", false, "Queue job if connection fails")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'remote-jobs kill')")
+	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID (replaces retry)")
+	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
-	host := args[0]
-
 	// Handle --kill mode
 	if runKillJobID > 0 {
-		return killJob(runKillJobID)
+		database, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer database.Close()
+		return killJob(database, runKillJobID)
 	}
 
-	command := args[1]
+	// Open database early for --from support
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	var host, command string
+
+	// Handle --from mode: copy settings from existing job
+	if runFrom > 0 {
+		fromJob, err := db.GetJobByID(database, runFrom)
+		if err != nil {
+			return fmt.Errorf("get job %d: %w", runFrom, err)
+		}
+		if fromJob == nil {
+			return fmt.Errorf("job %d not found", runFrom)
+		}
+
+		// Copy settings from existing job
+		host = fromJob.Host
+		command = fromJob.Command
+		if runDir == "" {
+			runDir = fromJob.WorkingDir
+		}
+		if runDescription == "" {
+			runDescription = fromJob.Description
+		}
+
+		// Allow overriding host from command line
+		if len(args) > 0 {
+			host = args[0]
+		}
+		// Allow overriding command from command line
+		if len(args) > 1 {
+			command = args[1]
+		}
+	} else {
+		// Normal mode: require host and command
+		if len(args) < 2 {
+			return fmt.Errorf("usage: remote-jobs run <host> <command>")
+		}
+		host = args[0]
+		command = args[1]
+	}
 
 	// Validate flag combinations
 	if runFollow && runQueue {
@@ -97,12 +148,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("get working dir: %w", err)
 		}
 	}
-
-	database, err := db.Open()
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
 
 	// Queue-only mode
 	if runQueue {
@@ -171,6 +216,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	logDir := session.LogDir
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
 	if _, stderr, err := ssh.RunWithRetry(host, mkdirCmd); err != nil {
+		if ssh.IsConnectionError(stderr) && runQueueOnFail {
+			// Connection failed - queue job for later
+			fmt.Println("Connection failed. Queuing job for later...")
+			if err := db.UpdateJobPending(database, jobID); err != nil {
+				return fmt.Errorf("queue job: %w", err)
+			}
+			fmt.Printf("Job queued with ID: %d\n", jobID)
+			return nil
+		}
 		errMsg := ssh.FriendlyError(host, stderr, err)
 		db.UpdateJobFailed(database, jobID, errMsg)
 		return fmt.Errorf("%s", errMsg)
@@ -233,6 +287,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		StatusFile: statusFile,
 		PidFile:    pidFile,
 		NotifyCmd:  notifyCmd,
+		Timeout:    runTimeout,
 	})
 
 	// Escape single quotes in wrapped command for embedding in single-quoted string
@@ -241,6 +296,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Start tmux session - use single quotes to prevent shell expansion
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
+		if ssh.IsConnectionError(stderr) && runQueueOnFail {
+			// Connection failed - queue job for later
+			fmt.Println("Connection failed. Queuing job for later...")
+			if err := db.UpdateJobPending(database, jobID); err != nil {
+				return fmt.Errorf("queue job: %w", err)
+			}
+			fmt.Printf("Job queued with ID: %d\n", jobID)
+			return nil
+		}
 		errMsg := ssh.FriendlyError(host, stderr, err)
 		db.UpdateJobFailed(database, jobID, errMsg)
 		return fmt.Errorf("%s", errMsg)
@@ -274,36 +338,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 }
 
 // killJob kills a job by ID (used by --kill flag)
-func killJob(jobID int64) error {
-	database, err := db.Open()
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
-
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
-	}
-
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	fmt.Printf("Killing job %d on %s...\n", jobID, job.Host)
-
-	if err := ssh.TmuxKillSession(job.Host, tmuxSession); err != nil {
-		return fmt.Errorf("kill session: %w", err)
-	}
-
-	// Mark job as dead in database
-	if err := db.MarkDeadByID(database, jobID); err != nil {
-		fmt.Printf("Warning: failed to update database: %v\n", err)
-	}
-
-	fmt.Println("Job killed")
-	return nil
-}
 
 // parseCdPrefix extracts "cd /path && " or "cd /path; " prefix from a command.
 // Returns (directory, remaining_command) if found, or ("", original_command) if not.

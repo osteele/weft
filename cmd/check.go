@@ -31,7 +31,8 @@ Example:
 }
 
 func init() {
-	rootCmd.AddCommand(checkCmd)
+	// Removed: Check command is deprecated, use `job list --host <host>` or TUI instead
+	// rootCmd.AddCommand(checkCmd)
 }
 
 func runCheck(cmd *cobra.Command, args []string) error {

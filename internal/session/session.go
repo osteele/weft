@@ -211,26 +211,51 @@ type WrapperCommandParams struct {
 	StatusFile string
 	PidFile    string
 	NotifyCmd  string // Optional notification command to run after job completes
+	Timeout    string // Optional timeout duration (e.g., "2h", "30m")
 }
 
 // BuildWrapperCommand creates the bash command that wraps a job with logging,
-// PID capture, and exit code handling.
+// PID capture, exit code handling, and optional timeout.
 //
 // IMPORTANT: File paths containing ~ must NOT be quoted to allow shell expansion.
-// The working directory is also unquoted to support tilde expansion.
-// This function has unit tests to prevent regressions on quoting behavior.
+// The working directory supports both tilde expansion and spaces by replacing ~ with $HOME
+// before quoting. This function has unit tests to prevent regressions on quoting behavior.
 func BuildWrapperCommand(params WrapperCommandParams) string {
 	// Note: file paths use ~ which must not be quoted to allow expansion
 	// The command runs in a subshell that writes its PID then execs bash -c
 	// This ensures the recorded PID is the actual job process, not a wrapper
 	// The command is escaped for use in single quotes passed to bash -c
 	escapedCmd := escapeForBashC(params.Command)
+
+	// Prepare working directory: replace ~ with $HOME and quote for spaces
+	// This allows both tilde expansion and support for spaces in paths
+	workingDirQuoted := prepareWorkingDir(params.WorkingDir)
+
+	// Build timeout monitor if timeout is specified
+	timeoutMonitor := ""
+	if params.Timeout != "" {
+		// Timeout monitor runs in background and kills job if timeout exceeded
+		// Uses GNU date for seconds since epoch (portable across Linux)
+		timeoutMonitor = fmt.Sprintf(
+			`{ START_TIME=$(date +%%s); TIMEOUT_SECONDS=$(echo '%s' | `+
+				`sed 's/h/*3600+/g;s/m/*60+/g;s/s/*1+/g;s/+$//' | bc); `+
+				`while kill -0 $(cat %s 2>/dev/null) 2>/dev/null; do `+
+				`ELAPSED=$(($(date +%%s) - START_TIME)); `+
+				`if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then `+
+				`echo "=== TIMEOUT after %s ===" >> %s; `+
+				`kill $(cat %s 2>/dev/null) 2>/dev/null; break; fi; `+
+				`sleep 10; done; } & `,
+			params.Timeout, params.PidFile, params.Timeout, params.LogFile, params.PidFile)
+	}
+
 	return fmt.Sprintf(
 		`echo "=== START $(date) ===" > %s; `+
 			`echo "job_id: %d" >> %s; `+
 			`echo "cd: %s" >> %s; `+
 			`echo "cmd: %s" >> %s; `+
+			`%s`+ // timeout line (empty if no timeout)
 			`echo "===" >> %s; `+
+			`%s`+ // timeout monitor (empty if no timeout)
 			`cd %s && { (echo $BASHPID > %s; exec bash -c '%s') >> %s 2>&1 & wait $!; }; `+
 			`EXIT_CODE=$?; `+
 			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
@@ -239,10 +264,32 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 		params.JobID, params.LogFile,
 		params.WorkingDir, params.LogFile,
 		params.Command, params.LogFile,
+		func() string {
+			if params.Timeout != "" {
+				return fmt.Sprintf(`echo "timeout: %s" >> %s; `, params.Timeout, params.LogFile)
+			}
+			return ""
+		}(),
 		params.LogFile,
-		params.WorkingDir, params.PidFile, escapedCmd, params.LogFile,
+		timeoutMonitor,
+		workingDirQuoted, params.PidFile, escapedCmd, params.LogFile,
 		params.LogFile,
 		params.StatusFile, params.NotifyCmd)
+}
+
+// prepareWorkingDir replaces ~ with $HOME and quotes the path to handle spaces
+// Example: "~/my project" -> "$HOME/my project" (with quotes)
+func prepareWorkingDir(dir string) string {
+	// Replace leading ~ or ~/ with $HOME
+	if strings.HasPrefix(dir, "~/") {
+		dir = "$HOME/" + dir[2:]
+	} else if dir == "~" {
+		dir = "$HOME"
+	}
+
+	// Quote the path to handle spaces and special characters
+	// Use double quotes to allow $HOME expansion
+	return fmt.Sprintf(`"%s"`, dir)
 }
 
 // escapeForBashC escapes a command for use in bash -c '...'

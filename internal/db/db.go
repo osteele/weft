@@ -130,6 +130,23 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create deferred_operations table for operations pending on unreachable hosts
+	deferredOpsSchema := `
+	CREATE TABLE IF NOT EXISTS deferred_operations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		host TEXT NOT NULL,
+		operation TEXT NOT NULL,
+		job_id INTEGER NOT NULL,
+		queue_name TEXT,
+		created_at INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_deferred_ops_host ON deferred_operations(host);
+	CREATE INDEX IF NOT EXISTS idx_deferred_ops_job ON deferred_operations(job_id);
+	`
+	if _, err := db.Exec(deferredOpsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -196,6 +213,15 @@ func UpdateJobDescription(db *sql.DB, id int64, description string) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET description = ? WHERE id = ?`,
 		description, id,
+	)
+	return err
+}
+
+// UpdateJobHost updates the host for a job (only for queued jobs)
+func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET host = ? WHERE id = ? AND status = ?`,
+		newHost, id, StatusQueued,
 	)
 	return err
 }
@@ -906,4 +932,68 @@ func FormatDuration(seconds int64) string {
 		parts = append(parts, fmt.Sprintf("%ds", s))
 	}
 	return strings.Join(parts, " ")
+}
+
+// DeferredOperation represents an operation pending on an unreachable host
+type DeferredOperation struct {
+	ID        int64
+	Host      string
+	Operation string
+	JobID     int64
+	QueueName string
+	CreatedAt int64
+}
+
+// Operation types for deferred operations
+const (
+	OpKillJob       = "kill_job"
+	OpRemoveQueued  = "remove_queued"
+	OpMoveFromQueue = "move_from_queue"
+)
+
+// AddDeferredOperation adds an operation to execute when host becomes reachable
+func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, queueName string) error {
+	createdAt := time.Now().Unix()
+	_, err := db.Exec(
+		`INSERT INTO deferred_operations (host, operation, job_id, queue_name, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		host, operation, jobID, queueName, createdAt,
+	)
+	return err
+}
+
+// GetDeferredOperations returns all deferred operations for a host
+func GetDeferredOperations(db *sql.DB, host string) ([]*DeferredOperation, error) {
+	rows, err := db.Query(
+		`SELECT id, host, operation, job_id, queue_name, created_at
+		 FROM deferred_operations
+		 WHERE host = ?
+		 ORDER BY created_at ASC`,
+		host,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ops []*DeferredOperation
+	for rows.Next() {
+		op := &DeferredOperation{}
+		var queueName sql.NullString
+		if err := rows.Scan(&op.ID, &op.Host, &op.Operation, &op.JobID, &queueName, &op.CreatedAt); err != nil {
+			return nil, err
+		}
+		if queueName.Valid {
+			op.QueueName = queueName.String
+		}
+		ops = append(ops, op)
+	}
+
+	return ops, rows.Err()
+}
+
+// DeleteDeferredOperation removes a deferred operation after execution
+func DeleteDeferredOperation(db *sql.DB, id int64) error {
+	_, err := db.Exec(`DELETE FROM deferred_operations WHERE id = ?`, id)
+	return err
 }

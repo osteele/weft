@@ -21,6 +21,11 @@ const (
 	ExitNotFound = 3
 )
 
+var (
+	statusSync   bool
+	statusNoSync bool
+)
+
 var statusCmd = &cobra.Command{
 	Use:   "status <job-id>...",
 	Short: "Check the status of one or more jobs",
@@ -40,7 +45,10 @@ Examples:
 }
 
 func init() {
-	rootCmd.AddCommand(statusCmd)
+	// Removed: Status command is now only available as `job status`
+	// rootCmd.AddCommand(statusCmd)
+	statusCmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
+	statusCmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -49,6 +57,26 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	// Sync logic: fast sync by default, full sync with --sync, skip with --no-sync
+	if !statusNoSync {
+		if statusSync {
+			// Full sync requested
+			// Reuse the list sync logic
+			hosts, err := db.ListUniqueActiveHosts(database)
+			if err == nil && len(hosts) > 0 {
+				for _, host := range hosts {
+					syncHost(database, host)
+				}
+			}
+		} else {
+			// Fast sync by default
+			completed := performFastSync(database, false)
+			if !completed {
+				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Run with --sync for full sync.\n")
+			}
+		}
+	}
 
 	singleJob := len(args) == 1
 

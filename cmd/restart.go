@@ -28,7 +28,8 @@ Examples:
 }
 
 func init() {
-	rootCmd.AddCommand(restartCmd)
+	// Removed: Restart command is now only available as `job restart`
+	// rootCmd.AddCommand(restartCmd)
 }
 
 func runRestart(cmd *cobra.Command, args []string) error {

@@ -34,17 +34,18 @@ remote-jobs/
 ├── main.go                 # Entry point
 ├── cmd/                    # CLI commands (Cobra)
 │   ├── root.go            # Root command, default command handling
-│   ├── run.go             # Start jobs
-│   ├── check.go           # Check host status
-│   ├── status.go          # Check job status
-│   ├── list.go            # Query job history
+│   ├── job.go             # Job subcommand (groups job operations)
+│   ├── run.go             # Start jobs (supports --from, --timeout, --queue)
 │   ├── log.go             # View job logs
 │   ├── kill.go            # Kill running jobs
-│   ├── restart.go         # Restart jobs
-│   ├── retry.go           # Retry pending jobs
+│   ├── status.go          # Check job status (via job subcommand)
+│   ├── list.go            # Query job history (via job subcommand)
+│   ├── restart.go         # Restart jobs (via job subcommand)
+│   ├── describe.go        # Set job description (via job subcommand)
 │   ├── sync.go            # Sync job statuses
 │   ├── cleanup.go         # Clean up finished sessions
 │   ├── prune.go           # Remove old jobs
+│   ├── queue.go           # Queue commands (add, start, stop, list)
 │   ├── tui.go             # Launch interactive TUI
 │   ├── embed.go           # Embedded files (notify script)
 │   └── notify-slack.sh    # Slack notification script (embedded)
@@ -77,22 +78,29 @@ Built with [Cobra](https://github.com/spf13/cobra), the CLI provides subcommands
 **Command Flow:**
 
 ```
-remote-jobs run <host> <command>
+remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
     │
-    ├── 1. Create job record in SQLite (status: "starting")
+    ├── 0. (If --from) Copy settings from existing job (can override)
+    ├── 1. Create job record in SQLite (status: "starting" or "queued")
     ├── 2. Generate unique tmux session name (rj-{job_id})
     ├── 3. Create log directory on remote (~/.cache/remote-jobs/logs/)
     ├── 4. Save metadata file on remote
-    ├── 5. Build wrapper command (cd, logging, exit code capture)
+    ├── 5. Build wrapper command (cd, logging, exit code, timeout monitor)
     ├── 6. SSH: tmux new-session -d -s 'rj-N' bash -c '...'
     ├── 7. Update job status to "running"
     └── 8. Print monitoring instructions
 ```
 
+**Key Flags:**
+- `--from <id>`: Copy settings from existing job (command, directory, description)
+- `--timeout <duration>`: Automatically kill job after duration (e.g., "2h", "30m")
+- `--queue`: Add to job queue instead of running immediately
+
 **Key Design Decisions:**
 - Job ID is allocated BEFORE starting the tmux session, ensuring the database always knows about the job
 - If SSH fails during setup, the job is marked as "failed" with the error message
 - The `--queue-on-fail` flag allows jobs to be queued for later retry on connection errors
+- `--from` flag replaces the old `retry` command with a more composable approach
 
 ### 2. Database Layer (`internal/db/`)
 
@@ -138,7 +146,7 @@ CREATE INDEX idx_jobs_start ON jobs(start_time DESC);
      │   (--queue or --queue-on-fail)
      ▼
 ┌──────────┐
-│ pending  │ ────▶ (retry) ────▶ starting
+│ queued   │ ────▶ (queue runner or run --from) ────▶ starting
 └──────────┘
 ```
 
@@ -147,7 +155,7 @@ CREATE INDEX idx_jobs_start ON jobs(start_time DESC);
 - `running`: Tmux session successfully started
 - `completed`: Job finished (exit code captured from status file)
 - `dead`: Job terminated without writing exit code (crashed/killed)
-- `pending`: Job queued for later execution
+- `queued`: Job added to remote queue for later execution
 - `failed`: Job setup failed (e.g., SSH connection error)
 
 ### 3. SSH Layer (`internal/ssh/`)
@@ -193,15 +201,23 @@ Manages tmux session naming and remote file paths.
 **Wrapper Command:**
 
 Jobs run inside a wrapper that:
-1. Logs start timestamp and metadata
+1. Logs start timestamp and metadata (including timeout if specified)
 2. Changes to working directory (with tilde expansion)
-3. Runs the actual command with tee for logging
-4. Captures exit code via `${PIPESTATUS[0]}`
-5. Writes exit code to status file
-6. Optionally triggers Slack notification
+3. Starts timeout monitor in background (if --timeout specified)
+4. Runs the actual command, capturing PID for timeout monitoring
+5. Captures exit code when job completes
+6. Writes exit code to status file
+7. Optionally triggers Slack notification
+
+**Timeout Monitor** (optional, if `--timeout` specified):
+- Runs in background, monitors elapsed time
+- Uses `bc` to parse duration strings (e.g., "2h", "30m", "1h30m")
+- Checks every 10 seconds if timeout exceeded
+- Kills job if timeout reached, logs timeout message
 
 ```bash
 echo "=== START $(date) ===" > $LOG_FILE;
+# (if timeout) Start background timeout monitor
 cd $WORKING_DIR && { ($COMMAND) & CMD_PID=$!; echo $CMD_PID > $PID_FILE; wait $CMD_PID; } 2>&1 | tee -a $LOG_FILE;
 EXIT_CODE=${PIPESTATUS[0]};
 echo "=== END exit=$EXIT_CODE $(date) ===" >> $LOG_FILE;
@@ -497,9 +513,9 @@ The queue system allows jobs to run sequentially on a remote host without requir
 ```
 
 **Queue Status** (`queued`):
-- New job status between `pending` and `running`
-- Indicates job is waiting in a remote queue
-- Transitions to `running` when the queue runner processes it
+- Job status indicating job is in a remote queue awaiting execution
+- Jobs are added with `queue add` or `run --queue`
+- Transitions to `starting` when the queue runner processes it
 
 ### Queue File Structure on Remote
 
@@ -556,12 +572,17 @@ queue-runner.sh default
     └── Exit gracefully
 ```
 
-### Queue vs Pending Jobs
+### Queue Jobs
 
-| Aspect | Pending (`--queue` flag) | Queued (`queue add`) |
-|--------|--------------------------|----------------------|
-| Where stored | Local DB only | Local DB + remote queue file |
-| Execution | Manual (`retry` command) | Automatic (queue runner) |
-| Ordering | Manual control | FIFO (first in, first out) |
-| Connection needed | Yes, for retry | No, runs independently |
-| Use case | Queue for later manual retry | Sequential execution |
+All jobs added with `queue add` or `run --queue` have status `queued` in the database.
+
+**Queue Execution:**
+- Jobs are stored both in the local DB and in a remote queue file
+- The queue runner processes jobs automatically in FIFO order
+- No local machine connection needed after queue runner starts
+- Jobs transition from `queued` → `starting` → `running` → `completed`
+
+**Manual Execution:**
+- Use `run --from <id>` to manually execute a queued job
+- This creates a new job with copied settings, doesn't modify the original
+- Allows overriding host, command, or adding timeout

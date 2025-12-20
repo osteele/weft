@@ -39,6 +39,7 @@ var (
 	listShow      int64
 	listCleanup   int
 	listSync      bool
+	listNoSync    bool
 )
 
 func init() {
@@ -53,7 +54,8 @@ func init() {
 	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
 	listCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	listCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
-	listCmd.Flags().BoolVar(&listSync, "sync", false, "Sync job statuses from remote hosts before listing")
+	listCmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
+	listCmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -63,10 +65,19 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Optional sync before listing
-	if listSync {
-		if err := performListSync(database); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
+	// Sync logic: fast sync by default, full sync with --sync, skip with --no-sync
+	if !listNoSync {
+		if listSync {
+			// Full sync requested
+			if err := performListSync(database); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
+			}
+		} else {
+			// Fast sync by default
+			completed := performFastSync(database, false)
+			if !completed {
+				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Run with --sync for full sync.\n")
+			}
 		}
 	}
 

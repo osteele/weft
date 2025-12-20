@@ -239,12 +239,14 @@ func TestBuildWrapperCommand_TildeExpansion(t *testing.T) {
 		}
 	}
 
-	// Verify the paths ARE present (unquoted)
+	// Verify the paths ARE present
+	// Working directory is quoted with $HOME for tilde expansion
+	// Other file paths remain unquoted (they don't contain spaces in practice)
 	goodPatterns := []struct {
 		pattern string
 		desc    string
 	}{
-		{"cd ~/code/project", "working directory should appear unquoted after cd"},
+		{`cd "$HOME/code/project"`, "working directory should use $HOME with quotes"},
 		{"> ~/.cache/remote-jobs/logs/42.log", "log file should appear unquoted"},
 		{">> ~/.cache/remote-jobs/logs/42.log", "log file should appear unquoted in append"},
 		{"> ~/.cache/remote-jobs/logs/42.status", "status file should appear unquoted"},
@@ -273,7 +275,8 @@ func TestBuildWrapperCommand_AbsolutePaths(t *testing.T) {
 	cmd := BuildWrapperCommand(params)
 
 	// Absolute paths should appear in the command
-	if !strings.Contains(cmd, "cd /mnt/data/project") {
+	// Working directory is quoted to handle spaces
+	if !strings.Contains(cmd, `cd "/mnt/data/project"`) {
 		t.Errorf("BuildWrapperCommand: working directory not found\nCommand: %s", cmd)
 	}
 	if !strings.Contains(cmd, "/tmp/job-99.log") {
