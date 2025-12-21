@@ -175,15 +175,17 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Desc:     %s\n", job.Description)
 	}
 
-	startTime := time.Unix(job.StartTime, 0)
-	fmt.Printf("Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
+	if job.StartTime > 0 {
+		startTime := time.Unix(job.StartTime, 0)
+		fmt.Printf("Started:  %s\n", startTime.Format("2006-01-02 15:04:05"))
+	}
 
 	if job.EndTime != nil {
 		endTime := time.Unix(*job.EndTime, 0)
 		duration := *job.EndTime - job.StartTime
 		fmt.Printf("Ended:    %s\n", endTime.Format("2006-01-02 15:04:05"))
 		fmt.Printf("Duration: %s\n", db.FormatDuration(duration))
-	} else if job.Status == db.StatusRunning {
+	} else if job.Status == db.StatusRunning && job.StartTime > 0 {
 		duration := time.Now().Unix() - job.StartTime
 		fmt.Printf("Running:  %s\n", db.FormatDuration(duration))
 	}

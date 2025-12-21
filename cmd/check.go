@@ -138,10 +138,12 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			if job.Description != "" {
 				fmt.Printf("Description: %s\n", job.Description)
 			}
-			startTime := time.Unix(job.StartTime, 0)
-			fmt.Printf("Started: %s\n", startTime.Format("2006-01-02 15:04:05"))
+			if job.StartTime > 0 {
+				startTime := time.Unix(job.StartTime, 0)
+				fmt.Printf("Started: %s\n", startTime.Format("2006-01-02 15:04:05"))
+			}
 
-			if job.Status == db.StatusRunning {
+			if job.Status == db.StatusRunning && job.StartTime > 0 {
 				duration := time.Now().Unix() - job.StartTime
 				fmt.Printf("Running for: %s\n", db.FormatDuration(duration))
 			}

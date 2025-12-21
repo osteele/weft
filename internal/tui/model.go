@@ -57,6 +57,7 @@ type keyMap struct {
 	Sync        key.Binding
 	Help        key.Binding
 	StartQueue  key.Binding
+	StartNow    key.Binding
 }
 
 var keys = keyMap{
@@ -135,6 +136,10 @@ var keys = keyMap{
 		key.WithKeys("S"),
 		key.WithHelp("S", "start queue"),
 	),
+	StartNow: key.NewBinding(
+		key.WithKeys("g"),
+		key.WithHelp("g", "start now"),
+	),
 }
 
 // Messages
@@ -164,6 +169,11 @@ type jobRestartedMsg struct {
 	oldJobID int64
 	newJobID int64
 	err      error
+}
+
+type jobStartedNowMsg struct {
+	jobID int64
+	err   error
 }
 
 type pruneCompletedMsg struct {
@@ -507,6 +517,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pendingSelectJobID = msg.newJobID
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID), false), m.refreshJobs())
+
+	case jobStartedNowMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Start failed: %v", msg.err), true)
+		}
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d started", msg.jobID), false), m.refreshJobs())
 
 	case pruneCompletedMsg:
 		var flashCmd tea.Cmd
@@ -1004,6 +1020,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case key.Matches(msg, keys.StartNow):
+		job := m.getTargetJob()
+		if job != nil && job.Status == db.StatusQueued {
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
+		}
+		return m, m.setFlash("Can only start queued jobs", true)
+
 	case key.Matches(msg, keys.Sync):
 		if m.viewMode == ViewModeJobs && !m.syncing {
 			m.syncing = true
@@ -1385,25 +1408,27 @@ func (m Model) renderJobDetails(height int) string {
 		content = dimStyle.Render("No jobs to display")
 	} else {
 		job := highlightedJob
-		startTime := time.Unix(job.StartTime, 0)
 		header = fmt.Sprintf("Job %d on %s\n", job.ID, job.Host)
 
 		// Show Cmd and Dir first (most useful info)
 		header += fmt.Sprintf("Cmd:     %s\n", job.EffectiveCommand())
 		header += fmt.Sprintf("Dir:     %s\n", job.EffectiveWorkingDir())
 
-		// Then timing information
-		header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
+		// Then timing information (only if job has started)
+		if job.StartTime > 0 {
+			startTime := time.Unix(job.StartTime, 0)
+			header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
 
-		// Show timing information based on job status
-		if job.Status == db.StatusRunning {
-			elapsed := time.Since(startTime)
-			header += fmt.Sprintf("Elapsed: %s (running)\n", formatDuration(elapsed))
-		} else if job.EndTime != nil {
-			endTime := time.Unix(*job.EndTime, 0)
-			duration := endTime.Sub(startTime)
-			header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
-			header += fmt.Sprintf("Duration: %s\n", formatDuration(duration))
+			// Show timing information based on job status
+			if job.Status == db.StatusRunning {
+				elapsed := time.Since(startTime)
+				header += fmt.Sprintf("Elapsed: %s (running)\n", formatDuration(elapsed))
+			} else if job.EndTime != nil {
+				endTime := time.Unix(*job.EndTime, 0)
+				duration := endTime.Sub(startTime)
+				header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
+				header += fmt.Sprintf("Duration: %s\n", formatDuration(duration))
+			}
 		}
 
 		// Show exit status if available
@@ -2378,6 +2403,77 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 		}
 
 		return jobRestartedMsg{oldJobID: job.ID, newJobID: newJobID}
+	}
+}
+
+// startQueuedJobNow starts a queued job immediately, bypassing any dependencies
+func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
+	if job == nil || job.Status != db.StatusQueued {
+		return nil
+	}
+	database := m.database
+	return func() tea.Msg {
+		// Remove job from remote queue file
+		queueName := job.QueueName
+		if queueName == "" {
+			queueName = "default"
+		}
+		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
+			job.ID, queueFile, queueFile, queueFile, queueFile)
+		ssh.Run(job.Host, removeCmd)
+
+		// Update database: transition from queued to running and set start time
+		if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
+			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("update db: %w", err)}
+		}
+
+		// Get updated job to access new start time
+		updatedJob, err := db.GetJobByID(database, job.ID)
+		if err != nil || updatedJob == nil {
+			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("get job: %w", err)}
+		}
+
+		// Generate file paths from job ID
+		tmuxSession := session.TmuxSessionName(job.ID)
+		logFile := session.LogFile(job.ID, updatedJob.StartTime)
+		statusFile := session.StatusFile(job.ID, updatedJob.StartTime)
+		metadataFile := session.MetadataFile(job.ID, updatedJob.StartTime)
+		pidFile := session.PidFile(job.ID, updatedJob.StartTime)
+
+		// Create log directory on remote
+		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
+		if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
+			errMsg := ssh.FriendlyError(job.Host, stderr, err)
+			db.UpdateJobFailed(database, job.ID, errMsg)
+			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("%s", errMsg)}
+		}
+
+		// Save metadata
+		metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.Description, updatedJob.StartTime)
+		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
+		ssh.Run(job.Host, metadataCmd)
+
+		// Create the wrapped command
+		wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+			JobID:      job.ID,
+			WorkingDir: job.WorkingDir,
+			Command:    job.Command,
+			LogFile:    logFile,
+			StatusFile: statusFile,
+			PidFile:    pidFile,
+		})
+
+		// Start tmux session
+		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
+		if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
+			errMsg := ssh.FriendlyError(job.Host, stderr, err)
+			db.UpdateJobFailed(database, job.ID, errMsg)
+			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("%s", errMsg)}
+		}
+
+		return jobStartedNowMsg{jobID: job.ID}
 	}
 }
 

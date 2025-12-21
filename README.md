@@ -185,6 +185,7 @@ Press `l` to view logs:
 - `k`: Kill highlighted job
 - `P`: Prune completed/dead jobs from database
 - `S`: Start queue runner (for queued jobs)
+- `g`: Start queued job now (bypasses `--after` dependency)
 - `x`: Remove job from list
 - `h` or `Tab`: Switch to hosts view
 - `Esc`: Clear selection / exit logs view

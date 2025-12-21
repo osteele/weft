@@ -262,12 +262,12 @@ func RecordPending(db *sql.DB, host, workingDir, command, description string) (i
 }
 
 // RecordQueued records a queued job for sequential execution and returns its ID
+// Note: start_time is NULL until the job actually starts running (set by UpdateQueuedToRunning)
 func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName string) (int64, error) {
-	startTime := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status, queue_name)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
-		host, workingDir, command, description, startTime, StatusQueued, queueName,
+		 VALUES (?, NULL, ?, ?, ?, NULL, ?, ?)`,
+		host, workingDir, command, description, StatusQueued, queueName,
 	)
 	if err != nil {
 		return 0, err
@@ -279,7 +279,7 @@ func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName 
 func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
 	return queryJobs(db,
 		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE status = ? AND host = ? AND queue_name = ? ORDER BY start_time ASC`,
+		 FROM jobs WHERE status = ? AND host = ? AND queue_name = ? ORDER BY id ASC`,
 		StatusQueued, host, queueName,
 	)
 }
