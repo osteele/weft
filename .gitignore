@@ -14,6 +14,9 @@ remote-jobs
 go.work
 go.work.sum
 
+# Go build cache
+.gocache/
+
 # Dependency directories
 vendor/
 

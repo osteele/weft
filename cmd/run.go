@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -55,6 +58,7 @@ var (
 	runQueue       bool
 	runQueueOnFail bool
 	runFollow      bool
+	runAllow       bool
 	runKillJobID   int64
 	runFrom        int64
 	runTimeout     string
@@ -71,6 +75,7 @@ func init() {
 	runCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
 	runCmd.Flags().BoolVar(&runQueueOnFail, "queue-on-fail", false, "Queue job if connection fails")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
+	runCmd.Flags().BoolVar(&runAllow, "allow", false, "Stream the job log live and stay attached until interrupted")
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'remote-jobs kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID (replaces retry)")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
@@ -140,14 +145,26 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runFollow && runQueue {
 		return fmt.Errorf("--follow cannot be used with --queue")
 	}
+	if runAllow && runQueue {
+		return fmt.Errorf("--allow cannot be used with --queue")
+	}
 	if runFollow && runAfter > 0 {
 		return fmt.Errorf("--follow cannot be used with --after")
+	}
+	if runAllow && runAfter > 0 {
+		return fmt.Errorf("--allow cannot be used with --after")
 	}
 	if runFollow && runAfterAny > 0 {
 		return fmt.Errorf("--follow cannot be used with --after-any")
 	}
+	if runAllow && runAfterAny > 0 {
+		return fmt.Errorf("--allow cannot be used with --after-any")
+	}
 	if runAfter > 0 && runAfterAny > 0 {
 		return fmt.Errorf("cannot use both --after and --after-any")
+	}
+	if runAllow && runFollow {
+		return fmt.Errorf("--allow cannot be used with --follow")
 	}
 
 	// --after and --after-any imply queue mode (job added to remote queue for dependency handling)
@@ -352,6 +369,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Println("✓ Session started successfully")
 	fmt.Printf("Job ID: %d\n", jobID)
 
+	if runAllow {
+		return streamJobLogAllow(host, logFile, jobID)
+	}
+
 	// If --follow flag is set, tail the log
 	if runFollow {
 		fmt.Printf("\nFollowing log output (Ctrl+C to stop)...\n\n")
@@ -520,4 +541,38 @@ func runQueueWithDependency(database *sql.DB, host, workingDir, command, descrip
 	fmt.Printf("  remote-jobs queue start %s\n", host)
 
 	return nil
+}
+
+func streamJobLogAllow(host, logFile string, jobID int64) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Printf("\nFollowing live output (Ctrl+C to stop streaming; job keeps running)...\n\n")
+	waitAndTail := fmt.Sprintf("sh -c 'while [ ! -f %s ]; do sleep 1; done; tail -n +1 -F %s'", logFile, logFile)
+	sshCmd := exec.CommandContext(ctx, "ssh", host, waitAndTail)
+	sshCmd.Stdout = os.Stdout
+	sshCmd.Stderr = os.Stderr
+	sshCmd.Stdin = nil
+
+	err := sshCmd.Run()
+	if ctx.Err() != nil {
+		fmt.Printf("\nDetached from log stream.\n")
+		printDetachedInstructions(jobID)
+		return nil
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nLog streaming stopped with error: %v\n", err)
+		printDetachedInstructions(jobID)
+		return err
+	}
+
+	fmt.Printf("\nLog streaming finished.\n")
+	printDetachedInstructions(jobID)
+	return nil
+}
+
+func printDetachedInstructions(jobID int64) {
+	fmt.Printf("Job %d continues running.\n", jobID)
+	fmt.Printf("View logs later: remote-jobs log %d -f\n", jobID)
+	fmt.Printf("Check status:   remote-jobs job status %d\n", jobID)
 }

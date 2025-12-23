@@ -45,8 +45,7 @@ Examples:
 }
 
 func init() {
-	// Removed: Status command is now only available as `job status`
-	// rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(statusCmd)
 	statusCmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	statusCmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
 }

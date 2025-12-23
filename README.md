@@ -39,6 +39,7 @@ remote-jobs run [flags] <host> <command...>
 - `-d, --description TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
 - `-f, --follow`: Follow log output after starting (Ctrl+C to stop following; job continues)
+- `--allow`: Stream the job log live and stay attached until interrupted
 - `--queue`: Queue job for later instead of running now
 - `--queue-on-fail`: Queue job if connection fails
 - `--from ID`: Copy settings from existing job ID (allows overriding)
@@ -60,6 +61,9 @@ remote-jobs run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
 
 # Start and follow log output
 remote-jobs run -f -d "Training run" deepthought 'python train.py'
+
+# Stay attached to live output (Ctrl+C detaches, job keeps running)
+remote-jobs run --allow -d "Training run" deepthought 'python train.py'
 
 # Set environment variables
 remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python train.py'
