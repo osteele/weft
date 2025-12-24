@@ -750,12 +750,28 @@ func (j *Job) EffectiveWorkingDir() string {
 
 // EffectiveCommand returns the actual command for display.
 // If the command starts with "cd <dir> &&", returns the command after "&&".
+// Also strips "export VAR=... && " prefixes for cleaner display.
 func (j *Job) EffectiveCommand() string {
 	cmd, _ := j.ParseCdCommand()
-	if cmd != "" {
-		return cmd
+	if cmd == "" {
+		cmd = j.Command
 	}
-	return j.Command
+	return stripExportPrefix(cmd)
+}
+
+// stripExportPrefix removes "export VAR=... && " prefixes from commands.
+// Handles multiple consecutive exports: "export A=1 && export B=2 && cmd" -> "cmd"
+func stripExportPrefix(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	for strings.HasPrefix(cmd, "export ") {
+		// Find the " && " separator
+		andIdx := strings.Index(cmd, " && ")
+		if andIdx == -1 {
+			break
+		}
+		cmd = strings.TrimSpace(cmd[andIdx+4:])
+	}
+	return cmd
 }
 
 // ParseCdCommand checks if the command starts with "cd <dir> &&" pattern.

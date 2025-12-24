@@ -105,6 +105,26 @@ func TestEffectiveCommand(t *testing.T) {
 			command: "python train.py",
 			want:    "python train.py",
 		},
+		{
+			name:    "export prefix is stripped",
+			command: "export TMPDIR=/tmp && python train.py",
+			want:    "python train.py",
+		},
+		{
+			name:    "multiple export prefixes are stripped",
+			command: "export A=1 && export B=2 && python train.py",
+			want:    "python train.py",
+		},
+		{
+			name:    "cd then export is stripped",
+			command: "cd /foo && export TMPDIR=/tmp && python train.py",
+			want:    "python train.py",
+		},
+		{
+			name:    "export without && is preserved",
+			command: "export FOO=bar",
+			want:    "export FOO=bar",
+		},
 	}
 
 	for _, tt := range tests {
