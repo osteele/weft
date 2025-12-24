@@ -1517,7 +1517,7 @@ func (m Model) renderJobDetails(height int) string {
 			header += fmt.Sprintf("Env:     %s\n", strings.Join(envVars, ", "))
 		}
 
-		// Then timing information (only if job has started)
+		// Then timing information
 		if job.StartTime > 0 {
 			startTime := time.Unix(job.StartTime, 0)
 			header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
@@ -1532,6 +1532,10 @@ func (m Model) renderJobDetails(height int) string {
 				header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
 				header += fmt.Sprintf("Duration: %s\n", formatDuration(duration))
 			}
+		} else if job.EndTime != nil {
+			// Job ended without ever starting (failed/killed before start)
+			endTime := time.Unix(*job.EndTime, 0)
+			header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
 		}
 
 		// Show exit status if available
@@ -2580,6 +2584,32 @@ func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
 	}
 }
 
+// updateStartTimeFromMetadataTUI reads the metadata file for a queued job and updates its start_time if not already set
+func updateStartTimeFromMetadataTUI(database *sql.DB, job *db.Job) {
+	// Only update if start_time is not set
+	if job.StartTime > 0 {
+		return
+	}
+
+	metadataPattern := session.MetadataFilePattern(job.ID)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null", metadataPattern)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
+	if err != nil || strings.TrimSpace(stdout) == "" {
+		return // No metadata file or couldn't read it
+	}
+
+	// Parse metadata
+	metadata := session.ParseMetadata(stdout)
+	if startTimeStr, ok := metadata["start_time"]; ok {
+		if startTime, err := strconv.ParseInt(startTimeStr, 10, 64); err == nil && startTime > 0 {
+			// Update database with actual start time from metadata
+			db.UpdateStartTime(database, job.ID, startTime)
+			// Update in-memory job struct too for current sync cycle
+			job.StartTime = startTime
+		}
+	}
+}
+
 // syncQueuedJob checks if a queued job has started or completed
 func syncQueuedJob(database *sql.DB, job *db.Job) (bool, error) {
 	// Look for status files matching this job ID
@@ -2590,9 +2620,13 @@ func syncQueuedJob(database *sql.DB, job *db.Job) (bool, error) {
 	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
 	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
 	if err == nil && strings.TrimSpace(stdout) != "" {
-		// Job completed - read exit code
+		// Job completed - read exit code and update start time from metadata
 		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
 		endTime := time.Now().Unix()
+
+		// Update start time from metadata if not already set
+		updateStartTimeFromMetadataTUI(database, job)
+
 		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
 		}
@@ -2604,11 +2638,17 @@ func syncQueuedJob(database *sql.DB, job *db.Job) (bool, error) {
 	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
 	stdout, _, err = ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
 	if err == nil && strings.TrimSpace(stdout) != "" {
-		// Job has started running - update status
-		if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
-			return false, err
+		// Job has started running - update start time from metadata
+		updateStartTimeFromMetadataTUI(database, job)
+
+		// Update status to running only if not already set
+		if job.Status == db.StatusQueued {
+			if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
-		return true, nil
+		return false, nil
 	}
 
 	// Job still queued
@@ -2705,8 +2745,12 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 
 	// Parse result and update database
 	switch result {
-	case "RUNNING", "QUEUED":
-		// Job is still active, no change needed
+	case "RUNNING":
+		// Job is currently running - update start time from metadata if not set
+		updateStartTimeFromMetadataTUI(database, job)
+		return false, nil
+	case "QUEUED":
+		// Job is still waiting in queue, no change needed
 		return false, nil
 	case "DEAD":
 		// Job has died unexpectedly
@@ -2725,6 +2769,10 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 			return false, nil
 		}
 		endTime := time.Now().Unix()
+
+		// Update start time from metadata if not already set
+		updateStartTimeFromMetadataTUI(database, job)
+
 		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
 		}
@@ -3089,6 +3137,11 @@ func truncate(s string, max int) string {
 // formatStartTime formats a start time as relative ("2h ago") for recent jobs
 // or as absolute ("01/02 15:04") for older jobs
 func formatStartTime(startTime int64) string {
+	// Handle queued jobs that haven't started yet
+	if startTime == 0 {
+		return "—"
+	}
+
 	t := time.Unix(startTime, 0)
 	elapsed := time.Since(t)
 

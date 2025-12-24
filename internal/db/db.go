@@ -88,7 +88,7 @@ func initSchema(db *sql.DB) error {
 		working_dir TEXT NOT NULL,
 		command TEXT NOT NULL,
 		description TEXT,
-		start_time INTEGER NOT NULL,
+		start_time INTEGER,
 		end_time INTEGER,
 		exit_code INTEGER,
 		status TEXT NOT NULL DEFAULT 'running'
@@ -110,6 +110,12 @@ func initSchema(db *sql.DB) error {
 	// Migration: add queue_name column for queued jobs
 	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN queue_name TEXT`)
 	// Ignore error - column may already exist
+
+	// Migration: make start_time nullable for queued jobs
+	// SQLite doesn't support ALTER COLUMN, so we need to recreate the table
+	if err := migrateStartTimeNullable(db); err != nil {
+		return err
+	}
 
 	// Create hosts table for caching static host information
 	hostsSchema := `
@@ -145,6 +151,81 @@ func initSchema(db *sql.DB) error {
 	`
 	if _, err := db.Exec(deferredOpsSchema); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+// checkStartTimeNotNull checks if the start_time column has a NOT NULL constraint.
+// Returns true if migration is needed (column is NOT NULL).
+func checkStartTimeNotNull(db *sql.DB) (bool, error) {
+	rows, err := db.Query("PRAGMA table_info(jobs)")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, typeName string
+		var notNull, pk int
+		var dfltValue interface{}
+		if err := rows.Scan(&cid, &name, &typeName, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == "start_time" && notNull == 1 {
+			// Close rows before returning to release any locks
+			rows.Close()
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// migrateStartTimeNullable migrates the jobs table to allow NULL start_time.
+// This is needed for queued jobs that haven't started yet.
+func migrateStartTimeNullable(db *sql.DB) error {
+	// Check if start_time column is NOT NULL
+	needsMigration, err := checkStartTimeNotNull(db)
+	if err != nil {
+		return err
+	}
+
+	if !needsMigration {
+		return nil
+	}
+
+	// SQLite doesn't support ALTER COLUMN, so recreate the table
+	// Execute each statement separately (SQLite auto-commits DDL)
+	statements := []string{
+		`CREATE TABLE jobs_new (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			host TEXT NOT NULL,
+			session_name TEXT,
+			working_dir TEXT NOT NULL,
+			command TEXT NOT NULL,
+			description TEXT,
+			start_time INTEGER,
+			end_time INTEGER,
+			exit_code INTEGER,
+			status TEXT NOT NULL DEFAULT 'running',
+			error_message TEXT,
+			queue_name TEXT
+		)`,
+		`INSERT INTO jobs_new SELECT id, host, session_name, working_dir, command, description,
+			start_time, end_time, exit_code, status, error_message, queue_name FROM jobs`,
+		`DROP TABLE jobs`,
+		`ALTER TABLE jobs_new RENAME TO jobs`,
+		`CREATE INDEX idx_jobs_host ON jobs(host)`,
+		`CREATE INDEX idx_jobs_session ON jobs(session_name)`,
+		`CREATE INDEX idx_jobs_status ON jobs(status)`,
+		`CREATE INDEX idx_jobs_start ON jobs(start_time DESC)`,
+	}
+
+	for _, stmt := range statements {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate start_time: %w", err)
+		}
 	}
 
 	return nil
@@ -323,6 +404,15 @@ func MarkStarted(db *sql.DB, id int64, startTime int64) error {
 	return err
 }
 
+// UpdateStartTime updates the start_time for a job (for jobs where start_time was initially null/0)
+func UpdateStartTime(db *sql.DB, id int64, startTime int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET start_time = ? WHERE id = ? AND (start_time IS NULL OR start_time = 0)`,
+		startTime, id,
+	)
+	return err
+}
+
 // DeletePending deletes a pending job
 func DeletePending(db *sql.DB, id int64) error {
 	_, err := db.Exec(`DELETE FROM jobs WHERE id = ? AND status = ?`, id, StatusPending)
@@ -386,10 +476,11 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var desc sql.NullString
 	var errorMsg sql.NullString
 	var queueName sql.NullString
+	var startTime sql.NullInt64
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -408,6 +499,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if queueName.Valid {
 		j.QueueName = queueName.String
+	}
+	if startTime.Valid {
+		j.StartTime = startTime.Int64
 	}
 	if endTime.Valid {
 		j.EndTime = &endTime.Int64
@@ -429,10 +523,11 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var desc sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
+		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
 		if err != nil {
 			return nil, err
 		}
@@ -445,6 +540,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
+		}
+		if startTime.Valid {
+			j.StartTime = startTime.Int64
 		}
 		if queueName.Valid {
 			j.QueueName = queueName.String
@@ -477,7 +575,9 @@ func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
 		args = append(args, host)
 	}
 
-	query += ` ORDER BY start_time DESC LIMIT ?`
+	// Order queued jobs first (NULL start_time), then by start_time DESC
+	// Use COALESCE to put queued jobs at the top (far future timestamp)
+	query += ` ORDER BY COALESCE(start_time, 9999999999) DESC LIMIT ?`
 	args = append(args, limit)
 
 	return queryJobs(db, query, args...)
@@ -537,6 +637,25 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 // ListUniqueActiveHosts returns unique hosts with running or queued jobs
 func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?)`, StatusRunning, StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
+// ListHostsWithQueuedJobs returns unique hosts that have queued jobs
+func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ?`, StatusQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -704,10 +823,11 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var desc sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
+		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &j.StartTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
 		if err != nil {
 			return nil, err
 		}
@@ -723,6 +843,9 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		}
 		if queueName.Valid {
 			j.QueueName = queueName.String
+		}
+		if startTime.Valid {
+			j.StartTime = startTime.Int64
 		}
 		if endTime.Valid {
 			j.EndTime = &endTime.Int64

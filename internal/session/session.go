@@ -80,6 +80,12 @@ func PidFilePattern(jobID int64) string {
 	return fmt.Sprintf("%s/%d-*.pid", LogDir, jobID)
 }
 
+// MetadataFilePattern returns a glob pattern to find metadata files for a job ID
+// This is useful for queued jobs where the exact timestamp is unknown
+func MetadataFilePattern(jobID int64) string {
+	return fmt.Sprintf("%s/%d-*.meta", LogDir, jobID)
+}
+
 // LegacyLogFile returns the old-style log file path for backward compatibility
 func LegacyLogFile(sessionName string) string {
 	return fmt.Sprintf("/tmp/tmux-%s.log", sessionName)

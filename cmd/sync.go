@@ -173,6 +173,33 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 	return true, nil
 }
 
+// updateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set
+func updateStartTimeFromMetadata(database *sql.DB, job *db.Job) {
+	// Only update if start_time is not set
+	if job.StartTime > 0 {
+		return
+	}
+
+	const timeout = 5 * time.Second
+	metadataPattern := session.MetadataFilePattern(job.ID)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null", metadataPattern)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
+	if err != nil || strings.TrimSpace(stdout) == "" {
+		return // No metadata file or couldn't read it
+	}
+
+	// Parse metadata
+	metadata := session.ParseMetadata(stdout)
+	if startTimeStr, ok := metadata["start_time"]; ok {
+		if startTime, err := strconv.ParseInt(startTimeStr, 10, 64); err == nil && startTime > 0 {
+			// Update database with actual start time from metadata
+			db.UpdateStartTime(database, job.ID, startTime)
+			// Update in-memory job struct too for current sync cycle
+			job.StartTime = startTime
+		}
+	}
+}
+
 // syncQueueRunnerJob checks and updates a queue runner job's status using pattern-based file lookup
 func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	const timeout = 5 * time.Second
@@ -187,9 +214,13 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	}
 
 	if strings.TrimSpace(stdout) != "" {
-		// Job completed - read exit code
+		// Job completed - read exit code and update start time from metadata
 		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
 		endTime := time.Now().Unix()
+
+		// Update start time from metadata if not already set
+		updateStartTimeFromMetadata(database, job)
+
 		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
 		}
@@ -211,7 +242,8 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 
 	currentJobID := strings.TrimSpace(stdout)
 	if currentJobID == fmt.Sprintf("%d", job.ID) {
-		// Job is currently running
+		// Job is currently running - update start time from metadata if not set
+		updateStartTimeFromMetadata(database, job)
 		return false, nil
 	}
 

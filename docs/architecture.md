@@ -117,10 +117,11 @@ CREATE TABLE jobs (
     command TEXT NOT NULL,
     description TEXT,
     error_message TEXT,          -- For failed jobs
-    start_time INTEGER NOT NULL,
+    start_time INTEGER,          -- NULL for queued jobs that haven't started
     end_time INTEGER,
     exit_code INTEGER,
-    status TEXT NOT NULL DEFAULT 'running'
+    status TEXT NOT NULL DEFAULT 'running',
+    queue_name TEXT              -- Name of queue for queued jobs
 );
 
 -- Indexes for common queries

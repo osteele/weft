@@ -136,6 +136,7 @@ var (
 	queueEnvVars     []string
 	queueAfter       int64
 	queueAfterAny    int64
+	queueNoStart     bool
 )
 
 func init() {
@@ -157,6 +158,7 @@ func init() {
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
+	queueAddCmd.Flags().BoolVar(&queueNoStart, "no-start", false, "Don't auto-start the queue runner")
 }
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
@@ -236,54 +238,57 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueAfterAny > 0 {
 		fmt.Printf("  After job: %d (will wait for completion)\n", queueAfterAny)
 	}
-	fmt.Printf("\nTo start the queue runner (if not already running):\n")
-	fmt.Printf("  remote-jobs queue start %s", host)
-	if queueName != defaultQueueName {
-		fmt.Printf(" --queue %s", queueName)
+
+	// Auto-start queue runner unless --no-start is specified
+	if !queueNoStart {
+		started, err := ensureQueueRunnerStarted(host, queueName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nWarning: failed to start queue runner: %v\n", err)
+			fmt.Printf("\nTo start the queue runner manually:\n")
+			fmt.Printf("  remote-jobs queue start %s", host)
+			if queueName != defaultQueueName {
+				fmt.Printf(" --queue %s", queueName)
+			}
+			fmt.Println()
+		} else if started {
+			fmt.Printf("\nQueue runner started automatically.\n")
+		}
 	}
-	fmt.Println()
 
 	return nil
 }
 
-func runQueueStart(cmd *cobra.Command, args []string) error {
-	host := args[0]
-
-	// Check if queue runner is already running
-	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
+// ensureQueueRunnerStarted checks if the queue runner is running and starts it if not.
+// Returns (true, nil) if the runner was started, (false, nil) if already running,
+// or (false, error) if starting failed.
+func ensureQueueRunnerStarted(host, queue string) (bool, error) {
+	runnerSession := fmt.Sprintf("rj-queue-%s", queue)
 	exists, err := ssh.TmuxSessionExists(host, runnerSession)
 	if err != nil {
-		return fmt.Errorf("check session: %w", err)
+		return false, fmt.Errorf("check session: %w", err)
 	}
 
 	if exists {
-		fmt.Printf("Queue runner '%s' is already running on %s\n", queueName, host)
-		fmt.Printf("\nTo check status:\n")
-		fmt.Printf("  remote-jobs queue status %s", host)
-		if queueName != defaultQueueName {
-			fmt.Printf(" --queue %s", queueName)
-		}
-		fmt.Println()
-		return nil
+		return false, nil // Already running
 	}
 
 	// Create directories on remote
 	scriptsDir := "~/.cache/remote-jobs/scripts"
 	mkdirCmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
 	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-		return fmt.Errorf("create directories: %s", stderr)
+		return false, fmt.Errorf("create directories: %s", stderr)
 	}
 
 	// Deploy queue runner script
 	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(queueRunnerScript))
 	if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
-		return fmt.Errorf("write queue runner script: %s", stderr)
+		return false, fmt.Errorf("write queue runner script: %s", stderr)
 	}
 
 	// Make script executable
 	chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
 	if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
-		return fmt.Errorf("chmod script: %s", stderr)
+		return false, fmt.Errorf("chmod script: %s", stderr)
 	}
 
 	// Deploy notify script if Slack is configured
@@ -312,17 +317,33 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Start queue runner in tmux
-	// Need to expand tilde for the script path
-	runnerCmd := fmt.Sprintf("%s$HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envVars, queueName)
+	runnerCmd := fmt.Sprintf("%s$HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envVars, queue)
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
 
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
-		return fmt.Errorf("start queue runner: %s", stderr)
+		return false, fmt.Errorf("start queue runner: %s", stderr)
 	}
 
-	fmt.Printf("Queue runner '%s' started on %s\n", queueName, host)
-	fmt.Printf("Session: %s\n\n", runnerSession)
-	fmt.Printf("Monitor:\n")
+	return true, nil
+}
+
+func runQueueStart(cmd *cobra.Command, args []string) error {
+	host := args[0]
+
+	started, err := ensureQueueRunnerStarted(host, queueName)
+	if err != nil {
+		return err
+	}
+
+	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
+	if started {
+		fmt.Printf("Queue runner '%s' started on %s\n", queueName, host)
+		fmt.Printf("Session: %s\n\n", runnerSession)
+		fmt.Printf("Monitor:\n")
+	} else {
+		fmt.Printf("Queue runner '%s' is already running on %s\n", queueName, host)
+		fmt.Printf("\nTo check status:\n")
+	}
 	fmt.Printf("  remote-jobs queue status %s", host)
 	if queueName != defaultQueueName {
 		fmt.Printf(" --queue %s", queueName)

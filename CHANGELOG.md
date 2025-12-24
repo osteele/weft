@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`queue add` command**: Fixed database error when adding jobs to queue
+  (`NOT NULL constraint failed: jobs.start_time`). Queued jobs now correctly
+  have NULL start_time until they begin running.
+- **Queued jobs in TUI and list**: Queued jobs now appear at the top of the
+  job list and display "—" for start time instead of epoch date.
+
 ## [0.1.0] - 2024-12-24
 
 ### Added

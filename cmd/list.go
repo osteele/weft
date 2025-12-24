@@ -79,6 +79,9 @@ func runList(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Run with --sync for full sync.\n")
 			}
 		}
+
+		// Start queue runners on hosts with queued jobs
+		startQueueRunnersForQueuedHosts(database)
 	}
 
 	// Handle cleanup mode
@@ -165,7 +168,10 @@ func printJobs(jobs []*db.Job) error {
 	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tCOMMAND / DESCRIPTION")
 
 	for _, job := range jobs {
-		started := time.Unix(job.StartTime, 0).Format("01/02 15:04")
+		started := "—"
+		if job.StartTime > 0 {
+			started = time.Unix(job.StartTime, 0).Format("01/02 15:04")
+		}
 
 		status := job.Status
 		if job.Status == db.StatusCompleted && job.ExitCode != nil {
@@ -221,4 +227,23 @@ func performListSync(database *sql.DB) error {
 	}
 
 	return nil
+}
+
+// startQueueRunnersForQueuedHosts starts queue runners on hosts that have queued jobs
+func startQueueRunnersForQueuedHosts(database *sql.DB) {
+	hosts, err := db.ListHostsWithQueuedJobs(database)
+	if err != nil {
+		return // Silently ignore errors
+	}
+
+	for _, host := range hosts {
+		started, err := ensureQueueRunnerStarted(host, defaultQueueName)
+		if err != nil {
+			// Silently ignore - host might be unreachable
+			continue
+		}
+		if started {
+			fmt.Printf("(started queue runner on %s)\n", host)
+		}
+	}
 }
