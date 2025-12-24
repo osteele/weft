@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"context"
-	"database/sql"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,7 +12,6 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -193,11 +190,44 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Queue-only mode (including when --after is used)
 	if runQueue {
 		// When --after or --after-any is specified, use the remote queue system for dependency handling
-		if runAfter > 0 {
-			return runQueueWithDependency(database, host, workingDir, command, runDescription, runEnvVars, runAfter, false)
-		}
-		if runAfterAny > 0 {
-			return runQueueWithDependency(database, host, workingDir, command, runDescription, runEnvVars, runAfterAny, true)
+		if runAfter > 0 || runAfterAny > 0 {
+			afterID := runAfter
+			afterAny := false
+			if runAfterAny > 0 {
+				afterID = runAfterAny
+				afterAny = true
+			}
+			jobID, err := queueJob(database, queueJobOptions{
+				Host:        host,
+				WorkingDir:  workingDir,
+				Command:     command,
+				Description: runDescription,
+				EnvVars:     runEnvVars,
+				QueueName:   defaultQueueName,
+				AfterJobID:  afterID,
+				AfterAny:    afterAny,
+			})
+			if err != nil {
+				return fmt.Errorf("queue job: %w", err)
+			}
+
+			waitType := "succeeds"
+			if afterAny {
+				waitType = "completes"
+			}
+			fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterID, waitType)
+			fmt.Printf("  Working dir: %s\n", workingDir)
+			fmt.Printf("  Command: %s\n", command)
+			if runDescription != "" {
+				fmt.Printf("  Description: %s\n", runDescription)
+			}
+			if len(runEnvVars) > 0 {
+				fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+			}
+			fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
+			fmt.Printf("\nTo start the queue runner (if not already running):\n")
+			fmt.Printf("  remote-jobs queue start %s\n", host)
+			return nil
 		}
 
 		// Standard local pending mode (no dependency)
@@ -218,165 +248,50 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Create job record first to get the ID
-	jobID, err := db.RecordJobStarting(database, host, workingDir, command, runDescription)
-	if err != nil {
-		return fmt.Errorf("create job record: %w", err)
-	}
-
-	// Get the job to access start time
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil || job == nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-
-	// Generate tmux session name and file paths from job ID
-	tmuxSession := session.TmuxSessionName(jobID)
-	logFile := session.LogFile(jobID, job.StartTime)
-	statusFile := session.StatusFile(jobID, job.StartTime)
-	metadataFile := session.MetadataFile(jobID, job.StartTime)
-	pidFile := session.PidFile(jobID, job.StartTime)
-
-	// Test connection and check if session already exists
-	exists, err := ssh.TmuxSessionExists(host, tmuxSession)
-	if err != nil {
-		if ssh.IsConnectionError(err.Error()) && runQueueOnFail {
-			// Convert to pending job so it can be retried later
-			fmt.Println("Connection failed. Queuing job for later...")
-			if err := db.UpdateJobPending(database, jobID); err != nil {
-				return fmt.Errorf("queue job: %w", err)
+	result, err := startJob(database, startJobOptions{
+		Host:        host,
+		WorkingDir:  workingDir,
+		Command:     command,
+		Description: runDescription,
+		EnvVars:     runEnvVars,
+		Timeout:     runTimeout,
+		QueueOnFail: runQueueOnFail,
+		OnPrepared: func(info StartJobPreparedInfo) {
+			fmt.Printf("Starting job %d on %s\n", info.JobID, info.Host)
+			fmt.Printf("Working directory: %s\n", info.WorkingDir)
+			fmt.Printf("Command: %s\n", info.Command)
+			if info.Description != "" {
+				fmt.Printf("Description: %s\n", info.Description)
 			}
-			fmt.Printf("Job queued with ID: %d\n\n", jobID)
-			fmt.Printf("To retry when connection is available:\n")
-			fmt.Printf("  remote-jobs retry %d\n", jobID)
-			return nil
-		}
-		// Mark job as failed
-		db.UpdateJobFailed(database, jobID, err.Error())
-		return fmt.Errorf("check session: %w", err)
-	}
-
-	if exists {
-		// This shouldn't happen with unique job IDs, but handle it anyway
-		db.UpdateJobFailed(database, jobID, "Session already exists")
-		return fmt.Errorf("session '%s' already exists on %s", tmuxSession, host)
-	}
-
-	// Create log directory on remote
-	logDir := session.LogDir
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
-	if _, stderr, err := ssh.RunWithRetry(host, mkdirCmd); err != nil {
-		if ssh.IsConnectionError(stderr) && runQueueOnFail {
-			// Connection failed - queue job for later
-			fmt.Println("Connection failed. Queuing job for later...")
-			if err := db.UpdateJobPending(database, jobID); err != nil {
-				return fmt.Errorf("queue job: %w", err)
-			}
-			fmt.Printf("Job queued with ID: %d\n", jobID)
-			return nil
-		}
-		errMsg := ssh.FriendlyError(host, stderr, err)
-		db.UpdateJobFailed(database, jobID, errMsg)
-		return fmt.Errorf("%s", errMsg)
-	}
-
-	fmt.Printf("Starting job %d on %s\n", jobID, host)
-	fmt.Printf("Working directory: %s\n", workingDir)
-	fmt.Printf("Command: %s\n", command)
-	if runDescription != "" {
-		fmt.Printf("Description: %s\n", runDescription)
-	}
-	fmt.Printf("Log file: %s\n\n", logFile)
-
-	// Save metadata
-	metadata := session.FormatMetadata(jobID, workingDir, command, host, runDescription, job.StartTime)
-	// Don't quote path - it contains ~ which needs shell expansion
-	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
-	if _, _, err := ssh.RunWithRetry(host, metadataCmd); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
-	}
-
-	// Set up Slack notification if configured
-	notifyCmd := ""
-	slackWebhook := getSlackWebhook()
-	if slackWebhook != "" {
-		// Write embedded notify script to remote
-		remoteNotifyScript := "/tmp/remote-jobs-notify-slack.sh"
-		writeCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", remoteNotifyScript, string(notifySlackScript))
-
-		if _, stderr, err := ssh.RunWithRetry(host, writeCmd); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write notify script: %s\n", stderr)
-		} else {
-			if _, stderr, err := ssh.Run(host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript)); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to chmod notify script: %s\n", stderr)
-			}
-			// $EXIT_CODE is expanded by bash when the command runs
-			// Pass through optional settings
-			envVars := fmt.Sprintf("REMOTE_JOBS_SLACK_WEBHOOK='%s'", slackWebhook)
-			if v := os.Getenv("REMOTE_JOBS_SLACK_VERBOSE"); v == "1" {
-				envVars += " REMOTE_JOBS_SLACK_VERBOSE=1"
-			}
-			if v := os.Getenv("REMOTE_JOBS_SLACK_NOTIFY"); v != "" {
-				envVars += fmt.Sprintf(" REMOTE_JOBS_SLACK_NOTIFY='%s'", v)
-			}
-			if v := os.Getenv("REMOTE_JOBS_SLACK_MIN_DURATION"); v != "" {
-				envVars += fmt.Sprintf(" REMOTE_JOBS_SLACK_MIN_DURATION='%s'", v)
-			}
-			notifyCmd = fmt.Sprintf("; %s '%s' 'rj-%d' $EXIT_CODE '%s' '%s'",
-				envVars, remoteNotifyScript, jobID, host, metadataFile)
-			fmt.Println("Slack notifications: enabled")
-		}
-	}
-
-	// Create the wrapped command using the common builder (tested for tilde expansion)
-	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-		JobID:      jobID,
-		WorkingDir: workingDir,
-		Command:    command,
-		LogFile:    logFile,
-		StatusFile: statusFile,
-		PidFile:    pidFile,
-		NotifyCmd:  notifyCmd,
-		Timeout:    runTimeout,
-		EnvVars:    runEnvVars,
+			fmt.Printf("Log file: %s\n\n", info.LogFile)
+		},
 	})
-
-	// Escape single quotes in wrapped command for embedding in single-quoted string
-	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-
-	// Start tmux session - use single quotes to prevent shell expansion
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
-	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
-		if ssh.IsConnectionError(stderr) && runQueueOnFail {
-			// Connection failed - queue job for later
-			fmt.Println("Connection failed. Queuing job for later...")
-			if err := db.UpdateJobPending(database, jobID); err != nil {
-				return fmt.Errorf("queue job: %w", err)
-			}
-			fmt.Printf("Job queued with ID: %d\n", jobID)
-			return nil
-		}
-		errMsg := ssh.FriendlyError(host, stderr, err)
-		db.UpdateJobFailed(database, jobID, errMsg)
-		return fmt.Errorf("%s", errMsg)
+	if err != nil {
+		return err
 	}
 
-	// Mark job as running
-	if err := db.UpdateJobRunning(database, jobID); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to update job status: %v\n", err)
+	if result.QueuedOnConnectionFailure {
+		fmt.Println("Connection failed. Queuing job for later...")
+		fmt.Printf("Job queued with ID: %d\n\n", result.Info.JobID)
+		fmt.Printf("To retry when connection is available:\n")
+		fmt.Printf("  remote-jobs retry %d\n", result.Info.JobID)
+		return nil
+	}
+
+	if result.SlackEnabled {
+		fmt.Println("Slack notifications: enabled")
 	}
 
 	fmt.Println("✓ Session started successfully")
-	fmt.Printf("Job ID: %d\n", jobID)
+	fmt.Printf("Job ID: %d\n", result.Info.JobID)
 
 	if runAllow {
-		return streamJobLogAllow(host, logFile, jobID)
+		return streamJobLogAllow(host, result.Info.LogFile, result.Info.JobID)
 	}
 
-	// If --follow flag is set, tail the log
 	if runFollow {
 		fmt.Printf("\nFollowing log output (Ctrl+C to stop)...\n\n")
-		tailCmd := fmt.Sprintf("tail -n 50 -f %s", logFile)
+		tailCmd := fmt.Sprintf("tail -n 50 -f %s", result.Info.LogFile)
 		sshCmd := exec.Command("ssh", host, tailCmd)
 		sshCmd.Stdout = os.Stdout
 		sshCmd.Stderr = os.Stderr
@@ -384,10 +299,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nMonitor progress:\n")
-	fmt.Printf("  remote-jobs log %d      # View log\n", jobID)
-	fmt.Printf("  remote-jobs log %d -f   # Follow log\n", jobID)
+	fmt.Printf("  remote-jobs log %d      # View log\n", result.Info.JobID)
+	fmt.Printf("  remote-jobs log %d -f   # Follow log\n", result.Info.JobID)
 	fmt.Printf("\nCheck status:\n")
-	fmt.Printf("  remote-jobs status %d\n", jobID)
+	fmt.Printf("  remote-jobs status %d\n", result.Info.JobID)
 
 	return nil
 }
@@ -482,65 +397,6 @@ func getSlackWebhook() string {
 	}
 
 	return ""
-}
-
-// runQueueWithDependency adds a job to the remote queue with a dependency on another job.
-// This is similar to queue.go's runQueueAdd but called from run.go when --after is used.
-func runQueueWithDependency(database *sql.DB, host, workingDir, command, description string, envVars []string, afterJobID int64, afterAny bool) error {
-	const remoteQueueDir = "~/.cache/remote-jobs/queue"
-	const defaultQueueName = "default"
-
-	// Record job as queued
-	jobID, err := db.RecordQueued(database, host, workingDir, command, description, defaultQueueName)
-	if err != nil {
-		return fmt.Errorf("queue job: %w", err)
-	}
-
-	// Create queue directory on remote
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteQueueDir)
-	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-		db.DeleteJob(database, jobID)
-		return fmt.Errorf("create queue directory: %s", stderr)
-	}
-
-	// Append job to queue file
-	// Format: job_id\tworking_dir\tcommand\tdescription\tenv_vars_b64\tafter_job_id
-	// after_job_id format: "ID" (wait for success) or "ID:any" (wait for completion)
-	queueFile := fmt.Sprintf("%s/%s.queue", remoteQueueDir, defaultQueueName)
-	envVarsB64 := ""
-	if len(envVars) > 0 {
-		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(envVars, "\n")))
-	}
-	afterJobStr := fmt.Sprintf("%d", afterJobID)
-	if afterAny {
-		afterJobStr = fmt.Sprintf("%d:any", afterJobID)
-	}
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, description, envVarsB64, afterJobStr)
-	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
-
-	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
-		db.DeleteJob(database, jobID)
-		return fmt.Errorf("append to queue: %s", stderr)
-	}
-
-	waitType := "succeeds"
-	if afterAny {
-		waitType = "completes"
-	}
-	fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterJobID, waitType)
-	fmt.Printf("  Working dir: %s\n", workingDir)
-	fmt.Printf("  Command: %s\n", command)
-	if description != "" {
-		fmt.Printf("  Description: %s\n", description)
-	}
-	if len(envVars) > 0 {
-		fmt.Printf("  Env vars: %s\n", strings.Join(envVars, ", "))
-	}
-	fmt.Printf("  After job: %d (%s)\n", afterJobID, waitType)
-	fmt.Printf("\nTo start the queue runner (if not already running):\n")
-	fmt.Printf("  remote-jobs queue start %s\n", host)
-
-	return nil
 }
 
 func streamJobLogAllow(host, logFile string, jobID int64) error {

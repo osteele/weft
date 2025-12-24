@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -181,46 +180,27 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Record job in database
-	jobID, err := db.RecordQueued(database, host, workingDir, command, queueDescription, queueName)
-	if err != nil {
-		return fmt.Errorf("record job: %w", err)
-	}
-
-	// Create queue directory on remote
-	remoteQueueDir := queueDir
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteQueueDir)
-	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-		// Failed to create directory - delete job from DB and return error
-		db.DeleteJob(database, jobID)
-		return fmt.Errorf("create queue directory: %s", stderr)
-	}
-
-	// Append job to queue file
-	// Format: job_id\tworking_dir\tcommand\tdescription\tenv_vars_b64\tafter_job_id
-	// env_vars_b64 is base64-encoded newline-separated VAR=value pairs
-	// after_job_id is the job ID to wait for (empty if no dependency)
-	queueFile := fmt.Sprintf("%s/%s.queue", remoteQueueDir, queueName)
-	envVarsB64 := ""
-	if len(queueEnvVars) > 0 {
-		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(queueEnvVars, "\n")))
-	}
-	afterJobStr := ""
 	if queueAfter > 0 && queueAfterAny > 0 {
 		return fmt.Errorf("cannot use both --after and --after-any")
 	}
-	if queueAfter > 0 {
-		afterJobStr = fmt.Sprintf("%d", queueAfter)
-	} else if queueAfterAny > 0 {
-		afterJobStr = fmt.Sprintf("%d:any", queueAfterAny)
-	}
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, queueDescription, envVarsB64, afterJobStr)
-	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 
-	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
-		// Failed to append to queue - delete job from DB and return error
-		db.DeleteJob(database, jobID)
-		return fmt.Errorf("append to queue: %s", stderr)
+	afterID := queueAfter
+	if queueAfter == 0 && queueAfterAny > 0 {
+		afterID = queueAfterAny
+	}
+
+	jobID, err := queueJob(database, queueJobOptions{
+		Host:        host,
+		WorkingDir:  workingDir,
+		Command:     command,
+		Description: queueDescription,
+		EnvVars:     queueEnvVars,
+		QueueName:   queueName,
+		AfterJobID:  afterID,
+		AfterAny:    queueAfterAny > 0,
+	})
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Job %d added to queue '%s' on %s\n\n", jobID, queueName, host)

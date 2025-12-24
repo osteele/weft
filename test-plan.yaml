@@ -1,0 +1,23 @@
+version: 1
+jobs:
+  - job:
+      name: test-hostname
+      command: hostname
+      description: Test single job
+
+  - parallel:
+      name: test-parallel
+      jobs:
+        - command: echo "Parallel job 1"
+          description: Parallel test 1
+        - command: echo "Parallel job 2"
+          description: Parallel test 2
+
+  - series:
+      name: test-series
+      wait: success
+      jobs:
+        - command: echo "Series job 1"
+          description: Series test 1
+        - command: echo "Series job 2"
+          description: Series test 2

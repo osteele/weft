@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -22,8 +24,10 @@ const (
 )
 
 var (
-	statusSync   bool
-	statusNoSync bool
+	statusSync        bool
+	statusNoSync      bool
+	statusWait        bool
+	statusWaitTimeout time.Duration
 )
 
 var statusCmd = &cobra.Command{
@@ -48,6 +52,8 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	statusCmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	statusCmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
+	statusCmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job to complete before returning (single job only)")
+	statusCmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -78,6 +84,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	singleJob := len(args) == 1
+	if statusWait && !singleJob {
+		return fmt.Errorf("--wait can only be used with a single job ID")
+	}
 
 	for i, arg := range args {
 		if i > 0 {
@@ -108,6 +117,25 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				os.Exit(ExitNotFound)
 			}
 			continue
+		}
+
+		if statusWait && singleJob {
+			fmt.Printf("Waiting for job %d to complete", jobID)
+			if statusWaitTimeout > 0 {
+				fmt.Printf(" (timeout: %s)", statusWaitTimeout)
+			}
+			fmt.Println()
+			updatedJob, err := waitForJobCompletion(database, jobID, statusWaitTimeout)
+			if err != nil {
+				if errors.Is(err, errWaitTimeout) {
+					fmt.Fprintf(os.Stderr, "%v\n", err)
+				} else {
+					return err
+				}
+			}
+			if updatedJob != nil {
+				job = updatedJob
+			}
 		}
 
 		// If job is already marked as completed or dead, use cached result
@@ -163,6 +191,59 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+var errWaitTimeout = errors.New("wait timeout")
+
+func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration) (*db.Job, error) {
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if job == nil {
+			return nil, fmt.Errorf("job %d not found", jobID)
+		}
+		if isTerminalStatus(job.Status) {
+			return job, nil
+		}
+		if timeout > 0 && time.Now().After(deadline) {
+			return job, fmt.Errorf("%w waiting for job %d", errWaitTimeout, jobID)
+		}
+
+		if shouldAttemptSync(job.Status) {
+			if _, err := syncJob(database, job); err != nil && !ssh.IsConnectionError(err.Error()) {
+				return nil, err
+			}
+		}
+
+		<-ticker.C
+	}
+}
+
+func isTerminalStatus(status string) bool {
+	switch status {
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldAttemptSync(status string) bool {
+	switch status {
+	case db.StatusRunning, db.StatusStarting, db.StatusQueued:
+		return true
+	default:
+		return false
+	}
 }
 
 func printJobStatus(job *db.Job, exitOnComplete bool) {

@@ -98,12 +98,40 @@ The command:
 - Returns immediately (non-blocking)
 - Prints the job ID and instructions for monitoring
 
+### remote-jobs plan submit
+
+Submit a YAML job execution plan that can mix one-off jobs, parallel groups,
+and queue-backed series.
+
+```bash
+remote-jobs plan submit plan.yaml
+remote-jobs plan submit --host studio plan.yaml   # provide default host via CLI
+remote-jobs plan submit - < generated-plan.yaml   # read from stdin / heredoc
+```
+
+Plan files support an optional `kill` list, single `job` entries, `parallel`
+groups (which simply run without dependencies), and `series` groups (which
+queue jobs so each starts only after the prior job completes successfully or
+after it finishes in any state). Provide `--host <name>` to supply a default
+host for jobs that omit it, and add `--watch <duration>` to keep the CLI
+around and report which jobs finished. See `docs/job-plans.md` for the full
+schema, examples, and the reserved syntax for future resource-aware triggers.
+
+> **Agents welcome:** Remote Jobs (and the plan syntax in particular) was
+> designed for coding agents as well as humans. The YAML shape is easy for an
+> agent to emit directly from a prompt, so consider giving your agent runtime a
+> skill/instruction that invokes `remote-jobs plan submit` with generated plans.
+> This lets automated assistants spin up, chain, and monitor jobs using the same
+> dependency and queueing logic described below.
+
 ### remote-jobs job status
 
 Check the status of one or more jobs by ID.
 
 ```bash
 remote-jobs job status <job-id>...
+remote-jobs job status --wait 42         # block until the job finishes
+remote-jobs job status --wait --wait-timeout 30m 42
 ```
 
 **Exit codes (single job only):**
@@ -122,6 +150,10 @@ This command:
 - First checks the local database for terminated jobs
 - Only queries the remote host if the job is still running
 - Updates the database if status has changed
+- Use `--wait` (with optional `--wait-timeout`) to block until a job finishes.
+- Use `--wait` (with optional `--wait-timeout`) to block until a job finishes.
+  This lets coding agents wait for downstream steps without polling or burning
+  tokens on tailing logs.
 
 ### remote-jobs tui
 
