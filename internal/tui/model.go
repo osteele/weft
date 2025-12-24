@@ -36,6 +36,17 @@ const (
 	ViewModeHosts
 )
 
+// jobFilterMode controls which subset of jobs is displayed in the Jobs view
+type jobFilterMode int
+
+const (
+	jobFilterAll jobFilterMode = iota
+	jobFilterActive
+	jobFilterSucceeded
+	jobFilterFailed
+	jobFilterModeCount
+)
+
 // DetailTab represents which tab is active in the job detail panel
 type DetailTab int
 
@@ -50,6 +61,7 @@ type keyMap struct {
 	Down        key.Binding
 	Enter       key.Binding
 	Logs        key.Binding
+	Filter      key.Binding
 	Escape      key.Binding
 	Kill        key.Binding
 	Restart     key.Binding
@@ -84,6 +96,10 @@ var keys = keyMap{
 	Logs: key.NewBinding(
 		key.WithKeys("l"),
 		key.WithHelp("l", "logs"),
+	),
+	Filter: key.NewBinding(
+		key.WithKeys("f"),
+		key.WithHelp("f", "cycle filter"),
 	),
 	Escape: key.NewBinding(
 		key.WithKeys("esc"),
@@ -256,9 +272,11 @@ type Model struct {
 	viewMode ViewMode
 
 	// Jobs data
+	allJobs       []*db.Job
 	jobs          []*db.Job
 	selectedIndex int
 	selectedJob   *db.Job
+	jobFilter     jobFilterMode
 
 	// Hosts data
 	hosts           []*Host
@@ -378,6 +396,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	return Model{
 		database:                database,
 		selectedIndex:           0,
+		jobFilter:               jobFilterAll,
 		inputs:                  inputs,
 		syncInterval:            opts.SyncInterval,
 		logRefreshInterval:      opts.LogRefreshInterval,
@@ -424,7 +443,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
 		}
-		m.jobs = msg.jobs
+		m.allJobs = msg.jobs
+		m.applyJobFilter()
 
 		// If there's a pending job selection, find and select it
 		if m.pendingSelectJobID > 0 {
@@ -435,14 +455,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.pendingSelectJobID = 0
-		}
-
-		// Keep selection in bounds
-		if m.selectedIndex >= len(m.jobs) {
-			m.selectedIndex = len(m.jobs) - 1
-		}
-		if m.selectedIndex < 0 {
-			m.selectedIndex = 0
 		}
 		return m, nil
 
@@ -1086,6 +1098,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case key.Matches(msg, keys.Filter):
+		m.jobFilter = jobFilterMode((int(m.jobFilter) + 1) % int(jobFilterModeCount))
+		m.applyJobFilter()
+		return m, m.setFlash(fmt.Sprintf("Filter: %s", jobFilterDescription(m.jobFilter)), false)
+
 	case key.Matches(msg, keys.Prune):
 		return m, tea.Batch(m.setFlash("Pruning completed/dead jobs...", false), m.pruneJobs())
 
@@ -1378,9 +1395,17 @@ func (m Model) renderJobList(height int) string {
 	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %s",
 		"ID", "HOST", "STATUS", "STARTED", "COMMAND / DESCRIPTION")
 	rows = append(rows, headerStyle.Render(header))
+	filterLabel := fmt.Sprintf(" Filter: %s (press f to cycle)", jobFilterDescription(m.jobFilter))
+	rows = append(rows, dimStyle.Render(filterLabel))
+
+	if len(m.jobs) == 0 {
+		rows = append(rows, dimStyle.Render(" No jobs match this filter"))
+		content := strings.Join(rows, "\n")
+		return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
+	}
 
 	// Jobs
-	contentHeight := height - 4 // Account for borders and header
+	contentHeight := height - 5 // Account for borders, header, and filter line
 	for i, job := range m.jobs {
 		if i >= contentHeight {
 			break
@@ -1705,7 +1730,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs s:sync n:new r:restart k:kill P:prune h:hosts")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs f:filter s:sync n:new r:restart k:kill P:prune h:hosts")
 
 	if m.syncing {
 		help = syncingStyle.Render("⟳ ") + help
@@ -2074,6 +2099,48 @@ func (m Model) refreshJobs() tea.Cmd {
 	}
 }
 
+func (m *Model) applyJobFilter() {
+	prevSelectedID := int64(0)
+	if len(m.jobs) > 0 && m.selectedIndex >= 0 && m.selectedIndex < len(m.jobs) {
+		prevSelectedID = m.jobs[m.selectedIndex].ID
+	}
+
+	var filtered []*db.Job
+	for _, job := range m.allJobs {
+		if jobMatchesFilter(job, m.jobFilter) {
+			filtered = append(filtered, job)
+		}
+	}
+	m.jobs = filtered
+
+	if len(m.jobs) == 0 {
+		m.selectedIndex = 0
+	} else {
+		if m.selectedIndex >= len(m.jobs) {
+			m.selectedIndex = len(m.jobs) - 1
+		}
+		if m.selectedIndex < 0 {
+			m.selectedIndex = 0
+		}
+	}
+
+	if prevSelectedID != 0 {
+		for i, job := range m.jobs {
+			if job.ID == prevSelectedID {
+				m.selectedIndex = i
+				break
+			}
+		}
+	}
+
+	if m.selectedJob != nil && !jobMatchesFilter(m.selectedJob, m.jobFilter) {
+		m.detailTab = DetailTabDetails
+		m.selectedJob = nil
+		m.logContent = ""
+		m.logStale = false
+	}
+}
+
 func (m Model) startHostRefreshTicker() tea.Cmd {
 	return tea.Tick(m.hostRefreshInterval, func(t time.Time) tea.Msg {
 		return hostRefreshTickMsg(t)
@@ -2236,6 +2303,35 @@ func (m Model) getTargetJob() *db.Job {
 		return m.jobs[m.selectedIndex]
 	}
 	return nil
+}
+
+func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
+	switch mode {
+	case jobFilterActive:
+		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued
+	case jobFilterSucceeded:
+		return job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
+	case jobFilterFailed:
+		if job.Status == db.StatusFailed || job.Status == db.StatusDead {
+			return true
+		}
+		return job.Status == db.StatusCompleted && (job.ExitCode == nil || *job.ExitCode != 0)
+	default:
+		return true
+	}
+}
+
+func jobFilterDescription(mode jobFilterMode) string {
+	switch mode {
+	case jobFilterActive:
+		return "Queued/Running"
+	case jobFilterSucceeded:
+		return "Completed (success)"
+	case jobFilterFailed:
+		return "Completed (failure)"
+	default:
+		return "All jobs"
+	}
 }
 
 func (m Model) fetchSelectedJobLog() tea.Cmd {

@@ -164,12 +164,15 @@ remote-jobs tui --mouse   # enable mouse clicks (disables terminal selection)
 ```
 
 The TUI has two views: **Jobs** and **Hosts**.
+Press `f` at any time to cycle the Jobs view between showing all jobs, only queued/running jobs, completed successes, or completed failures.
 
 #### Jobs View (default)
 
 Split-screen with:
 - **Top panel**: Job list with status indicators (colored by status)
 - **Bottom panel**: Job details or logs
+
+Jobs are sorted by the newest job IDs so your latest or actively queued entries stay near the top of the list.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -228,6 +231,7 @@ Press `l` to view logs:
 - `g`: Start queued job now (bypasses `--after` dependency)
 - `x`: Remove job from list
 - `h` or `Tab`: Switch to hosts view
+- `f`: Cycle job filter (All → Queued/Running → Success → Failure)
 - `Esc`: Clear selection / exit logs view
 
 Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/remote-jobs/config.yaml`) if you prefer clickable rows instead.
