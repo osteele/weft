@@ -36,6 +36,14 @@ const (
 	ViewModeHosts
 )
 
+// DetailTab represents which tab is active in the job detail panel
+type DetailTab int
+
+const (
+	DetailTabDetails DetailTab = iota
+	DetailTabLogs
+)
+
 // Key bindings
 type keyMap struct {
 	Up          key.Binding
@@ -257,6 +265,7 @@ type Model struct {
 	selectedHostIdx int
 
 	// UI State
+	detailTab    DetailTab // Which tab is active in detail panel (Details or Logs)
 	logContent   string
 	logStale     bool             // true if showing cached content due to connection error
 	logCache     map[int64]string // cache of last successful log content per job
@@ -587,8 +596,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case logTickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startLogTicker())
-		// Refresh logs if in log mode
-		if m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
+		// Refresh logs if in Logs tab with a running job
+		if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
 			cmds = append(cmds, m.fetchSelectedJobLog())
 		}
 		// Refresh process stats for highlighted running job (even if not in log mode)
@@ -768,7 +777,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// When in log view, forward scroll keys to viewport
-	if m.selectedJob != nil {
+	if m.detailTab == DetailTabLogs {
 		switch msg.String() {
 		case "pgup", "pgdown", "home", "end", "ctrl+u", "ctrl+d":
 			var cmd tea.Cmd
@@ -798,19 +807,28 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Suspend
 
 	case key.Matches(msg, keys.Tab):
-		// Toggle between views
+		// In Jobs view, toggle between Details and Logs tabs
 		if m.viewMode == ViewModeJobs {
-			m.viewMode = ViewModeHosts
-			// Refresh hosts when switching to hosts view, but only if needed
-			var cmds []tea.Cmd
-			for _, host := range m.hosts {
-				// Only refresh if not queried this session or if online (for dynamic data)
-				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
-					cmds = append(cmds, m.fetchHostInfo(host.Name))
+			if m.detailTab == DetailTabDetails {
+				// Switch to Logs tab
+				m.detailTab = DetailTabLogs
+				if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
+					m.selectedJob = m.jobs[m.selectedIndex]
+					m.logLoading = true
+					var cmds []tea.Cmd
+					cmds = append(cmds, m.fetchSelectedJobLog())
+					if m.selectedJob.Status == db.StatusRunning {
+						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+					}
+					return m, tea.Batch(cmds...)
 				}
+			} else {
+				// Switch to Details tab
+				m.detailTab = DetailTabDetails
 			}
-			return m, tea.Batch(cmds...)
+			return m, nil
 		}
+		// In Hosts view, switch to Jobs view
 		m.viewMode = ViewModeJobs
 		return m, nil
 
@@ -860,8 +878,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.processStats = nil
 				m.prevProcessStats = nil
 				m.processStatsJobID = 0
-				// If in logs mode, fetch logs for new job
-				if m.selectedJob != nil && len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
+				// If in Logs tab, fetch logs for new job
+				if m.detailTab == DetailTabLogs && len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
 					m.selectedJob = m.jobs[m.selectedIndex]
 					m.logLoading = true
 					var cmds []tea.Cmd
@@ -872,7 +890,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 					return m, tea.Batch(cmds...)
 				}
-				// Even if not in logs mode, fetch stats for running jobs
+				// Even if not in Logs tab, fetch stats for running jobs
 				if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
 					job := m.jobs[m.selectedIndex]
 					if job.Status == db.StatusRunning {
@@ -895,8 +913,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.processStats = nil
 				m.prevProcessStats = nil
 				m.processStatsJobID = 0
-				// If in logs mode, fetch logs for new job
-				if m.selectedJob != nil && m.selectedIndex < len(m.jobs) {
+				// If in Logs tab, fetch logs for new job
+				if m.detailTab == DetailTabLogs && m.selectedIndex < len(m.jobs) {
 					m.selectedJob = m.jobs[m.selectedIndex]
 					m.logLoading = true
 					var cmds []tea.Cmd
@@ -907,7 +925,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					}
 					return m, tea.Batch(cmds...)
 				}
-				// Even if not in logs mode, fetch stats for running jobs
+				// Even if not in Logs tab, fetch stats for running jobs
 				if m.selectedIndex < len(m.jobs) {
 					job := m.jobs[m.selectedIndex]
 					if job.Status == db.StatusRunning {
@@ -939,14 +957,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Logs):
 		if m.viewMode == ViewModeJobs {
-			// Toggle logs mode
-			if m.selectedJob != nil {
+			// Toggle to logs tab (or toggle if already there)
+			if m.detailTab == DetailTabLogs {
 				// Already in logs mode - go back to details
-				m.selectedJob = nil
-				m.logContent = ""
-				m.logStale = false
+				m.detailTab = DetailTabDetails
 			} else if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
 				// Enter logs mode
+				m.detailTab = DetailTabLogs
 				m.selectedJob = m.jobs[m.selectedIndex]
 				m.logLoading = true
 				var cmds []tea.Cmd
@@ -961,6 +978,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Escape):
+		m.detailTab = DetailTabDetails
 		m.selectedJob = nil
 		m.logContent = ""
 		m.logStale = false
@@ -1318,9 +1336,7 @@ func (m Model) renderJobList(height int) string {
 		if display == "" {
 			display = job.EffectiveCommand()
 		}
-		if len(display) > 40 {
-			display = display[:37] + "..."
-		}
+		display = truncate(display, 40)
 
 		line := fmt.Sprintf(" %-4d %-10s %-12s %-12s %s",
 			job.ID, truncate(job.Host, 10),
@@ -1340,13 +1356,27 @@ func (m Model) renderJobList(height int) string {
 }
 
 func (m Model) renderLogPanel(height int) string {
-	// If a job is selected (l pressed), show only logs
-	if m.selectedJob != nil {
+	// Render based on active tab
+	if m.detailTab == DetailTabLogs {
 		return m.renderLogsOnly(height)
 	}
-
-	// Otherwise show details for highlighted job
 	return m.renderJobDetails(height)
+}
+
+// renderTabHeader renders the "Details  Logs" tab header with active tab bolded
+func (m Model) renderTabHeader() string {
+	detailsLabel := "Details"
+	logsLabel := "Logs"
+
+	if m.detailTab == DetailTabDetails {
+		detailsLabel = headerStyle.Render(detailsLabel)
+		logsLabel = dimStyle.Render(logsLabel)
+	} else {
+		detailsLabel = dimStyle.Render(detailsLabel)
+		logsLabel = headerStyle.Render(logsLabel)
+	}
+
+	return detailsLabel + "  " + logsLabel
 }
 
 func (m Model) renderLogsOnly(height int) string {
@@ -1354,8 +1384,17 @@ func (m Model) renderLogsOnly(height int) string {
 	var content string
 	var staleIndicator string
 
-	// Calculate viewport dimensions (account for borders, title, padding)
-	viewportHeight := height - 4
+	// Handle case where no job is selected yet
+	if job == nil {
+		job = m.getTargetJob()
+		if job == nil {
+			panelContent := m.renderTabHeader() + "\n" + dimStyle.Render("No job selected")
+			return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+		}
+	}
+
+	// Calculate viewport dimensions (account for borders, title, tab header, padding)
+	viewportHeight := height - 5
 	viewportWidth := m.width - 6 // Account for panel borders and padding
 	if m.logStale {
 		viewportHeight -= 1 // Make room for stale indicator
@@ -1382,7 +1421,7 @@ func (m Model) renderLogsOnly(height int) string {
 		}
 	}
 
-	title := fmt.Sprintf("Logs: Job %d on %s", job.ID, job.Host)
+	jobInfo := fmt.Sprintf("Job %d on %s", job.ID, job.Host)
 	if m.logStale {
 		staleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render(" (cached - host offline)")
 	}
@@ -1394,7 +1433,7 @@ func (m Model) renderLogsOnly(height int) string {
 		scrollInfo = fmt.Sprintf(" [%d/%d]", m.logViewport.YOffset+viewportHeight, totalLines)
 	}
 
-	panelContent := titleStyle.Render(title) + staleIndicator + scrollInfo + "\n" + content
+	panelContent := m.renderTabHeader() + "\n" + dimStyle.Render(jobInfo) + staleIndicator + scrollInfo + "\n" + content
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
@@ -1413,6 +1452,12 @@ func (m Model) renderJobDetails(height int) string {
 		// Show Cmd and Dir first (most useful info)
 		header += fmt.Sprintf("Cmd:     %s\n", job.EffectiveCommand())
 		header += fmt.Sprintf("Dir:     %s\n", job.EffectiveWorkingDir())
+
+		// Show environment variables if any
+		envVars := job.ParseExportVars()
+		if len(envVars) > 0 {
+			header += fmt.Sprintf("Env:     %s\n", strings.Join(envVars, ", "))
+		}
 
 		// Then timing information (only if job has started)
 		if job.StartTime > 0 {
@@ -1490,7 +1535,7 @@ func (m Model) renderJobDetails(height int) string {
 		}
 	}
 
-	panelContent := titleStyle.Render("Details") + "\n"
+	panelContent := m.renderTabHeader() + "\n"
 	if header != "" {
 		panelContent += header
 	}

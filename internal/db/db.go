@@ -774,6 +774,34 @@ func stripExportPrefix(cmd string) string {
 	return cmd
 }
 
+// ParseExportVars extracts environment variable assignments from the command.
+// Returns a slice of "VAR=value" strings from "export VAR=value && " prefixes.
+// Processes the command after stripping "cd dir && " if present.
+func (j *Job) ParseExportVars() []string {
+	// Get the command after any cd prefix
+	cmd, _ := j.ParseCdCommand()
+	if cmd == "" {
+		cmd = j.Command
+	}
+	cmd = strings.TrimSpace(cmd)
+
+	var envVars []string
+	for strings.HasPrefix(cmd, "export ") {
+		// Find the " && " separator
+		andIdx := strings.Index(cmd, " && ")
+		if andIdx == -1 {
+			break
+		}
+		// Extract the VAR=value part (skip "export ")
+		exportPart := strings.TrimSpace(cmd[7:andIdx])
+		if exportPart != "" {
+			envVars = append(envVars, exportPart)
+		}
+		cmd = strings.TrimSpace(cmd[andIdx+4:])
+	}
+	return envVars
+}
+
 // ParseCdCommand checks if the command starts with "cd <dir> &&" pattern.
 // Returns (command_after_and, cd_directory) if pattern matches, or ("", "") if not.
 func (j *Job) ParseCdCommand() (command, dir string) {

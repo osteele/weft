@@ -182,7 +182,7 @@ func printJobs(jobs []*db.Job) error {
 			display = job.EffectiveCommand()
 		}
 		if len(display) > 40 {
-			display = display[:37] + "..."
+			display = display[:39] + "…"
 		}
 
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",

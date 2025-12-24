@@ -138,6 +138,56 @@ func TestEffectiveCommand(t *testing.T) {
 	}
 }
 
+func TestParseExportVars(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{
+			name:    "no exports",
+			command: "python train.py",
+			want:    nil,
+		},
+		{
+			name:    "single export",
+			command: "export TMPDIR=/tmp && python train.py",
+			want:    []string{"TMPDIR=/tmp"},
+		},
+		{
+			name:    "multiple exports",
+			command: "export A=1 && export B=2 && python train.py",
+			want:    []string{"A=1", "B=2"},
+		},
+		{
+			name:    "cd then export",
+			command: "cd /foo && export TMPDIR=/tmp && python train.py",
+			want:    []string{"TMPDIR=/tmp"},
+		},
+		{
+			name:    "export without && returns nothing",
+			command: "export FOO=bar",
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{Command: tt.command}
+			got := job.ParseExportVars()
+			if len(got) != len(tt.want) {
+				t.Errorf("ParseExportVars() = %v, want %v", got, tt.want)
+				return
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("ParseExportVars()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestEffectiveWorkingDir(t *testing.T) {
 	tests := []struct {
 		name       string
