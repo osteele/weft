@@ -34,7 +34,10 @@ Keyboard shortcuts:
 
 func init() {
 	rootCmd.AddCommand(tuiCmd)
+	tuiCmd.Flags().BoolVar(&tuiMouse, "mouse", false, "Enable mouse support (disables terminal selection)")
 }
+
+var tuiMouse bool
 
 func runTUI(cmd *cobra.Command, args []string) error {
 	// Load config
@@ -63,11 +66,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	model := tui.NewModelWithOptions(database, opts)
 
-	p := tea.NewProgram(
-		model,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	useMouse := cfg.EnableMouse
+	if cmd.Flags().Changed("mouse") {
+		useMouse = tuiMouse
+	}
+
+	programOpts := []tea.ProgramOption{tea.WithAltScreen()}
+	if useMouse {
+		programOpts = append(programOpts, tea.WithMouseCellMotion())
+	}
+
+	p := tea.NewProgram(model, programOpts...)
 
 	_, err = p.Run()
 	if err != nil {

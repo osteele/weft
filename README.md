@@ -160,6 +160,7 @@ Launch an interactive terminal UI for viewing and managing jobs.
 
 ```bash
 remote-jobs tui
+remote-jobs tui --mouse   # enable mouse clicks (disables terminal selection)
 ```
 
 The TUI has two views: **Jobs** and **Hosts**.
@@ -228,6 +229,8 @@ Press `l` to view logs:
 - `x`: Remove job from list
 - `h` or `Tab`: Switch to hosts view
 - `Esc`: Clear selection / exit logs view
+
+Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/remote-jobs/config.yaml`) if you prefer clickable rows instead.
 - `q` or `Ctrl-C`: Quit
 - `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
 

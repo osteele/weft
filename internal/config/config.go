@@ -20,6 +20,9 @@ type Config struct {
 	LogRefreshInterval int `yaml:"log_refresh_interval"`
 	// HostRefreshInterval is how often to refresh host info in hosts view
 	HostRefreshInterval int `yaml:"host_refresh_interval"`
+
+	// EnableMouse toggles mouse support in the TUI (disables terminal selection when true)
+	EnableMouse bool `yaml:"enable_mouse"`
 }
 
 // DefaultConfig returns the default configuration
@@ -29,6 +32,7 @@ func DefaultConfig() *Config {
 		SyncInterval:        15,
 		LogRefreshInterval:  3,
 		HostRefreshInterval: 30,
+		EnableMouse:         false,
 	}
 }
 
