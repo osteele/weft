@@ -2229,7 +2229,7 @@ func (m Model) fetchHostJobsGPU(hostName string) tea.Cmd {
 
 // getTargetJob returns the job to act on - either the selected job or the highlighted job
 func (m Model) getTargetJob() *db.Job {
-	if m.selectedJob != nil {
+	if m.detailTab == DetailTabLogs && m.selectedJob != nil {
 		return m.selectedJob
 	}
 	if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
