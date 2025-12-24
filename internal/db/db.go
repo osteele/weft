@@ -575,9 +575,8 @@ func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
 		args = append(args, host)
 	}
 
-	// Order queued jobs first (NULL start_time), then by start_time DESC
-	// Use COALESCE to put queued jobs at the top (far future timestamp)
-	query += ` ORDER BY COALESCE(start_time, 9999999999) DESC LIMIT ?`
+	// Order by job ID descending so newest jobs appear first
+	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
 
 	return queryJobs(db, query, args...)
