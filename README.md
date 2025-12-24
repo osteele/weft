@@ -1,5 +1,9 @@
 # Remote Jobs
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/osteele/remote-jobs.svg)](https://pkg.go.dev/github.com/osteele/remote-jobs)
+[![Go Report Card](https://goreportcard.com/badge/github.com/osteele/remote-jobs)](https://goreportcard.com/report/github.com/osteele/remote-jobs)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A CLI tool for running persistent tmux sessions on remote hosts that survive SSH disconnections.
 
 ## Problem Solved

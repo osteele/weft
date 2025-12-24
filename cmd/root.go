@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/spf13/cobra"
 )
+
+// Version is set at build time via -ldflags
+var Version = "dev"
 
 var rootCmd = &cobra.Command{
 	Use:   "remote-jobs",
@@ -30,6 +34,14 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version information",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("remote-jobs %s\n", Version)
+	},
+}
+
 func init() {
-	// Global flags can be added here if needed
+	rootCmd.AddCommand(versionCmd)
 }
