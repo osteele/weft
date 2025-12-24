@@ -417,6 +417,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleKeyPress(msg)
 
+	case tea.MouseMsg:
+		return m.handleMouseClick(msg)
+
 	case jobsRefreshedMsg:
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
@@ -762,6 +765,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashExpiry = time.Time{}
 		}
 		return m, nil
+	}
+
+	return m, nil
+}
+
+// handleMouseClick handles mouse click events
+func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Only handle left button press
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
+	// Ignore clicks when in input mode or showing overlays
+	if m.inputMode || m.showHelp || m.restarting || m.creatingJob {
+		return m, nil
+	}
+
+	// Calculate list panel height (same as in View)
+	listHeight := int(float64(m.height) * 0.55)
+
+	// Check if click is within the list panel (top portion of screen)
+	// Account for: top border (1), header row (1), then job rows
+	// So first job row is at Y=2
+	if msg.Y >= 2 && msg.Y < listHeight-1 {
+		clickedIndex := msg.Y - 2 // Subtract border + header
+
+		if m.viewMode == ViewModeJobs {
+			if clickedIndex >= 0 && clickedIndex < len(m.jobs) {
+				m.selectedIndex = clickedIndex
+				// Clear cached process stats when changing jobs
+				m.processStats = nil
+				m.prevProcessStats = nil
+				m.processStatsJobID = 0
+				// If in Logs tab, fetch logs for new selection
+				if m.detailTab == DetailTabLogs {
+					m.selectedJob = m.jobs[m.selectedIndex]
+					m.logLoading = true
+					var cmds []tea.Cmd
+					cmds = append(cmds, m.fetchSelectedJobLog())
+					if m.selectedJob.Status == db.StatusRunning {
+						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+					}
+					return m, tea.Batch(cmds...)
+				}
+				// Fetch stats for running jobs even if not in Logs tab
+				job := m.jobs[m.selectedIndex]
+				if job.Status == db.StatusRunning {
+					return m, m.fetchProcessStats(job)
+				}
+			}
+		} else if m.viewMode == ViewModeHosts {
+			if clickedIndex >= 0 && clickedIndex < len(m.hosts) {
+				m.selectedHostIdx = clickedIndex
+			}
+		}
 	}
 
 	return m, nil
