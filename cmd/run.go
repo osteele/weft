@@ -263,7 +263,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if info.Description != "" {
 				fmt.Printf("Description: %s\n", info.Description)
 			}
-			fmt.Printf("Log file: %s\n\n", info.LogFile)
+			fmt.Println()
 		},
 	})
 	if err != nil {
@@ -299,10 +299,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("\nMonitor progress:\n")
-	fmt.Printf("  remote-jobs log %d      # View log\n", result.Info.JobID)
-	fmt.Printf("  remote-jobs log %d -f   # Follow log\n", result.Info.JobID)
-	fmt.Printf("\nCheck status:\n")
-	fmt.Printf("  remote-jobs status %d\n", result.Info.JobID)
+	fmt.Printf("  remote-jobs status %d                   # Check status\n", result.Info.JobID)
+	fmt.Printf("  remote-jobs status --wait %d            # Wait for completion\n", result.Info.JobID)
+	fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
+	fmt.Printf("\nView log:\n")
+	fmt.Printf("  remote-jobs log %d                      # View log\n", result.Info.JobID)
+	fmt.Printf("  remote-jobs log %d -f                   # Follow log\n", result.Info.JobID)
 
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -100,6 +101,7 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	printCommandMap(commandMap)
+	printPlanStatusCommands(scheduled)
 
 	if planWatchDuration > 0 {
 		if err := watchPlanJobs(database, scheduled, planWatchDuration); err != nil {
@@ -315,6 +317,26 @@ func printCommandMap(m map[string][]int64) {
 			fmt.Printf("    - %d\n", id)
 		}
 	}
+}
+
+func printPlanStatusCommands(jobs []scheduledPlanJob) {
+	if len(jobs) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		if job.JobID > 0 {
+			ids = append(ids, fmt.Sprintf("%d", job.JobID))
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Monitor plan progress:")
+	fmt.Printf("  remote-jobs status %s\n", strings.Join(ids, " "))
+	fmt.Printf("  remote-jobs status --wait %s\n", strings.Join(ids, " "))
+	fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %s\n", strings.Join(ids, " "))
 }
 
 func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Duration) error {

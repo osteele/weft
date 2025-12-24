@@ -132,6 +132,7 @@ Check the status of one or more jobs by ID.
 remote-jobs job status <job-id>...
 remote-jobs job status --wait 42         # block until the job finishes
 remote-jobs job status --wait --wait-timeout 30m 42
+remote-jobs job status --wait 42 43 44   # wait for all (exits 0 only if all succeed)
 ```
 
 **Exit codes (single job only):**
@@ -150,10 +151,8 @@ This command:
 - First checks the local database for terminated jobs
 - Only queries the remote host if the job is still running
 - Updates the database if status has changed
-- Use `--wait` (with optional `--wait-timeout`) to block until a job finishes.
-- Use `--wait` (with optional `--wait-timeout`) to block until a job finishes.
-  This lets coding agents wait for downstream steps without polling or burning
-  tokens on tailing logs.
+- Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
+  The command exits with `0` only if every waited-on job succeeds.
 
 ### remote-jobs tui
 
