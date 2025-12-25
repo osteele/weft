@@ -34,7 +34,7 @@ var jobRunCmd = &cobra.Command{
 	Use:   "run <host> <command>",
 	Short: "Start a new job on a remote host",
 	Long:  runCmd.Long,
-	Args:  cobra.MinimumNArgs(2),
+	Args:  usageArgs(cobra.MinimumNArgs(2)),
 	RunE:  runRun,
 }
 
@@ -44,7 +44,7 @@ var jobLogCmd = &cobra.Command{
 	Aliases: []string{"logs"},
 	Short:   "View log output from a remote job",
 	Long:    logCmd.Long,
-	Args:    cobra.ExactArgs(1),
+	Args:    usageArgs(cobra.ExactArgs(1)),
 	RunE:    runLog,
 }
 
@@ -53,7 +53,7 @@ var jobKillCmd = &cobra.Command{
 	Use:   "kill <job-id>...",
 	Short: "Kill one or more running jobs",
 	Long:  killCmd.Long,
-	Args:  cobra.MinimumNArgs(1),
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
 	RunE:  runKill,
 }
 
@@ -69,7 +69,7 @@ Supports checking multiple jobs at once.
 Examples:
   remote-jobs job status 42          # Single job
   remote-jobs job status 42 43 44    # Multiple jobs`,
-	Args: cobra.MinimumNArgs(1),
+	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runStatus,
 }
 
@@ -78,7 +78,7 @@ var jobDescribeCmd = &cobra.Command{
 	Use:   "describe <job-id> <description>",
 	Short: "Set or update the description of a job",
 	Long:  describeCmd.Long,
-	Args:  cobra.ExactArgs(2),
+	Args:  usageArgs(cobra.ExactArgs(2)),
 	RunE:  runDescribe,
 }
 
@@ -87,7 +87,7 @@ var jobRestartCmd = &cobra.Command{
 	Use:   "restart <job-id>",
 	Short: "Restart a job using saved metadata",
 	Long:  restartCmd.Long,
-	Args:  cobra.ExactArgs(1),
+	Args:  usageArgs(cobra.ExactArgs(1)),
 	RunE:  runRestart,
 }
 
@@ -111,7 +111,7 @@ It updates the host in the database and removes/adds the job from/to queue files
 Examples:
   remote-jobs job move 42 cool100   # Move job 42 to cool100
   remote-jobs job move 43 studio    # Move job 43 to studio`,
-	Args: cobra.ExactArgs(2),
+	Args: usageArgs(cobra.ExactArgs(2)),
 	RunE: runJobMove,
 }
 

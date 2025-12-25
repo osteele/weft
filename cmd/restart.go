@@ -23,7 +23,7 @@ with the same command and working directory. Creates a new job ID for each.
 Examples:
   remote-jobs restart 42
   remote-jobs restart 42 43 44`,
-	Args: cobra.MinimumNArgs(1),
+	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runRestart,
 }
 

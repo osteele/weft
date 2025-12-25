@@ -16,7 +16,7 @@ var describeCmd = &cobra.Command{
 Examples:
   remote-jobs describe 42 "Training GPT-2 with lr=0.001"
   remote-jobs describe 42 ""  # Clear description`,
-	Args: cobra.RangeArgs(1, 2),
+	Args: usageArgs(cobra.RangeArgs(1, 2)),
 	RunE: runDescribe,
 }
 

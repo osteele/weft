@@ -23,27 +23,26 @@ jobs:                          # required list of plan items
 
   - parallel:                  # jobs that may start immediately
       name: launch-trainers    # optional label for output clarity
+      host: cool42             # defaults shared with nested jobs
       dir: ~/code/train        # defaults shared with nested jobs
       env:
         DATASET: imagenet
       jobs:
-        - host: cool42
-          command: python train.py --shard 0
+        - command: python train.py --shard 0
         - host: cool43
           command: python train.py --shard 1
 
   - series:                    # queue-backed sequential block
       name: evaluate
+      host: cool42
       wait: success            # "success" (default) or "any"
       queue: default           # optional queue name on the host
       dir: ~/code/eval
       env:
         CUDA_VISIBLE_DEVICES: "0"
       jobs:
-        - host: cool42
-          command: python eval.py
-        - host: cool42
-          command: python clean.py
+        - command: python eval.py
+        - command: python clean.py
 ```
 
 Rules:
@@ -56,8 +55,8 @@ Rules:
 - Inside `parallel.jobs` and `series.jobs`, you list raw job definitions
   (no extra `job:` key). Each job entry must at least define `host` and
   `command`.
-- `parallel` and `series` blocks can set `dir` and `env` to provide defaults
-  for every nested job. A nested `job` entry can still override either field.
+- `parallel` and `series` blocks can set `dir`, `host`, and `env` to provide
+  defaults for nested jobs. A nested `job` entry can still override any field.
 - `series` blocks enforce sequential execution on the remote queue runner.
   Every job in the block is queued on the specified host & queue name. The
   `wait` field decides how the queue runner encodes dependencies:

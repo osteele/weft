@@ -31,7 +31,7 @@ var hostInfoCmd = &cobra.Command{
 
 Example:
   remote-jobs host info cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runHostInfo,
 }
 
@@ -42,7 +42,7 @@ var hostJobsCmd = &cobra.Command{
 
 Example:
   remote-jobs host jobs cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runHostJobs,
 }
 
@@ -53,7 +53,7 @@ var hostLoadCmd = &cobra.Command{
 
 Example:
   remote-jobs host load cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runHostLoad,
 }
 

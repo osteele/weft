@@ -45,7 +45,7 @@ Exit codes (single job only):
 Examples:
   remote-jobs status 42
   remote-jobs status 42 43 44`,
-	Args: cobra.MinimumNArgs(1),
+	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runStatus,
 }
 

@@ -109,6 +109,9 @@ remote-jobs plan submit --host studio plan.yaml   # provide default host via CLI
 remote-jobs plan submit - < generated-plan.yaml   # read from stdin / heredoc
 ```
 
+Plan files must start with `version: 1` to opt into the current schema and
+remain compatible with future releases.
+
 Plan files support an optional `kill` list, single `job` entries, `parallel`
 groups (which simply run without dependencies), and `series` groups (which
 queue jobs so each starts only after the prior job completes successfully or

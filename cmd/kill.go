@@ -20,7 +20,7 @@ var killCmd = &cobra.Command{
 Examples:
   remote-jobs kill 42
   remote-jobs kill 42 43 44`,
-	Args: cobra.MinimumNArgs(1),
+	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runKill,
 }
 

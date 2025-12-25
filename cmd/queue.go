@@ -50,7 +50,7 @@ Examples:
   remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
   remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes
   remote-jobs queue add --queue gpu cool30 'python train.py'`,
-	Args: cobra.ExactArgs(2),
+	Args: usageArgs(cobra.ExactArgs(2)),
 	RunE: runQueueAdd,
 }
 
@@ -67,7 +67,7 @@ This command is idempotent - safe to call multiple times.
 Examples:
   remote-jobs queue start cool30
   remote-jobs queue start --queue gpu cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStart,
 }
 
@@ -82,7 +82,7 @@ job finishes. The runner will exit gracefully.
 Examples:
   remote-jobs queue stop cool30
   remote-jobs queue stop --queue gpu cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStop,
 }
 
@@ -94,7 +94,7 @@ var queueListCmd = &cobra.Command{
 Examples:
   remote-jobs queue list cool30
   remote-jobs queue list --queue gpu cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueList,
 }
 
@@ -108,7 +108,7 @@ Displays whether the runner is active, current job (if any), and queue depth.
 Examples:
   remote-jobs queue status cool30
   remote-jobs queue status --queue gpu cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStatus,
 }
 
@@ -124,7 +124,7 @@ Examples:
   remote-jobs queue remove 123
   remote-jobs queue remove 123 124 125
   remote-jobs queue remove --queue gpu 456`,
-	Args: cobra.MinimumNArgs(1),
+	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runQueueRemove,
 }
 

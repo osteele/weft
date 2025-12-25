@@ -55,4 +55,30 @@ func TestValidate(t *testing.T) {
 	if err := noHostPlan.ApplyDefaults(Defaults{}); err == nil {
 		t.Fatalf("expected error when host missing without default")
 	}
+
+	blockHostPlan := &File{
+		Version: 1,
+		Jobs: []Entry{
+			{Parallel: &Parallel{
+				Host: "block-host",
+				Jobs: []Job{{Command: "c"}},
+			}},
+			{Series: &Series{
+				Host: "series-host",
+				Jobs: []Job{{Command: "a"}, {Host: "override", Command: "b"}},
+			}},
+		},
+	}
+	if err := blockHostPlan.ApplyDefaults(Defaults{}); err != nil {
+		t.Fatalf("expected block host defaults to apply: %v", err)
+	}
+	if got := blockHostPlan.Jobs[0].Parallel.Jobs[0].Host; got != "block-host" {
+		t.Fatalf("expected parallel job host to inherit block host, got %q", got)
+	}
+	if got := blockHostPlan.Jobs[1].Series.Jobs[0].Host; got != "series-host" {
+		t.Fatalf("expected series job host to inherit block host, got %q", got)
+	}
+	if got := blockHostPlan.Jobs[1].Series.Jobs[1].Host; got != "override" {
+		t.Fatalf("expected explicit job host to override block host, got %q", got)
+	}
 }

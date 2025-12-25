@@ -41,6 +41,7 @@ type Job struct {
 // Parallel represents a block of jobs that can start at the same time
 type Parallel struct {
 	Name string            `yaml:"name"`
+	Host string            `yaml:"host"`
 	Dir  string            `yaml:"dir"`
 	Env  map[string]string `yaml:"env"`
 	Jobs []Job             `yaml:"jobs"`
@@ -49,6 +50,7 @@ type Parallel struct {
 // Series represents a block of jobs that should run sequentially
 type Series struct {
 	Name  string            `yaml:"name"`
+	Host  string            `yaml:"host"`
 	Dir   string            `yaml:"dir"`
 	Env   map[string]string `yaml:"env"`
 	Queue string            `yaml:"queue"`
@@ -188,9 +190,13 @@ func (p *Parallel) validate(path string) error {
 }
 
 func (p *Parallel) applyDefaults(defaults Defaults, path string) error {
+	jobDefaults := defaults
+	if p.Host != "" {
+		jobDefaults.Host = p.Host
+	}
 	for i := range p.Jobs {
 		jobPath := fmt.Sprintf("%s.jobs[%d]", path, i)
-		if err := p.Jobs[i].applyDefaults(defaults, jobPath); err != nil {
+		if err := p.Jobs[i].applyDefaults(jobDefaults, jobPath); err != nil {
 			return err
 		}
 	}
@@ -216,9 +222,13 @@ func (s *Series) validate(path string) error {
 }
 
 func (s *Series) applyDefaults(defaults Defaults, path string) error {
+	jobDefaults := defaults
+	if s.Host != "" {
+		jobDefaults.Host = s.Host
+	}
 	for i := range s.Jobs {
 		jobPath := fmt.Sprintf("%s.jobs[%d]", path, i)
-		if err := s.Jobs[i].applyDefaults(defaults, jobPath); err != nil {
+		if err := s.Jobs[i].applyDefaults(jobDefaults, jobPath); err != nil {
 			return err
 		}
 	}

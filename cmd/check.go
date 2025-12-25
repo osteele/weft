@@ -26,7 +26,7 @@ Shows:
 
 Example:
   remote-jobs check cool30`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runCheck,
 }
 

@@ -23,7 +23,7 @@ var planCmd = &cobra.Command{
 var planSubmitCmd = &cobra.Command{
 	Use:   "submit <file|- >",
 	Short: "Submit a YAML job execution plan",
-	Args:  cobra.ExactArgs(1),
+	Args:  usageArgs(cobra.ExactArgs(1)),
 	RunE:  runPlanSubmit,
 }
 

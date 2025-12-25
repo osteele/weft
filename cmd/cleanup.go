@@ -21,7 +21,7 @@ Examples:
   remote-jobs cleanup cool30 --sessions         # Only finished sessions
   remote-jobs cleanup cool30 --logs --older-than 3  # Logs > 3 days old
   remote-jobs cleanup cool30 --dry-run          # Preview only`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runCleanup,
 }
 

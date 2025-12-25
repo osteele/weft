@@ -27,7 +27,7 @@ Examples:
   remote-jobs log 25 --to 100            # First 100 lines
   remote-jobs log 25 --grep error        # Lines containing "error"
   remote-jobs log 25 -f --grep epoch     # Follow, filter for "epoch"`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runLog,
 }
 

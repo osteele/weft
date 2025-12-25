@@ -32,7 +32,7 @@ Examples:
   remote-jobs run --queue cool30 'python train.py'
   remote-jobs run -f cool30 'python train.py'   # Start and follow log
   remote-jobs run cool30 --kill 42              # Kill job 42`,
-	Args: func(cmd *cobra.Command, args []string) error {
+	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
 		// --kill mode only needs host
 		if runKillJobID > 0 {
 			if len(args) < 1 {
@@ -45,7 +45,7 @@ Examples:
 			return fmt.Errorf("requires exactly host and command arguments")
 		}
 		return nil
-	},
+	}),
 	RunE: runRun,
 }
 
@@ -132,7 +132,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	} else {
 		// Normal mode: require host and command
 		if len(args) < 2 {
-			return fmt.Errorf("usage: remote-jobs run <host> <command>")
+			return usageErrorf("usage: remote-jobs run <host> <command>")
 		}
 		host = args[0]
 		command = args[1]
