@@ -113,12 +113,20 @@ Plan files must start with `version: 1` to opt into the current schema and
 remain compatible with future releases.
 
 Plan files support an optional `kill` list, single `job` entries, `parallel`
-groups (which simply run without dependencies), and `series` groups (which
-queue jobs so each starts only after the prior job completes successfully or
-after it finishes in any state). Provide `--host <name>` to supply a default
-host for jobs that omit it, and add `--watch <duration>` to keep the CLI
-around and report which jobs finished. See `docs/job-plans.md` for the full
-schema, examples, and the reserved syntax for future resource-aware triggers.
+groups, and `series` groups. Every block and job may declare `id`, `alias`,
+`depends_on`, and `continue_on_failure`. The CLI resolves these references into
+a DAG, auto-generating IDs (`block0`, `block0.job0`, etc.) when missing, so you
+can declare multi-phase pipelines in a single YAML file. Provide `--host <name>`
+to supply a default host for jobs that omit it, and add `--watch <duration>` to
+keep the CLI around and report which jobs finished. See `docs/job-plans.md` for
+the full schema plus dependency examples.
+
+Inspect or lint a plan without running it:
+
+```bash
+remote-jobs plan validate plan.yaml
+remote-jobs plan show --ids plan.yaml   # show generated IDs, aliases, hosts, deps
+```
 
 > **Agents welcome:** Remote Jobs (and the plan syntax in particular) was
 > designed for coding agents as well as humans. The YAML shape is easy for an
@@ -634,6 +642,17 @@ remote-jobs queue status cool30
 remote-jobs queue status --queue gpu cool30
 ```
 
+#### remote-jobs queue upgrade
+
+Redeploy and restart the queue runner if the remote script is out of date. The
+CLI records a build number on the first line of the embedded script, compares
+it with the version on the host, and restarts the runner only when needed.
+
+```bash
+remote-jobs queue upgrade cool30
+remote-jobs queue upgrade --queue gpu cool30
+```
+
 #### Queue Workflow Example
 
 ```bash
@@ -683,6 +702,10 @@ remote-jobs queue add --after-any 42 -d "Cleanup" cool30 "python cleanup.py"
 - `--after-any ID`: Waits for the job to complete (any exit code). Always runs.
 
 Both flags work entirely on the remote host (no laptop connection needed) and can be used with both `queue add` and `run` commands.
+
+> **Note:** Dependencies must stay on the same host. If you try to start a job on
+> `cool30` that waits on a job recorded on `studio`, the CLI errors immediately
+> instead of queuing work that can never start.
 
 ## Configuration
 

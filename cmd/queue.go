@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -33,7 +36,8 @@ Subcommands:
   start   Start the queue runner
   stop    Stop the queue runner after current job
   list    List jobs in the queue
-  status  Show queue runner status`,
+  status  Show queue runner status
+  upgrade Restart the queue runner if the script is outdated`,
 }
 
 var queueAddCmd = &cobra.Command{
@@ -112,6 +116,18 @@ Examples:
 	RunE: runQueueStatus,
 }
 
+var queueUpgradeCmd = &cobra.Command{
+	Use:   "upgrade <host>",
+	Short: "Restart queue runner if the remote script is outdated",
+	Long: `Restart the queue runner on a host if the remote script is outdated.
+
+This checks the embedded queue runner build number against the remote copy.
+If they differ, the runner is stopped, the script is redeployed, and the
+runner is restarted.`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runQueueUpgrade,
+}
+
 var queueRemoveCmd = &cobra.Command{
 	Use:   "remove <job-id>...",
 	Short: "Remove one or more queued jobs",
@@ -145,10 +161,11 @@ func init() {
 	queueCmd.AddCommand(queueStopCmd)
 	queueCmd.AddCommand(queueListCmd)
 	queueCmd.AddCommand(queueStatusCmd)
+	queueCmd.AddCommand(queueUpgradeCmd)
 	queueCmd.AddCommand(queueRemoveCmd)
 
 	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueRemoveCmd} {
+	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpgradeCmd, queueRemoveCmd} {
 		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
 	}
 
@@ -184,20 +201,28 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cannot use both --after and --after-any")
 	}
 
-	afterID := queueAfter
-	if queueAfter == 0 && queueAfterAny > 0 {
-		afterID = queueAfterAny
+	var deps []queueDependency
+	if queueAfter > 0 {
+		if err := ensureSameHostDependency(database, queueAfter, host); err != nil {
+			return err
+		}
+		deps = append(deps, queueDependency{JobID: queueAfter, AllowFailure: false})
+	}
+	if queueAfterAny > 0 {
+		if err := ensureSameHostDependency(database, queueAfterAny, host); err != nil {
+			return err
+		}
+		deps = append(deps, queueDependency{JobID: queueAfterAny, AllowFailure: true})
 	}
 
 	jobID, err := queueJob(database, queueJobOptions{
-		Host:        host,
-		WorkingDir:  workingDir,
-		Command:     command,
-		Description: queueDescription,
-		EnvVars:     queueEnvVars,
-		QueueName:   queueName,
-		AfterJobID:  afterID,
-		AfterAny:    queueAfterAny > 0,
+		Host:         host,
+		WorkingDir:   workingDir,
+		Command:      command,
+		Description:  queueDescription,
+		EnvVars:      queueEnvVars,
+		QueueName:    queueName,
+		Dependencies: deps,
 	})
 	if err != nil {
 		return err
@@ -297,7 +322,7 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	}
 
 	// Start queue runner in tmux
-	runnerCmd := fmt.Sprintf("%s$HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envVars, queue)
+	runnerCmd := fmt.Sprintf("%sbash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envVars, queue)
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
 
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
@@ -336,18 +361,40 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 func runQueueStop(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	// Create stop signal file
-	stopFile := fmt.Sprintf("%s/%s.stop", queueDir, queueName)
-	touchCmd := fmt.Sprintf("touch %s", stopFile)
-
-	if _, stderr, err := ssh.Run(host, touchCmd); err != nil {
-		return fmt.Errorf("create stop signal: %s", stderr)
+	if err := sendQueueStopSignal(host, queueName); err != nil {
+		return err
 	}
-
 	fmt.Printf("Stop signal sent to queue '%s' on %s\n", queueName, host)
 	fmt.Println("The queue runner will exit after the current job completes.")
 
 	return nil
+}
+
+func sendQueueStopSignal(host, queue string) error {
+	stopFile := fmt.Sprintf("%s/%s.stop", queueDir, queue)
+	touchCmd := fmt.Sprintf("touch %s", stopFile)
+	if _, stderr, err := ssh.Run(host, touchCmd); err != nil {
+		return fmt.Errorf("create stop signal: %s", stderr)
+	}
+	return nil
+}
+
+func waitForQueueRunnerStop(host, queue string, timeout time.Duration) error {
+	runnerSession := fmt.Sprintf("rj-queue-%s", queue)
+	deadline := time.Now().Add(timeout)
+	for {
+		exists, err := ssh.TmuxSessionExists(host, runnerSession)
+		if err != nil {
+			return fmt.Errorf("check queue runner: %w", err)
+		}
+		if !exists {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("queue runner did not stop within %s", timeout)
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 func runQueueList(cmd *cobra.Command, args []string) error {
@@ -447,6 +494,64 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func queueRunnerLocalVersion() string {
+	scanner := bufio.NewScanner(bytes.NewReader(queueRunnerScript))
+	if scanner.Scan() {
+		return strings.TrimSpace(scanner.Text())
+	}
+	return ""
+}
+
+func readRemoteQueueRunnerVersion(host string) (string, error) {
+	cmd := fmt.Sprintf("head -n 1 %s 2>/dev/null || true", queueRunnerPath)
+	stdout, stderr, err := ssh.Run(host, cmd)
+	if err != nil {
+		return "", fmt.Errorf("read remote version: %s", strings.TrimSpace(stderr))
+	}
+	return strings.TrimSpace(stdout), nil
+}
+
+func runQueueUpgrade(cmd *cobra.Command, args []string) error {
+	host := args[0]
+	localVersion := queueRunnerLocalVersion()
+	remoteVersion, err := readRemoteQueueRunnerVersion(host)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+	}
+
+	if remoteVersion == localVersion && remoteVersion != "" {
+		fmt.Printf("Queue runner on %s already up to date (%s)\n", host, localVersion)
+		return nil
+	}
+
+	fmt.Printf("Updating queue runner on %s (remote: %s, local: %s)\n", host, remoteVersion, localVersion)
+	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
+	exists, err := ssh.TmuxSessionExists(host, runnerSession)
+	if err != nil {
+		return fmt.Errorf("check runner: %w", err)
+	}
+	if exists {
+		if err := sendQueueStopSignal(host, queueName); err != nil {
+			return err
+		}
+		fmt.Println("Waiting for queue runner to stop...")
+		if err := waitForQueueRunnerStop(host, queueName, 2*time.Minute); err != nil {
+			return err
+		}
+	}
+
+	started, err := ensureQueueRunnerStarted(host, queueName)
+	if err != nil {
+		return err
+	}
+	if started {
+		fmt.Println("Queue runner restarted with the latest script.")
+	} else {
+		fmt.Println("Queue runner already running with the latest script.")
+	}
+	return nil
+}
+
 func runQueueRemove(cmd *cobra.Command, args []string) error {
 	// Open database
 	database, err := db.Open()
@@ -483,7 +588,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		}
 
 		// Remove from remote queue file
-		// The queue file format is: job_id\tworking_dir\tcommand\tdescription
+		// The queue file format is: job_id\tworking_dir\tcommand\tdescription\tenv_vars\tdependencies
 		// We filter out lines starting with this job ID
 		queueFile := fmt.Sprintf("%s/%s.queue", queueDir, jobQueueName)
 		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",

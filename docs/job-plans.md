@@ -12,6 +12,8 @@ version: 1                     # required for forwards-compatibility
 kill: [12, 19]                 # optional list of job IDs to kill first
 jobs:                          # required list of plan items
   - job:                       # a single job entry
+      id: prep-dataset         # optional identifier for depends_on references
+      alias: prep              # optional shorthand alias (must be unique)
       name: prep-dataset       # optional identifier for logs/references
       host: cool42             # required
       dir: ~/code/train        # optional working directory
@@ -22,17 +24,26 @@ jobs:                          # required list of plan items
         CUDA_VISIBLE_DEVICES: "0"
 
   - parallel:                  # jobs that may start immediately
+      id: launch-trainers      # Block ID (jobs inherit dependencies)
       name: launch-trainers    # optional label for output clarity
       host: cool42             # defaults shared with nested jobs
       dir: ~/code/train        # defaults shared with nested jobs
+      depends_on: [prep]       # wait for the prep job to succeed
       env:
         DATASET: imagenet
       jobs:
-        - command: python train.py --shard 0
-        - host: cool43
+        - id: train-shard0
+          command: python train.py --shard 0
+        - id: train-shard1
+          host: cool43
           command: python train.py --shard 1
+        - id: notify-failure
+          continue_on_failure: true          # run even if dependencies failed
+          depends_on: [train-shard0, train-shard1]
+          command: ./notify-slack.sh
 
   - series:                    # queue-backed sequential block
+      id: evaluate
       name: evaluate
       host: cool42
       wait: success            # "success" (default) or "any"
@@ -40,9 +51,13 @@ jobs:                          # required list of plan items
       dir: ~/code/eval
       env:
         CUDA_VISIBLE_DEVICES: "0"
+      depends_on: [launch-trainers]
       jobs:
-        - command: python eval.py
-        - command: python clean.py
+        - id: eval-model
+          command: python eval.py
+        - id: cleanup
+          continue_on_failure: true
+          command: python clean.py
 ```
 
 Rules:
@@ -55,6 +70,13 @@ Rules:
 - Inside `parallel.jobs` and `series.jobs`, you list raw job definitions
   (no extra `job:` key). Each job entry must at least define `host` and
   `command`.
+- Blocks and jobs accept `id`, `alias`, `depends_on`, and `continue_on_failure`.
+  IDs and aliases must be globally unique within the plan. Use `depends_on`
+  to connect blocks/jobs together. `continue_on_failure: true` runs the job
+  even if one or more dependencies failed (useful for cleanup and alerts).
+- Omit `id` to let the CLI generate one. Blocks fall back to `block0`,
+  `block1`, ... while jobs inside inherit `block0.job0`, `block0.job1`, etc.
+  Run `remote-jobs plan show --ids plan.yaml` to inspect the generated IDs.
 - `parallel` and `series` blocks can set `dir`, `host`, and `env` to provide
   defaults for nested jobs. A nested `job` entry can still override any field.
 - `series` blocks enforce sequential execution on the remote queue runner.
@@ -93,6 +115,23 @@ uses the queue name declared on the block (or `default`). The first job in the
 block is queued without a dependency; subsequent jobs specify the prior job's
 ID via the same mechanism that backs `remote-jobs run --after` and
 `--after-any`.
+
+### Dependency semantics
+
+- `depends_on` runs after **all** referenced IDs succeed. The IDs may refer to
+  job IDs, block IDs, or aliases. Referencing a block waits for every job in
+  that block to succeed.
+- Set `continue_on_failure: true` on a job to ignore all dependency failures,
+  or set it on a block to ignore failures for dependencies inherited from that
+  block. When `wait: any` is used within a `series` block the implicit dependency
+  on the previous job also ignores failures.
+- Cross-host dependencies are not supported. Every referenced job must run on
+  the same host as the dependent job; otherwise `remote-jobs plan submit` and
+  `remote-jobs plan validate` fail with a descriptive error.
+- Dependencies form a DAG. Circular references are rejected at submission time.
+- Jobs with dependencies run via the remote queue runner so they can start
+  automatically when upstream jobs finish. Jobs without dependencies still
+  start immediately unless `queue_only` is set.
 
 Jobs with `queue_only: true` behave like `remote-jobs queue add`. They are
 written to the specified (or default) remote queue, and the CLI automatically
@@ -136,6 +175,19 @@ jobs:
   - job:
       command: hostname
 EOF
+
+Validate a plan without running anything:
+
+```bash
+remote-jobs plan validate plan.yaml
+```
+
+List the generated IDs, aliases, hosts, and dependency chains:
+
+```bash
+remote-jobs plan show --ids plan.yaml
+remote-jobs plan show plan.yaml
+```
 ```
 
 Every submission prints a "Command to job IDs" map so downstream tooling can

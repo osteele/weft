@@ -27,35 +27,47 @@ type Entry struct {
 
 // Job represents a single job specification
 type Job struct {
-	Name        string            `yaml:"name"`
-	Host        string            `yaml:"host"`
-	Dir         string            `yaml:"dir"`
-	Command     string            `yaml:"command"`
-	Description string            `yaml:"description"`
-	Env         map[string]string `yaml:"env"`
-	Queue       string            `yaml:"queue"`
-	QueueOnly   bool              `yaml:"queue_only"`
-	When        *When             `yaml:"when"`
+	ID                string            `yaml:"id"`
+	Alias             string            `yaml:"alias"`
+	Name              string            `yaml:"name"`
+	Host              string            `yaml:"host"`
+	Dir               string            `yaml:"dir"`
+	Command           string            `yaml:"command"`
+	Description       string            `yaml:"description"`
+	Env               map[string]string `yaml:"env"`
+	Queue             string            `yaml:"queue"`
+	QueueOnly         bool              `yaml:"queue_only"`
+	DependsOn         []string          `yaml:"depends_on"`
+	ContinueOnFailure bool              `yaml:"continue_on_failure"`
+	When              *When             `yaml:"when"`
 }
 
 // Parallel represents a block of jobs that can start at the same time
 type Parallel struct {
-	Name string            `yaml:"name"`
-	Host string            `yaml:"host"`
-	Dir  string            `yaml:"dir"`
-	Env  map[string]string `yaml:"env"`
-	Jobs []Job             `yaml:"jobs"`
+	ID                string            `yaml:"id"`
+	Alias             string            `yaml:"alias"`
+	Name              string            `yaml:"name"`
+	Host              string            `yaml:"host"`
+	Dir               string            `yaml:"dir"`
+	Env               map[string]string `yaml:"env"`
+	DependsOn         []string          `yaml:"depends_on"`
+	ContinueOnFailure bool              `yaml:"continue_on_failure"`
+	Jobs              []Job             `yaml:"jobs"`
 }
 
 // Series represents a block of jobs that should run sequentially
 type Series struct {
-	Name  string            `yaml:"name"`
-	Host  string            `yaml:"host"`
-	Dir   string            `yaml:"dir"`
-	Env   map[string]string `yaml:"env"`
-	Queue string            `yaml:"queue"`
-	Wait  string            `yaml:"wait"`
-	Jobs  []Job             `yaml:"jobs"`
+	ID                string            `yaml:"id"`
+	Alias             string            `yaml:"alias"`
+	Name              string            `yaml:"name"`
+	Host              string            `yaml:"host"`
+	Dir               string            `yaml:"dir"`
+	Env               map[string]string `yaml:"env"`
+	Queue             string            `yaml:"queue"`
+	Wait              string            `yaml:"wait"`
+	DependsOn         []string          `yaml:"depends_on"`
+	ContinueOnFailure bool              `yaml:"continue_on_failure"`
+	Jobs              []Job             `yaml:"jobs"`
 }
 
 // When represents the reserved future syntax for resource triggers

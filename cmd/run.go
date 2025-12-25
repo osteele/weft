@@ -191,30 +191,35 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runQueue {
 		// When --after or --after-any is specified, use the remote queue system for dependency handling
 		if runAfter > 0 || runAfterAny > 0 {
+			deps := []queueDependency{}
+			waitType := "succeeds"
 			afterID := runAfter
-			afterAny := false
 			if runAfterAny > 0 {
 				afterID = runAfterAny
-				afterAny = true
+				waitType = "completes"
+				if err := ensureSameHostDependency(database, afterID, host); err != nil {
+					return err
+				}
+				deps = append(deps, queueDependency{JobID: afterID, AllowFailure: true})
+			} else if runAfter > 0 {
+				if err := ensureSameHostDependency(database, afterID, host); err != nil {
+					return err
+				}
+				deps = append(deps, queueDependency{JobID: afterID, AllowFailure: false})
 			}
 			jobID, err := queueJob(database, queueJobOptions{
-				Host:        host,
-				WorkingDir:  workingDir,
-				Command:     command,
-				Description: runDescription,
-				EnvVars:     runEnvVars,
-				QueueName:   defaultQueueName,
-				AfterJobID:  afterID,
-				AfterAny:    afterAny,
+				Host:         host,
+				WorkingDir:   workingDir,
+				Command:      command,
+				Description:  runDescription,
+				EnvVars:      runEnvVars,
+				QueueName:    defaultQueueName,
+				Dependencies: deps,
 			})
 			if err != nil {
 				return fmt.Errorf("queue job: %w", err)
 			}
 
-			waitType := "succeeds"
-			if afterAny {
-				waitType = "completes"
-			}
 			fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterID, waitType)
 			fmt.Printf("  Working dir: %s\n", workingDir)
 			fmt.Printf("  Command: %s\n", command)

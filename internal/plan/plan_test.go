@@ -82,3 +82,71 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("expected explicit job host to override block host, got %q", got)
 	}
 }
+
+func TestBuildExecutionPlan(t *testing.T) {
+	pf := &File{
+		Version: 1,
+		Jobs: []Entry{
+			{Parallel: &Parallel{
+				ID:   "extract",
+				Name: "extract",
+				Jobs: []Job{
+					{ID: "extract.a", Host: "h1", Command: "cmd-a"},
+					{Host: "h1", Command: "cmd-b"},
+				},
+			}},
+			{Parallel: &Parallel{
+				ID:                "train",
+				DependsOn:         []string{"extract"},
+				Jobs:              []Job{{ID: "train.a", Host: "h1", Command: "train", DependsOn: []string{"extract.a"}}},
+				ContinueOnFailure: true,
+			}},
+		},
+	}
+	if err := pf.Validate(); err != nil {
+		t.Fatalf("expected base plan to validate: %v", err)
+	}
+	plan, err := pf.BuildExecutionPlan()
+	if err != nil {
+		t.Fatalf("build execution plan: %v", err)
+	}
+	if len(plan.Jobs) != 3 {
+		t.Fatalf("expected 3 jobs, got %d", len(plan.Jobs))
+	}
+	if plan.Jobs[0].ID != "extract.a" {
+		t.Fatalf("expected first job to be extract.a, got %s", plan.Jobs[0].ID)
+	}
+	if len(plan.Jobs[2].Dependencies) == 0 {
+		t.Fatalf("expected train job to have dependencies")
+	}
+	found := false
+	for _, dep := range plan.Jobs[2].Dependencies {
+		if dep.Job.ID == "extract.a" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("train job missing dependency on extract.a")
+	}
+}
+
+func TestBuildExecutionPlanUnknownDependency(t *testing.T) {
+	pf := &File{
+		Version: 1,
+		Jobs: []Entry{
+			{Job: &Job{
+				ID:        "job1",
+				Host:      "h1",
+				Command:   "cmd",
+				DependsOn: []string{"missing"},
+			}},
+		},
+	}
+	if err := pf.Validate(); err != nil {
+		t.Fatalf("expected plan to validate: %v", err)
+	}
+	if _, err := pf.BuildExecutionPlan(); err == nil {
+		t.Fatalf("expected execution plan to fail for unknown dependency")
+	}
+}

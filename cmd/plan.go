@@ -27,18 +27,40 @@ var planSubmitCmd = &cobra.Command{
 	RunE:  runPlanSubmit,
 }
 
+var planValidateCmd = &cobra.Command{
+	Use:   "validate <file|- >",
+	Short: "Validate a YAML job execution plan without submitting",
+	Args:  usageArgs(cobra.ExactArgs(1)),
+	RunE:  runPlanValidate,
+}
+
+var planShowCmd = &cobra.Command{
+	Use:   "show <file|- >",
+	Short: "Inspect plan jobs, IDs, and dependencies",
+	Args:  usageArgs(cobra.ExactArgs(1)),
+	RunE:  runPlanShow,
+}
+
 var (
 	planWatchDuration time.Duration
 	planNoQueueStart  bool
 	planDefaultHost   string
+	planValidateHost  string
+	planShowHost      string
+	planShowIDsOnly   bool
 )
 
 func init() {
 	rootCmd.AddCommand(planCmd)
 	planCmd.AddCommand(planSubmitCmd)
+	planCmd.AddCommand(planValidateCmd)
+	planCmd.AddCommand(planShowCmd)
 	planSubmitCmd.Flags().DurationVar(&planWatchDuration, "watch", 0, "Wait for up to this duration and report job outcomes")
 	planSubmitCmd.Flags().BoolVar(&planNoQueueStart, "no-queue-start", false, "Skip auto-starting queue runners for queued jobs")
 	planSubmitCmd.Flags().StringVarP(&planDefaultHost, "host", "H", "", "Default host for jobs that omit the host field")
+	planValidateCmd.Flags().StringVarP(&planValidateHost, "host", "H", "", "Default host for jobs that omit the host field")
+	planShowCmd.Flags().StringVarP(&planShowHost, "host", "H", "", "Default host for jobs that omit the host field")
+	planShowCmd.Flags().BoolVar(&planShowIDsOnly, "ids", false, "Only print IDs and aliases without job details")
 }
 
 type scheduledPlanJob struct {
@@ -51,19 +73,12 @@ type scheduledPlanJob struct {
 
 func runPlanSubmit(cmd *cobra.Command, args []string) error {
 	path := args[0]
-	data, err := readPlanInput(path)
+	planFile, err := loadPlanFile(path, planDefaultHost)
 	if err != nil {
 		return err
 	}
-
-	planFile, err := plan.Decode(data)
+	execPlan, err := planFile.BuildExecutionPlan()
 	if err != nil {
-		return fmt.Errorf("parse plan: %w", err)
-	}
-	if err := planFile.ApplyDefaults(plan.Defaults{Host: planDefaultHost}); err != nil {
-		return err
-	}
-	if err := planFile.Validate(); err != nil {
 		return err
 	}
 
@@ -88,16 +103,12 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 	commandMap := make(map[string][]int64)
 	startedQueues := make(map[string]bool)
 
-	for idx, entry := range planFile.Jobs {
-		label := fmt.Sprintf("jobs[%d]", idx)
-		subJobs, err := schedulePlanEntry(database, entry, startedQueues)
-		if err != nil {
-			return fmt.Errorf("%s: %w", label, err)
-		}
-		for _, sj := range subJobs {
-			scheduled = append(scheduled, sj)
-			commandMap[sj.Command] = append(commandMap[sj.Command], sj.JobID)
-		}
+	scheduled, err = scheduleExecutionPlan(database, execPlan, startedQueues)
+	if err != nil {
+		return err
+	}
+	for _, sj := range scheduled {
+		commandMap[sj.Command] = append(commandMap[sj.Command], sj.JobID)
 	}
 
 	printCommandMap(commandMap)
@@ -119,87 +130,175 @@ func readPlanInput(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-func schedulePlanEntry(database *sql.DB, entry plan.Entry, startedQueues map[string]bool) ([]scheduledPlanJob, error) {
-	switch {
-	case entry.Job != nil:
-		job := applyJobDefaults(*entry.Job, "", nil)
-		sj, err := scheduleSingleJob(database, job, startedQueues)
-		if err != nil {
-			return nil, err
-		}
-		return []scheduledPlanJob{sj}, nil
-	case entry.Parallel != nil:
-		return scheduleParallelBlock(database, entry.Parallel, startedQueues)
-	case entry.Series != nil:
-		return scheduleSeriesBlock(database, entry.Series, startedQueues)
-	default:
-		return nil, fmt.Errorf("invalid plan entry")
+func loadPlanFile(path, defaultHost string) (*plan.File, error) {
+	data, err := readPlanInput(path)
+	if err != nil {
+		return nil, err
 	}
+	planFile, err := plan.Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse plan: %w", err)
+	}
+	if err := planFile.ApplyDefaults(plan.Defaults{Host: defaultHost}); err != nil {
+		return nil, err
+	}
+	if err := planFile.Validate(); err != nil {
+		return nil, err
+	}
+	return planFile, nil
 }
 
-func scheduleParallelBlock(database *sql.DB, block *plan.Parallel, startedQueues map[string]bool) ([]scheduledPlanJob, error) {
-	var out []scheduledPlanJob
-	for _, job := range block.Jobs {
-		resolved := applyJobDefaults(job, block.Dir, block.Env)
-		sj, err := scheduleSingleJob(database, resolved, startedQueues)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sj)
-	}
-	return out, nil
-}
+func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, startedQueues map[string]bool) ([]scheduledPlanJob, error) {
+	idToJob := make(map[string]int64)
+	var scheduled []scheduledPlanJob
 
-func scheduleSeriesBlock(database *sql.DB, block *plan.Series, startedQueues map[string]bool) ([]scheduledPlanJob, error) {
-	queueName := block.Queue
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
-	var out []scheduledPlanJob
-	var prevJobID int64
-	waitMode := block.Wait
-	if waitMode == "" {
-		waitMode = "success"
-	}
-	detectedHost := ""
-	for i, job := range block.Jobs {
-		resolved := applyJobDefaults(job, block.Dir, block.Env)
-		if detectedHost == "" {
-			detectedHost = resolved.Host
-		} else if resolved.Host != detectedHost {
-			return nil, fmt.Errorf("series block jobs must target the same host (found %s and %s)", detectedHost, resolved.Host)
+	for _, job := range execPlan.Jobs {
+		blockDir := ""
+		var blockEnv map[string]string
+		blockQueue := ""
+		if job.Block != nil {
+			blockDir = job.Block.Dir
+			blockEnv = job.Block.Env
+			blockQueue = job.Block.Queue
 		}
-		afterID := int64(0)
-		afterAny := false
-		if i > 0 {
-			afterID = prevJobID
-			afterAny = waitMode == "any"
+		resolved := applyJobDefaults(*job.Source, blockDir, blockEnv)
+		queueRequired := job.Source.QueueOnly || (job.Block != nil && job.Block.Kind == plan.BlockKindSeries) || len(job.Dependencies) > 0
+		queueName := job.Source.Queue
+		if queueName == "" {
+			queueName = blockQueue
 		}
-		jobID, err := queueJob(database, queueJobOptions{
+		label := jobLabel(resolved)
+
+		if queueRequired {
+			deps := make([]queueDependency, 0, len(job.Dependencies))
+			for _, dep := range job.Dependencies {
+				depJobID, ok := idToJob[dep.Job.ID]
+				if !ok {
+					return nil, fmt.Errorf("%s: dependency %s has not been scheduled yet", job.Path, dep.Job.ID)
+				}
+				deps = append(deps, queueDependency{JobID: depJobID, AllowFailure: dep.Optional})
+			}
+			targetQueue := queueName
+			if targetQueue == "" {
+				targetQueue = defaultQueueName
+			}
+			jobID, err := queueJob(database, queueJobOptions{
+				Host:         resolved.Host,
+				WorkingDir:   resolved.Dir,
+				Command:      resolved.Command,
+				Description:  resolved.Description,
+				EnvVars:      resolved.EnvVars,
+				QueueName:    targetQueue,
+				Dependencies: deps,
+			})
+			if err != nil {
+				return nil, err
+			}
+			fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, resolved.Host, targetQueue)
+			idToJob[job.ID] = jobID
+			maybeStartQueueRunner(resolved.Host, targetQueue, startedQueues)
+			scheduled = append(scheduled, scheduledPlanJob{
+				Label:     label,
+				Command:   resolved.Command,
+				Host:      resolved.Host,
+				QueueName: targetQueue,
+				JobID:     jobID,
+			})
+			continue
+		}
+
+		result, err := startJob(database, startJobOptions{
 			Host:        resolved.Host,
 			WorkingDir:  resolved.Dir,
 			Command:     resolved.Command,
 			Description: resolved.Description,
 			EnvVars:     resolved.EnvVars,
-			QueueName:   queueName,
-			AfterJobID:  afterID,
-			AfterAny:    afterAny,
 		})
 		if err != nil {
 			return nil, err
 		}
-		prevJobID = jobID
-		out = append(out, scheduledPlanJob{
-			Label:     jobLabel(resolved),
-			Command:   resolved.Command,
-			Host:      resolved.Host,
-			QueueName: queueName,
-			JobID:     jobID,
+		idToJob[job.ID] = result.Info.JobID
+		if result.QueuedOnConnectionFailure {
+			fmt.Printf("Connection to %s failed; job %d queued locally for retry\n", resolved.Host, result.Info.JobID)
+		}
+		scheduled = append(scheduled, scheduledPlanJob{
+			Label:   label,
+			Command: resolved.Command,
+			Host:    resolved.Host,
+			JobID:   result.Info.JobID,
 		})
-		fmt.Printf("Series job %s queued as %d on %s (queue %s)\n", jobLabel(resolved), jobID, resolved.Host, queueName)
-		maybeStartQueueRunner(resolved.Host, queueName, startedQueues)
 	}
-	return out, nil
+
+	return scheduled, nil
+}
+
+func runPlanValidate(cmd *cobra.Command, args []string) error {
+	path := args[0]
+	planFile, err := loadPlanFile(path, planValidateHost)
+	if err != nil {
+		return err
+	}
+	execPlan, err := planFile.BuildExecutionPlan()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Plan %s validated successfully (%d jobs)\n", path, len(execPlan.Jobs))
+	return nil
+}
+
+func runPlanShow(cmd *cobra.Command, args []string) error {
+	path := args[0]
+	planFile, err := loadPlanFile(path, planShowHost)
+	if err != nil {
+		return err
+	}
+	execPlan, err := planFile.BuildExecutionPlan()
+	if err != nil {
+		return err
+	}
+
+	if planShowIDsOnly {
+		fmt.Println("Plan identifiers:")
+		for _, job := range execPlan.Jobs {
+			if job.Alias != "" {
+				fmt.Printf("  %s (alias %s)\n", job.ID, job.Alias)
+			} else {
+				fmt.Printf("  %s\n", job.ID)
+			}
+		}
+		return nil
+	}
+
+	fmt.Println("Plan jobs:")
+	for _, job := range execPlan.Jobs {
+		fmt.Printf("- %s", job.ID)
+		if job.Alias != "" {
+			fmt.Printf(" (alias %s)", job.Alias)
+		}
+		if job.Block != nil && job.Block.ID != "" {
+			fmt.Printf(" [block %s]", job.Block.ID)
+		}
+		fmt.Printf("\n    host: %s\n", job.Source.Host)
+		if job.Source.Dir != "" || (job.Block != nil && job.Block.Dir != "") {
+			if job.Source.Dir != "" {
+				fmt.Printf("    dir: %s\n", job.Source.Dir)
+			} else if job.Block != nil && job.Block.Dir != "" {
+				fmt.Printf("    dir: %s (from block)\n", job.Block.Dir)
+			}
+		}
+		fmt.Printf("    cmd: %s\n", job.Source.Command)
+		if len(job.Dependencies) > 0 {
+			fmt.Printf("    depends_on:\n")
+			for _, dep := range job.Dependencies {
+				mode := "success"
+				if dep.Optional {
+					mode = "any"
+				}
+				fmt.Printf("      - %s (%s)\n", dep.Job.ID, mode)
+			}
+		}
+	}
+	return nil
 }
 
 type resolvedPlanJob struct {

@@ -1,4 +1,5 @@
-#!/bin/bash
+# BUILD: 1
+#!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
 # This script runs on the remote host and processes jobs from a queue file.
@@ -7,11 +8,11 @@
 #   queue-runner.sh <queue-name>
 #
 # Queue file format (one job per line, tab-separated):
-#   {job_id}\t{working_dir}\t{command}\t{description}\t{env_vars_b64}\t{after_job_id}
+#   {job_id}\t{working_dir}\t{command}\t{description}\t{env_vars_b64}\t{dependencies}
 #
 # env_vars_b64 is base64-encoded newline-separated VAR=value pairs (optional)
-# after_job_id is the job ID to wait for before starting (optional)
-#   Format: "ID" (wait for success) or "ID:any" (wait for completion)
+# dependencies is a comma-separated list of job IDs to wait for before starting (optional)
+#   Each entry can be "ID" (requires success) or "ID:any" (waits for completion)
 #
 # Files:
 #   ~/.cache/remote-jobs/queue/{queue-name}.queue    - Queue file (jobs waiting)
@@ -84,48 +85,57 @@ while true; do
     tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
     mv "$temp_file" "$QUEUE_FILE"
 
-    # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, after_job_id)
-    IFS=$'\t' read -r job_id working_dir command description env_vars_b64 after_job_id <<< "$job_line"
+    # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, dependencies)
+    IFS=$'\t' read -r job_id working_dir command description env_vars_b64 deps_spec <<< "$job_line"
 
     if [ -z "$job_id" ] || [ -z "$working_dir" ] || [ -z "$command" ]; then
         echo "Invalid job line, skipping: $job_line"
         continue
     fi
 
-    # Check dependency if specified
-    if [ -n "$after_job_id" ]; then
-        # Parse after_job_id - format is "ID" or "ID:any"
-        dep_id="${after_job_id%%:*}"
-        dep_mode="${after_job_id#*:}"
-        if [ "$dep_mode" = "$after_job_id" ]; then
-            dep_mode="success"  # Default: only run on success
-        fi
+    # Check dependencies if specified (comma-separated list of job_id[:any])
+    if [ -n "$deps_spec" ]; then
+        IFS=',' read -ra dep_entries <<< "$deps_spec"
+        unmet_dependency=false
+        skip_due_to_failure=false
+        skip_reason=""
 
-        # Find status file for dependency job (use most recent)
-        dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1)
+        for dep_entry in "${dep_entries[@]}"; do
+            [ -z "$dep_entry" ] && continue
 
-        if [ -z "$dep_status_file" ]; then
-            # Dependency job not completed yet - put job back in queue
-            echo "Job $job_id: waiting for job $dep_id to complete (not finished yet)"
+            dep_id="${dep_entry%%:*}"
+            dep_mode="${dep_entry#*:}"
+            if [ "$dep_mode" = "$dep_entry" ]; then
+                dep_mode="success"
+            fi
+
+            dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1)
+            if [ -z "$dep_status_file" ]; then
+                unmet_dependency=true
+                break
+            fi
+
+            dep_exit=$(cat "$dep_status_file")
+            if [ "$dep_mode" != "any" ] && [ "$dep_exit" != "0" ]; then
+                skip_due_to_failure=true
+                skip_reason="dependency job $dep_id failed with exit code $dep_exit"
+                break
+            fi
+        done
+
+        if [ "$unmet_dependency" = true ]; then
+            echo "Job $job_id: waiting for dependencies to complete"
             echo "$job_line" >> "$QUEUE_FILE"
-            sleep 10  # Avoid busy loop
+            sleep 10
             continue
         fi
 
-        dep_exit=$(cat "$dep_status_file")
-        if [ "$dep_mode" = "success" ] && [ "$dep_exit" != "0" ]; then
-            echo "Job $job_id: skipped, dependency job $dep_id failed with exit code $dep_exit"
-            # Write failure status for this job
+        if [ "$skip_due_to_failure" = true ]; then
+            echo "Job $job_id: skipped, $skip_reason"
             timestamp=$(date +%Y%m%d-%H%M%S)
-            echo "SKIPPED: dependency job $dep_id failed with exit code $dep_exit" > "$LOG_DIR/${job_id}-${timestamp}.log"
+            echo "SKIPPED: $skip_reason" > "$LOG_DIR/${job_id}-${timestamp}.log"
             echo "1" > "$LOG_DIR/${job_id}-${timestamp}.status"
             continue
-        fi
-
-        if [ "$dep_mode" = "any" ]; then
-            echo "Job $job_id: dependency job $dep_id completed (exit $dep_exit), proceeding"
-        else
-            echo "Job $job_id: dependency job $dep_id completed successfully, proceeding"
         fi
     fi
 

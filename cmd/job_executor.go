@@ -190,14 +190,18 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 
 // queueJobOptions controls adding a job to a remote queue.
 type queueJobOptions struct {
-	Host        string
-	WorkingDir  string
-	Command     string
-	Description string
-	EnvVars     []string
-	QueueName   string
-	AfterJobID  int64
-	AfterAny    bool
+	Host         string
+	WorkingDir   string
+	Command      string
+	Description  string
+	EnvVars      []string
+	QueueName    string
+	Dependencies []queueDependency
+}
+
+type queueDependency struct {
+	JobID        int64
+	AllowFailure bool
 }
 
 func queueJob(database *sql.DB, opts queueJobOptions) (int64, error) {
@@ -222,14 +226,8 @@ func queueJob(database *sql.DB, opts queueJobOptions) (int64, error) {
 	if len(opts.EnvVars) > 0 {
 		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(opts.EnvVars, "\n")))
 	}
-	afterJobStr := ""
-	if opts.AfterJobID > 0 {
-		afterJobStr = fmt.Sprintf("%d", opts.AfterJobID)
-		if opts.AfterAny {
-			afterJobStr = fmt.Sprintf("%d:any", opts.AfterJobID)
-		}
-	}
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, opts.WorkingDir, opts.Command, opts.Description, envVarsB64, afterJobStr)
+	depSpec := encodeQueueDependencies(opts.Dependencies)
+	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, opts.WorkingDir, opts.Command, opts.Description, envVarsB64, depSpec)
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 	if _, stderr, err := ssh.Run(opts.Host, appendCmd); err != nil {
 		db.DeleteJob(database, jobID)
@@ -253,4 +251,39 @@ func applyEnvMap(env map[string]string) []string {
 		vars = append(vars, fmt.Sprintf("%s=%s", k, env[k]))
 	}
 	return vars
+}
+
+func encodeQueueDependencies(deps []queueDependency) string {
+	if len(deps) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		if dep.JobID <= 0 {
+			continue
+		}
+		part := fmt.Sprintf("%d", dep.JobID)
+		if dep.AllowFailure {
+			part += ":any"
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, ",")
+}
+
+func ensureSameHostDependency(database *sql.DB, depID int64, host string) error {
+	if depID <= 0 {
+		return fmt.Errorf("invalid dependency job ID %d", depID)
+	}
+	job, err := db.GetJobByID(database, depID)
+	if err != nil {
+		return fmt.Errorf("lookup dependency job %d: %w", depID, err)
+	}
+	if job == nil {
+		return fmt.Errorf("dependency job %d not found", depID)
+	}
+	if job.Host != host {
+		return fmt.Errorf("dependency job %d runs on host %s; cannot depend on it from host %s", depID, job.Host, host)
+	}
+	return nil
 }

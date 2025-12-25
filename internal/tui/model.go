@@ -3032,7 +3032,7 @@ func (m Model) startQueue(host string) tea.Cmd {
 		}
 
 		// Start queue runner in tmux
-		runnerCmd := fmt.Sprintf("$HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", queueName)
+		runnerCmd := fmt.Sprintf("bash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", queueName)
 		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
 
 		if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
