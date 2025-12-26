@@ -362,7 +362,7 @@ remote-jobs sync --verbose    # Show progress
 
 ### remote-jobs prune
 
-Remove completed and dead jobs from the local database and their log files from remote hosts.
+Tombstone completed/dead jobs so they disappear from listings, and optionally delete their log files on remote hosts.
 
 ```bash
 remote-jobs prune [flags]
@@ -376,12 +376,16 @@ remote-jobs prune [flags]
 
 **Examples:**
 ```bash
-remote-jobs prune                    # Remove all completed/dead jobs
-remote-jobs prune --older-than 7d    # Only jobs older than 7 days
-remote-jobs prune --older-than 24h   # Only jobs older than 24 hours
-remote-jobs prune --dry-run          # Preview deletions
-remote-jobs prune --dead-only        # Only remove dead jobs
-remote-jobs prune --keep-files       # Don't delete remote files
+remote-jobs prune                    # Tombstone all completed/dead jobs
+remote-jobs prune --older-than 7d    # Only tombstone jobs older than 7 days
+remote-jobs prune --older-than 24h   # Only tombstone jobs older than 24 hours
+remote-jobs prune --dry-run          # Preview which jobs would be tombstoned
+remote-jobs prune --dead-only        # Only tombstone dead jobs
+remote-jobs prune --keep-files       # Tombstone locally but keep remote files
+
+Tombstoned jobs remain in the database for auditing and can still be viewed with
+`remote-jobs job status <id>` or `remote-jobs log <id>`, but they disappear from
+`remote-jobs list` and the TUI.
 ```
 
 ### remote-jobs log
@@ -443,6 +447,25 @@ This command updates the host for a job that hasn't started yet (status=queued).
 remote-jobs job move 42 cool100   # Move job 42 to cool100
 remote-jobs job move 43 studio    # Move job 43 to studio
 ```
+
+### remote-jobs job start
+
+Start a queued job immediately, bypassing its queue order. The job is removed
+from the remote queue file, marked as running, and launched right away in its
+tmux session.
+
+```bash
+remote-jobs job start <job-id>
+```
+
+Examples:
+```bash
+remote-jobs job start 512          # Start queued job 512 immediately
+remote-jobs job start 9001         # Bypass queue order and run now
+```
+
+Only jobs with status `queued` can be started this way. The command preserves
+the job's working directory, environment variables, and metadata.
 
 **Note:** This only works for queued jobs. For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
 

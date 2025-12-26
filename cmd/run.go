@@ -283,6 +283,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if result.DeferredToQueue {
+		fmt.Println("SSH connection failed. Job will be added to the remote queue on the next sync.")
+		fmt.Printf("Job ID: %d on %s\n", result.Info.JobID, result.Info.Host)
+		fmt.Printf("Run 'remote-jobs sync %s' when the host is reachable to trigger the start.\n", result.Info.Host)
+		return nil
+	}
+
 	if result.SlackEnabled {
 		fmt.Println("Slack notifications: enabled")
 	}

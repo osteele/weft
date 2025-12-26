@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -45,6 +46,7 @@ type startJobResult struct {
 	Info                      StartJobPreparedInfo
 	SlackEnabled              bool
 	QueuedOnConnectionFailure bool
+	DeferredToQueue           bool
 }
 
 func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
@@ -87,11 +89,14 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	// Check if session already exists
 	exists, err := ssh.TmuxSessionExists(opts.Host, info.TmuxSession)
 	if err != nil {
-		if ssh.IsConnectionError(err.Error()) && opts.QueueOnFail {
-			if err := db.UpdateJobPending(database, jobID); err != nil {
-				return nil, fmt.Errorf("queue job: %w", err)
+		if ssh.IsConnectionError(err.Error()) {
+			if opts.QueueOnFail {
+				if err := db.UpdateJobPending(database, jobID); err != nil {
+					return nil, fmt.Errorf("queue job: %w", err)
+				}
+				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
 			}
-			return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
+			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}
 		db.UpdateJobFailed(database, jobID, err.Error())
 		return nil, fmt.Errorf("check session: %w", err)
@@ -106,11 +111,14 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	logDir := session.LogDir
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
 	if _, stderr, err := ssh.RunWithRetry(opts.Host, mkdirCmd); err != nil {
-		if ssh.IsConnectionError(stderr) && opts.QueueOnFail {
-			if err := db.UpdateJobPending(database, jobID); err != nil {
-				return nil, fmt.Errorf("queue job: %w", err)
+		if isConnectionFailure(stderr, err) {
+			if opts.QueueOnFail {
+				if err := db.UpdateJobPending(database, jobID); err != nil {
+					return nil, fmt.Errorf("queue job: %w", err)
+				}
+				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
 			}
-			return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
+			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}
 		errMsg := ssh.FriendlyError(opts.Host, stderr, err)
 		db.UpdateJobFailed(database, jobID, errMsg)
@@ -170,11 +178,14 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", info.TmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(opts.Host, tmuxCmd); err != nil {
-		if ssh.IsConnectionError(stderr) && opts.QueueOnFail {
-			if err := db.UpdateJobPending(database, jobID); err != nil {
-				return nil, fmt.Errorf("queue job: %w", err)
+		if isConnectionFailure(stderr, err) {
+			if opts.QueueOnFail {
+				if err := db.UpdateJobPending(database, jobID); err != nil {
+					return nil, fmt.Errorf("queue job: %w", err)
+				}
+				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
 			}
-			return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
+			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}
 		errMsg := ssh.FriendlyError(opts.Host, stderr, err)
 		db.UpdateJobFailed(database, jobID, errMsg)
@@ -186,6 +197,58 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	}
 
 	return result, nil
+}
+
+type deferredQueuePayload struct {
+	WorkingDir  string   `json:"working_dir"`
+	Command     string   `json:"command"`
+	Description string   `json:"description,omitempty"`
+	EnvVars     []string `json:"env_vars,omitempty"`
+	QueueName   string   `json:"queue_name"`
+	DepSpec     string   `json:"dep_spec,omitempty"`
+}
+
+func isConnectionFailure(stderr string, err error) bool {
+	if stderr != "" && ssh.IsConnectionError(stderr) {
+		return true
+	}
+	if err != nil && ssh.IsConnectionError(err.Error()) {
+		return true
+	}
+	return false
+}
+
+func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedInfo, envVars []string) (*startJobResult, error) {
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = defaultQueueName
+	}
+
+	payload := deferredQueuePayload{
+		WorkingDir:  job.WorkingDir,
+		Command:     job.Command,
+		Description: job.Description,
+		EnvVars:     envVars,
+		QueueName:   queueName,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode deferred queue payload: %w", err)
+	}
+
+	if err := db.UpdateJobStartingToQueued(database, job.ID, queueName); err != nil {
+		return nil, fmt.Errorf("mark job queued: %w", err)
+	}
+
+	if err := db.AddDeferredOperation(database, job.Host, db.OpQueueJob, job.ID, queueName, string(payloadJSON)); err != nil {
+		return nil, fmt.Errorf("add deferred operation: %w", err)
+	}
+
+	return &startJobResult{
+		Info:            info,
+		DeferredToQueue: true,
+	}, nil
 }
 
 // queueJobOptions controls adding a job to a remote queue.

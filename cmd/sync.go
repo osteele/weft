@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -303,6 +306,10 @@ func executeDeferredOperations(database *sql.DB, host string) error {
 			err = executeDeferredRemoveQueued(host, op)
 		case db.OpMoveFromQueue:
 			err = executeDeferredMoveFrom(host, op)
+		case db.OpQueueJob:
+			err = executeDeferredQueueAdd(database, op)
+		case db.OpStartQueuedJob:
+			err = executeDeferredStartQueued(database, op)
 		default:
 			err = fmt.Errorf("unknown operation: %s", op.Operation)
 		}
@@ -358,6 +365,152 @@ func executeDeferredMoveFrom(host string, op *db.DeferredOperation) error {
 	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", op.JobID, queueFile)
 	_, _, err := ssh.Run(host, removeCmd)
 	return err
+}
+
+func executeDeferredQueueAdd(database *sql.DB, op *db.DeferredOperation) error {
+	if op.Payload == "" {
+		return fmt.Errorf("missing payload for queued job %d", op.JobID)
+	}
+
+	var payload deferredQueuePayload
+	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
+		return fmt.Errorf("decode payload: %w", err)
+	}
+
+	job, err := db.GetJobByID(database, op.JobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", op.JobID)
+	}
+
+	queueName := payload.QueueName
+	if queueName == "" {
+		queueName = op.QueueName
+	}
+	if queueName == "" {
+		queueName = defaultQueueName
+	}
+
+	workingDir := payload.WorkingDir
+	if workingDir == "" {
+		workingDir = job.WorkingDir
+	}
+	command := payload.Command
+	if command == "" {
+		command = job.Command
+	}
+	description := payload.Description
+	if description == "" {
+		description = job.Description
+	}
+
+	if err := appendQueueEntry(job.Host, queueName, job.ID, workingDir, command, description, payload.EnvVars, payload.DepSpec); err != nil {
+		return err
+	}
+
+	if syncVerbose {
+		fmt.Printf("    Added job %d to queue %s on %s\n", job.ID, queueName, job.Host)
+	}
+	return nil
+}
+
+func executeDeferredStartQueued(database *sql.DB, op *db.DeferredOperation) error {
+	job, err := db.GetJobByID(database, op.JobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", op.JobID)
+	}
+
+	var payload deferredStartPayloadData
+	if op.Payload != "" {
+		if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
+			return fmt.Errorf("decode payload: %w", err)
+		}
+	}
+
+	queueName := payload.QueueName
+	if queueName == "" {
+		queueName = op.QueueName
+	}
+	if queueName == "" {
+		queueName = job.QueueName
+	}
+	if queueName == "" {
+		queueName = defaultQueueName
+	}
+
+	if payload.EntryMissing {
+		workingDir := payload.WorkingDir
+		if workingDir == "" {
+			workingDir = job.WorkingDir
+		}
+		command := payload.Command
+		if command == "" {
+			command = job.Command
+		}
+		description := payload.Description
+		if description == "" {
+			description = job.Description
+		}
+		if err := appendQueueEntry(job.Host, queueName, job.ID, workingDir, command, description, payload.EnvVars, payload.DepSpec); err != nil {
+			return fmt.Errorf("restore queue entry: %w", err)
+		}
+	}
+
+	deferred, err := queuejob.StartNow(database, job)
+	if err != nil {
+		return fmt.Errorf("start queued job: %w", err)
+	}
+	if deferred && syncVerbose {
+		fmt.Printf("    Host %s still unreachable for job %d; deferred again\n", job.Host, job.ID)
+	}
+	return nil
+}
+
+func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, description string, envVars []string, depSpec string) error {
+	if workingDir == "" || command == "" {
+		return fmt.Errorf("job %d missing command or working dir", jobID)
+	}
+	if queueName == "" {
+		queueName = defaultQueueName
+	}
+
+	if _, stderr, err := ssh.Run(host, fmt.Sprintf("mkdir -p %s", queueDir)); err != nil {
+		return fmt.Errorf("create queue dir: %s", strings.TrimSpace(stderr))
+	}
+
+	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
+	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", jobID, queueFile)
+	if _, stderr, err := ssh.Run(host, removeCmd); err != nil {
+		return fmt.Errorf("clean queue file: %s", strings.TrimSpace(stderr))
+	}
+
+	envVarsB64 := ""
+	if len(envVars) > 0 {
+		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(envVars, "\n")))
+	}
+
+	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, description, envVarsB64, depSpec)
+	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
+	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
+		return fmt.Errorf("append queue entry: %s", strings.TrimSpace(stderr))
+	}
+
+	return nil
+}
+
+type deferredStartPayloadData struct {
+	QueueName    string   `json:"queue_name"`
+	WorkingDir   string   `json:"working_dir"`
+	Command      string   `json:"command"`
+	Description  string   `json:"description"`
+	EnvVars      []string `json:"env_vars"`
+	DepSpec      string   `json:"dep_spec"`
+	EntryMissing bool     `json:"entry_missing"`
 }
 
 // performFastSync performs a quick sync with fast timeout for list/status commands

@@ -15,6 +15,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -196,8 +197,10 @@ type jobRestartedMsg struct {
 }
 
 type jobStartedNowMsg struct {
-	jobID int64
-	err   error
+	jobID    int64
+	host     string
+	deferred bool
+	err      error
 }
 
 type pruneCompletedMsg struct {
@@ -546,6 +549,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Start failed: %v", msg.err), true)
 		}
+		if msg.deferred {
+			return m, tea.Batch(
+				m.setFlash(fmt.Sprintf("Host %s unreachable. Job %d will start on next sync.", msg.host, msg.jobID), false),
+				m.refreshJobs(),
+			)
+		}
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d started", msg.jobID), false), m.refreshJobs())
 
 	case pruneCompletedMsg:
@@ -553,7 +562,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Prune failed: %v", msg.err), true)
 		} else if msg.count > 0 {
-			flashCmd = m.setFlash(fmt.Sprintf("Pruned %d job(s)", msg.count), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Tombstoned %d job(s)", msg.count), false)
 		} else {
 			flashCmd = m.setFlash("No jobs to prune", false)
 		}
@@ -2616,67 +2625,11 @@ func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		// Remove job from remote queue file
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = "default"
+		deferred, err := queuejob.StartNow(database, job)
+		if err != nil {
+			return jobStartedNowMsg{jobID: job.ID, host: job.Host, err: err}
 		}
-		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
-			job.ID, queueFile, queueFile, queueFile, queueFile)
-		ssh.Run(job.Host, removeCmd)
-
-		// Update database: transition from queued to running and set start time
-		if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
-			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("update db: %w", err)}
-		}
-
-		// Get updated job to access new start time
-		updatedJob, err := db.GetJobByID(database, job.ID)
-		if err != nil || updatedJob == nil {
-			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("get job: %w", err)}
-		}
-
-		// Generate file paths from job ID
-		tmuxSession := session.TmuxSessionName(job.ID)
-		logFile := session.LogFile(job.ID, updatedJob.StartTime)
-		statusFile := session.StatusFile(job.ID, updatedJob.StartTime)
-		metadataFile := session.MetadataFile(job.ID, updatedJob.StartTime)
-		pidFile := session.PidFile(job.ID, updatedJob.StartTime)
-
-		// Create log directory on remote
-		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-		if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
-			errMsg := ssh.FriendlyError(job.Host, stderr, err)
-			db.UpdateJobFailed(database, job.ID, errMsg)
-			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("%s", errMsg)}
-		}
-
-		// Save metadata
-		metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.Description, updatedJob.StartTime)
-		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
-		ssh.Run(job.Host, metadataCmd)
-
-		// Create the wrapped command
-		wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-			JobID:      job.ID,
-			WorkingDir: job.WorkingDir,
-			Command:    job.Command,
-			LogFile:    logFile,
-			StatusFile: statusFile,
-			PidFile:    pidFile,
-		})
-
-		// Start tmux session
-		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
-		if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
-			errMsg := ssh.FriendlyError(job.Host, stderr, err)
-			db.UpdateJobFailed(database, job.ID, errMsg)
-			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("%s", errMsg)}
-		}
-
-		return jobStartedNowMsg{jobID: job.ID}
+		return jobStartedNowMsg{jobID: job.ID, host: job.Host, deferred: deferred}
 	}
 }
 

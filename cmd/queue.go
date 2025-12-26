@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
 const (
-	defaultQueueName = "default"
+	defaultQueueName = queuefile.DefaultQueueName
 	queueDir         = "~/.cache/remote-jobs/queue"
 	queueRunnerPath  = "~/.cache/remote-jobs/scripts/queue-runner.sh"
 )
@@ -599,7 +600,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			if ssh.IsConnectionError(stderr) {
 				// Host unreachable - add deferred operation
 				fmt.Printf("Host %s unreachable, will remove on next sync\n", job.Host)
-				if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, jobID, jobQueueName); err != nil {
+				if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, jobID, jobQueueName, ""); err != nil {
 					errors = append(errors, fmt.Sprintf("job %d: failed to add deferred operation: %v", jobID, err))
 					continue
 				}

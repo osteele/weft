@@ -25,7 +25,10 @@ type Job struct {
 	EndTime      *int64
 	ExitCode     *int
 	Status       string
+	Tombstoned   bool
 }
+
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name, tombstoned`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -86,12 +89,13 @@ func initSchema(db *sql.DB) error {
 		host TEXT NOT NULL,
 		session_name TEXT,
 		working_dir TEXT NOT NULL,
-		command TEXT NOT NULL,
-		description TEXT,
-		start_time INTEGER,
-		end_time INTEGER,
-		exit_code INTEGER,
-		status TEXT NOT NULL DEFAULT 'running'
+	command TEXT NOT NULL,
+	description TEXT,
+	start_time INTEGER,
+	end_time INTEGER,
+	exit_code INTEGER,
+	status TEXT NOT NULL DEFAULT 'running',
+	tombstoned INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_jobs_host ON jobs(host);
 	CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_name);
@@ -110,6 +114,9 @@ func initSchema(db *sql.DB) error {
 	// Migration: add queue_name column for queued jobs
 	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN queue_name TEXT`)
 	// Ignore error - column may already exist
+
+	// Migration: add tombstoned column for soft-deleted jobs
+	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0`)
 
 	// Migration: make start_time nullable for queued jobs
 	// SQLite doesn't support ALTER COLUMN, so we need to recreate the table
@@ -144,6 +151,7 @@ func initSchema(db *sql.DB) error {
 		operation TEXT NOT NULL,
 		job_id INTEGER NOT NULL,
 		queue_name TEXT,
+		payload TEXT,
 		created_at INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_deferred_ops_host ON deferred_operations(host);
@@ -152,6 +160,9 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(deferredOpsSchema); err != nil {
 		return err
 	}
+
+	// Ensure payload column exists (older versions may lack it)
+	_, _ = db.Exec(`ALTER TABLE deferred_operations ADD COLUMN payload TEXT`)
 
 	return nil
 }
@@ -210,10 +221,11 @@ func migrateStartTimeNullable(db *sql.DB) error {
 			exit_code INTEGER,
 			status TEXT NOT NULL DEFAULT 'running',
 			error_message TEXT,
-			queue_name TEXT
+			queue_name TEXT,
+			tombstoned INTEGER NOT NULL DEFAULT 0
 		)`,
 		`INSERT INTO jobs_new SELECT id, host, session_name, working_dir, command, description,
-			start_time, end_time, exit_code, status, error_message, queue_name FROM jobs`,
+			start_time, end_time, exit_code, status, error_message, queue_name, tombstoned FROM jobs`,
 		`DROP TABLE jobs`,
 		`ALTER TABLE jobs_new RENAME TO jobs`,
 		`CREATE INDEX idx_jobs_host ON jobs(host)`,
@@ -289,6 +301,24 @@ func UpdateJobPending(db *sql.DB, id int64) error {
 	return err
 }
 
+// UpdateJobStartingToQueued transitions a starting job to queued state and assigns a queue name.
+func UpdateJobStartingToQueued(db *sql.DB, id int64, queueName string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL WHERE id = ? AND status = ?`,
+		StatusQueued, queueName, id, StatusStarting,
+	)
+	return err
+}
+
+// UpdateJobRunningToQueued transitions a running job back to queued state.
+func UpdateJobRunningToQueued(db *sql.DB, id int64, queueName string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL WHERE id = ? AND status = ?`,
+		StatusQueued, queueName, id, StatusRunning,
+	)
+	return err
+}
+
 // UpdateJobDescription updates the description for a job
 func UpdateJobDescription(db *sql.DB, id int64, description string) error {
 	_, err := db.Exec(
@@ -358,11 +388,8 @@ func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName 
 
 // ListQueued returns queued jobs for a host and queue name
 func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE status = ? AND host = ? AND queue_name = ? ORDER BY id ASC`,
-		StatusQueued, host, queueName,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND queue_name = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, StatusQueued, host, queueName)
 }
 
 // UpdateQueuedToRunning transitions a queued job to running
@@ -427,41 +454,29 @@ func DeleteJob(db *sql.DB, id int64) error {
 
 // GetJob retrieves a job by host and session name (most recent)
 func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
-	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`,
-		host, sessionName,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`, jobSelectColumns)
+	row := db.QueryRow(query, host, sessionName)
 	return scanJob(row)
 }
 
 // GetJobByID retrieves a job by ID
 func GetJobByID(db *sql.DB, id int64) (*Job, error) {
-	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE id = ?`,
-		id,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns)
+	row := db.QueryRow(query, id)
 	return scanJob(row)
 }
 
 // GetPendingJob retrieves a pending job by ID
 func GetPendingJob(db *sql.DB, id int64) (*Job, error) {
-	row := db.QueryRow(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE id = ? AND status = ?`,
-		id, StatusPending,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns)
+	row := db.QueryRow(query, id, StatusPending)
 	return scanJob(row)
 }
 
 // GetRunningJobsByHost retrieves all running jobs for a specific host
 func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
-	rows, err := db.Query(
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE host = ? AND status = ? ORDER BY start_time DESC`,
-		host, StatusRunning,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? ORDER BY start_time DESC`, jobSelectColumns)
+	rows, err := db.Query(query, host, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -479,8 +494,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var startTime sql.NullInt64
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
+	var tombstoned sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -510,6 +526,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 		code := int(exitCode.Int64)
 		j.ExitCode = &code
 	}
+	if tombstoned.Valid {
+		j.Tombstoned = tombstoned.Int64 != 0
+	}
 
 	return &j, nil
 }
@@ -526,8 +545,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
+		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -554,6 +574,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			code := int(exitCode.Int64)
 			j.ExitCode = &code
 		}
+		if tombstoned.Valid {
+			j.Tombstoned = tombstoned.Int64 != 0
+		}
 
 		jobs = append(jobs, &j)
 	}
@@ -563,7 +586,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 
 // ListJobs returns jobs matching the given filters
 func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name FROM jobs WHERE 1=1`
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0`, jobSelectColumns)
 	args := []interface{}{}
 
 	if status != "" {
@@ -584,7 +607,7 @@ func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
 
 // ListPending returns pending jobs, optionally filtered by host
 func ListPending(db *sql.DB, host string) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name FROM jobs WHERE status = ?`
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0`, jobSelectColumns)
 	args := []interface{}{StatusPending}
 
 	if host != "" {
@@ -598,25 +621,19 @@ func ListPending(db *sql.DB, host string) ([]*Job, error) {
 
 // ListRunning returns running jobs for a host
 func ListRunning(db *sql.DB, host string) ([]*Job, error) {
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE status = ? AND host = ? ORDER BY start_time DESC`,
-		StatusRunning, host,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
+	return queryJobs(db, query, StatusRunning, host)
 }
 
 // ListAllRunning returns all running jobs across all hosts
 func ListAllRunning(db *sql.DB) ([]*Job, error) {
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE status = ? ORDER BY start_time DESC`,
-		StatusRunning,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
+	return queryJobs(db, query, StatusRunning)
 }
 
 // ListUniqueRunningHosts returns all unique hosts with running jobs
 func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ?`, StatusRunning)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0`, StatusRunning)
 	if err != nil {
 		return nil, err
 	}
@@ -635,7 +652,7 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 
 // ListUniqueActiveHosts returns unique hosts with running or queued jobs
 func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?)`, StatusRunning, StatusQueued)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?) AND tombstoned = 0`, StatusRunning, StatusQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +671,7 @@ func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
 
 // ListHostsWithQueuedJobs returns unique hosts that have queued jobs
 func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ?`, StatusQueued)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0`, StatusQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -673,30 +690,21 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE host = ? AND status IN (?, ?) ORDER BY start_time ASC`,
-		host, StatusRunning, StatusQueued,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusRunning, StatusQueued)
 }
 
 // ListAllQueued returns all queued jobs across all hosts
 func ListAllQueued(db *sql.DB) ([]*Job, error) {
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE status = ? ORDER BY start_time ASC`,
-		StatusQueued,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, StatusQueued)
 }
 
 // ListRecentDeadQueueJobs returns recently-dead jobs that were queue runner jobs
 // These should be re-checked in case they were incorrectly marked as dead
 func ListRecentDeadQueueJobs(db *sql.DB, since int64) ([]*Job, error) {
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE status = ? AND session_name IS NULL AND end_time > ? ORDER BY start_time ASC`,
-		StatusDead, since,
-	)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND session_name IS NULL AND end_time > ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, StatusDead, since)
 }
 
 // ReviveDeadJob changes a dead job back to running (for incorrectly marked jobs)
@@ -710,7 +718,7 @@ func ReviveDeadJob(db *sql.DB, id int64) error {
 
 // ListUniqueHosts returns all unique hosts from all jobs
 func ListUniqueHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs ORDER BY host`)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE tombstoned = 0 ORDER BY host`)
 	if err != nil {
 		return nil, err
 	}
@@ -730,11 +738,8 @@ func ListUniqueHosts(db *sql.DB) ([]string, error) {
 // SearchJobs searches jobs by description or command
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"
-	return queryJobs(db,
-		`SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name
-		 FROM jobs WHERE description LIKE ? OR command LIKE ? ORDER BY start_time DESC LIMIT ?`,
-		pattern, pattern, limit,
-	)
+	stmt := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0 AND (description LIKE ? OR command LIKE ?) ORDER BY start_time DESC LIMIT ?`, jobSelectColumns)
+	return queryJobs(db, stmt, pattern, pattern, limit)
 }
 
 // CleanupOld deletes completed/dead jobs older than the given number of days
@@ -750,36 +755,25 @@ func CleanupOld(db *sql.DB, days int) (int64, error) {
 	return result.RowsAffected()
 }
 
-// PruneJobs deletes completed and/or dead jobs, optionally filtered by age
+// PruneJobs tombstones completed/dead jobs so they no longer appear in listings.
 func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
-	var result sql.Result
-	var err error
+	query := `UPDATE jobs SET tombstoned = 1 WHERE tombstoned = 0`
+	args := []interface{}{}
 
 	if deadOnly {
-		if olderThan != nil {
-			result, err = db.Exec(
-				`DELETE FROM jobs WHERE status = ? AND start_time < ?`,
-				StatusDead, olderThan.Unix(),
-			)
-		} else {
-			result, err = db.Exec(
-				`DELETE FROM jobs WHERE status = ?`,
-				StatusDead,
-			)
-		}
+		query += ` AND status = ?`
+		args = append(args, StatusDead)
 	} else {
-		if olderThan != nil {
-			result, err = db.Exec(
-				`DELETE FROM jobs WHERE status IN (?, ?) AND start_time < ?`,
-				StatusCompleted, StatusDead, olderThan.Unix(),
-			)
-		} else {
-			result, err = db.Exec(
-				`DELETE FROM jobs WHERE status IN (?, ?)`,
-				StatusCompleted, StatusDead,
-			)
-		}
+		query += ` AND status IN (?, ?)`
+		args = append(args, StatusCompleted, StatusDead)
 	}
+
+	if olderThan != nil {
+		query += ` AND start_time < ?`
+		args = append(args, olderThan.Unix())
+	}
+
+	result, err := db.Exec(query, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -788,7 +782,7 @@ func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 
 // ListJobsForPrune returns jobs that would be deleted by prune
 func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, error) {
-	query := `SELECT id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name FROM jobs WHERE `
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0 AND `, jobSelectColumns)
 	var args []interface{}
 
 	if deadOnly {
@@ -825,8 +819,9 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
+		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -852,6 +847,9 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		if exitCode.Valid {
 			code := int(exitCode.Int64)
 			j.ExitCode = &code
+		}
+		if tombstoned.Valid {
+			j.Tombstoned = tombstoned.Int64 != 0
 		}
 
 		jobs = append(jobs, &j)
@@ -1107,23 +1105,26 @@ type DeferredOperation struct {
 	Operation string
 	JobID     int64
 	QueueName string
+	Payload   string
 	CreatedAt int64
 }
 
 // Operation types for deferred operations
 const (
-	OpKillJob       = "kill_job"
-	OpRemoveQueued  = "remove_queued"
-	OpMoveFromQueue = "move_from_queue"
+	OpKillJob        = "kill_job"
+	OpRemoveQueued   = "remove_queued"
+	OpMoveFromQueue  = "move_from_queue"
+	OpQueueJob       = "queue_job"
+	OpStartQueuedJob = "start_queued_job"
 )
 
 // AddDeferredOperation adds an operation to execute when host becomes reachable
-func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, queueName string) error {
+func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, queueName string, payload string) error {
 	createdAt := time.Now().Unix()
 	_, err := db.Exec(
-		`INSERT INTO deferred_operations (host, operation, job_id, queue_name, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		host, operation, jobID, queueName, createdAt,
+		`INSERT INTO deferred_operations (host, operation, job_id, queue_name, payload, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		host, operation, jobID, queueName, payload, createdAt,
 	)
 	return err
 }
@@ -1131,7 +1132,7 @@ func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, queue
 // GetDeferredOperations returns all deferred operations for a host
 func GetDeferredOperations(db *sql.DB, host string) ([]*DeferredOperation, error) {
 	rows, err := db.Query(
-		`SELECT id, host, operation, job_id, queue_name, created_at
+		`SELECT id, host, operation, job_id, queue_name, payload, created_at
 		 FROM deferred_operations
 		 WHERE host = ?
 		 ORDER BY created_at ASC`,
@@ -1146,11 +1147,15 @@ func GetDeferredOperations(db *sql.DB, host string) ([]*DeferredOperation, error
 	for rows.Next() {
 		op := &DeferredOperation{}
 		var queueName sql.NullString
-		if err := rows.Scan(&op.ID, &op.Host, &op.Operation, &op.JobID, &queueName, &op.CreatedAt); err != nil {
+		var payload sql.NullString
+		if err := rows.Scan(&op.ID, &op.Host, &op.Operation, &op.JobID, &queueName, &payload, &op.CreatedAt); err != nil {
 			return nil, err
 		}
 		if queueName.Valid {
 			op.QueueName = queueName.String
+		}
+		if payload.Valid {
+			op.Payload = payload.String
 		}
 		ops = append(ops, op)
 	}

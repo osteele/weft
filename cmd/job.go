@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -115,6 +116,17 @@ Examples:
 	RunE: runJobMove,
 }
 
+var jobStartCmd = &cobra.Command{
+	Use:   "start <job-id>",
+	Short: "Start a queued job immediately",
+	Long: `Start a queued job immediately on its host, bypassing queue order.
+
+This removes the job from the remote queue file, updates the database,
+and launches the job right away in its tmux session.`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runJobStartNow,
+}
+
 func init() {
 	// Register job command with root
 	rootCmd.AddCommand(jobCmd)
@@ -128,6 +140,7 @@ func init() {
 	jobCmd.AddCommand(jobRestartCmd)
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobMoveCmd)
+	jobCmd.AddCommand(jobStartCmd)
 
 	// Copy flags from run command to job run
 	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "Job description")
@@ -203,7 +216,7 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 	if err != nil && ssh.IsConnectionError(stderr) {
 		// Old host unreachable - defer removal
 		fmt.Printf("Old host %s unreachable, will remove on next sync\n", oldHost)
-		if err := db.AddDeferredOperation(database, oldHost, db.OpMoveFromQueue, jobID, queueName); err != nil {
+		if err := db.AddDeferredOperation(database, oldHost, db.OpMoveFromQueue, jobID, queueName, ""); err != nil {
 			return fmt.Errorf("add deferred operation for old host: %w", err)
 		}
 	} else if err != nil {
@@ -231,5 +244,43 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Description: %s\n", job.Description)
 	}
 
+	return nil
+}
+
+func runJobStartNow(cmd *cobra.Command, args []string) error {
+	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid job ID: %s", args[0])
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+	if job.Status != db.StatusQueued {
+		return fmt.Errorf("job %d is not queued (status: %s)", jobID, job.Status)
+	}
+
+	deferred, err := queuejob.StartNow(database, job)
+	if err != nil {
+		return err
+	}
+
+	if deferred {
+		fmt.Printf("Host %s unreachable. Job %d will start when the next sync reaches that host.\n", job.Host, jobID)
+		fmt.Printf("Run 'remote-jobs sync %s' once the host is reachable to trigger the start.\n", job.Host)
+		return nil
+	}
+
+	fmt.Printf("Job %d started immediately on %s\n", jobID, job.Host)
 	return nil
 }

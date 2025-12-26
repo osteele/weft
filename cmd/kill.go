@@ -93,7 +93,7 @@ func removeQueuedJob(database *sql.DB, job *db.Job) error {
 	if err != nil && ssh.IsConnectionError(stderr) {
 		// Host unreachable - add deferred operation
 		fmt.Printf("Host %s unreachable, will remove on next sync\n", job.Host)
-		if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, job.ID, queueName); err != nil {
+		if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, job.ID, queueName, ""); err != nil {
 			return fmt.Errorf("add deferred operation: %w", err)
 		}
 	} else if err != nil {
@@ -125,7 +125,7 @@ func killRunningJob(database *sql.DB, job *db.Job) error {
 		if ssh.IsConnectionError(err.Error()) {
 			// Host unreachable - add deferred operation
 			fmt.Printf("Host %s unreachable, will kill on next sync\n", job.Host)
-			if err := db.AddDeferredOperation(database, job.Host, db.OpKillJob, job.ID, ""); err != nil {
+			if err := db.AddDeferredOperation(database, job.Host, db.OpKillJob, job.ID, "", ""); err != nil {
 				return fmt.Errorf("add deferred operation: %w", err)
 			}
 			// Mark job as dead in database anyway
@@ -166,7 +166,7 @@ func killQueueRunnerJob(database *sql.DB, job *db.Job) error {
 	if err != nil && ssh.IsConnectionError(stderr) {
 		// Host unreachable - add deferred operation
 		fmt.Printf("Host %s unreachable, will kill on next sync\n", job.Host)
-		if err := db.AddDeferredOperation(database, job.Host, db.OpKillJob, job.ID, ""); err != nil {
+		if err := db.AddDeferredOperation(database, job.Host, db.OpKillJob, job.ID, "", ""); err != nil {
 			return fmt.Errorf("add deferred operation: %w", err)
 		}
 		// Mark job as dead in database anyway

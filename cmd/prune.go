@@ -15,20 +15,13 @@ import (
 
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
-	Short: "Remove old jobs from the database and remote files",
-	Long: `Remove completed and dead jobs from the local database and their
-log files from remote hosts.
+	Short: "Tombstone old jobs and optionally delete remote files",
+	Long: `Hide (tombstone) completed/dead jobs so they disappear from listings,
+and optionally delete their log files from remote hosts.
 
-By default, removes all completed and dead jobs. Use --older-than to
-filter by age.
-
-Examples:
-  remote-jobs prune                    # Remove all completed/dead jobs
-  remote-jobs prune --older-than 7d    # Only jobs older than 7 days
-  remote-jobs prune --older-than 24h   # Only jobs older than 24 hours
-  remote-jobs prune --dry-run          # Preview what would be deleted
-  remote-jobs prune --dead-only        # Only remove dead jobs
-  remote-jobs prune --keep-files       # Don't delete remote files`,
+By default, tombstones all completed and dead jobs. Use --older-than to
+filter by age. Tombstoned jobs remain viewable by ID (logs, status) but are
+excluded from the TUI and job list.`,
 	RunE: runPrune,
 }
 
@@ -122,7 +115,7 @@ func runPrune(cmd *cobra.Command, args []string) error {
 	if pruneDeadOnly {
 		what = "dead"
 	}
-	fmt.Printf("Pruned %d %s job(s) from database\n", count, what)
+	fmt.Printf("Tombstoned %d %s job(s)\n", count, what)
 
 	return nil
 }
