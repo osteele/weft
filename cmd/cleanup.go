@@ -14,7 +14,7 @@ import (
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup <host>",
 	Short: "Clean up finished sessions and old log files",
-	Long: `Clean up finished tmux sessions and old log files on a remote host.
+	Long: `Clean up finished sessions and old log files on a remote host.
 
 Examples:
   remote-jobs cleanup cool30                    # Clean both
@@ -96,7 +96,7 @@ func cleanupFinishedSessions(host string) (int, error) {
 	}
 
 	if len(sessions) == 0 {
-		fmt.Println("No tmux sessions found")
+		fmt.Println("No sessions found")
 		return 0, nil
 	}
 

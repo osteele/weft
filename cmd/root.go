@@ -16,12 +16,11 @@ var Version = "dev"
 
 var rootCmd = &cobra.Command{
 	Use:   "remote-jobs",
-	Short: "Manage persistent tmux jobs on remote hosts",
-	Long: `Remote Jobs manages persistent tmux sessions on remote hosts.
+	Short: "Manage long-running jobs on remote hosts",
+	Long: `Run long-running jobs on remote hosts.
 
 Jobs continue running even when you disconnect, close your laptop,
-or lose network connectivity. Use SSH + tmux to create robust,
-long-running processes on remote machines.`,
+or lose network connectivity.`,
 }
 
 // Execute runs the root command

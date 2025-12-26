@@ -122,7 +122,7 @@ var jobStartCmd = &cobra.Command{
 	Long: `Start a queued job immediately on its host, bypassing queue order.
 
 This removes the job from the remote queue file, updates the database,
-and launches the job right away in its tmux session.`,
+and launches the job right away.`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runJobStartNow,
 }

@@ -17,11 +17,10 @@ import (
 
 var runCmd = &cobra.Command{
 	Use:   "run [flags] <host> <command>",
-	Short: "Start a persistent tmux session on a remote host",
-	Long: `Start a persistent tmux session on a remote host.
+	Short: "Run a long-running job on a remote host",
+	Long: `Run a long-running job on a remote host.
 
-The session continues running even when you disconnect. Use SSH + tmux
-to create robust, long-running processes on remote machines.
+The job continues running even when you disconnect.
 
 Examples:
   remote-jobs run cool30 'python train.py'

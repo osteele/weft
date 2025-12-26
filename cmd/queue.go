@@ -28,7 +28,7 @@ var queueCmd = &cobra.Command{
 	Long: `Manage job queues that run sequentially on remote hosts.
 
 Jobs added to a queue run one after another without requiring the local
-machine to stay connected. The queue runner runs in a tmux session on
+machine to stay connected. The queue runner runs in the background on
 the remote host.
 
 Subcommands:
@@ -65,7 +65,7 @@ var queueStartCmd = &cobra.Command{
 	Long: `Start the queue runner on a remote host.
 
 The queue runner processes jobs from the queue file sequentially.
-It runs in a tmux session and continues running even when you disconnect.
+It continues running even when you disconnect.
 
 This command is idempotent - safe to call multiple times.
 

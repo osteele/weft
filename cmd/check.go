@@ -16,10 +16,10 @@ import (
 var checkCmd = &cobra.Command{
 	Use:   "check <host>",
 	Short: "Check status of all jobs on a remote host",
-	Long: `Check the status of all running tmux sessions on a remote host.
+	Long: `Check the status of all running sessions on a remote host.
 
 Shows:
-- List of all active tmux sessions (rj-* pattern)
+- List of all active sessions (rj-* pattern)
 - Status of each job (RUNNING or FINISHED)
 - Exit code for finished jobs
 - Last 10 lines of output from each session
@@ -51,7 +51,7 @@ func runCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(sessions) == 0 {
-		fmt.Printf("No tmux sessions found on %s\n", host)
+		fmt.Printf("No sessions found on %s\n", host)
 
 		// Check if any jobs in DB are marked as running for this host
 		runningJobs, err := db.ListRunning(database, host)
