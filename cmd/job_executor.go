@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -206,6 +206,7 @@ type deferredQueuePayload struct {
 	EnvVars     []string `json:"env_vars,omitempty"`
 	QueueName   string   `json:"queue_name"`
 	DepSpec     string   `json:"dep_spec,omitempty"`
+	AutoStart   bool     `json:"auto_start_runner,omitempty"`
 }
 
 func isConnectionFailure(stderr string, err error) bool {
@@ -230,6 +231,7 @@ func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedI
 		Description: job.Description,
 		EnvVars:     envVars,
 		QueueName:   queueName,
+		AutoStart:   true,
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -251,6 +253,11 @@ func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedI
 	}, nil
 }
 
+type queueJobResult struct {
+	JobID    int64
+	Deferred bool
+}
+
 // queueJobOptions controls adding a job to a remote queue.
 type queueJobOptions struct {
 	Host         string
@@ -260,6 +267,7 @@ type queueJobOptions struct {
 	EnvVars      []string
 	QueueName    string
 	Dependencies []queueDependency
+	AutoStart    bool
 }
 
 type queueDependency struct {
@@ -267,7 +275,7 @@ type queueDependency struct {
 	AllowFailure bool
 }
 
-func queueJob(database *sql.DB, opts queueJobOptions) (int64, error) {
+func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	queueName := opts.QueueName
 	if queueName == "" {
 		queueName = defaultQueueName
@@ -275,29 +283,59 @@ func queueJob(database *sql.DB, opts queueJobOptions) (int64, error) {
 
 	jobID, err := db.RecordQueued(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description, queueName)
 	if err != nil {
-		return 0, fmt.Errorf("record job: %w", err)
+		return nil, fmt.Errorf("record job: %w", err)
 	}
 
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", queueDir)
-	if _, stderr, err := ssh.Run(opts.Host, mkdirCmd); err != nil {
-		db.DeleteJob(database, jobID)
-		return 0, fmt.Errorf("create queue directory: %s", stderr)
-	}
-
-	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
-	envVarsB64 := ""
-	if len(opts.EnvVars) > 0 {
-		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(opts.EnvVars, "\n")))
-	}
 	depSpec := encodeQueueDependencies(opts.Dependencies)
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, opts.WorkingDir, opts.Command, opts.Description, envVarsB64, depSpec)
-	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
-	if _, stderr, err := ssh.Run(opts.Host, appendCmd); err != nil {
+	if err := appendQueueEntry(opts.Host, queueName, jobID, opts.WorkingDir, opts.Command, opts.Description, opts.EnvVars, depSpec); err != nil {
+		if shouldDeferQueueAppend(err) {
+			if err := deferQueueAppend(database, opts, queueName, jobID, depSpec); err != nil {
+				db.DeleteJob(database, jobID)
+				return nil, err
+			}
+			return &queueJobResult{JobID: jobID, Deferred: true}, nil
+		}
 		db.DeleteJob(database, jobID)
-		return 0, fmt.Errorf("append to queue: %s", stderr)
+		return nil, err
 	}
 
-	return jobID, nil
+	return &queueJobResult{JobID: jobID}, nil
+}
+
+func shouldDeferQueueAppend(err error) bool {
+	var qaErr *queueAppendError
+	if errors.As(err, &qaErr) {
+		return qaErr.ConnectionError()
+	}
+	if err == nil {
+		return false
+	}
+	return ssh.IsConnectionError(err.Error())
+}
+
+func deferQueueAppend(database *sql.DB, opts queueJobOptions, queueName string, jobID int64, depSpec string) error {
+	payload := deferredQueuePayload{
+		WorkingDir:  opts.WorkingDir,
+		Command:     opts.Command,
+		Description: opts.Description,
+		EnvVars:     opts.EnvVars,
+		QueueName:   queueName,
+		DepSpec:     depSpec,
+	}
+
+	if opts.AutoStart && depSpec == "" {
+		payload.AutoStart = true
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode deferred queue payload: %w", err)
+	}
+
+	if err := db.AddDeferredOperation(database, opts.Host, db.OpQueueJob, jobID, queueName, string(payloadJSON)); err != nil {
+		return fmt.Errorf("add deferred operation: %w", err)
+	}
+	return nil
 }
 
 func applyEnvMap(env map[string]string) []string {

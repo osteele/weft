@@ -216,7 +216,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		deps = append(deps, queueDependency{JobID: queueAfterAny, AllowFailure: true})
 	}
 
-	jobID, err := queueJob(database, queueJobOptions{
+	result, err := queueJob(database, queueJobOptions{
 		Host:         host,
 		WorkingDir:   workingDir,
 		Command:      command,
@@ -224,10 +224,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		EnvVars:      queueEnvVars,
 		QueueName:    queueName,
 		Dependencies: deps,
+		AutoStart:    !queueNoStart,
 	})
 	if err != nil {
 		return err
 	}
+	jobID := result.JobID
 
 	fmt.Printf("Job %d added to queue '%s' on %s\n\n", jobID, queueName, host)
 	fmt.Printf("  Working dir: %s\n", workingDir)
@@ -246,6 +248,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Auto-start queue runner unless --no-start is specified
+	if result.Deferred {
+		fmt.Printf("\nHost %s is unreachable. This job will be appended to queue '%s' when the host is reachable again.\n", host, queueName)
+		fmt.Printf("Run `remote-jobs sync --sync` after %s is online to retry, or wait for the next automatic sync.\n", host)
+		return nil
+	}
+
 	if !queueNoStart {
 		started, err := ensureQueueRunnerStarted(host, queueName)
 		if err != nil {

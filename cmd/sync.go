@@ -432,6 +432,16 @@ func executeDeferredQueueAdd(database *sql.DB, op *db.DeferredOperation) error {
 	if syncVerbose {
 		fmt.Printf("    Added job %d to queue %s on %s\n", job.ID, queueName, job.Host)
 	}
+
+	if payload.AutoStart {
+		if started, err := ensureQueueRunnerStarted(job.Host, queueName); err != nil {
+			if syncVerbose {
+				fmt.Fprintf(os.Stderr, "    Warning: failed to auto-start queue runner on %s (%s): %v\n", job.Host, queueName, err)
+			}
+		} else if syncVerbose && started {
+			fmt.Printf("    Queue runner started on %s (%s)\n", job.Host, queueName)
+		}
+	}
 	return nil
 }
 
@@ -490,6 +500,46 @@ func executeDeferredStartQueued(database *sql.DB, op *db.DeferredOperation) erro
 	return nil
 }
 
+type queueAppendError struct {
+	op     string
+	stderr string
+	err    error
+}
+
+func (e *queueAppendError) Error() string {
+	if e == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(e.stderr)
+	if msg == "" && e.err != nil {
+		msg = e.err.Error()
+	}
+	if msg == "" {
+		msg = "unknown error"
+	}
+	return fmt.Sprintf("%s: %s", e.op, msg)
+}
+
+func (e *queueAppendError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *queueAppendError) ConnectionError() bool {
+	if e == nil {
+		return false
+	}
+	if e.stderr != "" && ssh.IsConnectionError(e.stderr) {
+		return true
+	}
+	if e.err != nil && ssh.IsConnectionError(e.err.Error()) {
+		return true
+	}
+	return false
+}
+
 func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, description string, envVars []string, depSpec string) error {
 	if workingDir == "" || command == "" {
 		return fmt.Errorf("job %d missing command or working dir", jobID)
@@ -499,13 +549,13 @@ func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, 
 	}
 
 	if _, stderr, err := ssh.Run(host, fmt.Sprintf("mkdir -p %s", queueDir)); err != nil {
-		return fmt.Errorf("create queue dir: %s", strings.TrimSpace(stderr))
+		return &queueAppendError{op: "create queue dir", stderr: strings.TrimSpace(stderr), err: err}
 	}
 
 	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
 	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", jobID, queueFile)
 	if _, stderr, err := ssh.Run(host, removeCmd); err != nil {
-		return fmt.Errorf("clean queue file: %s", strings.TrimSpace(stderr))
+		return &queueAppendError{op: "clean queue file", stderr: strings.TrimSpace(stderr), err: err}
 	}
 
 	envVarsB64 := ""
@@ -516,7 +566,7 @@ func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, 
 	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, description, envVarsB64, depSpec)
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
-		return fmt.Errorf("append queue entry: %s", strings.TrimSpace(stderr))
+		return &queueAppendError{op: "append queue entry", stderr: strings.TrimSpace(stderr), err: err}
 	}
 
 	return nil

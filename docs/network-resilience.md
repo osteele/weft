@@ -30,6 +30,13 @@ established:
   that syncs) will add the job back to the host's queue when it becomes
   reachable. No work is lost.
 
+Queue submissions behave the same way. `plan submit` and `queue add` now
+spool queue entries locally whenever the host is unreachable. The job remains
+visible in the local database immediately, and the next sync run replays the
+append operation. If the user didn't disable auto-start and the job has no
+dependencies, the queue runner is automatically started as soon as the host
+comes back so the job begins right away.
+
 Queued jobs that are manually started via `remote-jobs job start` use the same
 mechanism. If the host goes down while removing the entry from the queue file,
 the CLI records exactly what happened and replays it later.

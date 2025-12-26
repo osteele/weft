@@ -183,7 +183,7 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 			if targetQueue == "" {
 				targetQueue = defaultQueueName
 			}
-			jobID, err := queueJob(database, queueJobOptions{
+			res, err := queueJob(database, queueJobOptions{
 				Host:         resolved.Host,
 				WorkingDir:   resolved.Dir,
 				Command:      resolved.Command,
@@ -191,13 +191,19 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 				EnvVars:      resolved.EnvVars,
 				QueueName:    targetQueue,
 				Dependencies: deps,
+				AutoStart:    !planNoQueueStart,
 			})
 			if err != nil {
 				return nil, err
 			}
-			fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, resolved.Host, targetQueue)
+			jobID := res.JobID
 			idToJob[job.ID] = jobID
-			maybeStartQueueRunner(resolved.Host, targetQueue, startedQueues)
+			if res.Deferred {
+				fmt.Printf("Job %s recorded as %d for queue %s on %s (host unreachable, will sync later)\n", label, jobID, targetQueue, resolved.Host)
+			} else {
+				fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, resolved.Host, targetQueue)
+				maybeStartQueueRunner(resolved.Host, targetQueue, startedQueues)
+			}
 			scheduled = append(scheduled, scheduledPlanJob{
 				Label:     label,
 				Command:   resolved.Command,
@@ -336,19 +342,25 @@ func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[
 		if queueName == "" {
 			queueName = defaultQueueName
 		}
-		jobID, err := queueJob(database, queueJobOptions{
+		res, err := queueJob(database, queueJobOptions{
 			Host:        job.Host,
 			WorkingDir:  job.Dir,
 			Command:     job.Command,
 			Description: job.Description,
 			EnvVars:     job.EnvVars,
 			QueueName:   queueName,
+			AutoStart:   !planNoQueueStart,
 		})
 		if err != nil {
 			return scheduledPlanJob{}, err
 		}
-		fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, job.Host, queueName)
-		maybeStartQueueRunner(job.Host, queueName, startedQueues)
+		jobID := res.JobID
+		if res.Deferred {
+			fmt.Printf("Job %s recorded as %d for queue %s on %s (host unreachable, will sync later)\n", label, jobID, queueName, job.Host)
+		} else {
+			fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, job.Host, queueName)
+			maybeStartQueueRunner(job.Host, queueName, startedQueues)
+		}
 		return scheduledPlanJob{Label: label, Command: job.Command, Host: job.Host, QueueName: queueName, JobID: jobID}, nil
 	}
 
