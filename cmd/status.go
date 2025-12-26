@@ -64,9 +64,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	var tracker *hostConnectionTracker
 	if statusWait {
 		statusSync = true
 		statusNoSync = false
+		tracker = newHostConnectionTracker()
 	}
 
 	// Sync logic: fast sync by default, full sync with --sync, skip with --no-sync
@@ -133,7 +135,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if len(waitRequests) == 0 {
 			return fmt.Errorf("no valid job IDs to wait for")
 		}
-		results, err := waitForJobsCompletion(database, waitRequests, statusWaitTimeout)
+		results, err := waitForJobsCompletion(database, waitRequests, statusWaitTimeout, tracker)
 		if err != nil {
 			if errors.Is(err, errWaitTimeout) {
 				fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -222,7 +224,7 @@ type jobStatusRequest struct {
 	Job *db.Job
 }
 
-func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration) (*db.Job, error) {
+func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, tracker *hostConnectionTracker) (*db.Job, error) {
 	var deadline time.Time
 	if timeout > 0 {
 		deadline = time.Now().Add(timeout)
@@ -246,8 +248,25 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration) 
 		}
 
 		if shouldAttemptSync(job.Status) {
-			if _, err := syncJob(database, job); err != nil && !ssh.IsConnectionError(err.Error()) {
-				return nil, err
+			if _, err := syncJob(database, job); err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					if tracker != nil {
+						tracker.MarkDown(job.Host)
+					}
+				} else {
+					return nil, err
+				}
+			} else {
+				job, err = db.GetJobByID(database, jobID)
+				if err != nil {
+					return nil, err
+				}
+				if tracker != nil && job != nil {
+					tracker.MarkUp(job.Host, !isTerminalStatus(job.Status))
+				}
+				if job != nil && isTerminalStatus(job.Status) {
+					return job, nil
+				}
 			}
 		}
 
@@ -255,7 +274,7 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration) 
 	}
 }
 
-func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout time.Duration) (map[int64]*db.Job, error) {
+func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout time.Duration, tracker *hostConnectionTracker) (map[int64]*db.Job, error) {
 	final := make(map[int64]*db.Job, len(jobs))
 	pending := make(map[int64]struct{})
 	order := make([]int64, 0, len(jobs))
@@ -313,15 +332,26 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 			}
 			if shouldAttemptSync(job.Status) {
 				if _, err := syncJob(database, job); err != nil {
-					if !ssh.IsConnectionError(err.Error()) {
+					if ssh.IsConnectionError(err.Error()) {
+						if tracker != nil {
+							tracker.MarkDown(job.Host)
+						}
+					} else {
 						return final, err
 					}
+					continue
 				}
-				job, err = db.GetJobByID(database, id)
+				refreshed, err := db.GetJobByID(database, id)
 				if err != nil {
 					return final, err
 				}
-				final[id] = job
+				if refreshed != nil {
+					final[id] = refreshed
+					if tracker != nil {
+						tracker.MarkUp(refreshed.Host, !isTerminalStatus(refreshed.Status))
+					}
+					job = refreshed
+				}
 				if job != nil && isTerminalStatus(job.Status) {
 					printJobStatus(job, false)
 					delete(pending, id)

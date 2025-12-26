@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/plan"
+	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -454,6 +455,7 @@ func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Dura
 	defer cancel()
 
 	statusByID := make(map[int64]*db.Job)
+	tracker := newHostConnectionTracker()
 
 	for {
 		completed := true
@@ -479,8 +481,18 @@ func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Dura
 		}
 		for host := range hostsToSync {
 			if _, err := syncHost(database, host); err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					tracker.MarkDown(host)
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "Warning: sync %s: %v\n", host, err)
+				continue
 			}
+			pending, err := hostHasPendingPlanJobs(database, host, jobs)
+			if err != nil {
+				return err
+			}
+			tracker.MarkUp(host, pending)
 		}
 		time.Sleep(3 * time.Second)
 	}
@@ -496,6 +508,22 @@ func jobTerminal(job *db.Job) bool {
 	default:
 		return false
 	}
+}
+
+func hostHasPendingPlanJobs(database *sql.DB, host string, jobs []scheduledPlanJob) (bool, error) {
+	for _, job := range jobs {
+		if job.Host != host {
+			continue
+		}
+		record, err := db.GetJobByID(database, job.JobID)
+		if err != nil {
+			return false, err
+		}
+		if record != nil && !jobTerminal(record) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func printWatchSummary(statusByID map[int64]*db.Job, jobs []scheduledPlanJob) {

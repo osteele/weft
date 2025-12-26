@@ -15,6 +15,20 @@ When running long-running training jobs or analysis scripts on remote machines v
 
 Remote Jobs uses tmux to create persistent sessions that continue running even when you disconnect.
 
+### Designed for unreliable networks
+
+Laptops move between Wi-Fi networks, VPNs flap, and SSH servers occasionally
+drop. Remote Jobs treats those scenarios as normal operations:
+
+- Jobs always start locally first, so connection failures never lose metadata.
+- Failed SSH attempts automatically defer work to the host queue (or the local
+  pending list) and are replayed by `remote-jobs sync` when the host returns.
+- Blocking commands such as `status --wait` and `plan submit --watch` keep
+  polling while the host is down and announce when the connection comes back.
+
+See [docs/network-resilience.md](docs/network-resilience.md) for the full story
+on how the CLI keeps itself useful while you roam across networks.
+
 ## Installation
 
 ```bash
