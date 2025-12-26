@@ -148,7 +148,13 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 	}
 
 	if exists {
-		// Job still running, no change
+		// Session is running - update status if still marked as starting
+		if job.Status == db.StatusStarting {
+			if err := db.MarkRunningByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 		return false, nil
 	}
 

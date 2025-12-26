@@ -374,8 +374,17 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE jobs SET end_time = ?, status = ?
-		 WHERE id = ? AND status IN (?, ?)`,
-		endTime, StatusDead, id, StatusRunning, StatusQueued,
+		 WHERE id = ? AND status IN (?, ?, ?)`,
+		endTime, StatusDead, id, StatusRunning, StatusStarting, StatusQueued,
+	)
+	return err
+}
+
+// MarkRunningByID transitions a job from starting to running
+func MarkRunningByID(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		StatusRunning, id, StatusStarting,
 	)
 	return err
 }
@@ -631,8 +640,8 @@ func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int) 
 		args = append(args, cutoff)
 	}
 
-	// Order by job ID descending so newest jobs appear first
-	query += ` ORDER BY id DESC LIMIT ?`
+	// Order by running jobs first, then by job ID descending
+	query += ` ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 ELSE 1 END, id DESC LIMIT ?`
 	args = append(args, limit)
 
 	return queryJobs(db, query, args...)
@@ -723,8 +732,8 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusRunning, StatusQueued)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusQueued)
 }
 
 // ListAllQueued returns all queued jobs across all hosts
