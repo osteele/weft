@@ -608,6 +608,12 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 
 // ListJobs returns jobs matching the given filters
 func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
+	return ListJobsWithMaxAge(db, status, host, limit, 0)
+}
+
+// ListJobsWithMaxAge returns jobs, optionally filtered by status, host, and age.
+// maxAgeDays of 0 means no age limit.
+func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0`, jobSelectColumns)
 	args := []interface{}{}
 
@@ -618,6 +624,11 @@ func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
 	if host != "" {
 		query += ` AND host = ?`
 		args = append(args, host)
+	}
+	if maxAgeDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
+		query += ` AND start_time > ?`
+		args = append(args, cutoff)
 	}
 
 	// Order by job ID descending so newest jobs appear first

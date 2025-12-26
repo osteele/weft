@@ -17,8 +17,11 @@ var listCmd = &cobra.Command{
 	Short: "List and search job history",
 	Long: `Query and search job history from the local database.
 
+By default, only shows jobs from the last 7 days. Use --all/-a to include older jobs.
+
 Examples:
-  remote-jobs list                    # Recent jobs
+  remote-jobs list                    # Recent jobs (last 7 days)
+  remote-jobs list --all              # All jobs including older
   remote-jobs list --running          # Running jobs only
   remote-jobs list --running --sync   # Running jobs (sync first)
   remote-jobs list --pending          # Pending jobs
@@ -40,6 +43,7 @@ var (
 	listCleanup   int
 	listSync      bool
 	listNoSync    bool
+	listAll       bool
 )
 
 func init() {
@@ -56,6 +60,7 @@ func init() {
 	listCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	listCmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	listCmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
+	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
 }
 
 func runList(cmd *cobra.Command, args []string) error {
@@ -120,7 +125,13 @@ func runList(cmd *cobra.Command, args []string) error {
 		status = db.StatusPending
 	}
 
-	jobs, err := db.ListJobs(database, status, listHost, listLimit)
+	// Default to 7 days unless --all is specified
+	maxAgeDays := 7
+	if listAll {
+		maxAgeDays = 0
+	}
+
+	jobs, err := db.ListJobsWithMaxAge(database, status, listHost, listLimit, maxAgeDays)
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -409,6 +410,12 @@ func waitForQueueRunnerStop(host, queue string, timeout time.Duration) error {
 func runQueueList(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
 	// Get currently running job
 	currentFile := fmt.Sprintf("%s/%s.current", queueDir, queueName)
 	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
@@ -418,43 +425,74 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
 	queueContents, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", queueFile))
 
-	// Parse and display queue
-	fmt.Printf("Queue '%s' on %s:\n\n", queueName, host)
+	// Collect all job entries (current + waiting)
+	type queueEntry struct {
+		jobID       string
+		command     string
+		description string
+		status      string
+	}
+	var entries []queueEntry
 
+	// Add currently running job
 	if currentID != "" {
-		fmt.Printf("Currently running: Job %s\n\n", currentID)
-	} else {
-		fmt.Println("Currently running: (none)")
-		fmt.Println()
+		entry := queueEntry{
+			jobID:  currentID,
+			status: "running",
+		}
+		// Look up job details from database
+		if jobID, err := strconv.ParseInt(currentID, 10, 64); err == nil {
+			if job, err := db.GetJobByID(database, jobID); err == nil && job != nil {
+				entry.command = job.EffectiveCommand()
+				entry.description = job.Description
+			}
+		}
+		entries = append(entries, entry)
 	}
 
+	// Add waiting jobs
 	lines := strings.Split(strings.TrimSpace(queueContents), "\n")
-	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
-		fmt.Println("Queue is empty")
-	} else {
-		fmt.Printf("Waiting (%d jobs):\n", len(lines))
-		for i, line := range lines {
-			if line == "" {
-				continue
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 4)
+		if len(parts) >= 3 {
+			entry := queueEntry{
+				jobID:   parts[0],
+				command: parseEffectiveCommand(parts[2]),
+				status:  "queued",
 			}
-			parts := strings.SplitN(line, "\t", 4)
-			if len(parts) >= 3 {
-				jobID := parts[0]
-				command := parseEffectiveCommand(parts[2])
-				description := ""
-				if len(parts) >= 4 {
-					description = parts[3]
-				}
-				if description != "" {
-					fmt.Printf("  %d. [%s] %s - %s\n", i+1, jobID, description, truncate(command, 40))
-				} else {
-					fmt.Printf("  %d. [%s] %s\n", i+1, jobID, truncate(command, 60))
-				}
+			if len(parts) >= 4 {
+				entry.description = parts[3]
 			}
+			entries = append(entries, entry)
 		}
 	}
 
-	return nil
+	if len(entries) == 0 {
+		fmt.Printf("No jobs in queue '%s' on %s\n", queueName, host)
+		return nil
+	}
+
+	// Print in tabular format matching `list` command
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tCOMMAND / DESCRIPTION")
+
+	for _, entry := range entries {
+		display := entry.description
+		if display == "" {
+			display = entry.command
+		}
+		if len(display) > 40 {
+			display = display[:39] + "…"
+		}
+
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+			entry.jobID, host, entry.status, display)
+	}
+
+	return w.Flush()
 }
 
 func runQueueStatus(cmd *cobra.Command, args []string) error {
