@@ -38,24 +38,6 @@ done
 - What about jobs that only update other files (not stdout/stderr)?
 - Should this be opt-in per job or configurable per host?
 
-## Job Dependencies
-
-Allow jobs to specify dependencies on other jobs.
-
-```bash
-# Start job B only after job A completes successfully
-remote-jobs run --after 42 cool30 "process-results.py"
-
-# Or in queue
-remote-jobs queue add --after 42 cool30 "process-results.py"
-```
-
-### Implementation
-- Store dependency graph in database
-- Queue runner checks dependencies before starting each job
-- Handle cycles, missing dependencies
-- What about cross-host dependencies?
-
 ## Resource Limits
 
 Specify CPU, memory, or GPU requirements.
@@ -80,56 +62,6 @@ remote-jobs job list --tag experiment-v2
 remote-jobs job kill --tag experiment-v2  # Kill all matching
 ```
 
-## Offline Host Support for Job Operations
-
-Enhance `job kill` and `job move` to work with offline/unreachable hosts.
-
-### Enhanced `job kill`
-
-Support killing jobs and removing queued jobs even when hosts are offline.
-
-```bash
-# Kill active jobs and remove queued jobs
-remote-jobs job kill 42
-
-# If host is unreachable:
-# - Mark job for deferred kill/removal
-# - Kill/remove on next successful sync
-# - Store pending operations in database
-```
-
-**Implementation:**
-- Add `deferred_operations` table to database
-- Store pending kill/remove operations
-- Execute during `sync` when host becomes reachable
-- Support force flag to delete from DB immediately without contacting host
-
-### Enhanced `job move`
-
-Queue move operations for execution when host becomes reachable.
-
-```bash
-# Move queued job to different host
-remote-jobs job move 42 cool100
-
-# If original host is unreachable:
-# - Update job's host in database
-# - Queue deferred removal from original host's queue file
-# - Execute removal on next sync
-```
-
-**Implementation:**
-- Update database immediately
-- Store deferred queue file operation
-- Execute during sync when host becomes reachable
-- Handle edge cases: job already started, queue file modified externally
-
-### Benefits
-- Better offline workflow: can queue operations from laptop
-- Resilient to network issues
-- Cleaner database state management
-- Support for "queue these commands for next sync"
-
 ## Notification Channels
 
 Beyond Slack, support other notification methods.
@@ -142,6 +74,68 @@ remote-jobs run --notify discord --notify email cool30 "long-job.sh"
 - Discord webhooks
 - Generic webhook POST
 - Desktop notifications (for local machine)
+
+## Reconnectable Stay-Attached Mode
+
+Extend the `remote-jobs run --allow` pipeline so the CLI can automatically
+reconnect if the SSH tail session drops and expose a standalone
+`remote-jobs attach <job-id>` command to resume streaming logs later.
+
+### Enhancements
+- Detect lost SSH tail sessions, print a notice, and retry a limited number of
+  times before giving up.
+- Provide a `remote-jobs attach` helper that reuses the wait-and-tail logic
+  without starting a new job.
+- Surface clearer status when the job finishes while attached (prompt to exit
+  or keep streaming for post-run logs).
+
+## Resource-Aware Plan Scheduling
+
+Implement the reserved `when` block in job plans so submissions can wait for
+CPU/RAM/GPU thresholds before dispatching to a host.
+
+```yaml
+job:
+  host: cool42
+  command: python train.py
+  when:
+    cpu_below: 30
+    ram_free_gb: 16
+    gpu:
+      device: any
+      util_below: 40
+      memory_free_gb: 12
+```
+
+### Requirements
+- Poll host stats (existing `internal/ssh` helpers) until thresholds are met.
+- Integrate with plan DAG so dependent jobs still respect `depends_on`.
+- Allow per-job and per-block defaults (e.g., series block waits for available
+  GPU before queueing the next job).
+
+## Job Move Command
+
+Add a dedicated `job move` CLI that relocates queued jobs to a different host,
+including when the original host is offline.
+
+```bash
+# Move queued job 42 from cool30 to cool100
+remote-jobs job move 42 cool100
+```
+
+### Requirements
+- Update the job's host in the database immediately.
+- Remove the job from the original host queue (or queue the removal for the
+  next `remote-jobs sync` if the host is unreachable).
+- Append the job to the target host's queue with the same metadata/env vars.
+- Validate that the job is still queued and hasn't started.
+- Provide clear user feedback when operations are deferred due to network
+  issues.
+
+### Benefits
+- Lets users rebalance or evacuate queues without logging into the remote host.
+- Keeps queue state consistent even when moving across unstable connections.
+- Builds on the deferred operation model introduced for other host actions.
 
 ## Job Templates
 

@@ -27,6 +27,35 @@ Remote Jobs is a CLI tool for managing persistent tmux sessions on remote hosts.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## Job States
+
+Every job lives in the local SQLite database and transitions through a finite
+set of states. The CLI records each transition so commands such as `status`,
+`list`, and `sync` can reason about progress even when the host is offline.
+
+| State       | Description                                                                 |
+|-------------|-----------------------------------------------------------------------------|
+| `starting`  | Job entry created; CLI is preparing the tmux session and remote files.      |
+| `running`   | tmux session launched successfully and the wrapper script is executing.     |
+| `completed` | Job wrote an exit code to the `.status` file (success or failure recorded). |
+| `dead`      | tmux session disappeared without writing a status file (crash/kill).        |
+| `queued`    | Job was added to a remote queue file and awaits the queue runner.           |
+| `pending`   | Job deferred locally (e.g., `--queue-on-fail`) until a later retry.         |
+| `failed`    | CLI could not finish setup (e.g., SSH error) and recorded the failure text. |
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued : run --queue / plan series
+    [*] --> starting : run
+    queued --> starting : queue runner / job start
+    starting --> running : tmux session ready
+    starting --> failed : setup error
+    running --> completed : status file written
+    running --> dead : tmux gone, no status file
+    starting --> pending : queue-on-fail
+    pending --> starting : retry/run --from
+```
+
 ## Directory Structure
 
 ```
@@ -130,34 +159,6 @@ CREATE INDEX idx_jobs_session ON jobs(session_name);
 CREATE INDEX idx_jobs_status ON jobs(status);
 CREATE INDEX idx_jobs_start ON jobs(start_time DESC);
 ```
-
-**Job Status Lifecycle:**
-
-```
-┌──────────┐     ┌─────────┐     ┌───────────┐
-│ starting │────▶│ running │────▶│ completed │
-└──────────┘     └─────────┘     └───────────┘
-     │                │
-     │                │   (session dies unexpectedly)
-     ▼                ▼
-┌──────────┐     ┌─────────┐
-│  failed  │     │  dead   │
-└──────────┘     └─────────┘
-     │
-     │   (--queue or --queue-on-fail)
-     ▼
-┌──────────┐
-│ queued   │ ────▶ (queue runner or run --from) ────▶ starting
-└──────────┘
-```
-
-**Status Definitions:**
-- `starting`: Job record created, tmux session being set up
-- `running`: Tmux session successfully started
-- `completed`: Job finished (exit code captured from status file)
-- `dead`: Job terminated without writing exit code (crashed/killed)
-- `queued`: Job added to remote queue for later execution
-- `failed`: Job setup failed (e.g., SSH connection error)
 
 ### 3. SSH Layer (`internal/ssh/`)
 
@@ -499,91 +500,57 @@ The queue system allows jobs to run sequentially on a remote host without requir
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Queue Components
+### Remote Queue Runner
 
-**Queue Runner Script** (`cmd/queue-runner.sh`):
-- Embedded bash script deployed to remote host
-- Runs in a tmux session (`rj-queue-{name}`)
-- Processes jobs from queue file in FIFO order
-- Continues to next job regardless of exit code
-- Handles stop signals gracefully
+Jobs enqueued via `remote-jobs queue add`, `remote-jobs run --queue`, or plan
+`series` blocks are executed by a small bash daemon that lives on each host.
 
-**Queue File Format** (tab-separated):
-```
-{job_id}\t{working_dir}\t{command}\t{description}
-```
+- The script is embedded in the binary (`internal/scripts/queue-runner.sh`) and
+  deployed on demand to `~/.cache/remote-jobs/scripts/queue-runner.sh`.
+- A tmux session named `rj-queue-{queue}` runs the script so it keeps running
+  even when you disconnect.
+- Queue data is purely file-based to avoid keeping a network service running:
+  - `~/.cache/remote-jobs/queue/{queue}.queue`: FIFO list of jobs (tab-separated).
+  - `~/.cache/remote-jobs/queue/{queue}.current`: ID of the job currently
+    executing (used by `status`/`sync` to detect runner progress).
+  - `~/.cache/remote-jobs/queue/{queue}.runner.pid`: PID of the runner itself.
+  - `~/.cache/remote-jobs/queue/{queue}.stop`: Presence signals the runner to
+    exit after the current job.
+- Each queue entry includes base64 encoded environment variables and dependency
+  metadata so the runner knows whether it should wait for other jobs’ status
+  files before starting.
+- Queue entry columns (tab-separated): `job_id`, `working_dir`, `command`,
+  `description`, `env_vars_b64`, `dependencies`.
 
-**Queue Status** (`queued`):
-- Job status indicating job is in a remote queue awaiting execution
-- Jobs are added with `queue add` or `run --queue`
-- Transitions to `starting` when the queue runner processes it
-
-### Queue File Structure on Remote
-
-```
-~/.cache/remote-jobs/
-├── queue/
-│   ├── {name}.queue        # Queue file (jobs waiting)
-│   ├── {name}.current      # Currently running job ID
-│   ├── {name}.runner.pid   # Runner process ID
-│   └── {name}.stop         # Stop signal file
-├── logs/
-│   ├── {job_id}-{ts}.log   # Job output
-│   ├── {job_id}-{ts}.status # Exit code
-│   └── {job_id}-{ts}.meta  # Metadata
-└── scripts/
-    └── queue-runner.sh     # Deployed runner script
-```
-
-### Queue Command Flow
-
-**Adding a Job:**
-```
-remote-jobs queue add cool30 'python train.py'
-    │
-    ├── 1. Record job in SQLite (status: "queued")
-    ├── 2. SSH: mkdir -p ~/.cache/remote-jobs/queue/
-    └── 3. SSH: echo "job_line" >> ~/.cache/remote-jobs/queue/default.queue
+```mermaid
+flowchart TD
+    A[CLI queues job] --> B["Append line to ~/.cache/remote-jobs/queue/{queue}.queue"]
+    B --> C["rj-queue-{queue} tmux session"]
+    C --> D{Queue runner loop}
+    D -->|Read first entry| E[Write job ID to .current]
+    E --> F[Check dependency status files]
+    F -->|blocked| G[Re-append job and sleep]
+    F -->|ready| H[Create log/status/meta paths]
+    H --> I[Run job command]
+    I --> J[Write exit code to .status]
+    J --> K["Slack notify (optional)"]
+    K --> L[Delete .current, loop]
 ```
 
-**Starting the Runner:**
-```
-remote-jobs queue start cool30
-    │
-    ├── 1. Check if runner already exists (tmux has-session)
-    ├── 2. Deploy queue-runner.sh to remote
-    ├── 3. Deploy notify-slack.sh if Slack configured
-    └── 4. SSH: tmux new-session -d -s 'rj-queue-default' bash -c 'queue-runner.sh default'
-```
+**Activity Notes**
 
-**Runner Processing Loop:**
-```
-queue-runner.sh default
-    │
-    ├── Write PID to runner.pid
-    ├── While not stopped:
-    │   ├── Check for stop signal file
-    │   ├── Read first line from queue file
-    │   ├── Remove line from queue file (atomic)
-    │   ├── Write job ID to .current file
-    │   ├── Execute job, capture to log file
-    │   ├── Write exit code to .status file
-    │   ├── Send Slack notification
-    │   └── Clear .current file
-    └── Exit gracefully
-```
+- Dependencies: The runner inspects `~/.cache/remote-jobs/logs/{dep}-*.status`
+  files. If they are missing it re-queues the job at the end. If a dependency
+  failed and the spec required success, the job is marked skipped by writing a
+  log/status pair.
+- Environment: The queue entry contains base64 encoded `VAR=value` lines. The
+  runner decodes and exports them before launching the command.
+- Metadata: A `.meta` file is written before execution so later `sync` calls can
+  recover `start_time`, display-friendly command, queue name, etc.
+- Queue persistence: Because the queue file is just a text file, jobs survive
+  remote reboots. Re-starting the runner tmux session picks up where it left
+  off.
 
-### Queue Jobs
-
-All jobs added with `queue add` or `run --queue` have status `queued` in the database.
-
-**Queue Execution:**
-- Jobs are stored both in the local DB and in a remote queue file
-- The queue runner processes jobs automatically in FIFO order
-- No local machine connection needed after queue runner starts
-- Jobs transition from `queued` → `starting` → `running` → `completed`
-
-**Manual Execution:**
-- Use `run --from <id>` to manually execute a queued job
-- This creates a new job with copied settings, doesn't modify the original
-- Allows overriding host, command, or adding timeout
+The combination of queue files plus the runner loop means no long-lived process
+is required on the local machine once the job is queued—the remote host and its
+tmux sessions orchestrate everything.

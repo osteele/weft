@@ -107,16 +107,19 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Migration: add error_message column if it doesn't exist
-	// SQLite supports ALTER TABLE ADD COLUMN
-	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN error_message TEXT`)
-	// Ignore error - column may already exist
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN error_message TEXT`); err != nil {
+		return err
+	}
 
 	// Migration: add queue_name column for queued jobs
-	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN queue_name TEXT`)
-	// Ignore error - column may already exist
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queue_name TEXT`); err != nil {
+		return err
+	}
 
 	// Migration: add tombstoned column for soft-deleted jobs
-	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0`)
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 
 	// Migration: make start_time nullable for queued jobs
 	// SQLite doesn't support ALTER COLUMN, so we need to recreate the table
@@ -162,7 +165,9 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Ensure payload column exists (older versions may lack it)
-	_, _ = db.Exec(`ALTER TABLE deferred_operations ADD COLUMN payload TEXT`)
+	if err := addColumnIfMissing(db, `ALTER TABLE deferred_operations ADD COLUMN payload TEXT`); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -241,6 +246,23 @@ func migrateStartTimeNullable(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+func addColumnIfMissing(db *sql.DB, stmt string) error {
+	if _, err := db.Exec(stmt); err != nil {
+		if isDuplicateColumnError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 // RecordStart records a new job start and returns its ID

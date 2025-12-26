@@ -80,16 +80,29 @@ func runCheck(cmd *cobra.Command, args []string) error {
 		var job *db.Job
 		if strings.HasPrefix(sessionName, "rj-") {
 			if jobID, err := strconv.ParseInt(sessionName[3:], 10, 64); err == nil {
-				job, _ = db.GetJobByID(database, jobID)
+				job, err = db.GetJobByID(database, jobID)
+				if err != nil {
+					return fmt.Errorf("get job %d: %w", jobID, err)
+				}
 			}
 		} else {
 			// Legacy session - try to look up by session name
-			job, _ = db.GetJob(database, host, sessionName)
+			var err error
+			job, err = db.GetJob(database, host, sessionName)
+			if err != nil {
+				return fmt.Errorf("get job %s: %w", sessionName, err)
+			}
 		}
 
 		// Check if job is still running by looking for child processes
-		panePID, _ := ssh.GetTmuxPanePID(host, sessionName)
-		hasChildren, _ := ssh.HasChildProcesses(host, panePID)
+		panePID, err := ssh.GetTmuxPanePID(host, sessionName)
+		if err != nil {
+			return fmt.Errorf("get tmux pane pid %s: %w", sessionName, err)
+		}
+		hasChildren, err := ssh.HasChildProcesses(host, panePID)
+		if err != nil {
+			return fmt.Errorf("check child processes %s: %w", sessionName, err)
+		}
 
 		// Determine status file path
 		var statusFile string
@@ -105,12 +118,18 @@ func runCheck(cmd *cobra.Command, args []string) error {
 
 		var statusContent string
 		if statusFile != "" {
-			statusContent, _ = ssh.ReadRemoteFile(host, statusFile)
+			statusContent, err = ssh.ReadRemoteFile(host, statusFile)
+			if err != nil {
+				return fmt.Errorf("read status file %s:%s: %w", host, statusFile, err)
+			}
 		}
 
 		if statusContent != "" {
 			// Job has finished
-			exitCode, _ := strconv.Atoi(strings.TrimSpace(statusContent))
+			exitCode, err := strconv.Atoi(strings.TrimSpace(statusContent))
+			if err != nil {
+				return fmt.Errorf("parse exit code for %s: %w", sessionName, err)
+			}
 			if exitCode == 0 {
 				fmt.Printf("Status: FINISHED ✓\n")
 			} else {
@@ -120,7 +139,9 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			// Update database
 			endTime := time.Now().Unix()
 			if job != nil {
-				db.RecordCompletionByID(database, job.ID, exitCode, endTime)
+				if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+					return fmt.Errorf("record completion for job %d: %w", job.ID, err)
+				}
 			}
 		} else if hasChildren {
 			fmt.Printf("Status: RUNNING\n")
@@ -129,7 +150,9 @@ func runCheck(cmd *cobra.Command, args []string) error {
 
 			// Mark as dead in database
 			if job != nil {
-				db.MarkDeadByID(database, job.ID)
+				if err := db.MarkDeadByID(database, job.ID); err != nil {
+					return fmt.Errorf("mark job %d dead: %w", job.ID, err)
+				}
 			}
 		}
 

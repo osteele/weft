@@ -28,7 +28,10 @@ long-running processes on remote machines.`,
 func Execute() error {
 	// If no args provided, check config for default command
 	if len(os.Args) == 1 {
-		cfg, _ := config.Load()
+		cfg, err := config.Load()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
 		if cfg != nil && cfg.DefaultCommand != "" && cfg.DefaultCommand != "help" {
 			// Insert the default command as the first argument
 			os.Args = append(os.Args, cfg.DefaultCommand)

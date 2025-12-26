@@ -190,7 +190,15 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 
 		if content != "" {
 			// Job completed, update database
-			exitCode, _ := strconv.Atoi(strings.TrimSpace(content))
+			exitCodeStr := strings.TrimSpace(content)
+			exitCode, err := strconv.Atoi(exitCodeStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Job %d: invalid status file contents %q: %v\n", jobID, exitCodeStr, err)
+				if exitOnComplete {
+					os.Exit(ExitFailed)
+				}
+				return
+			}
 			endTime := time.Now().Unix()
 			if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)

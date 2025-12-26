@@ -161,7 +161,10 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 
 	if content != "" {
 		// Job completed
-		exitCode, _ := strconv.Atoi(content)
+		exitCode, err := strconv.Atoi(content)
+		if err != nil {
+			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
+		}
 		endTime := time.Now().Unix()
 		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
@@ -177,10 +180,10 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 }
 
 // updateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set
-func updateStartTimeFromMetadata(database *sql.DB, job *db.Job) {
+func updateStartTimeFromMetadata(database *sql.DB, job *db.Job) error {
 	// Only update if start_time is not set
 	if job.StartTime > 0 {
-		return
+		return nil
 	}
 
 	const timeout = 5 * time.Second
@@ -188,19 +191,27 @@ func updateStartTimeFromMetadata(database *sql.DB, job *db.Job) {
 	cmd := fmt.Sprintf("cat %s 2>/dev/null", metadataPattern)
 	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
 	if err != nil || strings.TrimSpace(stdout) == "" {
-		return // No metadata file or couldn't read it
+		return nil // No metadata file or couldn't read it
 	}
 
 	// Parse metadata
 	metadata := session.ParseMetadata(stdout)
 	if startTimeStr, ok := metadata["start_time"]; ok {
-		if startTime, err := strconv.ParseInt(startTimeStr, 10, 64); err == nil && startTime > 0 {
-			// Update database with actual start time from metadata
-			db.UpdateStartTime(database, job.ID, startTime)
-			// Update in-memory job struct too for current sync cycle
-			job.StartTime = startTime
+		startTime, err := strconv.ParseInt(startTimeStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse metadata start time for job %d: %w", job.ID, err)
 		}
+		if startTime <= 0 {
+			return nil
+		}
+		// Update database with actual start time from metadata
+		if err := db.UpdateStartTime(database, job.ID, startTime); err != nil {
+			return fmt.Errorf("update start time for job %d: %w", job.ID, err)
+		}
+		// Update in-memory job struct too for current sync cycle
+		job.StartTime = startTime
 	}
+	return nil
 }
 
 // syncQueueRunnerJob checks and updates a queue runner job's status using pattern-based file lookup
@@ -216,13 +227,19 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, err
 	}
 
-	if strings.TrimSpace(stdout) != "" {
+	exitCodeStr := strings.TrimSpace(stdout)
+	if exitCodeStr != "" {
 		// Job completed - read exit code and update start time from metadata
-		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
+		exitCode, err := strconv.Atoi(exitCodeStr)
+		if err != nil {
+			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
+		}
 		endTime := time.Now().Unix()
 
 		// Update start time from metadata if not already set
-		updateStartTimeFromMetadata(database, job)
+		if err := updateStartTimeFromMetadata(database, job); err != nil {
+			return false, err
+		}
 
 		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err
@@ -246,7 +263,9 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	currentJobID := strings.TrimSpace(stdout)
 	if currentJobID == fmt.Sprintf("%d", job.ID) {
 		// Job is currently running - update start time from metadata if not set
-		updateStartTimeFromMetadata(database, job)
+		if err := updateStartTimeFromMetadata(database, job); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 
@@ -592,7 +611,10 @@ func syncJobQuick(database *sql.DB, job *db.Job, timeout time.Duration) (bool, e
 	}
 
 	if content != "" {
-		exitCode, _ := strconv.Atoi(content)
+		exitCode, err := strconv.Atoi(content)
+		if err != nil {
+			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
+		}
 		endTime := time.Now().Unix()
 		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
 			return false, err

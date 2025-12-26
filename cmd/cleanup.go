@@ -106,10 +106,17 @@ func cleanupFinishedSessions(host string) (int, error) {
 		var job *db.Job
 		if strings.HasPrefix(sessionName, "rj-") {
 			if jobID, err := strconv.ParseInt(sessionName[3:], 10, 64); err == nil {
-				job, _ = db.GetJobByID(database, jobID)
+				job, err = db.GetJobByID(database, jobID)
+				if err != nil {
+					return 0, fmt.Errorf("get job %d: %w", jobID, err)
+				}
 			}
 		} else {
-			job, _ = db.GetJob(database, host, sessionName)
+			var err error
+			job, err = db.GetJob(database, host, sessionName)
+			if err != nil {
+				return 0, fmt.Errorf("get job %s: %w", sessionName, err)
+			}
 		}
 
 		// Determine status file path
@@ -123,11 +130,21 @@ func cleanupFinishedSessions(host string) (int, error) {
 
 		var statusContent string
 		if statusFile != "" {
-			statusContent, _ = ssh.ReadRemoteFile(host, statusFile)
+			var err error
+			statusContent, err = ssh.ReadRemoteFile(host, statusFile)
+			if err != nil {
+				return 0, fmt.Errorf("read status file %s:%s: %w", host, statusFile, err)
+			}
 		}
 
-		panePID, _ := ssh.GetTmuxPanePID(host, sessionName)
-		hasChildren, _ := ssh.HasChildProcesses(host, panePID)
+		panePID, err := ssh.GetTmuxPanePID(host, sessionName)
+		if err != nil {
+			return 0, fmt.Errorf("get tmux pane pid %s: %w", sessionName, err)
+		}
+		hasChildren, err := ssh.HasChildProcesses(host, panePID)
+		if err != nil {
+			return 0, fmt.Errorf("check child processes %s: %w", sessionName, err)
+		}
 
 		if statusContent != "" || !hasChildren {
 			// Session has finished
@@ -136,7 +153,7 @@ func cleanupFinishedSessions(host string) (int, error) {
 			} else {
 				fmt.Printf("  Killing session: %s\n", sessionName)
 				if err := ssh.TmuxKillSession(host, sessionName); err != nil {
-					fmt.Printf("    Warning: %v\n", err)
+					return 0, fmt.Errorf("kill session %s: %w", sessionName, err)
 				}
 			}
 			cleaned++
@@ -159,22 +176,26 @@ func cleanupOldLogs(host string) (int, error) {
 
 	// Find legacy archived log files in /tmp (format: /tmp/tmux-*.YYYYMMDD-HHMMSS.log)
 	legacyFindCmd := fmt.Sprintf("find /tmp -maxdepth 1 -name 'tmux-*.*.log' -mtime +%d 2>/dev/null", cleanupOlderThan)
-	if stdout, _, err := ssh.Run(host, legacyFindCmd); err == nil {
-		for _, file := range strings.Split(strings.TrimSpace(stdout), "\n") {
-			if file != "" {
-				allFiles = append(allFiles, file)
-			}
+	stdout, _, err := ssh.Run(host, legacyFindCmd)
+	if err != nil {
+		return 0, fmt.Errorf("list legacy logs on %s: %w", host, err)
+	}
+	for _, file := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if file != "" {
+			allFiles = append(allFiles, file)
 		}
 	}
 
 	// Find new log files in ~/.cache/remote-jobs/logs
 	// Note: path not quoted to allow tilde expansion
 	newFindCmd := fmt.Sprintf("find ~/.cache/remote-jobs/logs -maxdepth 1 -type f -mtime +%d 2>/dev/null", cleanupOlderThan)
-	if stdout, _, err := ssh.Run(host, newFindCmd); err == nil {
-		for _, file := range strings.Split(strings.TrimSpace(stdout), "\n") {
-			if file != "" {
-				allFiles = append(allFiles, file)
-			}
+	stdout, _, err = ssh.Run(host, newFindCmd)
+	if err != nil {
+		return 0, fmt.Errorf("list logs on %s: %w", host, err)
+	}
+	for _, file := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if file != "" {
+			allFiles = append(allFiles, file)
 		}
 	}
 
@@ -186,7 +207,7 @@ func cleanupOldLogs(host string) (int, error) {
 			fmt.Printf("  Deleting: %s\n", file)
 			// Note: path not quoted to allow tilde expansion
 			if _, stderr, err := ssh.Run(host, fmt.Sprintf("rm -f %s", file)); err != nil {
-				fmt.Printf("    Warning: %s\n", strings.TrimSpace(stderr))
+				return 0, fmt.Errorf("delete log %s: %s", file, strings.TrimSpace(stderr))
 			}
 		}
 		cleaned++
