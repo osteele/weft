@@ -21,6 +21,7 @@ type Job struct {
 	Description  string
 	ErrorMessage string
 	QueueName    string // Name of the queue this job belongs to (empty for non-queued jobs)
+	CreatedAt    int64  // When the job was created/queued (0 for legacy jobs)
 	StartTime    int64
 	EndTime      *int64
 	ExitCode     *int
@@ -28,7 +29,7 @@ type Job struct {
 	Tombstoned   bool
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, start_time, end_time, exit_code, status, error_message, queue_name, tombstoned`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, created_at, start_time, end_time, exit_code, status, error_message, queue_name, tombstoned`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -118,6 +119,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add tombstoned column for soft-deleted jobs
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+
+	// Migration: add created_at column to track when jobs were queued
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN created_at INTEGER`); err != nil {
 		return err
 	}
 
@@ -282,11 +288,11 @@ func RecordStart(db *sql.DB, host, sessionName, workingDir, command string, star
 // RecordJobStarting creates a new job with status="starting" and returns its ID
 // This allows getting the job ID before starting the tmux session
 func RecordJobStarting(db *sql.DB, host, workingDir, command, description string) (int64, error) {
-	startTime := time.Now().Unix()
+	now := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?)`,
-		host, workingDir, command, description, startTime, StatusStarting,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
+		host, workingDir, command, description, now, now, StatusStarting,
 	)
 	if err != nil {
 		return 0, err
@@ -350,6 +356,24 @@ func UpdateJobDescription(db *sql.DB, id int64, description string) error {
 	return err
 }
 
+// UpdateJobWorkingDir updates the working directory for a queued job
+func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET working_dir = ? WHERE id = ? AND status = ?`,
+		workingDir, id, StatusQueued,
+	)
+	return err
+}
+
+// UpdateJobCommand updates the command for a queued job
+func UpdateJobCommand(db *sql.DB, id int64, command string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET command = ? WHERE id = ? AND status = ?`,
+		command, id, StatusQueued,
+	)
+	return err
+}
+
 // UpdateJobHost updates the host for a job (only for queued jobs)
 func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 	_, err := db.Exec(
@@ -391,11 +415,11 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 
 // RecordPending records a pending job and returns its ID
 func RecordPending(db *sql.DB, host, workingDir, command, description string) (int64, error) {
-	startTime := time.Now().Unix()
+	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?)`,
-		host, workingDir, command, description, startTime, StatusPending,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status)
+		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?)`,
+		host, workingDir, command, description, createdAt, StatusPending,
 	)
 	if err != nil {
 		return 0, err
@@ -406,10 +430,11 @@ func RecordPending(db *sql.DB, host, workingDir, command, description string) (i
 // RecordQueued records a queued job for sequential execution and returns its ID
 // Note: start_time is NULL until the job actually starts running (set by UpdateQueuedToRunning)
 func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName string) (int64, error) {
+	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status, queue_name)
-		 VALUES (?, NULL, ?, ?, ?, NULL, ?, ?)`,
-		host, workingDir, command, description, StatusQueued, queueName,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name)
+		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
+		host, workingDir, command, description, createdAt, StatusQueued, queueName,
 	)
 	if err != nil {
 		return 0, err
@@ -516,18 +541,31 @@ func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
 	return scanJobs(rows)
 }
 
+// GetJobsByHost retrieves all jobs for a specific host
+func GetJobsByHost(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? ORDER BY id DESC`, jobSelectColumns)
+	rows, err := db.Query(query, host)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobs(rows)
+}
+
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
 	var sessionName sql.NullString
 	var desc sql.NullString
 	var errorMsg sql.NullString
 	var queueName sql.NullString
+	var createdAt sql.NullInt64
 	var startTime sql.NullInt64
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 	var tombstoned sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -546,6 +584,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if queueName.Valid {
 		j.QueueName = queueName.String
+	}
+	if createdAt.Valid {
+		j.CreatedAt = createdAt.Int64
 	}
 	if startTime.Valid {
 		j.StartTime = startTime.Int64
@@ -573,12 +614,13 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var desc sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
+		var createdAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -591,6 +633,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
+		}
+		if createdAt.Valid {
+			j.CreatedAt = createdAt.Int64
 		}
 		if startTime.Valid {
 			j.StartTime = startTime.Int64
@@ -858,12 +903,13 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var desc sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
+		var createdAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -876,6 +922,9 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
+		}
+		if createdAt.Valid {
+			j.CreatedAt = createdAt.Int64
 		}
 		if queueName.Valid {
 			j.QueueName = queueName.String
@@ -936,6 +985,45 @@ func stripExportPrefix(cmd string) string {
 	return cmd
 }
 
+// GetGPU extracts the CUDA_VISIBLE_DEVICES value from the job's command.
+// Returns empty string if not found.
+func (j *Job) GetGPU() string {
+	// Get command after cd prefix if present
+	cmd := j.Command
+	if afterCd, _ := j.ParseCdCommand(); afterCd != "" {
+		cmd = afterCd
+	}
+
+	// First check for env prefix: "env CUDA_VISIBLE_DEVICES=0 ..."
+	_, envVars := ParseEnvPrefix(cmd)
+	for _, ev := range envVars {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+		}
+	}
+
+	// Then check exports (handles cd prefix first)
+	for _, ev := range j.ParseExportVars() {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+		}
+	}
+
+	// Check in command itself for inline assignment: "CUDA_VISIBLE_DEVICES=0 python ..."
+	parts := strings.Fields(cmd)
+	for _, part := range parts {
+		if strings.HasPrefix(part, "CUDA_VISIBLE_DEVICES=") {
+			return strings.TrimPrefix(part, "CUDA_VISIBLE_DEVICES=")
+		}
+		// Stop at first non-assignment
+		if !strings.Contains(part, "=") {
+			break
+		}
+	}
+
+	return ""
+}
+
 // ParseExportVars extracts environment variable assignments from the command.
 // Returns a slice of "VAR=value" strings from "export VAR=value && " prefixes.
 // Processes the command after stripping "cd dir && " if present.
@@ -967,7 +1055,13 @@ func (j *Job) ParseExportVars() []string {
 // ParseCdCommand checks if the command starts with "cd <dir> &&" pattern.
 // Returns (command_after_and, cd_directory) if pattern matches, or ("", "") if not.
 func (j *Job) ParseCdCommand() (command, dir string) {
-	cmd := strings.TrimSpace(j.Command)
+	return ParseCdPrefix(j.Command)
+}
+
+// ParseCdPrefix extracts "cd <dir> && " prefix from a command string.
+// Returns (command_after_and, cd_directory) if pattern matches, or ("", "") if not.
+func ParseCdPrefix(cmd string) (command, dir string) {
+	cmd = strings.TrimSpace(cmd)
 
 	// Check for "cd " prefix
 	if !strings.HasPrefix(cmd, "cd ") {
@@ -994,6 +1088,93 @@ func (j *Job) ParseCdCommand() (command, dir string) {
 	command = strings.TrimSpace(cmd[andIdx+4:])
 
 	return command, dir
+}
+
+// ParseEnvPrefix extracts "env VAR=value ... " prefix from a command string.
+// Returns (command_after_env, env_vars) where env_vars is a slice of "VAR=value" strings.
+// If no env prefix is found, returns (original_cmd, nil).
+func ParseEnvPrefix(cmd string) (command string, envVars []string) {
+	cmd = strings.TrimSpace(cmd)
+
+	// Check for "env " prefix
+	if !strings.HasPrefix(cmd, "env ") {
+		return cmd, nil
+	}
+
+	// Skip "env "
+	rest := cmd[4:]
+
+	// Parse VAR=value pairs until we hit a command (doesn't contain '=')
+	parts := strings.Fields(rest)
+	var envParts []string
+	cmdStartIdx := 0
+
+	for i, part := range parts {
+		if strings.Contains(part, "=") {
+			envParts = append(envParts, part)
+			cmdStartIdx = i + 1
+		} else {
+			// This is the start of the actual command
+			break
+		}
+	}
+
+	if len(envParts) == 0 {
+		return cmd, nil
+	}
+
+	// Reconstruct the command from remaining parts
+	if cmdStartIdx < len(parts) {
+		command = strings.Join(parts[cmdStartIdx:], " ")
+	}
+
+	return command, envParts
+}
+
+// ParseExportPrefix extracts "export VAR=value && " prefixes from a command string.
+// Returns (command_after_exports, env_vars) where env_vars is a slice of "VAR=value" strings.
+// Handles multiple consecutive exports: "export A=1 && export B=2 && cmd" -> ("cmd", ["A=1", "B=2"])
+func ParseExportPrefix(cmd string) (command string, envVars []string) {
+	cmd = strings.TrimSpace(cmd)
+
+	for strings.HasPrefix(cmd, "export ") {
+		// Find the " && " separator
+		andIdx := strings.Index(cmd, " && ")
+		if andIdx == -1 {
+			break
+		}
+		// Extract the VAR=value part (skip "export ")
+		exportPart := strings.TrimSpace(cmd[7:andIdx])
+		if exportPart != "" {
+			envVars = append(envVars, exportPart)
+		}
+		cmd = strings.TrimSpace(cmd[andIdx+4:])
+	}
+
+	return cmd, envVars
+}
+
+// NormalizeCommand parses a command and extracts working directory and environment variables.
+// This is used when creating new jobs to split embedded cd/env prefixes into their proper fields.
+// Returns (working_dir, command, env_vars).
+// If workingDir is empty, no cd prefix was found.
+func NormalizeCommand(cmd string) (workingDir, command string, envVars []string) {
+	// First check for cd prefix
+	remainder, dir := ParseCdPrefix(cmd)
+	if dir != "" {
+		workingDir = dir
+		cmd = remainder
+	}
+
+	// Then check for env prefix
+	cmd, envFromEnv := ParseEnvPrefix(cmd)
+	envVars = append(envVars, envFromEnv...)
+
+	// Then check for export prefix
+	cmd, envFromExport := ParseExportPrefix(cmd)
+	envVars = append(envVars, envFromExport...)
+
+	return workingDir, cmd, envVars
 }
 
 // CachedHostInfo represents cached static information about a host
@@ -1116,6 +1297,12 @@ func LoadAllCachedHosts(db *sql.DB) ([]*CachedHostInfo, error) {
 	}
 
 	return hosts, rows.Err()
+}
+
+// DeleteCachedHost removes a host from the hosts cache
+func DeleteCachedHost(db *sql.DB, name string) error {
+	_, err := db.Exec(`DELETE FROM hosts WHERE name = ?`, name)
+	return err
 }
 
 // FormatDuration formats a duration in human-readable form

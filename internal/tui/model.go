@@ -81,6 +81,7 @@ type keyMap struct {
 	Help        key.Binding
 	StartQueue  key.Binding
 	StartNow    key.Binding
+	Edit        key.Binding
 }
 
 var keys = keyMap{
@@ -140,12 +141,12 @@ var keys = keyMap{
 		key.WithHelp("q", "quit"),
 	),
 	HostsView: key.NewBinding(
-		key.WithKeys("h"),
-		key.WithHelp("h", "hosts"),
+		key.WithKeys("right"),
+		key.WithHelp("→", "hosts"),
 	),
 	JobsView: key.NewBinding(
-		key.WithKeys("j"),
-		key.WithHelp("j", "jobs"),
+		key.WithKeys("left"),
+		key.WithHelp("←", "jobs"),
 	),
 	Tab: key.NewBinding(
 		key.WithKeys("tab"),
@@ -166,6 +167,10 @@ var keys = keyMap{
 	StartNow: key.NewBinding(
 		key.WithKeys("g"),
 		key.WithHelp("g", "start now"),
+	),
+	Edit: key.NewBinding(
+		key.WithKeys("e"),
+		key.WithHelp("e", "edit"),
 	),
 }
 
@@ -226,6 +231,11 @@ type jobCreatedMsg struct {
 	err   error
 }
 
+type jobEditedMsg struct {
+	jobID int64
+	err   error
+}
+
 type jobCreateProgressMsg struct {
 	step string
 }
@@ -245,6 +255,11 @@ type hostsLoadedMsg struct {
 type hostInfoMsg struct {
 	hostName string
 	info     *Host
+}
+
+type hostDeletedMsg struct {
+	hostName string
+	err      error
 }
 
 type queueStatusMsg struct {
@@ -316,6 +331,10 @@ type Model struct {
 	creatingJob    bool
 	createJobStart time.Time
 	createJobStep  string
+
+	// Edit job mode (for queued jobs only)
+	editMode     bool
+	editingJobID int64
 
 	// Layout
 	width  int
@@ -646,6 +665,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reload hosts in case this job was on a new host
 		return m, tea.Batch(flashCmd, m.refreshJobs(), m.loadHosts())
 
+	case jobEditedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			flashCmd = m.setFlash(fmt.Sprintf("Edit failed: %v", msg.err), true)
+		} else {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d updated", msg.jobID), false)
+			m.pendingSelectJobID = msg.jobID
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
 	case tickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startSyncTicker())
@@ -751,6 +780,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Mark host as queried this session
 		m.hostsQueriedThisSession[msg.hostName] = true
 		return m, cmd
+
+	case hostDeletedMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Delete failed: %v", msg.err), true)
+		}
+		// Remove host from list
+		for i, h := range m.hosts {
+			if h.Name == msg.hostName {
+				m.hosts = append(m.hosts[:i], m.hosts[i+1:]...)
+				// Adjust selection if needed
+				if m.selectedHostIdx >= len(m.hosts) && m.selectedHostIdx > 0 {
+					m.selectedHostIdx--
+				}
+				break
+			}
+		}
+		delete(m.hostsQueriedThisSession, msg.hostName)
+		return m, m.setFlash(fmt.Sprintf("Host %s deleted", msg.hostName), false)
 
 	case queueStatusMsg:
 		// Update queue status for host
@@ -956,6 +1003,15 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
 					m.selectedJob = m.jobs[idx]
 					m.logLoading = true
+					// Show cached content immediately while fetching fresh logs
+					if cached, ok := m.logCache[m.selectedJob.ID]; ok {
+						m.logContent = cached
+						m.logStale = true
+						m.logViewport.SetContent(m.logContent)
+					} else {
+						m.logContent = ""
+						m.logStale = false
+					}
 					var cmds []tea.Cmd
 					cmds = append(cmds, m.fetchSelectedJobLog())
 					if m.selectedJob.Status == db.StatusRunning {
@@ -974,20 +1030,22 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.HostsView):
-		if m.viewMode != ViewModeHosts {
-			m.viewMode = ViewModeHosts
-			// Refresh hosts when switching to hosts view, but only if needed
-			var cmds []tea.Cmd
-			for _, host := range m.hosts {
-				// Only refresh if not queried this session or if online (for dynamic data)
-				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
-					cmds = append(cmds, m.fetchHostInfo(host.Name))
-					cmds = append(cmds, m.fetchQueueStatus(host.Name))
-				}
-			}
-			return m, tea.Batch(cmds...)
+		// Toggle between hosts and jobs view
+		if m.viewMode == ViewModeHosts {
+			m.viewMode = ViewModeJobs
+			return m, nil
 		}
-		return m, nil
+		m.viewMode = ViewModeHosts
+		// Refresh hosts when switching to hosts view, but only if needed
+		var cmds []tea.Cmd
+		for _, host := range m.hosts {
+			// Only refresh if not queried this session or if online (for dynamic data)
+			if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
+				cmds = append(cmds, m.fetchHostInfo(host.Name))
+				cmds = append(cmds, m.fetchQueueStatus(host.Name))
+			}
+		}
+		return m, tea.Batch(cmds...)
 
 	case key.Matches(msg, keys.JobsView):
 		// Toggle between jobs and hosts view
@@ -1071,6 +1129,15 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.detailTab = DetailTabLogs
 					m.selectedJob = m.jobs[idx]
 					m.logLoading = true
+					// Show cached content immediately while fetching fresh logs
+					if cached, ok := m.logCache[m.selectedJob.ID]; ok {
+						m.logContent = cached
+						m.logStale = true
+						m.logViewport.SetContent(m.logContent)
+					} else {
+						m.logContent = ""
+						m.logStale = false
+					}
 					var cmds []tea.Cmd
 					cmds = append(cmds, m.fetchSelectedJobLog())
 					// Fetch process stats for running jobs
@@ -1111,6 +1178,15 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Restarting job %d...", job.ID), false), m.restartJob(job))
 
 	case key.Matches(msg, keys.Remove):
+		if m.viewMode == ViewModeHosts {
+			// Delete host in hosts view
+			if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+				return m, nil
+			}
+			host := m.hosts[m.selectedHostIdx]
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Deleting host %s...", host.Name), false), m.deleteHost(host.Name))
+		}
+		// Remove job in jobs view
 		job := m.getTargetJob()
 		if job == nil {
 			return m, nil
@@ -1156,6 +1232,31 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.setFlash("Can only start queued jobs", true)
 
+	case key.Matches(msg, keys.Edit):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, m.setFlash("No job selected", true)
+		}
+		if job.Status != db.StatusQueued {
+			return m, m.setFlash("Can only edit queued jobs", true)
+		}
+		// Enter edit mode with form pre-populated
+		m.inputMode = true
+		m.editMode = true
+		m.editingJobID = job.ID
+		m.inputFocus = 0
+		m.inputs[inputHost].Focus()
+		m.flashMessage = ""
+		// Pre-populate all fields
+		m.inputs[inputHost].SetValue(job.Host)
+		m.inputs[inputCommand].SetValue(job.Command)
+		m.inputs[inputDescription].SetValue(job.Description)
+		m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
+		return m, nil
+
 	case key.Matches(msg, keys.Sync):
 		if m.viewMode == ViewModeJobs && !m.syncing {
 			m.syncing = true
@@ -1172,6 +1273,8 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		// Cancel input mode
 		m.inputMode = false
+		m.editMode = false
+		m.editingJobID = 0
 		m.inputs[m.inputFocus].Blur()
 		return m, nil
 
@@ -1201,13 +1304,21 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash("Host and command are required", true)
 		}
 
-		// Exit input mode and create job
+		// Exit input mode
 		m.inputMode = false
 		m.inputs[m.inputFocus].Blur()
+		m.flashMessage = ""
+
+		if m.editMode {
+			// Edit existing job
+			m.editMode = false
+			return m, m.editJob()
+		}
+
+		// Create new job
 		m.creatingJob = true
 		m.createJobStart = time.Now()
 		m.createJobStep = "Connecting..."
-		m.flashMessage = ""
 		return m, tea.Batch(m.createJob(), m.startCreateTicker())
 	}
 
@@ -1324,16 +1435,18 @@ func (m Model) renderHelpOverlay(background string) string {
 		b.WriteString("\n")
 		shortcuts := []struct{ key, desc string }{
 			{"↑/↓", "Navigate job list"},
+			{"←/→", "Switch to hosts view"},
 			{"l", "Toggle logs view"},
 			{"s", "Sync job statuses"},
 			{"n", "New job"},
+			{"e", "Edit queued job"},
 			{"r", "Restart job"},
 			{"R", "Edit & restart job"},
 			{"k", "Kill running job"},
-			{"S", "Start queue (for queued jobs)"},
+			{"g", "Start queued job now"},
+			{"S", "Start queue runner"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
-			{"h / Tab", "Switch to hosts view"},
 			{"Esc", "Clear selection/messages"},
 		}
 		for _, s := range shortcuts {
@@ -1346,7 +1459,8 @@ func (m Model) renderHelpOverlay(background string) string {
 		b.WriteString("\n")
 		shortcuts := []struct{ key, desc string }{
 			{"↑/↓", "Navigate host list"},
-			{"j / Tab", "Switch to jobs view"},
+			{"←/→", "Switch to jobs view"},
+			{"x", "Delete host"},
 		}
 		for _, s := range shortcuts {
 			b.WriteString(keyStyle.Render(s.key))
@@ -1393,7 +1507,11 @@ func (m Model) renderInputForm(background string) string {
 	focusedLabelStyle := lipgloss.NewStyle().Width(14).Foreground(lipgloss.Color("69")).Bold(true)
 
 	var b strings.Builder
-	b.WriteString("New Job\n\n")
+	if m.editMode {
+		b.WriteString(fmt.Sprintf("Edit Job %d\n\n", m.editingJobID))
+	} else {
+		b.WriteString("New Job\n\n")
+	}
 
 	labels := []string{"Host:", "Description:", "Command:", "Working Dir:", "Env Vars:"}
 	for i, input := range m.inputs {
@@ -1407,7 +1525,12 @@ func (m Model) renderInputForm(background string) string {
 	}
 
 	b.WriteString("\n")
-	helpText := "Tab: next field • Enter: create job • Esc: cancel"
+	var helpText string
+	if m.editMode {
+		helpText = "Tab: next field • Enter: save changes • Esc: cancel"
+	} else {
+		helpText = "Tab: next field • Enter: create job • Esc: cancel"
+	}
 	if m.flashIsError && m.flashMessage != "" {
 		helpText = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.flashMessage)
 	}
@@ -1428,8 +1551,8 @@ func (m Model) renderJobList(height int) string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %s",
-		"ID", "HOST", "STATUS", "STARTED", "COMMAND / DESCRIPTION")
+	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
+		"ID", "HOST", "STATUS", "TIME", "GPU", "COMMAND / DESCRIPTION")
 	rows = append(rows, headerStyle.Render(header))
 	filterLabel := fmt.Sprintf(" Filter: %s (press f to cycle)", jobFilterDescription(m.jobFilter))
 	rows = append(rows, dimStyle.Render(filterLabel))
@@ -1455,18 +1578,22 @@ func (m Model) renderJobList(height int) string {
 	for i := start; i < end; i++ {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
-		started := formatStartTime(job.StartTime)
+		timeCol := formatJobTime(job)
+		gpu := job.GetGPU()
+		if gpu == "" {
+			gpu = "—"
+		}
 
 		// Show description if available, otherwise truncated command
 		display := job.Description
 		if display == "" {
 			display = job.EffectiveCommand()
 		}
-		display = truncate(display, 40)
+		display = truncate(display, 35)
 
-		line := fmt.Sprintf(" %-4d %-10s %-12s %-12s %s",
+		line := fmt.Sprintf(" %-4d %-10s %-12s %-12s %-4s %s",
 			job.ID, truncate(job.Host, 10),
-			status, started, display)
+			status, timeCol, truncate(gpu, 4), display)
 
 		// DEBUG: Log host state for disconnected host jobs
 		if job.Host == "cool100" || job.Host == "studio" {
@@ -1511,20 +1638,24 @@ func (m Model) renderLogPanel(height int) string {
 	return m.renderJobDetails(height)
 }
 
-// renderTabHeader renders the "Details  Logs" tab header with active tab bolded
+// renderTabHeader renders the "Details  Logs" tab header as visual tabs
 func (m Model) renderTabHeader() string {
 	detailsLabel := "Details"
 	logsLabel := "Logs"
 
+	var detailsTab, logsTab string
 	if m.detailTab == DetailTabDetails {
-		detailsLabel = headerStyle.Render(detailsLabel)
-		logsLabel = dimStyle.Render(logsLabel)
+		detailsTab = activeTabStyle.Render(detailsLabel)
+		logsTab = inactiveTabStyle.Render(logsLabel)
 	} else {
-		detailsLabel = dimStyle.Render(detailsLabel)
-		logsLabel = headerStyle.Render(logsLabel)
+		detailsTab = inactiveTabStyle.Render(detailsLabel)
+		logsTab = activeTabStyle.Render(logsLabel)
 	}
 
-	return detailsLabel + "  " + logsLabel
+	// Add hint about Tab key switching
+	hint := dimStyle.Render(" (Tab to switch)")
+
+	return detailsTab + " " + logsTab + hint
 }
 
 func (m Model) renderLogsOnly(height int) string {
@@ -1587,7 +1718,13 @@ func (m Model) renderLogsOnly(height int) string {
 
 func (m Model) renderJobDetails(height int) string {
 	var content string
-	var header string
+	var b strings.Builder
+
+	// Styles for the details view
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Width(10)
+	valueStyle := lipgloss.NewStyle()
+	headerStyle := lipgloss.NewStyle().Bold(true)
+	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
 
 	highlightedJob := m.getTargetJob()
 
@@ -1595,102 +1732,166 @@ func (m Model) renderJobDetails(height int) string {
 		content = dimStyle.Render("No jobs to display")
 	} else {
 		job := highlightedJob
-		header = fmt.Sprintf("Job %d on %s\n", job.ID, job.Host)
 
-		// Show Cmd and Dir first (most useful info)
-		header += fmt.Sprintf("Cmd:     %s\n", job.EffectiveCommand())
-		header += fmt.Sprintf("Dir:     %s\n", job.EffectiveWorkingDir())
+		// Header line with job ID, host, and status
+		statusStr := m.formatStatus(job)
+		b.WriteString(headerStyle.Render(fmt.Sprintf("Job %d", job.ID)))
+		b.WriteString(dimStyle.Render(" on "))
+		b.WriteString(headerStyle.Render(job.Host))
+		b.WriteString(dimStyle.Render(" · "))
+		b.WriteString(statusStr)
+		b.WriteString("\n\n")
 
-		// Show environment variables if any
+		// Description (if any) - shown in italic without label
+		if job.Description != "" {
+			descStyle := lipgloss.NewStyle().Italic(true)
+			b.WriteString(descStyle.Render(job.Description))
+			b.WriteString("\n")
+		}
+
+		// Command (most important)
+		b.WriteString(labelStyle.Render("Command"))
+		b.WriteString(valueStyle.Render(job.EffectiveCommand()))
+		b.WriteString("\n")
+
+		// Directory
+		b.WriteString(labelStyle.Render("Directory"))
+		b.WriteString(valueStyle.Render(job.EffectiveWorkingDir()))
+		b.WriteString("\n")
+
+		// Environment variables (if any)
 		envVars := job.ParseExportVars()
 		if len(envVars) > 0 {
-			header += fmt.Sprintf("Env:     %s\n", strings.Join(envVars, ", "))
+			b.WriteString(labelStyle.Render("Env"))
+			b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
+			b.WriteString("\n")
 		}
 
-		// Then timing information
-		if job.StartTime > 0 {
-			startTime := time.Unix(job.StartTime, 0)
-			header += fmt.Sprintf("Started: %s (%s)\n", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))
+		// Timing section
+		if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
+			b.WriteString("\n")
 
-			// Show timing information based on job status
-			if job.Status == db.StatusRunning {
-				elapsed := time.Since(startTime)
-				header += fmt.Sprintf("Elapsed: %s (running)\n", formatDuration(elapsed))
+			// Show created time if available and different from start time
+			if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {
+				createdTime := time.Unix(job.CreatedAt, 0)
+				label := "Created"
+				if job.Status == db.StatusQueued {
+					label = "Queued"
+				}
+				b.WriteString(labelStyle.Render(label))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", createdTime.Format("2006-01-02 15:04:05"), formatStartTime(job.CreatedAt))))
+				b.WriteString("\n")
+			}
+
+			if job.StartTime > 0 {
+				startTime := time.Unix(job.StartTime, 0)
+				b.WriteString(labelStyle.Render("Started"))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))))
+				b.WriteString("\n")
+
+				// Show timing information based on job status
+				if job.Status == db.StatusRunning {
+					elapsed := time.Since(startTime)
+					b.WriteString(labelStyle.Render("Elapsed"))
+					b.WriteString(valueStyle.Render(formatDuration(elapsed)))
+					b.WriteString("\n")
+				} else if job.EndTime != nil {
+					endTime := time.Unix(*job.EndTime, 0)
+					duration := endTime.Sub(startTime)
+					b.WriteString(labelStyle.Render("Ended"))
+					b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))))
+					b.WriteString("\n")
+					b.WriteString(labelStyle.Render("Duration"))
+					b.WriteString(valueStyle.Render(formatDuration(duration)))
+					b.WriteString("\n")
+				}
 			} else if job.EndTime != nil {
+				// Job ended without ever starting (failed/killed before start)
 				endTime := time.Unix(*job.EndTime, 0)
-				duration := endTime.Sub(startTime)
-				header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
-				header += fmt.Sprintf("Duration: %s\n", formatDuration(duration))
+				b.WriteString(labelStyle.Render("Ended"))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))))
+				b.WriteString("\n")
 			}
-		} else if job.EndTime != nil {
-			// Job ended without ever starting (failed/killed before start)
-			endTime := time.Unix(*job.EndTime, 0)
-			header += fmt.Sprintf("Ended:   %s (%s)\n", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))
 		}
 
-		// Show exit status if available
+		// Exit status
 		if job.Status == db.StatusCompleted && job.ExitCode != nil {
+			b.WriteString(labelStyle.Render("Exit"))
 			if *job.ExitCode == 0 {
-				header += "Exit:    0 (success)\n"
+				b.WriteString(completedStyle.Render("0 (success)"))
 			} else {
-				header += fmt.Sprintf("Exit:    %d (failed)\n", *job.ExitCode)
+				b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
 			}
+			b.WriteString("\n")
 		} else if job.Status == db.StatusDead {
-			header += "Exit:    killed/crashed\n"
+			b.WriteString(labelStyle.Render("Exit"))
+			b.WriteString(deadStyle.Render("killed/crashed"))
+			b.WriteString("\n")
 		} else if job.Status == db.StatusFailed {
-			header += "Exit:    failed to start\n"
+			b.WriteString(labelStyle.Render("Exit"))
+			b.WriteString(failedStyle.Render("failed to start"))
+			b.WriteString("\n")
 			if job.ErrorMessage != "" {
-				header += fmt.Sprintf("Error:   %s\n", job.ErrorMessage)
+				b.WriteString(labelStyle.Render("Error"))
+				b.WriteString(errorStyle.Render(job.ErrorMessage))
+				b.WriteString("\n")
 			}
 		}
 
-		// Show process stats for running jobs (show whatever stats we have for this job)
+		// Process stats for running jobs
 		if job.Status == db.StatusRunning && m.processStats != nil && m.processStatsJobID == job.ID {
-			header += "\n"
-			header += "Process Stats:\n"
+			b.WriteString("\n")
+			b.WriteString(sectionStyle.Render("Process Stats"))
+			b.WriteString("\n")
 
 			// CPU: show % if available, plus user/sys time
 			if m.processStats.CPUUser != "" || m.processStats.CPUSys != "" {
-				cpuLine := "  CPU:     "
+				b.WriteString(labelStyle.Render("  CPU"))
+				cpuVal := ""
 				if m.processStats.CPUPct > 0 {
-					cpuLine += fmt.Sprintf("%.0f%% ", m.processStats.CPUPct)
+					cpuVal += fmt.Sprintf("%.0f%% ", m.processStats.CPUPct)
 				}
-				cpuLine += fmt.Sprintf("(%s user, %s sys)\n", m.processStats.CPUUser, m.processStats.CPUSys)
-				header += cpuLine
+				cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
+				b.WriteString(valueStyle.Render(cpuVal))
+				b.WriteString("\n")
 			}
 
 			// Memory
 			if m.processStats.MemoryRSS != "" {
+				b.WriteString(labelStyle.Render("  Memory"))
 				mem := m.processStats.MemoryRSS
 				if m.processStats.MemoryPct != "" {
 					mem += " (" + m.processStats.MemoryPct + ")"
 				}
-				header += fmt.Sprintf("  Memory:  %s\n", mem)
+				b.WriteString(valueStyle.Render(mem))
+				b.WriteString("\n")
 			}
 
 			// Threads
 			if m.processStats.Threads > 0 {
-				header += fmt.Sprintf("  Threads: %d\n", m.processStats.Threads)
+				b.WriteString(labelStyle.Render("  Threads"))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.processStats.Threads)))
+				b.WriteString("\n")
 			}
 
 			// GPUs with utilization and memory
 			if len(m.processStats.GPUs) > 0 {
 				for _, gpu := range m.processStats.GPUs {
-					gpuLine := fmt.Sprintf("  GPU %d:   ", gpu.Index)
+					b.WriteString(labelStyle.Render(fmt.Sprintf("  GPU %d", gpu.Index)))
+					gpuVal := ""
 					if gpu.Utilization > 0 {
-						gpuLine += fmt.Sprintf("%d%% util, ", gpu.Utilization)
+						gpuVal += fmt.Sprintf("%d%% util, ", gpu.Utilization)
 					}
-					gpuLine += gpu.MemUsed + "\n"
-					header += gpuLine
+					gpuVal += gpu.MemUsed
+					b.WriteString(valueStyle.Render(gpuVal))
+					b.WriteString("\n")
 				}
 			}
 		}
 	}
 
 	panelContent := m.renderTabHeader() + "\n"
-	if header != "" {
-		panelContent += header
-	}
+	panelContent += b.String()
 	panelContent += content
 
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
@@ -1795,7 +1996,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs f:filter s:sync n:new r:restart k:kill P:prune h:hosts")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:views l:logs f:filter s:sync n:new e:edit r:restart k:kill P:prune")
 
 	if m.syncing {
 		help = syncingStyle.Render(m.spinner.View()+" ") + help
@@ -1864,8 +2065,12 @@ func (m Model) renderHostDetail(height int) string {
 
 		lines = append(lines, fmt.Sprintf("Host: %s", host.Name))
 		statusLine := fmt.Sprintf("Status: %s", host.StatusString())
+		if host.Status == HostStatusOffline && !host.LastCheck.IsZero() {
+			elapsed := time.Since(host.LastCheck).Truncate(time.Second)
+			statusLine += fmt.Sprintf(" (for %s)", formatDuration(elapsed))
+		}
 		if host.Error != "" {
-			statusLine += fmt.Sprintf(" (%s)", host.Error)
+			statusLine += fmt.Sprintf(" - %s", host.Error)
 		}
 		lines = append(lines, statusLine)
 
@@ -2039,7 +2244,7 @@ func (m Model) renderHostDetail(height int) string {
 }
 
 func (m Model) renderHostsStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav R:refresh j:jobs tab:switch")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:jobs x:delete R:refresh")
 
 	// Right-align the help text
 	gap := m.width - lipgloss.Width(help) - 2
@@ -2384,6 +2589,15 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 	if m.detailTab == DetailTabLogs {
 		m.selectedJob = job
 		m.logLoading = true
+		// Show cached content immediately while fetching fresh logs
+		if cached, ok := m.logCache[job.ID]; ok {
+			m.logContent = cached
+			m.logStale = true
+			m.logViewport.SetContent(m.logContent)
+		} else {
+			m.logContent = ""
+			m.logStale = false
+		}
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.fetchSelectedJobLog())
 		if job.Status == db.StatusRunning {
@@ -3093,6 +3307,49 @@ func (m Model) removeJob(job *db.Job) tea.Cmd {
 	}
 }
 
+func (m Model) deleteHost(hostName string) tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		// Check for running or queued jobs on this host
+		jobs, err := db.GetJobsByHost(database, hostName)
+		if err != nil {
+			return hostDeletedMsg{hostName: hostName, err: fmt.Errorf("check jobs: %w", err)}
+		}
+
+		var activeJobs []int64
+		var jobsToTombstone []int64
+		for _, job := range jobs {
+			if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
+				activeJobs = append(activeJobs, job.ID)
+			} else {
+				// Completed, failed, dead jobs can be tombstoned
+				jobsToTombstone = append(jobsToTombstone, job.ID)
+			}
+		}
+
+		if len(activeJobs) > 0 {
+			return hostDeletedMsg{
+				hostName: hostName,
+				err:      fmt.Errorf("host has %d active jobs (IDs: %v)", len(activeJobs), activeJobs),
+			}
+		}
+
+		// Tombstone (delete) inactive jobs for this host
+		for _, jobID := range jobsToTombstone {
+			if err := db.DeleteJob(database, jobID); err != nil {
+				return hostDeletedMsg{hostName: hostName, err: fmt.Errorf("tombstone job %d: %w", jobID, err)}
+			}
+		}
+
+		// Delete the host from cache
+		if err := db.DeleteCachedHost(database, hostName); err != nil {
+			return hostDeletedMsg{hostName: hostName, err: fmt.Errorf("delete host: %w", err)}
+		}
+
+		return hostDeletedMsg{hostName: hostName}
+	}
+}
+
 func (m Model) createJob() tea.Cmd {
 	database := m.database
 	host := strings.TrimSpace(m.inputs[inputHost].Value())
@@ -3101,11 +3358,19 @@ func (m Model) createJob() tea.Cmd {
 	workingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
 	envVarsStr := strings.TrimSpace(m.inputs[inputEnvVars].Value())
 
+	// Normalize command: extract cd/env prefixes into proper fields
+	// This allows users to paste commands like "cd /foo && env CUDA=0 python train.py"
+	normalizedDir, normalizedCmd, normalizedEnv := db.NormalizeCommand(command)
+	if normalizedDir != "" && workingDir == "" {
+		workingDir = normalizedDir
+		command = normalizedCmd
+	}
+
 	if workingDir == "" {
 		workingDir = "~"
 	}
 
-	// Parse env vars (comma-separated VAR=value pairs)
+	// Parse env vars (comma-separated VAR=value pairs from form field)
 	var envVars []string
 	if envVarsStr != "" {
 		for _, ev := range strings.Split(envVarsStr, ",") {
@@ -3114,6 +3379,16 @@ func (m Model) createJob() tea.Cmd {
 				envVars = append(envVars, ev)
 			}
 		}
+	}
+
+	// Append env vars extracted from command (if we didn't use them above)
+	if normalizedDir != "" {
+		// We extracted cd, so also use the normalized env vars
+		envVars = append(envVars, normalizedEnv...)
+	} else if len(normalizedEnv) > 0 {
+		// No cd prefix, but we have env vars in the command - use them
+		command = normalizedCmd
+		envVars = append(envVars, normalizedEnv...)
 	}
 
 	return func() tea.Msg {
@@ -3181,6 +3456,98 @@ func (m Model) createJob() tea.Cmd {
 
 		return jobCreatedMsg{jobID: jobID}
 	}
+}
+
+func (m Model) editJob() tea.Cmd {
+	database := m.database
+	jobID := m.editingJobID
+	newHost := strings.TrimSpace(m.inputs[inputHost].Value())
+	newCommand := strings.TrimSpace(m.inputs[inputCommand].Value())
+	newDescription := strings.TrimSpace(m.inputs[inputDescription].Value())
+	newWorkingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
+
+	return func() tea.Msg {
+		// Get the current job to check status and get original host
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("get job: %w", err)}
+		}
+		if job == nil {
+			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+		}
+		if job.Status != db.StatusQueued {
+			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("can only edit queued jobs")}
+		}
+
+		// Check if host is being changed - not allowed in edit, use job move instead
+		if newHost != job.Host {
+			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("cannot change host via edit; use 'job move' command")}
+		}
+
+		// Update fields in database
+		if newDescription != job.Description {
+			if err := db.UpdateJobDescription(database, jobID, newDescription); err != nil {
+				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update description: %w", err)}
+			}
+		}
+
+		if newWorkingDir != job.WorkingDir {
+			if err := db.UpdateJobWorkingDir(database, jobID, newWorkingDir); err != nil {
+				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update directory: %w", err)}
+			}
+		}
+
+		if newCommand != job.Command {
+			if err := db.UpdateJobCommand(database, jobID, newCommand); err != nil {
+				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update command: %w", err)}
+			}
+		}
+
+		// Update the remote queue file
+		queueName := job.QueueName
+		if queueName == "" {
+			queueName = "default"
+		}
+		updatedJob := &db.Job{
+			ID:          jobID,
+			Host:        job.Host,
+			Command:     newCommand,
+			WorkingDir:  newWorkingDir,
+			Description: newDescription,
+		}
+		if err := updateRemoteQueueEntry(job.Host, queueName, updatedJob); err != nil {
+			// Non-fatal - the local database was updated
+			// Log warning but don't fail the edit
+		}
+
+		return jobEditedMsg{jobID: jobID}
+	}
+}
+
+// updateRemoteQueueEntry updates a job's entry in the remote queue file
+func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
+	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+
+	// Remove old entry and add new one
+	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", job.ID, queueFile)
+	if _, stderr, err := ssh.Run(host, removeCmd); err != nil {
+		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+			return fmt.Errorf("host unreachable")
+		}
+		return fmt.Errorf("remove old entry: %s", strings.TrimSpace(stderr))
+	}
+
+	// Add updated entry
+	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s", job.ID, job.WorkingDir, job.Command, job.Description)
+	addCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(queueLine), queueFile)
+	if _, stderr, err := ssh.Run(host, addCmd); err != nil {
+		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+			return fmt.Errorf("host unreachable")
+		}
+		return fmt.Errorf("add updated entry: %s", strings.TrimSpace(stderr))
+	}
+
+	return nil
 }
 
 // hostFromCachedInfo creates a Host from cached database info
@@ -3289,4 +3656,33 @@ func formatStartTime(startTime int64) string {
 		return fmt.Sprintf("%dh ago", int(elapsed.Hours()))
 	}
 	return t.Format("01/02 15:04")
+}
+
+// formatJobTime formats the time column for a job, showing either start time or queue time
+func formatJobTime(job *db.Job) string {
+	// If job has started, show start time
+	if job.StartTime != 0 {
+		return formatStartTime(job.StartTime)
+	}
+	// For unstarted jobs (pending/queued), show when they were queued
+	if job.CreatedAt != 0 {
+		return "Q:" + formatQueueTime(job.CreatedAt)
+	}
+	return "—"
+}
+
+// formatQueueTime formats a queue time in a compact form
+func formatQueueTime(createdAt int64) string {
+	t := time.Unix(createdAt, 0)
+	elapsed := time.Since(t)
+
+	if elapsed < time.Minute {
+		return "<1m"
+	} else if elapsed < time.Hour {
+		return fmt.Sprintf("%dm", int(elapsed.Minutes()))
+	} else if elapsed < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(elapsed.Hours()))
+	}
+	days := int(elapsed.Hours() / 24)
+	return fmt.Sprintf("%dd", days)
 }

@@ -82,4 +82,18 @@ var (
 
 	hostCheckingStyle = lipgloss.NewStyle().
 				Foreground(pendingColor) // Yellow
+
+	// Tab styles for Details/Logs panel
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Background(lipgloss.Color("4")).
+			Foreground(lipgloss.Color("15")).
+			Padding(0, 2)
+
+	inactiveTabStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Padding(0, 2)
+
+	tabGapStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8"))
 )

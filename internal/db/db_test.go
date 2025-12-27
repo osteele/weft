@@ -249,3 +249,177 @@ func TestFormatDuration(t *testing.T) {
 		})
 	}
 }
+
+func TestParseEnvPrefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		wantCmd string
+		wantEnv []string
+	}{
+		{
+			name:    "no env prefix",
+			command: "python train.py",
+			wantCmd: "python train.py",
+			wantEnv: nil,
+		},
+		{
+			name:    "single env var",
+			command: "env CUDA_VISIBLE_DEVICES=0 python train.py",
+			wantCmd: "python train.py",
+			wantEnv: []string{"CUDA_VISIBLE_DEVICES=0"},
+		},
+		{
+			name:    "multiple env vars",
+			command: "env CUDA_VISIBLE_DEVICES=0 FOO=bar python train.py",
+			wantCmd: "python train.py",
+			wantEnv: []string{"CUDA_VISIBLE_DEVICES=0", "FOO=bar"},
+		},
+		{
+			name:    "env without vars",
+			command: "env python train.py",
+			wantCmd: "env python train.py",
+			wantEnv: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCmd, gotEnv := ParseEnvPrefix(tt.command)
+			if gotCmd != tt.wantCmd {
+				t.Errorf("ParseEnvPrefix() cmd = %q, want %q", gotCmd, tt.wantCmd)
+			}
+			if len(gotEnv) != len(tt.wantEnv) {
+				t.Errorf("ParseEnvPrefix() env = %v, want %v", gotEnv, tt.wantEnv)
+				return
+			}
+			for i := range gotEnv {
+				if gotEnv[i] != tt.wantEnv[i] {
+					t.Errorf("ParseEnvPrefix() env[%d] = %q, want %q", i, gotEnv[i], tt.wantEnv[i])
+				}
+			}
+		})
+	}
+}
+
+func TestGetGPU(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{
+			name:    "no GPU",
+			command: "python train.py",
+			want:    "",
+		},
+		{
+			name:    "env prefix",
+			command: "env CUDA_VISIBLE_DEVICES=0 python train.py",
+			want:    "0",
+		},
+		{
+			name:    "export prefix",
+			command: "export CUDA_VISIBLE_DEVICES=1 && python train.py",
+			want:    "1",
+		},
+		{
+			name:    "cd then env",
+			command: "cd /foo && env CUDA_VISIBLE_DEVICES=2 python train.py",
+			want:    "2",
+		},
+		{
+			name:    "cd then export",
+			command: "cd /foo && export CUDA_VISIBLE_DEVICES=3 && python train.py",
+			want:    "3",
+		},
+		{
+			name:    "inline assignment",
+			command: "CUDA_VISIBLE_DEVICES=4 python train.py",
+			want:    "4",
+		},
+		{
+			name:    "multiple GPUs",
+			command: "env CUDA_VISIBLE_DEVICES=0,1,2 python train.py",
+			want:    "0,1,2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{Command: tt.command}
+			got := job.GetGPU()
+			if got != tt.want {
+				t.Errorf("GetGPU() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		command    string
+		wantDir    string
+		wantCmd    string
+		wantEnvLen int
+	}{
+		{
+			name:       "simple command",
+			command:    "python train.py",
+			wantDir:    "",
+			wantCmd:    "python train.py",
+			wantEnvLen: 0,
+		},
+		{
+			name:       "cd prefix",
+			command:    "cd /foo/bar && python train.py",
+			wantDir:    "/foo/bar",
+			wantCmd:    "python train.py",
+			wantEnvLen: 0,
+		},
+		{
+			name:       "env prefix",
+			command:    "env CUDA_VISIBLE_DEVICES=0 python train.py",
+			wantDir:    "",
+			wantCmd:    "python train.py",
+			wantEnvLen: 1,
+		},
+		{
+			name:       "export prefix",
+			command:    "export TMPDIR=/tmp && python train.py",
+			wantDir:    "",
+			wantCmd:    "python train.py",
+			wantEnvLen: 1,
+		},
+		{
+			name:       "cd then export",
+			command:    "cd /foo && export TMPDIR=/tmp && python train.py",
+			wantDir:    "/foo",
+			wantCmd:    "python train.py",
+			wantEnvLen: 1,
+		},
+		{
+			name:       "cd then env",
+			command:    "cd /foo && env CUDA_VISIBLE_DEVICES=0 python train.py",
+			wantDir:    "/foo",
+			wantCmd:    "python train.py",
+			wantEnvLen: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDir, gotCmd, gotEnv := NormalizeCommand(tt.command)
+			if gotDir != tt.wantDir {
+				t.Errorf("NormalizeCommand() dir = %q, want %q", gotDir, tt.wantDir)
+			}
+			if gotCmd != tt.wantCmd {
+				t.Errorf("NormalizeCommand() cmd = %q, want %q", gotCmd, tt.wantCmd)
+			}
+			if len(gotEnv) != tt.wantEnvLen {
+				t.Errorf("NormalizeCommand() env len = %d, want %d (env: %v)", len(gotEnv), tt.wantEnvLen, gotEnv)
+			}
+		})
+	}
+}

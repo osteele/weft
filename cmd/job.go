@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/queuejob"
@@ -76,10 +77,10 @@ Examples:
 
 // Job describe subcommand
 var jobDescribeCmd = &cobra.Command{
-	Use:   "describe <job-id> <description>",
-	Short: "Set or update the description of a job",
+	Use:   "describe <job-id> [description]",
+	Short: "Set or update job metadata",
 	Long:  describeCmd.Long,
-	Args:  usageArgs(cobra.ExactArgs(2)),
+	Args:  usageArgs(cobra.RangeArgs(1, 2)),
 	RunE:  runDescribe,
 }
 
@@ -127,9 +128,55 @@ and launches the job right away.`,
 	RunE: runJobStartNow,
 }
 
+var jobInfoCmd = &cobra.Command{
+	Use:   "info <job-id>",
+	Short: "Show detailed job information",
+	Long: `Show full details for a job including command, working directory,
+environment variables, and timing information.
+
+Examples:
+  remote-jobs job info 42`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runJobInfo,
+}
+
+// Top-level info command (alias for job info)
+var infoCmd = &cobra.Command{
+	Use:   "info <job-id>",
+	Short: "Show detailed job information",
+	Long: `Show full details for a job including command, working directory,
+environment variables, and timing information.
+
+This is an alias for 'job info'.
+
+Examples:
+  remote-jobs info 42`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runJobInfo,
+}
+
+// Top-level show command (alias for job info)
+var showCmd = &cobra.Command{
+	Use:   "show <job-id>",
+	Short: "Show detailed job information",
+	Long: `Show full details for a job including command, working directory,
+environment variables, and timing information.
+
+This is an alias for 'job info'.
+
+Examples:
+  remote-jobs show 42`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runJobInfo,
+}
+
 func init() {
 	// Register job command with root
 	rootCmd.AddCommand(jobCmd)
+
+	// Register top-level aliases for job info
+	rootCmd.AddCommand(infoCmd)
+	rootCmd.AddCommand(showCmd)
 
 	// Register subcommands
 	jobCmd.AddCommand(jobRunCmd)
@@ -141,6 +188,7 @@ func init() {
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobMoveCmd)
 	jobCmd.AddCommand(jobStartCmd)
+	jobCmd.AddCommand(jobInfoCmd)
 
 	// Copy flags from run command to job run
 	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "Job description")
@@ -168,6 +216,10 @@ func init() {
 	jobListCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	jobListCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	jobListCmd.Flags().BoolVar(&listSync, "sync", false, "Sync job statuses from remote hosts before listing")
+
+	// Copy flags from describe command to job describe
+	jobDescribeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
+	jobDescribeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {
@@ -283,4 +335,85 @@ func runJobStartNow(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Job %d started immediately on %s\n", jobID, job.Host)
 	return nil
+}
+
+func runJobInfo(cmd *cobra.Command, args []string) error {
+	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid job ID: %s", args[0])
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+
+	// Show full job details
+	fmt.Printf("Job ID:      %d\n", job.ID)
+	fmt.Printf("Host:        %s\n", job.Host)
+	fmt.Printf("Status:      %s\n", job.Status)
+	fmt.Printf("Description: %s\n", job.Description)
+	fmt.Printf("Directory:   %s\n", job.WorkingDir)
+	fmt.Printf("Command:     %s\n", job.Command)
+
+	// Show effective command/directory if different
+	effectiveCmd := job.EffectiveCommand()
+	effectiveDir := job.EffectiveWorkingDir()
+	if effectiveCmd != job.Command {
+		fmt.Printf("  (effective: %s)\n", effectiveCmd)
+	}
+	if effectiveDir != job.WorkingDir {
+		fmt.Printf("  (effective dir: %s)\n", effectiveDir)
+	}
+
+	// Show GPU if present
+	if gpu := job.GetGPU(); gpu != "" {
+		fmt.Printf("GPU:         %s\n", gpu)
+	}
+
+	// Show queue info if queued
+	if job.QueueName != "" {
+		fmt.Printf("Queue:       %s\n", job.QueueName)
+	}
+
+	// Show timing info
+	// Show created/queued time if different from start time
+	if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {
+		label := "Created"
+		if job.Status == db.StatusQueued {
+			label = "Queued"
+		}
+		fmt.Printf("%-12s %s\n", label+":", formatUnixTime(job.CreatedAt))
+	}
+	if job.StartTime > 0 {
+		fmt.Printf("Started:     %s\n", formatUnixTime(job.StartTime))
+	}
+	if job.EndTime != nil {
+		fmt.Printf("Ended:       %s\n", formatUnixTime(*job.EndTime))
+		if job.StartTime > 0 {
+			duration := *job.EndTime - job.StartTime
+			fmt.Printf("Duration:    %s\n", db.FormatDuration(duration))
+		}
+	}
+	if job.ExitCode != nil {
+		fmt.Printf("Exit Code:   %d\n", *job.ExitCode)
+	}
+	if job.ErrorMessage != "" {
+		fmt.Printf("Error:       %s\n", job.ErrorMessage)
+	}
+
+	return nil
+}
+
+func formatUnixTime(t int64) string {
+	return fmt.Sprintf("%s", time.Unix(t, 0).Format("2006-01-02 15:04:05"))
 }
