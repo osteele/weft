@@ -15,6 +15,14 @@ import (
 // It can be replaced in tests to capture command arguments.
 var execCommand = exec.Command
 
+// SetExecCommand allows tests to replace the exec.Command function.
+// Returns a cleanup function that restores the original.
+func SetExecCommand(fn func(name string, arg ...string) *exec.Cmd) func() {
+	original := execCommand
+	execCommand = fn
+	return func() { execCommand = original }
+}
+
 const (
 	// MaxRetries is the number of connection retry attempts
 	MaxRetries = 5

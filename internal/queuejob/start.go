@@ -26,6 +26,37 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		queueName = queuefile.DefaultQueueName
 	}
 
+	// Check if job has a pending queue_job operation (not yet synced to remote)
+	hasPendingQueue, _ := db.HasPendingOperation(database, job.ID, db.OpQueueJob)
+	if hasPendingQueue {
+		// Job isn't in remote queue yet - get data from pending operation and start directly
+		payload, _ := db.GetDeferredOperationPayload(database, job.ID, db.OpQueueJob)
+		var entry *queuefile.Entry
+		if payload != "" {
+			var p struct {
+				WorkingDir  string   `json:"working_dir"`
+				Command     string   `json:"command"`
+				Description string   `json:"description"`
+				EnvVars     []string `json:"env_vars"`
+				DepSpec     string   `json:"dep_spec"`
+			}
+			if err := json.Unmarshal([]byte(payload), &p); err == nil {
+				entry = &queuefile.Entry{
+					JobID:       job.ID,
+					WorkingDir:  p.WorkingDir,
+					Command:     p.Command,
+					Description: p.Description,
+					EnvVars:     p.EnvVars,
+					DepSpec:     p.DepSpec,
+				}
+			}
+		}
+		// Delete the pending queue_job operation
+		db.DeletePendingOperation(database, job.ID, db.OpQueueJob)
+		// Start the job directly (no need to remove from remote queue)
+		return startJobDirectly(database, job, queueName, entry)
+	}
+
 	entry, err := queuefile.FetchEntry(job.Host, queueName, job.ID)
 	if err != nil {
 		if queuefile.IsConnectionError(err) {
@@ -96,6 +127,83 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
+		}
+		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		db.UpdateJobFailed(database, job.ID, errMsg)
+		return false, fmt.Errorf("%s", errMsg)
+	}
+
+	return false, nil
+}
+
+// startJobDirectly starts a job without interacting with the remote queue file.
+// Used when job has a pending queue_job operation (not yet synced to remote).
+func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *queuefile.Entry) (bool, error) {
+	if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
+		return false, fmt.Errorf("update queued job: %w", err)
+	}
+
+	updated, err := db.GetJobByID(database, job.ID)
+	if err != nil || updated == nil {
+		return false, fmt.Errorf("refresh job after start: %w", err)
+	}
+
+	// Prepare log/metadata paths
+	logFile := session.LogFile(job.ID, updated.StartTime)
+	statusFile := session.StatusFile(job.ID, updated.StartTime)
+	metadataFile := session.MetadataFile(job.ID, updated.StartTime)
+	pidFile := session.PidFile(job.ID, updated.StartTime)
+	tmuxSession := session.TmuxSessionName(job.ID)
+
+	// Ensure log directory exists
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
+	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
+		if isConnectionFailure(stderr, err) {
+			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
+			// recreate it and revert status to queued
+			return deferQueuedJobStart(database, job, queueName, entry, true)
+		}
+		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		db.UpdateJobFailed(database, job.ID, errMsg)
+		return false, fmt.Errorf("%s", errMsg)
+	}
+
+	// Save metadata
+	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.Description, updated.StartTime)
+	writeMetadata := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
+	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
+		if isConnectionFailure(stderr, err) {
+			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
+			// recreate it and revert status to queued
+			return deferQueuedJobStart(database, job, queueName, entry, true)
+		}
+		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		db.UpdateJobFailed(database, job.ID, errMsg)
+		return false, fmt.Errorf("%s", errMsg)
+	}
+
+	var envVars []string
+	if entry != nil {
+		envVars = entry.EnvVars
+	}
+
+	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+		JobID:      job.ID,
+		WorkingDir: job.WorkingDir,
+		Command:    job.Command,
+		LogFile:    logFile,
+		StatusFile: statusFile,
+		PidFile:    pidFile,
+		EnvVars:    envVars,
+	})
+
+	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
+	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
+		if isConnectionFailure(stderr, err) {
+			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
+			// recreate it and revert status to queued
+			return deferQueuedJobStart(database, job, queueName, entry, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		db.UpdateJobFailed(database, job.ID, errMsg)

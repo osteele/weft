@@ -467,7 +467,19 @@ func executeDeferredStartQueued(database *sql.DB, op *db.DeferredOperation) erro
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", op.JobID)
+		// Job was deleted while offline - nothing to do
+		if syncVerbose {
+			fmt.Printf("    Skipping start for job %d: job no longer exists\n", op.JobID)
+		}
+		return nil
+	}
+
+	// If job is no longer queued (completed, dead, running, etc.), skip the start
+	if job.Status != db.StatusQueued {
+		if syncVerbose {
+			fmt.Printf("    Skipping start for job %d: no longer queued (status: %s)\n", op.JobID, job.Status)
+		}
+		return nil
 	}
 
 	var payload deferredStartPayloadData

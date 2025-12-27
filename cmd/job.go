@@ -285,9 +285,13 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 	_, stderr, err = ssh.Run(newHost, addCmd)
 
 	if err != nil && ssh.IsConnectionError(stderr) {
-		// New host unreachable - job will need to be manually re-queued
-		fmt.Printf("Warning: new host %s unreachable, job updated in database but not added to queue\n", newHost)
-		fmt.Printf("Run 'remote-jobs sync %s' when host is reachable to complete the move\n", newHost)
+		// New host unreachable - defer adding to new host's queue
+		fmt.Printf("New host %s unreachable, will add to queue on next sync\n", newHost)
+		payload := fmt.Sprintf(`{"working_dir":%q,"command":%q,"description":%q,"queue_name":%q}`,
+			job.WorkingDir, job.Command, job.Description, queueName)
+		if err := db.AddDeferredOperation(database, newHost, db.OpQueueJob, jobID, queueName, payload); err != nil {
+			return fmt.Errorf("add deferred operation for new host: %w", err)
+		}
 	} else if err != nil {
 		return fmt.Errorf("add to new host queue: %s", strings.TrimSpace(stderr))
 	}
