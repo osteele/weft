@@ -3,6 +3,7 @@ package tui
 import (
 	"testing"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/osteele/remote-jobs/internal/db"
 )
 
@@ -12,11 +13,15 @@ func TestGetTargetJobPrefersHighlightedInDetailsTab(t *testing.T) {
 		{ID: 2, Host: "host-b"},
 	}
 
+	// Create a job list with the jobs
+	jobList := list.New(JobsToListItems(jobs), NewJobDelegate(), 80, 10)
+	jobList.Select(0)
+
 	m := Model{
-		jobs:          jobs,
-		selectedIndex: 0,
-		selectedJob:   jobs[1],
-		detailTab:     DetailTabDetails,
+		jobs:        jobs,
+		jobList:     jobList,
+		selectedJob: jobs[1],
+		detailTab:   DetailTabDetails,
 	}
 
 	if got := m.getTargetJob(); got == nil || got.ID != 1 {

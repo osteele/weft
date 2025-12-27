@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -275,12 +276,11 @@ type Model struct {
 	viewMode ViewMode
 
 	// Jobs data
-	allJobs       []*db.Job
-	jobs          []*db.Job
-	selectedIndex int
-	jobListOffset int // scroll offset for job list
-	selectedJob   *db.Job
-	jobFilter     jobFilterMode
+	allJobs     []*db.Job
+	jobs        []*db.Job
+	jobList     list.Model // bubbles/list for job selection
+	selectedJob *db.Job
+	jobFilter   jobFilterMode
 
 	// Hosts data
 	hosts           []*Host
@@ -397,9 +397,28 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputEnvVars].Width = 40
 	inputs[inputEnvVars].CharLimit = 512
 
+	// Initialize the job list with custom delegate
+	delegate := NewJobDelegate()
+	jobList := list.New([]list.Item{}, delegate, 0, 0)
+	jobList.SetShowTitle(false)
+	jobList.SetShowStatusBar(false)
+	jobList.SetShowFilter(false)
+	jobList.SetShowHelp(false)
+	jobList.SetFilteringEnabled(false)
+	// Disable quit/filter keys - we handle those at the app level
+	jobList.KeyMap.Filter = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.ClearFilter = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.CancelWhileFiltering = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.AcceptWhileFiltering = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.ShowFullHelp = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.CloseFullHelp = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.Quit = key.NewBinding(key.WithDisabled())
+	jobList.KeyMap.ForceQuit = key.NewBinding(key.WithDisabled())
+	// Keep navigation keys enabled - let the list handle up/down/pgup/pgdown
+
 	return Model{
 		database:                database,
-		selectedIndex:           0,
+		jobList:                 jobList,
 		jobFilter:               jobFilterAll,
 		inputs:                  inputs,
 		syncInterval:            opts.SyncInterval,
@@ -432,6 +451,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detailHeight := int(float64(m.height) * 0.35)
 		m.logViewport.Width = m.width - 6
 		m.logViewport.Height = detailHeight - 4
+		// Update job list dimensions (subtract 2 more for column header + filter row)
+		listHeight := m.height - detailHeight - 5 // account for header/footer
+		m.jobList.SetWidth(m.width - 2)
+		m.jobList.SetHeight(listHeight - 2)
 		return m, nil
 
 	case tea.KeyMsg:
@@ -454,7 +477,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pendingSelectJobID > 0 {
 			for i, job := range m.jobs {
 				if job.ID == m.pendingSelectJobID {
-					m.selectedIndex = i
+					m.jobList.Select(i)
 					break
 				}
 			}
@@ -804,78 +827,63 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 	// Handle mouse wheel
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
-		scrollDelta := 3 // lines to scroll per wheel event
-		if msg.Button == tea.MouseButtonWheelUp {
-			scrollDelta = -scrollDelta
-		}
+		scrollUp := msg.Button == tea.MouseButtonWheelUp
 
 		// Check if mouse is in the log panel area (bottom portion)
 		if msg.Y >= listHeight && m.detailTab == DetailTabLogs {
-			// Scroll the log viewport
+			scrollDelta := 3
+			if scrollUp {
+				scrollDelta = -scrollDelta
+			}
 			m.logViewport.SetYOffset(m.logViewport.YOffset + scrollDelta)
 			return m, nil
 		}
 
-		// Mouse is in the job list area - scroll the job list
-		if m.viewMode == ViewModeJobs {
-			contentHeight := listHeight - 5
-			m.jobListOffset += scrollDelta
-			// Clamp offset
-			if m.jobListOffset < 0 {
-				m.jobListOffset = 0
+		// Scroll job list by moving cursor (bubbles/list doesn't handle wheel events)
+		if m.viewMode == ViewModeJobs && len(m.jobs) > 0 {
+			prevIdx := m.jobList.Index()
+			for i := 0; i < 3; i++ {
+				if scrollUp {
+					m.jobList.CursorUp()
+				} else {
+					m.jobList.CursorDown()
+				}
 			}
-			maxOffset := len(m.jobs) - contentHeight
-			if maxOffset < 0 {
-				maxOffset = 0
-			}
-			if m.jobListOffset > maxOffset {
-				m.jobListOffset = maxOffset
+			if m.jobList.Index() != prevIdx {
+				return m, m.handleSelectionChanged()
 			}
 		}
 		return m, nil
 	}
 
-	// Only handle left button press for clicks
-	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
-		return m, nil
-	}
-
-	// Check if click is within the list panel (top portion of screen)
-	// Layout: border(1) + header(1) + filter(1) + jobs...
-	// First job row is at Y=3
-	if msg.Y >= 2 && msg.Y < listHeight-1 {
-		// Y=2 is filter row, Y=3+ are job rows
-		clickedRow := msg.Y - 3 // Row within visible job area (-1 if filter clicked)
-		clickedIndex := m.jobListOffset + clickedRow
-
-		if m.viewMode == ViewModeJobs {
+	// Handle mouse clicks manually (bubbles/list has limited mouse support)
+	if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+		// Layout within panel: border(1) + header(1) + filter(1) + jobs start at Y=3
+		if m.viewMode == ViewModeJobs && msg.Y >= 3 && msg.Y < listHeight-1 {
+			clickedRow := msg.Y - 3
+			// Get the visible range from the list's paginator
+			start, _ := m.jobList.Paginator.GetSliceBounds(len(m.jobs))
+			clickedIndex := start + clickedRow
 			if clickedIndex >= 0 && clickedIndex < len(m.jobs) {
-				m.selectedIndex = clickedIndex
-				m.ensureSelectedVisible()
-				// Clear cached process stats when changing jobs
-				m.processStats = nil
-				m.prevProcessStats = nil
-				m.processStatsJobID = 0
-				// If in Logs tab, fetch logs for new selection
-				if m.detailTab == DetailTabLogs {
-					m.selectedJob = m.jobs[m.selectedIndex]
-					m.logLoading = true
-					var cmds []tea.Cmd
-					cmds = append(cmds, m.fetchSelectedJobLog())
-					if m.selectedJob.Status == db.StatusRunning {
-						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
-					}
-					return m, tea.Batch(cmds...)
-				}
-				// Fetch stats for running jobs even if not in Logs tab
-				job := m.jobs[m.selectedIndex]
-				if job.Status == db.StatusRunning {
-					return m, m.fetchProcessStats(job)
+				prevIdx := m.jobList.Index()
+				m.jobList.Select(clickedIndex)
+				if m.jobList.Index() != prevIdx {
+					return m, m.handleSelectionChanged()
 				}
 			}
-		} else if m.viewMode == ViewModeHosts {
-			if clickedRow >= 0 && clickedRow < len(m.hosts) {
-				m.selectedHostIdx = clickedRow
+			return m, nil
+		}
+	}
+
+	// Handle host clicks manually since hosts don't use bubbles/list
+	if m.viewMode == ViewModeHosts {
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+			// Layout within panel: border(1) + header(1) + hosts start at Y=2 (no filter row)
+			if msg.Y >= 2 && msg.Y < listHeight-1 {
+				clickedRow := msg.Y - 2
+				if clickedRow >= 0 && clickedRow < len(m.hosts) {
+					m.selectedHostIdx = clickedRow
+				}
 			}
 		}
 	}
@@ -928,8 +936,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.detailTab == DetailTabDetails {
 				// Switch to Logs tab
 				m.detailTab = DetailTabLogs
-				if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
-					m.selectedJob = m.jobs[m.selectedIndex]
+				idx := m.jobList.Index()
+				if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
+					m.selectedJob = m.jobs[idx]
 					m.logLoading = true
 					var cmds []tea.Cmd
 					cmds = append(cmds, m.fetchSelectedJobLog())
@@ -987,72 +996,32 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedHostIdx > 0 {
 				m.selectedHostIdx--
 			}
-		} else {
-			if m.selectedIndex > 0 {
-				m.selectedIndex--
-				m.ensureSelectedVisible()
-				// Clear cached process stats when changing jobs
-				m.processStats = nil
-				m.prevProcessStats = nil
-				m.processStatsJobID = 0
-				// If in Logs tab, fetch logs for new job
-				if m.detailTab == DetailTabLogs && len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
-					m.selectedJob = m.jobs[m.selectedIndex]
-					m.logLoading = true
-					var cmds []tea.Cmd
-					cmds = append(cmds, m.fetchSelectedJobLog())
-					// Fetch process stats for running jobs
-					if m.selectedJob.Status == db.StatusRunning {
-						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
-					}
-					return m, tea.Batch(cmds...)
-				}
-				// Even if not in Logs tab, fetch stats for running jobs
-				if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
-					job := m.jobs[m.selectedIndex]
-					if job.Status == db.StatusRunning {
-						return m, m.fetchProcessStats(job)
-					}
-				}
-			}
+			return m, nil
 		}
-		return m, nil
+		// Forward to list and handle selection change
+		prevIdx := m.jobList.Index()
+		newList, cmd := m.jobList.Update(msg)
+		m.jobList = newList
+		if m.jobList.Index() != prevIdx {
+			return m, tea.Batch(cmd, m.handleSelectionChanged())
+		}
+		return m, cmd
 
 	case key.Matches(msg, keys.Down):
 		if m.viewMode == ViewModeHosts {
 			if len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts)-1 {
 				m.selectedHostIdx++
 			}
-		} else {
-			if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs)-1 {
-				m.selectedIndex++
-				m.ensureSelectedVisible()
-				// Clear cached process stats when changing jobs
-				m.processStats = nil
-				m.prevProcessStats = nil
-				m.processStatsJobID = 0
-				// If in Logs tab, fetch logs for new job
-				if m.detailTab == DetailTabLogs && m.selectedIndex < len(m.jobs) {
-					m.selectedJob = m.jobs[m.selectedIndex]
-					m.logLoading = true
-					var cmds []tea.Cmd
-					cmds = append(cmds, m.fetchSelectedJobLog())
-					// Fetch process stats for running jobs
-					if m.selectedJob.Status == db.StatusRunning {
-						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
-					}
-					return m, tea.Batch(cmds...)
-				}
-				// Even if not in Logs tab, fetch stats for running jobs
-				if m.selectedIndex < len(m.jobs) {
-					job := m.jobs[m.selectedIndex]
-					if job.Status == db.StatusRunning {
-						return m, m.fetchProcessStats(job)
-					}
-				}
-			}
+			return m, nil
 		}
-		return m, nil
+		// Forward to list and handle selection change
+		prevIdx := m.jobList.Index()
+		newList, cmd := m.jobList.Update(msg)
+		m.jobList = newList
+		if m.jobList.Index() != prevIdx {
+			return m, tea.Batch(cmd, m.handleSelectionChanged())
+		}
+		return m, cmd
 
 	case key.Matches(msg, keys.EditRestart):
 		if m.viewMode != ViewModeJobs {
@@ -1079,18 +1048,21 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.detailTab == DetailTabLogs {
 				// Already in logs mode - go back to details
 				m.detailTab = DetailTabDetails
-			} else if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
-				// Enter logs mode
-				m.detailTab = DetailTabLogs
-				m.selectedJob = m.jobs[m.selectedIndex]
-				m.logLoading = true
-				var cmds []tea.Cmd
-				cmds = append(cmds, m.fetchSelectedJobLog())
-				// Fetch process stats for running jobs
-				if m.selectedJob.Status == db.StatusRunning {
-					cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+			} else {
+				idx := m.jobList.Index()
+				if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
+					// Enter logs mode
+					m.detailTab = DetailTabLogs
+					m.selectedJob = m.jobs[idx]
+					m.logLoading = true
+					var cmds []tea.Cmd
+					cmds = append(cmds, m.fetchSelectedJobLog())
+					// Fetch process stats for running jobs
+					if m.selectedJob.Status == db.StatusRunning {
+						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+					}
+					return m, tea.Batch(cmds...)
 				}
-				return m, tea.Batch(cmds...)
 			}
 		}
 		return m, nil
@@ -1452,14 +1424,19 @@ func (m Model) renderJobList(height int) string {
 		return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
 	}
 
-	// Jobs - render from offset
-	contentHeight := height - 5 // Account for borders, header, and filter line
-	endIdx := m.jobListOffset + contentHeight
-	if endIdx > len(m.jobs) {
-		endIdx = len(m.jobs)
+	// Render jobs manually using list's paginator for scroll offset
+	contentHeight := height - 4 // Account for borders, header, filter
+	start, end := m.jobList.Paginator.GetSliceBounds(len(m.jobs))
+	if end > len(m.jobs) {
+		end = len(m.jobs)
+	}
+	// Limit to visible height
+	if end-start > contentHeight {
+		end = start + contentHeight
 	}
 
-	for i := m.jobListOffset; i < endIdx; i++ {
+	selectedIdx := m.jobList.Index()
+	for i := start; i < end; i++ {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
 		started := formatStartTime(job.StartTime)
@@ -1475,7 +1452,29 @@ func (m Model) renderJobList(height int) string {
 			job.ID, truncate(job.Host, 10),
 			status, started, display)
 
-		if i == m.selectedIndex {
+		// DEBUG: Log host state for disconnected host jobs
+		if job.Host == "cool100" || job.Host == "studio" {
+			var debugInfo string
+			found := false
+			for _, h := range m.hosts {
+				if h.Name == job.Host {
+					found = true
+					debugInfo = fmt.Sprintf("job=%d host=%s status=%d lastCheck=%v ago=%v disconnected=%v\n",
+						job.ID, job.Host, h.Status, h.LastCheck, time.Since(h.LastCheck), m.isHostDisconnectedLong(job))
+					break
+				}
+			}
+			if !found {
+				debugInfo = fmt.Sprintf("job=%d host=%s NOT_FOUND_IN_HOSTS (len=%d)\n", job.ID, job.Host, len(m.hosts))
+			}
+			f, _ := os.OpenFile("/tmp/rj-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if f != nil {
+				f.WriteString(debugInfo)
+				f.Close()
+			}
+		}
+
+		if i == selectedIdx {
 			line = selectedStyle.Width(m.width - 4).Render(line)
 		} else {
 			line = m.styleForStatus(job.Status).Render(line)
@@ -1486,36 +1485,6 @@ func (m Model) renderJobList(height int) string {
 
 	content := strings.Join(rows, "\n")
 	return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
-}
-
-// ensureSelectedVisible adjusts jobListOffset to keep selectedIndex visible
-func (m *Model) ensureSelectedVisible() {
-	if len(m.jobs) == 0 {
-		return
-	}
-	// Calculate visible height (same as renderJobList)
-	listHeight := int(float64(m.height) * 0.55)
-	contentHeight := listHeight - 5
-
-	// Scroll up if selected is above visible area
-	if m.selectedIndex < m.jobListOffset {
-		m.jobListOffset = m.selectedIndex
-	}
-	// Scroll down if selected is below visible area
-	if m.selectedIndex >= m.jobListOffset+contentHeight {
-		m.jobListOffset = m.selectedIndex - contentHeight + 1
-	}
-	// Clamp offset
-	if m.jobListOffset < 0 {
-		m.jobListOffset = 0
-	}
-	maxOffset := len(m.jobs) - contentHeight
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-	if m.jobListOffset > maxOffset {
-		m.jobListOffset = maxOffset
-	}
 }
 
 func (m Model) renderLogPanel(height int) string {
@@ -2181,8 +2150,9 @@ func (m Model) refreshJobs() tea.Cmd {
 
 func (m *Model) applyJobFilter() {
 	prevSelectedID := int64(0)
-	if len(m.jobs) > 0 && m.selectedIndex >= 0 && m.selectedIndex < len(m.jobs) {
-		prevSelectedID = m.jobs[m.selectedIndex].ID
+	selectedIdx := m.jobList.Index()
+	if len(m.jobs) > 0 && selectedIdx >= 0 && selectedIdx < len(m.jobs) {
+		prevSelectedID = m.jobs[selectedIdx].ID
 	}
 
 	var filtered []*db.Job
@@ -2193,21 +2163,14 @@ func (m *Model) applyJobFilter() {
 	}
 	m.jobs = filtered
 
-	if len(m.jobs) == 0 {
-		m.selectedIndex = 0
-	} else {
-		if m.selectedIndex >= len(m.jobs) {
-			m.selectedIndex = len(m.jobs) - 1
-		}
-		if m.selectedIndex < 0 {
-			m.selectedIndex = 0
-		}
-	}
+	// Update the list items
+	m.jobList.SetItems(JobsToListItems(m.jobs))
 
+	// Try to restore selection to the same job
 	if prevSelectedID != 0 {
 		for i, job := range m.jobs {
 			if job.ID == prevSelectedID {
-				m.selectedIndex = i
+				m.jobList.Select(i)
 				break
 			}
 		}
@@ -2219,9 +2182,6 @@ func (m *Model) applyJobFilter() {
 		m.logContent = ""
 		m.logStale = false
 	}
-
-	// Ensure selected job is visible after filter change
-	m.ensureSelectedVisible()
 }
 
 func (m Model) startHostRefreshTicker() tea.Cmd {
@@ -2382,9 +2342,45 @@ func (m Model) getTargetJob() *db.Job {
 	if m.detailTab == DetailTabLogs && m.selectedJob != nil {
 		return m.selectedJob
 	}
-	if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs) {
-		return m.jobs[m.selectedIndex]
+	idx := m.jobList.Index()
+	if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
+		return m.jobs[idx]
 	}
+	return nil
+}
+
+// handleSelectionChanged is called when the job list selection changes.
+// It clears cached process stats and fetches logs/stats for the new selection.
+func (m *Model) handleSelectionChanged() tea.Cmd {
+	// Clear cached process stats when changing jobs
+	m.processStats = nil
+	m.prevProcessStats = nil
+	m.processStatsJobID = 0
+
+	idx := m.jobList.Index()
+	if len(m.jobs) == 0 || idx < 0 || idx >= len(m.jobs) {
+		return nil
+	}
+
+	job := m.jobs[idx]
+
+	// If in Logs tab, fetch logs for new job
+	if m.detailTab == DetailTabLogs {
+		m.selectedJob = job
+		m.logLoading = true
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.fetchSelectedJobLog())
+		if job.Status == db.StatusRunning {
+			cmds = append(cmds, m.fetchProcessStats(job))
+		}
+		return tea.Batch(cmds...)
+	}
+
+	// Even if not in Logs tab, fetch stats for running jobs
+	if job.Status == db.StatusRunning {
+		return m.fetchProcessStats(job)
+	}
+
 	return nil
 }
 

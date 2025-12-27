@@ -66,7 +66,8 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	model := tui.NewModelWithOptions(database, opts)
 
-	useMouse := cfg.EnableMouse
+	// Default to mouse enabled; flag can override
+	useMouse := true
 	if cmd.Flags().Changed("mouse") {
 		useMouse = tuiMouse
 	}
