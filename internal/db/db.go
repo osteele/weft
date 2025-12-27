@@ -1397,3 +1397,16 @@ func DeleteDeferredOperation(db *sql.DB, id int64) error {
 	_, err := db.Exec(`DELETE FROM deferred_operations WHERE id = ?`, id)
 	return err
 }
+
+// HasPendingDeferredOperationForJob checks if there's a pending deferred operation for a job ID
+func HasPendingDeferredOperationForJob(db *sql.DB, jobID int64) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM deferred_operations WHERE job_id = ?`,
+		jobID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}

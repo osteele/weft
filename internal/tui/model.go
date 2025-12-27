@@ -3102,7 +3102,27 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 		// Job is still waiting in queue, no change needed
 		return false, nil
 	case "DEAD":
-		// Job has died unexpectedly
+		// Job may have died unexpectedly, but we need to be careful not to mark
+		// recently queued jobs as dead if they haven't been synced to the remote yet
+
+		// Check 1: Don't mark as dead if job is less than 1 hour old
+		if job.CreatedAt > 0 {
+			age := time.Now().Unix() - job.CreatedAt
+			if age < 3600 { // Less than 1 hour
+				return false, nil
+			}
+		}
+
+		// Check 2: Don't mark as dead if there's a pending deferred operation
+		hasPending, err := db.HasPendingDeferredOperationForJob(database, job.ID)
+		if err != nil {
+			return false, err
+		}
+		if hasPending {
+			return false, nil
+		}
+
+		// Safe to mark as dead
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return false, err
 		}
