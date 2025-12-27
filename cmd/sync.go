@@ -299,6 +299,14 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, nil
 	}
 
+	// Before marking dead, check if job has pending deferred operations
+	// (e.g., queue_job not yet synced to remote)
+	hasPending, _ := db.HasPendingDeferredOperationForJob(database, job.ID)
+	if hasPending {
+		// Job has pending operations - don't mark as dead
+		return false, nil
+	}
+
 	// Job is not current, not in queue, process not running, and has no status file - it's dead
 	// (Either it died mid-execution, or was removed from queue)
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
@@ -335,6 +343,8 @@ func executeDeferredOperations(database *sql.DB, host string) error {
 			err = executeDeferredQueueAdd(database, op)
 		case db.OpStartQueuedJob:
 			err = executeDeferredStartQueued(database, op)
+		case db.OpUpdateQueuedJob:
+			err = executeDeferredUpdateQueued(database, op)
 		default:
 			err = fmt.Errorf("unknown operation: %s", op.Operation)
 		}
@@ -588,6 +598,61 @@ type deferredStartPayloadData struct {
 	EntryMissing bool     `json:"entry_missing"`
 }
 
+// executeDeferredUpdateQueued updates a job's entry in the remote queue file
+func executeDeferredUpdateQueued(database *sql.DB, op *db.DeferredOperation) error {
+	job, err := db.GetJobByID(database, op.JobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", op.JobID)
+	}
+
+	// Job may have changed status while we were offline
+	if job.Status != db.StatusQueued {
+		if syncVerbose {
+			fmt.Printf("    Skipping update for job %d: no longer queued (status: %s)\n", job.ID, job.Status)
+		}
+		return nil
+	}
+
+	queueName := op.QueueName
+	if queueName == "" {
+		queueName = job.QueueName
+	}
+	if queueName == "" {
+		queueName = defaultQueueName
+	}
+
+	// Get updated values from database (describe already updated the db)
+	workingDir := job.WorkingDir
+	command := job.Command
+	description := job.Description
+
+	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
+
+	// Remove old entry
+	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", job.ID, queueFile)
+	if _, stderr, err := ssh.Run(op.Host, removeCmd); err != nil {
+		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+			return fmt.Errorf("host unreachable")
+		}
+		return fmt.Errorf("remove old entry: %s", strings.TrimSpace(stderr))
+	}
+
+	// Add updated entry (without env vars and dep spec since we don't have them)
+	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t\t", job.ID, workingDir, command, description)
+	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
+	if _, stderr, err := ssh.Run(op.Host, appendCmd); err != nil {
+		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+			return fmt.Errorf("host unreachable")
+		}
+		return fmt.Errorf("add updated entry: %s", strings.TrimSpace(stderr))
+	}
+
+	return nil
+}
+
 // performFastSync performs a quick sync with fast timeout for list/status commands
 // Returns true if sync completed, false if timed out
 func performFastSync(database *sql.DB, verbose bool) bool {
@@ -736,6 +801,13 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job, timeout time.Duratio
 		// Job is still active, no change needed
 		return false, nil
 	case "DEAD":
+		// Before marking dead, check if job has pending deferred operations
+		// (e.g., queue_job not yet synced to remote)
+		hasPending, _ := db.HasPendingDeferredOperationForJob(database, job.ID)
+		if hasPending {
+			// Job has pending operations - don't mark as dead
+			return false, nil
+		}
 		// Job has died unexpectedly
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return false, err

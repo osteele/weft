@@ -1353,11 +1353,12 @@ type DeferredOperation struct {
 
 // Operation types for deferred operations
 const (
-	OpKillJob        = "kill_job"
-	OpRemoveQueued   = "remove_queued"
-	OpMoveFromQueue  = "move_from_queue"
-	OpQueueJob       = "queue_job"
-	OpStartQueuedJob = "start_queued_job"
+	OpKillJob         = "kill_job"
+	OpRemoveQueued    = "remove_queued"
+	OpMoveFromQueue   = "move_from_queue"
+	OpQueueJob        = "queue_job"
+	OpStartQueuedJob  = "start_queued_job"
+	OpUpdateQueuedJob = "update_queued_job"
 )
 
 // AddDeferredOperation adds an operation to execute when host becomes reachable
@@ -1454,6 +1455,24 @@ func HasPendingOperation(db *sql.DB, jobID int64, operation string) (bool, error
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// DeletePendingOperation deletes a deferred operation by job ID and operation type
+func DeletePendingOperation(db *sql.DB, jobID int64, operation string) error {
+	_, err := db.Exec(
+		`DELETE FROM deferred_operations WHERE job_id = ? AND operation = ?`,
+		jobID, operation,
+	)
+	return err
+}
+
+// UpdatePendingOperationPayload updates the payload of an existing deferred operation
+func UpdatePendingOperationPayload(db *sql.DB, jobID int64, operation string, payload string) error {
+	_, err := db.Exec(
+		`UPDATE deferred_operations SET payload = ? WHERE job_id = ? AND operation = ?`,
+		payload, jobID, operation,
+	)
+	return err
 }
 
 // DeleteDuplicateDeferredOperations removes duplicate deferred operations, keeping only the oldest

@@ -171,6 +171,14 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
+	// Queue runner jobs (no session name) don't have tmux sessions to check
+	// They are managed by the queue runner and synced separately
+	if job.SessionName == "" {
+		// For queued jobs, just display current status - don't mark dead
+		printJobStatus(job, exitOnComplete)
+		return
+	}
+
 	// Job is marked as running - verify actual status on remote
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 	exists, err := ssh.TmuxSessionExists(job.Host, tmuxSession)
@@ -207,7 +215,14 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 			job.ExitCode = &exitCode
 			job.EndTime = &endTime
 		} else {
-			// No status file - job died unexpectedly
+			// No status file - check for pending operations before marking dead
+			hasPending, _ := db.HasPendingDeferredOperationForJob(database, job.ID)
+			if hasPending {
+				// Job has pending operations - don't mark as dead
+				printJobStatus(job, exitOnComplete)
+				return
+			}
+			// Job died unexpectedly
 			if err := db.MarkDeadByID(database, job.ID); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
 			}

@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -13,14 +15,22 @@ import (
 var (
 	describeDirectory string
 	describeCommand   string
+	describeGPU       string
+	describeGPUs      string
 )
+
+type deferredUpdatePayload struct {
+	WorkingDir  string `json:"working_dir,omitempty"`
+	Command     string `json:"command,omitempty"`
+	Description string `json:"description,omitempty"`
+}
 
 var describeCmd = &cobra.Command{
 	Use:   "describe <job-id> [description]",
 	Short: "Set or update job metadata",
-	Long: `Set or update the description, directory, or command of a job.
+	Long: `Set or update the description, directory, command, or GPU of a job.
 
-For queued jobs, you can also update the working directory and command.
+For queued jobs, you can also update the working directory, command, and GPU.
 The remote queue file will be updated automatically.
 
 Examples:
@@ -28,6 +38,8 @@ Examples:
   remote-jobs describe 42 ""  # Clear description
   remote-jobs describe 42 --directory /new/path
   remote-jobs describe 42 --command "python train.py --epochs 100"
+  remote-jobs describe 42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
+  remote-jobs describe 42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
   remote-jobs describe 42 -d "New desc" --command "python new.py"`,
 	Args: usageArgs(cobra.RangeArgs(1, 2)),
 	RunE: runDescribe,
@@ -38,6 +50,8 @@ func init() {
 	// rootCmd.AddCommand(describeCmd)
 	describeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
 	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
+	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU (CUDA_VISIBLE_DEVICES) - queued jobs only")
+	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
@@ -68,9 +82,15 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
-	// Check if trying to update command/directory on non-queued job
-	if (describeCommand != "" || describeDirectory != "") && job.Status != db.StatusQueued {
-		return fmt.Errorf("can only update command/directory on queued jobs (job %d has status: %s)", jobID, job.Status)
+	// Normalize GPU flags (--gpu and --gpus are aliases)
+	gpuValue := describeGPU
+	if describeGPUs != "" {
+		gpuValue = describeGPUs
+	}
+
+	// Check if trying to update command/directory/gpu on non-queued job
+	if (describeCommand != "" || describeDirectory != "" || gpuValue != "") && job.Status != db.StatusQueued {
+		return fmt.Errorf("can only update command/directory/gpu on queued jobs (job %d has status: %s)", jobID, job.Status)
 	}
 
 	// Track what was updated
@@ -106,15 +126,58 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("command: %s", describeCommand))
 	}
 
-	// If we updated command or directory, also update the remote queue file
-	if describeCommand != "" || describeDirectory != "" {
+	// Update GPU (CUDA_VISIBLE_DEVICES) if provided (queued jobs only)
+	if gpuValue != "" {
+		newCommand := updateCudaVisibleDevices(job.Command, gpuValue)
+		if err := db.UpdateJobCommand(database, jobID, newCommand); err != nil {
+			return fmt.Errorf("update command with GPU: %w", err)
+		}
+		job.Command = newCommand
+		updates = append(updates, fmt.Sprintf("gpu: %s", gpuValue))
+	}
+
+	// If we updated command, directory, or GPU, sync to remote queue file
+	if describeCommand != "" || describeDirectory != "" || gpuValue != "" {
 		queueName := job.QueueName
 		if queueName == "" {
 			queueName = "default"
 		}
-		if err := updateRemoteQueueEntry(job.Host, queueName, job); err != nil {
-			fmt.Printf("Warning: could not update remote queue file: %v\n", err)
-			fmt.Printf("The local database was updated. Run 'remote-jobs sync' when host is reachable.\n")
+
+		// Check if job has a pending queue_job operation (not yet synced to remote)
+		hasPendingQueue, _ := db.HasPendingOperation(database, jobID, db.OpQueueJob)
+		if hasPendingQueue {
+			// Update the pending queue_job payload with new values
+			existingPayload, err := db.GetDeferredOperationPayload(database, jobID, db.OpQueueJob)
+			if err == nil && existingPayload != "" {
+				var payload map[string]interface{}
+				if err := json.Unmarshal([]byte(existingPayload), &payload); err == nil {
+					payload["working_dir"] = job.WorkingDir
+					payload["command"] = job.Command
+					payload["description"] = job.Description
+					if newPayloadJSON, err := json.Marshal(payload); err == nil {
+						db.UpdatePendingOperationPayload(database, jobID, db.OpQueueJob, string(newPayloadJSON))
+					}
+				}
+			}
+		} else {
+			// Job is already in remote queue - add update operation and try immediate sync
+			payload := deferredUpdatePayload{
+				WorkingDir:  job.WorkingDir,
+				Command:     job.Command,
+				Description: job.Description,
+			}
+			payloadJSON, _ := json.Marshal(payload)
+			if err := db.AddDeferredOperation(database, job.Host, db.OpUpdateQueuedJob, jobID, queueName, string(payloadJSON)); err != nil {
+				fmt.Printf("Warning: could not queue update operation: %v\n", err)
+			}
+
+			// Try immediate sync
+			if err := updateRemoteQueueEntry(job.Host, queueName, job); err != nil {
+				fmt.Printf("Note: remote host not reachable; changes will sync when host is available\n")
+			} else {
+				// Immediate sync succeeded - remove the deferred operation
+				db.DeletePendingOperation(database, jobID, db.OpUpdateQueuedJob)
+			}
 		}
 	}
 
@@ -154,4 +217,19 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 	}
 
 	return nil
+}
+
+// updateCudaVisibleDevices updates or adds CUDA_VISIBLE_DEVICES to a command
+func updateCudaVisibleDevices(cmd, gpuValue string) string {
+	// Pattern to match CUDA_VISIBLE_DEVICES=X at the start of the command
+	// Handles both "CUDA_VISIBLE_DEVICES=0 cmd" and "export CUDA_VISIBLE_DEVICES=0 && cmd"
+	cudaPattern := regexp.MustCompile(`^(export\s+)?CUDA_VISIBLE_DEVICES=[^\s]+(\s+&&\s+|\s+)`)
+
+	if cudaPattern.MatchString(cmd) {
+		// Replace existing CUDA_VISIBLE_DEVICES
+		return cudaPattern.ReplaceAllString(cmd, fmt.Sprintf("CUDA_VISIBLE_DEVICES=%s ", gpuValue))
+	}
+
+	// Prepend CUDA_VISIBLE_DEVICES to the command
+	return fmt.Sprintf("CUDA_VISIBLE_DEVICES=%s %s", gpuValue, cmd)
 }
