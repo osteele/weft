@@ -34,7 +34,7 @@ Keyboard shortcuts:
 
 func init() {
 	rootCmd.AddCommand(tuiCmd)
-	tuiCmd.Flags().BoolVar(&tuiMouse, "mouse", false, "Enable mouse support (disables terminal selection)")
+	tuiCmd.Flags().BoolVar(&tuiMouse, "mouse", true, "Enable mouse support (disables terminal text selection)")
 }
 
 var tuiMouse bool

@@ -278,6 +278,7 @@ type Model struct {
 	allJobs       []*db.Job
 	jobs          []*db.Job
 	selectedIndex int
+	jobListOffset int // scroll offset for job list
 	selectedJob   *db.Job
 	jobFilter     jobFilterMode
 
@@ -791,14 +792,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouseClick handles mouse click events
+// handleMouseClick handles mouse click and wheel events
 func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	// Only handle left button press
-	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
-		return m, nil
-	}
-
-	// Ignore clicks when in input mode or showing overlays
+	// Ignore mouse events when in input mode or showing overlays
 	if m.inputMode || m.showHelp || m.restarting || m.creatingJob {
 		return m, nil
 	}
@@ -806,15 +802,56 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Calculate list panel height (same as in View)
 	listHeight := int(float64(m.height) * 0.55)
 
+	// Handle mouse wheel
+	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
+		scrollDelta := 3 // lines to scroll per wheel event
+		if msg.Button == tea.MouseButtonWheelUp {
+			scrollDelta = -scrollDelta
+		}
+
+		// Check if mouse is in the log panel area (bottom portion)
+		if msg.Y >= listHeight && m.detailTab == DetailTabLogs {
+			// Scroll the log viewport
+			m.logViewport.SetYOffset(m.logViewport.YOffset + scrollDelta)
+			return m, nil
+		}
+
+		// Mouse is in the job list area - scroll the job list
+		if m.viewMode == ViewModeJobs {
+			contentHeight := listHeight - 5
+			m.jobListOffset += scrollDelta
+			// Clamp offset
+			if m.jobListOffset < 0 {
+				m.jobListOffset = 0
+			}
+			maxOffset := len(m.jobs) - contentHeight
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			if m.jobListOffset > maxOffset {
+				m.jobListOffset = maxOffset
+			}
+		}
+		return m, nil
+	}
+
+	// Only handle left button press for clicks
+	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
 	// Check if click is within the list panel (top portion of screen)
-	// Account for: top border (1), header row (1), then job rows
-	// So first job row is at Y=2
+	// Layout: border(1) + header(1) + filter(1) + jobs...
+	// First job row is at Y=3
 	if msg.Y >= 2 && msg.Y < listHeight-1 {
-		clickedIndex := msg.Y - 2 // Subtract border + header
+		// Y=2 is filter row, Y=3+ are job rows
+		clickedRow := msg.Y - 3 // Row within visible job area (-1 if filter clicked)
+		clickedIndex := m.jobListOffset + clickedRow
 
 		if m.viewMode == ViewModeJobs {
 			if clickedIndex >= 0 && clickedIndex < len(m.jobs) {
 				m.selectedIndex = clickedIndex
+				m.ensureSelectedVisible()
 				// Clear cached process stats when changing jobs
 				m.processStats = nil
 				m.prevProcessStats = nil
@@ -837,8 +874,8 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		} else if m.viewMode == ViewModeHosts {
-			if clickedIndex >= 0 && clickedIndex < len(m.hosts) {
-				m.selectedHostIdx = clickedIndex
+			if clickedRow >= 0 && clickedRow < len(m.hosts) {
+				m.selectedHostIdx = clickedRow
 			}
 		}
 	}
@@ -953,6 +990,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			if m.selectedIndex > 0 {
 				m.selectedIndex--
+				m.ensureSelectedVisible()
 				// Clear cached process stats when changing jobs
 				m.processStats = nil
 				m.prevProcessStats = nil
@@ -988,6 +1026,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			if len(m.jobs) > 0 && m.selectedIndex < len(m.jobs)-1 {
 				m.selectedIndex++
+				m.ensureSelectedVisible()
 				// Clear cached process stats when changing jobs
 				m.processStats = nil
 				m.prevProcessStats = nil
@@ -1413,13 +1452,15 @@ func (m Model) renderJobList(height int) string {
 		return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
 	}
 
-	// Jobs
+	// Jobs - render from offset
 	contentHeight := height - 5 // Account for borders, header, and filter line
-	for i, job := range m.jobs {
-		if i >= contentHeight {
-			break
-		}
+	endIdx := m.jobListOffset + contentHeight
+	if endIdx > len(m.jobs) {
+		endIdx = len(m.jobs)
+	}
 
+	for i := m.jobListOffset; i < endIdx; i++ {
+		job := m.jobs[i]
 		status := m.formatStatus(job)
 		started := formatStartTime(job.StartTime)
 
@@ -1445,6 +1486,36 @@ func (m Model) renderJobList(height int) string {
 
 	content := strings.Join(rows, "\n")
 	return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
+}
+
+// ensureSelectedVisible adjusts jobListOffset to keep selectedIndex visible
+func (m *Model) ensureSelectedVisible() {
+	if len(m.jobs) == 0 {
+		return
+	}
+	// Calculate visible height (same as renderJobList)
+	listHeight := int(float64(m.height) * 0.55)
+	contentHeight := listHeight - 5
+
+	// Scroll up if selected is above visible area
+	if m.selectedIndex < m.jobListOffset {
+		m.jobListOffset = m.selectedIndex
+	}
+	// Scroll down if selected is below visible area
+	if m.selectedIndex >= m.jobListOffset+contentHeight {
+		m.jobListOffset = m.selectedIndex - contentHeight + 1
+	}
+	// Clamp offset
+	if m.jobListOffset < 0 {
+		m.jobListOffset = 0
+	}
+	maxOffset := len(m.jobs) - contentHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if m.jobListOffset > maxOffset {
+		m.jobListOffset = maxOffset
+	}
 }
 
 func (m Model) renderLogPanel(height int) string {
@@ -2148,6 +2219,9 @@ func (m *Model) applyJobFilter() {
 		m.logContent = ""
 		m.logStale = false
 	}
+
+	// Ensure selected job is visible after filter change
+	m.ensureSelectedVisible()
 }
 
 func (m Model) startHostRefreshTicker() tea.Cmd {
