@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -293,6 +294,7 @@ type Model struct {
 	logCache     map[int64]string // cache of last successful log content per job
 	logLoading   bool
 	logViewport  viewport.Model
+	spinner      spinner.Model // Loading spinner
 	flashMessage string
 	flashIsError bool
 	flashExpiry  time.Time
@@ -309,8 +311,8 @@ type Model struct {
 
 	// New job input mode
 	inputMode      bool
-	inputFocus     int
 	inputs         []textinput.Model
+	inputFocus     int
 	creatingJob    bool
 	createJobStart time.Time
 	createJobStep  string
@@ -373,17 +375,17 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputHost].Width = 40
 	inputs[inputHost].CharLimit = 64
 
-	inputs[inputCommand] = textinput.New()
-	inputs[inputCommand].Placeholder = "e.g., python train.py"
-	inputs[inputCommand].Prompt = ""
-	inputs[inputCommand].Width = 40
-	inputs[inputCommand].CharLimit = 512
-
 	inputs[inputDescription] = textinput.New()
 	inputs[inputDescription].Placeholder = "(optional)"
 	inputs[inputDescription].Prompt = ""
 	inputs[inputDescription].Width = 40
 	inputs[inputDescription].CharLimit = 256
+
+	inputs[inputCommand] = textinput.New()
+	inputs[inputCommand].Placeholder = "e.g., python train.py"
+	inputs[inputCommand].Prompt = ""
+	inputs[inputCommand].Width = 40
+	inputs[inputCommand].CharLimit = 512
 
 	inputs[inputWorkingDir] = textinput.New()
 	inputs[inputWorkingDir].Placeholder = "(optional, defaults to ~)"
@@ -416,11 +418,17 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	jobList.KeyMap.ForceQuit = key.NewBinding(key.WithDisabled())
 	// Keep navigation keys enabled - let the list handle up/down/pgup/pgdown
 
+	// Initialize spinner
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
 	return Model{
 		database:                database,
 		jobList:                 jobList,
 		jobFilter:               jobFilterAll,
 		inputs:                  inputs,
+		spinner:                 s,
 		syncInterval:            opts.SyncInterval,
 		logRefreshInterval:      opts.LogRefreshInterval,
 		hostRefreshInterval:     opts.HostRefreshInterval,
@@ -438,6 +446,7 @@ func (m Model) Init() tea.Cmd {
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
+		m.spinner.Tick,
 	)
 }
 
@@ -456,6 +465,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.jobList.SetWidth(m.width - 2)
 		m.jobList.SetHeight(listHeight - 2)
 		return m, nil
+
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.KeyMsg:
 		if m.inputMode {
@@ -491,10 +505,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
 		} else if msg.updated > 0 {
-			// Silently refresh jobs without flash message
-			return m, m.refreshJobs()
+			return m, tea.Batch(
+				m.setFlash(fmt.Sprintf("Synced %d job(s)", msg.updated), false),
+				m.refreshJobs(),
+			)
 		}
-		return m, nil
+		return m, m.setFlash("Sync complete", false)
 
 	case logFetchedMsg:
 		m.logLoading = false
@@ -556,7 +572,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Kill failed: %v", msg.err), true)
 		} else {
-			flashCmd = m.setFlash("Job killed", false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -605,7 +621,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Remove failed: %v", msg.err), true)
 		} else {
-			flashCmd = m.setFlash("Job removed", false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d removed", msg.jobID), false)
 			m.selectedJob = nil
 			m.logContent = ""
 			m.logStale = false
@@ -1204,7 +1220,7 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // View renders the UI
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "Loading..."
+		return m.spinner.View() + " Loading..."
 	}
 
 	// Calculate panel heights
@@ -1533,7 +1549,7 @@ func (m Model) renderLogsOnly(height int) string {
 	}
 
 	if m.logLoading {
-		content = dimStyle.Render("Loading logs...")
+		content = dimStyle.Render(m.spinner.View() + " Loading logs...")
 	} else if m.logContent == "" {
 		content = dimStyle.Render("No log content available")
 	} else {
@@ -1782,7 +1798,7 @@ func (m Model) renderStatusBar() string {
 	help := helpStyle.Render("?:help q:quit ↑/↓:nav l:logs f:filter s:sync n:new r:restart k:kill P:prune h:hosts")
 
 	if m.syncing {
-		help = syncingStyle.Render("⟳ ") + help
+		help = syncingStyle.Render(m.spinner.View()+" ") + help
 	}
 
 	// Right-align the help text
