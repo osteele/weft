@@ -508,6 +508,19 @@ func DeleteJob(db *sql.DB, id int64) error {
 	return err
 }
 
+// TombstoneJob marks a job as tombstoned (soft-deleted) so it no longer appears in listings
+func TombstoneJob(db *sql.DB, id int64) error {
+	_, err := db.Exec(`UPDATE jobs SET tombstoned = 1 WHERE id = ?`, id)
+	return err
+}
+
+// GetTombstonedActiveJobs returns jobs that are tombstoned but still marked as running/queued/starting
+// These need to be killed on remote hosts during sync
+func GetTombstonedActiveJobs(db *sql.DB) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 1 AND status IN (?, ?, ?)`, jobSelectColumns)
+	return queryJobs(db, query, StatusRunning, StatusQueued, StatusStarting)
+}
+
 // GetJob retrieves a job by host and session name (most recent)
 func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`, jobSelectColumns)
@@ -1409,4 +1422,101 @@ func HasPendingDeferredOperationForJob(db *sql.DB, jobID int64) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// GetJobIDsWithPendingOperations returns a map of job IDs that have pending deferred operations
+func GetJobIDsWithPendingOperations(db *sql.DB) (map[int64]bool, error) {
+	rows, err := db.Query(`SELECT DISTINCT job_id FROM deferred_operations WHERE job_id > 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]bool)
+	for rows.Next() {
+		var jobID int64
+		if err := rows.Scan(&jobID); err != nil {
+			return nil, err
+		}
+		result[jobID] = true
+	}
+	return result, rows.Err()
+}
+
+// HasPendingOperation checks if a specific operation type already exists for a job
+func HasPendingOperation(db *sql.DB, jobID int64, operation string) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM deferred_operations WHERE job_id = ? AND operation = ?`,
+		jobID, operation,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// DeleteDuplicateDeferredOperations removes duplicate deferred operations, keeping only the oldest
+func DeleteDuplicateDeferredOperations(db *sql.DB) (int64, error) {
+	result, err := db.Exec(`
+		DELETE FROM deferred_operations
+		WHERE id NOT IN (
+			SELECT MIN(id) FROM deferred_operations
+			GROUP BY job_id, operation
+		)
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// GetDeferredOperationPayload returns the payload for a job's deferred operation
+func GetDeferredOperationPayload(db *sql.DB, jobID int64, operation string) (string, error) {
+	var payload sql.NullString
+	err := db.QueryRow(
+		`SELECT payload FROM deferred_operations WHERE job_id = ? AND operation = ? LIMIT 1`,
+		jobID, operation,
+	).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return payload.String, nil
+}
+
+// GetJobDependencyInfo returns dependency info for jobs with pending operations
+// Returns a map of jobID -> dep_spec (e.g., "930" or "930+" for after-any)
+func GetJobDependencyInfo(db *sql.DB) (map[int64]string, error) {
+	rows, err := db.Query(`
+		SELECT job_id, payload FROM deferred_operations
+		WHERE job_id > 0 AND operation = 'queue_job' AND payload != ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]string)
+	for rows.Next() {
+		var jobID int64
+		var payload string
+		if err := rows.Scan(&jobID, &payload); err != nil {
+			return nil, err
+		}
+		// Extract dep_spec from JSON payload
+		// Simple extraction without full JSON parsing
+		if depStart := strings.Index(payload, `"dep_spec":"`); depStart != -1 {
+			depStart += len(`"dep_spec":"`)
+			if depEnd := strings.Index(payload[depStart:], `"`); depEnd != -1 {
+				depSpec := payload[depStart : depStart+depEnd]
+				if depSpec != "" {
+					result[jobID] = depSpec
+				}
+			}
+		}
+	}
+	return result, rows.Err()
 }

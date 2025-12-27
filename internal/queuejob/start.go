@@ -116,6 +116,16 @@ type deferredStartPayload struct {
 }
 
 func deferQueuedJobStart(database *sql.DB, job *db.Job, queueName string, entry *queuefile.Entry, entryRemoved bool) (bool, error) {
+	// Check if a start operation already exists for this job
+	hasPending, err := db.HasPendingOperation(database, job.ID, db.OpStartQueuedJob)
+	if err != nil {
+		return false, fmt.Errorf("check pending operations: %w", err)
+	}
+	if hasPending {
+		// Already has a pending start operation, don't add another
+		return true, nil
+	}
+
 	payload := deferredStartPayload{
 		QueueName:    queueName,
 		EntryMissing: entryRemoved,

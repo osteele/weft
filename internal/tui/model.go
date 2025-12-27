@@ -176,8 +176,10 @@ var keys = keyMap{
 
 // Messages
 type jobsRefreshedMsg struct {
-	jobs []*db.Job
-	err  error
+	jobs             []*db.Job
+	pendingOpsJobIDs map[int64]bool
+	jobDependencies  map[int64]string // jobID -> dep_spec (e.g., "930" or "930+")
+	err              error
 }
 
 type syncCompletedMsg struct {
@@ -358,6 +360,12 @@ type Model struct {
 
 	// Host cache tracking - which hosts have been freshly queried this session
 	hostsQueriedThisSession map[string]bool
+
+	// Jobs with pending deferred operations (for status display)
+	pendingOpsJobIDs map[int64]bool
+
+	// Job dependencies (jobID -> dep_spec like "930" or "930+")
+	jobDependencies map[int64]string
 }
 
 // ModelOptions contains configuration for the TUI model
@@ -454,6 +462,8 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostCacheDuration:       opts.HostCacheDuration,
 		hostsQueriedThisSession: make(map[string]bool),
 		logCache:                make(map[int64]string),
+		pendingOpsJobIDs:        make(map[int64]bool),
+		jobDependencies:         make(map[int64]string),
 	}
 }
 
@@ -504,6 +514,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
 		}
 		m.allJobs = msg.jobs
+		if msg.pendingOpsJobIDs != nil {
+			m.pendingOpsJobIDs = msg.pendingOpsJobIDs
+		}
+		if msg.jobDependencies != nil {
+			m.jobDependencies = msg.jobDependencies
+		}
 		m.applyJobFilter()
 
 		// If there's a pending job selection, find and select it
@@ -1191,6 +1207,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, nil
 		}
+		// Refuse to remove active jobs - suggest killing first
+		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
+			return m, m.setFlash(fmt.Sprintf("Job %d is %s. Kill it first (k)", job.ID, job.Status), true)
+		}
 		return m, tea.Batch(m.setFlash("Removing job...", false), m.removeJob(job))
 
 	case key.Matches(msg, keys.NewJob):
@@ -1740,6 +1760,17 @@ func (m Model) renderJobDetails(height int) string {
 		b.WriteString(headerStyle.Render(job.Host))
 		b.WriteString(dimStyle.Render(" · "))
 		b.WriteString(statusStr)
+
+		// Show dependency info on same line if present
+		if depSpec := m.jobDependencies[job.ID]; depSpec != "" {
+			if strings.HasSuffix(depSpec, "+") {
+				b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s)", strings.TrimSuffix(depSpec, "+"))))
+			} else {
+				b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s succeeds)", depSpec)))
+			}
+		} else if m.pendingOpsJobIDs[job.ID] && job.Status == db.StatusQueued {
+			b.WriteString(dimStyle.Render(" (pending sync)"))
+		}
 		b.WriteString("\n\n")
 
 		// Description (if any) - shown in italic without label
@@ -2282,6 +2313,10 @@ func (m Model) styleForHostStatus(status HostStatus) lipgloss.Style {
 }
 
 func (m Model) formatStatus(job *db.Job) string {
+	// Check if job has pending deferred operations
+	hasPendingOps := m.pendingOpsJobIDs[job.ID]
+	depSpec := m.jobDependencies[job.ID]
+
 	switch job.Status {
 	case db.StatusRunning:
 		return "● running"
@@ -2298,6 +2333,16 @@ func (m Model) formatStatus(job *db.Job) string {
 	case db.StatusPending:
 		return "○ pending"
 	case db.StatusQueued:
+		if hasPendingOps {
+			if depSpec != "" {
+				// Show dependency - "930" means after success, "930+" means after any
+				if strings.HasSuffix(depSpec, "+") {
+					return fmt.Sprintf("◇ after %s", strings.TrimSuffix(depSpec, "+"))
+				}
+				return fmt.Sprintf("◇ after %s", depSpec)
+			}
+			return "◇ waiting" // Hollow diamond = waiting for sync (no dependency)
+		}
 		return "◆ queued"
 	case db.StatusFailed:
 		return "✗ failed"
@@ -2365,7 +2410,12 @@ func (m Model) startCreateTicker() tea.Cmd {
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
 		jobs, err := db.ListJobs(m.database, "", "", 100)
-		return jobsRefreshedMsg{jobs: jobs, err: err}
+		if err != nil {
+			return jobsRefreshedMsg{err: err}
+		}
+		pendingOps, _ := db.GetJobIDsWithPendingOperations(m.database)
+		deps, _ := db.GetJobDependencyInfo(m.database)
+		return jobsRefreshedMsg{jobs: jobs, pendingOpsJobIDs: pendingOps, jobDependencies: deps}
 	}
 }
 
@@ -2633,13 +2683,13 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 func jobFilterDescription(mode jobFilterMode) string {
 	switch mode {
 	case jobFilterActive:
-		return "Queued/Running"
+		return "Active (waiting/queued/running)"
 	case jobFilterSucceeded:
-		return "Completed (success)"
+		return "Succeeded"
 	case jobFilterFailed:
-		return "Completed (failure)"
+		return "Failed"
 	default:
-		return "All jobs"
+		return "All"
 	}
 }
 
@@ -2784,6 +2834,17 @@ func (m Model) performBackgroundSync() tea.Cmd {
 					continue
 				}
 				if revived {
+					updated++
+				}
+			}
+		}
+
+		// Kill tombstoned jobs that are still marked as running/queued on remote hosts
+		tombstonedJobs, err := db.GetTombstonedActiveJobs(m.database)
+		if err == nil {
+			for _, job := range tombstonedJobs {
+				killed := killTombstonedJob(m.database, job)
+				if killed {
 					updated++
 				}
 			}
@@ -3190,6 +3251,62 @@ func checkAndReviveDeadJob(database *sql.DB, job *db.Job) (bool, error) {
 	return true, nil
 }
 
+// killTombstonedJob kills a job that was tombstoned locally but may still be running remotely
+// Returns true if the job was killed, false if host unreachable or already dead
+func killTombstonedJob(database *sql.DB, job *db.Job) bool {
+	// For queued jobs, remove from queue file
+	if job.Status == db.StatusQueued {
+		queueName := job.QueueName
+		if queueName == "" {
+			queueName = "default"
+		}
+		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+		removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", job.ID, queueFile)
+		_, _, err := ssh.RunWithTimeout(job.Host, removeCmd, 5*time.Second)
+		if err != nil {
+			return false // Host unreachable
+		}
+		// Update status to dead
+		db.MarkDeadByID(database, job.ID)
+		return true
+	}
+
+	// For running/starting jobs, kill the process
+	if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+		var killed bool
+
+		if job.SessionName == "" {
+			// Queue runner job - kill via PID
+			pidPattern := session.PidFilePattern(job.ID)
+			killCmd := fmt.Sprintf(`
+				pid=$(cat %s 2>/dev/null | head -1)
+				if [ -n "$pid" ] && kill -0 $pid 2>/dev/null; then
+					kill $pid 2>/dev/null && echo "killed" || echo "failed"
+				else
+					echo "not_running"
+				fi
+			`, pidPattern)
+			stdout, _, err := ssh.RunWithTimeout(job.Host, killCmd, 5*time.Second)
+			if err != nil {
+				return false // Host unreachable
+			}
+			killed = strings.TrimSpace(stdout) == "killed"
+		} else {
+			// Regular job - kill via tmux
+			tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+			err := ssh.TmuxKillSession(job.Host, tmuxSession)
+			killed = err == nil
+		}
+
+		if killed {
+			db.MarkDeadByID(database, job.ID)
+			return true
+		}
+	}
+
+	return false
+}
+
 // syncQueueRunnerJob checks status for jobs started by the queue runner
 // These jobs don't have tmux sessions, so we check for status/log files by pattern
 func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
@@ -3322,7 +3439,7 @@ func (m Model) removeJob(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		err := db.DeleteJob(database, job.ID)
+		err := db.TombstoneJob(database, job.ID)
 		return jobRemovedMsg{jobID: job.ID, err: err}
 	}
 }

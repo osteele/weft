@@ -357,10 +357,39 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
+	// Check for pending operations and dependencies
+	hasPendingOps, _ := db.HasPendingDeferredOperationForJob(database, jobID)
+	var depSpec string
+	if hasPendingOps {
+		payload, _ := db.GetDeferredOperationPayload(database, jobID, db.OpQueueJob)
+		if payload != "" {
+			// Extract dep_spec from JSON payload
+			if depStart := strings.Index(payload, `"dep_spec":"`); depStart != -1 {
+				depStart += len(`"dep_spec":"`)
+				if depEnd := strings.Index(payload[depStart:], `"`); depEnd != -1 {
+					depSpec = payload[depStart : depStart+depEnd]
+				}
+			}
+		}
+	}
+
 	// Show full job details
 	fmt.Printf("Job ID:      %d\n", job.ID)
 	fmt.Printf("Host:        %s\n", job.Host)
-	fmt.Printf("Status:      %s\n", job.Status)
+	// Show status with waiting info
+	statusStr := job.Status
+	if hasPendingOps && job.Status == db.StatusQueued {
+		if depSpec != "" {
+			if strings.HasSuffix(depSpec, "+") {
+				statusStr = fmt.Sprintf("waiting (after job %s completes)", strings.TrimSuffix(depSpec, "+"))
+			} else {
+				statusStr = fmt.Sprintf("waiting (after job %s succeeds)", depSpec)
+			}
+		} else {
+			statusStr = "waiting (pending sync)"
+		}
+	}
+	fmt.Printf("Status:      %s\n", statusStr)
 	fmt.Printf("Description: %s\n", job.Description)
 	fmt.Printf("Directory:   %s\n", job.WorkingDir)
 	fmt.Printf("Command:     %s\n", job.Command)
