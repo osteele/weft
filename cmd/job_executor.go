@@ -91,7 +91,7 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			if opts.QueueOnFail {
-				if err := db.UpdateJobPending(database, jobID); err != nil {
+				if err := db.UpdateJobDraft(database, jobID); err != nil {
 					return nil, fmt.Errorf("queue job: %w", err)
 				}
 				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
@@ -113,7 +113,7 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	if _, stderr, err := ssh.RunWithRetry(opts.Host, mkdirCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			if opts.QueueOnFail {
-				if err := db.UpdateJobPending(database, jobID); err != nil {
+				if err := db.UpdateJobDraft(database, jobID); err != nil {
 					return nil, fmt.Errorf("queue job: %w", err)
 				}
 				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
@@ -180,7 +180,7 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	if _, stderr, err := ssh.Run(opts.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			if opts.QueueOnFail {
-				if err := db.UpdateJobPending(database, jobID); err != nil {
+				if err := db.UpdateJobDraft(database, jobID); err != nil {
 					return nil, fmt.Errorf("queue job: %w", err)
 				}
 				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil

@@ -335,7 +335,7 @@ remote-jobs job list [flags]
 - `--running`: Show only running jobs
 - `--completed`: Show only completed jobs
 - `--dead`: Show only dead jobs
-- `--pending`: Show only pending jobs (not yet started)
+- `--draft`: Show only draft jobs (saved locally, not yet started)
 - `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
 - `--limit N`: Limit results (default: 50)
@@ -348,7 +348,7 @@ remote-jobs job list [flags]
 remote-jobs job list                          # Recent jobs
 remote-jobs job list --running                # Running jobs
 remote-jobs job list --running --sync         # Running jobs (sync first)
-remote-jobs job list --pending                # Pending jobs
+remote-jobs job list --draft                  # Draft jobs
 remote-jobs job list --host deepthought       # Jobs on deepthought
 remote-jobs job list --search training        # Search jobs
 remote-jobs job list --show 42                # Job details
@@ -790,7 +790,7 @@ Log files are stored on remote hosts at `~/.cache/remote-jobs/logs/{id}-{timesta
 - `running`: Job is currently executing on the remote host
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
-- `pending`: Job queued but not yet started (for later manual execution)
+- `draft`: Job saved locally but not yet started (for later manual execution)
 - `queued`: Job waiting in a remote queue for sequential execution
 - `failed`: Job failed to start (e.g., connection error)
 

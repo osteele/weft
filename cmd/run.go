@@ -239,7 +239,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		// Standard local pending mode (no dependency)
-		jobID, err := db.RecordPending(database, host, workingDir, command, runDescription)
+		jobID, err := db.RecordDraft(database, host, workingDir, command, runDescription)
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
 		}

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -136,7 +137,7 @@ var keys = keyMap{
 	),
 	Kill: key.NewBinding(
 		key.WithKeys("k", "delete"),
-		key.WithHelp("k", "kill"),
+		key.WithHelp("k", "kill/cancel"),
 	),
 	Restart: key.NewBinding(
 		key.WithKeys("r"),
@@ -224,9 +225,10 @@ type logFetchedMsg struct {
 }
 
 type jobKilledMsg struct {
-	jobID    int64
-	err      error
-	deferred bool // true if kill was queued for later (host offline)
+	jobID     int64
+	err       error
+	deferred  bool // true if kill was queued for later (host offline)
+	cancelled bool // true if this was a queued job that was cancelled
 }
 
 type jobRestartedMsg struct {
@@ -638,11 +640,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobKilledMsg:
 		var flashCmd tea.Cmd
 		if msg.err != nil {
-			flashCmd = m.setFlash(fmt.Sprintf("Kill failed: %v", msg.err), true)
+			if msg.cancelled {
+				flashCmd = m.setFlash(fmt.Sprintf("Cancel failed: %v", msg.err), true)
+			} else {
+				flashCmd = m.setFlash(fmt.Sprintf("Kill failed: %v", msg.err), true)
+			}
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d marked dead (kill queued for when host is online)", msg.jobID), false)
+			if msg.cancelled {
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d cancelled (removal queued for when host is online)", msg.jobID), false)
+			} else {
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d marked dead (kill queued for when host is online)", msg.jobID), false)
+			}
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
+			if msg.cancelled {
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d cancelled", msg.jobID), false)
+			} else {
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
+			}
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -1185,10 +1199,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Kill):
 		job := m.getTargetJob()
-		if job != nil && job.Status == db.StatusRunning {
-			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
+		if job == nil {
+			return m, nil
 		}
-		return m, nil
+		switch job.Status {
+		case db.StatusRunning, db.StatusStarting:
+			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
+		case db.StatusQueued:
+			return m, tea.Batch(m.setFlash("Cancelling queued job...", false), m.cancelQueuedJob(job))
+		case db.StatusCompleted:
+			return m, m.setFlash(fmt.Sprintf("Job %d already completed", job.ID), true)
+		case db.StatusDead:
+			return m, m.setFlash(fmt.Sprintf("Job %d already dead", job.ID), true)
+		case db.StatusFailed:
+			return m, m.setFlash(fmt.Sprintf("Job %d already failed", job.ID), true)
+		default:
+			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, job.Status), true)
+		}
 
 	case key.Matches(msg, keys.Restart):
 		job := m.getTargetJob()
@@ -1471,7 +1498,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"e", "Edit queued job"},
 			{"r", "Restart job"},
 			{"R", "Edit & restart job"},
-			{"k", "Kill running job"},
+			{"k", "Kill/cancel job"},
 			{"g", "Start queued job now"},
 			{"S", "Start queue runner"},
 			{"x", "Remove job from list"},
@@ -1577,6 +1604,16 @@ func (m Model) renderInputForm(background string) string {
 }
 
 func (m Model) renderJobList(height int) string {
+	// DEBUG: Log at start of every render
+	f, _ := os.OpenFile("/tmp/rj-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if f != nil {
+		f.WriteString(fmt.Sprintf("=== renderJobList called, jobs=%d hosts=%d ===\n", len(m.jobs), len(m.hosts)))
+		for _, h := range m.hosts {
+			f.WriteString(fmt.Sprintf("  host=%s status=%d lastCheck=%v\n", h.Name, h.Status, h.LastCheck))
+		}
+		f.Close()
+	}
+
 	var rows []string
 
 	// Header
@@ -1648,6 +1685,9 @@ func (m Model) renderJobList(height int) string {
 
 		if i == selectedIdx {
 			line = selectedStyle.Width(m.width - 4).Render(line)
+		} else if m.isHostDisconnectedLong(job) {
+			// Dim jobs on hosts disconnected for more than 30 minutes
+			line = dimStyle.Render(line)
 		} else {
 			line = m.styleForStatus(job.Status).Render(line)
 		}
@@ -2682,8 +2722,8 @@ func (m Model) formatStatus(job *db.Job) string {
 		return fmt.Sprintf("✗ exit %d", *job.ExitCode)
 	case db.StatusDead:
 		return "✗ dead"
-	case db.StatusPending:
-		return "○ pending"
+	case db.StatusDraft:
+		return "○ draft"
 	case db.StatusQueued:
 		if hasPendingOps {
 			if depSpec != "" {
@@ -2713,7 +2753,7 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 		return completedStyle
 	case db.StatusDead:
 		return deadStyle
-	case db.StatusPending:
+	case db.StatusDraft:
 		return pendingStyle
 	case db.StatusQueued:
 		return queuedStyle
@@ -3335,6 +3375,25 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true}
 		}
 		return jobKilledMsg{jobID: job.ID, err: nil}
+	}
+}
+
+func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+
+	database := m.database
+	return func() tea.Msg {
+		result, err := ops.CancelQueuedJob(database, job, ops.DefaultOptions())
+		if err != nil {
+			return jobKilledMsg{jobID: job.ID, err: err, cancelled: true}
+		}
+		if result.Deferred {
+			// Job marked dead locally, removal will execute on next sync
+			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true, cancelled: true}
+		}
+		return jobKilledMsg{jobID: job.ID, err: nil, cancelled: true}
 	}
 }
 

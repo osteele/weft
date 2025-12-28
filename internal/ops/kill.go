@@ -69,6 +69,35 @@ func executeKill(database *sql.DB, host string, op *db.DeferredOperation, opts E
 	}, nil
 }
 
+// CancelQueuedJob cancels a queued job so it won't run when the queue drains to it.
+// The job is marked as dead and removed from the remote queue file.
+// Any pending queue_job or start_queued_job operations for this job are removed.
+func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	if job == nil {
+		return Result{}, fmt.Errorf("job is nil")
+	}
+
+	if job.Status != db.StatusQueued {
+		return Result{}, fmt.Errorf("job %d is not queued (status: %s)", job.ID, job.Status)
+	}
+
+	// Mark job as dead locally first (user intent is clear)
+	if err := db.MarkDeadByID(database, job.ID); err != nil {
+		return Result{}, fmt.Errorf("mark job dead: %w", err)
+	}
+
+	// Remove any pending queue/start operations for this job
+	// (they are incompatible with cancel intent)
+	db.DeletePendingOperationsForJob(database, job.ID, db.OpQueueJob, db.OpStartQueuedJob)
+
+	// Queue the remove operation to clean up remote queue file
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = "default"
+	}
+	return QueueAndExecute(database, job.Host, db.OpRemoveQueued, job.ID, queueName, "", opts)
+}
+
 // executeKillQueueRunnerJob kills a job running under the queue runner
 func executeKillQueueRunnerJob(host string, job *db.Job, opts ExecuteOptions) (Result, error) {
 	pidPattern := session.PidFilePattern(job.ID)

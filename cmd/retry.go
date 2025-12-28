@@ -14,16 +14,16 @@ import (
 
 var retryCmd = &cobra.Command{
 	Use:   "retry [job-id]",
-	Short: "Retry pending jobs",
-	Long: `Retry pending jobs that couldn't start (e.g., due to connection failures).
+	Short: "Retry draft jobs",
+	Long: `Retry draft jobs that couldn't start (e.g., due to connection failures).
 
 Examples:
-  remote-jobs retry --list               # List pending jobs
+  remote-jobs retry --list               # List draft jobs
   remote-jobs retry 42                   # Retry job #42
   remote-jobs retry 42 --host studio     # Retry on different host
-  remote-jobs retry --all                # Retry all pending jobs
-  remote-jobs retry --all --host cool30  # Retry pending jobs for cool30
-  remote-jobs retry --delete 42          # Remove pending job`,
+  remote-jobs retry --all                # Retry all draft jobs
+  remote-jobs retry --all --host cool30  # Retry draft jobs for cool30
+  remote-jobs retry --delete 42          # Remove draft job`,
 	RunE: runRetry,
 }
 
@@ -38,10 +38,10 @@ func init() {
 	// Removed: Retry command is deprecated, use `run --from <id>` instead
 	// rootCmd.AddCommand(retryCmd)
 
-	retryCmd.Flags().BoolVar(&retryList, "list", false, "List pending jobs")
-	retryCmd.Flags().BoolVar(&retryAll, "all", false, "Retry all pending jobs")
+	retryCmd.Flags().BoolVar(&retryList, "list", false, "List draft jobs")
+	retryCmd.Flags().BoolVar(&retryAll, "all", false, "Retry all draft jobs")
 	retryCmd.Flags().StringVar(&retryHost, "host", "", "Filter by host or override host for retry")
-	retryCmd.Flags().Int64Var(&retryDelete, "delete", 0, "Delete a pending job")
+	retryCmd.Flags().Int64Var(&retryDelete, "delete", 0, "Delete a draft job")
 }
 
 func runRetry(cmd *cobra.Command, args []string) error {
@@ -53,17 +53,17 @@ func runRetry(cmd *cobra.Command, args []string) error {
 
 	// Handle list mode
 	if retryList {
-		return listPendingJobs(database, retryHost)
+		return listDraftJobs(database, retryHost)
 	}
 
 	// Handle delete mode
 	if retryDelete > 0 {
-		return deletePendingJob(database, retryDelete)
+		return deleteDraftJob(database, retryDelete)
 	}
 
 	// Handle all mode
 	if retryAll {
-		return retryAllPending(database, retryHost)
+		return retryAllDraft(database, retryHost)
 	}
 
 	// Handle single job retry
@@ -79,18 +79,18 @@ func runRetry(cmd *cobra.Command, args []string) error {
 	return retrySingleJob(database, jobID, retryHost)
 }
 
-func listPendingJobs(database *sql.DB, host string) error {
-	jobs, err := db.ListPending(database, host)
+func listDraftJobs(database *sql.DB, host string) error {
+	jobs, err := db.ListDraft(database, host)
 	if err != nil {
-		return fmt.Errorf("list pending: %w", err)
+		return fmt.Errorf("list draft: %w", err)
 	}
 
 	if len(jobs) == 0 {
-		fmt.Println("No pending jobs")
+		fmt.Println("No draft jobs")
 		return nil
 	}
 
-	fmt.Printf("Pending jobs:\n\n")
+	fmt.Printf("Draft jobs:\n\n")
 	for _, job := range jobs {
 		fmt.Printf("ID %d on %s\n", job.ID, job.Host)
 		fmt.Printf("  Command: %s\n", job.EffectiveCommand())
@@ -104,38 +104,38 @@ func listPendingJobs(database *sql.DB, host string) error {
 	return nil
 }
 
-func deletePendingJob(database *sql.DB, id int64) error {
-	job, err := db.GetPendingJob(database, id)
+func deleteDraftJob(database *sql.DB, id int64) error {
+	job, err := db.GetDraftJob(database, id)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("pending job %d not found", id)
+		return fmt.Errorf("draft job %d not found", id)
 	}
 
-	if err := db.DeletePending(database, id); err != nil {
+	if err := db.DeleteDraft(database, id); err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
 
-	fmt.Printf("Deleted pending job %d on %s\n", id, job.Host)
+	fmt.Printf("Deleted draft job %d on %s\n", id, job.Host)
 	return nil
 }
 
-func retryAllPending(database *sql.DB, host string) error {
-	jobs, err := db.ListPending(database, host)
+func retryAllDraft(database *sql.DB, host string) error {
+	jobs, err := db.ListDraft(database, host)
 	if err != nil {
-		return fmt.Errorf("list pending: %w", err)
+		return fmt.Errorf("list draft: %w", err)
 	}
 
 	if len(jobs) == 0 {
-		fmt.Println("No pending jobs to retry")
+		fmt.Println("No draft jobs to retry")
 		return nil
 	}
 
 	var successes, failures int
 	for _, job := range jobs {
 		fmt.Printf("Retrying job %d on %s...\n", job.ID, job.Host)
-		if err := startPendingJob(database, job, ""); err != nil {
+		if err := startDraftJob(database, job, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "  Failed: %v\n", err)
 			failures++
 		} else {
@@ -148,26 +148,26 @@ func retryAllPending(database *sql.DB, host string) error {
 }
 
 func retrySingleJob(database *sql.DB, id int64, overrideHost string) error {
-	job, err := db.GetPendingJob(database, id)
+	job, err := db.GetDraftJob(database, id)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("pending job %d not found", id)
+		return fmt.Errorf("draft job %d not found", id)
 	}
 
-	return startPendingJob(database, job, overrideHost)
+	return startDraftJob(database, job, overrideHost)
 }
 
-func startPendingJob(database *sql.DB, job *db.Job, overrideHost string) error {
+func startDraftJob(database *sql.DB, job *db.Job, overrideHost string) error {
 	host := job.Host
 	if overrideHost != "" {
 		host = overrideHost
 	}
 
-	// Delete the pending entry
-	if err := db.DeletePending(database, job.ID); err != nil {
-		return fmt.Errorf("delete pending: %w", err)
+	// Delete the draft entry
+	if err := db.DeleteDraft(database, job.ID); err != nil {
+		return fmt.Errorf("delete draft: %w", err)
 	}
 
 	// Create new job record to get ID

@@ -24,7 +24,7 @@ Examples:
   remote-jobs list --all              # All jobs including older
   remote-jobs list --running          # Running jobs only
   remote-jobs list --running --sync   # Running jobs (sync first)
-  remote-jobs list --pending          # Pending jobs
+  remote-jobs list --draft            # Draft jobs
   remote-jobs list --host cool30      # Jobs on cool30
   remote-jobs list --search training  # Search jobs
   remote-jobs list --show 42          # Job details`,
@@ -35,7 +35,7 @@ var (
 	listRunning   bool
 	listCompleted bool
 	listDead      bool
-	listPending   bool
+	listDraft     bool
 	listHost      string
 	listSearch    string
 	listLimit     int
@@ -52,7 +52,7 @@ func init() {
 	listCmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
 	listCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
 	listCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
-	listCmd.Flags().BoolVar(&listPending, "pending", false, "Show only pending jobs")
+	listCmd.Flags().BoolVar(&listDraft, "draft", false, "Show only draft jobs")
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	listCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
@@ -121,8 +121,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		status = db.StatusCompleted
 	} else if listDead {
 		status = db.StatusDead
-	} else if listPending {
-		status = db.StatusPending
+	} else if listDraft {
+		status = db.StatusDraft
 	}
 
 	// Default to 7 days unless --all is specified

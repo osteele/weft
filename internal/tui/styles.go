@@ -58,7 +58,8 @@ var (
 			Padding(0, 1)
 
 	dimStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("8"))
+			Foreground(lipgloss.Color("240")). // Darker gray
+			Faint(true)
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("9")).

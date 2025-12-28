@@ -43,8 +43,8 @@ const StatusCompleted = "completed"
 // StatusDead indicates a job terminated unexpectedly
 const StatusDead = "dead"
 
-// StatusPending indicates a job queued but not started (for --queue flag)
-const StatusPending = "pending"
+// StatusDraft indicates a job saved locally but not yet submitted (for --queue flag without dependencies)
+const StatusDraft = "draft"
 
 // StatusQueued indicates a job queued for sequential execution
 const StatusQueued = "queued"
@@ -320,11 +320,11 @@ func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 	return err
 }
 
-// UpdateJobPending converts a starting job to pending status (for --queue-on-fail)
-func UpdateJobPending(db *sql.DB, id int64) error {
+// UpdateJobDraft converts a starting job to draft status (for --queue-on-fail)
+func UpdateJobDraft(db *sql.DB, id int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
-		StatusPending, id, StatusStarting,
+		StatusDraft, id, StatusStarting,
 	)
 	return err
 }
@@ -413,13 +413,13 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 	return err
 }
 
-// RecordPending records a pending job and returns its ID
-func RecordPending(db *sql.DB, host, workingDir, command, description string) (int64, error) {
+// RecordDraft records a draft job and returns its ID
+func RecordDraft(db *sql.DB, host, workingDir, command, description string) (int64, error) {
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status)
 		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?)`,
-		host, workingDir, command, description, createdAt, StatusPending,
+		host, workingDir, command, description, createdAt, StatusDraft,
 	)
 	if err != nil {
 		return 0, err
@@ -478,11 +478,11 @@ func MarkDead(db *sql.DB, host, sessionName string) error {
 	return err
 }
 
-// MarkStarted transitions a pending job to running
+// MarkStarted transitions a draft job to running
 func MarkStarted(db *sql.DB, id int64, startTime int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET start_time = ?, status = ? WHERE id = ? AND status = ?`,
-		startTime, StatusRunning, id, StatusPending,
+		startTime, StatusRunning, id, StatusDraft,
 	)
 	return err
 }
@@ -496,9 +496,9 @@ func UpdateStartTime(db *sql.DB, id int64, startTime int64) error {
 	return err
 }
 
-// DeletePending deletes a pending job
-func DeletePending(db *sql.DB, id int64) error {
-	_, err := db.Exec(`DELETE FROM jobs WHERE id = ? AND status = ?`, id, StatusPending)
+// DeleteDraft deletes a draft job
+func DeleteDraft(db *sql.DB, id int64) error {
+	_, err := db.Exec(`DELETE FROM jobs WHERE id = ? AND status = ?`, id, StatusDraft)
 	return err
 }
 
@@ -535,10 +535,10 @@ func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 	return scanJob(row)
 }
 
-// GetPendingJob retrieves a pending job by ID
-func GetPendingJob(db *sql.DB, id int64) (*Job, error) {
+// GetDraftJob retrieves a draft job by ID
+func GetDraftJob(db *sql.DB, id int64) (*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns)
-	row := db.QueryRow(query, id, StatusPending)
+	row := db.QueryRow(query, id, StatusDraft)
 	return scanJob(row)
 }
 
@@ -717,10 +717,10 @@ func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int) 
 	return queryJobs(db, query, args...)
 }
 
-// ListPending returns pending jobs, optionally filtered by host
-func ListPending(db *sql.DB, host string) ([]*Job, error) {
+// ListDraft returns draft jobs, optionally filtered by host
+func ListDraft(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0`, jobSelectColumns)
-	args := []interface{}{StatusPending}
+	args := []interface{}{StatusDraft}
 
 	if host != "" {
 		query += ` AND host = ?`

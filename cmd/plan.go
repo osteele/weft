@@ -560,7 +560,7 @@ func classifyJobStatus(job *db.Job) string {
 		return "failed"
 	case db.StatusDead, db.StatusFailed:
 		return "failed"
-	case db.StatusQueued, db.StatusPending:
+	case db.StatusQueued, db.StatusDraft:
 		return "queued"
 	case db.StatusRunning, db.StatusStarting:
 		return "running"

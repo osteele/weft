@@ -135,7 +135,7 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 			}
 		case db.StatusDead:
 			style = d.styles.dead
-		case db.StatusQueued, db.StatusPending:
+		case db.StatusQueued, db.StatusDraft:
 			style = d.styles.pending
 		}
 	}
@@ -167,8 +167,8 @@ func formatJobStatus(job *db.Job) string {
 		return "◌ queued"
 	case db.StatusDead:
 		return "✗ dead"
-	case db.StatusPending:
-		return "◌ pending"
+	case db.StatusDraft:
+		return "◌ draft"
 	default:
 		return job.Status
 	}
