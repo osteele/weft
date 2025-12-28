@@ -516,3 +516,85 @@ func TestMultipleDeferredOperationsForSameJob(t *testing.T) {
 		t.Error("Expected start_queued_job to still exist")
 	}
 }
+
+// TestDeletePendingOperationsForJob tests deletion of multiple operation types.
+func TestDeletePendingOperationsForJob(t *testing.T) {
+	db := setupTestDB(t)
+
+	jobID, err := RecordQueued(db, "testhost", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("Failed to insert job: %v", err)
+	}
+
+	// Add multiple operation types
+	AddDeferredOperation(db, "testhost", OpRunJob, jobID, "", `{"cmd":"echo 1"}`)
+	AddDeferredOperation(db, "testhost", OpRestartJob, jobID, "", `{"cmd":"echo 2"}`)
+	AddDeferredOperation(db, "testhost", OpKillJob, jobID, "", `{}`)
+
+	// All three should exist
+	hasRun, _ := HasPendingOperation(db, jobID, OpRunJob)
+	hasRestart, _ := HasPendingOperation(db, jobID, OpRestartJob)
+	hasKill, _ := HasPendingOperation(db, jobID, OpKillJob)
+
+	if !hasRun {
+		t.Error("Expected run_job operation")
+	}
+	if !hasRestart {
+		t.Error("Expected restart_job operation")
+	}
+	if !hasKill {
+		t.Error("Expected kill_job operation")
+	}
+
+	// Delete run and restart (simulating a kill canceling pending starts)
+	count, err := DeletePendingOperationsForJob(db, jobID, OpRunJob, OpRestartJob)
+	if err != nil {
+		t.Fatalf("DeletePendingOperationsForJob failed: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("Expected 2 deletions, got %d", count)
+	}
+
+	// Run and restart should be gone, kill should remain
+	hasRun, _ = HasPendingOperation(db, jobID, OpRunJob)
+	hasRestart, _ = HasPendingOperation(db, jobID, OpRestartJob)
+	hasKill, _ = HasPendingOperation(db, jobID, OpKillJob)
+
+	if hasRun {
+		t.Error("Expected run_job to be deleted")
+	}
+	if hasRestart {
+		t.Error("Expected restart_job to be deleted")
+	}
+	if !hasKill {
+		t.Error("Expected kill_job to still exist")
+	}
+}
+
+// TestDeletePendingOperationsForJobEmpty tests deletion with empty operation list.
+func TestDeletePendingOperationsForJobEmpty(t *testing.T) {
+	db := setupTestDB(t)
+
+	jobID, err := RecordQueued(db, "testhost", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("Failed to insert job: %v", err)
+	}
+
+	// Add an operation
+	AddDeferredOperation(db, "testhost", OpRunJob, jobID, "", `{}`)
+
+	// Delete with empty list should do nothing
+	count, err := DeletePendingOperationsForJob(db, jobID)
+	if err != nil {
+		t.Fatalf("DeletePendingOperationsForJob failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("Expected 0 deletions with empty list, got %d", count)
+	}
+
+	// Operation should still exist
+	hasRun, _ := HasPendingOperation(db, jobID, OpRunJob)
+	if !hasRun {
+		t.Error("Expected run_job to still exist")
+	}
+}

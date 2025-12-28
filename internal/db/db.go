@@ -1371,17 +1371,28 @@ const (
 	OpQueueJob        = "queue_job"
 	OpStartQueuedJob  = "start_queued_job"
 	OpUpdateQueuedJob = "update_queued_job"
+	OpRunJob          = "run_job"     // Create and run a new job
+	OpRestartJob      = "restart_job" // Restart a completed/dead job
 )
 
 // AddDeferredOperation adds an operation to execute when host becomes reachable
 func AddDeferredOperation(db *sql.DB, host, operation string, jobID int64, queueName string, payload string) error {
+	_, err := AddDeferredOperationReturningID(db, host, operation, jobID, queueName, payload)
+	return err
+}
+
+// AddDeferredOperationReturningID adds an operation and returns its ID
+func AddDeferredOperationReturningID(db *sql.DB, host, operation string, jobID int64, queueName string, payload string) (int64, error) {
 	createdAt := time.Now().Unix()
-	_, err := db.Exec(
+	result, err := db.Exec(
 		`INSERT INTO deferred_operations (host, operation, job_id, queue_name, payload, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		host, operation, jobID, queueName, payload, createdAt,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
 // GetDeferredOperations returns all deferred operations for a host
@@ -1422,6 +1433,29 @@ func GetDeferredOperations(db *sql.DB, host string) ([]*DeferredOperation, error
 func DeleteDeferredOperation(db *sql.DB, id int64) error {
 	_, err := db.Exec(`DELETE FROM deferred_operations WHERE id = ?`, id)
 	return err
+}
+
+// DeletePendingOperationsForJob removes pending deferred operations of specific types for a job.
+// This is used to remove incompatible operations, e.g., removing pending start operations
+// when a kill is requested before the start was executed.
+func DeletePendingOperationsForJob(db *sql.DB, jobID int64, operations ...string) (int64, error) {
+	if len(operations) == 0 {
+		return 0, nil
+	}
+	// Build placeholders for the IN clause
+	placeholders := make([]string, len(operations))
+	args := make([]interface{}, len(operations)+1)
+	args[0] = jobID
+	for i, op := range operations {
+		placeholders[i] = "?"
+		args[i+1] = op
+	}
+	query := `DELETE FROM deferred_operations WHERE job_id = ? AND operation IN (` + strings.Join(placeholders, ",") + `)`
+	result, err := db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // HasPendingDeferredOperationForJob checks if there's a pending deferred operation for a job ID

@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -223,14 +224,16 @@ type logFetchedMsg struct {
 }
 
 type jobKilledMsg struct {
-	jobID int64
-	err   error
+	jobID    int64
+	err      error
+	deferred bool // true if kill was queued for later (host offline)
 }
 
 type jobRestartedMsg struct {
 	oldJobID int64
 	newJobID int64
 	err      error
+	deferred bool // true if restart was queued for later (host offline)
 }
 
 type jobStartedNowMsg struct {
@@ -257,8 +260,9 @@ type jobRemovedMsg struct {
 }
 
 type jobCreatedMsg struct {
-	jobID int64
-	err   error
+	jobID    int64
+	err      error
+	deferred bool // true if job creation was queued for later (host offline)
 }
 
 type jobEditedMsg struct {
@@ -635,6 +639,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var flashCmd tea.Cmd
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Kill failed: %v", msg.err), true)
+		} else if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d marked dead (kill queued for when host is online)", msg.jobID), false)
 		} else {
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
 		}
@@ -647,6 +653,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Restart failed: %v", msg.err), true)
 		}
 		m.pendingSelectJobID = msg.newJobID
+		if msg.deferred {
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d created (will start when host is online)", msg.newJobID), false), m.refreshJobs())
+		}
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID), false), m.refreshJobs())
 
 	case jobStartedNowMsg:
@@ -702,6 +711,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var flashCmd tea.Cmd
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Create failed: %v", msg.err), true)
+		} else if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d created (will start when host is online)", msg.jobID), false)
+			m.pendingSelectJobID = msg.jobID
 		} else {
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d started", msg.jobID), false)
 			m.pendingSelectJobID = msg.jobID
@@ -3314,12 +3326,15 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 
 	database := m.database
 	return func() tea.Msg {
-		tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-		err := ssh.TmuxKillSession(job.Host, tmuxSession)
-		if err == nil {
-			db.MarkDeadByID(database, job.ID)
+		result, err := ops.KillJob(database, job, ops.DefaultOptions())
+		if err != nil {
+			return jobKilledMsg{jobID: job.ID, err: err}
 		}
-		return jobKilledMsg{jobID: job.ID, err: err}
+		if result.Deferred {
+			// Job marked dead locally, kill will execute on next sync
+			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true}
+		}
+		return jobKilledMsg{jobID: job.ID, err: nil}
 	}
 }
 
@@ -3329,13 +3344,9 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		// Read metadata from remote (for old jobs)
+		// Try to read metadata from remote for more accurate info (best effort)
 		metadataFile := session.JobMetadataFile(job.ID, job.StartTime, job.SessionName)
-		content, err := ssh.ReadRemoteFile(job.Host, metadataFile)
-		if err != nil || content == "" {
-			// Fall back to database info
-			content = ""
-		}
+		content, _ := ssh.ReadRemoteFile(job.Host, metadataFile)
 
 		var workingDir, command, description string
 		if content != "" {
@@ -3360,75 +3371,30 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("missing working directory or command")}
 		}
 
-		// Kill existing session if running
+		// Kill existing session if running (best effort, ignore errors)
 		oldTmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 		exists, _ := ssh.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
 		if exists {
 			ssh.TmuxKillSession(job.Host, oldTmuxSession)
 		}
 
-		// Create new job record to get ID
-		newJobID, err := db.RecordJobStarting(database, job.Host, workingDir, command, description)
+		// Use ops package to restart job (queues if host offline)
+		result, err := ops.RestartJob(database, ops.RestartJobParams{
+			OriginalJob: job,
+			WorkingDir:  workingDir,
+			Command:     command,
+			Description: description,
+		}, ops.DefaultOptions())
+
 		if err != nil {
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("create job record: %w", err)}
-		}
-
-		// Get the new job to access start time
-		newJob, err := db.GetJobByID(database, newJobID)
-		if err != nil || newJob == nil {
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("get new job: %w", err)}
-		}
-
-		// Generate new file paths from job ID
-		newTmuxSession := session.TmuxSessionName(newJobID)
-		logFile := session.LogFile(newJobID, newJob.StartTime)
-		statusFile := session.StatusFile(newJobID, newJob.StartTime)
-		newMetadataFile := session.MetadataFile(newJobID, newJob.StartTime)
-
-		// Create log directory on remote
-		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-		if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
-			errMsg := ssh.FriendlyError(job.Host, stderr, err)
-			db.UpdateJobFailed(database, newJobID, errMsg)
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("%s", errMsg)}
-		}
-
-		// Save metadata
-		newMetadata := session.FormatMetadata(newJobID, workingDir, command, job.Host, description, newJob.StartTime)
-		// Don't quote path - it contains ~ which needs shell expansion
-		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
-		ssh.Run(job.Host, metadataCmd)
-
-		// Generate pid file path
-		pidFile := session.PidFile(newJobID, newJob.StartTime)
-
-		// Create the wrapped command using the common builder (tested for tilde expansion)
-		wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-			JobID:      newJobID,
-			WorkingDir: workingDir,
-			Command:    command,
-			LogFile:    logFile,
-			StatusFile: statusFile,
-			PidFile:    pidFile,
-		})
-
-		// Escape single quotes for embedding in single-quoted string
-		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-
-		// Start tmux session - use single quotes to prevent shell expansion
-		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", newTmuxSession, escapedCommand)
-		if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
-			errMsg := ssh.FriendlyError(job.Host, stderr, err)
-			db.UpdateJobFailed(database, newJobID, errMsg)
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("%s", errMsg)}
-		}
-
-		// Mark job as running
-		if err := db.UpdateJobRunning(database, newJobID); err != nil {
 			return jobRestartedMsg{oldJobID: job.ID, err: err}
 		}
 
-		return jobRestartedMsg{oldJobID: job.ID, newJobID: newJobID}
+		return jobRestartedMsg{
+			oldJobID: job.ID,
+			newJobID: result.JobID,
+			deferred: result.Deferred,
+		}
 	}
 }
 
@@ -3982,69 +3948,23 @@ func (m Model) createJob() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		timeout := 30 * time.Second
+		// Use ops package to run job (queues if host offline)
+		result, err := ops.RunJob(database, ops.RunJobParams{
+			Host:        host,
+			WorkingDir:  workingDir,
+			Command:     command,
+			Description: description,
+			EnvVars:     envVars,
+		}, ops.DefaultOptions())
 
-		// Create job record to get ID
-		jobID, err := db.RecordJobStarting(database, host, workingDir, command, description)
 		if err != nil {
-			return jobCreatedMsg{err: fmt.Errorf("create job record: %w", err)}
-		}
-
-		// Get the new job to access start time
-		job, err := db.GetJobByID(database, jobID)
-		if err != nil || job == nil {
-			return jobCreatedMsg{err: fmt.Errorf("get new job: %w", err)}
-		}
-
-		// Generate file paths from job ID
-		tmuxSession := session.TmuxSessionName(jobID)
-		logFile := session.LogFile(jobID, job.StartTime)
-		statusFile := session.StatusFile(jobID, job.StartTime)
-		metadataFile := session.MetadataFile(jobID, job.StartTime)
-		pidFile := session.PidFile(jobID, job.StartTime)
-
-		// Create log directory on remote
-		mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-		if _, stderr, err := ssh.RunWithTimeout(host, mkdirCmd, timeout); err != nil {
-			errMsg := ssh.FriendlyError(host, stderr, err)
-			db.UpdateJobFailed(database, jobID, errMsg)
-			return jobCreatedMsg{err: fmt.Errorf("%s", errMsg)}
-		}
-
-		// Save metadata
-		metadata := session.FormatMetadata(jobID, workingDir, command, host, description, job.StartTime)
-		// Don't quote path - it contains ~ which needs shell expansion
-		metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
-		ssh.RunWithTimeout(host, metadataCmd, timeout)
-
-		// Create the wrapped command using the common builder (tested for tilde expansion)
-		wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-			JobID:      jobID,
-			WorkingDir: workingDir,
-			Command:    command,
-			LogFile:    logFile,
-			StatusFile: statusFile,
-			PidFile:    pidFile,
-			EnvVars:    envVars,
-		})
-
-		// Escape single quotes for embedding in single-quoted string
-		escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-
-		// Start tmux session - use single quotes to prevent shell expansion
-		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
-		if _, stderr, err := ssh.RunWithTimeout(host, tmuxCmd, timeout); err != nil {
-			errMsg := ssh.FriendlyError(host, stderr, err)
-			db.UpdateJobFailed(database, jobID, errMsg)
-			return jobCreatedMsg{err: fmt.Errorf("%s", errMsg)}
-		}
-
-		// Mark job as running
-		if err := db.UpdateJobRunning(database, jobID); err != nil {
 			return jobCreatedMsg{err: err}
 		}
 
-		return jobCreatedMsg{jobID: jobID}
+		return jobCreatedMsg{
+			jobID:    result.JobID,
+			deferred: result.Deferred,
+		}
 	}
 }
 

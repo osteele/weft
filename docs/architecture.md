@@ -84,6 +84,11 @@ remote-jobs/
 │   ├── db/                # Database operations
 │   │   ├── db.go          # Job CRUD, queries, migrations
 │   │   └── db_test.go     # Database tests
+│   ├── ops/               # Unified job operations (CLI + TUI)
+│   │   ├── ops.go         # Queue-and-execute pattern, deferred ops
+│   │   ├── kill.go        # Kill job operations
+│   │   ├── run.go         # Run/restart job operations
+│   │   └── ops_test.go    # Operation tests
 │   ├── session/           # Session/file path management
 │   │   ├── session.go     # Tmux naming, file paths, metadata
 │   │   └── session_test.go
@@ -131,7 +136,38 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 - The `--queue-on-fail` flag allows jobs to be queued for later retry on connection errors
 - `--from` flag replaces the old `retry` command with a more composable approach
 
-### 2. Database Layer (`internal/db/`)
+### 2. Operations Layer (`internal/ops/`)
+
+Provides unified job operations used by both CLI and TUI. All operations follow the same queue-and-execute pattern for network resilience.
+
+**Pattern:**
+1. Queue the operation in `deferred_operations` table
+2. Attempt to drain the queue for that host
+3. If host unreachable, operation stays queued for next sync
+4. If host reachable, execute and remove from queue
+
+**Key Functions:**
+
+| Function | Purpose |
+|----------|---------|
+| `KillJob` | Kill a running job's tmux session |
+| `RunJob` | Start a new job on a host |
+| `RestartJob` | Kill existing job and start a new one with same command |
+| `QueueAndExecute` | Core pattern: queue operation, then drain |
+| `ExecuteAllDeferredOperations` | Process all pending ops for a host (used by sync) |
+
+**Conflict Resolution:**
+
+When operations conflict, later operations cancel earlier incompatible ones:
+- Killing a job removes any pending run/restart operations for that job
+- This prevents "zombie" operations from executing after a job is killed
+
+**Benefits:**
+- Consistent behavior between CLI and TUI
+- Network-resilient: operations survive disconnections
+- Idempotent: duplicate operations are detected and skipped
+
+### 3. Database Layer (`internal/db/`)
 
 Uses [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure Go SQLite) for zero CGO dependencies.
 
@@ -160,7 +196,7 @@ CREATE INDEX idx_jobs_status ON jobs(status);
 CREATE INDEX idx_jobs_start ON jobs(start_time DESC);
 ```
 
-### 3. SSH Layer (`internal/ssh/`)
+### 4. SSH Layer (`internal/ssh/`)
 
 Wraps SSH/SCP commands with error handling and retry logic.
 
@@ -186,7 +222,7 @@ var connectionErrorPattern = regexp.MustCompile(
 
 The SSH layer distinguishes connection errors (which may be transient) from command errors (which indicate real failures).
 
-### 4. Session Management (`internal/session/`)
+### 5. Session Management (`internal/session/`)
 
 Manages tmux session naming and remote file paths.
 
@@ -226,7 +262,7 @@ echo "=== END exit=$EXIT_CODE $(date) ===" >> $LOG_FILE;
 echo $EXIT_CODE > $STATUS_FILE $NOTIFY_CMD
 ```
 
-### 5. TUI (`internal/tui/`)
+### 6. TUI (`internal/tui/`)
 
 Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm architecture) and [Lipgloss](https://github.com/charmbracelet/lipgloss) (styling).
 
@@ -288,7 +324,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 - Real-time CPU/GPU stats for running jobs
 - Modal overlays for job creation and long operations
 
-### 6. Configuration (`internal/config/`)
+### 7. Configuration (`internal/config/`)
 
 YAML configuration at `~/.config/remote-jobs/config.yaml`:
 

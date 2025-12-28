@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -112,85 +112,17 @@ func removeQueuedJob(database *sql.DB, job *db.Job) error {
 func killRunningJob(database *sql.DB, job *db.Job) error {
 	fmt.Printf("Killing job %d on %s...\n", job.ID, job.Host)
 
-	// Queue-runner jobs (SessionName == "") don't have individual tmux sessions
-	// They run under the queue runner's session, so we need to kill the PID directly
-	if job.SessionName == "" {
-		return killQueueRunnerJob(database, job)
+	// Use unified ops package for killing jobs
+	result, err := ops.KillJob(database, job, ops.DefaultOptions())
+	if err != nil {
+		return err
 	}
 
-	// Regular jobs have their own tmux sessions
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	if err := ssh.TmuxKillSession(job.Host, tmuxSession); err != nil {
-		// Check if connection error
-		if ssh.IsConnectionError(err.Error()) {
-			// Host unreachable - add deferred operation
-			fmt.Printf("Host %s unreachable, will kill on next sync\n", job.Host)
-			if err := db.AddDeferredOperation(database, job.Host, db.OpKillJob, job.ID, "", ""); err != nil {
-				return fmt.Errorf("add deferred operation: %w", err)
-			}
-			// Mark job as dead in database anyway
-			if err := db.MarkDeadByID(database, job.ID); err != nil {
-				fmt.Printf("Warning: failed to update database: %v\n", err)
-			}
-			fmt.Printf("Job %d marked for kill on next sync\n", job.ID)
-			return nil
-		}
-		return fmt.Errorf("kill session: %v", err)
-	}
-
-	// Mark job as dead in database
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		fmt.Printf("Warning: failed to update database: %v\n", err)
-	}
-
-	fmt.Printf("Job %d killed\n", job.ID)
-	return nil
-}
-
-func killQueueRunnerJob(database *sql.DB, job *db.Job) error {
-	// Find and kill the PID for this queue-runner job
-	pidPattern := session.PidFilePattern(job.ID)
-
-	// Try to read PID and kill the process
-	killCmd := fmt.Sprintf(`
-		pid=$(cat %s 2>/dev/null | head -1)
-		if [ -n "$pid" ] && kill -0 $pid 2>/dev/null; then
-			kill $pid 2>/dev/null && echo "killed" || echo "failed"
-		else
-			echo "not_running"
-		fi
-	`, pidPattern)
-
-	stdout, stderr, err := ssh.Run(job.Host, killCmd)
-
-	if err != nil && ssh.IsConnectionError(stderr) {
-		// Host unreachable - add deferred operation
+	if result.Deferred {
 		fmt.Printf("Host %s unreachable, will kill on next sync\n", job.Host)
-		if err := db.AddDeferredOperation(database, job.Host, db.OpKillJob, job.ID, "", ""); err != nil {
-			return fmt.Errorf("add deferred operation: %w", err)
-		}
-		// Mark job as dead in database anyway
-		if err := db.MarkDeadByID(database, job.ID); err != nil {
-			fmt.Printf("Warning: failed to update database: %v\n", err)
-		}
 		fmt.Printf("Job %d marked for kill on next sync\n", job.ID)
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("kill process: %s", strings.TrimSpace(stderr))
-	}
-
-	result := strings.TrimSpace(stdout)
-	if result == "not_running" {
-		fmt.Printf("Job %d is not running (already finished)\n", job.ID)
-	} else if result == "killed" {
-		fmt.Printf("Job %d killed\n", job.ID)
 	} else {
-		fmt.Printf("Warning: unexpected result: %s\n", result)
-	}
-
-	// Mark job as dead in database
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		fmt.Printf("Warning: failed to update database: %v\n", err)
+		fmt.Println(result.Message)
 	}
 
 	return nil

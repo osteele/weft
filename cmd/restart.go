@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -73,7 +74,7 @@ func restartSingleJob(database *sql.DB, jobID int64) error {
 		return fmt.Errorf("not found")
 	}
 
-	// Read metadata from remote (for additional info)
+	// Read metadata from remote (for additional info - best effort)
 	metadataFile := session.JobMetadataFile(job.ID, job.StartTime, job.SessionName)
 	content, _ := ssh.ReadRemoteFile(job.Host, metadataFile)
 
@@ -105,77 +106,33 @@ func restartSingleJob(database *sql.DB, jobID int64) error {
 		fmt.Printf("Description: %s\n", description)
 	}
 
-	// Kill existing session if running
+	// Kill existing session if running (best effort)
 	oldTmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, _ := ssh.TmuxSessionExists(job.Host, oldTmuxSession)
+	exists, _ := ssh.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
 	if exists {
 		fmt.Printf("Killing existing session...\n")
-		if err := ssh.TmuxKillSession(job.Host, oldTmuxSession); err != nil {
-			return fmt.Errorf("kill session: %w", err)
-		}
+		ssh.TmuxKillSession(job.Host, oldTmuxSession)
 	}
 
-	// Create new job record to get ID
-	newJobID, err := db.RecordJobStarting(database, job.Host, workingDir, command, description)
+	// Use unified ops package for restarting jobs
+	result, err := ops.RestartJob(database, ops.RestartJobParams{
+		OriginalJob: job,
+		WorkingDir:  workingDir,
+		Command:     command,
+		Description: description,
+	}, ops.DefaultOptions())
+
 	if err != nil {
-		return fmt.Errorf("create job record: %w", err)
+		return err
 	}
 
-	// Get the new job to access start time
-	newJob, err := db.GetJobByID(database, newJobID)
-	if err != nil || newJob == nil {
-		return fmt.Errorf("get new job: %w", err)
+	if result.Deferred {
+		fmt.Printf("Host %s unreachable, job will start on next sync\n", job.Host)
+		fmt.Printf("New job ID: %d (queued)\n", result.JobID)
+	} else {
+		fmt.Println("✓ Job restarted successfully")
+		fmt.Printf("New job ID: %d\n", result.JobID)
 	}
-
-	// Generate new file paths from job ID
-	newTmuxSession := session.TmuxSessionName(newJobID)
-	logFile := session.LogFile(newJobID, newJob.StartTime)
-	statusFile := session.StatusFile(newJobID, newJob.StartTime)
-	newMetadataFile := session.MetadataFile(newJobID, newJob.StartTime)
-	pidFile := session.PidFile(newJobID, newJob.StartTime)
-
-	// Create log directory on remote
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-	if _, stderr, err := ssh.RunWithRetry(job.Host, mkdirCmd); err != nil {
-		errMsg := ssh.FriendlyError(job.Host, stderr, err)
-		db.UpdateJobFailed(database, newJobID, errMsg)
-		return fmt.Errorf("%s", errMsg)
-	}
-
-	// Save metadata
-	newMetadata := session.FormatMetadata(newJobID, workingDir, command, job.Host, description, newJob.StartTime)
-	// Don't quote path - it contains ~ which needs shell expansion
-	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", newMetadataFile, newMetadata)
-	ssh.RunWithRetry(job.Host, metadataCmd)
-
-	// Create the wrapped command using the common builder (tested for tilde expansion)
-	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-		JobID:      newJobID,
-		WorkingDir: workingDir,
-		Command:    command,
-		LogFile:    logFile,
-		StatusFile: statusFile,
-		PidFile:    pidFile,
-	})
-
-	// Escape single quotes for embedding in single-quoted string
-	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-
-	// Start tmux session - use single quotes to prevent shell expansion
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", newTmuxSession, escapedCommand)
-	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
-		errMsg := ssh.FriendlyError(job.Host, stderr, err)
-		db.UpdateJobFailed(database, newJobID, errMsg)
-		return fmt.Errorf("%s", errMsg)
-	}
-
-	// Mark job as running
-	if err := db.UpdateJobRunning(database, newJobID); err != nil {
-		return fmt.Errorf("update job status: %w", err)
-	}
-
-	fmt.Println("✓ Job restarted successfully")
-	fmt.Printf("New job ID: %d\n", newJobID)
 
 	return nil
 }

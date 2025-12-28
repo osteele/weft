@@ -3,7 +3,6 @@ package cmd
 import (
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -11,7 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/queuejob"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -315,216 +314,38 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 	return true, nil
 }
 
-// executeDeferredOperations executes pending operations for a host
+// executeDeferredOperations executes pending operations for a host using the unified ops package
 func executeDeferredOperations(database *sql.DB, host string) error {
-	ops, err := db.GetDeferredOperations(database, host)
+	// Check count first for verbose output
+	operations, err := db.GetDeferredOperations(database, host)
 	if err != nil {
 		return fmt.Errorf("get deferred operations: %w", err)
 	}
 
-	if len(ops) == 0 {
+	if len(operations) == 0 {
 		return nil
 	}
 
 	if syncVerbose {
-		fmt.Printf("  %s: executing %d deferred operation(s)\n", host, len(ops))
+		fmt.Printf("  %s: executing %d deferred operation(s)\n", host, len(operations))
 	}
 
-	for _, op := range ops {
-		var err error
-		switch op.Operation {
-		case db.OpKillJob:
-			err = executeDeferredKill(host, op)
-		case db.OpRemoveQueued:
-			err = executeDeferredRemoveQueued(host, op)
-		case db.OpMoveFromQueue:
-			err = executeDeferredMoveFrom(host, op)
-		case db.OpQueueJob:
-			err = executeDeferredQueueAdd(database, op)
-		case db.OpStartQueuedJob:
-			err = executeDeferredStartQueued(database, op)
-		case db.OpUpdateQueuedJob:
-			err = executeDeferredUpdateQueued(database, op)
-		default:
-			err = fmt.Errorf("unknown operation: %s", op.Operation)
-		}
-
-		if err != nil {
-			if syncVerbose {
-				fmt.Fprintf(os.Stderr, "    Warning: operation %s for job %d failed: %v\n",
-					op.Operation, op.JobID, err)
-			}
-			// Continue with other operations
-			continue
-		}
-
-		// Remove completed operation
-		if err := db.DeleteDeferredOperation(database, op.ID); err != nil {
-			if syncVerbose {
-				fmt.Fprintf(os.Stderr, "    Warning: failed to delete deferred operation %d: %v\n",
-					op.ID, err)
-			}
-		} else if syncVerbose {
-			fmt.Printf("    Completed: %s for job %d\n", op.Operation, op.JobID)
-		}
-	}
-
-	return nil
-}
-
-// executeDeferredKill kills a job's tmux session
-func executeDeferredKill(host string, op *db.DeferredOperation) error {
-	tmuxSession := session.TmuxSessionName(op.JobID)
-	return ssh.TmuxKillSession(host, tmuxSession)
-}
-
-// executeDeferredRemoveQueued removes a job from the queue file
-func executeDeferredRemoveQueued(host string, op *db.DeferredOperation) error {
-	queueName := op.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", op.JobID, queueFile)
-	_, _, err := ssh.Run(host, removeCmd)
-	return err
-}
-
-// executeDeferredMoveFrom removes a job from the old host's queue file (for job move)
-func executeDeferredMoveFrom(host string, op *db.DeferredOperation) error {
-	queueName := op.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", op.JobID, queueFile)
-	_, _, err := ssh.Run(host, removeCmd)
-	return err
-}
-
-func executeDeferredQueueAdd(database *sql.DB, op *db.DeferredOperation) error {
-	if op.Payload == "" {
-		return fmt.Errorf("missing payload for queued job %d", op.JobID)
-	}
-
-	var payload deferredQueuePayload
-	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
-		return fmt.Errorf("decode payload: %w", err)
-	}
-
-	job, err := db.GetJobByID(database, op.JobID)
+	// Use ops package for unified operation execution
+	result, err := ops.ExecuteAllDeferredOperations(database, host, ops.ExecuteOptions{
+		Timeout: NormalSyncTimeout,
+		Verbose: syncVerbose,
+	})
 	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", op.JobID)
-	}
-
-	queueName := payload.QueueName
-	if queueName == "" {
-		queueName = op.QueueName
-	}
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
-
-	workingDir := payload.WorkingDir
-	if workingDir == "" {
-		workingDir = job.WorkingDir
-	}
-	command := payload.Command
-	if command == "" {
-		command = job.Command
-	}
-	description := payload.Description
-	if description == "" {
-		description = job.Description
-	}
-
-	if err := appendQueueEntry(job.Host, queueName, job.ID, workingDir, command, description, payload.EnvVars, payload.DepSpec); err != nil {
 		return err
 	}
 
-	if syncVerbose {
-		fmt.Printf("    Added job %d to queue %s on %s\n", job.ID, queueName, job.Host)
-	}
-
-	if payload.AutoStart {
-		if started, err := ensureQueueRunnerStarted(job.Host, queueName); err != nil {
-			if syncVerbose {
-				fmt.Fprintf(os.Stderr, "    Warning: failed to auto-start queue runner on %s (%s): %v\n", job.Host, queueName, err)
-			}
-		} else if syncVerbose && started {
-			fmt.Printf("    Queue runner started on %s (%s)\n", job.Host, queueName)
-		}
-	}
-	return nil
-}
-
-func executeDeferredStartQueued(database *sql.DB, op *db.DeferredOperation) error {
-	job, err := db.GetJobByID(database, op.JobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		// Job was deleted while offline - nothing to do
+	// Report any errors
+	for _, errMsg := range result.Errors {
 		if syncVerbose {
-			fmt.Printf("    Skipping start for job %d: job no longer exists\n", op.JobID)
-		}
-		return nil
-	}
-
-	// If job is no longer queued (completed, dead, running, etc.), skip the start
-	if job.Status != db.StatusQueued {
-		if syncVerbose {
-			fmt.Printf("    Skipping start for job %d: no longer queued (status: %s)\n", op.JobID, job.Status)
-		}
-		return nil
-	}
-
-	var payload deferredStartPayloadData
-	if op.Payload != "" {
-		if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
-			return fmt.Errorf("decode payload: %w", err)
+			fmt.Fprintf(os.Stderr, "    Warning: %s\n", errMsg)
 		}
 	}
 
-	queueName := payload.QueueName
-	if queueName == "" {
-		queueName = op.QueueName
-	}
-	if queueName == "" {
-		queueName = job.QueueName
-	}
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
-
-	if payload.EntryMissing {
-		workingDir := payload.WorkingDir
-		if workingDir == "" {
-			workingDir = job.WorkingDir
-		}
-		command := payload.Command
-		if command == "" {
-			command = job.Command
-		}
-		description := payload.Description
-		if description == "" {
-			description = job.Description
-		}
-		if err := appendQueueEntry(job.Host, queueName, job.ID, workingDir, command, description, payload.EnvVars, payload.DepSpec); err != nil {
-			return fmt.Errorf("restore queue entry: %w", err)
-		}
-	}
-
-	deferred, err := queuejob.StartNow(database, job)
-	if err != nil {
-		return fmt.Errorf("start queued job: %w", err)
-	}
-	if deferred && syncVerbose {
-		fmt.Printf("    Host %s still unreachable for job %d; deferred again\n", job.Host, job.ID)
-	}
 	return nil
 }
 
@@ -595,71 +416,6 @@ func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, 
 	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
 	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
 		return &queueAppendError{op: "append queue entry", stderr: strings.TrimSpace(stderr), err: err}
-	}
-
-	return nil
-}
-
-type deferredStartPayloadData struct {
-	QueueName    string   `json:"queue_name"`
-	WorkingDir   string   `json:"working_dir"`
-	Command      string   `json:"command"`
-	Description  string   `json:"description"`
-	EnvVars      []string `json:"env_vars"`
-	DepSpec      string   `json:"dep_spec"`
-	EntryMissing bool     `json:"entry_missing"`
-}
-
-// executeDeferredUpdateQueued updates a job's entry in the remote queue file
-func executeDeferredUpdateQueued(database *sql.DB, op *db.DeferredOperation) error {
-	job, err := db.GetJobByID(database, op.JobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", op.JobID)
-	}
-
-	// Job may have changed status while we were offline
-	if job.Status != db.StatusQueued {
-		if syncVerbose {
-			fmt.Printf("    Skipping update for job %d: no longer queued (status: %s)\n", job.ID, job.Status)
-		}
-		return nil
-	}
-
-	queueName := op.QueueName
-	if queueName == "" {
-		queueName = job.QueueName
-	}
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
-
-	// Get updated values from database (describe already updated the db)
-	workingDir := job.WorkingDir
-	command := job.Command
-	description := job.Description
-
-	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
-
-	// Remove old entry
-	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", job.ID, queueFile)
-	if _, stderr, err := ssh.Run(op.Host, removeCmd); err != nil {
-		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
-			return fmt.Errorf("host unreachable")
-		}
-		return fmt.Errorf("remove old entry: %s", strings.TrimSpace(stderr))
-	}
-
-	// Add updated entry (without env vars and dep spec since we don't have them)
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t\t", job.ID, workingDir, command, description)
-	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
-	if _, stderr, err := ssh.Run(op.Host, appendCmd); err != nil {
-		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
-			return fmt.Errorf("host unreachable")
-		}
-		return fmt.Errorf("add updated entry: %s", strings.TrimSpace(stderr))
 	}
 
 	return nil
