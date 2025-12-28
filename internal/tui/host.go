@@ -49,7 +49,8 @@ type HostRunningJob struct {
 	ID          int64
 	Description string
 	Command     string
-	GPUs        []JobGPUUsage // GPUs this job is using
+	DeclaredGPU string        // GPU from CUDA_VISIBLE_DEVICES in command
+	GPUs        []JobGPUUsage // GPUs this job is using (from nvidia-smi)
 }
 
 // Host represents a remote host with its system information

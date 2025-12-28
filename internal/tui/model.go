@@ -58,6 +58,29 @@ const (
 	DetailTabLogs
 )
 
+// HostDetailTab represents which tab is active in the host detail panel
+type HostDetailTab int
+
+const (
+	HostDetailTabInfo       HostDetailTab = iota // Host Info
+	HostDetailTabGPUSummary                      // GPU Summary (all GPUs)
+	HostDetailTabGPUBase                         // Base for GPU detail tabs (position in GPU list, not actual GPU index)
+)
+
+// IsGPUDetailTab returns true if this tab shows details for a specific GPU
+func (t HostDetailTab) IsGPUDetailTab() bool {
+	return t >= HostDetailTabGPUBase
+}
+
+// GPUPosition returns the position in the GPU list for a GPU detail tab (-1 if not a GPU detail tab)
+// This is the index into getHostGPUIndices(), not the actual GPU hardware index
+func (t HostDetailTab) GPUPosition() int {
+	if t >= HostDetailTabGPUBase {
+		return int(t - HostDetailTabGPUBase)
+	}
+	return -1
+}
+
 // Key bindings
 type keyMap struct {
 	Up          key.Binding
@@ -77,6 +100,7 @@ type keyMap struct {
 	HostsView   key.Binding
 	JobsView    key.Binding
 	Tab         key.Binding
+	ShiftTab    key.Binding
 	Sync        key.Binding
 	Help        key.Binding
 	StartQueue  key.Binding
@@ -151,6 +175,10 @@ var keys = keyMap{
 	Tab: key.NewBinding(
 		key.WithKeys("tab"),
 		key.WithHelp("tab", "switch view"),
+	),
+	ShiftTab: key.NewBinding(
+		key.WithKeys("shift+tab"),
+		key.WithHelp("shift+tab", "switch view back"),
 	),
 	Sync: key.NewBinding(
 		key.WithKeys("s"),
@@ -303,6 +331,7 @@ type Model struct {
 	// Hosts data
 	hosts           []*Host
 	selectedHostIdx int
+	hostDetailTab   HostDetailTab // Which tab is active in host detail panel (Info or GPU)
 
 	// UI State
 	detailTab    DetailTab // Which tab is active in detail panel (Details or Logs)
@@ -1009,41 +1038,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Suspend):
 		return m, tea.Suspend
 
-	case key.Matches(msg, keys.Tab):
-		// In Jobs view, toggle between Details and Logs tabs
-		if m.viewMode == ViewModeJobs {
-			if m.detailTab == DetailTabDetails {
-				// Switch to Logs tab
-				m.detailTab = DetailTabLogs
-				idx := m.jobList.Index()
-				if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
-					m.selectedJob = m.jobs[idx]
-					m.logLoading = true
-					// Show cached content immediately while fetching fresh logs
-					if cached, ok := m.logCache[m.selectedJob.ID]; ok {
-						m.logContent = cached
-						m.logStale = true
-						m.logViewport.SetContent(m.logContent)
-					} else {
-						m.logContent = ""
-						m.logStale = false
-					}
-					var cmds []tea.Cmd
-					cmds = append(cmds, m.fetchSelectedJobLog())
-					if m.selectedJob.Status == db.StatusRunning {
-						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
-					}
-					return m, tea.Batch(cmds...)
-				}
-			} else {
-				// Switch to Details tab
-				m.detailTab = DetailTabDetails
-			}
-			return m, nil
-		}
-		// In Hosts view, switch to Jobs view
-		m.viewMode = ViewModeJobs
-		return m, nil
+	case key.Matches(msg, keys.Tab), key.Matches(msg, keys.ShiftTab):
+		forward := key.Matches(msg, keys.Tab)
+		return m.cycleTab(forward)
 
 	case key.Matches(msg, keys.HostsView):
 		// Toggle between hosts and jobs view
@@ -1363,7 +1360,7 @@ func (m Model) View() string {
 	if m.viewMode == ViewModeHosts {
 		// Hosts view
 		listView := m.renderHostList(listHeight)
-		detailView := m.renderHostDetail(detailHeight)
+		detailView := m.renderHostDetailPanel(detailHeight)
 		flashView := m.renderFlash()
 		statusView := m.renderHostsStatusBar()
 
@@ -1780,9 +1777,16 @@ func (m Model) renderJobDetails(height int) string {
 			b.WriteString("\n")
 		}
 
-		// Command (most important)
+		// Command (most important) - indent continuation lines
 		b.WriteString(labelStyle.Render("Command"))
-		b.WriteString(valueStyle.Render(job.EffectiveCommand()))
+		cmd := job.EffectiveCommand()
+		cmdLines := strings.Split(cmd, "\n")
+		b.WriteString(valueStyle.Render(cmdLines[0]))
+		for i := 1; i < len(cmdLines); i++ {
+			b.WriteString("\n")
+			b.WriteString(strings.Repeat(" ", 12)) // Indent continuation lines
+			b.WriteString(valueStyle.Render(cmdLines[i]))
+		}
 		b.WriteString("\n")
 
 		// Directory
@@ -2266,11 +2270,343 @@ func (m Model) renderHostDetail(height int) string {
 	}
 
 	content := strings.Join(lines, "\n")
-	panelContent := titleStyle.Render("Host Details") + "\n" + content
+	panelContent := m.renderHostTabHeader() + "\n" + content
 	if footerText != "" {
 		panelContent = panelContent + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(footerText)
 	}
 
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+// renderHostTabHeader renders the tab header for the host detail panel
+func (m Model) renderHostTabHeader() string {
+	var tabs []string
+	gpuIndices := m.getHostGPUIndices()
+
+	// Info tab
+	infoLabel := "Info"
+	if m.hostDetailTab == HostDetailTabInfo {
+		tabs = append(tabs, activeTabStyle.Render(infoLabel))
+	} else {
+		tabs = append(tabs, inactiveTabStyle.Render(infoLabel))
+	}
+
+	// GPU Summary tab
+	summaryLabel := "GPUs"
+	if m.hostDetailTab == HostDetailTabGPUSummary {
+		tabs = append(tabs, activeTabStyle.Render(summaryLabel))
+	} else {
+		tabs = append(tabs, inactiveTabStyle.Render(summaryLabel))
+	}
+
+	// Count jobs per GPU for styling
+	gpuJobStatus := m.getGPUJobStatus()
+
+	// Individual GPU tabs (position in array, not actual GPU index)
+	for pos, gpuIdx := range gpuIndices {
+		label := fmt.Sprintf("%d", gpuIdx)
+		gpuTab := HostDetailTabGPUBase + HostDetailTab(pos)
+		if m.hostDetailTab == gpuTab {
+			tabs = append(tabs, activeTabStyle.Render(label))
+		} else {
+			// Style based on job status
+			status := gpuJobStatus[gpuIdx]
+			switch {
+			case status.running > 0:
+				tabs = append(tabs, gpuTabRunningStyle.Render(label))
+			case status.queued > 0:
+				tabs = append(tabs, gpuTabQueuedStyle.Render(label))
+			default:
+				tabs = append(tabs, gpuTabEmptyStyle.Render(label))
+			}
+		}
+	}
+
+	hint := dimStyle.Render(" (Tab)")
+	return strings.Join(tabs, " ") + hint
+}
+
+// getHostGPUIndices returns the sorted list of GPU indices for the selected host
+// This includes both hardware GPUs and GPUs referenced by jobs
+func (m Model) getHostGPUIndices() []int {
+	if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+		return nil
+	}
+	host := m.hosts[m.selectedHostIdx]
+
+	knownGPUs := make(map[int]bool)
+
+	// Add hardware GPUs
+	for _, gpu := range host.GPUs {
+		knownGPUs[gpu.Index] = true
+	}
+
+	// Add GPUs from jobs
+	for _, job := range m.allJobs {
+		if job.Host != host.Name {
+			continue
+		}
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+			continue
+		}
+		for _, idx := range parseGPUIndices(job.GetGPU()) {
+			knownGPUs[idx] = true
+		}
+	}
+
+	var indices []int
+	for idx := range knownGPUs {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	return indices
+}
+
+// gpuJobCounts holds running and queued job counts for a GPU
+type gpuJobCounts struct {
+	running int
+	queued  int
+}
+
+// getGPUJobStatus returns job counts per GPU for the selected host
+func (m Model) getGPUJobStatus() map[int]gpuJobCounts {
+	result := make(map[int]gpuJobCounts)
+
+	if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+		return result
+	}
+	host := m.hosts[m.selectedHostIdx]
+
+	for _, job := range m.allJobs {
+		if job.Host != host.Name {
+			continue
+		}
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+			continue
+		}
+
+		isRunning := job.Status == db.StatusRunning || job.Status == db.StatusStarting
+		for _, idx := range parseGPUIndices(job.GetGPU()) {
+			counts := result[idx]
+			if isRunning {
+				counts.running++
+			} else {
+				counts.queued++
+			}
+			result[idx] = counts
+		}
+	}
+
+	return result
+}
+
+// parseGPUIndices parses a CUDA_VISIBLE_DEVICES value into GPU indices
+func parseGPUIndices(gpuStr string) []int {
+	if gpuStr == "" {
+		return nil
+	}
+	parts := strings.Split(gpuStr, ",")
+	var indices []int
+	for _, p := range parts {
+		if idx, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+			indices = append(indices, idx)
+		}
+	}
+	return indices
+}
+
+// renderGPUSummary renders a compact summary of all GPUs with job counts
+func (m Model) renderGPUSummary(height int) string {
+	var lines []string
+
+	if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+		return dimStyle.Render("No host selected")
+	}
+	host := m.hosts[m.selectedHostIdx]
+
+	// Build job counts per GPU
+	type gpuCounts struct {
+		running int
+		queued  int
+	}
+	gpuJobCounts := make(map[int]*gpuCounts)
+	var noGPURunning, noGPUQueued int
+
+	// Initialize with hardware GPUs
+	for _, gpu := range host.GPUs {
+		gpuJobCounts[gpu.Index] = &gpuCounts{}
+	}
+
+	// Count jobs per GPU
+	for _, job := range m.allJobs {
+		if job.Host != host.Name {
+			continue
+		}
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+			continue
+		}
+
+		isRunning := job.Status == db.StatusRunning || job.Status == db.StatusStarting
+		gpuIndices := parseGPUIndices(job.GetGPU())
+
+		if len(gpuIndices) == 0 {
+			if isRunning {
+				noGPURunning++
+			} else {
+				noGPUQueued++
+			}
+		} else {
+			for _, idx := range gpuIndices {
+				if gpuJobCounts[idx] == nil {
+					gpuJobCounts[idx] = &gpuCounts{}
+				}
+				if isRunning {
+					gpuJobCounts[idx].running++
+				} else {
+					gpuJobCounts[idx].queued++
+				}
+			}
+		}
+	}
+
+	// Get sorted GPU indices
+	var gpuIndices []int
+	for idx := range gpuJobCounts {
+		gpuIndices = append(gpuIndices, idx)
+	}
+	sort.Ints(gpuIndices)
+
+	lines = append(lines, fmt.Sprintf("Jobs on %s:", host.Name))
+	lines = append(lines, "")
+	lines = append(lines, "GPU  Running  Queued  Name")
+	lines = append(lines, "───  ───────  ──────  ────")
+
+	for _, gpuIdx := range gpuIndices {
+		counts := gpuJobCounts[gpuIdx]
+		gpuName := ""
+		for _, gpu := range host.GPUs {
+			if gpu.Index == gpuIdx {
+				gpuName = truncate(gpu.Name, 30)
+				break
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%3d  %7d  %6d  %s", gpuIdx, counts.running, counts.queued, gpuName))
+	}
+
+	// No GPU section
+	if noGPURunning > 0 || noGPUQueued > 0 {
+		lines = append(lines, fmt.Sprintf("  —  %7d  %6d  (no GPU specified)", noGPURunning, noGPUQueued))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// renderGPUDetailTab renders detailed job list for a specific GPU
+func (m Model) renderGPUDetailTab(gpuIdx int, height int) string {
+	var lines []string
+
+	if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+		return dimStyle.Render("No host selected")
+	}
+	host := m.hosts[m.selectedHostIdx]
+
+	// Get GPU name
+	gpuName := ""
+	for _, gpu := range host.GPUs {
+		if gpu.Index == gpuIdx {
+			gpuName = gpu.Name
+			break
+		}
+	}
+
+	if gpuName != "" {
+		lines = append(lines, fmt.Sprintf("GPU %d: %s", gpuIdx, gpuName))
+	} else {
+		lines = append(lines, fmt.Sprintf("GPU %d", gpuIdx))
+	}
+	lines = append(lines, "")
+
+	// Collect jobs for this GPU
+	var running, queued []*db.Job
+	for _, job := range m.allJobs {
+		if job.Host != host.Name {
+			continue
+		}
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+			continue
+		}
+
+		jobGPUs := parseGPUIndices(job.GetGPU())
+		for _, idx := range jobGPUs {
+			if idx == gpuIdx {
+				if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+					running = append(running, job)
+				} else {
+					queued = append(queued, job)
+				}
+				break
+			}
+		}
+	}
+
+	// Running jobs
+	lines = append(lines, fmt.Sprintf("Running (%d):", len(running)))
+	if len(running) == 0 {
+		lines = append(lines, "  (none)")
+	} else {
+		for _, job := range running {
+			desc := job.Description
+			if desc == "" {
+				desc = truncate(job.EffectiveCommand(), 50)
+			}
+			lines = append(lines, fmt.Sprintf("  #%-4d %s", job.ID, desc))
+		}
+	}
+
+	lines = append(lines, "")
+
+	// Queued jobs
+	lines = append(lines, fmt.Sprintf("Queued (%d):", len(queued)))
+	if len(queued) == 0 {
+		lines = append(lines, "  (none)")
+	} else {
+		for _, job := range queued {
+			desc := job.Description
+			if desc == "" {
+				desc = truncate(job.EffectiveCommand(), 50)
+			}
+			lines = append(lines, fmt.Sprintf("  #%-4d %s", job.ID, desc))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// renderHostDetailPanel renders the host detail panel with tabs
+func (m Model) renderHostDetailPanel(height int) string {
+	header := m.renderHostTabHeader()
+
+	var content string
+	switch {
+	case m.hostDetailTab == HostDetailTabInfo:
+		// Use the existing renderHostDetail
+		return m.renderHostDetail(height)
+	case m.hostDetailTab == HostDetailTabGPUSummary:
+		content = m.renderGPUSummary(height - 3)
+	case m.hostDetailTab.IsGPUDetailTab():
+		// Convert position to actual GPU index
+		gpuIndices := m.getHostGPUIndices()
+		pos := m.hostDetailTab.GPUPosition()
+		if pos >= 0 && pos < len(gpuIndices) {
+			content = m.renderGPUDetailTab(gpuIndices[pos], height-3)
+		} else {
+			content = dimStyle.Render("Invalid GPU tab")
+		}
+	default:
+		return m.renderHostDetail(height)
+	}
+
+	panelContent := header + "\n" + content
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
@@ -2319,6 +2655,10 @@ func (m Model) formatStatus(job *db.Job) string {
 
 	switch job.Status {
 	case db.StatusRunning:
+		// Check if status is stale (host not checked in over 1 minute)
+		if m.isJobStatusStale(job) {
+			return "● running?"
+		}
 		return "● running"
 	case db.StatusCompleted:
 		if job.ExitCode == nil {
@@ -2372,6 +2712,50 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 	default:
 		return lipgloss.NewStyle()
 	}
+}
+
+// isJobStatusStale returns true if the job's host hasn't been checked recently
+// This helps identify running jobs whose status might be outdated
+func (m Model) isJobStatusStale(job *db.Job) bool {
+	const staleThreshold = 1 * time.Minute
+
+	// Find the host for this job
+	for _, host := range m.hosts {
+		if host.Name == job.Host {
+			// If host is offline or last check was more than threshold ago
+			if host.Status == HostStatusOffline {
+				return true
+			}
+			if !host.LastCheck.IsZero() && time.Since(host.LastCheck) > staleThreshold {
+				return true
+			}
+			return false
+		}
+	}
+	// Host not found in our list - consider it stale
+	return true
+}
+
+// isHostDisconnectedLong returns true if the job's host has been disconnected
+// for more than 30 minutes. Used to dim jobs on unreachable hosts.
+func (m Model) isHostDisconnectedLong(job *db.Job) bool {
+	const disconnectedThreshold = 30 * time.Minute
+
+	for _, host := range m.hosts {
+		if host.Name == job.Host {
+			// If host is online, it's not disconnected
+			if host.Status == HostStatusOnline {
+				return false
+			}
+			// For any non-online status (offline, unknown, checking),
+			// check if LastCheck is older than threshold
+			if !host.LastCheck.IsZero() {
+				return time.Since(host.LastCheck) > disconnectedThreshold
+			}
+			return false
+		}
+	}
+	return false
 }
 
 // Flash message duration
@@ -2453,6 +2837,74 @@ func (m *Model) applyJobFilter() {
 		m.logContent = ""
 		m.logStale = false
 	}
+}
+
+// cycleTab handles Tab/Shift+Tab navigation for both Jobs and Hosts views
+func (m *Model) cycleTab(forward bool) (Model, tea.Cmd) {
+	if m.viewMode == ViewModeJobs {
+		return m.cycleJobsTab(forward)
+	}
+	return m.cycleHostsTab(forward)
+}
+
+// cycleJobsTab toggles between Details and Logs tabs in Jobs view
+func (m *Model) cycleJobsTab(forward bool) (Model, tea.Cmd) {
+	// Toggle between Details and Logs (same in both directions for 2 tabs)
+	if m.detailTab == DetailTabDetails {
+		return m.switchToLogsTab()
+	}
+	m.detailTab = DetailTabDetails
+	return *m, nil
+}
+
+// switchToLogsTab switches to the Logs tab and fetches log content
+func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
+	m.detailTab = DetailTabLogs
+	idx := m.jobList.Index()
+	if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
+		m.selectedJob = m.jobs[idx]
+		m.logLoading = true
+		// Show cached content immediately while fetching fresh logs
+		if cached, ok := m.logCache[m.selectedJob.ID]; ok {
+			m.logContent = cached
+			m.logStale = true
+			m.logViewport.SetContent(m.logContent)
+		} else {
+			m.logContent = ""
+			m.logStale = false
+		}
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.fetchSelectedJobLog())
+		if m.selectedJob.Status == db.StatusRunning {
+			cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+		}
+		return *m, tea.Batch(cmds...)
+	}
+	return *m, nil
+}
+
+// cycleHostsTab cycles through host detail tabs (Info, GPUs, GPU 0, GPU 1, ...)
+func (m *Model) cycleHostsTab(forward bool) (Model, tea.Cmd) {
+	gpuIndices := m.getHostGPUIndices()
+	maxTab := HostDetailTabGPUBase + HostDetailTab(len(gpuIndices)-1)
+	if len(gpuIndices) == 0 {
+		maxTab = HostDetailTabGPUSummary
+	}
+
+	if forward {
+		if m.hostDetailTab < maxTab {
+			m.hostDetailTab++
+		} else {
+			m.hostDetailTab = HostDetailTabInfo
+		}
+	} else {
+		if m.hostDetailTab > HostDetailTabInfo {
+			m.hostDetailTab--
+		} else {
+			m.hostDetailTab = maxTab
+		}
+	}
+	return *m, nil
 }
 
 func (m Model) startHostRefreshTicker() tea.Cmd {
@@ -2600,6 +3052,7 @@ func (m Model) fetchHostJobsGPU(hostName string) tea.Cmd {
 				ID:          job.ID,
 				Description: job.Description,
 				Command:     job.Command,
+				DeclaredGPU: job.GetGPU(),
 				GPUs:        gpuByJob[job.ID],
 			})
 		}

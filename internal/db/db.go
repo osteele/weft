@@ -554,6 +554,18 @@ func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
 	return scanJobs(rows)
 }
 
+// GetJobsByHostAndStatus retrieves jobs for a specific host with a specific status
+func GetJobsByHostAndStatus(db *sql.DB, host, status string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0 ORDER BY created_at ASC`, jobSelectColumns)
+	rows, err := db.Query(query, host, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobs(rows)
+}
+
 // GetJobsByHost retrieves all jobs for a specific host
 func GetJobsByHost(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? ORDER BY id DESC`, jobSelectColumns)

@@ -96,4 +96,17 @@ var (
 
 	tabGapStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
+
+	// GPU tab styles based on job status (inactive state)
+	gpuTabRunningStyle = lipgloss.NewStyle().
+				Foreground(runningColor). // Green - has running jobs
+				Padding(0, 2)
+
+	gpuTabQueuedStyle = lipgloss.NewStyle().
+				Foreground(queuedColor). // Cyan - has queued jobs only
+				Padding(0, 2)
+
+	gpuTabEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")). // Gray - no jobs
+				Padding(0, 2)
 )
