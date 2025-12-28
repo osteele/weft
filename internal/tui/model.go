@@ -3774,11 +3774,10 @@ func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 		return true, nil
 	}
 
-	// Session doesn't exist and no status file - mark as dead
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		return false, err
-	}
-	return true, nil
+	// Session doesn't exist and no status file - this is UNCERTAIN, not dead.
+	// Could be a race condition during job startup/shutdown, or a transient check failure.
+	// Don't mark dead based on absence of evidence - only mark dead with positive evidence.
+	return false, nil
 }
 
 // syncQueueRunnerJobQuick is an optimized version for queue runner jobs that combines
@@ -3798,22 +3797,32 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	pidPattern := session.PidFilePattern(job.ID)
 
 	combinedCmd := fmt.Sprintf(`
-		# Check status file (completed?)
-		if [ -f %s ]; then
-			cat %s 2>/dev/null | head -1
+		# Check status file (completed?) - use ls to expand glob
+		status_file=$(ls %s 2>/dev/null | head -1)
+		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
+			cat "$status_file" 2>/dev/null | head -1
 		# Check if currently running in queue
 		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
 			echo RUNNING
 		# Check if waiting in queue
 		elif grep -q '^%d	' %s 2>/dev/null; then
 			echo QUEUED
-		# Check if process still running via PID
-		elif pid=$(cat %s 2>/dev/null) && [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-			echo RUNNING
+		# Check if process still running via PID - use ls to expand glob
+		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
+			pid=$(cat "$pid_file" 2>/dev/null | head -1)
+			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
+				echo RUNNING
+			else
+				# PID file exists but process not running - could be transitioning
+				# Don't declare dead, return UNCERTAIN to avoid race conditions
+				echo UNCERTAIN
+			fi
 		else
-			echo DEAD
+			# No evidence found - could be race condition during state transition
+			# Return UNCERTAIN rather than DEAD to avoid false positives
+			echo UNCERTAIN
 		fi
-	`, statusPattern, statusPattern,
+	`, statusPattern,
 		currentFile, currentFile, job.ID,
 		job.ID, queueFile,
 		pidPattern)
@@ -3835,32 +3844,14 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	case "QUEUED":
 		// Job is still waiting in queue, no change needed
 		return false, nil
-	case "DEAD":
-		// Job may have died unexpectedly, but we need to be careful not to mark
-		// recently queued jobs as dead if they haven't been synced to the remote yet
-
-		// Check 1: Don't mark as dead if job is less than 1 hour old
-		if job.CreatedAt > 0 {
-			age := time.Now().Unix() - job.CreatedAt
-			if age < 3600 { // Less than 1 hour
-				return false, nil
-			}
-		}
-
-		// Check 2: Don't mark as dead if there's a pending deferred operation
-		hasPending, err := db.HasPendingDeferredOperationForJob(database, job.ID)
-		if err != nil {
-			return false, err
-		}
-		if hasPending {
-			return false, nil
-		}
-
-		// Safe to mark as dead
-		if err := db.MarkDeadByID(database, job.ID); err != nil {
-			return false, err
-		}
-		return true, nil
+	case "UNCERTAIN":
+		// We couldn't determine the job's state - this could be due to:
+		// 1. Race condition during job state transition
+		// 2. Files being written/cleaned up
+		// 3. Transient filesystem issues
+		// Don't change the job status - keep showing whatever we had before.
+		// The job may recover on the next sync, or explicit CLI sync can investigate further.
+		return false, nil
 	case "":
 		// Empty result (shouldn't happen with our logic, but handle gracefully)
 		return false, nil

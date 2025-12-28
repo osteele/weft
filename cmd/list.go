@@ -17,12 +17,16 @@ var listCmd = &cobra.Command{
 	Short: "List and search job history",
 	Long: `Query and search job history from the local database.
 
+This shows historical jobs, not queue contents. Use --queued to see only jobs
+waiting in a queue.
+
 By default, only shows jobs from the last 7 days. Use --all/-a to include older jobs.
 
 Examples:
   remote-jobs list                    # Recent jobs (last 7 days)
   remote-jobs list --all              # All jobs including older
   remote-jobs list --running          # Running jobs only
+  remote-jobs list --queued           # Jobs waiting in queue
   remote-jobs list --running --sync   # Running jobs (sync first)
   remote-jobs list --draft            # Draft jobs
   remote-jobs list --host cool30      # Jobs on cool30
@@ -34,6 +38,7 @@ Examples:
 var (
 	listRunning   bool
 	listCompleted bool
+	listQueued    bool
 	listDead      bool
 	listDraft     bool
 	listHost      string
@@ -51,6 +56,7 @@ func init() {
 
 	listCmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
 	listCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
+	listCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
 	listCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
 	listCmd.Flags().BoolVar(&listDraft, "draft", false, "Show only draft jobs")
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
@@ -119,6 +125,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		status = db.StatusRunning
 	} else if listCompleted {
 		status = db.StatusCompleted
+	} else if listQueued {
+		status = db.StatusQueued
 	} else if listDead {
 		status = db.StatusDead
 	} else if listDraft {

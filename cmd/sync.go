@@ -177,11 +177,10 @@ func syncJob(database *sql.DB, job *db.Job) (bool, error) {
 		return true, nil
 	}
 
-	// No status file - job died unexpectedly
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		return false, err
-	}
-	return true, nil
+	// Session doesn't exist and no status file - this is UNCERTAIN, not dead.
+	// Could be a race condition during job startup/shutdown.
+	// Don't mark dead based on absence of evidence.
+	return false, nil
 }
 
 // updateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set
@@ -298,20 +297,10 @@ func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
 		return false, nil
 	}
 
-	// Before marking dead, check if job has pending deferred operations
-	// (e.g., queue_job not yet synced to remote)
-	hasPending, _ := db.HasPendingDeferredOperationForJob(database, job.ID)
-	if hasPending {
-		// Job has pending operations - don't mark as dead
-		return false, nil
-	}
-
-	// Job is not current, not in queue, process not running, and has no status file - it's dead
-	// (Either it died mid-execution, or was removed from queue)
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		return false, err
-	}
-	return true, nil
+	// We couldn't find the job in any expected location. This is UNCERTAIN, not dead.
+	// Could be a race condition during job state transitions.
+	// Don't mark dead based on absence of evidence.
+	return false, nil
 }
 
 // executeDeferredOperations executes pending operations for a host using the unified ops package

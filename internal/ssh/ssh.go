@@ -259,6 +259,8 @@ func TmuxSessionExistsQuick(host, sessionName string) (bool, error) {
 		if IsConnectionError(stdout + stderr) {
 			return false, fmt.Errorf("connection error: %s", strings.TrimSpace(stdout+stderr))
 		}
+		// Any SSH error means we couldn't determine status - return error
+		return false, err
 	}
 	// Check last line for YES/NO
 	lines := strings.Split(strings.TrimSpace(stdout), "\n")
