@@ -27,6 +27,7 @@ const (
 var (
 	statusSync        bool
 	statusNoSync      bool
+	statusFast        bool
 	statusWait        bool
 	statusWaitTimeout time.Duration
 )
@@ -44,15 +45,18 @@ Exit codes (single job only):
 
 Examples:
   remote-jobs status 42
-  remote-jobs status 42 43 44`,
+  remote-jobs status 42 --fast     # Quick check with 2s timeout
+  remote-jobs status 42 --wait     # Wait for job to complete
+  remote-jobs log 42               # View job output`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runStatus,
 }
 
 func init() {
 	rootCmd.AddCommand(statusCmd)
-	statusCmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
+	statusCmd.Flags().BoolVar(&statusSync, "sync", false, "Perform full sync (30s timeout)")
 	statusCmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
+	statusCmd.Flags().BoolVar(&statusFast, "fast", false, "Use quick 2s timeout (default is 5s)")
 	statusCmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job(s) to complete before returning")
 	statusCmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
 }
@@ -71,22 +75,46 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		tracker = newHostConnectionTracker()
 	}
 
-	// Sync logic: fast sync by default, full sync with --sync, skip with --no-sync
+	// Check if all requested jobs are already in terminal state - skip sync if so
+	needsSync := false
 	if !statusNoSync {
+		for _, arg := range args {
+			jobID, err := strconv.ParseInt(arg, 10, 64)
+			if err != nil {
+				continue
+			}
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil || job == nil {
+				continue
+			}
+			if !isTerminalStatus(job.Status) {
+				needsSync = true
+				break
+			}
+		}
+	}
+
+	// Sync logic: default 5s, fast 2s, full 30s, or skip
+	if needsSync {
 		if statusSync {
-			// Full sync requested
-			// Reuse the list sync logic
+			// Full sync requested (30s timeout)
 			hosts, err := db.ListUniqueActiveHosts(database)
 			if err == nil && len(hosts) > 0 {
 				for _, host := range hosts {
 					syncHost(database, host)
 				}
 			}
-		} else {
-			// Fast sync by default
+		} else if statusFast {
+			// Fast sync (2s timeout)
 			completed := performFastSync(database, false)
 			if !completed {
 				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Run with --sync for full sync.\n")
+			}
+		} else {
+			// Default sync (5s timeout)
+			completed := performSyncWithTimeout(database, DefaultSyncTimeout, false)
+			if !completed {
+				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Use --fast for quicker response or --sync for full sync.\n")
 			}
 		}
 	}
@@ -473,6 +501,15 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
 	}
 
+	// Print usage hints
+	if exitOnComplete {
+		fmt.Println()
+		fmt.Printf("Hints:    remote-jobs log %d        # View job output\n", job.ID)
+		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
+			fmt.Printf("          remote-jobs status %d --wait  # Don't exit until the remote job completes\n", job.ID)
+		}
+	}
+
 	// Set exit code based on status (only for single job)
 	if exitOnComplete {
 		switch job.Status {
@@ -484,7 +521,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 			}
 		case db.StatusDead:
 			os.Exit(ExitFailed)
-		case db.StatusRunning:
+		case db.StatusRunning, db.StatusQueued, db.StatusStarting:
 			os.Exit(ExitRunning)
 		default:
 			os.Exit(ExitNotFound)

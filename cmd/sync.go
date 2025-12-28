@@ -33,8 +33,10 @@ Examples:
 var syncVerbose bool
 
 const (
-	// FastSyncTimeout is used for quick syncs in list/status commands
+	// FastSyncTimeout is used for --fast mode in list/status commands
 	FastSyncTimeout = 2 * time.Second
+	// DefaultSyncTimeout is used for default syncs in status commands
+	DefaultSyncTimeout = 5 * time.Second
 	// NormalSyncTimeout is used for explicit sync commands
 	NormalSyncTimeout = 30 * time.Second
 )
@@ -410,35 +412,41 @@ func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, 
 	return nil
 }
 
-// performFastSync performs a quick sync with fast timeout for list/status commands
+// performSyncWithTimeout performs a sync with specified timeout for list/status commands
 // Returns true if sync completed, false if timed out
-func performFastSync(database *sql.DB, verbose bool) bool {
+func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose bool) bool {
 	hosts, err := db.ListUniqueActiveHosts(database)
 	if err != nil || len(hosts) == 0 {
 		return true
 	}
 
-	// Set fast timeout for SSH operations
+	// Set timeout for SSH operations
 	// We'll use goroutines with a timeout context
 	allCompleted := true
 	for _, host := range hosts {
 		// Try quick sync, but don't wait if it times out
 		done := make(chan bool, 1)
 		go func(h string) {
-			_, err := syncHostWithTimeout(database, h, FastSyncTimeout)
+			_, err := syncHostWithTimeout(database, h, timeout)
 			done <- (err == nil)
 		}(host)
 
 		select {
 		case <-done:
 			// Sync completed
-		case <-time.After(FastSyncTimeout):
+		case <-time.After(timeout):
 			// Timed out
 			allCompleted = false
 		}
 	}
 
 	return allCompleted
+}
+
+// performFastSync performs a quick sync with fast timeout for list/status commands
+// Returns true if sync completed, false if timed out
+func performFastSync(database *sql.DB, verbose bool) bool {
+	return performSyncWithTimeout(database, FastSyncTimeout, verbose)
 }
 
 // syncHostWithTimeout syncs a host with a specific timeout
