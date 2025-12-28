@@ -167,12 +167,12 @@ var keys = keyMap{
 		key.WithHelp("q", "quit"),
 	),
 	HostsView: key.NewBinding(
-		key.WithKeys("right"),
-		key.WithHelp("→", "hosts"),
+		key.WithKeys("right", "h"),
+		key.WithHelp("→/h", "hosts"),
 	),
 	JobsView: key.NewBinding(
-		key.WithKeys("left"),
-		key.WithHelp("←", "jobs"),
+		key.WithKeys("left", "j"),
+		key.WithHelp("←/j", "jobs"),
 	),
 	Tab: key.NewBinding(
 		key.WithKeys("tab"),
@@ -922,14 +922,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hostRefreshTickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startHostRefreshTicker())
-		// Only refresh hosts if in hosts view
-		if m.viewMode == ViewModeHosts {
-			for _, host := range m.hosts {
-				// Only refresh if:
-				// 1. Host hasn't been queried this session yet, OR
-				// 2. Host is online (to get updated dynamic info like load/memory)
-				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
-					cmds = append(cmds, m.fetchHostInfo(host.Name))
+
+		// Build set of hosts with running jobs
+		hostsWithRunningJobs := make(map[string]bool)
+		for _, job := range m.jobs {
+			if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+				hostsWithRunningJobs[job.Host] = true
+			}
+		}
+
+		for _, host := range m.hosts {
+			// Refresh host if:
+			// 1. In hosts view and (not queried yet OR online), OR
+			// 2. Host has running jobs (to update LastCheck for stale indicator)
+			inHostsView := m.viewMode == ViewModeHosts
+			needsRefresh := (!m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline)
+			hasRunningJobs := hostsWithRunningJobs[host.Name]
+
+			if (inHostsView && needsRefresh) || hasRunningJobs {
+				cmds = append(cmds, m.fetchHostInfo(host.Name))
+				if inHostsView {
 					cmds = append(cmds, m.fetchQueueStatus(host.Name))
 				}
 			}
@@ -1198,6 +1210,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Kill):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
 		job := m.getTargetJob()
 		if job == nil {
 			return m, nil
@@ -1218,6 +1233,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, keys.Restart):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
 		job := m.getTargetJob()
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
@@ -1267,14 +1285,23 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Filter):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
 		m.jobFilter = jobFilterMode((int(m.jobFilter) + 1) % int(jobFilterModeCount))
 		m.applyJobFilter()
 		return m, m.setFlash(fmt.Sprintf("Filter: %s", jobFilterDescription(m.jobFilter)), false)
 
 	case key.Matches(msg, keys.Prune):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
 		return m, tea.Batch(m.setFlash("Pruning completed/dead jobs...", false), m.pruneJobs())
 
 	case key.Matches(msg, keys.StartQueue):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
 		job := m.getTargetJob()
 		if job != nil && job.Status == db.StatusQueued {
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting queue on %s...", job.Host), false), m.startQueue(job.Host))
@@ -1282,6 +1309,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.StartNow):
+		if m.viewMode == ViewModeHosts {
+			// 'g' in hosts view switches to GPU Summary tab
+			m.hostDetailTab = HostDetailTabGPUSummary
+			return m, nil
+		}
 		job := m.getTargetJob()
 		if job != nil && job.Status == db.StatusQueued {
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
@@ -1319,6 +1351,28 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.setFlash("Syncing...", false), m.performBackgroundSync())
 		}
 		return m, nil
+	}
+
+	// Host view specific key bindings (handled after the switch)
+	if m.viewMode == ViewModeHosts {
+		switch msg.String() {
+		case "i":
+			// Switch to Info tab
+			m.hostDetailTab = HostDetailTabInfo
+			return m, nil
+		case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
+			// Switch to specific GPU tab by hardware index
+			gpuIndex, _ := strconv.Atoi(msg.String())
+			gpuIndices := m.getHostGPUIndices()
+			for pos, idx := range gpuIndices {
+				if idx == gpuIndex {
+					m.hostDetailTab = HostDetailTabGPUBase + HostDetailTab(pos)
+					return m, nil
+				}
+			}
+			// GPU not found - show message
+			return m, m.setFlash(fmt.Sprintf("No GPU %d on this host", gpuIndex), true)
+		}
 	}
 
 	return m, nil
@@ -1829,16 +1883,17 @@ func (m Model) renderJobDetails(height int) string {
 			b.WriteString("\n")
 		}
 
-		// Command (most important) - indent continuation lines
+		// Command (most important) - wrap and indent continuation lines
 		b.WriteString(labelStyle.Render("Command"))
 		cmd := job.EffectiveCommand()
-		cmdLines := strings.Split(cmd, "\n")
-		b.WriteString(valueStyle.Render(cmdLines[0]))
-		for i := 1; i < len(cmdLines); i++ {
-			b.WriteString("\n")
-			b.WriteString(strings.Repeat(" ", 12)) // Indent continuation lines
-			b.WriteString(valueStyle.Render(cmdLines[i]))
+		labelWidth := 10
+		// Panel content width is m.width - 6 (borders + padding), minus label
+		availableWidth := m.width - 6 - labelWidth
+		if availableWidth < 20 {
+			availableWidth = 60 // fallback if window too narrow
 		}
+		wrappedCmd := wrapTextWithIndent(cmd, availableWidth, labelWidth)
+		b.WriteString(valueStyle.Render(wrappedCmd))
 		b.WriteString("\n")
 
 		// Directory
@@ -2057,6 +2112,100 @@ func formatDuration(d time.Duration) string {
 		return fmt.Sprintf("%dm %ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
+}
+
+// wrapTextWithIndent wraps text to the given width, indenting continuation lines.
+// It handles both explicit newlines in the text and wrapping at word boundaries.
+// Long tokens that exceed the width are broken at the width boundary.
+func wrapTextWithIndent(text string, width, indent int) string {
+	if width <= 0 {
+		return text
+	}
+
+	var result strings.Builder
+	indentStr := strings.Repeat(" ", indent)
+
+	// Split by explicit newlines first
+	lines := strings.Split(text, "\n")
+	for li, line := range lines {
+		if li > 0 {
+			result.WriteString("\n")
+			result.WriteString(indentStr)
+		}
+
+		// Wrap this line
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			continue
+		}
+
+		lineLen := 0
+		for i, word := range words {
+			wordLen := len(word)
+
+			if i == 0 && li == 0 {
+				// First word of first line (no indent needed)
+				if wordLen > width {
+					// Break long word
+					for len(word) > 0 {
+						take := width - lineLen
+						if take <= 0 {
+							result.WriteString("\n")
+							result.WriteString(indentStr)
+							lineLen = 0
+							take = width
+						}
+						if take > len(word) {
+							take = len(word)
+						}
+						result.WriteString(word[:take])
+						word = word[take:]
+						lineLen += take
+					}
+				} else {
+					result.WriteString(word)
+					lineLen = wordLen
+				}
+			} else if lineLen+1+wordLen <= width {
+				// Word fits on current line
+				if lineLen > 0 {
+					result.WriteString(" ")
+					lineLen++
+				}
+				result.WriteString(word)
+				lineLen += wordLen
+			} else if wordLen > width {
+				// Word is longer than available width - break it
+				if lineLen > 0 {
+					result.WriteString("\n")
+					result.WriteString(indentStr)
+					lineLen = 0
+				}
+				for len(word) > 0 {
+					take := width
+					if take > len(word) {
+						take = len(word)
+					}
+					result.WriteString(word[:take])
+					word = word[take:]
+					lineLen = take
+					if len(word) > 0 {
+						result.WriteString("\n")
+						result.WriteString(indentStr)
+						lineLen = 0
+					}
+				}
+			} else {
+				// Need to wrap - word fits on next line
+				result.WriteString("\n")
+				result.WriteString(indentStr)
+				result.WriteString(word)
+				lineLen = wordLen
+			}
+		}
+	}
+
+	return result.String()
 }
 
 func (m Model) renderFlash() string {
@@ -2769,7 +2918,8 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 // isJobStatusStale returns true if the job's host hasn't been checked recently
 // This helps identify running jobs whose status might be outdated
 func (m Model) isJobStatusStale(job *db.Job) bool {
-	const staleThreshold = 1 * time.Minute
+	// Hosts with running jobs are refreshed every 30s, so 2 minutes gives margin
+	const staleThreshold = 2 * time.Minute
 
 	// Find the host for this job
 	for _, host := range m.hosts {
@@ -2990,12 +3140,12 @@ func (m Model) loadHosts() tea.Cmd {
 			hostSet[h.Name] = true
 		}
 
-		// Convert to sorted slice
+		// Convert to sorted slice using natural ordering
 		var hosts []string
 		for h := range hostSet {
 			hosts = append(hosts, h)
 		}
-		sort.Strings(hosts)
+		naturalSortStrings(hosts)
 
 		return hostsLoadedMsg{hostNames: hosts, err: nil}
 	}
@@ -4254,4 +4404,97 @@ func formatQueueTime(createdAt int64) string {
 	}
 	days := int(elapsed.Hours() / 24)
 	return fmt.Sprintf("%dd", days)
+}
+
+// naturalSortStrings sorts strings using macOS Finder-style natural ordering
+// where numeric segments are compared as numbers (e.g., "cool30" < "cool100")
+func naturalSortStrings(s []string) {
+	sort.Slice(s, func(i, j int) bool {
+		return naturalLess(s[i], s[j])
+	})
+}
+
+// naturalLess compares two strings using natural ordering
+func naturalLess(a, b string) bool {
+	aParts := splitIntoSegments(a)
+	bParts := splitIntoSegments(b)
+
+	// Compare segment by segment
+	minLen := len(aParts)
+	if len(bParts) < minLen {
+		minLen = len(bParts)
+	}
+
+	for i := 0; i < minLen; i++ {
+		aSeg := aParts[i]
+		bSeg := bParts[i]
+
+		// If both are numeric, compare as numbers
+		aNum, aIsNum := parseNumber(aSeg)
+		bNum, bIsNum := parseNumber(bSeg)
+
+		if aIsNum && bIsNum {
+			if aNum != bNum {
+				return aNum < bNum
+			}
+			// Numbers are equal, continue to next segment
+		} else {
+			// Compare as strings (case-insensitive)
+			aLower := strings.ToLower(aSeg)
+			bLower := strings.ToLower(bSeg)
+			if aLower != bLower {
+				return aLower < bLower
+			}
+			// Case-insensitive equal, continue to next segment
+		}
+	}
+
+	// If all compared segments are equal, shorter one comes first
+	// If same length, use case-sensitive comparison as final tiebreaker
+	if len(aParts) != len(bParts) {
+		return len(aParts) < len(bParts)
+	}
+	return a < b
+}
+
+// splitIntoSegments splits a string into alternating alphabetic and numeric segments
+func splitIntoSegments(s string) []string {
+	var segments []string
+	var current strings.Builder
+
+	for _, r := range s {
+		isDigit := r >= '0' && r <= '9'
+		isAlpha := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+
+		if current.Len() == 0 {
+			current.WriteRune(r)
+		} else {
+			lastRune := []rune(current.String())[current.Len()-1]
+			lastIsDigit := lastRune >= '0' && lastRune <= '9'
+			lastIsAlpha := (lastRune >= 'a' && lastRune <= 'z') || (lastRune >= 'A' && lastRune <= 'Z')
+
+			// Check if we're in the same segment type
+			sameType := (isDigit && lastIsDigit) || (isAlpha && lastIsAlpha) || (!isDigit && !isAlpha && !lastIsDigit && !lastIsAlpha)
+
+			if sameType {
+				current.WriteRune(r)
+			} else {
+				segments = append(segments, current.String())
+				current.Reset()
+				current.WriteRune(r)
+			}
+		}
+	}
+
+	if current.Len() > 0 {
+		segments = append(segments, current.String())
+	}
+
+	return segments
+}
+
+// parseNumber attempts to parse a string as an integer
+func parseNumber(s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	return n, err == nil
 }

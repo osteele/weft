@@ -308,3 +308,55 @@ func TestIsHostDisconnectedLong(t *testing.T) {
 		})
 	}
 }
+
+func TestNaturalSortStrings(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected []string
+	}{
+		{
+			name:     "numeric suffixes",
+			input:    []string{"cool100", "cool30", "cool10", "cool2"},
+			expected: []string{"cool2", "cool10", "cool30", "cool100"},
+		},
+		{
+			name:     "mixed hosts",
+			input:    []string{"studio", "cool100", "cool30", "alpha"},
+			expected: []string{"alpha", "cool30", "cool100", "studio"},
+		},
+		{
+			name:     "pure alphabetic",
+			input:    []string{"charlie", "alpha", "bravo"},
+			expected: []string{"alpha", "bravo", "charlie"},
+		},
+		{
+			name:     "numeric only",
+			input:    []string{"100", "30", "10", "2"},
+			expected: []string{"2", "10", "30", "100"},
+		},
+		{
+			name:     "case insensitive",
+			input:    []string{"Cool30", "cool10", "COOL20"},
+			expected: []string{"cool10", "COOL20", "Cool30"},
+		},
+		{
+			name:     "prefixes vary",
+			input:    []string{"server2", "host10", "server1", "host2"},
+			expected: []string{"host2", "host10", "server1", "server2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := make([]string, len(tt.input))
+			copy(input, tt.input)
+			naturalSortStrings(input)
+			for i, got := range input {
+				if got != tt.expected[i] {
+					t.Errorf("naturalSortStrings() at index %d = %q, want %q (full result: %v)", i, got, tt.expected[i], input)
+				}
+			}
+		})
+	}
+}
