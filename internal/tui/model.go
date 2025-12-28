@@ -3801,9 +3801,23 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 		status_file=$(ls %s 2>/dev/null | head -1)
 		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
 			cat "$status_file" 2>/dev/null | head -1
-		# Check if currently running in queue
+		# Check if currently running in queue - but verify process is alive
 		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
-			echo RUNNING
+			# Job is in .current, but verify process is actually running
+			# (handles case where server rebooted and .current is stale)
+			pid_file=$(ls %s 2>/dev/null | head -1)
+			if [ -n "$pid_file" ]; then
+				pid=$(cat "$pid_file" 2>/dev/null | head -1)
+				if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
+					echo RUNNING
+				else
+					# In .current but process dead = crashed/rebooted
+					echo DEAD
+				fi
+			else
+				# In .current but no PID file yet - probably just starting
+				echo RUNNING
+			fi
 		# Check if waiting in queue
 		elif grep -q '^%d	' %s 2>/dev/null; then
 			echo QUEUED
@@ -3824,6 +3838,7 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 		fi
 	`, statusPattern,
 		currentFile, currentFile, job.ID,
+		pidPattern,
 		job.ID, queueFile,
 		pidPattern)
 
@@ -3844,6 +3859,13 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
 	case "QUEUED":
 		// Job is still waiting in queue, no change needed
 		return false, nil
+	case "DEAD":
+		// Positive evidence the job is dead: it was in .current but the process is gone.
+		// This happens when the server reboots or the queue runner crashes.
+		if err := db.MarkDeadByID(database, job.ID); err != nil {
+			return false, err
+		}
+		return true, nil
 	case "UNCERTAIN":
 		// We couldn't determine the job's state - this could be due to:
 		// 1. Race condition during job state transition

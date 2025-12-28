@@ -22,6 +22,7 @@ Examples:
   remote-jobs log 25           # View log for job #25 (last 50 lines)
   remote-jobs log 25 -f        # Follow job #25's log
   remote-jobs log 25 -n 100    # Last 100 lines
+  remote-jobs log 25 --tail 30 # Last 30 lines (alias for -n)
   remote-jobs log 25 --from 50           # Lines from 50 onwards
   remote-jobs log 25 --from 50 --to 100  # Lines 50-100
   remote-jobs log 25 --to 100            # First 100 lines
@@ -44,6 +45,7 @@ func init() {
 
 	logCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log in real-time")
 	logCmd.Flags().IntVarP(&logLines, "lines", "n", 50, "Number of lines to show (last N lines)")
+	logCmd.Flags().IntVar(&logLines, "tail", 50, "Number of lines to show (alias for --lines)")
 	logCmd.Flags().IntVar(&logFrom, "from", 0, "Show lines starting from line N")
 	logCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
 	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
@@ -57,8 +59,8 @@ func runLog(cmd *cobra.Command, args []string) error {
 
 	// Validate flag combinations
 	hasLineRange := logFrom > 0 || logTo > 0
-	if hasLineRange && cmd.Flags().Changed("lines") {
-		return fmt.Errorf("--from/--to cannot be used with -n/--lines")
+	if hasLineRange && (cmd.Flags().Changed("lines") || cmd.Flags().Changed("tail")) {
+		return fmt.Errorf("--from/--to cannot be used with -n/--lines/--tail")
 	}
 	if logFollow && logTo > 0 {
 		return fmt.Errorf("--follow cannot be used with --to")

@@ -618,6 +618,10 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		// Get job from database
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: database error: %v", jobID, err))
+			continue
+		}
+		if job == nil {
 			errors = append(errors, fmt.Sprintf("job %d not found", jobID))
 			continue
 		}
