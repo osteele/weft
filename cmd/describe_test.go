@@ -4,6 +4,59 @@ import (
 	"testing"
 )
 
+func TestExtractGPUFromEnvVars(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVars []string
+		want    string
+	}{
+		{
+			name:    "no env vars",
+			envVars: nil,
+			want:    "",
+		},
+		{
+			name:    "empty env vars",
+			envVars: []string{},
+			want:    "",
+		},
+		{
+			name:    "no CUDA var",
+			envVars: []string{"FOO=bar", "BATCH_SIZE=32"},
+			want:    "",
+		},
+		{
+			name:    "CUDA var only",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=0"},
+			want:    "0",
+		},
+		{
+			name:    "CUDA var with others",
+			envVars: []string{"FOO=bar", "CUDA_VISIBLE_DEVICES=2", "BATCH_SIZE=32"},
+			want:    "2",
+		},
+		{
+			name:    "multiple GPUs",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=0,1,2"},
+			want:    "0,1,2",
+		},
+		{
+			name:    "CUDA var first",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=5", "OTHER=value"},
+			want:    "5",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractGPUFromEnvVars(tt.envVars)
+			if got != tt.want {
+				t.Errorf("extractGPUFromEnvVars(%v) = %q, want %q", tt.envVars, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpdateCudaVisibleDevices(t *testing.T) {
 	tests := []struct {
 		name     string

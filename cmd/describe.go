@@ -128,6 +128,13 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 
 	// Update GPU (CUDA_VISIBLE_DEVICES) if provided (queued jobs only)
 	if gpuValue != "" {
+		// Update the GPU field in database
+		if err := db.SetJobGPU(database, jobID, gpuValue); err != nil {
+			return fmt.Errorf("update GPU field: %w", err)
+		}
+		job.GPU = gpuValue
+
+		// Also update the command to include CUDA_VISIBLE_DEVICES for backwards compatibility
 		newCommand := updateCudaVisibleDevices(job.Command, gpuValue)
 		if err := db.UpdateJobCommand(database, jobID, newCommand); err != nil {
 			return fmt.Errorf("update command with GPU: %w", err)

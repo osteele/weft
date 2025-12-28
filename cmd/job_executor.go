@@ -265,6 +265,7 @@ type queueJobOptions struct {
 	Command      string
 	Description  string
 	EnvVars      []string
+	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
 	QueueName    string
 	Dependencies []queueDependency
 	AutoStart    bool
@@ -275,13 +276,29 @@ type queueDependency struct {
 	AllowFailure bool
 }
 
+// extractGPUFromEnvVars finds and returns the CUDA_VISIBLE_DEVICES value from env vars
+func extractGPUFromEnvVars(envVars []string) string {
+	for _, ev := range envVars {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+		}
+	}
+	return ""
+}
+
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	queueName := opts.QueueName
 	if queueName == "" {
 		queueName = defaultQueueName
 	}
 
-	jobID, err := db.RecordQueued(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description, queueName)
+	// Extract GPU from env vars if not explicitly set
+	gpu := opts.GPU
+	if gpu == "" {
+		gpu = extractGPUFromEnvVars(opts.EnvVars)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description, queueName, gpu)
 	if err != nil {
 		return nil, fmt.Errorf("record job: %w", err)
 	}

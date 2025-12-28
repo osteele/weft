@@ -21,6 +21,7 @@ type Job struct {
 	Description  string
 	ErrorMessage string
 	QueueName    string // Name of the queue this job belongs to (empty for non-queued jobs)
+	GPU          string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	CreatedAt    int64  // When the job was created/queued (0 for legacy jobs)
 	StartTime    int64
 	EndTime      *int64
@@ -29,7 +30,7 @@ type Job struct {
 	Tombstoned   bool
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, created_at, start_time, end_time, exit_code, status, error_message, queue_name, tombstoned`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, tombstoned`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -124,6 +125,16 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add created_at column to track when jobs were queued
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN created_at INTEGER`); err != nil {
+		return err
+	}
+
+	// Migration: add gpu column for CUDA_VISIBLE_DEVICES
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: populate gpu column from existing commands
+	if err := migrateGPUFromCommands(db); err != nil {
 		return err
 	}
 
@@ -269,6 +280,49 @@ func isDuplicateColumnError(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
+}
+
+// migrateGPUFromCommands populates the gpu column from existing command strings
+func migrateGPUFromCommands(db *sql.DB) error {
+	// Only migrate jobs that have CUDA_VISIBLE_DEVICES in their command but no gpu set
+	rows, err := db.Query(`SELECT id, command FROM jobs WHERE gpu IS NULL OR gpu = ''`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type jobUpdate struct {
+		id  int64
+		gpu string
+	}
+	var updates []jobUpdate
+
+	for rows.Next() {
+		var id int64
+		var command string
+		if err := rows.Scan(&id, &command); err != nil {
+			return err
+		}
+
+		// Parse GPU from command using a temporary Job struct
+		job := &Job{Command: command}
+		if gpu := job.parseGPUFromCommand(); gpu != "" {
+			updates = append(updates, jobUpdate{id: id, gpu: gpu})
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Apply updates
+	for _, u := range updates {
+		if _, err := db.Exec(`UPDATE jobs SET gpu = ? WHERE id = ?`, u.gpu, u.id); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // RecordStart records a new job start and returns its ID
@@ -430,16 +484,27 @@ func RecordDraft(db *sql.DB, host, workingDir, command, description string) (int
 // RecordQueued records a queued job for sequential execution and returns its ID
 // Note: start_time is NULL until the job actually starts running (set by UpdateQueuedToRunning)
 func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName string) (int64, error) {
+	return RecordQueuedWithGPU(db, host, workingDir, command, description, queueName, "")
+}
+
+// RecordQueuedWithGPU records a queued job with GPU specification
+func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name)
-		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?)`,
-		host, workingDir, command, description, createdAt, StatusQueued, queueName,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu)
+		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+		host, workingDir, command, description, createdAt, StatusQueued, queueName, gpu,
 	)
 	if err != nil {
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+// SetJobGPU updates the GPU field for a job
+func SetJobGPU(db *sql.DB, jobID int64, gpu string) error {
+	_, err := db.Exec(`UPDATE jobs SET gpu = ? WHERE id = ?`, gpu, jobID)
+	return err
 }
 
 // ListQueued returns queued jobs for a host and queue name
@@ -584,13 +649,14 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var desc sql.NullString
 	var errorMsg sql.NullString
 	var queueName sql.NullString
+	var gpu sql.NullString
 	var createdAt sql.NullInt64
 	var startTime sql.NullInt64
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 	var tombstoned sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -609,6 +675,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if queueName.Valid {
 		j.QueueName = queueName.String
+	}
+	if gpu.Valid {
+		j.GPU = gpu.String
 	}
 	if createdAt.Valid {
 		j.CreatedAt = createdAt.Int64
@@ -639,13 +708,14 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var desc sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
+		var gpu sql.NullString
 		var createdAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -659,14 +729,17 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
 		}
+		if queueName.Valid {
+			j.QueueName = queueName.String
+		}
+		if gpu.Valid {
+			j.GPU = gpu.String
+		}
 		if createdAt.Valid {
 			j.CreatedAt = createdAt.Int64
 		}
 		if startTime.Valid {
 			j.StartTime = startTime.Int64
-		}
-		if queueName.Valid {
-			j.QueueName = queueName.String
 		}
 		if endTime.Valid {
 			j.EndTime = &endTime.Int64
@@ -928,13 +1001,14 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var desc sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
+		var gpu sql.NullString
 		var createdAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -948,11 +1022,14 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
 		}
-		if createdAt.Valid {
-			j.CreatedAt = createdAt.Int64
-		}
 		if queueName.Valid {
 			j.QueueName = queueName.String
+		}
+		if gpu.Valid {
+			j.GPU = gpu.String
+		}
+		if createdAt.Valid {
+			j.CreatedAt = createdAt.Int64
 		}
 		if startTime.Valid {
 			j.StartTime = startTime.Int64
@@ -1010,9 +1087,21 @@ func stripExportPrefix(cmd string) string {
 	return cmd
 }
 
-// GetGPU extracts the CUDA_VISIBLE_DEVICES value from the job's command.
-// Returns empty string if not found.
+// GetGPU returns the GPU (CUDA_VISIBLE_DEVICES) value for this job.
+// First checks the database GPU field, then falls back to parsing the command.
 func (j *Job) GetGPU() string {
+	// Prefer the database field if set
+	if j.GPU != "" {
+		return j.GPU
+	}
+
+	// Fall back to parsing from command for backwards compatibility
+	return j.parseGPUFromCommand()
+}
+
+// parseGPUFromCommand extracts CUDA_VISIBLE_DEVICES from the job's command.
+// Returns empty string if not found.
+func (j *Job) parseGPUFromCommand() string {
 	// Get command after cd prefix if present
 	cmd := j.Command
 	if afterCd, _ := j.ParseCdCommand(); afterCd != "" {

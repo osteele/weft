@@ -356,6 +356,50 @@ func TestGetGPU(t *testing.T) {
 	}
 }
 
+func TestGetGPU_DatabaseFieldTakesPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		gpu     string
+		command string
+		want    string
+	}{
+		{
+			name:    "database field only",
+			gpu:     "3",
+			command: "python train.py",
+			want:    "3",
+		},
+		{
+			name:    "database field overrides command",
+			gpu:     "5",
+			command: "env CUDA_VISIBLE_DEVICES=0 python train.py",
+			want:    "5",
+		},
+		{
+			name:    "empty database field falls back to command",
+			gpu:     "",
+			command: "env CUDA_VISIBLE_DEVICES=2 python train.py",
+			want:    "2",
+		},
+		{
+			name:    "multiple GPUs in database field",
+			gpu:     "0,1,2",
+			command: "python train.py",
+			want:    "0,1,2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{GPU: tt.gpu, Command: tt.command}
+			got := job.GetGPU()
+			if got != tt.want {
+				t.Errorf("GetGPU() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeCommand(t *testing.T) {
 	tests := []struct {
 		name       string
