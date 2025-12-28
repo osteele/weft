@@ -467,6 +467,16 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// CountQueuedByHost returns the number of queued jobs for a host
+func CountQueuedByHost(db *sql.DB, host string) (int, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0`,
+		host, StatusQueued,
+	).Scan(&count)
+	return count, err
+}
+
 // RecordDraft records a draft job and returns its ID
 func RecordDraft(db *sql.DB, host, workingDir, command, description string) (int64, error) {
 	createdAt := time.Now().Unix()

@@ -412,60 +412,78 @@ func (h *Host) LoadAvgShort() string {
 	return strings.TrimSpace(parts[0])
 }
 
-// CPUUtilization returns CPU utilization as a percentage string based on 1-minute load average
-func (h *Host) CPUUtilization() string {
+// CPUUtilizationPct returns CPU utilization as a percentage int based on 1-minute load average
+// Returns -1 if unavailable
+func (h *Host) CPUUtilizationPct() int {
 	if h.LoadAvg == "" || h.CPUs == 0 {
-		return "-"
+		return -1
 	}
 	// Parse 1-minute load average
 	loadStr := strings.ReplaceAll(h.LoadAvg, ",", " ")
 	loads := strings.Fields(loadStr)
 	if len(loads) == 0 {
-		return "-"
+		return -1
 	}
 	loadVal, err := strconv.ParseFloat(loads[0], 64)
 	if err != nil {
+		return -1
+	}
+	return int((loadVal / float64(h.CPUs)) * 100)
+}
+
+// CPUUtilization returns CPU utilization as a percentage string based on 1-minute load average
+func (h *Host) CPUUtilization() string {
+	pct := h.CPUUtilizationPct()
+	if pct < 0 {
 		return "-"
 	}
-	pct := int((loadVal / float64(h.CPUs)) * 100)
 	return fmt.Sprintf("%d%%", pct)
+}
+
+// parseMemGB parses memory values (handles formats like "128G", "58G", "128Gi", "58Gi", "128GiB")
+func parseMemGB(s string) float64 {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "iB")
+	s = strings.TrimSuffix(s, "i")
+	s = strings.TrimSuffix(s, "B")
+	multiplier := 1.0
+	if strings.HasSuffix(s, "G") {
+		s = strings.TrimSuffix(s, "G")
+		multiplier = 1.0
+	} else if strings.HasSuffix(s, "M") {
+		s = strings.TrimSuffix(s, "M")
+		multiplier = 1.0 / 1024.0
+	} else if strings.HasSuffix(s, "T") {
+		s = strings.TrimSuffix(s, "T")
+		multiplier = 1024.0
+	}
+	val, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return val * multiplier
+}
+
+// RAMUtilizationPct returns RAM utilization as a percentage int
+// Returns -1 if unavailable
+func (h *Host) RAMUtilizationPct() int {
+	if h.MemTotal == "" || h.MemUsed == "" {
+		return -1
+	}
+	total := parseMemGB(h.MemTotal)
+	used := parseMemGB(h.MemUsed)
+	if total == 0 {
+		return -1
+	}
+	return int((used / total) * 100)
 }
 
 // RAMUtilization returns RAM utilization as a percentage string
 func (h *Host) RAMUtilization() string {
-	if h.MemTotal == "" || h.MemUsed == "" {
+	pct := h.RAMUtilizationPct()
+	if pct < 0 {
 		return "-"
 	}
-	// Parse memory values (handles formats like "128G", "58G", "128Gi", "58Gi", "128GiB")
-	parseMemGB := func(s string) float64 {
-		s = strings.TrimSpace(s)
-		s = strings.TrimSuffix(s, "iB")
-		s = strings.TrimSuffix(s, "i")
-		s = strings.TrimSuffix(s, "B")
-		multiplier := 1.0
-		if strings.HasSuffix(s, "G") {
-			s = strings.TrimSuffix(s, "G")
-			multiplier = 1.0
-		} else if strings.HasSuffix(s, "M") {
-			s = strings.TrimSuffix(s, "M")
-			multiplier = 1.0 / 1024.0
-		} else if strings.HasSuffix(s, "T") {
-			s = strings.TrimSuffix(s, "T")
-			multiplier = 1024.0
-		}
-		val, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return 0
-		}
-		return val * multiplier
-	}
-
-	total := parseMemGB(h.MemTotal)
-	used := parseMemGB(h.MemUsed)
-	if total == 0 {
-		return "-"
-	}
-	pct := int((used / total) * 100)
 	return fmt.Sprintf("%d%%", pct)
 }
 

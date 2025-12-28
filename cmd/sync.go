@@ -536,21 +536,27 @@ func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job, timeout time.Duratio
 
 	combinedCmd := fmt.Sprintf(`
 		# Check status file (completed?)
-		if [ -f %s ]; then
-			cat %s 2>/dev/null | head -1
+		status_file=$(ls %s 2>/dev/null | head -1)
+		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
+			cat "$status_file" 2>/dev/null | head -1
 		# Check if currently running in queue
 		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
 			echo RUNNING
 		# Check if waiting in queue
 		elif grep -q '^%d	' %s 2>/dev/null; then
 			echo QUEUED
-		# Check if process still running via PID
-		elif pid=$(cat %s 2>/dev/null) && [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-			echo RUNNING
+		# Check if process still running via PID (use ls to expand glob)
+		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
+			pid=$(cat "$pid_file" 2>/dev/null | head -1)
+			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
+				echo RUNNING
+			else
+				echo DEAD
+			fi
 		else
 			echo DEAD
 		fi
-	`, statusPattern, statusPattern,
+	`, statusPattern,
 		currentFile, currentFile, job.ID,
 		job.ID, queueFile,
 		pidPattern)

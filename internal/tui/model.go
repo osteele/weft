@@ -2251,8 +2251,8 @@ func (m Model) renderHostList(height int) string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf(" %-12s %-10s %-6s %-16s %-5s %-5s",
-		"HOST", "STATUS", "QUEUE", "ARCH", "CPU", "RAM")
+	header := fmt.Sprintf(" %-12s %-10s %-16s %-6s %-5s %-5s",
+		"HOST", "STATUS", "ARCH", "QUEUE", "CPU", "RAM")
 	rows = append(rows, headerStyle.Render(header))
 
 	if len(m.hosts) == 0 {
@@ -2266,7 +2266,7 @@ func (m Model) renderHostList(height int) string {
 			}
 
 			status := m.formatHostStatus(host)
-			queue := host.QueueSummary()
+			queue := m.queueSummaryForHost(host)
 			arch := truncate(host.Arch, 16)
 			if arch == "" {
 				arch = "-"
@@ -2274,8 +2274,18 @@ func (m Model) renderHostList(height int) string {
 			cpu := host.CPUUtilization()
 			ram := host.RAMUtilization()
 
-			line := fmt.Sprintf(" %-12s %-10s %-6s %-16s %-5s %-5s",
-				truncate(host.Name, 12), status, queue, arch, cpu, ram)
+			// Style CPU/RAM in red if >90%
+			cpuPct := host.CPUUtilizationPct()
+			ramPct := host.RAMUtilizationPct()
+			if cpuPct > 90 {
+				cpu = failedStyle.Render(cpu)
+			}
+			if ramPct > 90 {
+				ram = failedStyle.Render(ram)
+			}
+
+			line := fmt.Sprintf(" %-12s %-10s %-16s %-6s %-5s %-5s",
+				truncate(host.Name, 12), status, arch, queue, cpu, ram)
 
 			if i == m.selectedHostIdx {
 				line = selectedStyle.Width(m.width - 4).Render(line)
@@ -2299,38 +2309,87 @@ func (m Model) renderHostDetail(height int) string {
 	} else {
 		host := m.hosts[m.selectedHostIdx]
 
-		lines = append(lines, fmt.Sprintf("Host: %s", host.Name))
-		statusLine := fmt.Sprintf("Status: %s", host.StatusString())
+		hostLine := fmt.Sprintf("Host: %s (%s)", host.Name, host.StatusString())
 		if host.Status == HostStatusOffline && !host.LastCheck.IsZero() {
 			elapsed := time.Since(host.LastCheck).Truncate(time.Second)
-			statusLine += fmt.Sprintf(" (for %s)", formatDuration(elapsed))
+			hostLine += fmt.Sprintf(" for %s", formatDuration(elapsed))
 		}
 		if host.Error != "" {
-			statusLine += fmt.Sprintf(" - %s", host.Error)
+			hostLine += fmt.Sprintf(" - %s", host.Error)
 		}
-		lines = append(lines, statusLine)
+		lines = append(lines, hostLine)
 
 		// Show static info (cached) regardless of online status
 		hasStaticInfo := host.Model != "" || host.Arch != "" || host.OS != "" || host.CPUModel != "" || host.CPUs > 0 || len(host.GPUs) > 0
 		if hasStaticInfo {
 			lines = append(lines, "───────────────────────────────────────────────────────────────")
+			// Helper to format label:value with bold label (14 chars for "Architecture:" + space)
+			fmtLine := func(label, value string) string {
+				return labelStyle.Render(fmt.Sprintf("%-14s", label)) + value
+			}
 			if host.Model != "" {
-				lines = append(lines, fmt.Sprintf("Model:        %s", host.Model))
+				lines = append(lines, fmtLine("Model:", host.Model))
 			}
 			if host.Arch != "" {
-				lines = append(lines, fmt.Sprintf("Architecture: %s", host.Arch))
+				lines = append(lines, fmtLine("Architecture:", host.Arch))
 			}
 			if host.OS != "" {
-				lines = append(lines, fmt.Sprintf("OS Version:   %s", host.OS))
+				lines = append(lines, fmtLine("OS Version:", host.OS))
 			}
 			if host.CPUModel != "" {
-				lines = append(lines, fmt.Sprintf("CPU:          %s", host.CPUModel))
+				lines = append(lines, fmtLine("CPU:", host.CPUModel))
 			}
 			if host.CPUs > 0 {
-				lines = append(lines, fmt.Sprintf("CPU Cores:    %d", host.CPUs))
+				lines = append(lines, fmtLine("CPU Cores:", fmt.Sprintf("%d", host.CPUs)))
 			}
 
-			// GPUs (right after CPU info)
+			// Memory (before GPUs, with CPU info)
+			if host.MemTotal != "" {
+				memInfo := host.MemTotal
+				if host.MemUsed != "" {
+					// Calculate utilization percentage
+					usedMiB := parseMiB(host.MemUsed)
+					totalMiB := parseMiB(host.MemTotal)
+					if totalMiB > 0 {
+						pct := (usedMiB * 100) / totalMiB
+						pctStr := fmt.Sprintf("(%d%%)", pct)
+						if pct > 90 {
+							pctStr = failedStyle.Render(pctStr)
+						}
+						memInfo = fmt.Sprintf("%s used / %s total %s", host.MemUsed, host.MemTotal, pctStr)
+					} else {
+						memInfo = fmt.Sprintf("%s used / %s total", host.MemUsed, host.MemTotal)
+					}
+				}
+				lines = append(lines, fmtLine("Memory:", memInfo))
+			}
+
+			// Load average (1m, 5m, 15m values)
+			if host.LoadAvg != "" {
+				// Parse load values - handle both comma-separated (Linux) and space-separated (macOS)
+				loadStr := strings.ReplaceAll(host.LoadAvg, ",", " ")
+				loads := strings.Fields(loadStr)
+				if len(loads) >= 3 && host.CPUs > 0 {
+					load1m := loads[0]
+					load5m := loads[1]
+					load15m := loads[2]
+					// Calculate utilization percentage from 1-minute load
+					if loadVal, err := strconv.ParseFloat(load1m, 64); err == nil {
+						pct := int((loadVal / float64(host.CPUs)) * 100)
+						pctStr := fmt.Sprintf("[%d%% of %d cores]", pct, host.CPUs)
+						if pct > 90 {
+							pctStr = failedStyle.Render(pctStr)
+						}
+						lines = append(lines, fmtLine("Load:", fmt.Sprintf("%s, %s, %s  %s", load1m, load5m, load15m, pctStr)))
+					} else {
+						lines = append(lines, fmtLine("Load:", fmt.Sprintf("%s, %s, %s", load1m, load5m, load15m)))
+					}
+				} else {
+					lines = append(lines, fmtLine("Load:", host.LoadAvg))
+				}
+			}
+
+			// GPUs
 			if len(host.GPUs) > 0 {
 				// Show GPU summary header
 				gpuNames := make(map[string]int)
@@ -2339,10 +2398,10 @@ func (m Model) renderHostDetail(height int) string {
 				}
 				if len(gpuNames) == 1 {
 					for name, count := range gpuNames {
-						lines = append(lines, fmt.Sprintf("GPUs:         %d× %s", count, name))
+						lines = append(lines, fmtLine("GPUs:", fmt.Sprintf("%d× %s", count, name)))
 					}
 				} else {
-					lines = append(lines, fmt.Sprintf("GPUs:         %d", len(host.GPUs)))
+					lines = append(lines, fmtLine("GPUs:", fmt.Sprintf("%d", len(host.GPUs))))
 				}
 				// Show per-GPU stats as a table (only when online - these are dynamic)
 				hasStats := false
@@ -2381,44 +2440,6 @@ func (m Model) renderHostDetail(height int) string {
 					}
 				}
 			}
-
-			// Memory (after GPUs)
-			if host.MemTotal != "" {
-				memInfo := host.MemTotal
-				if host.MemUsed != "" {
-					// Calculate utilization percentage
-					usedMiB := parseMiB(host.MemUsed)
-					totalMiB := parseMiB(host.MemTotal)
-					if totalMiB > 0 {
-						pct := (usedMiB * 100) / totalMiB
-						memInfo = fmt.Sprintf("%s used / %s total (%d%%)", host.MemUsed, host.MemTotal, pct)
-					} else {
-						memInfo = fmt.Sprintf("%s used / %s total", host.MemUsed, host.MemTotal)
-					}
-				}
-				lines = append(lines, fmt.Sprintf("Memory:       %s", memInfo))
-			}
-
-			// Load average (labeled: 1m, 5m, 15m)
-			if host.LoadAvg != "" {
-				// Parse load values - handle both comma-separated (Linux) and space-separated (macOS)
-				loadStr := strings.ReplaceAll(host.LoadAvg, ",", " ")
-				loads := strings.Fields(loadStr)
-				if len(loads) >= 3 && host.CPUs > 0 {
-					load1m := loads[0]
-					load5m := loads[1]
-					load15m := loads[2]
-					// Calculate utilization percentage from 1-minute load
-					if loadVal, err := strconv.ParseFloat(load1m, 64); err == nil {
-						pct := int((loadVal / float64(host.CPUs)) * 100)
-						lines = append(lines, fmt.Sprintf("Load (1/5/15m): %s, %s, %s  [%d%% of %d cores]", load1m, load5m, load15m, pct, host.CPUs))
-					} else {
-						lines = append(lines, fmt.Sprintf("Load (1/5/15m): %s, %s, %s", load1m, load5m, load15m))
-					}
-				} else {
-					lines = append(lines, fmt.Sprintf("Load:         %s", host.LoadAvg))
-				}
-			}
 		}
 
 		// Queue status section
@@ -2432,7 +2453,8 @@ func (m Model) renderHostDetail(height int) string {
 				} else {
 					lines = append(lines, "  Current job:  None")
 				}
-				lines = append(lines, fmt.Sprintf("  Jobs waiting: %d", host.QueuedJobCount))
+				queuedCount, _ := db.CountQueuedByHost(m.database, host.Name)
+				lines = append(lines, fmt.Sprintf("  Jobs waiting: %d", queuedCount))
 				if host.QueueStopPending {
 					lines = append(lines, "  Stop pending: Yes")
 				}
@@ -2833,6 +2855,29 @@ func (m Model) formatHostStatus(host *Host) string {
 		return "◐ checking"
 	default:
 		return "? unknown"
+	}
+}
+
+// queueSummaryForHost returns a brief queue status string using database count
+func (m Model) queueSummaryForHost(host *Host) string {
+	switch host.QueueStatus {
+	case QueueCheckUnknown, QueueCheckChecking:
+		return "-"
+	case QueueCheckChecked:
+		// Get count from database instead of remote file
+		count, err := db.CountQueuedByHost(m.database, host.Name)
+		if err != nil {
+			count = 0
+		}
+		if !host.QueueRunnerActive {
+			return "○"
+		}
+		if host.QueueStopPending {
+			return fmt.Sprintf("■ %d", count)
+		}
+		return fmt.Sprintf("▶ %d", count)
+	default:
+		return "-"
 	}
 }
 

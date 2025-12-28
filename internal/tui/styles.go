@@ -53,6 +53,9 @@ var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true)
 
+	labelStyle = lipgloss.NewStyle().
+			Bold(true)
+
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Padding(0, 1)
@@ -79,7 +82,7 @@ var (
 			Foreground(runningColor) // Green
 
 	hostOfflineStyle = lipgloss.NewStyle().
-				Foreground(failedColor) // Red
+				Foreground(completedColor) // Gray (offline is normal, not an error)
 
 	hostCheckingStyle = lipgloss.NewStyle().
 				Foreground(pendingColor) // Yellow
