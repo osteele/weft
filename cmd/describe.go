@@ -13,6 +13,7 @@ import (
 )
 
 var (
+	describeMessage   string
 	describeDirectory string
 	describeCommand   string
 	describeGPU       string
@@ -26,7 +27,7 @@ type deferredUpdatePayload struct {
 }
 
 var describeCmd = &cobra.Command{
-	Use:   "describe <job-id> [description]",
+	Use:   "describe <job-id>",
 	Short: "Set or update job metadata",
 	Long: `Set or update the description, directory, command, or GPU of a job.
 
@@ -34,20 +35,21 @@ For queued jobs, you can also update the working directory, command, and GPU.
 The remote queue file will be updated automatically.
 
 Examples:
-  remote-jobs describe 42 "Training GPT-2 with lr=0.001"
-  remote-jobs describe 42 ""  # Clear description
+  remote-jobs describe 42 -m "Training GPT-2 with lr=0.001"
+  remote-jobs describe 42 -m ""  # Clear description
   remote-jobs describe 42 --directory /new/path
   remote-jobs describe 42 --command "python train.py --epochs 100"
   remote-jobs describe 42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
   remote-jobs describe 42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
-  remote-jobs describe 42 -d "New desc" --command "python new.py"`,
-	Args: usageArgs(cobra.RangeArgs(1, 2)),
+  remote-jobs describe 42 -m "New desc" --command "python new.py"`,
+	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runDescribe,
 }
 
 func init() {
 	// Removed: Describe command is now only available as `job describe`
 	// rootCmd.AddCommand(describeCmd)
+	describeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
 	describeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
 	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU (CUDA_VISIBLE_DEVICES) - queued jobs only")
@@ -60,12 +62,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
 
-	// Description is optional second argument
-	description := ""
-	hasDescription := len(args) > 1
-	if hasDescription {
-		description = args[1]
-	}
+	// Description from -m flag
+	description := describeMessage
+	hasDescription := cmd.Flags().Changed("message")
 
 	database, err := db.Open()
 	if err != nil {

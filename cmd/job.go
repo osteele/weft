@@ -77,10 +77,10 @@ Examples:
 
 // Job describe subcommand
 var jobDescribeCmd = &cobra.Command{
-	Use:   "describe <job-id> [description]",
+	Use:   "describe <job-id>",
 	Short: "Set or update job metadata",
 	Long:  describeCmd.Long,
-	Args:  usageArgs(cobra.RangeArgs(1, 2)),
+	Args:  usageArgs(cobra.ExactArgs(1)),
 	RunE:  runDescribe,
 }
 
@@ -191,7 +191,9 @@ func init() {
 	jobCmd.AddCommand(jobInfoCmd)
 
 	// Copy flags from run command to job run
-	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "Job description")
+	jobRunCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Job description")
+	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Job description")
+	jobRunCmd.Flags().MarkHidden("description")
 	jobRunCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory on remote host")
 	jobRunCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	jobRunCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
@@ -218,6 +220,7 @@ func init() {
 	jobListCmd.Flags().BoolVar(&listSync, "sync", false, "Sync job statuses from remote hosts before listing")
 
 	// Copy flags from describe command to job describe
+	jobDescribeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
 	jobDescribeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
 	jobDescribeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 	jobDescribeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU (CUDA_VISIBLE_DEVICES) - queued jobs only")

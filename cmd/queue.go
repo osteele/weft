@@ -52,7 +52,7 @@ in FIFO order.
 
 Examples:
   remote-jobs queue add cool30 'python train.py --epochs 100'
-  remote-jobs queue add -d "Training run 1" cool30 'python train.py'
+  remote-jobs queue add -m "Training run 1" cool30 'python train.py'
   remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
   remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes
   remote-jobs queue add --queue gpu cool30 'python train.py'`,
@@ -188,7 +188,9 @@ func init() {
 	}
 
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path)")
-	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "Description of the job")
+	queueAddCmd.Flags().StringVarP(&queueDescription, "message", "m", "", "Description of the job")
+	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
+	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
@@ -198,6 +200,9 @@ func init() {
 func runQueueAdd(cmd *cobra.Command, args []string) error {
 	host := args[0]
 	command := args[1]
+
+	// Print recommendations for common patterns
+	printCommandRecommendations(command)
 
 	// Set defaults
 	workingDir := queueDir_

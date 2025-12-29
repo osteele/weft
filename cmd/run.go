@@ -24,7 +24,7 @@ The job continues running even when you disconnect.
 
 Examples:
   remote-jobs run cool30 'python train.py'
-  remote-jobs run -d "Training GPT-2" cool30 'with-gpu python train.py'
+  remote-jobs run -m "Training GPT-2" cool30 'with-gpu python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
   remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 cool30 'python train.py'
   remote-jobs run --after 42 cool30 'python eval.py'  # Run after job 42 completes
@@ -67,7 +67,9 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path)")
-	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "Description of the job")
+	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
+	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
+	runCmd.Flags().MarkHidden("description")
 	runCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
 	runCmd.Flags().BoolVar(&runQueueOnFail, "queue-on-fail", false, "Queue job if connection fails")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
@@ -136,6 +138,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		host = args[0]
 		command = args[1]
 	}
+
+	// Print recommendations for common patterns
+	printCommandRecommendations(command)
 
 	// Validate flag combinations
 	if runFollow && runQueue {
@@ -448,4 +453,62 @@ func printDetachedInstructions(jobID int64) {
 	fmt.Printf("Job %d continues running.\n", jobID)
 	fmt.Printf("View logs later: remote-jobs log %d -f\n", jobID)
 	fmt.Printf("Check status:   remote-jobs job status %d\n", jobID)
+}
+
+// printCommandRecommendations checks for common command patterns and suggests
+// better alternatives using CLI flags. Returns true if any recommendations were printed.
+func printCommandRecommendations(command string) bool {
+	var recommendations []string
+
+	// Check for "cd /path && " prefix
+	trimmed := strings.TrimSpace(command)
+	if strings.HasPrefix(trimmed, "cd ") {
+		// Extract the directory for the recommendation
+		dir, _ := parseCdPrefix(command)
+		if dir != "" {
+			recommendations = append(recommendations,
+				fmt.Sprintf("Tip: Instead of 'cd %s && ...', consider using -C %q to set the working directory.\n"+
+					"     This ensures ~ is expanded on the remote host, not locally.", dir, dir))
+		}
+	}
+
+	// Check for "VAR=value " prefix (environment variable)
+	if idx := strings.Index(trimmed, "="); idx > 0 && idx < len(trimmed)-1 {
+		// Check if it looks like VAR=value at the start (VAR must be valid identifier)
+		prefix := trimmed[:idx]
+		// Valid env var names: start with letter or _, followed by letters, digits, or _
+		isValidEnvVar := true
+		for i, c := range prefix {
+			if i == 0 {
+				if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+					isValidEnvVar = false
+					break
+				}
+			} else {
+				if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
+					isValidEnvVar = false
+					break
+				}
+			}
+		}
+		if isValidEnvVar {
+			// Find the value (up to the next space)
+			rest := trimmed[idx+1:]
+			var value string
+			if spaceIdx := strings.Index(rest, " "); spaceIdx > 0 {
+				value = rest[:spaceIdx]
+				recommendations = append(recommendations,
+					fmt.Sprintf("Tip: Instead of '%s=%s ...', consider using -e %s=%s to set environment variables.", prefix, value, prefix, value))
+			}
+		}
+	}
+
+	if len(recommendations) > 0 {
+		fmt.Fprintln(os.Stderr)
+		for _, rec := range recommendations {
+			fmt.Fprintln(os.Stderr, rec)
+		}
+		return true
+	}
+	return false
 }
