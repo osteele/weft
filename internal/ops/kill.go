@@ -56,10 +56,7 @@ func executeKill(database *sql.DB, host string, op *db.DeferredOperation, opts E
 		if ssh.IsConnectionError(err.Error()) {
 			return Result{}, fmt.Errorf("connection error: %w", err)
 		}
-		// Session might already be gone - that's OK
-		if opts.Verbose {
-			fmt.Printf("Note: kill session returned: %v\n", err)
-		}
+		// Session might already be gone - that's OK, continue silently
 	}
 
 	return Result{

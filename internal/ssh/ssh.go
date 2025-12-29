@@ -235,7 +235,7 @@ func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) er
 
 // TmuxSessionExists checks if a tmux session exists on the remote host (with retry)
 func TmuxSessionExists(host, sessionName string) (bool, error) {
-	stdout, stderr, err := RunWithRetry(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))
+	stdout, stderr, err := RunWithRetryQuiet(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))
 	if err != nil {
 		// Check if it's a connection error
 		if IsConnectionError(stdout + stderr) {

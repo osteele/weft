@@ -58,7 +58,7 @@ func ExecuteAllDeferredOperations(database *sql.DB, host string, opts ExecuteOpt
 
 	var result ExecutionResult
 	for _, op := range operations {
-		opResult, err := executeOperation(database, host, op, opts)
+		_, err := executeOperation(database, host, op, opts)
 		if err != nil {
 			if isConnectionError(err) {
 				// Host went offline - stop processing, remaining ops stay queued
@@ -76,9 +76,6 @@ func ExecuteAllDeferredOperations(database *sql.DB, host string, opts ExecuteOpt
 		}
 
 		result.Completed++
-		if opts.Verbose && opResult.Message != "" {
-			fmt.Printf("    Completed: %s\n", opResult.Message)
-		}
 	}
 
 	return result, nil
@@ -140,18 +137,11 @@ func drainOperationsUntil(database *sql.DB, host string, targetOpID int64, opts 
 					Message:  fmt.Sprintf("Host %s became unreachable, remaining operations queued", host),
 				}, nil
 			}
-			// Log error but continue with other operations
-			if opts.Verbose {
-				fmt.Printf("Warning: operation %s for job %d failed: %v\n", op.Operation, op.JobID, err)
-			}
+			// Continue with other operations (error is silently ignored for TUI compatibility)
 		}
 
-		// Delete completed operation
-		if err := db.DeleteDeferredOperation(database, op.ID); err != nil {
-			if opts.Verbose {
-				fmt.Printf("Warning: failed to delete operation %d: %v\n", op.ID, err)
-			}
-		}
+		// Delete completed operation (errors silently ignored)
+		_ = db.DeleteDeferredOperation(database, op.ID)
 
 		lastResult = result
 

@@ -110,3 +110,54 @@ func RemoveEntry(host, queueName string, jobID int64) error {
 	}
 	return nil
 }
+
+// MoveToFront moves a job to the front of the queue (next to run after current job).
+// Returns true if the job was moved, false if it was already at the front or not found.
+func MoveToFront(host, queueName string, jobID int64) (bool, error) {
+	queueFile := queueFilePath(queueName)
+
+	// Shell script to atomically move job to front:
+	// 1. Extract the job's line
+	// 2. Get remaining lines
+	// 3. Write job's line first, then remaining lines
+	moveCmd := fmt.Sprintf(`
+		job_line=$(grep -m1 '^%d	' %s 2>/dev/null)
+		if [ -z "$job_line" ]; then
+			echo "NOT_FOUND"
+			exit 0
+		fi
+		# Check if already at front
+		first_line=$(head -1 %s 2>/dev/null)
+		if [ "$job_line" = "$first_line" ]; then
+			echo "ALREADY_FRONT"
+			exit 0
+		fi
+		# Move to front: job line first, then all other lines
+		(echo "$job_line"; grep -v '^%d	' %s 2>/dev/null) > %s.tmp && mv %s.tmp %s
+		echo "MOVED"
+	`, jobID, queueFile, queueFile, jobID, queueFile, queueFile, queueFile, queueFile)
+
+	stdout, stderr, err := ssh.Run(host, moveCmd)
+	if err != nil {
+		errMsg := strings.TrimSpace(stderr)
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+			return false, fmt.Errorf("%w: %s", ErrConnection, errMsg)
+		}
+		return false, fmt.Errorf("move job %d to front: %s", jobID, errMsg)
+	}
+
+	result := strings.TrimSpace(stdout)
+	switch result {
+	case "MOVED":
+		return true, nil
+	case "ALREADY_FRONT":
+		return false, nil
+	case "NOT_FOUND":
+		return false, fmt.Errorf("job %d not found in queue %s", jobID, queueName)
+	default:
+		return false, fmt.Errorf("unexpected result: %s", result)
+	}
+}

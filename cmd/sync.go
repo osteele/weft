@@ -22,15 +22,20 @@ var syncCmd = &cobra.Command{
 	Long: `Sync job statuses by checking all hosts with running jobs.
 
 Automatically finds hosts with running jobs and updates their status
-in the local database. Connection failures are silently ignored.
+in the local database. Also starts queue runners on hosts with queued jobs.
+Connection failures are silently ignored.
 
 Examples:
-  remote-jobs sync              # Sync all hosts
-  remote-jobs sync --verbose    # Show progress`,
+  remote-jobs sync                    # Sync all hosts
+  remote-jobs sync --verbose          # Show progress
+  remote-jobs sync --no-queue-start   # Don't start queue runners`,
 	RunE: runSync,
 }
 
-var syncVerbose bool
+var (
+	syncVerbose      bool
+	syncNoQueueStart bool
+)
 
 const (
 	// FastSyncTimeout is used for --fast mode in list/status commands
@@ -44,6 +49,7 @@ const (
 func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVarP(&syncVerbose, "verbose", "v", false, "Show detailed progress")
+	syncCmd.Flags().BoolVar(&syncNoQueueStart, "no-queue-start", false, "Don't auto-start queue runners")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
@@ -91,6 +97,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 		if syncVerbose && updated > 0 {
 			fmt.Printf("  %s: %d job(s) updated\n", host, updated)
 		}
+	}
+
+	// Start queue runners on hosts with queued jobs (unless --no-queue-start)
+	if !syncNoQueueStart {
+		startQueueRunnersForQueuedHosts(database)
 	}
 
 	// Print summary

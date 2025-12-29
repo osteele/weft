@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -51,6 +52,35 @@ const (
 	jobFilterFailed
 	jobFilterModeCount
 )
+
+// jobSortMode represents how jobs are sorted in the list
+type jobSortMode int
+
+const (
+	jobSortNewest     jobSortMode = iota // Most recent first (default)
+	jobSortOldest                        // Oldest first
+	jobSortIDDesc                        // Job ID descending
+	jobSortIDAsc                         // Job ID ascending
+	jobSortQueueOrder                    // Queued jobs in execution order, then running, then completed
+	jobSortModeCount
+)
+
+func (m jobSortMode) String() string {
+	switch m {
+	case jobSortNewest:
+		return "Newest"
+	case jobSortOldest:
+		return "Oldest"
+	case jobSortIDDesc:
+		return "ID↓"
+	case jobSortIDAsc:
+		return "ID↑"
+	case jobSortQueueOrder:
+		return "Queue"
+	default:
+		return "Unknown"
+	}
+}
 
 // DetailTab represents which tab is active in the job detail panel
 type DetailTab int
@@ -107,7 +137,9 @@ type keyMap struct {
 	Help        key.Binding
 	StartQueue  key.Binding
 	StartNow    key.Binding
+	MoveToFront key.Binding
 	Edit        key.Binding
+	Sort        key.Binding
 }
 
 var keys = keyMap{
@@ -198,9 +230,17 @@ var keys = keyMap{
 		key.WithKeys("g"),
 		key.WithHelp("g", "start now"),
 	),
+	MoveToFront: key.NewBinding(
+		key.WithKeys("F"),
+		key.WithHelp("F", "move to front"),
+	),
 	Edit: key.NewBinding(
 		key.WithKeys("e"),
 		key.WithHelp("e", "edit"),
+	),
+	Sort: key.NewBinding(
+		key.WithKeys("o"),
+		key.WithHelp("o", "cycle sort"),
 	),
 }
 
@@ -213,8 +253,9 @@ type jobsRefreshedMsg struct {
 }
 
 type syncCompletedMsg struct {
-	updated int
-	err     error
+	updated       int
+	queuesStarted []string // hosts where queue runners were started
+	err           error
 }
 
 type logFetchedMsg struct {
@@ -254,6 +295,12 @@ type queueStartedMsg struct {
 	host    string
 	already bool // true if queue was already running
 	err     error
+}
+
+type jobMovedToFrontMsg struct {
+	jobID int64
+	moved bool // false if already at front
+	err   error
 }
 
 type jobRemovedMsg struct {
@@ -333,6 +380,7 @@ type Model struct {
 	jobList     list.Model // bubbles/list for job selection
 	selectedJob *db.Job
 	jobFilter   jobFilterMode
+	jobSort     jobSortMode
 
 	// Hosts data
 	hosts           []*Host
@@ -574,10 +622,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastSyncTime = time.Now()
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
-		} else if msg.updated > 0 {
+		}
+		// Build flash message
+		var flashParts []string
+		if msg.updated > 0 {
+			flashParts = append(flashParts, fmt.Sprintf("Synced %d job(s)", msg.updated))
+		}
+		if len(msg.queuesStarted) > 0 {
+			flashParts = append(flashParts, fmt.Sprintf("Started queue on %s", strings.Join(msg.queuesStarted, ", ")))
+		}
+		if len(flashParts) > 0 {
 			return m, tea.Batch(
-				m.setFlash(fmt.Sprintf("Synced %d job(s)", msg.updated), false),
+				m.setFlash(strings.Join(flashParts, "; "), false),
 				m.refreshJobs(),
+				m.loadHosts(), // Refresh hosts to update queue status
 			)
 		}
 		return m, m.setFlash("Sync complete", false)
@@ -702,6 +760,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Queue already running on %s", msg.host), false)
 		}
 		return m, m.setFlash(fmt.Sprintf("Queue started on %s", msg.host), false)
+
+	case jobMovedToFrontMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Move to front failed: %v", msg.err), true)
+		} else if !msg.moved {
+			return m, m.setFlash(fmt.Sprintf("Job %d is already at the front", msg.jobID), false)
+		}
+		return m, m.setFlash(fmt.Sprintf("Job %d moved to front of queue", msg.jobID), false)
 
 	case jobRemovedMsg:
 		var flashCmd tea.Cmd
@@ -1320,6 +1386,24 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.setFlash("Can only start queued jobs", true)
 
+	case key.Matches(msg, keys.MoveToFront):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job != nil && job.Status == db.StatusQueued {
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Moving job %d to front...", job.ID), false), m.moveJobToFront(job))
+		}
+		return m, m.setFlash("Can only move queued jobs to front", true)
+
+	case key.Matches(msg, keys.Sort):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		m.jobSort = (m.jobSort + 1) % jobSortModeCount
+		m.applyJobFilter() // Re-filter and sort
+		return m, m.setFlash(fmt.Sprintf("Sort: %s", m.jobSort), false)
+
 	case key.Matches(msg, keys.Edit):
 		if m.viewMode != ViewModeJobs {
 			return m, nil
@@ -1359,6 +1443,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "i":
 			// Switch to Info tab
 			m.hostDetailTab = HostDetailTabInfo
+			return m, nil
+		case "S":
+			// Start queue runner on selected host
+			if len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts) {
+				host := m.hosts[m.selectedHostIdx]
+				return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting queue on %s...", host.Name), false), m.startQueue(host.Name))
+			}
 			return m, nil
 		case "0", "1", "2", "3", "4", "5", "6", "7", "8", "9":
 			// Switch to specific GPU tab by hardware index
@@ -1674,7 +1765,7 @@ func (m Model) renderJobList(height int) string {
 	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
 		"ID", "HOST", "STATUS", "TIME", "GPU", "COMMAND / DESCRIPTION")
 	rows = append(rows, headerStyle.Render(header))
-	filterLabel := fmt.Sprintf(" Filter: %s (press f to cycle)", jobFilterDescription(m.jobFilter))
+	filterLabel := fmt.Sprintf(" Filter: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
 	rows = append(rows, dimStyle.Render(filterLabel))
 
 	if len(m.jobs) == 0 {
@@ -2232,7 +2323,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:views l:logs f:filter s:sync n:new e:edit r:restart k:kill P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:views l:logs f:filter o:sort s:sync n:new e:edit r:restart k:kill P:prune")
 
 	if m.syncing {
 		help = syncingStyle.Render(m.spinner.View()+" ") + help
@@ -2389,9 +2480,8 @@ func (m Model) renderHostDetail(height int) string {
 				}
 			}
 
-			// GPUs
+			// GPUs (just summary, full stats are in GPUs tab)
 			if len(host.GPUs) > 0 {
-				// Show GPU summary header
 				gpuNames := make(map[string]int)
 				for _, gpu := range host.GPUs {
 					gpuNames[gpu.Name]++
@@ -2403,42 +2493,38 @@ func (m Model) renderHostDetail(height int) string {
 				} else {
 					lines = append(lines, fmtLine("GPUs:", fmt.Sprintf("%d", len(host.GPUs))))
 				}
-				// Show per-GPU stats as a table (only when online - these are dynamic)
-				hasStats := false
-				if host.Status == HostStatusOnline {
-					for _, gpu := range host.GPUs {
-						if gpu.Temperature > 0 || gpu.Utilization > 0 || gpu.MemUsed != "" {
-							hasStats = true
-							break
-						}
+			}
+
+			// Job counts for this host
+			var runningCount, queuedCount, recentFailedCount int
+			oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
+			for _, job := range m.allJobs {
+				if job.Host != host.Name {
+					continue
+				}
+				switch job.Status {
+				case db.StatusRunning, db.StatusStarting:
+					runningCount++
+				case db.StatusQueued:
+					queuedCount++
+				case db.StatusDead, db.StatusFailed:
+					// Count as recent if ended within the last hour
+					if job.EndTime != nil && *job.EndTime > oneHourAgo {
+						recentFailedCount++
+					}
+				case db.StatusCompleted:
+					// Count failed completions (non-zero exit) as recent failures
+					if job.ExitCode != nil && *job.ExitCode != 0 && job.EndTime != nil && *job.EndTime > oneHourAgo {
+						recentFailedCount++
 					}
 				}
-				if hasStats {
-					lines = append(lines, "")
-					lines = append(lines, "ID    TEMP    UTIL   MEM USED / TOTAL")
-					for _, gpu := range host.GPUs {
-						temp := "-"
-						if gpu.Temperature > 0 {
-							temp = fmt.Sprintf("%d°C", gpu.Temperature)
-						}
-						util := "-"
-						if gpu.Utilization > 0 || gpu.MemUsed != "" {
-							util = fmt.Sprintf("%d%%", gpu.Utilization)
-						}
-						mem := "-"
-						if gpu.MemUsed != "" && gpu.MemTotal != "" {
-							usedMiB := parseMiB(gpu.MemUsed)
-							totalMiB := parseMiB(gpu.MemTotal)
-							if totalMiB > 0 {
-								pct := (usedMiB * 100) / totalMiB
-								mem = fmt.Sprintf("%s / %s (%d%%)", formatGPUMem(gpu.MemUsed), formatGPUMem(gpu.MemTotal), pct)
-							} else {
-								mem = fmt.Sprintf("%s / %s", formatGPUMem(gpu.MemUsed), formatGPUMem(gpu.MemTotal))
-							}
-						}
-						lines = append(lines, fmt.Sprintf("%2d   %5s   %5s   %s", gpu.Index, temp, util, mem))
-					}
-				}
+			}
+			lines = append(lines, "")
+			lines = append(lines, "Jobs")
+			lines = append(lines, fmt.Sprintf("  Running: %d", runningCount))
+			lines = append(lines, fmt.Sprintf("  Queued:  %d", queuedCount))
+			if recentFailedCount > 0 {
+				lines = append(lines, fmt.Sprintf("  Failed:  %d (last hour)", recentFailedCount))
 			}
 		}
 
@@ -2699,26 +2785,87 @@ func (m Model) renderGPUSummary(height int) string {
 	}
 	sort.Ints(gpuIndices)
 
-	lines = append(lines, fmt.Sprintf("Jobs on %s:", host.Name))
-	lines = append(lines, "")
-	lines = append(lines, "GPU  Running  Queued  Name")
-	lines = append(lines, "───  ───────  ──────  ────")
-
-	for _, gpuIdx := range gpuIndices {
-		counts := gpuJobCounts[gpuIdx]
-		gpuName := ""
+	// Check if we have stats to show
+	hasStats := false
+	if host.Status == HostStatusOnline {
 		for _, gpu := range host.GPUs {
-			if gpu.Index == gpuIdx {
-				gpuName = truncate(gpu.Name, 30)
+			if gpu.Temperature > 0 || gpu.Utilization > 0 || gpu.MemUsed != "" {
+				hasStats = true
 				break
 			}
 		}
-		lines = append(lines, fmt.Sprintf("%3d  %7d  %6d  %s", gpuIdx, counts.running, counts.queued, gpuName))
+	}
+
+	lines = append(lines, fmt.Sprintf("Jobs on %s:", host.Name))
+	lines = append(lines, "")
+
+	if hasStats {
+		// Combined table with job counts and GPU stats
+		lines = append(lines, "GPU  Run  Queue  Temp  Util  Memory            Name")
+		lines = append(lines, "───  ───  ─────  ────  ────  ────────────────  ────")
+
+		for _, gpuIdx := range gpuIndices {
+			counts := gpuJobCounts[gpuIdx]
+			var gpu *GPUInfo
+			for i := range host.GPUs {
+				if host.GPUs[i].Index == gpuIdx {
+					gpu = &host.GPUs[i]
+					break
+				}
+			}
+
+			temp := "  -"
+			util := "  -"
+			mem := "-"
+			gpuName := ""
+
+			if gpu != nil {
+				gpuName = truncate(gpu.Name, 18)
+				if gpu.Temperature > 0 {
+					temp = fmt.Sprintf("%3d°C", gpu.Temperature)
+				}
+				if gpu.Utilization > 0 || gpu.MemUsed != "" {
+					util = fmt.Sprintf("%3d%%", gpu.Utilization)
+				}
+				if gpu.MemUsed != "" && gpu.MemTotal != "" {
+					usedMiB := parseMiB(gpu.MemUsed)
+					totalMiB := parseMiB(gpu.MemTotal)
+					if totalMiB > 0 {
+						pct := (usedMiB * 100) / totalMiB
+						mem = fmt.Sprintf("%s/%s(%d%%)", formatGPUMem(gpu.MemUsed), formatGPUMem(gpu.MemTotal), pct)
+					} else {
+						mem = fmt.Sprintf("%s/%s", formatGPUMem(gpu.MemUsed), formatGPUMem(gpu.MemTotal))
+					}
+				}
+			}
+			lines = append(lines, fmt.Sprintf("%3d  %3d  %5d  %5s %5s  %-16s  %s",
+				gpuIdx, counts.running, counts.queued, temp, util, mem, gpuName))
+		}
+	} else {
+		// Simple table without stats (host offline or no stats available)
+		lines = append(lines, "GPU  Running  Queued  Name")
+		lines = append(lines, "───  ───────  ──────  ────")
+
+		for _, gpuIdx := range gpuIndices {
+			counts := gpuJobCounts[gpuIdx]
+			gpuName := ""
+			for _, gpu := range host.GPUs {
+				if gpu.Index == gpuIdx {
+					gpuName = truncate(gpu.Name, 30)
+					break
+				}
+			}
+			lines = append(lines, fmt.Sprintf("%3d  %7d  %6d  %s", gpuIdx, counts.running, counts.queued, gpuName))
+		}
 	}
 
 	// No GPU section
 	if noGPURunning > 0 || noGPUQueued > 0 {
-		lines = append(lines, fmt.Sprintf("  —  %7d  %6d  (no GPU specified)", noGPURunning, noGPUQueued))
+		if hasStats {
+			lines = append(lines, fmt.Sprintf("  —  %3d  %5d                              (no GPU specified)", noGPURunning, noGPUQueued))
+		} else {
+			lines = append(lines, fmt.Sprintf("  —  %7d  %6d  (no GPU specified)", noGPURunning, noGPUQueued))
+		}
 	}
 
 	return strings.Join(lines, "\n")
@@ -2870,7 +3017,10 @@ func (m Model) queueSummaryForHost(host *Host) string {
 			count = 0
 		}
 		if !host.QueueRunnerActive {
-			return "○"
+			if count > 0 {
+				return fmt.Sprintf("○ %d", count) // Queue stopped but has jobs
+			}
+			return "○" // Queue stopped, no jobs
 		}
 		if host.QueueStopPending {
 			return fmt.Sprintf("■ %d", count)
@@ -3065,6 +3215,9 @@ func (m *Model) applyJobFilter() {
 	}
 	m.jobs = filtered
 
+	// Apply sorting
+	m.sortJobs()
+
 	// Update the list items
 	m.jobList.SetItems(JobsToListItems(m.jobs))
 
@@ -3083,6 +3236,88 @@ func (m *Model) applyJobFilter() {
 		m.selectedJob = nil
 		m.logContent = ""
 		m.logStale = false
+	}
+}
+
+// sortJobs sorts m.jobs in place according to m.jobSort
+func (m *Model) sortJobs() {
+	switch m.jobSort {
+	case jobSortNewest:
+		// Most recent first (by start time, or created time for queued jobs)
+		sort.Slice(m.jobs, func(i, j int) bool {
+			return getJobSortTime(m.jobs[i]) > getJobSortTime(m.jobs[j])
+		})
+	case jobSortOldest:
+		// Oldest first
+		sort.Slice(m.jobs, func(i, j int) bool {
+			return getJobSortTime(m.jobs[i]) < getJobSortTime(m.jobs[j])
+		})
+	case jobSortIDDesc:
+		// Job ID descending (largest first)
+		sort.Slice(m.jobs, func(i, j int) bool {
+			return m.jobs[i].ID > m.jobs[j].ID
+		})
+	case jobSortIDAsc:
+		// Job ID ascending (smallest first)
+		sort.Slice(m.jobs, func(i, j int) bool {
+			return m.jobs[i].ID < m.jobs[j].ID
+		})
+	case jobSortQueueOrder:
+		// Queued jobs first in queue order, then running, then completed
+		sort.Slice(m.jobs, func(i, j int) bool {
+			return jobQueueOrderLess(m.jobs[i], m.jobs[j])
+		})
+	}
+}
+
+// getJobSortTime returns the time to use for sorting (start time or queue time)
+func getJobSortTime(job *db.Job) int64 {
+	if job.StartTime > 0 {
+		return job.StartTime
+	}
+	// For queued jobs, use ID as a proxy for queue time (higher ID = more recent)
+	return job.ID
+}
+
+// jobQueueOrderLess returns true if job i should come before job j in queue order
+func jobQueueOrderLess(i, j *db.Job) bool {
+	// Status priority: queued first, then running/starting, then completed/dead/failed
+	statusPriority := func(job *db.Job) int {
+		switch job.Status {
+		case db.StatusQueued:
+			return 0
+		case db.StatusRunning, db.StatusStarting:
+			return 1
+		default:
+			return 2
+		}
+	}
+
+	pi, pj := statusPriority(i), statusPriority(j)
+	if pi != pj {
+		return pi < pj
+	}
+
+	// Within same status group:
+	// - Queued: by queue position (lower ID typically means queued earlier, but could be reordered)
+	// - Running: by start time (oldest first = running longest)
+	// - Completed: by end time (most recent first)
+	if i.Status == db.StatusQueued {
+		// For queued jobs, use ID as proxy for queue position (lower = earlier)
+		return i.ID < j.ID
+	} else if i.Status == db.StatusRunning || i.Status == db.StatusStarting {
+		// Running jobs: show oldest (running longest) first
+		return i.StartTime < j.StartTime
+	} else {
+		// Completed/failed/dead: most recently finished first
+		ti, tj := int64(0), int64(0)
+		if i.EndTime != nil {
+			ti = *i.EndTime
+		}
+		if j.EndTime != nil {
+			tj = *j.EndTime
+		}
+		return ti > tj
 	}
 }
 
@@ -3550,7 +3785,19 @@ func (m Model) performBackgroundSync() tea.Cmd {
 			}
 		}
 
-		return syncCompletedMsg{updated: updated}
+		// Start queue runners on hosts with queued jobs
+		var queuesStarted []string
+		hostsWithQueued, err := db.ListHostsWithQueuedJobs(m.database)
+		if err == nil {
+			for _, host := range hostsWithQueued {
+				started, err := ensureQueueRunnerStartedTUI(host)
+				if err == nil && started {
+					queuesStarted = append(queuesStarted, host)
+				}
+			}
+		}
+
+		return syncCompletedMsg{updated: updated, queuesStarted: queuesStarted}
 	}
 }
 
@@ -3664,6 +3911,17 @@ func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
 			return jobStartedNowMsg{jobID: job.ID, host: job.Host, err: err}
 		}
 		return jobStartedNowMsg{jobID: job.ID, host: job.Host, deferred: deferred}
+	}
+}
+
+// moveJobToFront moves a queued job to the front of its queue
+func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
+	if job == nil || job.Status != db.StatusQueued {
+		return nil
+	}
+	return func() tea.Msg {
+		moved, err := queuefile.MoveToFront(job.Host, job.QueueName, job.ID)
+		return jobMovedToFrontMsg{jobID: job.ID, moved: moved, err: err}
 	}
 }
 
@@ -4117,6 +4375,53 @@ func (m Model) startQueue(host string) tea.Cmd {
 
 		return queueStartedMsg{host: host}
 	}
+}
+
+// ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
+// Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
+func ensureQueueRunnerStartedTUI(host string) (bool, error) {
+	queueName := "default"
+	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
+
+	// Check if queue runner is already running
+	exists, err := ssh.TmuxSessionExists(host, runnerSession)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		return false, nil // Already running
+	}
+
+	// Create directories on remote
+	queueDir := "~/.cache/remote-jobs/queue"
+	scriptsDir := "~/.cache/remote-jobs/scripts"
+	mkdirCmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
+	if _, _, err := ssh.Run(host, mkdirCmd); err != nil {
+		return false, err
+	}
+
+	// Deploy queue runner script
+	queueRunnerPath := "~/.cache/remote-jobs/scripts/queue-runner.sh"
+	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
+	if _, _, err := ssh.Run(host, writeCmd); err != nil {
+		return false, err
+	}
+
+	// Make script executable
+	chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
+	if _, _, err := ssh.Run(host, chmodCmd); err != nil {
+		return false, err
+	}
+
+	// Start queue runner in tmux
+	runnerCmd := fmt.Sprintf("bash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", queueName)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
+
+	if _, _, err := ssh.Run(host, tmuxCmd); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 func (m Model) removeJob(job *db.Job) tea.Cmd {

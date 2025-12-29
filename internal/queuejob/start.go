@@ -58,20 +58,34 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	}
 
 	entry, err := queuefile.FetchEntry(job.Host, queueName, job.ID)
+	entryWasInQueue := err == nil
 	if err != nil {
 		if queuefile.IsConnectionError(err) {
 			return deferQueuedJobStart(database, job, queueName, nil, false)
 		}
-		return false, err
+		// Job not found in remote queue - this can happen if:
+		// 1. The queue runner already started it
+		// 2. Sync issue between database and remote queue
+		// Use database info to start directly
+		entry = &queuefile.Entry{
+			JobID:       job.ID,
+			WorkingDir:  job.WorkingDir,
+			Command:     job.Command,
+			Description: job.Description,
+		}
 	}
 
-	if err := queuefile.RemoveEntry(job.Host, queueName, job.ID); err != nil {
-		if queuefile.IsConnectionError(err) {
-			return deferQueuedJobStart(database, job, queueName, entry, false)
+	// Only try to remove from queue if it was actually there
+	entryRemoved := false
+	if entryWasInQueue {
+		if err := queuefile.RemoveEntry(job.Host, queueName, job.ID); err != nil {
+			if queuefile.IsConnectionError(err) {
+				return deferQueuedJobStart(database, job, queueName, entry, false)
+			}
+			return false, err
 		}
-		return false, err
+		entryRemoved = true
 	}
-	entryRemoved := true
 
 	if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
 		return false, fmt.Errorf("update queued job: %w", err)

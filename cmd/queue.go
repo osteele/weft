@@ -146,6 +146,21 @@ Examples:
 	RunE: runQueueRemove,
 }
 
+var queueFrontCmd = &cobra.Command{
+	Use:   "front <job-id>",
+	Short: "Move a queued job to the front of the queue",
+	Long: `Move a queued job to the front of the queue so it runs next.
+
+The job will run immediately after the currently running job completes.
+Only works for jobs that haven't started yet (status: queued).
+
+Examples:
+  remote-jobs queue front 123
+  remote-jobs queue front --queue gpu 456`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runQueueFront,
+}
+
 var (
 	queueName        string
 	queueDir_        string
@@ -165,9 +180,10 @@ func init() {
 	queueCmd.AddCommand(queueStatusCmd)
 	queueCmd.AddCommand(queueUpgradeCmd)
 	queueCmd.AddCommand(queueRemoveCmd)
+	queueCmd.AddCommand(queueFrontCmd)
 
 	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpgradeCmd, queueRemoveCmd} {
+	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpgradeCmd, queueRemoveCmd, queueFrontCmd} {
 		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
 	}
 
@@ -679,6 +695,51 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 
 	if len(errors) > 0 {
 		return fmt.Errorf("errors: %s", strings.Join(errors, "; "))
+	}
+	return nil
+}
+
+func runQueueFront(cmd *cobra.Command, args []string) error {
+	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid job ID: %s", args[0])
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+	if job.Status != db.StatusQueued {
+		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, job.Status)
+	}
+
+	// Determine queue name
+	jobQueueName := job.QueueName
+	if jobQueueName == "" {
+		jobQueueName = queueName
+	}
+
+	moved, err := queuefile.MoveToFront(job.Host, jobQueueName, jobID)
+	if err != nil {
+		if queuefile.IsConnectionError(err) {
+			return fmt.Errorf("host %s unreachable", job.Host)
+		}
+		return err
+	}
+
+	if moved {
+		fmt.Printf("Job %d moved to front of queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+	} else {
+		fmt.Printf("Job %d is already at the front of queue '%s' on %s\n", jobID, jobQueueName, job.Host)
 	}
 	return nil
 }

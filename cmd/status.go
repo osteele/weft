@@ -104,8 +104,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 					syncHost(database, host)
 				}
 			}
+			// Start queue runners (full sync mode)
+			startQueueRunnersForQueuedHosts(database)
 		} else if statusFast {
-			// Fast sync (2s timeout)
+			// Fast sync (2s timeout) - skip queue starting for speed
 			completed := performFastSync(database, false)
 			if !completed {
 				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Run with --sync for full sync.\n")
@@ -116,6 +118,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			if !completed {
 				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Use --fast for quicker response or --sync for full sync.\n")
 			}
+			// Start queue runners (default mode)
+			startQueueRunnersForQueuedHosts(database)
 		}
 	}
 
