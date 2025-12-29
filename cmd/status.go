@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -303,7 +304,7 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, 
 		}
 
 		if shouldAttemptSync(job.Status) {
-			if _, err := syncJob(database, job); err != nil {
+			if _, err := ops.SyncJob(database, job, ops.DefaultSyncOptions()); err != nil {
 				if ssh.IsConnectionError(err.Error()) {
 					if tracker != nil {
 						tracker.MarkDown(job.Host)
@@ -386,7 +387,7 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 				continue
 			}
 			if shouldAttemptSync(job.Status) {
-				if _, err := syncJob(database, job); err != nil {
+				if _, err := ops.SyncJob(database, job, ops.DefaultSyncOptions()); err != nil {
 					if ssh.IsConnectionError(err.Error()) {
 						if tracker != nil {
 							tracker.MarkDown(job.Host)

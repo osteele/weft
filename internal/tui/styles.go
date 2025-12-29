@@ -113,4 +113,11 @@ var (
 	gpuTabEmptyStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("8")). // Gray - no jobs
 				Padding(0, 2)
+
+	// Progress bar styles
+	progressBarFilledStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("10")) // Green
+
+	progressBarEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")) // Gray
 )

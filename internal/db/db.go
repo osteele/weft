@@ -467,6 +467,15 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
+func MarkQueuedByID(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, start_time = 0 WHERE id = ?`,
+		StatusQueued, id,
+	)
+	return err
+}
+
 // CountQueuedByHost returns the number of queued jobs for a host
 func CountQueuedByHost(db *sql.DB, host string) (int, error) {
 	var count int

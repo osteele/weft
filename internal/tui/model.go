@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/remote-jobs/internal/progress"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/scripts"
@@ -261,6 +262,7 @@ type syncCompletedMsg struct {
 type logFetchedMsg struct {
 	jobID     int64
 	content   string
+	progress  *progress.Progress // extracted progress info (nil if none found)
 	err       error
 	connError bool // true if this was a connection error (host unreachable)
 }
@@ -403,6 +405,10 @@ type Model struct {
 	processStats      *ssh.ProcessStats
 	prevProcessStats  *ssh.ProcessStats // Previous sample for CPU% calculation
 	processStatsJobID int64
+
+	// Progress tracking for running jobs
+	progressTracker *progress.Tracker            // tracks file sizes for incremental reads
+	jobProgress     map[int64]*progress.Progress // jobID -> latest progress
 
 	// Operation state
 	restarting         bool
@@ -547,6 +553,8 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		logCache:                make(map[int64]string),
 		pendingOpsJobIDs:        make(map[int64]bool),
 		jobDependencies:         make(map[int64]string),
+		progressTracker:         progress.NewTracker(),
+		jobProgress:             make(map[int64]*progress.Progress),
 	}
 }
 
@@ -642,6 +650,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case logFetchedMsg:
 		m.logLoading = false
+
+		// Store progress info if available (regardless of selection)
+		if msg.progress != nil {
+			m.jobProgress[msg.jobID] = msg.progress
+		}
+
 		if msg.err != nil {
 			m.logContent = fmt.Sprintf("Error: %v", msg.err)
 			m.logStale = false
@@ -1974,7 +1988,7 @@ func (m Model) renderJobDetails(height int) string {
 			b.WriteString("\n")
 		}
 
-		// Command (most important) - wrap and indent continuation lines
+		// Command (most important) - wrap and indent continuation lines, but limit height
 		b.WriteString(labelStyle.Render("Command"))
 		cmd := job.EffectiveCommand()
 		labelWidth := 10
@@ -1984,6 +1998,13 @@ func (m Model) renderJobDetails(height int) string {
 			availableWidth = 60 // fallback if window too narrow
 		}
 		wrappedCmd := wrapTextWithIndent(cmd, availableWidth, labelWidth)
+		// Limit command display to 8 lines max to avoid overwhelming the details panel
+		const maxCmdLines = 8
+		cmdLines := strings.Split(wrappedCmd, "\n")
+		if len(cmdLines) > maxCmdLines {
+			cmdLines = cmdLines[:maxCmdLines]
+			wrappedCmd = strings.Join(cmdLines, "\n") + "\n" + strings.Repeat(" ", labelWidth) + "..."
+		}
 		b.WriteString(valueStyle.Render(wrappedCmd))
 		b.WriteString("\n")
 
@@ -2121,6 +2142,31 @@ func (m Model) renderJobDetails(height int) string {
 				}
 			}
 		}
+
+		// Progress section for running jobs
+		if job.Status == db.StatusRunning {
+			if prog, ok := m.jobProgress[job.ID]; ok {
+				b.WriteString("\n")
+				b.WriteString(sectionStyle.Render("Progress"))
+				b.WriteString("\n")
+
+				// Render progress bar
+				pct := prog.DisplayPercent()
+				if pct >= 0 {
+					b.WriteString("  ")
+					b.WriteString(renderProgressBar(pct, 20))
+					b.WriteString(fmt.Sprintf(" %d%%", pct))
+					b.WriteString("\n")
+				}
+
+				// Show step info for N/M format
+				if prog.Total > 0 {
+					b.WriteString(labelStyle.Render("  Step"))
+					b.WriteString(valueStyle.Render(fmt.Sprintf("%d of %d", prog.Current, prog.Total)))
+					b.WriteString("\n")
+				}
+			}
+		}
 	}
 
 	panelContent := m.renderTabHeader() + "\n"
@@ -2168,6 +2214,22 @@ func parseMiB(mem string) int {
 	}
 
 	return 0
+}
+
+// renderProgressBar renders a progress bar with the given percentage and width
+func renderProgressBar(percent int, width int) string {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	filled := (percent * width) / 100
+	empty := width - filled
+
+	bar := progressBarFilledStyle.Render(strings.Repeat("█", filled))
+	bar += progressBarEmptyStyle.Render(strings.Repeat("░", empty))
+	return bar
 }
 
 // formatGPUMem formats GPU memory, converting large MiB values to GiB
@@ -3055,6 +3117,13 @@ func (m Model) formatStatus(job *db.Job) string {
 		if m.isJobStatusStale(job) {
 			return "● running?"
 		}
+		// Show progress percentage if available
+		if prog, ok := m.jobProgress[job.ID]; ok {
+			pct := prog.DisplayPercent()
+			if pct >= 0 {
+				return fmt.Sprintf("● %3d%%", pct)
+			}
+		}
 		return "● running"
 	case db.StatusCompleted:
 		if job.ExitCode == nil {
@@ -3695,9 +3764,14 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 				content: msg,
 			}
 		}
+
+		// Extract progress information from log content
+		prog := progress.FindLastProgress(stdout)
+
 		return logFetchedMsg{
-			jobID:   job.ID,
-			content: stdout,
+			jobID:    job.ID,
+			content:  stdout,
+			progress: prog,
 		}
 	}
 }
@@ -3733,8 +3807,9 @@ func (m Model) performBackgroundSync() tea.Cmd {
 				continue
 			}
 
+			syncOpts := ops.DefaultSyncOptions()
 			for _, job := range jobs {
-				changed, err := syncJobQuick(m.database, job)
+				changed, err := ops.SyncJobQuick(m.database, job, syncOpts)
 				if err != nil {
 					continue
 				}
@@ -3747,8 +3822,9 @@ func (m Model) performBackgroundSync() tea.Cmd {
 		// Sync queued jobs (check if they've started or completed)
 		queuedJobs, err := db.ListAllQueued(m.database)
 		if err == nil {
+			syncOpts := ops.DefaultSyncOptions()
 			for _, job := range queuedJobs {
-				changed, err := syncQueuedJob(m.database, job)
+				changed, err := ops.SyncJobQuick(m.database, job, syncOpts)
 				if err != nil {
 					continue
 				}
@@ -3925,235 +4001,6 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	}
 }
 
-// updateStartTimeFromMetadataTUI reads the metadata file for a queued job and updates its start_time if not already set
-func updateStartTimeFromMetadataTUI(database *sql.DB, job *db.Job) {
-	// Only update if start_time is not set
-	if job.StartTime > 0 {
-		return
-	}
-
-	metadataPattern := session.MetadataFilePattern(job.ID)
-	cmd := fmt.Sprintf("cat %s 2>/dev/null", metadataPattern)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
-	if err != nil || strings.TrimSpace(stdout) == "" {
-		return // No metadata file or couldn't read it
-	}
-
-	// Parse metadata
-	metadata := session.ParseMetadata(stdout)
-	if startTimeStr, ok := metadata["start_time"]; ok {
-		if startTime, err := strconv.ParseInt(startTimeStr, 10, 64); err == nil && startTime > 0 {
-			// Update database with actual start time from metadata
-			db.UpdateStartTime(database, job.ID, startTime)
-			// Update in-memory job struct too for current sync cycle
-			job.StartTime = startTime
-		}
-	}
-}
-
-// syncQueuedJob checks if a queued job has started or completed
-func syncQueuedJob(database *sql.DB, job *db.Job) (bool, error) {
-	// Look for status files matching this job ID
-	// Pattern: ~/.cache/remote-jobs/logs/{jobID}-*.status
-	statusPattern := session.StatusFilePattern(job.ID)
-
-	// Check if any status file exists (job completed)
-	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
-	if err == nil && strings.TrimSpace(stdout) != "" {
-		// Job completed - read exit code and update start time from metadata
-		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
-		endTime := time.Now().Unix()
-
-		// Update start time from metadata if not already set
-		updateStartTimeFromMetadataTUI(database, job)
-
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Check if log file exists (job is running)
-	logPattern := fmt.Sprintf("~/.cache/remote-jobs/logs/%d-*.log", job.ID)
-	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
-	stdout, _, err = ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
-	if err == nil && strings.TrimSpace(stdout) != "" {
-		// Job has started running - update start time from metadata
-		updateStartTimeFromMetadataTUI(database, job)
-
-		// Update status to running only if not already set
-		if job.Status == db.StatusQueued {
-			if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-
-	// Job still queued
-	return false, nil
-}
-
-// syncJobQuick checks and updates a single job's status (no retry for TUI responsiveness)
-func syncJobQuick(database *sql.DB, job *db.Job) (bool, error) {
-	// Jobs without a session name were started by the queue runner
-	// Use optimized quick sync that combines checks into one SSH command
-	if job.SessionName == "" {
-		return syncQueueRunnerJobQuick(database, job)
-	}
-
-	// Regular jobs have tmux sessions
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, err := ssh.TmuxSessionExistsQuick(job.Host, tmuxSession)
-	if err != nil {
-		// Can't reach host - don't change job status
-		return false, nil
-	}
-
-	if exists {
-		return false, nil
-	}
-
-	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-	content, err := ssh.ReadRemoteFileQuick(job.Host, statusFile)
-	if err != nil {
-		// Can't reach host - don't change job status
-		return false, nil
-	}
-
-	if content != "" {
-		exitCode, _ := strconv.Atoi(content)
-		endTime := time.Now().Unix()
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Session doesn't exist and no status file - this is UNCERTAIN, not dead.
-	// Could be a race condition during job startup/shutdown, or a transient check failure.
-	// Don't mark dead based on absence of evidence - only mark dead with positive evidence.
-	return false, nil
-}
-
-// syncQueueRunnerJobQuick is an optimized version for queue runner jobs that combines
-// all status checks into a single SSH command to reduce latency
-func syncQueueRunnerJobQuick(database *sql.DB, job *db.Job) (bool, error) {
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
-
-	// Combine all checks into ONE SSH command for fast sync
-	// This checks: status file, .current file, .queue file, and PID file
-	// Returns: exit code (if completed), RUNNING, QUEUED, or DEAD
-	statusPattern := session.StatusFilePattern(job.ID)
-	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	pidPattern := session.PidFilePattern(job.ID)
-
-	combinedCmd := fmt.Sprintf(`
-		# Check status file (completed?) - use ls to expand glob
-		status_file=$(ls %s 2>/dev/null | head -1)
-		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
-			cat "$status_file" 2>/dev/null | head -1
-		# Check if currently running in queue - but verify process is alive
-		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
-			# Job is in .current, but verify process is actually running
-			# (handles case where server rebooted and .current is stale)
-			pid_file=$(ls %s 2>/dev/null | head -1)
-			if [ -n "$pid_file" ]; then
-				pid=$(cat "$pid_file" 2>/dev/null | head -1)
-				if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-					echo RUNNING
-				else
-					# In .current but process dead = crashed/rebooted
-					echo DEAD
-				fi
-			else
-				# In .current but no PID file yet - probably just starting
-				echo RUNNING
-			fi
-		# Check if waiting in queue
-		elif grep -q '^%d	' %s 2>/dev/null; then
-			echo QUEUED
-		# Check if process still running via PID - use ls to expand glob
-		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
-			pid=$(cat "$pid_file" 2>/dev/null | head -1)
-			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-				echo RUNNING
-			else
-				# PID file exists but process not running - could be transitioning
-				# Don't declare dead, return UNCERTAIN to avoid race conditions
-				echo UNCERTAIN
-			fi
-		else
-			# No evidence found - could be race condition during state transition
-			# Return UNCERTAIN rather than DEAD to avoid false positives
-			echo UNCERTAIN
-		fi
-	`, statusPattern,
-		currentFile, currentFile, job.ID,
-		pidPattern,
-		job.ID, queueFile,
-		pidPattern)
-
-	stdout, _, err := ssh.RunWithTimeout(job.Host, combinedCmd, 5*time.Second)
-	if err != nil {
-		// Connection error - don't update status
-		return false, nil
-	}
-
-	result := strings.TrimSpace(stdout)
-
-	// Parse result and update database
-	switch result {
-	case "RUNNING":
-		// Job is currently running - update start time from metadata if not set
-		updateStartTimeFromMetadataTUI(database, job)
-		return false, nil
-	case "QUEUED":
-		// Job is still waiting in queue, no change needed
-		return false, nil
-	case "DEAD":
-		// Positive evidence the job is dead: it was in .current but the process is gone.
-		// This happens when the server reboots or the queue runner crashes.
-		if err := db.MarkDeadByID(database, job.ID); err != nil {
-			return false, err
-		}
-		return true, nil
-	case "UNCERTAIN":
-		// We couldn't determine the job's state - this could be due to:
-		// 1. Race condition during job state transition
-		// 2. Files being written/cleaned up
-		// 3. Transient filesystem issues
-		// Don't change the job status - keep showing whatever we had before.
-		// The job may recover on the next sync, or explicit CLI sync can investigate further.
-		return false, nil
-	case "":
-		// Empty result (shouldn't happen with our logic, but handle gracefully)
-		return false, nil
-	default:
-		// Numeric exit code - job completed
-		exitCode, parseErr := strconv.Atoi(result)
-		if parseErr != nil {
-			// Unexpected output - don't change status
-			return false, nil
-		}
-		endTime := time.Now().Unix()
-
-		// Update start time from metadata if not already set
-		updateStartTimeFromMetadataTUI(database, job)
-
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-}
-
 // checkAndReviveDeadJob checks if a dead job is actually still running and revives it
 func checkAndReviveDeadJob(database *sql.DB, job *db.Job) (bool, error) {
 	// Check if log file exists but no status file (job still running)
@@ -4249,77 +4096,6 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 	}
 
 	return false
-}
-
-// syncQueueRunnerJob checks status for jobs started by the queue runner
-// These jobs don't have tmux sessions, so we check for status/log files by pattern
-func syncQueueRunnerJob(database *sql.DB, job *db.Job) (bool, error) {
-	// Check if status file exists (job completed)
-	statusPattern := session.StatusFilePattern(job.ID)
-	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 5*time.Second)
-	if err != nil {
-		// Can't reach host - don't change job status
-		return false, nil
-	}
-	if strings.TrimSpace(stdout) != "" {
-		// Job completed - read exit code
-		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
-		endTime := time.Now().Unix()
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Check if job is in queue's .current file (actively running right now)
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
-	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
-	currentCmd := fmt.Sprintf("cat %s 2>/dev/null || true", currentFile)
-	stdout, _, err = ssh.RunWithTimeout(job.Host, currentCmd, 5*time.Second)
-	if err != nil {
-		// Can't reach host - don't change job status
-		return false, nil
-	}
-	currentJobID := strings.TrimSpace(stdout)
-	if currentJobID == fmt.Sprintf("%d", job.ID) {
-		// Job is currently running
-		return false, nil
-	}
-
-	// Check if job is still in the queue file (waiting to run)
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	grepCmd := fmt.Sprintf("grep -q '^%d	' %s 2>/dev/null && echo yes || echo no", job.ID, queueFile)
-	stdout, _, err = ssh.RunWithTimeout(job.Host, grepCmd, 5*time.Second)
-	if err != nil {
-		return false, nil
-	}
-	if strings.TrimSpace(stdout) == "yes" {
-		// Job is still in queue, waiting to run
-		return false, nil
-	}
-
-	// Check if the job's process is still running (via PID file)
-	pidPattern := session.PidFilePattern(job.ID)
-	pidCmd := fmt.Sprintf("pid=$(cat %s 2>/dev/null); [ -n \"$pid\" ] && ps -p $pid > /dev/null 2>&1 && echo running || echo not_running", pidPattern)
-	stdout, _, err = ssh.RunWithTimeout(job.Host, pidCmd, 5*time.Second)
-	if err != nil {
-		return false, nil
-	}
-	if strings.TrimSpace(stdout) == "running" {
-		// Process is still running, don't mark as dead
-		return false, nil
-	}
-
-	// Job is not current, not in queue, process not running, and has no status file - it's dead
-	// (Either it died mid-execution, or was removed from queue)
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 func (m Model) pruneJobs() tea.Cmd {

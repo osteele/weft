@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -96,7 +97,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check log file: %w", err)
 	}
 	if !exists {
-		return fmt.Errorf("log file not found: %s:%s", job.Host, logFile)
+		return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)
 	}
 
 	// Build the remote command based on flags
@@ -113,10 +114,17 @@ func runLog(cmd *cobra.Command, args []string) error {
 	// Regular mode
 	stdout, stderr, err := ssh.Run(job.Host, remoteCmd)
 	if err != nil {
-		if stderr != "" {
-			return fmt.Errorf("read log: %s", stderr)
+		// Provide user-friendly error messages without leaking internal paths
+		if strings.Contains(stderr, "No such file") || strings.Contains(stderr, "cannot open") {
+			return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)
 		}
-		return fmt.Errorf("read log: %w", err)
+		if strings.Contains(stderr, "Permission denied") {
+			return fmt.Errorf("permission denied reading log for job %d on %s", jobID, job.Host)
+		}
+		if stderr != "" {
+			return fmt.Errorf("read log for job %d: %w", jobID, err)
+		}
+		return fmt.Errorf("read log for job %d: %w", jobID, err)
 	}
 
 	fmt.Print(stdout)
