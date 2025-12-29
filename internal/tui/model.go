@@ -47,7 +47,8 @@ const (
 type jobFilterMode int
 
 const (
-	jobFilterAll jobFilterMode = iota
+	jobFilterAll    jobFilterMode = iota
+	jobFilterRecent               // Active jobs + completed within 24h
 	jobFilterActive
 	jobFilterSucceeded
 	jobFilterFailed
@@ -162,7 +163,7 @@ var keys = keyMap{
 	),
 	Filter: key.NewBinding(
 		key.WithKeys("f"),
-		key.WithHelp("f", "cycle filter"),
+		key.WithHelp("f", "cycle view"),
 	),
 	Escape: key.NewBinding(
 		key.WithKeys("esc"),
@@ -542,7 +543,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	return Model{
 		database:                database,
 		jobList:                 jobList,
-		jobFilter:               jobFilterAll,
+		jobFilter:               jobFilterRecent,
 		inputs:                  inputs,
 		spinner:                 s,
 		syncInterval:            opts.SyncInterval,
@@ -1370,7 +1371,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.jobFilter = jobFilterMode((int(m.jobFilter) + 1) % int(jobFilterModeCount))
 		m.applyJobFilter()
-		return m, m.setFlash(fmt.Sprintf("Filter: %s", jobFilterDescription(m.jobFilter)), false)
+		return m, m.setFlash(fmt.Sprintf("View: %s", jobFilterDescription(m.jobFilter)), false)
 
 	case key.Matches(msg, keys.Prune):
 		if m.viewMode != ViewModeJobs {
@@ -1779,11 +1780,11 @@ func (m Model) renderJobList(height int) string {
 	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
 		"ID", "HOST", "STATUS", "TIME", "GPU", "COMMAND / DESCRIPTION")
 	rows = append(rows, headerStyle.Render(header))
-	filterLabel := fmt.Sprintf(" Filter: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
+	filterLabel := fmt.Sprintf(" View: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
 	rows = append(rows, dimStyle.Render(filterLabel))
 
 	if len(m.jobs) == 0 {
-		rows = append(rows, dimStyle.Render(" No jobs match this filter"))
+		rows = append(rows, dimStyle.Render(" No jobs match this view"))
 		content := strings.Join(rows, "\n")
 		return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
 	}
@@ -1949,10 +1950,10 @@ func (m Model) renderJobDetails(height int) string {
 	var b strings.Builder
 
 	// Styles for the details view
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Width(10)
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Width(11)
 	valueStyle := lipgloss.NewStyle()
 	headerStyle := lipgloss.NewStyle().Bold(true)
-	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true)
+	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Underline(true)
 
 	highlightedJob := m.getTargetJob()
 
@@ -1961,13 +1962,10 @@ func (m Model) renderJobDetails(height int) string {
 	} else {
 		job := highlightedJob
 
-		// Header line with job ID, host, and status
-		statusStr := m.formatStatus(job)
+		// Header line with job ID and host (progress shown in Progress section)
 		b.WriteString(headerStyle.Render(fmt.Sprintf("Job %d", job.ID)))
 		b.WriteString(dimStyle.Render(" on "))
 		b.WriteString(headerStyle.Render(job.Host))
-		b.WriteString(dimStyle.Render(" · "))
-		b.WriteString(statusStr)
 
 		// Show dependency info on same line if present
 		if depSpec := m.jobDependencies[job.ID]; depSpec != "" {
@@ -1981,8 +1979,9 @@ func (m Model) renderJobDetails(height int) string {
 		}
 		b.WriteString("\n\n")
 
-		// Description (if any) - shown in italic without label
+		// Description (if any)
 		if job.Description != "" {
+			b.WriteString(labelStyle.Render("Desc"))
 			descStyle := lipgloss.NewStyle().Italic(true)
 			b.WriteString(descStyle.Render(job.Description))
 			b.WriteString("\n")
@@ -1991,7 +1990,7 @@ func (m Model) renderJobDetails(height int) string {
 		// Command (most important) - wrap and indent continuation lines, but limit height
 		b.WriteString(labelStyle.Render("Command"))
 		cmd := job.EffectiveCommand()
-		labelWidth := 10
+		labelWidth := 11
 		// Panel content width is m.width - 6 (borders + padding), minus label
 		availableWidth := m.width - 6 - labelWidth
 		if availableWidth < 20 {
@@ -2025,8 +2024,8 @@ func (m Model) renderJobDetails(height int) string {
 		if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
 			b.WriteString("\n")
 
-			// Show created time if available and different from start time
-			if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {
+			// Show created time if significantly different from start time (>60s gap)
+			if job.CreatedAt > 0 && (job.StartTime == 0 || job.StartTime-job.CreatedAt > 60) {
 				createdTime := time.Unix(job.CreatedAt, 0)
 				label := "Created"
 				if job.Status == db.StatusQueued {
@@ -2098,21 +2097,26 @@ func (m Model) renderJobDetails(height int) string {
 			b.WriteString(sectionStyle.Render("Process Stats"))
 			b.WriteString("\n")
 
-			// CPU: show % if available, plus user/sys time
-			if m.processStats.CPUUser != "" || m.processStats.CPUSys != "" {
-				b.WriteString(labelStyle.Render("  CPU"))
+			// CPU: percentage and cumulative time
+			if m.processStats.CPUPct > 0 || m.processStats.CPUUser != "" {
+				b.WriteString(labelStyle.Render("CPU"))
 				cpuVal := ""
 				if m.processStats.CPUPct > 0 {
-					cpuVal += fmt.Sprintf("%.0f%% ", m.processStats.CPUPct)
+					cpuVal = fmt.Sprintf("%.1f%%", m.processStats.CPUPct)
 				}
-				cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
+				if m.processStats.CPUUser != "" {
+					if cpuVal != "" {
+						cpuVal += " "
+					}
+					cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
+				}
 				b.WriteString(valueStyle.Render(cpuVal))
 				b.WriteString("\n")
 			}
 
-			// Memory
+			// Memory: absolute and percentage
 			if m.processStats.MemoryRSS != "" {
-				b.WriteString(labelStyle.Render("  Memory"))
+				b.WriteString(labelStyle.Render("Memory"))
 				mem := m.processStats.MemoryRSS
 				if m.processStats.MemoryPct != "" {
 					mem += " (" + m.processStats.MemoryPct + ")"
@@ -2123,7 +2127,7 @@ func (m Model) renderJobDetails(height int) string {
 
 			// Threads
 			if m.processStats.Threads > 0 {
-				b.WriteString(labelStyle.Render("  Threads"))
+				b.WriteString(labelStyle.Render("Threads"))
 				b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.processStats.Threads)))
 				b.WriteString("\n")
 			}
@@ -2131,7 +2135,7 @@ func (m Model) renderJobDetails(height int) string {
 			// GPUs with utilization and memory
 			if len(m.processStats.GPUs) > 0 {
 				for _, gpu := range m.processStats.GPUs {
-					b.WriteString(labelStyle.Render(fmt.Sprintf("  GPU %d", gpu.Index)))
+					b.WriteString(labelStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)))
 					gpuVal := ""
 					if gpu.Utilization > 0 {
 						gpuVal += fmt.Sprintf("%d%% util, ", gpu.Utilization)
@@ -2143,26 +2147,21 @@ func (m Model) renderJobDetails(height int) string {
 			}
 		}
 
-		// Progress section for running jobs
+		// Progress section for running jobs (combined on one line)
 		if job.Status == db.StatusRunning {
 			if prog, ok := m.jobProgress[job.ID]; ok {
-				b.WriteString("\n")
-				b.WriteString(sectionStyle.Render("Progress"))
-				b.WriteString("\n")
-
-				// Render progress bar
 				pct := prog.DisplayPercent()
-				if pct >= 0 {
-					b.WriteString("  ")
-					b.WriteString(renderProgressBar(pct, 20))
-					b.WriteString(fmt.Sprintf(" %d%%", pct))
+				if pct >= 0 || prog.Total > 0 {
 					b.WriteString("\n")
-				}
-
-				// Show step info for N/M format
-				if prog.Total > 0 {
-					b.WriteString(labelStyle.Render("  Step"))
-					b.WriteString(valueStyle.Render(fmt.Sprintf("%d of %d", prog.Current, prog.Total)))
+					b.WriteString(labelStyle.Render("Progress"))
+					b.WriteString("  ")
+					if pct >= 0 {
+						b.WriteString(renderProgressBar(pct, 20))
+						b.WriteString(fmt.Sprintf(" %d%%", pct))
+					}
+					if prog.Total > 0 {
+						b.WriteString(fmt.Sprintf(" (%d/%d)", prog.Current, prog.Total))
+					}
 					b.WriteString("\n")
 				}
 			}
@@ -3310,6 +3309,14 @@ func (m *Model) applyJobFilter() {
 
 // sortJobs sorts m.jobs in place according to m.jobSort
 func (m *Model) sortJobs() {
+	// In Recent view with Newest sort, put running/starting first
+	if m.jobFilter == jobFilterRecent && m.jobSort == jobSortNewest {
+		sort.Slice(m.jobs, func(i, j int) bool {
+			return jobRecentOrderLess(m.jobs[i], m.jobs[j])
+		})
+		return
+	}
+
 	switch m.jobSort {
 	case jobSortNewest:
 		// Most recent first (by start time, or created time for queued jobs)
@@ -3388,6 +3395,29 @@ func jobQueueOrderLess(i, j *db.Job) bool {
 		}
 		return ti > tj
 	}
+}
+
+// jobRecentOrderLess sorts for Recent view: running/starting first, then queued, then completed (by recency)
+func jobRecentOrderLess(i, j *db.Job) bool {
+	// Status priority: running/starting first, then queued, then completed/dead/failed
+	statusPriority := func(job *db.Job) int {
+		switch job.Status {
+		case db.StatusRunning, db.StatusStarting:
+			return 0
+		case db.StatusQueued:
+			return 1
+		default:
+			return 2
+		}
+	}
+
+	pi, pj := statusPriority(i), statusPriority(j)
+	if pi != pj {
+		return pi < pj
+	}
+
+	// Within same status group, sort by recency (newest first)
+	return getJobSortTime(i) > getJobSortTime(j)
 }
 
 // cycleTab handles Tab/Shift+Tab navigation for both Jobs and Hosts views
@@ -3670,6 +3700,16 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 
 func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	switch mode {
+	case jobFilterRecent:
+		// Active jobs (running, starting, queued)
+		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued {
+			return true
+		}
+		// Completed within last 24 hours
+		if job.EndTime != nil {
+			return time.Now().Unix()-*job.EndTime < 24*60*60
+		}
+		return false
 	case jobFilterActive:
 		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued
 	case jobFilterSucceeded:
@@ -3686,8 +3726,10 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 
 func jobFilterDescription(mode jobFilterMode) string {
 	switch mode {
+	case jobFilterRecent:
+		return "Recent"
 	case jobFilterActive:
-		return "Active (waiting/queued/running)"
+		return "Active"
 	case jobFilterSucceeded:
 		return "Succeeded"
 	case jobFilterFailed:

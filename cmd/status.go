@@ -223,15 +223,15 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	if !exists {
 		// Session doesn't exist - check for status file
 		statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-		content, err := ssh.ReadRemoteFile(job.Host, statusFile)
+		result, err := ops.ReadStatusFile(job.Host, statusFile, 10*time.Second)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Job %d: read status file: %v\n", jobID, err)
 			return
 		}
 
-		if content != "" {
+		if result != nil {
 			// Job completed, update database
-			exitCodeStr := strings.TrimSpace(content)
+			exitCodeStr := strings.TrimSpace(result.Content)
 			exitCode, err := strconv.Atoi(exitCodeStr)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Job %d: invalid status file contents %q: %v\n", jobID, exitCodeStr, err)
@@ -240,12 +240,16 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 				}
 				return
 			}
-			endTime := time.Now().Unix()
-			if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+			if err := ops.RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
 			}
 			job.Status = db.StatusCompleted
 			job.ExitCode = &exitCode
+			// Use status file mtime as end time
+			endTime := result.Mtime
+			if endTime == 0 {
+				endTime = time.Now().Unix()
+			}
 			job.EndTime = &endTime
 		} else {
 			// No status file - check for pending operations before marking dead

@@ -86,15 +86,28 @@ func runLog(cmd *cobra.Command, args []string) error {
 	if job.SessionName != "" {
 		// Old job with session name - use legacy path
 		logFile = session.LegacyLogFile(job.SessionName)
-	} else {
-		// New job - use ID-based path
+	} else if job.StartTime > 0 {
+		// New job with known start time - use direct path
 		logFile = session.LogFile(jobID, job.StartTime)
+	} else {
+		// Queue runner job without start time yet - use pattern
+		logFile = session.LogFilePattern(jobID)
 	}
 
-	// Check if log file exists
-	exists, err := ssh.RemoteFileExists(job.Host, logFile)
-	if err != nil {
-		return fmt.Errorf("check log file: %w", err)
+	// Check if log file exists (handle both direct path and pattern)
+	var exists bool
+	if strings.Contains(logFile, "*") {
+		// Pattern - use glob to find actual file
+		stdout, _, err := ssh.Run(job.Host, fmt.Sprintf("ls %s 2>/dev/null | head -1", logFile))
+		if err == nil && strings.TrimSpace(stdout) != "" {
+			logFile = strings.TrimSpace(stdout)
+			exists = true
+		}
+	} else {
+		exists, err = ssh.RemoteFileExists(job.Host, logFile)
+		if err != nil {
+			return fmt.Errorf("check log file: %w", err)
+		}
 	}
 	if !exists {
 		return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)

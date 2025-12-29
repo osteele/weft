@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -116,17 +117,17 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			statusFile = session.LegacyStatusFile(sessionName)
 		}
 
-		var statusContent string
+		var result *ops.StatusFileResult
 		if statusFile != "" {
-			statusContent, err = ssh.ReadRemoteFile(host, statusFile)
+			result, err = ops.ReadStatusFile(host, statusFile, 10*time.Second)
 			if err != nil {
 				return fmt.Errorf("read status file %s:%s: %w", host, statusFile, err)
 			}
 		}
 
-		if statusContent != "" {
+		if result != nil {
 			// Job has finished
-			exitCode, err := strconv.Atoi(strings.TrimSpace(statusContent))
+			exitCode, err := strconv.Atoi(strings.TrimSpace(result.Content))
 			if err != nil {
 				return fmt.Errorf("parse exit code for %s: %w", sessionName, err)
 			}
@@ -137,9 +138,8 @@ func runCheck(cmd *cobra.Command, args []string) error {
 			}
 
 			// Update database
-			endTime := time.Now().Unix()
 			if job != nil {
-				if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+				if err := ops.RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
 					return fmt.Errorf("record completion for job %d: %w", job.ID, err)
 				}
 			}

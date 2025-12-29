@@ -44,6 +44,40 @@ type SyncOptions struct {
 	Timeout time.Duration
 }
 
+// StatusFileResult contains the result of reading a status file
+type StatusFileResult struct {
+	Content string
+	Mtime   int64
+}
+
+// ReadStatusFile reads a job's status file and returns its content and modification time.
+// This is the unified way to read status files across all sync paths.
+func ReadStatusFile(host, statusFile string, timeout time.Duration) (*StatusFileResult, error) {
+	if timeout == 0 {
+		timeout = 10 * time.Second
+	}
+	content, mtime, err := ssh.ReadRemoteFileWithMtime(host, statusFile, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if content == "" {
+		return nil, nil // File doesn't exist
+	}
+	return &StatusFileResult{Content: content, Mtime: mtime}, nil
+}
+
+// RecordJobCompletion records a job's completion in the database using the status file mtime.
+// This is the unified way to record job completion across all sync paths.
+func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int64) error {
+	// Use status file mtime as end time (when job actually completed)
+	// Fall back to current time if mtime not available
+	endTime := mtime
+	if endTime == 0 {
+		endTime = time.Now().Unix()
+	}
+	return db.RecordCompletionByID(database, jobID, exitCode, endTime)
+}
+
 // DefaultSyncOptions returns default sync options
 func DefaultSyncOptions() SyncOptions {
 	return SyncOptions{
@@ -70,11 +104,13 @@ const (
 type quickStatus struct {
 	State     queueState
 	ExitCode  *int
+	Mtime     int64 // File modification time (unix timestamp) when job completed
 	Uncertain bool
 }
 
 type remoteQueue interface {
-	StatusFile(host string, jobID int64, timeout time.Duration) (int, Option[bool])
+	// StatusFile returns (exitCode, mtime, completed) where mtime is the file modification time
+	StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool])
 	CurrentJob(host, queueName string, jobID int64, timeout time.Duration) Option[bool]
 	InQueue(host, queueName string, jobID int64, timeout time.Duration) Option[bool]
 	ProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool]
@@ -120,19 +156,18 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 
 	// Session doesn't exist - check for status file (no retry for sync)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-	content, err := ssh.ReadRemoteFileQuickTimeout(job.Host, statusFile, timeout)
+	result, err := ReadStatusFile(job.Host, statusFile, timeout)
 	if err != nil {
 		return false, err
 	}
 
-	if content != "" {
+	if result != nil {
 		// Job completed
-		exitCode, err := strconv.Atoi(content)
+		exitCode, err := strconv.Atoi(result.Content)
 		if err != nil {
 			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
 		}
-		endTime := time.Now().Unix()
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+		if err := RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -164,13 +199,12 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 	}
 
 	// Probe 1: Check if status file exists (job completed)
-	exitCode, completed := probeStatusFile(job.Host, job.ID, timeout)
+	exitCode, mtime, completed := probeStatusFile(job.Host, job.ID, timeout)
 	if completed.IsSome() && completed.Unwrap() {
-		endTime := time.Now().Unix()
 		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 			return false, err
 		}
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+		if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -256,18 +290,17 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 
 	// Session doesn't exist - check for status file
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-	content, err := ssh.ReadRemoteFileQuickTimeout(job.Host, statusFile, timeout)
+	result, err := ReadStatusFile(job.Host, statusFile, timeout)
 	if err != nil {
 		return false, err
 	}
 
-	if content != "" {
-		exitCode, err := strconv.Atoi(content)
+	if result != nil {
+		exitCode, err := strconv.Atoi(result.Content)
 		if err != nil {
 			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
 		}
-		endTime := time.Now().Unix()
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
+		if err := RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -308,8 +341,7 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 
 	if result.ExitCode != nil {
 		UpdateStartTimeFromMetadata(database, job, timeout)
-		endTime := time.Now().Unix()
-		if err := db.RecordCompletionByID(database, job.ID, *result.ExitCode, endTime); err != nil {
+		if err := RecordJobCompletion(database, job.ID, *result.ExitCode, result.Mtime); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -402,8 +434,8 @@ func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Dur
 // Probe functions for trinary logic
 
 // probeStatusFile checks if a job has a status file (completed)
-// Returns (exitCode, Some(true)) if completed, (0, Some(false)) if definitely not, (0, None) on error
-func probeStatusFile(host string, jobID int64, timeout time.Duration) (int, Option[bool]) {
+// Returns (exitCode, mtime, Some(true)) if completed, (0, 0, Some(false)) if definitely not, (0, 0, None) on error
+func probeStatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
 	return queueRemoteClient.StatusFile(host, jobID, timeout)
 }
 
@@ -424,24 +456,38 @@ func probeProcessRunning(host string, jobID int64, timeout time.Duration) Option
 
 type sshQueueRemote struct{}
 
-func (sshQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, Option[bool]) {
+func (sshQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
 	statusPattern := session.StatusFilePattern(jobID)
-	cmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
+	// Get both exit code content and file mtime in one command
+	// stat -c %Y gives mtime as unix timestamp on Linux
+	cmd := fmt.Sprintf(`f=$(ls %s 2>/dev/null | head -1); if [ -n "$f" ]; then echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)"; fi`, statusPattern)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
-		return 0, None[bool]()
+		return 0, 0, None[bool]()
 	}
 
-	exitCodeStr := strings.TrimSpace(stdout)
-	if exitCodeStr == "" {
-		return 0, Some(false)
+	output := strings.TrimSpace(stdout)
+	if output == "" {
+		return 0, 0, Some(false)
 	}
 
-	exitCode, err := strconv.Atoi(exitCodeStr)
+	// Parse "exitCode|mtime" format
+	parts := strings.Split(output, "|")
+	if len(parts) < 1 {
+		return 0, 0, None[bool]()
+	}
+
+	exitCode, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 	if err != nil {
-		return 0, None[bool]()
+		return 0, 0, None[bool]()
 	}
-	return exitCode, Some(true)
+
+	var mtime int64
+	if len(parts) >= 2 {
+		mtime, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	}
+
+	return exitCode, mtime, Some(true)
 }
 
 func (sshQueueRemote) CurrentJob(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
@@ -503,10 +549,13 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
 	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
 	pidPattern := session.PidFilePattern(jobID)
+	// When status file exists, output "exitcode|mtime" to capture actual completion time
 	combinedCmd := fmt.Sprintf(`
 		status_file=$(ls %s 2>/dev/null | head -1)
 		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
-			cat "$status_file" 2>/dev/null | head -1
+			exit_code=$(cat "$status_file" 2>/dev/null | head -1)
+			mtime=$(stat -c %%Y "$status_file" 2>/dev/null || stat -f %%m "$status_file" 2>/dev/null)
+			echo "${exit_code}|${mtime}"
 		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
 			pid_file=$(ls %s 2>/dev/null | head -1)
 			if [ -n "$pid_file" ]; then
@@ -554,11 +603,17 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 	case "UNCERTAIN", "":
 		return quickStatus{State: queueStateUnknown, Uncertain: true}, nil
 	default:
-		exitCode, err := strconv.Atoi(result)
+		// Parse "exitcode|mtime" format
+		parts := strings.Split(result, "|")
+		exitCode, err := strconv.Atoi(strings.TrimSpace(parts[0]))
 		if err != nil {
 			return quickStatus{State: queueStateUnknown, Uncertain: true}, nil
 		}
-		return quickStatus{ExitCode: &exitCode}, nil
+		var mtime int64
+		if len(parts) >= 2 {
+			mtime, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+		}
+		return quickStatus{ExitCode: &exitCode, Mtime: mtime}, nil
 	}
 }
 

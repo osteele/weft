@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -301,6 +302,42 @@ func ReadRemoteFileQuickTimeout(host, path string, timeout time.Duration) (strin
 		return "", err
 	}
 	return strings.TrimSpace(stdout), nil
+}
+
+// ReadRemoteFileWithMtime reads a file and returns its content and modification time.
+// Returns (content, mtime, error). If the file doesn't exist, returns ("", 0, nil).
+func ReadRemoteFileWithMtime(host, path string, timeout time.Duration) (string, int64, error) {
+	timeout = quickCommandTimeout(timeout)
+	// Get both content and mtime in one command
+	// stat -c %Y gives mtime as unix timestamp on Linux, stat -f %m on macOS
+	cmd := fmt.Sprintf(`if [ -f %s ]; then cat %s; echo '|MTIME|'; stat -c %%Y %s 2>/dev/null || stat -f %%m %s 2>/dev/null; fi`, path, path, path, path)
+	stdout, stderr, err := RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		if IsConnectionError(stdout + stderr) {
+			return "", 0, fmt.Errorf("connection error: %s", strings.TrimSpace(stdout+stderr))
+		}
+		return "", 0, err
+	}
+
+	output := strings.TrimSpace(stdout)
+	if output == "" {
+		return "", 0, nil // File doesn't exist
+	}
+
+	// Parse "content|MTIME|mtime" format
+	parts := strings.Split(output, "|MTIME|")
+	if len(parts) != 2 {
+		// Fallback: return content only
+		return output, 0, nil
+	}
+
+	content := strings.TrimSpace(parts[0])
+	var mtime int64
+	if mtimeStr := strings.TrimSpace(parts[1]); mtimeStr != "" {
+		mtime, _ = strconv.ParseInt(mtimeStr, 10, 64)
+	}
+
+	return content, mtime, nil
 }
 
 // TmuxListSessions lists all tmux sessions on a remote host

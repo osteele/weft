@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/queuefile"
@@ -17,9 +18,20 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if job == nil {
 		return false, fmt.Errorf("job not found")
 	}
-	if job.Status != db.StatusQueued {
-		return false, fmt.Errorf("job %d is not queued (status: %s)", job.ID, job.Status)
+
+	// Re-fetch job from DB to get current status (TUI may have stale data)
+	freshJob, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		return false, fmt.Errorf("fetch job: %w", err)
 	}
+	if freshJob == nil {
+		return false, fmt.Errorf("job %d not found", job.ID)
+	}
+	if freshJob.Status != db.StatusQueued {
+		return false, fmt.Errorf("job %d is already %s", job.ID, freshJob.Status)
+	}
+	// Use fresh job data from here on
+	job = freshJob
 
 	queueName := job.QueueName
 	if queueName == "" {
@@ -136,6 +148,14 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		EnvVars:    entry.EnvVars,
 	})
 
+	// Check if tmux session already exists (job may already be running but DB out of sync)
+	checkCmd := fmt.Sprintf("tmux has-session -t '%s' 2>/dev/null && echo exists || echo missing", tmuxSession)
+	stdout, _, err := ssh.Run(job.Host, checkCmd)
+	if err == nil && strings.TrimSpace(stdout) == "exists" {
+		// Session already exists - job is running, just DB is out of sync
+		return false, fmt.Errorf("job %d is already running (session %s exists)", job.ID, tmuxSession)
+	}
+
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
@@ -210,6 +230,13 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 		PidFile:    pidFile,
 		EnvVars:    envVars,
 	})
+
+	// Check if tmux session already exists (job may already be running but DB out of sync)
+	checkCmd := fmt.Sprintf("tmux has-session -t '%s' 2>/dev/null && echo exists || echo missing", tmuxSession)
+	stdout, _, err := ssh.Run(job.Host, checkCmd)
+	if err == nil && strings.TrimSpace(stdout) == "exists" {
+		return false, fmt.Errorf("job %d is already running (session %s exists)", job.ID, tmuxSession)
+	}
 
 	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)

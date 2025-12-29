@@ -9,6 +9,7 @@ import (
 
 type mockQueueRemote struct {
 	statusExitCode int
+	statusMtime    int64
 	statusOption   Option[bool]
 	current        Option[bool]
 	inQueue        Option[bool]
@@ -17,8 +18,8 @@ type mockQueueRemote struct {
 	metadata       string
 }
 
-func (m mockQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, Option[bool]) {
-	return m.statusExitCode, m.statusOption
+func (m mockQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
+	return m.statusExitCode, m.statusMtime, m.statusOption
 }
 
 func (m mockQueueRemote) CurrentJob(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
