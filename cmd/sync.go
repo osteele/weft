@@ -35,6 +35,12 @@ var (
 	syncNoQueueStart bool
 )
 
+var (
+	syncJobFunc            = ops.SyncJob
+	syncJobQuickFunc       = ops.SyncJobQuick
+	executeDeferredOpsFunc = ops.ExecuteAllDeferredOperations
+)
+
 const (
 	// FastSyncTimeout is used for --fast mode in list/status commands
 	FastSyncTimeout = 2 * time.Second
@@ -115,6 +121,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 // syncHost syncs all active jobs (running and queued) for a host and returns the count of updated jobs
 func syncHost(database *sql.DB, host string) (int, error) {
+	// Execute deferred operations FIRST so that queued jobs are added to remote queue
+	// before we check their status (prevents marking as dead jobs that are just pending sync)
+	if err := executeDeferredOperations(database, host, NormalSyncTimeout); err != nil {
+		// Don't fail the sync if deferred operations fail
+		if syncVerbose {
+			fmt.Fprintf(os.Stderr, "Warning: failed to execute deferred operations for %s: %v\n", host, err)
+		}
+	}
+
 	jobs, err := db.ListActiveJobs(database, host)
 	if err != nil {
 		return 0, err
@@ -123,7 +138,7 @@ func syncHost(database *sql.DB, host string) (int, error) {
 	syncOpts := ops.DefaultSyncOptions()
 	var updated int
 	for _, job := range jobs {
-		changed, err := ops.SyncJob(database, job, syncOpts)
+		changed, err := syncJobFunc(database, job, syncOpts)
 		if err != nil {
 			return updated, err
 		}
@@ -132,19 +147,11 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		}
 	}
 
-	// Execute any deferred operations for this host
-	if err := executeDeferredOperations(database, host); err != nil {
-		// Don't fail the sync if deferred operations fail
-		if syncVerbose {
-			fmt.Fprintf(os.Stderr, "Warning: failed to execute deferred operations for %s: %v\n", host, err)
-		}
-	}
-
 	return updated, nil
 }
 
 // executeDeferredOperations executes pending operations for a host using the unified ops package
-func executeDeferredOperations(database *sql.DB, host string) error {
+func executeDeferredOperations(database *sql.DB, host string, timeout time.Duration) error {
 	// Check count first for verbose output
 	operations, err := db.GetDeferredOperations(database, host)
 	if err != nil {
@@ -160,8 +167,12 @@ func executeDeferredOperations(database *sql.DB, host string) error {
 	}
 
 	// Use ops package for unified operation execution
-	result, err := ops.ExecuteAllDeferredOperations(database, host, ops.ExecuteOptions{
-		Timeout: NormalSyncTimeout,
+	if timeout <= 0 {
+		timeout = NormalSyncTimeout
+	}
+
+	result, err := executeDeferredOpsFunc(database, host, ops.ExecuteOptions{
+		Timeout: timeout,
 		Verbose: syncVerbose,
 	})
 	if err != nil {
@@ -290,6 +301,10 @@ func performFastSync(database *sql.DB, verbose bool) bool {
 // syncHostWithTimeout syncs a host with a specific timeout
 func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (int, error) {
 	// This is a simplified version of syncHost that uses quick timeouts
+	if err := executeDeferredOperations(database, host, timeout); err != nil && syncVerbose {
+		fmt.Fprintf(os.Stderr, "Warning: failed to execute deferred operations for %s: %v\n", host, err)
+	}
+
 	jobs, err := db.ListActiveJobs(database, host)
 	if err != nil {
 		return 0, err
@@ -299,7 +314,7 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	var updated int
 	for _, job := range jobs {
 		// Use quick check with timeout
-		changed, err := ops.SyncJobQuick(database, job, syncOpts)
+		changed, err := syncJobQuickFunc(database, job, syncOpts)
 		if err != nil {
 			return updated, err
 		}

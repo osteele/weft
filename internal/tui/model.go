@@ -3834,22 +3834,6 @@ func (m Model) performBackgroundSync() tea.Cmd {
 			}
 		}
 
-		// Re-check recently-dead queue runner jobs (may have been incorrectly marked)
-		// Look at jobs marked dead in the last hour
-		oneHourAgo := time.Now().Add(-1 * time.Hour).Unix()
-		deadJobs, err := db.ListRecentDeadQueueJobs(m.database, oneHourAgo)
-		if err == nil {
-			for _, job := range deadJobs {
-				revived, err := checkAndReviveDeadJob(m.database, job)
-				if err != nil {
-					continue
-				}
-				if revived {
-					updated++
-				}
-			}
-		}
-
 		// Kill tombstoned jobs that are still marked as running/queued on remote hosts
 		tombstonedJobs, err := db.GetTombstonedActiveJobs(m.database)
 		if err == nil {
@@ -3999,47 +3983,6 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 		moved, err := queuefile.MoveToFront(job.Host, job.QueueName, job.ID)
 		return jobMovedToFrontMsg{jobID: job.ID, moved: moved, err: err}
 	}
-}
-
-// checkAndReviveDeadJob checks if a dead job is actually still running and revives it
-func checkAndReviveDeadJob(database *sql.DB, job *db.Job) (bool, error) {
-	// Check if log file exists but no status file (job still running)
-	logPattern := session.LogFilePattern(job.ID)
-	checkCmd := fmt.Sprintf("ls %s 2>/dev/null | head -1", logPattern)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, checkCmd, 5*time.Second)
-	if err != nil {
-		return false, nil // Can't reach host, don't change status
-	}
-
-	if strings.TrimSpace(stdout) == "" {
-		// No log file, check if job is in queue's .current file
-		currentFile := "~/.cache/remote-jobs/queue/default.current"
-		currentCmd := fmt.Sprintf("cat %s 2>/dev/null", currentFile)
-		stdout, _, err = ssh.RunWithTimeout(job.Host, currentCmd, 5*time.Second)
-		if err != nil || strings.TrimSpace(stdout) != fmt.Sprintf("%d", job.ID) {
-			return false, nil // Job is not current, stay dead
-		}
-	}
-
-	// Check if status file exists (job completed, not running)
-	statusPattern := session.StatusFilePattern(job.ID)
-	statusCmd := fmt.Sprintf("cat %s 2>/dev/null | head -1", statusPattern)
-	stdout, _, err = ssh.RunWithTimeout(job.Host, statusCmd, 5*time.Second)
-	if err == nil && strings.TrimSpace(stdout) != "" {
-		// Job has completed, update to completed instead of reviving
-		exitCode, _ := strconv.Atoi(strings.TrimSpace(stdout))
-		endTime := time.Now().Unix()
-		if err := db.RecordCompletionByID(database, job.ID, exitCode, endTime); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Job is running (has log file or is current, but no status file) - revive it
-	if err := db.ReviveDeadJob(database, job.ID); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely

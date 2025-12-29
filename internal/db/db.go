@@ -467,6 +467,15 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// MarkQueuedJobRunning transitions a queued job to running without touching start_time.
+func MarkQueuedJobRunning(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		StatusRunning, id, StatusQueued,
+	)
+	return err
+}
+
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
 func MarkQueuedByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
@@ -902,22 +911,6 @@ func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 func ListAllQueued(db *sql.DB) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
 	return queryJobs(db, query, StatusQueued)
-}
-
-// ListRecentDeadQueueJobs returns recently-dead jobs that were queue runner jobs
-// These should be re-checked in case they were incorrectly marked as dead
-func ListRecentDeadQueueJobs(db *sql.DB, since int64) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND session_name IS NULL AND end_time > ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
-	return queryJobs(db, query, StatusDead, since)
-}
-
-// ReviveDeadJob changes a dead job back to running (for incorrectly marked jobs)
-func ReviveDeadJob(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, end_time = NULL WHERE id = ? AND status = ?`,
-		StatusRunning, id, StatusDead,
-	)
-	return err
 }
 
 // ListUniqueHosts returns all unique hosts from all jobs

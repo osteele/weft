@@ -1,4 +1,4 @@
-# BUILD: 1
+# BUILD: 2
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -86,6 +86,8 @@ while true; do
     mv "$temp_file" "$QUEUE_FILE"
 
     # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, dependencies)
+    # Normalize: convert literal \t to real tabs for backwards compatibility with older queue entries
+    job_line=$(printf '%b' "$job_line")
     IFS=$'\t' read -r job_id working_dir command description env_vars_b64 deps_spec <<< "$job_line"
 
     if [ -z "$job_id" ] || [ -z "$working_dir" ] || [ -z "$command" ]; then

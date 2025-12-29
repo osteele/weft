@@ -251,9 +251,22 @@ func TmuxSessionExists(host, sessionName string) (bool, error) {
 	return lastLine == "YES", nil
 }
 
+func quickCommandTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return 5 * time.Second
+	}
+	return timeout
+}
+
 // TmuxSessionExistsQuick checks if a tmux session exists without retrying (for sync)
 func TmuxSessionExistsQuick(host, sessionName string) (bool, error) {
-	stdout, stderr, err := Run(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))
+	return TmuxSessionExistsQuickTimeout(host, sessionName, 0)
+}
+
+// TmuxSessionExistsQuickTimeout checks if a tmux session exists with a timeout.
+func TmuxSessionExistsQuickTimeout(host, sessionName string, timeout time.Duration) (bool, error) {
+	timeout = quickCommandTimeout(timeout)
+	stdout, stderr, err := RunWithTimeout(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName), timeout)
 	if err != nil {
 		// Check if it's a connection error
 		if IsConnectionError(stdout + stderr) {
@@ -274,7 +287,13 @@ func TmuxSessionExistsQuick(host, sessionName string) (bool, error) {
 // ReadRemoteFileQuick reads a file from a remote host without retrying (for sync)
 // Note: path is not quoted to allow tilde expansion
 func ReadRemoteFileQuick(host, path string) (string, error) {
-	stdout, stderr, err := Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", path))
+	return ReadRemoteFileQuickTimeout(host, path, 0)
+}
+
+// ReadRemoteFileQuickTimeout reads a file with timeout handling.
+func ReadRemoteFileQuickTimeout(host, path string, timeout time.Duration) (string, error) {
+	timeout = quickCommandTimeout(timeout)
+	stdout, stderr, err := RunWithTimeout(host, fmt.Sprintf("cat %s 2>/dev/null || true", path), timeout)
 	if err != nil {
 		if IsConnectionError(stdout + stderr) {
 			return "", fmt.Errorf("connection error: %s", strings.TrimSpace(stdout+stderr))

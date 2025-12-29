@@ -322,7 +322,7 @@ func TestExecuteAllDeferredOperations_QueueAdd(t *testing.T) {
 	commands := capture.get()
 	foundAppend := false
 	for _, cmd := range commands {
-		if strings.Contains(cmd, "echo") && strings.Contains(cmd, "gpu.queue") {
+		if strings.Contains(cmd, "gpu.queue") {
 			foundAppend = true
 			// Verify the job ID is in the command
 			if !strings.Contains(cmd, "python train.py") {

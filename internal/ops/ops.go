@@ -264,8 +264,9 @@ func executeQueueAdd(database *sql.DB, op *db.DeferredOperation, opts ExecuteOpt
 		op.JobID, payload.WorkingDir, payload.Command, payload.Description, envStr, payload.DepSpec)
 
 	// Append to queue file
+	// Use printf '%b\n' to interpret \t as tabs (echo doesn't interpret escapes)
 	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	appendCmd := fmt.Sprintf("mkdir -p ~/.cache/remote-jobs/queue && echo %q >> %s",
+	appendCmd := fmt.Sprintf("mkdir -p ~/.cache/remote-jobs/queue && printf '%%b\\n' %q >> %s",
 		entry, queueFile)
 
 	_, stderr, err := ssh.RunWithTimeout(op.Host, appendCmd, opts.Timeout)
