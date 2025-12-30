@@ -99,7 +99,9 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		entryRemoved = true
 	}
 
-	if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
+	// Use the session name so sync knows this is a tmux-based job, not a queue runner job
+	tmuxSession := session.TmuxSessionName(job.ID)
+	if err := db.UpdateQueuedToRunningWithSession(database, job.ID, tmuxSession); err != nil {
 		return false, fmt.Errorf("update queued job: %w", err)
 	}
 
@@ -113,7 +115,6 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	statusFile := session.StatusFile(job.ID, updated.StartTime)
 	metadataFile := session.MetadataFile(job.ID, updated.StartTime)
 	pidFile := session.PidFile(job.ID, updated.StartTime)
-	tmuxSession := session.TmuxSessionName(job.ID)
 
 	// Ensure log directory exists
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
@@ -173,7 +174,9 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 // startJobDirectly starts a job without interacting with the remote queue file.
 // Used when job has a pending queue_job operation (not yet synced to remote).
 func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *queuefile.Entry) (bool, error) {
-	if err := db.UpdateQueuedToRunning(database, job.ID); err != nil {
+	// Use the session name so sync knows this is a tmux-based job, not a queue runner job
+	tmuxSession := session.TmuxSessionName(job.ID)
+	if err := db.UpdateQueuedToRunningWithSession(database, job.ID, tmuxSession); err != nil {
 		return false, fmt.Errorf("update queued job: %w", err)
 	}
 
@@ -187,7 +190,6 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	statusFile := session.StatusFile(job.ID, updated.StartTime)
 	metadataFile := session.MetadataFile(job.ID, updated.StartTime)
 	pidFile := session.PidFile(job.ID, updated.StartTime)
-	tmuxSession := session.TmuxSessionName(job.ID)
 
 	// Ensure log directory exists
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)

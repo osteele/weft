@@ -87,7 +87,8 @@ func runLog(cmd *cobra.Command, args []string) error {
 	if !logFollow && job.Status == db.StatusCompleted {
 		if cached, err := logcache.Read(jobID); err == nil {
 			output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
-			fmt.Print(output)
+			// Process carriage returns - progress bars use \r to overwrite lines
+			fmt.Print(processCarriageReturns(output))
 			return nil
 		}
 		// Fall through to remote fetch if not cached
@@ -152,7 +153,8 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("read log for job %d: %w", jobID, err)
 	}
 
-	fmt.Print(stdout)
+	// Process carriage returns - progress bars use \r to overwrite lines
+	fmt.Print(processCarriageReturns(stdout))
 	return nil
 }
 
@@ -293,4 +295,22 @@ func filterLogContent(content string, from, to, lines int, grepPattern string) s
 		return ""
 	}
 	return strings.Join(result, "\n") + "\n"
+}
+
+// processCarriageReturns handles \r characters used by progress bars.
+// For each line, it returns only the final segment after the last \r,
+// simulating what the terminal would display.
+func processCarriageReturns(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+
+	for _, line := range lines {
+		// If line contains \r, take only the part after the last \r
+		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+			line = line[idx+1:]
+		}
+		result = append(result, line)
+	}
+
+	return strings.Join(result, "\n")
 }

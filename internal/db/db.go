@@ -581,6 +581,16 @@ func UpdateQueuedToRunning(db *sql.DB, id int64) error {
 	return err
 }
 
+// UpdateQueuedToRunningWithSession transitions a queued job to running and sets session_name.
+// Used when starting a queued job directly via tmux (not through queue runner).
+func UpdateQueuedToRunningWithSession(db *sql.DB, id int64, sessionName string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, start_time = ?, session_name = ? WHERE id = ? AND status = ?`,
+		StatusRunning, time.Now().Unix(), sessionName, id, StatusQueued,
+	)
+	return err
+}
+
 // RecordCompletion updates a job with its exit code and end time
 func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTime int64) error {
 	_, err := db.Exec(
