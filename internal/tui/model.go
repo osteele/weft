@@ -4980,23 +4980,16 @@ func (m Model) editJob() tea.Cmd {
 func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
 
-	// Remove old entry and add new one
-	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", job.ID, queueFile)
-	if _, stderr, err := ssh.Run(host, removeCmd); err != nil {
-		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
-			return fmt.Errorf("host unreachable")
-		}
-		return fmt.Errorf("remove old entry: %s", strings.TrimSpace(stderr))
-	}
-
-	// Add updated entry
+	// Remove old entry and add new one (under flock to prevent race with queue runner)
+	lockFile := queueFile + ".lock"
 	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s", job.ID, job.WorkingDir, job.Command, job.Description)
-	addCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(queueLine), queueFile)
-	if _, stderr, err := ssh.Run(host, addCmd); err != nil {
+	updateCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' >> %s\"",
+		lockFile, job.ID, queueFile, ssh.EscapeForSingleQuotes(queueLine), queueFile)
+	if _, stderr, err := ssh.Run(host, updateCmd); err != nil {
 		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			return fmt.Errorf("host unreachable")
 		}
-		return fmt.Errorf("add updated entry: %s", strings.TrimSpace(stderr))
+		return fmt.Errorf("update queue entry: %s", strings.TrimSpace(stderr))
 	}
 
 	return nil

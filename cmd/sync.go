@@ -253,10 +253,7 @@ func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, 
 	}
 
 	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
-	removeCmd := fmt.Sprintf("sed -i '/^%d\\t/d' %s 2>/dev/null || true", jobID, queueFile)
-	if _, stderr, err := ssh.Run(host, removeCmd); err != nil {
-		return &queueAppendError{op: "clean queue file", stderr: strings.TrimSpace(stderr), err: err}
-	}
+	lockFile := queueFile + ".lock"
 
 	envVarsB64 := ""
 	if len(envVars) > 0 {
@@ -264,7 +261,9 @@ func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, 
 	}
 
 	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, description, envVarsB64, depSpec)
-	appendCmd := fmt.Sprintf("echo '%s' >> %s", ssh.EscapeForSingleQuotes(jobLine), queueFile)
+	// Use flock to prevent race with queue runner's pop operation
+	appendCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' >> %s\"",
+		lockFile, jobID, queueFile, ssh.EscapeForSingleQuotes(jobLine), queueFile)
 	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
 		return &queueAppendError{op: "append queue entry", stderr: strings.TrimSpace(stderr), err: err}
 	}

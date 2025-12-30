@@ -1,4 +1,4 @@
-# BUILD: 4
+# BUILD: 5
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -65,25 +65,55 @@ while true; do
         break
     fi
 
+    # Check for .start_now file - if present, promote that job to front of queue
+    START_NOW_FILE="$QUEUE_DIR/${QUEUE_NAME}.start_now"
+    if [ -f "$START_NOW_FILE" ]; then
+        start_now_id=$(cat "$START_NOW_FILE" 2>/dev/null | tr -d '[:space:]')
+        rm -f "$START_NOW_FILE"
+        if [ -n "$start_now_id" ] && [ -f "$QUEUE_FILE" ]; then
+            # Extract the job line and move it to front
+            (
+                flock -x 200
+                job_to_promote=$(grep "^${start_now_id}	" "$QUEUE_FILE" 2>/dev/null || true)
+                if [ -n "$job_to_promote" ]; then
+                    # Remove from current position and add to front
+                    temp_file=$(mktemp)
+                    grep -v "^${start_now_id}	" "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
+                    { echo "$job_to_promote"; cat "$temp_file"; } > "$QUEUE_FILE"
+                    rm -f "$temp_file"
+                    echo "Promoted job $start_now_id to front of queue"
+                fi
+            ) 200>"$QUEUE_FILE.lock"
+        fi
+    fi
+
     # Check if queue file exists
     if [ ! -f "$QUEUE_FILE" ]; then
         sleep 5
         continue
     fi
 
-    # Read first line from queue (atomic read and remove)
-    job_line=$(head -n 1 "$QUEUE_FILE" 2>/dev/null || true)
+    # Pop first job from queue (under flock to prevent race with concurrent appends)
+    job_line=""
+    (
+        flock -x 200
+        job_line=$(head -n 1 "$QUEUE_FILE" 2>/dev/null || true)
+        if [ -n "$job_line" ]; then
+            temp_file=$(mktemp)
+            tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
+            mv "$temp_file" "$QUEUE_FILE"
+        fi
+        # Export job_line to parent via temp file
+        echo "$job_line" > "$QUEUE_FILE.popped"
+    ) 200>"$QUEUE_FILE.lock"
+    job_line=$(cat "$QUEUE_FILE.popped" 2>/dev/null || true)
+    rm -f "$QUEUE_FILE.popped"
 
     if [ -z "$job_line" ]; then
         # Queue is empty, wait and check again
         sleep 5
         continue
     fi
-
-    # Remove first line from queue file (atomic operation)
-    temp_file=$(mktemp)
-    tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
-    mv "$temp_file" "$QUEUE_FILE"
 
     # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, dependencies)
     # Normalize: convert literal \t to real tabs for backwards compatibility with older queue entries
@@ -278,8 +308,8 @@ while true; do
         echo "Job $job_id failed with exit code $exit_code in $duration_text"
     fi
 
-    # Clear current job
-    rm -f "$CURRENT_FILE"
+    # Clear current job and clean up PID file (prevents killing wrong process if PID is reused)
+    rm -f "$CURRENT_FILE" "$pid_file"
 
     # Send Slack notification if script exists
     if [ -x "$NOTIFY_SCRIPT" ]; then
