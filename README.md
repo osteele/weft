@@ -46,53 +46,57 @@ go install .
 
 ### remote-jobs run
 
-Start a persistent tmux session on a remote host.
+Queue a job on a remote host for sequential execution.
 
 ```bash
 remote-jobs run [flags] <host> <command...>
 ```
 
+By default, jobs are added to a queue and run sequentially by the queue runner. Use `--immediate` (`-i`) to start a job immediately.
+
+Use `start <job-id>` to start a queued or draft job immediately.
+
 **Flags:**
+- `-i, --immediate`: Start job immediately instead of queuing
 - `-C, --directory DIR`: Working directory (default: current directory path)
-- `-d, --description TEXT`: Description of the job (for logging and queries)
+- `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `-f, --follow`: Follow log output after starting (Ctrl+C to stop following; job continues)
-- `--allow`: Stream the job log live and stay attached until interrupted
-- `--queue`: Queue job for later instead of running now
-- `--queue-on-fail`: Queue job if connection fails
+- `-f, --follow`: Follow log output after starting (requires `--immediate`)
+- `--allow`: Stream the job log live and stay attached (requires `--immediate`)
+- `--queue-on-fail`: Queue job if connection fails (for `--immediate` mode)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
-- `--after ID`: Start job after another job succeeds (implies `--queue`)
-- `--after-any ID`: Start job after another job completes, success or failure (implies `--queue`)
+- `--after ID`: Start job after another job succeeds
+- `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
 
 **Examples:**
 ```bash
-# Basic usage (uses current directory path)
+# Queue a job (default behavior)
 remote-jobs run deepthought 'python train.py'
 
+# Start a queued job immediately
+remote-jobs start 123
+
+# Start immediately instead of queuing
+remote-jobs run -i deepthought 'python train.py'
+
 # With description (recommended)
-remote-jobs run -d "Training GPT-2 with lr=0.001" deepthought 'with-gpu python train.py --lr 0.001'
+remote-jobs run -m "Training GPT-2 with lr=0.001" deepthought 'with-gpu python train.py --lr 0.001'
 
 # Explicit working directory
 remote-jobs run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
 
-# Start and follow log output
-remote-jobs run -f -d "Training run" deepthought 'python train.py'
+# Start immediately and follow log output
+remote-jobs run -i -f -m "Training run" deepthought 'python train.py'
 
 # Stay attached to live output (Ctrl+C detaches, job keeps running)
-remote-jobs run --allow -d "Training run" deepthought 'python train.py'
+remote-jobs run -i --allow -m "Training run" deepthought 'python train.py'
 
 # Set environment variables
 remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python train.py'
 
-# Queue for later (doesn't start immediately)
-remote-jobs run --queue -d "Training run" deepthought 'python train.py'
-
-# Auto-queue if connection fails
-remote-jobs run --queue-on-fail -d "Training run" deepthought 'python train.py'
-
-# Run job after another succeeds (auto-queues)
+# Run job after another succeeds
 remote-jobs run --after 42 deepthought 'python eval.py'
 
 # Run cleanup job after another completes (success or failure)
@@ -103,14 +107,14 @@ remote-jobs run deepthought --kill 42
 ```
 
 The command:
-- Creates a job ID first, then starts the tmux session as `rj-{id}`
+- Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
+- Queue runner executes jobs sequentially in FIFO order
 - Saves job metadata and logs to `~/.cache/remote-jobs/logs/` on the remote host
-- Creates a detached tmux session on the remote host
 - Records the job in a local SQLite database (`~/.config/remote-jobs/jobs.db`)
 - Captures exit code when job completes
 - Sends Slack notification on completion (if configured)
 - Returns immediately (non-blocking)
-- Prints the job ID and instructions for monitoring
+- Prints the job ID and instructions for starting immediately or monitoring
 
 ### remote-jobs plan submit
 
@@ -465,23 +469,24 @@ remote-jobs job move 43 studio    # Move job 43 to studio
 ### remote-jobs job start
 
 Start a queued job immediately, bypassing its queue order. The job is removed
-from the remote queue file, marked as running, and launched right away in its
-tmux session.
+from the remote queue file, marked as running, and launched right away.
 
 ```bash
 remote-jobs job start <job-id>
+remote-jobs run <job-id>           # Shorthand (same effect)
 ```
 
 Examples:
 ```bash
-remote-jobs job start 512          # Start queued job 512 immediately
+remote-jobs run 512                # Start queued job 512 immediately
+remote-jobs job start 512          # Same as above
 remote-jobs job start 9001         # Bypass queue order and run now
 ```
 
-Only jobs with status `queued` can be started this way. The command preserves
+Only jobs with status `queued` or `draft` can be started this way. The command preserves
 the job's working directory, environment variables, and metadata.
 
-**Note:** This only works for queued jobs. For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
+**Note:** This only works for queued/draft jobs. For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
 
 ### Advanced run options
 
@@ -524,18 +529,6 @@ Set environment variables for the remote job. Can be repeated for multiple varia
 remote-jobs run -e CUDA_VISIBLE_DEVICES=0 cool30 "python train.py"
 remote-jobs run -e BATCH_SIZE=32 -e LR=0.001 cool30 "python train.py"
 remote-jobs queue add -e TMPDIR=/mnt/data/tmp cool30 "python train.py"
-```
-
-**Queue for later (`--queue`)**:
-```bash
-remote-jobs run --queue <host> <command>
-```
-
-Queues the job without running it immediately (same as `queue add`):
-
-```bash
-remote-jobs run --queue cool30 "python train.py"
-remote-jobs run --queue --from 42            # Queue a copy of job 42
 ```
 
 ### remote-jobs cleanup

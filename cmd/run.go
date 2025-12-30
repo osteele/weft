@@ -17,20 +17,22 @@ import (
 
 var runCmd = &cobra.Command{
 	Use:   "run [flags] <host> <command>",
-	Short: "Run a long-running job on a remote host",
-	Long: `Run a long-running job on a remote host.
+	Short: "Queue a job on a remote host",
+	Long: `Queue a job on a remote host for sequential execution.
 
-The job continues running even when you disconnect.
+By default, jobs are added to a queue and run sequentially by the queue runner.
+Use --immediate (-i) to start a job immediately instead of adding it to the queue.
+
+Use 'start <job-id>' to start a queued or draft job immediately.
 
 Examples:
-  remote-jobs run cool30 'python train.py'
-  remote-jobs run -m "Training GPT-2" cool30 'with-gpu python train.py'
+  remote-jobs run cool30 'python train.py'           # Queue job
+  remote-jobs run -i cool30 'python train.py'        # Start immediately
+  remote-jobs start 123                              # Start queued job #123 now
+  remote-jobs run -m "Training" cool30 'python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
-  remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 cool30 'python train.py'
-  remote-jobs run --after 42 cool30 'python eval.py'  # Run after job 42 completes
-  remote-jobs run --queue cool30 'python train.py'
-  remote-jobs run -f cool30 'python train.py'   # Start and follow log
-  remote-jobs run cool30 --kill 42              # Kill job 42`,
+  remote-jobs run --after 42 cool30 'python eval.py' # Run after job 42
+  remote-jobs run -i -f cool30 'python train.py'     # Start and follow log`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
 		// --kill mode only needs host
 		if runKillJobID > 0 {
@@ -41,7 +43,7 @@ Examples:
 		}
 		// Normal mode needs exactly host + command
 		if len(args) != 2 {
-			return fmt.Errorf("requires exactly host and command arguments")
+			return fmt.Errorf("requires <host> <command>")
 		}
 		return nil
 	}),
@@ -51,7 +53,7 @@ Examples:
 var (
 	runDir         string
 	runDescription string
-	runQueue       bool
+	runImmediate   bool
 	runQueueOnFail bool
 	runFollow      bool
 	runAllow       bool
@@ -66,11 +68,11 @@ var (
 func init() {
 	rootCmd.AddCommand(runCmd)
 
+	runCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path)")
 	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	runCmd.Flags().MarkHidden("description")
-	runCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
 	runCmd.Flags().BoolVar(&runQueueOnFail, "queue-on-fail", false, "Queue job if connection fails")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	runCmd.Flags().BoolVar(&runAllow, "allow", false, "Stream the job log live and stay attached until interrupted")
@@ -143,11 +145,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	printCommandRecommendations(command)
 
 	// Validate flag combinations
-	if runFollow && runQueue {
-		return fmt.Errorf("--follow cannot be used with --queue")
+	// --follow and --allow require --immediate (can't follow a queued job)
+	if runFollow && !runImmediate {
+		return fmt.Errorf("--follow requires --immediate (-i) since jobs are queued by default")
 	}
-	if runAllow && runQueue {
-		return fmt.Errorf("--allow cannot be used with --queue")
+	if runAllow && !runImmediate {
+		return fmt.Errorf("--allow requires --immediate (-i) since jobs are queued by default")
 	}
 	if runFollow && runAfter > 0 {
 		return fmt.Errorf("--follow cannot be used with --after")
@@ -167,10 +170,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runAllow && runFollow {
 		return fmt.Errorf("--allow cannot be used with --follow")
 	}
-
-	// --after and --after-any imply queue mode (job added to remote queue for dependency handling)
-	if runAfter > 0 || runAfterAny > 0 {
-		runQueue = true
+	if runImmediate && (runAfter > 0 || runAfterAny > 0) {
+		return fmt.Errorf("--immediate cannot be used with --after/--after-any")
 	}
 
 	// Parse "cd /path && command" pattern to extract working directory
@@ -191,76 +192,94 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Queue-only mode (including when --after is used)
-	if runQueue {
-		// When --after or --after-any is specified, use the remote queue system for dependency handling
-		if runAfter > 0 || runAfterAny > 0 {
-			deps := []queueDependency{}
-			waitType := "succeeds"
-			afterID := runAfter
-			if runAfterAny > 0 {
-				afterID = runAfterAny
-				waitType = "completes"
-				if err := ensureSameHostDependency(database, afterID, host); err != nil {
-					return err
-				}
-				deps = append(deps, queueDependency{JobID: afterID, AllowFailure: true})
-			} else if runAfter > 0 {
-				if err := ensureSameHostDependency(database, afterID, host); err != nil {
-					return err
-				}
-				deps = append(deps, queueDependency{JobID: afterID, AllowFailure: false})
+	// Handle --after and --after-any dependencies (always uses remote queue)
+	if runAfter > 0 || runAfterAny > 0 {
+		deps := []queueDependency{}
+		waitType := "succeeds"
+		afterID := runAfter
+		if runAfterAny > 0 {
+			afterID = runAfterAny
+			waitType = "completes"
+			if err := ensureSameHostDependency(database, afterID, host); err != nil {
+				return err
 			}
-			res, err := queueJob(database, queueJobOptions{
-				Host:         host,
-				WorkingDir:   workingDir,
-				Command:      command,
-				Description:  runDescription,
-				EnvVars:      runEnvVars,
-				QueueName:    defaultQueueName,
-				Dependencies: deps,
-				AutoStart:    true,
-			})
-			if err != nil {
-				return fmt.Errorf("queue job: %w", err)
+			deps = append(deps, queueDependency{JobID: afterID, AllowFailure: true})
+		} else if runAfter > 0 {
+			if err := ensureSameHostDependency(database, afterID, host); err != nil {
+				return err
 			}
-			jobID := res.JobID
-			fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterID, waitType)
-			fmt.Printf("  Working dir: %s\n", workingDir)
-			fmt.Printf("  Command: %s\n", command)
-			if runDescription != "" {
-				fmt.Printf("  Description: %s\n", runDescription)
-			}
-			if len(runEnvVars) > 0 {
-				fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
-			}
-			fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
-			fmt.Printf("\nTo start the queue runner (if not already running):\n")
-			fmt.Printf("  remote-jobs queue start %s\n", host)
-			if res.Deferred {
-				fmt.Printf("\nHost %s is unreachable right now. The CLI will append this job to the remote queue once it can reach the host again (run `remote-jobs sync --sync` to retry).\n", host)
-			}
-			return nil
+			deps = append(deps, queueDependency{JobID: afterID, AllowFailure: false})
 		}
-
-		// Standard local pending mode (no dependency)
-		jobID, err := db.RecordDraft(database, host, workingDir, command, runDescription)
+		res, err := queueJob(database, queueJobOptions{
+			Host:         host,
+			WorkingDir:   workingDir,
+			Command:      command,
+			Description:  runDescription,
+			EnvVars:      runEnvVars,
+			QueueName:    defaultQueueName,
+			Dependencies: deps,
+			AutoStart:    true,
+		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
 		}
-
-		fmt.Printf("Job queued with ID: %d\n\n", jobID)
-		fmt.Printf("  Host: %s\n", host)
+		jobID := res.JobID
+		fmt.Printf("Job %d added to queue on %s, will run after job %d %s\n\n", jobID, host, afterID, waitType)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
 		if runDescription != "" {
 			fmt.Printf("  Description: %s\n", runDescription)
 		}
-		fmt.Printf("\nTo start this job:\n")
-		fmt.Printf("  remote-jobs retry %d\n", jobID)
+		if len(runEnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+		}
+		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
+		fmt.Printf("\nTo start the queue runner (if not already running):\n")
+		fmt.Printf("  remote-jobs queue start %s\n", host)
+		if res.Deferred {
+			fmt.Printf("\nHost %s is unreachable right now. The CLI will append this job to the remote queue once it can reach the host again (run `remote-jobs sync --sync` to retry).\n", host)
+		}
 		return nil
 	}
 
+	// Default behavior: queue job for sequential execution (unless --immediate)
+	if !runImmediate {
+		res, err := queueJob(database, queueJobOptions{
+			Host:        host,
+			WorkingDir:  workingDir,
+			Command:     command,
+			Description: runDescription,
+			EnvVars:     runEnvVars,
+			QueueName:   defaultQueueName,
+			AutoStart:   true,
+		})
+		if err != nil {
+			return fmt.Errorf("queue job: %w", err)
+		}
+		jobID := res.JobID
+		fmt.Printf("Job #%d queued on %s\n\n", jobID, host)
+		fmt.Printf("  Working dir: %s\n", workingDir)
+		fmt.Printf("  Command: %s\n", command)
+		if runDescription != "" {
+			fmt.Printf("  Description: %s\n", runDescription)
+		}
+		if len(runEnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+		}
+		fmt.Printf("\nTo start immediately: remote-jobs start %d\n", jobID)
+		if res.Deferred {
+			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
+		} else {
+			// Auto-start queue runner (silently ignore offline errors)
+			started, err := ensureQueueRunnerStarted(host, defaultQueueName)
+			if err == nil && started {
+				fmt.Printf("Queue runner started on %s.\n", host)
+			}
+		}
+		return nil
+	}
+
+	// --immediate mode: start job now in its own tmux session
 	result, err := startJob(database, startJobOptions{
 		Host:        host,
 		WorkingDir:  workingDir,

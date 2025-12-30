@@ -27,7 +27,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if freshJob == nil {
 		return false, fmt.Errorf("job %d not found", job.ID)
 	}
-	if freshJob.Status != db.StatusQueued {
+	if freshJob.Status != db.StatusQueued && freshJob.Status != db.StatusDraft {
 		return false, fmt.Errorf("job %d is already %s", job.ID, freshJob.Status)
 	}
 	// Use fresh job data from here on

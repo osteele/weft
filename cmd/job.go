@@ -170,13 +170,31 @@ Examples:
 	RunE: runJobInfo,
 }
 
+// Top-level start command (alias for job start)
+var startCmd = &cobra.Command{
+	Use:   "start <job-id>",
+	Short: "Start a queued job immediately",
+	Long: `Start a queued job immediately on its host, bypassing queue order.
+
+This removes the job from the remote queue file, updates the database,
+and launches the job right away.
+
+This is an alias for 'job start'.
+
+Examples:
+  remote-jobs start 42`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runJobStartNow,
+}
+
 func init() {
 	// Register job command with root
 	rootCmd.AddCommand(jobCmd)
 
-	// Register top-level aliases for job info
+	// Register top-level aliases
 	rootCmd.AddCommand(infoCmd)
 	rootCmd.AddCommand(showCmd)
+	rootCmd.AddCommand(startCmd)
 
 	// Register subcommands
 	jobCmd.AddCommand(jobRunCmd)
@@ -196,7 +214,7 @@ func init() {
 	jobRunCmd.Flags().MarkHidden("description")
 	jobRunCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory on remote host")
 	jobRunCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
-	jobRunCmd.Flags().BoolVar(&runQueue, "queue", false, "Queue job for later instead of running now")
+	jobRunCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
 	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID (replaces retry)")
 	jobRunCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 
@@ -327,7 +345,7 @@ func runJobStartNow(cmd *cobra.Command, args []string) error {
 	if job == nil {
 		return fmt.Errorf("job %d not found", jobID)
 	}
-	if job.Status != db.StatusQueued {
+	if job.Status != db.StatusQueued && job.Status != db.StatusDraft {
 		return fmt.Errorf("job %d is not queued (status: %s)", jobID, job.Status)
 	}
 
