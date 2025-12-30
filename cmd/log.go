@@ -176,7 +176,8 @@ func buildLogCommand(logFile string) string {
 		// Lines from N onwards
 		if logFollow {
 			// For follow mode with --from: get from line N then follow
-			cmd = fmt.Sprintf("tail -n +%d -f %s", logFrom, logFile)
+			// Use -F to retry if file doesn't exist yet, suppress errors
+			cmd = fmt.Sprintf("tail -n +%d -F %s 2>/dev/null", logFrom, logFile)
 		} else {
 			cmd = fmt.Sprintf("tail -n +%d %s", logFrom, logFile)
 		}
@@ -185,7 +186,9 @@ func buildLogCommand(logFile string) string {
 		cmd = fmt.Sprintf("head -n %d %s", logTo, logFile)
 	} else if logFollow {
 		// Follow mode with default or -n lines
-		cmd = fmt.Sprintf("tail -n %d -f %s", logLines, logFile)
+		// Use -F to retry if file doesn't exist yet or gets recreated
+		// Suppress "cannot open" errors (file might not exist yet for new jobs)
+		cmd = fmt.Sprintf("tail -n %d -F %s 2>/dev/null", logLines, logFile)
 	} else {
 		// Default: last N lines
 		cmd = fmt.Sprintf("tail -n %d %s", logLines, logFile)

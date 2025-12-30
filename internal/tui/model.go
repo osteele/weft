@@ -2250,68 +2250,81 @@ func (m Model) renderJobDetails(height int) string {
 			}
 		}
 
-		// Process stats for running jobs
-		if job.Status == db.StatusRunning && m.processStats != nil && m.processStatsJobID == job.ID {
+		// Process stats and progress section for running jobs
+		// Reserve a fixed number of lines to prevent log preview from jumping
+		if job.Status == db.StatusRunning {
+			const statsReservedLines = 7 // header + CPU + Memory + Threads + 2 GPUs + Progress
+			linesWritten := 0
+
 			b.WriteString("\n")
 			b.WriteString(sectionStyle.Render("Process Stats"))
 			b.WriteString("\n")
+			linesWritten++ // header
 
-			// CPU: percentage and cumulative time
-			if m.processStats.CPUPct > 0 || m.processStats.CPUUser != "" {
-				b.WriteString(labelStyle.Render("CPU"))
-				cpuVal := ""
-				if m.processStats.CPUPct > 0 {
-					cpuVal = fmt.Sprintf("%.1f%%", m.processStats.CPUPct)
-				}
-				if m.processStats.CPUUser != "" {
-					if cpuVal != "" {
-						cpuVal += " "
+			if m.processStats != nil && m.processStatsJobID == job.ID {
+				// CPU: percentage and cumulative time
+				if m.processStats.CPUPct > 0 || m.processStats.CPUUser != "" {
+					b.WriteString(labelStyle.Render("CPU"))
+					cpuVal := ""
+					if m.processStats.CPUPct > 0 {
+						cpuVal = fmt.Sprintf("%.1f%%", m.processStats.CPUPct)
 					}
-					cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
-				}
-				b.WriteString(valueStyle.Render(cpuVal))
-				b.WriteString("\n")
-			}
-
-			// Memory: absolute and percentage
-			if m.processStats.MemoryRSS != "" {
-				b.WriteString(labelStyle.Render("Memory"))
-				mem := m.processStats.MemoryRSS
-				if m.processStats.MemoryPct != "" {
-					mem += " (" + m.processStats.MemoryPct + ")"
-				}
-				b.WriteString(valueStyle.Render(mem))
-				b.WriteString("\n")
-			}
-
-			// Threads
-			if m.processStats.Threads > 0 {
-				b.WriteString(labelStyle.Render("Threads"))
-				b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.processStats.Threads)))
-				b.WriteString("\n")
-			}
-
-			// GPUs with utilization and memory
-			if len(m.processStats.GPUs) > 0 {
-				for _, gpu := range m.processStats.GPUs {
-					b.WriteString(labelStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)))
-					gpuVal := ""
-					if gpu.Utilization > 0 {
-						gpuVal += fmt.Sprintf("%d%% util, ", gpu.Utilization)
+					if m.processStats.CPUUser != "" {
+						if cpuVal != "" {
+							cpuVal += " "
+						}
+						cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
 					}
-					gpuVal += gpu.MemUsed
-					b.WriteString(valueStyle.Render(gpuVal))
+					b.WriteString(valueStyle.Render(cpuVal))
 					b.WriteString("\n")
+					linesWritten++
 				}
-			}
-		}
 
-		// Progress section for running jobs (combined on one line)
-		if job.Status == db.StatusRunning {
+				// Memory: absolute and percentage
+				if m.processStats.MemoryRSS != "" {
+					b.WriteString(labelStyle.Render("Memory"))
+					mem := m.processStats.MemoryRSS
+					if m.processStats.MemoryPct != "" {
+						mem += " (" + m.processStats.MemoryPct + ")"
+					}
+					b.WriteString(valueStyle.Render(mem))
+					b.WriteString("\n")
+					linesWritten++
+				}
+
+				// Threads
+				if m.processStats.Threads > 0 {
+					b.WriteString(labelStyle.Render("Threads"))
+					b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.processStats.Threads)))
+					b.WriteString("\n")
+					linesWritten++
+				}
+
+				// GPUs with utilization and memory
+				if len(m.processStats.GPUs) > 0 {
+					for _, gpu := range m.processStats.GPUs {
+						b.WriteString(labelStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)))
+						gpuVal := ""
+						if gpu.Utilization > 0 {
+							gpuVal += fmt.Sprintf("%d%% util, ", gpu.Utilization)
+						}
+						gpuVal += gpu.MemUsed
+						b.WriteString(valueStyle.Render(gpuVal))
+						b.WriteString("\n")
+						linesWritten++
+					}
+				}
+			} else {
+				// Stats not loaded yet - show placeholder
+				b.WriteString(dimStyle.Render("Loading..."))
+				b.WriteString("\n")
+				linesWritten++
+			}
+
+			// Progress (on same reserved block)
 			if prog, ok := m.jobProgress[job.ID]; ok {
 				pct := prog.DisplayPercent()
 				if pct >= 0 || prog.Total > 0 {
-					b.WriteString("\n")
 					b.WriteString(labelStyle.Render("Progress"))
 					b.WriteString("  ")
 					if pct >= 0 {
@@ -2321,6 +2334,53 @@ func (m Model) renderJobDetails(height int) string {
 					if prog.Total > 0 {
 						b.WriteString(fmt.Sprintf(" (%d/%d)", prog.Current, prog.Total))
 					}
+					b.WriteString("\n")
+					linesWritten++
+				}
+			}
+
+			// Pad with blank lines to reach reserved count
+			for linesWritten < statsReservedLines {
+				b.WriteString("\n")
+				linesWritten++
+			}
+		}
+
+		// Log preview section - show last few lines of log if available
+		logPreview := ""
+		if m.logContent != "" {
+			logPreview = m.logContent
+		} else if cached, ok := m.logCache[job.ID]; ok {
+			logPreview = cached
+		}
+		if logPreview != "" {
+			// Process carriage returns (progress bars use \r to overwrite lines)
+			logPreview = processCarriageReturns(logPreview)
+
+			// Get last 5 non-empty lines
+			allLines := strings.Split(strings.TrimSpace(logPreview), "\n")
+			var previewLines []string
+			for i := len(allLines) - 1; i >= 0 && len(previewLines) < 5; i-- {
+				line := strings.TrimSpace(allLines[i])
+				if line != "" {
+					previewLines = append([]string{line}, previewLines...)
+				}
+			}
+
+			if len(previewLines) > 0 {
+				b.WriteString("\n")
+				b.WriteString(sectionStyle.Render("Log (last lines)"))
+				b.WriteString("\n")
+				for _, line := range previewLines {
+					// Truncate long lines to fit panel width
+					maxWidth := m.width - 10
+					if maxWidth < 40 {
+						maxWidth = 40
+					}
+					if len(line) > maxWidth {
+						line = line[:maxWidth-3] + "..."
+					}
+					b.WriteString(dimStyle.Render(line))
 					b.WriteString("\n")
 				}
 			}
@@ -5170,4 +5230,22 @@ func splitIntoSegments(s string) []string {
 func parseNumber(s string) (int, bool) {
 	n, err := strconv.Atoi(s)
 	return n, err == nil
+}
+
+// processCarriageReturns handles \r characters used by progress bars.
+// For each line, it returns only the final segment after the last \r,
+// simulating what the terminal would display.
+func processCarriageReturns(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+
+	for _, line := range lines {
+		// If line contains \r, take only the part after the last \r
+		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+			line = line[idx+1:]
+		}
+		result = append(result, line)
+	}
+
+	return strings.Join(result, "\n")
 }

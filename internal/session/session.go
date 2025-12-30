@@ -102,10 +102,18 @@ func LegacyMetadataFile(sessionName string) string {
 }
 
 // JobLogFile returns the appropriate log file path for a job (handles legacy and new)
+// Jobs with a valid startTime use new-style paths in ~/.cache/remote-jobs/logs/
+// Only jobs without startTime fall back to legacy /tmp/ paths
 func JobLogFile(jobID int64, startTime int64, sessionName string) string {
+	// New-style jobs have startTime set - always use new path format
+	if startTime > 0 {
+		return LogFile(jobID, startTime)
+	}
+	// Legacy jobs without startTime - use old /tmp/ path if sessionName is set
 	if sessionName != "" {
 		return LegacyLogFile(sessionName)
 	}
+	// Fallback (shouldn't happen for valid jobs)
 	return LogFile(jobID, startTime)
 }
 
