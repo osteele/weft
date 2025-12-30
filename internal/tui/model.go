@@ -2,10 +2,13 @@ package tui
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,32 +128,33 @@ func (t HostDetailTab) GPUPosition() int {
 
 // Key bindings
 type keyMap struct {
-	Up             key.Binding
-	Down           key.Binding
-	Enter          key.Binding
-	Logs           key.Binding
-	Filter         key.Binding
-	Escape         key.Binding
-	Kill           key.Binding
-	Restart        key.Binding
-	EditRestart    key.Binding
-	Remove         key.Binding
-	NewJob         key.Binding
-	Prune          key.Binding
-	Suspend        key.Binding
-	Quit           key.Binding
-	HostsView      key.Binding
-	JobsView       key.Binding
-	Tab            key.Binding
-	ShiftTab       key.Binding
-	Sync           key.Binding
-	Help           key.Binding
-	StartQueue     key.Binding
-	StartNow       key.Binding
-	MoveToFront    key.Binding
-	Edit           key.Binding
-	Sort           key.Binding
-	RegenerateDesc key.Binding
+	Up              key.Binding
+	Down            key.Binding
+	Enter           key.Binding
+	Logs            key.Binding
+	Filter          key.Binding
+	Escape          key.Binding
+	Kill            key.Binding
+	Restart         key.Binding
+	EditRestart     key.Binding
+	Remove          key.Binding
+	NewJob          key.Binding
+	Prune           key.Binding
+	Suspend         key.Binding
+	Quit            key.Binding
+	HostsView       key.Binding
+	JobsView        key.Binding
+	Tab             key.Binding
+	ShiftTab        key.Binding
+	Sync            key.Binding
+	Help            key.Binding
+	StartQueue      key.Binding
+	StartNow        key.Binding
+	MoveToFront     key.Binding
+	Edit            key.Binding
+	Sort            key.Binding
+	RegenerateDesc  key.Binding
+	ToggleSummaries key.Binding
 }
 
 var keys = keyMap{
@@ -256,6 +260,10 @@ var keys = keyMap{
 	RegenerateDesc: key.NewBinding(
 		key.WithKeys("G"),
 		key.WithHelp("G", "generate AI description"),
+	),
+	ToggleSummaries: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "toggle AI host summaries"),
 	),
 }
 
@@ -381,6 +389,13 @@ type descriptionGeneratedMsg struct {
 	jobID       int64
 	description string
 	err         error
+}
+
+type hostSummaryGeneratedMsg struct {
+	host    string
+	summary string
+	hash    string
+	err     error
 }
 
 // Input field indices for new job form
@@ -607,6 +622,11 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		jobProgress:             make(map[int64]*progress.Progress),
 		llmGenerator:            llmGen,
 		appConfig:               appCfg,
+		showHostSummaries:       true, // Default to showing AI summaries
+		hostSummaries:           make(map[string]string),
+		hostSummaryHashes:       make(map[string]string),
+		hostSummaryTimes:        make(map[string]time.Time),
+		hostSummaryPending:      make(map[string]bool),
 	}
 }
 
@@ -674,6 +694,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.pendingSelectJobID = 0
+		}
+
+		// Trigger host summary regeneration if enabled
+		if m.showHostSummaries && m.llmGenerator != nil {
+			return m, m.generateAllHostSummaries()
 		}
 		return m, nil
 
@@ -844,6 +869,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setFlash(fmt.Sprintf("Generated: %s", msg.description), false),
 			m.refreshJobs(),
 		)
+
+	case hostSummaryGeneratedMsg:
+		delete(m.hostSummaryPending, msg.host)
+		if msg.err != nil {
+			// Silently ignore errors - just don't show summary
+			// Still try to generate next summary
+			if m.showHostSummaries {
+				return m, m.generateAllHostSummaries()
+			}
+			return m, nil
+		}
+		m.hostSummaries[msg.host] = msg.summary
+		m.hostSummaryHashes[msg.host] = msg.hash
+		m.hostSummaryTimes[msg.host] = time.Now()
+		// Trigger next summary if summaries are enabled
+		if m.showHostSummaries {
+			return m, m.generateAllHostSummaries()
+		}
+		return m, nil
 
 	case jobRemovedMsg:
 		var flashCmd tea.Cmd
@@ -1258,6 +1302,18 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.viewMode = ViewModeJobs
 		return m, nil
 
+	case key.Matches(msg, keys.ToggleSummaries):
+		// Toggle AI host summaries (only in hosts view)
+		if m.viewMode == ViewModeHosts {
+			m.showHostSummaries = !m.showHostSummaries
+			if m.showHostSummaries {
+				// Trigger summary generation for all hosts
+				return m, tea.Batch(m.setFlash("AI summaries enabled", false), m.generateAllHostSummaries())
+			}
+			return m, m.setFlash("AI summaries disabled", false)
+		}
+		return m, nil
+
 	case key.Matches(msg, keys.Up):
 		if m.viewMode == ViewModeHosts {
 			if m.selectedHostIdx > 0 {
@@ -1439,16 +1495,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, tea.Batch(m.setFlash("Pruning completed/dead jobs...", false), m.pruneJobs())
-
-	case key.Matches(msg, keys.StartQueue):
-		if m.viewMode != ViewModeJobs {
-			return m, nil
-		}
-		job := m.getTargetJob()
-		if job != nil && job.Status == db.StatusQueued {
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting queue on %s...", job.Host), false), m.startQueue(job.Host))
-		}
-		return m, nil
 
 	case key.Matches(msg, keys.StartNow):
 		if m.viewMode == ViewModeHosts {
@@ -1738,7 +1784,6 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"k", "Kill/cancel job"},
 			{"g", "Start queued job now"},
 			{"G", "Generate AI description"},
-			{"S", "Start queue runner"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
 			{"Esc", "Clear selection/messages"},
@@ -1754,6 +1799,7 @@ func (m Model) renderHelpOverlay(background string) string {
 		shortcuts := []struct{ key, desc string }{
 			{"↑/↓", "Navigate host list"},
 			{"←/→", "Switch to jobs view"},
+			{"d", "Toggle AI summaries"},
 			{"x", "Delete host"},
 		}
 		for _, s := range shortcuts {
@@ -1842,16 +1888,6 @@ func (m Model) renderInputForm(background string) string {
 }
 
 func (m Model) renderJobList(height int) string {
-	// DEBUG: Log at start of every render
-	f, _ := os.OpenFile("/tmp/rj-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if f != nil {
-		f.WriteString(fmt.Sprintf("=== renderJobList called, jobs=%d hosts=%d ===\n", len(m.jobs), len(m.hosts)))
-		for _, h := range m.hosts {
-			f.WriteString(fmt.Sprintf("  host=%s status=%d lastCheck=%v\n", h.Name, h.Status, h.LastCheck))
-		}
-		f.Close()
-	}
-
 	var rows []string
 
 	// Header
@@ -1933,28 +1969,6 @@ func (m Model) renderJobList(height int) string {
 			line = fmt.Sprintf(" %-4d %-10s %-12s %-12s %s",
 				job.ID, truncate(job.Host, 10),
 				status, timeCol, display)
-		}
-
-		// DEBUG: Log host state for disconnected host jobs
-		if job.Host == "cool100" || job.Host == "studio" {
-			var debugInfo string
-			found := false
-			for _, h := range m.hosts {
-				if h.Name == job.Host {
-					found = true
-					debugInfo = fmt.Sprintf("job=%d host=%s status=%d lastCheck=%v ago=%v disconnected=%v\n",
-						job.ID, job.Host, h.Status, h.LastCheck, time.Since(h.LastCheck), m.isHostDisconnectedLong(job))
-					break
-				}
-			}
-			if !found {
-				debugInfo = fmt.Sprintf("job=%d host=%s NOT_FOUND_IN_HOSTS (len=%d)\n", job.ID, job.Host, len(m.hosts))
-			}
-			f, _ := os.OpenFile("/tmp/rj-debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-			if f != nil {
-				f.WriteString(debugInfo)
-				f.Close()
-			}
 		}
 
 		if i == selectedIdx {
@@ -2479,6 +2493,38 @@ func wrapTextWithIndent(text string, width, indent int) string {
 	return result.String()
 }
 
+// wrapText wraps text to the given width without indentation
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+
+	var result strings.Builder
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+
+	lineLen := 0
+	for i, word := range words {
+		wordLen := len(word)
+		if i == 0 {
+			result.WriteString(word)
+			lineLen = wordLen
+		} else if lineLen+1+wordLen <= width {
+			result.WriteString(" ")
+			result.WriteString(word)
+			lineLen += 1 + wordLen
+		} else {
+			result.WriteString("\n")
+			result.WriteString(word)
+			lineLen = wordLen
+		}
+	}
+
+	return result.String()
+}
+
 // Chroma syntax highlighting for shell commands
 var (
 	shellLexer     chroma.Lexer
@@ -2582,8 +2628,9 @@ func (m Model) renderHostList(height int) string {
 	} else {
 		// Hosts
 		contentHeight := height - 4 // Account for borders and header
+		rowCount := 0
 		for i, host := range m.hosts {
-			if i >= contentHeight {
+			if rowCount >= contentHeight {
 				break
 			}
 
@@ -2616,6 +2663,38 @@ func (m Model) renderHostList(height int) string {
 			}
 
 			rows = append(rows, line)
+			rowCount++
+
+			// Show AI summary if enabled
+			if m.showHostSummaries {
+				if summary, ok := m.hostSummaries[host.Name]; ok && summary != "" {
+					// Wrap summary to fit width, indent and italicize
+					summaryStyle := lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("243"))
+					summaryLines := wrapText(summary, m.width-10)
+					for _, sl := range strings.Split(summaryLines, "\n") {
+						if rowCount >= contentHeight {
+							break
+						}
+						summaryLine := "    " + sl
+						if i == m.selectedHostIdx {
+							// Combine selected background with italic
+							selectedSummaryStyle := summaryStyle.Background(selectedBg)
+							summaryLine = selectedSummaryStyle.Width(m.width - 4).Render(summaryLine)
+						} else {
+							summaryLine = summaryStyle.Render(summaryLine)
+						}
+						rows = append(rows, summaryLine)
+						rowCount++
+					}
+				} else if m.hostSummaryPending[host.Name] {
+					// Show loading indicator
+					if rowCount < contentHeight {
+						pendingLine := "    " + dimStyle.Render("Generating summary...")
+						rows = append(rows, pendingLine)
+						rowCount++
+					}
+				}
+			}
 		}
 	}
 
@@ -4232,6 +4311,187 @@ func (m Model) regenerateDescription(job *db.Job) tea.Cmd {
 			return descriptionGeneratedMsg{jobID: job.ID, err: err}
 		}
 		return descriptionGeneratedMsg{jobID: job.ID, description: desc}
+	}
+}
+
+// hasEnoughRAM checks if the system has at least minBytes of available RAM
+func hasEnoughRAM(minBytes uint64) bool {
+	if runtime.GOOS == "darwin" {
+		// Use vm_stat on macOS
+		out, err := exec.Command("vm_stat").Output()
+		if err != nil {
+			return true // Assume OK if we can't check
+		}
+		// Parse pages - include free, inactive, and speculative (all reclaimable)
+		var freePages, inactivePages, speculativePages uint64
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			parts := strings.Fields(line)
+			if len(parts) >= 3 {
+				numStr := strings.TrimSuffix(parts[len(parts)-1], ".")
+				pages, err := strconv.ParseUint(numStr, 10, 64)
+				if err != nil {
+					continue
+				}
+				switch {
+				case strings.HasPrefix(line, "Pages free:"):
+					freePages = pages
+				case strings.HasPrefix(line, "Pages inactive:"):
+					inactivePages = pages
+				case strings.HasPrefix(line, "Pages speculative:"):
+					speculativePages = pages
+				}
+			}
+		}
+		// Available = free + inactive + speculative (all can be reclaimed)
+		availablePages := freePages + inactivePages + speculativePages
+		availableBytes := availablePages * 4096
+		return availableBytes >= minBytes
+	}
+	return true // Default to allowing on other platforms
+}
+
+// generateAllHostSummaries triggers summary generation for the next host that needs one
+// Only generates one at a time to avoid overwhelming the system
+func (m Model) generateAllHostSummaries() tea.Cmd {
+	if m.llmGenerator == nil || !m.llmGenerator.Client().IsAvailable() {
+		return nil
+	}
+	// Check if any summary is already being generated
+	for _, pending := range m.hostSummaryPending {
+		if pending {
+			return nil // Wait for current generation to complete
+		}
+	}
+	// Check available RAM before generating (skip if < 1GB available)
+	if !hasEnoughRAM(1 * 1024 * 1024 * 1024) {
+		return nil
+	}
+	// Find first host that needs a summary
+	for _, host := range m.hosts {
+		if cmd := m.maybeGenerateHostSummary(host.Name); cmd != nil {
+			return cmd
+		}
+	}
+	return nil
+}
+
+// maybeGenerateHostSummary generates a summary if hash changed and rate limit allows
+func (m Model) maybeGenerateHostSummary(host string) tea.Cmd {
+	// Check rate limit: no more than once per minute
+	if lastTime, ok := m.hostSummaryTimes[host]; ok {
+		if time.Since(lastTime) < time.Minute {
+			return nil
+		}
+	}
+	// Check if already generating
+	if m.hostSummaryPending[host] {
+		return nil
+	}
+	// Compute current hash
+	newHash := m.computeHostJobsHash(host)
+	if oldHash, ok := m.hostSummaryHashes[host]; ok && oldHash == newHash {
+		return nil // No change
+	}
+	// Mark as pending and generate
+	m.hostSummaryPending[host] = true
+	return m.generateHostSummary(host, newHash)
+}
+
+// computeHostJobsHash computes a hash of job IDs and statuses for a host
+func (m Model) computeHostJobsHash(host string) string {
+	var parts []string
+	for _, job := range m.allJobs {
+		if job.Host == host && !job.Tombstoned {
+			exitCode := ""
+			if job.ExitCode != nil {
+				exitCode = fmt.Sprintf(":%d", *job.ExitCode)
+			}
+			parts = append(parts, fmt.Sprintf("%d:%s%s", job.ID, job.Status, exitCode))
+		}
+	}
+	// Simple hash: join and take first 16 chars of sha256
+	h := sha256.New()
+	h.Write([]byte(strings.Join(parts, ",")))
+	return hex.EncodeToString(h.Sum(nil))[:16]
+}
+
+// generateHostSummary generates an AI summary for a host
+func (m Model) generateHostSummary(host, hash string) tea.Cmd {
+	return func() tea.Msg {
+		// Gather job data for this host
+		var running, queued, completedOK, failed []string
+		for _, job := range m.allJobs {
+			if job.Host != host || job.Tombstoned {
+				continue
+			}
+			desc := job.EffectiveDescription()
+			if len(desc) > 40 {
+				desc = desc[:40] + "..."
+			}
+			switch job.Status {
+			case db.StatusRunning, db.StatusStarting:
+				running = append(running, desc)
+			case db.StatusQueued:
+				queued = append(queued, desc)
+			case db.StatusCompleted:
+				if job.ExitCode != nil && *job.ExitCode == 0 {
+					completedOK = append(completedOK, desc)
+				} else {
+					failed = append(failed, desc)
+				}
+			}
+		}
+
+		// Build facts for the prompt (simplified format)
+		var facts []string
+		if len(running) > 0 {
+			facts = append(facts, fmt.Sprintf("RUNNING: %s", strings.Join(running, ", ")))
+		}
+		if len(queued) > 0 {
+			if len(queued) > 3 {
+				facts = append(facts, fmt.Sprintf("QUEUED: %d jobs", len(queued)))
+			} else {
+				facts = append(facts, fmt.Sprintf("QUEUED: %s", strings.Join(queued, ", ")))
+			}
+		}
+		if len(completedOK) > 0 {
+			if len(completedOK) > 3 {
+				completedOK = completedOK[:3]
+			}
+			facts = append(facts, fmt.Sprintf("OK: %s", strings.Join(completedOK, ", ")))
+		}
+		if len(failed) > 0 {
+			if len(failed) > 3 {
+				facts = append(facts, fmt.Sprintf("FAILED: %d jobs including %s", len(failed), failed[0]))
+			} else {
+				facts = append(facts, fmt.Sprintf("FAILED: %s", strings.Join(failed, ", ")))
+			}
+		}
+
+		// No activity at all
+		if len(facts) == 0 {
+			return hostSummaryGeneratedMsg{host: host, summary: "No recent activity", hash: hash}
+		}
+
+		// Idle case: nothing running but has other activity
+		prefix := ""
+		if len(running) == 0 {
+			prefix = "Idle. "
+		}
+
+		// Generate via ollama
+		prompt := fmt.Sprintf(`Rewrite as a status summary (1-2 sentences). Be specific about what's running and any failures.
+
+%s
+
+Status:`, strings.Join(facts, "\n"))
+
+		summary, err := m.llmGenerator.Client().GenerateText(prompt)
+		if err != nil {
+			return hostSummaryGeneratedMsg{host: host, err: err}
+		}
+		return hostSummaryGeneratedMsg{host: host, summary: prefix + summary, hash: hash}
 	}
 }
 

@@ -187,6 +187,47 @@ func (c *Client) GenerateDescription(command string) (description string, hash s
 	return description, hash, nil
 }
 
+// GenerateText generates text from a raw prompt
+func (c *Client) GenerateText(prompt string) (string, error) {
+	if !c.IsAvailable() {
+		return "", fmt.Errorf("ollama is not available")
+	}
+
+	reqBody := ollamaRequest{
+		Model:  c.config.Model,
+		Prompt: prompt,
+		Stream: false,
+	}
+
+	jsonBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	resp, err := c.httpClient.Post(c.config.APIURL, "application/json", bytes.NewReader(jsonBody))
+	if err != nil {
+		return "", fmt.Errorf("ollama request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
+	}
+
+	var ollamaResp ollamaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+
+	if ollamaResp.Error != "" {
+		return "", fmt.Errorf("ollama error: %s", ollamaResp.Error)
+	}
+
+	// Clean up the response
+	text := strings.TrimSpace(ollamaResp.Response)
+	return text, nil
+}
+
 // Config returns the current configuration
 func (c *Client) Config() Config {
 	return c.config

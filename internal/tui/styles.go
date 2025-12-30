@@ -4,14 +4,14 @@ import "github.com/charmbracelet/lipgloss"
 
 var (
 	// Colors
-	runningColor   = lipgloss.Color("10") // Green
-	completedColor = lipgloss.Color("8")  // Gray
-	failedColor    = lipgloss.Color("9")  // Red
-	deadColor      = lipgloss.Color("9")  // Red
-	pendingColor   = lipgloss.Color("11") // Yellow
-	queuedColor    = lipgloss.Color("6")  // Cyan
-	selectedBg     = lipgloss.Color("4")  // Blue
-	borderColor    = lipgloss.Color("8")  // Gray
+	runningColor   = lipgloss.Color("10")      // Green
+	completedColor = lipgloss.Color("8")       // Gray
+	failedColor    = lipgloss.Color("9")       // Red
+	deadColor      = lipgloss.Color("9")       // Red
+	pendingColor   = lipgloss.Color("11")      // Yellow
+	queuedColor    = lipgloss.Color("6")       // Cyan
+	selectedBg     = lipgloss.Color("#E0E0E0") // Light gray highlight
+	borderColor    = lipgloss.Color("8")       // Gray
 
 	// Panel styles
 	listPanelStyle = lipgloss.NewStyle().
@@ -24,11 +24,9 @@ var (
 			BorderForeground(borderColor).
 			Padding(0, 1)
 
-	// Selection style
+	// Selection style - only changes background, preserves status colors
 	selectedStyle = lipgloss.NewStyle().
-			Background(selectedBg).
-			Foreground(lipgloss.Color("15")).
-			Bold(true)
+			Background(selectedBg)
 
 	// Status-based styles
 	runningStyle = lipgloss.NewStyle().
