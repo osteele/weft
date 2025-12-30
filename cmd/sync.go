@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -106,6 +108,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Start queue runners on hosts with queued jobs (unless --no-queue-start)
 	if !syncNoQueueStart {
 		startQueueRunnersForQueuedHosts(database)
+	}
+
+	// Prune old cached log files
+	cfg, _ := config.Load()
+	if cfg.LogCacheMaxAge > 0 {
+		maxAge := time.Duration(cfg.LogCacheMaxAge) * 24 * time.Hour
+		if pruned, err := logcache.Prune(maxAge); err == nil && pruned > 0 && syncVerbose {
+			fmt.Printf("Pruned %d old cached log file(s)\n", pruned)
+		}
 	}
 
 	// Print summary

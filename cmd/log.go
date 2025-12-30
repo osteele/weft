@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -79,6 +81,16 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 	if job == nil {
 		return fmt.Errorf("job %d not found", jobID)
+	}
+
+	// For completed jobs, try local cache first (unless following)
+	if !logFollow && job.Status == db.StatusCompleted {
+		if cached, err := logcache.Read(jobID); err == nil {
+			output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
+			fmt.Print(output)
+			return nil
+		}
+		// Fall through to remote fetch if not cached
 	}
 
 	// Determine log file path based on whether this is an old or new job
@@ -202,4 +214,83 @@ func escapeShellArg(s string) string {
 		}
 	}
 	return result
+}
+
+// filterLogContent applies line range and grep filters to cached log content
+func filterLogContent(content string, from, to, lines int, grepPattern string) string {
+	allLines := strings.Split(content, "\n")
+
+	// Remove trailing empty line if content ends with newline
+	if len(allLines) > 0 && allLines[len(allLines)-1] == "" {
+		allLines = allLines[:len(allLines)-1]
+	}
+
+	var result []string
+
+	// Apply line range filters
+	if from > 0 && to > 0 {
+		// Lines from N to M (1-indexed)
+		start := from - 1
+		end := to
+		if start < 0 {
+			start = 0
+		}
+		if end > len(allLines) {
+			end = len(allLines)
+		}
+		if start < len(allLines) {
+			result = allLines[start:end]
+		}
+	} else if from > 0 {
+		// Lines from N onwards (1-indexed)
+		start := from - 1
+		if start < 0 {
+			start = 0
+		}
+		if start < len(allLines) {
+			result = allLines[start:]
+		}
+	} else if to > 0 {
+		// First N lines
+		end := to
+		if end > len(allLines) {
+			end = len(allLines)
+		}
+		result = allLines[:end]
+	} else {
+		// Default: last N lines
+		start := len(allLines) - lines
+		if start < 0 {
+			start = 0
+		}
+		result = allLines[start:]
+	}
+
+	// Apply grep filter if specified
+	if grepPattern != "" {
+		re, err := regexp.Compile(grepPattern)
+		if err != nil {
+			// Fall back to simple substring match
+			var filtered []string
+			for _, line := range result {
+				if strings.Contains(line, grepPattern) {
+					filtered = append(filtered, line)
+				}
+			}
+			result = filtered
+		} else {
+			var filtered []string
+			for _, line := range result {
+				if re.MatchString(line) {
+					filtered = append(filtered, line)
+				}
+			}
+			result = filtered
+		}
+	}
+
+	if len(result) == 0 {
+		return ""
+	}
+	return strings.Join(result, "\n") + "\n"
 }

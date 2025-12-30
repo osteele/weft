@@ -23,6 +23,14 @@ type Config struct {
 
 	// EnableMouse toggles mouse support in the TUI (disables terminal selection when true)
 	EnableMouse bool `yaml:"enable_mouse"`
+
+	// LogCacheMaxAge is how long to keep cached log files (in days)
+	// Default: 7 days. Set to 0 to disable caching.
+	LogCacheMaxAge int `yaml:"log_cache_max_age"`
+
+	// LogCacheMaxSize is the maximum size of log files to cache (in bytes)
+	// Default: 51200 (50KB). Logs larger than this are not cached.
+	LogCacheMaxSize int `yaml:"log_cache_max_size"`
 }
 
 // DefaultConfig returns the default configuration
@@ -33,6 +41,8 @@ func DefaultConfig() *Config {
 		LogRefreshInterval:  3,
 		HostRefreshInterval: 30,
 		EnableMouse:         false,
+		LogCacheMaxAge:      7,
+		LogCacheMaxSize:     50 * 1024, // 50KB
 	}
 }
 

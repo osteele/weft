@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/progress"
 	"github.com/osteele/remote-jobs/internal/queuefile"
@@ -266,6 +267,7 @@ type logFetchedMsg struct {
 	progress  *progress.Progress // extracted progress info (nil if none found)
 	err       error
 	connError bool // true if this was a connection error (host unreachable)
+	fromCache bool // true if this log was served from local cache
 }
 
 type jobKilledMsg struct {
@@ -3746,6 +3748,26 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 
 	job := m.selectedJob
 	return func() tea.Msg {
+		// For completed jobs, try local cache first
+		if job.Status == db.StatusCompleted {
+			if cached, err := logcache.Read(job.ID); err == nil {
+				// Apply tail -500 equivalent
+				lines := strings.Split(cached, "\n")
+				if len(lines) > 500 {
+					lines = lines[len(lines)-500:]
+				}
+				content := strings.Join(lines, "\n")
+				prog := progress.FindLastProgress(content)
+				return logFetchedMsg{
+					jobID:     job.ID,
+					content:   content,
+					progress:  prog,
+					fromCache: true,
+				}
+			}
+			// Fall through to remote fetch if not cached
+		}
+
 		var logFile string
 
 		// For jobs without a session name (queued jobs, or jobs started by queue runner),

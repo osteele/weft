@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -76,6 +78,26 @@ func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int6
 		endTime = time.Now().Unix()
 	}
 	return db.RecordCompletionByID(database, jobID, exitCode, endTime)
+}
+
+// CacheCompletedJobLog attempts to cache a completed job's log file locally.
+// This is best-effort: errors are ignored since caching is optional.
+func CacheCompletedJobLog(job *db.Job) {
+	if job == nil {
+		return
+	}
+
+	cfg, _ := config.Load()
+	maxSize := cfg.LogCacheMaxSize
+	if maxSize <= 0 {
+		return // Caching disabled
+	}
+
+	// Get the log file path on the remote host
+	logFile := session.JobLogFile(job.ID, job.StartTime, job.SessionName)
+
+	// Try to cache it (ignores errors - caching is best-effort)
+	logcache.CacheFromRemote(job.Host, logFile, job.ID, maxSize)
 }
 
 // DefaultSyncOptions returns default sync options
@@ -170,6 +192,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 		if err := RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
 			return false, err
 		}
+		CacheCompletedJobLog(job)
 		return true, nil
 	}
 
@@ -207,6 +230,7 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 		if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
 			return false, err
 		}
+		CacheCompletedJobLog(job)
 		return true, nil
 	}
 
@@ -303,6 +327,7 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 		if err := RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
 			return false, err
 		}
+		CacheCompletedJobLog(job)
 		return true, nil
 	}
 
@@ -344,6 +369,7 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 		if err := RecordJobCompletion(database, job.ID, *result.ExitCode, result.Mtime); err != nil {
 			return false, err
 		}
+		CacheCompletedJobLog(job)
 		return true, nil
 	}
 

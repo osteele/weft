@@ -766,6 +766,18 @@ log_refresh_interval: 3    # Seconds between log refreshes for running jobs (def
 host_refresh_interval: 30  # Seconds between host info refreshes in hosts view (default: 30)
 ```
 
+### Log Caching
+
+Completed job logs under 50KB are cached locally for faster access without SSH:
+
+```yaml
+# ~/.config/remote-jobs/config.yaml
+log_cache_max_size: 51200  # Maximum log size to cache in bytes (default: 50KB)
+log_cache_max_age: 7       # Days to keep cached logs (default: 7, 0 to disable)
+```
+
+Cached logs are stored in `~/.cache/remote-jobs/logs/` and automatically pruned during sync.
+
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/remote-jobs/jobs.db`. The database records:
