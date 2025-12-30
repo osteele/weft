@@ -246,7 +246,8 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 				return false, err
 			}
 			return true, nil
-		case db.StatusStarting:
+		case db.StatusStarting, db.StatusDead, db.StatusFailed:
+			// Job is actually running - fix the status
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
 				return false, err
 			}
@@ -271,6 +272,13 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 	// Probe 4: Check if process is running via PID
 	processRunning := probeProcessRunning(job.Host, job.ID, timeout)
 	if processRunning.IsSome() && processRunning.Unwrap() {
+		// Process is running - if job is marked dead/failed, fix it
+		if job.Status == db.StatusDead || job.Status == db.StatusFailed {
+			if err := db.MarkRunningByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 		return false, nil
 	}
 

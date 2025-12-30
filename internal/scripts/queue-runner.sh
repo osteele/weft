@@ -1,4 +1,4 @@
-# BUILD: 2
+# BUILD: 4
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -92,6 +92,13 @@ while true; do
 
     if [ -z "$job_id" ] || [ -z "$working_dir" ] || [ -z "$command" ]; then
         echo "Invalid job line, skipping: $job_line"
+        continue
+    fi
+
+    # Skip jobs that already have a status file (already completed in a previous run)
+    existing_status=$(ls -t "$LOG_DIR/${job_id}"-*.status 2>/dev/null | head -1)
+    if [ -n "$existing_status" ]; then
+        echo "Job $job_id: already completed, skipping (status file exists)"
         continue
     fi
 
@@ -210,8 +217,40 @@ while true; do
         exec bash -c "$command"
     ) >> "$log_file" 2>&1 &
     cmd_pid=$!
-    wait $cmd_pid
-    exit_code=$?
+
+    # Robust wait: poll for process completion instead of blocking wait
+    # This handles cases where the process is killed externally and wait doesn't return
+    exit_code=0
+    while true; do
+        # Check if process still exists
+        if ! kill -0 $cmd_pid 2>/dev/null; then
+            # Process is gone, get exit code via wait
+            wait $cmd_pid 2>/dev/null
+            exit_code=$?
+            break
+        fi
+
+        # Check if status file was written (job completed via normal path)
+        if [ -f "$status_file" ]; then
+            exit_code=$(cat "$status_file")
+            # Give process a moment to fully exit, then force cleanup
+            sleep 1
+            kill -0 $cmd_pid 2>/dev/null && kill $cmd_pid 2>/dev/null
+            wait $cmd_pid 2>/dev/null || true
+            break
+        fi
+
+        # Check for STOP signal while waiting
+        if [ -f "$QUEUE_DIR/${QUEUE_NAME}.stop" ]; then
+            echo "STOP signal received while job running, killing job..."
+            kill $cmd_pid 2>/dev/null || true
+            wait $cmd_pid 2>/dev/null
+            exit_code=$?
+            break
+        fi
+
+        sleep 2
+    done
     set -e
 
     end_time=$(date +%s)

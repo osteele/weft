@@ -1,34 +1,69 @@
 package db
 
 import (
+	"os"
 	"testing"
 )
 
 func TestEffectiveDescriptionFromDB(t *testing.T) {
+	tmpfile, err := os.CreateTemp("", "effective-desc-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	tmpfile.Close()
+	defer os.Remove(tmpfile.Name())
+
+	cleanup := SetDBPath(tmpfile.Name())
+	defer cleanup()
+
 	database, err := Open()
 	if err != nil {
-		t.Fatalf("Failed to open database: %v", err)
+		t.Fatalf("open database: %v", err)
 	}
 	defer database.Close()
 
-	job, err := GetJobByID(database, 1159)
+	jobID, err := RecordJobStarting(database, "test-host", "~/project", "cd ~/project && python train.py", "")
 	if err != nil {
-		t.Fatalf("Failed to get job: %v", err)
-	}
-	if job == nil {
-		t.Skip("Job 1159 not found")
+		t.Fatalf("record job: %v", err)
 	}
 
-	t.Logf("Job ID: %d", job.ID)
-	t.Logf("Description: %q", job.Description)
-	t.Logf("GeneratedDescription: %q", job.GeneratedDescription)
-	t.Logf("GenerationHash: %q", job.GenerationHash)
-	t.Logf("EffectiveDescription(): %q", job.EffectiveDescription())
+	// Generated description should be used when user description is empty
+	if _, err := database.Exec(`UPDATE jobs SET description = '', generated_description = ?, generation_hash = ? WHERE id = ?`,
+		"Generated summary", "hash1", jobID); err != nil {
+		t.Fatalf("set generated description: %v", err)
+	}
 
-	// Verify EffectiveDescription returns the generated description
-	if job.Description == "" && job.GeneratedDescription != "" {
-		if job.EffectiveDescription() != job.GeneratedDescription {
-			t.Errorf("EffectiveDescription() = %q, want %q", job.EffectiveDescription(), job.GeneratedDescription)
-		}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got := job.EffectiveDescription(); got != "Generated summary" {
+		t.Fatalf("EffectiveDescription() = %q, want %q", got, "Generated summary")
+	}
+
+	// User description overrides generated description
+	if _, err := database.Exec(`UPDATE jobs SET description = ?, generated_description = '' WHERE id = ?`,
+		"User supplied", jobID); err != nil {
+		t.Fatalf("set user description: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job second time: %v", err)
+	}
+	if got := job.EffectiveDescription(); got != "User supplied" {
+		t.Fatalf("EffectiveDescription() = %q, want %q", got, "User supplied")
+	}
+
+	// Fallback to effective command when neither description present
+	if _, err := database.Exec(`UPDATE jobs SET description = '', generated_description = '' WHERE id = ?`, jobID); err != nil {
+		t.Fatalf("clear descriptions: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job third time: %v", err)
+	}
+	expectedCmd := "python train.py"
+	if got := job.EffectiveDescription(); got != expectedCmd {
+		t.Fatalf("EffectiveDescription() = %q, want %q", got, expectedCmd)
 	}
 }

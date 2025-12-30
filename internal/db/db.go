@@ -86,6 +86,12 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
+	// Enable WAL mode for better concurrent access (TUI + sync + CLI)
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable WAL mode: %w", err)
+	}
+
 	return db, nil
 }
 

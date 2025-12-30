@@ -1,10 +1,15 @@
 package ops
 
 import (
+	"fmt"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 type mockQueueRemote struct {
@@ -84,4 +89,322 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 	if updated.StartTime != 1700000000 {
 		t.Fatalf("expected start time updated from metadata, got %d", updated.StartTime)
 	}
+}
+
+func TestSyncJobMarksStartingAsRunningWhenTmuxAlive(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "tmux-host", "/tmp", "echo run", "tmux job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	sessionName := "session-running"
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID); err != nil {
+		t.Fatalf("update session name: %v", err)
+	}
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "YES\n"},
+	})
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected job transition to running")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusRunning {
+		t.Fatalf("expected running status, got %s", updated.Status)
+	}
+}
+
+func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "status-host", "/tmp", "echo done", "status job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	sessionName := "session-complete"
+	startTime := int64(1700000000)
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, start_time = ? WHERE id = ?`, sessionName, startTime, jobID); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+	if err := db.MarkRunningByID(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	statusOutput := "0\n|MTIME|\n1700000005\n"
+	logFile := session.LogFile(jobID, startTime)
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+		{Contains: "|MTIME|", Stdout: statusOutput},
+		{Contains: "stat -c %s", Stdout: "0\n"},
+		{Contains: logFile, Stdout: "log contents"},
+	})
+
+	job, _ := db.GetJobByID(database, jobID)
+	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected completion change")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusCompleted {
+		t.Fatalf("expected completed status, got %s", updated.Status)
+	}
+	if updated.ExitCode == nil || *updated.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %v", updated.ExitCode)
+	}
+	if updated.EndTime == nil || *updated.EndTime != 1700000005 {
+		t.Fatalf("expected end time from mtime, got %v", updated.EndTime)
+	}
+}
+
+func TestSyncJobSkipsDeadWhenPendingOperations(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "pending-host", "/tmp", "echo pending", "pending job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	sessionName := "session-pending"
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+
+	if err := db.AddDeferredOperation(database, "pending-host", db.OpQueueJob, jobID, "", "{}"); err != nil {
+		t.Fatalf("add deferred op: %v", err)
+	}
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+	})
+
+	job, _ := db.GetJobByID(database, jobID)
+	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected no change due to pending operations")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusStarting {
+		t.Fatalf("expected status to remain starting, got %s", updated.Status)
+	}
+}
+
+func TestSyncJobQuickMarksDeadWithoutStatus(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "quick-host", "/tmp", "echo quick", "quick job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	sessionName := "session-quick"
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+	})
+
+	job, _ := db.GetJobByID(database, jobID)
+	changed, err := SyncJobQuick(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJobQuick: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected job to be marked dead")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusDead {
+		t.Fatalf("expected dead status, got %s", updated.Status)
+	}
+}
+
+func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "dead-host", "/tmp", "echo dead", "dead job", "default")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	mock := mockQueueRemote{
+		statusOption: Some(false),
+		current:      Some(false),
+		inQueue:      Some(false),
+		process:      Some(false),
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	changed, err := SyncQueueRunnerJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJob: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected job to be marked dead")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusDead {
+		t.Fatalf("expected dead status, got %s", updated.Status)
+	}
+}
+
+func TestSyncQueueRunnerJobQuickCompletesJobs(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "quick-queue", "/tmp", "echo", "queue job", "default")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	exitCode := 3
+	mock := mockQueueRemote{
+		quickStatus: quickStatus{
+			ExitCode: &exitCode,
+			Mtime:    1700001000,
+		},
+		metadata: "start_time=1700000500\n",
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	job, _ := db.GetJobByID(database, jobID)
+	changed, err := SyncQueueRunnerJobQuick(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJobQuick: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected completion change")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusCompleted {
+		t.Fatalf("expected completed status, got %s", updated.Status)
+	}
+	if updated.ExitCode == nil || *updated.ExitCode != exitCode {
+		t.Fatalf("expected exit code %d, got %v", exitCode, updated.ExitCode)
+	}
+	if updated.StartTime != 1700000500 {
+		t.Fatalf("expected start time from metadata, got %d", updated.StartTime)
+	}
+}
+
+func TestSyncQueueRunnerJobQuickSkipsDeadWhenPendingOperations(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "skip-host", "/tmp", "echo", "skip job", "default")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := db.AddDeferredOperation(database, "skip-host", db.OpQueueJob, jobID, "", "{}"); err != nil {
+		t.Fatalf("add deferred op: %v", err)
+	}
+
+	mock := mockQueueRemote{
+		quickStatus: quickStatus{State: queueStateDead},
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	job, _ := db.GetJobByID(database, jobID)
+	changed, err := SyncQueueRunnerJobQuick(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJobQuick: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected no change when pending operations exist")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusRunning {
+		t.Fatalf("expected status to remain running, got %s", updated.Status)
+	}
+}
+
+type sshMockResponse struct {
+	Contains string
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+func mockSSHCommands(t *testing.T, responses []sshMockResponse) {
+	handler := func(host, command string) (string, string, int) {
+		for _, resp := range responses {
+			if resp.Contains == "" || strings.Contains(command, resp.Contains) {
+				return resp.Stdout, resp.Stderr, resp.ExitCode
+			}
+		}
+		return "", "", 0
+	}
+
+	cleanup := ssh.SetExecCommand(mockSSHExecCommand(handler))
+	t.Cleanup(cleanup)
+}
+
+func mockSSHExecCommand(handler func(host, command string) (string, string, int)) func(string, ...string) *exec.Cmd {
+	return func(name string, args ...string) *exec.Cmd {
+		if name != "ssh" {
+			return exec.Command(name, args...)
+		}
+		host, command := parseHostAndCommand(args)
+		stdout, stderr, exitCode := handler(host, command)
+		return exec.Command("sh", "-c", buildMockCommand(stdout, stderr, exitCode))
+	}
+}
+
+func parseHostAndCommand(args []string) (string, string) {
+	if len(args) >= 2 {
+		return args[len(args)-2], args[len(args)-1]
+	}
+	if len(args) == 1 {
+		return "", args[0]
+	}
+	return "", ""
+}
+
+func buildMockCommand(stdout, stderr string, exitCode int) string {
+	return fmt.Sprintf("printf '%%s' %s; >&2 printf '%%s' %s; exit %d",
+		singleQuote(stdout), singleQuote(stderr), exitCode)
+}
+
+func singleQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
