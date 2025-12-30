@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -1998,15 +2003,20 @@ func (m Model) renderJobDetails(height int) string {
 		if availableWidth < 20 {
 			availableWidth = 60 // fallback if window too narrow
 		}
+		// Wrap first (on plain text), then apply syntax highlighting to each line
 		wrappedCmd := wrapTextWithIndent(cmd, availableWidth, labelWidth)
 		// Limit command display to 8 lines max to avoid overwhelming the details panel
 		const maxCmdLines = 8
 		cmdLines := strings.Split(wrappedCmd, "\n")
 		if len(cmdLines) > maxCmdLines {
 			cmdLines = cmdLines[:maxCmdLines]
-			wrappedCmd = strings.Join(cmdLines, "\n") + "\n" + strings.Repeat(" ", labelWidth) + "..."
+			cmdLines = append(cmdLines, strings.Repeat(" ", labelWidth)+"...")
 		}
-		b.WriteString(valueStyle.Render(wrappedCmd))
+		// Apply syntax highlighting to each line
+		for i, line := range cmdLines {
+			cmdLines[i] = highlightCommand(line)
+		}
+		b.WriteString(strings.Join(cmdLines, "\n"))
 		b.WriteString("\n")
 
 		// Directory
@@ -2360,6 +2370,57 @@ func wrapTextWithIndent(text string, width, indent int) string {
 	}
 
 	return result.String()
+}
+
+// Chroma syntax highlighting for shell commands
+var (
+	shellLexer     chroma.Lexer
+	shellFormatter chroma.Formatter
+	shellStyle     *chroma.Style
+)
+
+func init() {
+	// Use bash lexer for shell command highlighting
+	shellLexer = lexers.Get("bash")
+	if shellLexer == nil {
+		shellLexer = lexers.Fallback
+	}
+	shellLexer = chroma.Coalesce(shellLexer)
+
+	// Use terminal256 formatter for ANSI output
+	shellFormatter = formatters.Get("terminal256")
+	if shellFormatter == nil {
+		shellFormatter = formatters.Fallback
+	}
+
+	// Use pygments style (works well with light backgrounds)
+	shellStyle = styles.Get("pygments")
+	if shellStyle == nil {
+		shellStyle = styles.Fallback
+	}
+}
+
+// highlightCommand applies syntax coloring to a shell command using chroma.
+func highlightCommand(cmd string) string {
+	if cmd == "" {
+		return cmd
+	}
+
+	iterator, err := shellLexer.Tokenise(nil, cmd)
+	if err != nil {
+		return cmd // Fall back to plain text on error
+	}
+
+	var buf bytes.Buffer
+	err = shellFormatter.Format(&buf, shellStyle, iterator)
+	if err != nil {
+		return cmd // Fall back to plain text on error
+	}
+
+	// Remove trailing newline that chroma adds
+	result := buf.String()
+	result = strings.TrimSuffix(result, "\n")
+	return result
 }
 
 func (m Model) renderFlash() string {
