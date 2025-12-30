@@ -290,6 +290,11 @@ type logFetchedMsg struct {
 	fromCache bool // true if this log was served from local cache
 }
 
+type quickProgressMsg struct {
+	jobID    int64
+	progress *progress.Progress
+}
+
 type jobKilledMsg struct {
 	jobID     int64
 	err       error
@@ -696,9 +701,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingSelectJobID = 0
 		}
 
+		// Build commands to run after refresh
+		var cmds []tea.Cmd
+
+		// Fetch quick progress for all running jobs
+		if cmd := m.fetchAllRunningJobsProgress(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+
 		// Trigger host summary regeneration if enabled
 		if m.showHostSummaries && m.llmGenerator != nil {
-			return m, m.generateAllHostSummaries()
+			cmds = append(cmds, m.generateAllHostSummaries())
+		}
+
+		if len(cmds) > 0 {
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 
@@ -755,6 +772,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.logViewport.SetContent(m.logContent)
 			m.logViewport.GotoBottom()
+		}
+		return m, nil
+
+	case quickProgressMsg:
+		// Store quick progress fetch result (only if we don't already have progress)
+		if msg.progress != nil {
+			if _, exists := m.jobProgress[msg.jobID]; !exists {
+				m.jobProgress[msg.jobID] = msg.progress
+			}
 		}
 		return m, nil
 
@@ -4100,6 +4126,61 @@ func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
 			stats: stats,
 		}
 	}
+}
+
+// fetchQuickProgress quickly greps the log file for the last progress line
+// This is faster than fetching the full log and is used at startup
+func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
+	if job == nil || job.Status != db.StatusRunning {
+		return nil
+	}
+	// Skip if we already have progress for this job
+	if _, exists := m.jobProgress[job.ID]; exists {
+		return nil
+	}
+
+	return func() tea.Msg {
+		// Find the log file
+		var logFile string
+		if job.SessionName == "" {
+			pattern := session.LogFilePattern(job.ID)
+			findCmd := fmt.Sprintf("ls -t %s 2>/dev/null | head -1", pattern)
+			stdout, _, err := ssh.Run(job.Host, findCmd)
+			if err == nil && strings.TrimSpace(stdout) != "" {
+				logFile = strings.TrimSpace(stdout)
+			} else {
+				logFile = session.LogFile(job.ID, job.StartTime)
+			}
+		} else {
+			logFile = session.JobLogFile(job.ID, job.StartTime, job.SessionName)
+		}
+
+		// Quick grep for last progress line (case-insensitive)
+		grepCmd := fmt.Sprintf("grep -i '^Progress:' %s 2>/dev/null | tail -1", logFile)
+		stdout, _, err := ssh.Run(job.Host, grepCmd)
+		if err != nil || strings.TrimSpace(stdout) == "" {
+			return quickProgressMsg{jobID: job.ID, progress: nil}
+		}
+
+		prog := progress.ParseProgress(strings.TrimSpace(stdout))
+		return quickProgressMsg{jobID: job.ID, progress: prog}
+	}
+}
+
+// fetchAllRunningJobsProgress fetches progress for all running jobs quickly
+func (m Model) fetchAllRunningJobsProgress() tea.Cmd {
+	var cmds []tea.Cmd
+	for _, job := range m.allJobs {
+		if job.Status == db.StatusRunning && !job.Tombstoned {
+			if cmd := m.fetchQuickProgress(job); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m Model) performBackgroundSync() tea.Cmd {
