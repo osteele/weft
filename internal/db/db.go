@@ -13,24 +13,26 @@ import (
 
 // Job represents a remote job record
 type Job struct {
-	ID           int64
-	Host         string
-	SessionName  string // Deprecated: kept for backward compatibility with old jobs
-	WorkingDir   string
-	Command      string
-	Description  string
-	ErrorMessage string
-	QueueName    string // Name of the queue this job belongs to (empty for non-queued jobs)
-	GPU          string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
-	CreatedAt    int64  // When the job was created/queued (0 for legacy jobs)
-	StartTime    int64
-	EndTime      *int64
-	ExitCode     *int
-	Status       string
-	Tombstoned   bool
+	ID                   int64
+	Host                 string
+	SessionName          string // Deprecated: kept for backward compatibility with old jobs
+	WorkingDir           string
+	Command              string
+	Description          string
+	GeneratedDescription string // LLM-generated description for jobs without user descriptions
+	GenerationHash       string // Hash of model+prompt+settings used to generate the description
+	ErrorMessage         string
+	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
+	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
+	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
+	StartTime            int64
+	EndTime              *int64
+	ExitCode             *int
+	Status               string
+	Tombstoned           bool
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, tombstoned`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, tombstoned`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -130,6 +132,16 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add gpu column for CUDA_VISIBLE_DEVICES
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add generated_description column for LLM-generated descriptions
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN generated_description TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add generation_hash column for tracking LLM generation settings
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN generation_hash TEXT`); err != nil {
 		return err
 	}
 
@@ -410,6 +422,25 @@ func UpdateJobDescription(db *sql.DB, id int64, description string) error {
 	return err
 }
 
+// UpdateJobGeneratedDescription updates the LLM-generated description for a job
+func UpdateJobGeneratedDescription(db *sql.DB, id int64, generatedDesc, generationHash string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET generated_description = ?, generation_hash = ? WHERE id = ?`,
+		generatedDesc, generationHash, id,
+	)
+	return err
+}
+
+// GetJobsNeedingDescriptions returns jobs without user or generated descriptions
+func GetJobsNeedingDescriptions(db *sql.DB, limit int) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE tombstoned = 0
+		AND (description IS NULL OR description = '')
+		AND (generated_description IS NULL OR generated_description = '')
+		ORDER BY id DESC LIMIT ?`, jobSelectColumns)
+	return queryJobs(db, query, limit)
+}
+
 // UpdateJobWorkingDir updates the working directory for a queued job
 func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
 	_, err := db.Exec(
@@ -675,6 +706,8 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
 	var sessionName sql.NullString
 	var desc sql.NullString
+	var generatedDesc sql.NullString
+	var generationHash sql.NullString
 	var errorMsg sql.NullString
 	var queueName sql.NullString
 	var gpu sql.NullString
@@ -684,7 +717,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var exitCode sql.NullInt64
 	var tombstoned sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -697,6 +730,12 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if desc.Valid {
 		j.Description = desc.String
+	}
+	if generatedDesc.Valid {
+		j.GeneratedDescription = generatedDesc.String
+	}
+	if generationHash.Valid {
+		j.GenerationHash = generationHash.String
 	}
 	if errorMsg.Valid {
 		j.ErrorMessage = errorMsg.String
@@ -734,6 +773,8 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var j Job
 		var sessionName sql.NullString
 		var desc sql.NullString
+		var generatedDesc sql.NullString
+		var generationHash sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
 		var gpu sql.NullString
@@ -743,7 +784,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -753,6 +794,12 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if desc.Valid {
 			j.Description = desc.String
+		}
+		if generatedDesc.Valid {
+			j.GeneratedDescription = generatedDesc.String
+		}
+		if generationHash.Valid {
+			j.GenerationHash = generationHash.String
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
@@ -1011,6 +1058,8 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var j Job
 		var sessionName sql.NullString
 		var desc sql.NullString
+		var generatedDesc sql.NullString
+		var generationHash sql.NullString
 		var errorMsg sql.NullString
 		var queueName sql.NullString
 		var gpu sql.NullString
@@ -1020,7 +1069,7 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
 		if err != nil {
 			return nil, err
 		}
@@ -1030,6 +1079,12 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 		}
 		if desc.Valid {
 			j.Description = desc.String
+		}
+		if generatedDesc.Valid {
+			j.GeneratedDescription = generatedDesc.String
+		}
+		if generationHash.Valid {
+			j.GenerationHash = generationHash.String
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
@@ -1071,6 +1126,18 @@ func (j *Job) EffectiveWorkingDir() string {
 		return dir
 	}
 	return j.WorkingDir
+}
+
+// EffectiveDescription returns the best description for display.
+// Priority: user description > generated description > effective command.
+func (j *Job) EffectiveDescription() string {
+	if j.Description != "" {
+		return j.Description
+	}
+	if j.GeneratedDescription != "" {
+		return j.GeneratedDescription
+	}
+	return j.EffectiveCommand()
 }
 
 // EffectiveCommand returns the actual command for display.

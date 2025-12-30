@@ -22,7 +22,9 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/llm"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/progress"
@@ -123,31 +125,32 @@ func (t HostDetailTab) GPUPosition() int {
 
 // Key bindings
 type keyMap struct {
-	Up          key.Binding
-	Down        key.Binding
-	Enter       key.Binding
-	Logs        key.Binding
-	Filter      key.Binding
-	Escape      key.Binding
-	Kill        key.Binding
-	Restart     key.Binding
-	EditRestart key.Binding
-	Remove      key.Binding
-	NewJob      key.Binding
-	Prune       key.Binding
-	Suspend     key.Binding
-	Quit        key.Binding
-	HostsView   key.Binding
-	JobsView    key.Binding
-	Tab         key.Binding
-	ShiftTab    key.Binding
-	Sync        key.Binding
-	Help        key.Binding
-	StartQueue  key.Binding
-	StartNow    key.Binding
-	MoveToFront key.Binding
-	Edit        key.Binding
-	Sort        key.Binding
+	Up             key.Binding
+	Down           key.Binding
+	Enter          key.Binding
+	Logs           key.Binding
+	Filter         key.Binding
+	Escape         key.Binding
+	Kill           key.Binding
+	Restart        key.Binding
+	EditRestart    key.Binding
+	Remove         key.Binding
+	NewJob         key.Binding
+	Prune          key.Binding
+	Suspend        key.Binding
+	Quit           key.Binding
+	HostsView      key.Binding
+	JobsView       key.Binding
+	Tab            key.Binding
+	ShiftTab       key.Binding
+	Sync           key.Binding
+	Help           key.Binding
+	StartQueue     key.Binding
+	StartNow       key.Binding
+	MoveToFront    key.Binding
+	Edit           key.Binding
+	Sort           key.Binding
+	RegenerateDesc key.Binding
 }
 
 var keys = keyMap{
@@ -249,6 +252,10 @@ var keys = keyMap{
 	Sort: key.NewBinding(
 		key.WithKeys("o"),
 		key.WithHelp("o", "cycle sort"),
+	),
+	RegenerateDesc: key.NewBinding(
+		key.WithKeys("G"),
+		key.WithHelp("G", "generate AI description"),
 	),
 }
 
@@ -370,6 +377,12 @@ type processStatsMsg struct {
 	stats *ssh.ProcessStats
 }
 
+type descriptionGeneratedMsg struct {
+	jobID       int64
+	description string
+	err         error
+}
+
 // Input field indices for new job form
 const (
 	inputHost = iota
@@ -463,6 +476,19 @@ type Model struct {
 
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
 	jobDependencies map[int64]string
+
+	// LLM description generator (nil if ollama not available or disabled)
+	llmGenerator *llm.Generator
+
+	// App configuration
+	appConfig *config.Config
+
+	// Host AI summaries
+	showHostSummaries  bool                 // Toggle for showing AI summaries in hosts view
+	hostSummaries      map[string]string    // host name -> AI-generated summary
+	hostSummaryHashes  map[string]string    // host name -> hash of job states used for summary
+	hostSummaryTimes   map[string]time.Time // host name -> last generation time
+	hostSummaryPending map[string]bool      // host name -> currently generating
 }
 
 // ModelOptions contains configuration for the TUI model
@@ -547,6 +573,22 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
+	// Load app config
+	appCfg, _ := config.Load()
+
+	// Create and start LLM generator if enabled and ollama is available
+	var llmGen *llm.Generator
+	if appCfg.IsAIEnabled() {
+		genOpts := []llm.GeneratorOption{}
+		if model := appCfg.AIModel(); model != "" {
+			genOpts = append(genOpts, llm.WithModel(model))
+		}
+		gen := llm.NewGenerator(database, genOpts...)
+		if gen.Start() {
+			llmGen = gen
+		}
+	}
+
 	return Model{
 		database:                database,
 		jobList:                 jobList,
@@ -563,6 +605,8 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
 		jobProgress:             make(map[int64]*progress.Progress),
+		llmGenerator:            llmGen,
+		appConfig:               appCfg,
 	}
 }
 
@@ -790,6 +834,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Job %d is already at the front", msg.jobID), false)
 		}
 		return m, m.setFlash(fmt.Sprintf("Job %d moved to front of queue", msg.jobID), false)
+
+	case descriptionGeneratedMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Generate description failed: %v", msg.err), true)
+		}
+		// Refresh jobs to show the new description
+		return m, tea.Batch(
+			m.setFlash(fmt.Sprintf("Generated: %s", msg.description), false),
+			m.refreshJobs(),
+		)
 
 	case jobRemovedMsg:
 		var flashCmd tea.Cmd
@@ -1426,6 +1480,22 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.applyJobFilter() // Re-filter and sort
 		return m, m.setFlash(fmt.Sprintf("Sort: %s", m.jobSort), false)
 
+	case key.Matches(msg, keys.RegenerateDesc):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		if m.llmGenerator == nil {
+			return m, m.setFlash("AI description generation not available", true)
+		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, nil
+		}
+		return m, tea.Batch(
+			m.setFlash(fmt.Sprintf("Generating description for job %d...", job.ID), false),
+			m.regenerateDescription(job),
+		)
+
 	case key.Matches(msg, keys.Edit):
 		if m.viewMode != ViewModeJobs {
 			return m, nil
@@ -1667,6 +1737,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"R", "Edit & restart job"},
 			{"k", "Kill/cancel job"},
 			{"g", "Start queued job now"},
+			{"G", "Generate AI description"},
 			{"S", "Start queue runner"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
@@ -1785,7 +1856,7 @@ func (m Model) renderJobList(height int) string {
 
 	// Header
 	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
-		"ID", "HOST", "STATUS", "TIME", "GPU", "COMMAND / DESCRIPTION")
+		"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
 	rows = append(rows, headerStyle.Render(header))
 	filterLabel := fmt.Sprintf(" View: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
 	rows = append(rows, dimStyle.Render(filterLabel))
@@ -1807,26 +1878,62 @@ func (m Model) renderJobList(height int) string {
 		end = start + contentHeight
 	}
 
+	// Check if any visible jobs have GPU specified
+	showGPU := false
+	for i := start; i < end; i++ {
+		if m.jobs[i].GetGPU() != "" {
+			showGPU = true
+			break
+		}
+	}
+
+	// Update header based on GPU column visibility
+	if showGPU {
+		header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
+			"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
+		rows[0] = headerStyle.Render(header)
+	} else {
+		header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %s",
+			"ID", "HOST", "STATUS", "TIME", "DESCRIPTION")
+		rows[0] = headerStyle.Render(header)
+	}
+
 	selectedIdx := m.jobList.Index()
 	for i := start; i < end; i++ {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
-		gpu := job.GetGPU()
-		if gpu == "" {
-			gpu = "—"
+
+		// Calculate available width for description (total - fixed columns - margins)
+		// Fixed columns: 1 + 4 + 1 + 10 + 1 + 12 + 1 + 12 + 1 = 43, plus GPU column (5) if shown
+		fixedWidth := 47 // without GPU
+		if showGPU {
+			fixedWidth = 52 // with GPU
+		}
+		descWidth := m.width - fixedWidth
+		if descWidth < 20 {
+			descWidth = 20
+		}
+		display := truncate(job.EffectiveDescription(), descWidth)
+		// Style generated descriptions in italic to distinguish from user-provided
+		if job.Description == "" && job.GeneratedDescription != "" {
+			display = lipgloss.NewStyle().Italic(true).Render(display)
 		}
 
-		// Show description if available, otherwise truncated command
-		display := job.Description
-		if display == "" {
-			display = job.EffectiveCommand()
+		var line string
+		if showGPU {
+			gpu := job.GetGPU()
+			if gpu == "" {
+				gpu = "—"
+			}
+			line = fmt.Sprintf(" %-4d %-10s %-12s %-12s %-4s %s",
+				job.ID, truncate(job.Host, 10),
+				status, timeCol, truncate(gpu, 4), display)
+		} else {
+			line = fmt.Sprintf(" %-4d %-10s %-12s %-12s %s",
+				job.ID, truncate(job.Host, 10),
+				status, timeCol, display)
 		}
-		display = truncate(display, 35)
-
-		line := fmt.Sprintf(" %-4d %-10s %-12s %-12s %-4s %s",
-			job.ID, truncate(job.Host, 10),
-			status, timeCol, truncate(gpu, 4), display)
 
 		// DEBUG: Log host state for disconnected host jobs
 		if job.Host == "cool100" || job.Host == "studio" {
@@ -3049,9 +3156,9 @@ func (m Model) renderGPUDetailTab(gpuIdx int, height int) string {
 		lines = append(lines, "  (none)")
 	} else {
 		for _, job := range running {
-			desc := job.Description
-			if desc == "" {
-				desc = truncate(job.EffectiveCommand(), 50)
+			desc := truncate(job.EffectiveDescription(), 50)
+			if job.Description == "" && job.GeneratedDescription != "" {
+				desc = lipgloss.NewStyle().Italic(true).Render(desc)
 			}
 			lines = append(lines, fmt.Sprintf("  #%-4d %s", job.ID, desc))
 		}
@@ -3065,9 +3172,9 @@ func (m Model) renderGPUDetailTab(gpuIdx int, height int) string {
 		lines = append(lines, "  (none)")
 	} else {
 		for _, job := range queued {
-			desc := job.Description
-			if desc == "" {
-				desc = truncate(job.EffectiveCommand(), 50)
+			desc := truncate(job.EffectiveDescription(), 50)
+			if job.Description == "" && job.GeneratedDescription != "" {
+				desc = lipgloss.NewStyle().Italic(true).Render(desc)
 			}
 			lines = append(lines, fmt.Sprintf("  #%-4d %s", job.ID, desc))
 		}
@@ -4107,6 +4214,24 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	return func() tea.Msg {
 		moved, err := queuefile.MoveToFront(job.Host, job.QueueName, job.ID)
 		return jobMovedToFrontMsg{jobID: job.ID, moved: moved, err: err}
+	}
+}
+
+// regenerateDescription generates an AI description for a job
+func (m Model) regenerateDescription(job *db.Job) tea.Cmd {
+	if job == nil || m.llmGenerator == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		desc, hash, err := m.llmGenerator.GenerateOne(job)
+		if err != nil {
+			return descriptionGeneratedMsg{jobID: job.ID, err: err}
+		}
+		// Save to database
+		if err := db.UpdateJobGeneratedDescription(m.database, job.ID, desc, hash); err != nil {
+			return descriptionGeneratedMsg{jobID: job.ID, err: err}
+		}
+		return descriptionGeneratedMsg{jobID: job.ID, description: desc}
 	}
 }
 

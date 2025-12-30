@@ -19,10 +19,7 @@ type JobItem struct {
 
 // FilterValue implements list.Item interface - used for filtering
 func (i JobItem) FilterValue() string {
-	if i.Job.Description != "" {
-		return i.Job.Description
-	}
-	return i.Job.EffectiveCommand()
+	return i.Job.EffectiveDescription()
 }
 
 // JobDelegate handles rendering of job items in the list
@@ -92,10 +89,7 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 	}
 
 	// Build description/command display
-	display := job.Description
-	if display == "" {
-		display = job.EffectiveCommand()
-	}
+	display := job.EffectiveDescription()
 
 	// Calculate available width for description
 	// Format: ID(6) + space + Host(10) + space + Status(12) + space + Time(11) + space + Desc

@@ -41,6 +41,7 @@ var (
 	listQueued    bool
 	listDead      bool
 	listDraft     bool
+	listStatus    string
 	listHost      string
 	listSearch    string
 	listLimit     int
@@ -59,6 +60,7 @@ func init() {
 	listCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
 	listCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
 	listCmd.Flags().BoolVar(&listDraft, "draft", false, "Show only draft jobs")
+	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, draft)")
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	listCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
@@ -121,7 +123,9 @@ func runList(cmd *cobra.Command, args []string) error {
 
 	// Determine status filter
 	var status string
-	if listRunning {
+	if listStatus != "" {
+		status = listStatus
+	} else if listRunning {
 		status = db.StatusRunning
 	} else if listCompleted {
 		status = db.StatusCompleted
@@ -162,6 +166,8 @@ func showJob(database *sql.DB, id int64) error {
 	fmt.Printf("Command:      %s\n", job.EffectiveCommand())
 	if job.Description != "" {
 		fmt.Printf("Description:  %s\n", job.Description)
+	} else if job.GeneratedDescription != "" {
+		fmt.Printf("Description:  %s (AI-generated)\n", job.GeneratedDescription)
 	}
 	fmt.Printf("Status:       %s\n", job.Status)
 	fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
@@ -184,7 +190,7 @@ func printJobs(jobs []*db.Job) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tCOMMAND / DESCRIPTION")
+	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tDESCRIPTION")
 
 	for _, job := range jobs {
 		started := "—"
@@ -201,13 +207,10 @@ func printJobs(jobs []*db.Job) error {
 			}
 		}
 
-		// Show description if available, otherwise truncated command
-		display := job.Description
-		if display == "" {
-			display = job.EffectiveCommand()
-		}
-		if len(display) > 40 {
-			display = display[:39] + "…"
+		// Show description (user or generated), otherwise truncated command
+		display := job.EffectiveDescription()
+		if len(display) > 50 {
+			display = display[:49] + "…"
 		}
 
 		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",

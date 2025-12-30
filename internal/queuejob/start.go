@@ -126,8 +126,8 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		return false, fmt.Errorf("%s", errMsg)
 	}
 
-	// Save metadata
-	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.Description, updated.StartTime)
+	// Save metadata (use EffectiveDescription to include AI-generated descriptions)
+	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.EffectiveDescription(), updated.StartTime)
 	writeMetadata := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
 		if isConnectionFailure(stderr, err) {
@@ -202,8 +202,8 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 		return false, fmt.Errorf("%s", errMsg)
 	}
 
-	// Save metadata
-	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.Description, updated.StartTime)
+	// Save metadata (use EffectiveDescription to include AI-generated descriptions)
+	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.EffectiveDescription(), updated.StartTime)
 	writeMetadata := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
 		if isConnectionFailure(stderr, err) {

@@ -31,6 +31,20 @@ type Config struct {
 	// LogCacheMaxSize is the maximum size of log files to cache (in bytes)
 	// Default: 51200 (50KB). Logs larger than this are not cached.
 	LogCacheMaxSize int `yaml:"log_cache_max_size"`
+
+	// AI/LLM configuration for automatic job description generation
+	AI AIConfig `yaml:"ai"`
+}
+
+// AIConfig holds configuration for AI/LLM features
+type AIConfig struct {
+	// Enabled controls whether AI description generation is active
+	// Default: true (if ollama is available)
+	Enabled *bool `yaml:"enabled"`
+
+	// Model specifies the ollama model to use for description generation
+	// Default: "llama3.2"
+	Model string `yaml:"model"`
 }
 
 // DefaultConfig returns the default configuration
@@ -43,7 +57,29 @@ func DefaultConfig() *Config {
 		EnableMouse:         false,
 		LogCacheMaxAge:      7,
 		LogCacheMaxSize:     50 * 1024, // 50KB
+		AI: AIConfig{
+			Enabled: nil, // nil means "auto" - enabled if ollama is available
+			Model:   "",  // empty means use default model
+		},
 	}
+}
+
+// IsAIEnabled returns whether AI description generation is enabled.
+// Returns true if explicitly enabled, or if not set and ollama would be available.
+func (c *Config) IsAIEnabled() bool {
+	if c.AI.Enabled != nil {
+		return *c.AI.Enabled
+	}
+	// Default: enabled (will check ollama availability at runtime)
+	return true
+}
+
+// AIModel returns the configured AI model, or the default if not set.
+func (c *Config) AIModel() string {
+	if c.AI.Model != "" {
+		return c.AI.Model
+	}
+	return "llama3.2" // Default model
 }
 
 var configPath string

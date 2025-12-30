@@ -23,14 +23,15 @@ with the same command and working directory. Creates a new job ID for each.
 
 Examples:
   remote-jobs restart 42
-  remote-jobs restart 42 43 44`,
+  remote-jobs restart 42 43 44
+
+Also available as: remote-jobs job restart`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runRestart,
 }
 
 func init() {
-	// Removed: Restart command is now only available as `job restart`
-	// rootCmd.AddCommand(restartCmd)
+	rootCmd.AddCommand(restartCmd)
 }
 
 func runRestart(cmd *cobra.Command, args []string) error {
