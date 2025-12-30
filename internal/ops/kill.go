@@ -99,10 +99,21 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 func executeKillQueueRunnerJob(host string, job *db.Job, opts ExecuteOptions) (Result, error) {
 	pidPattern := session.PidFilePattern(job.ID)
 
+	// Kill the entire process tree, not just the main process
+	// This handles jobs that spawn worker processes (e.g., Python multiprocessing)
 	killCmd := fmt.Sprintf(`
 		pid=$(cat %s 2>/dev/null | head -1)
 		if [ -n "$pid" ] && kill -0 $pid 2>/dev/null; then
-			kill $pid 2>/dev/null && echo "killed" || echo "failed"
+			# First, recursively kill all children
+			pkill -TERM -P $pid 2>/dev/null
+			# Then kill the main process
+			kill -TERM $pid 2>/dev/null
+			# Give processes a moment to terminate gracefully
+			sleep 0.5
+			# Force kill any remaining processes
+			pkill -KILL -P $pid 2>/dev/null
+			kill -KILL $pid 2>/dev/null
+			echo "killed"
 		else
 			echo "not_running"
 		fi

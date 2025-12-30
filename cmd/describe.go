@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -201,18 +201,34 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 
 // updateRemoteQueueEntry updates a job's entry in the remote queue file
 func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	// Reconstruct env vars from GPU field if present
+	var envVars []string
+	if job.GPU != "" {
+		envVars = append(envVars, "CUDA_VISIBLE_DEVICES="+job.GPU)
+	}
 
-	// Remove old entry and add new one (under flock to prevent race with queue runner)
-	lockFile := queueFile + ".lock"
-	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s", job.ID, job.WorkingDir, job.Command, job.Description)
-	updateCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' >> %s\"",
-		lockFile, job.ID, queueFile, ssh.EscapeForSingleQuotes(queueLine), queueFile)
-	if _, stderr, err := ssh.Run(host, updateCmd); err != nil {
-		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+	// Use ops.AppendQueueEntry which handles the 6-column format with proper
+	// base64 encoding, flock, and trailing newline
+	entry := ops.QueueEntry{
+		JobID:       job.ID,
+		WorkingDir:  job.WorkingDir,
+		Command:     job.Command,
+		Description: job.Description,
+		EnvVars:     envVars,
+		// DepSpec is not stored in db, so dependencies are lost on edit
+	}
+
+	if err := ops.AppendQueueEntry(host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+		var qaErr *ops.QueueAppendError
+		if e, ok := err.(*ops.QueueAppendError); ok {
+			qaErr = e
+			if qaErr.IsConnectionError() {
+				return fmt.Errorf("host unreachable")
+			}
+		} else if ssh.IsConnectionError(err.Error()) {
 			return fmt.Errorf("host unreachable")
 		}
-		return fmt.Errorf("update queue entry: %s", strings.TrimSpace(stderr))
+		return fmt.Errorf("update queue entry: %w", err)
 	}
 
 	return nil

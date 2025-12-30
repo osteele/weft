@@ -6,6 +6,7 @@ package ops
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -246,33 +247,23 @@ func executeQueueAdd(database *sql.DB, op *db.DeferredOperation, opts ExecuteOpt
 
 	queueName := op.QueueName
 	if queueName == "" {
-		queueName = "default"
+		queueName = DefaultQueueName
 	}
 
-	// Build queue entry line
-	envStr := ""
-	if len(payload.EnvVars) > 0 {
-		for i, ev := range payload.EnvVars {
-			if i > 0 {
-				envStr += ","
-			}
-			envStr += ev
-		}
+	entry := QueueEntry{
+		JobID:       op.JobID,
+		WorkingDir:  payload.WorkingDir,
+		Command:     payload.Command,
+		Description: payload.Description,
+		EnvVars:     payload.EnvVars,
+		DepSpec:     payload.DepSpec,
 	}
 
-	entry := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s",
-		op.JobID, payload.WorkingDir, payload.Command, payload.Description, envStr, payload.DepSpec)
-
-	// Append to queue file
-	// Use printf '%b\n' to interpret \t as tabs (echo doesn't interpret escapes)
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	appendCmd := fmt.Sprintf("mkdir -p ~/.cache/remote-jobs/queue && printf '%%b\\n' %q >> %s",
-		entry, queueFile)
-
-	_, stderr, err := ssh.RunWithTimeout(op.Host, appendCmd, opts.Timeout)
-	if err != nil {
-		if ssh.IsConnectionError(stderr) {
-			return Result{}, fmt.Errorf("connection error: %s", stderr)
+	appendOpts := AppendQueueEntryOptions{Timeout: opts.Timeout}
+	if err := AppendQueueEntry(op.Host, queueName, entry, appendOpts); err != nil {
+		var qaErr *QueueAppendError
+		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
+			return Result{}, fmt.Errorf("connection error: %s", qaErr.Stderr)
 		}
 		return Result{}, err
 	}

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -34,6 +36,18 @@ type Config struct {
 
 	// AI/LLM configuration for automatic job description generation
 	AI AIConfig `yaml:"ai"`
+
+	// BlockedCommandPatterns lists substrings that should cause an error if found in job commands.
+	// Each entry has a pattern (substring to match) and an error message to display.
+	BlockedCommandPatterns []BlockedPattern `yaml:"blocked_command_patterns"`
+}
+
+// BlockedPattern defines a substring that should not appear in job commands
+type BlockedPattern struct {
+	// Pattern is the substring to search for in commands
+	Pattern string `yaml:"pattern"`
+	// Message is the error message to display when the pattern is found
+	Message string `yaml:"message"`
 }
 
 // AIConfig holds configuration for AI/LLM features
@@ -118,4 +132,15 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// ValidateCommand checks if a command contains any blocked patterns.
+// Returns an error if a blocked pattern is found, nil otherwise.
+func (c *Config) ValidateCommand(command string) error {
+	for _, bp := range c.BlockedCommandPatterns {
+		if strings.Contains(command, bp.Pattern) {
+			return fmt.Errorf("command contains blocked pattern %q: %s", bp.Pattern, bp.Message)
+		}
+	}
+	return nil
 }

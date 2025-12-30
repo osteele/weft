@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -640,6 +641,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshJobs(),
 		m.loadHosts(),
+		m.performBackgroundSync(), // Sync immediately on startup
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
@@ -938,10 +940,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Create failed: %v", msg.err), true)
 		} else if msg.deferred {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d created (will start when host is online)", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued (will append when host is online)", msg.jobID), false)
 			m.pendingSelectJobID = msg.jobID
 		} else {
-			flashCmd = m.setFlash(fmt.Sprintf("Job %d started", msg.jobID), false)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued", msg.jobID), false)
 			m.pendingSelectJobID = msg.jobID
 			// Keep inputs for easy re-use (user can modify and submit again)
 		}
@@ -3681,12 +3683,16 @@ func (m *Model) sortJobs() {
 	}
 }
 
-// getJobSortTime returns the time to use for sorting (start time or queue time)
+// getJobSortTime returns the time to use for sorting (start time, created time, or ID)
 func getJobSortTime(job *db.Job) int64 {
 	if job.StartTime > 0 {
 		return job.StartTime
 	}
-	// For queued jobs, use ID as a proxy for queue time (higher ID = more recent)
+	// For jobs that never started, use created_at if available
+	if job.CreatedAt > 0 {
+		return job.CreatedAt
+	}
+	// For legacy jobs without created_at, use ID as a proxy (higher ID = more recent)
 	return job.ID
 }
 
@@ -4246,6 +4252,18 @@ func (m Model) fetchAllRunningJobsProgress() tea.Cmd {
 func (m Model) performBackgroundSync() tea.Cmd {
 	return func() tea.Msg {
 		var updated int
+
+		// Execute deferred operations first to push queued jobs to remote queues
+		// This must happen before checking job status to avoid marking jobs as dead
+		// that are just pending sync
+		activeHosts, _ := db.ListUniqueActiveHosts(m.database)
+		for _, host := range activeHosts {
+			execOpts := ops.ExecuteOptions{Timeout: 5 * time.Second}
+			result, err := ops.ExecuteAllDeferredOperations(m.database, host, execOpts)
+			if err == nil {
+				updated += result.Completed
+			}
+		}
 
 		// Sync running jobs
 		hosts, err := db.ListUniqueRunningHosts(m.database)
@@ -4890,8 +4908,8 @@ func (m Model) createJob() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		// Use ops package to run job (queues if host offline)
-		result, err := ops.RunJob(database, ops.RunJobParams{
+		// Queue job for sequential execution via queue runner
+		result, err := ops.QueueJob(database, ops.QueueJobParams{
 			Host:        host,
 			WorkingDir:  workingDir,
 			Command:     command,
@@ -4983,8 +5001,10 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 	// Remove old entry and add new one (under flock to prevent race with queue runner)
 	lockFile := queueFile + ".lock"
 	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s", job.ID, job.WorkingDir, job.Command, job.Description)
-	updateCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' >> %s\"",
-		lockFile, job.ID, queueFile, ssh.EscapeForSingleQuotes(queueLine), queueFile)
+	// Use base64 encoding to safely pass the queue line through nested shell contexts
+	queueLineB64 := base64.StdEncoding.EncodeToString([]byte(queueLine))
+	updateCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' | base64 -d >> %s\"",
+		lockFile, job.ID, queueFile, queueLineB64, queueFile)
 	if _, stderr, err := ssh.Run(host, updateCmd); err != nil {
 		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			return fmt.Errorf("host unreachable")

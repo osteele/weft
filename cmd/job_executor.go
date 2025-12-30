@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -304,7 +305,15 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	}
 
 	depSpec := encodeQueueDependencies(opts.Dependencies)
-	if err := appendQueueEntry(opts.Host, queueName, jobID, opts.WorkingDir, opts.Command, opts.Description, opts.EnvVars, depSpec); err != nil {
+	entry := ops.QueueEntry{
+		JobID:       jobID,
+		WorkingDir:  opts.WorkingDir,
+		Command:     opts.Command,
+		Description: opts.Description,
+		EnvVars:     opts.EnvVars,
+		DepSpec:     depSpec,
+	}
+	if err := ops.AppendQueueEntry(opts.Host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
 		if shouldDeferQueueAppend(err) {
 			if err := deferQueueAppend(database, opts, queueName, jobID, depSpec); err != nil {
 				db.DeleteJob(database, jobID)
@@ -320,9 +329,9 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 }
 
 func shouldDeferQueueAppend(err error) bool {
-	var qaErr *queueAppendError
+	var qaErr *ops.QueueAppendError
 	if errors.As(err, &qaErr) {
-		return qaErr.ConnectionError()
+		return qaErr.IsConnectionError()
 	}
 	if err == nil {
 		return false

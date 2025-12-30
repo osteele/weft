@@ -1,4 +1,4 @@
-# BUILD: 5
+# BUILD: 8
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -118,15 +118,21 @@ while true; do
     # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, dependencies)
     # Normalize: convert literal \t to real tabs for backwards compatibility with older queue entries
     job_line=$(printf '%b' "$job_line")
-    IFS=$'\t' read -r job_id working_dir command description env_vars_b64 deps_spec <<< "$job_line"
+    # Use awk to properly handle empty fields (bash read collapses consecutive delimiters)
+    job_id=$(echo "$job_line" | awk -F'\t' '{print $1}')
+    working_dir=$(echo "$job_line" | awk -F'\t' '{print $2}')
+    command=$(echo "$job_line" | awk -F'\t' '{print $3}')
+    description=$(echo "$job_line" | awk -F'\t' '{print $4}')
+    env_vars_b64=$(echo "$job_line" | awk -F'\t' '{print $5}')
+    deps_spec=$(echo "$job_line" | awk -F'\t' '{print $6}')
 
-    if [ -z "$job_id" ] || [ -z "$working_dir" ] || [ -z "$command" ]; then
-        echo "Invalid job line, skipping: $job_line"
+    if [ -z "$job_id" ] || [ -z "$command" ]; then
+        echo "Invalid job line (missing job_id or command), skipping: $job_line"
         continue
     fi
 
     # Skip jobs that already have a status file (already completed in a previous run)
-    existing_status=$(ls -t "$LOG_DIR/${job_id}"-*.status 2>/dev/null | head -1)
+    existing_status=$(ls -t "$LOG_DIR/${job_id}"-*.status 2>/dev/null | head -1 || true)
     if [ -n "$existing_status" ]; then
         echo "Job $job_id: already completed, skipping (status file exists)"
         continue
@@ -148,7 +154,7 @@ while true; do
                 dep_mode="success"
             fi
 
-            dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1)
+            dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1 || true)
             if [ -z "$dep_status_file" ]; then
                 unmet_dependency=true
                 break
@@ -223,15 +229,18 @@ while true; do
     } > "$log_file"
 
     # Execute command, capture exit code
-    # Expand tilde in working_dir
+    # Expand tilde in working_dir (if specified)
     eval_working_dir="${working_dir/#\~/$HOME}"
 
     set +e
     (
-        cd "$eval_working_dir" 2>/dev/null || {
-            echo "ERROR: Could not cd to $working_dir" >> "$log_file"
-            exit 1
-        }
+        # Only cd if working directory is specified
+        if [ -n "$working_dir" ]; then
+            cd "$eval_working_dir" 2>/dev/null || {
+                echo "ERROR: Could not cd to $working_dir" >> "$log_file"
+                exit 1
+            }
+        fi
 
         # Apply environment variables if present (base64 encoded, newline-separated)
         if [ -n "$env_vars_b64" ]; then

@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 )
@@ -22,24 +21,12 @@ func FileBasename(jobID int64, startTime int64) string {
 	return fmt.Sprintf("%d-%s", jobID, t.Format("20060102-150405"))
 }
 
-// DefaultWorkingDir returns the current working directory converted to a remote-friendly path
-// /Users/osteele/code/LM2 -> ~/code/LM2
+// DefaultWorkingDir returns an empty string to indicate no working directory should be set.
+// Jobs will run from the user's home directory on the remote host.
+// Previously this returned the local cwd converted to a remote path, but that path
+// often doesn't exist on the remote host, causing jobs to fail.
 func DefaultWorkingDir() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	if strings.HasPrefix(cwd, home) {
-		return "~" + cwd[len(home):], nil
-	}
-
-	return cwd, nil
+	return "", nil
 }
 
 // LogFile returns the log file path for a job
@@ -270,6 +257,12 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 	// This allows both tilde expansion and support for spaces in paths
 	workingDirQuoted := prepareWorkingDir(params.WorkingDir)
 
+	// Build the cd prefix - either "cd <dir> &&" or empty if no dir specified
+	cdPrefix := ""
+	if workingDirQuoted != "" {
+		cdPrefix = fmt.Sprintf("cd %s && ", workingDirQuoted)
+	}
+
 	// Build timeout monitor if timeout is specified
 	timeoutMonitor := ""
 	if params.Timeout != "" {
@@ -287,6 +280,12 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 			params.Timeout, params.PidFile, params.Timeout, params.LogFile, params.PidFile)
 	}
 
+	// Log working dir - use "(home)" if none specified
+	logWorkingDir := params.WorkingDir
+	if logWorkingDir == "" {
+		logWorkingDir = "(home)"
+	}
+
 	return fmt.Sprintf(
 		`echo "=== START $(date) ===" > %s; `+
 			`echo "job_id: %d" >> %s; `+
@@ -295,13 +294,13 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 			`%s`+ // timeout line (empty if no timeout)
 			`echo "===" >> %s; `+
 			`%s`+ // timeout monitor (empty if no timeout)
-			`cd %s && { (echo $BASHPID > %s; exec bash -c '%s') >> %s 2>&1 & wait $!; }; `+
+			`%s{ (echo $BASHPID > %s; exec bash -c '%s') >> %s 2>&1 & wait $!; }; `+
 			`EXIT_CODE=$?; `+
 			`echo "=== END exit=$EXIT_CODE $(date) ===" >> %s; `+
 			`echo $EXIT_CODE > %s%s`,
 		params.LogFile,
 		params.JobID, params.LogFile,
-		params.WorkingDir, params.LogFile,
+		logWorkingDir, params.LogFile,
 		params.Command, params.LogFile,
 		func() string {
 			if params.Timeout != "" {
@@ -311,14 +310,19 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 		}(),
 		params.LogFile,
 		timeoutMonitor,
-		workingDirQuoted, params.PidFile, escapedCmd, params.LogFile,
+		cdPrefix, params.PidFile, escapedCmd, params.LogFile,
 		params.LogFile,
 		params.StatusFile, params.NotifyCmd)
 }
 
 // prepareWorkingDir replaces ~ with $HOME and quotes the path to handle spaces
 // Example: "~/my project" -> "$HOME/my project" (with quotes)
+// Returns empty string if dir is empty (job will run from home directory)
 func prepareWorkingDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+
 	// Replace leading ~ or ~/ with $HOME
 	if strings.HasPrefix(dir, "~/") {
 		dir = "$HOME/" + dir[2:]

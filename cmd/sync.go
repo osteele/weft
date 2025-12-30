@@ -2,10 +2,8 @@ package cmd
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/config"
@@ -195,77 +193,6 @@ func executeDeferredOperations(database *sql.DB, host string, timeout time.Durat
 		if syncVerbose {
 			fmt.Fprintf(os.Stderr, "    Warning: %s\n", errMsg)
 		}
-	}
-
-	return nil
-}
-
-type queueAppendError struct {
-	op     string
-	stderr string
-	err    error
-}
-
-func (e *queueAppendError) Error() string {
-	if e == nil {
-		return ""
-	}
-	msg := strings.TrimSpace(e.stderr)
-	if msg == "" && e.err != nil {
-		msg = e.err.Error()
-	}
-	if msg == "" {
-		msg = "unknown error"
-	}
-	return fmt.Sprintf("%s: %s", e.op, msg)
-}
-
-func (e *queueAppendError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.err
-}
-
-func (e *queueAppendError) ConnectionError() bool {
-	if e == nil {
-		return false
-	}
-	if e.stderr != "" && ssh.IsConnectionError(e.stderr) {
-		return true
-	}
-	if e.err != nil && ssh.IsConnectionError(e.err.Error()) {
-		return true
-	}
-	return false
-}
-
-func appendQueueEntry(host, queueName string, jobID int64, workingDir, command, description string, envVars []string, depSpec string) error {
-	if workingDir == "" || command == "" {
-		return fmt.Errorf("job %d missing command or working dir", jobID)
-	}
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
-
-	if _, stderr, err := ssh.Run(host, fmt.Sprintf("mkdir -p %s", queueDir)); err != nil {
-		return &queueAppendError{op: "create queue dir", stderr: strings.TrimSpace(stderr), err: err}
-	}
-
-	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
-	lockFile := queueFile + ".lock"
-
-	envVarsB64 := ""
-	if len(envVars) > 0 {
-		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(envVars, "\n")))
-	}
-
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s", jobID, workingDir, command, description, envVarsB64, depSpec)
-	// Use flock to prevent race with queue runner's pop operation
-	appendCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' >> %s\"",
-		lockFile, jobID, queueFile, ssh.EscapeForSingleQuotes(jobLine), queueFile)
-	if _, stderr, err := ssh.Run(host, appendCmd); err != nil {
-		return &queueAppendError{op: "append queue entry", stderr: strings.TrimSpace(stderr), err: err}
 	}
 
 	return nil

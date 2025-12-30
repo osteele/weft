@@ -2,6 +2,7 @@ package ops
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"os"
 	"os/exec"
 	"strings"
@@ -318,21 +319,33 @@ func TestExecuteAllDeferredOperations_QueueAdd(t *testing.T) {
 		t.Errorf("Expected 1 completed operation, got %d", result.Completed)
 	}
 
-	// Verify echo command was called to append to queue file
+	// Verify command was called to append to queue file
 	commands := capture.get()
 	foundAppend := false
 	for _, cmd := range commands {
 		if strings.Contains(cmd, "gpu.queue") {
 			foundAppend = true
-			// Verify the job ID is in the command
-			if !strings.Contains(cmd, "python train.py") {
-				t.Errorf("Expected command to contain job command, got: %s", cmd)
+			// The command is now base64 encoded, extract and decode it
+			// Format: ... echo 'BASE64' | base64 -d >> ...
+			if strings.Contains(cmd, "base64 -d") {
+				// Extract base64 string between single quotes
+				start := strings.Index(cmd, "echo '") + 6
+				end := strings.Index(cmd[start:], "'") + start
+				if start > 5 && end > start {
+					b64 := cmd[start:end]
+					decoded, err := base64.StdEncoding.DecodeString(b64)
+					if err != nil {
+						t.Errorf("Failed to decode base64: %v", err)
+					} else if !strings.Contains(string(decoded), "python train.py") {
+						t.Errorf("Decoded command should contain 'python train.py', got: %s", string(decoded))
+					}
+				}
 			}
 			break
 		}
 	}
 	if !foundAppend {
-		t.Errorf("Expected echo command to append to queue file, got: %v", commands)
+		t.Errorf("Expected command to append to queue file, got: %v", commands)
 	}
 }
 
@@ -482,5 +495,85 @@ func TestExecuteAllDeferredOperations_MultipleOps(t *testing.T) {
 	ops, _ := db.GetDeferredOperations(database, "testhost")
 	if len(ops) != 0 {
 		t.Errorf("Expected 0 pending operations, got %d", len(ops))
+	}
+}
+
+func TestAppendQueueEntryFormatsQueueLine(t *testing.T) {
+	capture := &commandCapture{}
+	cleanup := ssh.SetExecCommand(mockExecCommandSuccess(capture))
+	defer cleanup()
+
+	entry := QueueEntry{
+		JobID:       42,
+		WorkingDir:  "",
+		Command:     "python train.py",
+		Description: "test job",
+		EnvVars:     []string{"CUDA_VISIBLE_DEVICES=0", "DEBUG=1"},
+		DepSpec:     "10,20:any",
+	}
+
+	err := AppendQueueEntry("testhost", "gpu", entry, AppendQueueEntryOptions{})
+	if err != nil {
+		t.Fatalf("AppendQueueEntry returned error: %v", err)
+	}
+
+	commands := capture.get()
+	var appendCmd string
+	for _, cmd := range commands {
+		if strings.Contains(cmd, "remote-jobs/queue/gpu.queue") {
+			appendCmd = cmd
+			break
+		}
+	}
+	if appendCmd == "" {
+		t.Fatalf("expected AppendQueueEntry to invoke queue update, commands: %v", commands)
+	}
+
+	start := strings.Index(appendCmd, "echo '")
+	if start == -1 {
+		t.Fatalf("expected command to contain echo pipeline: %s", appendCmd)
+	}
+	start += len("echo '")
+	end := strings.Index(appendCmd[start:], "' | base64 -d")
+	if end == -1 {
+		t.Fatalf("expected command to contain base64 decode: %s", appendCmd)
+	}
+	end += start
+
+	b64 := appendCmd[start:end]
+	decoded, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("failed to decode base64 payload: %v", err)
+	}
+
+	line := string(decoded)
+	if !strings.HasSuffix(line, "\n") {
+		t.Fatalf("queue line must end with newline, got %q", line)
+	}
+	line = strings.TrimSuffix(line, "\n")
+
+	parts := strings.Split(line, "\t")
+	if len(parts) != 6 {
+		t.Fatalf("expected 6 queue columns, got %d (%v)", len(parts), parts)
+	}
+	if parts[0] != "42" {
+		t.Fatalf("expected job id 42, got %q", parts[0])
+	}
+	if parts[1] != "" {
+		t.Fatalf("expected empty working dir placeholder, got %q", parts[1])
+	}
+	if parts[2] != entry.Command {
+		t.Fatalf("expected command %q, got %q", entry.Command, parts[2])
+	}
+	if parts[3] != entry.Description {
+		t.Fatalf("expected description %q, got %q", entry.Description, parts[3])
+	}
+
+	wantEnv := base64.StdEncoding.EncodeToString([]byte(strings.Join(entry.EnvVars, "\n")))
+	if parts[4] != wantEnv {
+		t.Fatalf("expected env payload %q, got %q", wantEnv, parts[4])
+	}
+	if parts[5] != entry.DepSpec {
+		t.Fatalf("expected dependency spec %q, got %q", entry.DepSpec, parts[5])
 	}
 }

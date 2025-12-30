@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/spf13/cobra"
@@ -139,6 +140,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		host = args[0]
 		command = args[1]
+	}
+
+	// Validate command against blocked patterns
+	cfg, _ := config.Load()
+	if err := cfg.ValidateCommand(command); err != nil {
+		return err
 	}
 
 	// Print recommendations for common patterns
