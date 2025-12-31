@@ -75,6 +75,26 @@ remote-jobs run --notify discord --notify email cool30 "long-job.sh"
 - Generic webhook POST
 - Desktop notifications (for local machine)
 
+## Agent Coaching Output
+
+Expose a structured way for the CLI to describe “next steps” so autonomous
+agents can more easily keep context. Today commands print helpful follow-up
+lines (“run `remote-jobs status 42` next”), but the format is unstructured text.
+
+### Idea
+- Emit a machine-readable block (JSON or YAML) that mirrors the human-readable
+  hints so agent runtimes can parse and insert them into their memories.
+- Allow users to opt into different verbosity levels (minimal vs. verbose hints)
+  so humans don’t feel overwhelmed while agents still get the detail they need.
+- Let `remote-jobs plan` emit suggested commands for every job ID it creates,
+  making agent chaining even easier.
+
+### Benefits
+- Keeps the agent-friendly workflow first-class without requiring bespoke
+  “skills” files.
+- Helps human+agent pairs stay in sync: humans can read the regular hints,
+  agents can consume the structured metadata.
+
 ## Reconnectable Stay-Attached Mode
 
 Extend the `remote-jobs run --allow` pipeline so the CLI can automatically
@@ -88,6 +108,25 @@ reconnect if the SSH tail session drops and expose a standalone
   without starting a new job.
 - Surface clearer status when the job finishes while attached (prompt to exit
   or keep streaming for post-run logs).
+
+## Deferred Operation Insights
+
+Provide better tooling around the “occasionally connected” design so users and
+agents can see exactly what is queued for each host.
+
+### Possibilities
+- `remote-jobs ops list` showing pending deferred operations, their age, and the
+  command that created them.
+- TUI panel that highlights hosts with a large backlog so humans know which
+  machines need attention.
+- Notifications (or next-step hints) when commands finish replaying after a host
+  reconnects.
+
+### Impact
+- Reinforces the core workflow where agents happily queue work offline while
+  humans supervise connectivity.
+- Makes it easier to debug “nothing is happening on host X” situations because
+  you can inspect the pending queue locally.
 
 ## Resource-Aware Plan Scheduling
 

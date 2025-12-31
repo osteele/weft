@@ -29,6 +29,26 @@ drop. Remote Jobs treats those scenarios as normal operations:
 See [docs/network-resilience.md](docs/network-resilience.md) for the full story
 on how the CLI keeps itself useful while you roam across networks.
 
+### Agents-first ergonomics
+
+Remote Jobs was designed for workflows where an automated agent drives the CLI
+while a human keeps an eye on the TUI. Most commands print suggested follow-up
+commands (“next steps”) directly in their output so agents can keep the relevant
+context in their prompt without hunting through reference docs or skills files.
+For example, `remote-jobs run` prints the `status`, `log`, and `start` commands
+that make sense for the job it just created, which agents can copy verbatim. The
+TUI then becomes the dashboard where humans monitor progress, adjust queues, or
+apply manual fixes when needed.
+
+### Occasionally connected workflow
+
+Every action is recorded locally first—jobs, queue operations, even “start this
+queued job now”—and synchronized with the remote host whenever it’s reachable.
+If a host is offline the CLI keeps showing the most recent known state, queues
+the requested mutations, and replays them on the next connection. This approach
+lets agents submit work in bulk without waiting for SSH, while humans can rely
+on the TUI to show what will happen once hosts come back.
+
 ## Installation
 
 ```bash
@@ -69,6 +89,11 @@ Use `start <job-id>` to start a queued or draft job immediately.
 - `--after ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
+
+If an immediate run fails while `--queue-on-fail` is set, the job is saved as a
+draft. Rerun it later with `remote-jobs retry <job-id>` (which recreates the job
+with the same settings) or `remote-jobs run --from <job-id>` if you want to make
+changes before trying again.
 
 **Examples:**
 ```bash
@@ -487,6 +512,24 @@ Only jobs with status `queued` or `draft` can be started this way. The command p
 the job's working directory, environment variables, and metadata.
 
 **Note:** This only works for queued/draft jobs. For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
+
+### remote-jobs retry
+
+Retry draft jobs created when `run --queue-on-fail` couldn't reach the host.
+
+```bash
+remote-jobs retry <job-id>          # Retry a single draft job
+remote-jobs retry --host studio 42  # Retry on a different host
+remote-jobs retry --list            # List all draft jobs
+remote-jobs retry --all             # Retry every draft (optionally --host)
+remote-jobs retry --delete <id>     # Remove a draft without running it
+```
+
+The command deletes the draft entry, recreates a fresh job with the same
+metadata, and attempts to run it immediately (respecting host overrides). Use
+`--list` to see which drafts are waiting, or `--delete` to clean up ones you no
+longer need. For more control over the command before retrying, pair this with
+`remote-jobs run --from <id>`.
 
 ### Advanced run options
 

@@ -95,6 +95,11 @@ remote-jobs/
 │   ├── ssh/               # SSH operations
 │   │   ├── ssh.go         # SSH commands, retry logic, process stats
 │   │   └── command_test.go
+│   ├── logcache/          # Offline cache for finished job logs
+│   ├── progress/          # Progress parsing + incremental log tracking
+│   ├── llm/               # Background AI description generator
+│   ├── queuejob/          # Helpers for starting/moving queued jobs
+│   ├── plan/              # Plan parser, DAG builder, executor
 │   └── tui/               # Terminal UI
 │       ├── model.go       # Bubble Tea model, update loop, views
 │       ├── host.go        # Host info parsing
@@ -134,7 +139,9 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 - Job ID is allocated BEFORE starting the tmux session, ensuring the database always knows about the job
 - If SSH fails during setup, the job is marked as "failed" with the error message
 - The `--queue-on-fail` flag allows jobs to be queued for later retry on connection errors
-- `--from` flag replaces the old `retry` command with a more composable approach
+- Draft jobs created by `--queue-on-fail` can be restarted verbatim via
+  `remote-jobs retry`, while `--from` lets you copy settings into a brand-new
+  job when you want to make edits before retrying
 
 ### 2. Operations Layer (`internal/ops/`)
 
@@ -335,6 +342,45 @@ log_refresh_interval: 3 # Seconds between log refreshes
 host_refresh_interval: 30
 ```
 
+### 8. Log Cache (`internal/logcache/`)
+
+Remote log files are mirrored into `~/.cache/remote-jobs/logs/` whenever a job
+finishes (or the queue runner writes a status file) so that `remote-jobs log`
+and the TUI can fall back to an offline copy. The cache honors the configurable
+age/size caps, prunes stale entries during `remote-jobs sync`, and quietly skips
+files that are too large. When you run `remote-jobs log JOB_ID`, the CLI serves
+cached bytes immediately and only re-fetches from SSH if the cache misses or
+the job is still running.
+
+### 9. Progress Tracking (`internal/progress/`)
+
+The progress subsystem tracks how much of each log has already been tailed and
+parses the newest `Progress:` line to present inline percentages. Supported
+formats include `Progress: 75%`, `Progress: 9/14`, and `Progress: 9 of 14`. The
+tracker feeds both the job list (status column shows `● 42%`) and the detail
+pane (progress bar plus `step/total`) without constantly re-downloading entire
+logs from the host.
+
+### 10. AI Descriptions (`internal/llm/`)
+
+If AI is enabled in config, a background generator polls the database for jobs
+missing descriptions and asks an [ollama](https://ollama.com/) model to produce
+one. Each description stores a hash of the model/prompt/settings combination so
+future runs can skip already processed commands. The TUI registers a callback
+so rows update live the moment an AI description is written, and any manual
+`remote-jobs describe` edits override the generated text permanently.
+
+### 11. Queue Helpers (`internal/queuejob/`, `internal/plan/`)
+
+Queue-heavy workflows use dedicated helpers. `internal/queuejob` knows how to
+remove entries from `~/.cache/remote-jobs/queue/*.queue`, rehydrate metadata,
+and start a job immediately even if it never reached the remote queue (pending
+deferred op). `internal/plan` parses YAML plans, expands IDs/aliases, validates
+per-host dependency DAGs, and emits queue operations that match the semantics
+documented in [docs/job-plans.md](job-plans.md). Together they let both humans
+and agents orchestrate large job graphs while keeping local/remote state
+consistent even when connections flap.
+
 ## Data Flow
 
 ### Starting a Job
@@ -481,6 +527,24 @@ User: remote-jobs sync
 - **Zero remote setup**: Script deployed with each job
 - **Version consistency**: Script matches client version
 - **Simpler workflow**: No separate installation step
+
+### Agents as first-class users
+
+- **Suggested next commands**: CLI responses include ready-to-run follow-ups so
+  autonomous agents keep context without bespoke skills files.
+- **TUI monitoring**: Humans can supervise and adjust queues while agents focus
+  on issuing CLI operations.
+- **Plan syntax**: YAML plans were intentionally shaped so agents can emit them
+  directly from prompts, harnessing the same dependency/queue logic as humans.
+
+### Occasionally connected hosts
+
+- **Local-first state**: Jobs and queue operations persist in SQLite before any
+  SSH call, guaranteeing intent is saved even if the network drops.
+- **Deferred operations**: Everything that touches a host (start, kill, move,
+  queue edits) is recorded and replayed when the host comes back.
+- **Most-recent view**: The CLI/TUI always show the latest known state and make
+  it obvious which operations are pending for the next successful sync.
 
 ## Error Handling
 

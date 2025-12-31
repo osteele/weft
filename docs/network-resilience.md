@@ -23,8 +23,9 @@ When you start a job (`remote-jobs run` or `remote-jobs job start`), the CLI
 records the job locally before touching the remote host. If SSH cannot be
 established:
 
-- With `--queue-on-fail`, the job is marked `pending` so you can retry via
-  `remote-jobs retry`.
+- With `--queue-on-fail`, the job is marked `pending` (draft). Rerun it later
+  with `remote-jobs retry <job-id>` or, if you want to tweak settings first,
+  `remote-jobs run --from <job-id>`.
 - Otherwise the job is deferred to the remote queue automatically. A
   `deferred_operations` entry is created and `remote-jobs sync` (or any command
   that syncs) will add the job back to the host's queue when it becomes
@@ -69,6 +70,13 @@ now treat intermittent SSH failures as informational instead of fatal:
 This makes it safe to start a wait on one network and finish it on another;
 the CLI always falls back to the local database and periodically re-syncs when
 possible.
+
+## Offline logs
+
+Completed logs are mirrored into `~/.cache/remote-jobs/logs/` so `remote-jobs log`
+and the TUI can show output even while offline. Entries honor the max-age and
+size limits from `config.yaml`. `remote-jobs sync` keeps the cache fresh and
+prunes expired files, and cache hits are served instantly without touching SSH.
 
 ## Recovering job status
 
