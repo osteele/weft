@@ -29,6 +29,8 @@ const (
 	MaxRetries = 5
 	// RetryDelay is the delay between retries
 	RetryDelay = 30 * time.Second
+	// remoteLogDir is where wrapper metadata is stored on the host
+	remoteLogDir = "~/.cache/remote-jobs/logs"
 )
 
 // connectionErrorPattern matches SSH connection errors that should trigger retry
@@ -428,6 +430,15 @@ type ProcessGPU struct {
 	Utilization int    // GPU utilization % (0-100)
 }
 
+// TopProcess represents a CPU-heavy process on the host
+type TopProcess struct {
+	User    string
+	PID     int
+	CPU     float64
+	Command string
+	JobID   int64
+}
+
 // GetProcessStats fetches process statistics from a remote host
 // The pidFile should contain the PID to query
 func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
@@ -512,6 +523,42 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 	return parseProcessStats(stdout), nil
 }
 
+// GetTopProcesses returns the highest CPU consumers on a host along with remote job IDs if available.
+func GetTopProcesses(host string, limit int) ([]TopProcess, error) {
+	if limit <= 0 {
+		limit = 15
+	}
+
+	cmd := fmt.Sprintf(`
+LOG_DIR=%s
+LIMIT=%d
+echo "__PIDMAP__"
+if ls "$LOG_DIR"/*.pid >/dev/null 2>&1; then
+	for file in "$LOG_DIR"/*.pid; do
+		job=$(basename "$file")
+		job=${job%%-*}
+		pid=$(cat "$file" 2>/dev/null)
+		if [ -n "$pid" ]; then
+			echo "$pid|$job"
+		fi
+	done
+fi
+echo "__TOP__"
+ps -eo user=,pid=,%%cpu=,command= --sort=-%%cpu | head -n $LIMIT
+`, remoteLogDir, limit)
+
+	stdout, stderr, err := RunWithTimeout(host, cmd, 15*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("%s", FriendlyError(host, stderr, err))
+	}
+
+	processes, parseErr := parseTopProcesses(stdout, limit)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	return processes, nil
+}
+
 // parseProcessStats parses the output of the process stats command
 func parseProcessStats(output string) *ProcessStats {
 	stats := &ProcessStats{}
@@ -593,6 +640,88 @@ func parseProcessStats(output string) *ProcessStats {
 	}
 
 	return stats
+}
+
+func parseTopProcesses(output string, limit int) ([]TopProcess, error) {
+	const (
+		pidMarker = "__PIDMAP__"
+		topMarker = "__TOP__"
+	)
+
+	pidToJob := make(map[string]int64)
+	section := ""
+	var processes []TopProcess
+	sawTopSection := false
+	lines := strings.Split(output, "\n")
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+
+		switch line {
+		case pidMarker:
+			section = pidMarker
+			continue
+		case topMarker:
+			section = topMarker
+			sawTopSection = true
+			continue
+		}
+
+		if section == pidMarker {
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			if jobID, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+				pidToJob[parts[0]] = jobID
+			}
+			continue
+		}
+
+		if section != topMarker {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+
+		pidVal, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		cpuVal, err := strconv.ParseFloat(fields[2], 64)
+		if err != nil {
+			continue
+		}
+		cmd := ""
+		if len(fields) > 3 {
+			cmd = strings.Join(fields[3:], " ")
+		}
+
+		proc := TopProcess{
+			User:    fields[0],
+			PID:     pidVal,
+			CPU:     cpuVal,
+			Command: cmd,
+		}
+		if jobID, ok := pidToJob[fields[1]]; ok {
+			proc.JobID = jobID
+		}
+		processes = append(processes, proc)
+		if limit > 0 && len(processes) >= limit {
+			break
+		}
+	}
+
+	if !sawTopSection {
+		return nil, fmt.Errorf("unexpected top output")
+	}
+	return processes, nil
 }
 
 // formatDuration converts seconds to a human-readable duration

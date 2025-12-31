@@ -45,6 +45,7 @@ const (
 	DefaultLogRefreshInterval  = 3 * time.Second
 	DefaultHostRefreshInterval = 30 * time.Second
 	DefaultHostCacheDuration   = 24 * time.Hour // How long cached host info is considered fresh
+	topProcessLimit            = 15
 )
 
 // ViewMode represents which view is currently active
@@ -102,6 +103,7 @@ type DetailTab int
 const (
 	DetailTabDetails DetailTab = iota
 	DetailTabLogs
+	DetailTabCPU
 )
 
 // HostDetailTab represents which tab is active in the host detail panel
@@ -391,6 +393,12 @@ type processStatsMsg struct {
 	stats *ssh.ProcessStats
 }
 
+type cpuTopMsg struct {
+	host      string
+	processes []ssh.TopProcess
+	err       error
+}
+
 type descriptionGeneratedMsg struct {
 	jobID       int64
 	description string
@@ -447,6 +455,14 @@ type Model struct {
 	processStats      *ssh.ProcessStats
 	prevProcessStats  *ssh.ProcessStats // Previous sample for CPU% calculation
 	processStatsJobID int64
+
+	// Host CPU usage view
+	cpuTopEntries       []ssh.TopProcess
+	cpuTopDataHost      string
+	cpuTopRequestedHost string
+	cpuTopLoading       bool
+	cpuTopError         string
+	cpuTopUpdated       time.Time
 
 	// Progress tracking for running jobs
 	progressTracker *progress.Tracker            // tracks file sizes for incremental reads
@@ -812,6 +828,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.processStatsJobID = msg.jobID
 			}
 		}
+		return m, nil
+
+	case cpuTopMsg:
+		// Ignore stale responses if a newer host request is pending
+		if m.cpuTopRequestedHost != "" && msg.host != m.cpuTopRequestedHost {
+			return m, nil
+		}
+		m.cpuTopRequestedHost = ""
+		m.cpuTopLoading = false
+		if msg.err != nil {
+			m.cpuTopError = msg.err.Error()
+			m.cpuTopEntries = nil
+			m.cpuTopDataHost = msg.host
+			return m, nil
+		}
+		m.cpuTopError = ""
+		m.cpuTopEntries = msg.processes
+		m.cpuTopDataHost = msg.host
+		m.cpuTopUpdated = time.Now()
 		return m, nil
 
 	case jobKilledMsg:
@@ -1241,8 +1276,8 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			// Layout within panel: border(1) + header(1) + hosts start at Y=2 (no filter row)
 			if msg.Y >= 2 && msg.Y < listHeight-1 {
 				clickedRow := msg.Y - 2
-				if clickedRow >= 0 && clickedRow < len(m.hosts) {
-					m.selectedHostIdx = clickedRow
+				if idx := m.hostIndexAtRow(clickedRow, listHeight); idx >= 0 {
+					m.selectedHostIdx = idx
 				}
 			}
 		}
@@ -2017,30 +2052,40 @@ func (m Model) renderJobList(height int) string {
 
 func (m Model) renderLogPanel(height int) string {
 	// Render based on active tab
-	if m.detailTab == DetailTabLogs {
+	switch m.detailTab {
+	case DetailTabLogs:
 		return m.renderLogsOnly(height)
+	case DetailTabCPU:
+		return m.renderCPUTop(height)
+	default:
+		return m.renderJobDetails(height)
 	}
-	return m.renderJobDetails(height)
 }
 
 // renderTabHeader renders the "Details  Logs" tab header as visual tabs
 func (m Model) renderTabHeader() string {
-	detailsLabel := "Details"
-	logsLabel := "Logs"
+	tabs := []struct {
+		label string
+		tab   DetailTab
+	}{
+		{"Details", DetailTabDetails},
+		{"Logs", DetailTabLogs},
+		{"CPU", DetailTabCPU},
+	}
 
-	var detailsTab, logsTab string
-	if m.detailTab == DetailTabDetails {
-		detailsTab = activeTabStyle.Render(detailsLabel)
-		logsTab = inactiveTabStyle.Render(logsLabel)
-	} else {
-		detailsTab = inactiveTabStyle.Render(detailsLabel)
-		logsTab = activeTabStyle.Render(logsLabel)
+	var rendered []string
+	for _, t := range tabs {
+		if m.detailTab == t.tab {
+			rendered = append(rendered, activeTabStyle.Render(t.label))
+		} else {
+			rendered = append(rendered, inactiveTabStyle.Render(t.label))
+		}
 	}
 
 	// Add hint about Tab key switching
 	hint := dimStyle.Render(" (Tab to switch)")
 
-	return detailsTab + " " + logsTab + hint
+	return strings.Join(rendered, " ") + hint
 }
 
 func (m Model) renderLogsOnly(height int) string {
@@ -2098,6 +2143,97 @@ func (m Model) renderLogsOnly(height int) string {
 	}
 
 	panelContent := m.renderTabHeader() + "\n" + dimStyle.Render(jobInfo) + staleIndicator + scrollInfo + "\n" + content
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+func (m Model) renderCPUTop(height int) string {
+	job := m.getTargetJob()
+	panelHeader := m.renderTabHeader() + "\n"
+	if job == nil {
+		panelContent := panelHeader + dimStyle.Render("No job selected")
+		return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+	}
+
+	var b strings.Builder
+	host := job.Host
+	b.WriteString(fmt.Sprintf("Top CPU processes on %s\n\n", host))
+
+	switch {
+	case m.cpuTopLoading && (m.cpuTopRequestedHost == host):
+		b.WriteString(dimStyle.Render(m.spinner.View() + " Loading..."))
+		b.WriteString("\n")
+	case m.cpuTopError != "" && m.cpuTopDataHost == host:
+		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed to fetch: %s", m.cpuTopError)))
+		b.WriteString("\n")
+	case m.cpuTopDataHost == host && len(m.cpuTopEntries) > 0:
+		userWidth := 10
+		cpuWidth := 6
+		jobWidth := 8
+		panelWidth := m.width - 6
+		if panelWidth < 40 {
+			panelWidth = 40
+		}
+		processWidth := panelWidth - (userWidth + cpuWidth + jobWidth + 6)
+		if processWidth < 20 {
+			processWidth = 20
+		}
+
+		header := fmt.Sprintf(" %-*s %*s %-*s %s", userWidth, "User", cpuWidth, "%CPU", jobWidth, "Job", "Process")
+		b.WriteString(lipgloss.NewStyle().Bold(true).Render(header))
+		b.WriteString("\n")
+
+		totalCPU := 0.0
+		for _, proc := range m.cpuTopEntries {
+			jobLabel := "—"
+			if proc.JobID > 0 {
+				jobLabel = fmt.Sprintf("#%d", proc.JobID)
+			}
+			process := proc.Command
+			if process == "" {
+				process = fmt.Sprintf("PID %d", proc.PID)
+			}
+			process = truncate(process, processWidth)
+			line := fmt.Sprintf(" %-*s %*.1f %-*s %s",
+				userWidth, truncate(proc.User, userWidth),
+				cpuWidth, proc.CPU,
+				jobWidth, jobLabel,
+				process,
+			)
+			b.WriteString(line)
+			b.WriteString("\n")
+			totalCPU += proc.CPU
+		}
+
+		coreEstimate := ""
+		if totalCPU > 0 {
+			coreEstimate = fmt.Sprintf("(~%.0f cores)", totalCPU/100.0)
+		}
+		totalLine := fmt.Sprintf(" %-*s %*.1f %-*s %s",
+			userWidth, "TOTAL",
+			cpuWidth, totalCPU,
+			jobWidth, "",
+			dimStyle.Render(coreEstimate),
+		)
+		b.WriteString(totalLine)
+		b.WriteString("\n")
+
+		if !m.cpuTopUpdated.IsZero() {
+			b.WriteString("\n")
+			b.WriteString(dimStyle.Render(fmt.Sprintf("Updated %s ago", time.Since(m.cpuTopUpdated).Truncate(time.Second))))
+		}
+	case m.cpuTopDataHost == host && len(m.cpuTopEntries) == 0:
+		b.WriteString(dimStyle.Render("No active processes reported"))
+		b.WriteString("\n")
+	default:
+		if m.cpuTopRequestedHost != "" {
+			b.WriteString(dimStyle.Render(m.spinner.View() + " Loading..."))
+		} else {
+			b.WriteString(dimStyle.Render("Select a job to load CPU data"))
+		}
+		b.WriteString("\n")
+	}
+
+	panelContent := panelHeader + b.String()
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
@@ -2788,6 +2924,44 @@ func (m Model) renderHostList(height int) string {
 
 	content := strings.Join(rows, "\n")
 	return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
+}
+
+// hostIndexAtRow maps a host list row (excluding header/borders) to the host index.
+// It mirrors renderHostList's logic so clicks on wrapped summary rows select the owner host.
+func (m Model) hostIndexAtRow(row, height int) int {
+	contentHeight := height - 4
+	if row < 0 || contentHeight <= 0 || row >= contentHeight {
+		return -1
+	}
+
+	rowCount := 0
+	for idx, host := range m.hosts {
+		if rowCount >= contentHeight {
+			break
+		}
+
+		startRow := rowCount
+		rowCount++ // Account for the host's main row
+
+		if m.showHostSummaries {
+			if summary, ok := m.hostSummaries[host.Name]; ok && summary != "" {
+				summaryLines := wrapText(summary, m.width-10)
+				for range strings.Split(summaryLines, "\n") {
+					if rowCount >= contentHeight {
+						break
+					}
+					rowCount++
+				}
+			} else if m.hostSummaryPending[host.Name] && rowCount < contentHeight {
+				rowCount++
+			}
+		}
+
+		if row >= startRow && row < rowCount {
+			return idx
+		}
+	}
+	return -1
 }
 
 func (m Model) renderHostDetail(height int) string {
@@ -3771,12 +3945,22 @@ func (m *Model) cycleTab(forward bool) (Model, tea.Cmd) {
 
 // cycleJobsTab toggles between Details and Logs tabs in Jobs view
 func (m *Model) cycleJobsTab(forward bool) (Model, tea.Cmd) {
-	// Toggle between Details and Logs (same in both directions for 2 tabs)
-	if m.detailTab == DetailTabDetails {
-		return m.switchToLogsTab()
+	tabs := []DetailTab{DetailTabDetails, DetailTabLogs, DetailTabCPU}
+	currentIdx := 0
+	for i, tab := range tabs {
+		if tab == m.detailTab {
+			currentIdx = i
+			break
+		}
 	}
-	m.detailTab = DetailTabDetails
-	return *m, nil
+
+	if forward {
+		currentIdx = (currentIdx + 1) % len(tabs)
+	} else {
+		currentIdx = (currentIdx - 1 + len(tabs)) % len(tabs)
+	}
+
+	return m.switchToJobTab(tabs[currentIdx])
 }
 
 // switchToLogsTab switches to the Logs tab and fetches log content
@@ -3803,6 +3987,27 @@ func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 		return *m, tea.Batch(cmds...)
 	}
 	return *m, nil
+}
+
+func (m *Model) switchToCPUTab() (Model, tea.Cmd) {
+	m.detailTab = DetailTabCPU
+	job := m.getTargetJob()
+	if cmd := m.requestCPUTop(job); cmd != nil {
+		return *m, cmd
+	}
+	return *m, nil
+}
+
+func (m *Model) switchToJobTab(tab DetailTab) (Model, tea.Cmd) {
+	switch tab {
+	case DetailTabLogs:
+		return m.switchToLogsTab()
+	case DetailTabCPU:
+		return m.switchToCPUTab()
+	default:
+		m.detailTab = DetailTabDetails
+		return *m, nil
+	}
 }
 
 // cycleHostsTab cycles through host detail tabs (Info, GPUs, GPU 0, GPU 1, ...)
@@ -4031,11 +4236,24 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	// Even if not in Logs tab, fetch stats for running jobs
-	if job.Status == db.StatusRunning {
-		return m.fetchProcessStats(job)
+	var cmds []tea.Cmd
+	// Fetch CPU summary if that tab is active
+	if m.detailTab == DetailTabCPU {
+		if cmd := m.requestCPUTop(job); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
+	// Even if not in Logs tab, fetch stats for running jobs
+	if job.Status == db.StatusRunning {
+		if cmd := m.fetchProcessStats(job); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if len(cmds) > 0 {
+		return tea.Batch(cmds...)
+	}
 	return nil
 }
 
@@ -4192,6 +4410,38 @@ func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
 			stats: stats,
 		}
 	}
+}
+
+func (m Model) fetchTopProcesses(host string) tea.Cmd {
+	if host == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		procs, err := ssh.GetTopProcesses(host, topProcessLimit)
+		return cpuTopMsg{
+			host:      host,
+			processes: procs,
+			err:       err,
+		}
+	}
+}
+
+func (m *Model) requestCPUTop(job *db.Job) tea.Cmd {
+	if job == nil {
+		m.cpuTopEntries = nil
+		m.cpuTopError = ""
+		m.cpuTopRequestedHost = ""
+		m.cpuTopDataHost = ""
+		m.cpuTopLoading = false
+		return nil
+	}
+	if m.cpuTopDataHost != job.Host {
+		m.cpuTopEntries = nil
+	}
+	m.cpuTopLoading = true
+	m.cpuTopError = ""
+	m.cpuTopRequestedHost = job.Host
+	return m.fetchTopProcesses(job.Host)
 }
 
 // fetchQuickProgress quickly greps the log file for the last progress line
@@ -4633,12 +4883,6 @@ func (m Model) generateHostSummary(host, hash string) tea.Cmd {
 			return hostSummaryGeneratedMsg{host: host, summary: "No recent activity", hash: hash}
 		}
 
-		// Idle case: nothing running but has other activity
-		prefix := ""
-		if len(running) == 0 {
-			prefix = "Idle. "
-		}
-
 		// Generate via ollama
 		prompt := fmt.Sprintf(`Rewrite as a status summary (1-2 sentences). Be specific about what's running and any failures.
 
@@ -4650,7 +4894,7 @@ Status:`, strings.Join(facts, "\n"))
 		if err != nil {
 			return hostSummaryGeneratedMsg{host: host, err: err}
 		}
-		return hostSummaryGeneratedMsg{host: host, summary: prefix + summary, hash: hash}
+		return hostSummaryGeneratedMsg{host: host, summary: summary, hash: hash}
 	}
 }
 
