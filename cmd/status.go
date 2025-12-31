@@ -511,7 +511,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	}
 
 	// Print usage hints
-	if exitOnComplete {
+	if exitOnComplete && usageHintsEnabled() {
 		fmt.Println()
 		fmt.Printf("Hints:    remote-jobs log %d        # View job output\n", job.ID)
 		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {

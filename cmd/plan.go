@@ -441,6 +441,9 @@ func printPlanStatusCommands(jobs []scheduledPlanJob) {
 	if len(jobs) == 0 {
 		return
 	}
+	if !usageHintsEnabled() {
+		return
+	}
 	ids := make([]string, 0, len(jobs))
 	for _, job := range jobs {
 		if job.JobID > 0 {

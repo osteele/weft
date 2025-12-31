@@ -144,6 +144,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Validate command against blocked patterns
 	cfg, _ := config.Load()
+	setUsageHintsFromConfig(cfg)
 	if err := cfg.ValidateCommand(command); err != nil {
 		return err
 	}
@@ -241,8 +242,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
-		fmt.Printf("\nTo start the queue runner (if not already running):\n")
-		fmt.Printf("  remote-jobs queue start %s\n", host)
+		if usageHintsEnabled() {
+			fmt.Printf("\nTo start the queue runner (if not already running):\n")
+			fmt.Printf("  remote-jobs queue start %s\n", host)
+		}
 		if res.Deferred {
 			fmt.Printf("\nHost %s is unreachable right now. The CLI will append this job to the remote queue once it can reach the host again (run `remote-jobs sync --sync` to retry).\n", host)
 		}
@@ -273,7 +276,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if len(runEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
-		fmt.Printf("\nTo start immediately: remote-jobs start %d\n", jobID)
+		if usageHintsEnabled() {
+			fmt.Printf("\nTo start immediately: remote-jobs start %d\n", jobID)
+		}
 		if res.Deferred {
 			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
 		} else {
@@ -344,13 +349,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return sshCmd.Run()
 	}
 
-	fmt.Printf("\nMonitor progress:\n")
-	fmt.Printf("  remote-jobs status %d                   # Check status\n", result.Info.JobID)
-	fmt.Printf("  remote-jobs status --wait %d            # Wait for completion\n", result.Info.JobID)
-	fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
-	fmt.Printf("\nView log:\n")
-	fmt.Printf("  remote-jobs log %d                      # View log\n", result.Info.JobID)
-	fmt.Printf("  remote-jobs log %d -f                   # Follow log\n", result.Info.JobID)
+	if usageHintsEnabled() {
+		fmt.Printf("\nMonitor progress:\n")
+		fmt.Printf("  remote-jobs status %d                   # Check status\n", result.Info.JobID)
+		fmt.Printf("  remote-jobs status --wait %d            # Wait for completion\n", result.Info.JobID)
+		fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
+		fmt.Printf("\nView log:\n")
+		fmt.Printf("  remote-jobs log %d                      # View log\n", result.Info.JobID)
+		fmt.Printf("  remote-jobs log %d -f                   # Follow log\n", result.Info.JobID)
+	}
 
 	return nil
 }
@@ -477,13 +484,18 @@ func streamJobLogAllow(host, logFile string, jobID int64) error {
 
 func printDetachedInstructions(jobID int64) {
 	fmt.Printf("Job %d continues running.\n", jobID)
-	fmt.Printf("View logs later: remote-jobs log %d -f\n", jobID)
-	fmt.Printf("Check status:   remote-jobs job status %d\n", jobID)
+	if usageHintsEnabled() {
+		fmt.Printf("View logs later: remote-jobs log %d -f\n", jobID)
+		fmt.Printf("Check status:   remote-jobs job status %d\n", jobID)
+	}
 }
 
 // printCommandRecommendations checks for common command patterns and suggests
 // better alternatives using CLI flags. Returns true if any recommendations were printed.
 func printCommandRecommendations(command string) bool {
+	if !usageHintsEnabled() {
+		return false
+	}
 	var recommendations []string
 
 	// Check for "cd /path && " prefix

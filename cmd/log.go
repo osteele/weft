@@ -41,6 +41,7 @@ var (
 	logFrom   int
 	logTo     int
 	logGrep   string
+	logFull   bool
 )
 
 func init() {
@@ -52,12 +53,20 @@ func init() {
 	logCmd.Flags().IntVar(&logFrom, "from", 0, "Show lines starting from line N")
 	logCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
 	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
+	logCmd.Flags().BoolVar(&logFull, "full", false, "Show the entire log (alias for --from 1)")
 }
 
 func runLog(cmd *cobra.Command, args []string) error {
 	jobID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid job ID: %s", args[0])
+	}
+
+	if logFull {
+		if cmd.Flags().Changed("from") {
+			return fmt.Errorf("--full cannot be combined with --from")
+		}
+		logFrom = 1
 	}
 
 	// Validate flag combinations
@@ -83,9 +92,16 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
+	defaultTailHint := shouldShowDefaultTailHint(cmd)
+	tailHintPrinted := false
+
 	// For completed jobs, try local cache first (unless following)
 	if !logFollow && job.Status == db.StatusCompleted {
 		if cached, err := logcache.Read(jobID); err == nil {
+			if defaultTailHint && !tailHintPrinted {
+				printDefaultTailHint(jobID)
+				tailHintPrinted = true
+			}
 			output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
 			// Process carriage returns - progress bars use \r to overwrite lines
 			fmt.Print(processCarriageReturns(output))
@@ -154,6 +170,10 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 
 	// Process carriage returns - progress bars use \r to overwrite lines
+	if defaultTailHint && !tailHintPrinted {
+		printDefaultTailHint(jobID)
+		tailHintPrinted = true
+	}
 	fmt.Print(processCarriageReturns(stdout))
 	return nil
 }
@@ -205,6 +225,23 @@ func buildLogCommand(logFile string) string {
 	}
 
 	return cmd
+}
+
+func shouldShowDefaultTailHint(cmd *cobra.Command) bool {
+	if logFollow || logFull {
+		return false
+	}
+	if logFrom > 0 || logTo > 0 {
+		return false
+	}
+	if cmd.Flags().Changed("lines") || cmd.Flags().Changed("tail") || cmd.Flags().Changed("from") || cmd.Flags().Changed("to") {
+		return false
+	}
+	return true
+}
+
+func printDefaultTailHint(jobID int64) {
+	fmt.Printf("(showing last %d lines; run 'remote-jobs log %d --full' to see the entire log or adjust -n/--lines)\n\n", logLines, jobID)
 }
 
 // escapeShellArg escapes a string for use in single quotes in shell

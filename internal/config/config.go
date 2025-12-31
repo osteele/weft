@@ -34,6 +34,9 @@ type Config struct {
 	// Default: 51200 (50KB). Logs larger than this are not cached.
 	LogCacheMaxSize int `yaml:"log_cache_max_size"`
 
+	// ShowUsageHints toggles whether CLI commands print follow-up suggestions
+	ShowUsageHints bool `yaml:"show_usage_hints"`
+
 	// AI/LLM configuration for automatic job description generation
 	AI AIConfig `yaml:"ai"`
 
@@ -71,6 +74,7 @@ func DefaultConfig() *Config {
 		EnableMouse:         false,
 		LogCacheMaxAge:      7,
 		LogCacheMaxSize:     50 * 1024, // 50KB
+		ShowUsageHints:      true,
 		AI: AIConfig{
 			Enabled: nil, // nil means "auto" - enabled if ollama is available
 			Model:   "",  // empty means use default model

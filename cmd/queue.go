@@ -202,6 +202,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	// Validate command against blocked patterns
 	cfg, _ := config.Load()
+	setUsageHintsFromConfig(cfg)
 	if err := cfg.ValidateCommand(command); err != nil {
 		return err
 	}
@@ -345,16 +346,25 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 	if started {
 		fmt.Printf("Queue runner '%s' started on %s\n", queueName, host)
 		fmt.Printf("Session: %s\n\n", runnerSession)
-		fmt.Printf("Monitor:\n")
+		if usageHintsEnabled() {
+			fmt.Printf("Monitor:\n")
+			fmt.Printf("  remote-jobs queue status %s", host)
+			if queueName != defaultQueueName {
+				fmt.Printf(" --queue %s", queueName)
+			}
+			fmt.Println()
+		}
 	} else {
 		fmt.Printf("Queue runner '%s' is already running on %s\n", queueName, host)
-		fmt.Printf("\nTo check status:\n")
+		if usageHintsEnabled() {
+			fmt.Printf("\nTo check status:\n")
+			fmt.Printf("  remote-jobs queue status %s", host)
+			if queueName != defaultQueueName {
+				fmt.Printf(" --queue %s", queueName)
+			}
+			fmt.Println()
+		}
 	}
-	fmt.Printf("  remote-jobs queue status %s", host)
-	if queueName != defaultQueueName {
-		fmt.Printf(" --queue %s", queueName)
-	}
-	fmt.Println()
 
 	return nil
 }
