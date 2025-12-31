@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"os/user"
 	"runtime"
 	"sort"
 	"strconv"
@@ -111,6 +112,7 @@ type HostDetailTab int
 
 const (
 	HostDetailTabInfo       HostDetailTab = iota // Host Info
+	HostDetailTabCPU                             // Host-wide CPU processes
 	HostDetailTabGPUSummary                      // GPU Summary (all GPUs)
 	HostDetailTabGPUBase                         // Base for GPU detail tabs (position in GPU list, not actual GPU index)
 )
@@ -160,114 +162,129 @@ type keyMap struct {
 	ToggleSummaries key.Binding
 }
 
-var keys = keyMap{
-	Up: key.NewBinding(
-		key.WithKeys("up"),
-		key.WithHelp("↑", "up"),
-	),
-	Down: key.NewBinding(
-		key.WithKeys("down"),
-		key.WithHelp("↓", "down"),
-	),
-	Enter: key.NewBinding(
-		key.WithKeys("enter"),
-		key.WithHelp("enter", "select"),
-	),
-	Logs: key.NewBinding(
-		key.WithKeys("l"),
-		key.WithHelp("l", "logs"),
-	),
-	Filter: key.NewBinding(
-		key.WithKeys("f"),
-		key.WithHelp("f", "cycle view"),
-	),
-	Escape: key.NewBinding(
-		key.WithKeys("esc"),
-		key.WithHelp("esc", "clear"),
-	),
-	Kill: key.NewBinding(
-		key.WithKeys("k", "delete"),
-		key.WithHelp("k", "kill/cancel"),
-	),
-	Restart: key.NewBinding(
-		key.WithKeys("r"),
-		key.WithHelp("r", "restart"),
-	),
-	EditRestart: key.NewBinding(
-		key.WithKeys("R"),
-		key.WithHelp("R", "edit & restart"),
-	),
-	Remove: key.NewBinding(
-		key.WithKeys("x"),
-		key.WithHelp("x", "remove"),
-	),
-	NewJob: key.NewBinding(
-		key.WithKeys("n"),
-		key.WithHelp("n", "new job"),
-	),
-	Prune: key.NewBinding(
-		key.WithKeys("P"),
-		key.WithHelp("P", "prune"),
-	),
-	Suspend: key.NewBinding(
-		key.WithKeys("ctrl+z"),
-	),
-	Quit: key.NewBinding(
-		key.WithKeys("q", "ctrl+c"),
-		key.WithHelp("q", "quit"),
-	),
-	HostsView: key.NewBinding(
-		key.WithKeys("right", "h"),
-		key.WithHelp("→/h", "hosts"),
-	),
-	JobsView: key.NewBinding(
-		key.WithKeys("left", "j"),
-		key.WithHelp("←/j", "jobs"),
-	),
-	Tab: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "switch view"),
-	),
-	ShiftTab: key.NewBinding(
-		key.WithKeys("shift+tab"),
-		key.WithHelp("shift+tab", "switch view back"),
-	),
-	Sync: key.NewBinding(
-		key.WithKeys("s"),
-		key.WithHelp("s", "sync"),
-	),
-	Help: key.NewBinding(
-		key.WithKeys("?"),
-		key.WithHelp("?", "help"),
-	),
-	StartQueue: key.NewBinding(
-		key.WithKeys("S"),
-		key.WithHelp("S", "start queue"),
-	),
-	StartNow: key.NewBinding(
-		key.WithKeys("g"),
-		key.WithHelp("g", "start now"),
-	),
-	MoveToFront: key.NewBinding(
-		key.WithKeys("F"),
-		key.WithHelp("F", "move to front"),
-	),
-	Edit: key.NewBinding(
-		key.WithKeys("e"),
-		key.WithHelp("e", "edit"),
-	),
-	Sort: key.NewBinding(
-		key.WithKeys("o"),
-		key.WithHelp("o", "cycle sort"),
-	),
-	RegenerateDesc: key.NewBinding(
-		key.WithKeys("G"),
-		key.WithHelp("G", "generate AI description"),
-	),
-	ToggleSummaries: key.NewBinding(
-		key.WithKeys("d"),
-		key.WithHelp("d", "toggle AI host summaries"),
-	),
+var (
+	keys = keyMap{
+		Up: key.NewBinding(
+			key.WithKeys("up"),
+			key.WithHelp("↑", "up"),
+		),
+		Down: key.NewBinding(
+			key.WithKeys("down"),
+			key.WithHelp("↓", "down"),
+		),
+		Enter: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "select"),
+		),
+		Logs: key.NewBinding(
+			key.WithKeys("l"),
+			key.WithHelp("l", "logs"),
+		),
+		Filter: key.NewBinding(
+			key.WithKeys("f"),
+			key.WithHelp("f", "cycle view"),
+		),
+		Escape: key.NewBinding(
+			key.WithKeys("esc"),
+			key.WithHelp("esc", "clear"),
+		),
+		Kill: key.NewBinding(
+			key.WithKeys("k", "delete"),
+			key.WithHelp("k", "kill/cancel"),
+		),
+		Restart: key.NewBinding(
+			key.WithKeys("r"),
+			key.WithHelp("r", "restart"),
+		),
+		EditRestart: key.NewBinding(
+			key.WithKeys("R"),
+			key.WithHelp("R", "edit & restart"),
+		),
+		Remove: key.NewBinding(
+			key.WithKeys("x"),
+			key.WithHelp("x", "remove"),
+		),
+		NewJob: key.NewBinding(
+			key.WithKeys("n"),
+			key.WithHelp("n", "new job"),
+		),
+		Prune: key.NewBinding(
+			key.WithKeys("P"),
+			key.WithHelp("P", "prune"),
+		),
+		Suspend: key.NewBinding(
+			key.WithKeys("ctrl+z"),
+		),
+		Quit: key.NewBinding(
+			key.WithKeys("q", "ctrl+c"),
+			key.WithHelp("q", "quit"),
+		),
+		HostsView: key.NewBinding(
+			key.WithKeys("right", "h"),
+			key.WithHelp("→/h", "hosts"),
+		),
+		JobsView: key.NewBinding(
+			key.WithKeys("left", "j"),
+			key.WithHelp("←/j", "jobs"),
+		),
+		Tab: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "switch view"),
+		),
+		ShiftTab: key.NewBinding(
+			key.WithKeys("shift+tab"),
+			key.WithHelp("shift+tab", "switch view back"),
+		),
+		Sync: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "sync"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys("?"),
+			key.WithHelp("?", "help"),
+		),
+		StartQueue: key.NewBinding(
+			key.WithKeys("S"),
+			key.WithHelp("S", "start queue"),
+		),
+		StartNow: key.NewBinding(
+			key.WithKeys("g"),
+			key.WithHelp("g", "start now"),
+		),
+		MoveToFront: key.NewBinding(
+			key.WithKeys("F"),
+			key.WithHelp("F", "move to front"),
+		),
+		Edit: key.NewBinding(
+			key.WithKeys("e"),
+			key.WithHelp("e", "edit"),
+		),
+		Sort: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "cycle sort"),
+		),
+		RegenerateDesc: key.NewBinding(
+			key.WithKeys("G"),
+			key.WithHelp("G", "generate AI description"),
+		),
+		ToggleSummaries: key.NewBinding(
+			key.WithKeys("d"),
+			key.WithHelp("d", "toggle AI host summaries"),
+		),
+	}
+	localUserName = detectLocalUsername()
+)
+
+func detectLocalUsername() string {
+	u, err := user.Current()
+	if err != nil || u == nil {
+		return ""
+	}
+	name := u.Username
+	if idx := strings.LastIndex(name, `\`); idx >= 0 {
+		name = name[idx+1:]
+	}
+	return name
 }
 
 // Messages
@@ -397,6 +414,7 @@ type cpuTopMsg struct {
 	host      string
 	processes []ssh.TopProcess
 	err       error
+	jobView   bool
 }
 
 type descriptionGeneratedMsg struct {
@@ -456,13 +474,21 @@ type Model struct {
 	prevProcessStats  *ssh.ProcessStats // Previous sample for CPU% calculation
 	processStatsJobID int64
 
-	// Host CPU usage view
-	cpuTopEntries       []ssh.TopProcess
-	cpuTopDataHost      string
-	cpuTopRequestedHost string
-	cpuTopLoading       bool
-	cpuTopError         string
-	cpuTopUpdated       time.Time
+	// Job CPU usage view (per-host snapshot)
+	jobCPUTopEntries       []ssh.TopProcess
+	jobCPUTopDataHost      string
+	jobCPUTopRequestedHost string
+	jobCPUTopLoading       bool
+	jobCPUTopError         string
+	jobCPUTopUpdated       time.Time
+
+	// Host CPU usage view (hosts tab)
+	hostCPUTopEntries       []ssh.TopProcess
+	hostCPUTopDataHost      string
+	hostCPUTopRequestedHost string
+	hostCPUTopLoading       bool
+	hostCPUTopError         string
+	hostCPUTopUpdated       time.Time
 
 	// Progress tracking for running jobs
 	progressTracker *progress.Tracker            // tracks file sizes for incremental reads
@@ -831,22 +857,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case cpuTopMsg:
-		// Ignore stale responses if a newer host request is pending
-		if m.cpuTopRequestedHost != "" && msg.host != m.cpuTopRequestedHost {
+		if msg.jobView {
+			if m.jobCPUTopRequestedHost != "" && msg.host != m.jobCPUTopRequestedHost {
+				return m, nil
+			}
+			m.jobCPUTopRequestedHost = ""
+			m.jobCPUTopLoading = false
+			if msg.err != nil {
+				m.jobCPUTopError = msg.err.Error()
+				m.jobCPUTopEntries = nil
+				m.jobCPUTopDataHost = msg.host
+				return m, nil
+			}
+			m.jobCPUTopError = ""
+			m.jobCPUTopEntries = msg.processes
+			m.jobCPUTopDataHost = msg.host
+			m.jobCPUTopUpdated = time.Now()
 			return m, nil
 		}
-		m.cpuTopRequestedHost = ""
-		m.cpuTopLoading = false
+		if m.hostCPUTopRequestedHost != "" && msg.host != m.hostCPUTopRequestedHost {
+			return m, nil
+		}
+		m.hostCPUTopRequestedHost = ""
+		m.hostCPUTopLoading = false
 		if msg.err != nil {
-			m.cpuTopError = msg.err.Error()
-			m.cpuTopEntries = nil
-			m.cpuTopDataHost = msg.host
+			m.hostCPUTopError = msg.err.Error()
+			m.hostCPUTopEntries = nil
+			m.hostCPUTopDataHost = msg.host
 			return m, nil
 		}
-		m.cpuTopError = ""
-		m.cpuTopEntries = msg.processes
-		m.cpuTopDataHost = msg.host
-		m.cpuTopUpdated = time.Now()
+		m.hostCPUTopError = ""
+		m.hostCPUTopEntries = msg.processes
+		m.hostCPUTopDataHost = msg.host
+		m.hostCPUTopUpdated = time.Now()
 		return m, nil
 
 	case jobKilledMsg:
@@ -1278,6 +1321,9 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				clickedRow := msg.Y - 2
 				if idx := m.hostIndexAtRow(clickedRow, listHeight); idx >= 0 {
 					m.selectedHostIdx = idx
+					if cmd := m.handleHostSelectionChanged(); cmd != nil {
+						return m, cmd
+					}
 				}
 			}
 		}
@@ -1345,6 +1391,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.fetchQueueStatus(host.Name))
 			}
 		}
+		if m.hostDetailTab == HostDetailTabCPU {
+			if cmd := m.handleHostSelectionChanged(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 		return m, tea.Batch(cmds...)
 
 	case key.Matches(msg, keys.JobsView):
@@ -1358,6 +1409,11 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
 					cmds = append(cmds, m.fetchHostInfo(host.Name))
 					cmds = append(cmds, m.fetchQueueStatus(host.Name))
+				}
+			}
+			if m.hostDetailTab == HostDetailTabCPU {
+				if cmd := m.handleHostSelectionChanged(); cmd != nil {
+					cmds = append(cmds, cmd)
 				}
 			}
 			return m, tea.Batch(cmds...)
@@ -1382,6 +1438,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.selectedHostIdx > 0 {
 				m.selectedHostIdx--
 			}
+			if cmd := m.handleHostSelectionChanged(); cmd != nil {
+				return m, cmd
+			}
 			return m, nil
 		}
 		// Forward to list and handle selection change
@@ -1397,6 +1456,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.viewMode == ViewModeHosts {
 			if len(m.hosts) > 0 && m.selectedHostIdx < len(m.hosts)-1 {
 				m.selectedHostIdx++
+			}
+			if cmd := m.handleHostSelectionChanged(); cmd != nil {
+				return m, cmd
 			}
 			return m, nil
 		}
@@ -2056,7 +2118,7 @@ func (m Model) renderLogPanel(height int) string {
 	case DetailTabLogs:
 		return m.renderLogsOnly(height)
 	case DetailTabCPU:
-		return m.renderCPUTop(height)
+		return m.renderJobCPUTop(height)
 	default:
 		return m.renderJobDetails(height)
 	}
@@ -2146,7 +2208,7 @@ func (m Model) renderLogsOnly(height int) string {
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
-func (m Model) renderCPUTop(height int) string {
+func (m Model) renderJobCPUTop(height int) string {
 	job := m.getTargetJob()
 	panelHeader := m.renderTabHeader() + "\n"
 	if job == nil {
@@ -2159,44 +2221,38 @@ func (m Model) renderCPUTop(height int) string {
 	b.WriteString(fmt.Sprintf("Top CPU processes on %s\n\n", host))
 
 	switch {
-	case m.cpuTopLoading && (m.cpuTopRequestedHost == host):
+	case m.jobCPUTopLoading && (m.jobCPUTopRequestedHost == host):
 		b.WriteString(dimStyle.Render(m.spinner.View() + " Loading..."))
 		b.WriteString("\n")
-	case m.cpuTopError != "" && m.cpuTopDataHost == host:
-		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed to fetch: %s", m.cpuTopError)))
+	case m.jobCPUTopError != "" && m.jobCPUTopDataHost == host:
+		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed to fetch: %s", m.jobCPUTopError)))
 		b.WriteString("\n")
-	case m.cpuTopDataHost == host && len(m.cpuTopEntries) > 0:
+	case m.jobCPUTopDataHost == host && len(m.jobCPUTopEntries) > 0:
 		userWidth := 10
 		cpuWidth := 6
-		jobWidth := 8
 		panelWidth := m.width - 6
 		if panelWidth < 40 {
 			panelWidth = 40
 		}
-		processWidth := panelWidth - (userWidth + cpuWidth + jobWidth + 6)
+		processWidth := panelWidth - (userWidth + cpuWidth + 4)
 		if processWidth < 20 {
 			processWidth = 20
 		}
 
-		header := fmt.Sprintf(" %-*s %*s %-*s %s", userWidth, "User", cpuWidth, "%CPU", jobWidth, "Job", "Process")
+		header := fmt.Sprintf(" %-*s %*s %s", userWidth, "User", cpuWidth, "%CPU", "Process")
 		b.WriteString(lipgloss.NewStyle().Bold(true).Render(header))
 		b.WriteString("\n")
 
 		totalCPU := 0.0
-		for _, proc := range m.cpuTopEntries {
-			jobLabel := "—"
-			if proc.JobID > 0 {
-				jobLabel = fmt.Sprintf("#%d", proc.JobID)
-			}
+		for _, proc := range m.jobCPUTopEntries {
 			process := proc.Command
 			if process == "" {
 				process = fmt.Sprintf("PID %d", proc.PID)
 			}
-			process = truncate(process, processWidth)
-			line := fmt.Sprintf(" %-*s %*.1f %-*s %s",
+			process = truncate(shortenCommandPath(process), processWidth)
+			line := fmt.Sprintf(" %-*s %*.1f %s",
 				userWidth, truncate(proc.User, userWidth),
 				cpuWidth, proc.CPU,
-				jobWidth, jobLabel,
 				process,
 			)
 			b.WriteString(line)
@@ -2208,24 +2264,23 @@ func (m Model) renderCPUTop(height int) string {
 		if totalCPU > 0 {
 			coreEstimate = fmt.Sprintf("(~%.0f cores)", totalCPU/100.0)
 		}
-		totalLine := fmt.Sprintf(" %-*s %*.1f %-*s %s",
+		totalLine := fmt.Sprintf(" %-*s %*.1f %s",
 			userWidth, "TOTAL",
 			cpuWidth, totalCPU,
-			jobWidth, "",
 			dimStyle.Render(coreEstimate),
 		)
 		b.WriteString(totalLine)
 		b.WriteString("\n")
 
-		if !m.cpuTopUpdated.IsZero() {
+		if !m.jobCPUTopUpdated.IsZero() {
 			b.WriteString("\n")
-			b.WriteString(dimStyle.Render(fmt.Sprintf("Updated %s ago", time.Since(m.cpuTopUpdated).Truncate(time.Second))))
+			b.WriteString(dimStyle.Render(fmt.Sprintf("Updated %s ago", time.Since(m.jobCPUTopUpdated).Truncate(time.Second))))
 		}
-	case m.cpuTopDataHost == host && len(m.cpuTopEntries) == 0:
+	case m.jobCPUTopDataHost == host && len(m.jobCPUTopEntries) == 0:
 		b.WriteString(dimStyle.Render("No active processes reported"))
 		b.WriteString("\n")
 	default:
-		if m.cpuTopRequestedHost != "" {
+		if m.jobCPUTopRequestedHost != "" {
 			b.WriteString(dimStyle.Render(m.spinner.View() + " Loading..."))
 		} else {
 			b.WriteString(dimStyle.Render("Select a job to load CPU data"))
@@ -3159,6 +3214,94 @@ func (m Model) renderHostDetail(height int) string {
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
 }
 
+func (m Model) renderHostCPUTop(height int) string {
+	if len(m.hosts) == 0 || m.selectedHostIdx >= len(m.hosts) {
+		return dimStyle.Render("No host selected")
+	}
+	host := m.hosts[m.selectedHostIdx]
+	hostName := host.Name
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Top CPU processes on %s\n\n", hostName))
+
+	switch {
+	case m.hostCPUTopLoading && m.hostCPUTopRequestedHost == hostName:
+		b.WriteString(dimStyle.Render(m.spinner.View() + " Loading..."))
+		b.WriteString("\n")
+	case m.hostCPUTopError != "" && m.hostCPUTopDataHost == hostName:
+		b.WriteString(errorStyle.Render(fmt.Sprintf("Failed to fetch: %s", m.hostCPUTopError)))
+		b.WriteString("\n")
+	case m.hostCPUTopDataHost == hostName && len(m.hostCPUTopEntries) > 0:
+		userWidth := 10
+		cpuWidth := 6
+		jobWidth := 8
+		panelWidth := m.width - 6
+		if panelWidth < 40 {
+			panelWidth = 40
+		}
+		processWidth := panelWidth - (userWidth + cpuWidth + jobWidth + 6)
+		if processWidth < 20 {
+			processWidth = 20
+		}
+
+		header := fmt.Sprintf(" %-*s %*s %-*s %s", userWidth, "User", cpuWidth, "%CPU", jobWidth, "Job", "Process")
+		b.WriteString(lipgloss.NewStyle().Bold(true).Render(header))
+		b.WriteString("\n")
+
+		totalCPU := 0.0
+		for _, proc := range m.hostCPUTopEntries {
+			jobLabel := "—"
+			if proc.JobID > 0 {
+				jobLabel = fmt.Sprintf("#%d", proc.JobID)
+			}
+			process := proc.Command
+			if process == "" {
+				process = fmt.Sprintf("PID %d", proc.PID)
+			}
+			process = truncate(shortenCommandPath(process), processWidth)
+			line := fmt.Sprintf(" %-*s %*.1f %-*s %s",
+				userWidth, truncate(proc.User, userWidth),
+				cpuWidth, proc.CPU,
+				jobWidth, jobLabel,
+				process,
+			)
+			b.WriteString(line)
+			b.WriteString("\n")
+			totalCPU += proc.CPU
+		}
+
+		coreEstimate := ""
+		if totalCPU > 0 {
+			coreEstimate = fmt.Sprintf("(~%.0f cores)", totalCPU/100.0)
+		}
+		totalLine := fmt.Sprintf(" %-*s %*.1f %-*s %s",
+			userWidth, "TOTAL",
+			cpuWidth, totalCPU,
+			jobWidth, "",
+			dimStyle.Render(coreEstimate),
+		)
+		b.WriteString(totalLine)
+		b.WriteString("\n")
+
+		if !m.hostCPUTopUpdated.IsZero() {
+			b.WriteString("\n")
+			b.WriteString(dimStyle.Render(fmt.Sprintf("Updated %s ago", time.Since(m.hostCPUTopUpdated).Truncate(time.Second))))
+		}
+	case m.hostCPUTopDataHost == hostName && len(m.hostCPUTopEntries) == 0:
+		b.WriteString(dimStyle.Render("No active processes reported"))
+		b.WriteString("\n")
+	default:
+		if m.hostCPUTopRequestedHost != "" {
+			b.WriteString(dimStyle.Render(m.spinner.View() + " Loading..."))
+		} else {
+			b.WriteString(dimStyle.Render("Select a host to load CPU data"))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
 // renderHostTabHeader renders the tab header for the host detail panel
 func (m Model) renderHostTabHeader() string {
 	var tabs []string
@@ -3170,6 +3313,14 @@ func (m Model) renderHostTabHeader() string {
 		tabs = append(tabs, activeTabStyle.Render(infoLabel))
 	} else {
 		tabs = append(tabs, inactiveTabStyle.Render(infoLabel))
+	}
+
+	// CPU tab
+	cpuLabel := "CPU"
+	if m.hostDetailTab == HostDetailTabCPU {
+		tabs = append(tabs, activeTabStyle.Render(cpuLabel))
+	} else {
+		tabs = append(tabs, inactiveTabStyle.Render(cpuLabel))
 	}
 
 	// GPU Summary tab
@@ -3372,9 +3523,13 @@ func (m Model) renderGPUSummary(height int) string {
 	lines = append(lines, "")
 
 	if hasStats {
+		const (
+			gpuHeaderFmt = "%-4s %-5s %-7s %-6s %-6s %-22s %s"
+			gpuRowFmt    = "%-4d %-5d %-7d %-6s %-6s %-22s %s"
+		)
 		// Combined table with job counts and GPU stats
-		lines = append(lines, "GPU  Run  Queue  Temp  Util  Memory            Name")
-		lines = append(lines, "───  ───  ─────  ────  ────  ────────────────  ────")
+		lines = append(lines, fmt.Sprintf(gpuHeaderFmt, "GPU", "Run", "Queue", "Temp", "Util", "Memory", "Name"))
+		lines = append(lines, fmt.Sprintf(gpuHeaderFmt, "───", "───", "─────", "────", "────", "──────────────────────", "────"))
 
 		for _, gpuIdx := range gpuIndices {
 			counts := gpuJobCounts[gpuIdx]
@@ -3386,8 +3541,8 @@ func (m Model) renderGPUSummary(height int) string {
 				}
 			}
 
-			temp := "  -"
-			util := "  -"
+			temp := "-"
+			util := "-"
 			mem := "-"
 			gpuName := ""
 
@@ -3410,7 +3565,7 @@ func (m Model) renderGPUSummary(height int) string {
 					}
 				}
 			}
-			lines = append(lines, fmt.Sprintf("%3d  %3d  %5d  %5s %5s  %-16s  %s",
+			lines = append(lines, fmt.Sprintf(gpuRowFmt,
 				gpuIdx, counts.running, counts.queued, temp, util, mem, gpuName))
 		}
 	} else {
@@ -3533,6 +3688,8 @@ func (m Model) renderHostDetailPanel(height int) string {
 	case m.hostDetailTab == HostDetailTabInfo:
 		// Use the existing renderHostDetail
 		return m.renderHostDetail(height)
+	case m.hostDetailTab == HostDetailTabCPU:
+		content = m.renderHostCPUTop(height - 3)
 	case m.hostDetailTab == HostDetailTabGPUSummary:
 		content = m.renderGPUSummary(height - 3)
 	case m.hostDetailTab.IsGPUDetailTab():
@@ -3992,7 +4149,7 @@ func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 func (m *Model) switchToCPUTab() (Model, tea.Cmd) {
 	m.detailTab = DetailTabCPU
 	job := m.getTargetJob()
-	if cmd := m.requestCPUTop(job); cmd != nil {
+	if cmd := m.requestJobCPUTop(job); cmd != nil {
 		return *m, cmd
 	}
 	return *m, nil
@@ -4010,28 +4167,59 @@ func (m *Model) switchToJobTab(tab DetailTab) (Model, tea.Cmd) {
 	}
 }
 
-// cycleHostsTab cycles through host detail tabs (Info, GPUs, GPU 0, GPU 1, ...)
+func (m *Model) switchToHostCPUTab() (Model, tea.Cmd) {
+	m.hostDetailTab = HostDetailTabCPU
+	if len(m.hosts) == 0 || m.selectedHostIdx < 0 || m.selectedHostIdx >= len(m.hosts) {
+		m.hostCPUTopEntries = nil
+		m.hostCPUTopError = ""
+		m.hostCPUTopRequestedHost = ""
+		m.hostCPUTopDataHost = ""
+		m.hostCPUTopLoading = false
+		return *m, nil
+	}
+	host := m.hosts[m.selectedHostIdx]
+	if cmd := m.requestHostCPUTop(host.Name); cmd != nil {
+		return *m, cmd
+	}
+	return *m, nil
+}
+
+func (m *Model) switchToHostTab(tab HostDetailTab) (Model, tea.Cmd) {
+	switch tab {
+	case HostDetailTabCPU:
+		return m.switchToHostCPUTab()
+	default:
+		m.hostDetailTab = tab
+		return *m, nil
+	}
+}
+
+// cycleHostsTab cycles through host detail tabs (Info, CPU, GPUs, GPU 0, GPU 1, ...)
 func (m *Model) cycleHostsTab(forward bool) (Model, tea.Cmd) {
 	gpuIndices := m.getHostGPUIndices()
-	maxTab := HostDetailTabGPUBase + HostDetailTab(len(gpuIndices)-1)
-	if len(gpuIndices) == 0 {
-		maxTab = HostDetailTabGPUSummary
+	order := []HostDetailTab{HostDetailTabInfo, HostDetailTabCPU, HostDetailTabGPUSummary}
+	for i := range gpuIndices {
+		order = append(order, HostDetailTabGPUBase+HostDetailTab(i))
+	}
+	if len(order) == 0 {
+		order = []HostDetailTab{HostDetailTabInfo}
+	}
+
+	current := 0
+	for i, tab := range order {
+		if tab == m.hostDetailTab {
+			current = i
+			break
+		}
 	}
 
 	if forward {
-		if m.hostDetailTab < maxTab {
-			m.hostDetailTab++
-		} else {
-			m.hostDetailTab = HostDetailTabInfo
-		}
+		current = (current + 1) % len(order)
 	} else {
-		if m.hostDetailTab > HostDetailTabInfo {
-			m.hostDetailTab--
-		} else {
-			m.hostDetailTab = maxTab
-		}
+		current = (current - 1 + len(order)) % len(order)
 	}
-	return *m, nil
+
+	return m.switchToHostTab(order[current])
 }
 
 func (m Model) startHostRefreshTicker() tea.Cmd {
@@ -4239,7 +4427,7 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 	var cmds []tea.Cmd
 	// Fetch CPU summary if that tab is active
 	if m.detailTab == DetailTabCPU {
-		if cmd := m.requestCPUTop(job); cmd != nil {
+		if cmd := m.requestJobCPUTop(job); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -4253,6 +4441,20 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 
 	if len(cmds) > 0 {
 		return tea.Batch(cmds...)
+	}
+	return nil
+}
+
+func (m *Model) handleHostSelectionChanged() tea.Cmd {
+	if len(m.hosts) == 0 || m.selectedHostIdx < 0 || m.selectedHostIdx >= len(m.hosts) {
+		if m.hostDetailTab == HostDetailTabCPU {
+			return m.requestHostCPUTop("")
+		}
+		return nil
+	}
+	host := m.hosts[m.selectedHostIdx]
+	if m.hostDetailTab == HostDetailTabCPU {
+		return m.requestHostCPUTop(host.Name)
 	}
 	return nil
 }
@@ -4412,7 +4614,7 @@ func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
 	}
 }
 
-func (m Model) fetchTopProcesses(host string) tea.Cmd {
+func (m Model) fetchTopProcesses(host string, jobView bool) tea.Cmd {
 	if host == "" {
 		return nil
 	}
@@ -4422,26 +4624,45 @@ func (m Model) fetchTopProcesses(host string) tea.Cmd {
 			host:      host,
 			processes: procs,
 			err:       err,
+			jobView:   jobView,
 		}
 	}
 }
 
-func (m *Model) requestCPUTop(job *db.Job) tea.Cmd {
+func (m *Model) requestJobCPUTop(job *db.Job) tea.Cmd {
 	if job == nil {
-		m.cpuTopEntries = nil
-		m.cpuTopError = ""
-		m.cpuTopRequestedHost = ""
-		m.cpuTopDataHost = ""
-		m.cpuTopLoading = false
+		m.jobCPUTopEntries = nil
+		m.jobCPUTopError = ""
+		m.jobCPUTopRequestedHost = ""
+		m.jobCPUTopDataHost = ""
+		m.jobCPUTopLoading = false
 		return nil
 	}
-	if m.cpuTopDataHost != job.Host {
-		m.cpuTopEntries = nil
+	if m.jobCPUTopDataHost != job.Host {
+		m.jobCPUTopEntries = nil
 	}
-	m.cpuTopLoading = true
-	m.cpuTopError = ""
-	m.cpuTopRequestedHost = job.Host
-	return m.fetchTopProcesses(job.Host)
+	m.jobCPUTopLoading = true
+	m.jobCPUTopError = ""
+	m.jobCPUTopRequestedHost = job.Host
+	return m.fetchTopProcesses(job.Host, true)
+}
+
+func (m *Model) requestHostCPUTop(hostName string) tea.Cmd {
+	if hostName == "" {
+		m.hostCPUTopEntries = nil
+		m.hostCPUTopError = ""
+		m.hostCPUTopRequestedHost = ""
+		m.hostCPUTopDataHost = ""
+		m.hostCPUTopLoading = false
+		return nil
+	}
+	if m.hostCPUTopDataHost != hostName {
+		m.hostCPUTopEntries = nil
+	}
+	m.hostCPUTopLoading = true
+	m.hostCPUTopError = ""
+	m.hostCPUTopRequestedHost = hostName
+	return m.fetchTopProcesses(hostName, false)
 }
 
 // fetchQuickProgress quickly greps the log file for the last progress line
@@ -5343,6 +5564,47 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-1] + "…"
+}
+
+func shortenCommandPath(cmd string) string {
+	if cmd == "" {
+		return ""
+	}
+	prefixes := []string{"/home/", "/usr/home/", "/Users/"}
+	result := cmd
+	for _, prefix := range prefixes {
+		result = replaceHomePrefix(result, prefix)
+	}
+	return result
+}
+
+func replaceHomePrefix(s, prefix string) string {
+	idx := strings.Index(s, prefix)
+	for idx != -1 {
+		start := idx + len(prefix)
+		end := start
+		for end < len(s) && isUsernameChar(s[end]) {
+			end++
+		}
+		if end == start {
+			break
+		}
+		username := s[start:end]
+		replacement := "~" + username
+		if localUserName != "" && strings.EqualFold(username, localUserName) {
+			replacement = "~"
+		}
+		s = s[:idx] + replacement + s[end:]
+		idx = strings.Index(s, prefix)
+	}
+	return s
+}
+
+func isUsernameChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '_' || b == '-' || b == '.'
 }
 
 // formatStartTime formats a start time as relative ("2h ago") for recent jobs
