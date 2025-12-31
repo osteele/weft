@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -15,6 +16,11 @@ const (
 	scriptsDir      = "~/.cache/remote-jobs/scripts"
 	queueRunnerPath = "~/.cache/remote-jobs/scripts/queue-runner.sh"
 )
+
+// QueueDir returns the remote directory used for queue files.
+func QueueDir() string {
+	return queueDir
+}
 
 var (
 	localBuildHeader = firstLine(scripts.QueueRunnerScript)
@@ -137,4 +143,113 @@ func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 		return false, fmt.Errorf("start queue runner: %s", strings.TrimSpace(stderr))
 	}
 	return true, nil
+}
+
+// Runner models a queue runner on a specific host/queue combination.
+type Runner struct {
+	host  string
+	queue string
+}
+
+// NewRunner creates a runner manager for the given host and queue.
+func NewRunner(host, queue string) *Runner {
+	return &Runner{host: host, queue: queue}
+}
+
+// Host returns the runner host.
+func (r *Runner) Host() string { return r.host }
+
+// Queue returns the queue name.
+func (r *Runner) Queue() string { return r.queue }
+
+// SessionName returns the tmux session associated with this runner.
+func (r *Runner) SessionName() string { return fmt.Sprintf("rj-queue-%s", r.queue) }
+
+// EnsureStarted ensures the runner is active, deploying scripts and starting tmux if needed.
+func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {
+	runnerCmd := RunnerCommand(r.queue, envPrefix)
+	return EnsureRunnerStarted(r.host, r.queue, runnerCmd)
+}
+
+// SendStopSignal signals the runner to stop after the current job.
+func (r *Runner) SendStopSignal() error {
+	stopFile := fmt.Sprintf("%s/%s.stop", queueDir, r.queue)
+	touchCmd := fmt.Sprintf("touch %s", stopFile)
+	if _, stderr, err := ssh.Run(r.host, touchCmd); err != nil {
+		return fmt.Errorf("create stop signal: %s", strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
+// WaitForStop waits until the runner's tmux session exits or timeout elapses.
+func (r *Runner) WaitForStop(timeout time.Duration) error {
+	session := r.SessionName()
+	deadline := time.Now().Add(timeout)
+	for {
+		exists, err := ssh.TmuxSessionExists(r.host, session)
+		if err != nil {
+			return fmt.Errorf("check queue runner: %w", err)
+		}
+		if !exists {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("queue runner did not stop within %s", timeout)
+		}
+		time.Sleep(3 * time.Second)
+	}
+}
+
+// IsRunning reports whether the runner tmux session exists.
+func (r *Runner) IsRunning() (bool, error) {
+	return ssh.TmuxSessionExists(r.host, r.SessionName())
+}
+
+// UpgradeResult describes the outcome of an upgrade attempt.
+type UpgradeResult struct {
+	LocalBuild      int
+	RemoteBuild     int
+	RemoteError     error
+	SkippedNewer    bool
+	AlreadyUpToDate bool
+	Updated         bool
+	Started         bool
+}
+
+// Upgrade ensures the remote script matches the embedded version, restarting if needed.
+func (r *Runner) Upgrade(envPrefix string, timeout time.Duration) (UpgradeResult, error) {
+	result := UpgradeResult{LocalBuild: localBuildNumber}
+	remoteBuild, err := RemoteBuildNumber(r.host)
+	if err != nil {
+		result.RemoteError = err
+		remoteBuild = -1
+	}
+	result.RemoteBuild = remoteBuild
+
+	if remoteBuild > localBuildNumber && remoteBuild != -1 {
+		result.SkippedNewer = true
+		return result, nil
+	}
+	if remoteBuild == localBuildNumber && remoteBuild != -1 {
+		result.AlreadyUpToDate = true
+		return result, nil
+	}
+
+	running, err := r.IsRunning()
+	if err != nil {
+		return result, err
+	}
+	if running {
+		if err := r.SendStopSignal(); err != nil {
+			return result, err
+		}
+		if err := r.WaitForStop(timeout); err != nil {
+			return result, err
+		}
+	}
+
+	started, err := r.EnsureStarted(envPrefix)
+	result.Updated = true
+	result.Started = started
+	return result, err
 }

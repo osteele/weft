@@ -19,7 +19,6 @@ import (
 
 const (
 	defaultQueueName = queuefile.DefaultQueueName
-	queueDir         = "~/.cache/remote-jobs/queue"
 )
 
 var queueCmd = &cobra.Command{
@@ -306,15 +305,27 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	// Deploy notify script if Slack is configured
 	slackWebhook := getSlackWebhook()
-	if slackWebhook != "" {
-		notifyScript := "/tmp/remote-jobs-notify-slack.sh"
-		writeNotifyCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", notifyScript, string(notifySlackScript))
-		if _, _, err := ssh.Run(host, writeNotifyCmd); err == nil {
-			ssh.Run(host, fmt.Sprintf("chmod +x '%s'", notifyScript))
-		}
-	}
+	deploySlackScript(host, slackWebhook)
 
 	// Build environment variables for the runner
+	envVars := buildRunnerEnvPrefix(slackWebhook)
+
+	runner := queuerunner.NewRunner(host, queue)
+	return runner.EnsureStarted(envVars)
+}
+
+func deploySlackScript(host, slackWebhook string) {
+	if slackWebhook == "" {
+		return
+	}
+	notifyScript := "/tmp/remote-jobs-notify-slack.sh"
+	writeNotifyCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", notifyScript, string(notifySlackScript))
+	if _, _, err := ssh.Run(host, writeNotifyCmd); err == nil {
+		ssh.Run(host, fmt.Sprintf("chmod +x '%s'", notifyScript))
+	}
+}
+
+func buildRunnerEnvPrefix(slackWebhook string) string {
 	envVars := ""
 	if slackWebhook != "" {
 		envVars = fmt.Sprintf("REMOTE_JOBS_SLACK_WEBHOOK='%s' ", slackWebhook)
@@ -328,10 +339,7 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 			envVars += fmt.Sprintf("REMOTE_JOBS_SLACK_MIN_DURATION='%s' ", v)
 		}
 	}
-
-	// Start queue runner in tmux
-	runnerCmd := queuerunner.RunnerCommand(queue, envVars)
-	return queuerunner.EnsureRunnerStarted(host, queue, runnerCmd)
+	return envVars
 }
 
 func runQueueStart(cmd *cobra.Command, args []string) error {
@@ -372,40 +380,14 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 func runQueueStop(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	if err := sendQueueStopSignal(host, queueName); err != nil {
+	runner := queuerunner.NewRunner(host, queueName)
+	if err := runner.SendStopSignal(); err != nil {
 		return err
 	}
 	fmt.Printf("Stop signal sent to queue '%s' on %s\n", queueName, host)
 	fmt.Println("The queue runner will exit after the current job completes.")
 
 	return nil
-}
-
-func sendQueueStopSignal(host, queue string) error {
-	stopFile := fmt.Sprintf("%s/%s.stop", queueDir, queue)
-	touchCmd := fmt.Sprintf("touch %s", stopFile)
-	if _, stderr, err := ssh.Run(host, touchCmd); err != nil {
-		return fmt.Errorf("create stop signal: %s", stderr)
-	}
-	return nil
-}
-
-func waitForQueueRunnerStop(host, queue string, timeout time.Duration) error {
-	runnerSession := fmt.Sprintf("rj-queue-%s", queue)
-	deadline := time.Now().Add(timeout)
-	for {
-		exists, err := ssh.TmuxSessionExists(host, runnerSession)
-		if err != nil {
-			return fmt.Errorf("check queue runner: %w", err)
-		}
-		if !exists {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("queue runner did not stop within %s", timeout)
-		}
-		time.Sleep(3 * time.Second)
-	}
 }
 
 func runQueueList(cmd *cobra.Command, args []string) error {
@@ -418,12 +400,12 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	// Get currently running job
-	currentFile := fmt.Sprintf("%s/%s.current", queueDir, queueName)
+	currentFile := fmt.Sprintf("%s/%s.current", queuerunner.QueueDir(), queueName)
 	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
 	currentID = strings.TrimSpace(currentID)
 
 	// Get queue contents
-	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
+	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
 	queueContents, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", queueFile))
 
 	// Collect all job entries (current + waiting)
@@ -516,7 +498,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get currently running job
-	currentFile := fmt.Sprintf("%s/%s.current", queueDir, queueName)
+	currentFile := fmt.Sprintf("%s/%s.current", queuerunner.QueueDir(), queueName)
 	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
 	currentID = strings.TrimSpace(currentID)
 
@@ -527,13 +509,13 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get queue depth
-	queueFile := fmt.Sprintf("%s/%s.queue", queueDir, queueName)
+	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
 	countOutput, _, _ := ssh.Run(host, fmt.Sprintf("wc -l < %s 2>/dev/null || echo 0", queueFile))
 	countOutput = strings.TrimSpace(countOutput)
 	fmt.Printf("Jobs waiting: %s\n", countOutput)
 
 	// Check for stop signal
-	stopFile := fmt.Sprintf("%s/%s.stop", queueDir, queueName)
+	stopFile := fmt.Sprintf("%s/%s.stop", queuerunner.QueueDir(), queueName)
 	stopExists, _, _ := ssh.Run(host, fmt.Sprintf("test -f %s && echo yes || echo no", stopFile))
 	if strings.TrimSpace(stopExists) == "yes" {
 		fmt.Println("\nSTOP signal pending - runner will exit after current job")
@@ -544,46 +526,34 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 
 func runQueueUpgrade(cmd *cobra.Command, args []string) error {
 	host := args[0]
-	localBuild := queuerunner.LocalBuildNumber()
-	remoteBuild, err := queuerunner.RemoteBuildNumber(host)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
-	}
 
-	if remoteBuild > localBuild && remoteBuild != -1 {
-		fmt.Printf("Queue runner on %s is newer (remote build %d, local build %d); skipping downgrade\n", host, remoteBuild, localBuild)
-		return nil
-	}
-	if remoteBuild == localBuild && remoteBuild != -1 {
-		fmt.Printf("Queue runner on %s already up to date (build %d)\n", host, remoteBuild)
-		return nil
-	}
+	runner := queuerunner.NewRunner(host, queueName)
+	slackWebhook := getSlackWebhook()
+	deploySlackScript(host, slackWebhook)
+	envPrefix := buildRunnerEnvPrefix(slackWebhook)
 
-	fmt.Printf("Updating queue runner on %s (remote build %d, local build %d)\n", host, remoteBuild, localBuild)
-	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
-	exists, err := ssh.TmuxSessionExists(host, runnerSession)
-	if err != nil {
-		return fmt.Errorf("check runner: %w", err)
-	}
-	if exists {
-		if err := sendQueueStopSignal(host, queueName); err != nil {
-			return err
-		}
-		fmt.Println("Waiting for queue runner to stop...")
-		if err := waitForQueueRunnerStop(host, queueName, 2*time.Minute); err != nil {
-			return err
-		}
-	}
-
-	started, err := ensureQueueRunnerStarted(host, queueName)
+	result, err := runner.Upgrade(envPrefix, 2*time.Minute)
 	if err != nil {
 		return err
 	}
-	if started {
-		fmt.Println("Queue runner restarted with the latest script.")
-	} else {
-		fmt.Println("Queue runner already running with the latest script.")
+	if result.RemoteError != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %v\n", result.RemoteError)
 	}
+
+	switch {
+	case result.SkippedNewer:
+		fmt.Printf("Queue runner on %s is newer (remote build %d, local build %d); skipping downgrade\n", host, result.RemoteBuild, result.LocalBuild)
+	case result.AlreadyUpToDate:
+		fmt.Printf("Queue runner on %s already up to date (build %d)\n", host, result.LocalBuild)
+	default:
+		fmt.Printf("Updating queue runner on %s (remote build %d, local build %d)\n", host, result.RemoteBuild, result.LocalBuild)
+		if result.Started {
+			fmt.Println("Queue runner restarted with the latest script.")
+		} else {
+			fmt.Println("Queue runner already running with the latest script.")
+		}
+	}
+
 	return nil
 }
 
@@ -629,7 +599,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		// Remove from remote queue file
 		// The queue file format is: job_id\tworking_dir\tcommand\tdescription\tenv_vars\tdependencies
 		// We filter out lines starting with this job ID
-		queueFile := fmt.Sprintf("%s/%s.queue", queueDir, jobQueueName)
+		queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), jobQueueName)
 		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
 			jobID, queueFile, queueFile, queueFile, queueFile)
 

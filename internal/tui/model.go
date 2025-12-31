@@ -31,14 +31,15 @@ import (
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/llm"
 	"github.com/osteele/remote-jobs/internal/logcache"
+	"github.com/osteele/remote-jobs/internal/logfiles"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/progress"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
+	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 // Default intervals for background operations
@@ -398,7 +399,7 @@ type hostDeletedMsg struct {
 
 type queueStatusMsg struct {
 	hostName string
-	info     *QueueStatusInfo
+	info     *queuerunner.StatusInfo
 }
 
 type hostJobsGPUMsg struct {
@@ -408,12 +409,12 @@ type hostJobsGPUMsg struct {
 
 type processStatsMsg struct {
 	jobID int64
-	stats *ssh.ProcessStats
+	stats *remote.ProcessStats
 }
 
 type cpuTopMsg struct {
 	host      string
-	processes []ssh.TopProcess
+	processes []remote.TopProcess
 	err       error
 	jobView   bool
 }
@@ -446,12 +447,13 @@ type Model struct {
 	viewMode ViewMode
 
 	// Jobs data
-	allJobs     []*db.Job
-	jobs        []*db.Job
-	jobList     list.Model // bubbles/list for job selection
-	selectedJob *db.Job
-	jobFilter   jobFilterMode
-	jobSort     jobSortMode
+	allJobs            []*db.Job
+	jobs               []*db.Job
+	jobList            list.Model // bubbles/list for job selection
+	selectedJob        *db.Job
+	jobFilter          jobFilterMode
+	jobSort            jobSortMode
+	jobSelectionActive bool // false when user has deselected the highlighted job
 
 	// Hosts data
 	hosts           []*Host
@@ -471,12 +473,12 @@ type Model struct {
 	flashExpiry  time.Time
 
 	// Process stats for running jobs
-	processStats      *ssh.ProcessStats
-	prevProcessStats  *ssh.ProcessStats // Previous sample for CPU% calculation
+	processStats      *remote.ProcessStats
+	prevProcessStats  *remote.ProcessStats // Previous sample for CPU% calculation
 	processStatsJobID int64
 
 	// Job CPU usage view (per-host snapshot)
-	jobCPUTopEntries       []ssh.TopProcess
+	jobCPUTopEntries       []remote.TopProcess
 	jobCPUTopDataHost      string
 	jobCPUTopRequestedHost string
 	jobCPUTopLoading       bool
@@ -484,7 +486,7 @@ type Model struct {
 	jobCPUTopUpdated       time.Time
 
 	// Host CPU usage view (hosts tab)
-	hostCPUTopEntries       []ssh.TopProcess
+	hostCPUTopEntries       []remote.TopProcess
 	hostCPUTopDataHost      string
 	hostCPUTopRequestedHost string
 	hostCPUTopLoading       bool
@@ -656,6 +658,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	return Model{
 		database:                database,
 		jobList:                 jobList,
+		jobSelectionActive:      true,
 		jobFilter:               jobFilterRecent,
 		inputs:                  inputs,
 		spinner:                 s,
@@ -1305,7 +1308,16 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			clickedIndex := start + clickedRow
 			if clickedIndex >= 0 && clickedIndex < len(m.jobs) {
 				prevIdx := m.jobList.Index()
+				if clickedIndex == prevIdx {
+					if m.jobSelectionActive {
+						m.clearJobSelection()
+						return m, nil
+					}
+					m.jobSelectionActive = true
+					return m, m.handleSelectionChanged()
+				}
 				m.jobList.Select(clickedIndex)
+				m.jobSelectionActive = true
 				if m.jobList.Index() != prevIdx {
 					return m, m.handleSelectionChanged()
 				}
@@ -1451,6 +1463,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.jobList.Index() != prevIdx {
 			return m, tea.Batch(cmd, m.handleSelectionChanged())
 		}
+		if !m.jobSelectionActive {
+			return m, tea.Batch(cmd, m.handleSelectionChanged())
+		}
 		return m, cmd
 
 	case key.Matches(msg, keys.Down):
@@ -1468,6 +1483,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		newList, cmd := m.jobList.Update(msg)
 		m.jobList = newList
 		if m.jobList.Index() != prevIdx {
+			return m, tea.Batch(cmd, m.handleSelectionChanged())
+		}
+		if !m.jobSelectionActive {
 			return m, tea.Batch(cmd, m.handleSelectionChanged())
 		}
 		return m, cmd
@@ -1502,6 +1520,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
 					// Enter logs mode
 					m.detailTab = DetailTabLogs
+					m.jobSelectionActive = true
 					m.selectedJob = m.jobs[idx]
 					m.logLoading = true
 					// Show cached content immediately while fetching fresh logs
@@ -1526,10 +1545,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Escape):
-		m.detailTab = DetailTabDetails
-		m.selectedJob = nil
-		m.logContent = ""
-		m.logStale = false
+		m.clearJobSelection()
 		m.flashMessage = ""
 		return m, nil
 
@@ -2097,7 +2113,7 @@ func (m Model) renderJobList(height int) string {
 				status, timeCol, display)
 		}
 
-		if i == selectedIdx {
+		if i == selectedIdx && m.jobSelectionActive {
 			line = selectedStyle.Width(m.width - 4).Render(line)
 		} else if m.isHostDisconnectedLong(job) {
 			// Dim jobs on hosts disconnected for more than 30 minutes
@@ -2294,6 +2310,9 @@ func (m Model) renderJobCPUTop(height int) string {
 }
 
 func (m Model) renderJobDetails(height int) string {
+	if !m.jobSelectionActive {
+		return m.renderJobSummaryPanel(height)
+	}
 	var content string
 	var b strings.Builder
 
@@ -2586,6 +2605,86 @@ func (m Model) renderJobDetails(height int) string {
 	panelContent += content
 
 	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+func (m Model) renderJobSummaryPanel(height int) string {
+	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Underline(true)
+	headerStyle := lipgloss.NewStyle().Bold(true)
+
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("Hosts Overview"))
+	b.WriteString("\n")
+
+	if len(m.hosts) == 0 {
+		b.WriteString(dimStyle.Render("No hosts have reported yet. Run a job to gather host data."))
+	} else {
+		header := fmt.Sprintf(" %-12s %-10s %-16s %-5s %-7s %-6s %-5s %-5s",
+			"HOST", "STATUS", "ARCH", "RUN", "QUEUE", "LOAD", "CPU", "RAM")
+		b.WriteString(headerStyle.Render(header))
+		b.WriteString("\n")
+
+		for _, host := range m.hosts {
+			running, _ := m.jobCountsForHost(host.Name)
+			load := host.LoadAvgShort()
+			if load == "" {
+				load = "-"
+			}
+			line := fmt.Sprintf(" %-12s %-10s %-16s %-5d %-7s %-6s %-5s %-5s",
+				truncate(host.Name, 12),
+				strings.TrimSpace(m.formatHostStatus(host)),
+				truncate(host.Arch, 16),
+				running,
+				m.queueSummaryForHost(host),
+				load,
+				host.CPUUtilization(),
+				host.RAMUtilization(),
+			)
+			b.WriteString(m.styleForHostStatus(host.Status).Render(line))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(sectionStyle.Render("System Summary"))
+	b.WriteString("\n")
+	b.WriteString(m.renderSystemSummaryLines(m.width - 6))
+
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(b.String())
+}
+
+func (m Model) renderSystemSummaryLines(width int) string {
+	if width < 20 {
+		width = 20
+	}
+	if len(m.hosts) == 0 {
+		return dimStyle.Render("No hosts have reported yet.")
+	}
+	if !m.showHostSummaries {
+		return dimStyle.Render("AI host summaries are disabled (press d in Hosts view to enable).")
+	}
+	if m.llmGenerator == nil {
+		return dimStyle.Render("Host summaries unavailable (LLM generator not running).")
+	}
+	var lines []string
+	for _, host := range m.hosts {
+		summary := strings.TrimSpace(m.hostSummaries[host.Name])
+		switch {
+		case summary == "" && m.hostSummaryPending[host.Name]:
+			summary = "Generating summary..."
+		case summary == "":
+			summary = "No summary available yet."
+		}
+		wrapped := wrapText(summary, width-4)
+		segments := strings.Split(wrapped, "\n")
+		for i, segment := range segments {
+			prefix := "  "
+			if i == 0 {
+				prefix = fmt.Sprintf("%s ", lipgloss.NewStyle().Bold(true).Render(truncate(host.Name, 12)))
+			}
+			lines = append(lines, prefix+segment)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // parseMiB extracts a MiB value from various memory string formats
@@ -4124,6 +4223,7 @@ func (m *Model) cycleJobsTab(forward bool) (Model, tea.Cmd) {
 // switchToLogsTab switches to the Logs tab and fetches log content
 func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 	m.detailTab = DetailTabLogs
+	m.jobSelectionActive = true
 	idx := m.jobList.Index()
 	if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
 		m.selectedJob = m.jobs[idx]
@@ -4149,6 +4249,7 @@ func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 
 func (m *Model) switchToCPUTab() (Model, tea.Cmd) {
 	m.detailTab = DetailTabCPU
+	m.jobSelectionActive = true
 	job := m.getTargetJob()
 	if cmd := m.requestJobCPUTop(job); cmd != nil {
 		return *m, cmd
@@ -4274,7 +4375,7 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 		}
 
 		// Use short timeout to avoid blocking UI
-		stdout, stderr, err := ssh.RunWithTimeout(hostName, HostInfoCommand, 10*time.Second)
+		stdout, stderr, err := remote.RunWithTimeout(hostName, HostInfoCommand, 10*time.Second)
 		if err != nil {
 			host.Status = HostStatusOffline
 			host.Error = strings.TrimSpace(stderr)
@@ -4313,15 +4414,11 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 
 func (m Model) fetchQueueStatus(hostName string) tea.Cmd {
 	return func() tea.Msg {
-		// Use short timeout to avoid blocking UI
-		stdout, _, err := ssh.RunWithTimeout(hostName, QueueStatusCommand("default"), 5*time.Second)
+		runner := queuerunner.NewRunner(hostName, queuefile.DefaultQueueName)
+		info, err := runner.Status(5 * time.Second)
 		if err != nil {
-			// On error, return empty status (will show as "-")
-			return queueStatusMsg{hostName: hostName, info: &QueueStatusInfo{}}
+			return queueStatusMsg{hostName: hostName, info: &queuerunner.StatusInfo{}}
 		}
-
-		// Parse the output
-		info := ParseQueueStatus(stdout)
 		return queueStatusMsg{hostName: hostName, info: info}
 	}
 }
@@ -4336,17 +4433,17 @@ func (m Model) fetchHostJobsGPU(hostName string) tea.Cmd {
 		}
 
 		// Build list of job PID info
-		var jobPIDInfos []ssh.JobPIDInfo
+		var jobPIDInfos []remote.JobPIDInfo
 		for _, job := range jobs {
 			pidFile := session.JobPidFile(job.ID, job.StartTime)
-			jobPIDInfos = append(jobPIDInfos, ssh.JobPIDInfo{
+			jobPIDInfos = append(jobPIDInfos, remote.JobPIDInfo{
 				JobID:   job.ID,
 				PIDFile: pidFile,
 			})
 		}
 
 		// Get GPU mappings via SSH script
-		mappings, err := ssh.GetJobGPUMappings(hostName, scripts.GPUJobMappingScript, jobPIDInfos)
+		mappings, err := remote.GetJobGPUMappings(hostName, scripts.GPUJobMappingScript, jobPIDInfos)
 		if err != nil {
 			// Don't fail - just return jobs without GPU info
 			mappings = nil
@@ -4379,6 +4476,9 @@ func (m Model) fetchHostJobsGPU(hostName string) tea.Cmd {
 
 // getTargetJob returns the job to act on - either the selected job or the highlighted job
 func (m Model) getTargetJob() *db.Job {
+	if !m.jobSelectionActive {
+		return nil
+	}
 	if m.detailTab == DetailTabLogs && m.selectedJob != nil {
 		return m.selectedJob
 	}
@@ -4389,9 +4489,22 @@ func (m Model) getTargetJob() *db.Job {
 	return nil
 }
 
+func (m *Model) clearJobSelection() {
+	m.jobSelectionActive = false
+	m.detailTab = DetailTabDetails
+	m.selectedJob = nil
+	m.logContent = ""
+	m.logStale = false
+	m.logLoading = false
+	m.processStats = nil
+	m.prevProcessStats = nil
+	m.processStatsJobID = 0
+}
+
 // handleSelectionChanged is called when the job list selection changes.
 // It clears cached process stats and fetches logs/stats for the new selection.
 func (m *Model) handleSelectionChanged() tea.Cmd {
+	m.jobSelectionActive = true
 	// Clear cached process stats when changing jobs
 	m.processStats = nil
 	m.prevProcessStats = nil
@@ -4404,6 +4517,7 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 
 	job := m.jobs[idx]
 
+	var cmds []tea.Cmd
 	// If in Logs tab, fetch logs for new job
 	if m.detailTab == DetailTabLogs {
 		m.selectedJob = job
@@ -4417,7 +4531,6 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 			m.logContent = ""
 			m.logStale = false
 		}
-		var cmds []tea.Cmd
 		cmds = append(cmds, m.fetchSelectedJobLog())
 		if job.Status == db.StatusRunning {
 			cmds = append(cmds, m.fetchProcessStats(job))
@@ -4425,10 +4538,15 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 		return tea.Batch(cmds...)
 	}
 
-	var cmds []tea.Cmd
 	// Fetch CPU summary if that tab is active
 	if m.detailTab == DetailTabCPU {
 		if cmd := m.requestJobCPUTop(job); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if _, ok := m.logCache[job.ID]; !ok || job.Status == db.StatusRunning {
+		if cmd := m.fetchJobLog(job); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -4501,13 +4619,14 @@ func jobFilterDescription(mode jobFilterMode) string {
 	}
 }
 
-func (m Model) fetchSelectedJobLog() tea.Cmd {
-	if m.selectedJob == nil {
+func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
+	if job == nil {
 		return nil
 	}
 
-	job := m.selectedJob
+	jobCopy := *job
 	return func() tea.Msg {
+		job := jobCopy
 		// For completed jobs, try local cache first
 		if job.Status == db.StatusCompleted {
 			if cached, err := logcache.Read(job.ID); err == nil {
@@ -4528,32 +4647,15 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 			// Fall through to remote fetch if not cached
 		}
 
-		var logFile string
-
-		// For jobs without a session name (queued jobs, or jobs started by queue runner),
-		// we need to find the log file by pattern since the timestamp may differ
-		if job.SessionName == "" {
-			// Try to find log file by pattern
-			pattern := session.LogFilePattern(job.ID)
-			findCmd := fmt.Sprintf("ls -t %s 2>/dev/null | head -1", pattern)
-			stdout, _, err := ssh.Run(job.Host, findCmd)
-			if err == nil && strings.TrimSpace(stdout) != "" {
-				logFile = strings.TrimSpace(stdout)
-			} else {
-				// Fall back to the expected path (may not exist)
-				logFile = session.LogFile(job.ID, job.StartTime)
-			}
-		} else {
-			logFile = session.JobLogFile(job.ID, job.StartTime, job.SessionName)
-		}
+		logFile, _ := logfiles.Resolve(&job)
 
 		// Fetch the log content
 		// Don't quote path - it contains ~ which needs shell expansion
-		stdout, stderr, err := ssh.Run(job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
+		stdout, stderr, err := remote.Run(job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
 		if err != nil {
 			// Check if it's a connection error
 			combined := stdout + stderr
-			if ssh.IsConnectionError(combined) {
+			if remote.IsConnectionError(combined) {
 				return logFetchedMsg{
 					jobID:     job.ID,
 					content:   fmt.Sprintf("Host %s unreachable", job.Host),
@@ -4600,6 +4702,13 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 	}
 }
 
+func (m Model) fetchSelectedJobLog() tea.Cmd {
+	if m.selectedJob == nil {
+		return nil
+	}
+	return m.fetchJobLog(m.selectedJob)
+}
+
 func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
 	if job == nil || job.Status != db.StatusRunning {
 		return nil
@@ -4607,7 +4716,7 @@ func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
 
 	return func() tea.Msg {
 		pidFile := session.JobPidFile(job.ID, job.StartTime)
-		stats, _ := ssh.GetProcessStats(job.Host, pidFile)
+		stats, _ := remote.GetProcessStats(job.Host, pidFile)
 		return processStatsMsg{
 			jobID: job.ID,
 			stats: stats,
@@ -4620,7 +4729,7 @@ func (m Model) fetchTopProcesses(host string, jobView bool) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		procs, err := ssh.GetTopProcesses(host, topProcessLimit)
+		procs, err := remote.GetTopProcesses(host, topProcessLimit)
 		return cpuTopMsg{
 			host:      host,
 			processes: procs,
@@ -4678,24 +4787,12 @@ func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		// Find the log file
-		var logFile string
-		if job.SessionName == "" {
-			pattern := session.LogFilePattern(job.ID)
-			findCmd := fmt.Sprintf("ls -t %s 2>/dev/null | head -1", pattern)
-			stdout, _, err := ssh.Run(job.Host, findCmd)
-			if err == nil && strings.TrimSpace(stdout) != "" {
-				logFile = strings.TrimSpace(stdout)
-			} else {
-				logFile = session.LogFile(job.ID, job.StartTime)
-			}
-		} else {
-			logFile = session.JobLogFile(job.ID, job.StartTime, job.SessionName)
-		}
+		// Find the log file via shared resolver
+		logFile, _ := logfiles.Resolve(job)
 
 		// Quick grep for last progress line (case-insensitive)
 		grepCmd := fmt.Sprintf("grep -i '^Progress:' %s 2>/dev/null | tail -1", logFile)
-		stdout, _, err := ssh.Run(job.Host, grepCmd)
+		stdout, _, err := remote.Run(job.Host, grepCmd)
 		if err != nil || strings.TrimSpace(stdout) == "" {
 			return quickProgressMsg{jobID: job.ID, progress: nil}
 		}
@@ -4849,7 +4946,7 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 	return func() tea.Msg {
 		// Try to read metadata from remote for more accurate info (best effort)
 		metadataFile := session.JobMetadataFile(job.ID, job.StartTime, job.SessionName)
-		content, _ := ssh.ReadRemoteFile(job.Host, metadataFile)
+		content, _ := remote.ReadFile(job.Host, metadataFile)
 
 		var workingDir, command, description string
 		if content != "" {
@@ -4876,9 +4973,9 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 
 		// Kill existing session if running (best effort, ignore errors)
 		oldTmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-		exists, _ := ssh.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
+		exists, _ := remote.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
 		if exists {
-			ssh.TmuxKillSession(job.Host, oldTmuxSession)
+			remote.TmuxKillSession(job.Host, oldTmuxSession)
 		}
 
 		// Use ops package to restart job (queues if host offline)
@@ -5131,7 +5228,7 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 		}
 		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
 		removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", job.ID, queueFile)
-		_, _, err := ssh.RunWithTimeout(job.Host, removeCmd, 5*time.Second)
+		_, _, err := remote.RunWithTimeout(job.Host, removeCmd, 5*time.Second)
 		if err != nil {
 			return false // Host unreachable
 		}
@@ -5155,7 +5252,7 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 					echo "not_running"
 				fi
 			`, pidPattern)
-			stdout, _, err := ssh.RunWithTimeout(job.Host, killCmd, 5*time.Second)
+			stdout, _, err := remote.RunWithTimeout(job.Host, killCmd, 5*time.Second)
 			if err != nil {
 				return false // Host unreachable
 			}
@@ -5163,7 +5260,7 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 		} else {
 			// Regular job - kill via tmux
 			tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-			err := ssh.TmuxKillSession(job.Host, tmuxSession)
+			err := remote.TmuxKillSession(job.Host, tmuxSession)
 			killed = err == nil
 		}
 
@@ -5176,6 +5273,21 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 	return false
 }
 
+func (m Model) jobCountsForHost(host string) (running, queued int) {
+	for _, job := range m.allJobs {
+		if job.Host != host || job.Tombstoned {
+			continue
+		}
+		switch job.Status {
+		case db.StatusRunning, db.StatusStarting:
+			running++
+		case db.StatusQueued:
+			queued++
+		}
+	}
+	return
+}
+
 func (m Model) pruneJobs() tea.Cmd {
 	return func() tea.Msg {
 		count, err := db.PruneJobs(m.database, false, nil)
@@ -5185,9 +5297,8 @@ func (m Model) pruneJobs() tea.Cmd {
 
 func (m Model) startQueue(host string) tea.Cmd {
 	return func() tea.Msg {
-		queueName := queuefile.DefaultQueueName
-		runnerCmd := queuerunner.RunnerCommand(queueName, "")
-		started, err := queuerunner.EnsureRunnerStarted(host, queueName, runnerCmd)
+		runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
+		started, err := runner.EnsureStarted("")
 		if err != nil {
 			return queueStartedMsg{host: host, err: err}
 		}
@@ -5198,9 +5309,8 @@ func (m Model) startQueue(host string) tea.Cmd {
 // ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
-	queueName := queuefile.DefaultQueueName
-	runnerCmd := queuerunner.RunnerCommand(queueName, "")
-	return queuerunner.EnsureRunnerStarted(host, queueName, runnerCmd)
+	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
+	return runner.EnsureStarted("")
 }
 
 func (m Model) removeJob(job *db.Job) tea.Cmd {
@@ -5396,8 +5506,8 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 	queueLineB64 := base64.StdEncoding.EncodeToString([]byte(queueLine))
 	updateCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' | base64 -d >> %s\"",
 		lockFile, job.ID, queueFile, queueLineB64, queueFile)
-	if _, stderr, err := ssh.Run(host, updateCmd); err != nil {
-		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
+	if _, stderr, err := remote.Run(host, updateCmd); err != nil {
+		if remote.IsConnectionError(stderr) || remote.IsConnectionError(err.Error()) {
 			return fmt.Errorf("host unreachable")
 		}
 		return fmt.Errorf("update queue entry: %s", strings.TrimSpace(stderr))

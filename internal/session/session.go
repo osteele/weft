@@ -61,6 +61,19 @@ func LogFilePattern(jobID int64) string {
 	return fmt.Sprintf("%s/%d-*.log", LogDir, jobID)
 }
 
+// JobLogPath returns the canonical log path for a job along with whether it is a glob pattern.
+// Jobs with timestamps or tmux session names resolve to concrete files; queue-runner jobs without
+// timestamps use glob patterns because the final filename isn't known yet.
+func JobLogPath(jobID int64, startTime int64, sessionName string) (string, bool) {
+	if startTime > 0 {
+		return LogFile(jobID, startTime), false
+	}
+	if sessionName != "" {
+		return LegacyLogFile(sessionName), false
+	}
+	return LogFilePattern(jobID), true
+}
+
 // PidFilePattern returns a glob pattern to find PID files for a job ID
 // This is useful for queued jobs where the exact timestamp is unknown
 func PidFilePattern(jobID int64) string {

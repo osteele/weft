@@ -487,57 +487,6 @@ func (h *Host) RAMUtilization() string {
 	return fmt.Sprintf("%d%%", pct)
 }
 
-// QueueStatusCommand returns the SSH command to check queue status for a given queue name
-// It outputs structured lines that ParseQueueStatus can parse
-func QueueStatusCommand(queueName string) string {
-	return fmt.Sprintf(
-		`tmux has-session -t 'rj-queue-%s' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; `+
-			`cat ~/.cache/remote-jobs/queue/%s.current 2>/dev/null | head -1 | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
-			`wc -l < ~/.cache/remote-jobs/queue/%s.queue 2>/dev/null | tr -d ' ' | sed 's/^/DEPTH:/' || echo "DEPTH:0"; `+
-			`test -f ~/.cache/remote-jobs/queue/%s.stop && echo "STOP:yes" || echo "STOP:no"`,
-		queueName, queueName, queueName, queueName)
-}
-
-// QueueStatus holds the parsed queue status information
-type QueueStatusInfo struct {
-	RunnerActive   bool
-	QueuedJobCount int
-	CurrentJob     string
-	StopPending    bool
-}
-
-// ParseQueueStatus parses the output of QueueStatusCommand into QueueStatusInfo
-func ParseQueueStatus(output string) *QueueStatusInfo {
-	info := &QueueStatusInfo{}
-
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		if idx := strings.Index(line, ":"); idx > 0 {
-			key := line[:idx]
-			value := strings.TrimSpace(line[idx+1:])
-
-			switch key {
-			case "RUNNER":
-				info.RunnerActive = value == "yes"
-			case "CURRENT":
-				info.CurrentJob = value
-			case "DEPTH":
-				if n, err := strconv.Atoi(value); err == nil {
-					info.QueuedJobCount = n
-				}
-			case "STOP":
-				info.StopPending = value == "yes"
-			}
-		}
-	}
-
-	return info
-}
-
 // QueueSummary returns a brief queue status string for the list view
 func (h *Host) QueueSummary() string {
 	switch h.QueueStatus {

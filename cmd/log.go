@@ -10,7 +10,7 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
-	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/remote-jobs/internal/logfiles"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -110,29 +110,12 @@ func runLog(cmd *cobra.Command, args []string) error {
 		// Fall through to remote fetch if not cached
 	}
 
-	// Determine log file path based on whether this is an old or new job
-	var logFile string
-	if job.SessionName != "" {
-		// Old job with session name - use legacy path
-		logFile = session.LegacyLogFile(job.SessionName)
-	} else if job.StartTime > 0 {
-		// New job with known start time - use direct path
-		logFile = session.LogFile(jobID, job.StartTime)
-	} else {
-		// Queue runner job without start time yet - use pattern
-		logFile = session.LogFilePattern(jobID)
-	}
+	// Determine log file path using shared resolver
+	logFile, resolved := logfiles.Resolve(job)
 
-	// Check if log file exists (handle both direct path and pattern)
-	var exists bool
-	if strings.Contains(logFile, "*") {
-		// Pattern - use glob to find actual file
-		stdout, _, err := ssh.Run(job.Host, fmt.Sprintf("ls %s 2>/dev/null | head -1", logFile))
-		if err == nil && strings.TrimSpace(stdout) != "" {
-			logFile = strings.TrimSpace(stdout)
-			exists = true
-		}
-	} else {
+	// Check if log file exists (skip when resolver already confirmed it)
+	exists := resolved
+	if !exists {
 		exists, err = ssh.RemoteFileExists(job.Host, logFile)
 		if err != nil {
 			return fmt.Errorf("check log file: %w", err)
