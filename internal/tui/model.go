@@ -2149,16 +2149,25 @@ func (m Model) renderJobList(height int) string {
 				status, timeCol, display)
 		}
 
-		if i == selectedIdx && m.jobSelectionActive {
-			line = selectedStyle.Width(m.width - 4).Render(line)
-		} else if m.isHostDisconnectedLong(job) {
+		offlineDuration, offline := m.hostOfflineDuration(job.Host)
+		strikethrough := offline && offlineDuration > hostOfflineStrikethroughThreshold
+
+		var style lipgloss.Style
+		switch {
+		case i == selectedIdx && m.jobSelectionActive:
+			style = selectedStyle.Width(m.width - 4)
+		case m.isHostDisconnectedLong(job):
 			// Dim jobs on hosts disconnected for more than 30 minutes
-			line = dimStyle.Render(line)
-		} else {
-			line = m.styleForStatus(job.Status).Render(line)
+			style = dimStyle
+		default:
+			style = m.styleForStatus(job.Status)
 		}
 
-		rows = append(rows, line)
+		if strikethrough {
+			style = style.Strikethrough(true)
+		}
+
+		rows = append(rows, style.Render(line))
 	}
 
 	content := strings.Join(rows, "\n")
@@ -2838,6 +2847,42 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
+// formatCompactDuration renders a duration using up to two time units (e.g. "3m20s")
+func formatCompactDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	d = d.Truncate(time.Second)
+
+	var parts []string
+	const day = 24 * time.Hour
+
+	if d >= day {
+		days := d / day
+		parts = append(parts, fmt.Sprintf("%dd", days))
+		d -= days * day
+	}
+	if len(parts) < 2 && d >= time.Hour {
+		hours := d / time.Hour
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+		d -= hours * time.Hour
+	}
+	if len(parts) < 2 && d >= time.Minute {
+		minutes := d / time.Minute
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+		d -= minutes * time.Minute
+	}
+	if len(parts) < 2 && d >= time.Second {
+		seconds := d / time.Second
+		parts = append(parts, fmt.Sprintf("%ds", seconds))
+	}
+
+	if len(parts) == 0 {
+		return "0s"
+	}
+	return strings.Join(parts, "")
+}
+
 // wrapTextWithIndent wraps text to the given width, indenting continuation lines.
 // It handles both explicit newlines in the text and wrapping at word boundaries.
 // Long tokens that exceed the width are broken at the width boundary.
@@ -3058,7 +3103,7 @@ func (m Model) renderHostList(height int) string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf(" %-12s %-10s %-16s %-6s %-5s %-5s",
+	header := fmt.Sprintf(" %-12s %-16s %-16s %-6s %-5s %-5s",
 		"HOST", "STATUS", "ARCH", "QUEUE", "CPU", "RAM")
 	rows = append(rows, headerStyle.Render(header))
 
@@ -3092,7 +3137,7 @@ func (m Model) renderHostList(height int) string {
 				ram = failedStyle.Render(ram)
 			}
 
-			line := fmt.Sprintf(" %-12s %-10s %-16s %-6s %-5s %-5s",
+			line := fmt.Sprintf(" %-12s %-16s %-16s %-6s %-5s %-5s",
 				truncate(host.Name, 12), status, arch, queue, cpu, ram)
 
 			if i == m.selectedHostIdx {
@@ -3886,7 +3931,12 @@ func (m Model) formatHostStatus(host *Host) string {
 	case HostStatusOnline:
 		return "● online"
 	case HostStatusOffline:
-		return "○ offline"
+		status := "○ offline"
+		if !host.LastCheck.IsZero() {
+			elapsed := time.Since(host.LastCheck)
+			status = fmt.Sprintf("%s %s", status, formatCompactDuration(elapsed))
+		}
+		return status
 	case HostStatusChecking:
 		return "◐ checking"
 	default:
@@ -4027,6 +4077,22 @@ func (m Model) isJobStatusStale(job *db.Job) bool {
 	}
 	// Host not found in our list - consider it stale
 	return true
+}
+
+// hostOfflineDuration returns the time a host has been offline, if known.
+const hostOfflineStrikethroughThreshold = time.Minute
+
+func (m Model) hostOfflineDuration(hostName string) (time.Duration, bool) {
+	for _, host := range m.hosts {
+		if host.Name != hostName {
+			continue
+		}
+		if host.Status != HostStatusOffline || host.LastCheck.IsZero() {
+			return 0, false
+		}
+		return time.Since(host.LastCheck), true
+	}
+	return 0, false
 }
 
 // isHostDisconnectedLong returns true if the job's host has been disconnected
@@ -5302,7 +5368,7 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 		var killed bool
 
 		if job.SessionName == "" {
-			// Queue runner job - kill via PID
+			// Queue runner job (no session name) - kill via PID
 			pidPattern := session.PidFilePattern(job.ID)
 			killCmd := fmt.Sprintf(`
 				pid=$(cat %s 2>/dev/null | head -1)

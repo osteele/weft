@@ -3,6 +3,7 @@ package ops
 import (
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -202,7 +203,7 @@ func TestKillJobPreservesOtherJobsOperations(t *testing.T) {
 	}
 }
 
-// TestExecuteAllDeferredOperations_KillJob tests that kill operations execute correctly
+// TestExecuteAllDeferredOperations_KillJob tests that kill operations execute correctly for queue runner jobs
 func TestExecuteAllDeferredOperations_KillJob(t *testing.T) {
 	capture := &commandCapture{}
 	cleanup := ssh.SetExecCommand(mockExecCommandSuccess(capture))
@@ -210,8 +211,8 @@ func TestExecuteAllDeferredOperations_KillJob(t *testing.T) {
 
 	database := setupTestDB(t)
 
-	// Create a job
-	jobID, _ := db.RecordJobStarting(database, "testhost", "/tmp", "echo test", "test job")
+	// Create a queued job (with QueueName) - these use PID-based kill
+	jobID, _ := db.RecordQueued(database, "testhost", "/tmp", "echo test", "test job", "default")
 
 	// Add a kill operation
 	_, err := db.AddDeferredOperationReturningID(database, "testhost", db.OpKillJob, jobID, "", "")
@@ -229,18 +230,69 @@ func TestExecuteAllDeferredOperations_KillJob(t *testing.T) {
 		t.Errorf("Expected 1 completed operation, got %d", result.Completed)
 	}
 
-	// Verify kill command was called (uses PID-based kill for queue runner jobs without session)
+	// Verify kill command was called (uses PID-based kill for queue runner jobs)
 	commands := capture.get()
 	foundKill := false
 	for _, cmd := range commands {
-		// Jobs without session names use PID-based kill
+		// Queue runner jobs use PID-based kill
 		if strings.Contains(cmd, "kill") && strings.Contains(cmd, "pid") {
 			foundKill = true
 			break
 		}
 	}
 	if !foundKill {
-		t.Errorf("Expected kill command, got: %v", commands)
+		t.Errorf("Expected PID-based kill command for queue runner job, got: %v", commands)
+	}
+
+	// Verify operation was removed from queue
+	ops, _ := db.GetDeferredOperations(database, "testhost")
+	if len(ops) != 0 {
+		t.Errorf("Expected 0 pending operations, got %d", len(ops))
+	}
+}
+
+// TestExecuteAllDeferredOperations_KillRegularJob tests that kill operations execute correctly for regular tmux jobs
+func TestExecuteAllDeferredOperations_KillRegularJob(t *testing.T) {
+	capture := &commandCapture{}
+	cleanup := ssh.SetExecCommand(mockExecCommandSuccess(capture))
+	defer cleanup()
+
+	database := setupTestDB(t)
+
+	// Create a regular job with a session name - these use tmux kill-session
+	jobID, _ := db.RecordJobStarting(database, "testhost", "/tmp", "echo test", "test job")
+	// Set session name to make it a regular tmux job (not a queue runner job)
+	sessionName := fmt.Sprintf("rj-%d", jobID)
+	database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID)
+
+	// Add a kill operation
+	_, err := db.AddDeferredOperationReturningID(database, "testhost", db.OpKillJob, jobID, "", "")
+	if err != nil {
+		t.Fatalf("Failed to add kill operation: %v", err)
+	}
+
+	// Execute deferred operations
+	result, err := ExecuteAllDeferredOperations(database, "testhost", ExecuteOptions{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("ExecuteAllDeferredOperations failed: %v", err)
+	}
+
+	if result.Completed != 1 {
+		t.Errorf("Expected 1 completed operation, got %d", result.Completed)
+	}
+
+	// Verify tmux kill-session command was called
+	commands := capture.get()
+	foundKill := false
+	for _, cmd := range commands {
+		// Regular jobs use tmux kill-session
+		if strings.Contains(cmd, "tmux kill-session") {
+			foundKill = true
+			break
+		}
+	}
+	if !foundKill {
+		t.Errorf("Expected tmux kill-session command for regular job, got: %v", commands)
 	}
 
 	// Verify operation was removed from queue

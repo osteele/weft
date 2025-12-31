@@ -19,10 +19,11 @@ func TestGetTargetJobPrefersHighlightedInDetailsTab(t *testing.T) {
 	jobList.Select(0)
 
 	m := Model{
-		jobs:        jobs,
-		jobList:     jobList,
-		selectedJob: jobs[1],
-		detailTab:   DetailTabDetails,
+		jobs:               jobs,
+		jobList:            jobList,
+		selectedJob:        jobs[1],
+		detailTab:          DetailTabDetails,
+		jobSelectionActive: true,
 	}
 
 	if got := m.getTargetJob(); got == nil || got.ID != 1 {

@@ -408,3 +408,134 @@ func singleQuote(value string) string {
 	}
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
+
+// TestSyncJobWithQueueNameAndSessionName tests that a queued job with a SessionName
+// (from a previous start_now action that was killed) can still complete correctly
+// when the job re-runs via queue runner and creates a status file with a new timestamp.
+// The sync should fall back to pattern-based lookup after the exact path fails.
+func TestSyncJobWithQueueNameAndSessionName(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Create a queued job
+	jobID, err := db.RecordQueued(database, "mixed-host", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	// Simulate start_now: add a session name (as if job was started directly, then killed)
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, status = ? WHERE id = ?`,
+		fmt.Sprintf("rj-%d", jobID), db.StatusRunning, jobID); err != nil {
+		t.Fatalf("update session name: %v", err)
+	}
+
+	// Mock SSH commands: tmux session doesn't exist, exact status file doesn't exist
+	// Note: We return exit code 0 because the SSH functions check stdout content, not exit code
+	// For tmux, "NO\n" indicates session doesn't exist
+	// For status file read, empty content means file doesn't exist
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+		{Contains: "|MTIME|", Stdout: ""}, // Exact status file not found (ReadRemoteFileWithMtime uses |MTIME|)
+	})
+
+	// Mock the queue remote pattern-based lookup to show the job completed (exit code 0)
+	mock := mockQueueRemote{
+		statusExitCode: 0,
+		statusMtime:    1700000000,
+		statusOption:   Some(true), // Status file exists (job completed via pattern lookup)
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	// Verify job has both QueueName AND SessionName
+	if job.QueueName == "" {
+		t.Fatalf("expected job to have QueueName set")
+	}
+	if job.SessionName == "" {
+		t.Fatalf("expected job to have SessionName set (from simulated start_now)")
+	}
+
+	// SyncJob should:
+	// 1. Check tmux session (doesn't exist)
+	// 2. Try exact status file path (doesn't exist due to different timestamp)
+	// 3. Fall back to pattern-based lookup (finds the status file)
+	// 4. Mark job as completed
+	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected job status to change to completed")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusCompleted {
+		t.Fatalf("expected completed status, got %s", updated.Status)
+	}
+	if updated.ExitCode == nil || *updated.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %v", updated.ExitCode)
+	}
+}
+
+// TestSyncJobQuickWithQueueNameAndSessionName tests the same scenario for SyncJobQuick
+func TestSyncJobQuickWithQueueNameAndSessionName(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Create a queued job
+	jobID, err := db.RecordQueued(database, "mixed-host-quick", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	// Simulate start_now: add a session name and set to running
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, status = ? WHERE id = ?`,
+		fmt.Sprintf("rj-%d", jobID), db.StatusRunning, jobID); err != nil {
+		t.Fatalf("update session name: %v", err)
+	}
+
+	// Mock SSH commands: tmux session doesn't exist, exact status file doesn't exist
+	// Note: We return exit code 0 because the SSH functions check stdout content, not exit code
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+		{Contains: "|MTIME|", Stdout: ""}, // Exact status file not found (ReadRemoteFileWithMtime uses |MTIME|)
+	})
+
+	// Mock the queue remote pattern-based lookup to show the job completed
+	mock := mockQueueRemote{
+		statusExitCode: 0,
+		statusMtime:    1700000000,
+		statusOption:   Some(true), // Status file exists (job completed via pattern lookup)
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	// Verify job has both QueueName AND SessionName
+	if job.QueueName == "" || job.SessionName == "" {
+		t.Fatalf("expected job to have both QueueName and SessionName set")
+	}
+
+	// SyncJobQuick should:
+	// 1. Check tmux session (doesn't exist)
+	// 2. Try exact status file path (doesn't exist)
+	// 3. Fall back to pattern-based lookup (finds the status file)
+	// 4. Mark job as completed
+	changed, err := SyncJobQuick(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJobQuick: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected job status to change to completed")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusCompleted {
+		t.Fatalf("expected completed status, got %s", updated.Status)
+	}
+}
+
+func intPtr(i int) *int {
+	return &i
+}

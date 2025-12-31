@@ -47,7 +47,8 @@ func executeKill(database *sql.DB, host string, op *db.DeferredOperation, opts E
 		return Result{}, fmt.Errorf("get job: %w", err)
 	}
 
-	// Queue-runner jobs don't have individual tmux sessions
+	// Queue-runner jobs (no session name) are killed via PID, not tmux session.
+	// Jobs with a SessionName have their own tmux session to kill.
 	if job != nil && job.SessionName == "" {
 		return executeKillQueueRunnerJob(host, job, opts)
 	}
@@ -58,11 +59,12 @@ func executeKill(database *sql.DB, host string, op *db.DeferredOperation, opts E
 		tmuxSession = session.JobTmuxSession(op.JobID, job.SessionName)
 	}
 
-	err = ssh.TmuxKillSession(host, tmuxSession)
+	killCmd := fmt.Sprintf("tmux kill-session -t '%s'", tmuxSession)
+	_, stderr, err := ssh.RunWithTimeout(host, killCmd, opts.Timeout)
 	if err != nil {
-		if ssh.IsConnectionError(err.Error()) {
+		if ssh.IsConnectionError(stderr) {
 			oplog.LogJob(oplog.OpDeferred, op.JobID, host, oplog.WithDetail("kill failed, connection error"))
-			return Result{}, fmt.Errorf("connection error: %w", err)
+			return Result{}, fmt.Errorf("connection error: %s", stderr)
 		}
 		// Session might already be gone - that's OK, continue silently
 	}

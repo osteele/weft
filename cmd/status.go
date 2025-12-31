@@ -204,8 +204,8 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
-	// Queue runner jobs (no session name) don't have tmux sessions to check
-	// They are managed by the queue runner and synced separately
+	// Queue runner jobs (no session name) don't have tmux sessions to check.
+	// They are managed by the queue runner and synced separately.
 	if job.SessionName == "" {
 		// For queued jobs, just display current status - don't mark dead
 		printJobStatus(job, exitOnComplete)

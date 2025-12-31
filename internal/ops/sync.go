@@ -151,9 +151,10 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 // SyncJob checks and updates a single job's status, returning true if status changed.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
 func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
-	// Jobs without a session name were started by the queue runner
-	// They don't have individual tmux sessions, so use pattern-based file lookup
-	if job.SessionName == "" {
+	// Jobs without a session name are managed by the queue runner and should use
+	// pattern-based file lookup (handles restarts with different timestamps).
+	// Jobs WITH a session name were started via start_now or run and have their own tmux session.
+	if job.SessionName == "" && job.QueueName != "" {
 		return SyncQueueRunnerJob(database, job, opts)
 	}
 
@@ -177,10 +178,25 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 	}
 
 	// Session doesn't exist - check for status file (no retry for sync)
+	// First try exact path (uses job.StartTime)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
 	result, err := ReadStatusFile(job.Host, statusFile, timeout)
 	if err != nil {
 		return false, err
+	}
+
+	// If exact path not found and job has a QueueName, try pattern-based lookup.
+	// This handles jobs that were started via start_now, killed, then re-ran via queue runner
+	// (the new run creates status files with a different timestamp).
+	if result == nil && job.QueueName != "" {
+		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
+		if found.IsSome() && found.Unwrap() {
+			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
+				return false, err
+			}
+			CacheCompletedJobLog(job)
+			return true, nil
+		}
 	}
 
 	if result != nil {
@@ -305,8 +321,8 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
-	if job.SessionName == "" {
-		// Queue runner job - use optimized check
+	if job.SessionName == "" && job.QueueName != "" {
+		// Queue runner job (no session name) - use optimized check with pattern-based file lookup
 		return SyncQueueRunnerJobQuick(database, job, opts)
 	}
 
@@ -320,11 +336,24 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 		return false, nil
 	}
 
-	// Session doesn't exist - check for status file
+	// Session doesn't exist - check for status file (exact path first)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
 	result, err := ReadStatusFile(job.Host, statusFile, timeout)
 	if err != nil {
 		return false, err
+	}
+
+	// If exact path not found and job has a QueueName, try pattern-based lookup.
+	// This handles jobs that were started via start_now, killed, then re-ran via queue runner.
+	if result == nil && job.QueueName != "" {
+		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
+		if found.IsSome() && found.Unwrap() {
+			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
+				return false, err
+			}
+			CacheCompletedJobLog(job)
+			return true, nil
+		}
 	}
 
 	if result != nil {
