@@ -32,6 +32,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/llm"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/logfiles"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/progress"
 	"github.com/osteele/remote-jobs/internal/queuefile"
@@ -432,12 +433,20 @@ type hostSummaryGeneratedMsg struct {
 	err     error
 }
 
+type jobEnvLoadedMsg struct {
+	jobID   int64
+	envVars []string
+	depSpec string
+	err     error
+}
+
 // Input field indices for new job form
 const (
 	inputHost = iota
 	inputDescription
 	inputCommand
 	inputWorkingDir
+	inputGPU
 	inputEnvVars
 )
 
@@ -511,8 +520,9 @@ type Model struct {
 	createJobStep  string
 
 	// Edit job mode (for queued jobs only)
-	editMode     bool
-	editingJobID int64
+	editMode          bool
+	editingJobID      int64
+	editingJobDepSpec string
 
 	// Layout
 	width  int
@@ -583,7 +593,7 @@ func NewModel(database *sql.DB) Model {
 // NewModelWithOptions creates a new TUI model with custom options
 func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Create text inputs for new job form
-	inputs := make([]textinput.Model, 5)
+	inputs := make([]textinput.Model, 6)
 
 	inputs[inputHost] = textinput.New()
 	inputs[inputHost].Placeholder = "e.g., cool30"
@@ -608,6 +618,12 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputWorkingDir].Prompt = ""
 	inputs[inputWorkingDir].Width = 40
 	inputs[inputWorkingDir].CharLimit = 256
+
+	inputs[inputGPU] = textinput.New()
+	inputs[inputGPU].Placeholder = "(optional, e.g., 0 or 0,1)"
+	inputs[inputGPU].Prompt = ""
+	inputs[inputGPU].Width = 40
+	inputs[inputGPU].CharLimit = 64
 
 	inputs[inputEnvVars] = textinput.New()
 	inputs[inputEnvVars].Placeholder = "VAR=value, VAR2=value2 (optional)"
@@ -1031,6 +1047,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Reload hosts in case this job was on a new host
 		return m, tea.Batch(flashCmd, m.refreshJobs(), m.loadHosts())
+
+	case jobEnvLoadedMsg:
+		if !m.editMode || msg.jobID != m.editingJobID || msg.err != nil {
+			return m, nil
+		}
+		gpu, rest := splitGPUEnvVars(msg.envVars)
+		m.inputs[inputGPU].SetValue(gpu)
+		m.inputs[inputEnvVars].SetValue(formatEnvInput(rest))
+		m.editingJobDepSpec = msg.depSpec
+		return m, nil
 
 	case jobEditedMsg:
 		var flashCmd tea.Cmd
@@ -1559,8 +1585,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		switch job.Status {
 		case db.StatusRunning, db.StatusStarting:
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=kill"))
 			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
 		case db.StatusQueued:
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=cancel"))
 			return m, tea.Batch(m.setFlash("Cancelling queued job...", false), m.cancelQueuedJob(job))
 		case db.StatusCompleted:
 			return m, m.setFlash(fmt.Sprintf("Job %d already completed", job.ID), true)
@@ -1585,6 +1613,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.restarting = true
 		m.restartingJobName = fmt.Sprintf("job %d", job.ID)
+		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=r action=restart"))
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Restarting job %d...", job.ID), false), m.restartJob(job))
 
 	case key.Matches(msg, keys.Remove):
@@ -1646,6 +1675,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		job := m.getTargetJob()
 		if job != nil && job.Status == db.StatusQueued {
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=start_now"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
 		}
 		return m, m.setFlash("Can only start queued jobs", true)
@@ -1656,6 +1686,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		job := m.getTargetJob()
 		if job != nil && job.Status == db.StatusQueued {
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=G action=move_to_front"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Moving job %d to front...", job.ID), false), m.moveJobToFront(job))
 		}
 		return m, m.setFlash("Can only move queued jobs to front", true)
@@ -1707,7 +1738,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputs[inputCommand].SetValue(job.Command)
 		m.inputs[inputDescription].SetValue(job.Description)
 		m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
-		return m, nil
+		m.inputs[inputGPU].SetValue("")
+		m.inputs[inputEnvVars].SetValue("")
+		m.editingJobDepSpec = ""
+		return m, m.fetchQueuedJobEnv(job)
 
 	case key.Matches(msg, keys.Sync):
 		if m.viewMode == ViewModeJobs && !m.syncing {
@@ -1756,6 +1790,7 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputMode = false
 		m.editMode = false
 		m.editingJobID = 0
+		m.editingJobDepSpec = ""
 		m.inputs[m.inputFocus].Blur()
 		return m, nil
 
@@ -1793,6 +1828,7 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.editMode {
 			// Edit existing job
 			m.editMode = false
+			m.editingJobDepSpec = ""
 			return m, m.editJob()
 		}
 
@@ -1995,7 +2031,7 @@ func (m Model) renderInputForm(background string) string {
 		b.WriteString("New Job\n\n")
 	}
 
-	labels := []string{"Host:", "Description:", "Command:", "Working Dir:", "Env Vars:"}
+	labels := []string{"Host:", "Description:", "Command:", "Working Dir:", "GPU:", "Env Vars:"}
 	for i, input := range m.inputs {
 		label := labelStyle
 		if i == m.inputFocus {
@@ -5374,6 +5410,7 @@ func (m Model) createJob() tea.Cmd {
 	description := strings.TrimSpace(m.inputs[inputDescription].Value())
 	workingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
 	envVarsStr := strings.TrimSpace(m.inputs[inputEnvVars].Value())
+	gpuInput := strings.TrimSpace(m.inputs[inputGPU].Value())
 
 	// Normalize command: extract cd/env prefixes into proper fields
 	// This allows users to paste commands like "cd /foo && env CUDA=0 python train.py"
@@ -5388,15 +5425,7 @@ func (m Model) createJob() tea.Cmd {
 	}
 
 	// Parse env vars (comma-separated VAR=value pairs from form field)
-	var envVars []string
-	if envVarsStr != "" {
-		for _, ev := range strings.Split(envVarsStr, ",") {
-			ev = strings.TrimSpace(ev)
-			if ev != "" {
-				envVars = append(envVars, ev)
-			}
-		}
-	}
+	envVars := parseEnvInput(envVarsStr)
 
 	// Append env vars extracted from command (if we didn't use them above)
 	if normalizedDir != "" {
@@ -5407,6 +5436,13 @@ func (m Model) createJob() tea.Cmd {
 		command = normalizedCmd
 		envVars = append(envVars, normalizedEnv...)
 	}
+
+	// Merge GPU field with env vars
+	existingGPU, envVars := splitGPUEnvVars(envVars)
+	if gpuInput == "" {
+		gpuInput = existingGPU
+	}
+	envVars = mergeGPUEnvVars(envVars, gpuInput)
 
 	return func() tea.Msg {
 		// Queue job for sequential execution via queue runner
@@ -5436,6 +5472,8 @@ func (m Model) editJob() tea.Cmd {
 	newCommand := strings.TrimSpace(m.inputs[inputCommand].Value())
 	newDescription := strings.TrimSpace(m.inputs[inputDescription].Value())
 	newWorkingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
+	envVarsStr := strings.TrimSpace(m.inputs[inputEnvVars].Value())
+	gpuInput := strings.TrimSpace(m.inputs[inputGPU].Value())
 
 	return func() tea.Msg {
 		// Get the current job to check status and get original host
@@ -5474,10 +5512,24 @@ func (m Model) editJob() tea.Cmd {
 			}
 		}
 
+		// Prepare env vars and GPU
+		envVars := parseEnvInput(envVarsStr)
+		existingGPU, envVars := splitGPUEnvVars(envVars)
+		if gpuInput == "" {
+			gpuInput = existingGPU
+		}
+		envVars = mergeGPUEnvVars(envVars, gpuInput)
+
 		// Update the remote queue file
 		queueName := job.QueueName
 		if queueName == "" {
-			queueName = "default"
+			queueName = queuefile.DefaultQueueName
+		}
+		depSpec := m.editingJobDepSpec
+		if depSpec == "" {
+			if data, err := fetchQueueEntryData(job.Host, queueName, jobID); err == nil && data != nil {
+				depSpec = data.depSpec
+			}
 		}
 		updatedJob := &db.Job{
 			ID:          jobID,
@@ -5486,7 +5538,7 @@ func (m Model) editJob() tea.Cmd {
 			WorkingDir:  newWorkingDir,
 			Description: newDescription,
 		}
-		if err := updateRemoteQueueEntry(job.Host, queueName, updatedJob); err != nil {
+		if err := updateRemoteQueueEntry(job.Host, queueName, updatedJob, envVars, depSpec); err != nil {
 			// Non-fatal - the local database was updated
 			// Log warning but don't fail the edit
 		}
@@ -5496,16 +5548,20 @@ func (m Model) editJob() tea.Cmd {
 }
 
 // updateRemoteQueueEntry updates a job's entry in the remote queue file
-func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []string, depSpec string) error {
+	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
 
 	// Remove old entry and add new one (under flock to prevent race with queue runner)
 	lockFile := queueFile + ".lock"
-	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s", job.ID, job.WorkingDir, job.Command, job.Description)
+	envVarsB64 := ""
+	if len(envVars) > 0 {
+		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(envVars, "\n")))
+	}
+	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\n", job.ID, job.WorkingDir, job.Command, job.Description, envVarsB64, depSpec)
 	// Use base64 encoding to safely pass the queue line through nested shell contexts
 	queueLineB64 := base64.StdEncoding.EncodeToString([]byte(queueLine))
-	updateCmd := fmt.Sprintf("flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' | base64 -d >> %s\"",
-		lockFile, job.ID, queueFile, queueLineB64, queueFile)
+	updateCmd := fmt.Sprintf("mkdir -p %s && flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' | base64 -d >> %s\"",
+		queuerunner.QueueDir(), lockFile, job.ID, queueFile, queueLineB64, queueFile)
 	if _, stderr, err := remote.Run(host, updateCmd); err != nil {
 		if remote.IsConnectionError(stderr) || remote.IsConnectionError(err.Error()) {
 			return fmt.Errorf("host unreachable")
@@ -5514,6 +5570,125 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 	}
 
 	return nil
+}
+
+func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, error) {
+	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
+	cmd := fmt.Sprintf("grep -m1 '^%d\\t' %s 2>/dev/null", jobID, queueFile)
+	stdout, _, err := remote.Run(host, cmd)
+	if err != nil {
+		if remote.IsConnectionError(err.Error()) {
+			return nil, fmt.Errorf("host unreachable")
+		}
+		return nil, err
+	}
+	line := strings.TrimSpace(stdout)
+	if line == "" {
+		return &queueEntryData{}, nil
+	}
+	fields := strings.SplitN(line, "\t", 6)
+	if len(fields) < 6 {
+		return nil, fmt.Errorf("malformed queue entry")
+	}
+
+	var envVars []string
+	if fields[4] != "" {
+		if decoded, err := base64.StdEncoding.DecodeString(fields[4]); err == nil {
+			for _, ev := range strings.Split(string(decoded), "\n") {
+				ev = strings.TrimSpace(ev)
+				if ev != "" {
+					envVars = append(envVars, ev)
+				}
+			}
+		}
+	}
+
+	return &queueEntryData{
+		envVars: envVars,
+		depSpec: fields[5],
+	}, nil
+}
+
+type queueEntryData struct {
+	envVars []string
+	depSpec string
+}
+
+func parseEnvInput(input string) []string {
+	var envVars []string
+	if input == "" {
+		return envVars
+	}
+	for _, ev := range strings.Split(input, ",") {
+		ev = strings.TrimSpace(ev)
+		if ev != "" {
+			envVars = append(envVars, ev)
+		}
+	}
+	return envVars
+}
+
+func formatEnvInput(envVars []string) string {
+	if len(envVars) == 0 {
+		return ""
+	}
+	return strings.Join(envVars, ", ")
+}
+
+func splitGPUEnvVars(envVars []string) (string, []string) {
+	var (
+		gpu   string
+		rest  []string
+		found bool
+	)
+	for _, ev := range envVars {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") && !found {
+			gpu = strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+			found = true
+			continue
+		}
+		rest = append(rest, ev)
+	}
+	return gpu, rest
+}
+
+func mergeGPUEnvVars(envVars []string, gpu string) []string {
+	var filtered []string
+	for _, ev := range envVars {
+		if !strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			filtered = append(filtered, ev)
+		}
+	}
+	if gpu != "" {
+		filtered = append(filtered, "CUDA_VISIBLE_DEVICES="+gpu)
+	}
+	return filtered
+}
+
+func (m Model) fetchQueuedJobEnv(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+	jobCopy := *job
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = queuefile.DefaultQueueName
+	}
+	return func() tea.Msg {
+		data, err := fetchQueueEntryData(jobCopy.Host, queueName, jobCopy.ID)
+		if err != nil {
+			return jobEnvLoadedMsg{jobID: jobCopy.ID, err: err}
+		}
+		if data == nil {
+			data = &queueEntryData{}
+		}
+		envCopy := append([]string(nil), data.envVars...)
+		return jobEnvLoadedMsg{
+			jobID:   jobCopy.ID,
+			envVars: envCopy,
+			depSpec: data.depSpec,
+		}
+	}
 }
 
 // hostFromCachedInfo creates a Host from cached database info

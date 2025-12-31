@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -19,15 +20,20 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		return false, fmt.Errorf("job not found")
 	}
 
+	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting queued job directly"))
+
 	// Re-fetch job from DB to get current status (TUI may have stale data)
 	freshJob, err := db.GetJobByID(database, job.ID)
 	if err != nil {
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("fetch job failed"))
 		return false, fmt.Errorf("fetch job: %w", err)
 	}
 	if freshJob == nil {
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr("job not found in database"))
 		return false, fmt.Errorf("job %d not found", job.ID)
 	}
 	if freshJob.Status != db.StatusQueued && freshJob.Status != db.StatusDraft {
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetailf("job already %s", freshJob.Status))
 		return false, fmt.Errorf("job %d is already %s", job.ID, freshJob.Status)
 	}
 	// Use fresh job data from here on
@@ -120,9 +126,11 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
 	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
 			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("mkdir failed"))
 		db.UpdateJobFailed(database, job.ID, errMsg)
 		return false, fmt.Errorf("%s", errMsg)
 	}
@@ -132,9 +140,11 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	writeMetadata := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
 		if isConnectionFailure(stderr, err) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("metadata write failed, deferring start"))
 			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("metadata write failed"))
 		db.UpdateJobFailed(database, job.ID, errMsg)
 		return false, fmt.Errorf("%s", errMsg)
 	}
@@ -161,22 +171,28 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("tmux create failed, deferring start"))
 			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("tmux create failed"))
 		db.UpdateJobFailed(database, job.ID, errMsg)
 		return false, fmt.Errorf("%s", errMsg)
 	}
 
+	oplog.LogJob(oplog.OpJobStarted, job.ID, job.Host, oplog.WithDetailf("started in session %s", tmuxSession))
 	return false, nil
 }
 
 // startJobDirectly starts a job without interacting with the remote queue file.
 // Used when job has a pending queue_job operation (not yet synced to remote).
 func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *queuefile.Entry) (bool, error) {
+	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting job directly (pending queue op)"))
+
 	// Use the session name so sync knows this is a tmux-based job, not a queue runner job
 	tmuxSession := session.TmuxSessionName(job.ID)
 	if err := db.UpdateQueuedToRunningWithSession(database, job.ID, tmuxSession); err != nil {
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("db update failed"))
 		return false, fmt.Errorf("update queued job: %w", err)
 	}
 
@@ -195,11 +211,13 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
 	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
 			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
 			// recreate it and revert status to queued
 			return deferQueuedJobStart(database, job, queueName, entry, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("mkdir failed"))
 		db.UpdateJobFailed(database, job.ID, errMsg)
 		return false, fmt.Errorf("%s", errMsg)
 	}
@@ -209,11 +227,13 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	writeMetadata := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
 		if isConnectionFailure(stderr, err) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("metadata write failed, deferring start"))
 			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
 			// recreate it and revert status to queued
 			return deferQueuedJobStart(database, job, queueName, entry, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("metadata write failed"))
 		db.UpdateJobFailed(database, job.ID, errMsg)
 		return false, fmt.Errorf("%s", errMsg)
 	}
@@ -237,6 +257,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	checkCmd := fmt.Sprintf("tmux has-session -t '%s' 2>/dev/null && echo exists || echo missing", tmuxSession)
 	stdout, _, err := ssh.Run(job.Host, checkCmd)
 	if err == nil && strings.TrimSpace(stdout) == "exists" {
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetailf("session %s already exists", tmuxSession))
 		return false, fmt.Errorf("job %d is already running (session %s exists)", job.ID, tmuxSession)
 	}
 
@@ -244,15 +265,18 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("tmux create failed, deferring start"))
 			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
 			// recreate it and revert status to queued
 			return deferQueuedJobStart(database, job, queueName, entry, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("tmux create failed"))
 		db.UpdateJobFailed(database, job.ID, errMsg)
 		return false, fmt.Errorf("%s", errMsg)
 	}
 
+	oplog.LogJob(oplog.OpJobStarted, job.ID, job.Host, oplog.WithDetailf("started directly in session %s", tmuxSession))
 	return false, nil
 }
 

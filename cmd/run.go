@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -199,6 +200,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("get working dir: %w", err)
 		}
 	}
+
+	// Log CLI command invocation
+	mode := "queue"
+	if runImmediate {
+		mode = "immediate"
+	}
+	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=%s cmd=%s", mode, command))
 
 	// Handle --after and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {

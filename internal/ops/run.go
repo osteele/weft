@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -32,11 +33,15 @@ type runJobPayload struct {
 // If the host is reachable, the job starts immediately.
 // If not, the job remains in "starting" status until the host is available.
 func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result, error) {
+	oplog.Log(oplog.OpJobStart, oplog.WithHost(params.Host), oplog.WithDetail("creating new job"))
+
 	// 1. Create job record locally first (so we have an ID)
 	jobID, err := db.RecordJobStarting(database, params.Host, params.WorkingDir, params.Command, params.Description)
 	if err != nil {
+		oplog.Log(oplog.OpJobStartFailed, oplog.WithHost(params.Host), oplog.WithError(err), oplog.WithDetail("create job record failed"))
 		return Result{}, fmt.Errorf("create job record: %w", err)
 	}
+	oplog.LogJob(oplog.OpJobStart, jobID, params.Host, oplog.WithDetail("job record created"))
 
 	// 2. Build payload for deferred operation
 	payload := runJobPayload{
@@ -64,20 +69,25 @@ func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result,
 
 // executeRun executes a run job operation (called during queue drain)
 func executeRun(database *sql.DB, host string, op *db.DeferredOperation, opts ExecuteOptions) (Result, error) {
+	oplog.LogJob(oplog.OpDeferredExec, op.JobID, host, oplog.WithDetail("executing deferred run"))
+
 	// Parse payload
 	var payload runJobPayload
 	if err := json.Unmarshal([]byte(op.Payload), &payload); err != nil {
+		oplog.LogJob(oplog.OpJobStartFailed, op.JobID, host, oplog.WithError(err), oplog.WithDetail("parse payload failed"))
 		return Result{}, fmt.Errorf("parse payload: %w", err)
 	}
 
 	// Get job to access start time
 	job, err := db.GetJobByID(database, op.JobID)
 	if err != nil || job == nil {
+		oplog.LogJob(oplog.OpJobStartFailed, op.JobID, host, oplog.WithError(err), oplog.WithDetail("get job failed"))
 		return Result{}, fmt.Errorf("get job %d: %w", op.JobID, err)
 	}
 
 	// Skip if job is no longer in starting state
 	if job.Status != db.StatusStarting {
+		oplog.LogJob(oplog.OpJobStart, op.JobID, host, oplog.WithDetailf("skipping, job status is %s", job.Status))
 		return Result{
 			Success: true,
 			JobID:   op.JobID,
@@ -96,9 +106,11 @@ func executeRun(database *sql.DB, host string, op *db.DeferredOperation, opts Ex
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
 	if _, stderr, err := ssh.RunWithTimeout(host, mkdirCmd, opts.Timeout); err != nil {
 		if ssh.IsConnectionError(stderr) {
+			oplog.LogJob(oplog.OpDeferred, op.JobID, host, oplog.WithDetail("mkdir failed, connection error"))
 			return Result{}, fmt.Errorf("connection error: %s", stderr)
 		}
 		errMsg := ssh.FriendlyError(host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, op.JobID, host, oplog.WithErrorStr(errMsg), oplog.WithDetail("mkdir failed"))
 		db.UpdateJobFailed(database, op.JobID, errMsg)
 		return Result{}, fmt.Errorf("create log directory: %s", errMsg)
 	}
@@ -124,18 +136,22 @@ func executeRun(database *sql.DB, host string, op *db.DeferredOperation, opts Ex
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
 	if _, stderr, err := ssh.RunWithTimeout(host, tmuxCmd, opts.Timeout); err != nil {
 		if ssh.IsConnectionError(stderr) {
+			oplog.LogJob(oplog.OpDeferred, op.JobID, host, oplog.WithDetail("tmux start failed, connection error"))
 			return Result{}, fmt.Errorf("connection error: %s", stderr)
 		}
 		errMsg := ssh.FriendlyError(host, stderr, err)
+		oplog.LogJob(oplog.OpJobStartFailed, op.JobID, host, oplog.WithErrorStr(errMsg), oplog.WithDetail("tmux start failed"))
 		db.UpdateJobFailed(database, op.JobID, errMsg)
 		return Result{}, fmt.Errorf("start tmux: %s", errMsg)
 	}
 
 	// Mark job as running
 	if err := db.UpdateJobRunning(database, op.JobID); err != nil {
+		oplog.LogJob(oplog.OpJobStartFailed, op.JobID, host, oplog.WithError(err), oplog.WithDetail("db update failed"))
 		return Result{}, fmt.Errorf("update job status: %w", err)
 	}
 
+	oplog.LogJob(oplog.OpJobStarted, op.JobID, host, oplog.WithDetailf("started in session %s", tmuxSession))
 	return Result{
 		Success: true,
 		JobID:   op.JobID,

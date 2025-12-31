@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -55,6 +56,8 @@ func runKill(cmd *cobra.Command, args []string) error {
 }
 
 func killJob(database *sql.DB, jobID int64) error {
+	oplog.Log(oplog.OpCLICommand, oplog.WithDetail("kill"), oplog.WithJobID(jobID))
+
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return err

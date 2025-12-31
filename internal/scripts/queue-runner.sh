@@ -1,4 +1,4 @@
-# BUILD: 10
+# BUILD: 11
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -18,6 +18,7 @@
 #   ~/.cache/remote-jobs/queue/{queue-name}.queue    - Queue file (jobs waiting)
 #   ~/.cache/remote-jobs/queue/{queue-name}.current  - Currently running job ID
 #   ~/.cache/remote-jobs/queue/{queue-name}.runner.pid - Runner process ID
+#   ~/.cache/remote-jobs/queue/runner-{queue-name}.log - Runner operations log
 #   ~/.cache/remote-jobs/logs/{job_id}-{ts}.log      - Job output
 #   ~/.cache/remote-jobs/logs/{job_id}-{ts}.status   - Exit code
 #   ~/.cache/remote-jobs/logs/{job_id}-{ts}.meta     - Metadata
@@ -37,10 +38,25 @@ LOG_DIR="$HOME/.cache/remote-jobs/logs"
 QUEUE_FILE="$QUEUE_DIR/${QUEUE_NAME}.queue"
 CURRENT_FILE="$QUEUE_DIR/${QUEUE_NAME}.current"
 PID_FILE="$QUEUE_DIR/${QUEUE_NAME}.runner.pid"
+RUNNER_LOG="$QUEUE_DIR/runner-${QUEUE_NAME}.log"
 NOTIFY_SCRIPT="/tmp/remote-jobs-notify-slack.sh"
 
 # Create directories
 mkdir -p "$QUEUE_DIR" "$LOG_DIR"
+
+# Log operation to persistent runner log (JSONL format)
+log_op() {
+    local op="$1"
+    local job_id="${2:-}"
+    local detail="${3:-}"
+    local ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local entry="{\"t\":\"$ts\",\"op\":\"$op\",\"queue\":\"$QUEUE_NAME\""
+    [ -n "$job_id" ] && entry="$entry,\"job\":$job_id"
+    [ -n "$detail" ] && entry="$entry,\"detail\":\"$detail\""
+    entry="$entry}"
+    echo "$entry" >> "$RUNNER_LOG"
+}
 
 # Write PID file
 echo $$ > "$PID_FILE"
@@ -51,6 +67,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+log_op "queue.start" "" "queue=$QUEUE_NAME pid=$$"
 echo "Queue runner started for queue: $QUEUE_NAME"
 echo "Queue file: $QUEUE_FILE"
 echo "PID: $$"
@@ -60,6 +77,7 @@ echo ""
 while true; do
     # Check for STOP signal
     if [ -f "$QUEUE_DIR/${QUEUE_NAME}.stop" ]; then
+        log_op "queue.stop" "" "stop signal received"
         echo "STOP signal received, exiting after current job..."
         rm -f "$QUEUE_DIR/${QUEUE_NAME}.stop"
         break
@@ -176,6 +194,7 @@ while true; do
         fi
 
         if [ "$skip_due_to_failure" = true ]; then
+            log_op "job.skipped" "$job_id" "$skip_reason"
             echo "Job $job_id: skipped, $skip_reason"
             timestamp=$(date +%Y%m%d-%H%M%S)
             echo "SKIPPED: $skip_reason" > "$LOG_DIR/${job_id}-${timestamp}.log"
@@ -197,6 +216,7 @@ while true; do
     # Write current job ID
     echo "$job_id" > "$CURRENT_FILE"
 
+    log_op "job.start" "$job_id" "cmd=$command"
     echo "=========================================="
     echo "Starting job $job_id"
     echo "  Working dir: $working_dir"
@@ -336,8 +356,10 @@ while true; do
     fi
 
     if [ "$exit_code" -eq 0 ]; then
+        log_op "job.completed" "$job_id" "exit=0 duration=${duration}s"
         echo "Job $job_id completed successfully in $duration_text"
     else
+        log_op "job.failed" "$job_id" "exit=$exit_code duration=${duration}s"
         echo "Job $job_id failed with exit code $exit_code in $duration_text"
     fi
 
@@ -352,4 +374,5 @@ while true; do
     echo ""
 done
 
+log_op "queue.stop" "" "normal exit"
 echo "Queue runner exiting"

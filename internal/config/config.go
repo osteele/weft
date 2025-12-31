@@ -43,6 +43,15 @@ type Config struct {
 	// BlockedCommandPatterns lists substrings that should cause an error if found in job commands.
 	// Each entry has a pattern (substring to match) and an error message to display.
 	BlockedCommandPatterns []BlockedPattern `yaml:"blocked_command_patterns"`
+
+	// OperationLogEnabled controls whether operation logging is enabled
+	// Default: true
+	OperationLogEnabled *bool `yaml:"operation_log_enabled"`
+
+	// OperationLogMaxSize is the maximum size of the operation log file in bytes
+	// When exceeded, the file is rotated (old content moved to .1 backup)
+	// Default: 10MB (10485760)
+	OperationLogMaxSize int64 `yaml:"operation_log_max_size"`
 }
 
 // BlockedPattern defines a substring that should not appear in job commands
@@ -98,6 +107,24 @@ func (c *Config) AIModel() string {
 		return c.AI.Model
 	}
 	return "llama3.2" // Default model
+}
+
+// IsOperationLogEnabled returns whether operation logging is enabled.
+// Returns true by default unless explicitly disabled.
+func (c *Config) IsOperationLogEnabled() bool {
+	if c.OperationLogEnabled != nil {
+		return *c.OperationLogEnabled
+	}
+	return true // Default: enabled
+}
+
+// GetOperationLogMaxSize returns the max operation log size.
+// Returns the default (10MB) if not set.
+func (c *Config) GetOperationLogMaxSize() int64 {
+	if c.OperationLogMaxSize > 0 {
+		return c.OperationLogMaxSize
+	}
+	return 10 * 1024 * 1024 // Default: 10MB
 }
 
 var configPath string

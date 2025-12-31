@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/config"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -37,6 +38,10 @@ func Execute() error {
 		}
 	}
 
+	// Initialize operation logger
+	initOpLog()
+	defer oplog.Close()
+
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
 
@@ -50,6 +55,20 @@ func Execute() error {
 	}
 	printCommandError(executedCmd, err)
 	return err
+}
+
+// initOpLog initializes the operation logger based on config.
+func initOpLog() {
+	cfg, err := config.Load()
+	if err != nil {
+		return // Silently continue without logging on config error
+	}
+	if cfg == nil || !cfg.IsOperationLogEnabled() {
+		return
+	}
+	// Initialize with default path and configured max size
+	// Errors are ignored - logging is best-effort
+	oplog.Init(oplog.DefaultLogPath(), cfg.GetOperationLogMaxSize())
 }
 
 var versionCmd = &cobra.Command{
