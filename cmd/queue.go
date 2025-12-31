@@ -1,8 +1,6 @@
 package cmd
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +11,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/queuefile"
+	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -21,7 +20,6 @@ import (
 const (
 	defaultQueueName = queuefile.DefaultQueueName
 	queueDir         = "~/.cache/remote-jobs/queue"
-	queueRunnerPath  = "~/.cache/remote-jobs/scripts/queue-runner.sh"
 )
 
 var queueCmd = &cobra.Command{
@@ -305,35 +303,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 // Returns (true, nil) if the runner was started, (false, nil) if already running,
 // or (false, error) if starting failed.
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
-	runnerSession := fmt.Sprintf("rj-queue-%s", queue)
-	exists, err := ssh.TmuxSessionExists(host, runnerSession)
-	if err != nil {
-		return false, fmt.Errorf("check session: %w", err)
-	}
-
-	if exists {
-		return false, nil // Already running
-	}
-
-	// Create directories on remote
-	scriptsDir := "~/.cache/remote-jobs/scripts"
-	mkdirCmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
-	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-		return false, fmt.Errorf("create directories: %s", stderr)
-	}
-
-	// Deploy queue runner script
-	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(queueRunnerScript))
-	if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
-		return false, fmt.Errorf("write queue runner script: %s", stderr)
-	}
-
-	// Make script executable
-	chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
-	if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
-		return false, fmt.Errorf("chmod script: %s", stderr)
-	}
-
 	// Deploy notify script if Slack is configured
 	slackWebhook := getSlackWebhook()
 	if slackWebhook != "" {
@@ -360,14 +329,8 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	}
 
 	// Start queue runner in tmux
-	runnerCmd := fmt.Sprintf("%sbash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envVars, queue)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
-
-	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
-		return false, fmt.Errorf("start queue runner: %s", stderr)
-	}
-
-	return true, nil
+	runnerCmd := queuerunner.RunnerCommand(queue, envVars)
+	return queuerunner.EnsureRunnerStarted(host, queue, runnerCmd)
 }
 
 func runQueueStart(cmd *cobra.Command, args []string) error {
@@ -569,37 +532,24 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func queueRunnerLocalVersion() string {
-	scanner := bufio.NewScanner(bytes.NewReader(queueRunnerScript))
-	if scanner.Scan() {
-		return strings.TrimSpace(scanner.Text())
-	}
-	return ""
-}
-
-func readRemoteQueueRunnerVersion(host string) (string, error) {
-	cmd := fmt.Sprintf("head -n 1 %s 2>/dev/null || true", queueRunnerPath)
-	stdout, stderr, err := ssh.Run(host, cmd)
-	if err != nil {
-		return "", fmt.Errorf("read remote version: %s", strings.TrimSpace(stderr))
-	}
-	return strings.TrimSpace(stdout), nil
-}
-
 func runQueueUpgrade(cmd *cobra.Command, args []string) error {
 	host := args[0]
-	localVersion := queueRunnerLocalVersion()
-	remoteVersion, err := readRemoteQueueRunnerVersion(host)
+	localBuild := queuerunner.LocalBuildNumber()
+	remoteBuild, err := queuerunner.RemoteBuildNumber(host)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
 	}
 
-	if remoteVersion == localVersion && remoteVersion != "" {
-		fmt.Printf("Queue runner on %s already up to date (%s)\n", host, localVersion)
+	if remoteBuild > localBuild && remoteBuild != -1 {
+		fmt.Printf("Queue runner on %s is newer (remote build %d, local build %d); skipping downgrade\n", host, remoteBuild, localBuild)
+		return nil
+	}
+	if remoteBuild == localBuild && remoteBuild != -1 {
+		fmt.Printf("Queue runner on %s already up to date (build %d)\n", host, remoteBuild)
 		return nil
 	}
 
-	fmt.Printf("Updating queue runner on %s (remote: %s, local: %s)\n", host, remoteVersion, localVersion)
+	fmt.Printf("Updating queue runner on %s (remote build %d, local build %d)\n", host, remoteBuild, localBuild)
 	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
 	exists, err := ssh.TmuxSessionExists(host, runnerSession)
 	if err != nil {

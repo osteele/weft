@@ -1,4 +1,4 @@
-# BUILD: 8
+# BUILD: 10
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -240,6 +240,30 @@ while true; do
                 echo "ERROR: Could not cd to $working_dir" >> "$log_file"
                 exit 1
             }
+        fi
+
+        # Load dotenv files for environment customization
+        if [ -f ".env" ]; then
+            echo "Loading .env"
+            set -a
+            # shellcheck disable=SC1091
+            source ./.env
+            set +a
+        fi
+
+        if [ -f ".env.local" ]; then
+            echo "Loading .env.local"
+            set -a
+            # shellcheck disable=SC1091
+            source ./.env.local
+            set +a
+        fi
+
+        # Source .envrc if present to load environment customizations
+        if [ -f ".envrc" ]; then
+            echo "Loading .envrc"
+            # shellcheck disable=SC1091
+            source ./.envrc
         fi
 
         # Apply environment variables if present (base64 encoded, newline-separated)

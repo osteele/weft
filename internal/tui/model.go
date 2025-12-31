@@ -35,6 +35,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/progress"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuejob"
+	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -5184,97 +5185,22 @@ func (m Model) pruneJobs() tea.Cmd {
 
 func (m Model) startQueue(host string) tea.Cmd {
 	return func() tea.Msg {
-		queueName := "default"
-		runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
-
-		// Check if queue runner is already running
-		exists, err := ssh.TmuxSessionExists(host, runnerSession)
+		queueName := queuefile.DefaultQueueName
+		runnerCmd := queuerunner.RunnerCommand(queueName, "")
+		started, err := queuerunner.EnsureRunnerStarted(host, queueName, runnerCmd)
 		if err != nil {
-			return queueStartedMsg{host: host, err: fmt.Errorf("check session: %w", err)}
+			return queueStartedMsg{host: host, err: err}
 		}
-
-		if exists {
-			return queueStartedMsg{host: host, already: true}
-		}
-
-		// Create directories on remote
-		queueDir := "~/.cache/remote-jobs/queue"
-		scriptsDir := "~/.cache/remote-jobs/scripts"
-		mkdirCmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
-		if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-			return queueStartedMsg{host: host, err: fmt.Errorf("create directories: %s", stderr)}
-		}
-
-		// Deploy queue runner script (embedded in binary)
-		queueRunnerPath := "~/.cache/remote-jobs/scripts/queue-runner.sh"
-		writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
-		if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
-			return queueStartedMsg{host: host, err: fmt.Errorf("write queue runner: %s", stderr)}
-		}
-
-		// Make script executable
-		chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
-		if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
-			return queueStartedMsg{host: host, err: fmt.Errorf("chmod: %s", stderr)}
-		}
-
-		// Start queue runner in tmux
-		runnerCmd := fmt.Sprintf("bash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", queueName)
-		tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
-
-		if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
-			return queueStartedMsg{host: host, err: fmt.Errorf("start queue runner: %s", stderr)}
-		}
-
-		return queueStartedMsg{host: host}
+		return queueStartedMsg{host: host, already: !started}
 	}
 }
 
 // ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
-	queueName := "default"
-	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
-
-	// Check if queue runner is already running
-	exists, err := ssh.TmuxSessionExists(host, runnerSession)
-	if err != nil {
-		return false, err
-	}
-	if exists {
-		return false, nil // Already running
-	}
-
-	// Create directories on remote
-	queueDir := "~/.cache/remote-jobs/queue"
-	scriptsDir := "~/.cache/remote-jobs/scripts"
-	mkdirCmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
-	if _, _, err := ssh.Run(host, mkdirCmd); err != nil {
-		return false, err
-	}
-
-	// Deploy queue runner script
-	queueRunnerPath := "~/.cache/remote-jobs/scripts/queue-runner.sh"
-	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
-	if _, _, err := ssh.Run(host, writeCmd); err != nil {
-		return false, err
-	}
-
-	// Make script executable
-	chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
-	if _, _, err := ssh.Run(host, chmodCmd); err != nil {
-		return false, err
-	}
-
-	// Start queue runner in tmux
-	runnerCmd := fmt.Sprintf("bash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", queueName)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", runnerSession, ssh.EscapeForSingleQuotes(runnerCmd))
-
-	if _, _, err := ssh.Run(host, tmuxCmd); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	queueName := queuefile.DefaultQueueName
+	runnerCmd := queuerunner.RunnerCommand(queueName, "")
+	return queuerunner.EnsureRunnerStarted(host, queueName, runnerCmd)
 }
 
 func (m Model) removeJob(job *db.Job) tea.Cmd {
