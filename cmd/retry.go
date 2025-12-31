@@ -35,8 +35,7 @@ var (
 )
 
 func init() {
-	// Removed: Retry command is deprecated, use `run --from <id>` instead
-	// rootCmd.AddCommand(retryCmd)
+	rootCmd.AddCommand(retryCmd)
 
 	retryCmd.Flags().BoolVar(&retryList, "list", false, "List draft jobs")
 	retryCmd.Flags().BoolVar(&retryAll, "all", false, "Retry all draft jobs")

@@ -215,7 +215,7 @@ func init() {
 	jobRunCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory on remote host")
 	jobRunCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	jobRunCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
-	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID (replaces retry)")
+	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	jobRunCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 
 	// Copy flags from log command to job log
