@@ -2401,8 +2401,8 @@ func (m Model) renderJobDetails(height int) string {
 		}
 		// Wrap first (on plain text), then apply syntax highlighting to each line
 		wrappedCmd := wrapTextWithIndent(cmd, availableWidth, labelWidth)
-		// Limit command display to 8 lines max to avoid overwhelming the details panel
-		const maxCmdLines = 8
+		// Limit command display to 4 lines max to avoid overwhelming the details panel
+		const maxCmdLines = 4
 		cmdLines := strings.Split(wrappedCmd, "\n")
 		if len(cmdLines) > maxCmdLines {
 			cmdLines = cmdLines[:maxCmdLines]
@@ -2606,31 +2606,55 @@ func (m Model) renderJobDetails(height int) string {
 			// Process carriage returns (progress bars use \r to overwrite lines)
 			logPreview = processCarriageReturns(logPreview)
 
-			// Get last 5 non-empty lines
-			allLines := strings.Split(strings.TrimSpace(logPreview), "\n")
-			var previewLines []string
-			for i := len(allLines) - 1; i >= 0 && len(previewLines) < 5; i-- {
-				line := strings.TrimSpace(allLines[i])
-				if line != "" {
-					previewLines = append([]string{line}, previewLines...)
+			const baseMaxPreviewLines = 5
+			maxPreviewLines := baseMaxPreviewLines
+			if height > 0 {
+				_, frameHeight := logPanelStyle.GetFrameSize()
+				innerHeight := height - frameHeight
+				if innerHeight < 0 {
+					innerHeight = 0
+				}
+				headerContent := m.renderTabHeader() + "\n" + b.String()
+				currentHeight := lipgloss.Height(headerContent)
+				remaining := innerHeight - currentHeight
+				const logSectionOverhead = 2 // blank spacer + section title
+				if remaining <= logSectionOverhead {
+					maxPreviewLines = 0
+				} else {
+					allowed := remaining - logSectionOverhead
+					if allowed < maxPreviewLines {
+						maxPreviewLines = allowed
+					}
 				}
 			}
 
-			if len(previewLines) > 0 {
-				b.WriteString("\n")
-				b.WriteString(sectionStyle.Render("Log (last lines)"))
-				b.WriteString("\n")
-				for _, line := range previewLines {
-					// Truncate long lines to fit panel width
-					maxWidth := m.width - 10
-					if maxWidth < 40 {
-						maxWidth = 40
+			if maxPreviewLines > 0 {
+				// Get last non-empty lines of the log, limited by remaining panel height
+				allLines := strings.Split(strings.TrimSpace(logPreview), "\n")
+				var previewLines []string
+				for i := len(allLines) - 1; i >= 0 && len(previewLines) < maxPreviewLines; i-- {
+					line := strings.TrimSpace(allLines[i])
+					if line != "" {
+						previewLines = append([]string{line}, previewLines...)
 					}
-					if len(line) > maxWidth {
-						line = line[:maxWidth-3] + "..."
-					}
-					b.WriteString(dimStyle.Render(line))
+				}
+
+				if len(previewLines) > 0 {
 					b.WriteString("\n")
+					b.WriteString(sectionStyle.Render("Log (last lines)"))
+					b.WriteString("\n")
+					for _, line := range previewLines {
+						// Truncate long lines to fit panel width
+						maxWidth := m.width - 10
+						if maxWidth < 40 {
+							maxWidth = 40
+						}
+						if len(line) > maxWidth {
+							line = line[:maxWidth-3] + "..."
+						}
+						b.WriteString(dimStyle.Render(line))
+						b.WriteString("\n")
+					}
 				}
 			}
 		}
