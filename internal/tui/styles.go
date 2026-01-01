@@ -85,6 +85,22 @@ var (
 	hostCheckingStyle = lipgloss.NewStyle().
 				Foreground(pendingColor) // Yellow
 
+	hostSummaryNameStyle = lipgloss.NewStyle().
+				Bold(true)
+
+	hostSummaryNormalStyle = lipgloss.NewStyle().
+				Foreground(runningColor)
+
+	hostSummaryWarningStyle = lipgloss.NewStyle().
+				Foreground(pendingColor)
+
+	hostSummaryCriticalStyle = lipgloss.NewStyle().
+					Foreground(failedColor)
+
+	hostSummaryOfflineStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Faint(true)
+
 	// Tab styles for Details/Logs panel
 	activeTabStyle = lipgloss.NewStyle().
 			Bold(true).

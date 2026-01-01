@@ -8,8 +8,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os/exec"
 	"os/user"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -52,6 +54,8 @@ const (
 	DefaultHostCacheDuration   = 24 * time.Hour // How long cached host info is considered fresh
 	topProcessLimit            = 15
 )
+
+var humanSizePattern = regexp.MustCompile(`(?i)^([\d.]+)\s*([kmgtp]?i?[b]?)?$`)
 
 // ViewMode represents which view is currently active
 type ViewMode int
@@ -2144,9 +2148,15 @@ func (m Model) renderJobList(height int) string {
 
 	var rows []string
 
+	hostSummary := m.renderInlineHostSummary(contentWidth)
+	if hostSummary != "" {
+		rows = append(rows, hostSummary)
+	}
+
 	// Header
 	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
 		"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
+	headerIndex := len(rows)
 	rows = append(rows, headerStyle.Render(header))
 	filterLabel := fmt.Sprintf(" View: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
 	rows = append(rows, dimStyle.Render(filterLabel))
@@ -2159,6 +2169,12 @@ func (m Model) renderJobList(height int) string {
 
 	// Render jobs manually using list's paginator for scroll offset
 	contentHeight := height - 4 // Account for borders, header, filter
+	if hostSummary != "" {
+		contentHeight--
+	}
+	if contentHeight < 0 {
+		contentHeight = 0
+	}
 	start, end := m.jobList.Paginator.GetSliceBounds(len(m.jobs))
 	if end > len(m.jobs) {
 		end = len(m.jobs)
@@ -2181,11 +2197,11 @@ func (m Model) renderJobList(height int) string {
 	if showGPU {
 		header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
 			"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
-		rows[0] = headerStyle.Render(header)
+		rows[headerIndex] = headerStyle.Render(header)
 	} else {
 		header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %s",
 			"ID", "HOST", "STATUS", "TIME", "DESCRIPTION")
-		rows[0] = headerStyle.Render(header)
+		rows[headerIndex] = headerStyle.Render(header)
 	}
 
 	selectedIdx := m.jobList.Index()
@@ -2215,20 +2231,14 @@ func (m Model) renderJobList(height int) string {
 		display := truncate(job.EffectiveDescription(), descWidth)
 		generatedDesc := job.Description == "" && job.GeneratedDescription != ""
 
-		offlineDuration, offline := m.hostOfflineDuration(job.Host)
-
 		rowStyle := m.styleForJob(job)
 		selected := i == selectedIdx && m.jobSelectionActive
 		if selected {
 			rowStyle = rowStyle.Copy().Background(selectedBg)
 		}
-		hostStyle := rowStyle
-		if offline && offlineDuration > hostOfflineStrikethroughThreshold {
-			hostStyle = hostStyle.Copy().Foreground(lipgloss.Color("240")).Faint(true)
-		}
 
 		idSegment := rowStyle.Render(fmt.Sprintf(" %-4d ", job.ID))
-		hostSegment := hostStyle.Render(fmt.Sprintf("%s ", hostCol))
+		hostSegment := rowStyle.Render(fmt.Sprintf("%s ", hostCol))
 		statusSegment := rowStyle.Render(fmt.Sprintf("%s ", statusCol))
 		timeSegment := rowStyle.Render(fmt.Sprintf("%s ", timeColFormatted))
 
@@ -2248,14 +2258,212 @@ func (m Model) renderJobList(height int) string {
 		if lineWidth < contentWidth {
 			line += strings.Repeat(" ", contentWidth-lineWidth)
 		}
-		if !selected && m.isHostDisconnectedLong(job) {
-			line = dimStyle.Render(line)
-		}
 		rows = append(rows, line)
 	}
 
 	content := strings.Join(rows, "\n")
 	return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
+}
+
+func (m Model) renderInlineHostSummary(maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+
+	segments := make([]string, 0, len(m.hosts))
+	for _, host := range m.hosts {
+		if host == nil {
+			continue
+		}
+		segments = append(segments, m.renderHostSummarySegment(host))
+	}
+
+	var content string
+	switch {
+	case len(segments) == 0 && len(m.hosts) == 0:
+		content = dimStyle.Render(" Hosts: no hosts configured")
+	case len(segments) == 0:
+		content = dimStyle.Render(" Hosts: no host data")
+	default:
+		content = lipgloss.JoinHorizontal(
+			lipgloss.Left,
+			labelStyle.Render("Hosts"),
+			" ",
+			strings.Join(segments, "  "),
+		)
+	}
+
+	if lipgloss.Width(content) > maxWidth {
+		content = lipgloss.NewStyle().MaxWidth(maxWidth).Render(content)
+	}
+
+	return content
+}
+
+func (m Model) renderHostSummarySegment(host *Host) string {
+	statusSymbol, statusStyle := hostStatusIndicator(host)
+
+	nameStyle := hostSummaryNameStyle
+	if host.Status == HostStatusOffline {
+		nameStyle = hostSummaryOfflineStyle.Copy()
+	}
+	name := nameStyle.Render(truncate(host.Name, 12))
+
+	cpuPct, cpuOK := hostCPULoadPercent(host)
+	memPct, memOK := hostMemUsagePercent(host)
+	gpuPct, gpuOK := hostGPULoadPercent(host)
+
+	cpuText := formatHostSummaryMetric("CPU", cpuPct, cpuOK)
+	memText := formatHostSummaryMetric("RAM", memPct, memOK)
+	gpuText := formatHostSummaryMetric("GPU", gpuPct, gpuOK)
+
+	cpuStyle := hostSummaryStyleForMetric(cpuPct, cpuOK)
+	memStyle := hostSummaryStyleForMetric(memPct, memOK)
+	gpuStyle := hostSummaryStyleForMetric(gpuPct, gpuOK)
+
+	if host.Status != HostStatusOnline {
+		cpuStyle = hostSummaryOfflineStyle
+		memStyle = hostSummaryOfflineStyle
+		gpuStyle = hostSummaryOfflineStyle
+	}
+
+	fields := []string{
+		statusStyle.Render(statusSymbol),
+		name,
+		cpuStyle.Render(cpuText),
+		memStyle.Render(memText),
+		gpuStyle.Render(gpuText),
+	}
+
+	return strings.Join(fields, " ")
+}
+
+func hostStatusIndicator(host *Host) (string, lipgloss.Style) {
+	switch host.Status {
+	case HostStatusOnline:
+		return "●", hostSummaryNormalStyle
+	case HostStatusChecking:
+		return "◐", hostSummaryWarningStyle
+	case HostStatusOffline:
+		return "○", hostSummaryOfflineStyle
+	default:
+		return "?", hostSummaryWarningStyle
+	}
+}
+
+func hostSummaryStyleForMetric(pct int, ok bool) lipgloss.Style {
+	if !ok {
+		return dimStyle
+	}
+	switch {
+	case pct >= 90:
+		return hostSummaryCriticalStyle
+	case pct >= 70:
+		return hostSummaryWarningStyle
+	default:
+		return hostSummaryNormalStyle
+	}
+}
+
+func formatHostSummaryMetric(label string, pct int, ok bool) string {
+	if !ok {
+		return label + "--"
+	}
+	return fmt.Sprintf("%s%3d%%", label, pct)
+}
+
+func hostCPULoadPercent(host *Host) (int, bool) {
+	if host == nil || host.LoadAvg == "" || host.CPUs <= 0 {
+		return 0, false
+	}
+	parts := strings.Split(host.LoadAvg, ",")
+	if len(parts) == 0 {
+		return 0, false
+	}
+	load, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return 0, false
+	}
+	pct := int(math.Round((load / float64(host.CPUs)) * 100))
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 200 {
+		pct = 200
+	}
+	return pct, true
+}
+
+func hostMemUsagePercent(host *Host) (int, bool) {
+	used, okUsed := parseSizeToGiB(host.MemUsed)
+	total, okTotal := parseSizeToGiB(host.MemTotal)
+	if !okUsed || !okTotal || total <= 0 {
+		return 0, false
+	}
+	pct := int(math.Round((used / total) * 100))
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct, true
+}
+
+func hostGPULoadPercent(host *Host) (int, bool) {
+	maxLoad := -1
+	for _, gpu := range host.GPUs {
+		if gpu.Utilization > maxLoad {
+			maxLoad = gpu.Utilization
+		}
+
+		used, okUsed := parseSizeToGiB(gpu.MemUsed)
+		total, okTotal := parseSizeToGiB(gpu.MemTotal)
+		if okUsed && okTotal && total > 0 {
+			memPct := int(math.Round((used / total) * 100))
+			if memPct > maxLoad {
+				maxLoad = memPct
+			}
+		}
+	}
+	if maxLoad < 0 {
+		return 0, false
+	}
+	if maxLoad > 100 {
+		maxLoad = 100
+	}
+	return maxLoad, true
+}
+
+func parseSizeToGiB(value string) (float64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "-" {
+		return 0, false
+	}
+	matches := humanSizePattern.FindStringSubmatch(value)
+	if matches == nil {
+		return 0, false
+	}
+	number, err := strconv.ParseFloat(matches[1], 64)
+	if err != nil {
+		return 0, false
+	}
+	unit := strings.ToUpper(matches[2])
+	unit = strings.TrimSuffix(unit, "B")
+	switch unit {
+	case "", "G", "GI":
+		return number, true
+	case "M", "MI":
+		return number / 1024, true
+	case "K", "KI":
+		return number / (1024 * 1024), true
+	case "T", "TI":
+		return number * 1024, true
+	case "P", "PI":
+		return number * 1024 * 1024, true
+	default:
+		return number, true
+	}
 }
 
 func (m Model) renderLogPanel(height int) string {
@@ -4259,22 +4467,6 @@ func (m Model) isJobStatusStale(job *db.Job) bool {
 	}
 	// Host not found in our list - consider it stale
 	return true
-}
-
-// hostOfflineDuration returns the time a host has been offline, if known.
-const hostOfflineStrikethroughThreshold = time.Minute
-
-func (m Model) hostOfflineDuration(hostName string) (time.Duration, bool) {
-	for _, host := range m.hosts {
-		if host.Name != hostName {
-			continue
-		}
-		if host.Status != HostStatusOffline || host.LastCheck.IsZero() {
-			return 0, false
-		}
-		return time.Since(host.LastCheck), true
-	}
-	return 0, false
 }
 
 // isHostDisconnectedLong returns true if the job's host has been disconnected
