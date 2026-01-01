@@ -27,6 +27,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/llm"
@@ -470,16 +471,17 @@ type Model struct {
 	hostDetailTab   HostDetailTab // Which tab is active in host detail panel (Info or GPU)
 
 	// UI State
-	detailTab    DetailTab // Which tab is active in detail panel (Details or Logs)
-	logContent   string
-	logStale     bool             // true if showing cached content due to connection error
-	logCache     map[int64]string // cache of last successful log content per job
-	logLoading   bool
-	logViewport  viewport.Model
-	spinner      spinner.Model // Loading spinner
-	flashMessage string
-	flashIsError bool
-	flashExpiry  time.Time
+	detailTab      DetailTab // Which tab is active in detail panel (Details or Logs)
+	logContent     string
+	logStale       bool             // true if showing cached content due to connection error
+	logCache       map[int64]string // cache of last successful log content per job
+	logLoading     bool
+	logViewport    viewport.Model
+	detailViewport *viewport.Model
+	spinner        spinner.Model // Loading spinner
+	flashMessage   string
+	flashIsError   bool
+	flashExpiry    time.Time
 
 	// Process stats for running jobs
 	processStats      *remote.ProcessStats
@@ -671,11 +673,15 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		}
 	}
 
+	detailVP := viewport.New(0, 0)
+
 	return Model{
 		database:                database,
 		jobList:                 jobList,
 		jobSelectionActive:      true,
 		jobFilter:               jobFilterRecent,
+		logViewport:             viewport.New(0, 0),
+		detailViewport:          &detailVP,
 		inputs:                  inputs,
 		spinner:                 s,
 		syncInterval:            opts.SyncInterval,
@@ -721,10 +727,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		detailHeight := int(float64(m.height) * 0.35)
 		m.logViewport.Width = m.width - 6
 		m.logViewport.Height = detailHeight - 4
+		m.detailViewport.Width = m.width - 6
+		m.detailViewport.Height = detailHeight - 4
 		// Update job list dimensions (subtract 2 more for column header + filter row)
 		listHeight := m.height - detailHeight - 5 // account for header/footer
 		m.jobList.SetWidth(m.width - 2)
-		m.jobList.SetHeight(listHeight - 2)
+		contentHeight := listHeight - 4
+		if contentHeight < 0 {
+			contentHeight = 0
+		}
+		m.jobList.SetHeight(contentHeight)
 		return m, nil
 
 	case spinner.TickMsg:
@@ -1297,14 +1309,22 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 		scrollUp := msg.Button == tea.MouseButtonWheelUp
 
-		// Check if mouse is in the log panel area (bottom portion)
-		if msg.Y >= listHeight && m.detailTab == DetailTabLogs {
+		// Check if mouse is in the log/detail panel area (bottom portion)
+		if msg.Y >= listHeight {
 			scrollDelta := 3
 			if scrollUp {
 				scrollDelta = -scrollDelta
 			}
-			m.logViewport.SetYOffset(m.logViewport.YOffset + scrollDelta)
-			return m, nil
+			switch m.detailTab {
+			case DetailTabLogs:
+				m.logViewport.SetYOffset(m.logViewport.YOffset + scrollDelta)
+				return m, nil
+			case DetailTabDetails:
+				if m.jobSelectionActive {
+					m.detailViewport.SetYOffset(m.detailViewport.YOffset + scrollDelta)
+					return m, nil
+				}
+			}
 		}
 
 		// Scroll job list by moving cursor (bubbles/list doesn't handle wheel events)
@@ -1386,6 +1406,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "pgup", "pgdown", "home", "end", "ctrl+u", "ctrl+d":
 			var cmd tea.Cmd
 			m.logViewport, cmd = m.logViewport.Update(msg)
+			return m, cmd
+		}
+	}
+	if m.detailTab == DetailTabDetails && m.jobSelectionActive {
+		switch msg.String() {
+		case "pgup", "pgdown", "home", "end", "ctrl+u", "ctrl+d":
+			updated, cmd := m.detailViewport.Update(msg)
+			*m.detailViewport = updated
 			return m, cmd
 		}
 	}
@@ -1541,6 +1569,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.detailTab == DetailTabLogs {
 				// Already in logs mode - go back to details
 				m.detailTab = DetailTabDetails
+				m.detailViewport.GotoTop()
 			} else {
 				idx := m.jobList.Index()
 				if len(m.jobs) > 0 && idx >= 0 && idx < len(m.jobs) {
@@ -2066,6 +2095,16 @@ func (m Model) renderInputForm(background string) string {
 }
 
 func (m Model) renderJobList(height int) string {
+	panelWidth := m.width - 2
+	if panelWidth < 0 {
+		panelWidth = 0
+	}
+	frameWidth, _ := listPanelStyle.GetFrameSize()
+	contentWidth := panelWidth - frameWidth
+	if contentWidth < 20 {
+		contentWidth = 20
+	}
+
 	var rows []string
 
 	// Header
@@ -2117,57 +2156,65 @@ func (m Model) renderJobList(height int) string {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
+		hostCol := fmt.Sprintf("%-10s", truncate(job.Host, 10))
+		statusCol := fmt.Sprintf("%-12s", status)
+		timeColFormatted := fmt.Sprintf("%-12s", timeCol)
 
-		// Calculate available width for description (total - fixed columns - margins)
-		// Fixed columns: 1 + 4 + 1 + 10 + 1 + 12 + 1 + 12 + 1 = 43, plus GPU column (5) if shown
-		fixedWidth := 47 // without GPU
-		if showGPU {
-			fixedWidth = 52 // with GPU
-		}
-		descWidth := m.width - fixedWidth
-		if descWidth < 20 {
-			descWidth = 20
-		}
-		display := truncate(job.EffectiveDescription(), descWidth)
-		// Style generated descriptions in italic to distinguish from user-provided
-		if job.Description == "" && job.GeneratedDescription != "" {
-			display = lipgloss.NewStyle().Italic(true).Render(display)
-		}
-
-		var line string
+		prefixPlain := fmt.Sprintf(" %-4d %s %s %s ", job.ID, hostCol, statusCol, timeColFormatted)
+		gpuField := ""
 		if showGPU {
 			gpu := job.GetGPU()
 			if gpu == "" {
 				gpu = "—"
 			}
-			line = fmt.Sprintf(" %-4d %-10s %-12s %-12s %-4s %s",
-				job.ID, truncate(job.Host, 10),
-				status, timeCol, truncate(gpu, 4), display)
-		} else {
-			line = fmt.Sprintf(" %-4d %-10s %-12s %-12s %s",
-				job.ID, truncate(job.Host, 10),
-				status, timeCol, display)
+			gpuField = fmt.Sprintf("%-4s ", truncate(gpu, 4))
+			prefixPlain += gpuField
 		}
+
+		descWidth := contentWidth - lipgloss.Width(prefixPlain)
+		if descWidth < 5 {
+			descWidth = 5
+		}
+		display := truncate(job.EffectiveDescription(), descWidth)
+		generatedDesc := job.Description == "" && job.GeneratedDescription != ""
 
 		offlineDuration, offline := m.hostOfflineDuration(job.Host)
-		strikethrough := offline && offlineDuration > hostOfflineStrikethroughThreshold
 
-		var style lipgloss.Style
-		switch {
-		case i == selectedIdx && m.jobSelectionActive:
-			style = selectedStyle.Width(m.width - 4)
-		case m.isHostDisconnectedLong(job):
-			// Dim jobs on hosts disconnected for more than 30 minutes
-			style = dimStyle
-		default:
-			style = m.styleForStatus(job.Status)
+		rowStyle := m.styleForJob(job)
+		selected := i == selectedIdx && m.jobSelectionActive
+		if selected {
+			rowStyle = rowStyle.Copy().Background(selectedBg)
+		}
+		hostStyle := rowStyle
+		if offline && offlineDuration > hostOfflineStrikethroughThreshold {
+			hostStyle = hostStyle.Copy().Foreground(lipgloss.Color("240")).Faint(true)
 		}
 
-		if strikethrough {
-			style = style.Strikethrough(true)
+		idSegment := rowStyle.Render(fmt.Sprintf(" %-4d ", job.ID))
+		hostSegment := hostStyle.Render(fmt.Sprintf("%s ", hostCol))
+		statusSegment := rowStyle.Render(fmt.Sprintf("%s ", statusCol))
+		timeSegment := rowStyle.Render(fmt.Sprintf("%s ", timeColFormatted))
+
+		segments := []string{idSegment, hostSegment, statusSegment, timeSegment}
+		if showGPU {
+			segments = append(segments, rowStyle.Render(gpuField))
 		}
 
-		rows = append(rows, style.Render(line))
+		descStyle := rowStyle
+		if generatedDesc {
+			descStyle = descStyle.Copy().Italic(true)
+		}
+		segments = append(segments, descStyle.Render(display))
+
+		line := lipgloss.JoinHorizontal(lipgloss.Left, segments...)
+		lineWidth := lipgloss.Width(line)
+		if lineWidth < contentWidth {
+			line += strings.Repeat(" ", contentWidth-lineWidth)
+		}
+		if !selected && m.isHostDisconnectedLong(job) {
+			line = dimStyle.Render(line)
+		}
+		rows = append(rows, line)
 	}
 
 	content := strings.Join(rows, "\n")
@@ -2356,324 +2403,350 @@ func (m Model) renderJobCPUTop(height int) string {
 
 func (m Model) renderJobDetails(height int) string {
 	if !m.jobSelectionActive {
+		if m.detailViewport != nil {
+			m.detailViewport.SetContent("")
+		}
 		return m.renderJobSummaryPanel(height)
 	}
-	var content string
+
+	panelHeader := m.renderTabHeader()
+	job := m.getTargetJob()
+
+	if job == nil {
+		emptyContent := dimStyle.Render("No jobs to display")
+		if m.detailViewport != nil {
+			m.detailViewport.SetContent(emptyContent)
+		}
+		panelContent := panelHeader + "\n" + emptyContent
+		return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+	}
+
+	viewportWidth := m.width - 6
+	if viewportWidth < 1 {
+		viewportWidth = 1
+	}
+	viewportHeight := height - 4
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+
+	detailBody := m.jobDetailContent(job)
+	m.detailViewport.SetContent(detailBody)
+
+	vp := *m.detailViewport
+	vp.Width = viewportWidth
+	vp.Height = viewportHeight
+
+	body := vp.View()
+	if body == "" {
+		body = dimStyle.Render("No jobs to display")
+	}
+
+	panelContent := panelHeader + "\n" + body
+	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+}
+
+func (m Model) jobDetailContent(job *db.Job) string {
 	var b strings.Builder
 
-	// Styles for the details view
 	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Width(11)
 	valueStyle := lipgloss.NewStyle()
 	headerStyle := lipgloss.NewStyle().Bold(true)
 	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Bold(true).Underline(true)
 
-	highlightedJob := m.getTargetJob()
+	// Header line with job ID and host (progress shown in Progress section)
+	b.WriteString(headerStyle.Render(fmt.Sprintf("Job %d", job.ID)))
+	b.WriteString(dimStyle.Render(" on "))
+	b.WriteString(headerStyle.Render(job.Host))
 
-	if highlightedJob == nil {
-		content = dimStyle.Render("No jobs to display")
-	} else {
-		job := highlightedJob
+	// Show dependency info on same line if present
+	if depSpec := m.jobDependencies[job.ID]; depSpec != "" {
+		if strings.HasSuffix(depSpec, "+") {
+			b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s)", strings.TrimSuffix(depSpec, "+"))))
+		} else {
+			b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s succeeds)", depSpec)))
+		}
+	} else if m.pendingOpsJobIDs[job.ID] && job.Status == db.StatusQueued {
+		b.WriteString(dimStyle.Render(" (pending sync)"))
+	}
+	b.WriteString("\n\n")
 
-		// Header line with job ID and host (progress shown in Progress section)
-		b.WriteString(headerStyle.Render(fmt.Sprintf("Job %d", job.ID)))
-		b.WriteString(dimStyle.Render(" on "))
-		b.WriteString(headerStyle.Render(job.Host))
+	// Description (if any)
+	if job.Description != "" {
+		b.WriteString(labelStyle.Render("Desc"))
+		descStyle := lipgloss.NewStyle().Italic(true)
+		b.WriteString(descStyle.Render(job.Description))
+		b.WriteString("\n")
+	}
 
-		// Show dependency info on same line if present
-		if depSpec := m.jobDependencies[job.ID]; depSpec != "" {
-			if strings.HasSuffix(depSpec, "+") {
-				b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s)", strings.TrimSuffix(depSpec, "+"))))
-			} else {
-				b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s succeeds)", depSpec)))
+	// Command (most important) - wrap and indent continuation lines, but limit height
+	b.WriteString(labelStyle.Render("Command"))
+	cmd := job.EffectiveCommand()
+	labelWidth := 11
+	// Panel content width is m.width - 6 (borders + padding), minus label
+	availableWidth := m.width - 6 - labelWidth
+	if availableWidth < 20 {
+		availableWidth = 60 // fallback if window too narrow
+	}
+	// Wrap first (on plain text), then apply syntax highlighting to each line
+	wrappedCmd := wrapTextWithIndent(cmd, availableWidth, labelWidth)
+	// Limit command display to 4 lines max to avoid overwhelming the details panel
+	const maxCmdLines = 4
+	cmdLines := strings.Split(wrappedCmd, "\n")
+	if len(cmdLines) > maxCmdLines {
+		cmdLines = cmdLines[:maxCmdLines]
+		cmdLines = append(cmdLines, strings.Repeat(" ", labelWidth)+"...")
+	}
+	// Apply syntax highlighting to each line
+	for i, line := range cmdLines {
+		cmdLines[i] = highlightCommand(line)
+	}
+	b.WriteString(strings.Join(cmdLines, "\n"))
+	b.WriteString("\n")
+
+	// Directory
+	b.WriteString(labelStyle.Render("Directory"))
+	b.WriteString(valueStyle.Render(job.EffectiveWorkingDir()))
+	b.WriteString("\n")
+
+	// Environment variables (if any)
+	envVars := job.ParseExportVars()
+	if len(envVars) > 0 {
+		b.WriteString(labelStyle.Render("Env"))
+		b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
+		b.WriteString("\n")
+	}
+
+	// Timing section
+	if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
+		b.WriteString("\n")
+
+		// Show created time if significantly different from start time (>60s gap)
+		if job.CreatedAt > 0 && (job.StartTime == 0 || job.StartTime-job.CreatedAt > 60) {
+			createdTime := time.Unix(job.CreatedAt, 0)
+			label := "Created"
+			if job.Status == db.StatusQueued {
+				label = "Queued"
 			}
-		} else if m.pendingOpsJobIDs[job.ID] && job.Status == db.StatusQueued {
-			b.WriteString(dimStyle.Render(" (pending sync)"))
-		}
-		b.WriteString("\n\n")
-
-		// Description (if any)
-		if job.Description != "" {
-			b.WriteString(labelStyle.Render("Desc"))
-			descStyle := lipgloss.NewStyle().Italic(true)
-			b.WriteString(descStyle.Render(job.Description))
+			b.WriteString(labelStyle.Render(label))
+			b.WriteString(valueStyle.Render(formatDetailTimestamp(createdTime)))
 			b.WriteString("\n")
 		}
 
-		// Command (most important) - wrap and indent continuation lines, but limit height
-		b.WriteString(labelStyle.Render("Command"))
-		cmd := job.EffectiveCommand()
-		labelWidth := 11
-		// Panel content width is m.width - 6 (borders + padding), minus label
-		availableWidth := m.width - 6 - labelWidth
-		if availableWidth < 20 {
-			availableWidth = 60 // fallback if window too narrow
-		}
-		// Wrap first (on plain text), then apply syntax highlighting to each line
-		wrappedCmd := wrapTextWithIndent(cmd, availableWidth, labelWidth)
-		// Limit command display to 4 lines max to avoid overwhelming the details panel
-		const maxCmdLines = 4
-		cmdLines := strings.Split(wrappedCmd, "\n")
-		if len(cmdLines) > maxCmdLines {
-			cmdLines = cmdLines[:maxCmdLines]
-			cmdLines = append(cmdLines, strings.Repeat(" ", labelWidth)+"...")
-		}
-		// Apply syntax highlighting to each line
-		for i, line := range cmdLines {
-			cmdLines[i] = highlightCommand(line)
-		}
-		b.WriteString(strings.Join(cmdLines, "\n"))
-		b.WriteString("\n")
+		if job.StartTime > 0 {
+			startTime := time.Unix(job.StartTime, 0)
+			var endTime time.Time
+			hasEnd := job.EndTime != nil
+			if hasEnd {
+				endTime = time.Unix(*job.EndTime, 0)
+			}
 
-		// Directory
-		b.WriteString(labelStyle.Render("Directory"))
-		b.WriteString(valueStyle.Render(job.EffectiveWorkingDir()))
-		b.WriteString("\n")
+			sameDay := hasEnd && sameLocalDay(startTime, endTime)
 
-		// Environment variables (if any)
-		envVars := job.ParseExportVars()
-		if len(envVars) > 0 {
-			b.WriteString(labelStyle.Render("Env"))
-			b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
-			b.WriteString("\n")
-		}
-
-		// Timing section
-		if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
-			b.WriteString("\n")
-
-			// Show created time if significantly different from start time (>60s gap)
-			if job.CreatedAt > 0 && (job.StartTime == 0 || job.StartTime-job.CreatedAt > 60) {
-				createdTime := time.Unix(job.CreatedAt, 0)
-				label := "Created"
-				if job.Status == db.StatusQueued {
-					label = "Queued"
-				}
-				b.WriteString(labelStyle.Render(label))
-				b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", createdTime.Format("2006-01-02 15:04:05"), formatStartTime(job.CreatedAt))))
+			if sameDay {
+				startStr, suffix := formatDetailTimeParts(startTime)
+				endStr, _ := formatDetailTimeParts(endTime)
+				line := fmt.Sprintf("%s – %s%s", startStr, endStr, suffix)
+				b.WriteString(labelStyle.Render("Start/End"))
+				b.WriteString(valueStyle.Render(line))
 				b.WriteString("\n")
-			}
-
-			if job.StartTime > 0 {
-				startTime := time.Unix(job.StartTime, 0)
+			} else {
 				b.WriteString(labelStyle.Render("Started"))
-				b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", startTime.Format("2006-01-02 15:04:05"), formatStartTime(job.StartTime))))
+				b.WriteString(valueStyle.Render(formatDetailTimestamp(startTime)))
 				b.WriteString("\n")
 
-				// Show timing information based on job status
-				if job.Status == db.StatusRunning {
-					elapsed := time.Since(startTime)
-					b.WriteString(labelStyle.Render("Elapsed"))
-					b.WriteString(valueStyle.Render(formatDuration(elapsed)))
-					b.WriteString("\n")
-				} else if job.EndTime != nil {
-					endTime := time.Unix(*job.EndTime, 0)
-					duration := endTime.Sub(startTime)
+				if hasEnd {
 					b.WriteString(labelStyle.Render("Ended"))
-					b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))))
-					b.WriteString("\n")
-					b.WriteString(labelStyle.Render("Duration"))
-					b.WriteString(valueStyle.Render(formatDuration(duration)))
+					b.WriteString(valueStyle.Render(formatDetailTimestamp(endTime)))
 					b.WriteString("\n")
 				}
-			} else if job.EndTime != nil {
-				// Job ended without ever starting (failed/killed before start)
-				endTime := time.Unix(*job.EndTime, 0)
-				b.WriteString(labelStyle.Render("Ended"))
-				b.WriteString(valueStyle.Render(fmt.Sprintf("%s (%s)", endTime.Format("2006-01-02 15:04:05"), formatStartTime(*job.EndTime))))
+			}
+
+			// Show timing information based on job status
+			if job.Status == db.StatusRunning {
+				elapsed := time.Since(startTime)
+				b.WriteString(labelStyle.Render("Elapsed"))
+				b.WriteString(valueStyle.Render(formatDuration(elapsed)))
+				b.WriteString("\n")
+			} else if hasEnd {
+				duration := endTime.Sub(startTime)
+				if !sameDay {
+					// If not already printed in single line, ensure duration context is visible
+					// (Started/Ended entries already present)
+				}
+				b.WriteString(labelStyle.Render("Duration"))
+				b.WriteString(valueStyle.Render(formatDuration(duration)))
 				b.WriteString("\n")
 			}
+		} else if job.EndTime != nil {
+			// Job ended without ever starting (failed/killed before start)
+			endTime := time.Unix(*job.EndTime, 0)
+			b.WriteString(labelStyle.Render("Ended"))
+			b.WriteString(valueStyle.Render(formatDetailTimestamp(endTime)))
+			b.WriteString("\n")
 		}
+	}
 
-		// Exit status
-		if job.Status == db.StatusCompleted && job.ExitCode != nil {
-			b.WriteString(labelStyle.Render("Exit"))
-			if *job.ExitCode == 0 {
-				b.WriteString(completedStyle.Render("0 (success)"))
-			} else {
-				b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
-			}
-			b.WriteString("\n")
-		} else if job.Status == db.StatusDead {
-			b.WriteString(labelStyle.Render("Exit"))
-			b.WriteString(deadStyle.Render("killed/crashed"))
-			b.WriteString("\n")
-		} else if job.Status == db.StatusFailed {
-			b.WriteString(labelStyle.Render("Exit"))
-			b.WriteString(failedStyle.Render("failed to start"))
-			b.WriteString("\n")
-			if job.ErrorMessage != "" {
-				b.WriteString(labelStyle.Render("Error"))
-				b.WriteString(errorStyle.Render(job.ErrorMessage))
-				b.WriteString("\n")
-			}
+	// Exit status
+	if job.Status == db.StatusCompleted && job.ExitCode != nil {
+		b.WriteString(labelStyle.Render("Exit"))
+		if *job.ExitCode == 0 {
+			b.WriteString(completedStyle.Render("0 (success)"))
+		} else {
+			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
 		}
-
-		// Process stats and progress section for running jobs
-		// Reserve a fixed number of lines to prevent log preview from jumping
-		if job.Status == db.StatusRunning {
-			const statsReservedLines = 7 // header + CPU + Memory + Threads + 2 GPUs + Progress
-			linesWritten := 0
-
+		b.WriteString("\n")
+	} else if job.Status == db.StatusDead {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(deadStyle.Render("killed/crashed"))
+		b.WriteString("\n")
+	} else if job.Status == db.StatusFailed {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(failedStyle.Render("failed to start"))
+		b.WriteString("\n")
+		if job.ErrorMessage != "" {
+			b.WriteString(labelStyle.Render("Error"))
+			b.WriteString(errorStyle.Render(job.ErrorMessage))
 			b.WriteString("\n")
-			b.WriteString(sectionStyle.Render("Process Stats"))
-			b.WriteString("\n")
-			linesWritten++ // header
+		}
+	}
 
-			if m.processStats != nil && m.processStatsJobID == job.ID {
-				// CPU: percentage and cumulative time
-				if m.processStats.CPUPct > 0 || m.processStats.CPUUser != "" {
-					b.WriteString(labelStyle.Render("CPU"))
-					cpuVal := ""
-					if m.processStats.CPUPct > 0 {
-						cpuVal = fmt.Sprintf("%.1f%%", m.processStats.CPUPct)
-					}
-					if m.processStats.CPUUser != "" {
-						if cpuVal != "" {
-							cpuVal += " "
-						}
-						cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
-					}
-					b.WriteString(valueStyle.Render(cpuVal))
-					b.WriteString("\n")
-					linesWritten++
-				}
+	// Process stats and progress section for running jobs
+	// Reserve a fixed number of lines to prevent log preview from jumping
+	if job.Status == db.StatusRunning {
+		const statsReservedLines = 7 // header + CPU + Memory + Threads + 2 GPUs + Progress
+		linesWritten := 0
 
-				// Memory: absolute and percentage
-				if m.processStats.MemoryRSS != "" {
-					b.WriteString(labelStyle.Render("Memory"))
-					mem := m.processStats.MemoryRSS
-					if m.processStats.MemoryPct != "" {
-						mem += " (" + m.processStats.MemoryPct + ")"
-					}
-					b.WriteString(valueStyle.Render(mem))
-					b.WriteString("\n")
-					linesWritten++
-				}
+		b.WriteString("\n")
+		b.WriteString(sectionStyle.Render("Process Stats"))
+		b.WriteString("\n")
+		linesWritten++ // header
 
-				// Threads
-				if m.processStats.Threads > 0 {
-					b.WriteString(labelStyle.Render("Threads"))
-					b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.processStats.Threads)))
-					b.WriteString("\n")
-					linesWritten++
+		if m.processStats != nil && m.processStatsJobID == job.ID {
+			// CPU: percentage and cumulative time
+			if m.processStats.CPUPct > 0 || m.processStats.CPUUser != "" {
+				b.WriteString(labelStyle.Render("CPU"))
+				cpuVal := ""
+				if m.processStats.CPUPct > 0 {
+					cpuVal = fmt.Sprintf("%.1f%%", m.processStats.CPUPct)
 				}
-
-				// GPUs with utilization and memory
-				if len(m.processStats.GPUs) > 0 {
-					for _, gpu := range m.processStats.GPUs {
-						b.WriteString(labelStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)))
-						gpuVal := ""
-						if gpu.Utilization > 0 {
-							gpuVal += fmt.Sprintf("%d%% util, ", gpu.Utilization)
-						}
-						gpuVal += gpu.MemUsed
-						b.WriteString(valueStyle.Render(gpuVal))
-						b.WriteString("\n")
-						linesWritten++
+				if m.processStats.CPUUser != "" {
+					if cpuVal != "" {
+						cpuVal += " "
 					}
+					cpuVal += fmt.Sprintf("(%s user, %s sys)", m.processStats.CPUUser, m.processStats.CPUSys)
 				}
-			} else {
-				// Stats not loaded yet - show placeholder
-				b.WriteString(dimStyle.Render("Loading..."))
+				b.WriteString(valueStyle.Render(cpuVal))
 				b.WriteString("\n")
 				linesWritten++
 			}
 
-			// Progress (on same reserved block)
-			if prog, ok := m.jobProgress[job.ID]; ok {
-				pct := prog.DisplayPercent()
-				if pct >= 0 || prog.Total > 0 {
-					b.WriteString(labelStyle.Render("Progress"))
-					b.WriteString("  ")
-					if pct >= 0 {
-						b.WriteString(renderProgressBar(pct, 20))
-						b.WriteString(fmt.Sprintf(" %d%%", pct))
+			// Memory: absolute and percentage
+			if m.processStats.MemoryRSS != "" {
+				b.WriteString(labelStyle.Render("Memory"))
+				mem := m.processStats.MemoryRSS
+				if m.processStats.MemoryPct != "" {
+					mem += " (" + m.processStats.MemoryPct + ")"
+				}
+				b.WriteString(valueStyle.Render(mem))
+				b.WriteString("\n")
+				linesWritten++
+			}
+
+			// Threads
+			if m.processStats.Threads > 0 {
+				b.WriteString(labelStyle.Render("Threads"))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%d", m.processStats.Threads)))
+				b.WriteString("\n")
+				linesWritten++
+			}
+
+			// GPUs with utilization and memory
+			if len(m.processStats.GPUs) > 0 {
+				for _, gpu := range m.processStats.GPUs {
+					b.WriteString(labelStyle.Render(fmt.Sprintf("GPU %d", gpu.Index)))
+					gpuVal := ""
+					if gpu.Utilization > 0 {
+						gpuVal += fmt.Sprintf("%d%% util, ", gpu.Utilization)
 					}
-					if prog.Total > 0 {
-						b.WriteString(fmt.Sprintf(" (%d/%d)", prog.Current, prog.Total))
-					}
+					gpuVal += gpu.MemUsed
+					b.WriteString(valueStyle.Render(gpuVal))
 					b.WriteString("\n")
 					linesWritten++
 				}
 			}
+		} else {
+			// Stats not loaded yet - show placeholder
+			b.WriteString(dimStyle.Render("Loading..."))
+			b.WriteString("\n")
+			linesWritten++
+		}
 
-			// Pad with blank lines to reach reserved count
-			for linesWritten < statsReservedLines {
+		// Progress (on same reserved block)
+		if prog, ok := m.jobProgress[job.ID]; ok {
+			pct := prog.DisplayPercent()
+			if pct >= 0 || prog.Total > 0 {
+				b.WriteString(labelStyle.Render("Progress"))
+				b.WriteString("  ")
+				if pct >= 0 {
+					b.WriteString(renderProgressBar(pct, 20))
+					b.WriteString(fmt.Sprintf(" %d%%", pct))
+				}
+				if prog.Total > 0 {
+					b.WriteString(fmt.Sprintf(" (%d/%d)", prog.Current, prog.Total))
+				}
 				b.WriteString("\n")
 				linesWritten++
 			}
 		}
 
-		// Log preview section - show last few lines of log if available
-		logPreview := ""
-		if m.logContent != "" {
-			logPreview = m.logContent
-		} else if cached, ok := m.logCache[job.ID]; ok {
-			logPreview = cached
+		// Pad with blank lines to reach reserved count
+		for linesWritten < statsReservedLines {
+			b.WriteString("\n")
+			linesWritten++
 		}
-		if logPreview != "" {
-			// Process carriage returns (progress bars use \r to overwrite lines)
-			logPreview = processCarriageReturns(logPreview)
+	}
 
-			const baseMaxPreviewLines = 5
-			maxPreviewLines := baseMaxPreviewLines
-			if height > 0 {
-				_, frameHeight := logPanelStyle.GetFrameSize()
-				innerHeight := height - frameHeight
-				if innerHeight < 0 {
-					innerHeight = 0
-				}
-				headerContent := m.renderTabHeader() + "\n" + b.String()
-				currentHeight := lipgloss.Height(headerContent)
-				remaining := innerHeight - currentHeight
-				const logSectionOverhead = 2 // blank spacer + section title
-				if remaining <= logSectionOverhead {
-					maxPreviewLines = 0
-				} else {
-					allowed := remaining - logSectionOverhead
-					if allowed < maxPreviewLines {
-						maxPreviewLines = allowed
-					}
-				}
+	// Log preview section - show last few lines of log if available
+	logPreview := ""
+	if m.logContent != "" {
+		logPreview = m.logContent
+	} else if cached, ok := m.logCache[job.ID]; ok {
+		logPreview = cached
+	}
+	if logPreview != "" {
+		logPreview = processCarriageReturns(logPreview)
+
+		const maxPreviewLines = 5
+		allLines := strings.Split(strings.TrimSpace(logPreview), "\n")
+		var previewLines []string
+		for i := len(allLines) - 1; i >= 0 && len(previewLines) < maxPreviewLines; i-- {
+			line := strings.TrimSpace(allLines[i])
+			if line != "" {
+				previewLines = append([]string{line}, previewLines...)
 			}
+		}
 
-			if maxPreviewLines > 0 {
-				// Get last non-empty lines of the log, limited by remaining panel height
-				allLines := strings.Split(strings.TrimSpace(logPreview), "\n")
-				var previewLines []string
-				for i := len(allLines) - 1; i >= 0 && len(previewLines) < maxPreviewLines; i-- {
-					line := strings.TrimSpace(allLines[i])
-					if line != "" {
-						previewLines = append([]string{line}, previewLines...)
-					}
+		if len(previewLines) > 0 {
+			b.WriteString("\n")
+			b.WriteString(sectionStyle.Render("Log (last lines)"))
+			b.WriteString("\n")
+			for _, line := range previewLines {
+				// Truncate long lines to fit panel width
+				maxWidth := m.width - 10
+				if maxWidth < 40 {
+					maxWidth = 40
 				}
-
-				if len(previewLines) > 0 {
-					b.WriteString("\n")
-					b.WriteString(sectionStyle.Render("Log (last lines)"))
-					b.WriteString("\n")
-					for _, line := range previewLines {
-						// Truncate long lines to fit panel width
-						maxWidth := m.width - 10
-						if maxWidth < 40 {
-							maxWidth = 40
-						}
-						if len(line) > maxWidth {
-							line = line[:maxWidth-3] + "..."
-						}
-						b.WriteString(dimStyle.Render(line))
-						b.WriteString("\n")
-					}
+				if len(line) > maxWidth {
+					line = line[:maxWidth-3] + "..."
 				}
+				b.WriteString(dimStyle.Render(line))
+				b.WriteString("\n")
 			}
 		}
 	}
 
-	panelContent := m.renderTabHeader() + "\n"
-	panelContent += b.String()
-	panelContent += content
-
-	return logPanelStyle.Width(m.width - 2).Height(height).Render(panelContent)
+	return b.String()
 }
 
 func (m Model) renderJobSummaryPanel(height int) string {
@@ -2881,6 +2954,41 @@ func formatCompactDuration(d time.Duration) string {
 		return "0s"
 	}
 	return strings.Join(parts, "")
+}
+
+func formatDetailTimestamp(t time.Time) string {
+	timeStr, suffix := formatDetailTimeParts(t)
+	return timeStr + suffix
+}
+
+func formatDetailTimeParts(t time.Time) (string, string) {
+	now := time.Now()
+	loc := now.Location()
+	tt := t.In(loc)
+	timeStr := tt.Format("15:04:05")
+
+	startToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	startYesterday := startToday.Add(-24 * time.Hour)
+	ttDay := time.Date(tt.Year(), tt.Month(), tt.Day(), 0, 0, 0, 0, loc)
+
+	switch {
+	case !ttDay.Before(startToday):
+		return timeStr, ""
+	case !ttDay.Before(startYesterday):
+		return timeStr, " (yesterday)"
+	default:
+		dateStr := tt.Format("01/02")
+		if tt.Year() != now.Year() {
+			dateStr += tt.Format("/2006")
+		}
+		return timeStr, " (" + dateStr + ")"
+	}
+}
+
+func sameLocalDay(a, b time.Time) bool {
+	a = a.In(time.Now().Location())
+	b = b.In(time.Now().Location())
+	return a.Year() == b.Year() && a.YearDay() == b.YearDay()
 }
 
 // wrapTextWithIndent wraps text to the given width, indenting continuation lines.
@@ -4040,6 +4148,13 @@ func (m Model) formatStatus(job *db.Job) string {
 	}
 }
 
+func (m Model) styleForJob(job *db.Job) lipgloss.Style {
+	if job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode != 0 {
+		return failedStyle
+	}
+	return m.styleForStatus(job.Status)
+}
+
 func (m Model) styleForStatus(status string) lipgloss.Style {
 	switch status {
 	case db.StatusRunning:
@@ -4419,6 +4534,7 @@ func (m *Model) switchToJobTab(tab DetailTab) (Model, tea.Cmd) {
 		return m.switchToCPUTab()
 	default:
 		m.detailTab = DetailTabDetails
+		m.detailViewport.GotoTop()
 		return *m, nil
 	}
 }
@@ -4653,6 +4769,8 @@ func (m *Model) clearJobSelection() {
 	m.processStats = nil
 	m.prevProcessStats = nil
 	m.processStatsJobID = 0
+	m.detailViewport.SetContent("")
+	m.detailViewport.GotoTop()
 }
 
 // handleSelectionChanged is called when the job list selection changes.
@@ -4670,6 +4788,10 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 	}
 
 	job := m.jobs[idx]
+
+	if m.detailTab == DetailTabDetails {
+		m.detailViewport.GotoTop()
+	}
 
 	var cmds []tea.Cmd
 	// If in Logs tab, fetch logs for new job
@@ -4739,11 +4861,7 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued {
 			return true
 		}
-		// Completed within last 24 hours
-		if job.EndTime != nil {
-			return time.Now().Unix()-*job.EndTime < 24*60*60
-		}
-		return false
+		return isRecentHistory(job)
 	case jobFilterActive:
 		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued
 	case jobFilterSucceeded:
@@ -4756,6 +4874,26 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	default:
 		return true
 	}
+}
+
+func isRecentHistory(job *db.Job) bool {
+	const window = 24 * time.Hour
+	windowSeconds := int64(window / time.Second)
+	now := time.Now()
+	if job.EndTime != nil {
+		return now.Unix()-*job.EndTime < windowSeconds
+	}
+	if job.Status == db.StatusDead || job.Status == db.StatusFailed {
+		timestamp := job.StartTime
+		if timestamp == 0 {
+			timestamp = job.CreatedAt
+		}
+		if timestamp == 0 {
+			return false
+		}
+		return now.Sub(time.Unix(timestamp, 0)) < window
+	}
+	return false
 }
 
 func jobFilterDescription(mode jobFilterMode) string {
@@ -5889,10 +6027,34 @@ func updateHostWithCachedStatic(host *Host, cached *Host) {
 }
 
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	if max <= 0 {
+		return ""
+	}
+	if runewidth.StringWidth(s) <= max {
 		return s
 	}
-	return s[:max-1] + "…"
+	ellipsisWidth := runewidth.StringWidth("…")
+	if max <= ellipsisWidth {
+		return "…"
+	}
+	target := max - ellipsisWidth
+	var b strings.Builder
+	width := 0
+	for _, r := range s {
+		rw := runewidth.RuneWidth(r)
+		if rw == 0 {
+			continue
+		}
+		if width+rw > target {
+			break
+		}
+		b.WriteRune(r)
+		width += rw
+	}
+	if b.Len() == 0 {
+		return "…"
+	}
+	return b.String() + "…"
 }
 
 func shortenCommandPath(cmd string) string {
