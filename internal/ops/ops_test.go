@@ -127,10 +127,14 @@ func TestKillJobRemovesPendingStartOperations(t *testing.T) {
 		t.Error("Expected run_job operation to be removed after kill")
 	}
 
-	// Job should be marked as dead
+	// Job should have pending_status set to dead (three-way merge model)
 	job, _ = db.GetJobByID(database, jobID)
-	if job.Status != db.StatusDead {
-		t.Errorf("Expected job status to be dead, got %s", job.Status)
+	if job.PendingStatus == nil || *job.PendingStatus != db.StatusDead {
+		pendingStr := "<nil>"
+		if job.PendingStatus != nil {
+			pendingStr = *job.PendingStatus
+		}
+		t.Errorf("Expected job pending_status to be dead, got %s", pendingStr)
 	}
 }
 

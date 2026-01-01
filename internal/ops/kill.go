@@ -10,11 +10,10 @@ import (
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
-// KillJob queues a kill operation and attempts to execute it.
-// The job is marked as dead in the database regardless of whether the
-// remote kill succeeds (for consistency with user intent).
-// Any pending run/restart operations for this job are removed since
-// they are now incompatible with the kill intent.
+// KillJob sets the pending status to dead and attempts to reconcile immediately.
+// Uses the three-way merge model: sets pending_status as user intent, then
+// tries to apply to remote. If successful, status is updated; if not, the
+// pending_status remains for later reconciliation during sync.
 func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
@@ -22,18 +21,52 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 
 	oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithDetail("killing job"))
 
-	// Mark job as dead locally first (user intent is clear)
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("mark dead failed"))
-		return Result{}, fmt.Errorf("mark job dead: %w", err)
+	// Set pending status to record user intent
+	if err := db.SetPendingStatus(database, job.ID, db.StatusDead); err != nil {
+		oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("set pending status failed"))
+		return Result{}, fmt.Errorf("set pending status: %w", err)
 	}
 
-	// Remove any pending run/restart operations for this job
+	// Remove any pending run/restart deferred operations for this job
 	// (they are incompatible with kill intent)
 	db.DeletePendingOperationsForJob(database, job.ID, db.OpRunJob, db.OpRestartJob)
 
-	// Queue the kill operation
-	return QueueAndExecute(database, job.Host, db.OpKillJob, job.ID, "", "", opts)
+	// Reload job to get updated pending status
+	job, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		return Result{}, fmt.Errorf("reload job: %w", err)
+	}
+
+	// Try to reconcile immediately (apply kill to remote)
+	reconcileOpts := ReconcileOptions{
+		Timeout: opts.Timeout,
+		Policy:  TerminalWins,
+	}
+
+	// Try to apply the pending status to remote
+	result, err := applyPendingToRemote(database, job, db.StatusDead, reconcileOpts)
+	if err != nil {
+		// Connection error - leave pending status for later reconciliation
+		if ssh.IsConnectionError(err.Error()) {
+			oplog.LogJob(oplog.OpJobKill, job.ID, job.Host,
+				oplog.WithDetail("kill deferred: connection error"))
+			return Result{
+				Success: true,
+				JobID:   job.ID,
+				Message: fmt.Sprintf("Job %d kill pending (host unreachable)", job.ID),
+			}, nil
+		}
+		return Result{}, err
+	}
+
+	oplog.LogJob(oplog.OpJobKilled, job.ID, job.Host,
+		oplog.WithDetailf("killed: %s -> %s", result.OldStatus, result.NewStatus))
+
+	return Result{
+		Success: true,
+		JobID:   job.ID,
+		Message: fmt.Sprintf("Job %d killed", job.ID),
+	}, nil
 }
 
 // executeKill executes a kill operation (called during queue drain)
@@ -78,8 +111,9 @@ func executeKill(database *sql.DB, host string, op *db.DeferredOperation, opts E
 }
 
 // CancelQueuedJob cancels a queued job so it won't run when the queue drains to it.
-// The job is marked as dead and removed from the remote queue file.
-// Any pending queue_job or start_queued_job operations for this job are removed.
+// Uses the three-way merge model: sets pending_status to dead, then tries to
+// remove from remote queue. If successful, status is updated; if not, the
+// pending_status remains for later reconciliation during sync.
 func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
@@ -91,22 +125,49 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 
 	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceling queued job"))
 
-	// Mark job as dead locally first (user intent is clear)
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("mark dead failed"))
-		return Result{}, fmt.Errorf("mark job dead: %w", err)
+	// Set pending status to record user intent
+	if err := db.SetPendingStatus(database, job.ID, db.StatusDead); err != nil {
+		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("set pending status failed"))
+		return Result{}, fmt.Errorf("set pending status: %w", err)
 	}
 
-	// Remove any pending queue/start operations for this job
+	// Remove any pending queue/start deferred operations for this job
 	// (they are incompatible with cancel intent)
 	db.DeletePendingOperationsForJob(database, job.ID, db.OpQueueJob, db.OpStartQueuedJob)
 
-	// Queue the remove operation to clean up remote queue file
+	// Try to remove from remote queue file immediately
 	queueName := job.QueueName
 	if queueName == "" {
 		queueName = "default"
 	}
-	return QueueAndExecute(database, job.Host, db.OpRemoveQueued, job.ID, queueName, "", opts)
+
+	err := removeFromQueueFile(job.Host, queueName, job.ID, opts.Timeout)
+	if err != nil {
+		// Connection error - leave pending status for later reconciliation
+		if ssh.IsConnectionError(err.Error()) {
+			oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host,
+				oplog.WithDetail("cancel deferred: connection error"))
+			return Result{
+				Success: true,
+				JobID:   job.ID,
+				Message: fmt.Sprintf("Job %d cancel pending (host unreachable)", job.ID),
+			}, nil
+		}
+		return Result{}, err
+	}
+
+	// Success - update status and clear pending
+	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
+		return Result{}, fmt.Errorf("update status: %w", err)
+	}
+
+	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceled"))
+
+	return Result{
+		Success: true,
+		JobID:   job.ID,
+		Message: fmt.Sprintf("Job %d canceled", job.ID),
+	}, nil
 }
 
 // executeKillQueueRunnerJob kills a job running under the queue runner

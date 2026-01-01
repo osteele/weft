@@ -3984,6 +3984,11 @@ func (m Model) styleForHostStatus(status HostStatus) lipgloss.Style {
 }
 
 func (m Model) formatStatus(job *db.Job) string {
+	// Check if job has a pending (target) status from three-way merge model
+	if job.PendingStatus != nil {
+		return m.formatPendingStatusDisplay(*job.PendingStatus, job.Status)
+	}
+
 	// Check if job has pending deferred operations
 	hasPendingOps := m.pendingOpsJobIDs[job.ID]
 	depSpec := m.jobDependencies[job.ID]
@@ -4053,6 +4058,29 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 		return pendingStyle
 	default:
 		return lipgloss.NewStyle()
+	}
+}
+
+// formatPendingStatusDisplay shows pending (target) status with current status context.
+// Uses ⧗ (hourglass) to indicate an operation is pending.
+func (m Model) formatPendingStatusDisplay(pendingStatus, currentStatus string) string {
+	switch pendingStatus {
+	case db.StatusDead:
+		// Show what we're transitioning from
+		switch currentStatus {
+		case db.StatusRunning:
+			return "⧗ killing"
+		case db.StatusQueued:
+			return "⧗ canceling"
+		default:
+			return "⧗ killing"
+		}
+	case db.StatusRunning:
+		return "⧗ starting"
+	case db.StatusQueued:
+		return "⧗ queuing"
+	default:
+		return "⧗ " + pendingStatus
 	}
 }
 

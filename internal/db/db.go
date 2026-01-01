@@ -30,9 +30,14 @@ type Job struct {
 	ExitCode             *int
 	Status               string
 	Tombstoned           bool
+
+	// Three-way merge state for reconciliation
+	LastSyncedStatus string  // Base: what remote was at last successful sync
+	PendingStatus    *string // Local: what user wants (nil = no pending change)
+	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, tombstoned`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, tombstoned, last_synced_status, pending_status, pending_at`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -162,6 +167,17 @@ func initSchema(db *sql.DB) error {
 	// Migration: make start_time nullable for queued jobs
 	// SQLite doesn't support ALTER COLUMN, so we need to recreate the table
 	if err := migrateStartTimeNullable(db); err != nil {
+		return err
+	}
+
+	// Migration: add three-way merge columns for reconciliation
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN last_synced_status TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN pending_status TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN pending_at INTEGER`); err != nil {
 		return err
 	}
 
@@ -525,6 +541,60 @@ func MarkQueuedByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// SetPendingStatus sets the pending (target) status for a job.
+// This represents what the user wants the job state to become.
+func SetPendingStatus(db *sql.DB, jobID int64, status string) error {
+	now := time.Now().Unix()
+	_, err := db.Exec(
+		`UPDATE jobs SET pending_status = ?, pending_at = ? WHERE id = ?`,
+		status, now, jobID,
+	)
+	return err
+}
+
+// ClearPendingStatus clears the pending status after reconciliation succeeds.
+func ClearPendingStatus(db *sql.DB, jobID int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET pending_status = NULL, pending_at = NULL WHERE id = ?`,
+		jobID,
+	)
+	return err
+}
+
+// UpdateLastSyncedStatus updates the base status (what remote was at last sync).
+func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET last_synced_status = ? WHERE id = ?`,
+		status, jobID,
+	)
+	return err
+}
+
+// UpdateStatusAndLastSynced updates both the current status and last synced status together.
+// Used when sync confirms the remote state.
+func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?`,
+		status, status, jobID,
+	)
+	return err
+}
+
+// ClearPendingAndUpdateStatus clears pending status and updates both status fields.
+// Used when reconciliation succeeds or when accepting remote state.
+func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL WHERE id = ?`,
+		status, status, jobID,
+	)
+	return err
+}
+
+// IsTerminalStatus returns true if the status represents a terminal state.
+func IsTerminalStatus(status string) bool {
+	return status == StatusCompleted || status == StatusDead || status == StatusFailed
+}
+
 // CountQueuedByHost returns the number of queued jobs for a host
 func CountQueuedByHost(db *sql.DB, host string) (int, error) {
 	var count int
@@ -735,8 +805,11 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
 	var tombstoned sql.NullInt64
+	var lastSyncedStatus sql.NullString
+	var pendingStatus sql.NullString
+	var pendingAt sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -781,6 +854,15 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if tombstoned.Valid {
 		j.Tombstoned = tombstoned.Int64 != 0
 	}
+	if lastSyncedStatus.Valid {
+		j.LastSyncedStatus = lastSyncedStatus.String
+	}
+	if pendingStatus.Valid {
+		j.PendingStatus = &pendingStatus.String
+	}
+	if pendingAt.Valid {
+		j.PendingAt = &pendingAt.Int64
+	}
 
 	return &j, nil
 }
@@ -802,8 +884,11 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
 		var tombstoned sql.NullInt64
+		var lastSyncedStatus sql.NullString
+		var pendingStatus sql.NullString
+		var pendingAt sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 		if err != nil {
 			return nil, err
 		}
@@ -844,6 +929,15 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if tombstoned.Valid {
 			j.Tombstoned = tombstoned.Int64 != 0
+		}
+		if lastSyncedStatus.Valid {
+			j.LastSyncedStatus = lastSyncedStatus.String
+		}
+		if pendingStatus.Valid {
+			j.PendingStatus = &pendingStatus.String
+		}
+		if pendingAt.Valid {
+			j.PendingAt = &pendingAt.Int64
 		}
 
 		jobs = append(jobs, &j)
@@ -1072,69 +1166,7 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 	}
 	defer rows.Close()
 
-	var jobs []*Job
-	for rows.Next() {
-		var j Job
-		var sessionName sql.NullString
-		var desc sql.NullString
-		var generatedDesc sql.NullString
-		var generationHash sql.NullString
-		var errorMsg sql.NullString
-		var queueName sql.NullString
-		var gpu sql.NullString
-		var createdAt sql.NullInt64
-		var startTime sql.NullInt64
-		var endTime sql.NullInt64
-		var exitCode sql.NullInt64
-		var tombstoned sql.NullInt64
-
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned)
-		if err != nil {
-			return nil, err
-		}
-
-		if sessionName.Valid {
-			j.SessionName = sessionName.String
-		}
-		if desc.Valid {
-			j.Description = desc.String
-		}
-		if generatedDesc.Valid {
-			j.GeneratedDescription = generatedDesc.String
-		}
-		if generationHash.Valid {
-			j.GenerationHash = generationHash.String
-		}
-		if errorMsg.Valid {
-			j.ErrorMessage = errorMsg.String
-		}
-		if queueName.Valid {
-			j.QueueName = queueName.String
-		}
-		if gpu.Valid {
-			j.GPU = gpu.String
-		}
-		if createdAt.Valid {
-			j.CreatedAt = createdAt.Int64
-		}
-		if startTime.Valid {
-			j.StartTime = startTime.Int64
-		}
-		if endTime.Valid {
-			j.EndTime = &endTime.Int64
-		}
-		if exitCode.Valid {
-			code := int(exitCode.Int64)
-			j.ExitCode = &code
-		}
-		if tombstoned.Valid {
-			j.Tombstoned = tombstoned.Int64 != 0
-		}
-
-		jobs = append(jobs, &j)
-	}
-
-	return jobs, rows.Err()
+	return scanJobs(rows)
 }
 
 // EffectiveWorkingDir returns the actual working directory for display.

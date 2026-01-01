@@ -144,6 +144,16 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 // formatJobStatus returns a display string for the job status
 func formatJobStatus(job *db.Job) string {
+	// If there's a pending status, show it with an indicator
+	if job.PendingStatus != nil {
+		return formatPendingStatus(*job.PendingStatus)
+	}
+
+	return formatActualStatus(job)
+}
+
+// formatActualStatus returns display string for the verified status
+func formatActualStatus(job *db.Job) string {
 	switch job.Status {
 	case db.StatusCompleted:
 		if job.ExitCode != nil {
@@ -165,6 +175,20 @@ func formatJobStatus(job *db.Job) string {
 		return "◌ draft"
 	default:
 		return job.Status
+	}
+}
+
+// formatPendingStatus returns display string for pending (target) status
+func formatPendingStatus(status string) string {
+	switch status {
+	case db.StatusDead:
+		return "⧗ killing…"
+	case db.StatusRunning:
+		return "⧗ starting…"
+	case db.StatusQueued:
+		return "⧗ queuing…"
+	default:
+		return "⧗ " + status + "…"
 	}
 }
 
