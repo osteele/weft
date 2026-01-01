@@ -21,52 +21,54 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 
 	oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithDetail("killing job"))
 
-	// Set pending status to record user intent
-	if err := db.SetPendingStatus(database, job.ID, db.StatusDead); err != nil {
-		oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("set pending status failed"))
-		return Result{}, fmt.Errorf("set pending status: %w", err)
-	}
-
 	// Remove any pending run/restart deferred operations for this job
 	// (they are incompatible with kill intent)
 	db.DeletePendingOperationsForJob(database, job.ID, db.OpRunJob, db.OpRestartJob)
 
-	// Reload job to get updated pending status
-	job, err := db.GetJobByID(database, job.ID)
+	outcome, err := requestJobStatus(database, job, db.StatusDead, opts)
 	if err != nil {
-		return Result{}, fmt.Errorf("reload job: %w", err)
-	}
-
-	// Try to reconcile immediately (apply kill to remote)
-	reconcileOpts := ReconcileOptions{
-		Timeout: opts.Timeout,
-		Policy:  TerminalWins,
-	}
-
-	// Try to apply the pending status to remote
-	result, err := applyPendingToRemote(database, job, db.StatusDead, reconcileOpts)
-	if err != nil {
-		// Connection error - leave pending status for later reconciliation
-		if ssh.IsConnectionError(err.Error()) {
-			oplog.LogJob(oplog.OpJobKill, job.ID, job.Host,
-				oplog.WithDetail("kill deferred: connection error"))
-			return Result{
-				Success: true,
-				JobID:   job.ID,
-				Message: fmt.Sprintf("Job %d kill pending (host unreachable)", job.ID),
-			}, nil
-		}
 		return Result{}, err
 	}
 
-	oplog.LogJob(oplog.OpJobKilled, job.ID, job.Host,
-		oplog.WithDetailf("killed: %s -> %s", result.OldStatus, result.NewStatus))
+	if !outcome.hostAvailable {
+		oplog.LogJob(oplog.OpJobKill, job.ID, job.Host,
+			oplog.WithDetail("kill deferred: host unreachable"))
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d kill pending (host unreachable)", job.ID),
+		}, nil
+	}
 
-	return Result{
-		Success: true,
-		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d killed", job.ID),
-	}, nil
+	if !outcome.resolved {
+		return Result{}, fmt.Errorf("unable to reconcile kill for job %d (status: %s)", job.ID, outcome.currentStatus)
+	}
+
+	switch outcome.currentStatus {
+	case db.StatusDead:
+		oplog.LogJob(oplog.OpJobKilled, job.ID, job.Host,
+			oplog.WithDetail("killed via reconciliation"))
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d killed", job.ID),
+		}, nil
+	case db.StatusCompleted:
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d already completed", job.ID),
+		}, nil
+	case db.StatusFailed:
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d already failed", job.ID),
+		}, nil
+	default:
+		return Result{}, fmt.Errorf("job %d remains %s after kill request", job.ID, outcome.currentStatus)
+	}
+
 }
 
 // executeKill executes a kill operation (called during queue drain)

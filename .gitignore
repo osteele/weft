@@ -17,6 +17,9 @@ go.work.sum
 # Go build cache
 .gocache/
 
+# Go module cache
+.gomodcache/
+
 # Dependency directories
 vendor/
 

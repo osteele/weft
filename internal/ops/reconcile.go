@@ -122,6 +122,20 @@ func resolveConflict(database *sql.DB, job *db.Job, base, local, remote string, 
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 		oplog.WithDetailf("conflict: base=%s local=%s remote=%s", base, local, remote))
 
+	// Draft conversions can't be applied once the job has started or finished remotely.
+	if local == db.StatusDraft && remote != db.StatusQueued {
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, remote); err != nil {
+			return nil, err
+		}
+		return &ReconcileResult{
+			Action:     "conflict_resolved",
+			OldStatus:  base,
+			NewStatus:  remote,
+			Conflict:   true,
+			Resolution: fmt.Sprintf("remote state %s superseded draft intent", remote),
+		}, nil
+	}
+
 	switch opts.Policy {
 	case TerminalWins:
 		if db.IsTerminalStatus(remote) {
@@ -181,11 +195,15 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 	}
 
 	var err error
+	useDraftFinalize := false
 	switch targetStatus {
 	case db.StatusDead:
 		err = applyKillToRemote(job, timeout)
 	case db.StatusRunning:
 		err = applyStartToRemote(database, job, timeout)
+	case db.StatusDraft:
+		err = applyDraftRemoval(job, timeout)
+		useDraftFinalize = true
 	default:
 		return nil, fmt.Errorf("unsupported pending status: %s", targetStatus)
 	}
@@ -194,9 +212,15 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 		return nil, err
 	}
 
-	// Success - update status and clear pending
-	if err := db.ClearPendingAndUpdateStatus(database, job.ID, targetStatus); err != nil {
-		return nil, err
+	if useDraftFinalize {
+		if err := finalizeDraftTransition(database, job.ID); err != nil {
+			return nil, err
+		}
+	} else {
+		// Success - update status and clear pending
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, targetStatus); err != nil {
+			return nil, err
+		}
 	}
 
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,

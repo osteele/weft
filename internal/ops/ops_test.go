@@ -554,6 +554,157 @@ func TestExecuteAllDeferredOperations_MultipleOps(t *testing.T) {
 	}
 }
 
+func TestConvertQueuedJobToDraftSuccess(t *testing.T) {
+	database := setupTestDB(t)
+	jobID, err := db.RecordQueued(database, "testhost", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	mock := &commandCapture{}
+	restoreSSH := ssh.SetExecCommand(mockExecCommandSuccess(mock))
+	defer restoreSSH()
+
+	restoreQueue := setQueueRemoteClientForTesting(&fakeQueueRemote{
+		inQueue: Some(true),
+		quick:   quickStatus{State: queueStateQueued},
+	})
+	defer restoreQueue()
+
+	result, err := ConvertQueuedJobToDraft(database, job, ExecuteOptions{})
+	if err != nil {
+		t.Fatalf("convert to draft: %v", err)
+	}
+	if result.Deferred {
+		t.Fatalf("expected immediate conversion, got deferred: %+v", result)
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusDraft {
+		t.Fatalf("expected draft status, got %s", updated.Status)
+	}
+	if updated.QueueName != "" {
+		t.Fatalf("expected queue cleared, got %q", updated.QueueName)
+	}
+	if updated.PendingStatus != nil {
+		t.Fatalf("expected pending cleared, got %v", *updated.PendingStatus)
+	}
+}
+
+func TestConvertQueuedJobToDraftHostOffline(t *testing.T) {
+	database := setupTestDB(t)
+	jobID, err := db.RecordQueued(database, "testhost", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	restoreSSH := ssh.SetExecCommand(mockExecCommandConnectionError())
+	defer restoreSSH()
+
+	restoreQueue := setQueueRemoteClientForTesting(&fakeQueueRemote{
+		inQueue: Some(true),
+		quick:   quickStatus{State: queueStateQueued},
+	})
+	defer restoreQueue()
+
+	result, err := ConvertQueuedJobToDraft(database, job, ExecuteOptions{})
+	if err != nil {
+		t.Fatalf("convert to draft: %v", err)
+	}
+	if !result.Deferred {
+		t.Fatalf("expected deferred result, got %+v", result)
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusQueued {
+		t.Fatalf("expected job to remain queued, got %s", updated.Status)
+	}
+	if updated.PendingStatus == nil || *updated.PendingStatus != db.StatusDraft {
+		if updated.PendingStatus == nil {
+			t.Fatalf("expected pending draft, got nil")
+		}
+		t.Fatalf("expected pending draft, got %s", *updated.PendingStatus)
+	}
+}
+
+func TestConvertQueuedJobToDraftRemoteRunning(t *testing.T) {
+	database := setupTestDB(t)
+	jobID, err := db.RecordQueued(database, "testhost", "/tmp", "echo test", "test job", "default")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	restoreSSH := ssh.SetExecCommand(mockExecCommandSuccess(&commandCapture{}))
+	defer restoreSSH()
+
+	restoreQueue := setQueueRemoteClientForTesting(&fakeQueueRemote{
+		inQueue: Some(false),
+		process: Some(true),
+		quick:   quickStatus{State: queueStateRunning},
+	})
+	defer restoreQueue()
+
+	if _, err := ConvertQueuedJobToDraft(database, job, ExecuteOptions{}); err == nil {
+		t.Fatalf("expected error when remote job already running")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusRunning {
+		t.Fatalf("expected job status to reflect remote running, got %s", updated.Status)
+	}
+	if updated.PendingStatus != nil {
+		t.Fatalf("expected pending cleared after conflict, got %v", *updated.PendingStatus)
+	}
+}
+
+type fakeQueueRemote struct {
+	statusFile Option[bool]
+	current    Option[bool]
+	inQueue    Option[bool]
+	process    Option[bool]
+	quick      quickStatus
+	metadata   string
+}
+
+func (f *fakeQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
+	if f.statusFile.IsSome() {
+		return 0, 0, f.statusFile
+	}
+	return 0, 0, None[bool]()
+}
+
+func (f *fakeQueueRemote) CurrentJob(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
+	if f.current.IsSome() {
+		return f.current
+	}
+	return None[bool]()
+}
+
+func (f *fakeQueueRemote) InQueue(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
+	if f.inQueue.IsSome() {
+		return f.inQueue
+	}
+	return None[bool]()
+}
+
+func (f *fakeQueueRemote) ProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool] {
+	if f.process.IsSome() {
+		return f.process
+	}
+	return None[bool]()
+}
+
+func (f *fakeQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error) {
+	return f.quick, nil
+}
+
+func (f *fakeQueueRemote) Metadata(host string, jobID int64, timeout time.Duration) (string, error) {
+	return f.metadata, nil
+}
+
 func TestAppendQueueEntryFormatsQueueLine(t *testing.T) {
 	capture := &commandCapture{}
 	cleanup := ssh.SetExecCommand(mockExecCommandSuccess(capture))

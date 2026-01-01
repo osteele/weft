@@ -541,6 +541,16 @@ func MarkQueuedByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// ClearQueueAssignment removes the queue association from a job.
+// Used when transitioning queued jobs back into local-only draft state.
+func ClearQueueAssignment(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET queue_name = NULL WHERE id = ?`,
+		id,
+	)
+	return err
+}
+
 // SetPendingStatus sets the pending (target) status for a job.
 // This represents what the user wants the job state to become.
 func SetPendingStatus(db *sql.DB, jobID int64, status string) error {

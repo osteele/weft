@@ -164,6 +164,7 @@ type keyMap struct {
 	Sort            key.Binding
 	RegenerateDesc  key.Binding
 	ToggleSummaries key.Binding
+	MakeDraft       key.Binding
 }
 
 var (
@@ -275,6 +276,10 @@ var (
 			key.WithKeys("d"),
 			key.WithHelp("d", "toggle AI host summaries"),
 		),
+		MakeDraft: key.NewBinding(
+			key.WithKeys("D"),
+			key.WithHelp("D", "queue→draft"),
+		),
 	}
 	localUserName = detectLocalUsername()
 )
@@ -324,6 +329,13 @@ type jobKilledMsg struct {
 	err       error
 	deferred  bool // true if kill was queued for later (host offline)
 	cancelled bool // true if this was a queued job that was cancelled
+}
+
+type jobDraftedMsg struct {
+	jobID    int64
+	err      error
+	deferred bool
+	message  string
 }
 
 type jobRestartedMsg struct {
@@ -944,6 +956,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
 			}
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
+	case jobDraftedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			flashCmd = m.setFlash(fmt.Sprintf("Draft failed: %v", msg.err), true)
+		} else if msg.message != "" {
+			flashCmd = m.setFlash(msg.message, false)
+		} else {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d converted to draft", msg.jobID), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -1719,6 +1742,20 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Moving job %d to front...", job.ID), false), m.moveJobToFront(job))
 		}
 		return m, m.setFlash("Can only move queued jobs to front", true)
+
+	case key.Matches(msg, keys.MakeDraft):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job == nil || job.Status != db.StatusQueued {
+			return m, m.setFlash("Can only convert queued jobs to drafts", true)
+		}
+		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=D action=convert_to_draft"))
+		return m, tea.Batch(
+			m.setFlash(fmt.Sprintf("Converting job %d to draft...", job.ID), false),
+			m.convertJobToDraft(job),
+		)
 
 	case key.Matches(msg, keys.Sort):
 		if m.viewMode != ViewModeJobs {
@@ -4194,6 +4231,8 @@ func (m Model) formatPendingStatusDisplay(pendingStatus, currentStatus string) s
 		return "⧗ starting"
 	case db.StatusQueued:
 		return "⧗ queuing"
+	case db.StatusDraft:
+		return "⧗ drafting"
 	default:
 		return "⧗ " + pendingStatus
 	}
@@ -5227,6 +5266,25 @@ func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
 			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true, cancelled: true}
 		}
 		return jobKilledMsg{jobID: job.ID, err: nil, cancelled: true}
+	}
+}
+
+func (m Model) convertJobToDraft(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+
+	database := m.database
+	return func() tea.Msg {
+		result, err := ops.ConvertQueuedJobToDraft(database, job, ops.DefaultOptions())
+		if err != nil {
+			return jobDraftedMsg{jobID: job.ID, err: err}
+		}
+		return jobDraftedMsg{
+			jobID:    job.ID,
+			deferred: result.Deferred,
+			message:  result.Message,
+		}
 	}
 }
 

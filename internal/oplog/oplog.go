@@ -22,6 +22,7 @@ const (
 	OpJobRestart     = "job.restart"
 	OpJobQueue       = "job.queue"
 	OpJobCancel      = "job.cancel"
+	OpJobDraft       = "job.draft"
 	OpJobSync        = "job.sync"
 	OpJobDead        = "job.dead"
 	OpJobCompleted   = "job.completed"

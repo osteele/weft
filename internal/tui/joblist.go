@@ -187,6 +187,8 @@ func formatPendingStatus(status string) string {
 		return "⧗ starting…"
 	case db.StatusQueued:
 		return "⧗ queuing…"
+	case db.StatusDraft:
+		return "⧗ drafting…"
 	default:
 		return "⧗ " + status + "…"
 	}
