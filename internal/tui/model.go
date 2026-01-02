@@ -4578,40 +4578,57 @@ func (m *Model) applyJobFilter() {
 
 // sortJobs sorts m.jobs in place according to m.jobSort
 func (m *Model) sortJobs() {
-	// In Recent view with Newest sort, put running/starting first
-	if m.jobFilter == jobFilterRecent && m.jobSort == jobSortNewest {
-		sort.Slice(m.jobs, func(i, j int) bool {
-			return jobRecentOrderLess(m.jobs[i], m.jobs[j])
-		})
+	if m.jobFilter == jobFilterRecent {
+		sortRecentJobs(m.jobs, m.jobSort)
 		return
 	}
 
-	switch m.jobSort {
+	sortJobsByMode(m.jobs, m.jobSort)
+}
+
+// sortJobsByMode sorts jobs strictly according to the selected sort mode.
+func sortJobsByMode(jobs []*db.Job, mode jobSortMode) {
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobLessBySortMode(jobs[i], jobs[j], mode)
+	})
+}
+
+// sortRecentJobs promotes running and queued jobs above other recents.
+func sortRecentJobs(jobs []*db.Job, mode jobSortMode) {
+	sort.SliceStable(jobs, func(i, j int) bool {
+		pi, pj := recentStatusPriority(jobs[i]), recentStatusPriority(jobs[j])
+		if pi != pj {
+			return pi < pj
+		}
+		return jobLessBySortMode(jobs[i], jobs[j], mode)
+	})
+}
+
+func recentStatusPriority(job *db.Job) int {
+	switch job.Status {
+	case db.StatusRunning, db.StatusStarting:
+		return 0
+	case db.StatusQueued:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func jobLessBySortMode(i, j *db.Job, mode jobSortMode) bool {
+	switch mode {
 	case jobSortNewest:
-		// Most recent first (by start time, or created time for queued jobs)
-		sort.Slice(m.jobs, func(i, j int) bool {
-			return getJobSortTime(m.jobs[i]) > getJobSortTime(m.jobs[j])
-		})
+		return getJobSortTime(i) > getJobSortTime(j)
 	case jobSortOldest:
-		// Oldest first
-		sort.Slice(m.jobs, func(i, j int) bool {
-			return getJobSortTime(m.jobs[i]) < getJobSortTime(m.jobs[j])
-		})
+		return getJobSortTime(i) < getJobSortTime(j)
 	case jobSortIDDesc:
-		// Job ID descending (largest first)
-		sort.Slice(m.jobs, func(i, j int) bool {
-			return m.jobs[i].ID > m.jobs[j].ID
-		})
+		return i.ID > j.ID
 	case jobSortIDAsc:
-		// Job ID ascending (smallest first)
-		sort.Slice(m.jobs, func(i, j int) bool {
-			return m.jobs[i].ID < m.jobs[j].ID
-		})
+		return i.ID < j.ID
 	case jobSortQueueOrder:
-		// Queued jobs first in queue order, then running, then completed
-		sort.Slice(m.jobs, func(i, j int) bool {
-			return jobQueueOrderLess(m.jobs[i], m.jobs[j])
-		})
+		return jobQueueOrderLess(i, j)
+	default:
+		return getJobSortTime(i) > getJobSortTime(j)
 	}
 }
 
@@ -4668,29 +4685,6 @@ func jobQueueOrderLess(i, j *db.Job) bool {
 		}
 		return ti > tj
 	}
-}
-
-// jobRecentOrderLess sorts for Recent view: running/starting first, then queued, then completed (by recency)
-func jobRecentOrderLess(i, j *db.Job) bool {
-	// Status priority: running/starting first, then queued, then completed/dead/failed
-	statusPriority := func(job *db.Job) int {
-		switch job.Status {
-		case db.StatusRunning, db.StatusStarting:
-			return 0
-		case db.StatusQueued:
-			return 1
-		default:
-			return 2
-		}
-	}
-
-	pi, pj := statusPriority(i), statusPriority(j)
-	if pi != pj {
-		return pi < pj
-	}
-
-	// Within same status group, sort by recency (newest first)
-	return getJobSortTime(i) > getJobSortTime(j)
 }
 
 // cycleTab handles Tab/Shift+Tab navigation for both Jobs and Hosts views
