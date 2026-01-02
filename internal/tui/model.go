@@ -11,6 +11,7 @@ import (
 	"math"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -29,6 +30,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/fsnotify/fsnotify"
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -53,6 +55,7 @@ const (
 	DefaultLogRefreshInterval  = 3 * time.Second
 	DefaultHostRefreshInterval = 30 * time.Second
 	DefaultHostCacheDuration   = 24 * time.Hour // How long cached host info is considered fresh
+	dbChangeDebounceInterval   = 200 * time.Millisecond
 	topProcessLimit            = 15
 )
 
@@ -309,6 +312,18 @@ type jobsRefreshedMsg struct {
 	err              error
 }
 
+type dbWatcherReadyMsg struct {
+	watcher *fsnotify.Watcher
+	targets map[string]struct{}
+	err     error
+}
+
+type dbWatchEventMsg struct {
+	err error
+}
+
+type dbRefreshTriggeredMsg struct{}
+
 type syncCompletedMsg struct {
 	updated       int
 	queuesStarted []string // hosts where queue runners were started
@@ -548,7 +563,10 @@ type Model struct {
 	height int
 
 	// Database connection
-	database *sql.DB
+	database                *sql.DB
+	dbWatcher               *fsnotify.Watcher
+	dbWatcherTargets        map[string]struct{}
+	dbRefreshDebounceActive bool
 
 	// Background sync state
 	syncing      bool
@@ -730,6 +748,7 @@ func (m Model) Init() tea.Cmd {
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
+		m.startDBWatcher(),
 		m.spinner.Tick,
 	)
 }
@@ -811,6 +830,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 		return m, nil
+
+	case dbWatcherReadyMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("DB watch error: %v", msg.err), true)
+		}
+		m.dbWatcher = msg.watcher
+		m.dbWatcherTargets = msg.targets
+		return m, m.waitForDBEvent()
+
+	case dbWatchEventMsg:
+		var cmds []tea.Cmd
+		if msg.err != nil {
+			cmds = append(cmds, m.setFlash(fmt.Sprintf("DB watch error: %v", msg.err), true))
+		} else if !m.dbRefreshDebounceActive {
+			m.dbRefreshDebounceActive = true
+			cmds = append(cmds, tea.Tick(dbChangeDebounceInterval, func(time.Time) tea.Msg {
+				return dbRefreshTriggeredMsg{}
+			}))
+		}
+		if cmd := m.waitForDBEvent(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
+
+	case dbRefreshTriggeredMsg:
+		m.dbRefreshDebounceActive = false
+		return m, m.refreshJobs()
 
 	case syncCompletedMsg:
 		m.syncing = false
@@ -4525,6 +4574,40 @@ func (m Model) startCreateTicker() tea.Cmd {
 	})
 }
 
+func (m Model) startDBWatcher() tea.Cmd {
+	dbFile := db.Path()
+	if dbFile == "" {
+		return nil
+	}
+	dir := filepath.Dir(dbFile)
+	targets := make(map[string]struct{})
+	addTarget := func(name string) {
+		if name == "" {
+			return
+		}
+		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
+	}
+	base := filepath.Base(dbFile)
+	addTarget(base)
+	addTarget(base + "-wal")
+	addTarget(base + "-shm")
+
+	return func() tea.Msg {
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			return dbWatcherReadyMsg{err: err}
+		}
+		if err := watcher.Add(dir); err != nil {
+			watcher.Close()
+			return dbWatcherReadyMsg{err: err}
+		}
+		return dbWatcherReadyMsg{
+			watcher: watcher,
+			targets: targets,
+		}
+	}
+}
+
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
 		jobs, err := db.ListJobs(m.database, "", "", 100)
@@ -4535,6 +4618,46 @@ func (m Model) refreshJobs() tea.Cmd {
 		deps, _ := db.GetJobDependencyInfo(m.database)
 		return jobsRefreshedMsg{jobs: jobs, pendingOpsJobIDs: pendingOps, jobDependencies: deps}
 	}
+}
+
+func (m Model) waitForDBEvent() tea.Cmd {
+	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
+		return nil
+	}
+	watcher := m.dbWatcher
+	targets := m.dbWatcherTargets
+
+	return func() tea.Msg {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return dbWatchEventMsg{err: fmt.Errorf("db watcher closed")}
+				}
+				if !isWatchedDBFile(event.Name, targets) {
+					continue
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+					continue
+				}
+				return dbWatchEventMsg{}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return dbWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
+				}
+				return dbWatchEventMsg{err: err}
+			}
+		}
+	}
+}
+
+func isWatchedDBFile(name string, targets map[string]struct{}) bool {
+	if name == "" {
+		return false
+	}
+	clean := filepath.Clean(name)
+	_, ok := targets[clean]
+	return ok
 }
 
 func (m *Model) applyJobFilter() {

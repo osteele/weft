@@ -100,6 +100,11 @@ func Open() (*sql.DB, error) {
 	return db, nil
 }
 
+// Path returns the location of the database file on disk.
+func Path() string {
+	return dbPath
+}
+
 func initSchema(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS jobs (
