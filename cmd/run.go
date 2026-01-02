@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -433,33 +432,6 @@ func parseCdPrefix(command string) (dir string, remaining string) {
 
 	// No valid separator found
 	return "", command
-}
-
-func getSlackWebhook() string {
-	// Check environment variable first
-	if webhook := os.Getenv("REMOTE_JOBS_SLACK_WEBHOOK"); webhook != "" {
-		return webhook
-	}
-
-	// Check config file
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-
-	configFile := filepath.Join(home, ".config", "remote-jobs", "config")
-	content, err := os.ReadFile(configFile)
-	if err != nil {
-		return ""
-	}
-
-	for _, line := range strings.Split(string(content), "\n") {
-		if strings.HasPrefix(line, "SLACK_WEBHOOK=") {
-			return strings.TrimPrefix(line, "SLACK_WEBHOOK=")
-		}
-	}
-
-	return ""
 }
 
 func streamJobLogAllow(host, logFile string, jobID int64) error {

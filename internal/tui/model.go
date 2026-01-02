@@ -44,6 +44,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/remote-jobs/internal/slack"
 )
 
 // Default intervals for background operations
@@ -5851,8 +5852,13 @@ func (m Model) startQueue(host string) tea.Cmd {
 // ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
+	// Deploy notify script and build env vars if Slack is configured
+	slackWebhook := slack.GetWebhook()
+	slack.DeployNotifyScript(host, slackWebhook)
+	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
+
 	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
-	return runner.EnsureStarted("")
+	return runner.EnsureStarted(envVars)
 }
 
 func (m Model) removeJob(job *db.Job) tea.Cmd {

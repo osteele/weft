@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/remote-jobs/internal/slack"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -304,42 +305,14 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 // or (false, error) if starting failed.
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	// Deploy notify script if Slack is configured
-	slackWebhook := getSlackWebhook()
-	deploySlackScript(host, slackWebhook)
+	slackWebhook := slack.GetWebhook()
+	slack.DeployNotifyScript(host, slackWebhook)
 
 	// Build environment variables for the runner
-	envVars := buildRunnerEnvPrefix(slackWebhook)
+	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
 	runner := queuerunner.NewRunner(host, queue)
 	return runner.EnsureStarted(envVars)
-}
-
-func deploySlackScript(host, slackWebhook string) {
-	if slackWebhook == "" {
-		return
-	}
-	notifyScript := "/tmp/remote-jobs-notify-slack.sh"
-	writeNotifyCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", notifyScript, string(notifySlackScript))
-	if _, _, err := ssh.Run(host, writeNotifyCmd); err == nil {
-		ssh.Run(host, fmt.Sprintf("chmod +x '%s'", notifyScript))
-	}
-}
-
-func buildRunnerEnvPrefix(slackWebhook string) string {
-	envVars := ""
-	if slackWebhook != "" {
-		envVars = fmt.Sprintf("REMOTE_JOBS_SLACK_WEBHOOK='%s' ", slackWebhook)
-		if v := os.Getenv("REMOTE_JOBS_SLACK_VERBOSE"); v == "1" {
-			envVars += "REMOTE_JOBS_SLACK_VERBOSE=1 "
-		}
-		if v := os.Getenv("REMOTE_JOBS_SLACK_NOTIFY"); v != "" {
-			envVars += fmt.Sprintf("REMOTE_JOBS_SLACK_NOTIFY='%s' ", v)
-		}
-		if v := os.Getenv("REMOTE_JOBS_SLACK_MIN_DURATION"); v != "" {
-			envVars += fmt.Sprintf("REMOTE_JOBS_SLACK_MIN_DURATION='%s' ", v)
-		}
-	}
-	return envVars
 }
 
 func runQueueStart(cmd *cobra.Command, args []string) error {
@@ -528,9 +501,9 @@ func runQueueUpgrade(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
 	runner := queuerunner.NewRunner(host, queueName)
-	slackWebhook := getSlackWebhook()
-	deploySlackScript(host, slackWebhook)
-	envPrefix := buildRunnerEnvPrefix(slackWebhook)
+	slackWebhook := slack.GetWebhook()
+	slack.DeployNotifyScript(host, slackWebhook)
+	envPrefix := slack.BuildRunnerEnvPrefix(slackWebhook)
 
 	result, err := runner.Upgrade(envPrefix, 2*time.Minute)
 	if err != nil {

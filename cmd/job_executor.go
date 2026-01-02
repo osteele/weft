@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/remote-jobs/internal/slack"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
@@ -137,31 +138,13 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 
 	// Slack notification setup
 	notifyCmd := ""
-	slackWebhook := getSlackWebhook()
+	slackWebhook := slack.GetWebhook()
 	if slackWebhook != "" {
-		remoteNotifyScript := "/tmp/remote-jobs-notify-slack.sh"
-		writeCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", remoteNotifyScript, string(notifySlackScript))
-		if _, stderr, err := ssh.RunWithRetry(opts.Host, writeCmd); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to write notify script: %s\n", stderr)
-		} else {
-			if _, stderr, err := ssh.Run(opts.Host, fmt.Sprintf("chmod +x '%s'", remoteNotifyScript)); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to chmod notify script: %s\n", stderr)
-			} else {
-				envVars := fmt.Sprintf("REMOTE_JOBS_SLACK_WEBHOOK='%s'", slackWebhook)
-				if v := os.Getenv("REMOTE_JOBS_SLACK_VERBOSE"); v == "1" {
-					envVars += " REMOTE_JOBS_SLACK_VERBOSE=1"
-				}
-				if v := os.Getenv("REMOTE_JOBS_SLACK_NOTIFY"); v != "" {
-					envVars += fmt.Sprintf(" REMOTE_JOBS_SLACK_NOTIFY='%s'", v)
-				}
-				if v := os.Getenv("REMOTE_JOBS_SLACK_MIN_DURATION"); v != "" {
-					envVars += fmt.Sprintf(" REMOTE_JOBS_SLACK_MIN_DURATION='%s'", v)
-				}
-				notifyCmd = fmt.Sprintf("; %s '%s' 'rj-%d' $EXIT_CODE '%s' '%s'",
-					envVars, remoteNotifyScript, jobID, info.Host, info.MetadataFile)
-				result.SlackEnabled = true
-			}
-		}
+		slack.DeployNotifyScript(opts.Host, slackWebhook)
+		envVars := strings.TrimSpace(slack.BuildRunnerEnvPrefix(slackWebhook))
+		notifyCmd = fmt.Sprintf("; %s '%s' 'rj-%d' $EXIT_CODE '%s' '%s'",
+			envVars, slack.NotifyScriptPath, jobID, info.Host, info.MetadataFile)
+		result.SlackEnabled = true
 	}
 
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
