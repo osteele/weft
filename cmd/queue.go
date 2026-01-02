@@ -168,6 +168,7 @@ var (
 	queueAfter       int64
 	queueAfterAny    int64
 	queueNoStart     bool
+	queueDraft       bool
 )
 
 func init() {
@@ -194,6 +195,7 @@ func init() {
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
 	queueAddCmd.Flags().BoolVar(&queueNoStart, "no-start", false, "Don't auto-start the queue runner")
+	queueAddCmd.Flags().BoolVar(&queueDraft, "draft", false, "Create the job in draft status without syncing to the remote queue")
 }
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
@@ -229,6 +231,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueAfter > 0 && queueAfterAny > 0 {
 		return fmt.Errorf("cannot use both --after and --after-any")
 	}
+	if queueDraft && (queueAfter > 0 || queueAfterAny > 0) {
+		return fmt.Errorf("--draft cannot be combined with dependency flags")
+	}
 
 	var deps []queueDependency
 	if queueAfter > 0 {
@@ -242,6 +247,24 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		deps = append(deps, queueDependency{JobID: queueAfterAny, AllowFailure: true})
+	}
+
+	if queueDraft {
+		gpu := extractGPUFromEnvVars(queueEnvVars)
+		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, queueDescription, queueName, gpu)
+		if err != nil {
+			return fmt.Errorf("record draft job: %w", err)
+		}
+		fmt.Printf("Draft job #%d saved for %s in queue '%s'\n\n", jobID, host, queueName)
+		fmt.Printf("  Working dir: %s\n", workingDir)
+		fmt.Printf("  Command: %s\n", command)
+		if queueDescription != "" {
+			fmt.Printf("  Description: %s\n", queueDescription)
+		}
+		if len(queueEnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+		}
+		return nil
 	}
 
 	result, err := queueJob(database, queueJobOptions{

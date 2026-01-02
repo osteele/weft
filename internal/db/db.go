@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +25,8 @@ type Job struct {
 	ErrorMessage         string
 	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
-	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
+	EnvVars              []string
+	CreatedAt            int64 // When the job was created/queued (0 for legacy jobs)
 	StartTime            int64
 	EndTime              *int64
 	ExitCode             *int
@@ -37,7 +39,7 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, tombstoned, last_synced_status, pending_status, pending_at`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, tombstoned, last_synced_status, pending_status, pending_at`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -56,6 +58,9 @@ const StatusQueued = "queued"
 
 // StatusFailed indicates a job failed to start
 const StatusFailed = "failed"
+
+// StatusDraft indicates a job that exists locally but should not run remotely
+const StatusDraft = "draft"
 
 var dbPath string
 
@@ -148,6 +153,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add gpu column for CUDA_VISIBLE_DEVICES
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add env vars column for storing job environment
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN env_vars TEXT`); err != nil {
 		return err
 	}
 
@@ -507,6 +517,16 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// MarkJobDraftPending updates a job to draft status locally and records pending cleanup.
+func MarkJobDraftPending(db *sql.DB, id int64) error {
+	now := time.Now().Unix()
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, pending_status = ?, pending_at = ? WHERE id = ?`,
+		StatusDraft, StatusDraft, now, id,
+	)
+	return err
+}
+
 // MarkRunningByID transitions a job from starting to running
 func MarkRunningByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
@@ -595,7 +615,7 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 
 // IsTerminalStatus returns true if the status represents a terminal state.
 func IsTerminalStatus(status string) bool {
-	return status == StatusCompleted || status == StatusDead || status == StatusFailed
+	return status == StatusCompleted || status == StatusDead || status == StatusFailed || status == StatusDraft
 }
 
 // CountQueuedByHost returns the number of queued jobs for a host
@@ -621,6 +641,20 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, que
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu)
 		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)`,
 		host, workingDir, command, description, createdAt, StatusQueued, queueName, gpu,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+// RecordDraftJobWithGPU records a job that should remain in draft locally.
+func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
+	createdAt := time.Now().Unix()
+	result, err := db.Exec(
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, last_synced_status)
+		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+		host, workingDir, command, description, createdAt, StatusDraft, queueName, gpu, StatusDraft,
 	)
 	if err != nil {
 		return 0, err
@@ -767,6 +801,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var errorMsg sql.NullString
 	var queueName sql.NullString
 	var gpu sql.NullString
+	var envVars sql.NullString
 	var createdAt sql.NullInt64
 	var startTime sql.NullInt64
 	var endTime sql.NullInt64
@@ -776,7 +811,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -805,6 +840,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if gpu.Valid {
 		j.GPU = gpu.String
 	}
+	j.EnvVars = decodeEnvVars(envVars)
 	if createdAt.Valid {
 		j.CreatedAt = createdAt.Int64
 	}
@@ -846,6 +882,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var errorMsg sql.NullString
 		var queueName sql.NullString
 		var gpu sql.NullString
+		var envVars sql.NullString
 		var createdAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
@@ -855,7 +892,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingStatus sql.NullString
 		var pendingAt sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 		if err != nil {
 			return nil, err
 		}
@@ -881,6 +918,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if gpu.Valid {
 			j.GPU = gpu.String
 		}
+		j.EnvVars = decodeEnvVars(envVars)
 		if createdAt.Valid {
 			j.CreatedAt = createdAt.Int64
 		}
@@ -976,9 +1014,15 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
-// ListUniqueActiveHosts returns unique hosts with running or queued jobs
+// ListUniqueActiveHosts returns unique hosts with running, queued, or pending draft jobs
 func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?) AND tombstoned = 0`, StatusRunning, StatusQueued)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
+		WHERE tombstoned = 0
+		AND (
+			status IN (?, ?)
+			OR (status = ? AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?))
+		)`,
+		StatusRunning, StatusQueued, StatusDraft, StatusDraft, StatusDraft)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,10 +1058,36 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
+// ListHostsWithDraftsPending returns hosts that have draft jobs needing remote cleanup.
+func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?)`,
+		StatusDraft, StatusDraft, StatusDraft)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusQueued)
+}
+
+// ListDraftJobsPendingSync returns draft jobs that still need remote cleanup.
+func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?) ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusDraft, StatusDraft, StatusDraft)
 }
 
 // ListAllQueued returns all queued jobs across all hosts

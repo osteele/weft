@@ -205,6 +205,7 @@ func init() {
 	jobCmd.AddCommand(jobRestartCmd)
 	jobCmd.AddCommand(jobListCmd)
 	jobCmd.AddCommand(jobMoveCmd)
+	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
 	jobCmd.AddCommand(jobInfoCmd)
 

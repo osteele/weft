@@ -34,6 +34,7 @@ type jobListStyles struct {
 	failed   lipgloss.Style
 	pending  lipgloss.Style
 	dead     lipgloss.Style
+	draft    lipgloss.Style
 }
 
 func newJobListStyles() jobListStyles {
@@ -44,6 +45,7 @@ func newJobListStyles() jobListStyles {
 		failed:   lipgloss.NewStyle().Foreground(lipgloss.Color("9")),  // red
 		pending:  lipgloss.NewStyle().Foreground(lipgloss.Color("11")), // yellow
 		dead:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),  // gray
+		draft:    lipgloss.NewStyle().Foreground(lipgloss.Color("14")), // cyan
 	}
 }
 
@@ -131,6 +133,8 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 			style = d.styles.dead
 		case db.StatusQueued:
 			style = d.styles.pending
+		case db.StatusDraft:
+			style = d.styles.draft
 		}
 	}
 
@@ -171,6 +175,8 @@ func formatActualStatus(job *db.Job) string {
 		return "◌ queued"
 	case db.StatusDead:
 		return "✗ dead"
+	case db.StatusDraft:
+		return "✎ draft"
 	default:
 		return job.Status
 	}
@@ -185,6 +191,8 @@ func formatPendingStatus(status string) string {
 		return "⧗ starting…"
 	case db.StatusQueued:
 		return "⧗ queuing…"
+	case db.StatusDraft:
+		return "⧗ drafting…"
 	default:
 		return "⧗ " + status + "…"
 	}

@@ -458,6 +458,87 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 	}
 }
 
+// SyncDraftJob ensures that a job marked as draft has no remote execution state.
+// It removes queued entries or kills running processes before marking the job clean.
+func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
+	if job == nil || job.Status != db.StatusDraft {
+		return false, nil
+	}
+
+	timeout := effectiveSyncTimeout(opts.Timeout)
+
+	// Queue-runner managed jobs (no session name) need queue/runner cleanup.
+	if job.SessionName == "" && job.QueueName != "" {
+		handled, err := syncDraftQueueJob(job, timeout)
+		if err != nil {
+			return false, err
+		}
+		if !handled {
+			return false, nil
+		}
+	} else {
+		handled, err := syncDraftTmuxJob(job, timeout)
+		if err != nil {
+			return false, err
+		}
+		if !handled {
+			return false, nil
+		}
+	}
+
+	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDraft); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func syncDraftQueueJob(job *db.Job, timeout time.Duration) (bool, error) {
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+
+	result, err := queueRemoteClient.QuickStatus(job.Host, queueName, job.ID, timeout)
+	if err != nil {
+		return false, err
+	}
+	if result.Uncertain {
+		return false, nil
+	}
+
+	switch result.State {
+	case queueStateRunning:
+		if err := applyKillToRemote(job, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
+	case queueStateQueued:
+		if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
+	case queueStateDead:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (bool, error) {
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	exists, err := ssh.TmuxSessionExistsQuickTimeout(job.Host, tmuxSession, timeout)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		if err := applyKillToRemote(job, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return true, nil
+}
+
 // UpdateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set
 func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) error {
 	// Only update if start_time is not set

@@ -152,6 +152,7 @@ type keyMap struct {
 	Filter          key.Binding
 	Escape          key.Binding
 	Kill            key.Binding
+	Draft           key.Binding
 	Restart         key.Binding
 	EditRestart     key.Binding
 	Remove          key.Binding
@@ -203,6 +204,10 @@ var (
 		Kill: key.NewBinding(
 			key.WithKeys("k", "delete"),
 			key.WithHelp("k", "kill/cancel"),
+		),
+		Draft: key.NewBinding(
+			key.WithKeys("d"),
+			key.WithHelp("d", "mark draft"),
 		),
 		Restart: key.NewBinding(
 			key.WithKeys("r"),
@@ -344,6 +349,12 @@ type jobKilledMsg struct {
 	err       error
 	deferred  bool // true if kill was queued for later (host offline)
 	cancelled bool // true if this was a queued job that was cancelled
+}
+
+type jobDraftedMsg struct {
+	jobID    int64
+	err      error
+	deferred bool
 }
 
 type jobRestartedMsg struct {
@@ -998,6 +1009,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
 			}
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
+	case jobDraftedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			flashCmd = m.setFlash(fmt.Sprintf("Draft failed: %v", msg.err), true)
+		} else if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d draft pending (sync when host online)", msg.jobID), false)
+		} else {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d marked draft", msg.jobID), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -1682,6 +1704,20 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		default:
 			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, job.Status), true)
 		}
+
+	case key.Matches(msg, keys.Draft):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, nil
+		}
+		if job.Status == db.StatusDraft {
+			return m, m.setFlash(fmt.Sprintf("Job %d already draft", job.ID), true)
+		}
+		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=d action=draft"))
+		return m, tea.Batch(m.setFlash("Marking job draft...", false), m.draftJob(job))
 
 	case key.Matches(msg, keys.Restart):
 		if m.viewMode != ViewModeJobs {
@@ -3450,7 +3486,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:views l:logs f:filter o:sort s:sync n:new e:edit r:restart k:kill P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:views l:logs f:filter o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
 
 	if m.syncing {
 		help = syncingStyle.Render(m.spinner.View()+" ") + help
@@ -5471,6 +5507,27 @@ func (m Model) performBackgroundSync() tea.Cmd {
 			}
 		}
 
+		// Clean up draft jobs that still have remote state
+		draftHosts, err := db.ListHostsWithDraftsPending(m.database)
+		if err == nil {
+			syncOpts := ops.DefaultSyncOptions()
+			for _, draftHost := range draftHosts {
+				drafts, err := db.ListDraftJobsPendingSync(m.database, draftHost)
+				if err != nil {
+					continue
+				}
+				for _, job := range drafts {
+					changed, err := ops.SyncDraftJob(m.database, job, syncOpts)
+					if err != nil {
+						continue
+					}
+					if changed {
+						updated++
+					}
+				}
+			}
+		}
+
 		// Kill tombstoned jobs that are still marked as running/queued on remote hosts
 		tombstonedJobs, err := db.GetTombstonedActiveJobs(m.database)
 		if err == nil {
@@ -5514,6 +5571,20 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true}
 		}
 		return jobKilledMsg{jobID: job.ID, err: nil}
+	}
+}
+
+func (m Model) draftJob(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+	database := m.database
+	return func() tea.Msg {
+		result, err := ops.DraftJob(database, job, ops.DefaultOptions())
+		if err != nil {
+			return jobDraftedMsg{jobID: job.ID, err: err}
+		}
+		return jobDraftedMsg{jobID: job.ID, deferred: result.Deferred}
 	}
 }
 

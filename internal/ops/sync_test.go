@@ -536,6 +536,102 @@ func TestSyncJobQuickWithQueueNameAndSessionName(t *testing.T) {
 	}
 }
 
+func TestSyncDraftJobRemovesQueuedEntry(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "draft-queue-host", "/tmp", "echo queued", "draft job", "default")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	if err := db.MarkJobDraftPending(database, jobID); err != nil {
+		t.Fatalf("mark draft pending: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	mock := mockQueueRemote{
+		quickStatus: quickStatus{State: queueStateQueued},
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: ".queue", Stdout: ""},
+	})
+
+	changed, err := SyncDraftJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncDraftJob queued: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected SyncDraftJob to update queued draft")
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.Status != db.StatusDraft {
+		t.Fatalf("expected draft status, got %s", updated.Status)
+	}
+	if updated.PendingStatus != nil {
+		t.Fatalf("expected pending status cleared, got %v", updated.PendingStatus)
+	}
+	if updated.LastSyncedStatus != db.StatusDraft {
+		t.Fatalf("expected last synced draft, got %s", updated.LastSyncedStatus)
+	}
+}
+
+func TestSyncDraftJobKillsTmuxSession(t *testing.T) {
+	database := setupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "draft-tmux-host", "/tmp", "echo run", "draft tmux job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, fmt.Sprintf("draft-%d", jobID), jobID); err != nil {
+		t.Fatalf("update session name: %v", err)
+	}
+
+	if err := db.MarkJobDraftPending(database, jobID); err != nil {
+		t.Fatalf("mark draft pending: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "YES\n"},
+		{Contains: "tmux kill-session", Stdout: ""},
+	})
+
+	changed, err := SyncDraftJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncDraftJob tmux: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected SyncDraftJob to update tmux draft")
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.PendingStatus != nil {
+		t.Fatalf("expected pending cleared, got %v", updated.PendingStatus)
+	}
+	if updated.LastSyncedStatus != db.StatusDraft {
+		t.Fatalf("expected last synced draft, got %s", updated.LastSyncedStatus)
+	}
+}
+
 func intPtr(i int) *int {
 	return &i
 }

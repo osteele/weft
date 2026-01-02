@@ -55,6 +55,7 @@ var (
 	runDir         string
 	runDescription string
 	runImmediate   bool
+	runDraft       bool
 	runFollow      bool
 	runAllow       bool
 	runKillJobID   int64
@@ -69,6 +70,7 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 
 	runCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
+	runCmd.Flags().BoolVar(&runDraft, "draft", false, "Create the job in draft status without contacting remote hosts")
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path)")
 	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
@@ -179,6 +181,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if runImmediate && (runAfter > 0 || runAfterAny > 0) {
 		return fmt.Errorf("--immediate cannot be used with --after/--after-any")
 	}
+	if runDraft && runImmediate {
+		return fmt.Errorf("--draft cannot be combined with --immediate")
+	}
+	if runDraft && (runFollow || runAllow) {
+		return fmt.Errorf("--draft cannot be combined with --follow/--allow")
+	}
+	if runDraft && (runAfter > 0 || runAfterAny > 0) {
+		return fmt.Errorf("--draft cannot be combined with --after/--after-any")
+	}
 
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided
@@ -204,6 +215,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 		mode = "immediate"
 	}
 	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=%s cmd=%s", mode, command))
+
+	if runDraft {
+		gpu := extractGPUFromEnvVars(runEnvVars)
+		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, defaultQueueName, gpu)
+		if err != nil {
+			return fmt.Errorf("record draft job: %w", err)
+		}
+		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
+		fmt.Printf("  Working dir: %s\n", workingDir)
+		fmt.Printf("  Command: %s\n", command)
+		if runDescription != "" {
+			fmt.Printf("  Description: %s\n", runDescription)
+		}
+		return nil
+	}
 
 	// Handle --after and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {

@@ -81,6 +81,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
+- `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
@@ -93,6 +94,11 @@ If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
 touches that host) will append the saved entry so it runs as soon as the host is
 reachable again.
+
+Draft jobs (`--draft`) stay entirely local. They’re useful for capturing a job
+definition you want to tweak later or to keep certain jobs from ever syncing to
+the host. When you’re ready to discard the draft, run `remote-jobs job draft <id>`
+to toggle the status (or do it from the TUI, described below).
 
 **Examples:**
 ```bash
@@ -227,6 +233,11 @@ Split-screen with:
 
 Jobs are sorted by the newest job IDs so your latest or actively queued entries stay near the top of the list.
 
+Press `d` on a highlighted job to flip it into draft mode. Drafting a queued job
+removes it from the remote queue (or defers the removal if the host is offline),
+while drafting a running job kills it and marks the record so future syncs don’t
+try to restart it.
+
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
 │ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
@@ -248,7 +259,7 @@ Jobs are sorted by the newest job IDs so your latest or actively queued entries 
 │   Threads: 24                                                                │
 │   GPU 0:   85% util, 12.5GiB                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill d:draft p:prune h:hosts q:quit
 ```
 
 Press `l` to view logs:
@@ -279,6 +290,7 @@ Press `l` to view logs:
 - `r`: Restart highlighted job
 - `R`: Edit & restart (opens new job form pre-filled with job's parameters)
 - `k`: Kill highlighted job
+- `d`: Mark highlighted job as draft (removes remote queue entries or kills running jobs)
 - `P`: Prune completed/dead jobs from database
 - `S`: Start queue runner (for queued jobs)
 - `g`: Start queued job now (bypasses `--after` dependency)
@@ -588,6 +600,24 @@ remote-jobs kill <job-id>
 remote-jobs kill 42    # Kill job #42
 ```
 
+### remote-jobs job draft
+
+Move a job into draft status and make sure it never runs remotely (queued or otherwise).
+
+```bash
+remote-jobs job draft <job-id>
+```
+
+When you draft a job:
+- Running jobs are killed and removed from the remote host queue/state
+- Queued jobs are removed from queue files so they won’t start later
+- Offline hosts keep the “draft pending” request until the next `remote-jobs sync`
+- Already-completed jobs simply change status locally
+
+Drafting is handy when you realize a queued job shouldn’t run anymore but you
+want to keep its metadata/log references around for editing or cloning later.
+You can also trigger the same action from the TUI by pressing `d`.
+
 ### remote-jobs queue
 
 Manage job queues for sequential execution on remote hosts.
@@ -606,9 +636,15 @@ remote-jobs queue add [flags] <host> <command...>
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-d, --description TEXT`: Description of the job
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
+- `--draft`: Save a draft queue entry locally without touching the remote queue file
 - `--after ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes (success or failure)
 - `--queue NAME`: Queue name (default: "default")
+
+Draft queue entries behave like sticky notes: they keep the command, env vars,
+and metadata in your local database while guaranteeing they never reach the
+remote queue runner. Convert them later with `remote-jobs job draft <id>` (or
+the `d` key in the TUI) once you decide they should be eligible to run.
 
 **Examples:**
 ```bash

@@ -464,7 +464,7 @@ func formatJobIDList(ids []int64) string {
 
 func isTerminalStatus(status string) bool {
 	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusDraft:
 		return true
 	default:
 		return false

@@ -156,6 +156,21 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		}
 	}
 
+	// Clean up draft jobs that still have remote state lingering
+	drafts, err := db.ListDraftJobsPendingSync(database, host)
+	if err != nil {
+		return updated, err
+	}
+	for _, job := range drafts {
+		changed, err := ops.SyncDraftJob(database, job, syncOpts)
+		if err != nil {
+			return updated, err
+		}
+		if changed {
+			updated++
+		}
+	}
+
 	return updated, nil
 }
 
@@ -252,6 +267,20 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	for _, job := range jobs {
 		// Use quick check with timeout
 		changed, err := syncJobQuickFunc(database, job, syncOpts)
+		if err != nil {
+			return updated, err
+		}
+		if changed {
+			updated++
+		}
+	}
+
+	drafts, err := db.ListDraftJobsPendingSync(database, host)
+	if err != nil {
+		return updated, err
+	}
+	for _, job := range drafts {
+		changed, err := ops.SyncDraftJob(database, job, syncOpts)
 		if err != nil {
 			return updated, err
 		}
