@@ -107,6 +107,14 @@ func Path() string {
 	return dbPath
 }
 
+func SetDBPath(path string) func() {
+	original := dbPath
+	dbPath = path
+	return func() {
+		dbPath = original
+	}
+}
+
 func initSchema(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS jobs (
@@ -868,6 +876,36 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 
 	return &j, nil
+}
+
+// decodeEnvVars converts the stored env_vars JSON (or legacy newline-separated values) into a slice.
+func decodeEnvVars(value sql.NullString) []string {
+	if !value.Valid {
+		return nil
+	}
+	raw := strings.TrimSpace(value.String)
+	if raw == "" {
+		return nil
+	}
+
+	var envVars []string
+	if err := json.Unmarshal([]byte(raw), &envVars); err == nil {
+		return envVars
+	}
+
+	// Fallback: legacy newline-delimited storage
+	parts := strings.Split(raw, "\n")
+	envVars = envVars[:0]
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			envVars = append(envVars, part)
+		}
+	}
+	if len(envVars) == 0 {
+		return nil
+	}
+	return envVars
 }
 
 // scanJobs scans multiple job rows

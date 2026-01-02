@@ -74,13 +74,8 @@ func runCancel(cmd *cobra.Command, args []string) error {
 		_, stderr, err := ssh.Run(job.Host, removeCmd)
 		if err != nil {
 			if ssh.IsConnectionError(stderr) {
-				// Host unreachable - add deferred operation
-				if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, jobID, jobQueueName, ""); err != nil {
-					errors = append(errors, fmt.Sprintf("job %d: failed to add deferred operation: %v", jobID, err))
-					continue
-				}
-				if err := db.MarkDeadByID(database, jobID); err != nil {
-					errors = append(errors, fmt.Sprintf("job %d: failed to mark as dead: %v", jobID, err))
+				if err := db.SetPendingStatus(database, jobID, db.StatusDead); err != nil {
+					errors = append(errors, fmt.Sprintf("job %d: failed to mark pending cancel: %v", jobID, err))
 					continue
 				}
 				fmt.Printf("Job %d: host %s unreachable, will cancel on next sync\n", jobID, job.Host)

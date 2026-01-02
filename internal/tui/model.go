@@ -306,10 +306,9 @@ func detectLocalUsername() string {
 
 // Messages
 type jobsRefreshedMsg struct {
-	jobs             []*db.Job
-	pendingOpsJobIDs map[int64]bool
-	jobDependencies  map[int64]string // jobID -> dep_spec (e.g., "930" or "930+")
-	err              error
+	jobs            []*db.Job
+	jobDependencies map[int64]string // jobID -> dep_spec (e.g., "930" or "930+")
+	err             error
 }
 
 type dbWatcherReadyMsg struct {
@@ -583,9 +582,6 @@ type Model struct {
 	// Host cache tracking - which hosts have been freshly queried this session
 	hostsQueriedThisSession map[string]bool
 
-	// Jobs with pending deferred operations (for status display)
-	pendingOpsJobIDs map[int64]bool
-
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
 	jobDependencies map[int64]string
 
@@ -724,7 +720,6 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostCacheDuration:       opts.HostCacheDuration,
 		hostsQueriedThisSession: make(map[string]bool),
 		logCache:                make(map[int64]string),
-		pendingOpsJobIDs:        make(map[int64]bool),
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
 		jobProgress:             make(map[int64]*progress.Progress),
@@ -793,9 +788,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
 		}
 		m.allJobs = msg.jobs
-		if msg.pendingOpsJobIDs != nil {
-			m.pendingOpsJobIDs = msg.pendingOpsJobIDs
-		}
 		if msg.jobDependencies != nil {
 			m.jobDependencies = msg.jobDependencies
 		}
@@ -2760,8 +2752,6 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		} else {
 			b.WriteString(dimStyle.Render(fmt.Sprintf(" (runs after job %s succeeds)", depSpec)))
 		}
-	} else if m.pendingOpsJobIDs[job.ID] && job.Status == db.StatusQueued {
-		b.WriteString(dimStyle.Render(" (pending sync)"))
 	}
 	b.WriteString("\n\n")
 
@@ -4391,10 +4381,6 @@ func (m Model) formatStatus(job *db.Job) string {
 		return m.formatPendingStatusDisplay(*job.PendingStatus, job.Status)
 	}
 
-	// Check if job has pending deferred operations
-	hasPendingOps := m.pendingOpsJobIDs[job.ID]
-	depSpec := m.jobDependencies[job.ID]
-
 	switch job.Status {
 	case db.StatusRunning:
 		// Check if status is stale (host not checked in over 1 minute)
@@ -4409,35 +4395,28 @@ func (m Model) formatStatus(job *db.Job) string {
 			}
 		}
 		return "● running"
-	case db.StatusCompleted:
-		if job.ExitCode == nil {
-			return "✓ done"
-		}
-		if *job.ExitCode == 0 {
-			return "✓ done"
-		}
-		return fmt.Sprintf("✗ exit %d", *job.ExitCode)
-	case db.StatusDead:
-		return "✗ dead"
-	case db.StatusQueued:
-		if hasPendingOps {
-			if depSpec != "" {
-				// Show dependency - "930" means after success, "930+" means after any
-				if strings.HasSuffix(depSpec, "+") {
-					return fmt.Sprintf("◇ after %s", strings.TrimSuffix(depSpec, "+"))
-				}
-				return fmt.Sprintf("◇ after %s", depSpec)
-			}
-			return "◇ waiting" // Hollow diamond = waiting for sync (no dependency)
-		}
-		return "◆ queued"
-	case db.StatusFailed:
-		return "✗ failed"
 	case db.StatusStarting:
 		return "◐ starting"
+	case db.StatusCompleted:
+		if job.ExitCode != nil && *job.ExitCode == 0 {
+			return "✔ succeeded"
+		}
+		return fmt.Sprintf("✖ failed (%d)", *job.ExitCode)
+	case db.StatusQueued:
+		return "… queued"
+	case db.StatusDead:
+		return "✖ dead"
+	case db.StatusFailed:
+		return "✖ failed"
+	case db.StatusDraft:
+		return "  Draft"
 	default:
 		return job.Status
 	}
+}
+
+func (m Model) areJobDependenciesMet(job *db.Job) (bool, []string) {
+	return true, nil
 }
 
 func (m Model) styleForJob(job *db.Job) lipgloss.Style {
@@ -4603,13 +4582,16 @@ func (m Model) startDBWatcher() tea.Cmd {
 
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
-		jobs, err := db.ListJobs(m.database, "", "", 100)
+		jobs, err := db.ListJobs(m.database, "", "", 1000)
 		if err != nil {
 			return jobsRefreshedMsg{err: err}
 		}
-		pendingOps, _ := db.GetJobIDsWithPendingOperations(m.database)
-		deps, _ := db.GetJobDependencyInfo(m.database)
-		return jobsRefreshedMsg{jobs: jobs, pendingOpsJobIDs: pendingOps, jobDependencies: deps}
+		// Also fetch job dependencies for queue view
+		deps, err := db.GetJobDependencyInfo(m.database)
+		if err != nil {
+			// Non-fatal, just ignore it
+		}
+		return jobsRefreshedMsg{jobs: jobs, jobDependencies: deps}
 	}
 }
 
@@ -5455,18 +5437,6 @@ func (m Model) fetchAllRunningJobsProgress() tea.Cmd {
 func (m Model) performBackgroundSync() tea.Cmd {
 	return func() tea.Msg {
 		var updated int
-
-		// Execute deferred operations first to push queued jobs to remote queues
-		// This must happen before checking job status to avoid marking jobs as dead
-		// that are just pending sync
-		activeHosts, _ := db.ListUniqueActiveHosts(m.database)
-		for _, host := range activeHosts {
-			execOpts := ops.ExecuteOptions{Timeout: 5 * time.Second}
-			result, err := ops.ExecuteAllDeferredOperations(m.database, host, execOpts)
-			if err == nil {
-				updated += result.Completed
-			}
-		}
 
 		// Sync running jobs
 		hosts, err := db.ListUniqueRunningHosts(m.database)

@@ -177,6 +177,14 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 		return false, nil
 	}
 
+	// Session doesn't exist - if job is still starting, attempt to launch it now.
+	if job.Status == db.StatusStarting {
+		if err := startStartingJob(database, job, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
 	// Session doesn't exist - check for status file (no retry for sync)
 	// First try exact path (uses job.StartTime)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
@@ -210,15 +218,6 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 		}
 		CacheCompletedJobLog(job)
 		return true, nil
-	}
-
-	// Session doesn't exist and no status file - check for pending operations
-	hasPending, err := db.HasPendingDeferredOperationForJob(database, job.ID)
-	if err != nil {
-		return false, err
-	}
-	if hasPending {
-		return false, nil
 	}
 
 	// Session doesn't exist and no status file - this is UNCERTAIN, not dead.
@@ -275,6 +274,16 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 	// Probe 3: Check if job is in queue file (waiting)
 	inQueue := probeInQueue(job.Host, queueName, job.ID, timeout)
 	if inQueue.IsSome() && inQueue.Unwrap() {
+		if job.PendingStatus != nil && *job.PendingStatus == db.StatusDead {
+			if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+				return false, err
+			}
+			if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+
 		// Job is queued - if DB says running, fix it
 		if job.Status == db.StatusRunning {
 			if err := db.MarkQueuedByID(database, job.ID); err != nil {
@@ -296,6 +305,21 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 			return true, nil
 		}
 		return false, nil
+	}
+
+	if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
+		if err := startQueuedJobNow(database, job, queueName, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	// Ensure queued job is present in queue if it was recorded locally while host was unreachable.
+	if inQueue.IsSome() && !inQueue.Unwrap() && job.Status == db.StatusQueued && job.PendingStatus == nil {
+		if err := appendQueueEntryForJob(database, job, queueName, timeout); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 
 	// Only mark dead if ALL probes returned definitive false (not None/unknown)
@@ -368,14 +392,6 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 		return true, nil
 	}
 
-	hasPending, err := db.HasPendingDeferredOperationForJob(database, job.ID)
-	if err != nil {
-		return false, err
-	}
-	if hasPending {
-		return false, nil
-	}
-
 	// No status file - mark as dead
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
@@ -441,13 +457,6 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 		}
 		return false, nil
 	case queueStateDead:
-		// Before marking dead, check if job has pending deferred operations
-		// (e.g., queue_job not yet synced to remote)
-		hasPending, _ := db.HasPendingDeferredOperationForJob(database, job.ID)
-		if hasPending {
-			// Job has pending operations - don't mark as dead
-			return false, nil
-		}
 		// Job has died unexpectedly
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return false, err
@@ -537,6 +546,113 @@ func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (bool, error) {
 		return true, nil
 	}
 	return true, nil
+}
+
+// appendQueueEntryForJob ensures the queued job exists in the remote queue file.
+func appendQueueEntryForJob(database *sql.DB, job *db.Job, queueName string, timeout time.Duration) error {
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+	entry := QueueEntry{
+		JobID:       job.ID,
+		WorkingDir:  job.WorkingDir,
+		Command:     job.Command,
+		Description: job.Description,
+		EnvVars:     job.EnvVars,
+	}
+	opts := AppendQueueEntryOptions{Timeout: timeout}
+	if err := AppendQueueEntry(job.Host, queueName, entry, opts); err != nil {
+		return err
+	}
+	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued)
+}
+
+// startJobFromRecord starts a job using the data stored in the job record.
+func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) error {
+	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
+	if tmuxSession == "" {
+		tmuxSession = session.TmuxSessionName(job.ID)
+	}
+
+	logFile := session.LogFile(job.ID, job.StartTime)
+	statusFile := session.StatusFile(job.ID, job.StartTime)
+	metadataFile := session.MetadataFile(job.ID, job.StartTime)
+	pidFile := session.PidFile(job.ID, job.StartTime)
+
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+
+	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
+	if _, stderr, err := ssh.RunWithTimeout(job.Host, mkdirCmd, timeout); err != nil {
+		return fmt.Errorf("create log directory: %s", ssh.FriendlyError(job.Host, stderr, err))
+	}
+
+	description := job.Description
+	if description == "" {
+		description = job.EffectiveDescription()
+	}
+	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, description, job.StartTime)
+	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
+	_, _, _ = ssh.RunWithTimeout(job.Host, metadataCmd, timeout)
+
+	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
+		JobID:      job.ID,
+		WorkingDir: job.WorkingDir,
+		Command:    job.Command,
+		LogFile:    logFile,
+		StatusFile: statusFile,
+		PidFile:    pidFile,
+		EnvVars:    envVars,
+	})
+
+	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
+	if _, stderr, err := ssh.RunWithTimeout(job.Host, tmuxCmd, timeout); err != nil {
+		return fmt.Errorf("start tmux: %s", ssh.FriendlyError(job.Host, stderr, err))
+	}
+
+	return nil
+}
+
+// startStartingJob ensures jobs stuck in "starting" state resume once the host is reachable.
+func startStartingJob(database *sql.DB, job *db.Job, timeout time.Duration) error {
+	if err := startJobFromRecord(job, job.EnvVars, timeout); err != nil {
+		return err
+	}
+	if err := db.UpdateJobRunning(database, job.ID); err != nil {
+		return err
+	}
+	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusRunning)
+}
+
+// startQueuedJobNow launches a queued job immediately (used for deferred start-now requests).
+func startQueuedJobNow(database *sql.DB, job *db.Job, queueName string, timeout time.Duration) error {
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+
+	_ = removeFromQueueFile(job.Host, queueName, job.ID, timeout)
+
+	tmuxSession := session.TmuxSessionName(job.ID)
+	if err := db.UpdateQueuedToRunningWithSession(database, job.ID, tmuxSession); err != nil {
+		return err
+	}
+
+	updated, err := db.GetJobByID(database, job.ID)
+	if err != nil || updated == nil {
+		return fmt.Errorf("refresh job %d: %w", job.ID, err)
+	}
+
+	if err := startJobFromRecord(updated, job.EnvVars, timeout); err != nil {
+		_ = db.UpdateJobRunningToQueued(database, job.ID, queueName)
+		return err
+	}
+
+	if err := db.ClearPendingStatus(database, job.ID); err != nil {
+		return err
+	}
+	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusRunning)
 }
 
 // UpdateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set

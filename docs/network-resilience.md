@@ -22,7 +22,7 @@ state even if it was restarted elsewhere.
 When you start a job (`remote-jobs run` or `remote-jobs job start`), the CLI
 records the job locally before touching the remote host. If SSH cannot be
 established, the job is deferred to the remote queue automatically. A
-`deferred_operations` entry is created and `remote-jobs sync` (or any command
+`remote-jobs sync` (or any command
 that syncs) will add the job back to the host's queue when it becomes
 reachable. No work is lost, and you no longer need a separate retry command.
 
@@ -37,18 +37,14 @@ Queued jobs that are manually started via `remote-jobs job start` use the same
 mechanism. If the host goes down while removing the entry from the queue file,
 the CLI records exactly what happened and replays it later.
 
-## Deferred operations + sync
+## Syncing
 
 Anything that must touch the remote host (moving queue entries, starting queued
-jobs, or killing sessions) goes through the deferred operations table when the
-host is unreachable. A later `remote-jobs sync`:
+jobs, or killing sessions) is handled by the reconciliation mechanism. A later `remote-jobs sync`:
 
 1. Detects that the host is back.
-2. Replays the recorded operations (re-append queue entries, start tmux,
-   remove queue lines, etc.).
-3. Cleans up the deferred rows so the queue stays consistent.
-
-This approach lets you issue commands from the subway or airplane without
+2. Reconciles the local and remote states.
+3. This approach lets you issue commands from the subway or airplane without
 needing a live SSH connection at that moment.
 
 ## Monitoring while offline

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -163,16 +162,6 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	return result, nil
 }
 
-type deferredQueuePayload struct {
-	WorkingDir  string   `json:"working_dir"`
-	Command     string   `json:"command"`
-	Description string   `json:"description,omitempty"`
-	EnvVars     []string `json:"env_vars,omitempty"`
-	QueueName   string   `json:"queue_name"`
-	DepSpec     string   `json:"dep_spec,omitempty"`
-	AutoStart   bool     `json:"auto_start_runner,omitempty"`
-}
-
 func isConnectionFailure(stderr string, err error) bool {
 	if stderr != "" && ssh.IsConnectionError(stderr) {
 		return true
@@ -189,26 +178,8 @@ func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedI
 		queueName = defaultQueueName
 	}
 
-	payload := deferredQueuePayload{
-		WorkingDir:  job.WorkingDir,
-		Command:     job.Command,
-		Description: job.Description,
-		EnvVars:     envVars,
-		QueueName:   queueName,
-		AutoStart:   true,
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encode deferred queue payload: %w", err)
-	}
-
 	if err := db.UpdateJobStartingToQueued(database, job.ID, queueName); err != nil {
 		return nil, fmt.Errorf("mark job queued: %w", err)
-	}
-
-	if err := db.AddDeferredOperation(database, job.Host, db.OpQueueJob, job.ID, queueName, string(payloadJSON)); err != nil {
-		return nil, fmt.Errorf("add deferred operation: %w", err)
 	}
 
 	return &startJobResult{
@@ -262,12 +233,12 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		gpu = extractGPUFromEnvVars(opts.EnvVars)
 	}
 
+	depSpec := encodeQueueDependencies(opts.Dependencies)
 	jobID, err := db.RecordQueuedWithGPU(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description, queueName, gpu)
 	if err != nil {
 		return nil, fmt.Errorf("record job: %w", err)
 	}
 
-	depSpec := encodeQueueDependencies(opts.Dependencies)
 	entry := ops.QueueEntry{
 		JobID:       jobID,
 		WorkingDir:  opts.WorkingDir,
@@ -278,14 +249,14 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	}
 	if err := ops.AppendQueueEntry(opts.Host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
 		if shouldDeferQueueAppend(err) {
-			if err := deferQueueAppend(database, opts, queueName, jobID, depSpec); err != nil {
-				db.DeleteJob(database, jobID)
-				return nil, err
-			}
 			return &queueJobResult{JobID: jobID, Deferred: true}, nil
 		}
 		db.DeleteJob(database, jobID)
 		return nil, err
+	}
+
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		return nil, fmt.Errorf("update sync state: %w", err)
 	}
 
 	return &queueJobResult{JobID: jobID}, nil
@@ -300,31 +271,6 @@ func shouldDeferQueueAppend(err error) bool {
 		return false
 	}
 	return ssh.IsConnectionError(err.Error())
-}
-
-func deferQueueAppend(database *sql.DB, opts queueJobOptions, queueName string, jobID int64, depSpec string) error {
-	payload := deferredQueuePayload{
-		WorkingDir:  opts.WorkingDir,
-		Command:     opts.Command,
-		Description: opts.Description,
-		EnvVars:     opts.EnvVars,
-		QueueName:   queueName,
-		DepSpec:     depSpec,
-	}
-
-	if opts.AutoStart && depSpec == "" {
-		payload.AutoStart = true
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode deferred queue payload: %w", err)
-	}
-
-	if err := db.AddDeferredOperation(database, opts.Host, db.OpQueueJob, jobID, queueName, string(payloadJSON)); err != nil {
-		return fmt.Errorf("add deferred operation: %w", err)
-	}
-	return nil
 }
 
 func applyEnvMap(env map[string]string) []string {

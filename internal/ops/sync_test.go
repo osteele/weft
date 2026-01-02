@@ -2,14 +2,11 @@ package ops
 
 import (
 	"fmt"
-	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 type mockQueueRemote struct {
@@ -48,7 +45,7 @@ func (m mockQueueRemote) Metadata(host string, jobID int64, timeout time.Duratio
 }
 
 func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo queued", "queued job", "default")
 	if err != nil {
@@ -92,7 +89,7 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 }
 
 func TestSyncJobMarksStartingAsRunningWhenTmuxAlive(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordJobStarting(database, "tmux-host", "/tmp", "echo run", "tmux job")
 	if err != nil {
@@ -128,7 +125,7 @@ func TestSyncJobMarksStartingAsRunningWhenTmuxAlive(t *testing.T) {
 }
 
 func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordJobStarting(database, "status-host", "/tmp", "echo done", "status job")
 	if err != nil {
@@ -175,43 +172,8 @@ func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
 	}
 }
 
-func TestSyncJobSkipsDeadWhenPendingOperations(t *testing.T) {
-	database := setupTestDB(t)
-
-	jobID, err := db.RecordJobStarting(database, "pending-host", "/tmp", "echo pending", "pending job")
-	if err != nil {
-		t.Fatalf("record job: %v", err)
-	}
-	sessionName := "session-pending"
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID); err != nil {
-		t.Fatalf("update session: %v", err)
-	}
-
-	if err := db.AddDeferredOperation(database, "pending-host", db.OpQueueJob, jobID, "", "{}"); err != nil {
-		t.Fatalf("add deferred op: %v", err)
-	}
-
-	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "tmux has-session", Stdout: "NO\n"},
-	})
-
-	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
-	if err != nil {
-		t.Fatalf("SyncJob: %v", err)
-	}
-	if changed {
-		t.Fatalf("expected no change due to pending operations")
-	}
-
-	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusStarting {
-		t.Fatalf("expected status to remain starting, got %s", updated.Status)
-	}
-}
-
 func TestSyncJobQuickMarksDeadWithoutStatus(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordJobStarting(database, "quick-host", "/tmp", "echo quick", "quick job")
 	if err != nil {
@@ -242,7 +204,7 @@ func TestSyncJobQuickMarksDeadWithoutStatus(t *testing.T) {
 }
 
 func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueued(database, "dead-host", "/tmp", "echo dead", "dead job", "default")
 	if err != nil {
@@ -278,7 +240,7 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 }
 
 func TestSyncQueueRunnerJobQuickCompletesJobs(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueued(database, "quick-queue", "/tmp", "echo", "queue job", "default")
 	if err != nil {
@@ -320,101 +282,12 @@ func TestSyncQueueRunnerJobQuickCompletesJobs(t *testing.T) {
 	}
 }
 
-func TestSyncQueueRunnerJobQuickSkipsDeadWhenPendingOperations(t *testing.T) {
-	database := setupTestDB(t)
-
-	jobID, err := db.RecordQueued(database, "skip-host", "/tmp", "echo", "skip job", "default")
-	if err != nil {
-		t.Fatalf("record queued job: %v", err)
-	}
-	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
-		t.Fatalf("mark running: %v", err)
-	}
-	if err := db.AddDeferredOperation(database, "skip-host", db.OpQueueJob, jobID, "", "{}"); err != nil {
-		t.Fatalf("add deferred op: %v", err)
-	}
-
-	mock := mockQueueRemote{
-		quickStatus: quickStatus{State: queueStateDead},
-	}
-	restore := setQueueRemoteClientForTesting(mock)
-	defer restore()
-
-	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncQueueRunnerJobQuick(database, job, SyncOptions{Timeout: time.Second})
-	if err != nil {
-		t.Fatalf("SyncQueueRunnerJobQuick: %v", err)
-	}
-	if changed {
-		t.Fatalf("expected no change when pending operations exist")
-	}
-
-	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusRunning {
-		t.Fatalf("expected status to remain running, got %s", updated.Status)
-	}
-}
-
-type sshMockResponse struct {
-	Contains string
-	Stdout   string
-	Stderr   string
-	ExitCode int
-}
-
-func mockSSHCommands(t *testing.T, responses []sshMockResponse) {
-	handler := func(host, command string) (string, string, int) {
-		for _, resp := range responses {
-			if resp.Contains == "" || strings.Contains(command, resp.Contains) {
-				return resp.Stdout, resp.Stderr, resp.ExitCode
-			}
-		}
-		return "", "", 0
-	}
-
-	cleanup := ssh.SetExecCommand(mockSSHExecCommand(handler))
-	t.Cleanup(cleanup)
-}
-
-func mockSSHExecCommand(handler func(host, command string) (string, string, int)) func(string, ...string) *exec.Cmd {
-	return func(name string, args ...string) *exec.Cmd {
-		if name != "ssh" {
-			return exec.Command(name, args...)
-		}
-		host, command := parseHostAndCommand(args)
-		stdout, stderr, exitCode := handler(host, command)
-		return exec.Command("sh", "-c", buildMockCommand(stdout, stderr, exitCode))
-	}
-}
-
-func parseHostAndCommand(args []string) (string, string) {
-	if len(args) >= 2 {
-		return args[len(args)-2], args[len(args)-1]
-	}
-	if len(args) == 1 {
-		return "", args[0]
-	}
-	return "", ""
-}
-
-func buildMockCommand(stdout, stderr string, exitCode int) string {
-	return fmt.Sprintf("printf '%%s' %s; >&2 printf '%%s' %s; exit %d",
-		singleQuote(stdout), singleQuote(stderr), exitCode)
-}
-
-func singleQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
-}
-
 // TestSyncJobWithQueueNameAndSessionName tests that a queued job with a SessionName
 // (from a previous start_now action that was killed) can still complete correctly
 // when the job re-runs via queue runner and creates a status file with a new timestamp.
 // The sync should fall back to pattern-based lookup after the exact path fails.
 func TestSyncJobWithQueueNameAndSessionName(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	// Create a queued job
 	jobID, err := db.RecordQueued(database, "mixed-host", "/tmp", "echo test", "test job", "default")
@@ -480,7 +353,7 @@ func TestSyncJobWithQueueNameAndSessionName(t *testing.T) {
 
 // TestSyncJobQuickWithQueueNameAndSessionName tests the same scenario for SyncJobQuick
 func TestSyncJobQuickWithQueueNameAndSessionName(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	// Create a queued job
 	jobID, err := db.RecordQueued(database, "mixed-host-quick", "/tmp", "echo test", "test job", "default")
@@ -537,7 +410,7 @@ func TestSyncJobQuickWithQueueNameAndSessionName(t *testing.T) {
 }
 
 func TestSyncDraftJobRemovesQueuedEntry(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueued(database, "draft-queue-host", "/tmp", "echo queued", "draft job", "default")
 	if err != nil {
@@ -587,7 +460,7 @@ func TestSyncDraftJobRemovesQueuedEntry(t *testing.T) {
 }
 
 func TestSyncDraftJobKillsTmuxSession(t *testing.T) {
-	database := setupTestDB(t)
+	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordJobStarting(database, "draft-tmux-host", "/tmp", "echo run", "draft tmux job")
 	if err != nil {

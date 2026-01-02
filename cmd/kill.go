@@ -94,17 +94,16 @@ func removeQueuedJob(database *sql.DB, job *db.Job) error {
 	_, stderr, err := ssh.Run(job.Host, removeCmd)
 
 	if err != nil && ssh.IsConnectionError(stderr) {
-		// Host unreachable - add deferred operation
 		fmt.Printf("Host %s unreachable, will remove on next sync\n", job.Host)
-		if err := db.AddDeferredOperation(database, job.Host, db.OpRemoveQueued, job.ID, queueName, ""); err != nil {
-			return fmt.Errorf("add deferred operation: %w", err)
+		if err := db.SetPendingStatus(database, job.ID, db.StatusDead); err != nil {
+			return fmt.Errorf("mark pending: %w", err)
 		}
+		return nil
 	} else if err != nil {
 		return fmt.Errorf("remove from queue file: %s", strings.TrimSpace(stderr))
 	}
 
-	// Mark job as dead in database
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
+	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
 		return fmt.Errorf("update database: %w", err)
 	}
 

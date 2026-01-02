@@ -3,12 +3,10 @@ package cmd
 import (
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/queuejob"
-	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -273,48 +271,15 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 	}
 
 	oldHost := job.Host
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
 
 	// Update host in database first
 	if err := db.UpdateJobHost(database, jobID, newHost); err != nil {
 		return fmt.Errorf("update database: %w", err)
 	}
 
-	// Remove from old host's queue file
-	oldQueueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", jobID, oldQueueFile)
-	_, stderr, err := ssh.Run(oldHost, removeCmd)
-
-	if err != nil && ssh.IsConnectionError(stderr) {
-		// Old host unreachable - defer removal
-		fmt.Printf("Old host %s unreachable, will remove on next sync\n", oldHost)
-		if err := db.AddDeferredOperation(database, oldHost, db.OpMoveFromQueue, jobID, queueName, ""); err != nil {
-			return fmt.Errorf("add deferred operation for old host: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("remove from old host queue: %s", strings.TrimSpace(stderr))
-	}
-
-	// Add to new host's queue file
-	newQueueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s", jobID, job.WorkingDir, job.Command, job.Description)
-	addCmd := fmt.Sprintf("mkdir -p ~/.cache/remote-jobs/queue && echo '%s' >> %s",
-		ssh.EscapeForSingleQuotes(queueLine), newQueueFile)
-	_, stderr, err = ssh.Run(newHost, addCmd)
-
-	if err != nil && ssh.IsConnectionError(stderr) {
-		// New host unreachable - defer adding to new host's queue
-		fmt.Printf("New host %s unreachable, will add to queue on next sync\n", newHost)
-		payload := fmt.Sprintf(`{"working_dir":%q,"command":%q,"description":%q,"queue_name":%q}`,
-			job.WorkingDir, job.Command, job.Description, queueName)
-		if err := db.AddDeferredOperation(database, newHost, db.OpQueueJob, jobID, queueName, payload); err != nil {
-			return fmt.Errorf("add deferred operation for new host: %w", err)
-		}
-	} else if err != nil {
-		return fmt.Errorf("add to new host queue: %s", strings.TrimSpace(stderr))
+	// Set pending status to queued to trigger reconciliation
+	if err := db.SetPendingStatus(database, jobID, db.StatusQueued); err != nil {
+		return fmt.Errorf("set pending status: %w", err)
 	}
 
 	fmt.Printf("Moved job %d: %s → %s\n", jobID, oldHost, newHost)
@@ -384,38 +349,11 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
-	// Check for pending operations and dependencies
-	hasPendingOps, _ := db.HasPendingDeferredOperationForJob(database, jobID)
-	var depSpec string
-	if hasPendingOps {
-		payload, _ := db.GetDeferredOperationPayload(database, jobID, db.OpQueueJob)
-		if payload != "" {
-			// Extract dep_spec from JSON payload
-			if depStart := strings.Index(payload, `"dep_spec":"`); depStart != -1 {
-				depStart += len(`"dep_spec":"`)
-				if depEnd := strings.Index(payload[depStart:], `"`); depEnd != -1 {
-					depSpec = payload[depStart : depStart+depEnd]
-				}
-			}
-		}
-	}
-
 	// Show full job details
 	fmt.Printf("Job ID:      %d\n", job.ID)
 	fmt.Printf("Host:        %s\n", job.Host)
 	// Show status with waiting info
 	statusStr := job.Status
-	if hasPendingOps && job.Status == db.StatusQueued {
-		if depSpec != "" {
-			if strings.HasSuffix(depSpec, "+") {
-				statusStr = fmt.Sprintf("waiting (after job %s completes)", strings.TrimSuffix(depSpec, "+"))
-			} else {
-				statusStr = fmt.Sprintf("waiting (after job %s succeeds)", depSpec)
-			}
-		} else {
-			statusStr = "waiting (pending sync)"
-		}
-	}
 	fmt.Printf("Status:      %s\n", statusStr)
 	fmt.Printf("Description: %s\n", job.Description)
 	fmt.Printf("Directory:   %s\n", job.WorkingDir)

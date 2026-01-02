@@ -4,6 +4,7 @@ package ops
 import (
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -137,6 +138,7 @@ type QueueJobParams struct {
 	Description string
 	EnvVars     []string
 	QueueName   string
+	DepSpec     string
 }
 
 // QueueJob creates a job record and adds it to the remote queue.
@@ -170,37 +172,35 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		Command:     params.Command,
 		Description: params.Description,
 		EnvVars:     params.EnvVars,
+		DepSpec:     params.DepSpec,
 	}
 
 	// Append to remote queue
 	appendOpts := AppendQueueEntryOptions{Timeout: opts.Timeout}
 	if err := AppendQueueEntry(params.Host, queueName, entry, appendOpts); err != nil {
-		// Check if this is a connection error - if so, defer the operation
 		var qaErr *QueueAppendError
-		if isConnectionErr := false; err != nil {
-			if e, ok := err.(*QueueAppendError); ok {
-				qaErr = e
-				isConnectionErr = qaErr.IsConnectionError()
-			} else {
-				isConnectionErr = ssh.IsConnectionError(err.Error())
-			}
-			if isConnectionErr {
-				// Defer the queue append for when host comes online
-				if deferErr := db.AddDeferredOperation(database, params.Host, db.OpQueueJob, jobID, queueName, ""); deferErr != nil {
-					db.DeleteJob(database, jobID)
-					return Result{}, fmt.Errorf("defer queue append: %w", deferErr)
-				}
-				return Result{
-					Success:  true,
-					Deferred: true,
-					JobID:    jobID,
-					Message:  fmt.Sprintf("Job %d queued (will append to queue when host is online)", jobID),
-				}, nil
-			}
+		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
+			}, nil
 		}
-		// Non-connection error - delete the job and return error
+		if ssh.IsConnectionError(err.Error()) {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
+			}, nil
+		}
 		db.DeleteJob(database, jobID)
 		return Result{}, err
+	}
+
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		return Result{}, fmt.Errorf("update sync state: %w", err)
 	}
 
 	return Result{

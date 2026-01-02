@@ -113,7 +113,19 @@ func Reconcile(database *sql.DB, job *db.Job, remoteStatus string, opts Reconcil
 		}, nil
 	}
 
-	// Case 5: Conflict - local wants one thing, remote became something else
+	// Case 5: Job is queued locally but does not exist remotely
+	if job.Status == db.StatusQueued && remoteStatus == "" {
+		if err := applyQueueToRemote(job, opts.Timeout); err != nil {
+			return nil, err
+		}
+		return &ReconcileResult{
+			Action:    "update_remote",
+			OldStatus: job.Status,
+			NewStatus: db.StatusQueued,
+		}, nil
+	}
+
+	// Case 6: Conflict - local wants one thing, remote became something else
 	return resolveConflict(database, job, base, *local, remote, opts)
 }
 
@@ -186,6 +198,8 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 		err = applyKillToRemote(job, timeout)
 	case db.StatusRunning:
 		err = applyStartToRemote(database, job, timeout)
+	case db.StatusQueued:
+		err = applyQueueToRemote(job, timeout)
 	default:
 		return nil, fmt.Errorf("unsupported pending status: %s", targetStatus)
 	}
@@ -252,6 +266,19 @@ func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Durat
 		// Non-connection errors are OK (file might not exist, etc.)
 	}
 	return nil
+}
+
+// applyQueueToRemote adds a job to the remote queue file.
+func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
+	entry := QueueEntry{
+		JobID:       job.ID,
+		WorkingDir:  job.WorkingDir,
+		Command:     job.Command,
+		Description: job.Description,
+		EnvVars:     job.EnvVars,
+	}
+	opts := AppendQueueEntryOptions{Timeout: timeout}
+	return AppendQueueEntry(job.Host, job.QueueName, entry, opts)
 }
 
 // applyStartToRemote starts a queued job on the remote host.

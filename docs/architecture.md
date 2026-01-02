@@ -146,7 +146,7 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 Provides unified job operations used by both CLI and TUI. All operations follow the same queue-and-execute pattern for network resilience.
 
 **Pattern:**
-1. Queue the operation in `deferred_operations` table
+1. Update the local database to reflect the intended state (e.g., `pending_status` = "dead").
 2. Attempt to drain the queue for that host
 3. If host unreachable, operation stays queued for next sync
 4. If host reachable, execute and remove from queue
@@ -159,7 +159,7 @@ Provides unified job operations used by both CLI and TUI. All operations follow 
 | `RunJob` | Start a new job on a host |
 | `RestartJob` | Kill existing job and start a new one with same command |
 | `QueueAndExecute` | Core pattern: queue operation, then drain |
-| `ExecuteAllDeferredOperations` | Process all pending ops for a host (used by sync) |
+| `SyncAndReconcile`           | Probe remote, then reconcile local and remote states  |
 
 **Conflict Resolution:**
 

@@ -2,7 +2,6 @@ package queuejob
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -44,42 +43,11 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		queueName = queuefile.DefaultQueueName
 	}
 
-	// Check if job has a pending queue_job operation (not yet synced to remote)
-	hasPendingQueue, _ := db.HasPendingOperation(database, job.ID, db.OpQueueJob)
-	if hasPendingQueue {
-		// Job isn't in remote queue yet - get data from pending operation and start directly
-		payload, _ := db.GetDeferredOperationPayload(database, job.ID, db.OpQueueJob)
-		var entry *queuefile.Entry
-		if payload != "" {
-			var p struct {
-				WorkingDir  string   `json:"working_dir"`
-				Command     string   `json:"command"`
-				Description string   `json:"description"`
-				EnvVars     []string `json:"env_vars"`
-				DepSpec     string   `json:"dep_spec"`
-			}
-			if err := json.Unmarshal([]byte(payload), &p); err == nil {
-				entry = &queuefile.Entry{
-					JobID:       job.ID,
-					WorkingDir:  p.WorkingDir,
-					Command:     p.Command,
-					Description: p.Description,
-					EnvVars:     p.EnvVars,
-					DepSpec:     p.DepSpec,
-				}
-			}
-		}
-		// Delete the pending queue_job operation
-		db.DeletePendingOperation(database, job.ID, db.OpQueueJob)
-		// Start the job directly (no need to remove from remote queue)
-		return startJobDirectly(database, job, queueName, entry)
-	}
-
 	entry, err := queuefile.FetchEntry(job.Host, queueName, job.ID)
 	entryWasInQueue := err == nil
 	if err != nil {
 		if queuefile.IsConnectionError(err) {
-			return deferQueuedJobStart(database, job, queueName, nil, false)
+			return markStartPending(database, job, queueName, false)
 		}
 		// Job not found in remote queue - this can happen if:
 		// 1. The queue runner already started it
@@ -94,15 +62,13 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	}
 
 	// Only try to remove from queue if it was actually there
-	entryRemoved := false
 	if entryWasInQueue {
 		if err := queuefile.RemoveEntry(job.Host, queueName, job.ID); err != nil {
 			if queuefile.IsConnectionError(err) {
-				return deferQueuedJobStart(database, job, queueName, entry, false)
+				return markStartPending(database, job, queueName, false)
 			}
 			return false, err
 		}
-		entryRemoved = true
 	}
 
 	// Use the session name so sync knows this is a tmux-based job, not a queue runner job
@@ -127,7 +93,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
-			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
+			return markStartPending(database, job, queueName, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("mkdir failed"))
@@ -141,7 +107,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("metadata write failed, deferring start"))
-			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
+			return markStartPending(database, job, queueName, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("metadata write failed"))
@@ -172,7 +138,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("tmux create failed, deferring start"))
-			return deferQueuedJobStart(database, job, queueName, entry, entryRemoved)
+			return markStartPending(database, job, queueName, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("tmux create failed"))
@@ -212,9 +178,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
-			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
-			// recreate it and revert status to queued
-			return deferQueuedJobStart(database, job, queueName, entry, true)
+			return markStartPending(database, job, queueName, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("mkdir failed"))
@@ -228,9 +192,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	if _, stderr, err := ssh.Run(job.Host, writeMetadata); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("metadata write failed, deferring start"))
-			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
-			// recreate it and revert status to queued
-			return deferQueuedJobStart(database, job, queueName, entry, true)
+			return markStartPending(database, job, queueName, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("metadata write failed"))
@@ -266,9 +228,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	if _, stderr, err := ssh.Run(job.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("tmux create failed, deferring start"))
-			// Pass entryRemoved=true: job was never in remote queue, so sync needs to
-			// recreate it and revert status to queued
-			return deferQueuedJobStart(database, job, queueName, entry, true)
+			return markStartPending(database, job, queueName, true)
 		}
 		errMsg := ssh.FriendlyError(job.Host, stderr, err)
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("tmux create failed"))
@@ -280,55 +240,18 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	return false, nil
 }
 
-type deferredStartPayload struct {
-	QueueName    string   `json:"queue_name"`
-	WorkingDir   string   `json:"working_dir,omitempty"`
-	Command      string   `json:"command,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	EnvVars      []string `json:"env_vars,omitempty"`
-	DepSpec      string   `json:"dep_spec,omitempty"`
-	EntryMissing bool     `json:"entry_missing,omitempty"`
-}
-
-func deferQueuedJobStart(database *sql.DB, job *db.Job, queueName string, entry *queuefile.Entry, entryRemoved bool) (bool, error) {
-	// Check if a start operation already exists for this job
-	hasPending, err := db.HasPendingOperation(database, job.ID, db.OpStartQueuedJob)
-	if err != nil {
-		return false, fmt.Errorf("check pending operations: %w", err)
+func markStartPending(database *sql.DB, job *db.Job, queueName string, revertToQueue bool) (bool, error) {
+	if queueName == "" {
+		queueName = queuefile.DefaultQueueName
 	}
-	if hasPending {
-		// Already has a pending start operation, don't add another
-		return true, nil
-	}
-
-	payload := deferredStartPayload{
-		QueueName:    queueName,
-		EntryMissing: entryRemoved,
-	}
-
-	if entry != nil {
-		payload.WorkingDir = entry.WorkingDir
-		payload.Command = entry.Command
-		payload.Description = entry.Description
-		payload.EnvVars = entry.EnvVars
-		payload.DepSpec = entry.DepSpec
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return false, fmt.Errorf("encode deferred start payload: %w", err)
-	}
-
-	if entryRemoved {
+	if revertToQueue {
 		if err := db.UpdateJobRunningToQueued(database, job.ID, queueName); err != nil {
 			return false, fmt.Errorf("mark job queued: %w", err)
 		}
 	}
-
-	if err := db.AddDeferredOperation(database, job.Host, db.OpStartQueuedJob, job.ID, queueName, string(payloadJSON)); err != nil {
-		return false, fmt.Errorf("add deferred operation: %w", err)
+	if err := db.SetPendingStatus(database, job.ID, db.StatusRunning); err != nil {
+		return false, fmt.Errorf("set pending status: %w", err)
 	}
-
 	return true, nil
 }
 

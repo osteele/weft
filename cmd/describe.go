@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -19,12 +18,6 @@ var (
 	describeGPU       string
 	describeGPUs      string
 )
-
-type deferredUpdatePayload struct {
-	WorkingDir  string `json:"working_dir,omitempty"`
-	Command     string `json:"command,omitempty"`
-	Description string `json:"description,omitempty"`
-}
 
 var describeCmd = &cobra.Command{
 	Use:   "describe <job-id>",
@@ -149,41 +142,8 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 			queueName = "default"
 		}
 
-		// Check if job has a pending queue_job operation (not yet synced to remote)
-		hasPendingQueue, _ := db.HasPendingOperation(database, jobID, db.OpQueueJob)
-		if hasPendingQueue {
-			// Update the pending queue_job payload with new values
-			existingPayload, err := db.GetDeferredOperationPayload(database, jobID, db.OpQueueJob)
-			if err == nil && existingPayload != "" {
-				var payload map[string]interface{}
-				if err := json.Unmarshal([]byte(existingPayload), &payload); err == nil {
-					payload["working_dir"] = job.WorkingDir
-					payload["command"] = job.Command
-					payload["description"] = job.Description
-					if newPayloadJSON, err := json.Marshal(payload); err == nil {
-						db.UpdatePendingOperationPayload(database, jobID, db.OpQueueJob, string(newPayloadJSON))
-					}
-				}
-			}
-		} else {
-			// Job is already in remote queue - add update operation and try immediate sync
-			payload := deferredUpdatePayload{
-				WorkingDir:  job.WorkingDir,
-				Command:     job.Command,
-				Description: job.Description,
-			}
-			payloadJSON, _ := json.Marshal(payload)
-			if err := db.AddDeferredOperation(database, job.Host, db.OpUpdateQueuedJob, jobID, queueName, string(payloadJSON)); err != nil {
-				fmt.Printf("Warning: could not queue update operation: %v\n", err)
-			}
-
-			// Try immediate sync
-			if err := updateRemoteQueueEntry(job.Host, queueName, job); err != nil {
-				fmt.Printf("Note: remote host not reachable; changes will sync when host is available\n")
-			} else {
-				// Immediate sync succeeded - remove the deferred operation
-				db.DeletePendingOperation(database, jobID, db.OpUpdateQueuedJob)
-			}
+		if err := updateRemoteQueueEntry(job.Host, queueName, job); err != nil {
+			fmt.Printf("Note: remote host not reachable; changes will sync when host is available\n")
 		}
 	}
 

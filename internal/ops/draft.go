@@ -25,10 +25,6 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host, oplog.WithDetail("marking job draft"))
 
-	// Remove any pending operations that would run the job in the future.
-	db.DeletePendingOperationsForJob(database, job.ID,
-		db.OpQueueJob, db.OpRunJob, db.OpRestartJob, db.OpStartQueuedJob)
-
 	// Terminal jobs can be marked draft immediately.
 	if db.IsTerminalStatus(job.Status) {
 		if err := db.MarkJobDraftPending(database, job.ID); err != nil {
