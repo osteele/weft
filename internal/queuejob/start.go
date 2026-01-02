@@ -32,7 +32,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr("job not found in database"))
 		return false, fmt.Errorf("job %d not found", job.ID)
 	}
-	if freshJob.Status != db.StatusQueued && freshJob.Status != db.StatusDraft {
+	if freshJob.Status != db.StatusQueued {
 		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetailf("job already %s", freshJob.Status))
 		return false, fmt.Errorf("job %d is already %s", job.ID, freshJob.Status)
 	}

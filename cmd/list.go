@@ -28,7 +28,6 @@ Examples:
   remote-jobs list --running          # Running jobs only
   remote-jobs list --queued           # Jobs waiting in queue
   remote-jobs list --running --sync   # Running jobs (sync first)
-  remote-jobs list --draft            # Draft jobs
   remote-jobs list --host cool30      # Jobs on cool30
   remote-jobs list --search training  # Search jobs
   remote-jobs list --show 42          # Job details`,
@@ -40,7 +39,6 @@ var (
 	listCompleted bool
 	listQueued    bool
 	listDead      bool
-	listDraft     bool
 	listStatus    string
 	listHost      string
 	listSearch    string
@@ -59,8 +57,7 @@ func init() {
 	listCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
 	listCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
 	listCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
-	listCmd.Flags().BoolVar(&listDraft, "draft", false, "Show only draft jobs")
-	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, draft)")
+	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead)")
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	listCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
@@ -133,8 +130,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		status = db.StatusQueued
 	} else if listDead {
 		status = db.StatusDead
-	} else if listDraft {
-		status = db.StatusDraft
 	}
 
 	// Default to 7 days unless --all is specified

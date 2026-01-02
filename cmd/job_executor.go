@@ -24,7 +24,6 @@ type startJobOptions struct {
 	Description string
 	EnvVars     []string
 	Timeout     string
-	QueueOnFail bool
 	OnPrepared  func(info StartJobPreparedInfo)
 }
 
@@ -45,10 +44,9 @@ type StartJobPreparedInfo struct {
 
 // startJobResult reports the outcome of the start operation.
 type startJobResult struct {
-	Info                      StartJobPreparedInfo
-	SlackEnabled              bool
-	QueuedOnConnectionFailure bool
-	DeferredToQueue           bool
+	Info            StartJobPreparedInfo
+	SlackEnabled    bool
+	DeferredToQueue bool
 }
 
 func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
@@ -92,12 +90,6 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	exists, err := ssh.TmuxSessionExists(opts.Host, info.TmuxSession)
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) {
-			if opts.QueueOnFail {
-				if err := db.UpdateJobDraft(database, jobID); err != nil {
-					return nil, fmt.Errorf("queue job: %w", err)
-				}
-				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
-			}
 			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}
 		db.UpdateJobFailed(database, jobID, err.Error())
@@ -114,12 +106,6 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
 	if _, stderr, err := ssh.RunWithRetry(opts.Host, mkdirCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
-			if opts.QueueOnFail {
-				if err := db.UpdateJobDraft(database, jobID); err != nil {
-					return nil, fmt.Errorf("queue job: %w", err)
-				}
-				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
-			}
 			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}
 		errMsg := ssh.FriendlyError(opts.Host, stderr, err)
@@ -163,12 +149,6 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", info.TmuxSession, escapedCommand)
 	if _, stderr, err := ssh.Run(opts.Host, tmuxCmd); err != nil {
 		if isConnectionFailure(stderr, err) {
-			if opts.QueueOnFail {
-				if err := db.UpdateJobDraft(database, jobID); err != nil {
-					return nil, fmt.Errorf("queue job: %w", err)
-				}
-				return &startJobResult{Info: info, QueuedOnConnectionFailure: true}, nil
-			}
 			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}
 		errMsg := ssh.FriendlyError(opts.Host, stderr, err)

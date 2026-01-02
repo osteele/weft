@@ -225,9 +225,7 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 			return nil, err
 		}
 		idToJob[job.ID] = result.Info.JobID
-		if result.QueuedOnConnectionFailure {
-			fmt.Printf("Connection to %s failed; job %d queued locally for retry\n", resolved.Host, result.Info.JobID)
-		} else if result.DeferredToQueue {
+		if result.DeferredToQueue {
 			fmt.Printf("SSH to %s failed; job %d will be added to the remote queue on next sync\n", resolved.Host, result.Info.JobID)
 		}
 		scheduled = append(scheduled, scheduledPlanJob{
@@ -376,10 +374,6 @@ func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[
 	})
 	if err != nil {
 		return scheduledPlanJob{}, err
-	}
-	if result.QueuedOnConnectionFailure {
-		fmt.Printf("Connection to %s failed; job %d queued locally for retry\n", job.Host, result.Info.JobID)
-		return scheduledPlanJob{Label: label, Command: job.Command, Host: job.Host, JobID: result.Info.JobID}, nil
 	}
 	if result.DeferredToQueue {
 		fmt.Printf("SSH to %s failed; job %d will be queued remotely on next sync\n", job.Host, result.Info.JobID)
@@ -563,7 +557,7 @@ func classifyJobStatus(job *db.Job) string {
 		return "failed"
 	case db.StatusDead, db.StatusFailed:
 		return "failed"
-	case db.StatusQueued, db.StatusDraft:
+	case db.StatusQueued:
 		return "queued"
 	case db.StatusRunning, db.StatusStarting:
 		return "running"

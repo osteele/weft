@@ -215,8 +215,8 @@ sacct <jobid>      # Historical resource usage
 **remote-jobs:**
 ```bash
 # Host is unreachable right now
-remote-jobs run --queue-on-fail cool30 'python train.py'
-# Job queued, will start when host becomes reachable
+remote-jobs run cool30 'python train.py'
+# CLI records the job locally and appends it when the host is reachable
 ```
 
 **SLURM:**

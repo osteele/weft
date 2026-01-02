@@ -21,15 +21,10 @@ state even if it was restarted elsewhere.
 
 When you start a job (`remote-jobs run` or `remote-jobs job start`), the CLI
 records the job locally before touching the remote host. If SSH cannot be
-established:
-
-- With `--queue-on-fail`, the job is marked `pending` (draft). Rerun it later
-  with `remote-jobs retry <job-id>` or, if you want to tweak settings first,
-  `remote-jobs run --from <job-id>`.
-- Otherwise the job is deferred to the remote queue automatically. A
-  `deferred_operations` entry is created and `remote-jobs sync` (or any command
-  that syncs) will add the job back to the host's queue when it becomes
-  reachable. No work is lost.
+established, the job is deferred to the remote queue automatically. A
+`deferred_operations` entry is created and `remote-jobs sync` (or any command
+that syncs) will add the job back to the host's queue when it becomes
+reachable. No work is lost, and you no longer need a separate retry command.
 
 Queue submissions behave the same way. `plan submit` and `queue add` now
 spool queue entries locally whenever the host is unreachable. The job remains

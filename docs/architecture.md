@@ -40,7 +40,7 @@ set of states. The CLI records each transition so commands such as `status`,
 | `completed` | Job wrote an exit code to the `.status` file (success or failure recorded). |
 | `dead`      | tmux session disappeared without writing a status file (crash/kill).        |
 | `queued`    | Job was added to a remote queue file and awaits the queue runner.           |
-| `pending`   | Job deferred locally (e.g., `--queue-on-fail`) until a later retry.         |
+| `pending`   | Local intent recorded (kill/start/change) awaiting reconciliation.          |
 | `failed`    | CLI could not finish setup (e.g., SSH error) and recorded the failure text. |
 
 ```mermaid
@@ -52,8 +52,6 @@ stateDiagram-v2
     starting --> failed : setup error
     running --> completed : status file written
     running --> dead : tmux gone, no status file
-    starting --> pending : queue-on-fail
-    pending --> starting : retry/run --from
 ```
 
 ## Directory Structure
@@ -138,10 +136,10 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 **Key Design Decisions:**
 - Job ID is allocated BEFORE starting the tmux session, ensuring the database always knows about the job
 - If SSH fails during setup, the job is marked as "failed" with the error message
-- The `--queue-on-fail` flag allows jobs to be queued for later retry on connection errors
-- Draft jobs created by `--queue-on-fail` can be restarted verbatim via
-  `remote-jobs retry`, while `--from` lets you copy settings into a brand-new
-  job when you want to make edits before retrying
+- Connection failures automatically record the job locally and defer the queue
+  append so it starts once the host is back online—no special retry flag needed.
+- `remote-jobs run --from <id>` lets you copy settings into a brand-new job when
+  you want to make edits before re-running.
 
 ### 2. Operations Layer (`internal/ops/`)
 
@@ -552,7 +550,7 @@ User: remote-jobs sync
 
 - Detected via regex pattern matching on SSH output
 - Retry logic with configurable attempts and delays
-- `--queue-on-fail` flag queues job for later retry
+- Failed operations are recorded locally and replayed once the host reconnects
 
 ### Job Failures
 

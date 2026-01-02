@@ -229,7 +229,6 @@ func init() {
 	jobListCmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
 	jobListCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
 	jobListCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
-	jobListCmd.Flags().BoolVar(&listDraft, "draft", false, "Show only draft jobs")
 	jobListCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	jobListCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	jobListCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
@@ -345,7 +344,7 @@ func runJobStartNow(cmd *cobra.Command, args []string) error {
 	if job == nil {
 		return fmt.Errorf("job %d not found", jobID)
 	}
-	if job.Status != db.StatusQueued && job.Status != db.StatusDraft {
+	if job.Status != db.StatusQueued {
 		return fmt.Errorf("job %d is not queued (status: %s)", jobID, job.Status)
 	}
 

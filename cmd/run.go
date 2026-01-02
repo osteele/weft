@@ -24,7 +24,7 @@ var runCmd = &cobra.Command{
 By default, jobs are added to a queue and run sequentially by the queue runner.
 Use --immediate (-i) to start a job immediately instead of adding it to the queue.
 
-Use 'start <job-id>' to start a queued or draft job immediately.
+Use 'start <job-id>' to start a queued job immediately.
 
 Examples:
   remote-jobs run cool30 'python train.py'           # Queue job
@@ -55,7 +55,6 @@ var (
 	runDir         string
 	runDescription string
 	runImmediate   bool
-	runQueueOnFail bool
 	runFollow      bool
 	runAllow       bool
 	runKillJobID   int64
@@ -74,7 +73,6 @@ func init() {
 	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	runCmd.Flags().MarkHidden("description")
-	runCmd.Flags().BoolVar(&runQueueOnFail, "queue-on-fail", false, "Queue job if connection fails")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	runCmd.Flags().BoolVar(&runAllow, "allow", false, "Stream the job log live and stay attached until interrupted")
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'remote-jobs kill')")
@@ -306,7 +304,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		Description: runDescription,
 		EnvVars:     runEnvVars,
 		Timeout:     runTimeout,
-		QueueOnFail: runQueueOnFail,
 		OnPrepared: func(info StartJobPreparedInfo) {
 			fmt.Printf("Starting job %d on %s\n", info.JobID, info.Host)
 			fmt.Printf("Working directory: %s\n", info.WorkingDir)
@@ -319,14 +316,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	})
 	if err != nil {
 		return err
-	}
-
-	if result.QueuedOnConnectionFailure {
-		fmt.Println("Connection failed. Queuing job for later...")
-		fmt.Printf("Job queued with ID: %d\n\n", result.Info.JobID)
-		fmt.Printf("To retry when connection is available:\n")
-		fmt.Printf("  remote-jobs retry %d\n", result.Info.JobID)
-		return nil
 	}
 
 	if result.DeferredToQueue {

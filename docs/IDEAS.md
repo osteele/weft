@@ -95,14 +95,6 @@ lines (“run `remote-jobs status 42` next”), but the format is unstructured t
 - Helps human+agent pairs stay in sync: humans can read the regular hints,
   agents can consume the structured metadata.
 
-## Queue-to-Draft Editing
-
-Allow queued jobs to be converted back into draft status directly from the TUI.
-Once a job is a draft it can be edited without touching the live queue and then
-re-queued (or started immediately) when the operator is ready. This would make
-it easy to fix command typos or update environment variables after a job has
-already been staged remotely.
-
 ## Reconnectable Stay-Attached Mode
 
 Extend the `remote-jobs run --allow` pipeline so the CLI can automatically

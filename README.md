@@ -74,7 +74,7 @@ remote-jobs run [flags] <host> <command...>
 
 By default, jobs are added to a queue and run sequentially by the queue runner. Use `--immediate` (`-i`) to start a job immediately.
 
-Use `start <job-id>` to start a queued or draft job immediately.
+Use `start <job-id>` to start a queued job immediately.
 
 **Flags:**
 - `-i, --immediate`: Start job immediately instead of queuing
@@ -83,17 +83,16 @@ Use `start <job-id>` to start a queued or draft job immediately.
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
-- `--queue-on-fail`: Queue job if connection fails (for `--immediate` mode)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
 - `--after ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
 
-If an immediate run fails while `--queue-on-fail` is set, the job is saved as a
-draft. Rerun it later with `remote-jobs retry <job-id>` (which recreates the job
-with the same settings) or `remote-jobs run --from <job-id>` if you want to make
-changes before trying again.
+If an immediate run can't reach the host, the CLI automatically records the job
+locally and defers it to the remote queue. The next sync (or any command that
+touches that host) will append the saved entry so it runs as soon as the host is
+reachable again.
 
 **Examples:**
 ```bash
@@ -364,7 +363,6 @@ remote-jobs job list [flags]
 - `--running`: Show only running jobs
 - `--completed`: Show only completed jobs
 - `--dead`: Show only dead jobs
-- `--draft`: Show only draft jobs (saved locally, not yet started)
 - `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
 - `--limit N`: Limit results (default: 50)
@@ -377,7 +375,6 @@ remote-jobs job list [flags]
 remote-jobs job list                          # Recent jobs
 remote-jobs job list --running                # Running jobs
 remote-jobs job list --running --sync         # Running jobs (sync first)
-remote-jobs job list --draft                  # Draft jobs
 remote-jobs job list --host deepthought       # Jobs on deepthought
 remote-jobs job list --search training        # Search jobs
 remote-jobs job list --show 42                # Job details
@@ -508,28 +505,10 @@ remote-jobs job start 512          # Same as above
 remote-jobs job start 9001         # Bypass queue order and run now
 ```
 
-Only jobs with status `queued` or `draft` can be started this way. The command preserves
+Only jobs with status `queued` can be started this way. The command preserves
 the job's working directory, environment variables, and metadata.
 
-**Note:** This only works for queued/draft jobs. For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
-
-### remote-jobs retry
-
-Retry draft jobs created when `run --queue-on-fail` couldn't reach the host.
-
-```bash
-remote-jobs retry <job-id>          # Retry a single draft job
-remote-jobs retry --host studio 42  # Retry on a different host
-remote-jobs retry --list            # List all draft jobs
-remote-jobs retry --all             # Retry every draft (optionally --host)
-remote-jobs retry --delete <id>     # Remove a draft without running it
-```
-
-The command deletes the draft entry, recreates a fresh job with the same
-metadata, and attempts to run it immediately (respecting host overrides). Use
-`--list` to see which drafts are waiting, or `--delete` to clean up ones you no
-longer need. For more control over the command before retrying, pair this with
-`remote-jobs run --from <id>`.
+**Note:** For running or completed jobs, use `run --from <id>` to create a new job on the desired host.
 
 ### Advanced run options
 
@@ -838,7 +817,6 @@ Log files are stored on remote hosts at `~/.cache/remote-jobs/logs/{id}-{timesta
 - `running`: Job is currently executing on the remote host
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
-- `draft`: Job saved locally but not yet started (for later manual execution)
 - `queued`: Job waiting in a remote queue for sequential execution
 - `failed`: Job failed to start (e.g., connection error)
 
