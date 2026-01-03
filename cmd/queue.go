@@ -231,9 +231,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueAfter > 0 && queueAfterAny > 0 {
 		return fmt.Errorf("cannot use both --after and --after-any")
 	}
-	if queueDraft && (queueAfter > 0 || queueAfterAny > 0) {
-		return fmt.Errorf("--draft cannot be combined with dependency flags")
-	}
 
 	var deps []queueDependency
 	if queueAfter > 0 {
@@ -251,7 +248,8 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	if queueDraft {
 		gpu := extractGPUFromEnvVars(queueEnvVars)
-		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, queueDescription, queueName, gpu)
+		depSpec := encodeQueueDependencies(deps)
+		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, queueName, gpu, depSpec)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
@@ -263,6 +261,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		}
 		if len(queueEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+		}
+		if queueAfter > 0 {
+			fmt.Printf("  After job: %d (will wait for success when queued)\n", queueAfter)
+		}
+		if queueAfterAny > 0 {
+			fmt.Printf("  After job: %d (will wait for completion when queued)\n", queueAfterAny)
 		}
 		return nil
 	}

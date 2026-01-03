@@ -31,6 +31,20 @@ const (
 	TimeoutSync
 )
 
+// String returns a string representation of the timeout mode.
+func (m TimeoutMode) String() string {
+	switch m {
+	case TimeoutFast:
+		return "fast"
+	case TimeoutNormal:
+		return "normal"
+	case TimeoutSync:
+		return "sync"
+	default:
+		return "unknown"
+	}
+}
+
 // Duration returns the timeout duration for this mode.
 // These values are centralized here for easy tuning and future config override.
 func (m TimeoutMode) Duration() time.Duration {

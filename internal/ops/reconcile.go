@@ -200,6 +200,8 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 		err = applyStartToRemote(database, job, timeout)
 	case db.StatusQueued:
 		err = applyQueueToRemote(job, timeout)
+	case db.StatusDraft:
+		err = applyDraftToRemote(job, timeout)
 	default:
 		return nil, fmt.Errorf("unsupported pending status: %s", targetStatus)
 	}
@@ -270,6 +272,30 @@ func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Durat
 	return nil
 }
 
+// applyDraftToRemote ensures no remote execution state exists for a draft job.
+// This removes the job from any queue and kills any running process.
+func applyDraftToRemote(job *db.Job, timeout time.Duration) error {
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+
+	// Remove from queue if present
+	if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+		if ssh.IsConnectionError(err.Error()) {
+			return err
+		}
+		// Non-connection errors are OK (not in queue)
+	}
+
+	// Kill if running
+	if err := applyKillToRemote(job, timeout); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // applyQueueToRemote adds a job to the remote queue file.
 func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
 	entry := QueueEntry{
@@ -278,6 +304,7 @@ func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
 		Command:     job.Command,
 		Description: job.Description,
 		EnvVars:     job.EnvVars,
+		DepSpec:     job.DepSpec,
 	}
 	opts := AppendQueueEntryOptions{Timeout: timeout}
 	return AppendQueueEntry(job.Host, job.QueueName, entry, opts)

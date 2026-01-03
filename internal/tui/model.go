@@ -207,7 +207,7 @@ var (
 		),
 		Draft: key.NewBinding(
 			key.WithKeys("d"),
-			key.WithHelp("d", "mark draft"),
+			key.WithHelp("d", "toggle draft/queue"),
 		),
 		Restart: key.NewBinding(
 			key.WithKeys("r"),
@@ -266,7 +266,7 @@ var (
 		),
 		StartNow: key.NewBinding(
 			key.WithKeys("g"),
-			key.WithHelp("g", "start now"),
+			key.WithHelp("g", "go/start now"),
 		),
 		MoveToFront: key.NewBinding(
 			key.WithKeys("F"),
@@ -351,6 +351,12 @@ type jobKilledMsg struct {
 }
 
 type jobDraftedMsg struct {
+	jobID    int64
+	err      error
+	deferred bool
+}
+
+type jobQueuedMsg struct {
 	jobID    int64
 	err      error
 	deferred bool
@@ -1012,6 +1018,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d draft pending (sync when host online)", msg.jobID), false)
 		} else {
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d marked draft", msg.jobID), false)
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
+	case jobQueuedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			flashCmd = m.setFlash(fmt.Sprintf("Queue failed: %v", msg.err), true)
+		} else if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued (pending sync)", msg.jobID), false)
+		} else {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued", msg.jobID), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
@@ -1705,8 +1722,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, nil
 		}
+		// Toggle behavior: draft→queued, anything else→draft
 		if job.Status == db.StatusDraft {
-			return m, m.setFlash(fmt.Sprintf("Job %d already draft", job.ID), true)
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=d action=queue_draft"))
+			return m, tea.Batch(m.setFlash("Queueing draft job...", false), m.queueDraftJob(job))
 		}
 		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=d action=draft"))
 		return m, tea.Batch(m.setFlash("Marking job draft...", false), m.draftJob(job))
@@ -1785,11 +1804,19 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		job := m.getTargetJob()
-		if job != nil && job.Status == db.StatusQueued {
+		if job == nil {
+			return m, m.setFlash("No job selected", true)
+		}
+		switch job.Status {
+		case db.StatusQueued:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=start_now"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
+		case db.StatusDraft:
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=run_draft"))
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Running draft job %d...", job.ID), false), m.runDraftJob(job))
+		default:
+			return m, m.setFlash("Can only start queued or draft jobs", true)
 		}
-		return m, m.setFlash("Can only start queued jobs", true)
 
 	case key.Matches(msg, keys.MoveToFront):
 		if m.viewMode != ViewModeJobs {
@@ -2071,7 +2098,8 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"r", "Restart job"},
 			{"R", "Edit & restart job"},
 			{"k", "Kill/cancel job"},
-			{"g", "Start queued job now"},
+			{"d", "Toggle draft/queue status"},
+			{"g", "Start queued/draft job now"},
 			{"G", "Generate AI description"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
@@ -5550,11 +5578,39 @@ func (m Model) draftJob(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		result, err := ops.DraftJob(database, job, ops.DefaultOptions())
+		result, err := ops.RequestStatus(database, job, db.StatusDraft, ops.TimeoutFast)
 		if err != nil {
 			return jobDraftedMsg{jobID: job.ID, err: err}
 		}
 		return jobDraftedMsg{jobID: job.ID, deferred: result.Deferred}
+	}
+}
+
+func (m Model) queueDraftJob(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+	database := m.database
+	return func() tea.Msg {
+		result, err := ops.RequestStatus(database, job, db.StatusQueued, ops.TimeoutFast)
+		if err != nil {
+			return jobQueuedMsg{jobID: job.ID, err: err}
+		}
+		return jobQueuedMsg{jobID: job.ID, deferred: result.Deferred}
+	}
+}
+
+func (m Model) runDraftJob(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+	database := m.database
+	return func() tea.Msg {
+		result, err := ops.RequestStatus(database, job, db.StatusRunning, ops.TimeoutFast)
+		if err != nil {
+			return jobQueuedMsg{jobID: job.ID, err: err}
+		}
+		return jobQueuedMsg{jobID: job.ID, deferred: result.Deferred}
 	}
 }
 

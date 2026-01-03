@@ -26,7 +26,8 @@ type Job struct {
 	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	EnvVars              []string
-	CreatedAt            int64 // When the job was created/queued (0 for legacy jobs)
+	DepSpec              string // Dependency specification (e.g., "42" or "42+" for after-any)
+	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
 	StartTime            int64
 	EndTime              *int64
 	ExitCode             *int
@@ -39,7 +40,7 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, tombstoned, last_synced_status, pending_status, pending_at`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, dep_spec, tombstoned, last_synced_status, pending_status, pending_at`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -198,6 +199,11 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN pending_at INTEGER`); err != nil {
+		return err
+	}
+
+	// Migration: add dep_spec column for job dependencies (e.g., "42" or "42+" for after-any)
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN dep_spec TEXT`); err != nil {
 		return err
 	}
 
@@ -658,11 +664,16 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, que
 
 // RecordDraftJobWithGPU records a job that should remain in draft locally.
 func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
+	return RecordDraftJob(db, host, workingDir, command, description, queueName, gpu, "")
+}
+
+// RecordDraftJob records a job that should remain in draft locally, with optional dependency.
+func RecordDraftJob(db *sql.DB, host, workingDir, command, description, queueName, gpu, depSpec string) (int64, error) {
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, last_synced_status)
-		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-		host, workingDir, command, description, createdAt, StatusDraft, queueName, gpu, StatusDraft,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, dep_spec, last_synced_status)
+		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+		host, workingDir, command, description, createdAt, StatusDraft, queueName, gpu, depSpec, StatusDraft,
 	)
 	if err != nil {
 		return 0, err
@@ -810,6 +821,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var queueName sql.NullString
 	var gpu sql.NullString
 	var envVars sql.NullString
+	var depSpec sql.NullString
 	var createdAt sql.NullInt64
 	var startTime sql.NullInt64
 	var endTime sql.NullInt64
@@ -819,7 +831,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -849,6 +861,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.GPU = gpu.String
 	}
 	j.EnvVars = decodeEnvVars(envVars)
+	if depSpec.Valid {
+		j.DepSpec = depSpec.String
+	}
 	if createdAt.Valid {
 		j.CreatedAt = createdAt.Int64
 	}
@@ -921,6 +936,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var queueName sql.NullString
 		var gpu sql.NullString
 		var envVars sql.NullString
+		var depSpec sql.NullString
 		var createdAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
@@ -930,7 +946,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingStatus sql.NullString
 		var pendingAt sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 		if err != nil {
 			return nil, err
 		}
@@ -957,6 +973,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.GPU = gpu.String
 		}
 		j.EnvVars = decodeEnvVars(envVars)
+		if depSpec.Valid {
+			j.DepSpec = depSpec.String
+		}
 		if createdAt.Valid {
 			j.CreatedAt = createdAt.Int64
 		}

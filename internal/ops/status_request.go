@@ -5,8 +5,50 @@ import (
 	"fmt"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
+
+// RequestStatus sets the target status for a job and attempts immediate reconciliation.
+// This is the unified entry point for all status transition requests (kill, start, queue, draft).
+// The TimeoutMode parameter controls timeout behavior based on caller context.
+func RequestStatus(database *sql.DB, job *db.Job, targetStatus string, mode TimeoutMode) (Result, error) {
+	if job == nil {
+		return Result{}, fmt.Errorf("job is nil")
+	}
+
+	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+		oplog.WithDetailf("requesting status transition to %s", targetStatus))
+
+	outcome, err := requestJobStatus(database, job, targetStatus, OptionsForMode(mode))
+	if err != nil {
+		return Result{}, err
+	}
+
+	if !outcome.hostAvailable {
+		return Result{
+			Success:  true,
+			Deferred: true,
+			JobID:    job.ID,
+			Message:  fmt.Sprintf("Job %d %s pending (host unreachable)", job.ID, targetStatus),
+		}, nil
+	}
+
+	if !outcome.resolved {
+		return Result{
+			Success:  true,
+			Deferred: true,
+			JobID:    job.ID,
+			Message:  fmt.Sprintf("Job %d %s pending (remote state uncertain)", job.ID, targetStatus),
+		}, nil
+	}
+
+	return Result{
+		Success: true,
+		JobID:   job.ID,
+		Message: fmt.Sprintf("Job %d now %s", job.ID, outcome.currentStatus),
+	}, nil
+}
 
 // statusRequestOutcome captures the result of requesting a state transition.
 type statusRequestOutcome struct {
