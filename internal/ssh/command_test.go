@@ -1,7 +1,6 @@
 package ssh
 
 import (
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -79,17 +78,6 @@ func TestEscapeForSingleQuotes(t *testing.T) {
 // TestReadRemoteFileCommand verifies that ReadRemoteFile doesn't quote paths
 // (which would break tilde expansion)
 func TestReadRemoteFileCommand(t *testing.T) {
-	var capturedArgs []string
-
-	// Replace execCommand to capture arguments
-	orig := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		capturedArgs = append([]string{name}, args...)
-		// Return a command that just echoes empty (won't actually run in test)
-		return exec.Command("echo", "")
-	}
-	defer func() { execCommand = orig }()
-
 	tests := []struct {
 		name        string
 		path        string
@@ -112,19 +100,25 @@ func TestReadRemoteFileCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			capturedArgs = nil
+			var capturedCommand string
+
+			// Use SetRunner to capture the command
+			cleanup := SetRunner(func(host, command string) (string, string, error) {
+				capturedCommand = command
+				return "", "", nil
+			})
+			defer cleanup()
+
 			ReadRemoteFile("testhost", tt.path)
 
-			if len(capturedArgs) < 3 {
-				t.Fatalf("expected at least 3 args, got %d: %v", len(capturedArgs), capturedArgs)
+			if capturedCommand == "" {
+				t.Fatal("command was not captured")
 			}
-
-			command := capturedArgs[2] // ssh host "command"
-			if !strings.Contains(command, tt.wantPattern) {
-				t.Errorf("command should contain %q, got %q", tt.wantPattern, command)
+			if !strings.Contains(capturedCommand, tt.wantPattern) {
+				t.Errorf("command should contain %q, got %q", tt.wantPattern, capturedCommand)
 			}
-			if strings.Contains(command, tt.badPattern) {
-				t.Errorf("command should NOT contain quoted path %q, got %q", tt.badPattern, command)
+			if strings.Contains(capturedCommand, tt.badPattern) {
+				t.Errorf("command should NOT contain quoted path %q, got %q", tt.badPattern, capturedCommand)
 			}
 		})
 	}
@@ -132,15 +126,6 @@ func TestReadRemoteFileCommand(t *testing.T) {
 
 // TestRemoteFileExistsCommand verifies that RemoteFileExists doesn't quote paths
 func TestRemoteFileExistsCommand(t *testing.T) {
-	var capturedArgs []string
-
-	orig := execCommand
-	execCommand = func(name string, args ...string) *exec.Cmd {
-		capturedArgs = append([]string{name}, args...)
-		return exec.Command("echo", "EXISTS")
-	}
-	defer func() { execCommand = orig }()
-
 	tests := []struct {
 		name        string
 		path        string
@@ -157,19 +142,24 @@ func TestRemoteFileExistsCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			capturedArgs = nil
+			var capturedCommand string
+
+			cleanup := SetRunner(func(host, command string) (string, string, error) {
+				capturedCommand = command
+				return "EXISTS", "", nil
+			})
+			defer cleanup()
+
 			RemoteFileExists("testhost", tt.path)
 
-			if len(capturedArgs) < 3 {
-				t.Fatalf("expected at least 3 args, got %d: %v", len(capturedArgs), capturedArgs)
+			if capturedCommand == "" {
+				t.Fatal("command was not captured")
 			}
-
-			command := capturedArgs[2]
-			if !strings.Contains(command, tt.wantPattern) {
-				t.Errorf("command should contain %q, got %q", tt.wantPattern, command)
+			if !strings.Contains(capturedCommand, tt.wantPattern) {
+				t.Errorf("command should contain %q, got %q", tt.wantPattern, capturedCommand)
 			}
-			if strings.Contains(command, tt.badPattern) {
-				t.Errorf("command should NOT contain quoted path %q, got %q", tt.badPattern, command)
+			if strings.Contains(capturedCommand, tt.badPattern) {
+				t.Errorf("command should NOT contain quoted path %q, got %q", tt.badPattern, capturedCommand)
 			}
 		})
 	}

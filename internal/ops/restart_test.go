@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 func TestRestartJob_Success(t *testing.T) {
@@ -58,15 +57,14 @@ func TestRestartJob_QuickTimeout(t *testing.T) {
 	origJob, _ := db.GetJobByID(database, origJobID)
 
 	// Mock immediate connection failure (no sync attempted)
-	cleanup := ssh.SetExecCommand(mockSSHExecCommand(func(host, command string) (string, string, int) {
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		return "", "ssh: connect to host test-host port 22: Connection refused", 255
-	}))
-	t.Cleanup(cleanup)
+	})
 
 	params := RestartJobParams{
 		OriginalJob: origJob,
 	}
-	result, err := RestartJob(database, params, ExecuteOptions{Timeout: 100 * time.Millisecond})
+	result, err := RestartJob(database, params, ExecuteOptions{Timeout: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("RestartJob returned an unexpected error: %v", err)
 	}

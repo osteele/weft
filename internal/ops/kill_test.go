@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 func TestKillJob_Success(t *testing.T) {
@@ -49,12 +48,11 @@ func TestKillJob_QuickTimeout(t *testing.T) {
 	job, _ := db.GetJobByID(database, jobID)
 
 	// Mock immediate connection failure (no sync attempted)
-	cleanup := ssh.SetExecCommand(mockSSHExecCommand(func(host, command string) (string, string, int) {
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		return "", "ssh: connect to host test-host port 22: Connection refused", 255
-	}))
-	t.Cleanup(cleanup)
+	})
 
-	result, err := KillJob(database, job, ExecuteOptions{Timeout: 100 * time.Millisecond})
+	result, err := KillJob(database, job, ExecuteOptions{Timeout: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("KillJob returned an unexpected error: %v", err)
 	}
@@ -86,17 +84,16 @@ func TestKillJob_SyncError(t *testing.T) {
 
 	// Mock: probe succeeds (session exists), then kill fails with connection error
 	callCount := 0
-	cleanup := ssh.SetExecCommand(mockSSHExecCommand(func(host, command string) (string, string, int) {
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		callCount++
 		if callCount == 1 {
 			return "", "", 0 // tmux has-session succeeds (session exists)
 		}
 		// Kill command fails (connection dropped during apply)
 		return "", "ssh: connect to host test-host port 22: Connection refused", 255
-	}))
-	t.Cleanup(cleanup)
+	})
 
-	result, err := KillJob(database, job, ExecuteOptions{Timeout: 1 * time.Second})
+	result, err := KillJob(database, job, ExecuteOptions{Timeout: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("KillJob returned an unexpected error: %v", err)
 	}
@@ -153,12 +150,11 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	job, _ := db.GetJobByID(database, jobID)
 
 	// Mock immediate connection failure (no sync attempted)
-	cleanup := ssh.SetExecCommand(mockSSHExecCommand(func(host, command string) (string, string, int) {
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		return "", "ssh: connect to host test-host port 22: Connection refused", 255
-	}))
-	t.Cleanup(cleanup)
+	})
 
-	result, err := CancelQueuedJob(database, job, ExecuteOptions{Timeout: 100 * time.Millisecond})
+	result, err := CancelQueuedJob(database, job, ExecuteOptions{Timeout: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("CancelQueuedJob returned an unexpected error: %v", err)
 	}

@@ -2,7 +2,6 @@ package ops
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 	"testing"
 
@@ -16,49 +15,34 @@ type sshMockResponse struct {
 	ExitCode int
 }
 
+// mockSSHCommands sets up SSH mocking for tests using the new SetRunner API.
+// This doesn't spawn any processes - the mock returns results directly.
 func mockSSHCommands(t *testing.T, responses []sshMockResponse) {
-	handler := func(host, command string) (string, string, int) {
+	cleanup := ssh.SetRunner(func(host, command string) (string, string, error) {
 		for _, resp := range responses {
 			if resp.Contains == "" || strings.Contains(command, resp.Contains) {
-				return resp.Stdout, resp.Stderr, resp.ExitCode
+				var err error
+				if resp.ExitCode != 0 {
+					err = fmt.Errorf("exit status %d", resp.ExitCode)
+				}
+				return resp.Stdout, resp.Stderr, err
 			}
 		}
-		return "", "", 0
-	}
-
-	cleanup := ssh.SetExecCommand(mockSSHExecCommand(handler))
+		return "", "", nil
+	})
 	t.Cleanup(cleanup)
 }
 
-func mockSSHExecCommand(handler func(host, command string) (string, string, int)) func(string, ...string) *exec.Cmd {
-	return func(name string, args ...string) *exec.Cmd {
-		if name != "ssh" {
-			return exec.Command(name, args...)
-		}
-		host, command := parseHostAndCommand(args)
+// mockSSHFunc creates an SSH mock from a simple handler function.
+// The handler returns (stdout, stderr, exitCode).
+func mockSSHFunc(t *testing.T, handler func(host, command string) (string, string, int)) {
+	cleanup := ssh.SetRunner(func(host, command string) (string, string, error) {
 		stdout, stderr, exitCode := handler(host, command)
-		return exec.Command("sh", "-c", buildMockCommand(stdout, stderr, exitCode))
-	}
-}
-
-func parseHostAndCommand(args []string) (string, string) {
-	if len(args) >= 2 {
-		return args[len(args)-2], args[len(args)-1]
-	}
-	if len(args) == 1 {
-		return "", args[0]
-	}
-	return "", ""
-}
-
-func buildMockCommand(stdout, stderr string, exitCode int) string {
-	return fmt.Sprintf("printf '%%s' %s; >&2 printf '%%s' %s; exit %d",
-		singleQuote(stdout), singleQuote(stderr), exitCode)
-}
-
-func singleQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+		var err error
+		if exitCode != 0 {
+			err = fmt.Errorf("exit status %d", exitCode)
+		}
+		return stdout, stderr, err
+	})
+	t.Cleanup(cleanup)
 }

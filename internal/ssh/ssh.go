@@ -12,11 +12,51 @@ import (
 	"time"
 )
 
+// RunnerFunc is the type for SSH command execution functions.
+// It takes host and command, returns stdout, stderr, and error.
+type RunnerFunc func(host, command string) (string, string, error)
+
+// runnerWithTimeout is called by RunWithTimeout when not mocked.
+// When mocked, the timeout is handled by the mock itself.
+var runnerWithTimeout func(host, command string, timeout time.Duration) (string, string, error)
+
+// runner is the function used for SSH command execution.
+// Tests can replace this with SetRunner to avoid process spawning.
+var runner RunnerFunc = defaultRunner
+
+// SetRunner allows tests to replace the SSH runner function.
+// This is the preferred way to mock SSH in tests - no process spawning overhead.
+// Returns a cleanup function that restores the original.
+func SetRunner(fn RunnerFunc) func() {
+	original := runner
+	origTimeout := runnerWithTimeout
+	runner = fn
+	// Also set the timeout version to use the same mock (timeout is ignored in mock)
+	runnerWithTimeout = func(host, command string, _ time.Duration) (string, string, error) {
+		return fn(host, command)
+	}
+	return func() {
+		runner = original
+		runnerWithTimeout = origTimeout
+	}
+}
+
+// defaultRunner executes SSH commands using exec.Command
+func defaultRunner(host, command string) (string, string, error) {
+	cmd := exec.Command("ssh", host, command)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+
 // execCommand is the function used to create exec.Cmd objects.
-// It can be replaced in tests to capture command arguments.
+// Deprecated: Use SetRunner instead for simpler mocking.
 var execCommand = exec.Command
 
 // SetExecCommand allows tests to replace the exec.Command function.
+// Deprecated: Use SetRunner instead - it's simpler and doesn't spawn processes.
 // Returns a cleanup function that restores the original.
 func SetExecCommand(fn func(name string, arg ...string) *exec.Cmd) func() {
 	original := execCommand
@@ -87,18 +127,22 @@ func EscapeForSingleQuotes(s string) string {
 
 // Run executes an SSH command and returns stdout, stderr, and error
 func Run(host string, command string) (string, string, error) {
-	cmd := execCommand("ssh", host, command)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
+	return runner(host, command)
 }
 
 // RunWithTimeout executes an SSH command with a timeout and connection options
 // to prevent hanging on unreachable hosts or password prompts
 func RunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
-	cmd := execCommand("ssh",
+	// If a mock is set via SetRunner, use it (timeout is handled by the mock wrapper)
+	if runnerWithTimeout != nil {
+		return runnerWithTimeout(host, command, timeout)
+	}
+	return defaultRunWithTimeout(host, command, timeout)
+}
+
+// defaultRunWithTimeout is the real implementation with timeout handling
+func defaultRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
+	cmd := exec.Command("ssh",
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
 		host, command)
