@@ -123,19 +123,43 @@ func RunnerCommand(queueName, envPrefix string) string {
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
-// Returns true when a new runner was started.
+// Also upgrades the queue runner script if needed, restarting the runner to pick up changes.
+// Returns true when a new runner was started (or restarted due to upgrade).
 func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 	session := fmt.Sprintf("rj-queue-%s", queueName)
+
+	// Always check if script needs upgrade, even if runner is already running
+	upgraded, err := EnsureScriptUpToDate(host)
+	if err != nil {
+		return false, err
+	}
+
 	exists, err := ssh.TmuxSessionExists(host, session)
 	if err != nil {
 		return false, fmt.Errorf("check session: %w", err)
 	}
-	if exists {
-		return false, nil
+
+	// If runner exists and script was upgraded, restart to pick up new version
+	if exists && upgraded {
+		// Signal runner to stop gracefully after current job
+		stopFile := fmt.Sprintf("%s/%s.stop", queueDir, queueName)
+		touchCmd := fmt.Sprintf("touch %s", stopFile)
+		_, _, _ = ssh.Run(host, touchCmd) // Best effort - ignore errors
+
+		// Wait briefly for runner to stop (it will exit after current job)
+		// Don't block too long - let it finish naturally
+		for i := 0; i < 3; i++ {
+			time.Sleep(500 * time.Millisecond)
+			stillExists, _ := ssh.TmuxSessionExists(host, session)
+			if !stillExists {
+				exists = false
+				break
+			}
+		}
 	}
 
-	if _, err := EnsureScriptUpToDate(host); err != nil {
-		return false, err
+	if exists {
+		return false, nil
 	}
 
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", session, ssh.EscapeForSingleQuotes(runnerCmd))
@@ -203,53 +227,4 @@ func (r *Runner) WaitForStop(timeout time.Duration) error {
 // IsRunning reports whether the runner tmux session exists.
 func (r *Runner) IsRunning() (bool, error) {
 	return ssh.TmuxSessionExists(r.host, r.SessionName())
-}
-
-// UpgradeResult describes the outcome of an upgrade attempt.
-type UpgradeResult struct {
-	LocalBuild      int
-	RemoteBuild     int
-	RemoteError     error
-	SkippedNewer    bool
-	AlreadyUpToDate bool
-	Updated         bool
-	Started         bool
-}
-
-// Upgrade ensures the remote script matches the embedded version, restarting if needed.
-func (r *Runner) Upgrade(envPrefix string, timeout time.Duration) (UpgradeResult, error) {
-	result := UpgradeResult{LocalBuild: localBuildNumber}
-	remoteBuild, err := RemoteBuildNumber(r.host)
-	if err != nil {
-		result.RemoteError = err
-		remoteBuild = -1
-	}
-	result.RemoteBuild = remoteBuild
-
-	if remoteBuild > localBuildNumber && remoteBuild != -1 {
-		result.SkippedNewer = true
-		return result, nil
-	}
-	if remoteBuild == localBuildNumber && remoteBuild != -1 {
-		result.AlreadyUpToDate = true
-		return result, nil
-	}
-
-	running, err := r.IsRunning()
-	if err != nil {
-		return result, err
-	}
-	if running {
-		if err := r.SendStopSignal(); err != nil {
-			return result, err
-		}
-		if err := r.WaitForStop(timeout); err != nil {
-			return result, err
-		}
-	}
-
-	started, err := r.EnsureStarted(envPrefix)
-	result.Updated = true
-	result.Started = started
-	return result, err
 }

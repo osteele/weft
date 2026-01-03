@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
-	"time"
 
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -120,18 +119,6 @@ Examples:
 	RunE: runQueueStatus,
 }
 
-var queueUpgradeCmd = &cobra.Command{
-	Use:   "upgrade <host>",
-	Short: "Restart queue runner if the remote script is outdated",
-	Long: `Restart the queue runner on a host if the remote script is outdated.
-
-This checks the embedded queue runner build number against the remote copy.
-If they differ, the runner is stopped, the script is redeployed, and the
-runner is restarted.`,
-	Args: usageArgs(cobra.ExactArgs(1)),
-	RunE: runQueueUpgrade,
-}
-
 var queueRemoveCmd = &cobra.Command{
 	Use:   "remove <job-id>...",
 	Short: "Remove one or more queued jobs",
@@ -211,7 +198,6 @@ func init() {
 	queueCmd.AddCommand(queueStopCmd)
 	queueCmd.AddCommand(queueListCmd)
 	queueCmd.AddCommand(queueStatusCmd)
-	queueCmd.AddCommand(queueUpgradeCmd)
 	queueCmd.AddCommand(queueRemoveCmd)
 	queueCmd.AddCommand(queueFrontCmd)
 	queueCmd.AddCommand(queueEditCmd)
@@ -219,7 +205,7 @@ func init() {
 	addEditFlags(queueEditCmd)
 
 	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpgradeCmd, queueRemoveCmd, queueFrontCmd, queueEditCmd} {
+	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueRemoveCmd, queueFrontCmd, queueEditCmd} {
 		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
 	}
 
@@ -539,39 +525,6 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	stopExists, _, _ := ssh.Run(host, fmt.Sprintf("test -f %s && echo yes || echo no", stopFile))
 	if strings.TrimSpace(stopExists) == "yes" {
 		fmt.Println("\nSTOP signal pending - runner will exit after current job")
-	}
-
-	return nil
-}
-
-func runQueueUpgrade(cmd *cobra.Command, args []string) error {
-	host := args[0]
-
-	runner := queuerunner.NewRunner(host, queueName)
-	slackWebhook := slack.GetWebhook()
-	slack.DeployNotifyScript(host, slackWebhook)
-	envPrefix := slack.BuildRunnerEnvPrefix(slackWebhook)
-
-	result, err := runner.Upgrade(envPrefix, 2*time.Minute)
-	if err != nil {
-		return err
-	}
-	if result.RemoteError != nil {
-		fmt.Fprintf(os.Stderr, "Warning: %v\n", result.RemoteError)
-	}
-
-	switch {
-	case result.SkippedNewer:
-		fmt.Printf("Queue runner on %s is newer (remote build %d, local build %d); skipping downgrade\n", host, result.RemoteBuild, result.LocalBuild)
-	case result.AlreadyUpToDate:
-		fmt.Printf("Queue runner on %s already up to date (build %d)\n", host, result.LocalBuild)
-	default:
-		fmt.Printf("Updating queue runner on %s (remote build %d, local build %d)\n", host, result.RemoteBuild, result.LocalBuild)
-		if result.Started {
-			fmt.Println("Queue runner restarted with the latest script.")
-		} else {
-			fmt.Println("Script deployed. Runner will use new script after current job completes.")
-		}
 	}
 
 	return nil
