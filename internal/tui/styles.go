@@ -92,7 +92,7 @@ var (
 				Foreground(runningColor)
 
 	hostSummaryWarningStyle = lipgloss.NewStyle().
-				Foreground(pendingColor)
+				Foreground(lipgloss.Color("#B58900"))
 
 	hostSummaryCriticalStyle = lipgloss.NewStyle().
 					Foreground(failedColor)

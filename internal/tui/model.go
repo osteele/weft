@@ -60,6 +60,11 @@ const (
 	topProcessLimit            = 15
 )
 
+const (
+	jobListHeightRatio     = 0.6
+	detailPanelHeightRatio = 0.3
+)
+
 var humanSizePattern = regexp.MustCompile(`(?i)^([\d.]+)\s*([kmgtp]?i?[b]?)?$`)
 
 // ViewMode represents which view is currently active
@@ -148,6 +153,9 @@ func (t HostDetailTab) GPUPosition() int {
 type keyMap struct {
 	Up              key.Binding
 	Down            key.Binding
+	PageDownList    key.Binding
+	PageUpList      key.Binding
+	TopList         key.Binding
 	Enter           key.Binding
 	Logs            key.Binding
 	Filter          key.Binding
@@ -186,6 +194,18 @@ var (
 		Down: key.NewBinding(
 			key.WithKeys("down"),
 			key.WithHelp("↓", "down"),
+		),
+		PageDownList: key.NewBinding(
+			key.WithKeys(" "),
+			key.WithHelp("space", "jobs page down"),
+		),
+		PageUpList: key.NewBinding(
+			key.WithKeys("b"),
+			key.WithHelp("b", "jobs page up"),
+		),
+		TopList: key.NewBinding(
+			key.WithKeys("t"),
+			key.WithHelp("t", "jobs to top"),
 		),
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
@@ -509,13 +529,14 @@ type Model struct {
 	viewMode ViewMode
 
 	// Jobs data
-	allJobs            []*db.Job
-	jobs               []*db.Job
-	jobList            list.Model // bubbles/list for job selection
-	selectedJob        *db.Job
-	jobFilter          jobFilterMode
-	jobSort            jobSortMode
-	jobSelectionActive bool // false when user has deselected the highlighted job
+	allJobs              []*db.Job
+	jobs                 []*db.Job
+	jobList              list.Model // bubbles/list for job selection
+	selectedJob          *db.Job
+	jobFilter            jobFilterMode
+	jobSort              jobSortMode
+	jobSelectionActive   bool // false when user has deselected the highlighted job
+	jobListContentHeight int
 
 	// Hosts data
 	hosts           []*Host
@@ -778,19 +799,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		// Update viewport dimensions for log scrolling
-		detailHeight := int(float64(m.height) * 0.35)
+		detailHeight := int(float64(m.height) * detailPanelHeightRatio)
 		m.logViewport.Width = m.width - 6
 		m.logViewport.Height = detailHeight - 4
 		m.detailViewport.Width = m.width - 6
 		m.detailViewport.Height = detailHeight - 4
 		// Update job list dimensions (subtract 2 more for column header + filter row)
-		listHeight := m.height - detailHeight - 5 // account for header/footer
+		listHeight := int(float64(m.height) * jobListHeightRatio)
 		m.jobList.SetWidth(m.width - 2)
 		contentHeight := listHeight - 4
 		if contentHeight < 0 {
 			contentHeight = 0
 		}
 		m.jobList.SetHeight(contentHeight)
+		m.jobListContentHeight = contentHeight
 		return m, nil
 
 	case spinner.TickMsg:
@@ -1433,7 +1455,7 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Calculate list panel height (same as in View)
-	listHeight := int(float64(m.height) * 0.55)
+	listHeight := int(float64(m.height) * jobListHeightRatio)
 
 	// Handle mouse wheel
 	if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
@@ -1627,6 +1649,33 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(m.setFlash("AI summaries enabled", false), m.generateAllHostSummaries())
 			}
 			return m, m.setFlash("AI summaries disabled", false)
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.PageDownList):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		if cmd := m.pageJobList(1); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.PageUpList):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		if cmd := m.pageJobList(-1); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
+
+	case key.Matches(msg, keys.TopList):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		if cmd := m.jumpJobListToTop(); cmd != nil {
+			return m, cmd
 		}
 		return m, nil
 
@@ -1845,7 +1894,14 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.jobFilter = jobFilterMode((int(m.jobFilter) + 1) % int(jobFilterModeCount))
 		m.applyJobFilter()
-		return m, m.setFlash(fmt.Sprintf("View: %s", jobFilterDescription(m.jobFilter)), false)
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.setFlash(fmt.Sprintf("View: %s", jobFilterDescription(m.jobFilter)), false))
+		if len(m.jobs) == 0 {
+			m.clearJobSelection()
+		} else if cmd := m.jumpJobListToTop(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
 
 	case key.Matches(msg, keys.Prune):
 		if m.viewMode != ViewModeJobs {
@@ -2046,8 +2102,8 @@ func (m Model) View() string {
 	}
 
 	// Calculate panel heights
-	listHeight := int(float64(m.height) * 0.55)
-	detailHeight := int(float64(m.height) * 0.35)
+	listHeight := int(float64(m.height) * jobListHeightRatio)
+	detailHeight := int(float64(m.height) * detailPanelHeightRatio)
 
 	var mainView string
 
@@ -2146,6 +2202,9 @@ func (m Model) renderHelpOverlay(background string) string {
 		b.WriteString("\n")
 		shortcuts := []struct{ key, desc string }{
 			{"↑/↓", "Navigate job list"},
+			{"space", "Page down job list"},
+			{"b", "Page up job list"},
+			{"t", "Jump to top of jobs"},
 			{"←/→", "Switch to hosts view"},
 			{"l", "Toggle logs view"},
 			{"s", "Sync job statuses"},
@@ -2265,7 +2324,7 @@ func (m Model) renderJobList(height int) string {
 	if panelWidth < 0 {
 		panelWidth = 0
 	}
-	frameWidth, _ := listPanelStyle.GetFrameSize()
+	frameWidth, frameHeight := listPanelStyle.GetFrameSize()
 	contentWidth := panelWidth - frameWidth
 	if contentWidth < 20 {
 		contentWidth = 20
@@ -2284,16 +2343,21 @@ func (m Model) renderJobList(height int) string {
 	headerIndex := len(rows)
 	rows = append(rows, headerStyle.Render(header))
 	filterLabel := fmt.Sprintf(" View: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
-	rows = append(rows, dimStyle.Render(filterLabel))
+	filterLine := dimStyle.Render(filterLabel)
 
 	if len(m.jobs) == 0 {
 		rows = append(rows, dimStyle.Render(" No jobs match this view"))
+		rows = append(rows, filterLine)
 		content := strings.Join(rows, "\n")
 		return listPanelStyle.Width(m.width - 2).Height(height).Render(content)
 	}
 
 	// Render jobs manually using list's paginator for scroll offset
-	contentHeight := height - 4 // Account for borders, header, filter
+	contentTarget := height - frameHeight
+	if contentTarget < 0 {
+		contentTarget = 0
+	}
+	contentHeight := contentTarget - 2 // header + filter
 	if hostSummary != "" {
 		contentHeight--
 	}
@@ -2330,6 +2394,7 @@ func (m Model) renderJobList(height int) string {
 	}
 
 	selectedIdx := m.jobList.Index()
+	jobLines := 0
 	for i := start; i < end; i++ {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
@@ -2384,6 +2449,23 @@ func (m Model) renderJobList(height int) string {
 			line += strings.Repeat(" ", contentWidth-lineWidth)
 		}
 		rows = append(rows, line)
+		jobLines++
+	}
+
+	if jobLines < contentHeight {
+		blank := strings.Repeat(" ", contentWidth)
+		for i := jobLines; i < contentHeight; i++ {
+			rows = append(rows, blank)
+		}
+	}
+
+	rows = append(rows, filterLine)
+
+	if len(rows) < contentTarget {
+		pad := strings.Repeat(" ", contentWidth)
+		for len(rows) < contentTarget {
+			rows = append(rows, pad)
+		}
 	}
 
 	content := strings.Join(rows, "\n")
@@ -2449,7 +2531,7 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 	statusSymbol, statusStyle := hostStatusIndicator(host)
 
 	nameStyle := hostSummaryNameStyle
-	if host.Status == HostStatusOffline {
+	if host.Status != HostStatusOnline {
 		nameStyle = hostSummaryOfflineStyle.Copy()
 	}
 	name := nameStyle.Render(truncate(host.Name, 12))
@@ -2536,11 +2618,11 @@ func hostCPULoadPercent(host *Host) (int, bool) {
 	if host == nil || host.LoadAvg == "" || host.CPUs <= 0 {
 		return 0, false
 	}
-	parts := strings.Split(host.LoadAvg, ",")
-	if len(parts) == 0 {
+	loadFields := strings.Fields(strings.ReplaceAll(host.LoadAvg, ",", " "))
+	if len(loadFields) == 0 {
 		return 0, false
 	}
-	load, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	load, err := strconv.ParseFloat(strings.TrimSpace(loadFields[0]), 64)
 	if err != nil {
 		return 0, false
 	}
@@ -2874,6 +2956,11 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	}
 	b.WriteString("\n\n")
 
+	wroteTiming := m.writeJobTimingSection(&b, job, labelStyle, valueStyle)
+	if wroteTiming {
+		b.WriteString("\n")
+	}
+
 	// Description (if any)
 	if job.Description != "" {
 		b.WriteString(labelStyle.Render("Desc"))
@@ -2918,76 +3005,6 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString(labelStyle.Render("Env"))
 		b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
 		b.WriteString("\n")
-	}
-
-	// Timing section
-	if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
-		b.WriteString("\n")
-
-		// Show created time if significantly different from start time (>60s gap)
-		if job.CreatedAt > 0 && (job.StartTime == 0 || job.StartTime-job.CreatedAt > 60) {
-			createdTime := time.Unix(job.CreatedAt, 0)
-			label := "Created"
-			if job.Status == db.StatusQueued {
-				label = "Queued"
-			}
-			b.WriteString(labelStyle.Render(label))
-			b.WriteString(valueStyle.Render(formatDetailTimestamp(createdTime)))
-			b.WriteString("\n")
-		}
-
-		if job.StartTime > 0 {
-			startTime := time.Unix(job.StartTime, 0)
-			var endTime time.Time
-			hasEnd := job.EndTime != nil
-			if hasEnd {
-				endTime = time.Unix(*job.EndTime, 0)
-			}
-
-			sameDay := hasEnd && sameLocalDay(startTime, endTime)
-
-			if sameDay {
-				startStr, suffix := formatDetailTimeParts(startTime)
-				endStr, _ := formatDetailTimeParts(endTime)
-				line := fmt.Sprintf("%s – %s%s", startStr, endStr, suffix)
-				b.WriteString(labelStyle.Render("Start/End"))
-				b.WriteString(valueStyle.Render(line))
-				b.WriteString("\n")
-			} else {
-				b.WriteString(labelStyle.Render("Started"))
-				b.WriteString(valueStyle.Render(formatDetailTimestamp(startTime)))
-				b.WriteString("\n")
-
-				if hasEnd {
-					b.WriteString(labelStyle.Render("Ended"))
-					b.WriteString(valueStyle.Render(formatDetailTimestamp(endTime)))
-					b.WriteString("\n")
-				}
-			}
-
-			// Show timing information based on job status
-			if job.Status == db.StatusRunning {
-				elapsed := time.Since(startTime)
-				b.WriteString(labelStyle.Render("Elapsed"))
-				b.WriteString(valueStyle.Render(formatDuration(elapsed)))
-				b.WriteString("\n")
-			} else if hasEnd {
-				duration := endTime.Sub(startTime)
-				if !sameDay {
-					// If not already printed in single line, ensure duration context is visible
-					// (Started/Ended entries already present)
-				}
-				b.WriteString(labelStyle.Render("Duration"))
-				b.WriteString(valueStyle.Render(formatDuration(duration)))
-				b.WriteString("\n")
-			}
-		} else if job.EndTime != nil {
-			// Job ended without ever starting (failed/killed before start)
-			endTime := time.Unix(*job.EndTime, 0)
-			b.WriteString(labelStyle.Render("Ended"))
-			b.WriteString(valueStyle.Render(formatDetailTimestamp(endTime)))
-			b.WriteString("\n")
-		}
 	}
 
 	// Exit status
@@ -3150,6 +3167,73 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	}
 
 	return b.String()
+}
+
+func (m Model) writeJobTimingSection(b *strings.Builder, job *db.Job, labelStyle, valueStyle lipgloss.Style) bool {
+	wrote := false
+	if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
+		if job.CreatedAt > 0 && (job.StartTime == 0 || job.StartTime-job.CreatedAt > 60) {
+			createdTime := time.Unix(job.CreatedAt, 0)
+			label := "Created"
+			if job.Status == db.StatusQueued {
+				label = "Queued"
+			}
+			b.WriteString(labelStyle.Render(label))
+			b.WriteString(valueStyle.Render(formatDetailTimestamp(createdTime)))
+			b.WriteString("\n")
+			wrote = true
+		}
+
+		if job.StartTime > 0 {
+			startTime := time.Unix(job.StartTime, 0)
+			var endTime time.Time
+			hasEnd := job.EndTime != nil
+			if hasEnd {
+				endTime = time.Unix(*job.EndTime, 0)
+			}
+
+			sameDay := hasEnd && sameLocalDay(startTime, endTime)
+
+			if sameDay {
+				startStr, suffix := formatDetailTimeParts(startTime)
+				endStr, _ := formatDetailTimeParts(endTime)
+				line := fmt.Sprintf("%s – %s%s", startStr, endStr, suffix)
+				b.WriteString(labelStyle.Render("Start/End"))
+				b.WriteString(valueStyle.Render(line))
+				b.WriteString("\n")
+			} else {
+				b.WriteString(labelStyle.Render("Started"))
+				b.WriteString(valueStyle.Render(formatDetailTimestamp(startTime)))
+				b.WriteString("\n")
+
+				if hasEnd {
+					b.WriteString(labelStyle.Render("Ended"))
+					b.WriteString(valueStyle.Render(formatDetailTimestamp(endTime)))
+					b.WriteString("\n")
+				}
+			}
+			wrote = true
+
+			if job.Status == db.StatusRunning {
+				elapsed := time.Since(startTime)
+				b.WriteString(labelStyle.Render("Elapsed"))
+				b.WriteString(valueStyle.Render(formatDuration(elapsed)))
+				b.WriteString("\n")
+			} else if hasEnd {
+				duration := endTime.Sub(startTime)
+				b.WriteString(labelStyle.Render("Duration"))
+				b.WriteString(valueStyle.Render(formatDuration(duration)))
+				b.WriteString("\n")
+			}
+		} else if job.EndTime != nil {
+			endTime := time.Unix(*job.EndTime, 0)
+			b.WriteString(labelStyle.Render("Ended"))
+			b.WriteString(valueStyle.Render(formatDetailTimestamp(endTime)))
+			b.WriteString("\n")
+			wrote = true
+		}
+	}
+	return wrote
 }
 
 func (m Model) renderJobSummaryPanel(height int) string {
@@ -3319,6 +3403,30 @@ func formatDuration(d time.Duration) string {
 	}
 	if m > 0 {
 		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
+// formatInlineRangeDuration renders a duration compactly for inline Start/End rows.
+func formatInlineRangeDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	d = d.Truncate(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh%02dm", h, m)
+	}
+	if m > 0 {
+		if s == 0 {
+			return fmt.Sprintf("0h%02dm", m)
+		}
+		return fmt.Sprintf("%dm%02ds", m, s)
 	}
 	return fmt.Sprintf("%ds", s)
 }
@@ -3595,7 +3703,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav ←/→:views l:logs f:filter o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
 
 	if m.syncing {
 		help = syncingStyle.Render(m.spinner.View()+" ") + help
@@ -5216,6 +5324,50 @@ func (m *Model) clearJobSelection() {
 	m.detailViewport.GotoTop()
 }
 
+func (m *Model) jumpJobListToTop() tea.Cmd {
+	if len(m.jobs) == 0 {
+		m.clearJobSelection()
+		return nil
+	}
+
+	prevIdx := m.jobList.Index()
+	m.jobList.Select(0)
+	m.jobList.Paginator.Page = 0
+	m.jobSelectionActive = true
+	if m.jobList.Index() != prevIdx {
+		return m.handleSelectionChanged()
+	}
+	return nil
+}
+
+func (m *Model) pageJobList(direction int) tea.Cmd {
+	if len(m.jobs) == 0 {
+		m.clearJobSelection()
+		return nil
+	}
+	pageSize := m.jobListContentHeight
+	if pageSize <= 0 {
+		pageSize = 10
+	}
+	idx := m.jobList.Index()
+	if idx < 0 {
+		idx = 0
+	}
+	newIdx := idx + direction*pageSize
+	if newIdx < 0 {
+		newIdx = 0
+	} else if newIdx >= len(m.jobs) {
+		newIdx = len(m.jobs) - 1
+	}
+	prevIdx := m.jobList.Index()
+	m.jobList.Select(newIdx)
+	m.jobSelectionActive = true
+	if m.jobList.Index() != prevIdx {
+		return m.handleSelectionChanged()
+	}
+	return nil
+}
+
 // handleSelectionChanged is called when the job list selection changes.
 // It clears cached process stats and fetches logs/stats for the new selection.
 func (m *Model) handleSelectionChanged() tea.Cmd {
@@ -6688,6 +6840,10 @@ func formatStartTime(startTime int64) string {
 
 // formatJobTime formats the time column for a job, showing either start time or queue time
 func formatJobTime(job *db.Job) string {
+	// Show end time for any job that has completed/terminated
+	if job.EndTime != nil && job.Status != db.StatusRunning && job.Status != db.StatusStarting {
+		return formatStartTime(*job.EndTime)
+	}
 	// If job has started, show start time
 	if job.StartTime != 0 {
 		return formatStartTime(job.StartTime)
