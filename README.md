@@ -484,6 +484,18 @@ This kills the existing session (if any) and starts a new one with the same comm
 
 **Note:** For most use cases, `run --from <id>` is more flexible as it allows overriding settings.
 
+### remote-jobs retry
+
+Clone a previous job and queue it again with the same host, directory, command, description, and environment variables. Dependencies are not copied so the retried job starts as soon as it reaches the front of the queue.
+
+```bash
+remote-jobs retry <job-id>
+remote-jobs job retry <job-id>   # Alias
+```
+
+The command prints the new job ID and whether it was queued immediately or deferred until the host is online.
+Queued jobs that previously depended on the retried job automatically update their dependency to the new job ID.
+
 ### remote-jobs job move
 
 Move a queued job to a different host.

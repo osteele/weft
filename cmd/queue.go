@@ -354,12 +354,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		started, err := ensureQueueRunnerStarted(host, queueName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to start queue runner: %v\n", err)
-			fmt.Printf("\nTo start the queue runner manually:\n")
-			fmt.Printf("  remote-jobs queue start %s", host)
-			if queueName != defaultQueueName {
-				fmt.Printf(" --queue %s", queueName)
-			}
-			fmt.Println()
 		} else if started {
 			fmt.Printf("\nQueue runner started automatically.\n")
 		}
@@ -395,24 +389,8 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 	if started {
 		fmt.Printf("Queue runner '%s' started on %s\n", queueName, host)
 		fmt.Printf("Session: %s\n\n", runnerSession)
-		if usageHintsEnabled() {
-			fmt.Printf("Monitor:\n")
-			fmt.Printf("  remote-jobs queue status %s", host)
-			if queueName != defaultQueueName {
-				fmt.Printf(" --queue %s", queueName)
-			}
-			fmt.Println()
-		}
 	} else {
 		fmt.Printf("Queue runner '%s' is already running on %s\n", queueName, host)
-		if usageHintsEnabled() {
-			fmt.Printf("\nTo check status:\n")
-			fmt.Printf("  remote-jobs queue status %s", host)
-			if queueName != defaultQueueName {
-				fmt.Printf(" --queue %s", queueName)
-			}
-			fmt.Println()
-		}
 	}
 
 	return nil
@@ -852,44 +830,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	envVars := job.EnvVars
-	needEnvFromQueue := len(envVars) == 0 && !envChanged
-	needCommand := job.Command == ""
-	needDir := job.WorkingDir == ""
-	if needEnvFromQueue || needCommand || needDir {
-		entry, err := queuefile.FetchEntry(job.Host, jobQueueName, jobID)
-		if err != nil {
-			if queuefile.IsConnectionError(err) {
-				return fmt.Errorf("host %s unreachable: %w", job.Host, err)
-			}
-		} else {
-			if needDir && entry.WorkingDir != "" {
-				job.WorkingDir = entry.WorkingDir
-			}
-			if needCommand && entry.Command != "" {
-				job.Command = entry.Command
-			}
-			if needEnvFromQueue {
-				envVars = entry.EnvVars
-			}
-		}
+	if envChanged {
+		envVars = job.EnvVars
 	}
-
-	entryJob := &db.Job{
-		ID:          job.ID,
-		Host:        job.Host,
-		WorkingDir:  job.WorkingDir,
-		Command:     job.Command,
-		Description: job.Description,
-		QueueName:   jobQueueName,
-	}
-
-	if err := ops.UpdateQueueEntry(ops.UpdateQueueEntryParams{
-		Host:      job.Host,
-		QueueName: jobQueueName,
-		Job:       entryJob,
-		EnvVars:   envVars,
-		DepSpec:   depSpec,
-	}); err != nil {
+	if err := ops.UpdateQueuedJobEntry(job, jobQueueName, envVars, depSpec); err != nil {
 		return err
 	}
 

@@ -154,6 +154,7 @@ type keyMap struct {
 	Kill            key.Binding
 	Draft           key.Binding
 	Restart         key.Binding
+	Retry           key.Binding
 	EditRestart     key.Binding
 	Remove          key.Binding
 	NewJob          key.Binding
@@ -212,6 +213,10 @@ var (
 		Restart: key.NewBinding(
 			key.WithKeys("r"),
 			key.WithHelp("r", "restart"),
+		),
+		Retry: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "retry"),
 		),
 		EditRestart: key.NewBinding(
 			key.WithKeys("R"),
@@ -285,8 +290,8 @@ var (
 			key.WithHelp("G", "generate AI description"),
 		),
 		ToggleSummaries: key.NewBinding(
-			key.WithKeys("d"),
-			key.WithHelp("d", "toggle AI host summaries"),
+			key.WithKeys("D"),
+			key.WithHelp("D", "toggle AI host summaries"),
 		),
 	}
 	localUserName = detectLocalUsername()
@@ -367,6 +372,13 @@ type jobRestartedMsg struct {
 	newJobID int64
 	err      error
 	deferred bool // true if restart was queued for later (host offline)
+}
+
+type jobRetriedMsg struct {
+	oldJobID int64
+	newJobID int64
+	err      error
+	deferred bool
 }
 
 type jobStartedNowMsg struct {
@@ -1043,6 +1055,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d created (will start when host is online)", msg.newJobID), false), m.refreshJobs())
 		}
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID), false), m.refreshJobs())
+
+	case jobRetriedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			if msg.newJobID > 0 {
+				m.pendingSelectJobID = msg.newJobID
+			}
+			if msg.newJobID > 0 {
+				flashCmd = m.setFlash(fmt.Sprintf("Retry created job %d but dependency update failed: %v", msg.newJobID, msg.err), true)
+			} else {
+				flashCmd = m.setFlash(fmt.Sprintf("Retry failed: %v", msg.err), true)
+			}
+		} else {
+			m.pendingSelectJobID = msg.newJobID
+			if msg.deferred {
+				flashCmd = m.setFlash(fmt.Sprintf("Job retried as %d (pending sync)", msg.newJobID), false)
+			} else {
+				flashCmd = m.setFlash(fmt.Sprintf("Job retried (new ID: %d)", msg.newJobID), false)
+			}
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
 
 	case jobStartedNowMsg:
 		if msg.err != nil {
@@ -1745,6 +1778,17 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.restartingJobName = fmt.Sprintf("job %d", job.ID)
 		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=r action=restart"))
 		return m, tea.Batch(m.setFlash(fmt.Sprintf("Restarting job %d...", job.ID), false), m.restartJob(job))
+
+	case key.Matches(msg, keys.Retry):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, m.setFlash("No job selected", true)
+		}
+		oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=y action=retry"))
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Retrying job %d...", job.ID), false), m.retryJob(job))
 
 	case key.Matches(msg, keys.Remove):
 		if m.viewMode == ViewModeHosts {
@@ -5726,6 +5770,69 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 			deferred: result.Deferred,
 		}
 	}
+}
+
+func (m Model) retryJob(job *db.Job) tea.Cmd {
+	if job == nil {
+		return nil
+	}
+	database := m.database
+	return func() tea.Msg {
+		if job.Host == "" {
+			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing host")}
+		}
+		if job.Command == "" {
+			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing command")}
+		}
+		queueName := job.QueueName
+		if queueName == "" {
+			queueName = queuefile.DefaultQueueName
+		}
+		workingDir := job.WorkingDir
+		if workingDir == "" {
+			if dir := job.EffectiveWorkingDir(); dir != "" {
+				workingDir = dir
+			} else {
+				workingDir = "~"
+			}
+		}
+		result, err := ops.QueueJob(database, ops.QueueJobParams{
+			Host:        job.Host,
+			WorkingDir:  workingDir,
+			Command:     job.Command,
+			Description: job.Description,
+			EnvVars:     job.EnvVars,
+			QueueName:   queueName,
+		}, ops.DefaultOptions())
+		if err != nil {
+			return jobRetriedMsg{oldJobID: job.ID, err: err}
+		}
+		if err := rewireDependenciesForRetry(database, job.ID, result.JobID); err != nil {
+			return jobRetriedMsg{oldJobID: job.ID, newJobID: result.JobID, err: err, deferred: result.Deferred}
+		}
+		return jobRetriedMsg{oldJobID: job.ID, newJobID: result.JobID, deferred: result.Deferred}
+	}
+}
+
+func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
+	depJobs, err := db.ListQueuedJobsWithDependency(database, oldID)
+	if err != nil {
+		return err
+	}
+	for _, depJob := range depJobs {
+		newSpec, changed := db.ReplaceDepSpecID(depJob.DepSpec, oldID, newID)
+		if !changed {
+			continue
+		}
+		if err := db.SetJobDepSpec(database, depJob.ID, newSpec); err != nil {
+			return err
+		}
+		depJob.DepSpec = newSpec
+		if err := ops.UpdateQueuedJobEntry(depJob, depJob.QueueName, depJob.EnvVars, newSpec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // startQueuedJobNow starts a queued job immediately, bypassing any dependencies

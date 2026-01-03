@@ -503,6 +503,8 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
 	}
 
+	fmt.Printf("Details:  remote-jobs info %d  # Show directory, command, env vars\n", job.ID)
+
 	// Print usage hints
 	if exitOnComplete && usageHintsEnabled() {
 		fmt.Println()

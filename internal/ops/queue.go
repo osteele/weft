@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
@@ -189,6 +190,60 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 	}
 
 	return nil
+}
+
+// UpdateQueuedJobEntry refreshes a queued job entry on the remote host, fetching
+// missing fields from the queue file if necessary.
+func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSpec string) error {
+	if job == nil {
+		return fmt.Errorf("job is nil")
+	}
+	if queueName == "" {
+		queueName = job.QueueName
+	}
+	if queueName == "" {
+		queueName = queuefile.DefaultQueueName
+	}
+
+	entryJob := &db.Job{
+		ID:          job.ID,
+		Host:        job.Host,
+		WorkingDir:  job.WorkingDir,
+		Command:     job.Command,
+		Description: job.Description,
+		QueueName:   queueName,
+	}
+
+	needEnv := len(envVars) == 0
+	needDir := entryJob.WorkingDir == ""
+	needCmd := entryJob.Command == ""
+
+	if needEnv || needDir || needCmd {
+		entry, err := queuefile.FetchEntry(job.Host, queueName, job.ID)
+		if err != nil {
+			return err
+		}
+		if needDir && entry.WorkingDir != "" {
+			entryJob.WorkingDir = entry.WorkingDir
+		}
+		if needCmd && entry.Command != "" {
+			entryJob.Command = entry.Command
+		}
+		if entryJob.Description == "" && entry.Description != "" {
+			entryJob.Description = entry.Description
+		}
+		if needEnv {
+			envVars = entry.EnvVars
+		}
+	}
+
+	return UpdateQueueEntry(UpdateQueueEntryParams{
+		Host:      job.Host,
+		QueueName: queueName,
+		Job:       entryJob,
+		EnvVars:   envVars,
+		DepSpec:   depSpec,
+	})
 }
 
 // QueueJobParams contains parameters for queueing a new job

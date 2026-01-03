@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -711,6 +712,75 @@ func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
 	}
 	_, err := db.Exec(`UPDATE jobs SET dep_spec = ? WHERE id = ?`, depSpec, jobID)
 	return err
+}
+
+// ListQueuedJobsWithDependency returns queued jobs whose dependency list references depID.
+func ListQueuedJobsWithDependency(db *sql.DB, depID int64) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND dep_spec IS NOT NULL AND dep_spec != '' AND tombstoned = 0`, jobSelectColumns)
+	jobs, err := queryJobs(db, query, StatusQueued)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []*Job
+	for _, job := range jobs {
+		if depSpecContains(job.DepSpec, depID) {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered, nil
+}
+
+func depSpecContains(spec string, depID int64) bool {
+	if spec == "" || depID <= 0 {
+		return false
+	}
+	target := strconv.FormatInt(depID, 10)
+	parts := strings.Split(spec, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if idx := strings.Index(part, ":"); idx != -1 {
+			part = part[:idx]
+		}
+		if part == target {
+			return true
+		}
+	}
+	return false
+}
+
+// ReplaceDepSpecID rewrites a dependency spec, replacing occurrences of oldID with newID.
+// Returns the new spec string and whether a replacement was made.
+func ReplaceDepSpecID(spec string, oldID, newID int64) (string, bool) {
+	if strings.TrimSpace(spec) == "" || oldID <= 0 || newID <= 0 {
+		return spec, false
+	}
+	oldStr := strconv.FormatInt(oldID, 10)
+	newStr := strconv.FormatInt(newID, 10)
+	parts := strings.Split(spec, ",")
+	changed := false
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		mode := ""
+		if idx := strings.Index(part, ":"); idx != -1 {
+			mode = part[idx:]
+			part = part[:idx]
+		}
+		if part == oldStr {
+			part = newStr
+			changed = true
+		}
+		parts[i] = part + mode
+	}
+	if !changed {
+		return spec, false
+	}
+	return strings.Join(parts, ","), true
 }
 
 // ListQueued returns queued jobs for a host and queue name
