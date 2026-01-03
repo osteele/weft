@@ -457,7 +457,16 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 		}
 		return false, nil
 	case queueStateDead:
-		// Job has died unexpectedly
+		// Job not found on remote - could be dead or never synced
+		if job.Status == db.StatusQueued {
+			// Job is queued locally but not on remote - push it to the queue
+			if err := appendQueueEntryForJob(database, job, queueName, timeout); err != nil {
+				// If push fails (e.g., host unreachable), don't change status
+				return false, nil
+			}
+			return true, nil
+		}
+		// Job was running/starting but is now gone - mark as dead
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return false, err
 		}
