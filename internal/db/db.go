@@ -687,6 +687,32 @@ func SetJobGPU(db *sql.DB, jobID int64, gpu string) error {
 	return err
 }
 
+// SetJobEnvVars updates the stored environment variables for a job.
+// The values are stored as a JSON array; passing nil or an empty slice clears the field.
+func SetJobEnvVars(db *sql.DB, jobID int64, envVars []string) error {
+	var value interface{}
+	if len(envVars) > 0 {
+		data, err := json.Marshal(envVars)
+		if err != nil {
+			return fmt.Errorf("encode env vars: %w", err)
+		}
+		value = string(data)
+	}
+	_, err := db.Exec(`UPDATE jobs SET env_vars = ? WHERE id = ?`, value, jobID)
+	return err
+}
+
+// SetJobDepSpec stores the dependency specification for a job (e.g., "42" or "42:any").
+// Passing an empty string clears the dependency field.
+func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
+	if depSpec == "" {
+		_, err := db.Exec(`UPDATE jobs SET dep_spec = NULL WHERE id = ?`, jobID)
+		return err
+	}
+	_, err := db.Exec(`UPDATE jobs SET dep_spec = ? WHERE id = ?`, depSpec, jobID)
+	return err
+}
+
 // ListQueued returns queued jobs for a host and queue name
 func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND queue_name = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)

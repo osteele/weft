@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
@@ -161,9 +162,16 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 
 // updateRemoteQueueEntry updates a job's entry in the remote queue file
 func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
-	// Reconstruct env vars from GPU field if present
-	var envVars []string
-	if job.GPU != "" {
+	// Use stored env vars if available, otherwise include GPU assignment if set.
+	envVars := append([]string(nil), job.EnvVars...)
+	hasCUDA := false
+	for _, ev := range envVars {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			hasCUDA = true
+			break
+		}
+	}
+	if job.GPU != "" && !hasCUDA {
 		envVars = append(envVars, "CUDA_VISIBLE_DEVICES="+job.GPU)
 	}
 
@@ -175,7 +183,7 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 		Command:     job.Command,
 		Description: job.Description,
 		EnvVars:     envVars,
-		// DepSpec is not stored in db, so dependencies are lost on edit
+		DepSpec:     job.DepSpec,
 	}
 
 	if err := ops.AppendQueueEntry(host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {

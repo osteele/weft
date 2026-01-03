@@ -656,6 +656,37 @@ remote-jobs queue add --after-any 42 cool30 'python cleanup.py' # Run after job 
 remote-jobs queue add --queue gpu cool30 'python train.py'
 ```
 
+#### remote-jobs edit
+
+Edit a queued job’s metadata—description, working directory, command, environment variables, or dependencies.  
+`remote-jobs queue edit` is an alias for this command and accepts the same flags (with an optional `--queue` override).
+
+```bash
+remote-jobs edit [flags] <job-id>
+```
+
+**Flags:**
+- `-m, --message TEXT`: Set job description
+- `-C, --directory DIR`: Set working directory
+- `--command CMD`: Replace the queued command
+- `-e, --env VAR=value`: Replace environment variables (repeat flag to set multiple)
+- `--clear-env`: Remove all environment variables
+- `--depends-on ID[,ID...]`: Require the listed jobs to succeed before running
+- `--depends-on-any ID[,ID...]`: Wait for the listed jobs to finish (success or failure)
+- `--clear-depends`: Remove all dependencies from the job
+
+IDs can also be suffixed with `+` or `:any` to mark them as completion-based dependencies, e.g. `--depends-on 101+` or `--depends-on 101:any`.
+
+**Examples:**
+```bash
+remote-jobs edit 1595 --depends-on 1599
+remote-jobs edit 1600 --depends-on 1400 --depends-on-any 1401
+remote-jobs edit 1700 --clear-depends
+remote-jobs edit 1800 --command "python eval.py" -C ~/project -e FOO=bar
+```
+
+Changes are validated so you can only depend on jobs that run on the same host. If the host is offline, the update is deferred like other queue operations and reapplied once it reconnects.
+
 #### remote-jobs queue start
 
 Start the queue runner on a remote host.

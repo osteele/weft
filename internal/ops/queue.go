@@ -225,6 +225,13 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	if err != nil {
 		return Result{}, fmt.Errorf("record job: %w", err)
 	}
+	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
+		db.DeleteJob(database, jobID)
+		return Result{}, fmt.Errorf("record env vars: %w", err)
+	}
+	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
+		return Result{}, fmt.Errorf("record dependencies: %w", err)
+	}
 
 	// Build queue entry
 	entry := QueueEntry{

@@ -4,7 +4,7 @@ import "github.com/charmbracelet/lipgloss"
 
 var (
 	// Colors
-	runningColor   = lipgloss.Color("10")      // Green
+	runningColor   = lipgloss.Color("#1F8F4D") // Darker green for better contrast
 	completedColor = lipgloss.Color("8")       // Gray
 	failedColor    = lipgloss.Color("9")       // Red
 	deadColor      = lipgloss.Color("9")       // Red
@@ -130,7 +130,7 @@ var (
 
 	// Progress bar styles
 	progressBarFilledStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("10")) // Green
+				Foreground(runningColor) // Match running color
 
 	progressBarEmptyStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("8")) // Gray

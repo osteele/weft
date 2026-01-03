@@ -356,6 +356,44 @@ func TestGetGPU(t *testing.T) {
 	}
 }
 
+func TestSetJobEnvVars(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	env := []string{"FOO=bar", "CUDA_VISIBLE_DEVICES=0"}
+	if err := SetJobEnvVars(database, jobID, env); err != nil {
+		t.Fatalf("set env vars: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got, want := job.EnvVars, env; len(got) != len(want) {
+		t.Fatalf("env vars len = %d, want %d", len(got), len(want))
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("env vars[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+
+	if err := SetJobEnvVars(database, jobID, nil); err != nil {
+		t.Fatalf("clear env vars: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after clear: %v", err)
+	}
+	if len(job.EnvVars) != 0 {
+		t.Fatalf("expected env vars cleared, got %v", job.EnvVars)
+	}
+}
+
 func TestGetGPU_DatabaseFieldTakesPrecedence(t *testing.T) {
 	tests := []struct {
 		name    string

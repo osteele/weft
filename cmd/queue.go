@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -33,6 +35,7 @@ the remote host.
 
 Subcommands:
   add     Add a job to the queue
+  edit    Alias for 'remote-jobs edit'
   remove  Remove a queued job before it starts
   start   Start the queue runner
   stop    Stop the queue runner after current job
@@ -160,19 +163,49 @@ Examples:
 	RunE: runQueueFront,
 }
 
+var editCmd = &cobra.Command{
+	Use:   "edit <job-id>",
+	Short: "Edit queued job metadata",
+	Long: `Edit a queued job's description, command, directory, environment variables, or dependencies.
+
+Examples:
+  remote-jobs edit 1595 --depends-on 1599
+  remote-jobs edit 1595 --command "python eval.py"
+  remote-jobs edit 1595 --env FOO=bar --env BAZ=qux`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runEdit,
+}
+
+var queueEditCmd = &cobra.Command{
+	Use:   "edit <job-id>",
+	Short: "Alias for 'remote-jobs edit'",
+	Long:  "Alias for 'remote-jobs edit'. All flags are shared with the top-level command.",
+	Args:  usageArgs(cobra.ExactArgs(1)),
+	RunE:  runEdit,
+}
+
 var (
-	queueName        string
-	queueDir_        string
-	queueDescription string
-	queueEnvVars     []string
-	queueAfter       int64
-	queueAfterAny    int64
-	queueNoStart     bool
-	queueDraft       bool
+	queueName           string
+	queueDir_           string
+	queueDescription    string
+	queueEnvVars        []string
+	queueAfter          int64
+	queueAfterAny       int64
+	queueNoStart        bool
+	queueDraft          bool
+	queueEditDepends    []string
+	queueEditDependsAny []string
+	queueEditClearDeps  bool
+	editMessage         string
+	editCommand         string
+	editDirectory       string
+	editEnvVars         []string
+	editClearEnv        bool
 )
 
 func init() {
 	rootCmd.AddCommand(queueCmd)
+	rootCmd.AddCommand(editCmd)
 	queueCmd.AddCommand(queueAddCmd)
 	queueCmd.AddCommand(queueStartCmd)
 	queueCmd.AddCommand(queueStopCmd)
@@ -181,9 +214,12 @@ func init() {
 	queueCmd.AddCommand(queueUpgradeCmd)
 	queueCmd.AddCommand(queueRemoveCmd)
 	queueCmd.AddCommand(queueFrontCmd)
+	queueCmd.AddCommand(queueEditCmd)
+	addEditFlags(editCmd)
+	addEditFlags(queueEditCmd)
 
 	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpgradeCmd, queueRemoveCmd, queueFrontCmd} {
+	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpgradeCmd, queueRemoveCmd, queueFrontCmd, queueEditCmd} {
 		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
 	}
 
@@ -196,6 +232,7 @@ func init() {
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
 	queueAddCmd.Flags().BoolVar(&queueNoStart, "no-start", false, "Don't auto-start the queue runner")
 	queueAddCmd.Flags().BoolVar(&queueDraft, "draft", false, "Create the job in draft status without syncing to the remote queue")
+
 }
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
@@ -252,6 +289,10 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, queueName, gpu, depSpec)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
+		}
+		if err := db.SetJobEnvVars(database, jobID, queueEnvVars); err != nil {
+			db.DeleteJob(database, jobID)
+			return fmt.Errorf("record draft env vars: %w", err)
 		}
 		fmt.Printf("Draft job #%d saved for %s in queue '%s'\n\n", jobID, host, queueName)
 		fmt.Printf("  Working dir: %s\n", workingDir)
@@ -683,6 +724,185 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runEdit(cmd *cobra.Command, args []string) error {
+	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid job ID: %s", args[0])
+	}
+
+	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
+	envChanged := cmd.Flags().Changed("env") || editClearEnv
+	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("command") ||
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps
+	if !fieldChanged {
+		return usageErrorf("no changes specified; use --message/--command/--directory/--env or dependency flags")
+	}
+	if queueEditClearDeps && dependsChanged {
+		return fmt.Errorf("cannot combine --clear-depends with --depends-on flags")
+	}
+	if editClearEnv && cmd.Flags().Changed("env") {
+		return fmt.Errorf("cannot combine --env and --clear-env")
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+	if job.Status != db.StatusQueued {
+		return fmt.Errorf("job %d has status '%s', can only edit queued jobs", jobID, job.Status)
+	}
+
+	jobQueueName := job.QueueName
+	if jobQueueName == "" {
+		jobQueueName = queueName
+		if jobQueueName == "" {
+			jobQueueName = defaultQueueName
+		}
+	}
+
+	var updates []string
+
+	if cmd.Flags().Changed("message") {
+		if err := db.UpdateJobDescription(database, jobID, editMessage); err != nil {
+			return fmt.Errorf("update description: %w", err)
+		}
+		job.Description = editMessage
+		if editMessage == "" {
+			updates = append(updates, "description cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("description: %s", editMessage))
+		}
+	}
+
+	if cmd.Flags().Changed("directory") {
+		if err := db.UpdateJobWorkingDir(database, jobID, editDirectory); err != nil {
+			return fmt.Errorf("update directory: %w", err)
+		}
+		job.WorkingDir = editDirectory
+		updates = append(updates, fmt.Sprintf("directory: %s", editDirectory))
+	}
+
+	if cmd.Flags().Changed("command") {
+		if err := db.UpdateJobCommand(database, jobID, editCommand); err != nil {
+			return fmt.Errorf("update command: %w", err)
+		}
+		job.Command = editCommand
+		updates = append(updates, fmt.Sprintf("command: %s", editCommand))
+	}
+
+	if envChanged {
+		var newEnv []string
+		if !editClearEnv {
+			newEnv = append([]string(nil), editEnvVars...)
+		}
+		if err := db.SetJobEnvVars(database, jobID, newEnv); err != nil {
+			return fmt.Errorf("update env vars: %w", err)
+		}
+		job.EnvVars = newEnv
+		if len(newEnv) == 0 {
+			updates = append(updates, "env vars cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("env vars: %s", strings.Join(newEnv, ", ")))
+		}
+	}
+
+	var depSpec string
+	var deps []queueDependency
+	switch {
+	case queueEditClearDeps:
+		depSpec = ""
+	case dependsChanged:
+		depValues := queueEditDepends
+		if !cmd.Flags().Changed("depends-on") {
+			depValues = nil
+		}
+		anyValues := queueEditDependsAny
+		if !cmd.Flags().Changed("depends-on-any") {
+			anyValues = nil
+		}
+		deps, err = buildQueueEditDependencies(database, job.Host, job.ID, depValues, anyValues)
+		if err != nil {
+			return err
+		}
+		depSpec = encodeQueueDependencies(deps)
+	default:
+		depSpec = job.DepSpec
+		deps = decodeQueueDependencies(job.DepSpec)
+	}
+
+	if depSpec != job.DepSpec {
+		if err := db.SetJobDepSpec(database, jobID, depSpec); err != nil {
+			return fmt.Errorf("update job dependencies: %w", err)
+		}
+		job.DepSpec = depSpec
+		if depSpec == "" {
+			updates = append(updates, "dependencies cleared")
+		} else {
+			updates = append(updates, "dependencies: "+formatQueueDependencies(deps))
+		}
+	}
+
+	envVars := job.EnvVars
+	needEnvFromQueue := len(envVars) == 0 && !envChanged
+	needCommand := job.Command == ""
+	needDir := job.WorkingDir == ""
+	if needEnvFromQueue || needCommand || needDir {
+		entry, err := queuefile.FetchEntry(job.Host, jobQueueName, jobID)
+		if err != nil {
+			if queuefile.IsConnectionError(err) {
+				return fmt.Errorf("host %s unreachable: %w", job.Host, err)
+			}
+		} else {
+			if needDir && entry.WorkingDir != "" {
+				job.WorkingDir = entry.WorkingDir
+			}
+			if needCommand && entry.Command != "" {
+				job.Command = entry.Command
+			}
+			if needEnvFromQueue {
+				envVars = entry.EnvVars
+			}
+		}
+	}
+
+	entryJob := &db.Job{
+		ID:          job.ID,
+		Host:        job.Host,
+		WorkingDir:  job.WorkingDir,
+		Command:     job.Command,
+		Description: job.Description,
+		QueueName:   jobQueueName,
+	}
+
+	if err := ops.UpdateQueueEntry(ops.UpdateQueueEntryParams{
+		Host:      job.Host,
+		QueueName: jobQueueName,
+		Job:       entryJob,
+		EnvVars:   envVars,
+		DepSpec:   depSpec,
+	}); err != nil {
+		return err
+	}
+
+	fmt.Printf("Updated job %d in queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+	for _, update := range updates {
+		fmt.Printf("  %s\n", update)
+	}
+	if len(updates) == 0 {
+		fmt.Println("  (no metadata fields changed)")
+	}
+	return nil
+}
+
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
@@ -702,4 +922,129 @@ func parseEffectiveCommand(command string) string {
 		return command
 	}
 	return strings.TrimSpace(cmd[andIdx+4:])
+}
+
+func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, error) {
+	var deps []queueDependency
+	seen := map[int64]bool{}
+
+	add := func(values []string, defaultAllowFailure bool) error {
+		for _, raw := range values {
+			for _, part := range splitDependencyValues(raw) {
+				allowFailure := defaultAllowFailure
+				value := part
+
+				if strings.HasSuffix(value, "+") {
+					allowFailure = true
+					value = strings.TrimSuffix(value, "+")
+				} else if idx := strings.Index(value, ":"); idx != -1 {
+					mode := strings.ToLower(strings.TrimSpace(value[idx+1:]))
+					value = strings.TrimSpace(value[:idx])
+					switch mode {
+					case "any", "complete", "completion":
+						allowFailure = true
+					case "success", "":
+						allowFailure = false
+					default:
+						return fmt.Errorf("unknown dependency mode %q in %q", mode, part)
+					}
+				}
+
+				if value == "" {
+					continue
+				}
+				depID, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return fmt.Errorf("invalid dependency job ID: %q", part)
+				}
+				if depID == targetJobID {
+					return fmt.Errorf("job %d cannot depend on itself", targetJobID)
+				}
+				if seen[depID] {
+					continue
+				}
+				if err := ensureSameHostDependency(database, depID, host); err != nil {
+					return err
+				}
+				seen[depID] = true
+				deps = append(deps, queueDependency{JobID: depID, AllowFailure: allowFailure})
+			}
+		}
+		return nil
+	}
+
+	if err := add(successVals, false); err != nil {
+		return nil, err
+	}
+	if err := add(anyVals, true); err != nil {
+		return nil, err
+	}
+	return deps, nil
+}
+
+func splitDependencyValues(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func formatQueueDependencies(deps []queueDependency) string {
+	if len(deps) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(deps))
+	for _, dep := range deps {
+		mode := "success"
+		if dep.AllowFailure {
+			mode = "completion"
+		}
+		parts = append(parts, fmt.Sprintf("%d (%s)", dep.JobID, mode))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func decodeQueueDependencies(spec string) []queueDependency {
+	if strings.TrimSpace(spec) == "" {
+		return nil
+	}
+	chunks := strings.Split(spec, ",")
+	deps := make([]queueDependency, 0, len(chunks))
+	for _, chunk := range chunks {
+		chunk = strings.TrimSpace(chunk)
+		if chunk == "" {
+			continue
+		}
+		allowFailure := false
+		if strings.HasSuffix(chunk, ":any") {
+			allowFailure = true
+			chunk = strings.TrimSuffix(chunk, ":any")
+		}
+		id, err := strconv.ParseInt(chunk, 10, 64)
+		if err != nil || id <= 0 {
+			continue
+		}
+		deps = append(deps, queueDependency{JobID: id, AllowFailure: allowFailure})
+	}
+	return deps
+}
+
+func addEditFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVarP(&editMessage, "message", "m", "", "Set job description")
+	cmd.Flags().StringVarP(&editDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
+	cmd.Flags().StringVar(&editCommand, "command", "", "Set command (queued jobs only)")
+	cmd.Flags().StringSliceVarP(&editEnvVars, "env", "e", nil, "Replace environment variables (VAR=value)")
+	cmd.Flags().BoolVar(&editClearEnv, "clear-env", false, "Remove all environment variables")
+	cmd.Flags().StringSliceVar(&queueEditDepends, "depends-on", nil, "Wait for these job IDs to succeed before running (comma-separated or repeated)")
+	cmd.Flags().StringSliceVar(&queueEditDependsAny, "depends-on-any", nil, "Wait for these job IDs to finish (success or failure)")
+	cmd.Flags().BoolVar(&queueEditClearDeps, "clear-depends", false, "Remove all dependencies from the job")
 }
