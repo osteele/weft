@@ -27,6 +27,16 @@ Remote Jobs is a CLI tool for managing persistent tmux sessions on remote hosts.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### Facades vs Core
+
+User-facing layers (CLI + TUI) now call into a shared core service that owns
+validation, database mutations, and reconciliation with remote hosts. This
+guarantees that every operation—whether triggered by a key binding or a Cobra
+command—runs through the same code path. The facades handle only input parsing,
+presentation, and read-heavy listing queries. The core service records intent,
+kicks off sync, and returns structured results. See `docs/facade-core.md` for
+details on the responsibilities split.
+
 ## Job States
 
 Every job lives in the local SQLite database and transitions through a finite

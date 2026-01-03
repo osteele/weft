@@ -3,7 +3,7 @@
 Plans let you describe a batch of jobs in YAML and submit them all at once.
 The CLI reads the plan, kills any requested jobs, and then decides which
 entries should run immediately and which must be queued with dependency
-rules that reuse the existing `--after` / `--after-any` behaviors.
+rules that reuse the existing `--after` (`--depends-on`) / `--after-any` behaviors.
 
 ## File structure
 

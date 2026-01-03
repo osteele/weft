@@ -229,6 +229,7 @@ func init() {
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
+	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
 	queueAddCmd.Flags().BoolVar(&queueNoStart, "no-start", false, "Don't auto-start the queue runner")
 	queueAddCmd.Flags().BoolVar(&queueDraft, "draft", false, "Create the job in draft status without syncing to the remote queue")
@@ -266,7 +267,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	if queueAfter > 0 && queueAfterAny > 0 {
-		return fmt.Errorf("cannot use both --after and --after-any")
+		return fmt.Errorf("cannot use both --after/--depends-on and --after-any")
 	}
 
 	var deps []queueDependency

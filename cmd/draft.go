@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/core"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/spf13/cobra"
 )
@@ -27,29 +27,20 @@ func runJobDraft(cmd *cobra.Command, args []string) error {
 		return usageErrorf("invalid job ID: %s", args[0])
 	}
 
-	database, err := db.Open()
+	service, err := core.NewService()
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return fmt.Errorf("initialize core service: %w", err)
 	}
-	defer database.Close()
+	defer service.Close()
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
-	}
-
-	result, err := ops.DraftJob(database, job, ops.DefaultOptions())
+	result, err := service.DraftJob(jobID, ops.TimeoutNormal)
 	if err != nil {
 		return err
 	}
-
-	if result.Deferred {
-		fmt.Printf("Job %d draft pending (host unavailable)\n", jobID)
-	} else {
-		fmt.Printf("Job %d marked as draft\n", jobID)
+	if result.Outcome.Message != "" {
+		fmt.Println(result.Outcome.Message)
+		return nil
 	}
+	fmt.Printf("Job %d marked as draft\n", jobID)
 	return nil
 }

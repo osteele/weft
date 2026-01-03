@@ -33,6 +33,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/mattn/go-runewidth"
 	"github.com/osteele/remote-jobs/internal/config"
+	"github.com/osteele/remote-jobs/internal/core"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/llm"
 	"github.com/osteele/remote-jobs/internal/logcache"
@@ -353,18 +354,21 @@ type jobKilledMsg struct {
 	err       error
 	deferred  bool // true if kill was queued for later (host offline)
 	cancelled bool // true if this was a queued job that was cancelled
+	message   string
 }
 
 type jobDraftedMsg struct {
 	jobID    int64
 	err      error
 	deferred bool
+	message  string
 }
 
 type jobQueuedMsg struct {
 	jobID    int64
 	err      error
 	deferred bool
+	message  string
 }
 
 type jobRestartedMsg struct {
@@ -580,6 +584,7 @@ type Model struct {
 
 	// Database connection
 	database                *sql.DB
+	coreService             *core.Service
 	dbWatcher               *fsnotify.Watcher
 	dbWatcherTargets        map[string]struct{}
 	dbRefreshDebounceActive bool
@@ -725,6 +730,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 
 	return Model{
 		database:                database,
+		coreService:             core.NewServiceWithDB(database),
 		jobList:                 jobList,
 		jobSelectionActive:      true,
 		jobFilter:               jobFilterRecent,
@@ -1007,6 +1013,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				flashCmd = m.setFlash(fmt.Sprintf("Kill failed: %v", msg.err), true)
 			}
+		} else if msg.message != "" {
+			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
 			if msg.cancelled {
 				flashCmd = m.setFlash(fmt.Sprintf("Job %d cancelled (removal queued for when host is online)", msg.jobID), false)
@@ -1026,6 +1034,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var flashCmd tea.Cmd
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Draft failed: %v", msg.err), true)
+		} else if msg.message != "" {
+			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d draft pending (sync when host online)", msg.jobID), false)
 		} else {
@@ -1037,6 +1047,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var flashCmd tea.Cmd
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Queue failed: %v", msg.err), true)
+		} else if msg.message != "" {
+			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d queued (pending sync)", msg.jobID), false)
 		} else {
@@ -5633,82 +5645,97 @@ func (m Model) performBackgroundSync() tea.Cmd {
 }
 
 func (m Model) killJob(job *db.Job) tea.Cmd {
-	if job == nil {
+	if job == nil || m.coreService == nil {
 		return nil
 	}
 
-	database := m.database
+	jobID := job.ID
+	cancelled := job.Status == db.StatusQueued
 	return func() tea.Msg {
-		result, err := ops.KillJob(database, job, ops.DefaultOptions())
+		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast)
 		if err != nil {
-			return jobKilledMsg{jobID: job.ID, err: err}
+			return jobKilledMsg{jobID: jobID, err: err, cancelled: cancelled}
 		}
-		if result.Deferred {
-			// Job marked dead locally, kill will execute on next sync
-			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true}
+		return jobKilledMsg{
+			jobID:     jobID,
+			deferred:  result.Outcome.Deferred,
+			cancelled: cancelled,
+			message:   result.Outcome.Message,
 		}
-		return jobKilledMsg{jobID: job.ID, err: nil}
 	}
 }
 
 func (m Model) draftJob(job *db.Job) tea.Cmd {
-	if job == nil {
+	if job == nil || m.coreService == nil {
 		return nil
 	}
-	database := m.database
+	jobID := job.ID
 	return func() tea.Msg {
-		result, err := ops.RequestStatus(database, job, db.StatusDraft, ops.TimeoutFast)
+		result, err := m.coreService.DraftJob(jobID, ops.TimeoutFast)
 		if err != nil {
-			return jobDraftedMsg{jobID: job.ID, err: err}
+			return jobDraftedMsg{jobID: jobID, err: err}
 		}
-		return jobDraftedMsg{jobID: job.ID, deferred: result.Deferred}
+		return jobDraftedMsg{
+			jobID:    jobID,
+			deferred: result.Outcome.Deferred,
+			message:  result.Outcome.Message,
+		}
 	}
 }
 
 func (m Model) queueDraftJob(job *db.Job) tea.Cmd {
-	if job == nil {
+	if job == nil || m.coreService == nil {
 		return nil
 	}
-	database := m.database
+	jobID := job.ID
 	return func() tea.Msg {
-		result, err := ops.RequestStatus(database, job, db.StatusQueued, ops.TimeoutFast)
+		result, err := m.coreService.RequestStatus(jobID, db.StatusQueued, ops.TimeoutFast)
 		if err != nil {
-			return jobQueuedMsg{jobID: job.ID, err: err}
+			return jobQueuedMsg{jobID: jobID, err: err}
 		}
-		return jobQueuedMsg{jobID: job.ID, deferred: result.Deferred}
+		return jobQueuedMsg{
+			jobID:    jobID,
+			deferred: result.Outcome.Deferred,
+			message:  result.Outcome.Message,
+		}
 	}
 }
 
 func (m Model) runDraftJob(job *db.Job) tea.Cmd {
-	if job == nil {
+	if job == nil || m.coreService == nil {
 		return nil
 	}
-	database := m.database
+	jobID := job.ID
 	return func() tea.Msg {
-		result, err := ops.RequestStatus(database, job, db.StatusRunning, ops.TimeoutFast)
+		result, err := m.coreService.RequestStatus(jobID, db.StatusRunning, ops.TimeoutFast)
 		if err != nil {
-			return jobQueuedMsg{jobID: job.ID, err: err}
+			return jobQueuedMsg{jobID: jobID, err: err}
 		}
-		return jobQueuedMsg{jobID: job.ID, deferred: result.Deferred}
+		return jobQueuedMsg{
+			jobID:    jobID,
+			deferred: result.Outcome.Deferred,
+			message:  result.Outcome.Message,
+		}
 	}
 }
 
 func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
-	if job == nil {
+	if job == nil || m.coreService == nil {
 		return nil
 	}
 
-	database := m.database
+	jobID := job.ID
 	return func() tea.Msg {
-		result, err := ops.CancelQueuedJob(database, job, ops.DefaultOptions())
+		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast)
 		if err != nil {
-			return jobKilledMsg{jobID: job.ID, err: err, cancelled: true}
+			return jobKilledMsg{jobID: jobID, err: err, cancelled: true}
 		}
-		if result.Deferred {
-			// Job marked dead locally, removal will execute on next sync
-			return jobKilledMsg{jobID: job.ID, err: nil, deferred: true, cancelled: true}
+		return jobKilledMsg{
+			jobID:     jobID,
+			deferred:  result.Outcome.Deferred,
+			cancelled: true,
+			message:   result.Outcome.Message,
 		}
-		return jobKilledMsg{jobID: job.ID, err: nil, cancelled: true}
 	}
 }
 

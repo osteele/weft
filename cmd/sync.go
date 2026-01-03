@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/config"
@@ -165,39 +167,47 @@ func syncHost(database *sql.DB, host string) (int, error) {
 }
 
 // performSyncWithTimeout performs a sync with specified timeout for list/status commands
-// Returns true if sync completed, false if timed out
-func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose bool) bool {
+// Returns true if sync completed, false if timed out along with the hosts that timed out
+func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose bool) (bool, []string) {
 	hosts, err := db.ListUniqueActiveHosts(database)
 	if err != nil || len(hosts) == 0 {
-		return true
+		return true, nil
 	}
 
 	// Set timeout for SSH operations
 	// We'll use goroutines with a timeout context
 	allCompleted := true
+	var unreachable []string
 	for _, host := range hosts {
 		// Try quick sync, but don't wait if it times out
-		done := make(chan bool, 1)
+		done := make(chan error, 1)
 		go func(h string) {
 			_, err := syncHostWithTimeout(database, h, timeout)
-			done <- (err == nil)
+			done <- err
 		}(host)
 
 		select {
-		case <-done:
-			// Sync completed
+		case err := <-done:
+			if err != nil {
+				allCompleted = false
+				unreachable = append(unreachable, host)
+				if verbose && !ssh.IsConnectionError(err.Error()) {
+					fmt.Fprintf(os.Stderr, "Warning: quick sync %s failed: %v\n", host, err)
+				}
+			}
 		case <-time.After(timeout):
 			// Timed out
 			allCompleted = false
+			unreachable = append(unreachable, host)
 		}
 	}
 
-	return allCompleted
+	return allCompleted, unreachable
 }
 
 // performFastSync performs a quick sync with fast timeout for list/status commands
-// Returns true if sync completed, false if timed out
-func performFastSync(database *sql.DB, verbose bool) bool {
+// Returns true if sync completed, false if timed out, along with hosts that timed out
+func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
 	return performSyncWithTimeout(database, FastSyncTimeout, verbose)
 }
 
@@ -237,4 +247,61 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	}
 
 	return updated, nil
+}
+
+// buildStaleDataNote renders a warning that results are from cached data.
+func buildStaleDataNote(database *sql.DB, hosts []string) string {
+	names := uniqueHosts(hosts)
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+
+	summaries := hostAgeSummaries(database, names)
+	if len(summaries) == 0 {
+		return ""
+	}
+
+	subject := "hosts " + strings.Join(names, ", ") + " are"
+	if len(names) == 1 {
+		subject = "host " + names[0] + " is"
+	}
+
+	return fmt.Sprintf(
+		"Because %s not currently reachable, these results are from cached data (%s). Try again later. Attempts to use ssh directly or inspect the local or remote filesystem won't reveal newer information.",
+		subject,
+		strings.Join(summaries, ", "),
+	)
+}
+
+func uniqueHosts(hosts []string) []string {
+	seen := make(map[string]struct{}, len(hosts))
+	var names []string
+	for _, host := range hosts {
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		names = append(names, host)
+	}
+	return names
+}
+
+func hostAgeSummaries(database *sql.DB, hosts []string) []string {
+	var summaries []string
+	for _, host := range hosts {
+		age := "unknown"
+		if info, err := db.LoadCachedHostInfo(database, host); err == nil && info != nil && info.LastUpdated > 0 {
+			ageDuration := time.Since(time.Unix(info.LastUpdated, 0))
+			if ageDuration < 0 {
+				ageDuration = 0
+			}
+			age = fmt.Sprintf("%s ago", db.FormatDuration(int64(ageDuration.Seconds())))
+		}
+		summaries = append(summaries, fmt.Sprintf("%s: %s", host, age))
+	}
+	return summaries
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -82,18 +83,22 @@ func init() {
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
+	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
 	// Handle --kill mode
 	if runKillJobID > 0 {
-		database, err := db.Open()
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("kill"), oplog.WithJobID(runKillJobID))
+		result, err := killJobWithService(nil, runKillJobID, ops.TimeoutNormal)
 		if err != nil {
-			return fmt.Errorf("open database: %w", err)
+			return err
 		}
-		defer database.Close()
-		return killJob(database, runKillJobID)
+		if result.Outcome.Message != "" {
+			fmt.Println(result.Outcome.Message)
+		}
+		return nil
 	}
 
 	// Open database early for --from support
@@ -161,10 +166,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--allow requires --immediate (-i) since jobs are queued by default")
 	}
 	if runFollow && runAfter > 0 {
-		return fmt.Errorf("--follow cannot be used with --after")
+		return fmt.Errorf("--follow cannot be used with --after/--depends-on")
 	}
 	if runAllow && runAfter > 0 {
-		return fmt.Errorf("--allow cannot be used with --after")
+		return fmt.Errorf("--allow cannot be used with --after/--depends-on")
 	}
 	if runFollow && runAfterAny > 0 {
 		return fmt.Errorf("--follow cannot be used with --after-any")
@@ -173,13 +178,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--allow cannot be used with --after-any")
 	}
 	if runAfter > 0 && runAfterAny > 0 {
-		return fmt.Errorf("cannot use both --after and --after-any")
+		return fmt.Errorf("cannot use both --after/--depends-on and --after-any")
 	}
 	if runAllow && runFollow {
 		return fmt.Errorf("--allow cannot be used with --follow")
 	}
 	if runImmediate && (runAfter > 0 || runAfterAny > 0) {
-		return fmt.Errorf("--immediate cannot be used with --after/--after-any")
+		return fmt.Errorf("--immediate cannot be used with --after/--depends-on or --after-any")
 	}
 	if runDraft && runImmediate {
 		return fmt.Errorf("--draft cannot be combined with --immediate")
@@ -188,7 +193,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--draft cannot be combined with --follow/--allow")
 	}
 	if runDraft && (runAfter > 0 || runAfterAny > 0) {
-		return fmt.Errorf("--draft cannot be combined with --after/--after-any")
+		return fmt.Errorf("--draft cannot be combined with --after/--depends-on or --after-any")
 	}
 
 	// Parse "cd /path && command" pattern to extract working directory
@@ -231,7 +236,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Handle --after and --after-any dependencies (always uses remote queue)
+	// Handle --after/--depends-on and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {
 		deps := []queueDependency{}
 		waitType := "succeeds"

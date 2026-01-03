@@ -10,7 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/core"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/plan"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -88,13 +91,20 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+	coreSvc := core.NewServiceWithDB(database)
 
 	if len(planFile.Kill) > 0 {
 		for _, id := range planFile.Kill {
-			if err := killJob(database, id); err != nil {
+			oplog.Log(oplog.OpCLICommand, oplog.WithDetail("plan kill"), oplog.WithJobID(id))
+			result, err := killJobWithService(coreSvc, id, ops.TimeoutNormal)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to kill job %d: %v\n", id, err)
 			} else {
-				fmt.Printf("Killed job %d\n", id)
+				message := result.Outcome.Message
+				if message == "" {
+					message = fmt.Sprintf("Killed job %d", id)
+				}
+				fmt.Println(message)
 			}
 		}
 		fmt.Println()

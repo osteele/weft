@@ -86,7 +86,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
 - `--from ID`: Copy settings from existing job ID (allows overriding)
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
-- `--after ID`: Start job after another job succeeds
+- `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
 
@@ -649,7 +649,7 @@ remote-jobs queue add [flags] <host> <command...>
 - `-d, --description TEXT`: Description of the job
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
 - `--draft`: Save a draft queue entry locally without touching the remote queue file
-- `--after ID`: Start job after another job succeeds
+- `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes (success or failure)
 - `--queue NAME`: Queue name (default: "default")
 

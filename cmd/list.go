@@ -84,9 +84,11 @@ func runList(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// Fast sync by default
-			completed := performFastSync(database, false)
+			completed, unreachable := performFastSync(database, false)
 			if !completed {
-				fmt.Fprintf(os.Stderr, "Note: Some hosts timed out. Run with --sync for full sync.\n")
+				if note := buildStaleDataNote(database, unreachable); note != "" {
+					fmt.Fprintln(os.Stderr, note)
+				}
 			}
 		}
 
