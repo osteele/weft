@@ -569,7 +569,7 @@ func runQueueUpgrade(cmd *cobra.Command, args []string) error {
 		if result.Started {
 			fmt.Println("Queue runner restarted with the latest script.")
 		} else {
-			fmt.Println("Queue runner already running with the latest script.")
+			fmt.Println("Script deployed. Runner will use new script after current job completes.")
 		}
 	}
 

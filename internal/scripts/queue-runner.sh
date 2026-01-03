@@ -1,4 +1,4 @@
-# BUILD: 12
+# BUILD: 13
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -161,6 +161,18 @@ while true; do
     if [ -n "$existing_status" ]; then
         echo "Job $job_id: already completed, skipping (status file exists)"
         continue
+    fi
+
+    # Skip jobs that are currently running (have a .pid file with a live process)
+    # This prevents double-starts if the queue runner restarts while a job is running
+    existing_pid_file=$(ls -t "$LOG_DIR/${job_id}"-*.pid 2>/dev/null | head -1 || true)
+    if [ -n "$existing_pid_file" ]; then
+        existing_pid=$(cat "$existing_pid_file" 2>/dev/null | tail -1)
+        if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+            echo "Job $job_id: already running (PID $existing_pid), skipping to avoid duplicate"
+            log_op "job.skip_duplicate" "$job_id" "pid=$existing_pid already running"
+            continue
+        fi
     fi
 
     # Check dependencies if specified (comma-separated list of job_id[:any])
