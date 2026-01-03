@@ -2339,37 +2339,57 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 		return ""
 	}
 
-	segments := make([]string, 0, len(m.hosts))
+	hostCount := 0
+	for _, host := range m.hosts {
+		if host != nil {
+			hostCount++
+		}
+	}
+
+	if hostCount == 0 {
+		if len(m.hosts) == 0 {
+			return dimStyle.Render(" Hosts: no hosts configured")
+		}
+		return dimStyle.Render(" Hosts: no host data")
+	}
+
+	// Calculate available width for host segments
+	// "Hosts " prefix takes ~7 chars, plus separators between hosts (2 chars each)
+	labelWidth := 7
+	separatorWidth := 2 * (hostCount - 1)
+	availableWidth := maxWidth - labelWidth - separatorWidth
+
+	// Select format based on available width
+	format := hostSummaryFull
+	widthPerHost := availableWidth / hostCount
+	if widthPerHost < hostSummaryFullWidth {
+		format = hostSummaryAbbrev
+	}
+
+	segments := make([]string, 0, hostCount)
 	for _, host := range m.hosts {
 		if host == nil {
 			continue
 		}
-		segments = append(segments, m.renderHostSummarySegment(host))
+		segments = append(segments, m.renderHostSummarySegment(host, format))
 	}
 
-	var content string
-	switch {
-	case len(segments) == 0 && len(m.hosts) == 0:
-		content = dimStyle.Render(" Hosts: no hosts configured")
-	case len(segments) == 0:
-		content = dimStyle.Render(" Hosts: no host data")
-	default:
-		content = lipgloss.JoinHorizontal(
-			lipgloss.Left,
-			labelStyle.Render("Hosts"),
-			" ",
-			strings.Join(segments, "  "),
-		)
-	}
+	content := lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		labelStyle.Render("Hosts"),
+		" ",
+		strings.Join(segments, "  "),
+	)
 
+	// Use truncate() for clean truncation with ellipsis instead of hard clipping
 	if lipgloss.Width(content) > maxWidth {
-		content = lipgloss.NewStyle().MaxWidth(maxWidth).Render(content)
+		content = truncate(content, maxWidth)
 	}
 
 	return content
 }
 
-func (m Model) renderHostSummarySegment(host *Host) string {
+func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) string {
 	statusSymbol, statusStyle := hostStatusIndicator(host)
 
 	nameStyle := hostSummaryNameStyle
@@ -2382,9 +2402,16 @@ func (m Model) renderHostSummarySegment(host *Host) string {
 	memPct, memOK := hostMemUsagePercent(host)
 	gpuPct, gpuOK := hostGPULoadPercent(host)
 
-	cpuText := formatHostSummaryMetric("CPU", cpuPct, cpuOK)
-	memText := formatHostSummaryMetric("RAM", memPct, memOK)
-	gpuText := formatHostSummaryMetric("GPU", gpuPct, gpuOK)
+	var cpuText, memText, gpuText string
+	if format == hostSummaryAbbrev {
+		cpuText = formatHostSummaryMetricAbbrev("C", cpuPct, cpuOK)
+		memText = formatHostSummaryMetricAbbrev("R", memPct, memOK)
+		gpuText = formatHostSummaryMetricAbbrev("G", gpuPct, gpuOK)
+	} else {
+		cpuText = formatHostSummaryMetric("CPU", cpuPct, cpuOK)
+		memText = formatHostSummaryMetric("RAM", memPct, memOK)
+		gpuText = formatHostSummaryMetric("GPU", gpuPct, gpuOK)
+	}
 
 	cpuStyle := hostSummaryStyleForMetric(cpuPct, cpuOK)
 	memStyle := hostSummaryStyleForMetric(memPct, memOK)
@@ -2439,6 +2466,14 @@ func formatHostSummaryMetric(label string, pct int, ok bool) string {
 		return label + "--"
 	}
 	return fmt.Sprintf("%s%3d%%", label, pct)
+}
+
+// formatHostSummaryMetricAbbrev formats a metric with abbreviated label (e.g., "C45%")
+func formatHostSummaryMetricAbbrev(label string, pct int, ok bool) string {
+	if !ok {
+		return label + "--"
+	}
+	return fmt.Sprintf("%s%d%%", label, pct)
 }
 
 func hostCPULoadPercent(host *Host) (int, bool) {
