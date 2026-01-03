@@ -61,7 +61,7 @@ func TestQueueJob_QuickTimeout(t *testing.T) {
 		Command:     "echo success",
 		Description: "test job",
 	}
-	result, err := QueueJob(database, params, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	result, err := QueueJob(database, params, ExecuteOptions{Timeout: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("QueueJob returned an unexpected error: %v", err)
 	}

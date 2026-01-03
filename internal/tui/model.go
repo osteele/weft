@@ -5866,7 +5866,9 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 			queueName = "default"
 		}
 		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-		removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", job.ID, queueFile)
+		// Use grep + temp file for cross-platform compatibility (Linux vs macOS)
+		removeCmd := fmt.Sprintf("grep -v '^%d	' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || rm -f %s.tmp",
+			job.ID, queueFile, queueFile, queueFile, queueFile, queueFile)
 		_, _, err := remote.RunWithTimeout(job.Host, removeCmd, 5*time.Second)
 		if err != nil {
 			return false // Host unreachable
@@ -6155,29 +6157,16 @@ func (m Model) editJob() tea.Cmd {
 	}
 }
 
-// updateRemoteQueueEntry updates a job's entry in the remote queue file
+// updateRemoteQueueEntry updates a job's entry in the remote queue file.
+// This is a thin wrapper around ops.UpdateQueueEntry.
 func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []string, depSpec string) error {
-	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
-
-	// Remove old entry and add new one (under flock to prevent race with queue runner)
-	lockFile := queueFile + ".lock"
-	envVarsB64 := ""
-	if len(envVars) > 0 {
-		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(envVars, "\n")))
-	}
-	queueLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\n", job.ID, job.WorkingDir, job.Command, job.Description, envVarsB64, depSpec)
-	// Use base64 encoding to safely pass the queue line through nested shell contexts
-	queueLineB64 := base64.StdEncoding.EncodeToString([]byte(queueLine))
-	updateCmd := fmt.Sprintf("mkdir -p %s && flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' | base64 -d >> %s\"",
-		queuerunner.QueueDir(), lockFile, job.ID, queueFile, queueLineB64, queueFile)
-	if _, stderr, err := remote.Run(host, updateCmd); err != nil {
-		if remote.IsConnectionError(stderr) || remote.IsConnectionError(err.Error()) {
-			return fmt.Errorf("host unreachable")
-		}
-		return fmt.Errorf("update queue entry: %s", strings.TrimSpace(stderr))
-	}
-
-	return nil
+	return ops.UpdateQueueEntry(ops.UpdateQueueEntryParams{
+		Host:      host,
+		QueueName: queueName,
+		Job:       job,
+		EnvVars:   envVars,
+		DepSpec:   depSpec,
+	})
 }
 
 func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, error) {

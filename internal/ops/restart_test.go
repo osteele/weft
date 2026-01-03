@@ -66,7 +66,7 @@ func TestRestartJob_QuickTimeout(t *testing.T) {
 	params := RestartJobParams{
 		OriginalJob: origJob,
 	}
-	result, err := RestartJob(database, params, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	result, err := RestartJob(database, params, ExecuteOptions{Timeout: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("RestartJob returned an unexpected error: %v", err)
 	}

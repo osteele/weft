@@ -89,8 +89,9 @@ func removeQueuedJob(database *sql.DB, job *db.Job) error {
 	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
 	fmt.Printf("Removing queued job %d from %s on %s...\n", job.ID, queueName, job.Host)
 
-	// Try to remove from queue file
-	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", job.ID, queueFile)
+	// Try to remove from queue file (use grep + temp file for cross-platform compatibility)
+	removeCmd := fmt.Sprintf("grep -v '^%d	' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || rm -f %s.tmp",
+		job.ID, queueFile, queueFile, queueFile, queueFile, queueFile)
 	_, stderr, err := ssh.Run(job.Host, removeCmd)
 
 	if err != nil && ssh.IsConnectionError(stderr) {

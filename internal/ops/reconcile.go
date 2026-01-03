@@ -257,7 +257,9 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 // removeFromQueueFile removes a job from the remote queue file.
 func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Duration) error {
 	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	removeCmd := fmt.Sprintf("sed -i '/^%d\t/d' %s 2>/dev/null || true", jobID, queueFile)
+	// Use grep + temp file instead of sed -i for cross-platform compatibility (Linux vs macOS)
+	removeCmd := fmt.Sprintf("grep -v '^%d	' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || rm -f %s.tmp",
+		jobID, queueFile, queueFile, queueFile, queueFile, queueFile)
 	_, stderr, err := ssh.RunWithTimeout(host, removeCmd, timeout)
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {

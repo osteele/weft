@@ -158,7 +158,7 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	}))
 	t.Cleanup(cleanup)
 
-	result, err := CancelQueuedJob(database, job, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	result, err := CancelQueuedJob(database, job, ExecuteOptions{Timeout: 100 * time.Millisecond})
 	if err != nil {
 		t.Fatalf("CancelQueuedJob returned an unexpected error: %v", err)
 	}

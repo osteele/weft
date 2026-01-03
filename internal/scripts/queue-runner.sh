@@ -1,4 +1,4 @@
-# BUILD: 11
+# BUILD: 12
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -67,6 +67,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Cross-platform file locking using mkdir (works on Linux and macOS)
+# mkdir is atomic on all POSIX systems
+LOCK_DIR="$QUEUE_FILE.lock.d"
+
+acquire_lock() {
+    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+        sleep 0.01
+    done
+}
+
+release_lock() {
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
 log_op "queue.start" "" "queue=$QUEUE_NAME pid=$$"
 echo "Queue runner started for queue: $QUEUE_NAME"
 echo "Queue file: $QUEUE_FILE"
@@ -89,19 +103,18 @@ while true; do
         start_now_id=$(cat "$START_NOW_FILE" 2>/dev/null | tr -d '[:space:]')
         rm -f "$START_NOW_FILE"
         if [ -n "$start_now_id" ] && [ -f "$QUEUE_FILE" ]; then
-            # Extract the job line and move it to front
-            (
-                flock -x 200
-                job_to_promote=$(grep "^${start_now_id}	" "$QUEUE_FILE" 2>/dev/null || true)
-                if [ -n "$job_to_promote" ]; then
-                    # Remove from current position and add to front
-                    temp_file=$(mktemp)
-                    grep -v "^${start_now_id}	" "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
-                    { echo "$job_to_promote"; cat "$temp_file"; } > "$QUEUE_FILE"
-                    rm -f "$temp_file"
-                    echo "Promoted job $start_now_id to front of queue"
-                fi
-            ) 200>"$QUEUE_FILE.lock"
+            # Extract the job line and move it to front (under lock)
+            acquire_lock
+            job_to_promote=$(grep "^${start_now_id}	" "$QUEUE_FILE" 2>/dev/null || true)
+            if [ -n "$job_to_promote" ]; then
+                # Remove from current position and add to front
+                temp_file=$(mktemp)
+                grep -v "^${start_now_id}	" "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
+                { echo "$job_to_promote"; cat "$temp_file"; } > "$QUEUE_FILE"
+                rm -f "$temp_file"
+                echo "Promoted job $start_now_id to front of queue"
+            fi
+            release_lock
         fi
     fi
 
@@ -111,21 +124,15 @@ while true; do
         continue
     fi
 
-    # Pop first job from queue (under flock to prevent race with concurrent appends)
-    job_line=""
-    (
-        flock -x 200
-        job_line=$(head -n 1 "$QUEUE_FILE" 2>/dev/null || true)
-        if [ -n "$job_line" ]; then
-            temp_file=$(mktemp)
-            tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
-            mv "$temp_file" "$QUEUE_FILE"
-        fi
-        # Export job_line to parent via temp file
-        echo "$job_line" > "$QUEUE_FILE.popped"
-    ) 200>"$QUEUE_FILE.lock"
-    job_line=$(cat "$QUEUE_FILE.popped" 2>/dev/null || true)
-    rm -f "$QUEUE_FILE.popped"
+    # Pop first job from queue (under lock to prevent race with concurrent appends)
+    acquire_lock
+    job_line=$(head -n 1 "$QUEUE_FILE" 2>/dev/null || true)
+    if [ -n "$job_line" ]; then
+        temp_file=$(mktemp)
+        tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
+        mv "$temp_file" "$QUEUE_FILE"
+    fi
+    release_lock
 
     if [ -z "$job_line" ]; then
         # Queue is empty, wait and check again

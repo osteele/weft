@@ -90,7 +90,6 @@ func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueue
 	}
 
 	queueFile := fmt.Sprintf("%s/%s.queue", QueueDir, queueName)
-	lockFile := queueFile + ".lock"
 
 	// Base64 encode env vars (newline-separated) for safe shell transport
 	envVarsB64 := ""
@@ -107,12 +106,27 @@ func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueue
 
 	// Build the command:
 	// 1. Create queue directory if needed
-	// 2. Use flock for atomic operation
+	// 2. Use mkdir-based lock (atomic on all POSIX systems, works on Linux and macOS)
 	// 3. Remove any existing entry for this job ID
 	// 4. Append new entry
+	// Note: We use grep + temp file instead of sed -i because sed -i syntax differs between Linux and macOS
+	lockDir := queueFile + ".lock.d"
 	appendCmd := fmt.Sprintf(
-		"mkdir -p %s && flock %s bash -c \"sed -i '/^%d\\t/d' %s 2>/dev/null || true; echo '%s' | base64 -d >> %s\"",
-		QueueDir, lockFile, entry.JobID, queueFile, jobLineB64, queueFile)
+		`mkdir -p %s && (
+			while ! mkdir %s 2>/dev/null; do sleep 0.01; done
+			trap 'rmdir %s 2>/dev/null' EXIT
+			grep -v '^%d	' %s > %s.tmp 2>/dev/null || true
+			mv %s.tmp %s 2>/dev/null || true
+			echo '%s' | base64 -d >> %s
+			rmdir %s 2>/dev/null
+		)`,
+		QueueDir,
+		lockDir,
+		lockDir,
+		entry.JobID, queueFile, queueFile,
+		queueFile, queueFile,
+		jobLineB64, queueFile,
+		lockDir)
 
 	var stdout, stderr string
 	var err error
@@ -125,6 +139,53 @@ func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueue
 
 	if err != nil {
 		return &QueueAppendError{Op: "append queue entry", Stderr: stderr, Err: err}
+	}
+
+	return nil
+}
+
+// UpdateQueueEntryParams contains parameters for updating an existing queue entry
+type UpdateQueueEntryParams struct {
+	Host      string
+	QueueName string
+	Job       *db.Job
+	EnvVars   []string
+	DepSpec   string
+	Timeout   time.Duration
+}
+
+// UpdateQueueEntry updates an existing job's entry in the remote queue file.
+// This is used when editing a queued job's command, working directory, or other parameters.
+// The existing entry is removed and a new one is appended with the updated values.
+func UpdateQueueEntry(params UpdateQueueEntryParams) error {
+	if params.Job == nil {
+		return fmt.Errorf("job is nil")
+	}
+
+	queueName := params.QueueName
+	if queueName == "" {
+		queueName = params.Job.QueueName
+	}
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+
+	entry := QueueEntry{
+		JobID:       params.Job.ID,
+		WorkingDir:  params.Job.WorkingDir,
+		Command:     params.Job.Command,
+		Description: params.Job.Description,
+		EnvVars:     params.EnvVars,
+		DepSpec:     params.DepSpec,
+	}
+
+	opts := AppendQueueEntryOptions{Timeout: params.Timeout}
+	if err := AppendQueueEntry(params.Host, queueName, entry, opts); err != nil {
+		var qaErr *QueueAppendError
+		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
+			return fmt.Errorf("host unreachable")
+		}
+		return fmt.Errorf("update queue entry: %w", err)
 	}
 
 	return nil
