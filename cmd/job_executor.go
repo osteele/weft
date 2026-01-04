@@ -75,10 +75,10 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 		Description:  job.Description,
 		StartTime:    job.StartTime,
 		TmuxSession:  session.TmuxSessionName(jobID),
-		LogFile:      session.LogFile(jobID, job.StartTime),
-		StatusFile:   session.StatusFile(jobID, job.StartTime),
-		MetadataFile: session.MetadataFile(jobID, job.StartTime),
-		PidFile:      session.PidFile(jobID, job.StartTime),
+		LogFile:      session.SimpleLogFile(jobID),
+		StatusFile:   session.SimpleStatusFile(jobID),
+		MetadataFile: session.SimpleMetadataFile(jobID),
+		PidFile:      session.SimplePidFile(jobID),
 	}
 
 	if opts.OnPrepared != nil {
@@ -100,10 +100,9 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 		return nil, fmt.Errorf("session '%s' already exists on %s", info.TmuxSession, opts.Host)
 	}
 
-	// Create log directory on remote
-	logDir := session.LogDir
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", logDir)
-	if _, stderr, err := ssh.RunWithRetry(opts.Host, mkdirCmd); err != nil {
+	// Create log directory on remote and archive any old files for this job
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(jobID))
+	if _, stderr, err := ssh.RunWithRetry(opts.Host, mkdirAndArchive); err != nil {
 		if isConnectionFailure(stderr, err) {
 			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
 		}

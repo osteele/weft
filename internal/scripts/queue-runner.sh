@@ -1,4 +1,4 @@
-# BUILD: 13
+# BUILD: 14
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
@@ -157,22 +157,34 @@ while true; do
     fi
 
     # Skip jobs that already have a status file (already completed in a previous run)
+    # Check both simple path and archived paths
+    if [ -f "$LOG_DIR/${job_id}.status" ]; then
+        echo "Job $job_id: already completed, skipping (status file exists)"
+        continue
+    fi
     existing_status=$(ls -t "$LOG_DIR/${job_id}"-*.status 2>/dev/null | head -1 || true)
     if [ -n "$existing_status" ]; then
-        echo "Job $job_id: already completed, skipping (status file exists)"
+        echo "Job $job_id: already completed, skipping (archived status file exists)"
         continue
     fi
 
     # Skip jobs that are currently running (have a .pid file with a live process)
     # This prevents double-starts if the queue runner restarts while a job is running
-    existing_pid_file=$(ls -t "$LOG_DIR/${job_id}"-*.pid 2>/dev/null | head -1 || true)
-    if [ -n "$existing_pid_file" ]; then
-        existing_pid=$(cat "$existing_pid_file" 2>/dev/null | tail -1)
-        if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
-            echo "Job $job_id: already running (PID $existing_pid), skipping to avoid duplicate"
-            log_op "job.skip_duplicate" "$job_id" "pid=$existing_pid already running"
-            continue
+    # Check both simple path and archived paths
+    existing_pid=""
+    if [ -f "$LOG_DIR/${job_id}.pid" ]; then
+        existing_pid=$(cat "$LOG_DIR/${job_id}.pid" 2>/dev/null | tail -1)
+    fi
+    if [ -z "$existing_pid" ]; then
+        existing_pid_file=$(ls -t "$LOG_DIR/${job_id}"-*.pid 2>/dev/null | head -1 || true)
+        if [ -n "$existing_pid_file" ]; then
+            existing_pid=$(cat "$existing_pid_file" 2>/dev/null | tail -1)
         fi
+    fi
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+        echo "Job $job_id: already running (PID $existing_pid), skipping to avoid duplicate"
+        log_op "job.skip_duplicate" "$job_id" "pid=$existing_pid already running"
+        continue
     fi
 
     # Check dependencies if specified (comma-separated list of job_id[:any])
@@ -191,7 +203,13 @@ while true; do
                 dep_mode="success"
             fi
 
-            dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1 || true)
+            # Check for dependency status file (simple path first, then archived)
+            dep_status_file=""
+            if [ -f "$LOG_DIR/${dep_id}.status" ]; then
+                dep_status_file="$LOG_DIR/${dep_id}.status"
+            else
+                dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1 || true)
+            fi
             if [ -z "$dep_status_file" ]; then
                 unmet_dependency=true
                 break
@@ -215,22 +233,34 @@ while true; do
         if [ "$skip_due_to_failure" = true ]; then
             log_op "job.skipped" "$job_id" "$skip_reason"
             echo "Job $job_id: skipped, $skip_reason"
-            timestamp=$(date +%Y%m%d-%H%M%S)
-            echo "SKIPPED: $skip_reason" > "$LOG_DIR/${job_id}-${timestamp}.log"
-            echo "1" > "$LOG_DIR/${job_id}-${timestamp}.status"
+            echo "SKIPPED: $skip_reason" > "$LOG_DIR/${job_id}.log"
+            echo "1" > "$LOG_DIR/${job_id}.status"
             continue
         fi
     fi
 
-    # Generate timestamp for file names
-    timestamp=$(date +%Y%m%d-%H%M%S)
     start_time=$(date +%s)
 
-    # File paths
-    log_file="$LOG_DIR/${job_id}-${timestamp}.log"
-    status_file="$LOG_DIR/${job_id}-${timestamp}.status"
-    meta_file="$LOG_DIR/${job_id}-${timestamp}.meta"
-    pid_file="$LOG_DIR/${job_id}-${timestamp}.pid"
+    # Simple file paths (no timestamp in primary files)
+    log_file="$LOG_DIR/${job_id}.log"
+    status_file="$LOG_DIR/${job_id}.status"
+    meta_file="$LOG_DIR/${job_id}.meta"
+    pid_file="$LOG_DIR/${job_id}.pid"
+
+    # Archive any existing files from previous runs
+    for ext in log status meta pid; do
+        f="$LOG_DIR/${job_id}.$ext"
+        if [ -f "$f" ]; then
+            # Get file mtime and format as timestamp
+            mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
+            if [ -n "$mtime" ]; then
+                ts=$(date -r "$mtime" "+%Y%m%d-%H%M%S" 2>/dev/null || date -d "@$mtime" "+%Y%m%d-%H%M%S" 2>/dev/null)
+                if [ -n "$ts" ]; then
+                    mv "$f" "$LOG_DIR/${job_id}-${ts}.$ext"
+                fi
+            fi
+        fi
+    done
 
     # Write current job ID
     echo "$job_id" > "$CURRENT_FILE"

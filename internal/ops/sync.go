@@ -587,17 +587,19 @@ func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) er
 		tmuxSession = session.TmuxSessionName(job.ID)
 	}
 
-	logFile := session.LogFile(job.ID, job.StartTime)
-	statusFile := session.StatusFile(job.ID, job.StartTime)
-	metadataFile := session.MetadataFile(job.ID, job.StartTime)
-	pidFile := session.PidFile(job.ID, job.StartTime)
+	// Simple file paths (no timestamp in primary files)
+	logFile := session.SimpleLogFile(job.ID)
+	statusFile := session.SimpleStatusFile(job.ID)
+	metadataFile := session.SimpleMetadataFile(job.ID)
+	pidFile := session.SimplePidFile(job.ID)
 
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
 
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-	if _, stderr, err := ssh.RunWithTimeout(job.Host, mkdirCmd, timeout); err != nil {
+	// Ensure log directory exists and archive any old files
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(job.ID))
+	if _, stderr, err := ssh.RunWithTimeout(job.Host, mkdirAndArchive, timeout); err != nil {
 		return fmt.Errorf("create log directory: %s", ssh.FriendlyError(job.Host, stderr, err))
 	}
 

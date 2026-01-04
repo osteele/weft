@@ -46,6 +46,6 @@ func Resolve(job *db.Job) (string, bool) {
 		}
 	}
 
-	// Fall back to the non-glob path, even though it may not exist (matches previous behavior)
-	return session.LogFile(job.ID, job.StartTime), false
+	// Fall back to the simple path, even though it may not exist (matches previous behavior)
+	return session.SimpleLogFile(job.ID), false
 }

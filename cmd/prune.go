@@ -124,22 +124,23 @@ func runPrune(cmd *cobra.Command, args []string) error {
 // Returns true if any files were deleted
 func deleteJobFiles(job *db.Job) bool {
 	// Determine file paths based on whether this is an old or new job
-	var logFile, statusFile, metadataFile string
+	var deleteCmd string
 	if job.SessionName != "" {
 		// Old job with session name - use legacy paths
-		logFile = session.LegacyLogFile(job.SessionName)
-		statusFile = session.LegacyStatusFile(job.SessionName)
-		metadataFile = session.LegacyMetadataFile(job.SessionName)
+		logFile := session.LegacyLogFile(job.SessionName)
+		statusFile := session.LegacyStatusFile(job.SessionName)
+		metadataFile := session.LegacyMetadataFile(job.SessionName)
+		deleteCmd = fmt.Sprintf("rm -f %s %s %s 2>/dev/null", logFile, statusFile, metadataFile)
 	} else {
-		// New job - use ID-based paths
-		logFile = session.LogFile(job.ID, job.StartTime)
-		statusFile = session.StatusFile(job.ID, job.StartTime)
-		metadataFile = session.MetadataFile(job.ID, job.StartTime)
+		// New job - use pattern-based deletion to catch both simple and archived files
+		// Pattern: {jobID}.{ext} and {jobID}-*.{ext}
+		logPattern := session.LogFilePattern(job.ID)
+		statusPattern := session.StatusFilePattern(job.ID)
+		metaPattern := session.MetadataFilePattern(job.ID)
+		pidPattern := session.PidFilePattern(job.ID)
+		// Use shell glob expansion with rm -f
+		deleteCmd = fmt.Sprintf("rm -f %s %s %s %s 2>/dev/null", logPattern, statusPattern, metaPattern, pidPattern)
 	}
-
-	// Build delete command
-	// Note: paths not quoted to allow tilde expansion
-	deleteCmd := fmt.Sprintf("rm -f %s %s %s 2>/dev/null", logFile, statusFile, metadataFile)
 
 	// Try to delete - silently ignore connection errors
 	_, _, err := ssh.Run(job.Host, deleteCmd)

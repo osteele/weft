@@ -84,15 +84,15 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		return false, fmt.Errorf("refresh job after start: %w", err)
 	}
 
-	// Prepare log/metadata paths
-	logFile := session.LogFile(job.ID, updated.StartTime)
-	statusFile := session.StatusFile(job.ID, updated.StartTime)
-	metadataFile := session.MetadataFile(job.ID, updated.StartTime)
-	pidFile := session.PidFile(job.ID, updated.StartTime)
+	// Simple file paths (no timestamp in primary files)
+	logFile := session.SimpleLogFile(job.ID)
+	statusFile := session.SimpleStatusFile(job.ID)
+	metadataFile := session.SimpleMetadataFile(job.ID)
+	pidFile := session.SimplePidFile(job.ID)
 
-	// Ensure log directory exists
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
+	// Ensure log directory exists and archive any old files
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(job.ID))
+	if _, stderr, err := ssh.Run(job.Host, mkdirAndArchive); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
 			return markStartPending(database, job, queueName, true)
@@ -169,15 +169,15 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 		return false, fmt.Errorf("refresh job after start: %w", err)
 	}
 
-	// Prepare log/metadata paths
-	logFile := session.LogFile(job.ID, updated.StartTime)
-	statusFile := session.StatusFile(job.ID, updated.StartTime)
-	metadataFile := session.MetadataFile(job.ID, updated.StartTime)
-	pidFile := session.PidFile(job.ID, updated.StartTime)
+	// Simple file paths (no timestamp in primary files)
+	logFile := session.SimpleLogFile(job.ID)
+	statusFile := session.SimpleStatusFile(job.ID)
+	metadataFile := session.SimpleMetadataFile(job.ID)
+	pidFile := session.SimplePidFile(job.ID)
 
-	// Ensure log directory exists
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", session.LogDir)
-	if _, stderr, err := ssh.Run(job.Host, mkdirCmd); err != nil {
+	// Ensure log directory exists and archive any old files
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(job.ID))
+	if _, stderr, err := ssh.Run(job.Host, mkdirAndArchive); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
 			return markStartPending(database, job, queueName, true)
