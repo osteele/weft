@@ -839,6 +839,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.applyJobFilter()
 
+		// Clean up stale progress entries for jobs that are no longer running
+		runningJobIDs := make(map[int64]bool)
+		for _, job := range msg.jobs {
+			if job.Status == db.StatusRunning {
+				runningJobIDs[job.ID] = true
+			}
+		}
+		for jobID := range m.jobProgress {
+			if !runningJobIDs[jobID] {
+				delete(m.jobProgress, jobID)
+			}
+		}
+
 		// If there's a pending job selection, find and select it
 		if m.pendingSelectJobID > 0 {
 			for i, job := range m.jobs {
@@ -2616,15 +2629,15 @@ func formatHostSummaryMetricAbbrev(label string, pct int, ok bool) string {
 
 func hostCPULoadPercent(host *Host) (int, bool) {
 	if host == nil || host.LoadAvg == "" || host.CPUs <= 0 {
-		return 0, false
+		return host.lastCPUPct, host.lastCPUPct > 0
 	}
 	loadFields := strings.Fields(strings.ReplaceAll(host.LoadAvg, ",", " "))
 	if len(loadFields) == 0 {
-		return 0, false
+		return host.lastCPUPct, host.lastCPUPct > 0
 	}
 	load, err := strconv.ParseFloat(strings.TrimSpace(loadFields[0]), 64)
 	if err != nil {
-		return 0, false
+		return host.lastCPUPct, host.lastCPUPct > 0
 	}
 	pct := int(math.Round((load / float64(host.CPUs)) * 100))
 	if pct < 0 {
@@ -2633,6 +2646,7 @@ func hostCPULoadPercent(host *Host) (int, bool) {
 	if pct > 200 {
 		pct = 200
 	}
+	host.lastCPUPct = pct
 	return pct, true
 }
 
@@ -2640,7 +2654,7 @@ func hostMemUsagePercent(host *Host) (int, bool) {
 	used, okUsed := parseSizeToGiB(host.MemUsed)
 	total, okTotal := parseSizeToGiB(host.MemTotal)
 	if !okUsed || !okTotal || total <= 0 {
-		return 0, false
+		return host.lastRAMPct, host.lastRAMPct > 0
 	}
 	pct := int(math.Round((used / total) * 100))
 	if pct < 0 {
@@ -2649,6 +2663,7 @@ func hostMemUsagePercent(host *Host) (int, bool) {
 	if pct > 100 {
 		pct = 100
 	}
+	host.lastRAMPct = pct
 	return pct, true
 }
 
@@ -2669,11 +2684,12 @@ func hostGPULoadPercent(host *Host) (int, bool) {
 		}
 	}
 	if maxLoad < 0 {
-		return 0, false
+		return host.lastGPUPct, host.lastGPUPct > 0
 	}
 	if maxLoad > 100 {
 		maxLoad = 100
 	}
+	host.lastGPUPct = maxLoad
 	return maxLoad, true
 }
 

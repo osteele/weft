@@ -49,10 +49,12 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		if queuefile.IsConnectionError(err) {
 			return markStartPending(database, job, queueName, false)
 		}
-		// Job not found in remote queue - this can happen if:
-		// 1. The queue runner already started it
-		// 2. Sync issue between database and remote queue
-		// Use database info to start directly
+		// Job not found in remote queue - check if queue runner is already running it
+		if isQueueRunnerRunningJob(job.Host, queueName, job.ID) {
+			oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetail("queue runner is already running this job"))
+			return false, fmt.Errorf("job %d is already being run by the queue runner", job.ID)
+		}
+		// Job not in queue and not being run by queue runner - use database info to start directly
 		entry = &queuefile.Entry{
 			JobID:       job.ID,
 			WorkingDir:  job.WorkingDir,
@@ -263,4 +265,40 @@ func isConnectionFailure(stderr string, err error) bool {
 		return true
 	}
 	return false
+}
+
+// isQueueRunnerRunningJob checks if the queue runner is currently running this job.
+// Returns true if either:
+// 1. The queue's .current file contains this job ID
+// 2. There's a PID file for this job with a running process
+func isQueueRunnerRunningJob(host, queueName string, jobID int64) bool {
+	// Check if this job is the current job in the queue runner
+	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
+	pidPattern := session.PidFilePattern(jobID)
+
+	// Combined check: is this job current OR has a running process?
+	checkCmd := fmt.Sprintf(`
+		current=$(cat %s 2>/dev/null)
+		if [ "$current" = "%d" ]; then
+			echo "CURRENT"
+			exit 0
+		fi
+		pid_file=$(ls %s 2>/dev/null | head -1)
+		if [ -n "$pid_file" ]; then
+			pid=$(cat "$pid_file" 2>/dev/null | head -1)
+			if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+				echo "RUNNING"
+				exit 0
+			fi
+		fi
+		echo "NO"
+	`, currentFile, jobID, pidPattern)
+
+	stdout, _, err := ssh.Run(host, checkCmd)
+	if err != nil {
+		return false // Can't determine, allow start to proceed
+	}
+
+	result := strings.TrimSpace(stdout)
+	return result == "CURRENT" || result == "RUNNING"
 }

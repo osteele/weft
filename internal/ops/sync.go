@@ -363,12 +363,11 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 	// Session doesn't exist - check for status file (exact path first)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
 	result, err := ReadStatusFile(job.Host, statusFile, timeout)
-	if err != nil {
-		return false, err
-	}
+	// Note: err is ignored here - we'll try pattern-based lookup as fallback
 
-	// If exact path not found and job has a QueueName, try pattern-based lookup.
-	// This handles jobs that were started via start_now, killed, then re-ran via queue runner.
+	// If exact path not found (or errored) and job has a QueueName, try pattern-based lookup.
+	// This handles jobs that were started via start_now, killed, then re-ran via queue runner,
+	// or cases where the exact path check fails due to network issues.
 	if result == nil && job.QueueName != "" {
 		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
 		if found.IsSome() && found.Unwrap() {
@@ -378,6 +377,11 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 			CacheCompletedJobLog(job)
 			return true, nil
 		}
+	}
+
+	// If we had an error from exact path and pattern-based didn't find anything, propagate the error
+	if err != nil && result == nil {
+		return false, err
 	}
 
 	if result != nil {

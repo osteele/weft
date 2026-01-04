@@ -93,6 +93,10 @@ type Host struct {
 
 	// Running jobs on this host
 	RunningJobs []HostRunningJob
+
+	lastCPUPct int
+	lastRAMPct int
+	lastGPUPct int
 }
 
 // HostInfoCommand is the SSH command to gather host information
