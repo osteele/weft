@@ -4,6 +4,7 @@ package ops
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -470,7 +471,22 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 			}
 			return true, nil
 		}
-		// Job was running/starting but is now gone - mark as dead
+		// Before marking dead, do a secondary probe for the status file.
+		// QuickStatus may have returned DEAD due to a transient issue.
+		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
+		if found.IsSome() && found.Unwrap() {
+			// Status file exists - job actually completed, not dead
+			// Log this anomaly for debugging (QuickStatus said DEAD but file exists)
+			log.Printf("sync: QuickStatus returned DEAD for job %d on %s but status file exists (exit=%d, mtime=%d) - recovering as completed",
+				job.ID, job.Host, exitCode, mtime)
+			UpdateStartTimeFromMetadata(database, job, timeout)
+			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
+				return false, err
+			}
+			CacheCompletedJobLog(job)
+			return true, nil
+		}
+		// Confirmed dead - no status file found
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return false, err
 		}
