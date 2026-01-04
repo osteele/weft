@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -196,12 +197,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--draft cannot be combined with --after/--depends-on or --after-any")
 	}
 
+	dirProvided := runDir != ""
+
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided
 	parsedDir, parsedCmd := parseCdPrefix(command)
 	if parsedDir != "" && runDir == "" {
 		command = parsedCmd
 		runDir = parsedDir
+		dirProvided = true
+		displayCdRewriteMessage(cmd, host, runDir, command)
 	}
 
 	// Set defaults
@@ -212,6 +217,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("get working dir: %w", err)
 		}
+	}
+
+	if dirProvided {
+		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
 	// Log CLI command invocation
@@ -452,6 +461,81 @@ func parseCdPrefix(command string) (dir string, remaining string) {
 
 	// No valid separator found
 	return "", command
+}
+
+func displayCdRewriteMessage(cmd *cobra.Command, host, dir, command string) {
+	if !usageHintsEnabled() {
+		return
+	}
+	rendered := formatRewrittenCommand(cmd, dir, host, command)
+	if rendered == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\nDetected \"cd %s &&\" in the command. The job will run as though you had invoked:\n  %s\n", dir, rendered)
+}
+
+func formatRewrittenCommand(cmd *cobra.Command, dir, host, command string) string {
+	if len(os.Args) == 0 {
+		return fmt.Sprintf("%s -C %s %s %q", cmd.CommandPath(), dir, host, command)
+	}
+	nonFlags := cmd.Flags().Args()
+	flagEnd := len(os.Args)
+	if len(nonFlags) > 0 && flagEnd >= len(nonFlags) {
+		flagEnd = len(os.Args) - len(nonFlags)
+	}
+	if flagEnd < 1 {
+		flagEnd = len(os.Args)
+	}
+	pieces := make([]string, 0, flagEnd+4)
+	pieces = append(pieces, os.Args[0])
+	if flagEnd > 1 {
+		pieces = append(pieces, os.Args[1:flagEnd]...)
+	}
+	pieces = append(pieces, "-C", dir, host, command)
+	for i, part := range pieces {
+		pieces[i] = shellQuote(part)
+	}
+	return strings.Join(pieces, " ")
+}
+
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.ContainsAny(s, " \t\n\"'`$\\") {
+		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+	}
+	return s
+}
+
+func maybeWarnHomePrefixedDir(host, dir string) {
+	if dir == "" {
+		return
+	}
+	if !usageHintsEnabled() {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	if !pathHasHomePrefix(dir, home) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\nWarning: working directory %s will be used literally on %s.\n", dir, host)
+	fmt.Fprintf(os.Stderr, "If you intended the remote home directory, quote it instead, e.g. -C '~/path/to/dir'.\n")
+}
+
+func pathHasHomePrefix(dir, home string) bool {
+	dirClean := filepath.Clean(dir)
+	homeClean := filepath.Clean(home)
+	if dirClean == homeClean {
+		return true
+	}
+	if strings.HasPrefix(dirClean, homeClean+string(os.PathSeparator)) {
+		return true
+	}
+	return false
 }
 
 func streamJobLogAllow(host, logFile string, jobID int64) error {
