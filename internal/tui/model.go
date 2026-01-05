@@ -4641,7 +4641,10 @@ func (m Model) formatStatus(job *db.Job) string {
 	case db.StatusStarting:
 		return "◐ starting"
 	case db.StatusCompleted:
-		if job.ExitCode != nil && *job.ExitCode == 0 {
+		if job.ExitCode == nil {
+			return "✔ completed"
+		}
+		if *job.ExitCode == 0 {
 			return "✔ succeeded"
 		}
 		return fmt.Sprintf("✖ failed (%d)", *job.ExitCode)

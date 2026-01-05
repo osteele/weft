@@ -397,7 +397,12 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 		return true, nil
 	}
 
-	// No status file - mark as dead
+	// No status file found - but only mark dead if job was actually running.
+	// Queued jobs shouldn't be marked dead just because they haven't run yet.
+	// Jobs with pending_status have deferred operations and shouldn't be marked dead.
+	if job.Status == db.StatusQueued || job.PendingStatus != nil {
+		return false, nil
+	}
 	if err := db.MarkDeadByID(database, job.ID); err != nil {
 		return false, err
 	}
