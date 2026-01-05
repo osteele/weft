@@ -34,9 +34,12 @@ var (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <job-id>...",
-	Short: "Check the status of one or more jobs",
+	Use:   "status [job-id]...",
+	Short: "Check the status of jobs",
 	Long: `Check the status of one or more jobs.
+
+Without arguments, shows all active jobs (running, starting, queued)
+and recent failures from the last 24 hours.
 
 Exit codes (single job only):
   0: Job completed successfully
@@ -45,11 +48,10 @@ Exit codes (single job only):
   3: Job not found
 
 Examples:
+  remote-jobs status              # Show all active jobs
   remote-jobs status 42
-  remote-jobs status 42 --fast     # Quick check with 2s timeout
-  remote-jobs status 42 --wait     # Wait for job to complete
-  remote-jobs log 42               # View job output`,
-	Args: usageArgs(cobra.MinimumNArgs(1)),
+  remote-jobs status 42 --fast    # Quick check with 2s timeout
+  remote-jobs status 42 --wait    # Wait for job to complete`,
 	RunE: runStatus,
 }
 
@@ -68,6 +70,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	// No args: show all active jobs
+	if len(args) == 0 {
+		return showActiveJobs(database)
+	}
 
 	var tracker *hostConnectionTracker
 	if statusWait {
@@ -535,4 +542,138 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 			os.Exit(ExitNotFound)
 		}
 	}
+}
+
+// showActiveJobs displays all active jobs (running, starting, queued) and recent failures
+func showActiveJobs(database *sql.DB) error {
+	// Sync first if not disabled
+	if !statusNoSync {
+		if statusSync {
+			hosts, err := db.ListUniqueActiveHosts(database)
+			if err == nil && len(hosts) > 0 {
+				for _, host := range hosts {
+					syncHost(database, host)
+				}
+			}
+		} else if statusFast {
+			performFastSync(database, false)
+		} else {
+			performSyncWithTimeout(database, DefaultSyncTimeout, false)
+		}
+	}
+
+	// Get running jobs
+	running, err := db.ListAllRunning(database)
+	if err != nil {
+		return fmt.Errorf("list running jobs: %w", err)
+	}
+
+	// Get starting jobs
+	starting, err := db.ListJobs(database, db.StatusStarting, "", 50)
+	if err != nil {
+		return fmt.Errorf("list starting jobs: %w", err)
+	}
+
+	// Get queued jobs
+	queued, err := db.ListJobs(database, db.StatusQueued, "", 50)
+	if err != nil {
+		return fmt.Errorf("list queued jobs: %w", err)
+	}
+
+	// Get recent failed jobs
+	failed, err := db.ListRecentFailed(database, 10)
+	if err != nil {
+		return fmt.Errorf("list failed jobs: %w", err)
+	}
+
+	if len(running) == 0 && len(starting) == 0 && len(queued) == 0 && len(failed) == 0 {
+		fmt.Println("No active jobs")
+		return nil
+	}
+
+	printed := false
+
+	// Print running jobs
+	if len(running) > 0 {
+		fmt.Printf("Running (%d):\n", len(running))
+		for _, job := range running {
+			printJobSummary(job)
+		}
+		printed = true
+	}
+
+	// Print starting jobs
+	if len(starting) > 0 {
+		if printed {
+			fmt.Println()
+		}
+		fmt.Printf("Starting (%d):\n", len(starting))
+		for _, job := range starting {
+			printJobSummary(job)
+		}
+		printed = true
+	}
+
+	// Print queued jobs
+	if len(queued) > 0 {
+		if printed {
+			fmt.Println()
+		}
+		fmt.Printf("Queued (%d):\n", len(queued))
+		for _, job := range queued {
+			printJobSummary(job)
+		}
+		printed = true
+	}
+
+	// Print recent failed jobs
+	if len(failed) > 0 {
+		if printed {
+			fmt.Println()
+		}
+		fmt.Printf("Recent failures (last 24h):\n")
+		for _, job := range failed {
+			printFailedJobSummary(job)
+		}
+	}
+
+	return nil
+}
+
+func printJobSummary(job *db.Job) {
+	desc := job.EffectiveDescription()
+	if desc == "" {
+		desc = job.EffectiveCommand()
+	}
+	if len(desc) > 60 {
+		desc = desc[:57] + "..."
+	}
+	fmt.Printf("  %4d  %-10s  %s\n", job.ID, job.Host, desc)
+}
+
+func printFailedJobSummary(job *db.Job) {
+	desc := job.EffectiveDescription()
+	if desc == "" {
+		desc = job.EffectiveCommand()
+	}
+	if len(desc) > 50 {
+		desc = desc[:47] + "..."
+	}
+
+	// Format the failure reason
+	var reason string
+	switch job.Status {
+	case db.StatusDead:
+		reason = "dead"
+	case db.StatusFailed:
+		reason = "failed"
+	default:
+		if job.ExitCode != nil {
+			reason = fmt.Sprintf("exit %d", *job.ExitCode)
+		} else {
+			reason = "failed"
+		}
+	}
+
+	fmt.Printf("  %4d  %-10s  %-8s  %s\n", job.ID, job.Host, reason, desc)
 }

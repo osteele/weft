@@ -514,7 +514,7 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 // RecordCompletionByID updates a job by ID with its exit code and end time
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?
+		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL
 		 WHERE id = ? AND status IN (?, ?)`,
 		exitCode, endTime, StatusCompleted, id, StatusRunning, StatusQueued,
 	)
@@ -525,7 +525,7 @@ func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) err
 func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?
+		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL
 		 WHERE id = ? AND status IN (?, ?, ?)`,
 		endTime, StatusDead, id, StatusRunning, StatusStarting, StatusQueued,
 	)
@@ -811,7 +811,7 @@ func UpdateQueuedToRunningWithSession(db *sql.DB, id int64, sessionName string) 
 // RecordCompletion updates a job with its exit code and end time
 func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTime int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?
+		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL
 		 WHERE host = ? AND session_name = ? AND status = ?`,
 		exitCode, endTime, StatusCompleted, host, sessionName, StatusRunning,
 	)
@@ -822,7 +822,7 @@ func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTim
 func MarkDead(db *sql.DB, host, sessionName string) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?
+		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL
 		 WHERE host = ? AND session_name = ? AND status = ?`,
 		endTime, StatusDead, host, sessionName, StatusRunning,
 	)
@@ -1146,6 +1146,23 @@ func ListRunning(db *sql.DB, host string) ([]*Job, error) {
 func ListAllRunning(db *sql.DB) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
 	return queryJobs(db, query, StatusRunning)
+}
+
+// ListRecentFailed returns recently failed jobs (last 24 hours)
+// Includes: completed with non-zero exit code, status=failed, status=dead
+func ListRecentFailed(db *sql.DB, limit int) ([]*Job, error) {
+	cutoff := time.Now().Add(-24 * time.Hour).Unix()
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE tombstoned = 0
+		AND end_time > ?
+		AND (
+			(status = ? AND exit_code IS NOT NULL AND exit_code != 0)
+			OR status = ?
+			OR status = ?
+		)
+		ORDER BY end_time DESC
+		LIMIT ?`, jobSelectColumns)
+	return queryJobs(db, query, cutoff, StatusCompleted, StatusFailed, StatusDead, limit)
 }
 
 // ListUniqueRunningHosts returns all unique hosts with running jobs

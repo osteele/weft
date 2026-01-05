@@ -932,7 +932,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loadHosts(), // Refresh hosts to update queue status
 			)
 		}
-		return m, m.setFlash("Sync complete", false)
+		return m, nil
 
 	case logFetchedMsg:
 		m.logLoading = false
@@ -1433,12 +1433,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, host := range m.hosts {
 			// Refresh host if:
 			// 1. In hosts view and (not queried yet OR online), OR
-			// 2. Host has running jobs (to update LastCheck for stale indicator)
+			// 2. Host has running jobs (to update LastCheck for stale indicator), OR
+			// 3. Host is marked online (to detect when it goes offline)
 			inHostsView := m.viewMode == ViewModeHosts
 			needsRefresh := (!m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline)
 			hasRunningJobs := hostsWithRunningJobs[host.Name]
+			isOnline := host.Status == HostStatusOnline
 
-			if (inHostsView && needsRefresh) || hasRunningJobs {
+			if (inHostsView && needsRefresh) || hasRunningJobs || isOnline {
 				cmds = append(cmds, m.fetchHostInfo(host.Name))
 				if inHostsView {
 					cmds = append(cmds, m.fetchQueueStatus(host.Name))
@@ -2009,7 +2011,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Sync):
 		if m.viewMode == ViewModeJobs && !m.syncing {
 			m.syncing = true
-			return m, tea.Batch(m.setFlash("Syncing...", false), m.performBackgroundSync())
+			return m, m.performBackgroundSync()
 		}
 		return m, nil
 	}

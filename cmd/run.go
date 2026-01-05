@@ -321,9 +321,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if len(runEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
-		if usageHintsEnabled() {
-			fmt.Printf("\nTo start immediately: remote-jobs start %d\n", jobID)
-		}
 		if res.Deferred {
 			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
 		} else {
