@@ -649,6 +649,11 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 	}
 
 	if moved {
+		// Update queued_at to be earlier than all other queued jobs
+		if err := db.SetQueuedAtBefore(database, jobID, job.Host); err != nil {
+			// Non-fatal: remote operation succeeded, just log locally
+			fmt.Fprintf(os.Stderr, "Warning: failed to update queue order: %v\n", err)
+		}
 		fmt.Printf("Job %d moved to front of queue '%s' on %s\n", jobID, jobQueueName, job.Host)
 	} else {
 		fmt.Printf("Job %d is already at the front of queue '%s' on %s\n", jobID, jobQueueName, job.Host)

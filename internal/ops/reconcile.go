@@ -118,6 +118,10 @@ func Reconcile(database *sql.DB, job *db.Job, remoteStatus string, opts Reconcil
 		if err := applyQueueToRemote(job, opts.Timeout); err != nil {
 			return nil, err
 		}
+		// Set queued_at when job is successfully added to the remote queue
+		if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+			return nil, err
+		}
 		return &ReconcileResult{
 			Action:    "update_remote",
 			OldStatus: job.Status,
@@ -215,6 +219,13 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 		return nil, err
 	}
 
+	// Set queued_at when job is successfully added to the remote queue
+	if targetStatus == db.StatusQueued {
+		if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+			return nil, err
+		}
+	}
+
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 		oplog.WithDetailf("applied pending: %s -> %s", job.Status, targetStatus))
 
@@ -310,18 +321,31 @@ func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
 	return AppendQueueEntry(job.Host, job.QueueName, entry, opts)
 }
 
-// applyStartToRemote starts a queued job on the remote host.
+// applyStartToRemote starts a queued or draft job on the remote host.
 func applyStartToRemote(database *sql.DB, job *db.Job, timeout time.Duration) error {
-	// This would trigger the queue runner to start the job
-	// For now, we only support this for queued jobs
-	if job.Status != db.StatusQueued {
-		return fmt.Errorf("can only start queued jobs, got status %s", job.Status)
+	// For draft jobs, first add to queue
+	if job.Status == db.StatusDraft {
+		if err := applyQueueToRemote(job, timeout); err != nil {
+			return fmt.Errorf("queue draft job: %w", err)
+		}
+		// Set queued_at since job is now in queue
+		if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+			return fmt.Errorf("set queued_at: %w", err)
+		}
+		// Update job status to queued for startQueuedJobNow
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+			return fmt.Errorf("update status to queued: %w", err)
+		}
+	} else if job.Status != db.StatusQueued {
+		return fmt.Errorf("can only start queued or draft jobs, got status %s", job.Status)
 	}
 
 	// Signal the queue runner to start this job immediately
-	// This is a placeholder - the actual implementation would depend on
-	// how the queue runner accepts immediate start signals
-	return fmt.Errorf("immediate start not yet implemented")
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+	return startQueuedJobNow(database, job, queueName, timeout)
 }
 
 // ProbeRemoteStatus determines the current status of a job on the remote host.

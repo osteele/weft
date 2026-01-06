@@ -1831,8 +1831,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, nil
 		}
-		// Toggle behavior: draft→queued, anything else→draft
-		if job.Status == db.StatusDraft {
+		// Toggle behavior based on effective (displayed) status: draft→queued, anything else→draft
+		if job.EffectiveStatus() == db.StatusDraft {
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=d action=queue_draft"))
 			return m, tea.Batch(m.setFlash("Queueing draft job...", false), m.queueDraftJob(job))
 		}
@@ -1934,7 +1934,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
-		switch job.Status {
+		// Use effective status so pending state is respected
+		switch job.EffectiveStatus() {
 		case db.StatusQueued:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=start_now"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
@@ -4954,7 +4955,7 @@ func recentStatusPriority(job *db.Job) int {
 	switch job.Status {
 	case db.StatusRunning, db.StatusStarting:
 		return 0
-	case db.StatusQueued:
+	case db.StatusQueued, db.StatusDraft:
 		return 1
 	default:
 		return 2
@@ -4993,10 +4994,10 @@ func getJobSortTime(job *db.Job) int64 {
 
 // jobQueueOrderLess returns true if job i should come before job j in queue order
 func jobQueueOrderLess(i, j *db.Job) bool {
-	// Status priority: queued first, then running/starting, then completed/dead/failed
+	// Status priority: queued/draft first, then running/starting, then completed/dead/failed
 	statusPriority := func(job *db.Job) int {
 		switch job.Status {
-		case db.StatusQueued:
+		case db.StatusQueued, db.StatusDraft:
 			return 0
 		case db.StatusRunning, db.StatusStarting:
 			return 1
@@ -5011,11 +5012,15 @@ func jobQueueOrderLess(i, j *db.Job) bool {
 	}
 
 	// Within same status group:
-	// - Queued: by queue position (lower ID typically means queued earlier, but could be reordered)
+	// - Queued/Draft: by queued_at (earlier = runs first), falling back to ID for legacy jobs
 	// - Running: by start time (oldest first = running longest)
 	// - Completed: by end time (most recent first)
-	if i.Status == db.StatusQueued {
-		// For queued jobs, use ID as proxy for queue position (lower = earlier)
+	if i.Status == db.StatusQueued || i.Status == db.StatusDraft {
+		// For queued/draft jobs, use queued_at for proper queue order
+		if i.QueuedAt > 0 && j.QueuedAt > 0 {
+			return i.QueuedAt < j.QueuedAt
+		}
+		// Fallback to ID for legacy jobs without queued_at
 		return i.ID < j.ID
 	} else if i.Status == db.StatusRunning || i.Status == db.StatusStarting {
 		// Running jobs: show oldest (running longest) first
@@ -5473,13 +5478,13 @@ func (m *Model) handleHostSelectionChanged() tea.Cmd {
 func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	switch mode {
 	case jobFilterRecent:
-		// Active jobs (running, starting, queued)
-		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued {
+		// Active jobs (running, starting, queued, draft)
+		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued || job.Status == db.StatusDraft {
 			return true
 		}
 		return isRecentHistory(job)
 	case jobFilterActive:
-		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued
+		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued || job.Status == db.StatusDraft
 	case jobFilterSucceeded:
 		return job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
 	case jobFilterFailed:
@@ -6055,8 +6060,13 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	if job == nil || job.Status != db.StatusQueued {
 		return nil
 	}
+	database := m.database
 	return func() tea.Msg {
 		moved, err := queuefile.MoveToFront(job.Host, job.QueueName, job.ID)
+		if err == nil && moved {
+			// Update queued_at to be earlier than all other queued jobs
+			_ = db.SetQueuedAtBefore(database, job.ID, job.Host)
+		}
 		return jobMovedToFrontMsg{jobID: job.ID, moved: moved, err: err}
 	}
 }

@@ -29,6 +29,7 @@ type Job struct {
 	EnvVars              []string
 	DepSpec              string // Dependency specification (e.g., "42" or "42+" for after-any)
 	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
+	QueuedAt             int64  // When job was added to remote queue (for queue ordering)
 	StartTime            int64
 	EndTime              *int64
 	ExitCode             *int
@@ -41,7 +42,7 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, dep_spec, tombstoned, last_synced_status, pending_status, pending_at`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, dep_spec, tombstoned, last_synced_status, pending_status, pending_at`
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -205,6 +206,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add dep_spec column for job dependencies (e.g., "42" or "42+" for after-any)
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN dep_spec TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add queued_at column for queue ordering (independent of job ID)
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queued_at INTEGER`); err != nil {
 		return err
 	}
 
@@ -628,6 +634,41 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 	return err
 }
 
+// SetQueuedAtNow sets queued_at to the current time if it's not already set.
+// Called when a job is successfully added to the remote queue.
+func SetQueuedAtNow(db *sql.DB, jobID int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET queued_at = ? WHERE id = ? AND (queued_at IS NULL OR queued_at = 0)`,
+		time.Now().Unix(), jobID,
+	)
+	return err
+}
+
+// SetQueuedAtBefore sets queued_at to one second before the current minimum for the host.
+// Used for "move to front" operations to ensure this job runs first.
+func SetQueuedAtBefore(db *sql.DB, jobID int64, host string) error {
+	// Get the minimum queued_at for queued jobs on this host
+	var minQueuedAt sql.NullInt64
+	err := db.QueryRow(
+		`SELECT MIN(queued_at) FROM jobs WHERE host = ? AND status = ? AND queued_at > 0 AND id != ? AND tombstoned = 0`,
+		host, StatusQueued, jobID,
+	).Scan(&minQueuedAt)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	var newQueuedAt int64
+	if minQueuedAt.Valid && minQueuedAt.Int64 > 0 {
+		newQueuedAt = minQueuedAt.Int64 - 1
+	} else {
+		// No other queued jobs, use current time
+		newQueuedAt = time.Now().Unix()
+	}
+
+	_, err = db.Exec(`UPDATE jobs SET queued_at = ? WHERE id = ?`, newQueuedAt, jobID)
+	return err
+}
+
 // IsTerminalStatus returns true if the status represents a terminal state.
 func IsTerminalStatus(status string) bool {
 	return status == StatusCompleted || status == StatusDead || status == StatusFailed || status == StatusDraft
@@ -651,11 +692,11 @@ func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName 
 
 // RecordQueuedWithGPU records a queued job with GPU specification
 func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
-	createdAt := time.Now().Unix()
+	now := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu)
-		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?)`,
-		host, workingDir, command, description, createdAt, StatusQueued, queueName, gpu,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+		host, workingDir, command, description, now, now, StatusQueued, queueName, gpu,
 	)
 	if err != nil {
 		return 0, err
@@ -919,6 +960,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var envVars sql.NullString
 	var depSpec sql.NullString
 	var createdAt sql.NullInt64
+	var queuedAt sql.NullInt64
 	var startTime sql.NullInt64
 	var endTime sql.NullInt64
 	var exitCode sql.NullInt64
@@ -927,7 +969,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -962,6 +1004,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if createdAt.Valid {
 		j.CreatedAt = createdAt.Int64
+	}
+	if queuedAt.Valid {
+		j.QueuedAt = queuedAt.Int64
 	}
 	if startTime.Valid {
 		j.StartTime = startTime.Int64
@@ -1034,6 +1079,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var envVars sql.NullString
 		var depSpec sql.NullString
 		var createdAt sql.NullInt64
+		var queuedAt sql.NullInt64
 		var startTime sql.NullInt64
 		var endTime sql.NullInt64
 		var exitCode sql.NullInt64
@@ -1042,7 +1088,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingStatus sql.NullString
 		var pendingAt sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 		if err != nil {
 			return nil, err
 		}
@@ -1074,6 +1120,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if createdAt.Valid {
 			j.CreatedAt = createdAt.Int64
+		}
+		if queuedAt.Valid {
+			j.QueuedAt = queuedAt.Int64
 		}
 		if startTime.Valid {
 			j.StartTime = startTime.Int64
@@ -1370,6 +1419,15 @@ func (j *Job) EffectiveWorkingDir() string {
 		return dir
 	}
 	return j.WorkingDir
+}
+
+// EffectiveStatus returns the status to use for UI decisions.
+// Returns PendingStatus if set (the desired/target state), otherwise Status.
+func (j *Job) EffectiveStatus() string {
+	if j.PendingStatus != nil {
+		return *j.PendingStatus
+	}
+	return j.Status
 }
 
 // EffectiveDescription returns the best description for display.
