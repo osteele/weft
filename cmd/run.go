@@ -374,12 +374,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	if runFollow {
-		fmt.Printf("\nFollowing log output (Ctrl+C to stop)...\n\n")
-		tailCmd := fmt.Sprintf("tail -n 50 -f %s", result.Info.LogFile)
-		sshCmd := exec.Command("ssh", host, tailCmd)
+		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
+		script := fmt.Sprintf("while [ ! -f %s ]; do sleep 1; done; tail -n 50 -F %s", shellQuote(result.Info.LogFile), shellQuote(result.Info.LogFile))
+		remoteCmd := fmt.Sprintf("sh -c %s", shellQuote(script))
+		sshCmd := exec.Command("ssh", host, remoteCmd)
 		sshCmd.Stdout = os.Stdout
 		sshCmd.Stderr = os.Stderr
-		return sshCmd.Run()
+		if err := streamCommandUntilJobDone(database, result.Info.JobID, sshCmd); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if usageHintsEnabled() {

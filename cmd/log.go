@@ -137,6 +137,11 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
+	if logFollow && isTerminalStatus(job.Status) {
+		fmt.Fprintf(os.Stderr, "Job %d already completed; showing log output without following.\n", jobID)
+		logFollow = false
+	}
+
 	defaultTailHint := shouldShowDefaultTailHint(cmd)
 	tailHintPrinted := false
 
@@ -174,11 +179,11 @@ func runLog(cmd *cobra.Command, args []string) error {
 	remoteCmd := buildLogCommand(logFile)
 
 	if logFollow {
-		// Follow mode - use interactive SSH
+		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
 		sshCmd := exec.Command("ssh", job.Host, remoteCmd)
 		sshCmd.Stdout = os.Stdout
 		sshCmd.Stderr = os.Stderr
-		return sshCmd.Run()
+		return streamCommandUntilJobDone(database, job.ID, sshCmd)
 	}
 
 	// Regular mode
