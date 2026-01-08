@@ -85,6 +85,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Check if all requested jobs are already in terminal state - skip sync if so
 	needsSync := false
+	hostsToSync := make(map[string]struct{})
 	if !statusNoSync {
 		for _, arg := range args {
 			jobID, err := strconv.ParseInt(arg, 10, 64)
@@ -97,26 +98,26 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 			if !isTerminalStatus(job.Status) {
 				needsSync = true
-				break
+				if job.Host != "" {
+					hostsToSync[job.Host] = struct{}{}
+				}
 			}
 		}
 	}
 
 	// Sync logic: default 5s, fast 2s, full 30s, or skip
 	if needsSync {
+		hosts := mapKeys(hostsToSync)
 		if statusSync {
 			// Full sync requested (30s timeout)
-			hosts, err := db.ListUniqueActiveHosts(database)
-			if err == nil && len(hosts) > 0 {
-				for _, host := range hosts {
-					syncHost(database, host)
-				}
+			for _, host := range hosts {
+				syncHost(database, host)
 			}
 			// Start queue runners (full sync mode)
-			startQueueRunnersForQueuedHosts(database)
+			startQueueRunnersForHosts(database, hosts)
 		} else if statusFast {
 			// Fast sync (2s timeout) - skip queue starting for speed
-			completed, unreachable := performFastSync(database, false)
+			completed, unreachable := performFastSyncForHosts(database, hosts, false)
 			if !completed {
 				if note := buildStaleDataNote(database, unreachable); note != "" {
 					fmt.Fprintln(os.Stderr, note)
@@ -124,14 +125,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// Default sync (5s timeout)
-			completed, unreachable := performSyncWithTimeout(database, DefaultSyncTimeout, false)
+			completed, unreachable := performSyncWithTimeoutForHosts(database, hosts, DefaultSyncTimeout, false)
 			if !completed {
 				if note := buildStaleDataNote(database, unreachable); note != "" {
 					fmt.Fprintln(os.Stderr, note)
 				}
 			}
 			// Start queue runners (default mode)
-			startQueueRunnersForQueuedHosts(database)
+			startQueueRunnersForHosts(database, hosts)
 		}
 	}
 
@@ -464,6 +465,18 @@ func formatJobIDList(ids []int64) string {
 		parts[i] = strconv.FormatInt(id, 10)
 	}
 	return strings.Join(parts, ", ")
+}
+
+func mapKeys(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func isTerminalStatus(status string) bool {

@@ -255,7 +255,19 @@ func startQueueRunnersForQueuedHosts(database *sql.DB) {
 		return // Silently ignore errors
 	}
 
+	startQueueRunnersForHosts(database, hosts)
+}
+
+func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
+	hosts = uniqueHosts(hosts)
+	if len(hosts) == 0 {
+		return
+	}
 	for _, host := range hosts {
+		count, err := db.CountQueuedByHost(database, host)
+		if err != nil || count == 0 {
+			continue
+		}
 		started, err := ensureQueueRunnerStarted(host, defaultQueueName)
 		if err != nil {
 			// Silently ignore - host might be unreachable

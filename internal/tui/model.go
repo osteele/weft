@@ -30,8 +30,8 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
-	"github.com/mattn/go-runewidth"
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/core"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -2975,11 +2975,6 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	}
 	b.WriteString("\n\n")
 
-	wroteTiming := m.writeJobTimingSection(&b, job, labelStyle, valueStyle)
-	if wroteTiming {
-		b.WriteString("\n")
-	}
-
 	// Description (if any)
 	if job.Description != "" {
 		b.WriteString(labelStyle.Render("Desc"))
@@ -2992,30 +2987,6 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	b.WriteString(labelStyle.Render("Directory"))
 	b.WriteString(valueStyle.Render(job.DisplayWorkingDir()))
 	b.WriteString("\n")
-
-	// Exit status
-	if job.Status == db.StatusCompleted && job.ExitCode != nil {
-		b.WriteString(labelStyle.Render("Exit"))
-		if *job.ExitCode == 0 {
-			b.WriteString(completedStyle.Render("0 (success)"))
-		} else {
-			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
-		}
-		b.WriteString("\n")
-	} else if job.Status == db.StatusDead {
-		b.WriteString(labelStyle.Render("Exit"))
-		b.WriteString(deadStyle.Render("killed/crashed"))
-		b.WriteString("\n")
-	} else if job.Status == db.StatusFailed {
-		b.WriteString(labelStyle.Render("Exit"))
-		b.WriteString(failedStyle.Render("failed to start"))
-		b.WriteString("\n")
-		if job.ErrorMessage != "" {
-			b.WriteString(labelStyle.Render("Error"))
-			b.WriteString(errorStyle.Render(job.ErrorMessage))
-			b.WriteString("\n")
-		}
-	}
 
 	// Command (most important) - wrap and indent continuation lines, but limit height
 	b.WriteString(labelStyle.Render("Command"))
@@ -3048,6 +3019,32 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString(labelStyle.Render("Env"))
 		b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
 		b.WriteString("\n")
+	}
+
+	_ = m.writeJobTimingSection(&b, job, labelStyle, valueStyle)
+
+	// Exit status
+	if job.Status == db.StatusCompleted && job.ExitCode != nil {
+		b.WriteString(labelStyle.Render("Exit"))
+		if *job.ExitCode == 0 {
+			b.WriteString(completedStyle.Render("0 (success)"))
+		} else {
+			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
+		}
+		b.WriteString("\n")
+	} else if job.Status == db.StatusDead {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(deadStyle.Render("killed/crashed"))
+		b.WriteString("\n")
+	} else if job.Status == db.StatusFailed {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(failedStyle.Render("failed to start"))
+		b.WriteString("\n")
+		if job.ErrorMessage != "" {
+			b.WriteString(labelStyle.Render("Error"))
+			b.WriteString(errorStyle.Render(job.ErrorMessage))
+			b.WriteString("\n")
+		}
 	}
 
 	// Process stats and progress section for running jobs
@@ -6779,31 +6776,7 @@ func truncate(s string, max int) string {
 	if max <= 0 {
 		return ""
 	}
-	if runewidth.StringWidth(s) <= max {
-		return s
-	}
-	ellipsisWidth := runewidth.StringWidth("…")
-	if max <= ellipsisWidth {
-		return "…"
-	}
-	target := max - ellipsisWidth
-	var b strings.Builder
-	width := 0
-	for _, r := range s {
-		rw := runewidth.RuneWidth(r)
-		if rw == 0 {
-			continue
-		}
-		if width+rw > target {
-			break
-		}
-		b.WriteRune(r)
-		width += rw
-	}
-	if b.Len() == 0 {
-		return "…"
-	}
-	return b.String() + "…"
+	return ansi.Truncate(s, max, "…")
 }
 
 func shortenCommandPath(cmd string) string {

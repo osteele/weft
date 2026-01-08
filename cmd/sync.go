@@ -173,6 +173,22 @@ func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose boo
 	if err != nil || len(hosts) == 0 {
 		return true, nil
 	}
+	return performSyncWithTimeoutForHosts(database, hosts, timeout, verbose)
+}
+
+// performFastSync performs a quick sync with fast timeout for list/status commands
+// Returns true if sync completed, false if timed out, along with hosts that timed out
+func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
+	return performSyncWithTimeout(database, FastSyncTimeout, verbose)
+}
+
+// performSyncWithTimeoutForHosts performs a sync with specified timeout for a host subset.
+// Returns true if sync completed, false if timed out, along with hosts that timed out.
+func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, timeout time.Duration, verbose bool) (bool, []string) {
+	hosts = uniqueHosts(hosts)
+	if len(hosts) == 0 {
+		return true, nil
+	}
 
 	// Set timeout for SSH operations
 	// We'll use goroutines with a timeout context
@@ -205,10 +221,9 @@ func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose boo
 	return allCompleted, unreachable
 }
 
-// performFastSync performs a quick sync with fast timeout for list/status commands
-// Returns true if sync completed, false if timed out, along with hosts that timed out
-func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
-	return performSyncWithTimeout(database, FastSyncTimeout, verbose)
+// performFastSyncForHosts performs a quick sync with fast timeout for a host subset.
+func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bool, []string) {
+	return performSyncWithTimeoutForHosts(database, hosts, FastSyncTimeout, verbose)
 }
 
 // syncHostWithTimeout syncs a host with a specific timeout
