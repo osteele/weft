@@ -2988,6 +2988,35 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString("\n")
 	}
 
+	// Directory (show remote home when unset)
+	b.WriteString(labelStyle.Render("Directory"))
+	b.WriteString(valueStyle.Render(job.DisplayWorkingDir()))
+	b.WriteString("\n")
+
+	// Exit status
+	if job.Status == db.StatusCompleted && job.ExitCode != nil {
+		b.WriteString(labelStyle.Render("Exit"))
+		if *job.ExitCode == 0 {
+			b.WriteString(completedStyle.Render("0 (success)"))
+		} else {
+			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
+		}
+		b.WriteString("\n")
+	} else if job.Status == db.StatusDead {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(deadStyle.Render("killed/crashed"))
+		b.WriteString("\n")
+	} else if job.Status == db.StatusFailed {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(failedStyle.Render("failed to start"))
+		b.WriteString("\n")
+		if job.ErrorMessage != "" {
+			b.WriteString(labelStyle.Render("Error"))
+			b.WriteString(errorStyle.Render(job.ErrorMessage))
+			b.WriteString("\n")
+		}
+	}
+
 	// Command (most important) - wrap and indent continuation lines, but limit height
 	b.WriteString(labelStyle.Render("Command"))
 	cmd := job.EffectiveCommand()
@@ -3013,41 +3042,12 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	b.WriteString(strings.Join(cmdLines, "\n"))
 	b.WriteString("\n")
 
-	// Directory (show remote home when unset)
-	b.WriteString(labelStyle.Render("Directory"))
-	b.WriteString(valueStyle.Render(job.DisplayWorkingDir()))
-	b.WriteString("\n")
-
 	// Environment variables (if any)
 	envVars := job.ParseExportVars()
 	if len(envVars) > 0 {
 		b.WriteString(labelStyle.Render("Env"))
 		b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
 		b.WriteString("\n")
-	}
-
-	// Exit status
-	if job.Status == db.StatusCompleted && job.ExitCode != nil {
-		b.WriteString(labelStyle.Render("Exit"))
-		if *job.ExitCode == 0 {
-			b.WriteString(completedStyle.Render("0 (success)"))
-		} else {
-			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
-		}
-		b.WriteString("\n")
-	} else if job.Status == db.StatusDead {
-		b.WriteString(labelStyle.Render("Exit"))
-		b.WriteString(deadStyle.Render("killed/crashed"))
-		b.WriteString("\n")
-	} else if job.Status == db.StatusFailed {
-		b.WriteString(labelStyle.Render("Exit"))
-		b.WriteString(failedStyle.Render("failed to start"))
-		b.WriteString("\n")
-		if job.ErrorMessage != "" {
-			b.WriteString(labelStyle.Render("Error"))
-			b.WriteString(errorStyle.Render(job.ErrorMessage))
-			b.WriteString("\n")
-		}
 	}
 
 	// Process stats and progress section for running jobs
