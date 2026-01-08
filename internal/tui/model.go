@@ -3013,9 +3013,9 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	b.WriteString(strings.Join(cmdLines, "\n"))
 	b.WriteString("\n")
 
-	// Directory
+	// Directory (show remote home when unset)
 	b.WriteString(labelStyle.Render("Directory"))
-	b.WriteString(valueStyle.Render(job.EffectiveWorkingDir()))
+	b.WriteString(valueStyle.Render(job.DisplayWorkingDir()))
 	b.WriteString("\n")
 
 	// Environment variables (if any)

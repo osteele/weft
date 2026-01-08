@@ -1421,6 +1421,16 @@ func (j *Job) EffectiveWorkingDir() string {
 	return j.WorkingDir
 }
 
+// DisplayWorkingDir returns a user-friendly directory string, falling back to
+// the remote home when no explicit directory is set.
+func (j *Job) DisplayWorkingDir() string {
+	dir := strings.TrimSpace(j.EffectiveWorkingDir())
+	if dir == "" {
+		return "~ (remote home)"
+	}
+	return dir
+}
+
 // EffectiveStatus returns the status to use for UI decisions.
 // Returns PendingStatus if set (the desired/target state), otherwise Status.
 func (j *Job) EffectiveStatus() string {
