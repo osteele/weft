@@ -48,10 +48,12 @@ set of states. The CLI records each transition so commands such as `status`,
 | `starting`  | Job entry created; CLI is preparing the tmux session and remote files.      |
 | `running`   | tmux session launched successfully and the wrapper script is executing.     |
 | `completed` | Job wrote an exit code to the `.status` file (success or failure recorded). |
-| `dead`      | tmux session disappeared without writing a status file (crash/kill).        |
+| `dead`      | Job failed to start (setup error before tmux/session execution).            |
+| `failed`    | Job terminated unexpectedly after starting (no status file found).          |
+| `killed`    | Job was terminated in response to an explicit user action.                  |
+| `canceled`  | Queued job was explicitly removed before it started.                        |
 | `queued`    | Job was added to a remote queue file and awaits the queue runner.           |
 | `pending`   | Local intent recorded (kill/start/change) awaiting reconciliation.          |
-| `failed`    | CLI could not finish setup (e.g., SSH error) and recorded the failure text. |
 
 ```mermaid
 stateDiagram-v2
@@ -59,9 +61,9 @@ stateDiagram-v2
     [*] --> starting : run
     queued --> starting : queue runner / job start
     starting --> running : tmux session ready
-    starting --> failed : setup error
+    starting --> dead : setup error
     running --> completed : status file written
-    running --> dead : tmux gone, no status file
+    running --> failed : tmux gone, no status file
 ```
 
 ## Directory Structure
@@ -145,7 +147,7 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 
 **Key Design Decisions:**
 - Job ID is allocated BEFORE starting the tmux session, ensuring the database always knows about the job
-- If SSH fails during setup, the job is marked as "failed" with the error message
+- If SSH fails during setup, the job is marked as "dead" with the error message
 - Connection failures automatically record the job locally and defer the queue
   append so it starts once the host is back online—no special retry flag needed.
 - `remote-jobs run --from <id>` lets you copy settings into a brand-new job when
@@ -156,7 +158,7 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 Provides unified job operations used by both CLI and TUI. All operations follow the same queue-and-execute pattern for network resilience.
 
 **Pattern:**
-1. Update the local database to reflect the intended state (e.g., `pending_status` = "dead").
+1. Update the local database to reflect the intended state (e.g., `pending_status` = "killed").
 2. Attempt to drain the queue for that host
 3. If host unreachable, operation stays queued for next sync
 4. If host reachable, execute and remove from queue
@@ -466,7 +468,7 @@ User: remote-jobs sync
 │      -> Job completed, UPDATE with exit code            │
 │                                                         │
 │    If no status file:                                   │
-│      -> Job died unexpectedly, mark as "dead"          │
+│      -> Job died unexpectedly, mark as "failed"        │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -565,7 +567,7 @@ User: remote-jobs sync
 ### Job Failures
 
 - Exit code captured in status file
-- Jobs without status files marked as "dead"
+- Jobs without status files marked as "failed"
 - Error messages stored in database for debugging
 
 ### TUI Resilience

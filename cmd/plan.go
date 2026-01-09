@@ -474,6 +474,7 @@ func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Dura
 	defer cancel()
 
 	statusByID := make(map[int64]*db.Job)
+	lastReported := make(map[int64]string)
 	tracker := newHostConnectionTracker()
 
 	for {
@@ -486,6 +487,10 @@ func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Dura
 			}
 			if record != nil {
 				statusByID[job.JobID] = record
+				if last, ok := lastReported[job.JobID]; !ok || last != record.Status {
+					lastReported[job.JobID] = record.Status
+					printPlanJobStatusLine(job, record)
+				}
 				if !jobTerminal(record) {
 					completed = false
 					hostsToSync[job.Host] = struct{}{}
@@ -543,6 +548,13 @@ func hostHasPendingPlanJobs(database *sql.DB, host string, jobs []scheduledPlanJ
 		}
 	}
 	return false, nil
+}
+
+func printPlanJobStatusLine(job scheduledPlanJob, record *db.Job) {
+	if record == nil {
+		return
+	}
+	fmt.Printf("Plan job %s (job %d on %s): %s\n", job.Label, job.JobID, job.Host, record.Status)
 }
 
 func printWatchSummary(statusByID map[int64]*db.Job, jobs []scheduledPlanJob) {

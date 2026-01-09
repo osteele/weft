@@ -211,7 +211,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	}
 
 	// If job is already marked as terminal, use cached result
-	if isTerminalStatus(job.Status) {
+	if isWaitTerminalStatus(job.Status) {
 		printJobStatus(job, exitOnComplete)
 		return
 	}
@@ -305,7 +305,7 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, 
 		if job == nil {
 			return nil, fmt.Errorf("job %d not found", jobID)
 		}
-		if isTerminalStatus(job.Status) {
+		if isWaitTerminalStatus(job.Status) {
 			return job, nil
 		}
 		if timeout > 0 && time.Now().After(deadline) {
@@ -327,9 +327,9 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, 
 					return nil, err
 				}
 				if tracker != nil && job != nil {
-					tracker.MarkUp(job.Host, !isTerminalStatus(job.Status))
+					tracker.MarkUp(job.Host, !isWaitTerminalStatus(job.Status))
 				}
-				if job != nil && isTerminalStatus(job.Status) {
+				if job != nil && isWaitTerminalStatus(job.Status) {
 					return job, nil
 				}
 			}
@@ -343,14 +343,17 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 	final := make(map[int64]*db.Job, len(jobs))
 	pending := make(map[int64]struct{})
 	order := make([]int64, 0, len(jobs))
+	lastReported := make(map[int64]string)
+
 	for _, req := range jobs {
 		final[req.ID] = req.Job
 		if req.Job == nil {
 			fmt.Printf("Job %d not found\n", req.ID)
 			continue
 		}
-		if isTerminalStatus(req.Job.Status) {
-			printJobStatus(req.Job, false)
+		lastReported[req.ID] = req.Job.Status
+		printJobStatusLine(req.Job)
+		if isWaitTerminalStatus(req.Job.Status) {
 			continue
 		}
 		pending[req.ID] = struct{}{}
@@ -375,6 +378,16 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 		deadline = time.Now().Add(timeout)
 	}
 
+	reportChange := func(job *db.Job) {
+		if job == nil {
+			return
+		}
+		if last, ok := lastReported[job.ID]; !ok || last != job.Status {
+			lastReported[job.ID] = job.Status
+			printJobStatusLine(job)
+		}
+	}
+
 	for len(pending) > 0 {
 		for _, id := range order {
 			if _, ok := pending[id]; !ok {
@@ -390,8 +403,8 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 				delete(pending, id)
 				continue
 			}
-			if isTerminalStatus(job.Status) {
-				printJobStatus(job, false)
+			reportChange(job)
+			if isWaitTerminalStatus(job.Status) {
 				delete(pending, id)
 				continue
 			}
@@ -413,12 +426,12 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 				if refreshed != nil {
 					final[id] = refreshed
 					if tracker != nil {
-						tracker.MarkUp(refreshed.Host, !isTerminalStatus(refreshed.Status))
+						tracker.MarkUp(refreshed.Host, !isWaitTerminalStatus(refreshed.Status))
 					}
 					job = refreshed
 				}
-				if job != nil && isTerminalStatus(job.Status) {
-					printJobStatus(job, false)
+				reportChange(job)
+				if job != nil && isWaitTerminalStatus(job.Status) {
 					delete(pending, id)
 				}
 			}
@@ -479,6 +492,15 @@ func mapKeys(m map[string]struct{}) []string {
 	return keys
 }
 
+func isWaitTerminalStatus(status string) bool {
+	switch status {
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminalStatus(status string) bool {
 	switch status {
 	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusDraft:
@@ -495,6 +517,17 @@ func shouldAttemptSync(status string) bool {
 	default:
 		return false
 	}
+}
+
+func printJobStatusLine(job *db.Job) {
+	if job == nil {
+		return
+	}
+	line := fmt.Sprintf("Job %d (%s): %s", job.ID, job.Host, job.Status)
+	if job.ExitCode != nil {
+		line = fmt.Sprintf("%s (exit %d)", line, *job.ExitCode)
+	}
+	fmt.Println(line)
 }
 
 func printJobStatus(job *db.Job, exitOnComplete bool) {

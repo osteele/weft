@@ -12,22 +12,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
-// ConflictPolicy determines how to handle conflicts when both local and remote
-// have changed from the base state.
-type ConflictPolicy int
-
-const (
-	// TerminalWins accepts terminal remote states (completed/dead/failed),
-	// otherwise keeps trying to reach local (pending) target.
-	TerminalWins ConflictPolicy = iota
-
-	// LocalWins always tries to apply the pending status to remote.
-	LocalWins
-
-	// RemoteWins always accepts the remote state and clears pending.
-	RemoteWins
-)
-
 // ReconcileResult describes what happened during reconciliation.
 type ReconcileResult struct {
 	Action     string // "none", "update_db", "update_remote", "conflict_resolved"
@@ -41,7 +25,6 @@ type ReconcileResult struct {
 // ReconcileOptions configures reconciliation behavior.
 type ReconcileOptions struct {
 	Timeout time.Duration
-	Policy  ConflictPolicy
 }
 
 // Reconcile performs three-way merge between base (last synced), local (pending),
@@ -138,42 +121,8 @@ func resolveConflict(database *sql.DB, job *db.Job, base, local, remote string, 
 	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 		oplog.WithDetailf("conflict: base=%s local=%s remote=%s", base, local, remote))
 
-	switch opts.Policy {
-	case TerminalWins:
-		if db.IsTerminalStatus(remote) {
-			// Remote reached a terminal state - accept it
-			if err := db.ClearPendingAndUpdateStatus(database, job.ID, remote); err != nil {
-				return nil, err
-			}
-			return &ReconcileResult{
-				Action:     "conflict_resolved",
-				OldStatus:  base,
-				NewStatus:  remote,
-				Conflict:   true,
-				Resolution: fmt.Sprintf("accepted terminal remote state %s (pending was %s)", remote, local),
-			}, nil
-		}
-		// Remote not terminal - keep trying for local intent
-		fallthrough
-
-	case LocalWins:
-		result, err := applyPendingToRemote(database, job, local, opts)
-		if err != nil {
-			if ssh.IsConnectionError(err.Error()) {
-				return &ReconcileResult{
-					Action:     "none",
-					Conflict:   true,
-					Resolution: "deferred: connection error",
-					Error:      err,
-				}, nil
-			}
-			return nil, err
-		}
-		result.Conflict = true
-		result.Resolution = fmt.Sprintf("applied local intent %s (remote was %s)", local, remote)
-		return result, nil
-
-	case RemoteWins:
+	if db.IsTerminalStatus(remote) {
+		// Remote reached a terminal state - accept it
 		if err := db.ClearPendingAndUpdateStatus(database, job.ID, remote); err != nil {
 			return nil, err
 		}
@@ -182,11 +131,26 @@ func resolveConflict(database *sql.DB, job *db.Job, base, local, remote string, 
 			OldStatus:  base,
 			NewStatus:  remote,
 			Conflict:   true,
-			Resolution: fmt.Sprintf("accepted remote state %s (pending was %s)", remote, local),
+			Resolution: fmt.Sprintf("accepted terminal remote state %s (pending was %s)", remote, local),
 		}, nil
 	}
 
-	return nil, fmt.Errorf("unknown conflict policy")
+	// Remote not terminal - keep trying for local intent
+	result, err := applyPendingToRemote(database, job, local, opts)
+	if err != nil {
+		if ssh.IsConnectionError(err.Error()) {
+			return &ReconcileResult{
+				Action:     "none",
+				Conflict:   true,
+				Resolution: "deferred: connection error",
+				Error:      err,
+			}, nil
+		}
+		return nil, err
+	}
+	result.Conflict = true
+	result.Resolution = fmt.Sprintf("applied local intent %s (remote was %s)", local, remote)
+	return result, nil
 }
 
 // applyPendingToRemote attempts to make the remote state match the pending status.

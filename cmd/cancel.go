@@ -77,7 +77,7 @@ func runCancel(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Error: %s\n", e)
 		}
 		if cancelled > 0 {
-			fmt.Printf("\n%d job(s) cancelled, %d error(s)\n", cancelled, len(errors))
+			fmt.Printf("\n%d job(s) canceled, %d error(s)\n", cancelled, len(errors))
 		}
 		return fmt.Errorf("%d error(s)", len(errors))
 	}

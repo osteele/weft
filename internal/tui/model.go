@@ -963,7 +963,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Successful fetch - update cache and show content
 				m.logCache[msg.jobID] = msg.content
 				m.logContent = msg.content
-				m.logStale = msg.fromCache
+				m.logStale = msg.connError
 			}
 			m.logViewport.SetContent(m.logContent)
 			m.logViewport.GotoBottom()
@@ -1055,13 +1055,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			flashCmd = m.setFlash(msg.message, false)
 		} else if msg.deferred {
 			if msg.cancelled {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d cancelled (removal queued for when host is online)", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d canceled (removal queued for when host is online)", msg.jobID), false)
 			} else {
 				flashCmd = m.setFlash(fmt.Sprintf("Job %d kill pending (host offline)", msg.jobID), false)
 			}
 		} else {
 			if msg.cancelled {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d cancelled", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d canceled", msg.jobID), false)
 			} else {
 				flashCmd = m.setFlash(fmt.Sprintf("Job %d killed", msg.jobID), false)
 			}
@@ -5848,6 +5848,18 @@ func (m Model) performBackgroundSync() tea.Cmd {
 			}
 		}
 
+		// Stop queue runners on hosts with no queued jobs
+		for _, host := range m.hosts {
+			if host == nil {
+				continue
+			}
+			count, err := db.CountQueuedByHost(m.database, host.Name)
+			if err != nil || count > 0 {
+				continue
+			}
+			_ = stopQueueRunnerIfIdleTUI(host.Name)
+		}
+
 		return syncCompletedMsg{updated: updated, queuesStarted: queuesStarted}
 	}
 }
@@ -6397,6 +6409,15 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	return runner.EnsureStarted(envVars)
 }
 
+func stopQueueRunnerIfIdleTUI(host string) error {
+	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
+	running, err := runner.IsRunning()
+	if err != nil || !running {
+		return err
+	}
+	return runner.SendStopSignal()
+}
+
 func (m Model) removeJob(job *db.Job) tea.Cmd {
 	if job == nil {
 		return nil
@@ -6568,6 +6589,8 @@ func (m Model) editJob() tea.Cmd {
 		}
 		envVars = mergeGPUEnvVars(envVars, gpuInput)
 
+		operationalChange := newWorkingDir != job.WorkingDir || newCommand != job.Command || gpuInput != job.GPU || !equalEnvVars(envVars, job.EnvVars)
+
 		// Update the remote queue file
 		queueName := job.QueueName
 		if queueName == "" {
@@ -6586,9 +6609,25 @@ func (m Model) editJob() tea.Cmd {
 			WorkingDir:  newWorkingDir,
 			Description: newDescription,
 		}
-		if err := updateRemoteQueueEntry(job.Host, queueName, updatedJob, envVars, depSpec); err != nil {
-			// Non-fatal - the local database was updated
-			// Log warning but don't fail the edit
+
+		if !equalEnvVars(envVars, job.EnvVars) {
+			if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
+				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update env vars: %w", err)}
+			}
+		}
+		if gpuInput != job.GPU {
+			if err := db.SetJobGPU(database, jobID, gpuInput); err != nil {
+				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update GPU: %w", err)}
+			}
+		}
+
+		if operationalChange {
+			if err := updateRemoteQueueEntry(job.Host, queueName, updatedJob, envVars, depSpec); err != nil {
+				if strings.Contains(err.Error(), "host unreachable") {
+					_ = db.SetPendingStatus(database, jobID, db.StatusQueued)
+				}
+				// Non-fatal - the local database was updated
+			}
 		}
 
 		return jobEditedMsg{jobID: jobID}
@@ -6698,6 +6737,22 @@ func mergeGPUEnvVars(envVars []string, gpu string) []string {
 		filtered = append(filtered, "CUDA_VISIBLE_DEVICES="+gpu)
 	}
 	return filtered
+}
+
+func equalEnvVars(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ac := append([]string(nil), a...)
+	bc := append([]string(nil), b...)
+	sort.Strings(ac)
+	sort.Strings(bc)
+	for i := range ac {
+		if ac[i] != bc[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (m Model) fetchQueuedJobEnv(job *db.Job) tea.Cmd {

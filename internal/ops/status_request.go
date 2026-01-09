@@ -91,7 +91,6 @@ func requestJobStatus(database *sql.DB, job *db.Job, targetStatus string, opts E
 
 	reconcileOpts := ReconcileOptions{
 		Timeout: opts.Timeout,
-		Policy:  TerminalWins,
 	}
 
 	res, err := SyncAndReconcile(database, job, reconcileOpts)

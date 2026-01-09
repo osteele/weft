@@ -194,12 +194,12 @@ func TestSyncJobQuickMarksDeadWithoutStatus(t *testing.T) {
 		t.Fatalf("SyncJobQuick: %v", err)
 	}
 	if !changed {
-		t.Fatalf("expected job to be marked dead")
+		t.Fatalf("expected job to be marked failed")
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusDead {
-		t.Fatalf("expected dead status, got %s", updated.Status)
+	if updated.Status != db.StatusFailed {
+		t.Fatalf("expected failed status, got %s", updated.Status)
 	}
 }
 
@@ -230,12 +230,12 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 		t.Fatalf("SyncQueueRunnerJob: %v", err)
 	}
 	if !changed {
-		t.Fatalf("expected job to be marked dead")
+		t.Fatalf("expected job to be marked failed")
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusDead {
-		t.Fatalf("expected dead status, got %s", updated.Status)
+	if updated.Status != db.StatusFailed {
+		t.Fatalf("expected failed status, got %s", updated.Status)
 	}
 }
 

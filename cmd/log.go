@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,8 +146,8 @@ func runLog(cmd *cobra.Command, args []string) error {
 	defaultTailHint := shouldShowDefaultTailHint(cmd)
 	tailHintPrinted := false
 
-	// For completed jobs, try local cache first (unless following)
-	if !logFollow && job.Status == db.StatusCompleted {
+	// For terminal jobs, prefer local cache first (unless following)
+	if !logFollow && shouldPreferCachedLog(job.Status) {
 		if cached, err := logcache.Read(jobID); err == nil {
 			if defaultTailHint && !tailHintPrinted {
 				printDefaultTailHint(jobID)
@@ -165,7 +166,14 @@ func runLog(cmd *cobra.Command, args []string) error {
 
 	// Check if log file exists (skip when resolver already confirmed it)
 	exists := resolved
-	if !exists {
+	if logFollow {
+		if !exists {
+			if err := waitForLogFile(database, job, logFile); err != nil {
+				return err
+			}
+			exists = true
+		}
+	} else if !exists {
 		exists, err = ssh.RemoteFileExists(job.Host, logFile)
 		if err != nil {
 			return fmt.Errorf("check log file: %w", err)
@@ -189,6 +197,14 @@ func runLog(cmd *cobra.Command, args []string) error {
 	// Regular mode
 	stdout, stderr, err := ssh.Run(job.Host, remoteCmd)
 	if err != nil {
+		if ssh.IsConnectionError(stderr) {
+			if cached, cacheErr := logcache.Read(jobID); cacheErr == nil {
+				fmt.Fprintf(os.Stderr, "Warning: host unreachable; using cached log for job %d.\n", jobID)
+				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
+				fmt.Print(processCarriageReturns(output))
+				return nil
+			}
+		}
 		// Provide user-friendly error messages without leaking internal paths
 		if strings.Contains(stderr, "No such file") || strings.Contains(stderr, "cannot open") {
 			return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)
@@ -209,6 +225,47 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Print(processCarriageReturns(stdout))
 	return nil
+}
+
+func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
+	warned := false
+	for {
+		exists, err := ssh.RemoteFileExists(job.Host, logFile)
+		if err != nil {
+			if ssh.IsConnectionError(err.Error()) {
+				if !warned {
+					fmt.Fprintf(os.Stderr, "Host %s unreachable; waiting for log file...\n", job.Host)
+					warned = true
+				}
+				time.Sleep(1 * time.Second)
+				continue
+			}
+			return fmt.Errorf("check log file: %w", err)
+		}
+		if exists {
+			return nil
+		}
+		refreshed, err := db.GetJobByID(database, job.ID)
+		if err != nil {
+			return err
+		}
+		if refreshed != nil {
+			job = refreshed
+		}
+		if job != nil && isTerminalStatus(job.Status) {
+			return fmt.Errorf("log file not found for job %d on %s", job.ID, job.Host)
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func shouldPreferCachedLog(status string) bool {
+	switch status {
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+		return true
+	default:
+		return false
+	}
 }
 
 // buildLogCommand constructs the remote command for reading log files

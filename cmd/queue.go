@@ -563,6 +563,14 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		jobQueueName := job.QueueName
+		if jobQueueName == "" {
+			jobQueueName = queueName
+		}
+		if jobQueueName == "" {
+			jobQueueName = defaultQueueName
+		}
+
 		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
@@ -571,7 +579,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		if result.Deferred {
 			fmt.Printf("Job %d marked for removal on next sync\n", jobID)
 		} else {
-			fmt.Printf("Job %d removed from queue '%s' on %s\n", jobID, job.QueueName, job.Host)
+			fmt.Printf("Job %d removed from queue '%s' on %s\n", jobID, jobQueueName, job.Host)
 		}
 	}
 

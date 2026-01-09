@@ -73,7 +73,7 @@ prunes expired files, and cache hits are served instantly without touching SSH.
 
 `remote-jobs sync` continuously reconciles local records with the remote host:
 
-- Detects tmux sessions that vanished and marks jobs as `dead`.
+- Detects tmux sessions that vanished and marks jobs as `failed`.
 - Reads status files to mark jobs as `completed` with their exit code.
 - Updates `start_time` from metadata if the queue runner launched the job.
 

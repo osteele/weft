@@ -144,6 +144,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		}
 
 		if err := updateRemoteQueueEntry(job.Host, queueName, job); err != nil {
+			if strings.Contains(err.Error(), "host unreachable") {
+				_ = db.SetPendingStatus(database, jobID, db.StatusQueued)
+			}
 			fmt.Printf("Note: remote host not reachable; changes will sync when host is available\n")
 		}
 	}

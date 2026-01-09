@@ -36,8 +36,8 @@ func TestKillJob_Success(t *testing.T) {
 	}
 
 	updatedJob, _ := db.GetJobByID(database, jobID)
-	if updatedJob.Status != db.StatusDead {
-		t.Errorf("expected job status to be dead, got %s", updatedJob.Status)
+	if updatedJob.Status != db.StatusKilled {
+		t.Errorf("expected job status to be killed, got %s", updatedJob.Status)
 	}
 }
 
@@ -68,11 +68,11 @@ func TestKillJob_QuickTimeout(t *testing.T) {
 	}
 
 	updatedJob, _ := db.GetJobByID(database, jobID)
-	if updatedJob.Status == db.StatusDead {
-		t.Errorf("expected job status not to be dead, got %s", updatedJob.Status)
+	if updatedJob.Status == db.StatusKilled {
+		t.Errorf("expected job status not to be killed, got %s", updatedJob.Status)
 	}
-	if updatedJob.PendingStatus == nil || *updatedJob.PendingStatus != db.StatusDead {
-		t.Errorf("expected pending status to be dead, got %v", updatedJob.PendingStatus)
+	if updatedJob.PendingStatus == nil || *updatedJob.PendingStatus != db.StatusKilled {
+		t.Errorf("expected pending status to be killed, got %v", updatedJob.PendingStatus)
 	}
 }
 
@@ -106,8 +106,8 @@ func TestKillJob_SyncError(t *testing.T) {
 	}
 
 	updatedJob, _ := db.GetJobByID(database, jobID)
-	if updatedJob.PendingStatus == nil || *updatedJob.PendingStatus != db.StatusDead {
-		t.Errorf("expected pending status to be dead, got %v", updatedJob.PendingStatus)
+	if updatedJob.PendingStatus == nil || *updatedJob.PendingStatus != db.StatusKilled {
+		t.Errorf("expected pending status to be killed, got %v", updatedJob.PendingStatus)
 	}
 }
 
@@ -136,8 +136,8 @@ func TestCancelQueuedJob_Success(t *testing.T) {
 	}
 
 	updatedJob, _ := db.GetJobByID(database, jobID)
-	if updatedJob.Status != db.StatusDead {
-		t.Errorf("expected job status to be dead, got %s", updatedJob.Status)
+	if updatedJob.Status != db.StatusCanceled {
+		t.Errorf("expected job status to be canceled, got %s", updatedJob.Status)
 	}
 	if updatedJob.PendingStatus != nil {
 		t.Errorf("expected pending status to be nil, got %v", updatedJob.PendingStatus)
@@ -171,8 +171,8 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	if updatedJob.Status != db.StatusQueued {
 		t.Errorf("expected job status to remain queued, got %s", updatedJob.Status)
 	}
-	if updatedJob.PendingStatus == nil || *updatedJob.PendingStatus != db.StatusDead {
-		t.Errorf("expected pending status to be dead, got %v", updatedJob.PendingStatus)
+	if updatedJob.PendingStatus == nil || *updatedJob.PendingStatus != db.StatusCanceled {
+		t.Errorf("expected pending status to be canceled, got %v", updatedJob.PendingStatus)
 	}
 }
 
