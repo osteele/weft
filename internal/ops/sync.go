@@ -262,7 +262,7 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 				return false, err
 			}
 			return true, nil
-		case db.StatusStarting, db.StatusDead, db.StatusFailed:
+		case db.StatusStarting, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 			// Job is actually running - fix the status
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
 				return false, err
@@ -275,11 +275,15 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 	// Probe 3: Check if job is in queue file (waiting)
 	inQueue := probeInQueue(job.Host, queueName, job.ID, timeout)
 	if inQueue.IsSome() && inQueue.Unwrap() {
-		if job.PendingStatus != nil && *job.PendingStatus == db.StatusDead {
+		if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
 			if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
 				return false, err
 			}
-			if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
+			finalStatus := db.StatusCanceled
+			if *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead {
+				finalStatus = db.StatusKilled
+			}
+			if err := db.ClearPendingAndUpdateStatus(database, job.ID, finalStatus); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -299,7 +303,7 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 	processRunning := probeProcessRunning(job.Host, job.ID, timeout)
 	if processRunning.IsSome() && processRunning.Unwrap() {
 		// Process is running - if job is marked dead/failed, fix it
-		if job.Status == db.StatusDead || job.Status == db.StatusFailed {
+		if job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
 				return false, err
 			}

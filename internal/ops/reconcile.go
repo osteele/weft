@@ -197,9 +197,16 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 	}
 
 	var err error
+	resolvedStatus := targetStatus
 	switch targetStatus {
-	case db.StatusDead:
+	case db.StatusKilled:
 		err = applyKillToRemote(job, timeout)
+	case db.StatusCanceled:
+		err = applyCancelToRemote(job, timeout)
+	case db.StatusDead:
+		// Legacy: treat pending dead as a kill request.
+		err = applyKillToRemote(job, timeout)
+		resolvedStatus = db.StatusKilled
 	case db.StatusRunning:
 		err = applyStartToRemote(database, job, timeout)
 	case db.StatusQueued:
@@ -215,12 +222,12 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 	}
 
 	// Success - update status and clear pending
-	if err := db.ClearPendingAndUpdateStatus(database, job.ID, targetStatus); err != nil {
+	if err := db.ClearPendingAndUpdateStatus(database, job.ID, resolvedStatus); err != nil {
 		return nil, err
 	}
 
 	// Set queued_at when job is successfully added to the remote queue
-	if targetStatus == db.StatusQueued {
+	if resolvedStatus == db.StatusQueued {
 		if err := db.SetQueuedAtNow(database, job.ID); err != nil {
 			return nil, err
 		}
@@ -232,7 +239,7 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 	return &ReconcileResult{
 		Action:    "update_remote",
 		OldStatus: job.Status,
-		NewStatus: targetStatus,
+		NewStatus: resolvedStatus,
 	}, nil
 }
 
@@ -254,6 +261,15 @@ func applyKillToRemote(job *db.Job, timeout time.Duration) error {
 		// Session might already be gone - that's OK
 	}
 	return nil
+}
+
+// applyCancelToRemote removes a queued job from the remote queue.
+func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = "default"
+	}
+	return removeFromQueueFile(job.Host, queueName, job.ID, timeout)
 }
 
 // killQueueRunnerJob kills a queue-runner managed job via its PID.

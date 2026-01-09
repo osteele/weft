@@ -53,14 +53,20 @@ const StatusRunning = "running"
 // StatusCompleted indicates a job finished (check exit code)
 const StatusCompleted = "completed"
 
-// StatusDead indicates a job terminated unexpectedly
+// StatusDead indicates a job failed to start
 const StatusDead = "dead"
 
 // StatusQueued indicates a job queued for sequential execution
 const StatusQueued = "queued"
 
-// StatusFailed indicates a job failed to start
+// StatusFailed indicates a job terminated unexpectedly after starting
 const StatusFailed = "failed"
+
+// StatusKilled indicates a job was terminated by an explicit user action
+const StatusKilled = "killed"
+
+// StatusCanceled indicates a queued job was explicitly removed from the queue
+const StatusCanceled = "canceled"
 
 // StatusDraft indicates a job that exists locally but should not run remotely
 const StatusDraft = "draft"
@@ -433,13 +439,13 @@ func UpdateJobRunning(db *sql.DB, id int64) error {
 	return err
 }
 
-// UpdateJobFailed marks a starting job as failed
+// UpdateJobFailed marks a starting job as failed to start
 func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 	endTime := time.Now().Unix()
 	// Store error in error_message column (not description) for debugging
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, end_time = ?, error_message = ? WHERE id = ? AND status = ?`,
-		StatusFailed, endTime, errorMsg, id, StatusStarting,
+		StatusDead, endTime, errorMsg, id, StatusStarting,
 	)
 	return err
 }
@@ -527,13 +533,13 @@ func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) err
 	return err
 }
 
-// MarkDeadByID marks a running or queued job as dead by ID
+// MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID
 func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL
 		 WHERE id = ? AND status IN (?, ?, ?)`,
-		endTime, StatusDead, id, StatusRunning, StatusStarting, StatusQueued,
+		endTime, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued,
 	)
 	return err
 }
@@ -671,7 +677,7 @@ func SetQueuedAtBefore(db *sql.DB, jobID int64, host string) error {
 
 // IsTerminalStatus returns true if the status represents a terminal state.
 func IsTerminalStatus(status string) bool {
-	return status == StatusCompleted || status == StatusDead || status == StatusFailed || status == StatusDraft
+	return status == StatusCompleted || status == StatusDead || status == StatusFailed || status == StatusKilled || status == StatusCanceled || status == StatusDraft
 }
 
 // CountQueuedByHost returns the number of queued jobs for a host
@@ -859,13 +865,13 @@ func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTim
 	return err
 }
 
-// MarkDead marks a running job as dead
+// MarkDead marks a running job as failed (unexpected termination)
 func MarkDead(db *sql.DB, host, sessionName string) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL
 		 WHERE host = ? AND session_name = ? AND status = ?`,
-		endTime, StatusDead, host, sessionName, StatusRunning,
+		endTime, StatusFailed, host, sessionName, StatusRunning,
 	)
 	return err
 }
@@ -1341,12 +1347,12 @@ func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	return queryJobs(db, stmt, pattern, pattern, limit)
 }
 
-// CleanupOld deletes completed/dead jobs older than the given number of days
+// CleanupOld deletes terminal jobs older than the given number of days
 func CleanupOld(db *sql.DB, days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Unix()
 	result, err := db.Exec(
-		`DELETE FROM jobs WHERE status IN (?, ?) AND start_time < ?`,
-		StatusCompleted, StatusDead, cutoff,
+		`DELETE FROM jobs WHERE status IN (?, ?, ?, ?, ?) AND start_time < ?`,
+		StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, cutoff,
 	)
 	if err != nil {
 		return 0, err
@@ -1354,7 +1360,7 @@ func CleanupOld(db *sql.DB, days int) (int64, error) {
 	return result.RowsAffected()
 }
 
-// PruneJobs tombstones completed/dead jobs so they no longer appear in listings.
+// PruneJobs tombstones terminal jobs so they no longer appear in listings.
 func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 	query := `UPDATE jobs SET tombstoned = 1 WHERE tombstoned = 0`
 	args := []interface{}{}
@@ -1363,8 +1369,8 @@ func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 		query += ` AND status = ?`
 		args = append(args, StatusDead)
 	} else {
-		query += ` AND status IN (?, ?)`
-		args = append(args, StatusCompleted, StatusDead)
+		query += ` AND status IN (?, ?, ?, ?, ?)`
+		args = append(args, StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled)
 	}
 
 	if olderThan != nil {
@@ -1388,8 +1394,8 @@ func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, 
 		query += `status = ?`
 		args = append(args, StatusDead)
 	} else {
-		query += `status IN (?, ?)`
-		args = append(args, StatusCompleted, StatusDead)
+		query += `status IN (?, ?, ?, ?, ?)`
+		args = append(args, StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled)
 	}
 
 	if olderThan != nil {

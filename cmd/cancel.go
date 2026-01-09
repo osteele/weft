@@ -3,10 +3,9 @@ package cmd
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -60,39 +59,16 @@ func runCancel(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Determine queue name
-		jobQueueName := job.QueueName
-		if jobQueueName == "" {
-			jobQueueName = "default"
-		}
-
-		// Remove from remote queue file
-		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", jobQueueName)
-		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
-			jobID, queueFile, queueFile, queueFile, queueFile)
-
-		_, stderr, err := ssh.Run(job.Host, removeCmd)
+		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
 		if err != nil {
-			if ssh.IsConnectionError(stderr) {
-				if err := db.SetPendingStatus(database, jobID, db.StatusDead); err != nil {
-					errors = append(errors, fmt.Sprintf("job %d: failed to mark pending cancel: %v", jobID, err))
-					continue
-				}
-				fmt.Printf("Job %d: host %s unreachable, will cancel on next sync\n", jobID, job.Host)
-				cancelled++
-				continue
-			}
-			errors = append(errors, fmt.Sprintf("job %d: failed to remove from remote queue: %s", jobID, strings.TrimSpace(stderr)))
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-
-		// Delete from local database
-		if err := db.DeleteJob(database, jobID); err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: delete failed: %v", jobID, err))
-			continue
+		if result.Deferred {
+			fmt.Printf("Job %d: cancel pending (host unreachable)\n", jobID)
+		} else {
+			fmt.Printf("Job %d canceled\n", jobID)
 		}
-
-		fmt.Printf("Job %d cancelled\n", jobID)
 		cancelled++
 	}
 

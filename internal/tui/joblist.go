@@ -129,7 +129,7 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 			if job.ExitCode != nil && *job.ExitCode != 0 {
 				style = d.styles.failed
 			}
-		case db.StatusDead:
+		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 			style = d.styles.dead
 		case db.StatusQueued:
 			style = d.styles.pending
@@ -174,7 +174,13 @@ func formatActualStatus(job *db.Job) string {
 	case db.StatusQueued:
 		return "◌ queued"
 	case db.StatusDead:
-		return "✗ dead"
+		return "✗ start failed"
+	case db.StatusFailed:
+		return "✗ crashed"
+	case db.StatusKilled:
+		return "✗ killed"
+	case db.StatusCanceled:
+		return "✗ canceled"
 	case db.StatusDraft:
 		return "✎ draft"
 	default:
@@ -187,6 +193,10 @@ func formatPendingStatus(status string) string {
 	switch status {
 	case db.StatusDead:
 		return "⧗ killing…"
+	case db.StatusKilled:
+		return "⧗ killing…"
+	case db.StatusCanceled:
+		return "⧗ canceling…"
 	case db.StatusRunning:
 		return "⧗ starting…"
 	case db.StatusQueued:

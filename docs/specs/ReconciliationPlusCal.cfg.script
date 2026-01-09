@@ -1,0 +1,8 @@
+#!/bin/sh
+cat <<'EOF'
+SPECIFICATION Spec
+CONSTANT defaultInitValue = Draft
+INVARIANT TypeInvariant
+INVARIANT PendingConsistency
+INVARIANT QueueOnlyWhenRemoteVisible
+EOF

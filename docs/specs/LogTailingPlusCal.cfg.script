@@ -1,0 +1,7 @@
+#!/bin/sh
+cat <<'CFG'
+SPECIFICATION Spec
+INVARIANT TypeInvariant
+INVARIANT TailCompletion
+INVARIANT TimeoutCompletion
+CFG

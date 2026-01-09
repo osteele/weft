@@ -9,7 +9,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
-// KillJob sets the pending status to dead and attempts to reconcile immediately.
+// KillJob sets the pending status to killed and attempts to reconcile immediately.
 // Uses the three-way merge model: sets pending_status as user intent, then
 // tries to apply to remote. If successful, status is updated; if not, the
 // pending_status remains for later reconciliation during sync.
@@ -20,7 +20,7 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 
 	oplog.LogJob(oplog.OpJobKill, job.ID, job.Host, oplog.WithDetail("killing job"))
 
-	outcome, err := requestJobStatus(database, job, db.StatusDead, opts)
+	outcome, err := requestJobStatus(database, job, db.StatusKilled, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -41,7 +41,7 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 	}
 
 	switch outcome.currentStatus {
-	case db.StatusDead:
+	case db.StatusKilled:
 		oplog.LogJob(oplog.OpJobKilled, job.ID, job.Host,
 			oplog.WithDetail("killed via reconciliation"))
 		return Result{
@@ -55,7 +55,7 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 			JobID:   job.ID,
 			Message: fmt.Sprintf("Job %d already completed", job.ID),
 		}, nil
-	case db.StatusFailed:
+	case db.StatusFailed, db.StatusDead:
 		return Result{
 			Success: true,
 			JobID:   job.ID,
@@ -68,7 +68,7 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 }
 
 // CancelQueuedJob cancels a queued job so it won't run when the queue drains to it.
-// Uses the three-way merge model: sets pending_status to dead, then tries to
+// Uses the three-way merge model: sets pending_status to canceled, then tries to
 // remove from remote queue. If successful, status is updated; if not, the
 // pending_status remains for later reconciliation during sync.
 func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
@@ -83,7 +83,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceling queued job"))
 
 	// Set pending status to record user intent
-	if err := db.SetPendingStatus(database, job.ID, db.StatusDead); err != nil {
+	if err := db.SetPendingStatus(database, job.ID, db.StatusCanceled); err != nil {
 		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("set pending status failed"))
 		return Result{}, fmt.Errorf("set pending status: %w", err)
 	}
@@ -126,7 +126,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 	}
 
 	// Success - update status and clear pending
-	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
+	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusCanceled); err != nil {
 		return Result{}, fmt.Errorf("update status: %w", err)
 	}
 

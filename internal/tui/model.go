@@ -948,8 +948,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logViewport.SetContent(m.logContent)
 		} else if m.selectedJob != nil && msg.jobID == m.selectedJob.ID {
 			if msg.connError {
-				// Connection error - try to show cached content
-				if cached, ok := m.logCache[msg.jobID]; ok {
+				if msg.fromCache {
+					m.logContent = msg.content
+					m.logStale = true
+					m.logCache[msg.jobID] = msg.content
+				} else if cached, ok := m.logCache[msg.jobID]; ok {
 					m.logContent = cached
 					m.logStale = true
 				} else {
@@ -960,7 +963,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Successful fetch - update cache and show content
 				m.logCache[msg.jobID] = msg.content
 				m.logContent = msg.content
-				m.logStale = false
+				m.logStale = msg.fromCache
 			}
 			m.logViewport.SetContent(m.logContent)
 			m.logViewport.GotoBottom()
@@ -1054,7 +1057,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.cancelled {
 				flashCmd = m.setFlash(fmt.Sprintf("Job %d cancelled (removal queued for when host is online)", msg.jobID), false)
 			} else {
-				flashCmd = m.setFlash(fmt.Sprintf("Job %d marked dead (kill queued for when host is online)", msg.jobID), false)
+				flashCmd = m.setFlash(fmt.Sprintf("Job %d kill pending (host offline)", msg.jobID), false)
 			}
 		} else {
 			if msg.cancelled {
@@ -1816,9 +1819,13 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case db.StatusCompleted:
 			return m, m.setFlash(fmt.Sprintf("Job %d already completed", job.ID), true)
 		case db.StatusDead:
-			return m, m.setFlash(fmt.Sprintf("Job %d already dead", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %d already failed to start", job.ID), true)
 		case db.StatusFailed:
-			return m, m.setFlash(fmt.Sprintf("Job %d already failed", job.ID), true)
+			return m, m.setFlash(fmt.Sprintf("Job %d already crashed", job.ID), true)
+		case db.StatusKilled:
+			return m, m.setFlash(fmt.Sprintf("Job %d already killed", job.ID), true)
+		case db.StatusCanceled:
+			return m, m.setFlash(fmt.Sprintf("Job %d already canceled", job.ID), true)
 		default:
 			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, job.Status), true)
 		}
@@ -3032,11 +3039,15 @@ func (m Model) jobDetailContent(job *db.Job) string {
 			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
 		}
 		b.WriteString("\n")
-	} else if job.Status == db.StatusDead {
+	} else if job.Status == db.StatusKilled {
 		b.WriteString(labelStyle.Render("Exit"))
-		b.WriteString(deadStyle.Render("killed/crashed"))
+		b.WriteString(deadStyle.Render("killed"))
 		b.WriteString("\n")
-	} else if job.Status == db.StatusFailed {
+	} else if job.Status == db.StatusCanceled {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(deadStyle.Render("canceled"))
+		b.WriteString("\n")
+	} else if job.Status == db.StatusDead {
 		b.WriteString(labelStyle.Render("Exit"))
 		b.WriteString(failedStyle.Render("failed to start"))
 		b.WriteString("\n")
@@ -3045,6 +3056,10 @@ func (m Model) jobDetailContent(job *db.Job) string {
 			b.WriteString(errorStyle.Render(job.ErrorMessage))
 			b.WriteString("\n")
 		}
+	} else if job.Status == db.StatusFailed {
+		b.WriteString(labelStyle.Render("Exit"))
+		b.WriteString(failedStyle.Render("crashed"))
+		b.WriteString("\n")
 	}
 
 	// Process stats and progress section for running jobs
@@ -3974,7 +3989,7 @@ func (m Model) renderHostDetail(height int) string {
 					runningCount++
 				case db.StatusQueued:
 					queuedCount++
-				case db.StatusDead, db.StatusFailed:
+				case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 					// Count as recent if ended within the last hour
 					if job.EndTime != nil && *job.EndTime > oneHourAgo {
 						recentFailedCount++
@@ -4651,9 +4666,13 @@ func (m Model) formatStatus(job *db.Job) string {
 	case db.StatusQueued:
 		return "… queued"
 	case db.StatusDead:
-		return "✖ dead"
+		return "✖ start failed"
 	case db.StatusFailed:
-		return "✖ failed"
+		return "✖ crashed"
+	case db.StatusKilled:
+		return "✖ killed"
+	case db.StatusCanceled:
+		return "✖ canceled"
 	case db.StatusDraft:
 		return "  Draft"
 	default:
@@ -4684,6 +4703,10 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 		return queuedStyle
 	case db.StatusFailed:
 		return failedStyle
+	case db.StatusKilled:
+		return deadStyle
+	case db.StatusCanceled:
+		return deadStyle
 	case db.StatusStarting:
 		return pendingStyle
 	default:
@@ -4695,7 +4718,7 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 // Uses ⧗ (hourglass) to indicate an operation is pending.
 func (m Model) formatPendingStatusDisplay(pendingStatus, currentStatus string) string {
 	switch pendingStatus {
-	case db.StatusDead:
+	case db.StatusDead, db.StatusKilled:
 		// Show what we're transitioning from
 		switch currentStatus {
 		case db.StatusRunning:
@@ -4705,6 +4728,8 @@ func (m Model) formatPendingStatusDisplay(pendingStatus, currentStatus string) s
 		default:
 			return "⧗ killing"
 		}
+	case db.StatusCanceled:
+		return "⧗ canceling"
 	case db.StatusRunning:
 		return "⧗ starting"
 	case db.StatusQueued:
@@ -5485,7 +5510,7 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	case jobFilterSucceeded:
 		return job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
 	case jobFilterFailed:
-		if job.Status == db.StatusFailed || job.Status == db.StatusDead {
+		if job.Status == db.StatusFailed || job.Status == db.StatusDead || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 			return true
 		}
 		return job.Status == db.StatusCompleted && (job.ExitCode == nil || *job.ExitCode != 0)
@@ -5501,7 +5526,7 @@ func isRecentHistory(job *db.Job) bool {
 	if job.EndTime != nil {
 		return now.Unix()-*job.EndTime < windowSeconds
 	}
-	if job.Status == db.StatusDead || job.Status == db.StatusFailed {
+	if job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 		timestamp := job.StartTime
 		if timestamp == 0 {
 			timestamp = job.CreatedAt
@@ -5537,8 +5562,8 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 	jobCopy := *job
 	return func() tea.Msg {
 		job := jobCopy
-		// For completed jobs, try local cache first
-		if job.Status == db.StatusCompleted {
+		// For terminal jobs, try local cache first
+		if job.Status == db.StatusCompleted || job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 			if cached, err := logcache.Read(job.ID); err == nil {
 				// Apply tail -500 equivalent
 				lines := strings.Split(cached, "\n")
@@ -5566,6 +5591,14 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 			// Check if it's a connection error
 			combined := stdout + stderr
 			if remote.IsConnectionError(combined) {
+				if cached, err := logcache.Read(job.ID); err == nil {
+					return logFetchedMsg{
+						jobID:     job.ID,
+						content:   cached,
+						connError: true,
+						fromCache: true,
+					}
+				}
 				return logFetchedMsg{
 					jobID:     job.ID,
 					content:   fmt.Sprintf("Host %s unreachable", job.Host),
@@ -5575,7 +5608,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 			// Check if log file doesn't exist
 			if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
 				msg := "No log file yet"
-				if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead {
+				if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 					msg = "Log file not found (may have been cleaned up)"
 				}
 				return logFetchedMsg{
@@ -5592,7 +5625,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 		// Check if output indicates file not found (for cases where tail doesn't error)
 		if strings.Contains(stdout, "No such file") || strings.Contains(stdout, "cannot open") {
 			msg := "No log file yet"
-			if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead {
+			if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 				msg = "Log file not found (may have been cleaned up)"
 			}
 			return logFetchedMsg{

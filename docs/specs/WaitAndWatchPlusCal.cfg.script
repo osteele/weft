@@ -1,0 +1,8 @@
+#!/bin/sh
+cat <<'CFG'
+SPECIFICATION Spec
+CONSTANT ReportModeConst = "all"
+INVARIANT TypeInvariant
+INVARIANT WaitCompletion
+INVARIANT TimeoutCompletion
+CFG

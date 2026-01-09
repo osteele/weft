@@ -563,46 +563,16 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Determine queue name
-		jobQueueName := job.QueueName
-		if jobQueueName == "" {
-			jobQueueName = queueName // use --queue flag or default
-		}
-
-		// Remove from remote queue file
-		// The queue file format is: job_id\tworking_dir\tcommand\tdescription\tenv_vars\tdependencies
-		// We filter out lines starting with this job ID
-		queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), jobQueueName)
-		removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
-			jobID, queueFile, queueFile, queueFile, queueFile)
-
-		_, stderr, err := ssh.Run(job.Host, removeCmd)
+		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
 		if err != nil {
-			if ssh.IsConnectionError(stderr) {
-				// Host unreachable - mark as dead and let reconciliation handle it
-				if err := db.MarkDeadByID(database, jobID); err != nil {
-					errors = append(errors, fmt.Sprintf("job %d: failed to mark as dead: %v", jobID, err))
-					continue
-				}
-				if err := db.SetPendingStatus(database, jobID, db.StatusDead); err != nil {
-					errors = append(errors, fmt.Sprintf("job %d: failed to set pending status: %v", jobID, err))
-					continue
-				}
-				fmt.Printf("Job %d marked for removal on next sync\n", jobID)
-				continue
-			}
-			// Non-connection error - don't remove from DB
-			errors = append(errors, fmt.Sprintf("job %d: failed to remove from remote queue: %s", jobID, strings.TrimSpace(stderr)))
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-
-		// Delete from local database only after successful remote removal
-		if err := db.DeleteJob(database, jobID); err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: delete failed: %v", jobID, err))
-			continue
+		if result.Deferred {
+			fmt.Printf("Job %d marked for removal on next sync\n", jobID)
+		} else {
+			fmt.Printf("Job %d removed from queue '%s' on %s\n", jobID, job.QueueName, job.Host)
 		}
-
-		fmt.Printf("Job %d removed from queue '%s' on %s\n", jobID, jobQueueName, job.Host)
 	}
 
 	if len(errors) > 0 {

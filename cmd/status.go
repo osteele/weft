@@ -210,8 +210,8 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
-	// If job is already marked as completed or dead, use cached result
-	if job.Status == db.StatusCompleted || job.Status == db.StatusDead {
+	// If job is already marked as terminal, use cached result
+	if isTerminalStatus(job.Status) {
 		printJobStatus(job, exitOnComplete)
 		return
 	}
@@ -264,11 +264,11 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 			}
 			job.EndTime = &endTime
 		} else {
-			// Job died unexpectedly
+			// Job terminated unexpectedly
 			if err := db.MarkDeadByID(database, job.ID); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
 			}
-			job.Status = db.StatusDead
+			job.Status = db.StatusFailed
 		}
 	} else if exitOnComplete {
 		// Session still running - show last few lines of output (only for single job)
@@ -481,7 +481,7 @@ func mapKeys(m map[string]struct{}) []string {
 
 func isTerminalStatus(status string) bool {
 	switch status {
-	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusDraft:
+	case db.StatusCompleted, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled, db.StatusDraft:
 		return true
 	default:
 		return false
@@ -523,6 +523,13 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Running:  %s\n", db.FormatDuration(duration))
 	}
 
+	if job.Status == db.StatusKilled {
+		fmt.Printf("Exit:     killed\n")
+	}
+	if job.Status == db.StatusCanceled {
+		fmt.Printf("Exit:     canceled\n")
+	}
+
 	if job.ExitCode != nil {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
 	}
@@ -547,7 +554,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 			} else {
 				os.Exit(ExitFailed)
 			}
-		case db.StatusDead:
+		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 			os.Exit(ExitFailed)
 		case db.StatusRunning, db.StatusQueued, db.StatusStarting:
 			os.Exit(ExitRunning)
@@ -677,9 +684,9 @@ func printFailedJobSummary(job *db.Job) {
 	var reason string
 	switch job.Status {
 	case db.StatusDead:
-		reason = "dead"
+		reason = "start-failed"
 	case db.StatusFailed:
-		reason = "failed"
+		reason = "crashed"
 	default:
 		if job.ExitCode != nil {
 			reason = fmt.Sprintf("exit %d", *job.ExitCode)
