@@ -16,8 +16,13 @@ type Config struct {
 	DefaultCommand string `yaml:"default_command"`
 
 	// TUI polling intervals (in seconds)
-	// SyncInterval is how often to check if running jobs have completed
+	// SyncInterval is the legacy TUI sync interval (seconds).
+	// Deprecated in favor of SyncActiveInterval/SyncIdleInterval.
 	SyncInterval int `yaml:"sync_interval"`
+	// SyncActiveInterval is how often to sync hosts with running/queued jobs (seconds).
+	SyncActiveInterval int `yaml:"sync_active_interval"`
+	// SyncIdleInterval is how often to sync idle hosts (seconds).
+	SyncIdleInterval int `yaml:"sync_idle_interval"`
 	// LogRefreshInterval is how often to refresh logs for selected running jobs
 	LogRefreshInterval int `yaml:"log_refresh_interval"`
 	// HostRefreshInterval is how often to refresh host info in hosts view
@@ -78,6 +83,8 @@ func DefaultConfig() *Config {
 	return &Config{
 		DefaultCommand:      "help",
 		SyncInterval:        15,
+		SyncActiveInterval:  15,
+		SyncIdleInterval:    60,
 		LogRefreshInterval:  3,
 		HostRefreshInterval: 30,
 		EnableMouse:         false,

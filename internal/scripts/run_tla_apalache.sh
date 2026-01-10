@@ -31,16 +31,12 @@ for spec in "$SPECDIR"/*.tla; do
         continue
     fi
 
-    const_args=""
-    while IFS= read -r line; do
-        case "$line" in
-            CONSTANT\ *)
-                name=$(echo "$line" | awk '{print $2}')
-                value=$(echo "$line" | cut -d'=' -f2 | xargs)
-                const_args="$const_args --const ${name}=${value}"
-                ;;
-        esac
-    done < "$cfg_file"
+    # Skip PlusCal specs (BEGIN TRANSLATION marker) - Apalache needs type annotations
+    # that would be overwritten when PlusCal retranslates
+    if grep -q "BEGIN TRANSLATION" "$spec"; then
+        echo "Skipping $spec (PlusCal specs require type annotations for Apalache)" >&2
+        continue
+    fi
 
     inv_args=""
     while IFS= read -r line; do
@@ -52,7 +48,7 @@ for spec in "$SPECDIR"/*.tla; do
         esac
     done < "$cfg_file"
 
-    apalache-mc check $const_args $inv_args "$spec"
+    apalache-mc check --config="$cfg_file" $inv_args "$spec"
 done
 
 if [ "$found" -eq 0 ]; then

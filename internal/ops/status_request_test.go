@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -39,6 +40,13 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 	// Create a draft job
 	jobID, _ := db.RecordJobStarting(database, "test-host", "/tmp", "echo test", "test job")
 	db.ClearPendingAndUpdateStatus(database, jobID, db.StatusDraft)
+	now := time.Now().Unix()
+	if _, err := database.Exec(
+		`UPDATE jobs SET session_name = ?, start_time = ?, end_time = ?, exit_code = ?, error_message = ? WHERE id = ?`,
+		fmt.Sprintf("rj-%d", jobID), now-100, now, 1, "boom", jobID,
+	); err != nil {
+		t.Fatalf("seed run metadata: %v", err)
+	}
 	job, _ := db.GetJobByID(database, jobID)
 
 	// Mock SSH to succeed
@@ -56,6 +64,15 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 
 	if !result.Success {
 		t.Error("expected Success to be true")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusQueued {
+		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+	if updated.SessionName != "" || updated.StartTime != 0 || updated.EndTime != nil || updated.ExitCode != nil || updated.ErrorMessage != "" {
+		t.Fatalf("expected run metadata cleared on re-queue, got session=%q start=%d end=%v exit=%v err=%q",
+			updated.SessionName, updated.StartTime, updated.EndTime, updated.ExitCode, updated.ErrorMessage)
 	}
 }
 

@@ -54,8 +54,13 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Build TUI options from config
 	opts := tui.DefaultModelOptions()
-	if cfg.SyncInterval > 0 {
-		opts.SyncInterval = time.Duration(cfg.SyncInterval) * time.Second
+	if cfg.SyncActiveInterval > 0 {
+		opts.SyncActiveInterval = time.Duration(cfg.SyncActiveInterval) * time.Second
+	} else if cfg.SyncInterval > 0 {
+		opts.SyncActiveInterval = time.Duration(cfg.SyncInterval) * time.Second
+	}
+	if cfg.SyncIdleInterval > 0 {
+		opts.SyncIdleInterval = time.Duration(cfg.SyncIdleInterval) * time.Second
 	}
 	if cfg.LogRefreshInterval > 0 {
 		opts.LogRefreshInterval = time.Duration(cfg.LogRefreshInterval) * time.Second

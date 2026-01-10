@@ -198,6 +198,7 @@ CREATE TABLE jobs (
     working_dir TEXT NOT NULL,
     command TEXT NOT NULL,
     description TEXT,
+    tags TEXT,                  -- JSON-encoded tag list
     error_message TEXT,          -- For failed jobs
     start_time INTEGER,          -- NULL for queued jobs that haven't started
     end_time INTEGER,

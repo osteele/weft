@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+
+cat <<'CFG'
+SPECIFICATION Spec
+INVARIANTS
+  QueuedOrDraftClearsMetadata
+  SessionImpliesRunning
+CFG

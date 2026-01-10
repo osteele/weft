@@ -52,7 +52,8 @@ import (
 
 // Default intervals for background operations
 const (
-	DefaultSyncInterval        = 15 * time.Second
+	DefaultSyncActiveInterval  = 15 * time.Second
+	DefaultSyncIdleInterval    = 60 * time.Second
 	DefaultLogRefreshInterval  = 3 * time.Second
 	DefaultHostRefreshInterval = 30 * time.Second
 	DefaultHostCacheDuration   = 24 * time.Hour // How long cached host info is considered fresh
@@ -349,9 +350,12 @@ type dbWatchEventMsg struct {
 
 type dbRefreshTriggeredMsg struct{}
 
+type dbSyncTriggeredMsg struct{}
+
 type syncCompletedMsg struct {
 	updated       int
 	queuesStarted []string // hosts where queue runners were started
+	hostsSynced   []string
 	err           error
 }
 
@@ -611,14 +615,20 @@ type Model struct {
 	dbRefreshDebounceActive bool
 
 	// Background sync state
-	syncing      bool
-	lastSyncTime time.Time
+	syncing                 bool
+	lastSyncTime            time.Time
+	lastHostSyncTimes       map[string]time.Time
+	syncForceAll            bool
+	syncPendingAfterCurrent bool
+	// DB-triggered sync debounce
+	dbSyncDebounceActive bool
 
 	// Help overlay
 	showHelp bool
 
 	// Configurable intervals
-	syncInterval        time.Duration
+	syncActiveInterval  time.Duration
+	syncIdleInterval    time.Duration
 	logRefreshInterval  time.Duration
 	hostRefreshInterval time.Duration
 	hostCacheDuration   time.Duration
@@ -645,7 +655,8 @@ type Model struct {
 
 // ModelOptions contains configuration for the TUI model
 type ModelOptions struct {
-	SyncInterval        time.Duration
+	SyncActiveInterval  time.Duration
+	SyncIdleInterval    time.Duration
 	LogRefreshInterval  time.Duration
 	HostRefreshInterval time.Duration
 	HostCacheDuration   time.Duration // How long cached host info is considered fresh
@@ -654,7 +665,8 @@ type ModelOptions struct {
 // DefaultModelOptions returns the default TUI options
 func DefaultModelOptions() ModelOptions {
 	return ModelOptions{
-		SyncInterval:        DefaultSyncInterval,
+		SyncActiveInterval:  DefaultSyncActiveInterval,
+		SyncIdleInterval:    DefaultSyncIdleInterval,
 		LogRefreshInterval:  DefaultLogRefreshInterval,
 		HostRefreshInterval: DefaultHostRefreshInterval,
 		HostCacheDuration:   DefaultHostCacheDuration,
@@ -759,7 +771,8 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		detailViewport:          &detailVP,
 		inputs:                  inputs,
 		spinner:                 s,
-		syncInterval:            opts.SyncInterval,
+		syncActiveInterval:      opts.SyncActiveInterval,
+		syncIdleInterval:        opts.SyncIdleInterval,
 		logRefreshInterval:      opts.LogRefreshInterval,
 		hostRefreshInterval:     opts.HostRefreshInterval,
 		hostCacheDuration:       opts.HostCacheDuration,
@@ -783,7 +796,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshJobs(),
 		m.loadHosts(),
-		m.performBackgroundSync(), // Sync immediately on startup
+		m.performBackgroundSync(true), // Sync immediately on startup
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
@@ -899,6 +912,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return dbRefreshTriggeredMsg{}
 			}))
 		}
+		if !m.dbSyncDebounceActive {
+			m.dbSyncDebounceActive = true
+			cmds = append(cmds, tea.Tick(m.syncActiveInterval, func(time.Time) tea.Msg {
+				return dbSyncTriggeredMsg{}
+			}))
+		}
 		if cmd := m.waitForDBEvent(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -911,9 +930,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dbRefreshDebounceActive = false
 		return m, m.refreshJobs()
 
+	case dbSyncTriggeredMsg:
+		m.dbSyncDebounceActive = false
+		if time.Since(m.lastSyncTime) < m.syncActiveInterval {
+			return m, nil
+		}
+		if m.syncing {
+			m.syncPendingAfterCurrent = true
+			m.syncForceAll = true
+			return m, nil
+		}
+		m.syncing = true
+		m.syncForceAll = true
+		return m, m.performBackgroundSync(true)
+
 	case syncCompletedMsg:
 		m.syncing = false
+		m.syncForceAll = false
 		m.lastSyncTime = time.Now()
+		if len(msg.hostsSynced) > 0 {
+			for _, host := range msg.hostsSynced {
+				m.lastHostSyncTimes[host] = m.lastSyncTime
+			}
+		}
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
 		}
@@ -925,14 +964,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.queuesStarted) > 0 {
 			flashParts = append(flashParts, fmt.Sprintf("Started queue on %s", strings.Join(msg.queuesStarted, ", ")))
 		}
+		var cmds []tea.Cmd
 		if len(flashParts) > 0 {
-			return m, tea.Batch(
-				m.setFlash(strings.Join(flashParts, "; "), false),
-				m.refreshJobs(),
-				m.loadHosts(), // Refresh hosts to update queue status
-			)
+			cmds = append(cmds, m.setFlash(strings.Join(flashParts, "; "), false))
 		}
-		return m, nil
+		cmds = append(cmds, m.refreshJobs(), m.loadHosts())
+		if m.syncPendingAfterCurrent {
+			m.syncPendingAfterCurrent = false
+			m.syncing = true
+			m.syncForceAll = true
+			cmds = append(cmds, m.performBackgroundSync(true))
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
 
 	case logFetchedMsg:
 		m.logLoading = false
@@ -1255,7 +1301,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.refreshJobs())
 		if !m.syncing {
 			m.syncing = true
-			cmds = append(cmds, m.performBackgroundSync())
+			cmds = append(cmds, m.performBackgroundSync(false))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -2019,7 +2065,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Sync):
 		if m.viewMode == ViewModeJobs && !m.syncing {
 			m.syncing = true
-			return m, m.performBackgroundSync()
+			return m, m.performBackgroundSync(true)
 		}
 		return m, nil
 	}
@@ -4800,7 +4846,7 @@ func (m *Model) setFlash(msg string, isError bool) tea.Cmd {
 // Commands
 
 func (m Model) startSyncTicker() tea.Cmd {
-	return tea.Tick(m.syncInterval, func(t time.Time) tea.Msg {
+	return tea.Tick(m.syncActiveInterval, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
 }
@@ -5761,24 +5807,61 @@ func (m Model) fetchAllRunningJobsProgress() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) performBackgroundSync() tea.Cmd {
+func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 	return func() tea.Msg {
 		var updated int
+		var queuesStarted []string
+		var hostsSynced []string
 
-		// Sync running jobs
-		hosts, err := db.ListUniqueRunningHosts(m.database)
+		hosts, err := db.ListUniqueHosts(m.database)
 		if err != nil {
 			return syncCompletedMsg{err: err}
 		}
 
+		now := time.Now()
+		activeJobsByHost := make(map[string][]*db.Job)
+		activeHost := make(map[string]bool)
 		for _, host := range hosts {
-			jobs, err := db.ListRunning(m.database, host)
+			jobs, err := db.ListActiveJobs(m.database, host)
 			if err != nil {
 				continue
 			}
+			activeJobsByHost[host] = jobs
+			activeHost[host] = len(jobs) > 0
+		}
 
+		hostsToSync := make([]string, 0, len(hosts))
+		for _, host := range hosts {
+			interval := m.syncIdleInterval
+			if activeHost[host] {
+				interval = m.syncActiveInterval
+			}
+			last := m.lastHostSyncTimes[host]
+			due := forceAll || m.syncForceAll || last.IsZero() || now.Sub(last) >= interval
+			if due {
+				hostsToSync = append(hostsToSync, host)
+			}
+		}
+
+		if len(hostsToSync) == 0 {
+			return syncCompletedMsg{updated: 0, queuesStarted: nil, hostsSynced: nil}
+		}
+
+		// Pre-fetch tombstoned jobs once and group by host
+		tombstonedJobs, _ := db.GetTombstonedActiveJobs(m.database)
+		tombstonedByHost := map[string][]*db.Job{}
+		for _, job := range tombstonedJobs {
+			if job == nil {
+				continue
+			}
+			tombstonedByHost[job.Host] = append(tombstonedByHost[job.Host], job)
+		}
+
+		for _, host := range hostsToSync {
+			hostsSynced = append(hostsSynced, host)
+			// Sync running/starting/queued jobs
 			syncOpts := ops.DefaultSyncOptions()
-			for _, job := range jobs {
+			for _, job := range activeJobsByHost[host] {
 				changed, err := ops.SyncJobQuick(m.database, job, syncOpts)
 				if err != nil {
 					continue
@@ -5787,32 +5870,9 @@ func (m Model) performBackgroundSync() tea.Cmd {
 					updated++
 				}
 			}
-		}
 
-		// Sync queued jobs (check if they've started or completed)
-		queuedJobs, err := db.ListAllQueued(m.database)
-		if err == nil {
-			syncOpts := ops.DefaultSyncOptions()
-			for _, job := range queuedJobs {
-				changed, err := ops.SyncJobQuick(m.database, job, syncOpts)
-				if err != nil {
-					continue
-				}
-				if changed {
-					updated++
-				}
-			}
-		}
-
-		// Clean up draft jobs that still have remote state
-		draftHosts, err := db.ListHostsWithDraftsPending(m.database)
-		if err == nil {
-			syncOpts := ops.DefaultSyncOptions()
-			for _, draftHost := range draftHosts {
-				drafts, err := db.ListDraftJobsPendingSync(m.database, draftHost)
-				if err != nil {
-					continue
-				}
+			// Sync draft jobs that still have remote state
+			if drafts, err := db.ListDraftJobsPendingSync(m.database, host); err == nil {
 				for _, job := range drafts {
 					changed, err := ops.SyncDraftJob(m.database, job, syncOpts)
 					if err != nil {
@@ -5823,44 +5883,36 @@ func (m Model) performBackgroundSync() tea.Cmd {
 					}
 				}
 			}
-		}
 
-		// Kill tombstoned jobs that are still marked as running/queued on remote hosts
-		tombstonedJobs, err := db.GetTombstonedActiveJobs(m.database)
-		if err == nil {
-			for _, job := range tombstonedJobs {
+			// Kill tombstoned jobs still running/queued on remote host
+			for _, job := range tombstonedByHost[host] {
+				if job == nil {
+					continue
+				}
 				killed := killTombstonedJob(m.database, job)
 				if killed {
 					updated++
 				}
 			}
-		}
 
-		// Start queue runners on hosts with queued jobs
-		var queuesStarted []string
-		hostsWithQueued, err := db.ListHostsWithQueuedJobs(m.database)
-		if err == nil {
-			for _, host := range hostsWithQueued {
+			// Start queue runner if there are queued jobs
+			queuedCount := 0
+			for _, job := range activeJobsByHost[host] {
+				if job != nil && job.Status == db.StatusQueued {
+					queuedCount++
+				}
+			}
+			if queuedCount > 0 {
 				started, err := ensureQueueRunnerStartedTUI(host)
 				if err == nil && started {
 					queuesStarted = append(queuesStarted, host)
 				}
+			} else {
+				_ = stopQueueRunnerIfIdleTUI(host)
 			}
 		}
 
-		// Stop queue runners on hosts with no queued jobs
-		for _, host := range m.hosts {
-			if host == nil {
-				continue
-			}
-			count, err := db.CountQueuedByHost(m.database, host.Name)
-			if err != nil || count > 0 {
-				continue
-			}
-			_ = stopQueueRunnerIfIdleTUI(host.Name)
-		}
-
-		return syncCompletedMsg{updated: updated, queuesStarted: queuesStarted}
+		return syncCompletedMsg{updated: updated, queuesStarted: queuesStarted, hostsSynced: hostsSynced}
 	}
 }
 

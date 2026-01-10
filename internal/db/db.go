@@ -453,7 +453,7 @@ func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 // UpdateJobStartingToQueued transitions a starting job to queued state and assigns a queue name.
 func UpdateJobStartingToQueued(db *sql.DB, id int64, queueName string) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL WHERE id = ? AND status = ?`,
+		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
 		StatusQueued, queueName, id, StatusStarting,
 	)
 	return err
@@ -462,7 +462,7 @@ func UpdateJobStartingToQueued(db *sql.DB, id int64, queueName string) error {
 // UpdateJobRunningToQueued transitions a running job back to queued state.
 func UpdateJobRunningToQueued(db *sql.DB, id int64, queueName string) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL WHERE id = ? AND status = ?`,
+		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
 		StatusQueued, queueName, id, StatusRunning,
 	)
 	return err
@@ -523,21 +523,23 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 	return err
 }
 
-// RecordCompletionByID updates a job by ID with its exit code and end time
+// RecordCompletionByID updates a job by ID with its exit code and end time.
+// Clears session_name per spec: SessionImpliesRunning (session => status = running).
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL
+		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?)`,
 		exitCode, endTime, StatusCompleted, id, StatusRunning, StatusQueued,
 	)
 	return err
 }
 
-// MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID
+// MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID.
+// Clears session_name per spec: SessionImpliesRunning (session => status = running).
 func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL
+		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?, ?)`,
 		endTime, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued,
 	)
@@ -575,7 +577,7 @@ func MarkQueuedJobRunning(db *sql.DB, id int64) error {
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
 func MarkQueuedByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, start_time = 0 WHERE id = ?`,
+		`UPDATE jobs SET status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
 		StatusQueued, id,
 	)
 	return err
@@ -632,7 +634,24 @@ func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
 
 // ClearPendingAndUpdateStatus clears pending status and updates both status fields.
 // Used when reconciliation succeeds or when accepting remote state.
+// Clears session_name for non-running states per spec: SessionImpliesRunning.
 func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
+	if status == StatusQueued || status == StatusDraft {
+		// Reset all execution-related fields when going back to queued/draft
+		_, err := db.Exec(
+			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+			status, status, jobID,
+		)
+		return err
+	}
+	if IsTerminalStatus(status) {
+		// Clear session_name for terminal states per spec: SessionImpliesRunning
+		_, err := db.Exec(
+			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, session_name = NULL WHERE id = ?`,
+			status, status, jobID,
+		)
+		return err
+	}
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL WHERE id = ?`,
 		status, status, jobID,

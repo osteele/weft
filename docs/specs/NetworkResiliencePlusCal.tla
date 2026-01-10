@@ -1,5 +1,5 @@
 --------------------------- MODULE NetworkResiliencePlusCal ---------------------------
-EXTENDS TLC, Sequences
+EXTENDS TLC, Sequences, Naturals
 
 Draft == "draft"
 Queued == "queued"
@@ -16,15 +16,16 @@ StatusSet == {Draft, Queued, Starting, Running, Completed, Dead, Failed, Killed,
 PendingSet == StatusSet \cup {NoPending}
 
 HostSet == {"hostA", "hostB"}
-JobID == Nat
+MaxJobs == 2
+JobID == 1..MaxJobs
 
 JobRecord == [status: StatusSet, pending: PendingSet, host: HostSet]
 
 (* --algorithm NetworkResilience
 variables
-    jobs \in [JobID -> JobRecord],
-    nextID \in Nat,
-    hostUp \in [HostSet -> BOOLEAN];
+    jobs = [j \in {} |-> [status |-> Draft, pending |-> NoPending, host |-> "hostA"]],
+    nextID = 1,
+    hostUp = [h \in HostSet |-> TRUE];
 
 procedure RecordIntent(jobId, target)
 begin
@@ -35,20 +36,17 @@ begin
 end procedure;
 
 begin
-Init:
-    jobs := [j \in {} |-> [status |-> Draft, pending |-> NoPending, host |-> "hostA"]];
-    nextID := 1;
-    hostUp := [h \in HostSet |-> TRUE];
-
 Loop:
     while TRUE do
         either
             SubmitWhileOffline:
-                with h \in HostSet do
-                    hostUp[h] := FALSE;
-                    jobs[nextID] := [status |-> Queued, pending |-> Queued, host |-> h];
-                    nextID := nextID + 1;
-                end with;
+                if nextID \in JobID then
+                    with h \in HostSet do
+                        hostUp[h] := FALSE;
+                        jobs[nextID] := [status |-> Queued, pending |-> Queued, host |-> h];
+                        nextID := nextID + 1;
+                    end with;
+                end if;
         or
             SyncWhenOnline:
                 with j \in DOMAIN jobs do
@@ -64,21 +62,21 @@ Loop:
         end either;
     end while;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "74736ea1" /\ chksum(tla) = "7310f177")
+\* BEGIN TRANSLATION (chksum(pcal) = "1443177a" /\ chksum(tla) = "ee03fe79")
 CONSTANT defaultInitValue
 VARIABLES jobs, nextID, hostUp, pc, stack, jobId, target
 
 vars == << jobs, nextID, hostUp, pc, stack, jobId, target >>
 
 Init == (* Global variables *)
-        /\ jobs \in [JobID -> JobRecord]
-        /\ nextID \in Nat
-        /\ hostUp \in [HostSet -> BOOLEAN]
+        /\ jobs = [j \in {} |-> [status |-> Draft, pending |-> NoPending, host |-> "hostA"]]
+        /\ nextID = 1
+        /\ hostUp = [h \in HostSet |-> TRUE]
         (* Procedure RecordIntent *)
         /\ jobId = defaultInitValue
         /\ target = defaultInitValue
         /\ stack = << >>
-        /\ pc = "Init"
+        /\ pc = "Loop"
 
 RecordIntentDo == /\ pc = "RecordIntentDo"
                   /\ jobs' = [jobs EXCEPT ![jobId] = [status |-> target, pending |-> target, host |-> jobs[jobId].host]]
@@ -94,13 +92,6 @@ RecordIntentReturn == /\ pc = "RecordIntentReturn"
 
 RecordIntent == RecordIntentDo \/ RecordIntentReturn
 
-Init == /\ pc = "Init"
-        /\ jobs' = [j \in {} |-> [status |-> Draft, pending |-> NoPending, host |-> "hostA"]]
-        /\ nextID' = 1
-        /\ hostUp' = [h \in HostSet |-> TRUE]
-        /\ pc' = "Loop"
-        /\ UNCHANGED << stack, jobId, target >>
-
 Loop == /\ pc = "Loop"
         /\ \/ /\ pc' = "SubmitWhileOffline"
            \/ /\ pc' = "SyncWhenOnline"
@@ -108,10 +99,13 @@ Loop == /\ pc = "Loop"
         /\ UNCHANGED << jobs, nextID, hostUp, stack, jobId, target >>
 
 SubmitWhileOffline == /\ pc = "SubmitWhileOffline"
-                      /\ \E h \in HostSet:
-                           /\ hostUp' = [hostUp EXCEPT ![h] = FALSE]
-                           /\ jobs' = [jobs EXCEPT ![nextID] = [status |-> Queued, pending |-> Queued, host |-> h]]
-                           /\ nextID' = nextID + 1
+                      /\ IF nextID \in JobID
+                            THEN /\ \E h \in HostSet:
+                                      /\ hostUp' = [hostUp EXCEPT ![h] = FALSE]
+                                      /\ jobs' = [jobs EXCEPT ![nextID] = [status |-> Queued, pending |-> Queued, host |-> h]]
+                                      /\ nextID' = nextID + 1
+                            ELSE /\ TRUE
+                                 /\ UNCHANGED << jobs, nextID, hostUp >>
                       /\ pc' = "Loop"
                       /\ UNCHANGED << stack, jobId, target >>
 
@@ -130,16 +124,10 @@ HostFlap == /\ pc = "HostFlap"
             /\ pc' = "Loop"
             /\ UNCHANGED << jobs, nextID, stack, jobId, target >>
 
-(* Allow infinite stuttering to prevent deadlock on termination. *)
-Terminating == pc = "Done" /\ UNCHANGED vars
-
-Next == RecordIntent \/ Init \/ Loop \/ SubmitWhileOffline
-           \/ SyncWhenOnline \/ HostFlap
-           \/ Terminating
+Next == RecordIntent \/ Loop \/ SubmitWhileOffline \/ SyncWhenOnline
+           \/ HostFlap
 
 Spec == Init /\ [][Next]_vars
-
-Termination == <>(pc = "Done")
 
 \* END TRANSLATION 
 

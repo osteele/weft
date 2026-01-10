@@ -1,6 +1,10 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+	"time"
+)
 
 func TestParseCdCommand(t *testing.T) {
 	tests := []struct {
@@ -391,6 +395,107 @@ func TestSetJobEnvVars(t *testing.T) {
 	}
 	if len(job.EnvVars) != 0 {
 		t.Fatalf("expected env vars cleared, got %v", job.EnvVars)
+	}
+}
+
+func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
+	database := SetupTestDB(t)
+
+	now := time.Now().Unix()
+	exitCode := 1
+
+	makeRunningJob := func(status string) int64 {
+		jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")
+		if err != nil {
+			t.Fatalf("record queued: %v", err)
+		}
+		if _, err := database.Exec(
+			`UPDATE jobs SET status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?, error_message = ? WHERE id = ?`,
+			status, fmt.Sprintf("rj-%d", jobID), now-100, now, exitCode, "boom", jobID,
+		); err != nil {
+			t.Fatalf("seed job fields: %v", err)
+		}
+		return jobID
+	}
+
+	jobID := makeRunningJob(StatusRunning)
+	if err := UpdateJobRunningToQueued(database, jobID, "default"); err != nil {
+		t.Fatalf("UpdateJobRunningToQueued: %v", err)
+	}
+	updated, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if updated.Status != StatusQueued {
+		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+	if updated.SessionName != "" || updated.StartTime != 0 || updated.EndTime != nil || updated.ExitCode != nil || updated.ErrorMessage != "" {
+		t.Fatalf("expected run metadata cleared after running->queued, got session=%q start=%d end=%v exit=%v err=%q",
+			updated.SessionName, updated.StartTime, updated.EndTime, updated.ExitCode, updated.ErrorMessage)
+	}
+
+	jobID = makeRunningJob(StatusStarting)
+	if err := UpdateJobStartingToQueued(database, jobID, "default"); err != nil {
+		t.Fatalf("UpdateJobStartingToQueued: %v", err)
+	}
+	updated, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if updated.Status != StatusQueued {
+		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+	if updated.SessionName != "" || updated.StartTime != 0 || updated.EndTime != nil || updated.ExitCode != nil || updated.ErrorMessage != "" {
+		t.Fatalf("expected run metadata cleared after starting->queued, got session=%q start=%d end=%v exit=%v err=%q",
+			updated.SessionName, updated.StartTime, updated.EndTime, updated.ExitCode, updated.ErrorMessage)
+	}
+
+	jobID = makeRunningJob(StatusRunning)
+	if err := MarkQueuedByID(database, jobID); err != nil {
+		t.Fatalf("MarkQueuedByID: %v", err)
+	}
+	updated, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if updated.Status != StatusQueued {
+		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+	if updated.SessionName != "" || updated.StartTime != 0 || updated.EndTime != nil || updated.ExitCode != nil || updated.ErrorMessage != "" {
+		t.Fatalf("expected run metadata cleared after mark queued, got session=%q start=%d end=%v exit=%v err=%q",
+			updated.SessionName, updated.StartTime, updated.EndTime, updated.ExitCode, updated.ErrorMessage)
+	}
+
+	jobID = makeRunningJob(StatusRunning)
+	if err := ClearPendingAndUpdateStatus(database, jobID, StatusQueued); err != nil {
+		t.Fatalf("ClearPendingAndUpdateStatus queued: %v", err)
+	}
+	updated, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if updated.Status != StatusQueued {
+		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+	if updated.SessionName != "" || updated.StartTime != 0 || updated.EndTime != nil || updated.ExitCode != nil || updated.ErrorMessage != "" {
+		t.Fatalf("expected run metadata cleared after clear pending queued, got session=%q start=%d end=%v exit=%v err=%q",
+			updated.SessionName, updated.StartTime, updated.EndTime, updated.ExitCode, updated.ErrorMessage)
+	}
+
+	jobID = makeRunningJob(StatusRunning)
+	if err := ClearPendingAndUpdateStatus(database, jobID, StatusDraft); err != nil {
+		t.Fatalf("ClearPendingAndUpdateStatus draft: %v", err)
+	}
+	updated, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if updated.Status != StatusDraft {
+		t.Fatalf("expected draft status, got %s", updated.Status)
+	}
+	if updated.SessionName != "" || updated.StartTime != 0 || updated.EndTime != nil || updated.ExitCode != nil || updated.ErrorMessage != "" {
+		t.Fatalf("expected run metadata cleared after clear pending draft, got session=%q start=%d end=%v exit=%v err=%q",
+			updated.SessionName, updated.StartTime, updated.EndTime, updated.ExitCode, updated.ErrorMessage)
 	}
 }
 

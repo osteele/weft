@@ -2,7 +2,5 @@
 cat <<'EOF'
 SPECIFICATION Spec
 CONSTANT defaultInitValue = Draft
-INVARIANT TypeInvariant
-INVARIANT PendingConsistency
-INVARIANT QueueOnlyWhenRemoteVisible
+CONSTRAINT StateConstraint
 EOF

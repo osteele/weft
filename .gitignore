@@ -43,3 +43,6 @@ docs/specs/*.old
 
 # Generated config (rebuild via cfg.script)
 docs/specs/*.cfg
+
+# Apalache output
+_apalache-out/
