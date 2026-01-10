@@ -961,6 +961,13 @@ func UpdateQueuedToRunningWithSession(db *sql.DB, id int64, sessionName string) 
 	return err
 }
 
+// ClearSessionName removes the session_name from a job.
+// Used when a job that was started via tmux is now being managed by the queue runner.
+func ClearSessionName(db *sql.DB, id int64) error {
+	_, err := db.Exec(`UPDATE jobs SET session_name = NULL WHERE id = ?`, id)
+	return err
+}
+
 // RecordCompletion updates a job with its exit code and end time
 func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTime int64) error {
 	_, err := db.Exec(

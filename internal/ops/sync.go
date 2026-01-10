@@ -371,10 +371,10 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 	result, err := ReadStatusFile(job.Host, statusFile, timeout)
 	// Note: err is ignored here - we'll try pattern-based lookup as fallback
 
-	// If exact path not found (or errored) and job has a QueueName, try pattern-based lookup.
-	// This handles jobs that were started via start_now, killed, then re-ran via queue runner,
-	// or cases where the exact path check fails due to network issues.
+	// If exact path not found (or errored) and job has a QueueName, check queue state.
+	// This handles jobs that were started via start_now, killed, then re-queued.
 	if result == nil && job.QueueName != "" {
+		// First check if job completed (status file exists)
 		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
 		if found.IsSome() && found.Unwrap() {
 			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
@@ -382,6 +382,40 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 			}
 			CacheCompletedJobLog(job)
 			return true, nil
+		}
+
+		// Check if job is currently running or queued via queue runner
+		queueName := job.QueueName
+		if queueName == "" {
+			queueName = "default"
+		}
+		queueStatus, qErr := queueRemoteClient.QuickStatus(job.Host, queueName, job.ID, timeout)
+		if qErr == nil && !queueStatus.Uncertain {
+			switch queueStatus.State {
+			case queueStateRunning:
+				// Job is running via queue runner - update status and clear session_name
+				if job.Status != db.StatusRunning {
+					if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
+						return false, err
+					}
+				}
+				// Clear session_name since job is now managed by queue runner
+				if job.SessionName != "" {
+					if err := db.ClearSessionName(database, job.ID); err != nil {
+						return false, err
+					}
+				}
+				return true, nil
+			case queueStateQueued:
+				// Job is in queue - update status to queued
+				if job.Status != db.StatusQueued {
+					if err := db.MarkQueuedByID(database, job.ID); err != nil {
+						return false, err
+					}
+					return true, nil
+				}
+				return false, nil
+			}
 		}
 	}
 
