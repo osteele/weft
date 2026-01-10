@@ -16,22 +16,24 @@ Canceled == "canceled"
 
 NoPending == "no-pending"
 NotPresent == "missing"
+Unknown == "unknown"
 
 StatusSet == {Draft, Queued, Running, Completed, Dead, Failed, Killed, Canceled}
 PendingSet == StatusSet \cup {NoPending}
-RemoteStatusSet == StatusSet \cup {NotPresent}
+RemoteStatusSet == StatusSet \cup {NotPresent, Unknown}
 TerminalSet == {Completed, Dead, Failed, Draft, Killed, Canceled}
 DesiredIntents == {Draft, Queued, Running, Dead, Killed, Canceled}
 
 RemoteChoices(r) ==
-    CASE r = Draft -> {Draft, Queued}
-        [] r = Queued -> {Queued, Running, NotPresent}
-        [] r = Running -> {Running, Completed, Dead}
-        [] r = Completed -> {Completed}
-        [] r = Dead -> {Dead}
-        [] r = Failed -> {Failed, Draft}
-        [] r = NotPresent -> {NotPresent, Queued}
-        [] OTHER -> {r}
+    CASE r = Draft -> {Draft, Queued, Unknown}
+        [] r = Queued -> {Queued, Running, NotPresent, Unknown}
+        [] r = Running -> {Running, Completed, Dead, Failed, Unknown}
+        [] r = Completed -> {Completed, Unknown}
+        [] r = Dead -> {Dead, Unknown}
+        [] r = Failed -> {Failed, Unknown}
+        [] r = NotPresent -> {NotPresent, Queued, Unknown}
+        [] r = Unknown -> RemoteStatusSet
+        [] OTHER -> {r, Unknown}
 
 (* --algorithm SyncAndReconcile
 variables
@@ -131,7 +133,9 @@ begin
     ReconcileReset:
         connectionError := FALSE;
     ReconcileCases:
-        if ~PendingActive /\ base = remote then
+        if remote = Unknown then
+            skip;  \* Cannot reconcile when remote state is unknown
+        elsif ~PendingActive /\ base = remote then
             skip;
         elsif ~PendingActive /\ base # remote then
             call AcceptRemote();
@@ -202,7 +206,7 @@ Loop:
         end either;
     end while;
 end algorithm; *)
-\* BEGIN TRANSLATION (chksum(pcal) = "1c760e78" /\ chksum(tla) = "80b1b8be")
+\* BEGIN TRANSLATION (chksum(pcal) = "97261f05" /\ chksum(tla) = "504685d2")
 CONSTANT defaultInitValue
 VARIABLES status, base, pending, remote, queueHasEntry, runnerActive, 
           runnerVersion, runnerDesiredVersion, hostUp, connectionError, pc, 
@@ -376,36 +380,40 @@ ReconcileReset == /\ pc = "ReconcileReset"
                                   runnerDesiredVersion, hostUp, stack, target >>
 
 ReconcileCases == /\ pc = "ReconcileCases"
-                  /\ IF ~PendingActive /\ base = remote
+                  /\ IF remote = Unknown
                         THEN /\ TRUE
                              /\ pc' = "ReconcileRunner"
                              /\ UNCHANGED << stack, target >>
-                        ELSE /\ IF ~PendingActive /\ base # remote
-                                   THEN /\ stack' = << [ procedure |->  "AcceptRemote",
-                                                         pc        |->  "ReconcileRunner" ] >>
-                                                     \o stack
-                                        /\ pc' = "AcceptRemoteUpdate"
-                                        /\ UNCHANGED target
-                                   ELSE /\ IF PendingActive /\ base = remote
-                                              THEN /\ /\ stack' = << [ procedure |->  "ApplyPending",
-                                                                       pc        |->  "ReconcileRunner",
-                                                                       target    |->  target ] >>
-                                                                   \o stack
-                                                      /\ target' = pending
-                                                   /\ pc' = "ApplyPendingDecision"
-                                              ELSE /\ IF PendingActive /\ pending = remote
-                                                         THEN /\ stack' = << [ procedure |->  "AcceptRemote",
-                                                                               pc        |->  "ReconcileRunner" ] >>
-                                                                           \o stack
-                                                              /\ pc' = "AcceptRemoteUpdate"
-                                                         ELSE /\ IF QueueMissing
-                                                                    THEN /\ pc' = "QueueRepair"
-                                                                         /\ stack' = stack
-                                                                    ELSE /\ stack' = << [ procedure |->  "ResolveConflict",
+                        ELSE /\ IF ~PendingActive /\ base = remote
+                                   THEN /\ TRUE
+                                        /\ pc' = "ReconcileRunner"
+                                        /\ UNCHANGED << stack, target >>
+                                   ELSE /\ IF ~PendingActive /\ base # remote
+                                              THEN /\ stack' = << [ procedure |->  "AcceptRemote",
+                                                                    pc        |->  "ReconcileRunner" ] >>
+                                                                \o stack
+                                                   /\ pc' = "AcceptRemoteUpdate"
+                                                   /\ UNCHANGED target
+                                              ELSE /\ IF PendingActive /\ base = remote
+                                                         THEN /\ /\ stack' = << [ procedure |->  "ApplyPending",
+                                                                                  pc        |->  "ReconcileRunner",
+                                                                                  target    |->  target ] >>
+                                                                              \o stack
+                                                                 /\ target' = pending
+                                                              /\ pc' = "ApplyPendingDecision"
+                                                         ELSE /\ IF PendingActive /\ pending = remote
+                                                                    THEN /\ stack' = << [ procedure |->  "AcceptRemote",
                                                                                           pc        |->  "ReconcileRunner" ] >>
                                                                                       \o stack
-                                                                         /\ pc' = "ResolvePolicy"
-                                                   /\ UNCHANGED target
+                                                                         /\ pc' = "AcceptRemoteUpdate"
+                                                                    ELSE /\ IF QueueMissing
+                                                                               THEN /\ pc' = "QueueRepair"
+                                                                                    /\ stack' = stack
+                                                                               ELSE /\ stack' = << [ procedure |->  "ResolveConflict",
+                                                                                                     pc        |->  "ReconcileRunner" ] >>
+                                                                                                 \o stack
+                                                                                    /\ pc' = "ResolvePolicy"
+                                                              /\ UNCHANGED target
                   /\ UNCHANGED << status, base, pending, remote, queueHasEntry, 
                                   runnerActive, runnerVersion, 
                                   runnerDesiredVersion, hostUp, 
@@ -536,5 +544,21 @@ Termination == <>(pc = "Done")
 
 \* State constraint to bound state space for model checking
 StateConstraint == runnerDesiredVersion < 3
+
+\* Type invariant - all variables have valid values
+TypeInvariant ==
+    /\ status \in StatusSet
+    /\ base \in StatusSet
+    /\ pending \in PendingSet
+    /\ remote \in RemoteStatusSet
+    /\ queueHasEntry \in BOOLEAN
+    /\ runnerActive \in BOOLEAN
+    /\ hostUp \in BOOLEAN
+    /\ connectionError \in BOOLEAN
+
+\* Queue consistency: queueHasEntry reflects remote state when at rest
+QueueConsistent ==
+    (pc = "Loop" /\ remote \notin {NotPresent, Unknown}) =>
+    (queueHasEntry = (remote \in {Queued, Running}))
 
 =============================================================================

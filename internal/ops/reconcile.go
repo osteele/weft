@@ -47,6 +47,14 @@ func Reconcile(database *sql.DB, job *db.Job, remoteStatus string, opts Reconcil
 		base = job.Status
 	}
 
+	// Log reconcile inputs for debugging
+	pendingStr := "nil"
+	if local != nil {
+		pendingStr = *local
+	}
+	oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+		oplog.WithDetailf("reconcile-input: base=%s pending=%s remote=%s", base, pendingStr, remote))
+
 	// Case 1: No local intent and remote unchanged from base
 	if local == nil && base == remote {
 		return &ReconcileResult{Action: "none"}, nil
@@ -408,8 +416,15 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 	// Probe remote state
 	remoteStatus, err := ProbeRemoteStatus(job, opts.Timeout)
 	if err != nil {
+		oplog.LogJob(oplog.OpJobProbe, job.ID, job.Host,
+			oplog.WithDetailf("error current=%s", job.Status),
+			oplog.WithError(err))
 		return nil, fmt.Errorf("probe remote: %w", err)
 	}
+
+	// Log probe result
+	oplog.LogJob(oplog.OpJobProbe, job.ID, job.Host,
+		oplog.WithDetailf("result=%s current=%s", remoteStatus, job.Status))
 
 	// Reconcile the three states
 	return Reconcile(database, job, remoteStatus, opts)

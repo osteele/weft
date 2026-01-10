@@ -68,6 +68,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if cfg.HostRefreshInterval > 0 {
 		opts.HostRefreshInterval = time.Duration(cfg.HostRefreshInterval) * time.Second
 	}
+	opts.StopQueueRunnerWhenIdle = cfg.StopQueueRunnerWhenIdle
 
 	model := tui.NewModelWithOptions(database, opts)
 

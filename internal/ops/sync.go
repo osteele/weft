@@ -363,6 +363,13 @@ func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 	}
 
 	if exists {
+		// Session exists - job is running. Update status if needed.
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting {
+			if err := db.MarkRunningByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
 		return false, nil
 	}
 

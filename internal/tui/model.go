@@ -353,10 +353,11 @@ type dbRefreshTriggeredMsg struct{}
 type dbSyncTriggeredMsg struct{}
 
 type syncCompletedMsg struct {
-	updated       int
-	queuesStarted []string // hosts where queue runners were started
-	hostsSynced   []string
-	err           error
+	updated           int
+	queuesStarted     []string // hosts where queue runners were started
+	hostsSynced       []string
+	queueRunnerErrors []string
+	err               error
 }
 
 type logFetchedMsg struct {
@@ -627,11 +628,12 @@ type Model struct {
 	showHelp bool
 
 	// Configurable intervals
-	syncActiveInterval  time.Duration
-	syncIdleInterval    time.Duration
-	logRefreshInterval  time.Duration
-	hostRefreshInterval time.Duration
-	hostCacheDuration   time.Duration
+	syncActiveInterval      time.Duration
+	syncIdleInterval        time.Duration
+	logRefreshInterval      time.Duration
+	hostRefreshInterval     time.Duration
+	hostCacheDuration       time.Duration
+	stopQueueRunnerWhenIdle bool
 
 	// Host cache tracking - which hosts have been freshly queried this session
 	hostsQueriedThisSession map[string]bool
@@ -655,21 +657,23 @@ type Model struct {
 
 // ModelOptions contains configuration for the TUI model
 type ModelOptions struct {
-	SyncActiveInterval  time.Duration
-	SyncIdleInterval    time.Duration
-	LogRefreshInterval  time.Duration
-	HostRefreshInterval time.Duration
-	HostCacheDuration   time.Duration // How long cached host info is considered fresh
+	SyncActiveInterval      time.Duration
+	SyncIdleInterval        time.Duration
+	LogRefreshInterval      time.Duration
+	HostRefreshInterval     time.Duration
+	HostCacheDuration       time.Duration // How long cached host info is considered fresh
+	StopQueueRunnerWhenIdle bool
 }
 
 // DefaultModelOptions returns the default TUI options
 func DefaultModelOptions() ModelOptions {
 	return ModelOptions{
-		SyncActiveInterval:  DefaultSyncActiveInterval,
-		SyncIdleInterval:    DefaultSyncIdleInterval,
-		LogRefreshInterval:  DefaultLogRefreshInterval,
-		HostRefreshInterval: DefaultHostRefreshInterval,
-		HostCacheDuration:   DefaultHostCacheDuration,
+		SyncActiveInterval:      DefaultSyncActiveInterval,
+		SyncIdleInterval:        DefaultSyncIdleInterval,
+		LogRefreshInterval:      DefaultLogRefreshInterval,
+		HostRefreshInterval:     DefaultHostRefreshInterval,
+		HostCacheDuration:       DefaultHostCacheDuration,
+		StopQueueRunnerWhenIdle: false,
 	}
 }
 
@@ -776,6 +780,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		logRefreshInterval:      opts.LogRefreshInterval,
 		hostRefreshInterval:     opts.HostRefreshInterval,
 		hostCacheDuration:       opts.HostCacheDuration,
+		stopQueueRunnerWhenIdle: opts.StopQueueRunnerWhenIdle,
 		hostsQueriedThisSession: make(map[string]bool),
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),
@@ -966,7 +971,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			flashParts = append(flashParts, fmt.Sprintf("Started queue on %s", strings.Join(msg.queuesStarted, ", ")))
 		}
 		var cmds []tea.Cmd
-		if len(flashParts) > 0 {
+		if len(msg.queueRunnerErrors) > 0 {
+			label := "error"
+			if len(msg.queueRunnerErrors) > 1 {
+				label = "errors"
+			}
+			errorFlash := fmt.Sprintf("Queue runner %s: %s", label, strings.Join(msg.queueRunnerErrors, "; "))
+			if len(flashParts) > 0 {
+				errorFlash = strings.Join(append(flashParts, errorFlash), "; ")
+			}
+			cmds = append(cmds, m.setFlash(errorFlash, true))
+		} else if len(flashParts) > 0 {
 			cmds = append(cmds, m.setFlash(strings.Join(flashParts, "; "), false))
 		}
 		cmds = append(cmds, m.refreshJobs(), m.loadHosts())
@@ -5818,6 +5833,7 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 		var updated int
 		var queuesStarted []string
 		var hostsSynced []string
+		var queueRunnerErrors []string
 
 		hosts, err := db.ListUniqueHosts(m.database)
 		if err != nil {
@@ -5850,7 +5866,7 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 		}
 
 		if len(hostsToSync) == 0 {
-			return syncCompletedMsg{updated: 0, queuesStarted: nil, hostsSynced: nil}
+			return syncCompletedMsg{updated: 0, queuesStarted: nil, hostsSynced: nil, queueRunnerErrors: nil}
 		}
 
 		// Pre-fetch tombstoned jobs once and group by host
@@ -5870,6 +5886,9 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 			for _, job := range activeJobsByHost[host] {
 				changed, err := ops.SyncJobQuick(m.database, job, syncOpts)
 				if err != nil {
+					oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+						oplog.WithDetail("sync-quick-error"),
+						oplog.WithError(err))
 					continue
 				}
 				if changed {
@@ -5882,6 +5901,9 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 				for _, job := range drafts {
 					changed, err := ops.SyncDraftJob(m.database, job, syncOpts)
 					if err != nil {
+						oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
+							oplog.WithDetail("sync-draft-error"),
+							oplog.WithError(err))
 						continue
 					}
 					if changed {
@@ -5903,22 +5925,34 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 
 			// Start queue runner if there are queued jobs
 			queuedCount := 0
+			runningCount := 0
 			for _, job := range activeJobsByHost[host] {
 				if job != nil && job.Status == db.StatusQueued {
 					queuedCount++
+				} else if job != nil && (job.Status == db.StatusRunning || job.Status == db.StatusStarting) {
+					runningCount++
 				}
 			}
 			if queuedCount > 0 {
 				started, err := ensureQueueRunnerStartedTUI(host)
-				if err == nil && started {
+				if err != nil {
+					queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
+				} else if started {
 					queuesStarted = append(queuesStarted, host)
 				}
-			} else {
-				_ = stopQueueRunnerIfIdleTUI(host)
+			} else if m.stopQueueRunnerWhenIdle && runningCount == 0 {
+				if err := stopQueueRunnerIfIdleTUI(host); err != nil {
+					queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
+				}
 			}
 		}
 
-		return syncCompletedMsg{updated: updated, queuesStarted: queuesStarted, hostsSynced: hostsSynced}
+		return syncCompletedMsg{
+			updated:           updated,
+			queuesStarted:     queuesStarted,
+			hostsSynced:       hostsSynced,
+			queueRunnerErrors: queueRunnerErrors,
+		}
 	}
 }
 

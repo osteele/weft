@@ -296,10 +296,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
-		if usageHintsEnabled() {
-			fmt.Printf("\nTo start the queue runner (if not already running):\n")
-			fmt.Printf("  remote-jobs queue start %s\n", host)
-		}
+
 		if res.Deferred {
 			fmt.Printf("\nHost %s is unreachable right now. The CLI will append this job to the remote queue once it can reach the host again (run `remote-jobs sync --sync` to retry).\n", host)
 		}
