@@ -81,6 +81,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
+- `--tag TAG`: Tag to attach to the job (can be repeated)
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -125,6 +126,9 @@ remote-jobs run -i --allow -m "Training run" deepthought 'python train.py'
 
 # Set environment variables
 remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python train.py'
+
+# Tag jobs for later filtering
+remote-jobs run --tag exp-012 --tag notebook-sync deepthought 'python train.py'
 
 # Run job after another succeeds
 remote-jobs run --after 42 deepthought 'python eval.py'
@@ -374,9 +378,12 @@ remote-jobs job list [flags]
 **Flags:**
 - `--running`: Show only running jobs
 - `--completed`: Show only completed jobs
+- `--queued`: Show only queued jobs
 - `--dead`: Show only dead jobs
+- `--status STATUS`: Filter by status (`running`, `completed`, `queued`, `dead`, `processed`, `unprocessed`)
 - `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
+- `--tag TAG`: Filter by tag (can be repeated)
 - `--limit N`: Limit results (default: 50)
 - `--show ID`: Show detailed info for a specific job
 - `--cleanup DAYS`: Delete jobs older than N days
@@ -388,9 +395,40 @@ remote-jobs job list                          # Recent jobs
 remote-jobs job list --running                # Running jobs
 remote-jobs job list --running --sync         # Running jobs (sync first)
 remote-jobs job list --host deepthought       # Jobs on deepthought
+remote-jobs job list --tag exp-012            # Jobs with a tag
+remote-jobs job list --status unprocessed     # Jobs missing the processed tag
 remote-jobs job list --search training        # Search jobs
 remote-jobs job list --show 42                # Job details
 remote-jobs job list --cleanup 30             # Remove old jobs
+```
+
+### remote-jobs tag
+
+Attach or remove tags on jobs stored in the local database.
+
+```bash
+remote-jobs tag add <job-id> <tag>
+remote-jobs tag rm <job-id> <tag>
+```
+
+**Examples:**
+```bash
+remote-jobs tag add 42 exp-012
+remote-jobs tag rm 42 exp-012
+```
+
+### remote-jobs mark-processed
+
+Mark a job as processed by adding the reserved `processed` tag.
+
+```bash
+remote-jobs mark-processed <job-id>
+```
+
+**Examples:**
+```bash
+remote-jobs mark-processed 42
+remote-jobs job list --status unprocessed
 ```
 
 ### remote-jobs sync

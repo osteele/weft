@@ -22,6 +22,7 @@ type startJobOptions struct {
 	Command     string
 	Description string
 	EnvVars     []string
+	Tags        []string
 	Timeout     string
 	OnPrepared  func(info StartJobPreparedInfo)
 }
@@ -60,6 +61,9 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	jobID, err := db.RecordJobStarting(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description)
 	if err != nil {
 		return nil, fmt.Errorf("create job record: %w", err)
+	}
+	if err := db.SetJobTags(database, jobID, opts.Tags); err != nil {
+		return nil, fmt.Errorf("set job tags: %w", err)
 	}
 
 	job, err := db.GetJobByID(database, jobID)
@@ -199,6 +203,7 @@ type queueJobOptions struct {
 	Command      string
 	Description  string
 	EnvVars      []string
+	Tags         []string
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
 	QueueName    string
 	Dependencies []queueDependency
@@ -240,6 +245,10 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	if err := db.SetJobEnvVars(database, jobID, opts.EnvVars); err != nil {
 		db.DeleteJob(database, jobID)
 		return nil, fmt.Errorf("record env vars: %w", err)
+	}
+	if err := db.SetJobTags(database, jobID, opts.Tags); err != nil {
+		db.DeleteJob(database, jobID)
+		return nil, fmt.Errorf("record tags: %w", err)
 	}
 	if err := db.SetJobDepSpec(database, jobID, depSpec); err != nil {
 		return nil, fmt.Errorf("record dependencies: %w", err)

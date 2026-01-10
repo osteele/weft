@@ -98,6 +98,7 @@ func retryJob(database *sql.DB, originalID int64) error {
 		Command:     job.Command,
 		Description: job.Description,
 		EnvVars:     job.EnvVars,
+		Tags:        job.Tags,
 		GPU:         job.GPU,
 		QueueName:   queue,
 		AutoStart:   true,

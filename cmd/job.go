@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -216,6 +217,7 @@ func init() {
 	jobRunCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
 	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	jobRunCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
+	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
 
 	// Copy flags from log command to job log
 	jobLogCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log in real-time")
@@ -228,12 +230,17 @@ func init() {
 	jobListCmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
 	jobListCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
 	jobListCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
+	jobListCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
+	jobListCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, processed, unprocessed)")
 	jobListCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	jobListCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
+	jobListCmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
 	jobListCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
 	jobListCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	jobListCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	jobListCmd.Flags().BoolVar(&listSync, "sync", false, "Sync job statuses from remote hosts before listing")
+	jobListCmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
+	jobListCmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
 
 	// Copy flags from describe command to job describe
 	jobDescribeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
@@ -358,6 +365,9 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Description: %s\n", job.Description)
 	fmt.Printf("Directory:   %s\n", job.WorkingDir)
 	fmt.Printf("Command:     %s\n", job.Command)
+	if len(job.Tags) > 0 {
+		fmt.Printf("Tags:        %s\n", strings.Join(job.Tags, ", "))
+	}
 
 	// Show effective command/directory if different
 	effectiveCmd := job.EffectiveCommand()

@@ -622,13 +622,13 @@ func showActiveJobs(database *sql.DB) error {
 	}
 
 	// Get starting jobs
-	starting, err := db.ListJobs(database, db.StatusStarting, "", 50)
+	starting, err := db.ListJobs(database, db.StatusStarting, "", 50, nil, "")
 	if err != nil {
 		return fmt.Errorf("list starting jobs: %w", err)
 	}
 
 	// Get queued jobs
-	queued, err := db.ListJobs(database, db.StatusQueued, "", 50)
+	queued, err := db.ListJobs(database, db.StatusQueued, "", 50, nil, "")
 	if err != nil {
 		return fmt.Errorf("list queued jobs: %w", err)
 	}

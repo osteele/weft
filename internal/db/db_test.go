@@ -398,6 +398,45 @@ func TestSetJobEnvVars(t *testing.T) {
 	}
 }
 
+func TestSetJobTags(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	tags := []string{"exp-012", "processed", "exp-012", " "}
+	if err := SetJobTags(database, jobID, tags); err != nil {
+		t.Fatalf("set tags: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	want := []string{"exp-012", "processed"}
+	if got := job.Tags; len(got) != len(want) {
+		t.Fatalf("tags len = %d, want %d", len(got), len(want))
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("tags[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+
+	if err := SetJobTags(database, jobID, nil); err != nil {
+		t.Fatalf("clear tags: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after clear: %v", err)
+	}
+	if len(job.Tags) != 0 {
+		t.Fatalf("expected tags cleared, got %v", job.Tags)
+	}
+}
+
 func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	database := SetupTestDB(t)
 

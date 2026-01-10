@@ -64,6 +64,7 @@ var (
 	runFrom        int64
 	runTimeout     string
 	runEnvVars     []string
+	runTags        []string
 	runAfter       int64
 	runAfterAny    int64
 )
@@ -83,6 +84,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
+	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
@@ -129,6 +131,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if runDescription == "" {
 			runDescription = fromJob.Description
+		}
+		if len(runTags) == 0 {
+			runTags = append([]string(nil), fromJob.Tags...)
 		}
 
 		// Allow overriding host from command line
@@ -236,6 +241,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
+		if err := db.SetJobTags(database, jobID, runTags); err != nil {
+			return fmt.Errorf("set job tags: %w", err)
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -269,6 +277,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Command:      command,
 			Description:  runDescription,
 			EnvVars:      runEnvVars,
+			Tags:         runTags,
 			QueueName:    defaultQueueName,
 			Dependencies: deps,
 			AutoStart:    true,
@@ -305,6 +314,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Command:     command,
 			Description: runDescription,
 			EnvVars:     runEnvVars,
+			Tags:        runTags,
 			QueueName:   defaultQueueName,
 			AutoStart:   true,
 		})
@@ -340,6 +350,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		Command:     command,
 		Description: runDescription,
 		EnvVars:     runEnvVars,
+		Tags:        runTags,
 		Timeout:     runTimeout,
 		OnPrepared: func(info StartJobPreparedInfo) {
 			fmt.Printf("Starting job %d on %s\n", info.JobID, info.Host)

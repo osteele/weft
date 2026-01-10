@@ -3036,6 +3036,11 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString(descStyle.Render(job.Description))
 		b.WriteString("\n")
 	}
+	if len(job.Tags) > 0 {
+		b.WriteString(labelStyle.Render("Tags"))
+		b.WriteString(valueStyle.Render(strings.Join(job.Tags, ", ")))
+		b.WriteString("\n")
+	}
 
 	// Directory (show remote home when unset)
 	b.WriteString(labelStyle.Render("Directory"))

@@ -27,6 +27,7 @@ type Job struct {
 	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	EnvVars              []string
+	Tags                 []string
 	DepSpec              string // Dependency specification (e.g., "42" or "42+" for after-any)
 	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
 	QueuedAt             int64  // When job was added to remote queue (for queue ordering)
@@ -42,7 +43,9 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, dep_spec, tombstoned, last_synced_status, pending_status, pending_at`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, env_vars, tags, dep_spec, tombstoned, last_synced_status, pending_status, pending_at`
+
+const ProcessedTag = "processed"
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -133,6 +136,7 @@ func initSchema(db *sql.DB) error {
 		working_dir TEXT NOT NULL,
 	command TEXT NOT NULL,
 	description TEXT,
+	tags TEXT,
 	start_time INTEGER,
 	end_time INTEGER,
 	exit_code INTEGER,
@@ -175,6 +179,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add env vars column for storing job environment
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN env_vars TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add tags column for job metadata
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN tags TEXT`); err != nil {
 		return err
 	}
 
@@ -320,10 +329,11 @@ func migrateStartTimeNullable(db *sql.DB) error {
 			status TEXT NOT NULL DEFAULT 'running',
 			error_message TEXT,
 			queue_name TEXT,
+			tags TEXT,
 			tombstoned INTEGER NOT NULL DEFAULT 0
 		)`,
 		`INSERT INTO jobs_new SELECT id, host, session_name, working_dir, command, description,
-			start_time, end_time, exit_code, status, error_message, queue_name, tombstoned FROM jobs`,
+			start_time, end_time, exit_code, status, error_message, queue_name, NULL, tombstoned FROM jobs`,
 		`DROP TABLE jobs`,
 		`ALTER TABLE jobs_new RENAME TO jobs`,
 		`CREATE INDEX idx_jobs_host ON jobs(host)`,
@@ -769,6 +779,64 @@ func SetJobEnvVars(db *sql.DB, jobID int64, envVars []string) error {
 	return err
 }
 
+// SetJobTags updates the stored tags for a job.
+// The values are stored as a JSON array; passing nil or an empty slice clears the field.
+func SetJobTags(db *sql.DB, jobID int64, tags []string) error {
+	value, err := encodeTags(tags)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE jobs SET tags = ? WHERE id = ?`, value, jobID)
+	return err
+}
+
+// AddJobTag adds a tag to a job if it doesn't already exist.
+func AddJobTag(db *sql.DB, jobID int64, tag string) error {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return fmt.Errorf("tag cannot be empty")
+	}
+	job, err := GetJobByID(db, jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+	for _, existing := range job.Tags {
+		if existing == tag {
+			return nil
+		}
+	}
+	updated := append(append([]string(nil), job.Tags...), tag)
+	return SetJobTags(db, jobID, updated)
+}
+
+// RemoveJobTag removes a tag from a job if present.
+func RemoveJobTag(db *sql.DB, jobID int64, tag string) error {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return fmt.Errorf("tag cannot be empty")
+	}
+	job, err := GetJobByID(db, jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+	if len(job.Tags) == 0 {
+		return nil
+	}
+	updated := make([]string, 0, len(job.Tags))
+	for _, existing := range job.Tags {
+		if existing != tag {
+			updated = append(updated, existing)
+		}
+	}
+	return SetJobTags(db, jobID, updated)
+}
+
 // SetJobDepSpec stores the dependency specification for a job (e.g., "42" or "42:any").
 // Passing an empty string clears the dependency field.
 func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
@@ -983,6 +1051,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var queueName sql.NullString
 	var gpu sql.NullString
 	var envVars sql.NullString
+	var tags sql.NullString
 	var depSpec sql.NullString
 	var createdAt sql.NullInt64
 	var queuedAt sql.NullInt64
@@ -994,7 +1063,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1024,6 +1093,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.GPU = gpu.String
 	}
 	j.EnvVars = decodeEnvVars(envVars)
+	j.Tags = decodeTags(tags)
 	if depSpec.Valid {
 		j.DepSpec = depSpec.String
 	}
@@ -1089,6 +1159,95 @@ func decodeEnvVars(value sql.NullString) []string {
 	return envVars
 }
 
+func encodeTags(tags []string) (interface{}, error) {
+	normalized := normalizeTags(tags)
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("encode tags: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeTags(value sql.NullString) []string {
+	if !value.Valid {
+		return nil
+	}
+	raw := strings.TrimSpace(value.String)
+	if raw == "" {
+		return nil
+	}
+
+	var tags []string
+	if err := json.Unmarshal([]byte(raw), &tags); err == nil {
+		return normalizeTags(tags)
+	}
+
+	parts := strings.Split(raw, ",")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			tags = append(tags, part)
+		}
+	}
+	return normalizeTags(tags)
+}
+
+func normalizeTags(tags []string) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	normalized := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			continue
+		}
+		if _, exists := seen[tag]; exists {
+			continue
+		}
+		seen[tag] = struct{}{}
+		normalized = append(normalized, tag)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func FilterJobsByTags(jobs []*Job, tags []string, processedFilter string) []*Job {
+	tags = normalizeTags(tags)
+	if len(tags) == 0 && processedFilter == "" {
+		return jobs
+	}
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		if processedFilter == "processed" && !job.HasTag(ProcessedTag) {
+			continue
+		}
+		if processedFilter == "unprocessed" && job.HasTag(ProcessedTag) {
+			continue
+		}
+		if len(tags) > 0 {
+			matches := true
+			for _, tag := range tags {
+				if !job.HasTag(tag) {
+					matches = false
+					break
+				}
+			}
+			if !matches {
+				continue
+			}
+		}
+		filtered = append(filtered, job)
+	}
+	return filtered
+}
+
 // scanJobs scans multiple job rows
 func scanJobs(rows *sql.Rows) ([]*Job, error) {
 	var jobs []*Job
@@ -1102,6 +1261,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var queueName sql.NullString
 		var gpu sql.NullString
 		var envVars sql.NullString
+		var tags sql.NullString
 		var depSpec sql.NullString
 		var createdAt sql.NullInt64
 		var queuedAt sql.NullInt64
@@ -1113,7 +1273,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingStatus sql.NullString
 		var pendingAt sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
 		if err != nil {
 			return nil, err
 		}
@@ -1140,6 +1300,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.GPU = gpu.String
 		}
 		j.EnvVars = decodeEnvVars(envVars)
+		j.Tags = decodeTags(tags)
 		if depSpec.Valid {
 			j.DepSpec = depSpec.String
 		}
@@ -1179,13 +1340,13 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 }
 
 // ListJobs returns jobs matching the given filters
-func ListJobs(db *sql.DB, status, host string, limit int) ([]*Job, error) {
-	return ListJobsWithMaxAge(db, status, host, limit, 0)
+func ListJobs(db *sql.DB, status, host string, limit int, tags []string, processedFilter string) ([]*Job, error) {
+	return ListJobsWithMaxAge(db, status, host, limit, 0, tags, processedFilter)
 }
 
 // ListJobsWithMaxAge returns jobs, optionally filtered by status, host, and age.
 // maxAgeDays of 0 means no age limit.
-func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int) ([]*Job, error) {
+func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, tags []string, processedFilter string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0`, jobSelectColumns)
 	args := []interface{}{}
 
@@ -1204,10 +1365,22 @@ func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int) 
 	}
 
 	// Order by running jobs first, then by job ID descending
-	query += ` ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 ELSE 1 END, id DESC LIMIT ?`
-	args = append(args, limit)
+	query += ` ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 ELSE 1 END, id DESC`
+	applyLimit := limit > 0 && len(normalizeTags(tags)) == 0 && processedFilter == ""
+	if applyLimit {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
 
-	return queryJobs(db, query, args...)
+	jobs, err := queryJobs(db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	jobs = FilterJobsByTags(jobs, tags, processedFilter)
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
 }
 
 // ListRunning returns running jobs for a host
@@ -1362,8 +1535,13 @@ func ListUniqueHosts(db *sql.DB) ([]string, error) {
 // SearchJobs searches jobs by description or command
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"
-	stmt := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0 AND (description LIKE ? OR command LIKE ?) ORDER BY start_time DESC LIMIT ?`, jobSelectColumns)
-	return queryJobs(db, stmt, pattern, pattern, limit)
+	stmt := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0 AND (description LIKE ? OR command LIKE ?) ORDER BY start_time DESC`, jobSelectColumns)
+	args := []interface{}{pattern, pattern}
+	if limit > 0 {
+		stmt += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	return queryJobs(db, stmt, args...)
 }
 
 // CleanupOld deletes terminal jobs older than the given number of days
@@ -1463,6 +1641,20 @@ func (j *Job) EffectiveStatus() string {
 		return *j.PendingStatus
 	}
 	return j.Status
+}
+
+// HasTag returns true if the job has the given tag.
+func (j *Job) HasTag(tag string) bool {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return false
+	}
+	for _, existing := range j.Tags {
+		if existing == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveDescription returns the best description for display.
