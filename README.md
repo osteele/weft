@@ -140,6 +140,47 @@ remote-jobs run --after-any 42 deepthought 'python cleanup.py'
 remote-jobs run deepthought --kill 42
 ```
 
+### remote-jobs artifact
+
+Track and retrieve job outputs through a durable local artifact store.
+
+Artifacts are declared by writing a manifest on the remote host. The CLI
+syncs those files into `~/.config/remote-jobs/artifacts/` so they survive
+remote cleanup.
+
+**Manifest format:**
+```json
+{
+  "job_id": 2073,
+  "artifact_root": ".",
+  "artifacts": [
+    {"name": "selectivity_results", "path": "output/selectivity_results.json"},
+    {"name": "probe_ckpt", "path": "runs/roberta-base/probe.pt"}
+  ]
+}
+```
+
+**Environment variables available to job scripts:**
+- `RJ_JOB_ID`
+- `RJ_ARTIFACT_MANIFEST` (default: `~/.cache/remote-jobs/artifacts/<job-id>.json`)
+- `RJ_ARTIFACT_ROOT` (default: `.`)
+
+**Examples:**
+```bash
+# Sync artifacts for job 2073 into the local store
+remote-jobs artifact sync 2073
+
+# List cached artifacts
+remote-jobs artifact list 2073
+
+# Retrieve by name or path
+remote-jobs artifact get 2073 selectivity_results -o ./results.json
+remote-jobs artifact get 2073 output/selectivity_results.json -o ./results.json
+
+# Resolve latest job by tag
+remote-jobs artifact get --tag exp-012 --latest selectivity_results -o ./results.json
+```
+
 The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
 - Queue runner executes jobs sequentially in FIFO order

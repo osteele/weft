@@ -280,6 +280,52 @@ func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) er
 	return lastErr
 }
 
+// CopyFrom copies a remote file to a local path using scp.
+func CopyFrom(remotePath, host, localPath string) error {
+	return CopyFromWithRetryVerbose(remotePath, host, localPath, true)
+}
+
+// CopyFromWithRetry copies a remote file to a local path with retry logic.
+func CopyFromWithRetry(remotePath, host, localPath string) error {
+	return CopyFromWithRetryVerbose(remotePath, host, localPath, true)
+}
+
+// CopyFromWithRetryVerbose copies a remote file to a local path with retry logic.
+func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) error {
+	var lastErr error
+
+	for attempt := 1; attempt <= MaxRetries; attempt++ {
+		cmd := exec.Command("scp", "-q", fmt.Sprintf("%s:%s", host, remotePath), localPath)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		output := stderr.String()
+
+		if IsConnectionError(output) {
+			if attempt < MaxRetries {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "SCP failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(output))
+					fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
+				}
+				time.Sleep(RetryDelay)
+				continue
+			}
+			return fmt.Errorf("scp failed after %d attempts: %s", MaxRetries, strings.TrimSpace(output))
+		}
+
+		// Non-connection error, don't retry
+		return err
+	}
+
+	return lastErr
+}
+
 // TmuxSessionExists checks if a tmux session exists on the remote host (with retry)
 func TmuxSessionExists(host, sessionName string) (bool, error) {
 	stdout, stderr, err := RunWithRetryQuiet(host, fmt.Sprintf("tmux has-session -t '%s' 2>&1 && echo YES || echo NO", sessionName))

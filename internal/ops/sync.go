@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
@@ -623,7 +624,7 @@ func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) er
 	}
 
 	// Ensure log directory exists and archive any old files
-	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(job.ID))
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s %s; %s", session.LogDir, artifacts.RemoteArtifactsDir, session.ArchiveCommand(job.ID))
 	if _, stderr, err := ssh.RunWithTimeout(job.Host, mkdirAndArchive, timeout); err != nil {
 		return fmt.Errorf("create log directory: %s", ssh.FriendlyError(job.Host, stderr, err))
 	}
@@ -636,6 +637,7 @@ func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) er
 	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	_, _, _ = ssh.RunWithTimeout(job.Host, metadataCmd, timeout)
 
+	envVars = artifacts.MergeEnvVars(envVars, job.ID)
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
 		JobID:      job.ID,
 		WorkingDir: job.WorkingDir,

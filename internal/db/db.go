@@ -271,6 +271,25 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create artifacts table for cached job artifacts
+	artifactsSchema := `
+	CREATE TABLE IF NOT EXISTS artifacts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id INTEGER NOT NULL,
+		name TEXT,
+		path TEXT NOT NULL,
+		stored_path TEXT NOT NULL,
+		size_bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT,
+		created_at INTEGER NOT NULL
+	);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_artifacts_job_name_path ON artifacts(job_id, name, path);
+	CREATE INDEX IF NOT EXISTS idx_artifacts_job ON artifacts(job_id);
+	`
+	if _, err := db.Exec(artifactsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 

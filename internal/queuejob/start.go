@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/queuefile"
@@ -91,7 +92,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	pidFile := session.SimplePidFile(job.ID)
 
 	// Ensure log directory exists and archive any old files
-	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(job.ID))
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s %s; %s", session.LogDir, artifacts.RemoteArtifactsDir, session.ArchiveCommand(job.ID))
 	if _, stderr, err := ssh.Run(job.Host, mkdirAndArchive); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
@@ -117,6 +118,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		return false, fmt.Errorf("%s", errMsg)
 	}
 
+	envVars := artifacts.MergeEnvVars(entry.EnvVars, job.ID)
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
 		JobID:      job.ID,
 		WorkingDir: job.WorkingDir,
@@ -124,7 +126,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 		LogFile:    logFile,
 		StatusFile: statusFile,
 		PidFile:    pidFile,
-		EnvVars:    entry.EnvVars,
+		EnvVars:    envVars,
 	})
 
 	// Check if tmux session already exists (job may already be running but DB out of sync)
@@ -176,7 +178,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 	pidFile := session.SimplePidFile(job.ID)
 
 	// Ensure log directory exists and archive any old files
-	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(job.ID))
+	mkdirAndArchive := fmt.Sprintf("mkdir -p %s %s; %s", session.LogDir, artifacts.RemoteArtifactsDir, session.ArchiveCommand(job.ID))
 	if _, stderr, err := ssh.Run(job.Host, mkdirAndArchive); err != nil {
 		if isConnectionFailure(stderr, err) {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
@@ -207,6 +209,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 		envVars = entry.EnvVars
 	}
 
+	envVars = artifacts.MergeEnvVars(envVars, job.ID)
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
 		JobID:      job.ID,
 		WorkingDir: job.WorkingDir,
