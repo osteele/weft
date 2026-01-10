@@ -781,6 +781,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
 		jobProgress:             make(map[int64]*progress.Progress),
+		lastHostSyncTimes:       make(map[string]time.Time),
 		llmGenerator:            llmGen,
 		appConfig:               appCfg,
 		showHostSummaries:       true, // Default to showing AI summaries
