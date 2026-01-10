@@ -32,6 +32,7 @@ Examples:
   remote-jobs list --running --sync   # Running jobs (sync first)
   remote-jobs list --host cool30      # Jobs on cool30
   remote-jobs list --tag exp-012      # Jobs with tag exp-012
+  remote-jobs list --exclude-tag exp-012  # Jobs without tag exp-012
   remote-jobs list --status unprocessed --tag exp-012
   remote-jobs list --search training  # Search jobs
   remote-jobs list --show 42          # Job details`,
@@ -39,20 +40,21 @@ Examples:
 }
 
 var (
-	listRunning   bool
-	listCompleted bool
-	listQueued    bool
-	listDead      bool
-	listStatus    string
-	listHost      string
-	listSearch    string
-	listLimit     int
-	listShow      int64
-	listCleanup   int
-	listSync      bool
-	listNoSync    bool
-	listAll       bool
-	listTags      []string
+	listRunning     bool
+	listCompleted   bool
+	listQueued      bool
+	listDead        bool
+	listStatus      string
+	listHost        string
+	listSearch      string
+	listLimit       int
+	listShow        int64
+	listCleanup     int
+	listSync        bool
+	listNoSync      bool
+	listAll         bool
+	listTags        []string
+	listExcludeTags []string
 )
 
 func init() {
@@ -66,6 +68,7 @@ func init() {
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	listCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	listCmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
+	listCmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
 	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
 	listCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	listCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
@@ -125,7 +128,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" {
+		if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
@@ -133,6 +136,7 @@ func runList(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("search: %w", err)
 		}
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
+		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -161,9 +165,17 @@ func runList(cmd *cobra.Command, args []string) error {
 		maxAgeDays = 0
 	}
 
-	jobs, err := db.ListJobsWithMaxAge(database, status, listHost, listLimit, maxAgeDays, listTags, processedFilter)
+	queryLimit := listLimit
+	if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 {
+		queryLimit = 0
+	}
+	jobs, err := db.ListJobsWithMaxAge(database, status, listHost, queryLimit, maxAgeDays, listTags, processedFilter)
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
+	}
+	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
+	if listLimit > 0 && len(jobs) > listLimit {
+		jobs = jobs[:listLimit]
 	}
 
 	return printJobs(jobs)

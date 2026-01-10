@@ -4905,7 +4905,7 @@ func (m Model) startDBWatcher() tea.Cmd {
 
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
-		jobs, err := db.ListJobs(m.database, "", "", 1000)
+		jobs, err := db.ListJobs(m.database, "", "", 1000, nil, "")
 		if err != nil {
 			return jobsRefreshedMsg{err: err}
 		}

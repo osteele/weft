@@ -1267,6 +1267,29 @@ func FilterJobsByTags(jobs []*Job, tags []string, processedFilter string) []*Job
 	return filtered
 }
 
+// FilterJobsByExcludedTags removes jobs that contain any of the excluded tags.
+func FilterJobsByExcludedTags(jobs []*Job, excluded []string) []*Job {
+	excluded = normalizeTags(excluded)
+	if len(excluded) == 0 {
+		return jobs
+	}
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		skip := false
+		for _, tag := range excluded {
+			if job.HasTag(tag) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		filtered = append(filtered, job)
+	}
+	return filtered
+}
+
 // scanJobs scans multiple job rows
 func scanJobs(rows *sql.Rows) ([]*Job, error) {
 	var jobs []*Job

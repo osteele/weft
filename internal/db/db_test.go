@@ -437,6 +437,17 @@ func TestSetJobTags(t *testing.T) {
 	}
 }
 
+func TestFilterJobsByExcludedTags(t *testing.T) {
+	jobWithTag := &Job{ID: 1, Tags: []string{"exp-012"}}
+	jobWithoutTag := &Job{ID: 2, Tags: []string{"other"}}
+	jobs := []*Job{jobWithTag, jobWithoutTag}
+
+	filtered := FilterJobsByExcludedTags(jobs, []string{"exp-012"})
+	if len(filtered) != 1 || filtered[0].ID != 2 {
+		t.Fatalf("expected job 2 only, got %+v", filtered)
+	}
+}
+
 func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	database := SetupTestDB(t)
 
