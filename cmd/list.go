@@ -98,8 +98,14 @@ func runList(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
 			}
 		} else {
-			// Fast sync by default
-			completed, unreachable := performFastSync(database, false)
+			// Fast sync by default - only sync filtered host if specified
+			var completed bool
+			var unreachable []string
+			if listHost != "" {
+				completed, unreachable = performFastSyncForHosts(database, []string{listHost}, false)
+			} else {
+				completed, unreachable = performFastSync(database, false)
+			}
 			if !completed {
 				if note := buildStaleDataNote(database, unreachable); note != "" {
 					fmt.Fprintln(os.Stderr, note)
