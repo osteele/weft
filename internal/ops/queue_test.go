@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,5 +133,147 @@ func TestQueueJob_DefaultQueueName(t *testing.T) {
 	job, _ := db.GetJobByID(database, result.JobID)
 	if job.QueueName != "default" {
 		t.Errorf("expected queue name to be 'default', got %q", job.QueueName)
+	}
+}
+
+func TestEscapeForQueueFile(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "no special chars",
+			input: "echo hello",
+			want:  "echo hello",
+		},
+		{
+			name:  "literal backslash-n",
+			input: `python -c "import x;\nprint(x)"`,
+			want:  `python -c "import x;\\nprint(x)"`,
+		},
+		{
+			name:  "actual newline",
+			input: "line1\nline2",
+			want:  `line1\nline2`,
+		},
+		{
+			name:  "actual tab",
+			input: "col1\tcol2",
+			want:  `col1\tcol2`,
+		},
+		{
+			name:  "backslash not followed by n",
+			input: `path\to\file`,
+			want:  `path\\to\\file`,
+		},
+		{
+			name:  "double backslash",
+			input: `echo \\n`,
+			want:  `echo \\\\n`,
+		},
+		{
+			name:  "mixed escapes",
+			input: "cmd\twith\ttabs\nand\nnewlines",
+			want:  `cmd\twith\ttabs\nand\nnewlines`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := escapeForQueueFile(tt.input)
+			if got != tt.want {
+				t.Errorf("escapeForQueueFile(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEscapeForQueueFile_RealWorldCommands(t *testing.T) {
+	// These are real commands that caused issues in production
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "python with literal newline escape",
+			command: `uv run python -c "import importlib;\nprint(importlib.import_module(\"h5py\").__version__)"`,
+		},
+		{
+			name:    "multiline python command",
+			command: `pixi run python -c "from collections import Counter; from safetensors import safe_open; path=\"/path/to/file\"; counts=Counter();\nwith safe_open(path) as handle:\n    for name in handle.keys():\n        tensor = handle.get_tensor(name)\nprint(counts)"`,
+		},
+		{
+			name:    "command with tabs",
+			command: "awk -F'\t' '{print $1}'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			escaped := escapeForQueueFile(tt.command)
+
+			// Escaped command should not contain actual newlines or tabs
+			if strings.Contains(escaped, "\n") {
+				t.Errorf("escaped command contains actual newline: %q", escaped)
+			}
+			if strings.Contains(escaped, "\t") {
+				t.Errorf("escaped command contains actual tab: %q", escaped)
+			}
+
+			// The escaped string should be safe to include in a tab-separated line
+			// (i.e., no unescaped tabs that would be interpreted as field separators)
+		})
+	}
+}
+
+func TestQueueEntryFormat_SingleLine(t *testing.T) {
+	// Verify that queue entries with special characters in commands
+	// result in single-line entries (no actual newlines in the formatted line)
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "simple command",
+			command: "echo hello",
+		},
+		{
+			name:    "command with literal backslash-n",
+			command: `python -c "print('line1');\nprint('line2')"`,
+		},
+		{
+			name:    "command with actual newlines",
+			command: "echo line1\necho line2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := QueueEntry{
+				JobID:       123,
+				WorkingDir:  "/tmp",
+				Command:     tt.command,
+				Description: "test",
+			}
+
+			// Build the queue line the same way AppendQueueEntry does
+			escapedCommand := escapeForQueueFile(entry.Command)
+			escapedDescription := escapeForQueueFile(entry.Description)
+			jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\n",
+				entry.JobID, entry.WorkingDir, escapedCommand, escapedDescription, "", "")
+
+			// Count newlines - should be exactly 1 (the trailing newline)
+			newlineCount := strings.Count(jobLine, "\n")
+			if newlineCount != 1 {
+				t.Errorf("queue entry has %d newlines, want 1: %q", newlineCount, jobLine)
+			}
+
+			// Count tabs - should be exactly 5 (6 fields = 5 separators)
+			tabCount := strings.Count(jobLine, "\t")
+			if tabCount != 5 {
+				t.Errorf("queue entry has %d tabs, want 5: %q", tabCount, jobLine)
+			}
+		})
 	}
 }

@@ -21,6 +21,20 @@ const (
 	DefaultQueueName = "default"
 )
 
+// escapeForQueueFile escapes a string for safe inclusion in queue file entries.
+// The queue runner uses printf '%b' to interpret escape sequences, so we need to
+// escape backslashes to prevent unintended interpretation (e.g., \n becoming newline).
+// This also converts actual newlines/tabs to their escape sequences.
+func escapeForQueueFile(s string) string {
+	// First escape existing backslashes (\ -> \\)
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	// Then convert actual newlines and tabs to escape sequences
+	// (these would break the tab-separated, one-line-per-entry format)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
+}
+
 // QueueEntry represents a job entry to be added to a remote queue
 type QueueEntry struct {
 	JobID       int64
@@ -98,9 +112,16 @@ func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueue
 		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(entry.EnvVars, "\n")))
 	}
 
+	// Escape backslashes in fields that might contain them (command, description)
+	// This prevents printf '%b' in queue-runner.sh from interpreting \n as newlines
+	// After escaping: \n -> \\n, \t -> \\t, \\ -> \\\\
+	// printf '%b' will then convert them back to the original characters
+	escapedCommand := escapeForQueueFile(entry.Command)
+	escapedDescription := escapeForQueueFile(entry.Description)
+
 	// Format the queue entry line (with trailing newline)
 	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\n",
-		entry.JobID, entry.WorkingDir, entry.Command, entry.Description, envVarsB64, entry.DepSpec)
+		entry.JobID, entry.WorkingDir, escapedCommand, escapedDescription, envVarsB64, entry.DepSpec)
 
 	// Base64 encode the entire line for safe shell transport
 	jobLineB64 := base64.StdEncoding.EncodeToString([]byte(jobLine))
