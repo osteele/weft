@@ -12,7 +12,7 @@ import (
 // Config holds application configuration
 type Config struct {
 	// DefaultCommand is the command to run when no arguments are provided
-	// Valid values: "help", "list", "tui"
+	// Valid values: "help", "list", "tui", "web"
 	DefaultCommand string `yaml:"default_command"`
 
 	// TUI polling intervals (in seconds)
@@ -60,6 +60,12 @@ type Config struct {
 	// When exceeded, the file is rotated (old content moved to .1 backup)
 	// Default: 10MB (10485760)
 	OperationLogMaxSize int64 `yaml:"operation_log_max_size"`
+
+	// WebEnabled controls whether the web UI starts with the TUI.
+	WebEnabled bool `yaml:"web_enabled"`
+
+	// WebPort is the localhost port for the web UI.
+	WebPort int `yaml:"web_port"`
 }
 
 // BlockedPattern defines a substring that should not appear in job commands
@@ -95,6 +101,8 @@ func DefaultConfig() *Config {
 		LogCacheMaxAge:          7,
 		LogCacheMaxSize:         50 * 1024, // 50KB
 		ShowUsageHints:          true,
+		WebEnabled:              true,
+		WebPort:                 8127,
 		AI: AIConfig{
 			Enabled: nil, // nil means "auto" - enabled if ollama is available
 			Model:   "",  // empty means use default model

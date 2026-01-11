@@ -239,6 +239,13 @@ remote-jobs job status --wait --wait-timeout 30m 42
 remote-jobs job status --wait 42 43 44   # wait for all (exits 0 only if all succeed)
 ```
 
+**Job ID syntax:**
+- Single IDs: `42`, `43`, `44`
+- Ranges: `42:45` (expands to 42, 43, 44, 45)
+- Mixed: `42 50:53 60` (expands to 42, 50, 51, 52, 53, 60)
+
+Duplicate IDs are automatically removed with a warning.
+
 **Exit codes (single job only):**
 - `0`: Job completed successfully
 - `1`: Job failed or error
@@ -249,6 +256,7 @@ remote-jobs job status --wait 42 43 44   # wait for all (exits 0 only if all suc
 ```bash
 remote-jobs job status 42           # Check status of job #42
 remote-jobs job status 42 43 44     # Check multiple jobs
+remote-jobs job status 100:105      # Check jobs 100 through 105
 ```
 
 This command:
@@ -934,6 +942,7 @@ Valid values for `default_command`:
 - `help` (default): Show help message
 - `tui`: Launch interactive terminal UI
 - `list`: Show job list
+- `web`: Launch the read-only web UI
 
 ### TUI Polling Intervals
 
@@ -944,6 +953,22 @@ Customize how often the TUI refreshes data:
 sync_interval: 15          # Seconds between job status syncs (default: 15)
 log_refresh_interval: 3    # Seconds between log refreshes for running jobs (default: 3)
 host_refresh_interval: 30  # Seconds between host info refreshes in hosts view (default: 30)
+```
+
+### Web UI
+
+The TUI automatically starts a local web UI (localhost only) unless disabled:
+
+```yaml
+# ~/.config/remote-jobs/config.yaml
+web_enabled: true
+web_port: 8127
+```
+
+You can also run it directly:
+
+```bash
+remote-jobs web --open
 ```
 
 ### Log Caching
@@ -990,6 +1015,20 @@ remote-jobs log 42
 Follow log output in real-time:
 ```bash
 remote-jobs log 42 -f
+```
+
+## Web UI (Read-only)
+
+Start the read-only web monitor on localhost:
+
+```bash
+remote-jobs web
+```
+
+Open it in your browser:
+
+```bash
+remote-jobs web --open
 ```
 
 Press `Ctrl+C` to stop following.

@@ -1,0 +1,163 @@
+package cmd
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"runtime"
+	"syscall"
+	"time"
+
+	"github.com/charmbracelet/x/term"
+	"github.com/osteele/remote-jobs/internal/config"
+	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/monitor"
+	"github.com/osteele/remote-jobs/internal/web"
+	"github.com/spf13/cobra"
+)
+
+var webCmd = &cobra.Command{
+	Use:   "web",
+	Short: "Read-only web UI for monitoring jobs",
+	RunE:  runWeb,
+}
+
+var webPort int
+var webOpen bool
+
+func init() {
+	rootCmd.AddCommand(webCmd)
+	webCmd.Flags().IntVar(&webPort, "port", 0, "Port to serve the web UI on (localhost only)")
+	webCmd.Flags().BoolVar(&webOpen, "open", false, "Open the web UI in a browser")
+}
+
+func runWeb(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	monCfg := monitor.DefaultConfig()
+	if cfg.SyncActiveInterval > 0 {
+		monCfg.SyncActiveInterval = time.Duration(cfg.SyncActiveInterval) * time.Second
+	} else if cfg.SyncInterval > 0 {
+		monCfg.SyncActiveInterval = time.Duration(cfg.SyncInterval) * time.Second
+	}
+	if cfg.SyncIdleInterval > 0 {
+		monCfg.SyncIdleInterval = time.Duration(cfg.SyncIdleInterval) * time.Second
+	}
+	if cfg.HostRefreshInterval > 0 {
+		monCfg.HostRefreshInterval = time.Duration(cfg.HostRefreshInterval) * time.Second
+	}
+	monCfg.StopQueueRunnerWhenIdle = cfg.StopQueueRunnerWhenIdle
+
+	mon := monitor.New(database, monCfg)
+	mon.Start()
+	defer mon.Stop()
+
+	port := cfg.WebPort
+	if webPort != 0 {
+		port = webPort
+	}
+
+	server, err := web.NewServer(mon, web.Config{Port: port})
+	if err != nil {
+		return err
+	}
+
+	url, err := server.Start()
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Web UI running at %s\n", url)
+	if webOpen {
+		if err := openURL(url); err != nil {
+			return err
+		}
+	}
+
+	quit := listenForQuit()
+	sigch := make(chan os.Signal, 1)
+	signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case <-quit:
+	case <-sigch:
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return server.Stop(ctx)
+}
+
+func openURL(url string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		return exec.Command("open", url).Start()
+	case "linux":
+		return exec.Command("xdg-open", url).Start()
+	default:
+		return nil
+	}
+}
+
+func listenForQuit() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fd := os.Stdin.Fd()
+		if !term.IsTerminal(fd) {
+			reader := bufio.NewReader(os.Stdin)
+			for {
+				r, _, err := reader.ReadRune()
+				if err != nil {
+					return
+				}
+				if r == 'q' || r == 'Q' {
+					return
+				}
+			}
+		}
+
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return
+		}
+		defer term.Restore(fd, oldState)
+
+		cont := make(chan os.Signal, 1)
+		signal.Notify(cont, syscall.SIGCONT)
+		defer signal.Stop(cont)
+
+		reader := bufio.NewReader(os.Stdin)
+		for {
+			b, err := reader.ReadByte()
+			if err != nil {
+				return
+			}
+			switch b {
+			case 'q', 'Q':
+				return
+			case 0x1a: // Ctrl-Z
+				_ = term.Restore(fd, oldState)
+				_ = syscall.Kill(syscall.Getpid(), syscall.SIGTSTP)
+				<-cont
+				oldState, err = term.MakeRaw(fd)
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+	return done
+}

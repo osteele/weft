@@ -41,6 +41,13 @@ var statusCmd = &cobra.Command{
 Without arguments, shows all active jobs (running, starting, queued)
 and recent failures from the last 24 hours.
 
+Job IDs can be specified individually or as ranges:
+  - Single ID: 42
+  - Range: 42:47 (expands to 42, 43, 44, 45, 46, 47)
+  - Mixed: 42 50:52 60 (expands to 42, 50, 51, 52, 60)
+
+Duplicate IDs are automatically removed with a warning.
+
 Exit codes (single job only):
   0: Job completed successfully
   1: Job failed or error
@@ -50,8 +57,9 @@ Exit codes (single job only):
 Examples:
   remote-jobs status              # Show all active jobs
   remote-jobs status 42
+  remote-jobs status 42:47        # Check jobs 42 through 47
   remote-jobs status 42 --fast    # Quick check with 2s timeout
-  remote-jobs status 42 --wait    # Wait for job to complete`,
+  remote-jobs status 42:47 --wait # Wait for jobs 42-47 to complete`,
 	RunE: runStatus,
 }
 
@@ -76,6 +84,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return showActiveJobs(database)
 	}
 
+	// Parse job IDs (supports ranges like 123:127, deduplicates with warning)
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
+
 	var tracker *hostConnectionTracker
 	if statusWait {
 		statusSync = true
@@ -87,11 +101,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	needsSync := false
 	hostsToSync := make(map[string]struct{})
 	if !statusNoSync {
-		for _, arg := range args {
-			jobID, err := strconv.ParseInt(arg, 10, 64)
-			if err != nil {
-				continue
-			}
+		for _, jobID := range jobIDs {
 			job, err := db.GetJobByID(database, jobID)
 			if err != nil || job == nil {
 				continue
@@ -136,24 +146,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	waitRequests := make([]jobStatusRequest, 0, len(args))
+	waitRequests := make([]jobStatusRequest, 0, len(jobIDs))
 	waitInputInvalid := false
-	singleJob := len(args) == 1 && !statusWait
-	for i, arg := range args {
+	singleJob := len(jobIDs) == 1 && !statusWait
+	for i, jobID := range jobIDs {
 		if i > 0 && !statusWait {
 			fmt.Println("---")
-		}
-
-		jobID, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid job ID: %s\n", arg)
-			if singleJob {
-				os.Exit(ExitNotFound)
-			}
-			if statusWait {
-				waitInputInvalid = true
-			}
-			continue
 		}
 
 		job, err := db.GetJobByID(database, jobID)

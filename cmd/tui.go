@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/monitor"
 	"github.com/osteele/remote-jobs/internal/tui"
+	"github.com/osteele/remote-jobs/internal/web"
 	"github.com/spf13/cobra"
 )
 
@@ -70,6 +73,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 	opts.StopQueueRunnerWhenIdle = cfg.StopQueueRunnerWhenIdle
 
+	monCfg := monitor.DefaultConfig()
+	monCfg.SyncActiveInterval = opts.SyncActiveInterval
+	monCfg.SyncIdleInterval = opts.SyncIdleInterval
+	monCfg.HostRefreshInterval = opts.HostRefreshInterval
+	monCfg.StopQueueRunnerWhenIdle = opts.StopQueueRunnerWhenIdle
+
+	mon := monitor.New(database, monCfg)
+	mon.Start()
+	defer mon.Stop()
+	opts.Monitor = mon
+
 	model := tui.NewModelWithOptions(database, opts)
 
 	// Default to mouse enabled; flag can override
@@ -84,6 +98,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	}
 
 	p := tea.NewProgram(model, programOpts...)
+
+	if cfg.WebEnabled {
+		server, err := web.NewServer(mon, web.Config{Port: cfg.WebPort})
+		if err != nil {
+			return fmt.Errorf("start web server: %w", err)
+		}
+		if _, err := server.Start(); err != nil {
+			return fmt.Errorf("start web server: %w", err)
+		}
+		defer server.Stop(context.Background())
+	}
 
 	_, err = p.Run()
 	if err != nil {

@@ -347,10 +347,12 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 YAML configuration at `~/.config/remote-jobs/config.yaml`:
 
 ```yaml
-default_command: tui    # "help", "list", or "tui"
+default_command: tui    # "help", "list", "tui", or "web"
 sync_interval: 15       # Seconds between status syncs
 log_refresh_interval: 3 # Seconds between log refreshes
 host_refresh_interval: 30
+web_enabled: true
+web_port: 8127
 ```
 
 ### 8. Log Cache (`internal/logcache/`)

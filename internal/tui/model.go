@@ -6,13 +6,10 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"math"
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -38,6 +35,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/llm"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/logfiles"
+	"github.com/osteele/remote-jobs/internal/monitor"
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/progress"
@@ -65,8 +63,6 @@ const (
 	jobListHeightRatio     = 0.6
 	detailPanelHeightRatio = 0.3
 )
-
-var humanSizePattern = regexp.MustCompile(`(?i)^([\d.]+)\s*([kmgtp]?i?[b]?)?$`)
 
 const hostRecentSyncWindow = 48 * time.Hour
 
@@ -368,6 +364,10 @@ type dbRefreshTriggeredMsg struct{}
 
 type dbSyncTriggeredMsg struct{}
 
+type monitorEventMsg struct {
+	event monitor.Event
+}
+
 type syncCompletedMsg struct {
 	updated           int
 	queuesStarted     []string // hosts where queue runners were started
@@ -634,6 +634,8 @@ type Model struct {
 	// Database connection
 	database                *sql.DB
 	coreService             *core.Service
+	monitor                 *monitor.Monitor
+	monitorEvents           <-chan monitor.Event
 	dbWatcher               *fsnotify.Watcher
 	dbWatcherTargets        map[string]struct{}
 	dbRefreshDebounceActive bool
@@ -689,6 +691,7 @@ type ModelOptions struct {
 	HostRefreshInterval     time.Duration
 	HostCacheDuration       time.Duration // How long cached host info is considered fresh
 	StopQueueRunnerWhenIdle bool
+	Monitor                 *monitor.Monitor
 }
 
 // DefaultModelOptions returns the default TUI options
@@ -791,9 +794,16 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 
 	detailVP := viewport.New(0, 0)
 
-	return Model{
-		database:                database,
-		coreService:             core.NewServiceWithDB(database),
+	model := Model{
+		database:    database,
+		coreService: core.NewServiceWithDB(database),
+		monitor:     opts.Monitor,
+		monitorEvents: func() <-chan monitor.Event {
+			if opts.Monitor != nil {
+				return opts.Monitor.Events()
+			}
+			return nil
+		}(),
 		jobList:                 jobList,
 		jobSelectionActive:      true,
 		jobFilter:               jobFilterRecent,
@@ -823,10 +833,34 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostSummaryTimes:        make(map[string]time.Time),
 		hostSummaryPending:      make(map[string]bool),
 	}
+
+	if opts.Monitor != nil {
+		model.allJobs = opts.Monitor.Jobs()
+		model.jobDependencies = opts.Monitor.JobDependencies()
+		model.hosts = opts.Monitor.Hosts()
+		model.hostSyncTimes = opts.Monitor.HostSyncTimes()
+		model.applyJobFilter()
+	}
+
+	return model
 }
 
 // Init initializes the model
 func (m Model) Init() tea.Cmd {
+	if m.monitor != nil {
+		return tea.Batch(
+			m.waitForMonitorEvent(),
+			func() tea.Msg {
+				m.monitor.RefreshJobs()
+				m.monitor.RefreshHosts()
+				m.monitor.RefreshHostSyncTimes()
+				return nil
+			},
+			m.startLogTicker(),
+			m.startHostRefreshTicker(),
+			m.spinner.Tick,
+		)
+	}
 	return tea.Batch(
 		m.refreshJobs(),
 		m.loadHosts(),
@@ -878,56 +912,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouseClick(msg)
 
 	case jobsRefreshedMsg:
-		if msg.err != nil {
-			return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
-		}
-		m.allJobs = msg.jobs
-		if msg.jobDependencies != nil {
-			m.jobDependencies = msg.jobDependencies
-		}
-		m.applyJobFilter()
-
-		// Clean up stale progress entries for jobs that are no longer running
-		runningJobIDs := make(map[int64]bool)
-		for _, job := range msg.jobs {
-			if job.Status == db.StatusRunning {
-				runningJobIDs[job.ID] = true
-			}
-		}
-		for jobID := range m.jobProgress {
-			if !runningJobIDs[jobID] {
-				delete(m.jobProgress, jobID)
-			}
-		}
-
-		// If there's a pending job selection, find and select it
-		if m.pendingSelectJobID > 0 {
-			for i, job := range m.jobs {
-				if job.ID == m.pendingSelectJobID {
-					m.jobList.Select(i)
-					break
-				}
-			}
-			m.pendingSelectJobID = 0
-		}
-
-		// Build commands to run after refresh
-		var cmds []tea.Cmd
-
-		// Fetch quick progress for all running jobs
-		if cmd := m.fetchAllRunningJobsProgress(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-
-		// Trigger host summary regeneration if enabled
-		if m.showHostSummaries && m.llmGenerator != nil {
-			cmds = append(cmds, m.generateAllHostSummaries())
-		}
-
-		if len(cmds) > 0 {
-			return m, tea.Batch(cmds...)
-		}
-		return m, nil
+		return m.handleJobsRefreshed(msg)
 
 	case dbWatcherReadyMsg:
 		if msg.err != nil {
@@ -980,51 +965,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.performBackgroundSync(true)
 
 	case syncCompletedMsg:
-		m.syncing = false
-		m.syncForceAll = false
-		m.lastSyncTime = time.Now()
-		if len(msg.hostsSynced) > 0 {
-			for _, host := range msg.hostsSynced {
-				m.lastHostSyncTimes[host] = m.lastSyncTime
-				m.hostSyncTimes[host] = m.lastSyncTime
-			}
-		}
-		if msg.err != nil {
-			return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
-		}
-		// Build flash message
-		var flashParts []string
-		if msg.updated > 0 {
-			flashParts = append(flashParts, fmt.Sprintf("Synced %d job(s)", msg.updated))
-		}
-		if len(msg.queuesStarted) > 0 {
-			flashParts = append(flashParts, fmt.Sprintf("Started queue on %s", strings.Join(msg.queuesStarted, ", ")))
-		}
-		var cmds []tea.Cmd
-		if len(msg.queueRunnerErrors) > 0 {
-			label := "error"
-			if len(msg.queueRunnerErrors) > 1 {
-				label = "errors"
-			}
-			errorFlash := fmt.Sprintf("Queue runner %s: %s", label, strings.Join(msg.queueRunnerErrors, "; "))
-			if len(flashParts) > 0 {
-				errorFlash = strings.Join(append(flashParts, errorFlash), "; ")
-			}
-			cmds = append(cmds, m.setFlash(errorFlash, true))
-		} else if len(flashParts) > 0 {
-			cmds = append(cmds, m.setFlash(strings.Join(flashParts, "; "), false))
-		}
-		cmds = append(cmds, m.refreshJobs(), m.loadHosts())
-		if m.syncPendingAfterCurrent {
-			m.syncPendingAfterCurrent = false
-			m.syncing = true
-			m.syncForceAll = true
-			cmds = append(cmds, m.performBackgroundSync(true))
-		}
-		if len(cmds) == 0 {
-			return m, nil
-		}
-		return m, tea.Batch(cmds...)
+		return m.handleSyncCompleted(msg)
+
+	case monitorEventMsg:
+		return m.handleMonitorEvent(msg)
 
 	case logFetchedMsg:
 		m.logLoading = false
@@ -1371,88 +1315,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case hostsLoadedMsg:
-		if msg.err != nil {
-			return m, m.setFlash(fmt.Sprintf("Error loading hosts: %v", msg.err), true)
-		}
-		// Initialize hosts with names, loading cached data where available
-		var cmds []tea.Cmd
-		for _, name := range msg.hostNames {
-			// Check if host already exists
-			found := false
-			for _, h := range m.hosts {
-				if h.Name == name {
-					found = true
-					break
-				}
-			}
-			if !found {
-				// Try to load cached host info
-				var host *Host
-				cachedInfo, err := db.LoadCachedHostInfo(m.database, name)
-				if err == nil && cachedInfo != nil {
-					// Use cached info
-					host = hostFromCachedInfo(cachedInfo)
-					// Check if cache is stale (older than configured duration)
-					cacheAge := time.Since(time.Unix(cachedInfo.LastUpdated, 0))
-					if cacheAge > m.hostCacheDuration {
-						// Cache is stale, mark as checking and fetch fresh
-						host.Status = HostStatusChecking
-						cmds = append(cmds, m.fetchHostInfo(name))
-						cmds = append(cmds, m.fetchQueueStatus(name))
-					}
-					// If cache is fresh, we'll still show it but won't fetch unless user switches to hosts view
-				} else {
-					// No cached info, create empty host and fetch
-					host = &Host{
-						Name:   name,
-						Status: HostStatusChecking,
-					}
-					cmds = append(cmds, m.fetchHostInfo(name))
-					cmds = append(cmds, m.fetchQueueStatus(name))
-				}
-				m.hosts = append(m.hosts, host)
-			}
-		}
-		if len(cmds) > 0 {
-			return m, tea.Batch(cmds...)
-		}
-		return m, nil
+		return m.handleHostsLoaded(msg)
 
 	case hostSyncTimesLoadedMsg:
-		if msg.err != nil {
-			return m, m.setFlash(fmt.Sprintf("Error loading host sync times: %v", msg.err), true)
-		}
-		if msg.times != nil {
-			m.hostSyncTimes = msg.times
-		}
-		m.applyJobFilter()
-		return m, nil
+		return m.handleHostSyncTimesLoaded(msg)
 
 	case hostInfoMsg:
-		// Update host info
-		var cmd tea.Cmd
-		for i, h := range m.hosts {
-			if h.Name == msg.hostName {
-				msg.info.Name = msg.hostName
-				// Preserve queue status when updating host info
-				msg.info.QueueStatus = h.QueueStatus
-				msg.info.QueueRunnerActive = h.QueueRunnerActive
-				msg.info.QueuedJobCount = h.QueuedJobCount
-				msg.info.CurrentQueueJob = h.CurrentQueueJob
-				msg.info.QueueStopPending = h.QueueStopPending
-				// Preserve running jobs until new data arrives
-				msg.info.RunningJobs = h.RunningJobs
-				// Preserve LastCheck from previous state if new one is zero (offline)
-				if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
-					msg.info.LastCheck = h.LastCheck
-				}
-				m.hosts[i] = msg.info
-				break
-			}
-		}
-		// Mark host as queried this session
-		m.hostsQueriedThisSession[msg.hostName] = true
-		return m, cmd
+		return m.handleHostInfo(msg)
 
 	case hostDeletedMsg:
 		if msg.err != nil {
@@ -1524,6 +1393,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hostRefreshTickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startHostRefreshTicker())
+
+		if m.monitor != nil {
+			if m.viewMode == ViewModeHosts {
+				for _, host := range m.hosts {
+					if host != nil {
+						cmds = append(cmds, m.fetchQueueStatus(host.Name))
+					}
+				}
+			}
+			if len(cmds) == 0 {
+				return m, nil
+			}
+			return m, tea.Batch(cmds...)
+		}
 
 		// Build set of hosts with running jobs
 		hostsWithRunningJobs := make(map[string]bool)
@@ -2757,103 +2640,6 @@ func formatHostSummaryMetricAbbrev(label string, pct int, ok bool) string {
 		return label + "--"
 	}
 	return fmt.Sprintf("%s%d%%", label, pct)
-}
-
-func hostCPULoadPercent(host *Host) (int, bool) {
-	if host == nil || host.LoadAvg == "" || host.CPUs <= 0 {
-		return host.lastCPUPct, host.lastCPUPct > 0
-	}
-	loadFields := strings.Fields(strings.ReplaceAll(host.LoadAvg, ",", " "))
-	if len(loadFields) == 0 {
-		return host.lastCPUPct, host.lastCPUPct > 0
-	}
-	load, err := strconv.ParseFloat(strings.TrimSpace(loadFields[0]), 64)
-	if err != nil {
-		return host.lastCPUPct, host.lastCPUPct > 0
-	}
-	pct := int(math.Round((load / float64(host.CPUs)) * 100))
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 200 {
-		pct = 200
-	}
-	host.lastCPUPct = pct
-	return pct, true
-}
-
-func hostMemUsagePercent(host *Host) (int, bool) {
-	used, okUsed := parseSizeToGiB(host.MemUsed)
-	total, okTotal := parseSizeToGiB(host.MemTotal)
-	if !okUsed || !okTotal || total <= 0 {
-		return host.lastRAMPct, host.lastRAMPct > 0
-	}
-	pct := int(math.Round((used / total) * 100))
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	host.lastRAMPct = pct
-	return pct, true
-}
-
-func hostGPULoadPercent(host *Host) (int, bool) {
-	maxLoad := -1
-	for _, gpu := range host.GPUs {
-		if gpu.Utilization > maxLoad {
-			maxLoad = gpu.Utilization
-		}
-
-		used, okUsed := parseSizeToGiB(gpu.MemUsed)
-		total, okTotal := parseSizeToGiB(gpu.MemTotal)
-		if okUsed && okTotal && total > 0 {
-			memPct := int(math.Round((used / total) * 100))
-			if memPct > maxLoad {
-				maxLoad = memPct
-			}
-		}
-	}
-	if maxLoad < 0 {
-		return host.lastGPUPct, host.lastGPUPct > 0
-	}
-	if maxLoad > 100 {
-		maxLoad = 100
-	}
-	host.lastGPUPct = maxLoad
-	return maxLoad, true
-}
-
-func parseSizeToGiB(value string) (float64, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "-" {
-		return 0, false
-	}
-	matches := humanSizePattern.FindStringSubmatch(value)
-	if matches == nil {
-		return 0, false
-	}
-	number, err := strconv.ParseFloat(matches[1], 64)
-	if err != nil {
-		return 0, false
-	}
-	unit := strings.ToUpper(matches[2])
-	unit = strings.TrimSuffix(unit, "B")
-	switch unit {
-	case "", "G", "GI":
-		return number, true
-	case "M", "MI":
-		return number / 1024, true
-	case "K", "KI":
-		return number / (1024 * 1024), true
-	case "T", "TI":
-		return number * 1024, true
-	case "P", "PI":
-		return number * 1024 * 1024, true
-	default:
-		return number, true
-	}
 }
 
 func (m Model) renderLogPanel(height int) string {
@@ -4978,6 +4764,19 @@ func (m Model) startDBWatcher() tea.Cmd {
 	}
 }
 
+func (m Model) waitForMonitorEvent() tea.Cmd {
+	if m.monitor == nil || m.monitorEvents == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		event, ok := <-m.monitorEvents
+		if !ok {
+			return nil
+		}
+		return monitorEventMsg{event: event}
+	}
+}
+
 func (m Model) refreshJobs() tea.Cmd {
 	return func() tea.Msg {
 		jobs, err := db.ListJobs(m.database, "", "", 1000, nil, "")
@@ -5326,6 +5125,239 @@ func (m Model) startHostRefreshTicker() tea.Cmd {
 	})
 }
 
+func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.setFlash(fmt.Sprintf("Error loading jobs: %v", msg.err), true)
+	}
+	m.allJobs = msg.jobs
+	if msg.jobDependencies != nil {
+		m.jobDependencies = msg.jobDependencies
+	}
+	m.applyJobFilter()
+
+	runningJobIDs := make(map[int64]bool)
+	for _, job := range msg.jobs {
+		if job.Status == db.StatusRunning {
+			runningJobIDs[job.ID] = true
+		}
+	}
+	for jobID := range m.jobProgress {
+		if !runningJobIDs[jobID] {
+			delete(m.jobProgress, jobID)
+		}
+	}
+
+	if m.pendingSelectJobID > 0 {
+		for i, job := range m.jobs {
+			if job.ID == m.pendingSelectJobID {
+				m.jobList.Select(i)
+				break
+			}
+		}
+		m.pendingSelectJobID = 0
+	}
+
+	var cmds []tea.Cmd
+	if cmd := m.fetchAllRunningJobsProgress(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if m.showHostSummaries && m.llmGenerator != nil {
+		cmds = append(cmds, m.generateAllHostSummaries())
+	}
+
+	if len(cmds) > 0 {
+		return m, tea.Batch(cmds...)
+	}
+	return m, nil
+}
+
+func (m Model) handleHostsLoaded(msg hostsLoadedMsg) (Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.setFlash(fmt.Sprintf("Error loading hosts: %v", msg.err), true)
+	}
+	monitorHosts := map[string]*Host{}
+	if m.monitor != nil {
+		for _, host := range m.monitor.Hosts() {
+			if host != nil && host.Name != "" {
+				monitorHosts[host.Name] = host
+			}
+		}
+	}
+	var cmds []tea.Cmd
+	for _, name := range msg.hostNames {
+		found := false
+		for _, h := range m.hosts {
+			if h.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			var host *Host
+			if monitorHost, ok := monitorHosts[name]; ok {
+				host = monitorHost
+				m.hosts = append(m.hosts, host)
+				continue
+			}
+			cachedInfo, err := db.LoadCachedHostInfo(m.database, name)
+			if err == nil && cachedInfo != nil {
+				host = hostFromCachedInfo(cachedInfo)
+				cacheAge := time.Since(time.Unix(cachedInfo.LastUpdated, 0))
+				if cacheAge > m.hostCacheDuration && m.monitor == nil {
+					host.Status = HostStatusChecking
+					cmds = append(cmds, m.fetchHostInfo(name))
+					cmds = append(cmds, m.fetchQueueStatus(name))
+				}
+			} else {
+				host = &Host{
+					Name:   name,
+					Status: HostStatusChecking,
+				}
+				if m.monitor == nil {
+					cmds = append(cmds, m.fetchHostInfo(name))
+					cmds = append(cmds, m.fetchQueueStatus(name))
+				}
+			}
+			m.hosts = append(m.hosts, host)
+		}
+	}
+	if len(cmds) > 0 {
+		return m, tea.Batch(cmds...)
+	}
+	return m, nil
+}
+
+func (m Model) handleHostSyncTimesLoaded(msg hostSyncTimesLoadedMsg) (Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.setFlash(fmt.Sprintf("Error loading host sync times: %v", msg.err), true)
+	}
+	if msg.times != nil {
+		m.hostSyncTimes = msg.times
+	}
+	m.applyJobFilter()
+	return m, nil
+}
+
+func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
+	var cmd tea.Cmd
+	for i, h := range m.hosts {
+		if h.Name == msg.hostName {
+			msg.info.Name = msg.hostName
+			msg.info.QueueStatus = h.QueueStatus
+			msg.info.QueueRunnerActive = h.QueueRunnerActive
+			msg.info.QueuedJobCount = h.QueuedJobCount
+			msg.info.CurrentQueueJob = h.CurrentQueueJob
+			msg.info.QueueStopPending = h.QueueStopPending
+			msg.info.RunningJobs = h.RunningJobs
+			if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
+				msg.info.LastCheck = h.LastCheck
+			}
+			m.hosts[i] = msg.info
+			break
+		}
+	}
+	m.hostsQueriedThisSession[msg.hostName] = true
+	return m, cmd
+}
+
+func (m Model) handleSyncCompleted(msg syncCompletedMsg) (Model, tea.Cmd) {
+	m.syncing = false
+	m.syncForceAll = false
+	m.lastSyncTime = time.Now()
+	if len(msg.hostsSynced) > 0 {
+		for _, host := range msg.hostsSynced {
+			m.lastHostSyncTimes[host] = m.lastSyncTime
+			m.hostSyncTimes[host] = m.lastSyncTime
+		}
+	}
+	if msg.err != nil {
+		return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
+	}
+	var flashParts []string
+	if msg.updated > 0 {
+		flashParts = append(flashParts, fmt.Sprintf("Synced %d job(s)", msg.updated))
+	}
+	if len(msg.queuesStarted) > 0 {
+		flashParts = append(flashParts, fmt.Sprintf("Started queue on %s", strings.Join(msg.queuesStarted, ", ")))
+	}
+	var cmds []tea.Cmd
+	if len(msg.queueRunnerErrors) > 0 {
+		label := "error"
+		if len(msg.queueRunnerErrors) > 1 {
+			label = "errors"
+		}
+		errorFlash := fmt.Sprintf("Queue runner %s: %s", label, strings.Join(msg.queueRunnerErrors, "; "))
+		if len(flashParts) > 0 {
+			errorFlash = strings.Join(append(flashParts, errorFlash), "; ")
+		}
+		cmds = append(cmds, m.setFlash(errorFlash, true))
+	} else if len(flashParts) > 0 {
+		cmds = append(cmds, m.setFlash(strings.Join(flashParts, "; "), false))
+	}
+	if m.monitor == nil {
+		cmds = append(cmds, m.refreshJobs(), m.loadHosts())
+		if m.syncPendingAfterCurrent {
+			m.syncPendingAfterCurrent = false
+			m.syncing = true
+			m.syncForceAll = true
+			cmds = append(cmds, m.performBackgroundSync(true))
+		}
+	}
+	if len(cmds) == 0 {
+		return m, nil
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m Model) handleMonitorEvent(msg monitorEventMsg) (Model, tea.Cmd) {
+	event := msg.event
+	var cmd tea.Cmd
+	switch event.Type {
+	case monitor.EventJobsRefreshed:
+		m, cmd = m.handleJobsRefreshed(jobsRefreshedMsg{
+			jobs:            event.Jobs,
+			jobDependencies: event.JobDependencies,
+			err:             event.Err,
+		})
+	case monitor.EventHostsLoaded:
+		m, cmd = m.handleHostsLoaded(hostsLoadedMsg{
+			hostNames: event.HostNames,
+			err:       event.Err,
+		})
+	case monitor.EventHostInfoUpdated:
+		if event.Host != nil {
+			m, cmd = m.handleHostInfo(hostInfoMsg{
+				hostName: event.Host.Name,
+				info:     event.Host,
+			})
+		}
+	case monitor.EventHostSyncTimesLoaded:
+		m, cmd = m.handleHostSyncTimesLoaded(hostSyncTimesLoadedMsg{
+			times: event.HostSyncTimes,
+			err:   event.Err,
+		})
+	case monitor.EventSyncCompleted:
+		m, cmd = m.handleSyncCompleted(syncCompletedMsg{
+			updated:           event.SyncResult.Updated,
+			queuesStarted:     event.SyncResult.QueuesStarted,
+			hostsSynced:       event.SyncResult.HostsSynced,
+			queueRunnerErrors: event.SyncResult.QueueRunnerErrors,
+			err:               event.Err,
+		})
+	case monitor.EventError:
+		if event.Err != nil {
+			cmd = m.setFlash(fmt.Sprintf("Monitor error: %v", event.Err), true)
+		}
+	}
+	waitCmd := m.waitForMonitorEvent()
+	if cmd == nil {
+		return m, waitCmd
+	}
+	if waitCmd == nil {
+		return m, cmd
+	}
+	return m, tea.Batch(cmd, waitCmd)
+}
 func (m Model) loadHosts() tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
@@ -5677,11 +5709,23 @@ func (m Model) isHostRecentlySynced(host string) bool {
 	if len(m.hostSyncTimes) == 0 {
 		return true
 	}
+	if !m.anyHostRecentlySynced() {
+		return true
+	}
 	last, ok := m.hostSyncTimes[host]
 	if !ok || last.IsZero() {
 		return false
 	}
 	return time.Since(last) <= hostRecentSyncWindow
+}
+
+func (m Model) anyHostRecentlySynced() bool {
+	for _, last := range m.hostSyncTimes {
+		if !last.IsZero() && time.Since(last) <= hostRecentSyncWindow {
+			return true
+		}
+	}
+	return false
 }
 
 func isRecentHistory(job *db.Job) bool {
@@ -7053,85 +7097,6 @@ func (m Model) fetchQueuedJobEnv(job *db.Job) tea.Cmd {
 			depSpec: data.depSpec,
 		}
 	}
-}
-
-// hostFromCachedInfo creates a Host from cached database info
-func hostFromCachedInfo(cached *db.CachedHostInfo) *Host {
-	host := &Host{
-		Name:      cached.Name,
-		Status:    HostStatusUnknown, // Will be updated when we query
-		Arch:      cached.Arch,
-		OS:        cached.OSVersion,
-		Model:     cached.Model,
-		CPUs:      cached.CPUCount,
-		CPUModel:  cached.CPUModel,
-		CPUFreq:   cached.CPUFreq,
-		MemTotal:  cached.MemTotal,
-		LastCheck: time.Unix(cached.LastUpdated, 0),
-	}
-
-	// Parse GPUs from JSON
-	if cached.GPUsJSON != "" {
-		var gpus []GPUInfo
-		if err := json.Unmarshal([]byte(cached.GPUsJSON), &gpus); err == nil {
-			host.GPUs = gpus
-		}
-	}
-
-	return host
-}
-
-// cachedInfoFromHost creates a CachedHostInfo from a Host
-func cachedInfoFromHost(host *Host) *db.CachedHostInfo {
-	cached := &db.CachedHostInfo{
-		Name:        host.Name,
-		Arch:        host.Arch,
-		OSVersion:   host.OS,
-		Model:       host.Model,
-		CPUCount:    host.CPUs,
-		CPUModel:    host.CPUModel,
-		CPUFreq:     host.CPUFreq,
-		MemTotal:    host.MemTotal,
-		LastUpdated: time.Now().Unix(),
-	}
-
-	// Encode GPUs to JSON
-	if len(host.GPUs) > 0 {
-		if data, err := json.Marshal(host.GPUs); err == nil {
-			cached.GPUsJSON = string(data)
-		}
-	}
-
-	return cached
-}
-
-// updateHostWithCachedStatic updates a host's dynamic fields while preserving static cached data
-func updateHostWithCachedStatic(host *Host, cached *Host) {
-	// Copy static fields from cached host if current host doesn't have them
-	// This preserves cached static info when we get a partial update
-	if host.Arch == "" {
-		host.Arch = cached.Arch
-	}
-	if host.OS == "" {
-		host.OS = cached.OS
-	}
-	if host.Model == "" {
-		host.Model = cached.Model
-	}
-	if host.CPUs == 0 {
-		host.CPUs = cached.CPUs
-	}
-	if host.CPUModel == "" {
-		host.CPUModel = cached.CPUModel
-	}
-	if host.CPUFreq == "" {
-		host.CPUFreq = cached.CPUFreq
-	}
-	if host.MemTotal == "" {
-		host.MemTotal = cached.MemTotal
-	}
-	// GPUs are static info about what GPUs exist (not utilization)
-	// We always get fresh GPU data when online, so don't merge
 }
 
 func truncate(s string, max int) string {
