@@ -82,6 +82,12 @@ var (
 // Returns nil if no progress pattern found.
 func ParseProgress(line string) *Progress {
 	line = strings.TrimSpace(line)
+	if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+		line = strings.TrimSpace(line[idx+1:])
+	}
+	if idx := strings.LastIndex(strings.ToLower(line), "progress:"); idx >= 0 {
+		line = strings.TrimSpace(line[idx:])
+	}
 
 	// Try percent pattern first
 	if m := percentPattern.FindStringSubmatch(line); m != nil {

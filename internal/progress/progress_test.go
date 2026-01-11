@@ -88,6 +88,16 @@ func TestParseProgress(t *testing.T) {
 			line: "  Progress: 50%",
 			want: &Progress{Percent: 50, RawLine: "Progress: 50%"},
 		},
+		{
+			name: "with prefix text",
+			line: "2026-01-10 12:00:00 Progress: 57%",
+			want: &Progress{Percent: 57, RawLine: "Progress: 57%"},
+		},
+		{
+			name: "with carriage return updates",
+			line: "Progress: 10%\rProgress: 57%",
+			want: &Progress{Percent: 57, RawLine: "Progress: 57%"},
+		},
 	}
 
 	for _, tt := range tests {

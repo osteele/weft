@@ -248,6 +248,17 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Track when a host was last successfully synced
+	hostSyncSchema := `
+	CREATE TABLE IF NOT EXISTS host_syncs (
+		name TEXT PRIMARY KEY,
+		last_synced INTEGER NOT NULL
+	);
+	`
+	if _, err := db.Exec(hostSyncSchema); err != nil {
+		return err
+	}
+
 	// Create deferred_operations table for operations pending on unreachable hosts
 	deferredOpsSchema := `
 	CREATE TABLE IF NOT EXISTS deferred_operations (
@@ -1297,6 +1308,31 @@ func FilterJobsByExcludedTags(jobs []*Job, excluded []string) []*Job {
 	return filtered
 }
 
+// FilterJobsByHosts keeps jobs whose host is in the provided list.
+func FilterJobsByHosts(jobs []*Job, hosts []string) []*Job {
+	if len(hosts) == 0 {
+		return jobs
+	}
+	hostSet := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		host = strings.TrimSpace(host)
+		if host == "" {
+			continue
+		}
+		hostSet[host] = struct{}{}
+	}
+	if len(hostSet) == 0 {
+		return jobs
+	}
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		if _, ok := hostSet[job.Host]; ok {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
 // scanJobs scans multiple job rows
 func scanJobs(rows *sql.Rows) ([]*Job, error) {
 	var jobs []*Job
@@ -1407,6 +1443,50 @@ func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, 
 		query += ` AND host = ?`
 		args = append(args, host)
 	}
+	if maxAgeDays > 0 {
+		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
+		query += ` AND start_time > ?`
+		args = append(args, cutoff)
+	}
+
+	// Order by running jobs first, then by job ID descending
+	query += ` ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 ELSE 1 END, id DESC`
+	applyLimit := limit > 0 && len(normalizeTags(tags)) == 0 && processedFilter == ""
+	if applyLimit {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	jobs, err := queryJobs(db, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	jobs = FilterJobsByTags(jobs, tags, processedFilter)
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs, nil
+}
+
+// ListJobsWithMaxAgeForHosts returns jobs filtered by a host list.
+func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit, maxAgeDays int, tags []string, processedFilter string) ([]*Job, error) {
+	if len(hosts) == 0 {
+		return ListJobsWithMaxAge(db, status, "", limit, maxAgeDays, tags, processedFilter)
+	}
+
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0`, jobSelectColumns)
+	args := []interface{}{}
+
+	if status != "" {
+		query += ` AND status = ?`
+		args = append(args, status)
+	}
+	placeholders := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		placeholders = append(placeholders, "?")
+		args = append(args, host)
+	}
+	query += fmt.Sprintf(` AND host IN (%s)`, strings.Join(placeholders, ", "))
 	if maxAgeDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
 		query += ` AND start_time > ?`
@@ -2067,6 +2147,63 @@ func LoadAllCachedHosts(db *sql.DB) ([]*CachedHostInfo, error) {
 		hosts = append(hosts, &info)
 	}
 
+	return hosts, rows.Err()
+}
+
+// RecordHostSync stores the latest successful sync timestamp for a host.
+func RecordHostSync(db *sql.DB, host string, syncedAt time.Time) error {
+	if host == "" {
+		return nil
+	}
+	_, err := db.Exec(`
+		INSERT INTO host_syncs (name, last_synced)
+		VALUES (?, ?)
+		ON CONFLICT(name) DO UPDATE SET last_synced = excluded.last_synced`,
+		host, syncedAt.Unix(),
+	)
+	return err
+}
+
+// LoadHostSyncTimes returns last sync timestamps for all hosts.
+func LoadHostSyncTimes(db *sql.DB) (map[string]time.Time, error) {
+	rows, err := db.Query(`SELECT name, last_synced FROM host_syncs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	times := make(map[string]time.Time)
+	for rows.Next() {
+		var name string
+		var lastSynced int64
+		if err := rows.Scan(&name, &lastSynced); err != nil {
+			return nil, err
+		}
+		if name != "" && lastSynced > 0 {
+			times[name] = time.Unix(lastSynced, 0)
+		}
+	}
+	return times, rows.Err()
+}
+
+// ListHostsSyncedSince returns hosts synced since the provided timestamp.
+func ListHostsSyncedSince(db *sql.DB, since time.Time) ([]string, error) {
+	rows, err := db.Query(`SELECT name FROM host_syncs WHERE last_synced >= ? ORDER BY name`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if name != "" {
+			hosts = append(hosts, name)
+		}
+	}
 	return hosts, rows.Err()
 }
 

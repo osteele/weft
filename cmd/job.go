@@ -233,6 +233,7 @@ func init() {
 	jobListCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
 	jobListCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, processed, unprocessed)")
 	jobListCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
+	jobListCmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
 	jobListCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	jobListCmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
 	jobListCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")

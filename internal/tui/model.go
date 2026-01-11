@@ -68,6 +68,8 @@ const (
 
 var humanSizePattern = regexp.MustCompile(`(?i)^([\d.]+)\s*([kmgtp]?i?[b]?)?$`)
 
+const hostRecentSyncWindow = 48 * time.Hour
+
 // ViewMode represents which view is currently active
 type ViewMode int
 
@@ -86,6 +88,15 @@ const (
 	jobFilterSucceeded
 	jobFilterFailed
 	jobFilterModeCount
+)
+
+// hostFilterMode controls host scoping in the Jobs view
+type hostFilterMode int
+
+const (
+	hostFilterRecent hostFilterMode = iota // Hosts synced recently
+	hostFilterAll
+	hostFilterSpecific
 )
 
 // jobSortMode represents how jobs are sorted in the list
@@ -160,6 +171,7 @@ type keyMap struct {
 	Enter           key.Binding
 	Logs            key.Binding
 	Filter          key.Binding
+	HostFilter      key.Binding
 	Escape          key.Binding
 	Kill            key.Binding
 	Draft           key.Binding
@@ -219,6 +231,10 @@ var (
 		Filter: key.NewBinding(
 			key.WithKeys("f"),
 			key.WithHelp("f", "cycle view"),
+		),
+		HostFilter: key.NewBinding(
+			key.WithKeys("H"),
+			key.WithHelp("H", "host filter"),
 		),
 		Escape: key.NewBinding(
 			key.WithKeys("esc"),
@@ -518,6 +534,11 @@ type jobEnvLoadedMsg struct {
 	err     error
 }
 
+type hostSyncTimesLoadedMsg struct {
+	times map[string]time.Time
+	err   error
+}
+
 // Input field indices for new job form
 const (
 	inputHost = iota
@@ -539,6 +560,8 @@ type Model struct {
 	jobList              list.Model // bubbles/list for job selection
 	selectedJob          *db.Job
 	jobFilter            jobFilterMode
+	jobHostFilterMode    hostFilterMode
+	jobHostFilterHost    string
 	jobSort              jobSortMode
 	jobSelectionActive   bool // false when user has deselected the highlighted job
 	jobListContentHeight int
@@ -623,6 +646,9 @@ type Model struct {
 	syncPendingAfterCurrent bool
 	// DB-triggered sync debounce
 	dbSyncDebounceActive bool
+
+	// Host sync tracking for job filtering
+	hostSyncTimes map[string]time.Time
 
 	// Help overlay
 	showHelp bool
@@ -771,6 +797,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		jobList:                 jobList,
 		jobSelectionActive:      true,
 		jobFilter:               jobFilterRecent,
+		jobHostFilterMode:       hostFilterRecent,
 		logViewport:             viewport.New(0, 0),
 		detailViewport:          &detailVP,
 		inputs:                  inputs,
@@ -787,6 +814,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		progressTracker:         progress.NewTracker(),
 		jobProgress:             make(map[int64]*progress.Progress),
 		lastHostSyncTimes:       make(map[string]time.Time),
+		hostSyncTimes:           make(map[string]time.Time),
 		llmGenerator:            llmGen,
 		appConfig:               appCfg,
 		showHostSummaries:       true, // Default to showing AI summaries
@@ -802,6 +830,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		m.refreshJobs(),
 		m.loadHosts(),
+		m.loadHostSyncTimes(),
 		m.performBackgroundSync(true), // Sync immediately on startup
 		m.startSyncTicker(),
 		m.startLogTicker(),
@@ -957,6 +986,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.hostsSynced) > 0 {
 			for _, host := range msg.hostsSynced {
 				m.lastHostSyncTimes[host] = m.lastSyncTime
+				m.hostSyncTimes[host] = m.lastSyncTime
 			}
 		}
 		if msg.err != nil {
@@ -1033,11 +1063,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case quickProgressMsg:
-		// Store quick progress fetch result (only if we don't already have progress)
+		// Store quick progress fetch result (always update to keep progress current)
 		if msg.progress != nil {
-			if _, exists := m.jobProgress[msg.jobID]; !exists {
-				m.jobProgress[msg.jobID] = msg.progress
-			}
+			m.jobProgress[msg.jobID] = msg.progress
 		}
 		return m, nil
 
@@ -1388,6 +1416,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
 		}
+		return m, nil
+
+	case hostSyncTimesLoadedMsg:
+		if msg.err != nil {
+			return m, m.setFlash(fmt.Sprintf("Error loading host sync times: %v", msg.err), true)
+		}
+		if msg.times != nil {
+			m.hostSyncTimes = msg.times
+		}
+		m.applyJobFilter()
 		return m, nil
 
 	case hostInfoMsg:
@@ -1987,6 +2025,26 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case key.Matches(msg, keys.HostFilter):
+		if m.viewMode == ViewModeHosts && m.selectedHostIdx >= 0 && m.selectedHostIdx < len(m.hosts) {
+			host := m.hosts[m.selectedHostIdx].Name
+			if host != "" {
+				m.jobHostFilterMode = hostFilterSpecific
+				m.jobHostFilterHost = host
+			}
+		} else {
+			m.cycleHostFilter()
+		}
+		m.applyJobFilter()
+		var cmds []tea.Cmd
+		cmds = append(cmds, m.setFlash(fmt.Sprintf("Host: %s", hostFilterDescription(m)), false))
+		if len(m.jobs) == 0 {
+			m.clearJobSelection()
+		} else if cmd := m.jumpJobListToTop(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+
 	case key.Matches(msg, keys.Prune):
 		if m.viewMode != ViewModeJobs {
 			return m, nil
@@ -2292,6 +2350,8 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"t", "Jump to top of jobs"},
 			{"←/→", "Switch to hosts view"},
 			{"l", "Toggle logs view"},
+			{"f", "Cycle job filters"},
+			{"H", "Cycle host filter"},
 			{"s", "Sync job statuses"},
 			{"n", "New job"},
 			{"e", "Edit queued job"},
@@ -2427,7 +2487,7 @@ func (m Model) renderJobList(height int) string {
 		"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
 	headerIndex := len(rows)
 	rows = append(rows, headerStyle.Render(header))
-	filterLabel := fmt.Sprintf(" View: %s | Sort: %s", jobFilterDescription(m.jobFilter), m.jobSort)
+	filterLabel := fmt.Sprintf(" View: %s | Host: %s | Sort: %s", jobFilterDescription(m.jobFilter), hostFilterDescription(m), m.jobSort)
 	filterLine := dimStyle.Render(filterLabel)
 
 	if len(m.jobs) == 0 {
@@ -3801,7 +3861,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
 
 	if m.syncing {
 		help = syncingStyle.Render(m.spinner.View()+" ") + help
@@ -4982,7 +5042,7 @@ func (m *Model) applyJobFilter() {
 
 	var filtered []*db.Job
 	for _, job := range m.allJobs {
-		if jobMatchesFilter(job, m.jobFilter) {
+		if jobMatchesFilter(job, m.jobFilter) && m.jobMatchesHostFilter(job) {
 			filtered = append(filtered, job)
 		}
 	}
@@ -5004,7 +5064,7 @@ func (m *Model) applyJobFilter() {
 		}
 	}
 
-	if m.selectedJob != nil && !jobMatchesFilter(m.selectedJob, m.jobFilter) {
+	if m.selectedJob != nil && (!jobMatchesFilter(m.selectedJob, m.jobFilter) || !m.jobMatchesHostFilter(m.selectedJob)) {
 		m.detailTab = DetailTabDetails
 		m.selectedJob = nil
 		m.logContent = ""
@@ -5302,6 +5362,17 @@ func (m Model) loadHosts() tea.Cmd {
 	}
 }
 
+func (m Model) loadHostSyncTimes() tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		times, err := db.LoadHostSyncTimes(database)
+		if err != nil {
+			return hostSyncTimesLoadedMsg{err: err}
+		}
+		return hostSyncTimesLoadedMsg{times: times}
+	}
+}
+
 func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
@@ -5586,6 +5657,33 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	}
 }
 
+func (m Model) jobMatchesHostFilter(job *db.Job) bool {
+	switch m.jobHostFilterMode {
+	case hostFilterAll:
+		return true
+	case hostFilterSpecific:
+		if m.jobHostFilterHost == "" {
+			return true
+		}
+		return job.Host == m.jobHostFilterHost
+	case hostFilterRecent:
+		return m.isHostRecentlySynced(job.Host)
+	default:
+		return true
+	}
+}
+
+func (m Model) isHostRecentlySynced(host string) bool {
+	if len(m.hostSyncTimes) == 0 {
+		return true
+	}
+	last, ok := m.hostSyncTimes[host]
+	if !ok || last.IsZero() {
+		return false
+	}
+	return time.Since(last) <= hostRecentSyncWindow
+}
+
 func isRecentHistory(job *db.Job) bool {
 	const window = 24 * time.Hour
 	windowSeconds := int64(window / time.Second)
@@ -5619,6 +5717,84 @@ func jobFilterDescription(mode jobFilterMode) string {
 	default:
 		return "All"
 	}
+}
+
+func hostFilterDescription(m Model) string {
+	switch m.jobHostFilterMode {
+	case hostFilterRecent:
+		return "Synced <2d"
+	case hostFilterAll:
+		return "All"
+	case hostFilterSpecific:
+		if m.jobHostFilterHost != "" {
+			return m.jobHostFilterHost
+		}
+		return "Host"
+	default:
+		return "All"
+	}
+}
+
+func (m *Model) cycleHostFilter() {
+	hosts := m.hostFilterCandidates()
+	switch m.jobHostFilterMode {
+	case hostFilterRecent:
+		m.jobHostFilterMode = hostFilterAll
+		m.jobHostFilterHost = ""
+	case hostFilterAll:
+		if len(hosts) == 0 {
+			m.jobHostFilterMode = hostFilterRecent
+			m.jobHostFilterHost = ""
+			return
+		}
+		m.jobHostFilterMode = hostFilterSpecific
+		m.jobHostFilterHost = hosts[0]
+	case hostFilterSpecific:
+		if len(hosts) == 0 {
+			m.jobHostFilterMode = hostFilterRecent
+			m.jobHostFilterHost = ""
+			return
+		}
+		index := -1
+		for i, host := range hosts {
+			if host == m.jobHostFilterHost {
+				index = i
+				break
+			}
+		}
+		if index == -1 || index == len(hosts)-1 {
+			m.jobHostFilterMode = hostFilterRecent
+			m.jobHostFilterHost = ""
+			return
+		}
+		m.jobHostFilterHost = hosts[index+1]
+	default:
+		m.jobHostFilterMode = hostFilterRecent
+		m.jobHostFilterHost = ""
+	}
+}
+
+func (m Model) hostFilterCandidates() []string {
+	hostSet := make(map[string]struct{})
+	for _, host := range m.hosts {
+		if host.Name != "" {
+			hostSet[host.Name] = struct{}{}
+		}
+	}
+	if len(hostSet) == 0 {
+		for _, job := range m.allJobs {
+			if job.Host != "" {
+				hostSet[job.Host] = struct{}{}
+			}
+		}
+	}
+
+	hosts := make([]string, 0, len(hostSet))
+	for host := range hostSet {
+		hosts = append(hosts, host)
+	}
+	naturalSortStrings(hosts)
+	return hosts
 }
 
 func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
@@ -5786,13 +5962,9 @@ func (m *Model) requestHostCPUTop(hostName string) tea.Cmd {
 }
 
 // fetchQuickProgress quickly greps the log file for the last progress line
-// This is faster than fetching the full log and is used at startup
+// This is faster than fetching the full log and is used for periodic refresh
 func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 	if job == nil || job.Status != db.StatusRunning {
-		return nil
-	}
-	// Skip if we already have progress for this job
-	if _, exists := m.jobProgress[job.ID]; exists {
 		return nil
 	}
 
@@ -5801,7 +5973,7 @@ func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 		logFile, _ := logfiles.Resolve(job)
 
 		// Quick grep for last progress line (case-insensitive)
-		grepCmd := fmt.Sprintf("grep -i '^Progress:' %s 2>/dev/null | tail -1", logFile)
+		grepCmd := fmt.Sprintf("grep -i 'Progress:' %s 2>/dev/null | tail -1", logFile)
 		stdout, _, err := remote.Run(job.Host, grepCmd)
 		if err != nil || strings.TrimSpace(stdout) == "" {
 			return quickProgressMsg{jobID: job.ID, progress: nil}
@@ -5880,7 +6052,7 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 		}
 
 		for _, host := range hostsToSync {
-			hostsSynced = append(hostsSynced, host)
+			hostSynced := false
 			// Sync running/starting/queued jobs
 			syncOpts := ops.DefaultSyncOptions()
 			for _, job := range activeJobsByHost[host] {
@@ -5891,6 +6063,7 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 						oplog.WithError(err))
 					continue
 				}
+				hostSynced = true
 				if changed {
 					updated++
 				}
@@ -5906,6 +6079,7 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 							oplog.WithError(err))
 						continue
 					}
+					hostSynced = true
 					if changed {
 						updated++
 					}
@@ -5936,14 +6110,22 @@ func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
 			if queuedCount > 0 {
 				started, err := ensureQueueRunnerStartedTUI(host)
 				if err != nil {
-					queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
+					if !remote.IsConnectionError(err.Error()) {
+						queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
+					}
 				} else if started {
 					queuesStarted = append(queuesStarted, host)
 				}
 			} else if m.stopQueueRunnerWhenIdle && runningCount == 0 {
 				if err := stopQueueRunnerIfIdleTUI(host); err != nil {
-					queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
+					if !remote.IsConnectionError(err.Error()) {
+						queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
+					}
 				}
+			}
+			if hostSynced {
+				hostsSynced = append(hostsSynced, host)
+				_ = db.RecordHostSync(m.database, host, time.Now())
 			}
 		}
 

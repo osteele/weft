@@ -22,11 +22,13 @@ var listCmd = &cobra.Command{
 This shows historical jobs, not queue contents. Use --queued to see only jobs
 waiting in a queue.
 
-By default, only shows jobs from the last 7 days. Use --all/-a to include older jobs.
+By default, only shows jobs from the last 7 days and hosts synced in the last 2 days.
+Use --all/-a to include older jobs and --all-hosts to include older hosts.
 
 Examples:
   remote-jobs list                    # Recent jobs (last 7 days)
   remote-jobs list --all              # All jobs including older
+  remote-jobs list --all-hosts        # Include jobs from older hosts
   remote-jobs list --running          # Running jobs only
   remote-jobs list --queued           # Jobs waiting in queue
   remote-jobs list --running --sync   # Running jobs (sync first)
@@ -46,6 +48,7 @@ var (
 	listDead        bool
 	listStatus      string
 	listHost        string
+	listAllHosts    bool
 	listSearch      string
 	listLimit       int
 	listShow        int64
@@ -57,6 +60,8 @@ var (
 	listExcludeTags []string
 )
 
+const defaultHostSyncWindow = 48 * time.Hour
+
 func init() {
 	rootCmd.AddCommand(listCmd)
 
@@ -66,6 +71,7 @@ func init() {
 	listCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
 	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, processed, unprocessed)")
 	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
+	listCmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
 	listCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
 	listCmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
 	listCmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
@@ -125,10 +131,23 @@ func runList(cmd *cobra.Command, args []string) error {
 		processedFilter = listStatus
 	}
 
+	hostFilterHosts := []string{}
+	if listHost != "" {
+		hostFilterHosts = []string{listHost}
+	} else if !listAllHosts {
+		recentHosts, err := db.ListHostsSyncedSince(database, time.Now().Add(-defaultHostSyncWindow))
+		if err != nil {
+			return fmt.Errorf("list recent hosts: %w", err)
+		}
+		if len(recentHosts) > 0 {
+			hostFilterHosts = recentHosts
+		}
+	}
+
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 {
+		if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
@@ -136,6 +155,7 @@ func runList(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("search: %w", err)
 		}
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
+		jobs = db.FilterJobsByHosts(jobs, hostFilterHosts)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
@@ -169,7 +189,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 {
 		queryLimit = 0
 	}
-	jobs, err := db.ListJobsWithMaxAge(database, status, listHost, queryLimit, maxAgeDays, listTags, processedFilter)
+	jobs, err := db.ListJobsWithMaxAgeForHosts(database, status, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}

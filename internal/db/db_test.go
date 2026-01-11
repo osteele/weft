@@ -448,6 +448,42 @@ func TestFilterJobsByExcludedTags(t *testing.T) {
 	}
 }
 
+func TestHostSyncTracking(t *testing.T) {
+	database := SetupTestDB(t)
+
+	now := time.Unix(1_700_000_000, 0)
+	old := now.Add(-72 * time.Hour)
+
+	if err := RecordHostSync(database, "cool30", now); err != nil {
+		t.Fatalf("RecordHostSync cool30: %v", err)
+	}
+	if err := RecordHostSync(database, "cool100", old); err != nil {
+		t.Fatalf("RecordHostSync cool100: %v", err)
+	}
+
+	times, err := LoadHostSyncTimes(database)
+	if err != nil {
+		t.Fatalf("LoadHostSyncTimes: %v", err)
+	}
+	if len(times) != 2 {
+		t.Fatalf("expected 2 host sync entries, got %d", len(times))
+	}
+	if got := times["cool30"]; !got.Equal(now) {
+		t.Fatalf("cool30 last sync = %v, want %v", got, now)
+	}
+	if got := times["cool100"]; !got.Equal(old) {
+		t.Fatalf("cool100 last sync = %v, want %v", got, old)
+	}
+
+	recentHosts, err := ListHostsSyncedSince(database, now.Add(-48*time.Hour))
+	if err != nil {
+		t.Fatalf("ListHostsSyncedSince: %v", err)
+	}
+	if len(recentHosts) != 1 || recentHosts[0] != "cool30" {
+		t.Fatalf("expected [cool30], got %v", recentHosts)
+	}
+}
+
 func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	database := SetupTestDB(t)
 

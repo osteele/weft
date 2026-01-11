@@ -163,6 +163,10 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		}
 	}
 
+	if err := db.RecordHostSync(database, host, time.Now()); err != nil {
+		return updated, err
+	}
+
 	return updated, nil
 }
 
@@ -259,6 +263,10 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		if changed {
 			updated++
 		}
+	}
+
+	if err := db.RecordHostSync(database, host, time.Now()); err != nil {
+		return updated, err
 	}
 
 	return updated, nil
