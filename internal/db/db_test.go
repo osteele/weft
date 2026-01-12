@@ -696,3 +696,42 @@ func TestNormalizeCommand(t *testing.T) {
 		})
 	}
 }
+
+func TestListJobsPendingReconciliation(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Create jobs with different states
+	job1ID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "no pending", "default")
+	job2ID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "has pending", "default")
+	job3ID, _ := RecordQueued(db, "host2", "/tmp", "cmd3", "different host", "default")
+
+	// Set pending status on job2 and job3
+	SetPendingStatus(db, job2ID, StatusKilled)
+	SetPendingStatus(db, job3ID, StatusCanceled)
+
+	// List pending jobs for host1
+	jobs, err := ListJobsPendingReconciliation(db, "host1")
+	if err != nil {
+		t.Fatalf("ListJobsPendingReconciliation failed: %v", err)
+	}
+
+	// Should only return job2 (host1 with pending status)
+	if len(jobs) != 1 {
+		t.Errorf("expected 1 job, got %d", len(jobs))
+	}
+	if len(jobs) > 0 && jobs[0].ID != job2ID {
+		t.Errorf("expected job ID %d, got %d", job2ID, jobs[0].ID)
+	}
+
+	// List pending jobs for host2
+	jobs, err = ListJobsPendingReconciliation(db, "host2")
+	if err != nil {
+		t.Fatalf("ListJobsPendingReconciliation failed: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Errorf("expected 1 job for host2, got %d", len(jobs))
+	}
+
+	// Job without pending status should not be included
+	_, _ = job1ID, job3ID // silence unused variable warnings
+}

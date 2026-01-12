@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -189,5 +190,75 @@ func TestCancelQueuedJob_NotQueued(t *testing.T) {
 	_, err := CancelQueuedJob(database, job, DefaultOptions())
 	if err == nil {
 		t.Fatal("expected error for non-queued job")
+	}
+}
+
+// TestKillQueueRunnerJob_TildeNotSingleQuoted verifies that the kill command
+// for queue-runner jobs doesn't use single-quoted tilde paths, which would
+// prevent shell expansion.
+func TestKillQueueRunnerJob_TildeNotSingleQuoted(t *testing.T) {
+	database := db.SetupTestDB(t)
+	// Create a queue-runner job (no session name, has queue name)
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	// Transition to running (simulating queue runner starting it)
+	db.MarkQueuedJobRunning(database, jobID)
+	job, _ := db.GetJobByID(database, jobID)
+
+	var capturedCommands []string
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		capturedCommands = append(capturedCommands, command)
+		return "", "", 0
+	})
+
+	_, err := KillJob(database, job, DefaultOptions())
+	if err != nil {
+		t.Fatalf("KillJob failed: %v", err)
+	}
+
+	// Check that no command contains single-quoted tilde path
+	for _, cmd := range capturedCommands {
+		if strings.Contains(cmd, "'~") {
+			t.Errorf("Command contains single-quoted tilde (prevents shell expansion): %s", cmd)
+		}
+	}
+}
+
+// TestApplyCancelToRemote_KillsRunningProcess verifies that canceling a job
+// that has already started running will also kill the process.
+func TestApplyCancelToRemote_KillsRunningProcess(t *testing.T) {
+	database := db.SetupTestDB(t)
+	// Create a queued job
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	job, _ := db.GetJobByID(database, jobID)
+
+	var capturedCommands []string
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		capturedCommands = append(capturedCommands, command)
+		return "", "", 0
+	})
+
+	// Manually call applyCancelToRemote (internal function)
+	err := applyCancelToRemote(job, 10*time.Second)
+	if err != nil {
+		t.Fatalf("applyCancelToRemote failed: %v", err)
+	}
+
+	// Verify both queue removal AND kill commands were issued
+	hasQueueRemoval := false
+	hasKillCommand := false
+	for _, cmd := range capturedCommands {
+		if strings.Contains(cmd, "grep -v") && strings.Contains(cmd, ".queue") {
+			hasQueueRemoval = true
+		}
+		if strings.Contains(cmd, "kill") && strings.Contains(cmd, ".pid") {
+			hasKillCommand = true
+		}
+	}
+
+	if !hasQueueRemoval {
+		t.Error("expected queue removal command to be issued")
+	}
+	if !hasKillCommand {
+		t.Error("expected kill command to be issued (for case where job started running)")
 	}
 }

@@ -93,9 +93,15 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Sync logic: fast sync by default, full sync with --sync, skip with --no-sync
 	if !listNoSync {
 		if listSync {
-			// Full sync requested
-			if err := performListSync(database); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
+			// Full sync requested - respect --host filter if specified
+			if listHost != "" {
+				if err := performListSyncForHost(database, listHost); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
+				}
+			} else {
+				if err := performListSync(database); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
+				}
 			}
 		} else {
 			// Fast sync by default - only sync filtered host if specified
@@ -301,6 +307,23 @@ func performListSync(database *sql.DB) error {
 			continue
 		}
 		updated += hostUpdated
+	}
+
+	if updated > 0 {
+		fmt.Printf("(synced %d job status(es))\n", updated)
+	}
+
+	return nil
+}
+
+// performListSyncForHost runs sync for a single host (used with --host flag)
+func performListSyncForHost(database *sql.DB, host string) error {
+	updated, err := syncHost(database, host)
+	if err != nil {
+		if ssh.IsConnectionError(err.Error()) {
+			return nil // Silently skip connection errors
+		}
+		return err
 	}
 
 	if updated > 0 {

@@ -236,18 +236,31 @@ func applyKillToRemote(job *db.Job, timeout time.Duration) error {
 }
 
 // applyCancelToRemote removes a queued job from the remote queue.
+// If the job is already running (queue runner started it before cancel),
+// this also kills the running process.
 func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
 	queueName := job.QueueName
 	if queueName == "" {
 		queueName = "default"
 	}
-	return removeFromQueueFile(job.Host, queueName, job.ID, timeout)
+
+	// Remove from queue file (in case it's still queued)
+	if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+		// Only fail on connection errors, non-connection errors are OK
+		if ssh.IsConnectionError(err.Error()) {
+			return err
+		}
+	}
+
+	// Also kill the process if it's running (queue runner may have started it)
+	return killQueueRunnerJob(job, timeout)
 }
 
 // killQueueRunnerJob kills a queue-runner managed job via its PID.
 func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 	pidFile := session.JobPidFile(job.ID, job.StartTime)
-	killCmd := fmt.Sprintf("if [ -f '%s' ]; then kill $(cat '%s') 2>/dev/null || true; fi", pidFile, pidFile)
+	// Note: pidFile contains ~ which must NOT be single-quoted (prevents expansion)
+	killCmd := fmt.Sprintf("if [ -f %s ]; then kill $(cat %s) 2>/dev/null || true; fi", pidFile, pidFile)
 	_, stderr, err := ssh.RunWithTimeout(job.Host, killCmd, timeout)
 	if err != nil && ssh.IsConnectionError(stderr) {
 		return fmt.Errorf("connection error: %s", stderr)

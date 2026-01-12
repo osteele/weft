@@ -1636,6 +1636,14 @@ func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
 	return queryJobs(db, query, host, StatusDraft, StatusDraft, StatusDraft)
 }
 
+// ListJobsPendingReconciliation returns jobs that have unresolved pending operations.
+// These are jobs where the user requested a status change (kill, cancel, etc.) that
+// may not have been applied to the remote yet.
+func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND pending_status IS NOT NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host)
+}
+
 // ListAllQueued returns all queued jobs across all hosts
 func ListAllQueued(db *sql.DB) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)

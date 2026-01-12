@@ -17,24 +17,28 @@ import (
 )
 
 var syncCmd = &cobra.Command{
-	Use:   "sync",
-	Short: "Sync job statuses from all remote hosts",
-	Long: `Sync job statuses by checking all hosts with running jobs.
+	Use:   "sync [host...]",
+	Short: "Sync job statuses from remote hosts",
+	Long: `Sync job statuses by checking remote hosts.
 
-Automatically finds hosts with running jobs and updates their status
-in the local database. Also starts queue runners on hosts with queued jobs.
-Connection failures are silently ignored.
+If hosts are specified, only those hosts are synced. Otherwise, all hosts
+with running or queued jobs are synced. Also starts queue runners on hosts
+with queued jobs. Connection failures are silently ignored.
 
 Examples:
-  remote-jobs sync                    # Sync all hosts
+  remote-jobs sync                    # Sync all hosts with active jobs
+  remote-jobs sync studio             # Sync only studio
+  remote-jobs sync cool30 cool100     # Sync specific hosts
   remote-jobs sync --verbose          # Show progress
-  remote-jobs sync --no-queue-start   # Don't start queue runners`,
+  remote-jobs sync --no-queue-start   # Don't start queue runners
+  remote-jobs sync --timeout 10s      # Use 10 second timeout per host`,
 	RunE: runSync,
 }
 
 var (
 	syncVerbose      bool
 	syncNoQueueStart bool
+	syncTimeout      time.Duration
 )
 
 var (
@@ -55,6 +59,7 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 	syncCmd.Flags().BoolVarP(&syncVerbose, "verbose", "v", false, "Show detailed progress")
 	syncCmd.Flags().BoolVar(&syncNoQueueStart, "no-queue-start", false, "Don't auto-start queue runners")
+	syncCmd.Flags().DurationVarP(&syncTimeout, "timeout", "t", NormalSyncTimeout, "Timeout per host (e.g., 10s, 1m)")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
@@ -64,10 +69,17 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Get all unique hosts with running or queued jobs
-	hosts, err := db.ListUniqueActiveHosts(database)
-	if err != nil {
-		return fmt.Errorf("list hosts: %w", err)
+	var hosts []string
+	if len(args) > 0 {
+		// Filter to specified hosts only
+		hosts = args
+	} else {
+		// Get all unique hosts with running or queued jobs
+		var err error
+		hosts, err = db.ListUniqueActiveHosts(database)
+		if err != nil {
+			return fmt.Errorf("list hosts: %w", err)
+		}
 	}
 
 	if len(hosts) == 0 {
@@ -136,9 +148,12 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		return 0, err
 	}
 
-	syncOpts := ops.DefaultSyncOptions()
+	syncOpts := ops.SyncOptions{Timeout: syncTimeout}
 	var updated int
+	seenJobs := make(map[int64]bool)
+
 	for _, job := range jobs {
+		seenJobs[job.ID] = true
 		changed, err := syncJobFunc(database, job, syncOpts)
 		if err != nil {
 			return updated, err
@@ -148,12 +163,37 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		}
 	}
 
+	// Reconcile jobs with pending operations (kill, cancel, etc.)
+	// These may have non-active status but need remote reconciliation
+	pendingJobs, err := db.ListJobsPendingReconciliation(database, host)
+	if err != nil {
+		return updated, err
+	}
+	for _, job := range pendingJobs {
+		if seenJobs[job.ID] {
+			continue // Already synced above
+		}
+		seenJobs[job.ID] = true
+		_, err := ops.SyncAndReconcile(database, job, ops.ReconcileOptions{Timeout: syncOpts.Timeout})
+		if err != nil {
+			// Log but continue - don't fail entire sync for one job
+			if syncVerbose {
+				fmt.Fprintf(os.Stderr, "  Warning: reconcile job %d: %v\n", job.ID, err)
+			}
+			continue
+		}
+		updated++
+	}
+
 	// Clean up draft jobs that still have remote state lingering
 	drafts, err := db.ListDraftJobsPendingSync(database, host)
 	if err != nil {
 		return updated, err
 	}
 	for _, job := range drafts {
+		if seenJobs[job.ID] {
+			continue // Already synced above
+		}
 		changed, err := ops.SyncDraftJob(database, job, syncOpts)
 		if err != nil {
 			return updated, err

@@ -4,13 +4,43 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+var (
+	// debugSSH enables verbose logging of SSH commands and timing
+	debugSSH = os.Getenv("REMOTE_JOBS_DEBUG_SSH") != ""
+
+	// sshCallCount tracks total SSH calls for debugging
+	sshCallCount atomic.Int64
+
+	// controlPath is the path pattern for SSH ControlMaster socket
+	// Uses /tmp for cross-platform compatibility
+	controlPath = "/tmp/remote-jobs-ssh-%r@%h:%p"
+)
+
+// sshControlMasterArgs returns the SSH arguments for connection multiplexing.
+// This enables subsequent SSH connections to the same host to reuse an existing connection.
+func sshControlMasterArgs() []string {
+	return []string{
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + controlPath,
+		"-o", "ControlPersist=60",
+	}
+}
+
+// scpControlMasterArgs returns the SCP arguments for connection multiplexing.
+// Uses the same socket path as SSH so connections can be shared.
+func scpControlMasterArgs() []string {
+	return sshControlMasterArgs()
+}
 
 // RunnerFunc is the type for SSH command execution functions.
 // It takes host and command, returns stdout, stderr, and error.
@@ -43,7 +73,8 @@ func SetRunner(fn RunnerFunc) func() {
 
 // defaultRunner executes SSH commands using exec.Command
 func defaultRunner(host, command string) (string, string, error) {
-	cmd := exec.Command("ssh", host, command)
+	args := append(sshControlMasterArgs(), host, command)
+	cmd := exec.Command("ssh", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -142,16 +173,33 @@ func RunWithTimeout(host string, command string, timeout time.Duration) (string,
 
 // defaultRunWithTimeout is the real implementation with timeout handling
 func defaultRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
-	cmd := exec.Command("ssh",
+	callNum := sshCallCount.Add(1)
+	start := time.Now()
+
+	// Truncate command for logging (first 80 chars)
+	cmdPreview := command
+	if len(cmdPreview) > 80 {
+		cmdPreview = cmdPreview[:80] + "..."
+	}
+
+	if debugSSH {
+		log.Printf("[SSH #%d] START host=%s timeout=%v cmd=%q", callNum, host, timeout, cmdPreview)
+	}
+
+	args := append(sshControlMasterArgs(),
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
 		host, command)
+	cmd := exec.Command("ssh", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
+		if debugSSH {
+			log.Printf("[SSH #%d] START_ERR elapsed=%v err=%v", callNum, time.Since(start), err)
+		}
 		return "", "", err
 	}
 
@@ -164,9 +212,26 @@ func defaultRunWithTimeout(host string, command string, timeout time.Duration) (
 
 	select {
 	case err := <-done:
+		elapsed := time.Since(start)
+		if debugSSH {
+			outPreview := stdout.String()
+			if len(outPreview) > 50 {
+				outPreview = outPreview[:50] + "..."
+			}
+			outPreview = strings.ReplaceAll(outPreview, "\n", "\\n")
+			if err != nil {
+				log.Printf("[SSH #%d] DONE elapsed=%v err=%v out=%q", callNum, elapsed, err, outPreview)
+			} else {
+				log.Printf("[SSH #%d] DONE elapsed=%v out=%q", callNum, elapsed, outPreview)
+			}
+		}
 		return stdout.String(), stderr.String(), err
 	case <-time.After(timeout):
 		cmd.Process.Kill()
+		elapsed := time.Since(start)
+		if debugSSH {
+			log.Printf("[SSH #%d] TIMEOUT elapsed=%v timeout=%v", callNum, elapsed, timeout)
+		}
 		return "", "", fmt.Errorf("ssh command timed out after %v", timeout)
 	}
 }
@@ -219,7 +284,8 @@ func RunWithRetryVerbose(host string, command string, verbose bool) (string, str
 
 // RunInteractive runs an SSH command that may require terminal interaction
 func RunInteractive(host string, command string) error {
-	cmd := exec.Command("ssh", host, "-t", command)
+	args := append(sshControlMasterArgs(), host, "-t", command)
+	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -228,7 +294,8 @@ func RunInteractive(host string, command string) error {
 
 // RunStreaming runs an SSH command and streams output to the provided writers
 func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
-	cmd := exec.Command("ssh", host, command)
+	args := append(sshControlMasterArgs(), host, command)
+	cmd := exec.Command("ssh", args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
@@ -249,7 +316,9 @@ func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) er
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		cmd := exec.Command("scp", "-q", localPath, fmt.Sprintf("%s:%s", host, remotePath))
+		args := append([]string{"-q"}, scpControlMasterArgs()...)
+		args = append(args, localPath, fmt.Sprintf("%s:%s", host, remotePath))
+		cmd := exec.Command("scp", args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
@@ -295,7 +364,9 @@ func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) 
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		cmd := exec.Command("scp", "-q", fmt.Sprintf("%s:%s", host, remotePath), localPath)
+		args := append([]string{"-q"}, scpControlMasterArgs()...)
+		args = append(args, fmt.Sprintf("%s:%s", host, remotePath), localPath)
+		cmd := exec.Command("scp", args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
