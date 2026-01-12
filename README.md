@@ -42,12 +42,31 @@ apply manual fixes when needed.
 
 ### Occasionally connected workflow
 
-Every action is recorded locally first—jobs, queue operations, even “start this
-queued job now”—and synchronized with the remote host whenever it’s reachable.
+The queue runner lives on each remote host and operates autonomously. Once you
+queue a job, the remote host handles execution, completion, logging, and
+starting the next queued job—all without any connection to your laptop.
+
+```
+Laptop (may sleep, travel, disconnect)
+   │
+   └──SSH──> Remote Host
+              └── queue-runner (autonomous)
+                   ├── Reads from queue file
+                   ├── Starts jobs in tmux sessions
+                   ├── Logs output, captures exit codes
+                   └── Processes next job when current completes
+```
+
+Every action is recorded locally first—jobs, queue operations, even "start this
+queued job now"—and synchronized with the remote host whenever it's reachable.
 If a host is offline the CLI keeps showing the most recent known state, queues
 the requested mutations, and replays them on the next connection. This approach
 lets agents submit work in bulk without waiting for SSH, while humans can rely
 on the TUI to show what will happen once hosts come back.
+
+This architecture is fundamentally different from centralized job managers like
+SLURM, where the controller must be reachable to submit or monitor jobs. See
+[Comparison to SLURM](docs/comparison-to-slurm.md) for a detailed analysis.
 
 ## Installation
 

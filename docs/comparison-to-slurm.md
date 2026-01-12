@@ -32,22 +32,52 @@ Use **SLURM** when:
 | **Client Requirements** | SSH access only | Must connect to cluster network |
 | **Daemon Installation** | None required | Requires daemons on all nodes |
 
-### Key Architectural Difference
+### Key Architectural Difference: Occasionally-Connected Operation
 
-**remote-jobs:**
+The fundamental difference is where job execution authority lives:
+
+**remote-jobs** — Queue runner lives on each remote host:
 ```
-Laptop ──SSH──> Host 1 (tmux session)
-       └──SSH──> Host 2 (tmux session)
-       └──SSH──> Host 3 (tmux session)
+Laptop (may disconnect)
+   │
+   ├──SSH──> Host 1: queue-runner (autonomous) → tmux sessions
+   ├──SSH──> Host 2: queue-runner (autonomous) → tmux sessions
+   └──SSH──> Host 3: queue-runner (autonomous) → tmux sessions
+
+When laptop disconnects:
+   - Queue runners continue processing jobs independently
+   - Jobs complete, new queued jobs start automatically
+   - Laptop syncs state when it reconnects
 ```
 
-**SLURM:**
+**SLURM** — Centralized controller manages all nodes:
 ```
-                ┌─ Node 1 (slurmd)
-Login Node ────>│  Node 2 (slurmd)
-                │  Node 3 (slurmd)
-                └─ slurmctld (controller)
+                    ┌─ Node 1 (slurmd) ─┐
+slurmctld ◄────────►│  Node 2 (slurmd)  │◄──── constant communication
+(controller)        │  Node 3 (slurmd)  │
+                    └───────────────────┘
+        ▲
+        │
+   Login Node (sbatch, squeue, scancel)
+        │
+   Must be reachable to submit/monitor jobs
 ```
+
+**Why this matters:**
+
+- **remote-jobs**: Your laptop can sleep, lose network, or be off entirely. The remote queue runners are self-sufficient—they read from the queue file, start jobs, handle completions, and log everything locally. When you reconnect, your laptop just syncs state.
+
+- **SLURM**: The controller (`slurmctld`) must be reachable for job submission (`sbatch`), status queries (`squeue`), and cancellation (`scancel`). The controller is the single source of truth and orchestrates all job scheduling.
+
+**Could remote-jobs be a layer on top of SLURM?**
+
+Not easily. The occasionally-connected capability is baked into remote-jobs at the architectural level. To achieve the same with SLURM, you'd need to build:
+1. A local queue that caches job submissions when disconnected
+2. A sync mechanism that submits cached jobs when SLURM becomes reachable
+3. Local state caching for offline status viewing
+4. Conflict resolution when local and SLURM state diverge
+
+This would essentially rebuild remote-jobs on top of SLURM, adding complexity without clear benefit for the target use case (personal machines, single user).
 
 ## Feature Comparison
 
