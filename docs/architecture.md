@@ -667,3 +667,73 @@ flowchart TD
 The combination of queue files plus the runner loop means no long-lived process
 is required on the local machine once the job is queued—the remote host and its
 tmux sessions orchestrate everything.
+
+## Shell Escaping and Quoting
+
+Data passes through multiple shell contexts between the Go CLI and remote job
+execution. This is a frequent source of bugs and requires careful attention.
+
+### Data Flow Through Shell Contexts
+
+1. **Go CLI** → builds SSH command string
+2. **Local shell** → interprets SSH command
+3. **SSH transport** → passes to remote shell
+4. **Remote shell** → executes command or writes to queue file
+5. **Queue runner (bash)** → reads queue file, parses fields, executes job
+
+### Current Escaping Strategy
+
+The queue file uses a tab-separated format with escape sequences:
+
+```
+JOB_ID<tab>WORKING_DIR<tab>COMMAND<tab>DESCRIPTION<tab>ENV_B64<tab>DEPS
+```
+
+Special characters in COMMAND and DESCRIPTION are escaped by `escapeForQueueFile()`:
+- `\` → `\\` (backslash doubled)
+- Actual newlines → `\n` (escaped)
+- Actual tabs → `\t` (escaped)
+
+The entire line is then base64-encoded for safe transport through SSH.
+
+On the remote side, `queue-runner.sh`:
+1. Decodes base64 to get the queue line
+2. **Parses tab-separated fields FIRST** (critical: before escape conversion)
+3. Converts escape sequences in command/description fields via `printf '%b'`
+4. Executes the command
+
+### Known Bug Pattern
+
+A common bug pattern occurs when escape sequence conversion happens **before**
+field parsing. For example, if `printf '%b'` is applied to the entire line
+before awk splits by tabs, embedded `\n` sequences become real newlines and
+break the field parsing.
+
+**Symptoms**: Job ID gets polluted with command fragments, file paths contain
+newlines, runner crashes immediately after logging `job.start`.
+
+### Architectural Alternatives
+
+The current text-based format is simple but fragile. Potential alternatives:
+
+1. **Per-field base64**: Encode each field separately. Most robust but harder
+   to inspect queue files manually.
+
+2. **JSON format**: Well-defined escaping rules, standard tooling (jq). More
+   complex bash parsing but eliminates custom escaping logic.
+
+3. **Length-prefixed binary**: Unambiguous parsing, no escaping needed. Not
+   human-readable.
+
+4. **Structured file per job**: One JSON/YAML file per queued job in a
+   directory. Eliminates multi-field parsing entirely but adds filesystem
+   overhead.
+
+The current approach is retained for debuggability (queue files are
+human-readable text) but requires careful testing of escaping round-trips.
+
+### Testing Escaping
+
+`TestQueueEntryShellParsing` in `internal/ops/queue_test.go` verifies that
+queue entries with multi-line commands survive the full escaping round-trip
+by actually running bash to parse them the same way `queue-runner.sh` does.

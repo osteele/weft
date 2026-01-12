@@ -141,15 +141,22 @@ while true; do
     fi
 
     # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, dependencies)
-    # Normalize: convert literal \t to real tabs for backwards compatibility with older queue entries
-    job_line=$(printf '%b' "$job_line")
+    # IMPORTANT: Parse fields FIRST, then convert escape sequences.
+    # The command field may contain \n (escaped newlines) which would break awk parsing
+    # if we converted them to real newlines before parsing.
     # Use awk to properly handle empty fields (bash read collapses consecutive delimiters)
     job_id=$(echo "$job_line" | awk -F'\t' '{print $1}')
     working_dir=$(echo "$job_line" | awk -F'\t' '{print $2}')
-    command=$(echo "$job_line" | awk -F'\t' '{print $3}')
-    description=$(echo "$job_line" | awk -F'\t' '{print $4}')
+    command_raw=$(echo "$job_line" | awk -F'\t' '{print $3}')
+    description_raw=$(echo "$job_line" | awk -F'\t' '{print $4}')
     env_vars_b64=$(echo "$job_line" | awk -F'\t' '{print $5}')
     deps_spec=$(echo "$job_line" | awk -F'\t' '{print $6}')
+
+    # Now convert escape sequences in fields that may contain them.
+    # printf '%b' converts \n to newline, \t to tab, \\ to \
+    # This is needed because commands may have multi-line continuations.
+    command=$(printf '%b' "$command_raw")
+    description=$(printf '%b' "$description_raw")
 
     if [ -z "$job_id" ] || [ -z "$command" ]; then
         echo "Invalid job line (missing job_id or command), skipping: $job_line"
