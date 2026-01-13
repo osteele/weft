@@ -88,10 +88,11 @@ type Monitor struct {
 	db     *sql.DB
 	config Config
 
-	stop   chan struct{}
-	wg     sync.WaitGroup
-	subsMu sync.Mutex
-	subs   map[chan Event]struct{}
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
+	subsMu   sync.Mutex
+	subs     map[chan Event]struct{}
 
 	mu                      sync.RWMutex
 	jobs                    []*db.Job
@@ -110,6 +111,7 @@ type Monitor struct {
 	dbRefreshDebounce *time.Timer
 	dbSyncDebounce    *time.Timer
 	started           bool
+	stopped           bool
 }
 
 // New returns a monitor for the given database.
@@ -165,7 +167,20 @@ func (m *Monitor) Start() {
 
 // Stop stops background tasks.
 func (m *Monitor) Stop() {
-	close(m.stop)
+	m.stopOnce.Do(func() {
+		m.mu.Lock()
+		m.stopped = true
+		if m.dbRefreshDebounce != nil {
+			m.dbRefreshDebounce.Stop()
+			m.dbRefreshDebounce = nil
+		}
+		if m.dbSyncDebounce != nil {
+			m.dbSyncDebounce.Stop()
+			m.dbSyncDebounce = nil
+		}
+		m.mu.Unlock()
+		close(m.stop)
+	})
 	m.wg.Wait()
 	if m.dbWatcher != nil {
 		_ = m.dbWatcher.Close()
@@ -262,7 +277,7 @@ func (m *Monitor) runSyncTicker() {
 	for {
 		select {
 		case <-ticker.C:
-			m.requestSync(false)
+			go m.requestSync(false)
 		case <-m.stop:
 			return
 		}
@@ -276,7 +291,7 @@ func (m *Monitor) runHostRefreshTicker() {
 	for {
 		select {
 		case <-ticker.C:
-			m.refreshHostsForStatus()
+			go m.refreshHostsForStatus()
 		case <-m.stop:
 			return
 		}
@@ -342,6 +357,9 @@ func (m *Monitor) runDBWatcher() {
 func (m *Monitor) scheduleDBRefresh() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
 	if m.dbRefreshDebounce != nil {
 		return
 	}
@@ -357,6 +375,9 @@ func (m *Monitor) scheduleDBRefresh() {
 func (m *Monitor) scheduleDBSync() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopped {
+		return
+	}
 	if m.dbSyncDebounce != nil {
 		return
 	}
@@ -556,6 +577,10 @@ func (m *Monitor) runningHosts() map[string]bool {
 
 func (m *Monitor) requestSync(forceAll bool) {
 	m.mu.Lock()
+	if m.stopped {
+		m.mu.Unlock()
+		return
+	}
 	if m.syncing {
 		m.syncPendingAfterCurrent = true
 		if forceAll {

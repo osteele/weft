@@ -188,7 +188,18 @@ var (
 	editDirectory       string
 	editEnvVars         []string
 	editClearEnv        bool
+	editStatus          string
+	editRetry           bool
 )
+
+// allowedStatusTransitions defines which status transitions are valid for the edit command.
+// These are statuses that can be transitioned TO queued.
+var requeueableStatuses = map[string]bool{
+	db.StatusKilled:   true,
+	db.StatusDead:     true,
+	db.StatusFailed:   true,
+	db.StatusCanceled: true,
+}
 
 func init() {
 	rootCmd.AddCommand(queueCmd)
@@ -393,61 +404,33 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Get currently running job
-	currentFile := fmt.Sprintf("%s/%s.current", queuerunner.QueueDir(), queueName)
-	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
-	currentID = strings.TrimSpace(currentID)
-
-	// Get queue contents
-	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
-	queueContents, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", queueFile))
-
-	// Collect all job entries (current + waiting)
-	type queueEntry struct {
-		jobID       string
-		command     string
-		description string
-		status      string
-	}
-	var entries []queueEntry
-
-	// Add currently running job
-	if currentID != "" {
-		entry := queueEntry{
-			jobID:  currentID,
-			status: "running",
-		}
-		// Look up job details from database
-		if jobID, err := strconv.ParseInt(currentID, 10, 64); err == nil {
-			if job, err := db.GetJobByID(database, jobID); err == nil && job != nil {
-				entry.command = job.EffectiveCommand()
-				entry.description = job.Description
-			}
-		}
-		entries = append(entries, entry)
+	// Query jobs from database - this is the source of truth
+	// Get queued jobs for this host/queue
+	queuedJobs, err := db.ListQueued(database, host, queueName)
+	if err != nil {
+		return fmt.Errorf("list queued jobs: %w", err)
 	}
 
-	// Add waiting jobs
-	lines := strings.Split(strings.TrimSpace(queueContents), "\n")
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, "\t", 4)
-		if len(parts) >= 3 {
-			entry := queueEntry{
-				jobID:   parts[0],
-				command: parseEffectiveCommand(parts[2]),
-				status:  "queued",
-			}
-			if len(parts) >= 4 {
-				entry.description = parts[3]
-			}
-			entries = append(entries, entry)
-		}
+	// Get running jobs for this host (running jobs may have been started from this queue)
+	runningJobs, err := db.ListRunning(database, host)
+	if err != nil {
+		return fmt.Errorf("list running jobs: %w", err)
 	}
 
-	if len(entries) == 0 {
+	// Filter running jobs to only include those from this queue
+	var jobs []*db.Job
+	for _, job := range runningJobs {
+		jobQueue := job.QueueName
+		if jobQueue == "" {
+			jobQueue = defaultQueueName
+		}
+		if jobQueue == queueName {
+			jobs = append(jobs, job)
+		}
+	}
+	jobs = append(jobs, queuedJobs...)
+
+	if len(jobs) == 0 {
 		fmt.Printf("No jobs in queue '%s' on %s\n", queueName, host)
 		return nil
 	}
@@ -456,17 +439,17 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tCOMMAND / DESCRIPTION")
 
-	for _, entry := range entries {
-		display := entry.description
+	for _, job := range jobs {
+		display := job.Description
 		if display == "" {
-			display = entry.command
+			display = job.EffectiveCommand()
 		}
 		if len(display) > 40 {
 			display = display[:39] + "…"
 		}
 
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			entry.jobID, host, entry.status, display)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n",
+			job.ID, host, job.Status, display)
 	}
 
 	return w.Flush()
@@ -633,18 +616,32 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid job ID: %s", args[0])
 	}
 
+	statusChanged := cmd.Flags().Changed("status") || editRetry
 	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--command/--directory/--env or dependency flags")
+		return usageErrorf("no changes specified; use --message/--command/--directory/--env/--status/--retry or dependency flags")
 	}
 	if queueEditClearDeps && dependsChanged {
 		return fmt.Errorf("cannot combine --clear-depends with --depends-on flags")
 	}
 	if editClearEnv && cmd.Flags().Changed("env") {
 		return fmt.Errorf("cannot combine --env and --clear-env")
+	}
+	if editRetry && cmd.Flags().Changed("status") {
+		return fmt.Errorf("cannot combine --retry with --status")
+	}
+
+	// Validate status flag if provided (--retry is equivalent to --status=queued)
+	if cmd.Flags().Changed("status") {
+		if editStatus != db.StatusQueued {
+			return fmt.Errorf("only --status=queued is supported")
+		}
+	}
+	if editRetry {
+		editStatus = db.StatusQueued
 	}
 
 	database, err := db.Open()
@@ -660,7 +657,16 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if job == nil {
 		return fmt.Errorf("job %d not found", jobID)
 	}
-	if job.Status != db.StatusQueued {
+
+	// Handle status change (requeue)
+	if statusChanged && editStatus == db.StatusQueued {
+		if job.Status == db.StatusQueued {
+			return fmt.Errorf("job %d is already queued", jobID)
+		}
+		if !requeueableStatuses[job.Status] {
+			return fmt.Errorf("cannot change job %d from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", jobID, job.Status)
+		}
+	} else if job.Status != db.StatusQueued {
 		return fmt.Errorf("job %d has status '%s', can only edit queued jobs", jobID, job.Status)
 	}
 
@@ -673,6 +679,19 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	var updates []string
+
+	// Handle status change first (requeue), since other field updates require job to be queued
+	var wasRequeued bool
+	var oldStatus string
+	if statusChanged && editStatus == db.StatusQueued {
+		oldStatus = job.Status
+		if err := db.MarkQueuedByID(database, jobID); err != nil {
+			return fmt.Errorf("update status to queued: %w", err)
+		}
+		job.Status = db.StatusQueued
+		wasRequeued = true
+		updates = append(updates, fmt.Sprintf("status: %s → queued", oldStatus))
+	}
 
 	if cmd.Flags().Changed("message") {
 		if err := db.UpdateJobDescription(database, jobID, editMessage); err != nil {
@@ -758,8 +777,27 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if envChanged {
 		envVars = job.EnvVars
 	}
-	if err := ops.UpdateQueuedJobEntry(job, jobQueueName, envVars, depSpec); err != nil {
-		return err
+
+	// Push to remote queue
+	if wasRequeued {
+		// Job was requeued - create new entry on remote
+		entry := ops.QueueEntry{
+			JobID:       job.ID,
+			WorkingDir:  job.EffectiveWorkingDir(),
+			Command:     job.Command,
+			Description: job.Description,
+			EnvVars:     envVars,
+			DepSpec:     depSpec,
+		}
+		if err := ops.AppendQueueEntry(job.Host, jobQueueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+			// Best effort - job is queued locally, sync will eventually push it
+			fmt.Fprintf(os.Stderr, "Warning: could not immediately push to remote queue (will sync later): %v\n", err)
+		}
+	} else {
+		// Job was already queued - update existing entry
+		if err := ops.UpdateQueuedJobEntry(job, jobQueueName, envVars, depSpec); err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("Updated job %d in queue '%s' on %s\n", jobID, jobQueueName, job.Host)
@@ -916,4 +954,6 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&queueEditDepends, "depends-on", nil, "Wait for these job IDs to succeed before running (comma-separated or repeated)")
 	cmd.Flags().StringSliceVar(&queueEditDependsAny, "depends-on-any", nil, "Wait for these job IDs to finish (success or failure)")
 	cmd.Flags().BoolVar(&queueEditClearDeps, "clear-depends", false, "Remove all dependencies from the job")
+	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
+	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 }

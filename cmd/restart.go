@@ -8,24 +8,20 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
 var restartCmd = &cobra.Command{
 	Use:   "restart <job-id>...",
-	Short: "Restart one or more jobs using saved metadata",
-	Long: `Restart jobs using their saved metadata or database info.
+	Short: "Requeue a killed, dead, failed, or canceled job",
+	Long: `Restart a job by changing its status back to queued.
 
-This kills the existing session (if any) and starts a new one
-with the same command and working directory. Creates a new job ID for each.
+The job keeps its original ID and all metadata. Only jobs with status
+killed, dead, failed, or canceled can be restarted.
 
 Examples:
   remote-jobs restart 42
-  remote-jobs restart 42 43 44
-
-Also available as: remote-jobs job restart`,
+  remote-jobs restart 42 43 44`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runRestart,
 }
@@ -46,16 +42,13 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		if i > 0 {
 			fmt.Println("---")
 		}
-
 		jobID, err := strconv.ParseInt(arg, 10, 64)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
 			continue
 		}
-
-		if err := restartSingleJob(database, jobID); err != nil {
+		if err := restartJob(database, jobID); err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
-			continue
 		}
 	}
 
@@ -65,85 +58,70 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func restartSingleJob(database *sql.DB, jobID int64) error {
-	// Get job from database
+func restartJob(database *sql.DB, jobID int64) error {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("not found")
+		return fmt.Errorf("job not found")
 	}
 
-	// Read metadata from remote (for additional info - best effort)
-	metadataFile := session.JobMetadataFile(job.ID, job.StartTime, job.SessionName)
-	content, _ := ssh.ReadRemoteFile(job.Host, metadataFile)
-
-	workingDir := job.WorkingDir
-	command := job.Command
-	description := job.Description
-
-	if content != "" {
-		metadata := session.ParseMetadata(content)
-		if metadata["working_dir"] != "" {
-			workingDir = metadata["working_dir"]
+	// Validate job can be retried
+	if !requeueableStatuses[job.Status] {
+		if job.Status == db.StatusQueued {
+			return fmt.Errorf("job is already queued")
 		}
-		if metadata["command"] != "" {
-			command = metadata["command"]
+		if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+			return fmt.Errorf("job is currently %s; kill it first if you want to retry", job.Status)
 		}
-		if metadata["description"] != "" && description == "" {
-			description = metadata["description"]
-		}
+		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled jobs can be retried", job.Status)
 	}
 
-	if workingDir == "" || command == "" {
-		return fmt.Errorf("missing working directory or command")
+	if job.Host == "" {
+		return fmt.Errorf("job missing host")
+	}
+	if job.Command == "" {
+		return fmt.Errorf("job missing command")
 	}
 
-	fmt.Printf("Restarting job %d on %s\n", jobID, job.Host)
-	fmt.Printf("Working directory: %s\n", workingDir)
-	fmt.Printf("Command: %s\n", command)
-	if description != "" {
-		fmt.Printf("Description: %s\n", description)
+	oldStatus := job.Status
+	queueName := job.QueueName
+	if queueName == "" {
+		queueName = defaultQueueName
 	}
 
-	// Kill existing session if running (best effort)
-	oldTmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, _ := ssh.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
-	if exists {
-		fmt.Printf("Killing existing session...\n")
-		ssh.TmuxKillSession(job.Host, oldTmuxSession)
+	// Change status to queued
+	if err := db.MarkQueuedByID(database, jobID); err != nil {
+		return fmt.Errorf("update status to queued: %w", err)
 	}
 
-	// Use unified ops package for restarting jobs
-	result, err := ops.RestartJob(database, ops.RestartJobParams{
-		OriginalJob: job,
-		WorkingDir:  workingDir,
-		Command:     command,
-		Description: description,
-	}, ops.DefaultOptions())
-
-	if err != nil {
-		return err
+	// Push to remote queue
+	entry := ops.QueueEntry{
+		JobID:       job.ID,
+		WorkingDir:  job.EffectiveWorkingDir(),
+		Command:     job.Command,
+		Description: job.Description,
+		EnvVars:     job.EnvVars,
+		DepSpec:     job.DepSpec,
+	}
+	deferred := false
+	if err := ops.AppendQueueEntry(job.Host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+		// Best effort - job is queued locally, sync will eventually push it
+		fmt.Printf("Note: could not immediately push to remote queue (will sync later): %v\n", err)
+		deferred = true
 	}
 
-	if result.Deferred {
-		fmt.Printf("Host %s unreachable, job will start on next sync\n", job.Host)
-		fmt.Printf("New job ID: %d (queued)\n", result.JobID)
-	} else {
-		fmt.Println("✓ Job restarted successfully")
-		fmt.Printf("New job ID: %d\n", result.JobID)
+	fmt.Printf("Restarted job %d on %s (queue '%s')\n", jobID, job.Host, queueName)
+	fmt.Printf("  Status: %s → queued\n", oldStatus)
+	if job.Description != "" {
+		fmt.Printf("  Description: %s\n", job.Description)
 	}
-
+	if len(job.EnvVars) > 0 {
+		fmt.Printf("  Env vars: %s\n", strings.Join(job.EnvVars, ", "))
+	}
+	if deferred {
+		fmt.Printf("Host offline; job will sync once reachable.\n")
+	}
 	return nil
-}
-
-// Helper for parsing integer from metadata
-func parseMetadataInt(metadata map[string]string, key string) int64 {
-	if val, ok := metadata[key]; ok {
-		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
-			return i
-		}
-	}
-	return 0
 }

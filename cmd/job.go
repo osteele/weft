@@ -25,7 +25,7 @@ Available subcommands:
   kill      Kill a running job
   status    Check status of one or more jobs
   describe  Set or update job description
-  restart   Restart a job using saved metadata
+  restart   Requeue a killed, dead, failed, or canceled job
   list      List and search job history
   move      Move a queued job to a different host`,
 }
@@ -85,10 +85,10 @@ var jobDescribeCmd = &cobra.Command{
 
 // Job restart subcommand
 var jobRestartCmd = &cobra.Command{
-	Use:   "restart <job-id>",
-	Short: "Restart a job using saved metadata",
+	Use:   "restart <job-id>...",
+	Short: "Requeue a killed, dead, failed, or canceled job",
 	Long:  restartCmd.Long,
-	Args:  usageArgs(cobra.ExactArgs(1)),
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
 	RunE:  runRestart,
 }
 
