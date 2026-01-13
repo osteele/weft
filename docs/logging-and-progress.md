@@ -42,7 +42,7 @@ remote-jobs run --allow cool30 "python train.py --lr 1e-4"
 - Compatible with `--from`, `--timeout`, env vars, etc.
 - Exit codes reflect the streaming session: `0` means the SSH/tail command
   finished cleanly, `130` indicates you interrupted with Ctrl+C, and other codes
-  bubble up from the SSH process. They do **not** reflect the remote job’s exit
+  bubble up from the SSH process. They do **not** reflect the job's exit
   status.
 
 ### Implementation Notes
@@ -51,7 +51,7 @@ remote-jobs run --allow cool30 "python train.py --lr 1e-4"
   and tails it from the beginning (`tail -n +1 -F ...`).
 - Stdin is disconnected so keystrokes never reach the remote process.
 - Signal handlers (`SIGINT`, `SIGTERM`) simply cancel the local tail command.
-  The remote job continues to run, and the CLI prints reminders on how to
+  The job continues to run, and the CLI prints reminders on how to
   reattach later.
 - If the network drops, the SSH tail process exits with a non-zero status; the
   CLI reports the error and reminds the user that the job is still running.

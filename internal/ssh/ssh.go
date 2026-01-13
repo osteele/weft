@@ -684,7 +684,7 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 	return parseProcessStats(stdout), nil
 }
 
-// GetTopProcesses returns the highest CPU consumers on a host along with remote job IDs if available.
+// GetTopProcesses returns the highest CPU consumers on a host along with job IDs if available.
 func GetTopProcesses(host string, limit int) ([]TopProcess, error) {
 	if limit <= 0 {
 		limit = 15

@@ -13,8 +13,8 @@ import (
 
 var jobCmd = &cobra.Command{
 	Use:   "job",
-	Short: "Manage remote jobs",
-	Long: `Manage remote jobs including running, monitoring, and controlling them.
+	Short: "Manage jobs",
+	Long: `Manage jobs including running, monitoring, and controlling them.
 
 All job-related operations are available under this subcommand. Common
 operations (run, log, kill) also have top-level shortcuts.
@@ -43,7 +43,7 @@ var jobRunCmd = &cobra.Command{
 var jobLogCmd = &cobra.Command{
 	Use:     "log <job-id>",
 	Aliases: []string{"logs"},
-	Short:   "View log output from a remote job",
+	Short:   "View log output from a job",
 	Long:    logCmd.Long,
 	Args:    usageArgs(cobra.ExactArgs(1)),
 	RunE:    runLog,

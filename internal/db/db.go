@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Job represents a remote job record
+// Job represents a job record
 type Job struct {
 	ID                   int64
 	Host                 string

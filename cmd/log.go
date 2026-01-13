@@ -21,8 +21,8 @@ import (
 var logCmd = &cobra.Command{
 	Use:     "log <job-id>",
 	Aliases: []string{"logs"},
-	Short:   "View log output from a remote job",
-	Long: `View the log file for a specific remote job.
+	Short:   "View log output from a job",
+	Long: `View the log file for a specific job.
 
 Examples:
   remote-jobs log 25           # View log for job #25 (last 50 lines)

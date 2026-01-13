@@ -23,15 +23,12 @@ var runCmd = &cobra.Command{
 	Short: "Queue a job on a remote host",
 	Long: `Queue a job on a remote host for sequential execution.
 
-By default, jobs are added to a queue and run sequentially by the queue runner.
+By default, jobs are added to a queue and run sequentially.
 Use --immediate (-i) to start a job immediately instead of adding it to the queue.
-
-Use 'start <job-id>' to start a queued job immediately.
 
 Examples:
   remote-jobs run cool30 'python train.py'           # Queue job
   remote-jobs run -i cool30 'python train.py'        # Start immediately
-  remote-jobs start 123                              # Start queued job #123 now
   remote-jobs run -m "Training" cool30 'python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
   remote-jobs run --after 42 cool30 'python eval.py' # Run after job 42
@@ -332,10 +329,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
 		} else {
 			// Auto-start queue runner (silently ignore offline errors)
-			started, err := ensureQueueRunnerStarted(host, defaultQueueName)
-			if err == nil && started {
-				fmt.Printf("Queue runner started on %s.\n", host)
-			}
+			_, _ = ensureQueueRunnerStarted(host, defaultQueueName)
 		}
 		return nil
 	}

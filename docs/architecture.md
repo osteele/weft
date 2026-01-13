@@ -670,7 +670,7 @@ tmux sessions orchestrate everything.
 
 ## Shell Escaping and Quoting
 
-Data passes through multiple shell contexts between the Go CLI and remote job
+Data passes through multiple shell contexts between the Go CLI and job
 execution. This is a frequent source of bugs and requires careful attention.
 
 ### Data Flow Through Shell Contexts

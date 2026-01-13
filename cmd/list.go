@@ -356,13 +356,10 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 			}
 			continue
 		}
-		started, err := ensureQueueRunnerStarted(host, defaultQueueName)
+		_, err = ensureQueueRunnerStarted(host, defaultQueueName)
 		if err != nil {
 			// Silently ignore - host might be unreachable
 			continue
-		}
-		if started {
-			fmt.Printf("(started queue runner on %s)\n", host)
 		}
 	}
 }

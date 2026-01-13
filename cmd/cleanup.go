@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
 
@@ -201,13 +202,14 @@ func cleanupOldLogs(host string) (int, error) {
 
 	var cleaned int
 	for _, file := range allFiles {
+		filename := path.Base(file)
 		if cleanupDryRun {
-			fmt.Printf("  Would delete: %s\n", file)
+			fmt.Printf("  Would delete: %s\n", filename)
 		} else {
-			fmt.Printf("  Deleting: %s\n", file)
+			fmt.Printf("  Deleting: %s\n", filename)
 			// Note: path not quoted to allow tilde expansion
 			if _, stderr, err := ssh.Run(host, fmt.Sprintf("rm -f %s", file)); err != nil {
-				return 0, fmt.Errorf("delete log %s: %s", file, strings.TrimSpace(stderr))
+				return 0, fmt.Errorf("delete log %s: %s", filename, strings.TrimSpace(stderr))
 			}
 		}
 		cleaned++

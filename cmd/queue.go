@@ -338,11 +338,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if !queueNoStart {
-		started, err := ensureQueueRunnerStarted(host, queueName)
+		_, err := ensureQueueRunnerStarted(host, queueName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to start queue runner: %v\n", err)
-		} else if started {
-			fmt.Printf("\nQueue runner started automatically.\n")
 		}
 	}
 
@@ -367,17 +365,9 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 func runQueueStart(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	started, err := ensureQueueRunnerStarted(host, queueName)
+	_, err := ensureQueueRunnerStarted(host, queueName)
 	if err != nil {
 		return err
-	}
-
-	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
-	if started {
-		fmt.Printf("Queue runner '%s' started on %s\n", queueName, host)
-		fmt.Printf("Session: %s\n\n", runnerSession)
-	} else {
-		fmt.Printf("Queue runner '%s' is already running on %s\n", queueName, host)
 	}
 
 	return nil
@@ -390,8 +380,6 @@ func runQueueStop(cmd *cobra.Command, args []string) error {
 	if err := runner.SendStopSignal(); err != nil {
 		return err
 	}
-	fmt.Printf("Stop signal sent to queue '%s' on %s\n", queueName, host)
-	fmt.Println("The queue runner will exit after the current job completes.")
 
 	return nil
 }

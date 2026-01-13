@@ -17,7 +17,7 @@ import (
 var tuiCmd = &cobra.Command{
 	Use:   "tui",
 	Short: "Interactive terminal UI for managing jobs",
-	Long: `Launch an interactive terminal UI for viewing and managing remote jobs.
+	Long: `Launch an interactive terminal UI for viewing and managing jobs.
 
 The TUI shows a split-screen view with:
   - Top panel: Job list with status indicators

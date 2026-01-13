@@ -675,7 +675,7 @@ remote-jobs run --timeout 30m --from 42      # Retry with timeout
 remote-jobs run -e VAR=value <host> <command>
 ```
 
-Set environment variables for the remote job. Can be repeated for multiple variables:
+Set environment variables for the job. Can be repeated for multiple variables:
 
 ```bash
 remote-jobs run -e CUDA_VISIBLE_DEVICES=0 cool30 "python train.py"

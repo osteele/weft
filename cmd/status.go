@@ -572,7 +572,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Println()
 		fmt.Printf("Hints:    remote-jobs log %d        # View job output\n", job.ID)
 		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
-			fmt.Printf("          remote-jobs status %d --wait  # Don't exit until the remote job completes\n", job.ID)
+			fmt.Printf("          remote-jobs status %d --wait  # Don't exit until the job completes\n", job.ID)
 		}
 	}
 

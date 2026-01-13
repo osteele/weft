@@ -20,7 +20,7 @@ import (
 var artifactCmd = &cobra.Command{
 	Use:   "artifact",
 	Short: "Manage job artifacts",
-	Long: `Manage job artifacts produced by remote jobs.
+	Long: `Manage job artifacts produced by jobs.
 
 Artifacts are declared by writing a manifest on the remote host and then
 synced into a durable local store for retrieval.`,
