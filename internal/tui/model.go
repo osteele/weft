@@ -841,6 +841,23 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		model.applyJobFilter()
 	}
 
+	// Restore saved host filter if the host has jobs
+	state := LoadState()
+	if state.HostFilter != "" {
+		hasJobs := false
+		for _, job := range model.allJobs {
+			if job.Host == state.HostFilter {
+				hasJobs = true
+				break
+			}
+		}
+		if hasJobs {
+			model.jobHostFilterMode = hostFilterSpecific
+			model.jobHostFilterHost = state.HostFilter
+			model.applyJobFilter()
+		}
+	}
+
 	return model
 }
 
@@ -1917,6 +1934,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.cycleHostFilter()
 		}
+		m.saveHostFilter()
 		m.applyJobFilter()
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.setFlash(fmt.Sprintf("Host: %s", hostFilterDescription(m)), false))
@@ -4887,14 +4905,58 @@ func sortJobsByMode(jobs []*db.Job, mode jobSortMode) {
 	})
 }
 
-// sortRecentJobs promotes running and queued jobs above other recents.
+// sortRecentJobs sorts jobs for Recent/Newest views:
+// 1. Running jobs by start time
+// 2. Queued jobs by queue order (order they will start)
+// 3. Draft jobs
+// 4. Terminal state jobs by completion time
 func sortRecentJobs(jobs []*db.Job, mode jobSortMode) {
 	sort.SliceStable(jobs, func(i, j int) bool {
-		pi, pj := recentStatusPriority(jobs[i]), recentStatusPriority(jobs[j])
+		ji, jj := jobs[i], jobs[j]
+		pi, pj := recentStatusPriority(ji), recentStatusPriority(jj)
 		if pi != pj {
 			return pi < pj
 		}
-		return jobLessBySortMode(jobs[i], jobs[j], mode)
+
+		// Within same status group, apply appropriate ordering
+		switch ji.Status {
+		case db.StatusRunning, db.StatusStarting:
+			// Running: most recently started first (for Newest), oldest first (for Oldest)
+			if mode == jobSortOldest {
+				return ji.StartTime < jj.StartTime
+			}
+			return ji.StartTime > jj.StartTime
+
+		case db.StatusQueued:
+			// Queued: by queue order (earliest queued = runs first, so show first)
+			if ji.QueuedAt > 0 && jj.QueuedAt > 0 {
+				return ji.QueuedAt < jj.QueuedAt
+			}
+			// Fallback to ID for legacy jobs
+			return ji.ID < jj.ID
+
+		case db.StatusDraft:
+			// Draft: by creation time
+			return jobLessBySortMode(ji, jj, mode)
+
+		default:
+			// Terminal states: by end time
+			ti, tj := int64(0), int64(0)
+			if ji.EndTime != nil {
+				ti = *ji.EndTime
+			}
+			if jj.EndTime != nil {
+				tj = *jj.EndTime
+			}
+			if ti != tj {
+				if mode == jobSortOldest {
+					return ti < tj
+				}
+				return ti > tj
+			}
+			// Fallback to standard sort
+			return jobLessBySortMode(ji, jj, mode)
+		}
 	})
 }
 
@@ -4902,10 +4964,12 @@ func recentStatusPriority(job *db.Job) int {
 	switch job.Status {
 	case db.StatusRunning, db.StatusStarting:
 		return 0
-	case db.StatusQueued, db.StatusDraft:
+	case db.StatusQueued:
 		return 1
-	default:
+	case db.StatusDraft:
 		return 2
+	default:
+		return 3
 	}
 }
 
