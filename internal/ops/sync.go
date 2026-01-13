@@ -628,7 +628,7 @@ func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (bool, error) {
 	return true, nil
 }
 
-// appendQueueEntryForJob ensures the queued job exists in the remote queue file.
+// appendQueueEntryForJob ensures the queued job exists in the remote queue.
 func appendQueueEntryForJob(database *sql.DB, job *db.Job, queueName string, timeout time.Duration) error {
 	if queueName == "" {
 		queueName = DefaultQueueName
@@ -639,9 +639,12 @@ func appendQueueEntryForJob(database *sql.DB, job *db.Job, queueName string, tim
 		Command:     job.Command,
 		Description: job.Description,
 		EnvVars:     job.EnvVars,
+		DepSpec:     job.DepSpec,
 	}
-	opts := AppendQueueEntryOptions{Timeout: timeout}
-	if err := AppendQueueEntry(job.Host, queueName, entry, opts); err != nil {
+	// Use new command queue format
+	addCmd := NewAddCommand(entry)
+	opts := AppendCommandOptions{Timeout: timeout}
+	if err := AppendCommand(job.Host, queueName, addCmd, opts); err != nil {
 		return err
 	}
 	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued)
@@ -849,9 +852,9 @@ func (sshQueueRemote) CurrentJob(host, queueName string, jobID int64, timeout ti
 }
 
 func (sshQueueRemote) InQueue(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	// Match job ID at start of line followed by either real tab or literal \t (for backwards compat)
-	cmd := fmt.Sprintf("grep -E -q '^%d(	|\\\\t)' %s 2>/dev/null && echo YES || echo NO", jobID, queueFile)
+	// Check new state.json format - job is in pending array
+	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", queueName)
+	cmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return None[bool]()
@@ -890,7 +893,7 @@ func (sshQueueRemote) ProcessRunning(host string, jobID int64, timeout time.Dura
 func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error) {
 	statusPattern := session.StatusFilePattern(jobID)
 	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
+	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", queueName)
 	pidPattern := session.PidFilePattern(jobID)
 	// When status file exists, output "exitcode|mtime" to capture actual completion time
 	combinedCmd := fmt.Sprintf(`
@@ -911,8 +914,8 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 			else
 				echo RUNNING
 			fi
-		# Match either real tab or literal \t for backwards compatibility
-		elif grep -E -q '^%d(	|\\t)' %s 2>/dev/null; then
+		# Check state file for job in pending array
+		elif [ -f %s ] && jq -e '.pending | index(%d)' %s >/dev/null 2>&1; then
 			echo QUEUED
 		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
 			pid=$(cat "$pid_file" 2>/dev/null | head -1)
@@ -927,7 +930,7 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 	`, statusPattern,
 		currentFile, currentFile, jobID,
 		pidPattern,
-		jobID, queueFile,
+		stateFile, jobID, stateFile,
 		pidPattern)
 
 	stdout, _, err := ssh.RunWithTimeout(host, combinedCmd, timeout)

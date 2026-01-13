@@ -19,8 +19,8 @@ type StatusInfo struct {
 func statusCommand(queueName string) string {
 	return fmt.Sprintf(
 		`tmux has-session -t 'rj-queue-%s' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; `+
-			`cat ~/.cache/remote-jobs/queue/%s.current 2>/dev/null | head -1 | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
-			`wc -l < ~/.cache/remote-jobs/queue/%s.queue 2>/dev/null | tr -d ' ' | sed 's/^/DEPTH:/' || echo "DEPTH:0"; `+
+			`jq -r '.current // ""' ~/.cache/remote-jobs/queue/%s.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
+			`jq -r '.pending | length // 0' ~/.cache/remote-jobs/queue/%s.state.json 2>/dev/null | sed 's/^/DEPTH:/' || echo "DEPTH:0"; `+
 			`test -f ~/.cache/remote-jobs/queue/%s.stop && echo "STOP:yes" || echo "STOP:no"`,
 		queueName, queueName, queueName, queueName)
 }

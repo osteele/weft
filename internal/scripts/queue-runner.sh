@@ -1,27 +1,27 @@
-# BUILD: 14
+# BUILD: 18
 #!/usr/bin/env bash
 #
 # Queue runner for remote-jobs
-# This script runs on the remote host and processes jobs from a queue file.
+# Uses append-only JSONL command log with jq for parsing.
 #
 # Usage:
-#   queue-runner.sh <queue-name>
+#   queue-runner-v2.sh <queue-name>
 #
-# Queue file format (one job per line, tab-separated):
-#   {job_id}\t{working_dir}\t{command}\t{description}\t{env_vars_b64}\t{dependencies}
-#
-# env_vars_b64 is base64-encoded newline-separated VAR=value pairs (optional)
-# dependencies is a comma-separated list of job IDs to wait for before starting (optional)
-#   Each entry can be "ID" (requires success) or "ID:any" (waits for completion)
+# Command log format (JSONL, one command per line):
+#   {"ts":"...","op":"add","job":{"id":123,"dir":"/path","cmd":"...","desc":"...","env":["..."],"deps":"..."}}
+#   {"ts":"...","op":"priority","job_id":123}
+#   {"ts":"...","op":"cancel","job_id":123}
+#   {"ts":"...","op":"stop"}
 #
 # Files:
-#   ~/.cache/remote-jobs/queue/{queue-name}.queue    - Queue file (jobs waiting)
-#   ~/.cache/remote-jobs/queue/{queue-name}.current  - Currently running job ID
-#   ~/.cache/remote-jobs/queue/{queue-name}.runner.pid - Runner process ID
-#   ~/.cache/remote-jobs/queue/runner-{queue-name}.log - Runner operations log
-#   ~/.cache/remote-jobs/logs/{job_id}-{ts}.log      - Job output
-#   ~/.cache/remote-jobs/logs/{job_id}-{ts}.status   - Exit code
-#   ~/.cache/remote-jobs/logs/{job_id}-{ts}.meta     - Metadata
+#   ~/.cache/remote-jobs/queue/{queue}.commands    - Command log (CLI appends, runner reads)
+#   ~/.cache/remote-jobs/queue/{queue}.state.json  - Runner state (runner writes)
+#   ~/.cache/remote-jobs/queue/{queue}.current     - Currently running job ID
+#   ~/.cache/remote-jobs/queue/{queue}.runner.pid  - Runner process ID
+#   ~/.cache/remote-jobs/queue/runner-{queue}.log  - Runner operations log
+#   ~/.cache/remote-jobs/logs/{job_id}.log         - Job output
+#   ~/.cache/remote-jobs/logs/{job_id}.status      - Exit code
+#   ~/.cache/remote-jobs/logs/{job_id}.meta        - Metadata
 #
 # Environment Variables (for Slack notifications):
 #   REMOTE_JOBS_SLACK_WEBHOOK     Slack webhook URL
@@ -32,10 +32,17 @@
 
 set -euo pipefail
 
+# Check for jq
+if ! command -v jq &>/dev/null; then
+    echo "ERROR: jq is required but not installed" >&2
+    exit 1
+fi
+
 QUEUE_NAME="${1:-default}"
 QUEUE_DIR="$HOME/.cache/remote-jobs/queue"
 LOG_DIR="$HOME/.cache/remote-jobs/logs"
-QUEUE_FILE="$QUEUE_DIR/${QUEUE_NAME}.queue"
+COMMANDS_FILE="$QUEUE_DIR/${QUEUE_NAME}.commands"
+STATE_FILE="$QUEUE_DIR/${QUEUE_NAME}.state.json"
 CURRENT_FILE="$QUEUE_DIR/${QUEUE_NAME}.current"
 PID_FILE="$QUEUE_DIR/${QUEUE_NAME}.runner.pid"
 RUNNER_LOG="$QUEUE_DIR/runner-${QUEUE_NAME}.log"
@@ -44,6 +51,11 @@ NOTIFY_SCRIPT="/tmp/remote-jobs-notify-slack.sh"
 # Create directories
 mkdir -p "$QUEUE_DIR" "$LOG_DIR"
 
+# Initialize state file if it doesn't exist
+if [ ! -f "$STATE_FILE" ]; then
+    echo '{"cursor":"","cursor_line":0,"pending":[],"current":null}' > "$STATE_FILE"
+fi
+
 # Log operation to persistent runner log (JSONL format)
 log_op() {
     local op="$1"
@@ -51,11 +63,21 @@ log_op() {
     local detail="${3:-}"
     local ts
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local entry="{\"t\":\"$ts\",\"op\":\"$op\",\"queue\":\"$QUEUE_NAME\""
-    [ -n "$job_id" ] && entry="$entry,\"job\":$job_id"
-    [ -n "$detail" ] && entry="$entry,\"detail\":\"$detail\""
-    entry="$entry}"
-    echo "$entry" >> "$RUNNER_LOG"
+
+    # Build JSON properly with jq to handle escaping
+    if [ -n "$job_id" ] && [ -n "$detail" ]; then
+        jq -nc --arg t "$ts" --arg op "$op" --arg q "$QUEUE_NAME" --argjson job "$job_id" --arg detail "$detail" \
+            '{t:$t,op:$op,queue:$q,job:$job,detail:$detail}' >> "$RUNNER_LOG"
+    elif [ -n "$job_id" ]; then
+        jq -nc --arg t "$ts" --arg op "$op" --arg q "$QUEUE_NAME" --argjson job "$job_id" \
+            '{t:$t,op:$op,queue:$q,job:$job}' >> "$RUNNER_LOG"
+    elif [ -n "$detail" ]; then
+        jq -nc --arg t "$ts" --arg op "$op" --arg q "$QUEUE_NAME" --arg detail "$detail" \
+            '{t:$t,op:$op,queue:$q,detail:$detail}' >> "$RUNNER_LOG"
+    else
+        jq -nc --arg t "$ts" --arg op "$op" --arg q "$QUEUE_NAME" \
+            '{t:$t,op:$op,queue:$q}' >> "$RUNNER_LOG"
+    fi
 }
 
 # Write PID file
@@ -67,210 +89,311 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Cross-platform file locking using mkdir (works on Linux and macOS)
-# mkdir is atomic on all POSIX systems
-LOCK_DIR="$QUEUE_FILE.lock.d"
+# Load state from file
+load_state() {
+    if [ -f "$STATE_FILE" ]; then
+        STATE_CURSOR=$(jq -r '.cursor // ""' "$STATE_FILE")
+        STATE_CURSOR_LINE=$(jq -r '.cursor_line // 0' "$STATE_FILE")
+        # Load pending as newline-separated list
+        STATE_PENDING=$(jq -r '.pending[]' "$STATE_FILE" 2>/dev/null || true)
+    else
+        STATE_CURSOR=""
+        STATE_CURSOR_LINE=0
+        STATE_PENDING=""
+    fi
+}
 
-acquire_lock() {
-    while ! mkdir "$LOCK_DIR" 2>/dev/null; do
-        sleep 0.01
+# Save state to file
+save_state() {
+    local current_json="null"
+    if [ -n "${CURRENT_JOB_ID:-}" ]; then
+        current_json="$CURRENT_JOB_ID"
+    fi
+
+    # Convert pending list to JSON array
+    local pending_json="[]"
+    if [ -n "$STATE_PENDING" ]; then
+        pending_json=$(echo "$STATE_PENDING" | jq -Rs 'split("\n") | map(select(. != "") | tonumber)')
+    fi
+
+    jq -nc \
+        --arg cursor "$STATE_CURSOR" \
+        --argjson cursor_line "$STATE_CURSOR_LINE" \
+        --argjson pending "$pending_json" \
+        --argjson current "$current_json" \
+        '{cursor:$cursor,cursor_line:$cursor_line,pending:$pending,current:$current}' > "$STATE_FILE"
+}
+
+# Add job to pending list (at end)
+add_pending() {
+    local job_id="$1"
+    if [ -z "$STATE_PENDING" ]; then
+        STATE_PENDING="$job_id"
+    else
+        STATE_PENDING="$STATE_PENDING"$'\n'"$job_id"
+    fi
+}
+
+# Add job to front of pending list
+priority_pending() {
+    local job_id="$1"
+    # Remove if already present
+    STATE_PENDING=$(echo "$STATE_PENDING" | grep -v "^${job_id}$" || true)
+    # Add to front
+    if [ -z "$STATE_PENDING" ]; then
+        STATE_PENDING="$job_id"
+    else
+        STATE_PENDING="$job_id"$'\n'"$STATE_PENDING"
+    fi
+}
+
+# Remove job from pending list
+remove_pending() {
+    local job_id="$1"
+    STATE_PENDING=$(echo "$STATE_PENDING" | grep -v "^${job_id}$" || true)
+}
+
+# Get and remove first job from pending list
+# Sets POPPED_JOB global variable (don't use command substitution - it runs in subshell)
+pop_pending() {
+    POPPED_JOB=$(echo "$STATE_PENDING" | head -1)
+    STATE_PENDING=$(echo "$STATE_PENDING" | tail -n +2)
+}
+
+# Check if pending list is empty
+pending_empty() {
+    [ -z "$STATE_PENDING" ]
+}
+
+# Process new commands from the command log
+process_commands() {
+    [ ! -f "$COMMANDS_FILE" ] && return
+
+    local line_num=0
+    local stop_requested=false
+
+    while IFS= read -r line; do
+        line_num=$((line_num + 1))
+
+        # Skip lines we've already processed
+        if [ "$line_num" -le "$STATE_CURSOR_LINE" ]; then
+            continue
+        fi
+
+        # Skip empty lines
+        [ -z "$line" ] && continue
+
+        local op ts
+        op=$(echo "$line" | jq -r '.op // ""')
+        ts=$(echo "$line" | jq -r '.ts // ""')
+
+        case "$op" in
+            add)
+                local job_id
+                job_id=$(echo "$line" | jq -r '.job.id')
+                add_pending "$job_id"
+                # Store job data for later use
+                echo "$line" | jq -c '.job' > "$QUEUE_DIR/job-${job_id}.json"
+                log_op "cmd.add" "$job_id"
+                echo "Command: add job $job_id"
+                ;;
+            priority)
+                local job_id
+                job_id=$(echo "$line" | jq -r '.job_id')
+                priority_pending "$job_id"
+                log_op "cmd.priority" "$job_id"
+                echo "Command: prioritize job $job_id"
+                ;;
+            cancel)
+                local job_id
+                job_id=$(echo "$line" | jq -r '.job_id')
+                remove_pending "$job_id"
+                rm -f "$QUEUE_DIR/job-${job_id}.json"
+                log_op "cmd.cancel" "$job_id"
+                echo "Command: cancel job $job_id"
+                ;;
+            stop)
+                stop_requested=true
+                log_op "cmd.stop"
+                echo "Command: stop requested"
+                ;;
+            *)
+                echo "Unknown command: $op"
+                ;;
+        esac
+
+        # Update cursor
+        STATE_CURSOR="$ts"
+        STATE_CURSOR_LINE="$line_num"
+    done < "$COMMANDS_FILE"
+
+    save_state
+
+    if [ "$stop_requested" = true ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Get job data from stored file
+get_job_data() {
+    local job_id="$1"
+    local job_file="$QUEUE_DIR/job-${job_id}.json"
+    if [ -f "$job_file" ]; then
+        cat "$job_file"
+    else
+        echo "{}"
+    fi
+}
+
+# Check if a job is already completed
+job_completed() {
+    local job_id="$1"
+    [ -f "$LOG_DIR/${job_id}.status" ] && return 0
+    ls "$LOG_DIR/${job_id}"-*.status &>/dev/null 2>&1 && return 0
+    return 1
+}
+
+# Check if a job is currently running
+job_running() {
+    local job_id="$1"
+    local pid_file="$LOG_DIR/${job_id}.pid"
+
+    if [ -f "$pid_file" ]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null | tail -1)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Check archived pid files
+    local archived_pid_file
+    archived_pid_file=$(ls -t "$LOG_DIR/${job_id}"-*.pid 2>/dev/null | head -1 || true)
+    if [ -n "$archived_pid_file" ]; then
+        local pid
+        pid=$(cat "$archived_pid_file" 2>/dev/null | tail -1)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# Check dependencies for a job
+check_dependencies() {
+    local deps_spec="$1"
+    [ -z "$deps_spec" ] && return 0
+
+    IFS=',' read -ra dep_entries <<< "$deps_spec"
+
+    for dep_entry in "${dep_entries[@]}"; do
+        [ -z "$dep_entry" ] && continue
+
+        local dep_id="${dep_entry%%:*}"
+        local dep_mode="${dep_entry#*:}"
+        [ "$dep_mode" = "$dep_entry" ] && dep_mode="success"
+
+        # Find status file
+        local dep_status_file=""
+        if [ -f "$LOG_DIR/${dep_id}.status" ]; then
+            dep_status_file="$LOG_DIR/${dep_id}.status"
+        else
+            dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1 || true)
+        fi
+
+        if [ -z "$dep_status_file" ]; then
+            echo "waiting"  # Dependency not completed yet
+            return 0
+        fi
+
+        local dep_exit
+        dep_exit=$(cat "$dep_status_file")
+        if [ "$dep_mode" != "any" ] && [ "$dep_exit" != "0" ]; then
+            echo "failed:$dep_id:$dep_exit"  # Dependency failed
+            return 0
+        fi
     done
+
+    echo "ok"
 }
 
-release_lock() {
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-}
+# Run a single job
+run_job() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
 
-log_op "queue.start" "" "queue=$QUEUE_NAME pid=$$"
-echo "Queue runner started for queue: $QUEUE_NAME"
-echo "Queue file: $QUEUE_FILE"
-echo "PID: $$"
-echo ""
+    # Extract job fields using jq
+    local working_dir command description env_vars deps_spec
+    working_dir=$(echo "$job_data" | jq -r '.dir // ""')
+    command=$(echo "$job_data" | jq -r '.cmd // ""')
+    description=$(echo "$job_data" | jq -r '.desc // ""')
+    deps_spec=$(echo "$job_data" | jq -r '.deps // ""')
 
-# Main loop
-while true; do
-    # Check for STOP signal
-    if [ -f "$QUEUE_DIR/${QUEUE_NAME}.stop" ]; then
-        log_op "queue.stop" "" "stop signal received"
-        echo "STOP signal received, exiting after current job..."
-        rm -f "$QUEUE_DIR/${QUEUE_NAME}.stop"
-        break
+    if [ -z "$command" ]; then
+        echo "Job $job_id: no command found, skipping"
+        return 1
     fi
 
-    # Check for .start_now file - if present, promote that job to front of queue
-    START_NOW_FILE="$QUEUE_DIR/${QUEUE_NAME}.start_now"
-    if [ -f "$START_NOW_FILE" ]; then
-        start_now_id=$(cat "$START_NOW_FILE" 2>/dev/null | tr -d '[:space:]')
-        rm -f "$START_NOW_FILE"
-        if [ -n "$start_now_id" ] && [ -f "$QUEUE_FILE" ]; then
-            # Extract the job line and move it to front (under lock)
-            acquire_lock
-            job_to_promote=$(grep "^${start_now_id}	" "$QUEUE_FILE" 2>/dev/null || true)
-            if [ -n "$job_to_promote" ]; then
-                # Remove from current position and add to front
-                temp_file=$(mktemp)
-                grep -v "^${start_now_id}	" "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
-                { echo "$job_to_promote"; cat "$temp_file"; } > "$QUEUE_FILE"
-                rm -f "$temp_file"
-                echo "Promoted job $start_now_id to front of queue"
-            fi
-            release_lock
-        fi
-    fi
-
-    # Check if queue file exists
-    if [ ! -f "$QUEUE_FILE" ]; then
-        sleep 5
-        continue
-    fi
-
-    # Pop first job from queue (under lock to prevent race with concurrent appends)
-    acquire_lock
-    job_line=$(head -n 1 "$QUEUE_FILE" 2>/dev/null || true)
-    if [ -n "$job_line" ]; then
-        temp_file=$(mktemp)
-        tail -n +2 "$QUEUE_FILE" > "$temp_file" 2>/dev/null || true
-        mv "$temp_file" "$QUEUE_FILE"
-    fi
-    release_lock
-
-    if [ -z "$job_line" ]; then
-        # Queue is empty, wait and check again
-        sleep 5
-        continue
-    fi
-
-    # Parse job line (tab-separated: job_id, working_dir, command, description, env_vars_b64, dependencies)
-    # IMPORTANT: Parse fields FIRST, then convert escape sequences.
-    # The command field may contain \n (escaped newlines) which would break awk parsing
-    # if we converted them to real newlines before parsing.
-    # Use awk to properly handle empty fields (bash read collapses consecutive delimiters)
-    job_id=$(echo "$job_line" | awk -F'\t' '{print $1}')
-    working_dir=$(echo "$job_line" | awk -F'\t' '{print $2}')
-    command_raw=$(echo "$job_line" | awk -F'\t' '{print $3}')
-    description_raw=$(echo "$job_line" | awk -F'\t' '{print $4}')
-    env_vars_b64=$(echo "$job_line" | awk -F'\t' '{print $5}')
-    deps_spec=$(echo "$job_line" | awk -F'\t' '{print $6}')
-
-    # Now convert escape sequences in fields that may contain them.
-    # printf '%b' converts \n to newline, \t to tab, \\ to \
-    # This is needed because commands may have multi-line continuations.
-    command=$(printf '%b' "$command_raw")
-    description=$(printf '%b' "$description_raw")
-
-    if [ -z "$job_id" ] || [ -z "$command" ]; then
-        echo "Invalid job line (missing job_id or command), skipping: $job_line"
-        continue
-    fi
-
-    # Skip jobs that already have a status file (already completed in a previous run)
-    # Check both simple path and archived paths
-    if [ -f "$LOG_DIR/${job_id}.status" ]; then
-        echo "Job $job_id: already completed, skipping (status file exists)"
-        continue
-    fi
-    existing_status=$(ls -t "$LOG_DIR/${job_id}"-*.status 2>/dev/null | head -1 || true)
-    if [ -n "$existing_status" ]; then
-        echo "Job $job_id: already completed, skipping (archived status file exists)"
-        continue
-    fi
-
-    # Skip jobs that are currently running (have a .pid file with a live process)
-    # This prevents double-starts if the queue runner restarts while a job is running
-    # Check both simple path and archived paths
-    existing_pid=""
-    if [ -f "$LOG_DIR/${job_id}.pid" ]; then
-        existing_pid=$(cat "$LOG_DIR/${job_id}.pid" 2>/dev/null | tail -1)
-    fi
-    if [ -z "$existing_pid" ]; then
-        existing_pid_file=$(ls -t "$LOG_DIR/${job_id}"-*.pid 2>/dev/null | head -1 || true)
-        if [ -n "$existing_pid_file" ]; then
-            existing_pid=$(cat "$existing_pid_file" 2>/dev/null | tail -1)
-        fi
-    fi
-    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
-        echo "Job $job_id: already running (PID $existing_pid), skipping to avoid duplicate"
-        log_op "job.skip_duplicate" "$job_id" "pid=$existing_pid already running"
-        continue
-    fi
-
-    # Check dependencies if specified (comma-separated list of job_id[:any])
-    if [ -n "$deps_spec" ]; then
-        IFS=',' read -ra dep_entries <<< "$deps_spec"
-        unmet_dependency=false
-        skip_due_to_failure=false
-        skip_reason=""
-
-        for dep_entry in "${dep_entries[@]}"; do
-            [ -z "$dep_entry" ] && continue
-
-            dep_id="${dep_entry%%:*}"
-            dep_mode="${dep_entry#*:}"
-            if [ "$dep_mode" = "$dep_entry" ]; then
-                dep_mode="success"
-            fi
-
-            # Check for dependency status file (simple path first, then archived)
-            dep_status_file=""
-            if [ -f "$LOG_DIR/${dep_id}.status" ]; then
-                dep_status_file="$LOG_DIR/${dep_id}.status"
-            else
-                dep_status_file=$(ls -t "$LOG_DIR/${dep_id}"-*.status 2>/dev/null | head -1 || true)
-            fi
-            if [ -z "$dep_status_file" ]; then
-                unmet_dependency=true
-                break
-            fi
-
-            dep_exit=$(cat "$dep_status_file")
-            if [ "$dep_mode" != "any" ] && [ "$dep_exit" != "0" ]; then
-                skip_due_to_failure=true
-                skip_reason="dependency job $dep_id failed with exit code $dep_exit"
-                break
-            fi
-        done
-
-        if [ "$unmet_dependency" = true ]; then
-            echo "Job $job_id: waiting for dependencies to complete"
-            echo "$job_line" >> "$QUEUE_FILE"
-            sleep 10
-            continue
-        fi
-
-        if [ "$skip_due_to_failure" = true ]; then
-            log_op "job.skipped" "$job_id" "$skip_reason"
-            echo "Job $job_id: skipped, $skip_reason"
-            echo "SKIPPED: $skip_reason" > "$LOG_DIR/${job_id}.log"
+    # Check dependencies
+    local dep_result
+    dep_result=$(check_dependencies "$deps_spec")
+    case "$dep_result" in
+        waiting)
+            echo "Job $job_id: waiting for dependencies"
+            return 2  # Re-queue
+            ;;
+        failed:*)
+            local dep_info="${dep_result#failed:}"
+            log_op "job.skipped" "$job_id" "dependency $dep_info failed"
+            echo "Job $job_id: skipped, dependency $dep_info failed"
+            echo "SKIPPED: dependency $dep_info failed" > "$LOG_DIR/${job_id}.log"
             echo "1" > "$LOG_DIR/${job_id}.status"
-            continue
-        fi
+            rm -f "$QUEUE_DIR/job-${job_id}.json"
+            return 0
+            ;;
+    esac
+
+    # Skip if already completed or running
+    if job_completed "$job_id"; then
+        echo "Job $job_id: already completed, skipping"
+        rm -f "$QUEUE_DIR/job-${job_id}.json"
+        return 0
     fi
 
+    if job_running "$job_id"; then
+        echo "Job $job_id: already running, skipping"
+        return 0
+    fi
+
+    local start_time
     start_time=$(date +%s)
 
-    # Simple file paths (no timestamp in primary files)
-    log_file="$LOG_DIR/${job_id}.log"
-    status_file="$LOG_DIR/${job_id}.status"
-    meta_file="$LOG_DIR/${job_id}.meta"
-    pid_file="$LOG_DIR/${job_id}.pid"
+    # File paths
+    local log_file="$LOG_DIR/${job_id}.log"
+    local status_file="$LOG_DIR/${job_id}.status"
+    local meta_file="$LOG_DIR/${job_id}.meta"
+    local pid_file="$LOG_DIR/${job_id}.pid"
 
     # Archive any existing files from previous runs
     for ext in log status meta pid; do
-        f="$LOG_DIR/${job_id}.$ext"
+        local f="$LOG_DIR/${job_id}.$ext"
         if [ -f "$f" ]; then
-            # Get file mtime and format as timestamp
+            local mtime ts
             mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)
             if [ -n "$mtime" ]; then
                 ts=$(date -r "$mtime" "+%Y%m%d-%H%M%S" 2>/dev/null || date -d "@$mtime" "+%Y%m%d-%H%M%S" 2>/dev/null)
-                if [ -n "$ts" ]; then
-                    mv "$f" "$LOG_DIR/${job_id}-${ts}.$ext"
-                fi
+                [ -n "$ts" ] && mv "$f" "$LOG_DIR/${job_id}-${ts}.$ext"
             fi
         fi
     done
 
-    # Write current job ID
+    # Mark as current
     echo "$job_id" > "$CURRENT_FILE"
+    CURRENT_JOB_ID="$job_id"
+    save_state
 
     log_op "job.start" "$job_id" "cmd=$command"
     echo "=========================================="
@@ -292,25 +415,25 @@ while true; do
         echo "queue=$QUEUE_NAME"
     } > "$meta_file"
 
-    # Run the job
+    # Write log header
     {
         echo "=== START $(date) ==="
         echo "job_id: $job_id"
         echo "cd: $working_dir"
         echo "cmd: $command"
-        if [ -n "$env_vars_b64" ]; then
-            echo "env: $(echo "$env_vars_b64" | base64 -d 2>/dev/null | tr '\n' ' ')"
-        fi
         echo "==="
     } > "$log_file"
 
-    # Execute command, capture exit code
-    # Expand tilde in working_dir (if specified)
-    eval_working_dir="${working_dir/#\~/$HOME}"
+    # Expand tilde in working_dir
+    local eval_working_dir="${working_dir/#\~/$HOME}"
+
+    # Get env vars as array
+    local env_vars_json
+    env_vars_json=$(echo "$job_data" | jq -r '.env // []')
 
     set +e
     (
-        # Only cd if working directory is specified
+        # cd if working directory specified
         if [ -n "$working_dir" ]; then
             cd "$eval_working_dir" 2>/dev/null || {
                 echo "ERROR: Could not cd to $working_dir" >> "$log_file"
@@ -318,70 +441,42 @@ while true; do
             }
         fi
 
-        # Load dotenv files for environment customization
-        if [ -f ".env" ]; then
-            echo "Loading .env"
-            set -a
-            # shellcheck disable=SC1091
-            source ./.env
-            set +a
-        fi
+        # Load dotenv files
+        [ -f ".env" ] && { echo "Loading .env"; set -a; source ./.env; set +a; }
+        [ -f ".env.local" ] && { echo "Loading .env.local"; set -a; source ./.env.local; set +a; }
+        [ -f ".envrc" ] && { echo "Loading .envrc"; source ./.envrc; }
 
-        if [ -f ".env.local" ]; then
-            echo "Loading .env.local"
-            set -a
-            # shellcheck disable=SC1091
-            source ./.env.local
-            set +a
-        fi
+        # Apply environment variables from job
+        while IFS= read -r env_line; do
+            [ -n "$env_line" ] && [ "$env_line" != "null" ] && export "$env_line"
+        done < <(echo "$env_vars_json" | jq -r '.[]' 2>/dev/null)
 
-        # Source .envrc if present to load environment customizations
-        if [ -f ".envrc" ]; then
-            echo "Loading .envrc"
-            # shellcheck disable=SC1091
-            source ./.envrc
-        fi
-
-        # Apply environment variables if present (base64 encoded, newline-separated)
-        if [ -n "$env_vars_b64" ]; then
-            while IFS= read -r env_line; do
-                [ -n "$env_line" ] && export "$env_line"
-            done < <(echo "$env_vars_b64" | base64 -d 2>/dev/null)
-        fi
-
-        # Record PID before exec - after exec, this becomes the command's PID
+        # Record PID and exec
         echo $BASHPID > "$pid_file"
-        # Use exec to replace this subshell with the actual command process
-        # This ensures the recorded PID is the job process, not a wrapper
         exec bash -c "$command"
     ) >> "$log_file" 2>&1 &
-    cmd_pid=$!
+    local cmd_pid=$!
 
-    # Robust wait: poll for process completion instead of blocking wait
-    # This handles cases where the process is killed externally and wait doesn't return
-    exit_code=0
+    # Wait for completion
+    local exit_code=0
     while true; do
-        # Check if process still exists
         if ! kill -0 $cmd_pid 2>/dev/null; then
-            # Process is gone, get exit code via wait
             wait $cmd_pid 2>/dev/null
             exit_code=$?
             break
         fi
 
-        # Check if status file was written (job completed via normal path)
         if [ -f "$status_file" ]; then
             exit_code=$(cat "$status_file")
-            # Give process a moment to fully exit, then force cleanup
             sleep 1
             kill -0 $cmd_pid 2>/dev/null && kill $cmd_pid 2>/dev/null
             wait $cmd_pid 2>/dev/null || true
             break
         fi
 
-        # Check for STOP signal while waiting
-        if [ -f "$QUEUE_DIR/${QUEUE_NAME}.stop" ]; then
-            echo "STOP signal received while job running, killing job..."
+        # Check for stop command (re-process commands)
+        if ! process_commands 2>/dev/null; then
+            echo "Stop requested while job running, killing job..."
             kill $cmd_pid 2>/dev/null || true
             wait $cmd_pid 2>/dev/null
             exit_code=$?
@@ -392,14 +487,16 @@ while true; do
     done
     set -e
 
+    local end_time duration
     end_time=$(date +%s)
     duration=$((end_time - start_time))
 
-    # Write status and end marker
+    # Write status
     echo "$exit_code" > "$status_file"
     echo "=== END exit=$exit_code $(date) ===" >> "$log_file"
 
     # Format duration
+    local hours minutes seconds duration_text
     hours=$((duration / 3600))
     minutes=$(((duration % 3600) / 60))
     seconds=$((duration % 60))
@@ -419,15 +516,68 @@ while true; do
         echo "Job $job_id failed with exit code $exit_code in $duration_text"
     fi
 
-    # Clear current job and clean up PID file (prevents killing wrong process if PID is reused)
-    rm -f "$CURRENT_FILE" "$pid_file"
+    # Cleanup
+    rm -f "$CURRENT_FILE" "$pid_file" "$QUEUE_DIR/job-${job_id}.json"
+    CURRENT_JOB_ID=""
+    save_state
 
-    # Send Slack notification if script exists
+    # Slack notification
     if [ -x "$NOTIFY_SCRIPT" ]; then
         "$NOTIFY_SCRIPT" "rj-$job_id" "$exit_code" "$(hostname)" "$meta_file" 2>/dev/null || true
     fi
 
-    echo ""
+    return 0
+}
+
+# Main
+log_op "queue.start" "" "queue=$QUEUE_NAME pid=$$"
+echo "Queue runner v2 started for queue: $QUEUE_NAME"
+echo "Commands file: $COMMANDS_FILE"
+echo "State file: $STATE_FILE"
+echo "PID: $$"
+echo ""
+
+load_state
+
+# Main loop
+while true; do
+    # Process any new commands
+    if ! process_commands; then
+        log_op "queue.stop" "" "stop command received"
+        echo "Stop command received, exiting..."
+        break
+    fi
+
+    # Check if we have pending jobs
+    if pending_empty; then
+        sleep 5
+        continue
+    fi
+
+    # Get next job (pop_pending sets POPPED_JOB global, can't use $() - subshell loses state)
+    pop_pending
+
+    if [ -z "$POPPED_JOB" ]; then
+        sleep 5
+        continue
+    fi
+
+    # Run the job
+    run_result=0
+    run_job "$POPPED_JOB" || run_result=$?
+
+    case "$run_result" in
+        2)
+            # Re-queue (dependency waiting)
+            add_pending "$POPPED_JOB"
+            save_state
+            sleep 10
+            ;;
+        *)
+            # For any other result (success or failure), save state to reflect the job was removed from pending
+            save_state
+            ;;
+    esac
 done
 
 log_op "queue.stop" "" "normal exit"

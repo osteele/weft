@@ -268,18 +268,21 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 	return nil
 }
 
-// removeFromQueueFile removes a job from the remote queue file.
+// removeFromQueueFile removes a job from the remote queue by issuing a cancel command.
 func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Duration) error {
-	queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-	// Use grep + temp file instead of sed -i for cross-platform compatibility (Linux vs macOS)
-	removeCmd := fmt.Sprintf("grep -v '^%d	' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || rm -f %s.tmp",
-		jobID, queueFile, queueFile, queueFile, queueFile, queueFile)
-	_, stderr, err := ssh.RunWithTimeout(host, removeCmd, timeout)
-	if err != nil {
-		if ssh.IsConnectionError(stderr) {
-			return fmt.Errorf("connection error: %s", stderr)
+	cancelCmd := NewCancelCommand(jobID)
+	opts := AppendCommandOptions{Timeout: timeout}
+	if err := AppendCommand(host, queueName, cancelCmd, opts); err != nil {
+		var qaErr *QueueAppendError
+		if e, ok := err.(*QueueAppendError); ok {
+			qaErr = e
+			if qaErr.IsConnectionError() {
+				return fmt.Errorf("connection error: %s", qaErr.Stderr)
+			}
+		} else if ssh.IsConnectionError(err.Error()) {
+			return fmt.Errorf("connection error: %s", err.Error())
 		}
-		// Non-connection errors are OK (file might not exist, etc.)
+		// Non-connection errors are OK (job might not be in queue)
 	}
 	return nil
 }
@@ -318,8 +321,9 @@ func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
 		EnvVars:     job.EnvVars,
 		DepSpec:     job.DepSpec,
 	}
-	opts := AppendQueueEntryOptions{Timeout: timeout}
-	return AppendQueueEntry(job.Host, job.QueueName, entry, opts)
+	addCmd := NewAddCommand(entry)
+	opts := AppendCommandOptions{Timeout: timeout}
+	return AppendCommand(job.Host, job.QueueName, addCmd, opts)
 }
 
 // applyStartToRemote starts a queued or draft job on the remote host.
@@ -417,6 +421,12 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	running := queueRemoteClient.ProcessRunning(job.Host, job.ID, timeout)
 	if running.IsSome() && running.Unwrap() {
 		return db.StatusRunning, nil
+	}
+
+	// Job is locally queued but not found in remote queue, not running, no status file
+	// This means it's orphaned (was removed from queue or never made it there)
+	if job.Status == db.StatusQueued && queued.IsSome() && !queued.Unwrap() {
+		return db.StatusDead, nil
 	}
 
 	// Unable to determine - return current status

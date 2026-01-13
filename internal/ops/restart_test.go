@@ -85,7 +85,7 @@ func TestRestartJob_QuickTimeout(t *testing.T) {
 	}
 }
 
-// Note: RestartJob only makes a single SSH call via Reconcile (AppendQueueEntry),
+// Note: RestartJob only makes a single SSH call via Reconcile (AppendCommand),
 // so there's no separate "SyncError" case distinct from QuickTimeout.
 // The connection error case is already covered by TestRestartJob_QuickTimeout.
 

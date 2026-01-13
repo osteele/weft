@@ -178,8 +178,7 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 		envVars = append(envVars, "CUDA_VISIBLE_DEVICES="+job.GPU)
 	}
 
-	// Use ops.AppendQueueEntry which handles the 6-column format with proper
-	// base64 encoding, flock, and trailing newline
+	// Use new command queue format
 	entry := ops.QueueEntry{
 		JobID:       job.ID,
 		WorkingDir:  job.WorkingDir,
@@ -188,8 +187,9 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job) error {
 		EnvVars:     envVars,
 		DepSpec:     job.DepSpec,
 	}
+	addCmd := ops.NewAddCommand(entry)
 
-	if err := ops.AppendQueueEntry(host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+	if err := ops.AppendCommand(host, queueName, addCmd, ops.AppendCommandOptions{}); err != nil {
 		var qaErr *ops.QueueAppendError
 		if e, ok := err.(*ops.QueueAppendError); ok {
 			qaErr = e

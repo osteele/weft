@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -141,10 +142,9 @@ func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 
 	// If runner exists and script was upgraded, restart to pick up new version
 	if exists && upgraded {
-		// Signal runner to stop gracefully after current job
-		stopFile := fmt.Sprintf("%s/%s.stop", queueDir, queueName)
-		touchCmd := fmt.Sprintf("touch %s", stopFile)
-		_, _, _ = ssh.Run(host, touchCmd) // Best effort - ignore errors
+		// Signal runner to stop gracefully after current job using command queue
+		stopCmd := ops.NewStopCommand()
+		_ = ops.AppendCommand(host, queueName, stopCmd, ops.AppendCommandOptions{}) // Best effort - ignore errors
 
 		// Wait briefly for runner to stop (it will exit after current job)
 		// Don't block too long - let it finish naturally
@@ -197,12 +197,8 @@ func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {
 
 // SendStopSignal signals the runner to stop after the current job.
 func (r *Runner) SendStopSignal() error {
-	stopFile := fmt.Sprintf("%s/%s.stop", queueDir, r.queue)
-	touchCmd := fmt.Sprintf("touch %s", stopFile)
-	if _, stderr, err := ssh.Run(r.host, touchCmd); err != nil {
-		return fmt.Errorf("create stop signal: %s", strings.TrimSpace(stderr))
-	}
-	return nil
+	cmd := ops.NewStopCommand()
+	return ops.AppendCommand(r.host, r.queue, cmd, ops.AppendCommandOptions{})
 }
 
 // WaitForStop waits until the runner's tmux session exits or timeout elapses.

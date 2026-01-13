@@ -84,7 +84,7 @@ func TestQueueJob_QuickTimeout(t *testing.T) {
 	}
 }
 
-// Note: QueueJob only makes a single SSH call (AppendQueueEntry),
+// Note: QueueJob only makes a single SSH call (AppendCommand),
 // so there's no separate "SyncError" case distinct from QuickTimeout.
 // The connection error case is already covered by TestQueueJob_QuickTimeout.
 
@@ -258,7 +258,7 @@ func TestQueueEntryFormat_SingleLine(t *testing.T) {
 				Description: "test",
 			}
 
-			// Build the queue line the same way AppendQueueEntry does
+			// Build the queue line using the same escaping logic
 			escapedCommand := escapeForQueueFile(entry.Command)
 			escapedDescription := escapeForQueueFile(entry.Description)
 			jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\n",
@@ -323,7 +323,7 @@ func TestQueueEntryShellParsing(t *testing.T) {
 				Description: tt.description,
 			}
 
-			// Build the queue line the same way AppendQueueEntry does
+			// Build the queue line using the same escaping logic
 			escapedCommand := escapeForQueueFile(entry.Command)
 			escapedDescription := escapeForQueueFile(entry.Description)
 			jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s",

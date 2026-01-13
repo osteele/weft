@@ -201,8 +201,10 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 		DepSpec:     params.DepSpec,
 	}
 
-	opts := AppendQueueEntryOptions{Timeout: params.Timeout}
-	if err := AppendQueueEntry(params.Host, queueName, entry, opts); err != nil {
+	// Use new command queue format
+	addCmd := NewAddCommand(entry)
+	opts := AppendCommandOptions{Timeout: params.Timeout}
+	if err := AppendCommand(params.Host, queueName, addCmd, opts); err != nil {
 		var qaErr *QueueAppendError
 		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
 			return fmt.Errorf("host unreachable")
@@ -320,8 +322,9 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	}
 
 	// Append to remote queue
-	appendOpts := AppendQueueEntryOptions{Timeout: opts.Timeout}
-	if err := AppendQueueEntry(params.Host, queueName, entry, appendOpts); err != nil {
+	addCmd := NewAddCommand(entry)
+	appendOpts := AppendCommandOptions{Timeout: opts.Timeout}
+	if err := AppendCommand(params.Host, queueName, addCmd, appendOpts); err != nil {
 		var qaErr *QueueAppendError
 		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
 			return Result{

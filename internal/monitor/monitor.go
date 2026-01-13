@@ -753,10 +753,8 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 		if queueName == "" {
 			queueName = "default"
 		}
-		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-		removeCmd := fmt.Sprintf("grep -v '^%d\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || rm -f %s.tmp",
-			job.ID, queueFile, queueFile, queueFile, queueFile, queueFile)
-		_, _, err := remote.RunWithTimeout(job.Host, removeCmd, 5*time.Second)
+		cancelCmd := ops.NewCancelCommand(job.ID)
+		err := ops.AppendCommand(job.Host, queueName, cancelCmd, ops.AppendCommandOptions{Timeout: 5 * time.Second})
 		if err != nil {
 			return false
 		}

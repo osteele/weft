@@ -1,7 +1,7 @@
 package queuefile
 
 import (
-	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -32,17 +32,24 @@ func IsConnectionError(err error) bool {
 	return errors.Is(err, ErrConnection)
 }
 
-func queueFilePath(queueName string) string {
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
-	return fmt.Sprintf("%s/%s.queue", queueDir, queueName)
+func jobFilePath(jobID int64) string {
+	return fmt.Sprintf("%s/jobs/%d.json", queueDir, jobID)
+}
+
+// jobData represents the JSON structure of a job file
+type jobData struct {
+	ID   int64    `json:"id"`
+	Dir  string   `json:"dir"`
+	Cmd  string   `json:"cmd"`
+	Desc string   `json:"desc"`
+	Env  []string `json:"env"`
+	Deps string   `json:"deps"`
 }
 
 // FetchEntry retrieves the queue file entry for a job ID from the remote host.
 func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
-	queueFile := queueFilePath(queueName)
-	cmd := fmt.Sprintf("grep -m1 '^%d\\\\t' %s 2>/dev/null || true", jobID, queueFile)
+	jobFile := jobFilePath(jobID)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null || true", jobFile)
 	stdout, stderr, err := ssh.Run(host, cmd)
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr)
@@ -52,53 +59,62 @@ func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
 		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			return nil, fmt.Errorf("%w: %s", ErrConnection, errMsg)
 		}
-		return nil, fmt.Errorf("read queue file: %s", errMsg)
+		return nil, fmt.Errorf("read job file: %s", errMsg)
 	}
-	line := strings.TrimSpace(stdout)
-	if line == "" {
+	content := strings.TrimSpace(stdout)
+	if content == "" {
 		return nil, fmt.Errorf("job %d not found in queue %s on %s", jobID, queueName, host)
 	}
-	parts := strings.Split(line, "\t")
-	if len(parts) < 3 {
-		return nil, fmt.Errorf("malformed queue entry for job %d: %q", jobID, line)
+
+	var data jobData
+	if err := json.Unmarshal([]byte(content), &data); err != nil {
+		return nil, fmt.Errorf("parse job file for job %d: %w", jobID, err)
 	}
 
-	entry := &Entry{
-		JobID:       jobID,
-		WorkingDir:  parts[1],
-		Command:     parts[2],
-		Description: "",
-		EnvVars:     nil,
-		DepSpec:     "",
-	}
-
-	if len(parts) >= 4 {
-		entry.Description = parts[3]
-	}
-	if len(parts) >= 5 && parts[4] != "" {
-		decoded, err := base64.StdEncoding.DecodeString(parts[4])
-		if err == nil {
-			for _, line := range strings.Split(string(decoded), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					entry.EnvVars = append(entry.EnvVars, line)
-				}
-			}
-		}
-	}
-	if len(parts) >= 6 {
-		entry.DepSpec = parts[5]
-	}
-
-	return entry, nil
+	return &Entry{
+		JobID:       data.ID,
+		WorkingDir:  data.Dir,
+		Command:     data.Cmd,
+		Description: data.Desc,
+		EnvVars:     data.Env,
+		DepSpec:     data.Deps,
+	}, nil
 }
 
-// RemoveEntry deletes a queued job entry from the remote queue file.
-func RemoveEntry(host, queueName string, jobID int64) error {
-	queueFile := queueFilePath(queueName)
-	removeCmd := fmt.Sprintf("grep -v '^%d\\t' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || true",
-		jobID, queueFile, queueFile, queueFile, queueFile)
-	if _, stderr, err := ssh.Run(host, removeCmd); err != nil {
+func commandsFilePath(queueName string) string {
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+	return fmt.Sprintf("%s/%s.commands", queueDir, queueName)
+}
+
+func stateFilePath(queueName string) string {
+	if queueName == "" {
+		queueName = DefaultQueueName
+	}
+	return fmt.Sprintf("%s/%s.state.json", queueDir, queueName)
+}
+
+// appendCommand appends a command to the commands file
+func appendCommand(host, queueName, cmdJSON string) error {
+	commandsFile := commandsFilePath(queueName)
+	// Append command to the commands file with locking
+	lockDir := commandsFile + ".lock.d"
+	appendCmd := fmt.Sprintf(
+		`mkdir -p %s && (
+			while ! mkdir %s 2>/dev/null; do sleep 0.01; done
+			trap 'rmdir %s 2>/dev/null' EXIT
+			echo '%s' >> %s
+			rmdir %s 2>/dev/null
+		)`,
+		queueDir,
+		lockDir,
+		lockDir,
+		cmdJSON, commandsFile,
+		lockDir)
+
+	_, stderr, err := ssh.Run(host, appendCmd)
+	if err != nil {
 		errMsg := strings.TrimSpace(stderr)
 		if errMsg == "" {
 			errMsg = err.Error()
@@ -106,38 +122,24 @@ func RemoveEntry(host, queueName string, jobID int64) error {
 		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			return fmt.Errorf("%w: %s", ErrConnection, errMsg)
 		}
-		return fmt.Errorf("remove queued job %d: %s", jobID, errMsg)
+		return fmt.Errorf("append command: %s", errMsg)
 	}
 	return nil
+}
+
+// RemoveEntry deletes a queued job entry from the remote queue.
+func RemoveEntry(host, queueName string, jobID int64) error {
+	cmdJSON := fmt.Sprintf(`{"op":"cancel","job_id":%d}`, jobID)
+	return appendCommand(host, queueName, cmdJSON)
 }
 
 // MoveToFront moves a job to the front of the queue (next to run after current job).
 // Returns true if the job was moved, false if it was already at the front or not found.
 func MoveToFront(host, queueName string, jobID int64) (bool, error) {
-	queueFile := queueFilePath(queueName)
-
-	// Shell script to atomically move job to front:
-	// 1. Extract the job's line
-	// 2. Get remaining lines
-	// 3. Write job's line first, then remaining lines
-	moveCmd := fmt.Sprintf(`
-		job_line=$(grep -m1 '^%d	' %s 2>/dev/null)
-		if [ -z "$job_line" ]; then
-			echo "NOT_FOUND"
-			exit 0
-		fi
-		# Check if already at front
-		first_line=$(head -1 %s 2>/dev/null)
-		if [ "$job_line" = "$first_line" ]; then
-			echo "ALREADY_FRONT"
-			exit 0
-		fi
-		# Move to front: job line first, then all other lines
-		(echo "$job_line"; grep -v '^%d	' %s 2>/dev/null) > %s.tmp && mv %s.tmp %s
-		echo "MOVED"
-	`, jobID, queueFile, queueFile, jobID, queueFile, queueFile, queueFile, queueFile)
-
-	stdout, stderr, err := ssh.Run(host, moveCmd)
+	// Check if job is in the pending list
+	stateFile := stateFilePath(queueName)
+	checkCmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
+	stdout, stderr, err := ssh.Run(host, checkCmd)
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr)
 		if errMsg == "" {
@@ -146,18 +148,26 @@ func MoveToFront(host, queueName string, jobID int64) (bool, error) {
 		if ssh.IsConnectionError(stderr) || ssh.IsConnectionError(err.Error()) {
 			return false, fmt.Errorf("%w: %s", ErrConnection, errMsg)
 		}
-		return false, fmt.Errorf("move job %d to front: %s", jobID, errMsg)
+		return false, fmt.Errorf("check job %d in queue: %s", jobID, errMsg)
 	}
 
 	result := strings.TrimSpace(stdout)
-	switch result {
-	case "MOVED":
-		return true, nil
-	case "ALREADY_FRONT":
-		return false, nil
-	case "NOT_FOUND":
+	if result != "YES" {
 		return false, fmt.Errorf("job %d not found in queue %s", jobID, queueName)
-	default:
-		return false, fmt.Errorf("unexpected result: %s", result)
 	}
+
+	// Check if already at front
+	frontCmd := fmt.Sprintf("jq -r '.pending[0] // \"\"' %s 2>/dev/null", stateFile)
+	frontStdout, _, _ := ssh.Run(host, frontCmd)
+	if strings.TrimSpace(frontStdout) == fmt.Sprintf("%d", jobID) {
+		return false, nil // Already at front
+	}
+
+	// Send priority command
+	cmdJSON := fmt.Sprintf(`{"op":"priority","job_id":%d}`, jobID)
+	if err := appendCommand(host, queueName, cmdJSON); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }

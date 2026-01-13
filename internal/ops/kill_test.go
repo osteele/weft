@@ -243,20 +243,21 @@ func TestApplyCancelToRemote_KillsRunningProcess(t *testing.T) {
 		t.Fatalf("applyCancelToRemote failed: %v", err)
 	}
 
-	// Verify both queue removal AND kill commands were issued
-	hasQueueRemoval := false
+	// Verify both cancel command AND kill commands were issued
+	hasCancelCommand := false
 	hasKillCommand := false
 	for _, cmd := range capturedCommands {
-		if strings.Contains(cmd, "grep -v") && strings.Contains(cmd, ".queue") {
-			hasQueueRemoval = true
+		// New format: cancel command appended to .commands file
+		if strings.Contains(cmd, ".commands") && strings.Contains(cmd, "cancel") {
+			hasCancelCommand = true
 		}
 		if strings.Contains(cmd, "kill") && strings.Contains(cmd, ".pid") {
 			hasKillCommand = true
 		}
 	}
 
-	if !hasQueueRemoval {
-		t.Error("expected queue removal command to be issued")
+	if !hasCancelCommand {
+		t.Errorf("expected cancel command to be issued; got commands: %v", capturedCommands)
 	}
 	if !hasKillCommand {
 		t.Error("expected kill command to be issued (for case where job started running)")

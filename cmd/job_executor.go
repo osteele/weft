@@ -262,7 +262,9 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		EnvVars:     opts.EnvVars,
 		DepSpec:     depSpec,
 	}
-	if err := ops.AppendQueueEntry(opts.Host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+	// Use the new command queue system
+	addCmd := ops.NewAddCommand(entry)
+	if err := ops.AppendCommand(opts.Host, queueName, addCmd, ops.AppendCommandOptions{}); err != nil {
 		if shouldDeferQueueAppend(err) {
 			return &queueJobResult{JobID: jobID, Deferred: true}, nil
 		}

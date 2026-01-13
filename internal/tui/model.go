@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os/exec"
@@ -6627,17 +6626,14 @@ Status:`, strings.Join(facts, "\n"))
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely
 // Returns true if the job was killed, false if host unreachable or already dead
 func killTombstonedJob(database *sql.DB, job *db.Job) bool {
-	// For queued jobs, remove from queue file
+	// For queued jobs, send cancel command to remove from queue
 	if job.Status == db.StatusQueued {
 		queueName := job.QueueName
 		if queueName == "" {
 			queueName = "default"
 		}
-		queueFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.queue", queueName)
-		// Use grep + temp file for cross-platform compatibility (Linux vs macOS)
-		removeCmd := fmt.Sprintf("grep -v '^%d	' %s > %s.tmp 2>/dev/null && mv %s.tmp %s || rm -f %s.tmp",
-			job.ID, queueFile, queueFile, queueFile, queueFile, queueFile)
-		_, _, err := remote.RunWithTimeout(job.Host, removeCmd, 5*time.Second)
+		cancelCmd := ops.NewCancelCommand(job.ID)
+		err := ops.AppendCommand(job.Host, queueName, cancelCmd, ops.AppendCommandOptions{Timeout: 5 * time.Second})
 		if err != nil {
 			return false // Host unreachable
 		}
@@ -6965,8 +6961,9 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []strin
 }
 
 func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, error) {
-	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
-	cmd := fmt.Sprintf("grep -m1 '^%d\\t' %s 2>/dev/null", jobID, queueFile)
+	// Read from new JSON job file format
+	jobFile := fmt.Sprintf("%s/jobs/%d.json", queuerunner.QueueDir(), jobID)
+	cmd := fmt.Sprintf("cat %s 2>/dev/null", jobFile)
 	stdout, _, err := remote.Run(host, cmd)
 	if err != nil {
 		if remote.IsConnectionError(err.Error()) {
@@ -6974,30 +6971,30 @@ func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, 
 		}
 		return nil, err
 	}
-	line := strings.TrimSpace(stdout)
-	if line == "" {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
 		return &queueEntryData{}, nil
 	}
-	fields := strings.SplitN(line, "\t", 6)
-	if len(fields) < 6 {
-		return nil, fmt.Errorf("malformed queue entry")
-	}
 
+	// Parse JSON using jq-style extraction
+	// Format: {"id":123,"dir":"...","cmd":"...","desc":"...","env":["VAR=val"],"deps":"..."}
+	envCmd := fmt.Sprintf("jq -r '.env // [] | .[]' %s 2>/dev/null", jobFile)
+	envStdout, _, _ := remote.Run(host, envCmd)
 	var envVars []string
-	if fields[4] != "" {
-		if decoded, err := base64.StdEncoding.DecodeString(fields[4]); err == nil {
-			for _, ev := range strings.Split(string(decoded), "\n") {
-				ev = strings.TrimSpace(ev)
-				if ev != "" {
-					envVars = append(envVars, ev)
-				}
-			}
+	for _, ev := range strings.Split(envStdout, "\n") {
+		ev = strings.TrimSpace(ev)
+		if ev != "" {
+			envVars = append(envVars, ev)
 		}
 	}
 
+	depCmd := fmt.Sprintf("jq -r '.deps // \"\"' %s 2>/dev/null", jobFile)
+	depStdout, _, _ := remote.Run(host, depCmd)
+	depSpec := strings.TrimSpace(depStdout)
+
 	return &queueEntryData{
 		envVars: envVars,
-		depSpec: fields[5],
+		depSpec: depSpec,
 	}, nil
 }
 
