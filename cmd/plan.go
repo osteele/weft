@@ -457,8 +457,8 @@ func printPlanStatusCommands(jobs []scheduledPlanJob) {
 	fmt.Println()
 	fmt.Println("Monitor plan progress:")
 	fmt.Printf("  remote-jobs status %s\n", strings.Join(ids, " "))
-	fmt.Printf("  remote-jobs status --wait %s\n", strings.Join(ids, " "))
-	fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %s\n", strings.Join(ids, " "))
+	fmt.Printf("  remote-jobs status --watch %s\n", strings.Join(ids, " "))
+	fmt.Printf("  remote-jobs status --watch --wait-timeout 30m %s\n", strings.Join(ids, " "))
 }
 
 func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Duration) error {

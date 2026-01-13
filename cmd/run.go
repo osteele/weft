@@ -391,8 +391,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if usageHintsEnabled() {
 		fmt.Printf("\nMonitor progress:\n")
 		fmt.Printf("  remote-jobs status %d                   # Check status\n", result.Info.JobID)
-		fmt.Printf("  remote-jobs status --wait %d            # Wait for completion\n", result.Info.JobID)
-		fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
+		fmt.Printf("  remote-jobs status --watch %d            # Wait for completion\n", result.Info.JobID)
+		fmt.Printf("  remote-jobs status --watch --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
 		fmt.Printf("\nView log:\n")
 		fmt.Printf("  remote-jobs log %d                      # View log\n", result.Info.JobID)
 		fmt.Printf("  remote-jobs log %d -f                   # Follow log\n", result.Info.JobID)
