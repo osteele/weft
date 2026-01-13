@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -639,6 +640,10 @@ type Model struct {
 	dbWatcherTargets        map[string]struct{}
 	dbRefreshDebounceActive bool
 
+	// Context for cancellation on quit
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	// Background sync state
 	syncing                 bool
 	lastSyncTime            time.Time
@@ -793,10 +798,15 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 
 	detailVP := viewport.New(0, 0)
 
+	// Create context for cancellation on quit
+	ctx, cancel := context.WithCancel(context.Background())
+
 	model := Model{
 		database:    database,
 		coreService: core.NewServiceWithDB(database),
 		monitor:     opts.Monitor,
+		ctx:         ctx,
+		cancel:      cancel,
 		monitorEvents: func() <-chan monitor.Event {
 			if opts.Monitor != nil {
 				return opts.Monitor.Events()
@@ -1602,6 +1612,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case key.Matches(msg, keys.Quit):
+		// Cancel all background SSH operations
+		if m.cancel != nil {
+			m.cancel()
+		}
 		return m, tea.Quit
 
 	case key.Matches(msg, keys.Suspend):
@@ -5910,6 +5924,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 	}
 
 	jobCopy := *job
+	ctx := m.ctx
 	return func() tea.Msg {
 		job := jobCopy
 		// For terminal jobs, try local cache first
@@ -5936,8 +5951,12 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 
 		// Fetch the log content
 		// Don't quote path - it contains ~ which needs shell expansion
-		stdout, stderr, err := remote.Run(job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
+		stdout, stderr, err := remote.RunWithContext(ctx, job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
 		if err != nil {
+			// Context cancelled - exit silently
+			if err == context.Canceled {
+				return nil
+			}
 			// Check if it's a connection error
 			combined := stdout + stderr
 			if remote.IsConnectionError(combined) {
@@ -6075,13 +6094,14 @@ func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 		return nil
 	}
 
+	ctx := m.ctx
 	return func() tea.Msg {
 		// Find the log file via shared resolver
 		logFile, _ := logfiles.Resolve(job)
 
 		// Quick grep for last progress line (case-insensitive)
 		grepCmd := fmt.Sprintf("grep -i 'Progress:' %s 2>/dev/null | tail -1", logFile)
-		stdout, _, err := remote.Run(job.Host, grepCmd)
+		stdout, _, err := remote.RunWithContext(ctx, job.Host, grepCmd)
 		if err != nil || strings.TrimSpace(stdout) == "" {
 			return quickProgressMsg{jobID: job.ID, progress: nil}
 		}
@@ -6914,6 +6934,7 @@ func (m Model) createJob() tea.Cmd {
 
 func (m Model) editJob() tea.Cmd {
 	database := m.database
+	ctx := m.ctx
 	jobID := m.editingJobID
 	newHost := strings.TrimSpace(m.inputs[inputHost].Value())
 	newCommand := strings.TrimSpace(m.inputs[inputCommand].Value())
@@ -6976,7 +6997,7 @@ func (m Model) editJob() tea.Cmd {
 		}
 		depSpec := m.editingJobDepSpec
 		if depSpec == "" {
-			if data, err := fetchQueueEntryData(job.Host, queueName, jobID); err == nil && data != nil {
+			if data, err := fetchQueueEntryData(ctx, job.Host, queueName, jobID); err == nil && data != nil {
 				depSpec = data.depSpec
 			}
 		}
@@ -7024,12 +7045,15 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []strin
 	})
 }
 
-func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, error) {
+func fetchQueueEntryData(ctx context.Context, host, queueName string, jobID int64) (*queueEntryData, error) {
 	// Read from new JSON job file format
 	jobFile := fmt.Sprintf("%s/jobs/%d.json", queuerunner.QueueDir(), jobID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null", jobFile)
-	stdout, _, err := remote.Run(host, cmd)
+	stdout, _, err := remote.RunWithContext(ctx, host, cmd)
 	if err != nil {
+		if err == context.Canceled {
+			return nil, context.Canceled
+		}
 		if remote.IsConnectionError(err.Error()) {
 			return nil, fmt.Errorf("host unreachable")
 		}
@@ -7043,7 +7067,7 @@ func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, 
 	// Parse JSON using jq-style extraction
 	// Format: {"id":123,"dir":"...","cmd":"...","desc":"...","env":["VAR=val"],"deps":"..."}
 	envCmd := fmt.Sprintf("jq -r '.env // [] | .[]' %s 2>/dev/null", jobFile)
-	envStdout, _, _ := remote.Run(host, envCmd)
+	envStdout, _, _ := remote.RunWithContext(ctx, host, envCmd)
 	var envVars []string
 	for _, ev := range strings.Split(envStdout, "\n") {
 		ev = strings.TrimSpace(ev)
@@ -7053,7 +7077,7 @@ func fetchQueueEntryData(host, queueName string, jobID int64) (*queueEntryData, 
 	}
 
 	depCmd := fmt.Sprintf("jq -r '.deps // \"\"' %s 2>/dev/null", jobFile)
-	depStdout, _, _ := remote.Run(host, depCmd)
+	depStdout, _, _ := remote.RunWithContext(ctx, host, depCmd)
 	depSpec := strings.TrimSpace(depStdout)
 
 	return &queueEntryData{
@@ -7139,13 +7163,17 @@ func (m Model) fetchQueuedJobEnv(job *db.Job) tea.Cmd {
 		return nil
 	}
 	jobCopy := *job
+	ctx := m.ctx
 	queueName := job.QueueName
 	if queueName == "" {
 		queueName = queuefile.DefaultQueueName
 	}
 	return func() tea.Msg {
-		data, err := fetchQueueEntryData(jobCopy.Host, queueName, jobCopy.ID)
+		data, err := fetchQueueEntryData(ctx, jobCopy.Host, queueName, jobCopy.ID)
 		if err != nil {
+			if err == context.Canceled {
+				return nil
+			}
 			return jobEnvLoadedMsg{jobID: jobCopy.ID, err: err}
 		}
 		if data == nil {

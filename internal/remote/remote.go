@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"context"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -13,6 +14,10 @@ type JobGPUMapping = ssh.JobGPUMapping
 
 func Run(host, command string) (string, string, error) {
 	return ssh.Run(host, command)
+}
+
+func RunWithContext(ctx context.Context, host, command string) (string, string, error) {
+	return ssh.RunWithContext(ctx, host, command)
 }
 
 func RunWithTimeout(host, command string, timeout time.Duration) (string, string, error) {

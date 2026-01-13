@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -159,6 +160,21 @@ func EscapeForSingleQuotes(s string) string {
 // Run executes an SSH command and returns stdout, stderr, and error
 func Run(host string, command string) (string, string, error) {
 	return runner(host, command)
+}
+
+// RunWithContext executes an SSH command with context cancellation support.
+// When the context is cancelled, the SSH process is killed immediately.
+func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {
+	args := append(sshControlMasterArgs(), host, command)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() == context.Canceled {
+		return stdout.String(), stderr.String(), context.Canceled
+	}
+	return stdout.String(), stderr.String(), err
 }
 
 // RunWithTimeout executes an SSH command with a timeout and connection options
