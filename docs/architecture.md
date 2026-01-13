@@ -52,7 +52,7 @@ set of states. The CLI records each transition so commands such as `status`,
 | `failed`    | Job terminated unexpectedly after starting (no status file found).          |
 | `killed`    | Job was terminated in response to an explicit user action.                  |
 | `canceled`  | Queued job was explicitly removed before it started.                        |
-| `queued`    | Job was added to a remote queue file and awaits the queue runner.           |
+| `queued`    | Job was added to a remote queue and awaits the queue runner.                |
 | `pending`   | Local intent recorded (kill/start/change) awaiting reconciliation.          |
 
 ```mermaid
@@ -205,6 +205,7 @@ CREATE TABLE jobs (
     exit_code INTEGER,
     status TEXT NOT NULL DEFAULT 'running',
     queue_name TEXT              -- Name of queue for queued jobs
+    cpu_allotment INTEGER        -- Optional per-job CPU allotment percent
 );
 
 -- Indexes for common queries
@@ -386,13 +387,13 @@ so rows update live the moment an AI description is written, and any manual
 ### 11. Queue Helpers (`internal/queuejob/`, `internal/plan/`)
 
 Queue-heavy workflows use dedicated helpers. `internal/queuejob` knows how to
-remove entries from `~/.cache/remote-jobs/queue/*.queue`, rehydrate metadata,
-and start a job immediately even if it never reached the remote queue (pending
-deferred op). `internal/plan` parses YAML plans, expands IDs/aliases, validates
-per-host dependency DAGs, and emits queue operations that match the semantics
-documented in [docs/job-plans.md](job-plans.md). Together they let both humans
-and agents orchestrate large job graphs while keeping local/remote state
-consistent even when connections flap.
+update the append-only command log in `~/.cache/remote-jobs/queue/*.commands`,
+rehydrate metadata, and start a job immediately even if it never reached the
+remote queue (pending deferred op). `internal/plan` parses YAML plans, expands
+IDs/aliases, validates per-host dependency DAGs, and emits queue operations that
+match the semantics documented in [docs/job-plans.md](job-plans.md). Together
+they let both humans and agents orchestrate large job graphs while keeping
+local/remote state consistent even when connections flap.
 
 ## Data Flow
 
@@ -581,7 +582,7 @@ User: remote-jobs sync
 
 ## Queue System
 
-The queue system allows jobs to run sequentially on a remote host without requiring the local machine to stay connected.
+The queue system allows jobs to run on a remote host without requiring the local machine to stay connected. The queue runner can run multiple jobs concurrently while keeping total CPU usage under a target cap; per-job CPU allotments come from the database (default when unset).
 
 ### Queue Architecture
 
@@ -594,14 +595,14 @@ The queue system allows jobs to run sequentially on a remote host without requir
 │  │              │    │   (SQLite)   │  status="queued"              │
 │  └──────┬───────┘    └──────────────┘                               │
 │         │                                                           │
-│         │ SSH: Append to queue file                                 │
+│         │ SSH: Append to queue command log                           │
 │         ▼                                                           │
 ├─────────────────────────────────────────────────────────────────────┤
 │                         Remote Host                                  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │ Queue Runner │◀───│  Queue File  │    │   Job Logs           │  │
-│  │ (tmux)       │    │  (.queue)    │    │   (.log, .status)    │  │
+│  │ Queue Runner │◀───│  Queue Log   │    │   Job Logs           │  │
+│  │ (tmux)       │    │  (.commands) │    │   (.log, .status)    │  │
 │  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
 │         │                                                           │
 │         │ For each job: run, capture output, notify                 │
@@ -623,31 +624,31 @@ Jobs enqueued via `remote-jobs queue add`, `remote-jobs run --queue`, or plan
 - A tmux session named `rj-queue-{queue}` runs the script so it keeps running
   even when you disconnect.
 - Queue data is purely file-based to avoid keeping a network service running:
-  - `~/.cache/remote-jobs/queue/{queue}.queue`: FIFO list of jobs (tab-separated).
-  - `~/.cache/remote-jobs/queue/{queue}.current`: ID of the job currently
-    executing (used by `status`/`sync` to detect runner progress).
+  - `~/.cache/remote-jobs/queue/{queue}.commands`: append-only JSONL command log.
+  - `~/.cache/remote-jobs/queue/{queue}.state.json`: runner state (pending list,
+    running jobs, current job).
+  - `~/.cache/remote-jobs/queue/{queue}.current`: ID of the most recently
+    started job (used by `status`/`sync` to detect runner progress).
   - `~/.cache/remote-jobs/queue/{queue}.runner.pid`: PID of the runner itself.
   - `~/.cache/remote-jobs/queue/{queue}.stop`: Presence signals the runner to
-    exit after the current job.
-- Each queue entry includes base64 encoded environment variables and dependency
-  metadata so the runner knows whether it should wait for other jobs’ status
-  files before starting.
-- Queue entry columns (tab-separated): `job_id`, `working_dir`, `command`,
-  `description`, `env_vars_b64`, `dependencies`.
+    exit after the current jobs complete.
+- Each queue entry includes environment variables, dependency metadata, and
+  optional CPU allotment so the runner can schedule concurrent jobs while
+  keeping total CPU usage under a target cap.
 
 ```mermaid
 flowchart TD
-    A[CLI queues job] --> B["Append line to ~/.cache/remote-jobs/queue/{queue}.queue"]
+    A[CLI queues job] --> B["Append JSON command to ~/.cache/remote-jobs/queue/{queue}.commands"]
     B --> C["rj-queue-{queue} tmux session"]
     C --> D{Queue runner loop}
-    D -->|Read first entry| E[Write job ID to .current]
+    D -->|Read pending list| E[Update .state.json / .current]
     E --> F[Check dependency status files]
-    F -->|blocked| G[Re-append job and sleep]
+    F -->|blocked| G[Keep pending, sleep]
     F -->|ready| H[Create log/status/meta paths]
     H --> I[Run job command]
     I --> J[Write exit code to .status]
     J --> K["Slack notify (optional)"]
-    K --> L[Delete .current, loop]
+    K --> L[Update .state.json, loop]
 ```
 
 **Activity Notes**
@@ -656,15 +657,15 @@ flowchart TD
   files. If they are missing it re-queues the job at the end. If a dependency
   failed and the spec required success, the job is marked skipped by writing a
   log/status pair.
-- Environment: The queue entry contains base64 encoded `VAR=value` lines. The
-  runner decodes and exports them before launching the command.
+- Environment: The queue entry includes `env` as a JSON array of `VAR=value`
+  strings. The runner exports them before launching the command.
 - Metadata: A `.meta` file is written before execution so later `sync` calls can
   recover `start_time`, display-friendly command, queue name, etc.
-- Queue persistence: Because the queue file is just a text file, jobs survive
+- Queue persistence: Because the queue command log/state are just files, jobs survive
   remote reboots. Re-starting the runner tmux session picks up where it left
   off.
 
-The combination of queue files plus the runner loop means no long-lived process
+The combination of queue log/state files plus the runner loop means no long-lived process
 is required on the local machine once the job is queued—the remote host and its
 tmux sessions orchestrate everything.
 
@@ -678,59 +679,41 @@ execution. This is a frequent source of bugs and requires careful attention.
 1. **Go CLI** → builds SSH command string
 2. **Local shell** → interprets SSH command
 3. **SSH transport** → passes to remote shell
-4. **Remote shell** → executes command or writes to queue file
-5. **Queue runner (bash)** → reads queue file, parses fields, executes job
+4. **Remote shell** → executes command or appends to queue log
+5. **Queue runner (bash)** → reads queue log/state, parses jobs, executes job
 
 ### Current Escaping Strategy
 
-The queue file uses a tab-separated format with escape sequences:
+Queue commands are stored as JSONL entries in the `.commands` file:
 
 ```
-JOB_ID<tab>WORKING_DIR<tab>COMMAND<tab>DESCRIPTION<tab>ENV_B64<tab>DEPS
+{"ts":"...","op":"add","job":{"id":123,"dir":"...","cmd":"...","desc":"...","env":["..."],"deps":"...","cpu":60}}
 ```
-
-Special characters in COMMAND and DESCRIPTION are escaped by `escapeForQueueFile()`:
-- `\` → `\\` (backslash doubled)
-- Actual newlines → `\n` (escaped)
-- Actual tabs → `\t` (escaped)
-
-The entire line is then base64-encoded for safe transport through SSH.
 
 On the remote side, `queue-runner.sh`:
-1. Decodes base64 to get the queue line
-2. **Parses tab-separated fields FIRST** (critical: before escape conversion)
-3. Converts escape sequences in command/description fields via `printf '%b'`
-4. Executes the command
+1. Reads each JSONL line from the command log
+2. Uses `jq` to parse the `job` object
+3. Executes the command string as provided (JSON escaping is handled by `jq`)
 
 ### Known Bug Pattern
 
-A common bug pattern occurs when escape sequence conversion happens **before**
-field parsing. For example, if `printf '%b'` is applied to the entire line
-before awk splits by tabs, embedded `\n` sequences become real newlines and
-break the field parsing.
-
-**Symptoms**: Job ID gets polluted with command fragments, file paths contain
-newlines, runner crashes immediately after logging `job.start`.
+With the JSONL format, the main failure mode is malformed JSON or a truncated
+command log line. These show up as `jq` parse errors in the runner logs.
 
 ### Architectural Alternatives
 
-The current text-based format is simple but fragile. Potential alternatives:
+The JSONL format is simple and debuggable. Potential alternatives:
 
-1. **Per-field base64**: Encode each field separately. Most robust but harder
-   to inspect queue files manually.
-
-2. **JSON format**: Well-defined escaping rules, standard tooling (jq). More
-   complex bash parsing but eliminates custom escaping logic.
-
-3. **Length-prefixed binary**: Unambiguous parsing, no escaping needed. Not
+1. **Length-prefixed binary**: Unambiguous parsing, no escaping needed. Not
    human-readable.
 
-4. **Structured file per job**: One JSON/YAML file per queued job in a
+2. **Structured file per job**: One JSON/YAML file per queued job in a
    directory. Eliminates multi-field parsing entirely but adds filesystem
    overhead.
 
-The current approach is retained for debuggability (queue files are
-human-readable text) but requires careful testing of escaping round-trips.
+The current approach is retained for debuggability (queue logs/state files are
+human-readable text) and relies on standard JSON escaping instead of custom
+parsing rules.
 
 ### Testing Escaping
 

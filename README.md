@@ -85,13 +85,13 @@ go install .
 
 ### remote-jobs run
 
-Queue a job on a remote host for sequential execution.
+Queue a job on a remote host for managed execution.
 
 ```bash
 remote-jobs run [flags] <host> <command...>
 ```
 
-By default, jobs are added to a queue and run sequentially by the queue runner. Use `--immediate` (`-i`) to start a job immediately.
+By default, jobs are added to a queue and scheduled by the queue runner. It can run multiple jobs on a host while keeping total CPU usage under a target cap. Use `--immediate` (`-i`) to start a job immediately.
 
 Use `start <job-id>` to start a queued job immediately.
 
@@ -202,7 +202,7 @@ remote-jobs artifact get --tag exp-012 --latest selectivity_results -o ./results
 
 The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
-- Queue runner executes jobs sequentially in FIFO order
+- Queue runner schedules queued jobs in FIFO order (subject to CPU allotments)
 - Saves job metadata and logs to `~/.cache/remote-jobs/logs/` on the remote host
 - Records the job in a local SQLite database (`~/.config/remote-jobs/jobs.db`)
 - Captures exit code when job completes
@@ -309,6 +309,11 @@ Press `d` on a highlighted job to flip it into draft mode. Drafting a queued job
 removes it from the remote queue (or defers the removal if the host is offline),
 while drafting a running job kills it and marks the record so future syncs don’t
 try to restart it.
+
+When editing a queued job (`e`), you can set a CPU allotment preset (20/40/60/80%).
+If unset, the runner treats it as the default (60%) and keeps total host
+utilization under its cap while adjusting local allotments based on observed
+usage.
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────────╮
@@ -738,9 +743,9 @@ You can also trigger the same action from the TUI by pressing `d`.
 
 ### remote-jobs queue
 
-Manage job queues for sequential execution on remote hosts.
+Manage job queues for CPU-capped execution on remote hosts.
 
-Jobs added to a queue run one after another without requiring the local machine to stay connected. The queue runner runs in a tmux session on the remote host and processes jobs in FIFO order.
+Jobs added to a queue are scheduled in FIFO order, and the queue runner can run multiple jobs per host while keeping total CPU usage under a target cap. The queue runner runs in a tmux session on the remote host and keeps working when you disconnect. CPU allotments are set in the TUI (presets); the CLI has no setter.
 
 #### remote-jobs queue add
 
@@ -818,7 +823,7 @@ remote-jobs queue start [flags] <host>
 
 The queue runner:
 - Runs in a tmux session (`rj-queue-{name}`)
-- Processes jobs sequentially from the queue file
+- Processes queued jobs in FIFO order with a CPU cap
 - Continues running even when you disconnect
 - Sends Slack notifications (if configured)
 
@@ -1019,7 +1024,7 @@ Log files are stored on remote hosts at `~/.cache/remote-jobs/logs/{id}-{timesta
 - `running`: Job is currently executing on the remote host
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
-- `queued`: Job waiting in a remote queue for sequential execution
+- `queued`: Job waiting in a remote queue for scheduling
 - `failed`: Job failed to start (e.g., connection error)
 
 The database is automatically created on first use and updated when checking job status.

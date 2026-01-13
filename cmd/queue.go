@@ -404,6 +404,13 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	completed, unreachable := performFastSyncForHosts(database, []string{host}, false)
+	if !completed {
+		if note := buildStaleDataNote(database, unreachable); note != "" {
+			fmt.Fprintln(os.Stderr, note)
+		}
+	}
+
 	// Query jobs from database - this is the source of truth
 	// Get queued jobs for this host/queue
 	queuedJobs, err := db.ListQueued(database, host, queueName)

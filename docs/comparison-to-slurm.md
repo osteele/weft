@@ -100,7 +100,7 @@ sbatch --gres=gpu:a100:2 --mem=64G --cpus-per-task=16 job.sh
 ### 2. Scheduling
 
 **remote-jobs:**
-- Simple FIFO queue per host
+- FIFO queue per host with per-job CPU allotments and a concurrency cap
 - No priority system
 - No fairshare
 - No backfill scheduling

@@ -48,12 +48,37 @@ PID_FILE="$QUEUE_DIR/${QUEUE_NAME}.runner.pid"
 RUNNER_LOG="$QUEUE_DIR/runner-${QUEUE_NAME}.log"
 NOTIFY_SCRIPT="/tmp/remote-jobs-notify-slack.sh"
 
+# Concurrency and allotment tuning defaults
+HOST_UTILIZATION_TARGET=80
+DEFAULT_ALLOTMENT=60
+WARMUP_DURATION=120
+SAMPLE_INTERVAL=15
+SAMPLE_WINDOW=60
+HYSTERESIS_WINDOW=5
+HYSTERESIS_THRESHOLD=3
+INCREASE_STEP=10
+DECAY_STEP=10
+MIN_ALLOTMENT=10
+MAX_ALLOTMENT=100
+
+SAMPLE_COUNT=$((SAMPLE_WINDOW / SAMPLE_INTERVAL))
+
+CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+CPU_COUNT=${CPU_COUNT:-1}
+
+# Running job state (JSON object keyed by job ID)
+RUNNING_JSON="{}"
+
+CURRENT_JOB_ID=""
+LAST_SAMPLE_TIME=0
+STOP_REQUESTED=false
+
 # Create directories
 mkdir -p "$QUEUE_DIR" "$LOG_DIR"
 
 # Initialize state file if it doesn't exist
 if [ ! -f "$STATE_FILE" ]; then
-    echo '{"cursor":"","cursor_line":0,"pending":[],"current":null}' > "$STATE_FILE"
+    echo '{"cursor":"","cursor_line":0,"pending":[],"current":null,"running":{}}' > "$STATE_FILE"
 fi
 
 # Log operation to persistent runner log (JSONL format)
@@ -91,15 +116,22 @@ trap cleanup EXIT
 
 # Load state from file
 load_state() {
+    STATE_CURSOR=""
+    STATE_CURSOR_LINE=0
+    STATE_PENDING=""
+    CURRENT_JOB_ID=""
+    RUNNING_JSON="{}"
+
     if [ -f "$STATE_FILE" ]; then
         STATE_CURSOR=$(jq -r '.cursor // ""' "$STATE_FILE")
         STATE_CURSOR_LINE=$(jq -r '.cursor_line // 0' "$STATE_FILE")
-        # Load pending as newline-separated list
         STATE_PENDING=$(jq -r '.pending[]' "$STATE_FILE" 2>/dev/null || true)
-    else
-        STATE_CURSOR=""
-        STATE_CURSOR_LINE=0
-        STATE_PENDING=""
+        CURRENT_JOB_ID=$(jq -r '.current // ""' "$STATE_FILE")
+        if [ "$CURRENT_JOB_ID" = "null" ]; then
+            CURRENT_JOB_ID=""
+        fi
+
+        RUNNING_JSON=$(jq -c '.running // {}' "$STATE_FILE")
     fi
 }
 
@@ -121,7 +153,8 @@ save_state() {
         --argjson cursor_line "$STATE_CURSOR_LINE" \
         --argjson pending "$pending_json" \
         --argjson current "$current_json" \
-        '{cursor:$cursor,cursor_line:$cursor_line,pending:$pending,current:$current}' > "$STATE_FILE"
+        --argjson running "$RUNNING_JSON" \
+        '{cursor:$cursor,cursor_line:$cursor_line,pending:$pending,current:$current,running:$running}' > "$STATE_FILE"
 }
 
 # Add job to pending list (at end)
@@ -165,6 +198,96 @@ pending_empty() {
     [ -z "$STATE_PENDING" ]
 }
 
+running_contains() {
+    local job_id="$1"
+    jq -e --arg id "$job_id" '.[$id] != null' <<< "$RUNNING_JSON" >/dev/null 2>&1
+}
+
+remove_running_job() {
+    local job_id="$1"
+    RUNNING_JSON=$(jq -c --arg id "$job_id" 'del(.[$id])' <<< "$RUNNING_JSON")
+}
+
+update_current_from_running() {
+    local current
+    current=$(jq -r 'if length == 0 then "" else (to_entries | max_by(.value.started_at // 0) | .key) end' <<< "$RUNNING_JSON")
+    if [ -z "$current" ] || [ "$current" = "null" ]; then
+        CURRENT_JOB_ID=""
+        rm -f "$CURRENT_FILE"
+        return
+    fi
+    CURRENT_JOB_ID="$current"
+    echo "$CURRENT_JOB_ID" > "$CURRENT_FILE"
+}
+
+job_allotment_from_data() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+    local cpu
+    cpu=$(echo "$job_data" | jq -r '.cpu // empty')
+    if [[ "$cpu" =~ ^[0-9]+$ ]]; then
+        echo "$cpu"
+    else
+        echo "$DEFAULT_ALLOTMENT"
+    fi
+}
+
+refresh_running_allotment() {
+    local job_id="$1"
+    local new_allotment
+    new_allotment=$(job_allotment_from_data "$job_id")
+    RUNNING_JSON=$(jq -c \
+        --arg id "$job_id" \
+        --argjson allot "$new_allotment" \
+        '.[$id].local_allotment = $allot | .[$id].samples = [] | .[$id].over_hist = [] | .[$id].under_hist = []' <<< "$RUNNING_JSON")
+    log_op "job.allotment_update" "$job_id" "cpu=${new_allotment}"
+}
+
+running_ids() {
+    jq -r 'keys[]?' <<< "$RUNNING_JSON"
+}
+
+running_count() {
+    jq -r 'length' <<< "$RUNNING_JSON"
+}
+
+append_history() {
+    local history_json="$1"
+    local value="$2"
+    local max_len="$3"
+    jq -nc --argjson history "$history_json" --argjson val "$value" --argjson max "$max_len" \
+        '$history + [$val] | if length > $max then .[(length-$max):] else . end'
+}
+
+history_count() {
+    local history_json="$1"
+    jq -r --argjson history "$history_json" '[$history[] | select(. == 1)] | length'
+}
+
+append_sample() {
+    local samples_json="$1"
+    local value="$2"
+    jq -nc --argjson samples "$samples_json" --argjson val "$value" --argjson max "$SAMPLE_COUNT" \
+        '$samples + [$val] | if length > $max then .[(length-$max):] else . end'
+}
+
+sample_average() {
+    local samples_json="$1"
+    jq -r --argjson samples "$samples_json" 'if ($samples | length) > 0 then ($samples | add / length) else 0 end'
+}
+
+proc_cpu_host_pct() {
+    local pid="$1"
+    local raw
+    raw=$(ps -p "$pid" -o %cpu= 2>/dev/null | head -1 | tr -d ' ')
+    if [ -z "$raw" ]; then
+        echo "0"
+        return
+    fi
+    awk -v p="$raw" -v c="$CPU_COUNT" 'BEGIN { if (c < 1) c = 1; printf "%.0f", (p / c) }'
+}
+
 # Process new commands from the command log
 process_commands() {
     [ ! -f "$COMMANDS_FILE" ] && return
@@ -196,6 +319,9 @@ process_commands() {
                 echo "$line" | jq -c '.job' > "$QUEUE_DIR/job-${job_id}.json"
                 log_op "cmd.add" "$job_id"
                 echo "Command: add job $job_id"
+                if running_contains "$job_id"; then
+                    refresh_running_allotment "$job_id"
+                fi
                 ;;
             priority)
                 local job_id
@@ -214,6 +340,7 @@ process_commands() {
                 ;;
             stop)
                 stop_requested=true
+                STOP_REQUESTED=true
                 log_op "cmd.stop"
                 echo "Command: stop requested"
                 ;;
@@ -319,14 +446,14 @@ check_dependencies() {
     echo "ok"
 }
 
-# Run a single job
-run_job() {
+# Start a single job in the background
+start_job() {
     local job_id="$1"
     local job_data
     job_data=$(get_job_data "$job_id")
 
     # Extract job fields using jq
-    local working_dir command description env_vars deps_spec
+    local working_dir command description deps_spec
     working_dir=$(echo "$job_data" | jq -r '.dir // ""')
     command=$(echo "$job_data" | jq -r '.cmd // ""')
     description=$(echo "$job_data" | jq -r '.desc // ""')
@@ -390,11 +517,6 @@ run_job() {
         fi
     done
 
-    # Mark as current
-    echo "$job_id" > "$CURRENT_FILE"
-    CURRENT_JOB_ID="$job_id"
-    save_state
-
     log_op "job.start" "$job_id" "cmd=$command"
     echo "=========================================="
     echo "Starting job $job_id"
@@ -431,12 +553,12 @@ run_job() {
     local env_vars_json
     env_vars_json=$(echo "$job_data" | jq -r '.env // []')
 
-    set +e
     (
+        set +e
         # cd if working directory specified
         if [ -n "$working_dir" ]; then
             cd "$eval_working_dir" 2>/dev/null || {
-                echo "ERROR: Could not cd to $working_dir" >> "$log_file"
+                echo "ERROR: Could not cd to $working_dir"
                 exit 1
             }
         fi
@@ -451,82 +573,199 @@ run_job() {
             [ -n "$env_line" ] && [ "$env_line" != "null" ] && export "$env_line"
         done < <(echo "$env_vars_json" | jq -r '.[]' 2>/dev/null)
 
-        # Record PID and exec
-        echo $BASHPID > "$pid_file"
-        exec bash -c "$command"
+        bash -c "$command"
+        exit_code=$?
+
+        local end_time duration
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+
+        echo "$exit_code" > "$status_file"
+        echo "=== END exit=$exit_code $(date) ==="
+
+        if [ "$exit_code" -eq 0 ]; then
+            log_op "job.completed" "$job_id" "exit=0 duration=${duration}s"
+            echo "Job $job_id completed successfully"
+        else
+            log_op "job.failed" "$job_id" "exit=$exit_code duration=${duration}s"
+            echo "Job $job_id failed with exit code $exit_code"
+        fi
+
+        if [ -x "$NOTIFY_SCRIPT" ]; then
+            "$NOTIFY_SCRIPT" "rj-$job_id" "$exit_code" "$(hostname)" "$meta_file" 2>/dev/null || true
+        fi
+
+        rm -f "$pid_file" "$QUEUE_DIR/job-${job_id}.json"
+        exit "$exit_code"
     ) >> "$log_file" 2>&1 &
+
     local cmd_pid=$!
+    echo "$cmd_pid" > "$pid_file"
 
-    # Wait for completion
-    local exit_code=0
-    while true; do
-        if ! kill -0 $cmd_pid 2>/dev/null; then
-            wait $cmd_pid 2>/dev/null
-            exit_code=$?
-            break
-        fi
+    local local_allotment
+    local_allotment=$(job_allotment_from_data "$job_id")
+    RUNNING_JSON=$(jq -nc \
+        --argjson running "$RUNNING_JSON" \
+        --arg id "$job_id" \
+        --argjson started_at "$start_time" \
+        --argjson warmup_until "$((start_time + WARMUP_DURATION))" \
+        --argjson local_allotment "$local_allotment" \
+        '$running + {($id | tonumber): {started_at: $started_at, warmup_until: $warmup_until, local_allotment: $local_allotment, samples: [], over_hist: [], under_hist: []}}')
 
-        if [ -f "$status_file" ]; then
-            exit_code=$(cat "$status_file")
-            sleep 1
-            kill -0 $cmd_pid 2>/dev/null && kill $cmd_pid 2>/dev/null
-            wait $cmd_pid 2>/dev/null || true
-            break
-        fi
-
-        # Check for stop command (re-process commands)
-        if ! process_commands 2>/dev/null; then
-            echo "Stop requested while job running, killing job..."
-            kill $cmd_pid 2>/dev/null || true
-            wait $cmd_pid 2>/dev/null
-            exit_code=$?
-            break
-        fi
-
-        sleep 2
-    done
-    set -e
-
-    local end_time duration
-    end_time=$(date +%s)
-    duration=$((end_time - start_time))
-
-    # Write status
-    echo "$exit_code" > "$status_file"
-    echo "=== END exit=$exit_code $(date) ===" >> "$log_file"
-
-    # Format duration
-    local hours minutes seconds duration_text
-    hours=$((duration / 3600))
-    minutes=$(((duration % 3600) / 60))
-    seconds=$((duration % 60))
-    if [ $hours -gt 0 ]; then
-        duration_text="${hours}h ${minutes}m ${seconds}s"
-    elif [ $minutes -gt 0 ]; then
-        duration_text="${minutes}m ${seconds}s"
-    else
-        duration_text="${seconds}s"
-    fi
-
-    if [ "$exit_code" -eq 0 ]; then
-        log_op "job.completed" "$job_id" "exit=0 duration=${duration}s"
-        echo "Job $job_id completed successfully in $duration_text"
-    else
-        log_op "job.failed" "$job_id" "exit=$exit_code duration=${duration}s"
-        echo "Job $job_id failed with exit code $exit_code in $duration_text"
-    fi
-
-    # Cleanup
-    rm -f "$CURRENT_FILE" "$pid_file" "$QUEUE_DIR/job-${job_id}.json"
-    CURRENT_JOB_ID=""
+    CURRENT_JOB_ID="$job_id"
+    echo "$CURRENT_JOB_ID" > "$CURRENT_FILE"
     save_state
 
-    # Slack notification
-    if [ -x "$NOTIFY_SCRIPT" ]; then
-        "$NOTIFY_SCRIPT" "rj-$job_id" "$exit_code" "$(hostname)" "$meta_file" 2>/dev/null || true
-    fi
-
     return 0
+}
+
+warmup_active() {
+    local now
+    now=$(date +%s)
+    local ids
+    ids=$(running_ids)
+    for job_id in $ids; do
+        local warmup_until
+        warmup_until=$(jq -r --arg id "$job_id" '.[$id].warmup_until // 0' <<< "$RUNNING_JSON")
+        if [ "$warmup_until" -gt "$now" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+total_local_allotment() {
+    jq -r '[.[]?.local_allotment // 0] | add // 0' <<< "$RUNNING_JSON"
+}
+
+refresh_running_jobs() {
+    local changed=false
+    local ids
+    ids=$(running_ids)
+    for job_id in $ids; do
+        local status_file="$LOG_DIR/${job_id}.status"
+        local pid_file="$LOG_DIR/${job_id}.pid"
+        if [ -f "$status_file" ]; then
+            remove_running_job "$job_id"
+            changed=true
+            continue
+        fi
+        if [ -f "$pid_file" ]; then
+            local pid
+            pid=$(cat "$pid_file" 2>/dev/null | tail -1)
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                continue
+            fi
+        fi
+
+        if [ ! -f "$status_file" ]; then
+            echo "1" > "$status_file"
+            log_op "job.failed" "$job_id" "exit=1 duration=0"
+        fi
+        remove_running_job "$job_id"
+        changed=true
+    done
+    update_current_from_running
+    if [ "$changed" = true ]; then
+        save_state
+    fi
+}
+
+sample_running_jobs() {
+    local now
+    now=$(date +%s)
+    if [ "$LAST_SAMPLE_TIME" -ne 0 ] && [ $((now - LAST_SAMPLE_TIME)) -lt "$SAMPLE_INTERVAL" ]; then
+        return
+    fi
+    LAST_SAMPLE_TIME="$now"
+
+    local updated=false
+    local ids
+    ids=$(running_ids)
+    for job_id in $ids; do
+        local pid_file="$LOG_DIR/${job_id}.pid"
+        local warmup_until
+        warmup_until=$(jq -r --arg id "$job_id" '.[$id].warmup_until // 0' <<< "$RUNNING_JSON")
+        if [ "$warmup_until" -gt "$now" ]; then
+            continue
+        fi
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null | tail -1)
+        if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+            continue
+        fi
+
+        local host_pct
+        host_pct=$(proc_cpu_host_pct "$pid")
+        local samples_json
+        samples_json=$(jq -c --arg id "$job_id" '.[$id].samples // []' <<< "$RUNNING_JSON")
+        samples_json=$(append_sample "$samples_json" "$host_pct")
+        RUNNING_JSON=$(jq -c --arg id "$job_id" --argjson samples "$samples_json" '.[$id].samples = $samples' <<< "$RUNNING_JSON")
+
+        local avg
+        avg=$(sample_average "$samples_json")
+        local sample_count
+        sample_count=$(jq -r --argjson samples "$samples_json" '($samples | length)')
+        if [ "$sample_count" -lt "$SAMPLE_COUNT" ]; then
+            updated=true
+            continue
+        fi
+        local local_allotment
+        local_allotment=$(jq -r --arg id "$job_id" '.[$id].local_allotment // 0' <<< "$RUNNING_JSON")
+
+        local over under
+        over=$(awk -v avg="$avg" -v allot="$local_allotment" 'BEGIN {print (avg > allot) ? 1 : 0}')
+        under=$(awk -v avg="$avg" -v allot="$local_allotment" 'BEGIN {print (avg < (allot - 10)) ? 1 : 0}')
+
+        local over_hist
+        local under_hist
+        over_hist=$(jq -c --arg id "$job_id" '.[$id].over_hist // []' <<< "$RUNNING_JSON")
+        under_hist=$(jq -c --arg id "$job_id" '.[$id].under_hist // []' <<< "$RUNNING_JSON")
+        over_hist=$(append_history "$over_hist" "$over" "$HYSTERESIS_WINDOW")
+        under_hist=$(append_history "$under_hist" "$under" "$HYSTERESIS_WINDOW")
+        RUNNING_JSON=$(jq -c \
+            --arg id "$job_id" \
+            --argjson over_hist "$over_hist" \
+            --argjson under_hist "$under_hist" \
+            '.[$id].over_hist = $over_hist | .[$id].under_hist = $under_hist' <<< "$RUNNING_JSON")
+
+        local over_count under_count
+        over_count=$(history_count "$over_hist")
+        under_count=$(history_count "$under_hist")
+
+        if [ "$over_count" -ge "$HYSTERESIS_THRESHOLD" ]; then
+            local new_allotment
+            new_allotment=$(awk -v avg="$avg" -v step="$INCREASE_STEP" -v max="$MAX_ALLOTMENT" 'BEGIN {v = avg + step; if (v > max) v = max; if (v < 0) v = 0; printf "%.0f", v}')
+            if [ "$new_allotment" -lt "$MIN_ALLOTMENT" ]; then
+                new_allotment="$MIN_ALLOTMENT"
+            fi
+            RUNNING_JSON=$(jq -c \
+                --arg id "$job_id" \
+                --argjson allot "$new_allotment" \
+                '.[$id].local_allotment = $allot | .[$id].samples = [] | .[$id].over_hist = [] | .[$id].under_hist = []' <<< "$RUNNING_JSON")
+            log_op "job.allotment_increase" "$job_id" "cpu=${new_allotment} observed=${avg}"
+            updated=true
+            continue
+        fi
+
+        if [ "$under_count" -ge "$HYSTERESIS_THRESHOLD" ]; then
+            local new_allotment
+            new_allotment=$((local_allotment - DECAY_STEP))
+            if [ "$new_allotment" -lt "$MIN_ALLOTMENT" ]; then
+                new_allotment="$MIN_ALLOTMENT"
+            fi
+            RUNNING_JSON=$(jq -c \
+                --arg id "$job_id" \
+                --argjson allot "$new_allotment" \
+                '.[$id].local_allotment = $allot | .[$id].samples = [] | .[$id].over_hist = [] | .[$id].under_hist = []' <<< "$RUNNING_JSON")
+            log_op "job.allotment_decay" "$job_id" "cpu=${new_allotment} observed=${avg}"
+            updated=true
+        fi
+    done
+
+    if [ "$updated" = true ]; then
+        save_state
+    fi
 }
 
 # Main
@@ -542,7 +781,14 @@ load_state
 # Main loop
 while true; do
     # Process any new commands
-    if ! process_commands; then
+    process_commands || true
+
+    # Refresh running jobs and sampling
+    refresh_running_jobs
+    sample_running_jobs
+
+    # Stop requested: exit once pending and running are empty
+    if [ "$STOP_REQUESTED" = true ] && pending_empty && [ "$(running_count)" -eq 0 ]; then
         log_op "queue.stop" "" "stop command received"
         echo "Stop command received, exiting..."
         break
@@ -550,6 +796,15 @@ while true; do
 
     # Check if we have pending jobs
     if pending_empty; then
+        sleep 5
+        continue
+    fi
+
+    if warmup_active; then
+        sleep 2
+        continue
+    fi
+    if [ "$STOP_REQUESTED" = true ]; then
         sleep 5
         continue
     fi
@@ -562,9 +817,19 @@ while true; do
         continue
     fi
 
-    # Run the job
+    # Check capacity before starting
+    current_allotment=$(total_local_allotment)
+    next_allotment=$(job_allotment_from_data "$POPPED_JOB")
+    if [ $((current_allotment + next_allotment)) -gt "$HOST_UTILIZATION_TARGET" ]; then
+        add_pending "$POPPED_JOB"
+        save_state
+        sleep 5
+        continue
+    fi
+
+    # Start the job
     run_result=0
-    run_job "$POPPED_JOB" || run_result=$?
+    start_job "$POPPED_JOB" || run_result=$?
 
     case "$run_result" in
         2)
@@ -574,7 +839,6 @@ while true; do
             sleep 10
             ;;
         *)
-            # For any other result (success or failure), save state to reflect the job was removed from pending
             save_state
             ;;
     esac

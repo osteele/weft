@@ -721,7 +721,11 @@ if ls "$LOG_DIR"/*.pid >/dev/null 2>&1; then
 	done
 fi
 echo "__TOP__"
-ps -eo user=,pid=,%%cpu=,command= --sort=-%%cpu | head -n $LIMIT
+if [ "$(uname)" = "Darwin" ]; then
+	ps -Ao user=,pid=,%%cpu=,command= -r | head -n $LIMIT
+else
+	ps -eo user=,pid=,%%cpu=,command= --sort=-%%cpu | head -n $LIMIT
+fi
 `, remoteLogDir, limit)
 
 	stdout, stderr, err := RunWithTimeout(host, cmd, 15*time.Second)

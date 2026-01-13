@@ -398,6 +398,40 @@ func TestSetJobEnvVars(t *testing.T) {
 	}
 }
 
+func TestSetJobCPUAllotment(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host", "/tmp", "echo ok", "desc", "default")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	allotment := 40
+	if err := SetJobCPUAllotment(database, jobID, &allotment); err != nil {
+		t.Fatalf("set cpu allotment: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.CPUAllotment == nil || *job.CPUAllotment != allotment {
+		t.Fatalf("expected CPU allotment %d, got %#v", allotment, job.CPUAllotment)
+	}
+
+	if err := SetJobCPUAllotment(database, jobID, nil); err != nil {
+		t.Fatalf("clear cpu allotment: %v", err)
+	}
+
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.CPUAllotment != nil {
+		t.Fatalf("expected CPU allotment cleared, got %#v", job.CPUAllotment)
+	}
+}
+
 func TestSetJobTags(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")

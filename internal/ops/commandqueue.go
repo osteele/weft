@@ -27,6 +27,7 @@ type CommandJob struct {
 	Desc string   `json:"desc,omitempty"`
 	Env  []string `json:"env,omitempty"`
 	Deps string   `json:"deps,omitempty"`
+	CPU  *int     `json:"cpu,omitempty"`
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -60,6 +61,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			Desc: entry.Description,
 			Env:  entry.EnvVars,
 			Deps: entry.DepSpec,
+			CPU:  entry.CPUAllotment,
 		},
 	}
 }
@@ -164,10 +166,21 @@ func AppendCommandLocal(commandsFile string, cmd QueueCommand) error {
 // RunnerState represents the queue runner's internal state.
 // Only the queue runner writes to this file.
 type RunnerState struct {
-	Cursor     string  `json:"cursor"`      // Timestamp of last processed command
-	CursorLine int     `json:"cursor_line"` // Line number of last processed command
-	Pending    []int64 `json:"pending"`     // Job IDs waiting to run (in order)
-	Current    *int64  `json:"current"`     // Currently running job ID (nil if none)
+	Cursor     string                   `json:"cursor"`            // Timestamp of last processed command
+	CursorLine int                      `json:"cursor_line"`       // Line number of last processed command
+	Pending    []int64                  `json:"pending"`           // Job IDs waiting to run (in order)
+	Current    *int64                   `json:"current"`           // Currently running job ID (nil if none)
+	Running    map[int64]RunnerJobState `json:"running,omitempty"` // Active jobs keyed by ID
+}
+
+// RunnerJobState captures per-job runtime state for concurrent execution.
+type RunnerJobState struct {
+	StartedAt      int64 `json:"started_at"`
+	WarmupUntil    int64 `json:"warmup_until"`
+	LocalAllotment int   `json:"local_allotment"`
+	Samples        []int `json:"samples,omitempty"`
+	OverCount      int   `json:"over_count"`
+	UnderCount     int   `json:"under_count"`
 }
 
 // StateFileName returns the filename for the runner state file.

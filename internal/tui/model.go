@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -546,8 +547,13 @@ const (
 	inputCommand
 	inputWorkingDir
 	inputGPU
+	inputCPUAllotment
 	inputEnvVars
 )
+
+const defaultCPUAllotment = 60
+
+var cpuAllotmentPresets = []int{20, 40, 60, 80}
 
 // Model is the main TUI state
 type Model struct {
@@ -718,7 +724,7 @@ func NewModel(database *sql.DB) Model {
 // NewModelWithOptions creates a new TUI model with custom options
 func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Create text inputs for new job form
-	inputs := make([]textinput.Model, 6)
+	inputs := make([]textinput.Model, 7)
 
 	inputs[inputHost] = textinput.New()
 	inputs[inputHost].Placeholder = "e.g., cool30"
@@ -749,6 +755,12 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputGPU].Prompt = ""
 	inputs[inputGPU].Width = 40
 	inputs[inputGPU].CharLimit = 64
+
+	inputs[inputCPUAllotment] = textinput.New()
+	inputs[inputCPUAllotment].Placeholder = "default (20/40/60/80)"
+	inputs[inputCPUAllotment].Prompt = ""
+	inputs[inputCPUAllotment].Width = 40
+	inputs[inputCPUAllotment].CharLimit = 8
 
 	inputs[inputEnvVars] = textinput.New()
 	inputs[inputEnvVars].Placeholder = "VAR=value, VAR2=value2 (optional)"
@@ -1771,6 +1783,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputs[inputCommand].SetValue(job.Command)
 		m.inputs[inputDescription].SetValue(job.Description)
 		m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
+		m.inputs[inputCPUAllotment].SetValue(formatCPUAllotmentInput(job.CPUAllotment))
 		return m, nil
 
 	case key.Matches(msg, keys.Logs):
@@ -1920,6 +1933,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Don't pre-populate description - it may contain error messages from failed jobs
 			// and descriptions are usually different for each job anyway
 			m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
+			m.inputs[inputCPUAllotment].SetValue(formatCPUAllotmentInput(job.CPUAllotment))
 		}
 		return m, nil
 
@@ -2046,6 +2060,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputs[inputDescription].SetValue(job.Description)
 		m.inputs[inputWorkingDir].SetValue(job.WorkingDir)
 		m.inputs[inputGPU].SetValue("")
+		m.inputs[inputCPUAllotment].SetValue(formatCPUAllotmentInput(job.CPUAllotment))
 		m.inputs[inputEnvVars].SetValue("")
 		m.editingJobDepSpec = ""
 		return m, m.fetchQueuedJobEnv(job)
@@ -2344,7 +2359,7 @@ func (m Model) renderInputForm(background string) string {
 		b.WriteString("New Job\n\n")
 	}
 
-	labels := []string{"Host:", "Description:", "Command:", "Working Dir:", "GPU:", "Env Vars:"}
+	labels := []string{"Host:", "Description:", "Command:", "Working Dir:", "GPU:", "CPU:", "Env Vars:"}
 	for i, input := range m.inputs {
 		label := labelStyle
 		if i == m.inputFocus {
@@ -2352,6 +2367,11 @@ func (m Model) renderInputForm(background string) string {
 		}
 		b.WriteString(label.Render(labels[i]))
 		b.WriteString(input.View())
+		if i == inputCPUAllotment {
+			if hint := m.cpuAllotmentHint(); hint != "" {
+				b.WriteString(dimStyle.Render(" " + hint))
+			}
+		}
 		b.WriteString("\n\n")
 	}
 
@@ -2376,6 +2396,65 @@ func (m Model) renderInputForm(background string) string {
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("237")),
 	)
+}
+
+func (m Model) cpuAllotmentHint() string {
+	hostName := strings.TrimSpace(m.inputs[inputHost].Value())
+	if hostName == "" {
+		return ""
+	}
+	host := m.findHostByName(hostName)
+	if host == nil || host.CPUs == 0 {
+		return ""
+	}
+	allotment, err := parseCPUAllotmentInput(m.inputs[inputCPUAllotment].Value())
+	if err != nil {
+		return "use " + formatPresetList(cpuAllotmentPresets) + " or default"
+	}
+	percent := defaultCPUAllotment
+	if allotment != nil {
+		percent = *allotment
+	}
+	cores := float64(host.CPUs) * float64(percent) / 100.0
+	coreText := fmt.Sprintf("%.1f", cores)
+	if rounded := math.Round(cores); math.Abs(cores-rounded) < 0.05 {
+		coreText = fmt.Sprintf("%.0f", rounded)
+	}
+	return fmt.Sprintf("%d%% ≈ %s cores on %d-core host", percent, coreText, host.CPUs)
+}
+
+func (m Model) formatCPUAllotmentDisplay(job *db.Job) string {
+	allotment := defaultCPUAllotment
+	source := "default"
+	if job.CPUAllotment != nil {
+		allotment = *job.CPUAllotment
+		source = "requested"
+	}
+	host := m.findHostByName(job.Host)
+	if host == nil || host.CPUs == 0 {
+		if source == "default" {
+			return fmt.Sprintf("%d%% (%s)", allotment, source)
+		}
+		return fmt.Sprintf("%d%%", allotment)
+	}
+	cores := float64(host.CPUs) * float64(allotment) / 100.0
+	coreText := fmt.Sprintf("%.1f", cores)
+	if rounded := math.Round(cores); math.Abs(cores-rounded) < 0.05 {
+		coreText = fmt.Sprintf("%.0f", rounded)
+	}
+	if source == "default" {
+		return fmt.Sprintf("%d%% (%s cores on %d-core host, %s)", allotment, coreText, host.CPUs, source)
+	}
+	return fmt.Sprintf("%d%% (%s cores on %d-core host)", allotment, coreText, host.CPUs)
+}
+
+func (m Model) findHostByName(name string) *Host {
+	for _, host := range m.hosts {
+		if host.Name == name {
+			return host
+		}
+	}
+	return nil
 }
 
 func (m Model) renderJobList(height int) string {
@@ -2804,8 +2883,20 @@ func (m Model) renderJobCPUTop(height int) string {
 		b.WriteString(lipgloss.NewStyle().Bold(true).Render(header))
 		b.WriteString("\n")
 
+		availableLines := height - 4
+		maxRows := len(m.jobCPUTopEntries)
+		if availableLines > 0 && maxRows > availableLines-2 {
+			maxRows = availableLines - 2
+		}
+		if maxRows < 0 {
+			maxRows = 0
+		}
+
 		totalCPU := 0.0
-		for _, proc := range m.jobCPUTopEntries {
+		for i, proc := range m.jobCPUTopEntries {
+			if i >= maxRows {
+				break
+			}
 			process := proc.Command
 			if process == "" {
 				process = fmt.Sprintf("PID %d", proc.PID)
@@ -2832,6 +2923,12 @@ func (m Model) renderJobCPUTop(height int) string {
 		)
 		b.WriteString(totalLine)
 		b.WriteString("\n")
+
+		remaining := len(m.jobCPUTopEntries) - maxRows
+		if remaining > 0 {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("... and %d more", remaining)))
+			b.WriteString("\n")
+		}
 
 		if !m.jobCPUTopUpdated.IsZero() {
 			b.WriteString("\n")
@@ -2969,6 +3066,12 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	if len(envVars) > 0 {
 		b.WriteString(labelStyle.Render("Env"))
 		b.WriteString(valueStyle.Render(strings.Join(envVars, ", ")))
+		b.WriteString("\n")
+	}
+
+	if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+		b.WriteString(labelStyle.Render("CPU"))
+		b.WriteString(valueStyle.Render(m.formatCPUAllotmentDisplay(job)))
 		b.WriteString("\n")
 	}
 
@@ -4047,8 +4150,20 @@ func (m Model) renderHostCPUTop(height int) string {
 		b.WriteString(lipgloss.NewStyle().Bold(true).Render(header))
 		b.WriteString("\n")
 
+		availableLines := height - 4
+		maxRows := len(m.hostCPUTopEntries)
+		if availableLines > 0 && maxRows > availableLines-2 {
+			maxRows = availableLines - 2
+		}
+		if maxRows < 0 {
+			maxRows = 0
+		}
+
 		totalCPU := 0.0
-		for _, proc := range m.hostCPUTopEntries {
+		for i, proc := range m.hostCPUTopEntries {
+			if i >= maxRows {
+				break
+			}
 			jobLabel := "—"
 			if proc.JobID > 0 {
 				jobLabel = fmt.Sprintf("#%d", proc.JobID)
@@ -4081,6 +4196,12 @@ func (m Model) renderHostCPUTop(height int) string {
 		)
 		b.WriteString(totalLine)
 		b.WriteString("\n")
+
+		remaining := len(m.hostCPUTopEntries) - maxRows
+		if remaining > 0 {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("... and %d more", remaining)))
+			b.WriteString("\n")
+		}
 
 		if !m.hostCPUTopUpdated.IsZero() {
 			b.WriteString("\n")
@@ -6878,6 +6999,8 @@ func (m Model) createJob() tea.Cmd {
 	workingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
 	envVarsStr := strings.TrimSpace(m.inputs[inputEnvVars].Value())
 	gpuInput := strings.TrimSpace(m.inputs[inputGPU].Value())
+	cpuInput := strings.TrimSpace(m.inputs[inputCPUAllotment].Value())
+	cpuAllotment, cpuErr := parseCPUAllotmentInput(cpuInput)
 
 	// Normalize command: extract cd/env prefixes into proper fields
 	// This allows users to paste commands like "cd /foo && env CUDA=0 python train.py"
@@ -6912,13 +7035,17 @@ func (m Model) createJob() tea.Cmd {
 	envVars = mergeGPUEnvVars(envVars, gpuInput)
 
 	return func() tea.Msg {
+		if cpuErr != nil {
+			return jobCreatedMsg{err: cpuErr}
+		}
 		// Queue job for sequential execution via queue runner
 		result, err := ops.QueueJob(database, ops.QueueJobParams{
-			Host:        host,
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: description,
-			EnvVars:     envVars,
+			Host:         host,
+			WorkingDir:   workingDir,
+			Command:      command,
+			Description:  description,
+			EnvVars:      envVars,
+			CPUAllotment: cpuAllotment,
 		}, ops.DefaultOptions())
 
 		if err != nil {
@@ -6942,8 +7069,13 @@ func (m Model) editJob() tea.Cmd {
 	newWorkingDir := strings.TrimSpace(m.inputs[inputWorkingDir].Value())
 	envVarsStr := strings.TrimSpace(m.inputs[inputEnvVars].Value())
 	gpuInput := strings.TrimSpace(m.inputs[inputGPU].Value())
+	cpuInput := strings.TrimSpace(m.inputs[inputCPUAllotment].Value())
 
 	return func() tea.Msg {
+		newAllotment, err := parseCPUAllotmentInput(cpuInput)
+		if err != nil {
+			return jobEditedMsg{jobID: jobID, err: err}
+		}
 		// Get the current job to check status and get original host
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
@@ -6988,7 +7120,7 @@ func (m Model) editJob() tea.Cmd {
 		}
 		envVars = mergeGPUEnvVars(envVars, gpuInput)
 
-		operationalChange := newWorkingDir != job.WorkingDir || newCommand != job.Command || gpuInput != job.GPU || !equalEnvVars(envVars, job.EnvVars)
+		operationalChange := newWorkingDir != job.WorkingDir || newCommand != job.Command || gpuInput != job.GPU || !equalEnvVars(envVars, job.EnvVars) || !equalCPUAllotment(newAllotment, job.CPUAllotment)
 
 		// Update the remote queue file
 		queueName := job.QueueName
@@ -7002,11 +7134,12 @@ func (m Model) editJob() tea.Cmd {
 			}
 		}
 		updatedJob := &db.Job{
-			ID:          jobID,
-			Host:        job.Host,
-			Command:     newCommand,
-			WorkingDir:  newWorkingDir,
-			Description: newDescription,
+			ID:           jobID,
+			Host:         job.Host,
+			Command:      newCommand,
+			WorkingDir:   newWorkingDir,
+			Description:  newDescription,
+			CPUAllotment: newAllotment,
 		}
 
 		if !equalEnvVars(envVars, job.EnvVars) {
@@ -7017,6 +7150,11 @@ func (m Model) editJob() tea.Cmd {
 		if gpuInput != job.GPU {
 			if err := db.SetJobGPU(database, jobID, gpuInput); err != nil {
 				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update GPU: %w", err)}
+			}
+		}
+		if !equalCPUAllotment(newAllotment, job.CPUAllotment) {
+			if err := db.SetJobCPUAllotment(database, jobID, newAllotment); err != nil {
+				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update CPU allotment: %w", err)}
 			}
 		}
 
@@ -7043,6 +7181,49 @@ func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []strin
 		EnvVars:   envVars,
 		DepSpec:   depSpec,
 	})
+}
+
+func parseCPUAllotmentInput(input string) (*int, error) {
+	trimmed := strings.TrimSpace(strings.ToLower(input))
+	if trimmed == "" || trimmed == "default" {
+		return nil, nil
+	}
+	trimmed = strings.TrimSuffix(trimmed, "%")
+	value, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return nil, fmt.Errorf("CPU allotment must be one of %s", formatPresetList(cpuAllotmentPresets))
+	}
+	for _, preset := range cpuAllotmentPresets {
+		if value == preset {
+			return &value, nil
+		}
+	}
+	return nil, fmt.Errorf("CPU allotment must be one of %s", formatPresetList(cpuAllotmentPresets))
+}
+
+func formatCPUAllotmentInput(allotment *int) string {
+	if allotment == nil {
+		return ""
+	}
+	return strconv.Itoa(*allotment)
+}
+
+func equalCPUAllotment(a, b *int) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
+}
+
+func formatPresetList(presets []int) string {
+	parts := make([]string, 0, len(presets))
+	for _, preset := range presets {
+		parts = append(parts, fmt.Sprintf("%d", preset))
+	}
+	return strings.Join(parts, "/")
 }
 
 func fetchQueueEntryData(ctx context.Context, host, queueName string, jobID int64) (*queueEntryData, error) {

@@ -37,12 +37,13 @@ func escapeForQueueFile(s string) string {
 
 // QueueEntry represents a job entry to be added to a remote queue
 type QueueEntry struct {
-	JobID       int64
-	WorkingDir  string
-	Command     string
-	Description string
-	EnvVars     []string
-	DepSpec     string
+	JobID        int64
+	WorkingDir   string
+	Command      string
+	Description  string
+	EnvVars      []string
+	DepSpec      string
+	CPUAllotment *int
 }
 
 // AppendQueueEntryOptions configures the queue append operation
@@ -193,12 +194,13 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 	}
 
 	entry := QueueEntry{
-		JobID:       params.Job.ID,
-		WorkingDir:  params.Job.WorkingDir,
-		Command:     params.Job.Command,
-		Description: params.Job.Description,
-		EnvVars:     params.EnvVars,
-		DepSpec:     params.DepSpec,
+		JobID:        params.Job.ID,
+		WorkingDir:   params.Job.WorkingDir,
+		Command:      params.Job.Command,
+		Description:  params.Job.Description,
+		EnvVars:      params.EnvVars,
+		DepSpec:      params.DepSpec,
+		CPUAllotment: params.Job.CPUAllotment,
 	}
 
 	// Use new command queue format
@@ -271,13 +273,14 @@ func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSp
 
 // QueueJobParams contains parameters for queueing a new job
 type QueueJobParams struct {
-	Host        string
-	WorkingDir  string
-	Command     string
-	Description string
-	EnvVars     []string
-	QueueName   string
-	DepSpec     string
+	Host         string
+	WorkingDir   string
+	Command      string
+	Description  string
+	EnvVars      []string
+	QueueName    string
+	DepSpec      string
+	CPUAllotment *int
 }
 
 // QueueJob creates a job record and adds it to the remote queue.
@@ -310,15 +313,22 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
 		return Result{}, fmt.Errorf("record dependencies: %w", err)
 	}
+	if params.CPUAllotment != nil {
+		if err := db.SetJobCPUAllotment(database, jobID, params.CPUAllotment); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record CPU allotment: %w", err)
+		}
+	}
 
 	// Build queue entry
 	entry := QueueEntry{
-		JobID:       jobID,
-		WorkingDir:  params.WorkingDir,
-		Command:     params.Command,
-		Description: params.Description,
-		EnvVars:     params.EnvVars,
-		DepSpec:     params.DepSpec,
+		JobID:        jobID,
+		WorkingDir:   params.WorkingDir,
+		Command:      params.Command,
+		Description:  params.Description,
+		EnvVars:      params.EnvVars,
+		DepSpec:      params.DepSpec,
+		CPUAllotment: params.CPUAllotment,
 	}
 
 	// Append to remote queue

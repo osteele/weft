@@ -52,6 +52,21 @@ remote-jobs run --cpus 4 --mem 16G --gpu 1 cool30 "train.py"
 - Queue jobs waiting for resources
 - May require host-level resource tracking
 
+## macOS Per-Job Stats
+
+Add per-job CPU/memory/thread stats for macOS hosts in the TUI.
+
+### Motivation
+- The job detail CPU panel currently relies on `/proc`, so it reports no per-job
+  stats on macOS.
+- Host-level top processes now work on macOS, but per-job stats remain empty.
+
+### Possible Approach
+- Use `ps -p <pid> -o %cpu=,rss=,comm=` and `ps -M <pid>` or `sysctl`/`proc_pidinfo`
+  equivalents to estimate CPU time and thread count.
+- Mirror the Linux fields we already show (CPU%, RSS, threads).
+- Keep the Linux path unchanged; add a macOS branch in `internal/ssh.GetProcessStats`.
+
 ## Job Tags
 
 Tag jobs for organization and bulk operations.
