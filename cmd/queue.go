@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -40,7 +41,7 @@ Subcommands:
   stop    Stop the queue runner after current job
   list    List jobs in the queue
   status  Show queue runner status
-  upgrade Restart the queue runner if the script is outdated`,
+  update  Update the queue runner script on a host`,
 }
 
 var queueAddCmd = &cobra.Command{
@@ -117,6 +118,17 @@ Examples:
   remote-jobs queue status --queue gpu cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStatus,
+}
+
+var queueUpdateCmd = &cobra.Command{
+	Use:   "update <host>",
+	Short: "Update the queue runner script on a remote host",
+	Long: `Update the queue runner script on a remote host.
+
+If the script was updated and the runner is currently running, the command
+will attempt a short restart so the new version is picked up.`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runQueueUpdate,
 }
 
 var queueRemoveCmd = &cobra.Command{
@@ -209,6 +221,7 @@ func init() {
 	queueCmd.AddCommand(queueStopCmd)
 	queueCmd.AddCommand(queueListCmd)
 	queueCmd.AddCommand(queueStatusCmd)
+	queueCmd.AddCommand(queueUpdateCmd)
 	queueCmd.AddCommand(queueRemoveCmd)
 	queueCmd.AddCommand(queueFrontCmd)
 	queueCmd.AddCommand(queueEditCmd)
@@ -216,7 +229,7 @@ func init() {
 	addEditFlags(queueEditCmd)
 
 	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueRemoveCmd, queueFrontCmd, queueEditCmd} {
+	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpdateCmd, queueRemoveCmd, queueFrontCmd, queueEditCmd} {
 		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
 	}
 
@@ -505,6 +518,68 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		fmt.Println("\nSTOP signal pending - runner will exit after current job")
 	}
 
+	return nil
+}
+
+func runQueueUpdate(cmd *cobra.Command, args []string) error {
+	host := args[0]
+	runner := queuerunner.NewRunner(host, queueName)
+
+	upgraded, err := queuerunner.EnsureScriptUpToDate(host)
+	if err != nil {
+		return fmt.Errorf("update queue runner script: %w", err)
+	}
+
+	running, err := runner.IsRunning()
+	if err != nil {
+		return fmt.Errorf("check queue runner: %w", err)
+	}
+
+	if !upgraded {
+		if running {
+			fmt.Printf("Queue runner on %s is already up to date (build %d) and running.\n", host, queuerunner.LocalBuildNumber())
+		} else {
+			fmt.Printf("Queue runner script on %s is already up to date (build %d).\n", host, queuerunner.LocalBuildNumber())
+		}
+		return nil
+	}
+
+	fmt.Printf("Updated queue runner script on %s (build %d).\n", host, queuerunner.LocalBuildNumber())
+	if !running {
+		return nil
+	}
+
+	if err := runner.SendStopSignal(); err != nil {
+		return fmt.Errorf("signal queue runner stop: %w", err)
+	}
+
+	stopped := false
+	for i := 0; i < 3; i++ {
+		time.Sleep(500 * time.Millisecond)
+		stillRunning, err := runner.IsRunning()
+		if err != nil {
+			return fmt.Errorf("check queue runner: %w", err)
+		}
+		if !stillRunning {
+			stopped = true
+			break
+		}
+	}
+
+	if !stopped {
+		fmt.Printf("Queue runner on %s will pick up the update after the current job completes.\n", host)
+		return nil
+	}
+
+	started, err := runner.EnsureStarted("")
+	if err != nil {
+		return fmt.Errorf("restart queue runner: %w", err)
+	}
+	if started {
+		fmt.Printf("Queue runner on %s restarted.\n", host)
+	} else {
+		fmt.Printf("Queue runner on %s is already running.\n", host)
+	}
 	return nil
 }
 

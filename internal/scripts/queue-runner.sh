@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 23
+# BUILD: 24
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -22,6 +22,7 @@
 #   ~/.cache/remote-jobs/logs/{job_id}.log         - Job output
 #   ~/.cache/remote-jobs/logs/{job_id}.status      - Exit code
 #   ~/.cache/remote-jobs/logs/{job_id}.meta        - Metadata
+#   ~/.cache/remote-jobs/logs/{job_id}.samples     - CPU samples (epoch + % of total cores)
 #
 # Environment Variables (for Slack notifications):
 #   REMOTE_JOBS_SLACK_WEBHOOK     Slack webhook URL
@@ -511,7 +512,7 @@ start_job() {
     local pid_file="$LOG_DIR/${job_id}.pid"
 
     # Archive any existing files from previous runs
-    for ext in log status meta pid; do
+    for ext in log status meta pid samples; do
         local f="$LOG_DIR/${job_id}.$ext"
         if [ -f "$f" ]; then
             local mtime ts
@@ -703,6 +704,8 @@ sample_running_jobs() {
 
         local host_pct
         host_pct=$(proc_cpu_host_pct "$pid")
+        local samples_file="$LOG_DIR/${job_id}.samples"
+        echo "$now $host_pct" >> "$samples_file"
         local samples_json
         samples_json=$(jq -c --arg id "$job_id" '.[$id].samples // []' <<< "$RUNNING_JSON")
         samples_json=$(append_sample "$samples_json" "$host_pct")

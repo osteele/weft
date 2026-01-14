@@ -28,6 +28,7 @@ type Job struct {
 	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
+	Metadata             *JobMetadata
 	EnvVars              []string
 	Tags                 []string
 	DepSpec              string // Dependency specification (e.g., "42" or "42+" for after-any)
@@ -45,7 +46,7 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, cpu_allotment, env_vars, tags, dep_spec, tombstoned, last_synced_status, pending_status, pending_at`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, cpu_allotment, env_vars, tags, dep_spec, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
 
 const ProcessedTag = "processed"
 
@@ -138,6 +139,7 @@ func initSchema(db *sql.DB) error {
 		working_dir TEXT NOT NULL,
 	command TEXT NOT NULL,
 	description TEXT,
+	job_metadata TEXT,
 	tags TEXT,
 	start_time INTEGER,
 	end_time INTEGER,
@@ -191,6 +193,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add tags column for job metadata
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN tags TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add job_metadata column for derived stats
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN job_metadata TEXT`); err != nil {
 		return err
 	}
 
@@ -704,9 +711,12 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 	}
 	if IsTerminalStatus(status) {
 		// Clear session_name for terminal states per spec: SessionImpliesRunning
+		now := time.Now().Unix()
 		_, err := db.Exec(
-			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, session_name = NULL WHERE id = ?`,
-			status, status, jobID,
+			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, session_name = NULL,
+			 end_time = CASE WHEN end_time IS NULL OR end_time = 0 THEN ? ELSE end_time END
+			 WHERE id = ?`,
+			status, status, now, jobID,
 		)
 		return err
 	}
@@ -845,6 +855,16 @@ func SetJobTags(db *sql.DB, jobID int64, tags []string) error {
 		return err
 	}
 	_, err = db.Exec(`UPDATE jobs SET tags = ? WHERE id = ?`, value, jobID)
+	return err
+}
+
+// SetJobMetadata updates the stored metadata JSON for a job (nil clears it).
+func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
+	value, err := encodeJobMetadata(meta)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE jobs SET job_metadata = ? WHERE id = ?`, value, jobID)
 	return err
 }
 
@@ -1132,8 +1152,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var lastSyncedStatus sql.NullString
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
+	var jobMetadata sql.NullString
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1199,6 +1220,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if pendingAt.Valid {
 		j.PendingAt = &pendingAt.Int64
 	}
+	j.Metadata = decodeJobMetadata(jobMetadata)
 
 	return &j, nil
 }
@@ -1395,8 +1417,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var lastSyncedStatus sql.NullString
 		var pendingStatus sql.NullString
 		var pendingAt sql.NullInt64
+		var jobMetadata sql.NullString
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -1459,6 +1482,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if pendingAt.Valid {
 			j.PendingAt = &pendingAt.Int64
 		}
+		j.Metadata = decodeJobMetadata(jobMetadata)
 
 		jobs = append(jobs, &j)
 	}

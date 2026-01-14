@@ -2441,6 +2441,35 @@ func (m Model) formatCPUAllotmentDisplay(job *db.Job) string {
 	return fmt.Sprintf("%d%% (%s cores on %d-core host)", allotment, coreText, host.CPUs)
 }
 
+func formatCPUPercent(value float64) string {
+	rounded := math.Round(value)
+	if math.Abs(value-rounded) < 0.05 {
+		return fmt.Sprintf("%.0f%%", rounded)
+	}
+	return fmt.Sprintf("%.1f%%", value)
+}
+
+func (m Model) formatCPUUsageDisplay(job *db.Job) string {
+	if job == nil || job.Metadata == nil || job.Metadata.CPU == nil {
+		return ""
+	}
+	stats := job.Metadata.CPU
+	parts := []string{}
+	if job.Status == db.StatusRunning && stats.Latest != nil {
+		parts = append(parts, fmt.Sprintf("latest %s", formatCPUPercent(*stats.Latest)))
+	}
+	if stats.Max != nil {
+		parts = append(parts, fmt.Sprintf("max %s", formatCPUPercent(*stats.Max)))
+	}
+	if stats.Mean != nil {
+		parts = append(parts, fmt.Sprintf("mean %s", formatCPUPercent(*stats.Mean)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ", ")
+}
+
 func (m Model) findHostByName(name string) *Host {
 	for _, host := range m.hosts {
 		if host.Name == name {
@@ -3100,6 +3129,11 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString(valueStyle.Render(m.formatCPUAllotmentDisplay(job)))
 		b.WriteString("\n")
 	}
+	if cpuUsage := m.formatCPUUsageDisplay(job); cpuUsage != "" {
+		b.WriteString(labelStyle.Render("CPU Usage"))
+		b.WriteString(valueStyle.Render(cpuUsage))
+		b.WriteString("\n")
+	}
 
 	_ = m.writeJobTimingSection(&b, job, labelStyle, valueStyle)
 
@@ -3288,8 +3322,13 @@ func (m Model) writeJobTimingSection(b *strings.Builder, job *db.Job, labelStyle
 			wrote = true
 		}
 
-		if job.StartTime > 0 {
-			startTime := time.Unix(job.StartTime, 0)
+		startTimestamp := job.StartTime
+		if startTimestamp == 0 && job.CreatedAt > 0 && db.IsTerminalStatus(job.Status) {
+			startTimestamp = job.CreatedAt
+		}
+
+		if startTimestamp > 0 {
+			startTime := time.Unix(startTimestamp, 0)
 			var endTime time.Time
 			hasEnd := job.EndTime != nil
 			if hasEnd {

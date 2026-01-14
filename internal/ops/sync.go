@@ -44,7 +44,8 @@ func (o Option[T]) Unwrap() T { return o.value }
 
 // SyncOptions configures sync behavior
 type SyncOptions struct {
-	Timeout time.Duration
+	Timeout     time.Duration
+	SkipSamples bool
 }
 
 // StatusFileResult contains the result of reading a status file
@@ -139,6 +140,7 @@ type remoteQueue interface {
 	ProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool]
 	QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error)
 	Metadata(host string, jobID int64, timeout time.Duration) (string, error)
+	Samples(host string, jobID int64, timeout time.Duration) (string, error)
 }
 
 var queueRemoteClient remoteQueue = sshQueueRemote{}
@@ -151,13 +153,30 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 
 // SyncJob checks and updates a single job's status, returning true if status changed.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
-func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
+func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
 	// Jobs without a session name are managed by the queue runner and should use
 	// pattern-based file lookup (handles restarts with different timestamps).
 	// Jobs WITH a session name were started via start_now or run and have their own tmux session.
 	if job.SessionName == "" && job.QueueName != "" {
 		return SyncQueueRunnerJob(database, job, opts)
 	}
+
+	defer func() {
+		if err != nil {
+			return
+		}
+		if opts.SkipSamples {
+			return
+		}
+		metaUpdated, metaErr := updateJobCPUSamples(database, job, opts.Timeout)
+		if metaErr != nil {
+			err = metaErr
+			return
+		}
+		if metaUpdated {
+			updated = true
+		}
+	}()
 
 	// Regular jobs have their own tmux sessions
 	timeout := effectiveSyncTimeout(opts.Timeout)
@@ -229,13 +248,30 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
 
 // SyncQueueRunnerJob checks and updates a queue runner job's status using pattern-based file lookup.
 // Uses multiple SSH calls with trinary logic for maximum accuracy.
-func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
+func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
 	queueName := job.QueueName
 	if queueName == "" {
 		queueName = "default"
 	}
+
+	defer func() {
+		if err != nil {
+			return
+		}
+		if opts.SkipSamples {
+			return
+		}
+		metaUpdated, metaErr := updateJobCPUSamples(database, job, opts.Timeout)
+		if metaErr != nil {
+			err = metaErr
+			return
+		}
+		if metaUpdated {
+			updated = true
+		}
+	}()
 
 	// Probe 1: Check if status file exists (job completed)
 	exitCode, mtime, completed := probeStatusFile(job.Host, job.ID, timeout)
@@ -811,6 +847,16 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 func (sshQueueRemote) Metadata(host string, jobID int64, timeout time.Duration) (string, error) {
 	metadataPattern := session.MetadataFilePattern(jobID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null", metadataPattern)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return "", err
+	}
+	return stdout, nil
+}
+
+func (sshQueueRemote) Samples(host string, jobID int64, timeout time.Duration) (string, error) {
+	samplesPattern := session.SamplesFilePattern(jobID)
+	cmd := fmt.Sprintf(`f=$(ls -t %s 2>/dev/null | head -1); if [ -n "$f" ]; then cat "$f"; fi`, samplesPattern)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return "", err

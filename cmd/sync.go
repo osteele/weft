@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -307,13 +308,32 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		return 0, err
 	}
 
-	syncOpts := ops.SyncOptions{Timeout: timeout}
+	syncOpts := ops.SyncOptions{Timeout: timeout, SkipSamples: true}
 	var updated int
 	var successCount, failCount int
 	seenJobs := make(map[int64]bool)
+	var queueRunnerJobs []*db.Job
+	var tmuxJobs []*db.Job
 
 	for _, job := range jobs {
 		seenJobs[job.ID] = true
+		if job.SessionName == "" && job.QueueName != "" {
+			queueRunnerJobs = append(queueRunnerJobs, job)
+		} else {
+			tmuxJobs = append(tmuxJobs, job)
+		}
+	}
+
+	if len(queueRunnerJobs) > 0 {
+		updatedCount, err := syncQueueRunnerJobsBatch(database, host, queueRunnerJobs, timeout)
+		if err != nil {
+			failCount++
+		} else {
+			successCount++
+			updated += updatedCount
+		}
+	}
+	for _, job := range tmuxJobs {
 		// Use quick check with timeout
 		changed, err := syncJobQuickFunc(database, job, syncOpts)
 		if err != nil {
@@ -331,19 +351,21 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	if err != nil {
 		return updated, err
 	}
+	var restartedQueueJobs []*db.Job
 	for _, job := range restartedJobs {
 		if seenJobs[job.ID] {
 			continue
 		}
 		seenJobs[job.ID] = true
-		changed, err := syncJobQuickFunc(database, job, syncOpts)
+		restartedQueueJobs = append(restartedQueueJobs, job)
+	}
+	if len(restartedQueueJobs) > 0 {
+		updatedCount, err := syncQueueRunnerJobsBatch(database, host, restartedQueueJobs, timeout)
 		if err != nil {
 			failCount++
-			continue // Don't fail entire sync for one job
-		}
-		successCount++
-		if changed {
-			updated++
+		} else {
+			successCount++
+			updated += updatedCount
 		}
 	}
 
@@ -375,6 +397,27 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		return updated, err
 	}
 
+	return updated, nil
+}
+
+func syncQueueRunnerJobsBatch(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration) (int, error) {
+	jobsByQueue := make(map[string][]*db.Job)
+	for _, job := range jobs {
+		queueName := job.QueueName
+		if queueName == "" {
+			queueName = queuefile.DefaultQueueName
+		}
+		jobsByQueue[queueName] = append(jobsByQueue[queueName], job)
+	}
+
+	var updated int
+	for queueName, queueJobs := range jobsByQueue {
+		batchUpdated, err := ops.BatchSyncQueueRunnerJobs(database, host, queueName, queueJobs, timeout)
+		if err != nil {
+			return updated, err
+		}
+		updated += batchUpdated
+	}
 	return updated, nil
 }
 

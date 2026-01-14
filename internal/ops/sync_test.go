@@ -18,6 +18,7 @@ type mockQueueRemote struct {
 	process        Option[bool]
 	quickStatus    quickStatus
 	metadata       string
+	samples        string
 }
 
 func (m mockQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration) (int, int64, Option[bool]) {
@@ -42,6 +43,10 @@ func (m mockQueueRemote) QuickStatus(host, queueName string, jobID int64, timeou
 
 func (m mockQueueRemote) Metadata(host string, jobID int64, timeout time.Duration) (string, error) {
 	return m.metadata, nil
+}
+
+func (m mockQueueRemote) Samples(host string, jobID int64, timeout time.Duration) (string, error) {
+	return m.samples, nil
 }
 
 func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {

@@ -34,6 +34,11 @@ func SimplePidFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.pid", LogDir, jobID)
 }
 
+// SimpleSamplesFile returns the primary samples file path for a job (no timestamp)
+func SimpleSamplesFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.samples", LogDir, jobID)
+}
+
 // ArchiveCommand returns a shell command that archives existing job files by renaming
 // them with their creation date. This should be run before starting a new job run.
 // Example: 123.log -> 123-20260104-095748.log
@@ -41,7 +46,7 @@ func ArchiveCommand(jobID int64) string {
 	// For each extension, check if file exists and rename it with its mtime
 	// Uses stat to get mtime: stat -c %Y on Linux, stat -f %m on macOS
 	return fmt.Sprintf(`
-		for ext in log status meta pid; do
+		for ext in log status meta pid samples; do
 			f="%s/%d.$ext"
 			if [ -f "$f" ]; then
 				mtime=$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)
@@ -106,6 +111,12 @@ func StatusFilePattern(jobID int64) string {
 // This matches both simple (123.log) and archived (123-*.log) files
 func LogFilePattern(jobID int64) string {
 	return fmt.Sprintf("%s/%d*.log", LogDir, jobID)
+}
+
+// SamplesFilePattern returns a glob pattern to find samples files for a job ID
+// This matches both simple (123.samples) and archived (123-*.samples) files
+func SamplesFilePattern(jobID int64) string {
+	return fmt.Sprintf("%s/%d*.samples", LogDir, jobID)
 }
 
 // JobLogPath returns the canonical log path for a job.
