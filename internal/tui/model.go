@@ -246,16 +246,16 @@ var (
 			key.WithHelp("d", "toggle draft/queue"),
 		),
 		Restart: key.NewBinding(
-			key.WithKeys("r"),
-			key.WithHelp("r", "restart"),
+			key.WithKeys("R"),
+			key.WithHelp("R", "restart"),
 		),
 		Retry: key.NewBinding(
 			key.WithKeys("y"),
 			key.WithHelp("y", "retry"),
 		),
 		EditRestart: key.NewBinding(
-			key.WithKeys("R"),
-			key.WithHelp("R", "edit & restart"),
+			key.WithKeys("E"),
+			key.WithHelp("E", "edit & restart"),
 		),
 		Remove: key.NewBinding(
 			key.WithKeys("x"),
@@ -293,8 +293,8 @@ var (
 			key.WithHelp("shift+tab", "switch view back"),
 		),
 		Sync: key.NewBinding(
-			key.WithKeys("s"),
-			key.WithHelp("s", "sync"),
+			key.WithKeys("r"),
+			key.WithHelp("r", "refresh"),
 		),
 		Help: key.NewBinding(
 			key.WithKeys("?"),
@@ -2274,11 +2274,11 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"l", "Toggle logs view"},
 			{"f", "Cycle job filters"},
 			{"H", "Cycle host filter"},
-			{"s", "Sync job statuses"},
+			{"r", "Refresh job statuses"},
 			{"n", "New job"},
 			{"e", "Edit queued job"},
-			{"r", "Restart job"},
-			{"R", "Edit & restart job"},
+			{"R", "Restart job"},
+			{"E", "Edit & restart job"},
 			{"k", "Kill/cancel job"},
 			{"d", "Toggle draft/queue status"},
 			{"g", "Start queued/draft job now"},
@@ -3807,7 +3807,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft P:prune")
 
 	// Right-align the help text
 	gap := m.width - lipgloss.Width(help) - 2

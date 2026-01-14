@@ -20,7 +20,7 @@ import (
 
 var logCmd = &cobra.Command{
 	Use:     "log <job-id>",
-	Aliases: []string{"logs"},
+	Aliases: []string{"logs", "output"},
 	Short:   "View log output from a job",
 	Long: `View the log file for a specific job.
 
