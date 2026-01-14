@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 19
+# BUILD: 22
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -76,8 +76,8 @@ STOP_REQUESTED=false
 # Create directories
 mkdir -p "$QUEUE_DIR" "$LOG_DIR"
 
-# Initialize state file if it doesn't exist
-if [ ! -f "$STATE_FILE" ]; then
+# Initialize state file if it doesn't exist or is empty
+if [ ! -f "$STATE_FILE" ] || [ ! -s "$STATE_FILE" ]; then
     echo '{"cursor":"","cursor_line":0,"pending":[],"current":null,"running":{}}' > "$STATE_FILE"
 fi
 
@@ -321,6 +321,12 @@ process_commands() {
                 echo "Command: add job $job_id"
                 if running_contains "$job_id"; then
                     refresh_running_allotment "$job_id"
+                fi
+                # Cancel any pending stop - new work arrived
+                if [ "$STOP_REQUESTED" = true ]; then
+                    STOP_REQUESTED=false
+                    stop_requested=false
+                    echo "Stop cancelled: new work arrived"
                 fi
                 ;;
             priority)
@@ -610,7 +616,7 @@ start_job() {
         --argjson started_at "$start_time" \
         --argjson warmup_until "$((start_time + WARMUP_DURATION))" \
         --argjson local_allotment "$local_allotment" \
-        '$running + {($id | tonumber): {started_at: $started_at, warmup_until: $warmup_until, local_allotment: $local_allotment, samples: [], over_hist: [], under_hist: []}}')
+        '$running + {($id): {started_at: $started_at, warmup_until: $warmup_until, local_allotment: $local_allotment, samples: [], over_hist: [], under_hist: []}}')
 
     CURRENT_JOB_ID="$job_id"
     echo "$CURRENT_JOB_ID" > "$CURRENT_FILE"

@@ -613,6 +613,16 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 	return err
 }
 
+// MarkRunningFromTerminal transitions a job from a terminal status (failed, dead, etc.) back to running.
+// This handles jobs that were restarted by the queue runner after previously failing.
+func MarkRunningFromTerminal(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE id = ? AND status IN (?, ?, ?, ?)`,
+		StatusRunning, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
+	)
+	return err
+}
+
 // MarkQueuedJobRunning transitions a queued job to running without touching start_time.
 func MarkQueuedJobRunning(db *sql.DB, id int64) error {
 	_, err := db.Exec(
@@ -1674,6 +1684,14 @@ func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
 func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND pending_status IS NOT NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host)
+}
+
+// ListPotentiallyRestartedJobs returns jobs that may have been restarted by the queue runner.
+// These are queue runner jobs (have queue_name) that are in terminal status (failed, dead)
+// but may have been re-queued and started again.
+func ListPotentiallyRestartedJobs(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND queue_name != '' AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusFailed, StatusDead)
 }
 
 // ListAllQueued returns all queued jobs across all hosts

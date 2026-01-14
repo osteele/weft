@@ -263,9 +263,14 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 				return false, err
 			}
 			return true, nil
-		case db.StatusStarting, db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
-			// Job is actually running - fix the status
+		case db.StatusStarting:
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+			// Job was in terminal status but is now running (restarted by queue runner)
+			if err := db.MarkRunningFromTerminal(database, job.ID); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -498,6 +503,12 @@ func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (b
 			return true, nil
 		case db.StatusStarting:
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		case db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
+			// Job was in terminal status but is now running (restarted by queue runner)
+			if err := db.MarkRunningFromTerminal(database, job.ID); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -892,18 +903,30 @@ func (sshQueueRemote) ProcessRunning(host string, jobID int64, timeout time.Dura
 
 func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error) {
 	statusPattern := session.StatusFilePattern(jobID)
+	statusFile := session.SimpleStatusFile(jobID)
 	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
 	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", queueName)
 	pidPattern := session.PidFilePattern(jobID)
+	pidFile := session.SimplePidFile(jobID)
 	// When status file exists, output "exitcode|mtime" to capture actual completion time
+	// Prioritize exact file (e.g., 2806.status) over archived (2806-*.status) since
+	// ls sorts archived files before current ones lexicographically
 	combinedCmd := fmt.Sprintf(`
-		status_file=$(ls %s 2>/dev/null | head -1)
+		if [ -f %s ]; then
+			status_file=%s
+		else
+			status_file=$(ls %s 2>/dev/null | head -1)
+		fi
 		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
 			exit_code=$(cat "$status_file" 2>/dev/null | head -1)
 			mtime=$(stat -c %%Y "$status_file" 2>/dev/null || stat -f %%m "$status_file" 2>/dev/null)
 			echo "${exit_code}|${mtime}"
 		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
-			pid_file=$(ls %s 2>/dev/null | head -1)
+			if [ -f %s ]; then
+				pid_file=%s
+			else
+				pid_file=$(ls %s 2>/dev/null | head -1)
+			fi
 			if [ -n "$pid_file" ]; then
 				pid=$(cat "$pid_file" 2>/dev/null | head -1)
 				if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
@@ -917,6 +940,13 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 		# Check state file for job in pending array
 		elif [ -f %s ] && jq -e '.pending | index(%d)' %s >/dev/null 2>&1; then
 			echo QUEUED
+		elif [ -f %s ]; then
+			pid=$(cat %s 2>/dev/null | head -1)
+			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
+				echo RUNNING
+			else
+				echo DEAD
+			fi
 		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
 			pid=$(cat "$pid_file" 2>/dev/null | head -1)
 			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
@@ -927,10 +957,11 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 		else
 			echo DEAD
 		fi
-	`, statusPattern,
+	`, statusFile, statusFile, statusPattern,
 		currentFile, currentFile, jobID,
-		pidPattern,
+		pidFile, pidFile, pidPattern,
 		stateFile, jobID, stateFile,
+		pidFile, pidFile,
 		pidPattern)
 
 	stdout, _, err := ssh.RunWithTimeout(host, combinedCmd, timeout)

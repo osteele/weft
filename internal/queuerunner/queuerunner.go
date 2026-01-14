@@ -111,8 +111,9 @@ func EnsureScriptUpToDate(host string) (bool, error) {
 		needsDeploy = true
 	}
 
-	// Failsafe: also deploy if file sizes differ (catches forgotten BUILD bumps)
-	if !needsDeploy {
+	// Failsafe: also deploy if BUILD numbers match but file sizes differ
+	// (catches forgotten BUILD bumps without causing ping-pong between different versions)
+	if !needsDeploy && remoteBuild == localBuildNumber {
 		remoteSize, err := remoteFileSize(host)
 		if err == nil && remoteSize != len(scripts.QueueRunnerScript) {
 			needsDeploy = true

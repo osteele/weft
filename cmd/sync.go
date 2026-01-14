@@ -185,6 +185,29 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		updated++
 	}
 
+	// Check jobs that may have been restarted by the queue runner
+	// (failed/dead jobs with queue_name that might be running again)
+	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
+	if err != nil {
+		return updated, err
+	}
+	for _, job := range restartedJobs {
+		if seenJobs[job.ID] {
+			continue // Already synced above
+		}
+		seenJobs[job.ID] = true
+		changed, err := syncJobFunc(database, job, syncOpts)
+		if err != nil {
+			if syncVerbose {
+				fmt.Fprintf(os.Stderr, "  Warning: check restarted job %d: %v\n", job.ID, err)
+			}
+			continue
+		}
+		if changed {
+			updated++
+		}
+	}
+
 	// Clean up draft jobs that still have remote state lingering
 	drafts, err := db.ListDraftJobsPendingSync(database, host)
 	if err != nil {
@@ -280,11 +303,33 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 
 	syncOpts := ops.SyncOptions{Timeout: timeout}
 	var updated int
+	seenJobs := make(map[int64]bool)
+
 	for _, job := range jobs {
+		seenJobs[job.ID] = true
 		// Use quick check with timeout
 		changed, err := syncJobQuickFunc(database, job, syncOpts)
 		if err != nil {
 			return updated, err
+		}
+		if changed {
+			updated++
+		}
+	}
+
+	// Check potentially restarted jobs (failed/dead queue runner jobs)
+	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
+	if err != nil {
+		return updated, err
+	}
+	for _, job := range restartedJobs {
+		if seenJobs[job.ID] {
+			continue
+		}
+		seenJobs[job.ID] = true
+		changed, err := syncJobQuickFunc(database, job, syncOpts)
+		if err != nil {
+			continue // Don't fail entire sync for one job
 		}
 		if changed {
 			updated++
@@ -296,6 +341,9 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		return updated, err
 	}
 	for _, job := range drafts {
+		if seenJobs[job.ID] {
+			continue
+		}
 		changed, err := ops.SyncDraftJob(database, job, syncOpts)
 		if err != nil {
 			return updated, err
