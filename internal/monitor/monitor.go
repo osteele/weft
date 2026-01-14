@@ -32,21 +32,19 @@ const (
 
 // Config controls monitor behavior.
 type Config struct {
-	SyncActiveInterval      time.Duration
-	SyncIdleInterval        time.Duration
-	HostRefreshInterval     time.Duration
-	HostCacheDuration       time.Duration
-	StopQueueRunnerWhenIdle bool
+	SyncActiveInterval  time.Duration
+	SyncIdleInterval    time.Duration
+	HostRefreshInterval time.Duration
+	HostCacheDuration   time.Duration
 }
 
 // DefaultConfig returns the default monitor configuration.
 func DefaultConfig() Config {
 	return Config{
-		SyncActiveInterval:      DefaultSyncActiveInterval,
-		SyncIdleInterval:        DefaultSyncIdleInterval,
-		HostRefreshInterval:     DefaultHostRefreshInterval,
-		HostCacheDuration:       DefaultHostCacheDuration,
-		StopQueueRunnerWhenIdle: false,
+		SyncActiveInterval:  DefaultSyncActiveInterval,
+		SyncIdleInterval:    DefaultSyncIdleInterval,
+		HostRefreshInterval: DefaultHostRefreshInterval,
+		HostCacheDuration:   DefaultHostCacheDuration,
 	}
 }
 
@@ -724,12 +722,6 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 			} else if started {
 				result.QueuesStarted = append(result.QueuesStarted, host)
 			}
-		} else if m.config.StopQueueRunnerWhenIdle && runningCount == 0 {
-			if err := stopQueueRunnerIfIdle(host); err != nil {
-				if !remote.IsConnectionError(err.Error()) {
-					result.QueueRunnerErrors = append(result.QueueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
-				}
-			}
 		}
 		if hostSynced {
 			result.HostsSynced = append(result.HostsSynced, host)
@@ -760,15 +752,6 @@ func ensureQueueRunnerStarted(host string) (bool, error) {
 
 	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
 	return runner.EnsureStarted(envVars)
-}
-
-func stopQueueRunnerIfIdle(host string) error {
-	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
-	running, err := runner.IsRunning()
-	if err != nil || !running {
-		return err
-	}
-	return runner.SendStopSignal()
 }
 
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely.

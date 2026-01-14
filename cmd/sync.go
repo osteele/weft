@@ -47,8 +47,11 @@ var (
 )
 
 const (
-	// FastSyncTimeout is used for --fast mode in list/status commands
+	// FastSyncTimeout is the per-SSH-call timeout for quick syncs
 	FastSyncTimeout = 2 * time.Second
+	// FastSyncHostTimeout is the overall timeout per host for quick syncs
+	// Must be long enough to sync multiple jobs (each with FastSyncTimeout)
+	FastSyncHostTimeout = 30 * time.Second
 	// DefaultSyncTimeout is used for default syncs in status commands
 	DefaultSyncTimeout = 5 * time.Second
 	// NormalSyncTimeout is used for explicit sync commands
@@ -250,8 +253,9 @@ func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
 }
 
 // performSyncWithTimeoutForHosts performs a sync with specified timeout for a host subset.
+// The sshTimeout is used for individual SSH calls; overall host timeout is FastSyncHostTimeout.
 // Returns true if sync completed, false if timed out, along with hosts that timed out.
-func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, timeout time.Duration, verbose bool) (bool, []string) {
+func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string) {
 	hosts = uniqueHosts(hosts)
 	if len(hosts) == 0 {
 		return true, nil
@@ -265,7 +269,7 @@ func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, timeout ti
 		// Try quick sync, but don't wait if it times out
 		done := make(chan error, 1)
 		go func(h string) {
-			_, err := syncHostWithTimeout(database, h, timeout)
+			_, err := syncHostWithTimeout(database, h, sshTimeout)
 			done <- err
 		}(host)
 
@@ -278,8 +282,8 @@ func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, timeout ti
 					fmt.Fprintf(os.Stderr, "Warning: quick sync %s failed: %v\n", host, err)
 				}
 			}
-		case <-time.After(timeout):
-			// Timed out
+		case <-time.After(FastSyncHostTimeout):
+			// Overall host sync timed out - host likely unreachable
 			allCompleted = false
 			unreachable = append(unreachable, host)
 		}
@@ -293,7 +297,9 @@ func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bo
 	return performSyncWithTimeoutForHosts(database, hosts, FastSyncTimeout, verbose)
 }
 
-// syncHostWithTimeout syncs a host with a specific timeout
+// syncHostWithTimeout syncs a host with a specific timeout.
+// Returns (updated count, error). Only returns error if host is truly unreachable
+// (all SSH calls failed). Individual job sync failures are tolerated.
 func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (int, error) {
 	// This is a simplified version of syncHost that uses quick timeouts
 	jobs, err := db.ListActiveJobs(database, host)
@@ -303,6 +309,7 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 
 	syncOpts := ops.SyncOptions{Timeout: timeout}
 	var updated int
+	var successCount, failCount int
 	seenJobs := make(map[int64]bool)
 
 	for _, job := range jobs {
@@ -310,8 +317,10 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		// Use quick check with timeout
 		changed, err := syncJobQuickFunc(database, job, syncOpts)
 		if err != nil {
-			return updated, err
+			failCount++
+			continue // Don't fail entire sync for one job
 		}
+		successCount++
 		if changed {
 			updated++
 		}
@@ -329,8 +338,10 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		seenJobs[job.ID] = true
 		changed, err := syncJobQuickFunc(database, job, syncOpts)
 		if err != nil {
+			failCount++
 			continue // Don't fail entire sync for one job
 		}
+		successCount++
 		if changed {
 			updated++
 		}
@@ -346,11 +357,18 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		}
 		changed, err := ops.SyncDraftJob(database, job, syncOpts)
 		if err != nil {
-			return updated, err
+			failCount++
+			continue // Don't fail entire sync for one job
 		}
+		successCount++
 		if changed {
 			updated++
 		}
+	}
+
+	// Only consider host unreachable if ALL calls failed
+	if successCount == 0 && failCount > 0 {
+		return updated, fmt.Errorf("all %d sync attempts failed", failCount)
 	}
 
 	if err := db.RecordHostSync(database, host, time.Now()); err != nil {

@@ -58,7 +58,6 @@ func runWeb(cmd *cobra.Command, args []string) error {
 	if cfg.HostRefreshInterval > 0 {
 		monCfg.HostRefreshInterval = time.Duration(cfg.HostRefreshInterval) * time.Second
 	}
-	monCfg.StopQueueRunnerWhenIdle = cfg.StopQueueRunnerWhenIdle
 
 	mon := monitor.New(database, monCfg)
 	mon.Start()

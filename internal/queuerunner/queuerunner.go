@@ -142,7 +142,8 @@ func ensureDirectories(host string) error {
 }
 
 func writeScript(host string) error {
-	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
+	// Script content already ends with newline, don't add another
+	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%sSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
 	if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
 		return fmt.Errorf("write queue runner: %s", strings.TrimSpace(stderr))
 	}

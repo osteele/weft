@@ -662,12 +662,11 @@ type Model struct {
 	showHelp bool
 
 	// Configurable intervals
-	syncActiveInterval      time.Duration
-	syncIdleInterval        time.Duration
-	logRefreshInterval      time.Duration
-	hostRefreshInterval     time.Duration
-	hostCacheDuration       time.Duration
-	stopQueueRunnerWhenIdle bool
+	syncActiveInterval  time.Duration
+	syncIdleInterval    time.Duration
+	logRefreshInterval  time.Duration
+	hostRefreshInterval time.Duration
+	hostCacheDuration   time.Duration
 
 	// Host cache tracking - which hosts have been freshly queried this session
 	hostsQueriedThisSession map[string]bool
@@ -694,24 +693,22 @@ type Model struct {
 
 // ModelOptions contains configuration for the TUI model
 type ModelOptions struct {
-	SyncActiveInterval      time.Duration
-	SyncIdleInterval        time.Duration
-	LogRefreshInterval      time.Duration
-	HostRefreshInterval     time.Duration
-	HostCacheDuration       time.Duration // How long cached host info is considered fresh
-	StopQueueRunnerWhenIdle bool
-	Monitor                 *monitor.Monitor
+	SyncActiveInterval  time.Duration
+	SyncIdleInterval    time.Duration
+	LogRefreshInterval  time.Duration
+	HostRefreshInterval time.Duration
+	HostCacheDuration   time.Duration // How long cached host info is considered fresh
+	Monitor             *monitor.Monitor
 }
 
 // DefaultModelOptions returns the default TUI options
 func DefaultModelOptions() ModelOptions {
 	return ModelOptions{
-		SyncActiveInterval:      DefaultSyncActiveInterval,
-		SyncIdleInterval:        DefaultSyncIdleInterval,
-		LogRefreshInterval:      DefaultLogRefreshInterval,
-		HostRefreshInterval:     DefaultHostRefreshInterval,
-		HostCacheDuration:       DefaultHostCacheDuration,
-		StopQueueRunnerWhenIdle: false,
+		SyncActiveInterval:  DefaultSyncActiveInterval,
+		SyncIdleInterval:    DefaultSyncIdleInterval,
+		LogRefreshInterval:  DefaultLogRefreshInterval,
+		HostRefreshInterval: DefaultHostRefreshInterval,
+		HostCacheDuration:   DefaultHostCacheDuration,
 	}
 }
 
@@ -837,7 +834,6 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		logRefreshInterval:      opts.LogRefreshInterval,
 		hostRefreshInterval:     opts.HostRefreshInterval,
 		hostCacheDuration:       opts.HostCacheDuration,
-		stopQueueRunnerWhenIdle: opts.StopQueueRunnerWhenIdle,
 		hostsQueriedThisSession: make(map[string]bool),
 		lowDiskWarnedHosts:      make(map[string]bool),
 		logCache:                make(map[int64]string),

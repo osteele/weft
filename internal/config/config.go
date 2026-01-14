@@ -27,9 +27,6 @@ type Config struct {
 	LogRefreshInterval int `yaml:"log_refresh_interval"`
 	// HostRefreshInterval is how often to refresh host info in hosts view
 	HostRefreshInterval int `yaml:"host_refresh_interval"`
-	// StopQueueRunnerWhenIdle controls whether the TUI stops the queue runner
-	// when a host has no queued jobs.
-	StopQueueRunnerWhenIdle bool `yaml:"stop_queue_runner_when_idle"`
 
 	// EnableMouse toggles mouse support in the TUI (disables terminal selection when true)
 	EnableMouse bool `yaml:"enable_mouse"`
@@ -90,19 +87,18 @@ type AIConfig struct {
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		DefaultCommand:          "help",
-		SyncInterval:            15,
-		SyncActiveInterval:      15,
-		SyncIdleInterval:        60,
-		LogRefreshInterval:      3,
-		HostRefreshInterval:     30,
-		StopQueueRunnerWhenIdle: false,
-		EnableMouse:             false,
-		LogCacheMaxAge:          7,
-		LogCacheMaxSize:         50 * 1024, // 50KB
-		ShowUsageHints:          true,
-		WebEnabled:              true,
-		WebPort:                 8127,
+		DefaultCommand:      "help",
+		SyncInterval:        15,
+		SyncActiveInterval:  15,
+		SyncIdleInterval:    60,
+		LogRefreshInterval:  3,
+		HostRefreshInterval: 30,
+		EnableMouse:         false,
+		LogCacheMaxAge:      7,
+		LogCacheMaxSize:     50 * 1024, // 50KB
+		ShowUsageHints:      true,
+		WebEnabled:          true,
+		WebPort:             8127,
 		AI: AIConfig{
 			Enabled: nil, // nil means "auto" - enabled if ollama is available
 			Model:   "",  // empty means use default model

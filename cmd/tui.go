@@ -71,13 +71,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if cfg.HostRefreshInterval > 0 {
 		opts.HostRefreshInterval = time.Duration(cfg.HostRefreshInterval) * time.Second
 	}
-	opts.StopQueueRunnerWhenIdle = cfg.StopQueueRunnerWhenIdle
 
 	monCfg := monitor.DefaultConfig()
 	monCfg.SyncActiveInterval = opts.SyncActiveInterval
 	monCfg.SyncIdleInterval = opts.SyncIdleInterval
 	monCfg.HostRefreshInterval = opts.HostRefreshInterval
-	monCfg.StopQueueRunnerWhenIdle = opts.StopQueueRunnerWhenIdle
 
 	mon := monitor.New(database, monCfg)
 	mon.Start()
