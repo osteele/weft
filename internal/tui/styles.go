@@ -72,9 +72,6 @@ var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("8"))
 
-	syncingStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("11"))
-
 	// Host status styles
 	hostOnlineStyle = lipgloss.NewStyle().
 			Foreground(runningColor) // Green

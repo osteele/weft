@@ -363,8 +363,6 @@ type dbWatchEventMsg struct {
 
 type dbRefreshTriggeredMsg struct{}
 
-type dbSyncTriggeredMsg struct{}
-
 type monitorEventMsg struct {
 	event monitor.Event
 }
@@ -650,14 +648,12 @@ type Model struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// Background sync state
-	syncing                 bool
-	lastSyncTime            time.Time
-	lastHostSyncTimes       map[string]time.Time
-	syncForceAll            bool
-	syncPendingAfterCurrent bool
-	// DB-triggered sync debounce
-	dbSyncDebounceActive bool
+	// Background sync worker
+	syncWorker        *SyncWorker
+	initialSyncNeeded bool // True until first priority sync after jobs load
+
+	// Legacy sync state (being phased out)
+	lastHostSyncTimes map[string]time.Time
 
 	// Host sync tracking for job filtering
 	hostSyncTimes map[string]time.Time
@@ -857,6 +853,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostSummaryHashes:       make(map[string]string),
 		hostSummaryTimes:        make(map[string]time.Time),
 		hostSummaryPending:      make(map[string]bool),
+		initialSyncNeeded:       true, // Trigger priority sync after jobs load
 	}
 
 	if opts.Monitor != nil {
@@ -884,6 +881,10 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		}
 	}
 
+	// Create and start sync worker
+	model.syncWorker = NewSyncWorker(database)
+	model.syncWorker.Start()
+
 	return model
 }
 
@@ -907,11 +908,11 @@ func (m Model) Init() tea.Cmd {
 		m.refreshJobs(),
 		m.loadHosts(),
 		m.loadHostSyncTimes(),
-		m.performBackgroundSync(true), // Sync immediately on startup
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
 		m.startDBWatcher(),
+		m.checkSyncResults(),
 		m.spinner.Tick,
 	)
 }
@@ -974,12 +975,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return dbRefreshTriggeredMsg{}
 			}))
 		}
-		if !m.dbSyncDebounceActive {
-			m.dbSyncDebounceActive = true
-			cmds = append(cmds, tea.Tick(m.syncActiveInterval, func(time.Time) tea.Msg {
-				return dbSyncTriggeredMsg{}
-			}))
-		}
+		// Request syncs for hosts with active jobs
+		m.requestSyncsForActiveHosts()
 		if cmd := m.waitForDBEvent(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -992,21 +989,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dbRefreshDebounceActive = false
 		return m, m.refreshJobs()
 
-	case dbSyncTriggeredMsg:
-		m.dbSyncDebounceActive = false
-		if time.Since(m.lastSyncTime) < m.syncActiveInterval {
-			return m, nil
-		}
-		if m.syncing {
-			m.syncPendingAfterCurrent = true
-			m.syncForceAll = true
-			return m, nil
-		}
-		m.syncing = true
-		m.syncForceAll = true
-		return m, m.performBackgroundSync(true)
+	case syncResultMsg:
+		// Handle sync result from worker
+		return m.handleSyncResult(msg)
 
 	case syncCompletedMsg:
+		// Legacy handler - should be removed once migration complete
 		return m.handleSyncCompleted(msg)
 
 	case monitorEventMsg:
@@ -1329,10 +1317,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.startSyncTicker())
 		// Always refresh job list to pick up new jobs created elsewhere
 		cmds = append(cmds, m.refreshJobs())
-		if !m.syncing {
-			m.syncing = true
-			cmds = append(cmds, m.performBackgroundSync(false))
-		}
+		// Request syncs for hosts based on their job activity
+		m.requestSyncsForActiveHosts()
+		// Check for sync results
+		cmds = append(cmds, m.checkSyncResults())
 		return m, tea.Batch(cmds...)
 
 	case logTickMsg:
@@ -1631,6 +1619,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Cancel all background SSH operations
 		if m.cancel != nil {
 			m.cancel()
+		}
+		// Stop the sync worker
+		if m.syncWorker != nil {
+			m.syncWorker.Stop()
 		}
 		return m, tea.Quit
 
@@ -2070,9 +2062,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.fetchQueuedJobEnv(job)
 
 	case key.Matches(msg, keys.Sync):
-		if m.viewMode == ViewModeJobs && !m.syncing {
-			m.syncing = true
-			return m, m.performBackgroundSync(true)
+		if m.viewMode == ViewModeJobs && m.syncWorker != nil {
+			// Request high-priority sync for all hosts
+			m.requestSyncAllHosts(true)
+			return m, m.setFlash("Sync requested", false)
 		}
 		return m, nil
 	}
@@ -3820,10 +3813,6 @@ func (m Model) renderFlash() string {
 func (m Model) renderStatusBar() string {
 	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort s:sync n:new e:edit r:restart k:kill d:draft P:prune")
 
-	if m.syncing {
-		help = syncingStyle.Render(m.spinner.View()+" ") + help
-	}
-
 	// Right-align the help text
 	gap := m.width - lipgloss.Width(help) - 2
 	if gap < 0 {
@@ -5413,6 +5402,14 @@ func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
 	}
 
 	var cmds []tea.Cmd
+
+	// Trigger initial priority sync now that jobs are loaded
+	if m.initialSyncNeeded && m.syncWorker != nil {
+		m.initialSyncNeeded = false
+		m.requestSyncAllHosts(true)
+		cmds = append(cmds, m.checkSyncResults())
+	}
+
 	if cmd := m.fetchAllRunningJobsProgress(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
@@ -5532,13 +5529,12 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleSyncCompleted(msg syncCompletedMsg) (Model, tea.Cmd) {
-	m.syncing = false
-	m.syncForceAll = false
-	m.lastSyncTime = time.Now()
+	// Legacy handler - update host sync times
+	now := time.Now()
 	if len(msg.hostsSynced) > 0 {
 		for _, host := range msg.hostsSynced {
-			m.lastHostSyncTimes[host] = m.lastSyncTime
-			m.hostSyncTimes[host] = m.lastSyncTime
+			m.lastHostSyncTimes[host] = now
+			m.hostSyncTimes[host] = now
 		}
 	}
 	if msg.err != nil {
@@ -5567,12 +5563,6 @@ func (m Model) handleSyncCompleted(msg syncCompletedMsg) (Model, tea.Cmd) {
 	}
 	if m.monitor == nil {
 		cmds = append(cmds, m.refreshJobs(), m.loadHosts())
-		if m.syncPendingAfterCurrent {
-			m.syncPendingAfterCurrent = false
-			m.syncing = true
-			m.syncForceAll = true
-			cmds = append(cmds, m.performBackgroundSync(true))
-		}
 	}
 	if len(cmds) == 0 {
 		return m, nil
@@ -6321,144 +6311,6 @@ func (m Model) fetchAllRunningJobsProgress() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) performBackgroundSync(forceAll bool) tea.Cmd {
-	return func() tea.Msg {
-		var updated int
-		var queuesStarted []string
-		var hostsSynced []string
-		var queueRunnerErrors []string
-
-		hosts, err := db.ListUniqueHosts(m.database)
-		if err != nil {
-			return syncCompletedMsg{err: err}
-		}
-
-		now := time.Now()
-		activeJobsByHost := make(map[string][]*db.Job)
-		activeHost := make(map[string]bool)
-		for _, host := range hosts {
-			jobs, err := db.ListActiveJobs(m.database, host)
-			if err != nil {
-				continue
-			}
-			activeJobsByHost[host] = jobs
-			activeHost[host] = len(jobs) > 0
-		}
-
-		hostsToSync := make([]string, 0, len(hosts))
-		for _, host := range hosts {
-			interval := m.syncIdleInterval
-			if activeHost[host] {
-				interval = m.syncActiveInterval
-			}
-			last := m.lastHostSyncTimes[host]
-			due := forceAll || m.syncForceAll || last.IsZero() || now.Sub(last) >= interval
-			if due {
-				hostsToSync = append(hostsToSync, host)
-			}
-		}
-
-		if len(hostsToSync) == 0 {
-			return syncCompletedMsg{updated: 0, queuesStarted: nil, hostsSynced: nil, queueRunnerErrors: nil}
-		}
-
-		// Pre-fetch tombstoned jobs once and group by host
-		tombstonedJobs, _ := db.GetTombstonedActiveJobs(m.database)
-		tombstonedByHost := map[string][]*db.Job{}
-		for _, job := range tombstonedJobs {
-			if job == nil {
-				continue
-			}
-			tombstonedByHost[job.Host] = append(tombstonedByHost[job.Host], job)
-		}
-
-		for _, host := range hostsToSync {
-			hostSynced := false
-			// Sync running/starting/queued jobs
-			syncOpts := ops.DefaultSyncOptions()
-			for _, job := range activeJobsByHost[host] {
-				changed, err := ops.SyncJobQuick(m.database, job, syncOpts)
-				if err != nil {
-					oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
-						oplog.WithDetail("sync-quick-error"),
-						oplog.WithError(err))
-					continue
-				}
-				hostSynced = true
-				if changed {
-					updated++
-				}
-			}
-
-			// Sync draft jobs that still have remote state
-			if drafts, err := db.ListDraftJobsPendingSync(m.database, host); err == nil {
-				for _, job := range drafts {
-					changed, err := ops.SyncDraftJob(m.database, job, syncOpts)
-					if err != nil {
-						oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
-							oplog.WithDetail("sync-draft-error"),
-							oplog.WithError(err))
-						continue
-					}
-					hostSynced = true
-					if changed {
-						updated++
-					}
-				}
-			}
-
-			// Kill tombstoned jobs still running/queued on remote host
-			for _, job := range tombstonedByHost[host] {
-				if job == nil {
-					continue
-				}
-				killed := killTombstonedJob(m.database, job)
-				if killed {
-					updated++
-				}
-			}
-
-			// Start queue runner if there are queued jobs
-			queuedCount := 0
-			runningCount := 0
-			for _, job := range activeJobsByHost[host] {
-				if job != nil && job.Status == db.StatusQueued {
-					queuedCount++
-				} else if job != nil && (job.Status == db.StatusRunning || job.Status == db.StatusStarting) {
-					runningCount++
-				}
-			}
-			if queuedCount > 0 {
-				started, err := ensureQueueRunnerStartedTUI(host)
-				if err != nil {
-					if !remote.IsConnectionError(err.Error()) {
-						queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
-					}
-				} else if started {
-					queuesStarted = append(queuesStarted, host)
-				}
-			} else if m.stopQueueRunnerWhenIdle && runningCount == 0 {
-				if err := stopQueueRunnerIfIdleTUI(host); err != nil {
-					if !remote.IsConnectionError(err.Error()) {
-						queueRunnerErrors = append(queueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
-					}
-				}
-			}
-			if hostSynced {
-				hostsSynced = append(hostsSynced, host)
-				_ = db.RecordHostSync(m.database, host, time.Now())
-			}
-		}
-
-		return syncCompletedMsg{
-			updated:           updated,
-			queuesStarted:     queuesStarted,
-			hostsSynced:       hostsSynced,
-			queueRunnerErrors: queueRunnerErrors,
-		}
-	}
-}
-
 func (m Model) killJob(job *db.Job) tea.Cmd {
 	if job == nil || m.coreService == nil {
 		return nil
@@ -6901,61 +6753,6 @@ Status:`, strings.Join(facts, "\n"))
 	}
 }
 
-// killTombstonedJob kills a job that was tombstoned locally but may still be running remotely
-// Returns true if the job was killed, false if host unreachable or already dead
-func killTombstonedJob(database *sql.DB, job *db.Job) bool {
-	// For queued jobs, send cancel command to remove from queue
-	if job.Status == db.StatusQueued {
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = "default"
-		}
-		cancelCmd := ops.NewCancelCommand(job.ID)
-		err := ops.AppendCommand(job.Host, queueName, cancelCmd, ops.AppendCommandOptions{Timeout: 5 * time.Second})
-		if err != nil {
-			return false // Host unreachable
-		}
-		// Update status to dead
-		db.MarkDeadByID(database, job.ID)
-		return true
-	}
-
-	// For running/starting jobs, kill the process
-	if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
-		var killed bool
-
-		if job.SessionName == "" {
-			// Queue runner job (no session name) - kill via PID
-			pidPattern := session.PidFilePattern(job.ID)
-			killCmd := fmt.Sprintf(`
-				pid=$(cat %s 2>/dev/null | head -1)
-				if [ -n "$pid" ] && kill -0 $pid 2>/dev/null; then
-					kill $pid 2>/dev/null && echo "killed" || echo "failed"
-				else
-					echo "not_running"
-				fi
-			`, pidPattern)
-			stdout, _, err := remote.RunWithTimeout(job.Host, killCmd, 5*time.Second)
-			if err != nil {
-				return false // Host unreachable
-			}
-			killed = strings.TrimSpace(stdout) == "killed"
-		} else {
-			// Regular job - kill via tmux
-			tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-			err := remote.TmuxKillSession(job.Host, tmuxSession)
-			killed = err == nil
-		}
-
-		if killed {
-			db.MarkDeadByID(database, job.ID)
-			return true
-		}
-	}
-
-	return false
-}
-
 func (m Model) jobCountsForHost(host string) (running, queued int) {
 	for _, job := range m.allJobs {
 		if job.Host != host || job.Tombstoned {
@@ -6999,15 +6796,6 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 
 	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
 	return runner.EnsureStarted(envVars)
-}
-
-func stopQueueRunnerIfIdleTUI(host string) error {
-	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
-	running, err := runner.IsRunning()
-	if err != nil || !running {
-		return err
-	}
-	return runner.SendStopSignal()
 }
 
 func (m Model) removeJob(job *db.Job) tea.Cmd {
