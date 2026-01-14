@@ -24,12 +24,17 @@ func QueueDir() string {
 }
 
 var (
-	localBuildHeader = firstLine(scripts.QueueRunnerScript)
+	localBuildHeader = secondLine(scripts.QueueRunnerScript)
 	localBuildNumber = parseBuildHeader(localBuildHeader)
 )
 
-func firstLine(data []byte) string {
+func secondLine(data []byte) string {
 	buf := bytes.NewBuffer(data)
+	// Skip first line (shebang)
+	if _, err := buf.ReadString('\n'); err != nil {
+		return ""
+	}
+	// Read second line (BUILD header)
 	line, err := buf.ReadString('\n')
 	if err != nil && len(line) == 0 {
 		return ""
@@ -68,7 +73,8 @@ func RemoteBuildNumber(host string) (int, error) {
 }
 
 func readRemoteHeader(host string) (string, error) {
-	cmd := fmt.Sprintf("head -n 1 %s 2>/dev/null || true", queueRunnerPath)
+	// Read line 2 (BUILD header is after shebang)
+	cmd := fmt.Sprintf("sed -n '2p' %s 2>/dev/null || true", queueRunnerPath)
 	stdout, stderr, err := ssh.Run(host, cmd)
 	if err != nil {
 		return "", fmt.Errorf("read remote version: %s", strings.TrimSpace(stderr))
@@ -76,7 +82,21 @@ func readRemoteHeader(host string) (string, error) {
 	return strings.TrimSpace(stdout), nil
 }
 
-// EnsureScriptUpToDate deploys the queue runner script if the remote build is older.
+func remoteFileSize(host string) (int, error) {
+	cmd := fmt.Sprintf("wc -c < %s 2>/dev/null || echo 0", queueRunnerPath)
+	stdout, _, err := ssh.Run(host, cmd)
+	if err != nil {
+		return 0, err
+	}
+	size, err := strconv.Atoi(strings.TrimSpace(stdout))
+	if err != nil {
+		return 0, nil // Treat parse errors as size 0
+	}
+	return size, nil
+}
+
+// EnsureScriptUpToDate deploys the queue runner script if the remote build is older
+// or if the file sizes differ (failsafe for when BUILD number wasn't bumped).
 // Returns true if a new script was deployed.
 func EnsureScriptUpToDate(host string) (bool, error) {
 	remoteBuild, err := RemoteBuildNumber(host)
@@ -84,8 +104,22 @@ func EnsureScriptUpToDate(host string) (bool, error) {
 		return false, err
 	}
 
-	// Only deploy when remote is missing or older. Never downgrade newer scripts.
-	if remoteBuild >= localBuildNumber && remoteBuild != -1 {
+	needsDeploy := false
+
+	// Deploy when remote is missing or older
+	if remoteBuild < localBuildNumber || remoteBuild == -1 {
+		needsDeploy = true
+	}
+
+	// Failsafe: also deploy if file sizes differ (catches forgotten BUILD bumps)
+	if !needsDeploy {
+		remoteSize, err := remoteFileSize(host)
+		if err == nil && remoteSize != len(scripts.QueueRunnerScript) {
+			needsDeploy = true
+		}
+	}
+
+	if !needsDeploy {
 		return false, nil
 	}
 

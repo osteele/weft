@@ -757,7 +757,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputGPU].CharLimit = 64
 
 	inputs[inputCPUAllotment] = textinput.New()
-	inputs[inputCPUAllotment].Placeholder = "default (20/40/60/80)"
+	inputs[inputCPUAllotment].Placeholder = "default (1-100)"
 	inputs[inputCPUAllotment].Prompt = ""
 	inputs[inputCPUAllotment].Width = 40
 	inputs[inputCPUAllotment].CharLimit = 8
@@ -2409,7 +2409,7 @@ func (m Model) cpuAllotmentHint() string {
 	}
 	allotment, err := parseCPUAllotmentInput(m.inputs[inputCPUAllotment].Value())
 	if err != nil {
-		return "use " + formatPresetList(cpuAllotmentPresets) + " or default"
+		return "use 1-100 or default"
 	}
 	percent := defaultCPUAllotment
 	if allotment != nil {
@@ -5418,6 +5418,10 @@ func (m Model) handleHostsLoaded(msg hostsLoadedMsg) (Model, tea.Cmd) {
 			}
 			m.hosts = append(m.hosts, host)
 		}
+		if !m.hostsQueriedThisSession[name] {
+			cmds = append(cmds, m.fetchHostInfo(name))
+			cmds = append(cmds, m.fetchQueueStatus(name))
+		}
 	}
 	if len(cmds) > 0 {
 		return m, tea.Batch(cmds...)
@@ -7191,14 +7195,12 @@ func parseCPUAllotmentInput(input string) (*int, error) {
 	trimmed = strings.TrimSuffix(trimmed, "%")
 	value, err := strconv.Atoi(trimmed)
 	if err != nil {
-		return nil, fmt.Errorf("CPU allotment must be one of %s", formatPresetList(cpuAllotmentPresets))
+		return nil, fmt.Errorf("CPU allotment must be 1-100 or default")
 	}
-	for _, preset := range cpuAllotmentPresets {
-		if value == preset {
-			return &value, nil
-		}
+	if value < 1 || value > 100 {
+		return nil, fmt.Errorf("CPU allotment must be 1-100 or default")
 	}
-	return nil, fmt.Errorf("CPU allotment must be one of %s", formatPresetList(cpuAllotmentPresets))
+	return &value, nil
 }
 
 func formatCPUAllotmentInput(allotment *int) string {
