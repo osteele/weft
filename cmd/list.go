@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -351,9 +350,6 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 	for _, host := range hosts {
 		count, err := db.CountQueuedByHost(database, host)
 		if err != nil || count == 0 {
-			if count == 0 {
-				stopQueueRunnerIfIdle(host)
-			}
 			continue
 		}
 		_, err = ensureQueueRunnerStarted(host, defaultQueueName)
@@ -362,13 +358,4 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 			continue
 		}
 	}
-}
-
-func stopQueueRunnerIfIdle(host string) {
-	runner := queuerunner.NewRunner(host, defaultQueueName)
-	running, err := runner.IsRunning()
-	if err != nil || !running {
-		return
-	}
-	_ = runner.SendStopSignal()
 }

@@ -4,7 +4,6 @@ package ops
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -248,6 +247,9 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 			return false, err
 		}
 		CacheCompletedJobLog(job)
+		// Clear the current job marker on remote if it matches this job.
+		// This repairs queue runner state after disk-full or other failures.
+		clearCurrentJobIfMatches(job.Host, queueName, job.ID, timeout)
 		return true, nil
 	}
 
@@ -351,211 +353,12 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, 
 	return false, nil
 }
 
-// SyncJobQuick is an optimized version of SyncJob that uses a single SSH command.
-// Suitable for TUI where latency matters more than perfect accuracy.
+// SyncJobQuick syncs a job with the same logic as SyncJob.
+// Previously optimized for lower latency, now delegates to SyncJob since
+// ControlMaster makes the overhead difference negligible.
+// Kept as a separate entry point to preserve caller intent.
 func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
-	timeout := effectiveSyncTimeout(opts.Timeout)
-
-	if job.SessionName == "" && job.QueueName != "" {
-		// Queue runner job (no session name) - use optimized check with pattern-based file lookup
-		return SyncQueueRunnerJobQuick(database, job, opts)
-	}
-
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, err := ssh.TmuxSessionExistsQuickTimeout(job.Host, tmuxSession, timeout)
-	if err != nil {
-		return false, err
-	}
-
-	if exists {
-		// Session exists - job is running. Update status if needed.
-		if job.Status != db.StatusRunning && job.Status != db.StatusStarting {
-			if err := db.MarkRunningByID(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-
-	// Session doesn't exist - check for status file (exact path first)
-	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-	result, err := ReadStatusFile(job.Host, statusFile, timeout)
-	// Note: err is ignored here - we'll try pattern-based lookup as fallback
-
-	// If exact path not found (or errored) and job has a QueueName, check queue state.
-	// This handles jobs that were started via start_now, killed, then re-queued.
-	if result == nil && job.QueueName != "" {
-		// First check if job completed (status file exists)
-		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
-		if found.IsSome() && found.Unwrap() {
-			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
-				return false, err
-			}
-			CacheCompletedJobLog(job)
-			return true, nil
-		}
-
-		// Check if job is currently running or queued via queue runner
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = "default"
-		}
-		queueStatus, qErr := queueRemoteClient.QuickStatus(job.Host, queueName, job.ID, timeout)
-		if qErr == nil && !queueStatus.Uncertain {
-			switch queueStatus.State {
-			case queueStateRunning:
-				// Job is running via queue runner - update status and clear session_name
-				if job.Status != db.StatusRunning {
-					if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
-						return false, err
-					}
-				}
-				// Clear session_name since job is now managed by queue runner
-				if job.SessionName != "" {
-					if err := db.ClearSessionName(database, job.ID); err != nil {
-						return false, err
-					}
-				}
-				return true, nil
-			case queueStateQueued:
-				// Job is in queue - update status to queued
-				if job.Status != db.StatusQueued {
-					if err := db.MarkQueuedByID(database, job.ID); err != nil {
-						return false, err
-					}
-					return true, nil
-				}
-				return false, nil
-			}
-		}
-	}
-
-	// If we had an error from exact path and pattern-based didn't find anything, propagate the error
-	if err != nil && result == nil {
-		return false, err
-	}
-
-	if result != nil {
-		exitCode, err := strconv.Atoi(result.Content)
-		if err != nil {
-			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
-		}
-		if err := RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
-			return false, err
-		}
-		CacheCompletedJobLog(job)
-		return true, nil
-	}
-
-	// No status file found - but only mark dead if job was actually running.
-	// Queued jobs shouldn't be marked dead just because they haven't run yet.
-	// Jobs with pending_status have deferred operations and shouldn't be marked dead.
-	if job.Status == db.StatusQueued || job.PendingStatus != nil {
-		return false, nil
-	}
-	if err := db.MarkDeadByID(database, job.ID); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// SyncQueueRunnerJobQuick is an optimized version for queue runner jobs that combines
-// all status checks into a single SSH command to reduce latency.
-func SyncQueueRunnerJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
-	timeout := effectiveSyncTimeout(opts.Timeout)
-
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
-
-	result, err := queueRemoteClient.QuickStatus(job.Host, queueName, job.ID, timeout)
-	if err != nil {
-		if ssh.IsConnectionError(err.Error()) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	if result.ExitCode != nil {
-		UpdateStartTimeFromMetadata(database, job, timeout)
-		if err := RecordJobCompletion(database, job.ID, *result.ExitCode, result.Mtime); err != nil {
-			return false, err
-		}
-		CacheCompletedJobLog(job)
-		return true, nil
-	}
-
-	if result.Uncertain {
-		return false, nil
-	}
-
-	switch result.State {
-	case queueStateRunning:
-		// Job is running - update start time from metadata if not set
-		UpdateStartTimeFromMetadata(database, job, timeout)
-		switch job.Status {
-		case db.StatusQueued:
-			if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		case db.StatusStarting:
-			if err := db.MarkRunningByID(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		case db.StatusFailed, db.StatusDead, db.StatusKilled, db.StatusCanceled:
-			// Job was in terminal status but is now running (restarted by queue runner)
-			if err := db.MarkRunningFromTerminal(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	case queueStateQueued:
-		// Job is queued - if DB says running, fix it
-		if job.Status == db.StatusRunning {
-			if err := db.MarkQueuedByID(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	case queueStateDead:
-		// Job not found on remote - could be dead or never synced
-		if job.Status == db.StatusQueued {
-			// Job is queued locally but not on remote - push it to the queue
-			if err := appendQueueEntryForJob(database, job, queueName, timeout); err != nil {
-				// If push fails (e.g., host unreachable), don't change status
-				return false, nil
-			}
-			return true, nil
-		}
-		// Before marking dead, do a secondary probe for the status file.
-		// QuickStatus may have returned DEAD due to a transient issue.
-		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
-		if found.IsSome() && found.Unwrap() {
-			// Status file exists - job actually completed, not dead
-			// Log this anomaly for debugging (QuickStatus said DEAD but file exists)
-			log.Printf("sync: QuickStatus returned DEAD for job %d on %s but status file exists (exit=%d, mtime=%d) - recovering as completed",
-				job.ID, job.Host, exitCode, mtime)
-			UpdateStartTimeFromMetadata(database, job, timeout)
-			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
-				return false, err
-			}
-			CacheCompletedJobLog(job)
-			return true, nil
-		}
-		// Confirmed dead - no status file found
-		if err := db.MarkDeadByID(database, job.ID); err != nil {
-			return false, err
-		}
-		return true, nil
-	default:
-		return false, nil
-	}
+	return SyncJob(database, job, opts)
 }
 
 // SyncDraftJob ensures that a job marked as draft has no remote execution state.
@@ -809,6 +612,17 @@ func probeInQueue(host, queueName string, jobID int64, timeout time.Duration) Op
 // probeProcessRunning checks if the job's process is still running via PID file
 func probeProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool] {
 	return queueRemoteClient.ProcessRunning(host, jobID, timeout)
+}
+
+// clearCurrentJobIfMatches clears the queue runner's current job marker if it matches the given job ID.
+// This repairs inconsistent state that can occur when disk is full and state files can't be updated.
+// Errors are ignored since this is a best-effort repair operation.
+func clearCurrentJobIfMatches(host, queueName string, jobID int64, timeout time.Duration) {
+	currentFile := fmt.Sprintf("%s/%s.current", QueueDir, queueName)
+	// Only clear if the current file contains this job ID
+	cmd := fmt.Sprintf(`current=$(cat %s 2>/dev/null); if [ "$current" = "%d" ]; then echo -n "" > %s && echo "cleared"; fi`,
+		currentFile, jobID, currentFile)
+	_, _, _ = ssh.RunWithTimeout(host, cmd, timeout)
 }
 
 type sshQueueRemote struct{}

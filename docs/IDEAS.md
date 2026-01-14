@@ -2,6 +2,23 @@
 
 Ideas for future enhancements that are not currently prioritized.
 
+## Disk Full Recovery
+
+When the disk fills up during job execution, the queue runner can get into an inconsistent state because it can't write state files.
+
+### Prevention
+- **Pre-flight disk check**: Refuse to start jobs if disk < threshold (e.g., 50MB)
+- **Low disk warning**: Alert users before it becomes critical (implemented in TUI)
+
+### Robustness
+- **Atomic writes with fsync**: Ensure state files are written completely or not at all
+- **Retry logic**: Queue runner should retry failed state file writes
+- **Journal/WAL**: Use write-ahead logging for critical state changes
+
+### Recovery
+- **Self-healing**: Queue runner detects inconsistent state (current job doesn't exist/already completed) and recovers
+- **Sync repairs remote state**: When sync detects a completed job, also clear `default.current` on remote
+
 ## Idle Timeout
 
 Add `--idle-timeout <duration>` flag to kill jobs that stop producing output.

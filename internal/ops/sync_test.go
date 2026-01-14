@@ -172,16 +172,18 @@ func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
 	}
 }
 
-func TestSyncJobQuickMarksDeadWithoutStatus(t *testing.T) {
+func TestSyncJobNoChangeWhenSessionGoneButNoStatus(t *testing.T) {
 	database := db.SetupTestDB(t)
 
+	// Create a running job (not starting) - session gone but no status file
+	// SyncJob is conservative: doesn't mark dead from missing evidence alone
 	jobID, err := db.RecordJobStarting(database, "quick-host", "/tmp", "echo quick", "quick job")
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
 	sessionName := "session-quick"
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID); err != nil {
-		t.Fatalf("update session: %v", err)
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, status = ? WHERE id = ?`, sessionName, db.StatusRunning, jobID); err != nil {
+		t.Fatalf("update job: %v", err)
 	}
 
 	mockSSHCommands(t, []sshMockResponse{
@@ -189,17 +191,19 @@ func TestSyncJobQuickMarksDeadWithoutStatus(t *testing.T) {
 	})
 
 	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncJobQuick(database, job, SyncOptions{Timeout: time.Second})
+	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
-		t.Fatalf("SyncJobQuick: %v", err)
+		t.Fatalf("SyncJob: %v", err)
 	}
-	if !changed {
-		t.Fatalf("expected job to be marked failed")
+	// SyncJob is conservative - doesn't mark dead from just session disappearing
+	// This avoids false positives from race conditions
+	if changed {
+		t.Fatalf("expected no change for uncertain state")
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusFailed {
-		t.Fatalf("expected failed status, got %s", updated.Status)
+	if updated.Status != db.StatusRunning {
+		t.Fatalf("expected status unchanged (running), got %s", updated.Status)
 	}
 }
 
@@ -239,10 +243,10 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 	}
 }
 
-func TestSyncQueueRunnerJobQuickCompletesJobs(t *testing.T) {
+func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	jobID, err := db.RecordQueued(database, "quick-queue", "/tmp", "echo", "queue job", "default")
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job", "default")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
@@ -252,19 +256,18 @@ func TestSyncQueueRunnerJobQuickCompletesJobs(t *testing.T) {
 
 	exitCode := 3
 	mock := mockQueueRemote{
-		quickStatus: quickStatus{
-			ExitCode: &exitCode,
-			Mtime:    1700001000,
-		},
-		metadata: "start_time=1700000500\n",
+		statusExitCode: exitCode,
+		statusMtime:    1700001000,
+		statusOption:   Some(true),
+		metadata:       "start_time=1700000500\n",
 	}
 	restore := setQueueRemoteClientForTesting(mock)
 	defer restore()
 
 	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncQueueRunnerJobQuick(database, job, SyncOptions{Timeout: time.Second})
+	changed, err := SyncQueueRunnerJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
-		t.Fatalf("SyncQueueRunnerJobQuick: %v", err)
+		t.Fatalf("SyncQueueRunnerJob: %v", err)
 	}
 	if !changed {
 		t.Fatalf("expected completion change")
@@ -503,8 +506,4 @@ func TestSyncDraftJobKillsTmuxSession(t *testing.T) {
 	if updated.LastSyncedStatus != db.StatusDraft {
 		t.Fatalf("expected last synced draft, got %s", updated.LastSyncedStatus)
 	}
-}
-
-func intPtr(i int) *int {
-	return &i
 }

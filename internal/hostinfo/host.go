@@ -66,6 +66,8 @@ type Host struct {
 	MemTotal  string // e.g., "128G"
 	MemUsed   string // e.g., "58G"
 	LoadAvg   string // e.g., "0.5, 0.3, 0.2"
+	DiskFree  int64  // Free disk space in bytes (for home directory)
+	DiskTotal int64  // Total disk space in bytes (for home directory)
 	GPUs      []GPUInfo
 	LastCheck time.Time
 	Error     string // connection error message (not displayed as error)
@@ -93,6 +95,8 @@ const HostInfoCommand = `echo "ARCH:$(uname -sm)"; ` +
 	`echo "OS:$(uname -r)"; ` +
 	`echo "CPUS:$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo -)"; ` +
 	`echo "LOAD:$(uptime | sed 's/.*load average[s]*: //')"; ` +
+	// Disk space: df -k on home directory, output in 1K blocks (portable)
+	`df -k ~ 2>/dev/null | awk 'NR==2 {print "DISK:" $2 ":" $4}' || true; ` +
 	// Memory: Linux uses free, macOS uses sysctl + vm_stat
 	`if command -v free >/dev/null 2>&1; then ` +
 	`echo "MEM:$(free -h | awk '/^Mem:/ {print $2":"$3}')"; ` +
@@ -163,6 +167,17 @@ func ParseHostInfo(output string) *Host {
 					// Clean up "-" for unused values (macOS doesn't report used)
 					if host.MemUsed == "-" {
 						host.MemUsed = ""
+					}
+				}
+			case "DISK":
+				// Format: total_kb:avail_kb (from df -k)
+				parts := strings.SplitN(value, ":", 2)
+				if len(parts) == 2 {
+					if total, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+						host.DiskTotal = total * 1024 // Convert KB to bytes
+					}
+					if free, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+						host.DiskFree = free * 1024 // Convert KB to bytes
 					}
 				}
 			case "MACGPU":
@@ -506,5 +521,55 @@ func (h *Host) QueueSummary() string {
 		return fmt.Sprintf("▶ %d", h.QueuedJobCount)
 	default:
 		return "-"
+	}
+}
+
+// LowDiskThreshold is the threshold below which disk space is considered critically low (5MB)
+const LowDiskThreshold = 5 * 1024 * 1024 // 5 MB in bytes
+
+// HasLowDiskSpace returns true if the host has less than 5MB free disk space
+func (h *Host) HasLowDiskSpace() bool {
+	// Only warn if we have disk info and the host is online
+	if h.DiskFree == 0 || h.Status != HostStatusOnline {
+		return false
+	}
+	return h.DiskFree < LowDiskThreshold
+}
+
+// DiskFreeSummary returns a human-readable disk free space string
+func (h *Host) DiskFreeSummary() string {
+	if h.DiskFree == 0 {
+		return ""
+	}
+	return formatBytes(h.DiskFree)
+}
+
+// DiskSummary returns a summary of disk usage (e.g., "45G free" or "4.2M free")
+func (h *Host) DiskSummary() string {
+	if h.DiskFree == 0 {
+		return "-"
+	}
+	return formatBytes(h.DiskFree) + " free"
+}
+
+// formatBytes formats bytes as human-readable string
+func formatBytes(b int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+	switch {
+	case b >= TB:
+		return fmt.Sprintf("%.1fT", float64(b)/float64(TB))
+	case b >= GB:
+		return fmt.Sprintf("%.1fG", float64(b)/float64(GB))
+	case b >= MB:
+		return fmt.Sprintf("%.1fM", float64(b)/float64(MB))
+	case b >= KB:
+		return fmt.Sprintf("%.1fK", float64(b)/float64(KB))
+	default:
+		return fmt.Sprintf("%dB", b)
 	}
 }

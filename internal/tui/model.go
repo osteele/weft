@@ -676,6 +676,9 @@ type Model struct {
 	// Host cache tracking - which hosts have been freshly queried this session
 	hostsQueriedThisSession map[string]bool
 
+	// Track hosts that have already shown low disk warning this session
+	lowDiskWarnedHosts map[string]bool
+
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
 	jobDependencies map[int64]string
 
@@ -840,6 +843,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostCacheDuration:       opts.HostCacheDuration,
 		stopQueueRunnerWhenIdle: opts.StopQueueRunnerWhenIdle,
 		hostsQueriedThisSession: make(map[string]bool),
+		lowDiskWarnedHosts:      make(map[string]bool),
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
@@ -2672,31 +2676,43 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 	if host.Status != HostStatusOnline {
 		nameStyle = hostSummaryOfflineStyle.Copy()
 	}
+
+	// Highlight host name in red if low disk space
+	if host.HasLowDiskSpace() {
+		nameStyle = hostSummaryCriticalStyle
+	}
+
 	name := nameStyle.Render(truncate(host.Name, 12))
 
+	// For offline hosts, just show status symbol and name (no stats)
+	if host.Status != HostStatusOnline {
+		return statusStyle.Render(statusSymbol) + " " + name
+	}
+
+	// Online hosts: show stats including disk
 	cpuPct, cpuOK := hostCPULoadPercent(host)
 	memPct, memOK := hostMemUsagePercent(host)
 	gpuPct, gpuOK := hostGPULoadPercent(host)
 
-	var cpuText, memText, gpuText string
+	var cpuText, memText, gpuText, diskText string
 	if format == hostSummaryAbbrev {
 		cpuText = formatHostSummaryMetricAbbrev("C", cpuPct, cpuOK)
 		memText = formatHostSummaryMetricAbbrev("R", memPct, memOK)
 		gpuText = formatHostSummaryMetricAbbrev("G", gpuPct, gpuOK)
+		diskText = formatDiskSummaryAbbrev(host)
 	} else {
 		cpuText = formatHostSummaryMetric("CPU", cpuPct, cpuOK)
 		memText = formatHostSummaryMetric("RAM", memPct, memOK)
 		gpuText = formatHostSummaryMetric("GPU", gpuPct, gpuOK)
+		diskText = formatDiskSummary(host)
 	}
 
 	cpuStyle := hostSummaryStyleForMetric(cpuPct, cpuOK)
 	memStyle := hostSummaryStyleForMetric(memPct, memOK)
 	gpuStyle := hostSummaryStyleForMetric(gpuPct, gpuOK)
-
-	if host.Status != HostStatusOnline {
-		cpuStyle = hostSummaryOfflineStyle
-		memStyle = hostSummaryOfflineStyle
-		gpuStyle = hostSummaryOfflineStyle
+	diskStyle := hostSummaryNormalStyle
+	if host.HasLowDiskSpace() {
+		diskStyle = hostSummaryCriticalStyle
 	}
 
 	fields := []string{
@@ -2705,6 +2721,11 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 		cpuStyle.Render(cpuText),
 		memStyle.Render(memText),
 		gpuStyle.Render(gpuText),
+	}
+
+	// Only add disk if we have disk info
+	if diskText != "" {
+		fields = append(fields, diskStyle.Render(diskText))
 	}
 
 	return strings.Join(fields, " ")
@@ -2750,6 +2771,22 @@ func formatHostSummaryMetricAbbrev(label string, pct int, ok bool) string {
 		return label + "--"
 	}
 	return fmt.Sprintf("%s%d%%", label, pct)
+}
+
+// formatDiskSummary formats disk free space for the host summary (e.g., "Disk:45G")
+func formatDiskSummary(host *Host) string {
+	if host.DiskFree == 0 {
+		return ""
+	}
+	return "Disk:" + host.DiskFreeSummary()
+}
+
+// formatDiskSummaryAbbrev formats disk free space abbreviated (e.g., "D45G")
+func formatDiskSummaryAbbrev(host *Host) string {
+	if host.DiskFree == 0 {
+		return ""
+	}
+	return "D" + host.DiskFreeSummary()
 }
 
 func (m Model) renderLogPanel(height int) string {
@@ -3800,8 +3837,8 @@ func (m Model) renderHostList(height int) string {
 	var rows []string
 
 	// Header
-	header := fmt.Sprintf(" %-12s %-16s %-16s %-6s %-5s %-5s",
-		"HOST", "STATUS", "ARCH", "QUEUE", "CPU", "RAM")
+	header := fmt.Sprintf(" %-12s %-16s %-16s %-6s %-5s %-5s %-8s",
+		"HOST", "STATUS", "ARCH", "QUEUE", "CPU", "RAM", "DISK")
 	rows = append(rows, headerStyle.Render(header))
 
 	if len(m.hosts) == 0 {
@@ -3810,6 +3847,7 @@ func (m Model) renderHostList(height int) string {
 		// Hosts
 		contentHeight := height - 4 // Account for borders and header
 		rowCount := 0
+		recentlyOnlineThreshold := time.Hour // Only show stats for hosts online within past hour
 		for i, host := range m.hosts {
 			if rowCount >= contentHeight {
 				break
@@ -3821,21 +3859,40 @@ func (m Model) renderHostList(height int) string {
 			if arch == "" {
 				arch = "-"
 			}
-			cpu := host.CPUUtilization()
-			ram := host.RAMUtilization()
 
-			// Style CPU/RAM in red if >90%
-			cpuPct := host.CPUUtilizationPct()
-			ramPct := host.RAMUtilizationPct()
-			if cpuPct > 90 {
-				cpu = failedStyle.Render(cpu)
-			}
-			if ramPct > 90 {
-				ram = failedStyle.Render(ram)
+			// Only show stats for recently online hosts (within past hour)
+			recentlyOnline := host.Status == HostStatusOnline ||
+				(!host.LastCheck.IsZero() && time.Since(host.LastCheck) < recentlyOnlineThreshold)
+
+			cpu := "-"
+			ram := "-"
+			disk := "-"
+			if recentlyOnline {
+				cpu = host.CPUUtilization()
+				ram = host.RAMUtilization()
+				disk = host.DiskFreeSummary()
+				if disk == "" {
+					disk = "-"
+				}
+
+				// Style CPU/RAM in red if >90%
+				cpuPct := host.CPUUtilizationPct()
+				ramPct := host.RAMUtilizationPct()
+				if cpuPct > 90 {
+					cpu = failedStyle.Render(cpu)
+				}
+				if ramPct > 90 {
+					ram = failedStyle.Render(ram)
+				}
+
+				// Style disk in red if low (<5MB)
+				if host.HasLowDiskSpace() {
+					disk = failedStyle.Render(disk)
+				}
 			}
 
-			line := fmt.Sprintf(" %-12s %-16s %-16s %-6s %-5s %-5s",
-				truncate(host.Name, 12), status, arch, queue, cpu, ram)
+			line := fmt.Sprintf(" %-12s %-16s %-16s %-6s %-5s %-5s %-8s",
+				truncate(host.Name, 12), status, arch, queue, cpu, ram, disk)
 
 			if i == m.selectedHostIdx {
 				line = selectedStyle.Width(m.width - 4).Render(line)
@@ -5441,7 +5498,7 @@ func (m Model) handleHostSyncTimesLoaded(msg hostSyncTimesLoadedMsg) (Model, tea
 }
 
 func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
-	var cmd tea.Cmd
+	var cmds []tea.Cmd
 	for i, h := range m.hosts {
 		if h.Name == msg.hostName {
 			msg.info.Name = msg.hostName
@@ -5455,11 +5512,23 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 				msg.info.LastCheck = h.LastCheck
 			}
 			m.hosts[i] = msg.info
+
+			// Warn if host has low disk space (only on first detection this session)
+			if msg.info.HasLowDiskSpace() && !m.lowDiskWarnedHosts[msg.hostName] {
+				m.lowDiskWarnedHosts[msg.hostName] = true
+				cmds = append(cmds, m.setFlash(
+					fmt.Sprintf("Warning: %s has low disk space (%s free)", msg.hostName, msg.info.DiskFreeSummary()),
+					true,
+				))
+			}
 			break
 		}
 	}
 	m.hostsQueriedThisSession[msg.hostName] = true
-	return m, cmd
+	if len(cmds) == 0 {
+		return m, nil
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) handleSyncCompleted(msg syncCompletedMsg) (Model, tea.Cmd) {
