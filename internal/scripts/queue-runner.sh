@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 22
+# BUILD: 23
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -262,7 +262,7 @@ append_history() {
 
 history_count() {
     local history_json="$1"
-    jq -r --argjson history "$history_json" '[$history[] | select(. == 1)] | length'
+    jq -rn --argjson history "$history_json" '[$history[] | select(. == 1)] | length'
 }
 
 append_sample() {
@@ -274,7 +274,7 @@ append_sample() {
 
 sample_average() {
     local samples_json="$1"
-    jq -r --argjson samples "$samples_json" 'if ($samples | length) > 0 then ($samples | add / length) else 0 end'
+    jq -rn --argjson samples "$samples_json" 'if ($samples | length) > 0 then ($samples | add / length) else 0 end'
 }
 
 proc_cpu_host_pct() {
@@ -711,7 +711,7 @@ sample_running_jobs() {
         local avg
         avg=$(sample_average "$samples_json")
         local sample_count
-        sample_count=$(jq -r --argjson samples "$samples_json" '($samples | length)')
+        sample_count=$(jq -rn --argjson samples "$samples_json" '($samples | length)')
         if [ "$sample_count" -lt "$SAMPLE_COUNT" ]; then
             updated=true
             continue
