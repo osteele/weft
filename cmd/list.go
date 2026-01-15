@@ -61,25 +61,31 @@ var (
 
 const defaultHostSyncWindow = 48 * time.Hour
 
+// addListFlags registers all list-related flags on a command.
+// Used by both listCmd and jobListCmd to share the same flag definitions.
+func addListFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
+	cmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
+	cmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
+	cmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
+	cmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, processed, unprocessed)")
+	cmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
+	cmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
+	cmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
+	cmd.Flags().StringVar(&listSearch, "filter", "", "Search by description or command (alias for --search)")
+	cmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
+	cmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
+	cmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
+	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
+	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
+	cmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
+	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
+	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
+}
+
 func init() {
 	rootCmd.AddCommand(listCmd)
-
-	listCmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
-	listCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
-	listCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
-	listCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
-	listCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, processed, unprocessed)")
-	listCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
-	listCmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
-	listCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
-	listCmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
-	listCmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
-	listCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
-	listCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
-	listCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
-	listCmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
-	listCmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
-	listCmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
+	addListFlags(listCmd)
 }
 
 func runList(cmd *cobra.Command, args []string) error {

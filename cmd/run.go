@@ -295,7 +295,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
 
 		if res.Deferred {
-			fmt.Printf("\nHost %s is unreachable right now. The CLI will append this job to the remote queue once it can reach the host again (run `remote-jobs sync --sync` to retry).\n", host)
+			fmt.Printf("\nHost %s is unreachable right now. The CLI will append this job to the remote queue once it can reach the host again (run `remote-jobs sync` to retry).\n", host)
 		}
 		return nil
 	}

@@ -8,9 +8,10 @@ import (
 
 // File represents a parsed job plan file
 type File struct {
-	Version int64   `yaml:"version"`
-	Kill    []int64 `yaml:"kill"`
-	Jobs    []Entry `yaml:"jobs"`
+	Version int64    `yaml:"version"`
+	Tags    []string `yaml:"tags,omitempty"` // File-level tags apply to all jobs
+	Kill    []int64  `yaml:"kill"`
+	Jobs    []Entry  `yaml:"jobs"`
 }
 
 // Defaults contains values that can be applied to a parsed plan.
@@ -35,6 +36,7 @@ type Job struct {
 	Command           string            `yaml:"command"`
 	Description       string            `yaml:"description"`
 	Env               map[string]string `yaml:"env"`
+	Tags              []string          `yaml:"tags,omitempty"` // Job-level tags
 	Queue             string            `yaml:"queue"`
 	QueueOnly         bool              `yaml:"queue_only"`
 	DependsOn         []string          `yaml:"depends_on"`
@@ -50,6 +52,7 @@ type Parallel struct {
 	Host              string            `yaml:"host"`
 	Dir               string            `yaml:"dir"`
 	Env               map[string]string `yaml:"env"`
+	Tags              []string          `yaml:"tags,omitempty"` // Block-level tags
 	DependsOn         []string          `yaml:"depends_on"`
 	ContinueOnFailure bool              `yaml:"continue_on_failure"`
 	Jobs              []Job             `yaml:"jobs"`
@@ -63,6 +66,7 @@ type Series struct {
 	Host              string            `yaml:"host"`
 	Dir               string            `yaml:"dir"`
 	Env               map[string]string `yaml:"env"`
+	Tags              []string          `yaml:"tags,omitempty"` // Block-level tags
 	Queue             string            `yaml:"queue"`
 	Wait              string            `yaml:"wait"`
 	DependsOn         []string          `yaml:"depends_on"`

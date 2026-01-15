@@ -189,6 +189,7 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 				Command:      resolved.Command,
 				Description:  resolved.Description,
 				EnvVars:      resolved.EnvVars,
+				Tags:         job.Tags,
 				QueueName:    targetQueue,
 				Dependencies: deps,
 				AutoStart:    !planNoQueueStart,
@@ -219,6 +220,7 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 			Command:     resolved.Command,
 			Description: resolved.Description,
 			EnvVars:     resolved.EnvVars,
+			Tags:        job.Tags,
 		})
 		if err != nil {
 			return nil, err
@@ -293,6 +295,9 @@ func runPlanShow(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Printf("    cmd: %s\n", job.Source.Command)
+		if len(job.Tags) > 0 {
+			fmt.Printf("    tags: %s\n", strings.Join(job.Tags, ", "))
+		}
 		if len(job.Dependencies) > 0 {
 			fmt.Printf("    depends_on:\n")
 			for _, dep := range job.Dependencies {

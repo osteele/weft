@@ -29,6 +29,7 @@ type ExecutionBlock struct {
 	Kind              BlockKind
 	Dir               string
 	Env               map[string]string
+	Tags              []string // Inherited from file + block tags
 	Queue             string
 	Wait              string
 	ContinueOnFailure bool
@@ -41,6 +42,7 @@ type ExecutionJob struct {
 	Path              string
 	Source            *Job
 	Block             *ExecutionBlock
+	Tags              []string // Merged: file + block + job tags
 	Dependencies      []*JobDependency
 	ContinueOnFailure bool
 }
@@ -57,6 +59,7 @@ var idPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 func (f *File) BuildExecutionPlan() (*ExecutionPlan, error) {
 	res := &resolver{
 		file:      f,
+		fileTags:  f.Tags,
 		idTargets: make(map[string]*idTarget),
 		aliasMap:  make(map[string]string),
 	}
@@ -75,6 +78,7 @@ func (f *File) BuildExecutionPlan() (*ExecutionPlan, error) {
 
 type resolver struct {
 	file      *File
+	fileTags  []string // File-level tags inherited by all jobs
 	blocks    []*blockContext
 	jobs      []*jobContext
 	idTargets map[string]*idTarget
@@ -154,7 +158,7 @@ func (r *resolver) handleStandaloneJob(job *Job, path string) error {
 }
 
 func (r *resolver) handleParallel(block *Parallel, path string) error {
-	execBlock, err := r.newExecutionBlock(block.ID, block.Alias, block.Name, path, BlockKindParallel, block.Dir, block.Env, "", "", block.ContinueOnFailure)
+	execBlock, err := r.newExecutionBlock(block.ID, block.Alias, block.Name, path, BlockKindParallel, block.Dir, block.Env, block.Tags, "", "", block.ContinueOnFailure)
 	if err != nil {
 		return err
 	}
@@ -180,7 +184,7 @@ func (r *resolver) handleSeries(block *Series, path string) error {
 	if waitMode == "" {
 		waitMode = "success"
 	}
-	execBlock, err := r.newExecutionBlock(block.ID, block.Alias, block.Name, path, BlockKindSeries, block.Dir, block.Env, block.Queue, waitMode, block.ContinueOnFailure)
+	execBlock, err := r.newExecutionBlock(block.ID, block.Alias, block.Name, path, BlockKindSeries, block.Dir, block.Env, block.Tags, block.Queue, waitMode, block.ContinueOnFailure)
 	if err != nil {
 		return err
 	}
@@ -215,7 +219,7 @@ func (r *resolver) nextBlockID() string {
 	return id
 }
 
-func (r *resolver) newExecutionBlock(id, alias, name, path string, kind BlockKind, dir string, env map[string]string, queue string, wait string, cof bool) (*ExecutionBlock, error) {
+func (r *resolver) newExecutionBlock(id, alias, name, path string, kind BlockKind, dir string, env map[string]string, blockTags []string, queue string, wait string, cof bool) (*ExecutionBlock, error) {
 	blockID := id
 	if blockID == "" {
 		blockID = r.nextBlockID()
@@ -236,6 +240,7 @@ func (r *resolver) newExecutionBlock(id, alias, name, path string, kind BlockKin
 		Kind:              kind,
 		Dir:               dir,
 		Env:               copyEnv(env),
+		Tags:              mergeTags(r.fileTags, blockTags),
 		Queue:             queue,
 		Wait:              wait,
 		ContinueOnFailure: cof,
@@ -263,16 +268,28 @@ func (r *resolver) newJobContext(job *Job, path string, blockCtx *blockContext, 
 		}
 	}
 
+	// Compute merged tags: file + block + job
+	var blockTags []string
+	var block *ExecutionBlock
+	if blockCtx != nil {
+		block = blockCtx.block
+		blockTags = block.Tags // Already includes file tags
+	}
+	var jobTags []string
+	if len(blockTags) > 0 {
+		jobTags = mergeTags(blockTags, job.Tags)
+	} else {
+		jobTags = mergeTags(r.fileTags, job.Tags)
+	}
+
 	execJob := &ExecutionJob{
 		ID:                job.ID,
 		Alias:             job.Alias,
 		Path:              path,
 		Source:            job,
-		Block:             nil,
+		Block:             block,
+		Tags:              jobTags,
 		ContinueOnFailure: job.ContinueOnFailure,
-	}
-	if blockCtx != nil {
-		execJob.Block = blockCtx.block
 	}
 	ctx := &jobContext{job: execJob}
 	ctx.rawDepends = append(ctx.rawDepends, r.buildDepRefs(job.DependsOn, false, path+".depends_on")...)
@@ -453,4 +470,19 @@ func copyEnv(src map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// mergeTags merges multiple tag slices into one, removing duplicates while preserving order.
+func mergeTags(tagSets ...[]string) []string {
+	seen := make(map[string]bool)
+	var result []string
+	for _, tags := range tagSets {
+		for _, tag := range tags {
+			if tag != "" && !seen[tag] {
+				seen[tag] = true
+				result = append(result, tag)
+			}
+		}
+	}
+	return result
 }

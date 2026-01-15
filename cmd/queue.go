@@ -45,7 +45,7 @@ Subcommands:
 }
 
 var queueAddCmd = &cobra.Command{
-	Use:   "add <host> <command>",
+	Use:   "add [host] <command>",
 	Short: "Add a job to the queue",
 	Long: `Add a job to a remote queue for sequential execution.
 
@@ -54,15 +54,16 @@ in FIFO order.
 
 Examples:
   remote-jobs queue add cool30 'python train.py --epochs 100'
+  remote-jobs queue add --host cool30 'python train.py --epochs 100'
   remote-jobs queue add -m "Training run 1" cool30 'python train.py'
   remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
   remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes`,
-	Args: usageArgs(cobra.ExactArgs(2)),
+	Args: usageArgs(cobra.RangeArgs(1, 2)),
 	RunE: runQueueAdd,
 }
 
 var queueStartCmd = &cobra.Command{
-	Use:   "start <host>",
+	Use:   "start [host]",
 	Short: "Start the queue runner on a remote host",
 	Long: `Start the queue runner on a remote host.
 
@@ -72,13 +73,14 @@ It continues running even when you disconnect.
 This command is idempotent - safe to call multiple times.
 
 Examples:
-  remote-jobs queue start cool30`,
-	Args: usageArgs(cobra.ExactArgs(1)),
+  remote-jobs queue start cool30
+  remote-jobs queue start --host cool30`,
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueStart,
 }
 
 var queueStopCmd = &cobra.Command{
-	Use:   "stop <host>",
+	Use:   "stop [host]",
 	Short: "Stop the queue runner after current job",
 	Long: `Stop the queue runner after the current job completes.
 
@@ -86,43 +88,50 @@ This sends a stop signal that the runner will detect after the current
 job finishes. The runner will exit gracefully.
 
 Examples:
-  remote-jobs queue stop cool30`,
-	Args: usageArgs(cobra.ExactArgs(1)),
+  remote-jobs queue stop cool30
+  remote-jobs queue stop --host cool30`,
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueStop,
 }
 
 var queueListCmd = &cobra.Command{
-	Use:   "list <host>",
+	Use:   "list [host]",
 	Short: "List jobs in the queue",
 	Long: `Show jobs waiting in the queue and the currently running job.
 
 Examples:
-  remote-jobs queue list cool30`,
-	Args: usageArgs(cobra.ExactArgs(1)),
+  remote-jobs queue list cool30
+  remote-jobs queue list --host cool30`,
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueList,
 }
 
 var queueStatusCmd = &cobra.Command{
-	Use:   "status <host>",
+	Use:   "status [host]",
 	Short: "Show queue runner status",
 	Long: `Show the status of the queue runner on a remote host.
 
 Displays whether the runner is active, current job (if any), and queue depth.
 
 Examples:
-  remote-jobs queue status cool30`,
-	Args: usageArgs(cobra.ExactArgs(1)),
+  remote-jobs queue status cool30
+  remote-jobs queue status --host cool30`,
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueStatus,
 }
 
 var queueUpdateCmd = &cobra.Command{
-	Use:   "update <host>",
+	Use:   "update [host]",
 	Short: "Update the queue runner script on a remote host",
 	Long: `Update the queue runner script on a remote host.
 
 If the script was updated and the runner is currently running, the command
-will attempt a short restart so the new version is picked up.`,
-	Args: usageArgs(cobra.ExactArgs(1)),
+will attempt a short restart so the new version is picked up.
+
+Examples:
+  remote-jobs queue update cool30
+  remote-jobs queue update --host cool30`,
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueUpdate,
 }
 
@@ -194,6 +203,7 @@ var (
 	editClearEnv        bool
 	editStatus          string
 	editRetry           bool
+	queueHost           string // Shared --host flag for queue subcommands
 )
 
 // allowedStatusTransitions defines which status transitions are valid for the edit command.
@@ -203,6 +213,23 @@ var requeueableStatuses = map[string]bool{
 	db.StatusDead:     true,
 	db.StatusFailed:   true,
 	db.StatusCanceled: true,
+}
+
+// addQueueHostFlag adds the --host flag to a queue subcommand
+func addQueueHostFlag(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&queueHost, "host", "", "Target host")
+}
+
+// resolveQueueHost resolves host from --host flag or positional argument.
+// For commands that take host as first positional arg.
+func resolveQueueHost(args []string) (string, error) {
+	if queueHost != "" {
+		return queueHost, nil
+	}
+	if len(args) > 0 {
+		return args[0], nil
+	}
+	return "", fmt.Errorf("host is required (provide as argument or use --host)")
 }
 
 func init() {
@@ -220,6 +247,14 @@ func init() {
 	addEditFlags(editCmd)
 	addEditFlags(queueEditCmd)
 
+	// Add --host flag to queue subcommands
+	addQueueHostFlag(queueAddCmd)
+	addQueueHostFlag(queueStartCmd)
+	addQueueHostFlag(queueStopCmd)
+	addQueueHostFlag(queueListCmd)
+	addQueueHostFlag(queueStatusCmd)
+	addQueueHostFlag(queueUpdateCmd)
+
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path)")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "message", "m", "", "Description of the job")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
@@ -234,8 +269,18 @@ func init() {
 }
 
 func runQueueAdd(cmd *cobra.Command, args []string) error {
-	host := args[0]
-	command := args[1]
+	var host, command string
+	if queueHost != "" {
+		// --host flag used, all args are the command
+		host = queueHost
+		command = strings.Join(args, " ")
+	} else if len(args) >= 2 {
+		// Positional: first arg is host, rest is command
+		host = args[0]
+		command = strings.Join(args[1:], " ")
+	} else {
+		return fmt.Errorf("requires host (via --host or first argument) and command")
+	}
 
 	// Validate command against blocked patterns
 	cfg, _ := config.Load()
@@ -344,7 +389,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	// Auto-start queue runner unless --no-start is specified
 	if result.Deferred {
 		fmt.Printf("\nHost %s is unreachable. This job will be appended to the queue when the host is reachable again.\n", host)
-		fmt.Printf("Run `remote-jobs sync --sync` after %s is online to retry, or wait for the next automatic sync.\n", host)
+		fmt.Printf("Run `remote-jobs sync` after %s is online to retry, or wait for the next automatic sync.\n", host)
 		return nil
 	}
 
@@ -375,9 +420,12 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 }
 
 func runQueueStart(cmd *cobra.Command, args []string) error {
-	host := args[0]
+	host, err := resolveQueueHost(args)
+	if err != nil {
+		return err
+	}
 
-	_, err := ensureQueueRunnerStarted(host, defaultQueueName)
+	_, err = ensureQueueRunnerStarted(host, defaultQueueName)
 	if err != nil {
 		return err
 	}
@@ -386,7 +434,10 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueStop(cmd *cobra.Command, args []string) error {
-	host := args[0]
+	host, err := resolveQueueHost(args)
+	if err != nil {
+		return err
+	}
 
 	runner := queuerunner.NewRunner(host, defaultQueueName)
 	if err := runner.SendStopSignal(); err != nil {
@@ -397,7 +448,10 @@ func runQueueStop(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueList(cmd *cobra.Command, args []string) error {
-	host := args[0]
+	host, err := resolveQueueHost(args)
+	if err != nil {
+		return err
+	}
 
 	database, err := db.Open()
 	if err != nil {
@@ -458,7 +512,10 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueStatus(cmd *cobra.Command, args []string) error {
-	host := args[0]
+	host, err := resolveQueueHost(args)
+	if err != nil {
+		return err
+	}
 
 	runnerSession := fmt.Sprintf("rj-queue-%s", defaultQueueName)
 
@@ -504,7 +561,11 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runQueueUpdate(cmd *cobra.Command, args []string) error {
-	host := args[0]
+	host, err := resolveQueueHost(args)
+	if err != nil {
+		return err
+	}
+
 	runner := queuerunner.NewRunner(host, defaultQueueName)
 
 	upgraded, err := queuerunner.EnsureScriptUpToDate(host)

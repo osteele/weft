@@ -226,22 +226,8 @@ func init() {
 	jobLogCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
 	jobLogCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
 
-	// Copy flags from list command to job list
-	jobListCmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
-	jobListCmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
-	jobListCmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
-	jobListCmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
-	jobListCmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, completed, queued, dead, processed, unprocessed)")
-	jobListCmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
-	jobListCmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
-	jobListCmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
-	jobListCmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
-	jobListCmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
-	jobListCmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
-	jobListCmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
-	jobListCmd.Flags().BoolVar(&listSync, "sync", false, "Sync job statuses from remote hosts before listing")
-	jobListCmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
-	jobListCmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
+	// Use shared list flags helper (defined in list.go)
+	addListFlags(jobListCmd)
 
 	// Copy flags from describe command to job describe
 	jobDescribeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
