@@ -704,16 +704,16 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 			}
 		}
 
-		queuedCount := 0
-		runningCount := 0
+		queueRunnerCount := 0
 		for _, job := range activeJobsByHost[host] {
-			if job != nil && job.Status == db.StatusQueued {
-				queuedCount++
-			} else if job != nil && (job.Status == db.StatusRunning || job.Status == db.StatusStarting) {
-				runningCount++
+			if job == nil {
+				continue
+			}
+			if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+				queueRunnerCount++
 			}
 		}
-		if queuedCount > 0 {
+		if queueRunnerCount > 0 {
 			started, err := ensureQueueRunnerStarted(host)
 			if err != nil {
 				if !remote.IsConnectionError(err.Error()) {
@@ -757,10 +757,7 @@ func ensureQueueRunnerStarted(host string) (bool, error) {
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely.
 func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 	if job.Status == db.StatusQueued {
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = "default"
-		}
+		queueName := ops.DefaultQueueName
 		cancelCmd := ops.NewCancelCommand(job.ID)
 		err := ops.AppendCommand(job.Host, queueName, cancelCmd, ops.AppendCommandOptions{Timeout: 5 * time.Second})
 		if err != nil {

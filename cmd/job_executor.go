@@ -176,10 +176,7 @@ func isConnectionFailure(stderr string, err error) bool {
 }
 
 func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedInfo, envVars []string) (*startJobResult, error) {
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
+	queueName := defaultQueueName
 
 	if err := db.UpdateJobStartingToQueued(database, job.ID, queueName); err != nil {
 		return nil, fmt.Errorf("mark job queued: %w", err)
@@ -226,10 +223,7 @@ func extractGPUFromEnvVars(envVars []string) string {
 }
 
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
-	queueName := opts.QueueName
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
+	queueName := defaultQueueName
 
 	// Extract GPU from env vars if not explicitly set
 	gpu := opts.GPU

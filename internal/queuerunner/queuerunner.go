@@ -156,6 +156,7 @@ func writeScript(host string) error {
 
 // RunnerCommand builds the command to start the queue runner (optionally with env prefix).
 func RunnerCommand(queueName, envPrefix string) string {
+	queueName = ops.DefaultQueueName
 	return fmt.Sprintf("%sbash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envPrefix, queueName)
 }
 
@@ -163,6 +164,7 @@ func RunnerCommand(queueName, envPrefix string) string {
 // Also upgrades the queue runner script if needed, restarting the runner to pick up changes.
 // Returns true when a new runner was started (or restarted due to upgrade).
 func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
+	queueName = ops.DefaultQueueName
 	session := fmt.Sprintf("rj-queue-%s", queueName)
 
 	// Always check if script needs upgrade, even if runner is already running

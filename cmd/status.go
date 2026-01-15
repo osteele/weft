@@ -612,6 +612,9 @@ func showActiveJobs(database *sql.DB) error {
 		} else {
 			performSyncWithTimeout(database, DefaultSyncTimeout, false)
 		}
+
+		// Start queue runners on hosts with queued or running queue-runner jobs
+		startQueueRunnersForQueuedHosts(database)
 	}
 
 	// Get running jobs

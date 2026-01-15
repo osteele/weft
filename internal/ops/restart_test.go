@@ -18,7 +18,7 @@ func TestRestartJob_Success(t *testing.T) {
 
 	mockSSHCommands(t, []sshMockResponse{
 		{Contains: "mkdir", Stdout: ""},
-		{Contains: "flock", Stdout: ""},
+		{Contains: "printf", Stdout: ""},
 	})
 
 	params := RestartJobParams{
@@ -99,7 +99,7 @@ func TestRestartJob_OverrideParams(t *testing.T) {
 
 	mockSSHCommands(t, []sshMockResponse{
 		{Contains: "mkdir", Stdout: ""},
-		{Contains: "flock", Stdout: ""},
+		{Contains: "printf", Stdout: ""},
 	})
 
 	params := RestartJobParams{

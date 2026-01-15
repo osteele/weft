@@ -68,11 +68,10 @@ func init() {
 }
 
 type scheduledPlanJob struct {
-	Label     string
-	Command   string
-	Host      string
-	QueueName string
-	JobID     int64
+	Label   string
+	Command string
+	Host    string
+	JobID   int64
 }
 
 func runPlanSubmit(cmd *cobra.Command, args []string) error {
@@ -166,18 +165,12 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 	for _, job := range execPlan.Jobs {
 		blockDir := ""
 		var blockEnv map[string]string
-		blockQueue := ""
 		if job.Block != nil {
 			blockDir = job.Block.Dir
 			blockEnv = job.Block.Env
-			blockQueue = job.Block.Queue
 		}
 		resolved := applyJobDefaults(*job.Source, blockDir, blockEnv)
 		queueRequired := job.Source.QueueOnly || (job.Block != nil && job.Block.Kind == plan.BlockKindSeries) || len(job.Dependencies) > 0
-		queueName := job.Source.Queue
-		if queueName == "" {
-			queueName = blockQueue
-		}
 		label := jobLabel(resolved)
 
 		if queueRequired {
@@ -189,10 +182,7 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 				}
 				deps = append(deps, queueDependency{JobID: depJobID, AllowFailure: dep.Optional})
 			}
-			targetQueue := queueName
-			if targetQueue == "" {
-				targetQueue = defaultQueueName
-			}
+			targetQueue := defaultQueueName
 			res, err := queueJob(database, queueJobOptions{
 				Host:         resolved.Host,
 				WorkingDir:   resolved.Dir,
@@ -209,17 +199,16 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 			jobID := res.JobID
 			idToJob[job.ID] = jobID
 			if res.Deferred {
-				fmt.Printf("Job %s recorded as %d for queue %s on %s (host unreachable, will sync later)\n", label, jobID, targetQueue, resolved.Host)
+				fmt.Printf("Job %s recorded as %d on %s (host unreachable, will sync later)\n", label, jobID, resolved.Host)
 			} else {
-				fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, resolved.Host, targetQueue)
-				maybeStartQueueRunner(resolved.Host, targetQueue, startedQueues)
+				fmt.Printf("Job %s queued as %d on %s\n", label, jobID, resolved.Host)
+				maybeStartQueueRunner(resolved.Host, startedQueues)
 			}
 			scheduled = append(scheduled, scheduledPlanJob{
-				Label:     label,
-				Command:   resolved.Command,
-				Host:      resolved.Host,
-				QueueName: targetQueue,
-				JobID:     jobID,
+				Label:   label,
+				Command: resolved.Command,
+				Host:    resolved.Host,
+				JobID:   jobID,
 			})
 			continue
 		}
@@ -346,10 +335,7 @@ func applyJobDefaults(job plan.Job, defaultDir string, defaultEnv map[string]str
 func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[string]bool) (scheduledPlanJob, error) {
 	label := jobLabel(job)
 	if job.QueueOnly {
-		queueName := job.Queue
-		if queueName == "" {
-			queueName = defaultQueueName
-		}
+		queueName := defaultQueueName
 		res, err := queueJob(database, queueJobOptions{
 			Host:        job.Host,
 			WorkingDir:  job.Dir,
@@ -364,12 +350,12 @@ func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[
 		}
 		jobID := res.JobID
 		if res.Deferred {
-			fmt.Printf("Job %s recorded as %d for queue %s on %s (host unreachable, will sync later)\n", label, jobID, queueName, job.Host)
+			fmt.Printf("Job %s recorded as %d on %s (host unreachable, will sync later)\n", label, jobID, job.Host)
 		} else {
-			fmt.Printf("Job %s queued as %d on %s (queue %s)\n", label, jobID, job.Host, queueName)
-			maybeStartQueueRunner(job.Host, queueName, startedQueues)
+			fmt.Printf("Job %s queued as %d on %s\n", label, jobID, job.Host)
+			maybeStartQueueRunner(job.Host, startedQueues)
 		}
-		return scheduledPlanJob{Label: label, Command: job.Command, Host: job.Host, QueueName: queueName, JobID: jobID}, nil
+		return scheduledPlanJob{Label: label, Command: job.Command, Host: job.Host, JobID: jobID}, nil
 	}
 
 	result, err := startJob(database, startJobOptions{
@@ -400,18 +386,18 @@ func jobLabel(job resolvedPlanJob) string {
 	return job.Command
 }
 
-func maybeStartQueueRunner(host, queue string, started map[string]bool) {
+func maybeStartQueueRunner(host string, started map[string]bool) {
 	if planNoQueueStart {
 		return
 	}
-	key := fmt.Sprintf("%s|%s", host, queue)
+	key := host
 	if started[key] {
 		return
 	}
 	started[key] = true
-	_, err := ensureQueueRunnerStarted(host, queue)
+	_, err := ensureQueueRunnerStarted(host, defaultQueueName)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to start queue runner on %s (%s): %v\n", host, queue, err)
+		fmt.Fprintf(os.Stderr, "Warning: failed to start queue runner on %s: %v\n", host, err)
 		return
 	}
 }

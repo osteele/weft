@@ -41,12 +41,12 @@ type QueueCommand struct {
 
 // CommandsFileName returns the path to the commands file for a queue.
 func CommandsFileName(queueName string) string {
-	return fmt.Sprintf("%s.commands", queueName)
+	return fmt.Sprintf("%s.commands", DefaultQueueName)
 }
 
 // CommandsFilePath returns the full remote path to the commands file.
 func CommandsFilePath(queueName string) string {
-	return fmt.Sprintf("%s/%s", QueueDir, CommandsFileName(queueName))
+	return fmt.Sprintf("%s/%s", QueueDir, CommandsFileName(DefaultQueueName))
 }
 
 // NewAddCommand creates a command to add a job to the queue.
@@ -100,9 +100,7 @@ type AppendCommandOptions struct {
 // AppendCommand appends a command to the remote queue's command log.
 // This is append-only - no locking required.
 func AppendCommand(host, queueName string, cmd QueueCommand, opts AppendCommandOptions) error {
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName = DefaultQueueName
 
 	// Serialize command to JSON (single line)
 	jsonBytes, err := json.Marshal(cmd)
@@ -185,10 +183,10 @@ type RunnerJobState struct {
 
 // StateFileName returns the filename for the runner state file.
 func StateFileName(queueName string) string {
-	return fmt.Sprintf("%s.state.json", queueName)
+	return fmt.Sprintf("%s.state.json", DefaultQueueName)
 }
 
 // StateFilePath returns the full remote path to the state file.
 func StateFilePath(queueName string) string {
-	return fmt.Sprintf("%s/%s", QueueDir, StateFileName(queueName))
+	return fmt.Sprintf("%s/%s", QueueDir, StateFileName(DefaultQueueName))
 }

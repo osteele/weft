@@ -3,7 +3,6 @@ package ops
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -20,20 +19,6 @@ const (
 	// DefaultQueueName is the default queue name when none is specified
 	DefaultQueueName = "default"
 )
-
-// escapeForQueueFile escapes a string for safe inclusion in queue file entries.
-// The queue runner uses printf '%b' to interpret escape sequences, so we need to
-// escape backslashes to prevent unintended interpretation (e.g., \n becoming newline).
-// This also converts actual newlines/tabs to their escape sequences.
-func escapeForQueueFile(s string) string {
-	// First escape existing backslashes (\ -> \\)
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	// Then convert actual newlines and tabs to escape sequences
-	// (these would break the tab-separated, one-line-per-entry format)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	return s
-}
 
 // QueueEntry represents a job entry to be added to a remote queue
 type QueueEntry struct {
@@ -93,77 +78,17 @@ func (e *QueueAppendError) IsConnectionError() bool {
 	return false
 }
 
-// AppendQueueEntry adds a job entry to a remote queue file.
-// It uses base64 encoding to safely pass data through shell contexts
-// and flock to prevent race conditions with the queue runner.
-// If an entry for the same job ID exists, it is removed first.
+// AppendQueueEntry adds a job entry to the remote command log (queue runner input).
 func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueueEntryOptions) error {
 	if entry.Command == "" {
 		return fmt.Errorf("job %d missing command", entry.JobID)
 	}
-	if queueName == "" {
-		queueName = DefaultQueueName
+	queueName = DefaultQueueName
+	addCmd := NewAddCommand(entry)
+	appendOpts := AppendCommandOptions{Timeout: opts.Timeout}
+	if err := AppendCommand(host, queueName, addCmd, appendOpts); err != nil {
+		return err
 	}
-
-	queueFile := fmt.Sprintf("%s/%s.queue", QueueDir, queueName)
-
-	// Base64 encode env vars (newline-separated) for safe shell transport
-	envVarsB64 := ""
-	if len(entry.EnvVars) > 0 {
-		envVarsB64 = base64.StdEncoding.EncodeToString([]byte(strings.Join(entry.EnvVars, "\n")))
-	}
-
-	// Escape backslashes in fields that might contain them (command, description)
-	// This prevents printf '%b' in queue-runner.sh from interpreting \n as newlines
-	// After escaping: \n -> \\n, \t -> \\t, \\ -> \\\\
-	// printf '%b' will then convert them back to the original characters
-	escapedCommand := escapeForQueueFile(entry.Command)
-	escapedDescription := escapeForQueueFile(entry.Description)
-
-	// Format the queue entry line (with trailing newline)
-	jobLine := fmt.Sprintf("%d\t%s\t%s\t%s\t%s\t%s\n",
-		entry.JobID, entry.WorkingDir, escapedCommand, escapedDescription, envVarsB64, entry.DepSpec)
-
-	// Base64 encode the entire line for safe shell transport
-	jobLineB64 := base64.StdEncoding.EncodeToString([]byte(jobLine))
-
-	// Build the command:
-	// 1. Create queue directory if needed
-	// 2. Use mkdir-based lock (atomic on all POSIX systems, works on Linux and macOS)
-	// 3. Remove any existing entry for this job ID
-	// 4. Append new entry
-	// Note: We use grep + temp file instead of sed -i because sed -i syntax differs between Linux and macOS
-	lockDir := queueFile + ".lock.d"
-	appendCmd := fmt.Sprintf(
-		`mkdir -p %s && (
-			while ! mkdir %s 2>/dev/null; do sleep 0.01; done
-			trap 'rmdir %s 2>/dev/null' EXIT
-			grep -v '^%d	' %s > %s.tmp 2>/dev/null || true
-			mv %s.tmp %s 2>/dev/null || true
-			echo '%s' | base64 -d >> %s
-			rmdir %s 2>/dev/null
-		)`,
-		QueueDir,
-		lockDir,
-		lockDir,
-		entry.JobID, queueFile, queueFile,
-		queueFile, queueFile,
-		jobLineB64, queueFile,
-		lockDir)
-
-	var stdout, stderr string
-	var err error
-	if opts.Timeout > 0 {
-		stdout, stderr, err = ssh.RunWithTimeout(host, appendCmd, opts.Timeout)
-	} else {
-		stdout, stderr, err = ssh.Run(host, appendCmd)
-	}
-	_ = stdout // unused
-
-	if err != nil {
-		return &QueueAppendError{Op: "append queue entry", Stderr: stderr, Err: err}
-	}
-
 	return nil
 }
 
@@ -185,13 +110,7 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 		return fmt.Errorf("job is nil")
 	}
 
-	queueName := params.QueueName
-	if queueName == "" {
-		queueName = params.Job.QueueName
-	}
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName := DefaultQueueName
 
 	entry := QueueEntry{
 		JobID:        params.Job.ID,
@@ -223,12 +142,7 @@ func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSp
 	if job == nil {
 		return fmt.Errorf("job is nil")
 	}
-	if queueName == "" {
-		queueName = job.QueueName
-	}
-	if queueName == "" {
-		queueName = queuefile.DefaultQueueName
-	}
+	queueName = queuefile.DefaultQueueName
 
 	entryJob := &db.Job{
 		ID:          job.ID,
@@ -287,10 +201,7 @@ type QueueJobParams struct {
 // The job is recorded locally with "queued" status, then appended to the queue file.
 // If the host is unreachable, the operation is deferred until the host comes online.
 func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Result, error) {
-	queueName := params.QueueName
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName := DefaultQueueName
 
 	// Extract GPU from env vars if present
 	gpu := ""
@@ -363,6 +274,6 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	return Result{
 		Success: true,
 		JobID:   jobID,
-		Message: fmt.Sprintf("Job %d added to queue '%s'", jobID, queueName),
+		Message: fmt.Sprintf("Job %d added to queue", jobID),
 	}, nil
 }

@@ -332,9 +332,9 @@ func performListSyncForHost(database *sql.DB, host string) error {
 	return nil
 }
 
-// startQueueRunnersForQueuedHosts starts queue runners on hosts that have queued jobs
+// startQueueRunnersForQueuedHosts starts queue runners on hosts that have queue-runner jobs.
 func startQueueRunnersForQueuedHosts(database *sql.DB) {
-	hosts, err := db.ListHostsWithQueuedJobs(database)
+	hosts, err := db.ListHostsWithQueueRunnerJobs(database)
 	if err != nil {
 		return // Silently ignore errors
 	}
@@ -348,7 +348,7 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 		return
 	}
 	for _, host := range hosts {
-		count, err := db.CountQueuedByHost(database, host)
+		count, err := db.CountQueueRunnerActiveByHost(database, host)
 		if err != nil || count == 0 {
 			continue
 		}

@@ -263,15 +263,18 @@ func (w *SyncWorker) doSync(host string) {
 		}
 	}
 
-	// Ensure queue runner is started if there are queued jobs
-	queuedCount := 0
+	// Ensure queue runner is started if there are queued or running queue-runner jobs
+	queueRunnerCount := 0
 	for _, job := range activeJobs {
-		if job.Status == db.StatusQueued {
-			queuedCount++
+		if job == nil {
+			continue
+		}
+		if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+			queueRunnerCount++
 		}
 	}
 
-	if queuedCount > 0 {
+	if queueRunnerCount > 0 {
 		started, err := ensureQueueRunnerStartedWorker(host)
 		if err != nil {
 			if !remote.IsConnectionError(err.Error()) {

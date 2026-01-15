@@ -385,11 +385,6 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("GPU:         %s\n", gpu)
 	}
 
-	// Show queue info if queued
-	if job.QueueName != "" {
-		fmt.Printf("Queue:       %s\n", job.QueueName)
-	}
-
 	// Show timing info
 	// Show created/queued time if different from start time
 	if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {

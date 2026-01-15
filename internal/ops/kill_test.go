@@ -118,7 +118,7 @@ func TestCancelQueuedJob_Success(t *testing.T) {
 	job, _ := db.GetJobByID(database, jobID)
 
 	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "flock", Stdout: ""},
+		{Contains: "printf", Stdout: ""},
 	})
 
 	result, err := CancelQueuedJob(database, job, DefaultOptions())

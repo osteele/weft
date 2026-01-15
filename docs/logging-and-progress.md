@@ -37,7 +37,7 @@ remote-jobs run --allow cool30 "python train.py --lr 1e-4"
 
 ### Flag Semantics
 
-- Works only with immediate runs (mutually exclusive with `--queue`,
+- Works only with immediate runs (mutually exclusive with queued runs,
   `--after`, `--after-any`).
 - Compatible with `--from`, `--timeout`, env vars, etc.
 - Exit codes reflect the streaming session: `0` means the SSH/tail command

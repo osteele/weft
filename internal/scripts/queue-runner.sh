@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 24
+# BUILD: 25
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -51,7 +51,7 @@ NOTIFY_SCRIPT="/tmp/remote-jobs-notify-slack.sh"
 
 # Concurrency and allotment tuning defaults
 HOST_UTILIZATION_TARGET=80
-DEFAULT_ALLOTMENT=60
+DEFAULT_ALLOTMENT_CORES=7
 WARMUP_DURATION=120
 SAMPLE_INTERVAL=15
 SAMPLE_WINDOW=60
@@ -66,6 +66,7 @@ SAMPLE_COUNT=$((SAMPLE_WINDOW / SAMPLE_INTERVAL))
 
 CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 CPU_COUNT=${CPU_COUNT:-1}
+DEFAULT_ALLOTMENT=$(awk -v cores="$DEFAULT_ALLOTMENT_CORES" -v cpus="$CPU_COUNT" 'BEGIN { if (cpus <= 0) { print 60; exit } pct = (cores * 100.0) / cpus; if (pct < 1) pct = 1; if (pct > 100) pct = 100; printf "%.0f", pct }')
 
 # Running job state (JSON object keyed by job ID)
 RUNNING_JSON="{}"

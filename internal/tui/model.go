@@ -549,7 +549,8 @@ const (
 	inputEnvVars
 )
 
-const defaultCPUAllotment = 60
+// Baseline default: ~60% of a 12-core M2 Max host.
+const defaultAllotmentCores = 7
 
 var cpuAllotmentPresets = []int{20, 40, 60, 80}
 
@@ -2404,7 +2405,10 @@ func (m Model) cpuAllotmentHint() string {
 	if err != nil {
 		return "use 1-100 or default"
 	}
-	percent := defaultCPUAllotment
+	percent, ok := defaultAllotmentPercent(host)
+	if !ok {
+		return ""
+	}
 	if allotment != nil {
 		percent = *allotment
 	}
@@ -2417,18 +2421,27 @@ func (m Model) cpuAllotmentHint() string {
 }
 
 func (m Model) formatCPUAllotmentDisplay(job *db.Job) string {
-	allotment := defaultCPUAllotment
 	source := "default"
 	if job.CPUAllotment != nil {
-		allotment = *job.CPUAllotment
 		source = "requested"
 	}
 	host := m.findHostByName(job.Host)
 	if host == nil || host.CPUs == 0 {
 		if source == "default" {
-			return fmt.Sprintf("%d%% (%s)", allotment, source)
+			return "default"
 		}
-		return fmt.Sprintf("%d%%", allotment)
+		return fmt.Sprintf("%d%%", *job.CPUAllotment)
+	}
+	allotment := 0
+	if job.CPUAllotment != nil {
+		allotment = *job.CPUAllotment
+	}
+	if source == "default" {
+		percent, ok := defaultAllotmentPercent(host)
+		if !ok {
+			return "default"
+		}
+		allotment = percent
 	}
 	cores := float64(host.CPUs) * float64(allotment) / 100.0
 	coreText := fmt.Sprintf("%.1f", cores)
@@ -2439,6 +2452,20 @@ func (m Model) formatCPUAllotmentDisplay(job *db.Job) string {
 		return fmt.Sprintf("%d%% (%s cores on %d-core host, %s)", allotment, coreText, host.CPUs, source)
 	}
 	return fmt.Sprintf("%d%% (%s cores on %d-core host)", allotment, coreText, host.CPUs)
+}
+
+func defaultAllotmentPercent(host *Host) (int, bool) {
+	if host == nil || host.CPUs == 0 {
+		return 0, false
+	}
+	percent := int(math.Round(float64(defaultAllotmentCores) * 100.0 / float64(host.CPUs)))
+	if percent < 1 {
+		percent = 1
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	return percent, true
 }
 
 func formatCPUPercent(value float64) string {
@@ -6513,10 +6540,7 @@ func (m Model) retryJob(job *db.Job) tea.Cmd {
 		if job.Command == "" {
 			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing command")}
 		}
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = queuefile.DefaultQueueName
-		}
+		queueName := queuefile.DefaultQueueName
 		workingDir := job.WorkingDir
 		if workingDir == "" {
 			if dir := job.EffectiveWorkingDir(); dir != "" {
@@ -6557,7 +6581,7 @@ func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
 			return err
 		}
 		depJob.DepSpec = newSpec
-		if err := ops.UpdateQueuedJobEntry(depJob, depJob.QueueName, depJob.EnvVars, newSpec); err != nil {
+		if err := ops.UpdateQueuedJobEntry(depJob, queuefile.DefaultQueueName, depJob.EnvVars, newSpec); err != nil {
 			return err
 		}
 	}
@@ -6586,7 +6610,7 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		moved, err := queuefile.MoveToFront(job.Host, job.QueueName, job.ID)
+		moved, err := queuefile.MoveToFront(job.Host, queuefile.DefaultQueueName, job.ID)
 		if err == nil && moved {
 			// Update queued_at to be earlier than all other queued jobs
 			_ = db.SetQueuedAtBefore(database, job.ID, job.Host)
@@ -7019,10 +7043,7 @@ func (m Model) editJob() tea.Cmd {
 		operationalChange := newWorkingDir != job.WorkingDir || newCommand != job.Command || gpuInput != job.GPU || !equalEnvVars(envVars, job.EnvVars) || !equalCPUAllotment(newAllotment, job.CPUAllotment)
 
 		// Update the remote queue file
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = queuefile.DefaultQueueName
-		}
+		queueName := queuefile.DefaultQueueName
 		depSpec := m.editingJobDepSpec
 		if depSpec == "" {
 			if data, err := fetchQueueEntryData(ctx, job.Host, queueName, jobID); err == nil && data != nil {
@@ -7070,6 +7091,7 @@ func (m Model) editJob() tea.Cmd {
 // updateRemoteQueueEntry updates a job's entry in the remote queue file.
 // This is a thin wrapper around ops.UpdateQueueEntry.
 func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []string, depSpec string) error {
+	queueName = queuefile.DefaultQueueName
 	return ops.UpdateQueueEntry(ops.UpdateQueueEntryParams{
 		Host:      host,
 		QueueName: queueName,
@@ -7121,6 +7143,7 @@ func formatPresetList(presets []int) string {
 }
 
 func fetchQueueEntryData(ctx context.Context, host, queueName string, jobID int64) (*queueEntryData, error) {
+	queueName = queuefile.DefaultQueueName
 	// Read from new JSON job file format
 	jobFile := fmt.Sprintf("%s/jobs/%d.json", queuerunner.QueueDir(), jobID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null", jobFile)
@@ -7239,10 +7262,7 @@ func (m Model) fetchQueuedJobEnv(job *db.Job) tea.Cmd {
 	}
 	jobCopy := *job
 	ctx := m.ctx
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = queuefile.DefaultQueueName
-	}
+	queueName := queuefile.DefaultQueueName
 	return func() tea.Msg {
 		data, err := fetchQueueEntryData(ctx, jobCopy.Host, queueName, jobCopy.ID)
 		if err != nil {

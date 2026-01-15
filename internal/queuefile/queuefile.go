@@ -48,6 +48,7 @@ type jobData struct {
 
 // FetchEntry retrieves the queue file entry for a job ID from the remote host.
 func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
+	queueName = DefaultQueueName
 	jobFile := jobFilePath(jobID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null || true", jobFile)
 	stdout, stderr, err := ssh.Run(host, cmd)
@@ -82,21 +83,16 @@ func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
 }
 
 func commandsFilePath(queueName string) string {
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
-	return fmt.Sprintf("%s/%s.commands", queueDir, queueName)
+	return fmt.Sprintf("%s/%s.commands", queueDir, DefaultQueueName)
 }
 
 func stateFilePath(queueName string) string {
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
-	return fmt.Sprintf("%s/%s.state.json", queueDir, queueName)
+	return fmt.Sprintf("%s/%s.state.json", queueDir, DefaultQueueName)
 }
 
 // appendCommand appends a command to the commands file
 func appendCommand(host, queueName, cmdJSON string) error {
+	queueName = DefaultQueueName
 	commandsFile := commandsFilePath(queueName)
 	// Append command to the commands file with locking
 	lockDir := commandsFile + ".lock.d"
@@ -129,6 +125,7 @@ func appendCommand(host, queueName, cmdJSON string) error {
 
 // RemoveEntry deletes a queued job entry from the remote queue.
 func RemoveEntry(host, queueName string, jobID int64) error {
+	queueName = DefaultQueueName
 	cmdJSON := fmt.Sprintf(`{"op":"cancel","job_id":%d}`, jobID)
 	return appendCommand(host, queueName, cmdJSON)
 }
@@ -136,6 +133,7 @@ func RemoveEntry(host, queueName string, jobID int64) error {
 // MoveToFront moves a job to the front of the queue (next to run after current job).
 // Returns true if the job was moved, false if it was already at the front or not found.
 func MoveToFront(host, queueName string, jobID int64) (bool, error) {
+	queueName = DefaultQueueName
 	// Check if job is in the pending list
 	stateFile := stateFilePath(queueName)
 	checkCmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)

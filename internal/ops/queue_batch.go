@@ -24,9 +24,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 	if len(jobs) == 0 {
 		return 0, nil
 	}
-	if queueName == "" {
-		queueName = "default"
-	}
+	queueName = DefaultQueueName
 	jobIDs := make([]int64, 0, len(jobs))
 	jobByID := make(map[int64]*db.Job, len(jobs))
 	for _, job := range jobs {
@@ -131,6 +129,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 }
 
 func fetchQueueBatchStatus(host, queueName string, jobIDs []int64, timeout time.Duration) (map[int64]queueBatchStatus, error) {
+	queueName = DefaultQueueName
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}

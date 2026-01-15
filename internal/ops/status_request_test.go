@@ -52,7 +52,7 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 	// Mock SSH to succeed
 	mockSSHCommands(t, []sshMockResponse{
 		{Contains: "mkdir", Stdout: ""},   // Queue append
-		{Contains: "flock", Stdout: ""},   // Fallback lock
+		{Contains: "printf", Stdout: ""},  // Append command
 		{Contains: "cat", Stdout: ""},     // Current file check
 		{Contains: "grep", Stdout: "YES"}, // In queue
 	})

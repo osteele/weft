@@ -86,10 +86,7 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 
 	oldStatus := job.Status
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = defaultQueueName
-	}
+	queueName := defaultQueueName
 
 	// Change status to queued
 	if err := db.MarkQueuedByID(database, jobID); err != nil {
@@ -112,7 +109,7 @@ func restartJob(database *sql.DB, jobID int64) error {
 		deferred = true
 	}
 
-	fmt.Printf("Restarted job %d on %s (queue '%s')\n", jobID, job.Host, queueName)
+	fmt.Printf("Restarted job %d on %s\n", jobID, job.Host)
 	fmt.Printf("  Status: %s → queued\n", oldStatus)
 	if job.Description != "" {
 		fmt.Printf("  Description: %s\n", job.Description)

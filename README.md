@@ -762,7 +762,6 @@ remote-jobs queue add [flags] <host> <command...>
 - `--draft`: Save a draft queue entry locally without touching the remote queue file
 - `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes (success or failure)
-- `--queue NAME`: Queue name (default: "default")
 
 Draft queue entries behave like sticky notes: they keep the command, env vars,
 and metadata in your local database while guaranteeing they never reach the
@@ -776,13 +775,12 @@ remote-jobs queue add -d "Training run 1" cool30 'python train.py'
 remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
 remote-jobs queue add --after 42 cool30 'python eval.py'       # Run after job 42 succeeds
 remote-jobs queue add --after-any 42 cool30 'python cleanup.py' # Run after job 42 completes (success or failure)
-remote-jobs queue add --queue gpu cool30 'python train.py'
 ```
 
 #### remote-jobs edit
 
 Edit a queued job’s metadata—description, working directory, command, environment variables, or dependencies.  
-`remote-jobs queue edit` is an alias for this command and accepts the same flags (with an optional `--queue` override).
+`remote-jobs queue edit` is an alias for this command and accepts the same flags.
 
 ```bash
 remote-jobs edit [flags] <job-id>
@@ -818,11 +816,8 @@ Start the queue runner on a remote host.
 remote-jobs queue start [flags] <host>
 ```
 
-**Flags:**
-- `--queue NAME`: Queue name (default: "default")
-
 The queue runner:
-- Runs in a tmux session (`rj-queue-{name}`)
+- Runs in a tmux session (`rj-queue-default`)
 - Processes queued jobs in FIFO order with a CPU cap
 - Continues running even when you disconnect
 - Sends Slack notifications (if configured)
@@ -830,7 +825,6 @@ The queue runner:
 **Examples:**
 ```bash
 remote-jobs queue start cool30
-remote-jobs queue start --queue gpu cool30
 ```
 
 #### remote-jobs queue stop
@@ -841,13 +835,9 @@ Stop the queue runner after the current job completes.
 remote-jobs queue stop [flags] <host>
 ```
 
-**Flags:**
-- `--queue NAME`: Queue name (default: "default")
-
 **Examples:**
 ```bash
 remote-jobs queue stop cool30
-remote-jobs queue stop --queue gpu cool30
 ```
 
 #### remote-jobs queue list
@@ -858,13 +848,9 @@ Show jobs waiting in the queue and the currently running job.
 remote-jobs queue list [flags] <host>
 ```
 
-**Flags:**
-- `--queue NAME`: Queue name (default: "default")
-
 **Examples:**
 ```bash
 remote-jobs queue list cool30
-remote-jobs queue list --queue gpu cool30
 ```
 
 #### remote-jobs queue status
@@ -875,13 +861,9 @@ Show the status of the queue runner.
 remote-jobs queue status [flags] <host>
 ```
 
-**Flags:**
-- `--queue NAME`: Queue name (default: "default")
-
 **Examples:**
 ```bash
 remote-jobs queue status cool30
-remote-jobs queue status --queue gpu cool30
 ```
 
 #### remote-jobs queue upgrade
@@ -892,7 +874,6 @@ it with the version on the host, and restarts the runner only when needed.
 
 ```bash
 remote-jobs queue upgrade cool30
-remote-jobs queue upgrade --queue gpu cool30
 ```
 
 #### Queue Workflow Example

@@ -89,15 +89,7 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 	}
 
 	// Try to remove from remote queue file immediately
-
-	queueName := job.QueueName
-
-	if queueName == "" {
-
-		queueName = "default"
-
-	}
-
+	queueName := DefaultQueueName
 	err := removeFromQueueFile(job.Host, queueName, job.ID, opts.Timeout)
 
 	if err != nil {

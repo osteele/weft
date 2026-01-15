@@ -24,7 +24,7 @@ allotments, adaptive tuning with hysteresis and decay, and warm-up gating.
 ## Constants (MVP Defaults)
 
 - `HOST_UTILIZATION_TARGET = 80`
-- `DEFAULT_ALLOTMENT = 60`
+- `DEFAULT_ALLOTMENT_CORES = 7` (percent computed per host)
 - `PRESETS = [20, 40, 60, 80]`
 - `WARMUP_DURATION = 120s`
 - `SAMPLE_INTERVAL = 15s`
@@ -97,7 +97,7 @@ Do not skip ahead in the queue when the head cannot start.
 When starting a job:
 
 - If `cpu_allotment` is set in DB: use it as `local_allotment`.
-- Else: use `DEFAULT_ALLOTMENT`.
+- Else: use `DEFAULT_ALLOTMENT_CORES` converted to a host percent.
 
 ### Warm-up
 
@@ -188,7 +188,7 @@ When `cpu_allotment` is changed in the DB:
 ## Migration Notes
 
 - Existing jobs default to `NULL` allotment in DB; runner applies
-  `DEFAULT_ALLOTMENT` on start.
+  `DEFAULT_ALLOTMENT_CORES` (converted to percent per host) on start.
 - No backfill required.
 
 ## Testing Strategy (MVP)
@@ -197,4 +197,3 @@ When `cpu_allotment` is changed in the DB:
 - Queue command serialization includes `cpu` (`internal/ops/commandqueue_test.go`).
 - Script-level tests can be added to validate state transitions for multiple
   running jobs and warm-up gating.
-

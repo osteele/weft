@@ -157,7 +157,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 	// Jobs without a session name are managed by the queue runner and should use
 	// pattern-based file lookup (handles restarts with different timestamps).
 	// Jobs WITH a session name were started via start_now or run and have their own tmux session.
-	if job.SessionName == "" && job.QueueName != "" {
+	if job.SessionName == "" {
 		return SyncQueueRunnerJob(database, job, opts)
 	}
 
@@ -213,20 +213,6 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 		return false, err
 	}
 
-	// If exact path not found and job has a QueueName, try pattern-based lookup.
-	// This handles jobs that were started via start_now, killed, then re-ran via queue runner
-	// (the new run creates status files with a different timestamp).
-	if result == nil && job.QueueName != "" {
-		exitCode, mtime, found := queueRemoteClient.StatusFile(job.Host, job.ID, timeout)
-		if found.IsSome() && found.Unwrap() {
-			if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
-				return false, err
-			}
-			CacheCompletedJobLog(job)
-			return true, nil
-		}
-	}
-
 	if result != nil {
 		// Job completed
 		exitCode, err := strconv.Atoi(result.Content)
@@ -251,10 +237,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
+	queueName := DefaultQueueName
 
 	defer func() {
 		if err != nil {
@@ -407,7 +390,7 @@ func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
 	// Queue-runner managed jobs (no session name) need queue/runner cleanup.
-	if job.SessionName == "" && job.QueueName != "" {
+	if job.SessionName == "" {
 		handled, err := syncDraftQueueJob(job, timeout)
 		if err != nil {
 			return false, err
@@ -432,10 +415,7 @@ func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 }
 
 func syncDraftQueueJob(job *db.Job, timeout time.Duration) (bool, error) {
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName := DefaultQueueName
 
 	result, err := queueRemoteClient.QuickStatus(job.Host, queueName, job.ID, timeout)
 	if err != nil {
@@ -480,9 +460,7 @@ func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (bool, error) {
 
 // appendQueueEntryForJob ensures the queued job exists in the remote queue.
 func appendQueueEntryForJob(database *sql.DB, job *db.Job, queueName string, timeout time.Duration) error {
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName = DefaultQueueName
 	entry := QueueEntry{
 		JobID:       job.ID,
 		WorkingDir:  job.WorkingDir,
@@ -564,9 +542,7 @@ func startStartingJob(database *sql.DB, job *db.Job, timeout time.Duration) erro
 
 // startQueuedJobNow launches a queued job immediately (used for deferred start-now requests).
 func startQueuedJobNow(database *sql.DB, job *db.Job, queueName string, timeout time.Duration) error {
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName = DefaultQueueName
 
 	_ = removeFromQueueFile(job.Host, queueName, job.ID, timeout)
 
@@ -715,7 +691,8 @@ func (sshQueueRemote) CurrentJob(host, queueName string, jobID int64, timeout ti
 func (sshQueueRemote) InQueue(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
 	// Check new state.json format - job is in pending array
 	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", queueName)
-	cmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
+	// Use jq without -e flag; check result value directly to avoid jq output pollution
+	cmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s >/dev/null 2>&1 && echo YES || echo NO", jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return None[bool]()

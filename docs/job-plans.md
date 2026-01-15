@@ -47,7 +47,6 @@ jobs:                          # required list of plan items
       name: evaluate
       host: cool42
       wait: success            # "success" (default) or "any"
-      queue: default           # optional queue name on the host
       dir: ~/code/eval
       env:
         CUDA_VISIBLE_DEVICES: "0"
@@ -80,15 +79,14 @@ Rules:
 - `parallel` and `series` blocks can set `dir`, `host`, and `env` to provide
   defaults for nested jobs. A nested `job` entry can still override any field.
 - `series` blocks enforce sequential execution on the remote queue runner.
-  Every job in the block is queued on the specified host & queue name. The
+  Every job in the block is queued on the specified host. The
   `wait` field decides how the queue runner encodes dependencies:
     - `success` (default): later jobs use `--after` semantics (run only if
       the previous job exits with code 0).
     - `any`: later jobs use `--after-any` semantics, so they run after the
       previous job completes whether it succeeded or failed.
-- All jobs in a `series` block must target the same host (and queue name if
-  provided). This ensures the remote queue runner can inspect the prior
-  job's status files.
+- All jobs in a `series` block must target the same host. This ensures the
+  remote queue runner can inspect the prior job's status files.
 
 ### Job fields
 
@@ -100,7 +98,6 @@ Rules:
 | `dir` | string | Working directory (`-C` equivalent). |
 | `description` | string | Same as `-d`/`--description`. |
 | `env` | map[string]string | Environment variables (`-e`). |
-| `queue` | string | Queue name for non-series jobs that should be enqueued (optional). |
 | `queue_only` | bool | Force a non-series job into queue mode instead of starting immediately. |
 | `when` | object | Reserved for future resource triggers (see below). |
 
@@ -110,10 +107,9 @@ invocation with matching host, command, directory, description, and env vars.
 Jobs inside `parallel` blocks simply have no automatic dependencies, so they
 can run simultaneously as soon as their host accepts connections.
 
-Jobs inside a `series` block are always queued on the remote host. The plan
-uses the queue name declared on the block (or `default`). The first job in the
-block is queued without a dependency; subsequent jobs specify the prior job's
-ID via the same mechanism that backs `remote-jobs run --after` and
+Jobs inside a `series` block are always queued on the remote host. The first
+job in the block is queued without a dependency; subsequent jobs specify the
+prior job's ID via the same mechanism that backs `remote-jobs run --after` and
 `--after-any`.
 
 ### Dependency semantics

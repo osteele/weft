@@ -39,10 +39,7 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	// Use fresh job data from here on
 	job = freshJob
 
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = queuefile.DefaultQueueName
-	}
+	queueName := queuefile.DefaultQueueName
 
 	entry, err := queuefile.FetchEntry(job.Host, queueName, job.ID)
 	entryWasInQueue := err == nil
@@ -246,9 +243,7 @@ func startJobDirectly(database *sql.DB, job *db.Job, queueName string, entry *qu
 }
 
 func markStartPending(database *sql.DB, job *db.Job, queueName string, revertToQueue bool) (bool, error) {
-	if queueName == "" {
-		queueName = queuefile.DefaultQueueName
-	}
+	queueName = queuefile.DefaultQueueName
 	if revertToQueue {
 		if err := db.UpdateJobRunningToQueued(database, job.ID, queueName); err != nil {
 			return false, fmt.Errorf("mark job queued: %w", err)
@@ -275,6 +270,7 @@ func isConnectionFailure(stderr string, err error) bool {
 // 1. The queue's .current file contains this job ID
 // 2. There's a PID file for this job with a running process
 func isQueueRunnerRunningJob(host, queueName string, jobID int64) bool {
+	queueName = queuefile.DefaultQueueName
 	// Check if this job is the current job in the queue runner
 	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", queueName)
 	pidPattern := session.PidFilePattern(jobID)

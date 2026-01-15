@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
@@ -17,6 +18,7 @@ type StatusInfo struct {
 }
 
 func statusCommand(queueName string) string {
+	queueName = ops.DefaultQueueName
 	return fmt.Sprintf(
 		`tmux has-session -t 'rj-queue-%s' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; `+
 			`jq -r '.current // ""' ~/.cache/remote-jobs/queue/%s.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+

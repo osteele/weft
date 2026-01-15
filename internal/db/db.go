@@ -507,6 +507,7 @@ func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 
 // UpdateJobStartingToQueued transitions a starting job to queued state and assigns a queue name.
 func UpdateJobStartingToQueued(db *sql.DB, id int64, queueName string) error {
+	queueName = queuefile.DefaultQueueName
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
 		StatusQueued, queueName, id, StatusStarting,
@@ -516,6 +517,7 @@ func UpdateJobStartingToQueued(db *sql.DB, id int64, queueName string) error {
 
 // UpdateJobRunningToQueued transitions a running job back to queued state.
 func UpdateJobRunningToQueued(db *sql.DB, id int64, queueName string) error {
+	queueName = queuefile.DefaultQueueName
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
 		StatusQueued, queueName, id, StatusRunning,
@@ -777,14 +779,29 @@ func CountQueuedByHost(db *sql.DB, host string) (int, error) {
 	return count, err
 }
 
+// CountQueueRunnerActiveByHost returns queued/running queue-runner jobs for a host.
+func CountQueueRunnerActiveByHost(db *sql.DB, host string) (int, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM jobs
+		 WHERE host = ?
+		 AND session_name IS NULL
+		 AND status IN (?, ?, ?)
+		 AND tombstoned = 0`,
+		host, StatusQueued, StatusRunning, StatusStarting,
+	).Scan(&count)
+	return count, err
+}
+
 // RecordQueued records a queued job for sequential execution and returns its ID
 // Note: start_time is NULL until the job actually starts running (set by UpdateQueuedToRunning)
 func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName string) (int64, error) {
-	return RecordQueuedWithGPU(db, host, workingDir, command, description, queueName, "")
+	return RecordQueuedWithGPU(db, host, workingDir, command, description, queuefile.DefaultQueueName, "")
 }
 
 // RecordQueuedWithGPU records a queued job with GPU specification
 func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
+	queueName = queuefile.DefaultQueueName
 	now := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
@@ -799,11 +816,12 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, que
 
 // RecordDraftJobWithGPU records a job that should remain in draft locally.
 func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
-	return RecordDraftJob(db, host, workingDir, command, description, queueName, gpu, "")
+	return RecordDraftJob(db, host, workingDir, command, description, queuefile.DefaultQueueName, gpu, "")
 }
 
 // RecordDraftJob records a job that should remain in draft locally, with optional dependency.
 func RecordDraftJob(db *sql.DB, host, workingDir, command, description, queueName, gpu, depSpec string) (int64, error) {
+	queueName = queuefile.DefaultQueueName
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, dep_spec, last_synced_status)
@@ -997,12 +1015,8 @@ func ReplaceDepSpecID(spec string, oldID, newID int64) (string, bool) {
 
 // ListQueued returns queued jobs for a host and queue name
 func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
-	if queueName == "" || queueName == queuefile.DefaultQueueName {
-		query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND tombstoned = 0 AND (queue_name = ? OR queue_name IS NULL OR queue_name = '') ORDER BY id ASC`, jobSelectColumns)
-		return queryJobs(db, query, StatusQueued, host, queuefile.DefaultQueueName)
-	}
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND queue_name = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, StatusQueued, host, queueName)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, StatusQueued, host)
 }
 
 // UpdateQueuedToRunning transitions a queued job to running
@@ -1670,6 +1684,29 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 	return hosts, rows.Err()
 }
 
+// ListHostsWithQueueRunnerJobs returns unique hosts that have queued/running queue-runner jobs.
+func ListHostsWithQueueRunnerJobs(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
+		WHERE session_name IS NULL
+		AND status IN (?, ?, ?)
+		AND tombstoned = 0`,
+		StatusQueued, StatusRunning, StatusStarting)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hosts []string
+	for rows.Next() {
+		var host string
+		if err := rows.Scan(&host); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts, rows.Err()
+}
+
 // ListHostsWithDraftsPending returns hosts that have draft jobs needing remote cleanup.
 func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?)`,
@@ -1711,10 +1748,10 @@ func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
 }
 
 // ListPotentiallyRestartedJobs returns jobs that may have been restarted by the queue runner.
-// These are queue runner jobs (have queue_name) that are in terminal status (failed, dead)
+// These are queue runner jobs (no session name) that are in terminal status (failed, dead)
 // but may have been re-queued and started again.
 func ListPotentiallyRestartedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND queue_name != '' AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name IS NULL AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusFailed, StatusDead)
 }
 

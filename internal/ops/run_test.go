@@ -11,7 +11,7 @@ func TestRunJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
 	mockSSHCommands(t, []sshMockResponse{
 		{Contains: "mkdir", Stdout: ""},
-		{Contains: "flock", Stdout: ""},
+		{Contains: "printf", Stdout: ""},
 	})
 
 	params := RunJobParams{

@@ -56,8 +56,7 @@ Examples:
   remote-jobs queue add cool30 'python train.py --epochs 100'
   remote-jobs queue add -m "Training run 1" cool30 'python train.py'
   remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
-  remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes
-  remote-jobs queue add --queue gpu cool30 'python train.py'`,
+  remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes`,
 	Args: usageArgs(cobra.ExactArgs(2)),
 	RunE: runQueueAdd,
 }
@@ -73,8 +72,7 @@ It continues running even when you disconnect.
 This command is idempotent - safe to call multiple times.
 
 Examples:
-  remote-jobs queue start cool30
-  remote-jobs queue start --queue gpu cool30`,
+  remote-jobs queue start cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStart,
 }
@@ -88,8 +86,7 @@ This sends a stop signal that the runner will detect after the current
 job finishes. The runner will exit gracefully.
 
 Examples:
-  remote-jobs queue stop cool30
-  remote-jobs queue stop --queue gpu cool30`,
+  remote-jobs queue stop cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStop,
 }
@@ -100,8 +97,7 @@ var queueListCmd = &cobra.Command{
 	Long: `Show jobs waiting in the queue and the currently running job.
 
 Examples:
-  remote-jobs queue list cool30
-  remote-jobs queue list --queue gpu cool30`,
+  remote-jobs queue list cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueList,
 }
@@ -114,8 +110,7 @@ var queueStatusCmd = &cobra.Command{
 Displays whether the runner is active, current job (if any), and queue depth.
 
 Examples:
-  remote-jobs queue status cool30
-  remote-jobs queue status --queue gpu cool30`,
+  remote-jobs queue status cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueStatus,
 }
@@ -141,8 +136,7 @@ Only works for jobs that haven't started yet (status: queued).
 
 Examples:
   remote-jobs queue remove 123
-  remote-jobs queue remove 123 124 125
-  remote-jobs queue remove --queue gpu 456`,
+  remote-jobs queue remove 123 124 125`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runQueueRemove,
 }
@@ -156,8 +150,7 @@ The job will run immediately after the currently running job completes.
 Only works for jobs that haven't started yet (status: queued).
 
 Examples:
-  remote-jobs queue front 123
-  remote-jobs queue front --queue gpu 456`,
+  remote-jobs queue front 123`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueFront,
 }
@@ -184,7 +177,6 @@ var queueEditCmd = &cobra.Command{
 }
 
 var (
-	queueName           string
 	queueDir_           string
 	queueDescription    string
 	queueEnvVars        []string
@@ -227,11 +219,6 @@ func init() {
 	queueCmd.AddCommand(queueEditCmd)
 	addEditFlags(editCmd)
 	addEditFlags(queueEditCmd)
-
-	// Add flags to all subcommands
-	for _, cmd := range []*cobra.Command{queueAddCmd, queueStartCmd, queueStopCmd, queueListCmd, queueStatusCmd, queueUpdateCmd, queueRemoveCmd, queueFrontCmd, queueEditCmd} {
-		cmd.Flags().StringVar(&queueName, "queue", defaultQueueName, "Queue name")
-	}
 
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path)")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "message", "m", "", "Description of the job")
@@ -297,7 +284,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueDraft {
 		gpu := extractGPUFromEnvVars(queueEnvVars)
 		depSpec := encodeQueueDependencies(deps)
-		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, queueName, gpu, depSpec)
+		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, defaultQueueName, gpu, depSpec)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
@@ -305,7 +292,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			db.DeleteJob(database, jobID)
 			return fmt.Errorf("record draft env vars: %w", err)
 		}
-		fmt.Printf("Draft job #%d saved for %s in queue '%s'\n\n", jobID, host, queueName)
+		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
 		if queueDescription != "" {
@@ -329,7 +316,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		Command:      command,
 		Description:  queueDescription,
 		EnvVars:      queueEnvVars,
-		QueueName:    queueName,
+		QueueName:    defaultQueueName,
 		Dependencies: deps,
 		AutoStart:    !queueNoStart,
 	})
@@ -338,7 +325,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	jobID := result.JobID
 
-	fmt.Printf("Job %d added to queue '%s' on %s\n\n", jobID, queueName, host)
+	fmt.Printf("Job %d added to queue on %s\n\n", jobID, host)
 	fmt.Printf("  Working dir: %s\n", workingDir)
 	fmt.Printf("  Command: %s\n", command)
 	if queueDescription != "" {
@@ -356,13 +343,13 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	// Auto-start queue runner unless --no-start is specified
 	if result.Deferred {
-		fmt.Printf("\nHost %s is unreachable. This job will be appended to queue '%s' when the host is reachable again.\n", host, queueName)
+		fmt.Printf("\nHost %s is unreachable. This job will be appended to the queue when the host is reachable again.\n", host)
 		fmt.Printf("Run `remote-jobs sync --sync` after %s is online to retry, or wait for the next automatic sync.\n", host)
 		return nil
 	}
 
 	if !queueNoStart {
-		_, err := ensureQueueRunnerStarted(host, queueName)
+		_, err := ensureQueueRunnerStarted(host, defaultQueueName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to start queue runner: %v\n", err)
 		}
@@ -375,6 +362,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 // Returns (true, nil) if the runner was started, (false, nil) if already running,
 // or (false, error) if starting failed.
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
+	queue = defaultQueueName
 	// Deploy notify script if Slack is configured
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)
@@ -389,7 +377,7 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 func runQueueStart(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	_, err := ensureQueueRunnerStarted(host, queueName)
+	_, err := ensureQueueRunnerStarted(host, defaultQueueName)
 	if err != nil {
 		return err
 	}
@@ -400,7 +388,7 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 func runQueueStop(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	runner := queuerunner.NewRunner(host, queueName)
+	runner := queuerunner.NewRunner(host, defaultQueueName)
 	if err := runner.SendStopSignal(); err != nil {
 		return err
 	}
@@ -426,7 +414,7 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 
 	// Query jobs from database - this is the source of truth
 	// Get queued jobs for this host/queue
-	queuedJobs, err := db.ListQueued(database, host, queueName)
+	queuedJobs, err := db.ListQueued(database, host, defaultQueueName)
 	if err != nil {
 		return fmt.Errorf("list queued jobs: %w", err)
 	}
@@ -440,18 +428,12 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 	// Filter running jobs to only include those from this queue
 	var jobs []*db.Job
 	for _, job := range runningJobs {
-		jobQueue := job.QueueName
-		if jobQueue == "" {
-			jobQueue = defaultQueueName
-		}
-		if jobQueue == queueName {
-			jobs = append(jobs, job)
-		}
+		jobs = append(jobs, job)
 	}
 	jobs = append(jobs, queuedJobs...)
 
 	if len(jobs) == 0 {
-		fmt.Printf("No jobs in queue '%s' on %s\n", queueName, host)
+		fmt.Printf("No jobs in queue on %s\n", host)
 		return nil
 	}
 
@@ -478,7 +460,7 @@ func runQueueList(cmd *cobra.Command, args []string) error {
 func runQueueStatus(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
-	runnerSession := fmt.Sprintf("rj-queue-%s", queueName)
+	runnerSession := fmt.Sprintf("rj-queue-%s", defaultQueueName)
 
 	// Check if runner is active
 	exists, err := ssh.TmuxSessionExists(host, runnerSession)
@@ -486,7 +468,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("check session: %w", err)
 	}
 
-	fmt.Printf("Queue '%s' on %s:\n\n", queueName, host)
+	fmt.Printf("Queue on %s:\n\n", host)
 
 	if exists {
 		fmt.Println("Runner: ACTIVE")
@@ -495,7 +477,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get currently running job
-	currentFile := fmt.Sprintf("%s/%s.current", queuerunner.QueueDir(), queueName)
+	currentFile := fmt.Sprintf("%s/%s.current", queuerunner.QueueDir(), defaultQueueName)
 	currentID, _, _ := ssh.Run(host, fmt.Sprintf("cat %s 2>/dev/null || true", currentFile))
 	currentID = strings.TrimSpace(currentID)
 
@@ -506,13 +488,13 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// Get queue depth
-	queueFile := fmt.Sprintf("%s/%s.queue", queuerunner.QueueDir(), queueName)
-	countOutput, _, _ := ssh.Run(host, fmt.Sprintf("wc -l < %s 2>/dev/null || echo 0", queueFile))
+	stateFile := fmt.Sprintf("%s/%s.state.json", queuerunner.QueueDir(), defaultQueueName)
+	countOutput, _, _ := ssh.Run(host, fmt.Sprintf("jq -r '.pending | length // 0' %s 2>/dev/null || echo 0", stateFile))
 	countOutput = strings.TrimSpace(countOutput)
 	fmt.Printf("Jobs waiting: %s\n", countOutput)
 
 	// Check for stop signal
-	stopFile := fmt.Sprintf("%s/%s.stop", queuerunner.QueueDir(), queueName)
+	stopFile := fmt.Sprintf("%s/%s.stop", queuerunner.QueueDir(), defaultQueueName)
 	stopExists, _, _ := ssh.Run(host, fmt.Sprintf("test -f %s && echo yes || echo no", stopFile))
 	if strings.TrimSpace(stopExists) == "yes" {
 		fmt.Println("\nSTOP signal pending - runner will exit after current job")
@@ -523,7 +505,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 
 func runQueueUpdate(cmd *cobra.Command, args []string) error {
 	host := args[0]
-	runner := queuerunner.NewRunner(host, queueName)
+	runner := queuerunner.NewRunner(host, defaultQueueName)
 
 	upgraded, err := queuerunner.EnsureScriptUpToDate(host)
 	if err != nil {
@@ -616,14 +598,6 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		jobQueueName := job.QueueName
-		if jobQueueName == "" {
-			jobQueueName = queueName
-		}
-		if jobQueueName == "" {
-			jobQueueName = defaultQueueName
-		}
-
 		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
@@ -632,7 +606,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		if result.Deferred {
 			fmt.Printf("Job %d marked for removal on next sync\n", jobID)
 		} else {
-			fmt.Printf("Job %d removed from queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+			fmt.Printf("Job %d removed from queue on %s\n", jobID, job.Host)
 		}
 	}
 
@@ -665,13 +639,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, job.Status)
 	}
 
-	// Determine queue name
-	jobQueueName := job.QueueName
-	if jobQueueName == "" {
-		jobQueueName = queueName
-	}
-
-	moved, err := queuefile.MoveToFront(job.Host, jobQueueName, jobID)
+	moved, err := queuefile.MoveToFront(job.Host, defaultQueueName, jobID)
 	if err != nil {
 		if queuefile.IsConnectionError(err) {
 			return fmt.Errorf("host %s unreachable", job.Host)
@@ -685,9 +653,9 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 			// Non-fatal: remote operation succeeded, just log locally
 			fmt.Fprintf(os.Stderr, "Warning: failed to update queue order: %v\n", err)
 		}
-		fmt.Printf("Job %d moved to front of queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+		fmt.Printf("Job %d moved to front of queue on %s\n", jobID, job.Host)
 	} else {
-		fmt.Printf("Job %d is already at the front of queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+		fmt.Printf("Job %d is already at the front of queue on %s\n", jobID, job.Host)
 	}
 	return nil
 }
@@ -752,13 +720,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d has status '%s', can only edit queued jobs", jobID, job.Status)
 	}
 
-	jobQueueName := job.QueueName
-	if jobQueueName == "" {
-		jobQueueName = queueName
-		if jobQueueName == "" {
-			jobQueueName = defaultQueueName
-		}
-	}
+	jobQueueName := defaultQueueName
 
 	var updates []string
 
@@ -882,7 +844,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Printf("Updated job %d in queue '%s' on %s\n", jobID, jobQueueName, job.Host)
+	fmt.Printf("Updated job %d in queue on %s\n", jobID, job.Host)
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)
 	}

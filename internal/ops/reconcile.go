@@ -239,10 +239,7 @@ func applyKillToRemote(job *db.Job, timeout time.Duration) error {
 // If the job is already running (queue runner started it before cancel),
 // this also kills the running process.
 func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
+	queueName := DefaultQueueName
 
 	// Remove from queue file (in case it's still queued)
 	if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
@@ -290,10 +287,7 @@ func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Durat
 // applyDraftToRemote ensures no remote execution state exists for a draft job.
 // This removes the job from any queue and kills any running process.
 func applyDraftToRemote(job *db.Job, timeout time.Duration) error {
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
+	queueName := DefaultQueueName
 
 	// Remove from queue if present
 	if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
@@ -323,7 +317,7 @@ func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
 	}
 	addCmd := NewAddCommand(entry)
 	opts := AppendCommandOptions{Timeout: timeout}
-	return AppendCommand(job.Host, job.QueueName, addCmd, opts)
+	return AppendCommand(job.Host, DefaultQueueName, addCmd, opts)
 }
 
 // applyStartToRemote starts a queued or draft job on the remote host.
@@ -346,11 +340,7 @@ func applyStartToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 	}
 
 	// Signal the queue runner to start this job immediately
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = DefaultQueueName
-	}
-	return startQueuedJobNow(database, job, queueName, timeout)
+	return startQueuedJobNow(database, job, DefaultQueueName, timeout)
 }
 
 // ProbeRemoteStatus determines the current status of a job on the remote host.
@@ -361,7 +351,7 @@ func ProbeRemoteStatus(job *db.Job, timeout time.Duration) (string, error) {
 	}
 
 	// Queue-runner jobs use pattern-based file lookup
-	if job.SessionName == "" && job.QueueName != "" {
+	if job.SessionName == "" {
 		return probeQueueRunnerJobStatus(job, timeout)
 	}
 
@@ -402,10 +392,7 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	}
 
 	// Check if job is current in queue runner
-	queueName := job.QueueName
-	if queueName == "" {
-		queueName = "default"
-	}
+	queueName := DefaultQueueName
 	current := queueRemoteClient.CurrentJob(job.Host, queueName, job.ID, timeout)
 	if current.IsSome() && current.Unwrap() {
 		return db.StatusRunning, nil

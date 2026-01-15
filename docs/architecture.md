@@ -57,7 +57,7 @@ set of states. The CLI records each transition so commands such as `status`,
 
 ```mermaid
 stateDiagram-v2
-    [*] --> queued : run --queue / plan series
+    [*] --> queued : run (queued by default) / plan series
     [*] --> starting : run
     queued --> starting : queue runner / job start
     starting --> running : tmux session ready
@@ -74,7 +74,7 @@ remote-jobs/
 ├── cmd/                    # CLI commands (Cobra)
 │   ├── root.go            # Root command, default command handling
 │   ├── job.go             # Job subcommand (groups job operations)
-│   ├── run.go             # Start jobs (supports --from, --timeout, --queue)
+│   ├── run.go             # Start jobs (supports --from, --timeout)
 │   ├── log.go             # View job logs
 │   ├── kill.go            # Kill running jobs
 │   ├── status.go          # Check job status (via job subcommand)
@@ -127,7 +127,7 @@ Built with [Cobra](https://github.com/spf13/cobra), the CLI provides subcommands
 **Command Flow:**
 
 ```
-remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
+remote-jobs run [--from ID] [--timeout DURATION] <host> <command>
     │
     ├── 0. (If --from) Copy settings from existing job (can override)
     ├── 1. Create job record in SQLite (status: "starting" or "queued")
@@ -143,7 +143,6 @@ remote-jobs run [--from ID] [--timeout DURATION] [--queue] <host> <command>
 **Key Flags:**
 - `--from <id>`: Copy settings from existing job (command, directory, description)
 - `--timeout <duration>`: Automatically kill job after duration (e.g., "2h", "30m")
-- `--queue`: Add to job queue instead of running immediately
 
 **Key Design Decisions:**
 - Job ID is allocated BEFORE starting the tmux session, ensuring the database always knows about the job
@@ -616,7 +615,7 @@ The queue system allows jobs to run on a remote host without requiring the local
 
 ### Remote Queue Runner
 
-Jobs enqueued via `remote-jobs queue add`, `remote-jobs run --queue`, or plan
+Jobs enqueued via `remote-jobs queue add`, `remote-jobs run`, or plan
 `series` blocks are executed by a small bash daemon that lives on each host.
 
 - The script is embedded in the binary (`internal/scripts/queue-runner.sh`) and
@@ -660,7 +659,7 @@ flowchart TD
 - Environment: The queue entry includes `env` as a JSON array of `VAR=value`
   strings. The runner exports them before launching the command.
 - Metadata: A `.meta` file is written before execution so later `sync` calls can
-  recover `start_time`, display-friendly command, queue name, etc.
+  recover `start_time`, display-friendly command, etc.
 - Queue persistence: Because the queue command log/state are just files, jobs survive
   remote reboots. Re-starting the runner tmux session picks up where it left
   off.

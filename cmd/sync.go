@@ -317,7 +317,7 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 
 	for _, job := range jobs {
 		seenJobs[job.ID] = true
-		if job.SessionName == "" && job.QueueName != "" {
+		if job.SessionName == "" {
 			queueRunnerJobs = append(queueRunnerJobs, job)
 		} else {
 			tmuxJobs = append(tmuxJobs, job)
@@ -401,24 +401,7 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 }
 
 func syncQueueRunnerJobsBatch(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration) (int, error) {
-	jobsByQueue := make(map[string][]*db.Job)
-	for _, job := range jobs {
-		queueName := job.QueueName
-		if queueName == "" {
-			queueName = queuefile.DefaultQueueName
-		}
-		jobsByQueue[queueName] = append(jobsByQueue[queueName], job)
-	}
-
-	var updated int
-	for queueName, queueJobs := range jobsByQueue {
-		batchUpdated, err := ops.BatchSyncQueueRunnerJobs(database, host, queueName, queueJobs, timeout)
-		if err != nil {
-			return updated, err
-		}
-		updated += batchUpdated
-	}
-	return updated, nil
+	return ops.BatchSyncQueueRunnerJobs(database, host, queuefile.DefaultQueueName, jobs, timeout)
 }
 
 // buildStaleDataNote renders a warning that results are from cached data.
