@@ -273,6 +273,11 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: add last_restart_check column for optimized restart detection
+	if err := addColumnIfMissing(db, `ALTER TABLE host_syncs ADD COLUMN last_restart_check INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+
 	// Create deferred_operations table for operations pending on unreachable hosts
 	deferredOpsSchema := `
 	CREATE TABLE IF NOT EXISTS deferred_operations (
@@ -2279,6 +2284,31 @@ func RecordHostSync(db *sql.DB, host string, syncedAt time.Time) error {
 		VALUES (?, ?)
 		ON CONFLICT(name) DO UPDATE SET last_synced = excluded.last_synced`,
 		host, syncedAt.Unix(),
+	)
+	return err
+}
+
+// GetLastRestartCheck returns the timestamp when we last checked for restarted jobs on this host.
+// Returns zero time if never checked.
+func GetLastRestartCheck(db *sql.DB, host string) time.Time {
+	var ts int64
+	err := db.QueryRow(`SELECT COALESCE(last_restart_check, 0) FROM host_syncs WHERE name = ?`, host).Scan(&ts)
+	if err != nil || ts == 0 {
+		return time.Time{}
+	}
+	return time.Unix(ts, 0)
+}
+
+// UpdateLastRestartCheck records when we last checked for restarted jobs on this host.
+func UpdateLastRestartCheck(db *sql.DB, host string, checkedAt time.Time) error {
+	if host == "" {
+		return nil
+	}
+	_, err := db.Exec(`
+		INSERT INTO host_syncs (name, last_synced, last_restart_check)
+		VALUES (?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET last_restart_check = excluded.last_restart_check`,
+		host, checkedAt.Unix(), checkedAt.Unix(),
 	)
 	return err
 }

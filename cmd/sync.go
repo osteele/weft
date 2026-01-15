@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuefile"
+	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -191,10 +192,40 @@ func syncHost(database *sql.DB, host string) (int, error) {
 
 	// Check jobs that may have been restarted by the queue runner
 	// (failed/dead jobs with queue_name that might be running again)
+	// Optimization: Only check jobs with files modified since our last check
+	lastCheck := db.GetLastRestartCheck(database, host)
+	checkTime := time.Now()
+
 	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
 	if err != nil {
 		return updated, err
 	}
+
+	// If we have a last check time, filter to jobs with recent activity
+	if !lastCheck.IsZero() && len(restartedJobs) > 0 {
+		sshHost := remote.NewSSHHost(host, syncTimeout)
+		recentJobIDs, err := sshHost.GetRecentlyModifiedJobIDs(lastCheck)
+		if err == nil && recentJobIDs != nil {
+			// Build set of recently modified job IDs
+			recentSet := make(map[int64]bool)
+			for _, id := range recentJobIDs {
+				recentSet[id] = true
+			}
+			// Filter to only jobs with recent activity
+			var filtered []*db.Job
+			for _, job := range restartedJobs {
+				if recentSet[job.ID] {
+					filtered = append(filtered, job)
+				}
+			}
+			if syncVerbose && len(restartedJobs) != len(filtered) {
+				fmt.Printf("  Filtered %d potentially restarted jobs to %d with recent activity\n",
+					len(restartedJobs), len(filtered))
+			}
+			restartedJobs = filtered
+		}
+	}
+
 	for _, job := range restartedJobs {
 		if seenJobs[job.ID] {
 			continue // Already synced above
@@ -209,6 +240,13 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		}
 		if changed {
 			updated++
+		}
+	}
+
+	// Update last restart check time
+	if err := db.UpdateLastRestartCheck(database, host, checkTime); err != nil {
+		if syncVerbose {
+			fmt.Fprintf(os.Stderr, "  Warning: update restart check time: %v\n", err)
 		}
 	}
 
@@ -347,10 +385,34 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	}
 
 	// Check potentially restarted jobs (failed/dead queue runner jobs)
+	// Optimization: Only check jobs with files modified since our last check
+	lastCheck := db.GetLastRestartCheck(database, host)
+	checkTime := time.Now()
+
 	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
 	if err != nil {
 		return updated, err
 	}
+
+	// If we have a last check time, filter to jobs with recent activity
+	if !lastCheck.IsZero() && len(restartedJobs) > 0 {
+		sshHost := remote.NewSSHHost(host, timeout)
+		recentJobIDs, err := sshHost.GetRecentlyModifiedJobIDs(lastCheck)
+		if err == nil && recentJobIDs != nil {
+			recentSet := make(map[int64]bool)
+			for _, id := range recentJobIDs {
+				recentSet[id] = true
+			}
+			var filtered []*db.Job
+			for _, job := range restartedJobs {
+				if recentSet[job.ID] {
+					filtered = append(filtered, job)
+				}
+			}
+			restartedJobs = filtered
+		}
+	}
+
 	var restartedQueueJobs []*db.Job
 	for _, job := range restartedJobs {
 		if seenJobs[job.ID] {
@@ -368,6 +430,9 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 			updated += updatedCount
 		}
 	}
+
+	// Update last restart check time
+	_ = db.UpdateLastRestartCheck(database, host, checkTime)
 
 	drafts, err := db.ListDraftJobsPendingSync(database, host)
 	if err != nil {

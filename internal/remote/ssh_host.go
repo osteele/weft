@@ -214,6 +214,43 @@ func (h *SSHHost) KillTmuxSession(sessionName string) error {
 	return ssh.TmuxKillSession(h.hostname, sessionName)
 }
 
+// GetRecentlyModifiedJobIDs returns job IDs that have had files modified since the given time.
+// This is used to optimize restart detection by only checking jobs that might have restarted.
+func (h *SSHHost) GetRecentlyModifiedJobIDs(since time.Time) ([]int64, error) {
+	if since.IsZero() {
+		return nil, nil // Return empty if no previous check
+	}
+
+	logsDir := session.LogDir
+	sinceStr := since.UTC().Format("2006-01-02T15:04:05")
+
+	// Find PID and status files modified since the given time, extract job IDs
+	cmd := fmt.Sprintf(
+		`find %s -newermt "%s" \( -name "*.pid" -o -name "*.status" \) 2>/dev/null | sed 's|.*/||; s/-.*//; s/\..*$//' | sort -un`,
+		logsDir, sinceStr,
+	)
+
+	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	var jobIDs []int64
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			continue // Skip invalid entries
+		}
+		jobIDs = append(jobIDs, id)
+	}
+
+	return jobIDs, nil
+}
+
 // Internal types for JSON serialization
 
 type queueCommand struct {
