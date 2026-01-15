@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
+	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -236,140 +237,13 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 // Uses multiple SSH calls with trinary logic for maximum accuracy.
 func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
-
 	queueName := DefaultQueueName
 
-	defer func() {
-		if err != nil {
-			return
-		}
-		if opts.SkipSamples {
-			return
-		}
-		metaUpdated, metaErr := updateJobCPUSamples(database, job, opts.Timeout)
-		if metaErr != nil {
-			err = metaErr
-			return
-		}
-		if metaUpdated {
-			updated = true
-		}
-	}()
+	// Use the SSH-based prober and host implementations
+	prober := remote.NewSSHProber(job.Host, timeout)
+	host := remote.NewSSHHost(job.Host, timeout)
 
-	// Probe 1: Check if status file exists (job completed)
-	exitCode, mtime, completed := probeStatusFile(job.Host, job.ID, timeout)
-	if completed.IsSome() && completed.Unwrap() {
-		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
-			return false, err
-		}
-		if err := RecordJobCompletion(database, job.ID, exitCode, mtime); err != nil {
-			return false, err
-		}
-		CacheCompletedJobLog(job)
-		// Clear the current job marker on remote if it matches this job.
-		// This repairs queue runner state after disk-full or other failures.
-		clearCurrentJobIfMatches(job.Host, queueName, job.ID, timeout)
-		return true, nil
-	}
-
-	// Probe 2: Check if job is the current job in queue runner
-	isCurrent := probeCurrentJob(job.Host, queueName, job.ID, timeout)
-	if isCurrent.IsSome() && isCurrent.Unwrap() {
-		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
-			return false, err
-		}
-		switch job.Status {
-		case db.StatusQueued:
-			if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		case db.StatusStarting:
-			if err := db.MarkRunningByID(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
-			// Job was in terminal status but is now running (restarted by queue runner)
-			if err := db.MarkRunningFromTerminal(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-
-	// Probe 3: Check if job is in queue file (waiting)
-	inQueue := probeInQueue(job.Host, queueName, job.ID, timeout)
-	if inQueue.IsSome() && inQueue.Unwrap() {
-		if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
-			if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
-				return false, err
-			}
-			finalStatus := db.StatusCanceled
-			if *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead {
-				finalStatus = db.StatusKilled
-			}
-			if err := db.ClearPendingAndUpdateStatus(database, job.ID, finalStatus); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-
-		// Job is queued - if DB says running, fix it
-		if job.Status == db.StatusRunning {
-			if err := db.MarkQueuedByID(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-
-	// Probe 4: Check if process is running via PID
-	processRunning := probeProcessRunning(job.Host, job.ID, timeout)
-	if processRunning.IsSome() && processRunning.Unwrap() {
-		// Process is running - if job is marked dead/failed, fix it
-		if job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
-			if err := db.MarkRunningByID(database, job.ID); err != nil {
-				return false, err
-			}
-			return true, nil
-		}
-		return false, nil
-	}
-
-	if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
-		if err := startQueuedJobNow(database, job, queueName, timeout); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Ensure queued job is present in queue if it was recorded locally while host was unreachable.
-	if inQueue.IsSome() && !inQueue.Unwrap() && job.Status == db.StatusQueued && job.PendingStatus == nil {
-		if err := appendQueueEntryForJob(database, job, queueName, timeout); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// Only mark dead if ALL probes returned definitive false (not None/unknown)
-	// This is trinary AND: unknown (None) propagates - we don't turn unknowns into knowns
-	allDefinitelyFalse := completed.IsSome() && !completed.Unwrap() &&
-		isCurrent.IsSome() && !isCurrent.Unwrap() &&
-		inQueue.IsSome() && !inQueue.Unwrap() &&
-		processRunning.IsSome() && !processRunning.Unwrap()
-
-	if allDefinitelyFalse {
-		if err := db.MarkDeadByID(database, job.ID); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	// At least one probe returned None (unknown) - don't change status
-	return false, nil
+	return SyncQueueRunnerJobWithProber(database, job, prober, host, queueName, opts)
 }
 
 // SyncJobQuick syncs a job with the same logic as SyncJob.

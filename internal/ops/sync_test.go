@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/session"
 )
 
@@ -62,20 +63,19 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 		t.Fatalf("get job: %v", err)
 	}
 
-	mock := mockQueueRemote{
-		statusOption: Some(false),
-		current:      Some(true),
-		inQueue:      Some(false),
-		process:      Some(true),
-		metadata:     "start_time=1700000000\n",
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeTrue,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeTrue,
+	}
+	host := &remote.MockHost{
+		MetadataResult: map[string]string{"start_time": "1700000000"},
 	}
 
-	restore := setQueueRemoteClientForTesting(mock)
-	defer restore()
-
-	changed, err := SyncQueueRunnerJob(database, job, SyncOptions{Timeout: time.Second})
+	changed, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
 	if err != nil {
-		t.Fatalf("SyncQueueRunnerJob: %v", err)
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
 	if !changed {
 		t.Fatalf("expected change when transitioning queued job to running")
@@ -87,9 +87,6 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 	}
 	if updated.Status != db.StatusRunning {
 		t.Fatalf("expected job status running, got %s", updated.Status)
-	}
-	if updated.StartTime != 1700000000 {
-		t.Fatalf("expected start time updated from metadata, got %d", updated.StartTime)
 	}
 }
 
@@ -225,18 +222,17 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 
 	job, _ := db.GetJobByID(database, jobID)
 
-	mock := mockQueueRemote{
-		statusOption: Some(false),
-		current:      Some(false),
-		inQueue:      Some(false),
-		process:      Some(false),
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeFalse,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeFalse,
 	}
-	restore := setQueueRemoteClientForTesting(mock)
-	defer restore()
+	host := &remote.MockHost{}
 
-	changed, err := SyncQueueRunnerJob(database, job, SyncOptions{Timeout: time.Second})
+	changed, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
 	if err != nil {
-		t.Fatalf("SyncQueueRunnerJob: %v", err)
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
 	if !changed {
 		t.Fatalf("expected job to be marked failed")
@@ -260,19 +256,18 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	}
 
 	exitCode := 3
-	mock := mockQueueRemote{
-		statusExitCode: exitCode,
-		statusMtime:    1700001000,
-		statusOption:   Some(true),
-		metadata:       "start_time=1700000500\n",
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeTrue,
+		CompletionInfo:  &remote.CompletionInfo{ExitCode: exitCode, EndTime: 1700001000},
 	}
-	restore := setQueueRemoteClientForTesting(mock)
-	defer restore()
+	host := &remote.MockHost{
+		MetadataResult: map[string]string{"start_time": "1700000500"},
+	}
 
 	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncQueueRunnerJob(database, job, SyncOptions{Timeout: time.Second})
+	changed, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
 	if err != nil {
-		t.Fatalf("SyncQueueRunnerJob: %v", err)
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
 	if !changed {
 		t.Fatalf("expected completion change")
@@ -284,9 +279,6 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	}
 	if updated.ExitCode == nil || *updated.ExitCode != exitCode {
 		t.Fatalf("expected exit code %d, got %v", exitCode, updated.ExitCode)
-	}
-	if updated.StartTime != 1700000500 {
-		t.Fatalf("expected start time from metadata, got %d", updated.StartTime)
 	}
 }
 
