@@ -222,12 +222,17 @@ func (h *SSHHost) GetRecentlyModifiedJobIDs(since time.Time) ([]int64, error) {
 	}
 
 	logsDir := session.LogDir
-	sinceStr := since.UTC().Format("2006-01-02T15:04:05")
 
-	// Find PID and status files modified since the given time, extract job IDs
+	// Calculate minutes ago (add 1 minute buffer for clock skew)
+	minutesAgo := int(time.Since(since).Minutes()) + 1
+	if minutesAgo < 1 {
+		minutesAgo = 1
+	}
+
+	// Use -mmin which is relative to remote's current time (avoids timezone issues)
 	cmd := fmt.Sprintf(
-		`find %s -newermt "%s" \( -name "*.pid" -o -name "*.status" \) 2>/dev/null | sed 's|.*/||; s/-.*//; s/\..*$//' | sort -un`,
-		logsDir, sinceStr,
+		`find %s -mmin -%d \( -name "*.pid" -o -name "*.status" \) 2>/dev/null | sed 's|.*/||; s/-.*//; s/\..*$//' | sort -un`,
+		logsDir, minutesAgo,
 	)
 
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
