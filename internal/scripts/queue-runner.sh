@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 25
+# BUILD: 26
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -281,13 +281,36 @@ sample_average() {
 
 proc_cpu_host_pct() {
     local pid="$1"
-    local raw
-    raw=$(ps -p "$pid" -o %cpu= 2>/dev/null | head -1 | tr -d ' ')
-    if [ -z "$raw" ]; then
-        echo "0"
-        return
-    fi
-    awk -v p="$raw" -v c="$CPU_COUNT" 'BEGIN { if (c < 1) c = 1; printf "%.0f", (p / c) }'
+    local total_cpu=0
+
+    # Sum CPU across the process and all its descendants
+    # pgrep -P gives direct children; we need recursive descendants
+    local all_pids="$pid"
+    local queue="$pid"
+
+    while [ -n "$queue" ]; do
+        local next_queue=""
+        for p in $queue; do
+            local children
+            children=$(pgrep -P "$p" 2>/dev/null || true)
+            if [ -n "$children" ]; then
+                all_pids="$all_pids $children"
+                next_queue="$next_queue $children"
+            fi
+        done
+        queue="$next_queue"
+    done
+
+    # Sum CPU for all PIDs in the tree
+    for p in $all_pids; do
+        local cpu
+        cpu=$(ps -p "$p" -o %cpu= 2>/dev/null | head -1 | tr -d ' ')
+        if [ -n "$cpu" ]; then
+            total_cpu=$(awk -v t="$total_cpu" -v c="$cpu" 'BEGIN { printf "%.1f", t + c }')
+        fi
+    done
+
+    awk -v p="$total_cpu" -v c="$CPU_COUNT" 'BEGIN { if (c < 1) c = 1; printf "%.0f", (p / c) }'
 }
 
 # Process new commands from the command log

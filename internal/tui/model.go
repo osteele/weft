@@ -58,6 +58,8 @@ const (
 	DefaultHostCacheDuration   = 24 * time.Hour // How long cached host info is considered fresh
 	dbChangeDebounceInterval   = 200 * time.Millisecond
 	topProcessLimit            = 15
+	hostSummaryTickerGap       = "   "
+	hostSummaryTickerInterval  = 200 * time.Millisecond
 )
 
 const (
@@ -473,6 +475,7 @@ type tickMsg time.Time
 type logTickMsg time.Time
 type createTickMsg time.Time
 type hostRefreshTickMsg time.Time
+type hostSummaryTickMsg time.Time
 type flashExpiredMsg struct{}
 
 // Host-related messages
@@ -577,17 +580,18 @@ type Model struct {
 	hostDetailTab   HostDetailTab // Which tab is active in host detail panel (Info or GPU)
 
 	// UI State
-	detailTab      DetailTab // Which tab is active in detail panel (Details or Logs)
-	logContent     string
-	logStale       bool             // true if showing cached content due to connection error
-	logCache       map[int64]string // cache of last successful log content per job
-	logLoading     bool
-	logViewport    viewport.Model
-	detailViewport *viewport.Model
-	spinner        spinner.Model // Loading spinner
-	flashMessage   string
-	flashIsError   bool
-	flashExpiry    time.Time
+	detailTab               DetailTab // Which tab is active in detail panel (Details or Logs)
+	logContent              string
+	logStale                bool             // true if showing cached content due to connection error
+	logCache                map[int64]string // cache of last successful log content per job
+	logLoading              bool
+	logViewport             viewport.Model
+	detailViewport          *viewport.Model
+	spinner                 spinner.Model // Loading spinner
+	flashMessage            string
+	flashIsError            bool
+	flashExpiry             time.Time
+	hostSummaryTickerOffset int
 
 	// Process stats for running jobs
 	processStats      *remote.ProcessStats
@@ -898,6 +902,7 @@ func (m Model) Init() tea.Cmd {
 			},
 			m.startLogTicker(),
 			m.startHostRefreshTicker(),
+			m.startHostSummaryTicker(),
 			m.spinner.Tick,
 		)
 	}
@@ -908,6 +913,7 @@ func (m Model) Init() tea.Cmd {
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
+		m.startHostSummaryTicker(),
 		m.startDBWatcher(),
 		m.checkSyncResults(),
 		m.spinner.Tick,
@@ -1461,6 +1467,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tea.Batch(cmds...)
+
+	case hostSummaryTickMsg:
+		if m.viewMode == ViewModeJobs && len(m.hosts) > 0 {
+			m.hostSummaryTickerOffset++
+			if m.hostSummaryTickerOffset > 1000000 {
+				m.hostSummaryTickerOffset = 0
+			}
+		}
+		return m, m.startHostSummaryTicker()
 
 	case flashExpiredMsg:
 		// Only clear if the flash has actually expired (not replaced by a newer one)
@@ -2678,15 +2693,17 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 		return dimStyle.Render(" Hosts: no host data")
 	}
 
-	// Calculate available width for host segments
-	// "Hosts " prefix takes ~7 chars, plus separators between hosts (2 chars each)
-	labelWidth := 7
+	label := labelStyle.Render("Hosts")
+	labelWidth := lipgloss.Width(label)
 	separatorWidth := 2 * (hostCount - 1)
-	availableWidth := maxWidth - labelWidth - separatorWidth
+	segmentWidthAvailable := maxWidth - labelWidth - 1
+	if segmentWidthAvailable <= 0 {
+		return truncate(label, maxWidth)
+	}
 
 	// Select format based on available width
 	format := hostSummaryFull
-	widthPerHost := availableWidth / hostCount
+	widthPerHost := (segmentWidthAvailable - separatorWidth) / hostCount
 	if widthPerHost < hostSummaryFullWidth {
 		format = hostSummaryAbbrev
 	}
@@ -2699,19 +2716,44 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 		segments = append(segments, m.renderHostSummarySegment(host, format))
 	}
 
+	segmentsText := strings.Join(segments, "  ")
 	content := lipgloss.JoinHorizontal(
 		lipgloss.Left,
-		labelStyle.Render("Hosts"),
+		label,
 		" ",
-		strings.Join(segments, "  "),
+		segmentsText,
 	)
 
-	// Use truncate() for clean truncation with ellipsis instead of hard clipping
-	if lipgloss.Width(content) > maxWidth {
-		content = truncate(content, maxWidth)
+	if lipgloss.Width(content) <= maxWidth {
+		return content
 	}
 
-	return content
+	tickerBase := segmentsText + hostSummaryTickerGap
+	tickerWidth := lipgloss.Width(tickerBase)
+	if tickerWidth == 0 {
+		return truncate(content, maxWidth)
+	}
+
+	offset := m.hostSummaryTickerOffset % tickerWidth
+	end := offset + segmentWidthAvailable
+	segmentView := ""
+	if end <= tickerWidth {
+		segmentView = ansi.Cut(tickerBase, offset, end)
+	} else {
+		segmentView = ansi.Cut(tickerBase, offset, tickerWidth) + ansi.Cut(tickerBase, 0, end-tickerWidth)
+	}
+
+	viewWidth := lipgloss.Width(segmentView)
+	if viewWidth < segmentWidthAvailable {
+		segmentView += strings.Repeat(" ", segmentWidthAvailable-viewWidth)
+	}
+
+	return lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		label,
+		" ",
+		segmentView,
+	)
 }
 
 func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) string {
@@ -4861,6 +4903,14 @@ func (m Model) styleForJob(job *db.Job) lipgloss.Style {
 	if job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode != 0 {
 		return failedStyle
 	}
+	if job.Status == db.StatusRunning {
+		host := m.findHostByName(job.Host)
+		if host != nil {
+			if cpuPct, ok := hostCPULoadPercent(host); ok && cpuPct > 100 {
+				return failedStyle
+			}
+		}
+	}
 	return m.styleForStatus(job.Status)
 }
 
@@ -5428,6 +5478,12 @@ func (m *Model) cycleHostsTab(forward bool) (Model, tea.Cmd) {
 func (m Model) startHostRefreshTicker() tea.Cmd {
 	return tea.Tick(m.hostRefreshInterval, func(t time.Time) tea.Msg {
 		return hostRefreshTickMsg(t)
+	})
+}
+
+func (m Model) startHostSummaryTicker() tea.Cmd {
+	return tea.Tick(hostSummaryTickerInterval, func(t time.Time) tea.Msg {
+		return hostSummaryTickMsg(t)
 	})
 }
 
