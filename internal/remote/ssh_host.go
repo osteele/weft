@@ -168,6 +168,17 @@ func (h *SSHHost) IsProcessRunning(jobID int64) (bool, error) {
 	return strings.TrimSpace(stdout) == "YES", nil
 }
 
+// IsProcessPaused checks if the job's process is paused (stopped) via PID file.
+func (h *SSHHost) IsProcessPaused(jobID int64) (bool, error) {
+	pidPattern := session.PidFilePattern(jobID)
+	cmd := fmt.Sprintf(`pid=$(cat %s 2>/dev/null | head -1); if [ -n "$pid" ]; then state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' '); case "$state" in *T*) echo YES ;; *) echo NO ;; esac; else echo NO; fi`, pidPattern)
+	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(stdout) == "YES", nil
+}
+
 // GetJobMetadata reads and parses the job's metadata file.
 func (h *SSHHost) GetJobMetadata(jobID int64) (map[string]string, error) {
 	metadataPattern := session.MetadataFilePattern(jobID)

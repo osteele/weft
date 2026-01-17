@@ -17,6 +17,7 @@ type mockQueueRemote struct {
 	current        Option[bool]
 	inQueue        Option[bool]
 	process        Option[bool]
+	paused         Option[bool]
 	quickStatus    quickStatus
 	metadata       string
 	samples        string
@@ -36,6 +37,10 @@ func (m mockQueueRemote) InQueue(host, queueName string, jobID int64, timeout ti
 
 func (m mockQueueRemote) ProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool] {
 	return m.process
+}
+
+func (m mockQueueRemote) ProcessPaused(host string, jobID int64, timeout time.Duration) Option[bool] {
+	return m.paused
 }
 
 func (m mockQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error) {

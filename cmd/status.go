@@ -511,7 +511,7 @@ func isTerminalStatus(status string) bool {
 
 func shouldAttemptSync(status string) bool {
 	switch status {
-	case db.StatusRunning, db.StatusStarting, db.StatusQueued:
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused, db.StatusQueued:
 		return true
 	default:
 		return false

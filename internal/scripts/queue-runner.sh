@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 26
+# BUILD: 29
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -283,8 +283,10 @@ proc_cpu_host_pct() {
     local pid="$1"
     local total_cpu=0
 
-    # Sum CPU across the process and all its descendants
-    # pgrep -P gives direct children; we need recursive descendants
+    # IMPORTANT: Sum CPU across the ENTIRE process tree, not just the direct PID.
+    # The .pid file contains the bash subshell PID, which uses ~0% CPU.
+    # The actual work happens in grandchildren (e.g., bash -> uv -> python).
+    # Without tree traversal, capacity checks see 0% and start too many jobs.
     local all_pids="$pid"
     local queue="$pid"
 
@@ -495,6 +497,21 @@ start_job() {
         return 1
     fi
 
+    # IMPORTANT: Check completed/running BEFORE dependencies.
+    # If a job already finished, skip it immediately. Otherwise a completed job
+    # whose dependency was never created (or was cleaned up) will loop forever
+    # waiting for a dependency that will never be satisfied.
+    if job_completed "$job_id"; then
+        echo "Job $job_id: already completed, skipping"
+        rm -f "$QUEUE_DIR/job-${job_id}.json"
+        return 0
+    fi
+
+    if job_running "$job_id"; then
+        echo "Job $job_id: already running, skipping"
+        return 0
+    fi
+
     # Check dependencies
     local dep_result
     dep_result=$(check_dependencies "$deps_spec")
@@ -513,18 +530,6 @@ start_job() {
             return 0
             ;;
     esac
-
-    # Skip if already completed or running
-    if job_completed "$job_id"; then
-        echo "Job $job_id: already completed, skipping"
-        rm -f "$QUEUE_DIR/job-${job_id}.json"
-        return 0
-    fi
-
-    if job_running "$job_id"; then
-        echo "Job $job_id: already running, skipping"
-        return 0
-    fi
 
     local start_time
     start_time=$(date +%s)
@@ -767,16 +772,27 @@ sample_running_jobs() {
         under_count=$(history_count "$under_hist")
 
         if [ "$over_count" -ge "$HYSTERESIS_THRESHOLD" ]; then
+            # Calculate headroom: how much can this job's allotment grow without
+            # pushing total above HOST_UTILIZATION_TARGET?
+            local total_allotment
+            total_allotment=$(jq -r '[.[]?.local_allotment // 0] | add // 0' <<< "$RUNNING_JSON")
+            local headroom
+            headroom=$((HOST_UTILIZATION_TARGET - total_allotment + local_allotment))
+
             local new_allotment
-            new_allotment=$(awk -v avg="$avg" -v step="$INCREASE_STEP" -v max="$MAX_ALLOTMENT" 'BEGIN {v = avg + step; if (v > max) v = max; if (v < 0) v = 0; printf "%.0f", v}')
+            new_allotment=$(awk -v avg="$avg" -v step="$INCREASE_STEP" -v max="$MAX_ALLOTMENT" -v head="$headroom" \
+                'BEGIN {v = avg + step; if (v > max) v = max; if (v > head) v = head; if (v < 0) v = 0; printf "%.0f", v}')
             if [ "$new_allotment" -lt "$MIN_ALLOTMENT" ]; then
                 new_allotment="$MIN_ALLOTMENT"
             fi
-            RUNNING_JSON=$(jq -c \
-                --arg id "$job_id" \
-                --argjson allot "$new_allotment" \
-                '.[$id].local_allotment = $allot | .[$id].samples = [] | .[$id].over_hist = [] | .[$id].under_hist = []' <<< "$RUNNING_JSON")
-            log_op "job.allotment_increase" "$job_id" "cpu=${new_allotment} observed=${avg}"
+            # Only update if there's actually room to grow
+            if [ "$new_allotment" -gt "$local_allotment" ]; then
+                RUNNING_JSON=$(jq -c \
+                    --arg id "$job_id" \
+                    --argjson allot "$new_allotment" \
+                    '.[$id].local_allotment = $allot | .[$id].samples = [] | .[$id].over_hist = [] | .[$id].under_hist = []' <<< "$RUNNING_JSON")
+                log_op "job.allotment_increase" "$job_id" "cpu=${new_allotment} observed=${avg} headroom=${headroom}"
+            fi
             updated=true
             continue
         fi

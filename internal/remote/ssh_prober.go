@@ -77,3 +77,15 @@ func (p *SSHProber) ProbeProcessRunning(jobID int64) ProbeResult {
 	}
 	return ProbeFalse
 }
+
+// ProbeProcessPaused checks if the job's process is paused.
+func (p *SSHProber) ProbeProcessPaused(jobID int64) ProbeResult {
+	result, err := p.host.IsProcessPaused(jobID)
+	if err != nil {
+		return ProbeUnknown
+	}
+	if result {
+		return ProbeTrue
+	}
+	return ProbeFalse
+}

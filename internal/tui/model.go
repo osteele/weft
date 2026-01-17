@@ -173,6 +173,7 @@ type keyMap struct {
 	HostFilter      key.Binding
 	Escape          key.Binding
 	Kill            key.Binding
+	Pause           key.Binding
 	Draft           key.Binding
 	Restart         key.Binding
 	Retry           key.Binding
@@ -243,6 +244,10 @@ var (
 			key.WithKeys("k", "delete"),
 			key.WithHelp("k", "kill/cancel"),
 		),
+		Pause: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "pause"),
+		),
 		Draft: key.NewBinding(
 			key.WithKeys("d"),
 			key.WithHelp("d", "toggle draft/queue"),
@@ -308,7 +313,7 @@ var (
 		),
 		StartNow: key.NewBinding(
 			key.WithKeys("g"),
-			key.WithHelp("g", "go/start now"),
+			key.WithHelp("g", "go/start/resume"),
 		),
 		MoveToFront: key.NewBinding(
 			key.WithKeys("F"),
@@ -397,6 +402,20 @@ type jobKilledMsg struct {
 	deferred  bool // true if kill was queued for later (host offline)
 	cancelled bool // true if this was a queued job that was cancelled
 	message   string
+}
+
+type jobPausedMsg struct {
+	jobID    int64
+	err      error
+	deferred bool
+	message  string
+}
+
+type jobResumedMsg struct {
+	jobID    int64
+	err      error
+	deferred bool
+	message  string
 }
 
 type jobDraftedMsg struct {
@@ -1135,6 +1154,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 
+	case jobPausedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			flashCmd = m.setFlash(fmt.Sprintf("Pause failed: %v", msg.err), true)
+		} else if msg.message != "" {
+			flashCmd = m.setFlash(msg.message, false)
+		} else if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d pause pending (host offline)", msg.jobID), false)
+		} else {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d paused", msg.jobID), false)
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
+	case jobResumedMsg:
+		var flashCmd tea.Cmd
+		if msg.err != nil {
+			flashCmd = m.setFlash(fmt.Sprintf("Resume failed: %v", msg.err), true)
+		} else if msg.message != "" {
+			flashCmd = m.setFlash(msg.message, false)
+		} else if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d resume pending (host offline)", msg.jobID), false)
+		} else {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d resumed", msg.jobID), false)
+		}
+		return m, tea.Batch(flashCmd, m.refreshJobs())
+
 	case jobDraftedMsg:
 		var flashCmd tea.Cmd
 		if msg.err != nil {
@@ -1444,7 +1489,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Build set of hosts with running jobs
 		hostsWithRunningJobs := make(map[string]bool)
 		for _, job := range m.jobs {
-			if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+			if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
 				hostsWithRunningJobs[job.Host] = true
 			}
 		}
@@ -1844,7 +1889,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch job.Status {
-		case db.StatusRunning, db.StatusStarting:
+		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=kill"))
 			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
 		case db.StatusQueued:
@@ -1862,6 +1907,24 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash(fmt.Sprintf("Job %d already canceled", job.ID), true)
 		default:
 			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, job.Status), true)
+		}
+
+	case key.Matches(msg, keys.Pause):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, nil
+		}
+		switch job.Status {
+		case db.StatusRunning, db.StatusStarting:
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=p action=pause"))
+			return m, tea.Batch(m.setFlash("Pausing job...", false), m.pauseJob(job))
+		case db.StatusPaused:
+			return m, m.setFlash(fmt.Sprintf("Job %d already paused (press g to resume)", job.ID), false)
+		default:
+			return m, m.setFlash(fmt.Sprintf("Can't pause job %d (status: %s)", job.ID, job.Status), true)
 		}
 
 	case key.Matches(msg, keys.Draft):
@@ -1922,7 +1985,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Refuse to remove active jobs - suggest killing first
-		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
+		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
 			return m, m.setFlash(fmt.Sprintf("Job %d is %s. Kill it first (k)", job.ID, job.Status), true)
 		}
 		return m, tea.Batch(m.setFlash("Removing job...", false), m.removeJob(job))
@@ -1999,6 +2062,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Use effective status so pending state is respected
 		switch job.EffectiveStatus() {
+		case db.StatusPaused:
+			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=resume"))
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Resuming job %d...", job.ID), false), m.resumeJob(job))
 		case db.StatusQueued:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=start_now"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Starting job %d now...", job.ID), false), m.startQueuedJobNow(job))
@@ -2296,8 +2362,9 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"R", "Restart job"},
 			{"E", "Edit & restart job"},
 			{"k", "Kill/cancel job"},
+			{"p", "Pause running job"},
 			{"d", "Toggle draft/queue status"},
-			{"g", "Start queued/draft job now"},
+			{"g", "Start queued/draft job now or resume paused"},
 			{"G", "Generate AI description"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
@@ -3193,7 +3260,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString("\n")
 	}
 
-	if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+	if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
 		b.WriteString(labelStyle.Render("CPU"))
 		b.WriteString(valueStyle.Render(m.formatCPUAllotmentDisplay(job)))
 		b.WriteString("\n")
@@ -4182,7 +4249,7 @@ func (m Model) renderHostDetail(height int) string {
 					continue
 				}
 				switch job.Status {
-				case db.StatusRunning, db.StatusStarting:
+				case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 					runningCount++
 				case db.StatusQueued:
 					queuedCount++
@@ -4448,7 +4515,7 @@ func (m Model) getHostGPUIndices() []int {
 		if job.Host != host.Name {
 			continue
 		}
-		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusPaused && job.Status != db.StatusQueued {
 			continue
 		}
 		for _, idx := range parseGPUIndices(job.GetGPU()) {
@@ -4483,11 +4550,11 @@ func (m Model) getGPUJobStatus() map[int]gpuJobCounts {
 		if job.Host != host.Name {
 			continue
 		}
-		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusPaused && job.Status != db.StatusQueued {
 			continue
 		}
 
-		isRunning := job.Status == db.StatusRunning || job.Status == db.StatusStarting
+		isRunning := job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused
 		for _, idx := range parseGPUIndices(job.GetGPU()) {
 			counts := result[idx]
 			if isRunning {
@@ -4544,11 +4611,11 @@ func (m Model) renderGPUSummary(height int) string {
 		if job.Host != host.Name {
 			continue
 		}
-		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusPaused && job.Status != db.StatusQueued {
 			continue
 		}
 
-		isRunning := job.Status == db.StatusRunning || job.Status == db.StatusStarting
+		isRunning := job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused
 		gpuIndices := parseGPUIndices(job.GetGPU())
 
 		if len(gpuIndices) == 0 {
@@ -4699,14 +4766,14 @@ func (m Model) renderGPUDetailTab(gpuIdx int, height int) string {
 		if job.Host != host.Name {
 			continue
 		}
-		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusQueued {
+		if job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusPaused && job.Status != db.StatusQueued {
 			continue
 		}
 
 		jobGPUs := parseGPUIndices(job.GetGPU())
 		for _, idx := range jobGPUs {
 			if idx == gpuIdx {
-				if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+				if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
 					running = append(running, job)
 				} else {
 					queued = append(queued, job)
@@ -4868,6 +4935,8 @@ func (m Model) formatStatus(job *db.Job) string {
 			}
 		}
 		return "● running"
+	case db.StatusPaused:
+		return "⏸ paused"
 	case db.StatusStarting:
 		return "◐ starting"
 	case db.StatusCompleted:
@@ -4903,7 +4972,7 @@ func (m Model) styleForJob(job *db.Job) lipgloss.Style {
 	if job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode != 0 {
 		return failedStyle
 	}
-	if job.Status == db.StatusRunning {
+	if job.Status == db.StatusRunning || job.Status == db.StatusPaused {
 		host := m.findHostByName(job.Host)
 		if host != nil {
 			if cpuPct, ok := hostCPULoadPercent(host); ok && cpuPct > 100 {
@@ -4918,6 +4987,8 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 	switch status {
 	case db.StatusRunning:
 		return runningStyle
+	case db.StatusPaused:
+		return pendingStyle
 	case db.StatusCompleted:
 		return completedStyle
 	case db.StatusDead:
@@ -4954,9 +5025,14 @@ func (m Model) formatPendingStatusDisplay(pendingStatus, currentStatus string) s
 	case db.StatusCanceled:
 		return "⧗ canceling"
 	case db.StatusRunning:
+		if currentStatus == db.StatusPaused {
+			return "⧗ resuming"
+		}
 		return "⧗ starting"
 	case db.StatusQueued:
 		return "⧗ queuing"
+	case db.StatusPaused:
+		return "⧗ pausing"
 	default:
 		return "⧗ " + pendingStatus
 	}
@@ -5213,7 +5289,7 @@ func sortRecentJobs(jobs []*db.Job, mode jobSortMode) {
 
 		// Within same status group, apply appropriate ordering
 		switch ji.Status {
-		case db.StatusRunning, db.StatusStarting:
+		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			// Running: most recently started first (for Newest), oldest first (for Oldest)
 			if mode == jobSortOldest {
 				return ji.StartTime < jj.StartTime
@@ -5255,7 +5331,7 @@ func sortRecentJobs(jobs []*db.Job, mode jobSortMode) {
 
 func recentStatusPriority(job *db.Job) int {
 	switch job.Status {
-	case db.StatusRunning, db.StatusStarting:
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		return 0
 	case db.StatusQueued:
 		return 1
@@ -5303,7 +5379,7 @@ func jobQueueOrderLess(i, j *db.Job) bool {
 		switch job.Status {
 		case db.StatusQueued, db.StatusDraft:
 			return 0
-		case db.StatusRunning, db.StatusStarting:
+		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			return 1
 		default:
 			return 2
@@ -6050,12 +6126,12 @@ func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
 	switch mode {
 	case jobFilterRecent:
 		// Active jobs (running, starting, queued, draft)
-		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued || job.Status == db.StatusDraft {
+		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusQueued || job.Status == db.StatusDraft {
 			return true
 		}
 		return isRecentHistory(job)
 	case jobFilterActive:
-		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusQueued || job.Status == db.StatusDraft
+		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusQueued || job.Status == db.StatusDraft
 	case jobFilterSucceeded:
 		return job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
 	case jobFilterFailed:
@@ -6524,6 +6600,42 @@ func (m Model) cancelQueuedJob(job *db.Job) tea.Cmd {
 	}
 }
 
+func (m Model) pauseJob(job *db.Job) tea.Cmd {
+	if job == nil || m.coreService == nil {
+		return nil
+	}
+	jobID := job.ID
+	return func() tea.Msg {
+		result, err := m.coreService.PauseJob(jobID, ops.TimeoutFast)
+		if err != nil {
+			return jobPausedMsg{jobID: jobID, err: err}
+		}
+		return jobPausedMsg{
+			jobID:    jobID,
+			deferred: result.Outcome.Deferred,
+			message:  result.Outcome.Message,
+		}
+	}
+}
+
+func (m Model) resumeJob(job *db.Job) tea.Cmd {
+	if job == nil || m.coreService == nil {
+		return nil
+	}
+	jobID := job.ID
+	return func() tea.Msg {
+		result, err := m.coreService.ResumeJob(jobID, ops.TimeoutFast)
+		if err != nil {
+			return jobResumedMsg{jobID: jobID, err: err}
+		}
+		return jobResumedMsg{
+			jobID:    jobID,
+			deferred: result.Outcome.Deferred,
+			message:  result.Outcome.Message,
+		}
+	}
+}
+
 func (m Model) restartJob(job *db.Job) tea.Cmd {
 	if job == nil {
 		return nil
@@ -6809,7 +6921,7 @@ func (m Model) generateHostSummary(host, hash string) tea.Cmd {
 				desc = desc[:40] + "..."
 			}
 			switch job.Status {
-			case db.StatusRunning, db.StatusStarting:
+			case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 				running = append(running, desc)
 			case db.StatusQueued:
 				queued = append(queued, desc)
@@ -6874,7 +6986,7 @@ func (m Model) jobCountsForHost(host string) (running, queued int) {
 			continue
 		}
 		switch job.Status {
-		case db.StatusRunning, db.StatusStarting:
+		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			running++
 		case db.StatusQueued:
 			queued++
@@ -7412,7 +7524,7 @@ func formatStartTime(startTime int64) string {
 // formatJobTime formats the time column for a job, showing either start time or queue time
 func formatJobTime(job *db.Job) string {
 	// Show end time for any job that has completed/terminated
-	if job.EndTime != nil && job.Status != db.StatusRunning && job.Status != db.StatusStarting {
+	if job.EndTime != nil && job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusPaused {
 		return formatStartTime(*job.EndTime)
 	}
 	// If job has started, show start time

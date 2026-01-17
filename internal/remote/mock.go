@@ -7,6 +7,7 @@ type MockProber struct {
 	CurrentResult   ProbeResult
 	InQueueResult   ProbeResult
 	ProcessResult   ProbeResult
+	PausedResult    ProbeResult
 }
 
 func (m *MockProber) ProbeInQueue(queueName string, jobID int64) ProbeResult {
@@ -25,6 +26,13 @@ func (m *MockProber) ProbeProcessRunning(jobID int64) ProbeResult {
 	return m.ProcessResult
 }
 
+func (m *MockProber) ProbeProcessPaused(jobID int64) ProbeResult {
+	if m.PausedResult == ProbeUnknown {
+		return ProbeFalse
+	}
+	return m.PausedResult
+}
+
 // MockHost is a test implementation of Host.
 type MockHost struct {
 	InQueueResult    bool
@@ -35,6 +43,8 @@ type MockHost struct {
 	CompletionErr    error
 	ProcessResult    bool
 	ProcessErr       error
+	PausedResult     bool
+	PausedErr        error
 	MetadataResult   map[string]string
 	MetadataErr      error
 	SamplesResult    string
@@ -69,6 +79,10 @@ func (m *MockHost) GetJobCompletion(jobID int64) (*CompletionInfo, error) {
 
 func (m *MockHost) IsProcessRunning(jobID int64) (bool, error) {
 	return m.ProcessResult, m.ProcessErr
+}
+
+func (m *MockHost) IsProcessPaused(jobID int64) (bool, error) {
+	return m.PausedResult, m.PausedErr
 }
 
 func (m *MockHost) GetJobMetadata(jobID int64) (map[string]string, error) {

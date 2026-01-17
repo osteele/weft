@@ -74,6 +74,9 @@ const StatusKilled = "killed"
 // StatusCanceled indicates a queued job was explicitly removed from the queue
 const StatusCanceled = "canceled"
 
+// StatusPaused indicates a job that has been paused (SIGSTOP)
+const StatusPaused = "paused"
+
 // StatusDraft indicates a job that exists locally but should not run remotely
 const StatusDraft = "draft"
 
@@ -590,8 +593,8 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL, session_name = NULL
-		 WHERE id = ? AND status IN (?, ?)`,
-		exitCode, endTime, StatusCompleted, id, StatusRunning, StatusQueued,
+		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
+		exitCode, endTime, StatusCompleted, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
 	)
 	return err
 }
@@ -602,8 +605,8 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL, session_name = NULL
-		 WHERE id = ? AND status IN (?, ?, ?)`,
-		endTime, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued,
+		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
+		endTime, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
 	)
 	return err
 }
@@ -623,6 +626,33 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
 		StatusRunning, id, StatusStarting,
+	)
+	return err
+}
+
+// MarkPausedByID transitions a job to paused from queued/starting/running.
+func MarkPausedByID(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ? AND status IN (?, ?, ?)`,
+		StatusPaused, id, StatusQueued, StatusStarting, StatusRunning,
+	)
+	return err
+}
+
+// MarkPausedFromTerminal transitions a job from a terminal status back to paused.
+func MarkPausedFromTerminal(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE id = ? AND status IN (?, ?, ?, ?)`,
+		StatusPaused, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
+	)
+	return err
+}
+
+// MarkRunningFromPaused transitions a job from paused back to running.
+func MarkRunningFromPaused(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
+		StatusRunning, id, StatusPaused,
 	)
 	return err
 }
@@ -791,9 +821,9 @@ func CountQueueRunnerActiveByHost(db *sql.DB, host string) (int, error) {
 		`SELECT COUNT(*) FROM jobs
 		 WHERE host = ?
 		 AND session_name IS NULL
-		 AND status IN (?, ?, ?)
+		 AND status IN (?, ?, ?, ?)
 		 AND tombstoned = 0`,
-		host, StatusQueued, StatusRunning, StatusStarting,
+		host, StatusQueued, StatusRunning, StatusStarting, StatusPaused,
 	).Scan(&count)
 	return count, err
 }
@@ -1095,8 +1125,8 @@ func TombstoneJob(db *sql.DB, id int64) error {
 // GetTombstonedActiveJobs returns jobs that are tombstoned but still marked as running/queued/starting
 // These need to be killed on remote hosts during sync
 func GetTombstonedActiveJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 1 AND status IN (?, ?, ?)`, jobSelectColumns)
-	return queryJobs(db, query, StatusRunning, StatusQueued, StatusStarting)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 1 AND status IN (?, ?, ?, ?)`, jobSelectColumns)
+	return queryJobs(db, query, StatusRunning, StatusQueued, StatusStarting, StatusPaused)
 }
 
 // GetJob retrieves a job by host and session name (most recent)
@@ -1115,8 +1145,8 @@ func GetJobByID(db *sql.DB, id int64) (*Job, error) {
 
 // GetRunningJobsByHost retrieves all running jobs for a specific host
 func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? ORDER BY start_time DESC`, jobSelectColumns)
-	rows, err := db.Query(query, host, StatusRunning)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?) ORDER BY start_time DESC`, jobSelectColumns)
+	rows, err := db.Query(query, host, StatusRunning, StatusPaused)
 	if err != nil {
 		return nil, err
 	}
@@ -1535,7 +1565,7 @@ func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, 
 	}
 
 	// Order by running jobs first, then by job ID descending
-	query += ` ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 ELSE 1 END, id DESC`
+	query += ` ORDER BY CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, id DESC`
 	applyLimit := limit > 0 && len(normalizeTags(tags)) == 0 && processedFilter == ""
 	if applyLimit {
 		query += ` LIMIT ?`
@@ -1579,7 +1609,7 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 	}
 
 	// Order by running jobs first, then by job ID descending
-	query += ` ORDER BY CASE WHEN status IN ('running', 'starting') THEN 0 ELSE 1 END, id DESC`
+	query += ` ORDER BY CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, id DESC`
 	applyLimit := limit > 0 && len(normalizeTags(tags)) == 0 && processedFilter == ""
 	if applyLimit {
 		query += ` LIMIT ?`
@@ -1628,7 +1658,7 @@ func ListRecentFailed(db *sql.DB, limit int) ([]*Job, error) {
 
 // ListUniqueRunningHosts returns all unique hosts with running jobs
 func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0`, StatusRunning)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?, ?) AND tombstoned = 0`, StatusRunning, StatusStarting, StatusPaused)
 	if err != nil {
 		return nil, err
 	}
@@ -1650,10 +1680,10 @@ func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
 		WHERE tombstoned = 0
 		AND (
-			status IN (?, ?)
+			status IN (?, ?, ?, ?)
 			OR (status = ? AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?))
 		)`,
-		StatusRunning, StatusQueued, StatusDraft, StatusDraft, StatusDraft)
+		StatusRunning, StatusStarting, StatusPaused, StatusQueued, StatusDraft, StatusDraft, StatusDraft)
 	if err != nil {
 		return nil, err
 	}
@@ -1693,9 +1723,9 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 func ListHostsWithQueueRunnerJobs(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
 		WHERE session_name IS NULL
-		AND status IN (?, ?, ?)
+		AND status IN (?, ?, ?, ?)
 		AND tombstoned = 0`,
-		StatusQueued, StatusRunning, StatusStarting)
+		StatusQueued, StatusRunning, StatusStarting, StatusPaused)
 	if err != nil {
 		return nil, err
 	}
@@ -1734,8 +1764,8 @@ func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
 
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusQueued)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
 // ListDraftJobsPendingSync returns draft jobs that still need remote cleanup.

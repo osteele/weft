@@ -91,8 +91,29 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 					return updated, err
 				}
 				updated++
+			case db.StatusPaused:
+				if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
+					return updated, err
+				}
+				updated++
 			case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 				if err := db.MarkRunningFromTerminal(database, job.ID); err != nil {
+					return updated, err
+				}
+				updated++
+			}
+		case queueStatePaused:
+			if job.StartTime == 0 {
+				_ = UpdateStartTimeFromMetadata(database, job, timeout)
+			}
+			switch job.Status {
+			case db.StatusQueued, db.StatusStarting, db.StatusRunning:
+				if err := db.MarkPausedByID(database, job.ID); err != nil {
+					return updated, err
+				}
+				updated++
+			case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+				if err := db.MarkPausedFromTerminal(database, job.ID); err != nil {
 					return updated, err
 				}
 				updated++
@@ -163,6 +184,20 @@ done
 		continue
 	fi
 	if [ "$CURRENT" = "$id" ]; then
+		pid_file=$(ls %s 2>/dev/null | head -1)
+		if [ -n "$pid_file" ]; then
+			pid=$(cat "$pid_file" 2>/dev/null | head -1)
+			if [ -n "$pid" ]; then
+				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
+				if [ -n "$state" ]; then
+					case "$state" in
+						*T*) echo "JOB|$id|PAUSED" ;;
+						*) echo "JOB|$id|CURRENT" ;;
+					esac
+					continue
+				fi
+			fi
+		fi
 		echo "JOB|$id|CURRENT"
 		continue
 	fi
@@ -173,14 +208,20 @@ done
 	pid_file=$(ls %s 2>/dev/null | head -1)
 	if [ -n "$pid_file" ]; then
 		pid=$(cat "$pid_file" 2>/dev/null | head -1)
-		if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-			echo "JOB|$id|RUNNING"
-			continue
+		if [ -n "$pid" ]; then
+			state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
+			if [ -n "$state" ]; then
+				case "$state" in
+					*T*) echo "JOB|$id|PAUSED" ;;
+					*) echo "JOB|$id|RUNNING" ;;
+				esac
+				continue
+			fi
 		fi
 	fi
 	echo "JOB|$id|DEAD"
 done
-`, stateFile, idsArg, statusPattern, pidPattern)
+`, stateFile, idsArg, statusPattern, pidPattern, pidPattern)
 
 	cmd := fmt.Sprintf("bash -c %s", ssh.EscapeForSingleQuotes(script))
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
@@ -219,6 +260,8 @@ done
 			results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: mtime}
 		case "CURRENT", "RUNNING":
 			results[id] = queueBatchStatus{State: queueStateRunning}
+		case "PAUSED":
+			results[id] = queueBatchStatus{State: queueStatePaused}
 		case "QUEUED":
 			results[id] = queueBatchStatus{State: queueStateQueued}
 		case "DEAD":

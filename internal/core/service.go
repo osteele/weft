@@ -66,7 +66,7 @@ func (s *Service) KillJob(jobID int64, mode ops.TimeoutMode) (OperationResult, e
 	switch job.Status {
 	case db.StatusQueued:
 		outcome, err = ops.CancelQueuedJob(s.database, job, opts)
-	case db.StatusRunning, db.StatusStarting:
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		outcome, err = ops.KillJob(s.database, job, opts)
 	default:
 		return OperationResult{}, fmt.Errorf("job %d is %s; nothing to kill", job.ID, job.Status)
@@ -84,6 +84,41 @@ func (s *Service) DraftJob(jobID int64, mode ops.TimeoutMode) (OperationResult, 
 		return OperationResult{}, err
 	}
 	outcome, err := ops.DraftJob(s.database, job, ops.OptionsForMode(resolveMode(mode)))
+	if err != nil {
+		return OperationResult{}, err
+	}
+	return s.operationResult(jobID, outcome)
+}
+
+// PauseJob pauses a running job (SIGSTOP) so it can be resumed later.
+func (s *Service) PauseJob(jobID int64, mode ops.TimeoutMode) (OperationResult, error) {
+	job, err := s.loadJob(jobID)
+	if err != nil {
+		return OperationResult{}, err
+	}
+	if job.Status == db.StatusPaused {
+		return OperationResult{}, fmt.Errorf("job %d is already paused", job.ID)
+	}
+	if job.Status != db.StatusRunning && job.Status != db.StatusStarting {
+		return OperationResult{}, fmt.Errorf("job %d is %s; only running jobs can be paused", job.ID, job.Status)
+	}
+	outcome, err := ops.RequestStatus(s.database, job, db.StatusPaused, resolveMode(mode))
+	if err != nil {
+		return OperationResult{}, err
+	}
+	return s.operationResult(jobID, outcome)
+}
+
+// ResumeJob resumes a paused job (SIGCONT).
+func (s *Service) ResumeJob(jobID int64, mode ops.TimeoutMode) (OperationResult, error) {
+	job, err := s.loadJob(jobID)
+	if err != nil {
+		return OperationResult{}, err
+	}
+	if job.Status != db.StatusPaused {
+		return OperationResult{}, fmt.Errorf("job %d is %s; only paused jobs can be resumed", job.ID, job.Status)
+	}
+	outcome, err := ops.RequestStatus(s.database, job, db.StatusRunning, resolveMode(mode))
 	if err != nil {
 		return OperationResult{}, err
 	}

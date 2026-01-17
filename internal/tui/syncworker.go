@@ -269,7 +269,7 @@ func (w *SyncWorker) doSync(host string) {
 		if job == nil {
 			continue
 		}
-		if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+		if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
 			queueRunnerCount++
 		}
 	}

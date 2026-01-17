@@ -182,6 +182,8 @@ func formatActualStatus(job *db.Job) string {
 		return "○ starting"
 	case db.StatusQueued:
 		return "◌ queued"
+	case db.StatusPaused:
+		return "⏸ paused"
 	case db.StatusDead:
 		return "✗ start failed"
 	case db.StatusFailed:
@@ -207,6 +209,8 @@ func formatPendingStatus(status string) string {
 		return "⧗ starting…"
 	case db.StatusQueued:
 		return "⧗ queuing…"
+	case db.StatusPaused:
+		return "⧗ pausing…"
 	case db.StatusDraft:
 		return "⧗ drafting…"
 	default:
@@ -215,7 +219,7 @@ func formatPendingStatus(status string) string {
 }
 
 func formatJobTime(job *db.Job) string {
-	if job.EndTime != nil && job.Status != db.StatusRunning && job.Status != db.StatusStarting {
+	if job.EndTime != nil && job.Status != db.StatusRunning && job.Status != db.StatusStarting && job.Status != db.StatusPaused {
 		return formatStartTime(*job.EndTime)
 	}
 	if job.StartTime != 0 {

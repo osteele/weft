@@ -38,6 +38,7 @@ type Host interface {
 	// Job status operations
 	GetJobCompletion(jobID int64) (*CompletionInfo, error) // nil if not completed
 	IsProcessRunning(jobID int64) (bool, error)
+	IsProcessPaused(jobID int64) (bool, error)
 
 	// Metadata operations
 	GetJobMetadata(jobID int64) (map[string]string, error)
@@ -71,4 +72,5 @@ type Prober interface {
 	ProbeCurrent(queueName string, jobID int64) ProbeResult
 	ProbeCompleted(jobID int64) (ProbeResult, *CompletionInfo)
 	ProbeProcessRunning(jobID int64) ProbeResult
+	ProbeProcessPaused(jobID int64) ProbeResult
 }

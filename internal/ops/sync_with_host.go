@@ -101,11 +101,39 @@ func SyncQueueRunnerJobWithProber(
 		return false, nil
 	}
 
-	// Probe 4: Check if process is running via PID
+	// Probe 4: Check if process is paused via PID
+	pausedResult := prober.ProbeProcessPaused(job.ID)
+	if pausedResult == remote.ProbeTrue {
+		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+			return false, err
+		}
+		switch job.Status {
+		case db.StatusQueued, db.StatusStarting, db.StatusRunning:
+			if err := db.MarkPausedByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+			if err := db.MarkPausedFromTerminal(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		case db.StatusPaused:
+			return false, nil
+		}
+	}
+
+	// Probe 5: Check if process is running via PID
 	processResult := prober.ProbeProcessRunning(job.ID)
 	if processResult == remote.ProbeTrue {
 		if job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		if job.Status == db.StatusPaused {
+			if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
 				return false, err
 			}
 			return true, nil
@@ -144,6 +172,7 @@ func SyncQueueRunnerJobWithProber(
 	allDefinitelyFalse := completedResult == remote.ProbeFalse &&
 		currentResult == remote.ProbeFalse &&
 		inQueueResult == remote.ProbeFalse &&
+		pausedResult == remote.ProbeFalse &&
 		processResult == remote.ProbeFalse
 
 	if allDefinitelyFalse {

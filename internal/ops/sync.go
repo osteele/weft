@@ -122,6 +122,7 @@ type queueState int
 const (
 	queueStateUnknown queueState = iota
 	queueStateRunning
+	queueStatePaused
 	queueStateQueued
 	queueStateDead
 )
@@ -139,6 +140,7 @@ type remoteQueue interface {
 	CurrentJob(host, queueName string, jobID int64, timeout time.Duration) Option[bool]
 	InQueue(host, queueName string, jobID int64, timeout time.Duration) Option[bool]
 	ProcessRunning(host string, jobID int64, timeout time.Duration) Option[bool]
+	ProcessPaused(host string, jobID int64, timeout time.Duration) Option[bool]
 	QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error)
 	Metadata(host string, jobID int64, timeout time.Duration) (string, error)
 	Samples(host string, jobID int64, timeout time.Duration) (string, error)
@@ -188,6 +190,34 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 	}
 
 	if exists {
+		paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
+		if paused.IsSome() && paused.Unwrap() {
+			if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+				return false, err
+			}
+			switch job.Status {
+			case db.StatusQueued, db.StatusStarting, db.StatusRunning:
+				if err := db.MarkPausedByID(database, job.ID); err != nil {
+					return false, err
+				}
+				return true, nil
+			case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
+				if err := db.MarkPausedFromTerminal(database, job.ID); err != nil {
+					return false, err
+				}
+				return true, nil
+			case db.StatusPaused:
+				return false, nil
+			}
+		}
+
+		if job.Status == db.StatusPaused {
+			if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+
 		// Session is running - update status if still marked as starting
 		if job.Status == db.StatusStarting {
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
@@ -300,7 +330,7 @@ func syncDraftQueueJob(job *db.Job, timeout time.Duration) (bool, error) {
 	}
 
 	switch result.State {
-	case queueStateRunning:
+	case queueStateRunning, queueStatePaused:
 		if err := applyKillToRemote(job, timeout); err != nil {
 			return false, err
 		}
@@ -602,6 +632,25 @@ func (sshQueueRemote) ProcessRunning(host string, jobID int64, timeout time.Dura
 	}
 }
 
+func (sshQueueRemote) ProcessPaused(host string, jobID int64, timeout time.Duration) Option[bool] {
+	pidPattern := session.PidFilePattern(jobID)
+	cmd := fmt.Sprintf(`pid=$(cat %s 2>/dev/null | head -1); if [ -n "$pid" ]; then state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' '); case "$state" in *T*) echo YES ;; "") echo NO ;; *) echo NO ;; esac; else echo NO; fi`, pidPattern)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return None[bool]()
+	}
+
+	result := strings.TrimSpace(stdout)
+	switch result {
+	case "YES":
+		return Some(true)
+	case "NO":
+		return Some(false)
+	default:
+		return None[bool]()
+	}
+}
+
 func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error) {
 	statusPattern := session.StatusFilePattern(jobID)
 	statusFile := session.SimpleStatusFile(jobID)
@@ -630,8 +679,16 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 			fi
 			if [ -n "$pid_file" ]; then
 				pid=$(cat "$pid_file" 2>/dev/null | head -1)
-				if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-					echo RUNNING
+				if [ -n "$pid" ]; then
+					state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
+					if [ -n "$state" ]; then
+						case "$state" in
+							*T*) echo PAUSED ;;
+							*) echo RUNNING ;;
+						esac
+					else
+						echo DEAD
+					fi
 				else
 					echo DEAD
 				fi
@@ -643,15 +700,31 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 			echo QUEUED
 		elif [ -f %s ]; then
 			pid=$(cat %s 2>/dev/null | head -1)
-			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-				echo RUNNING
+			if [ -n "$pid" ]; then
+				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
+				if [ -n "$state" ]; then
+					case "$state" in
+						*T*) echo PAUSED ;;
+						*) echo RUNNING ;;
+					esac
+				else
+					echo DEAD
+				fi
 			else
 				echo DEAD
 			fi
 		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
 			pid=$(cat "$pid_file" 2>/dev/null | head -1)
-			if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then
-				echo RUNNING
+			if [ -n "$pid" ]; then
+				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
+				if [ -n "$state" ]; then
+					case "$state" in
+						*T*) echo PAUSED ;;
+						*) echo RUNNING ;;
+					esac
+				else
+					echo DEAD
+				fi
 			else
 				echo DEAD
 			fi
@@ -674,6 +747,8 @@ func (sshQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout t
 	switch result {
 	case "RUNNING":
 		return quickStatus{State: queueStateRunning}, nil
+	case "PAUSED":
+		return quickStatus{State: queueStatePaused}, nil
 	case "QUEUED":
 		return quickStatus{State: queueStateQueued}, nil
 	case "DEAD":

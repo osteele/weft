@@ -470,6 +470,8 @@ type mockSSHHost struct {
 	completionErr    error
 	processResult    bool
 	processErr       error
+	pausedResult     bool
+	pausedErr        error
 }
 
 func (m *mockSSHHost) IsJobInQueue(queueName string, jobID int64) (bool, error) {
@@ -486,6 +488,10 @@ func (m *mockSSHHost) GetJobCompletion(jobID int64) (*CompletionInfo, error) {
 
 func (m *mockSSHHost) IsProcessRunning(jobID int64) (bool, error) {
 	return m.processResult, m.processErr
+}
+
+func (m *mockSSHHost) IsProcessPaused(jobID int64) (bool, error) {
+	return m.pausedResult, m.pausedErr
 }
 
 // testableSSHProber wraps a mockSSHHost for testing
@@ -528,6 +534,17 @@ func (p *testableSSHProber) ProbeCompleted(jobID int64) (ProbeResult, *Completio
 
 func (p *testableSSHProber) ProbeProcessRunning(jobID int64) ProbeResult {
 	result, err := p.mock.IsProcessRunning(jobID)
+	if err != nil {
+		return ProbeUnknown
+	}
+	if result {
+		return ProbeTrue
+	}
+	return ProbeFalse
+}
+
+func (p *testableSSHProber) ProbeProcessPaused(jobID int64) ProbeResult {
+	result, err := p.mock.IsProcessPaused(jobID)
 	if err != nil {
 		return ProbeUnknown
 	}

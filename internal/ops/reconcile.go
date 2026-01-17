@@ -4,6 +4,7 @@ package ops
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -180,9 +181,15 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 		err = applyKillToRemote(job, timeout)
 		resolvedStatus = db.StatusKilled
 	case db.StatusRunning:
-		err = applyStartToRemote(database, job, timeout)
+		if job.Status == db.StatusPaused {
+			err = applyResumeToRemote(job, timeout)
+		} else {
+			err = applyStartToRemote(database, job, timeout)
+		}
 	case db.StatusQueued:
 		err = applyQueueToRemote(job, timeout)
+	case db.StatusPaused:
+		err = applyPauseToRemote(job, timeout)
 	case db.StatusDraft:
 		err = applyDraftToRemote(job, timeout)
 	default:
@@ -231,6 +238,30 @@ func applyKillToRemote(job *db.Job, timeout time.Duration) error {
 			return fmt.Errorf("connection error: %s", stderr)
 		}
 		// Session might already be gone - that's OK
+	}
+	return nil
+}
+
+func applyPauseToRemote(job *db.Job, timeout time.Duration) error {
+	return signalJobProcess(job, "STOP", timeout)
+}
+
+func applyResumeToRemote(job *db.Job, timeout time.Duration) error {
+	return signalJobProcess(job, "CONT", timeout)
+}
+
+func signalJobProcess(job *db.Job, signal string, timeout time.Duration) error {
+	pidFile := session.JobPidFile(job.ID, job.StartTime)
+	cmd := fmt.Sprintf(`pid=$(cat %s 2>/dev/null | head -1); if [ -z "$pid" ]; then echo "pid not found" >&2; exit 2; fi; if ! ps -p $pid > /dev/null 2>&1; then echo "process not running" >&2; exit 3; fi; kill -%s $pid`, pidFile, signal)
+	_, stderr, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
+	if err != nil {
+		if ssh.IsConnectionError(stderr) {
+			return fmt.Errorf("connection error: %s", strings.TrimSpace(stderr))
+		}
+		if strings.TrimSpace(stderr) != "" {
+			return fmt.Errorf("%s signal failed: %s", signal, strings.TrimSpace(stderr))
+		}
+		return fmt.Errorf("%s signal failed", signal)
 	}
 	return nil
 }
@@ -363,6 +394,10 @@ func ProbeRemoteStatus(job *db.Job, timeout time.Duration) (string, error) {
 	}
 
 	if exists {
+		paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
+		if paused.IsSome() && paused.Unwrap() {
+			return db.StatusPaused, nil
+		}
 		return db.StatusRunning, nil
 	}
 
@@ -389,6 +424,11 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	if found.IsSome() && found.Unwrap() {
 		_ = exitCode // Exit code available if needed
 		return db.StatusCompleted, nil
+	}
+
+	paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
+	if paused.IsSome() && paused.Unwrap() {
+		return db.StatusPaused, nil
 	}
 
 	// Check if job is current in queue runner

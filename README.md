@@ -723,6 +723,32 @@ remote-jobs kill <job-id>
 remote-jobs kill 42    # Kill job #42
 ```
 
+### remote-jobs pause
+
+Pause a running job (SIGSTOP).
+
+```bash
+remote-jobs pause <job-id>
+```
+
+**Example:**
+```bash
+remote-jobs pause 42   # Pause job #42
+```
+
+### remote-jobs resume
+
+Resume a paused job (SIGCONT).
+
+```bash
+remote-jobs resume <job-id>
+```
+
+**Example:**
+```bash
+remote-jobs resume 42  # Resume job #42
+```
+
 ### remote-jobs job draft
 
 Move a job into draft status and make sure it never runs remotely (queued or otherwise).
