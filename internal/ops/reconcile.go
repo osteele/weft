@@ -357,17 +357,7 @@ func applyDraftToRemote(job *db.Job, timeout time.Duration) error {
 
 // applyQueueToRemote adds a job to the remote queue file.
 func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
-	entry := QueueEntry{
-		JobID:       job.ID,
-		WorkingDir:  job.WorkingDir,
-		Command:     job.Command,
-		Description: job.Description,
-		EnvVars:     job.EnvVars,
-		DepSpec:     job.DepSpec,
-	}
-	addCmd := NewAddCommand(entry)
-	opts := AppendCommandOptions{Timeout: timeout}
-	return AppendCommand(job.Host, DefaultQueueName, addCmd, opts)
+	return AppendJobToQueue(job, timeout)
 }
 
 // applyStartToRemote starts a queued or draft job on the remote host.

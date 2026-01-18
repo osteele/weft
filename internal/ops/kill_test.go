@@ -223,12 +223,20 @@ func TestKillQueueRunnerJob_TildeNotSingleQuoted(t *testing.T) {
 	}
 }
 
-// TestApplyCancelToRemote_KillsRunningProcess verifies that canceling a job
-// that has already started running will also kill the process.
-func TestApplyCancelToRemote_KillsRunningProcess(t *testing.T) {
+// TestReconcileCancelKillsRunningProcess verifies that reconciling a job with
+// pending=canceled issues both a cancel command and kills any running process.
+// This handles the race condition where the queue runner starts the job
+// between when we set pending status and when we reconcile.
+func TestReconcileCancelKillsRunningProcess(t *testing.T) {
 	database := db.SetupTestDB(t)
 	// Create a queued job
 	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+
+	// Set pending status to canceled (simulating user requesting cancel)
+	if err := db.SetPendingStatus(database, jobID, db.StatusCanceled); err != nil {
+		t.Fatalf("SetPendingStatus failed: %v", err)
+	}
+
 	job, _ := db.GetJobByID(database, jobID)
 
 	var capturedCommands []string
@@ -237,17 +245,17 @@ func TestApplyCancelToRemote_KillsRunningProcess(t *testing.T) {
 		return "", "", 0
 	})
 
-	// Manually call applyCancelToRemote (internal function)
-	err := applyCancelToRemote(job, 10*time.Second)
+	// Use production path: SyncAndReconcile
+	_, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: 10 * time.Second})
 	if err != nil {
-		t.Fatalf("applyCancelToRemote failed: %v", err)
+		t.Fatalf("SyncAndReconcile failed: %v", err)
 	}
 
 	// Verify both cancel command AND kill commands were issued
 	hasCancelCommand := false
 	hasKillCommand := false
 	for _, cmd := range capturedCommands {
-		// New format: cancel command appended to .commands file
+		// Cancel command appended to .commands file
 		if strings.Contains(cmd, ".commands") && strings.Contains(cmd, "cancel") {
 			hasCancelCommand = true
 		}
@@ -261,5 +269,11 @@ func TestApplyCancelToRemote_KillsRunningProcess(t *testing.T) {
 	}
 	if !hasKillCommand {
 		t.Error("expected kill command to be issued (for case where job started running)")
+	}
+
+	// Verify job status was updated
+	updatedJob, _ := db.GetJobByID(database, jobID)
+	if updatedJob.Status != db.StatusCanceled {
+		t.Errorf("expected job status to be canceled, got %s", updatedJob.Status)
 	}
 }

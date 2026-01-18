@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -222,66 +221,29 @@ func extractGPUFromEnvVars(envVars []string) string {
 	return ""
 }
 
+// queueJob delegates to ops.QueueJob, converting CLI types to ops types.
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
-	queueName := defaultQueueName
-
-	// Extract GPU from env vars if not explicitly set
-	gpu := opts.GPU
-	if gpu == "" {
-		gpu = extractGPUFromEnvVars(opts.EnvVars)
-	}
-
-	depSpec := encodeQueueDependencies(opts.Dependencies)
-	jobID, err := db.RecordQueuedWithGPU(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description, queueName, gpu)
-	if err != nil {
-		return nil, fmt.Errorf("record job: %w", err)
-	}
-	if err := db.SetJobEnvVars(database, jobID, opts.EnvVars); err != nil {
-		db.DeleteJob(database, jobID)
-		return nil, fmt.Errorf("record env vars: %w", err)
-	}
-	if err := db.SetJobTags(database, jobID, opts.Tags); err != nil {
-		db.DeleteJob(database, jobID)
-		return nil, fmt.Errorf("record tags: %w", err)
-	}
-	if err := db.SetJobDepSpec(database, jobID, depSpec); err != nil {
-		return nil, fmt.Errorf("record dependencies: %w", err)
-	}
-
-	entry := ops.QueueEntry{
-		JobID:       jobID,
+	params := ops.QueueJobParams{
+		Host:        opts.Host,
 		WorkingDir:  opts.WorkingDir,
 		Command:     opts.Command,
 		Description: opts.Description,
 		EnvVars:     opts.EnvVars,
-		DepSpec:     depSpec,
+		Tags:        opts.Tags,
+		GPU:         opts.GPU,
+		QueueName:   opts.QueueName,
+		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 	}
-	// Use the new command queue system
-	addCmd := ops.NewAddCommand(entry)
-	if err := ops.AppendCommand(opts.Host, queueName, addCmd, ops.AppendCommandOptions{}); err != nil {
-		if shouldDeferQueueAppend(err) {
-			return &queueJobResult{JobID: jobID, Deferred: true}, nil
-		}
-		db.DeleteJob(database, jobID)
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{})
+	if err != nil {
 		return nil, err
 	}
 
-	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
-		return nil, fmt.Errorf("update sync state: %w", err)
-	}
-
-	return &queueJobResult{JobID: jobID}, nil
-}
-
-func shouldDeferQueueAppend(err error) bool {
-	var qaErr *ops.QueueAppendError
-	if errors.As(err, &qaErr) {
-		return qaErr.IsConnectionError()
-	}
-	if err == nil {
-		return false
-	}
-	return ssh.IsConnectionError(err.Error())
+	return &queueJobResult{
+		JobID:    result.JobID,
+		Deferred: result.Deferred,
+	}, nil
 }
 
 func applyEnvMap(env map[string]string) []string {

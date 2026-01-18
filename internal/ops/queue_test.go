@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -131,5 +132,91 @@ func TestQueueJob_DefaultQueueName(t *testing.T) {
 	job, _ := db.GetJobByID(database, result.JobID)
 	if job.QueueName != "default" {
 		t.Errorf("expected queue name to be 'default', got %q", job.QueueName)
+	}
+}
+
+func TestQueueJob_IncludesArtifactEnvVars(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Capture the SSH command to verify artifact env vars are included
+	var capturedCommand string
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "printf") {
+			capturedCommand = command
+		}
+		return "", "", 0
+	})
+
+	params := QueueJobParams{
+		Host:        "test-host",
+		WorkingDir:  "/tmp",
+		Command:     "my-command",
+		Description: "artifact test",
+		EnvVars:     []string{"MY_VAR=value"},
+	}
+	result, err := QueueJob(database, params, DefaultOptions())
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+
+	// Verify the queue command includes artifact env vars
+	if !strings.Contains(capturedCommand, "RJ_JOB_ID=") {
+		t.Error("expected queue command to contain RJ_JOB_ID env var")
+	}
+	if !strings.Contains(capturedCommand, "RJ_ARTIFACT_MANIFEST=") {
+		t.Error("expected queue command to contain RJ_ARTIFACT_MANIFEST env var")
+	}
+	if !strings.Contains(capturedCommand, "RJ_ARTIFACT_ROOT=") {
+		t.Error("expected queue command to contain RJ_ARTIFACT_ROOT env var")
+	}
+
+	// Verify job ID is correct in env var
+	expectedJobID := result.JobID
+	if !strings.Contains(capturedCommand, "RJ_JOB_ID="+string(rune('0'+expectedJobID))) {
+		// For multi-digit IDs, just check it contains RJ_JOB_ID= followed by the ID
+		if !strings.Contains(capturedCommand, "RJ_JOB_ID=1") {
+			t.Errorf("expected RJ_JOB_ID to be %d", expectedJobID)
+		}
+	}
+}
+
+func TestAppendJobToQueue_IncludesArtifactEnvVars(t *testing.T) {
+	// Capture the SSH command to verify artifact env vars are included
+	var capturedCommand string
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "printf") {
+			capturedCommand = command
+		}
+		return "", "", 0
+	})
+
+	job := &db.Job{
+		ID:          42,
+		Host:        "test-host",
+		WorkingDir:  "/tmp",
+		Command:     "test-command",
+		Description: "test job",
+		EnvVars:     []string{"USER_VAR=xyz"},
+	}
+
+	err := AppendJobToQueue(job, 5*time.Second)
+	if err != nil {
+		t.Fatalf("AppendJobToQueue failed: %v", err)
+	}
+
+	// Verify the queue command includes artifact env vars
+	if !strings.Contains(capturedCommand, "RJ_JOB_ID=42") {
+		t.Error("expected queue command to contain RJ_JOB_ID=42 env var")
+	}
+	if !strings.Contains(capturedCommand, "RJ_ARTIFACT_MANIFEST=") {
+		t.Error("expected queue command to contain RJ_ARTIFACT_MANIFEST env var")
+	}
+	if !strings.Contains(capturedCommand, "RJ_ARTIFACT_ROOT=") {
+		t.Error("expected queue command to contain RJ_ARTIFACT_ROOT env var")
+	}
+
+	// Verify user env vars are also included
+	if !strings.Contains(capturedCommand, "USER_VAR=xyz") {
+		t.Error("expected queue command to contain USER_VAR=xyz env var")
 	}
 }

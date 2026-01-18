@@ -123,6 +123,28 @@ func (h *SSHHost) RemoveFromQueue(queueName string, jobID int64) error {
 	return nil
 }
 
+// IsJobInCommandsFile checks if a job ID appears in the commands file (for testing).
+func (h *SSHHost) IsJobInCommandsFile(queueName string, jobID int64) (bool, error) {
+	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, queueName)
+	cmd := fmt.Sprintf(`grep -q '"id":%d' %s 2>/dev/null && echo YES || echo NO`, jobID, commandsFile)
+	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(stdout) == "YES", nil
+}
+
+// GetLastCommandForJob returns the last command entry for a job ID from the commands file.
+func (h *SSHHost) GetLastCommandForJob(queueName string, jobID int64) (string, error) {
+	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, queueName)
+	cmd := fmt.Sprintf(`grep '"id":%d' %s 2>/dev/null | tail -1`, jobID, commandsFile)
+	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(stdout), nil
+}
+
 // GetJobCompletion checks if a job has completed and returns its exit info.
 // Returns nil if the job has not completed.
 func (h *SSHHost) GetJobCompletion(jobID int64) (*CompletionInfo, error) {

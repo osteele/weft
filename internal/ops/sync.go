@@ -364,19 +364,7 @@ func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (bool, error) {
 
 // appendQueueEntryForJob ensures the queued job exists in the remote queue.
 func appendQueueEntryForJob(database *sql.DB, job *db.Job, queueName string, timeout time.Duration) error {
-	queueName = DefaultQueueName
-	entry := QueueEntry{
-		JobID:       job.ID,
-		WorkingDir:  job.WorkingDir,
-		Command:     job.Command,
-		Description: job.Description,
-		EnvVars:     job.EnvVars,
-		DepSpec:     job.DepSpec,
-	}
-	// Use new command queue format
-	addCmd := NewAddCommand(entry)
-	opts := AppendCommandOptions{Timeout: timeout}
-	if err := AppendCommand(job.Host, queueName, addCmd, opts); err != nil {
+	if err := AppendJobToQueue(job, timeout); err != nil {
 		return err
 	}
 	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued)

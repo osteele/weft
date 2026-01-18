@@ -2,6 +2,7 @@ package remote
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -149,5 +150,90 @@ func TestSSHProberIntegration_AllProbes(t *testing.T) {
 	running := prober.ProbeProcessRunning(jobID)
 	if running != ProbeFalse {
 		t.Errorf("ProbeProcessRunning: expected ProbeFalse, got %v", running)
+	}
+}
+
+func TestSSHHostIntegration_AppendToQueue(t *testing.T) {
+	host := getTestHost(t)
+	sshHost := NewSSHHost(host, 10*time.Second)
+
+	// Test appending a command to the queue - should succeed
+	testJobID := int64(888888)
+	entry := QueueEntry{
+		JobID:       testJobID,
+		WorkingDir:  "/tmp",
+		Command:     "echo test",
+		Description: "test job",
+	}
+	err := sshHost.AppendToQueue("default", entry)
+	if err != nil {
+		t.Fatalf("AppendToQueue failed: %v", err)
+	}
+
+	// Verify the command was appended to the commands file
+	inCommands, err := sshHost.IsJobInCommandsFile("default", testJobID)
+	if err != nil {
+		t.Fatalf("IsJobInCommandsFile failed: %v", err)
+	}
+	if !inCommands {
+		t.Error("Expected job to be in commands file after appending")
+	}
+
+	// Clean up by canceling the job
+	err = sshHost.RemoveFromQueue("default", testJobID)
+	if err != nil {
+		t.Logf("Warning: failed to cancel test job: %v", err)
+	}
+}
+
+func TestSSHHostIntegration_AppendToQueueWithArtifactEnvVars(t *testing.T) {
+	host := getTestHost(t)
+	sshHost := NewSSHHost(host, 10*time.Second)
+
+	// Test that artifact env vars are passed through when provided
+	testJobID := int64(888889)
+	envVars := []string{
+		"RJ_JOB_ID=888889",
+		"RJ_ARTIFACT_MANIFEST=~/.cache/remote-jobs/artifacts/888889.json",
+		"RJ_ARTIFACT_ROOT=.",
+		"MY_CUSTOM_VAR=test_value",
+	}
+
+	entry := QueueEntry{
+		JobID:       testJobID,
+		WorkingDir:  "/tmp",
+		Command:     "env | grep -E 'RJ_|MY_CUSTOM'",
+		Description: "env test",
+		EnvVars:     envVars,
+	}
+	err := sshHost.AppendToQueue("default", entry)
+	if err != nil {
+		t.Fatalf("AppendToQueue failed: %v", err)
+	}
+
+	// Verify the command was appended to the commands file with env vars
+	content, err := sshHost.GetLastCommandForJob("default", testJobID)
+	if err != nil {
+		t.Fatalf("GetLastCommandForJob failed: %v", err)
+	}
+	if content == "" {
+		t.Fatal("Expected to find command in commands file")
+	}
+
+	// Verify env vars are in the command
+	if !strings.Contains(content, "RJ_JOB_ID=888889") {
+		t.Error("Expected command to contain RJ_JOB_ID env var")
+	}
+	if !strings.Contains(content, "RJ_ARTIFACT_MANIFEST=") {
+		t.Error("Expected command to contain RJ_ARTIFACT_MANIFEST env var")
+	}
+	if !strings.Contains(content, "MY_CUSTOM_VAR=test_value") {
+		t.Error("Expected command to contain MY_CUSTOM_VAR env var")
+	}
+
+	// Clean up by canceling the job
+	err = sshHost.RemoveFromQueue("default", testJobID)
+	if err != nil {
+		t.Logf("Warning: failed to cancel test job: %v", err)
 	}
 }

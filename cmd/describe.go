@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuefile"
@@ -174,14 +175,18 @@ func updateRemoteQueueEntry(host string, job *db.Job) error {
 		envVars = append(envVars, "CUDA_VISIBLE_DEVICES="+job.GPU)
 	}
 
+	// Merge artifact env vars
+	envVars = artifacts.MergeEnvVars(envVars, job.ID)
+
 	// Use new command queue format
 	entry := ops.QueueEntry{
-		JobID:       job.ID,
-		WorkingDir:  job.WorkingDir,
-		Command:     job.Command,
-		Description: job.Description,
-		EnvVars:     envVars,
-		DepSpec:     job.DepSpec,
+		JobID:        job.ID,
+		WorkingDir:   job.WorkingDir,
+		Command:      job.Command,
+		Description:  job.Description,
+		EnvVars:      envVars,
+		DepSpec:      job.DepSpec,
+		CPUAllotment: job.CPUAllotment,
 	}
 	addCmd := ops.NewAddCommand(entry)
 

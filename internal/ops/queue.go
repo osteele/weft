@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -90,6 +91,24 @@ func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueue
 		return err
 	}
 	return nil
+}
+
+// AppendJobToQueue adds an existing job to the remote queue.
+// This is the canonical function for appending existing jobs to the queue,
+// ensuring artifact env vars are properly merged.
+func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
+	entry := QueueEntry{
+		JobID:        job.ID,
+		WorkingDir:   job.WorkingDir,
+		Command:      job.Command,
+		Description:  job.Description,
+		EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
+		DepSpec:      job.DepSpec,
+		CPUAllotment: job.CPUAllotment,
+	}
+	addCmd := NewAddCommand(entry)
+	opts := AppendCommandOptions{Timeout: timeout}
+	return AppendCommand(job.Host, DefaultQueueName, addCmd, opts)
 }
 
 // UpdateQueueEntryParams contains parameters for updating an existing queue entry
@@ -192,6 +211,8 @@ type QueueJobParams struct {
 	Command      string
 	Description  string
 	EnvVars      []string
+	Tags         []string
+	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
 	QueueName    string
 	DepSpec      string
 	CPUAllotment *int
@@ -203,12 +224,14 @@ type QueueJobParams struct {
 func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Result, error) {
 	queueName := DefaultQueueName
 
-	// Extract GPU from env vars if present
-	gpu := ""
-	for _, ev := range params.EnvVars {
-		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
-			gpu = strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
-			break
+	// Extract GPU from env vars if not explicitly set
+	gpu := params.GPU
+	if gpu == "" {
+		for _, ev := range params.EnvVars {
+			if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+				gpu = strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+				break
+			}
 		}
 	}
 
@@ -221,6 +244,12 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		db.DeleteJob(database, jobID)
 		return Result{}, fmt.Errorf("record env vars: %w", err)
 	}
+	if len(params.Tags) > 0 {
+		if err := db.SetJobTags(database, jobID, params.Tags); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record tags: %w", err)
+		}
+	}
 	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
 		return Result{}, fmt.Errorf("record dependencies: %w", err)
 	}
@@ -231,13 +260,13 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		}
 	}
 
-	// Build queue entry
+	// Build queue entry with artifact env vars merged in
 	entry := QueueEntry{
 		JobID:        jobID,
 		WorkingDir:   params.WorkingDir,
 		Command:      params.Command,
 		Description:  params.Description,
-		EnvVars:      params.EnvVars,
+		EnvVars:      artifacts.MergeEnvVars(params.EnvVars, jobID),
 		DepSpec:      params.DepSpec,
 		CPUAllotment: params.CPUAllotment,
 	}
