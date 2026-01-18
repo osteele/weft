@@ -142,7 +142,19 @@ func SyncQueueRunnerJobWithProber(
 	}
 
 	// Handle pending start-now request
+	// Only attempt if we got at least one definitive probe result (host is reachable).
+	// If all probes returned unknown, the host is likely offline - don't flicker the status.
+	hostReachable := completedResult != remote.ProbeUnknown ||
+		currentResult != remote.ProbeUnknown ||
+		inQueueResult != remote.ProbeUnknown ||
+		pausedResult != remote.ProbeUnknown ||
+		processResult != remote.ProbeUnknown
+
 	if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
+		if !hostReachable {
+			// Host unreachable - leave pending status for retry when host comes online
+			return false, nil
+		}
 		if err := startQueuedJobNow(database, job, queueName, timeout); err != nil {
 			return false, err
 		}
