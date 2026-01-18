@@ -68,6 +68,27 @@ var artifactAddCmd = &cobra.Command{
 	RunE:  runArtifactAdd,
 }
 
+var artifactCatCmd = &cobra.Command{
+	Use:   "cat <job-id> <name-or-path>",
+	Short: "Write a cached artifact to stdout",
+	Long: `Write an artifact from the local cache to stdout.
+
+Use --tag with --latest to resolve the job ID from tags.`,
+	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
+		if len(artifactTag) > 0 {
+			if !artifactLatest {
+				return usageErrorf("use --latest when resolving by tag")
+			}
+			if len(args) != 1 {
+				return usageErrorf("expected 1 arg (<name-or-path>) when using --tag")
+			}
+			return nil
+		}
+		return cobra.ExactArgs(2)(cmd, args)
+	}),
+	RunE: runArtifactCat,
+}
+
 var (
 	artifactListSync bool
 	artifactOutput   string
@@ -81,13 +102,16 @@ func init() {
 	artifactCmd.AddCommand(artifactSyncCmd)
 	artifactCmd.AddCommand(artifactListCmd)
 	artifactCmd.AddCommand(artifactGetCmd)
+	artifactCmd.AddCommand(artifactCatCmd)
 	artifactCmd.AddCommand(artifactAddCmd)
 
 	artifactListCmd.Flags().BoolVar(&artifactListSync, "sync", false, "Sync artifacts from remote before listing")
-	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory)")
+	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
 	artifactGetCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactGetCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
+	artifactCatCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
+	artifactCatCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
 }
 
 func runArtifactSync(cmd *cobra.Command, args []string) error {
@@ -199,11 +223,47 @@ func runArtifactGet(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if dest == "-" {
+		return copyToWriter(localPath, cmd.OutOrStdout())
+	}
 	if err := copyFile(localPath, dest); err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 	return nil
+}
+
+func runArtifactCat(cmd *cobra.Command, args []string) error {
+	var token string
+	jobID, err := resolveArtifactJobID(args)
+	if err != nil {
+		return err
+	}
+	if len(artifactTag) > 0 {
+		token = args[0]
+	} else {
+		token = args[1]
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("artifact %q not found for job %d", token, jobID)
+		}
+		return err
+	}
+
+	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+	if err != nil {
+		return err
+	}
+	return copyToWriter(localPath, cmd.OutOrStdout())
 }
 
 func runArtifactAdd(cmd *cobra.Command, args []string) error {
@@ -296,6 +356,9 @@ func resolveArtifactOutputPath(source, output string) (string, error) {
 	if output == "" {
 		return filepath.Base(source), nil
 	}
+	if output == "-" {
+		return "-", nil
+	}
 	info, err := os.Stat(output)
 	if err == nil && info.IsDir() {
 		return filepath.Join(output, filepath.Base(source)), nil
@@ -326,6 +389,17 @@ func copyFile(src, dest string) error {
 		return err
 	}
 	return out.Sync()
+}
+
+func copyToWriter(src string, out io.Writer) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 func ensureRemoteArtifactDir(host string) error {

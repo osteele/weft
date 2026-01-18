@@ -196,6 +196,10 @@ remote-jobs artifact list 2073
 remote-jobs artifact get 2073 selectivity_results -o ./results.json
 remote-jobs artifact get 2073 output/selectivity_results.json -o ./results.json
 
+# Write artifact to stdout
+remote-jobs artifact get 2073 selectivity_results -o -
+remote-jobs artifact cat 2073 selectivity_results | jq '.metric'
+
 # Resolve latest job by tag
 remote-jobs artifact get --tag exp-012 --latest selectivity_results -o ./results.json
 ```
