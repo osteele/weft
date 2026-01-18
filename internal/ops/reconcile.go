@@ -251,8 +251,11 @@ func applyResumeToRemote(job *db.Job, timeout time.Duration) error {
 }
 
 func signalJobProcess(job *db.Job, signal string, timeout time.Duration) error {
-	pidFile := session.JobPidFile(job.ID, job.StartTime)
-	cmd := fmt.Sprintf(`pid=$(cat %s 2>/dev/null | head -1); if [ -z "$pid" ]; then echo "pid not found" >&2; exit 2; fi; if ! ps -p $pid > /dev/null 2>&1; then echo "process not running" >&2; exit 3; fi; kill -%s $pid`, pidFile, signal)
+	pgidFile := session.SimplePgidFile(job.ID)
+	// Use the PGID file and negative PID (-$pgid) to signal the entire process group.
+	// The pgid file contains the setsid process PID (which is the process group leader).
+	// This ensures child processes (e.g., Python spawned by uv) also receive the signal.
+	cmd := fmt.Sprintf(`pgid=$(cat %s 2>/dev/null | head -1); if [ -z "$pgid" ]; then echo "pgid not found" >&2; exit 2; fi; if ! ps -p $pgid > /dev/null 2>&1; then echo "process not running" >&2; exit 3; fi; kill -%s -$pgid`, pgidFile, signal)
 	_, stderr, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {

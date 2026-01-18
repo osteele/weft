@@ -149,10 +149,17 @@ func TestIntegration_JobLifecycle(t *testing.T) {
 		t.Fatal("Job did not complete within timeout")
 	}
 
-	t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, finalJob.ExitCode)
+	t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, *finalJob.ExitCode)
 
 	if finalJob.Status != db.StatusCompleted {
 		t.Errorf("Expected job status to be completed, got %s", finalJob.Status)
+	}
+
+	// Verify last_synced_status consistency - this catches bugs where sync operations
+	// update status but forget to update last_synced_status
+	if finalJob.LastSyncedStatus != finalJob.Status {
+		t.Errorf("last_synced_status (%s) should match status (%s) after sync completes",
+			finalJob.LastSyncedStatus, finalJob.Status)
 	}
 }
 

@@ -769,3 +769,81 @@ func TestListJobsPendingReconciliation(t *testing.T) {
 	// Job without pending status should not be included
 	_, _ = job1ID, job3ID // silence unused variable warnings
 }
+
+// TestSyncFunctionsUpdateLastSyncedStatus verifies that all sync operations
+// update both status and last_synced_status together. This prevents bugs where
+// a job's status shows one thing but last_synced_status shows another.
+func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
+	db := setupTestDB(t)
+
+	t.Run("RecordCompletionByID updates last_synced_status", func(t *testing.T) {
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "test", "default")
+		MarkQueuedJobRunning(db, jobID) // First transition to running
+
+		err := RecordCompletionByID(db, jobID, 0, time.Now().Unix())
+		if err != nil {
+			t.Fatalf("RecordCompletionByID failed: %v", err)
+		}
+
+		job, _ := GetJobByID(db, jobID)
+		if job.Status != StatusCompleted {
+			t.Errorf("status = %s, want %s", job.Status, StatusCompleted)
+		}
+		if job.LastSyncedStatus != StatusCompleted {
+			t.Errorf("last_synced_status = %s, want %s", job.LastSyncedStatus, StatusCompleted)
+		}
+	})
+
+	t.Run("MarkDeadByID updates last_synced_status", func(t *testing.T) {
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "test", "default")
+		MarkQueuedJobRunning(db, jobID)
+
+		err := MarkDeadByID(db, jobID)
+		if err != nil {
+			t.Fatalf("MarkDeadByID failed: %v", err)
+		}
+
+		job, _ := GetJobByID(db, jobID)
+		if job.Status != StatusFailed {
+			t.Errorf("status = %s, want %s", job.Status, StatusFailed)
+		}
+		if job.LastSyncedStatus != StatusFailed {
+			t.Errorf("last_synced_status = %s, want %s", job.LastSyncedStatus, StatusFailed)
+		}
+	})
+
+	t.Run("MarkQueuedJobRunning updates last_synced_status", func(t *testing.T) {
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd3", "test", "default")
+
+		err := MarkQueuedJobRunning(db, jobID)
+		if err != nil {
+			t.Fatalf("MarkQueuedJobRunning failed: %v", err)
+		}
+
+		job, _ := GetJobByID(db, jobID)
+		if job.Status != StatusRunning {
+			t.Errorf("status = %s, want %s", job.Status, StatusRunning)
+		}
+		if job.LastSyncedStatus != StatusRunning {
+			t.Errorf("last_synced_status = %s, want %s", job.LastSyncedStatus, StatusRunning)
+		}
+	})
+
+	t.Run("MarkQueuedByID updates last_synced_status", func(t *testing.T) {
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd4", "test", "default")
+		MarkQueuedJobRunning(db, jobID) // First make it running
+
+		err := MarkQueuedByID(db, jobID) // Then reset to queued (sync found it still queued)
+		if err != nil {
+			t.Fatalf("MarkQueuedByID failed: %v", err)
+		}
+
+		job, _ := GetJobByID(db, jobID)
+		if job.Status != StatusQueued {
+			t.Errorf("status = %s, want %s", job.Status, StatusQueued)
+		}
+		if job.LastSyncedStatus != StatusQueued {
+			t.Errorf("last_synced_status = %s, want %s", job.LastSyncedStatus, StatusQueued)
+		}
+	})
+}

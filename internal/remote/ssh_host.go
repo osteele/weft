@@ -190,10 +190,14 @@ func (h *SSHHost) IsProcessRunning(jobID int64) (bool, error) {
 	return strings.TrimSpace(stdout) == "YES", nil
 }
 
-// IsProcessPaused checks if the job's process is paused (stopped) via PID file.
+// IsProcessPaused checks if the job's process is paused (stopped) via PGID file.
+// The PGID file contains the process group leader (the setsid process), which is
+// what we signal for pause/resume. Falls back to PID file if PGID file doesn't exist.
 func (h *SSHHost) IsProcessPaused(jobID int64) (bool, error) {
+	pgidFile := session.SimplePgidFile(jobID)
 	pidPattern := session.PidFilePattern(jobID)
-	cmd := fmt.Sprintf(`pid=$(cat %s 2>/dev/null | head -1); if [ -n "$pid" ]; then state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' '); case "$state" in *T*) echo YES ;; *) echo NO ;; esac; else echo NO; fi`, pidPattern)
+	// Try PGID file first (preferred), then fall back to PID file
+	cmd := fmt.Sprintf(`pgid=$(cat %s 2>/dev/null | head -1); if [ -z "$pgid" ]; then pgid=$(cat %s 2>/dev/null | head -1); fi; if [ -n "$pgid" ]; then state=$(ps -o stat= -p $pgid 2>/dev/null | tr -d ' '); case "$state" in *T*) echo YES ;; *) echo NO ;; esac; else echo NO; fi`, pgidFile, pidPattern)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
 	if err != nil {
 		return false, err

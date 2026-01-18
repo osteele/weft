@@ -1,3 +1,25 @@
+// Package db provides database operations for job management.
+//
+// # Sync Operations Pattern
+//
+// Functions that update job status based on remote state (sync operations) MUST
+// also update last_synced_status to maintain consistency. These functions are:
+//
+//   - RecordCompletionByID: job completed on remote
+//   - MarkDeadByID: job died unexpectedly on remote
+//   - MarkQueuedJobRunning: sync detected job started running
+//   - MarkQueuedByID: sync found job still in queue
+//   - RecordCompletion: session-based completion (legacy)
+//   - MarkDead: session-based death (legacy)
+//   - UpdateStatusAndLastSynced: explicit sync update
+//   - ClearPendingAndUpdateStatus: reconciliation succeeded
+//
+// Functions that update status for LOCAL operations (user intent, not remote state)
+// should NOT update last_synced_status. Examples: MarkPausedByID (user requested pause),
+// MarkRunningByID (local state machine transition).
+//
+// To prevent bugs: any new function that detects remote state changes must update
+// both status and last_synced_status together.
 package db
 
 import (
@@ -590,23 +612,25 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 
 // RecordCompletionByID updates a job by ID with its exit code and end time.
 // Clears session_name per spec: SessionImpliesRunning (session => status = running).
+// Also updates last_synced_status since recording completion is a sync operation.
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL, session_name = NULL
+		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		exitCode, endTime, StatusCompleted, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
+		exitCode, endTime, StatusCompleted, StatusCompleted, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
 	)
 	return err
 }
 
 // MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID.
 // Clears session_name per spec: SessionImpliesRunning (session => status = running).
+// Also updates last_synced_status since this is detecting remote state.
 func MarkDeadByID(db *sql.DB, id int64) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL, session_name = NULL
+		`UPDATE jobs SET end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		endTime, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
+		endTime, StatusFailed, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
 	)
 	return err
 }
@@ -668,19 +692,22 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 }
 
 // MarkQueuedJobRunning transitions a queued job to running without touching start_time.
+// Called from sync when detecting a job has started running remotely.
+// Updates last_synced_status since this is a sync operation.
 func MarkQueuedJobRunning(db *sql.DB, id int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
-		StatusRunning, id, StatusQueued,
+		`UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ? AND status = ?`,
+		StatusRunning, StatusRunning, id, StatusQueued,
 	)
 	return err
 }
 
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
+// Updates last_synced_status since this is a sync operation.
 func MarkQueuedByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
-		StatusQueued, id,
+		`UPDATE jobs SET status = ?, last_synced_status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+		StatusQueued, StatusQueued, id,
 	)
 	return err
 }
@@ -1080,23 +1107,25 @@ func ClearSessionName(db *sql.DB, id int64) error {
 	return err
 }
 
-// RecordCompletion updates a job with its exit code and end time
+// RecordCompletion updates a job with its exit code and end time.
+// Also updates last_synced_status since this is a sync operation.
 func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTime int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, pending_status = NULL
+		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL
 		 WHERE host = ? AND session_name = ? AND status = ?`,
-		exitCode, endTime, StatusCompleted, host, sessionName, StatusRunning,
+		exitCode, endTime, StatusCompleted, StatusCompleted, host, sessionName, StatusRunning,
 	)
 	return err
 }
 
-// MarkDead marks a running job as failed (unexpected termination)
+// MarkDead marks a running job as failed (unexpected termination).
+// Also updates last_synced_status since this is a sync operation.
 func MarkDead(db *sql.DB, host, sessionName string) error {
 	endTime := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?, pending_status = NULL
+		`UPDATE jobs SET end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL
 		 WHERE host = ? AND session_name = ? AND status = ?`,
-		endTime, StatusFailed, host, sessionName, StatusRunning,
+		endTime, StatusFailed, StatusFailed, host, sessionName, StatusRunning,
 	)
 	return err
 }
