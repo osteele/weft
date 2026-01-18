@@ -34,6 +34,11 @@ func SimplePidFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.pid", LogDir, jobID)
 }
 
+// SimplePgidFile returns the primary process group ID file path for a job (no timestamp)
+func SimplePgidFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.pgid", LogDir, jobID)
+}
+
 // SimpleSamplesFile returns the primary samples file path for a job (no timestamp)
 func SimpleSamplesFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.samples", LogDir, jobID)

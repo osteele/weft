@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 29
+# BUILD: 32
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -67,6 +67,65 @@ SAMPLE_COUNT=$((SAMPLE_WINDOW / SAMPLE_INTERVAL))
 CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
 CPU_COUNT=${CPU_COUNT:-1}
 DEFAULT_ALLOTMENT=$(awk -v cores="$DEFAULT_ALLOTMENT_CORES" -v cpus="$CPU_COUNT" 'BEGIN { if (cpus <= 0) { print 60; exit } pct = (cores * 100.0) / cpus; if (pct < 1) pct = 1; if (pct > 100) pct = 100; printf "%.0f", pct }')
+
+# CPU history: learned CPU usage by command signature
+CPU_HISTORY_FILE="$QUEUE_DIR/cpu-history.json"
+if [ ! -f "$CPU_HISTORY_FILE" ]; then
+    echo '{}' > "$CPU_HISTORY_FILE"
+fi
+
+# Extract a signature from a command for CPU history lookup.
+# Extracts script name (*.py, *.sh) or first recognizable binary.
+extract_command_signature() {
+    local cmd="$1"
+    # Try to find a Python/shell script name
+    local script
+    script=$(echo "$cmd" | grep -oE '[a-zA-Z0-9_/-]+\.(py|sh)' | head -1)
+    if [ -n "$script" ]; then
+        # Return just the basename
+        basename "$script"
+        return
+    fi
+    # Fall back to first word after common prefixes (cd, &&, uv run, python, etc.)
+    local simplified
+    simplified=$(echo "$cmd" | sed -E 's/^(cd [^&]+&& *|uv run |python[0-9]* |bash -c )+//')
+    echo "$simplified" | awk '{print $1}' | head -c 50
+}
+
+# Get historical CPU usage for a command signature (returns empty if unknown)
+get_cpu_history() {
+    local sig="$1"
+    [ -z "$sig" ] && return
+    jq -r --arg sig "$sig" '.[$sig].avg // empty' "$CPU_HISTORY_FILE" 2>/dev/null
+}
+
+# Update CPU history with observed usage (exponential moving average)
+update_cpu_history() {
+    local sig="$1"
+    local observed_cpu="$2"
+    [ -z "$sig" ] || [ -z "$observed_cpu" ] && return
+
+    local current_avg current_count new_avg new_count
+    current_avg=$(jq -r --arg sig "$sig" '.[$sig].avg // 0' "$CPU_HISTORY_FILE" 2>/dev/null)
+    current_count=$(jq -r --arg sig "$sig" '.[$sig].count // 0' "$CPU_HISTORY_FILE" 2>/dev/null)
+
+    # Exponential moving average with alpha=0.3 for recent bias, or simple avg if few samples
+    if [ "$current_count" -lt 3 ]; then
+        new_avg=$(awk -v old="$current_avg" -v new="$observed_cpu" -v n="$current_count" \
+            'BEGIN { printf "%.0f", (old * n + new) / (n + 1) }')
+    else
+        new_avg=$(awk -v old="$current_avg" -v new="$observed_cpu" \
+            'BEGIN { printf "%.0f", old * 0.7 + new * 0.3 }')
+    fi
+    new_count=$((current_count + 1))
+
+    # Update the history file
+    jq --arg sig "$sig" --argjson avg "$new_avg" --argjson count "$new_count" \
+        '.[$sig] = {avg: $avg, count: $count}' "$CPU_HISTORY_FILE" > "${CPU_HISTORY_FILE}.tmp" \
+        && mv "${CPU_HISTORY_FILE}.tmp" "$CPU_HISTORY_FILE"
+
+    log_op "cpu_history.update" "" "sig=$sig avg=$new_avg count=$new_count observed=$observed_cpu"
+}
 
 # Running job state (JSON object keyed by job ID)
 RUNNING_JSON="{}"
@@ -226,13 +285,29 @@ job_allotment_from_data() {
     local job_id="$1"
     local job_data
     job_data=$(get_job_data "$job_id")
+
+    # 1. Check if CPU is explicitly specified in job data
     local cpu
     cpu=$(echo "$job_data" | jq -r '.cpu // empty')
     if [[ "$cpu" =~ ^[0-9]+$ ]]; then
         echo "$cpu"
-    else
-        echo "$DEFAULT_ALLOTMENT"
+        return
     fi
+
+    # 2. Check CPU history for similar commands
+    local cmd sig historical_cpu
+    cmd=$(echo "$job_data" | jq -r '.cmd // ""')
+    sig=$(extract_command_signature "$cmd")
+    if [ -n "$sig" ]; then
+        historical_cpu=$(get_cpu_history "$sig")
+        if [ -n "$historical_cpu" ] && [ "$historical_cpu" -gt 0 ]; then
+            echo "$historical_cpu"
+            return
+        fi
+    fi
+
+    # 3. Fall back to default
+    echo "$DEFAULT_ALLOTMENT"
 }
 
 refresh_running_allotment() {
@@ -418,11 +493,22 @@ job_completed() {
 job_running() {
     local job_id="$1"
     local pid_file="$LOG_DIR/${job_id}.pid"
+    local pgid_file="$LOG_DIR/${job_id}.pgid"
 
+    # Check wrapper process
     if [ -f "$pid_file" ]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null | tail -1)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Check actual command process group (may survive if wrapper died)
+    if [ -f "$pgid_file" ]; then
+        local pgid
+        pgid=$(cat "$pgid_file" 2>/dev/null)
+        if [ -n "$pgid" ] && kill -0 "$pgid" 2>/dev/null; then
             return 0
         fi
     fi
@@ -539,9 +625,10 @@ start_job() {
     local status_file="$LOG_DIR/${job_id}.status"
     local meta_file="$LOG_DIR/${job_id}.meta"
     local pid_file="$LOG_DIR/${job_id}.pid"
+    local pgid_file="$LOG_DIR/${job_id}.pgid"
 
     # Archive any existing files from previous runs
-    for ext in log status meta pid samples; do
+    for ext in log status meta pid pgid samples; do
         local f="$LOG_DIR/${job_id}.$ext"
         if [ -f "$f" ]; then
             local mtime ts
@@ -590,6 +677,8 @@ start_job() {
     env_vars_json=$(echo "$job_data" | jq -r '.env // []')
 
     (
+        # Ignore SIGHUP so job survives if queue runner is killed/restarted
+        trap '' HUP
         set +e
         # cd if working directory specified
         if [ -n "$working_dir" ]; then
@@ -609,7 +698,12 @@ start_job() {
             [ -n "$env_line" ] && [ "$env_line" != "null" ] && export "$env_line"
         done < <(echo "$env_vars_json" | jq -r '.[]' 2>/dev/null)
 
-        bash -c "$command"
+        # Use setsid to run command in new session, immune to parent's SIGHUP
+        # Run in background to capture the session leader PID for cleanup
+        setsid bash -c "$command" &
+        local setsid_pid=$!
+        echo "$setsid_pid" > "$pgid_file"
+        wait $setsid_pid
         exit_code=$?
 
         local end_time duration
@@ -631,7 +725,7 @@ start_job() {
             "$NOTIFY_SCRIPT" "rj-$job_id" "$exit_code" "$(hostname)" "$meta_file" 2>/dev/null || true
         fi
 
-        rm -f "$pid_file" "$QUEUE_DIR/job-${job_id}.json"
+        rm -f "$pid_file" "$pgid_file" "$QUEUE_DIR/job-${job_id}.json"
         exit "$exit_code"
     ) >> "$log_file" 2>&1 &
 
@@ -682,6 +776,18 @@ refresh_running_jobs() {
         local status_file="$LOG_DIR/${job_id}.status"
         local pid_file="$LOG_DIR/${job_id}.pid"
         if [ -f "$status_file" ]; then
+            # Record CPU history before removing job from running state
+            local samples_json avg_cpu job_data cmd sig
+            samples_json=$(jq -c --arg id "$job_id" '.[$id].samples // []' <<< "$RUNNING_JSON")
+            avg_cpu=$(sample_average "$samples_json")
+            if [ -n "$avg_cpu" ] && [ "$avg_cpu" != "0" ]; then
+                job_data=$(get_job_data "$job_id")
+                cmd=$(echo "$job_data" | jq -r '.cmd // ""')
+                sig=$(extract_command_signature "$cmd")
+                if [ -n "$sig" ]; then
+                    update_cpu_history "$sig" "$avg_cpu"
+                fi
+            fi
             remove_running_job "$job_id"
             changed=true
             continue
@@ -692,6 +798,23 @@ refresh_running_jobs() {
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 continue
             fi
+        fi
+
+        # Wrapper process is gone - check if orphaned command processes remain
+        # and kill them before marking job as failed
+        local pgid_file="$LOG_DIR/${job_id}.pgid"
+        if [ -f "$pgid_file" ]; then
+            local pgid
+            pgid=$(cat "$pgid_file" 2>/dev/null)
+            if [ -n "$pgid" ] && kill -0 "$pgid" 2>/dev/null; then
+                # Process group still running - kill it
+                echo "Killing orphaned process group $pgid for job $job_id"
+                kill -TERM -"$pgid" 2>/dev/null || true
+                sleep 1
+                kill -KILL -"$pgid" 2>/dev/null || true
+                log_op "job.orphan_killed" "$job_id" "pgid=$pgid"
+            fi
+            rm -f "$pgid_file"
         fi
 
         if [ ! -f "$status_file" ]; then

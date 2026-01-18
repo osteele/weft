@@ -2826,8 +2826,12 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) string {
 	statusSymbol, statusStyle := hostStatusIndicator(host)
 
+	// Consider data stale if LastCheck is more than 5 minutes old
+	const staleThreshold = 5 * time.Minute
+	isStale := !host.LastCheck.IsZero() && time.Since(host.LastCheck) > staleThreshold
+
 	nameStyle := hostSummaryNameStyle
-	if host.Status != HostStatusOnline {
+	if host.Status != HostStatusOnline || isStale {
 		nameStyle = hostSummaryOfflineStyle.Copy()
 	}
 
@@ -2838,12 +2842,12 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 
 	name := nameStyle.Render(truncate(host.Name, 12))
 
-	// For offline hosts, just show status symbol and name (no stats)
-	if host.Status != HostStatusOnline {
+	// For offline hosts or stale data, just show status symbol and name (no stats)
+	if host.Status != HostStatusOnline || isStale {
 		return statusStyle.Render(statusSymbol) + " " + name
 	}
 
-	// Online hosts: show stats including disk
+	// Online hosts with fresh data: show stats including disk
 	cpuPct, cpuOK := hostCPULoadPercent(host)
 	memPct, memOK := hostMemUsagePercent(host)
 	gpuPct, gpuOK := hostGPULoadPercent(host)

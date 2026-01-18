@@ -284,11 +284,30 @@ func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
 	return killQueueRunnerJob(job, timeout)
 }
 
-// killQueueRunnerJob kills a queue-runner managed job via its PID.
+// killQueueRunnerJob kills a queue-runner managed job via its PID and process group.
 func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 	pidFile := session.JobPidFile(job.ID, job.StartTime)
+	pgidFile := session.SimplePgidFile(job.ID)
+
+	// Kill both the wrapper process (pid file) and the command's process group (pgid file).
+	// The pgid file contains the setsid process PID, which is also the process group leader.
+	// Using kill -TERM -pgid sends SIGTERM to all processes in the group.
 	// Note: pidFile contains ~ which must NOT be single-quoted (prevents expansion)
-	killCmd := fmt.Sprintf("if [ -f %s ]; then kill $(cat %s) 2>/dev/null || true; fi", pidFile, pidFile)
+	killCmd := fmt.Sprintf(`
+		# Kill wrapper process
+		if [ -f %s ]; then kill $(cat %s) 2>/dev/null || true; fi
+		# Kill process group (setsid tree) - the minus sign targets the whole group
+		if [ -f %s ]; then
+			pgid=$(cat %s 2>/dev/null)
+			if [ -n "$pgid" ]; then
+				kill -TERM -$pgid 2>/dev/null || true
+				sleep 0.5
+				kill -KILL -$pgid 2>/dev/null || true
+			fi
+			rm -f %s
+		fi
+	`, pidFile, pidFile, pgidFile, pgidFile, pgidFile)
+
 	_, stderr, err := ssh.RunWithTimeout(job.Host, killCmd, timeout)
 	if err != nil && ssh.IsConnectionError(stderr) {
 		return fmt.Errorf("connection error: %s", stderr)
