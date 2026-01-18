@@ -5738,26 +5738,15 @@ func (m Model) handleSyncCompleted(msg syncCompletedMsg) (Model, tea.Cmd) {
 	if msg.err != nil {
 		return m, m.setFlash(fmt.Sprintf("Sync error: %v", msg.err), true)
 	}
-	var flashParts []string
-	if msg.updated > 0 {
-		flashParts = append(flashParts, fmt.Sprintf("Synced %d job(s)", msg.updated))
-	}
-	if len(msg.queuesStarted) > 0 {
-		flashParts = append(flashParts, fmt.Sprintf("Started queue on %s", strings.Join(msg.queuesStarted, ", ")))
-	}
+	// Only show flash messages for actual errors during periodic sync.
+	// Don't flash "Synced N jobs" or "Started queue" - those are normal operations.
 	var cmds []tea.Cmd
 	if len(msg.queueRunnerErrors) > 0 {
 		label := "error"
 		if len(msg.queueRunnerErrors) > 1 {
 			label = "errors"
 		}
-		errorFlash := fmt.Sprintf("Queue runner %s: %s", label, strings.Join(msg.queueRunnerErrors, "; "))
-		if len(flashParts) > 0 {
-			errorFlash = strings.Join(append(flashParts, errorFlash), "; ")
-		}
-		cmds = append(cmds, m.setFlash(errorFlash, true))
-	} else if len(flashParts) > 0 {
-		cmds = append(cmds, m.setFlash(strings.Join(flashParts, "; "), false))
+		cmds = append(cmds, m.setFlash(fmt.Sprintf("Queue runner %s: %s", label, strings.Join(msg.queueRunnerErrors, "; ")), true))
 	}
 	if m.monitor == nil {
 		cmds = append(cmds, m.refreshJobs(), m.loadHosts())
