@@ -10,7 +10,7 @@ import (
 func TestGeneratorIntegration(t *testing.T) {
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
-		t.Skip("Ollama not available")
+		t.Skip("LLM backend not available")
 	}
 
 	database, err := db.Open()
@@ -68,7 +68,7 @@ func TestGeneratorIntegration(t *testing.T) {
 func TestBackgroundGenerator(t *testing.T) {
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
-		t.Skip("Ollama not available")
+		t.Skip("LLM backend not available")
 	}
 
 	database, err := db.Open()

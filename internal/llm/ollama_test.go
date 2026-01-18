@@ -1,27 +1,32 @@
 package llm
 
 import (
+	"context"
+	"fmt"
 	"testing"
 )
 
 func TestClientAvailability(t *testing.T) {
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
-		t.Skip("Ollama not available")
+		t.Skip("LLM backend not available")
 	}
-	t.Log("Ollama is available")
+	t.Log("LLM backend is available")
 }
 
 func TestGenerateDescription(t *testing.T) {
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
-		t.Skip("Ollama not available")
+		t.Skip("LLM backend not available")
 	}
 
-	desc, hash, err := client.GenerateDescription("uv run compression-lab report --data weights.safetensors --output-dir output/")
+	prompt := fmt.Sprintf(DefaultPromptTemplate, "uv run compression-lab report --data weights.safetensors --output-dir output/")
+	desc, err := client.Generate(context.Background(), prompt)
 	if err != nil {
-		t.Fatalf("GenerateDescription failed: %v", err)
+		t.Fatalf("Generate failed: %v", err)
 	}
+
+	hash := client.GenerationHash(prompt)
 
 	t.Logf("Description: %s", desc)
 	t.Logf("Hash: %s", hash)

@@ -3,16 +3,28 @@ package llm
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 )
 
-// Generator handles background generation of job descriptions
-type Generator struct {
-	client     *Client
+// DefaultPromptTemplate is the prompt template for generating descriptions
+const DefaultPromptTemplate = `Describe what this shell command does in under 10 words.
+Focus on the specific task, model names, or data being processed.
+Avoid generic phrases like "run script" or "execute command".
+Output ONLY the description, nothing else.
+
+Command: %s
+
+Description:`
+
+// DescriptionGenerator handles background generation of job descriptions
+type DescriptionGenerator struct {
+	client     Generator
 	db         *sql.DB
 	batchSize  int
 	interval   time.Duration
@@ -24,41 +36,41 @@ type Generator struct {
 	onGenerate func(jobID int64, description string) // Callback for UI updates
 }
 
-// GeneratorOption configures the Generator
-type GeneratorOption func(*Generator)
+// GeneratorOption configures the DescriptionGenerator
+type GeneratorOption func(*DescriptionGenerator)
 
 // WithBatchSize sets the number of jobs to process per batch
 func WithBatchSize(size int) GeneratorOption {
-	return func(g *Generator) {
+	return func(g *DescriptionGenerator) {
 		g.batchSize = size
 	}
 }
 
 // WithInterval sets the interval between batches
 func WithInterval(interval time.Duration) GeneratorOption {
-	return func(g *Generator) {
+	return func(g *DescriptionGenerator) {
 		g.interval = interval
 	}
 }
 
-// WithModel sets the ollama model to use
+// WithModel sets the ollama model to use (only applies to Ollama backend)
 func WithModel(model string) GeneratorOption {
-	return func(g *Generator) {
-		g.client = NewClient(ConfigWithModel(model))
+	return func(g *DescriptionGenerator) {
+		g.client = NewOllamaClient(OllamaConfigWithModel(model))
 	}
 }
 
 // WithOnGenerate sets a callback function called when a description is generated
 func WithOnGenerate(fn func(jobID int64, description string)) GeneratorOption {
-	return func(g *Generator) {
+	return func(g *DescriptionGenerator) {
 		g.onGenerate = fn
 	}
 }
 
 // NewGenerator creates a new background description generator
-func NewGenerator(database *sql.DB, opts ...GeneratorOption) *Generator {
+func NewGenerator(database *sql.DB, opts ...GeneratorOption) *DescriptionGenerator {
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &Generator{
+	g := &DescriptionGenerator{
 		client:    NewDefaultClient(),
 		db:        database,
 		batchSize: 10,
@@ -76,7 +88,7 @@ func NewGenerator(database *sql.DB, opts ...GeneratorOption) *Generator {
 
 // Start begins the background generation process
 // Returns immediately; generation runs in a goroutine
-func (g *Generator) Start() bool {
+func (g *DescriptionGenerator) Start() bool {
 	g.runningMu.Lock()
 	defer g.runningMu.Unlock()
 
@@ -84,7 +96,7 @@ func (g *Generator) Start() bool {
 		return false
 	}
 
-	// Check if ollama is available before starting
+	// Check if LLM backend is available before starting
 	if !g.client.IsAvailable() {
 		return false
 	}
@@ -96,7 +108,7 @@ func (g *Generator) Start() bool {
 }
 
 // Stop stops the background generation process
-func (g *Generator) Stop() {
+func (g *DescriptionGenerator) Stop() {
 	g.runningMu.Lock()
 	if !g.running {
 		g.runningMu.Unlock()
@@ -113,14 +125,14 @@ func (g *Generator) Stop() {
 }
 
 // IsRunning returns whether the generator is currently running
-func (g *Generator) IsRunning() bool {
+func (g *DescriptionGenerator) IsRunning() bool {
 	g.runningMu.Lock()
 	defer g.runningMu.Unlock()
 	return g.running
 }
 
 // run is the main loop for the background generator
-func (g *Generator) run() {
+func (g *DescriptionGenerator) run() {
 	defer g.wg.Done()
 
 	// Run first batch immediately
@@ -140,7 +152,7 @@ func (g *Generator) run() {
 }
 
 // processBatch processes a batch of jobs needing descriptions
-func (g *Generator) processBatch() {
+func (g *DescriptionGenerator) processBatch() {
 	jobs, err := db.GetJobsNeedingDescriptions(g.db, g.batchSize)
 	if err != nil {
 		log.Printf("llm: error getting jobs: %v", err)
@@ -154,7 +166,7 @@ func (g *Generator) processBatch() {
 		default:
 		}
 
-		description, hash, err := g.client.GenerateDescription(job.Command)
+		description, hash, err := g.generateDescription(job.Command)
 		if err != nil {
 			log.Printf("llm: error generating description for job %d: %v", job.ID, err)
 			continue
@@ -172,13 +184,52 @@ func (g *Generator) processBatch() {
 	}
 }
 
+// generateDescription generates a description for a shell command using the LLM backend
+func (g *DescriptionGenerator) generateDescription(command string) (description string, hash string, err error) {
+	prompt := fmt.Sprintf(DefaultPromptTemplate, command)
+
+	ctx, cancel := context.WithTimeout(g.ctx, 30*time.Second)
+	defer cancel()
+
+	response, err := g.client.Generate(ctx, prompt)
+	if err != nil {
+		return "", "", err
+	}
+
+	// Clean up the response - remove newlines and extra whitespace
+	description = strings.TrimSpace(response)
+	description = strings.ReplaceAll(description, "\n", " ")
+	description = strings.Join(strings.Fields(description), " ")
+
+	// Truncate if too long (max 100 chars for display)
+	if len(description) > 100 {
+		description = description[:97] + "..."
+	}
+
+	hash = g.client.GenerationHash(prompt)
+
+	return description, hash, nil
+}
+
 // GenerateOne generates a description for a single job synchronously
 // Returns the generated description and hash, or an error
-func (g *Generator) GenerateOne(job *db.Job) (string, string, error) {
-	return g.client.GenerateDescription(job.Command)
+func (g *DescriptionGenerator) GenerateOne(job *db.Job) (string, string, error) {
+	return g.generateDescription(job.Command)
 }
 
 // Client returns the underlying LLM client
-func (g *Generator) Client() *Client {
+func (g *DescriptionGenerator) Client() Generator {
 	return g.client
+}
+
+// GenerateText generates text from a raw prompt (convenience method for host summaries etc.)
+func (g *DescriptionGenerator) GenerateText(prompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(g.ctx, 60*time.Second)
+	defer cancel()
+	return g.client.Generate(ctx, prompt)
+}
+
+// IsAvailable returns whether the underlying LLM backend is available
+func (g *DescriptionGenerator) IsAvailable() bool {
+	return g.client.IsAvailable()
 }

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,61 +14,39 @@ import (
 )
 
 const (
-	// DefaultModel is the default ollama model to use
-	DefaultModel = "llama3.2"
-
-	// DefaultPromptTemplate is the prompt template for generating descriptions
-	DefaultPromptTemplate = `Describe what this shell command does in under 10 words.
-Focus on the specific task, model names, or data being processed.
-Avoid generic phrases like "run script" or "execute command".
-Output ONLY the description, nothing else.
-
-Command: %s
-
-Description:`
+	// DefaultOllamaModel is the default ollama model to use
+	DefaultOllamaModel = "llama3.2"
 
 	// OllamaAPIURL is the default ollama API endpoint
 	OllamaAPIURL = "http://localhost:11434/api/generate"
 
-	// RequestTimeout is the timeout for ollama API requests
-	RequestTimeout = 30 * time.Second
+	// OllamaTimeout is the timeout for ollama API requests
+	OllamaTimeout = 60 * time.Second
 )
 
-// Config holds the configuration for LLM description generation
-type Config struct {
-	Model          string
-	PromptTemplate string
-	APIURL         string
+// OllamaConfig holds the configuration for Ollama
+type OllamaConfig struct {
+	Model   string
+	APIURL  string
+	Timeout time.Duration
 }
 
-// DefaultConfig returns the default configuration
-func DefaultConfig() Config {
-	return Config{
-		Model:          DefaultModel,
-		PromptTemplate: DefaultPromptTemplate,
-		APIURL:         OllamaAPIURL,
+// DefaultOllamaConfig returns the default Ollama configuration
+func DefaultOllamaConfig() OllamaConfig {
+	return OllamaConfig{
+		Model:   DefaultOllamaModel,
+		APIURL:  OllamaAPIURL,
+		Timeout: OllamaTimeout,
 	}
 }
 
-// ConfigWithModel returns a config with the specified model
-func ConfigWithModel(model string) Config {
-	cfg := DefaultConfig()
+// OllamaConfigWithModel returns a config with the specified model
+func OllamaConfigWithModel(model string) OllamaConfig {
+	cfg := DefaultOllamaConfig()
 	if model != "" {
 		cfg.Model = model
 	}
 	return cfg
-}
-
-// GenerationHash computes a hash of the model, prompt template, and command
-// This allows detecting when regeneration is needed due to config changes
-func (c Config) GenerationHash(command string) string {
-	h := sha256.New()
-	h.Write([]byte(c.Model))
-	h.Write([]byte("|"))
-	h.Write([]byte(c.PromptTemplate))
-	h.Write([]byte("|"))
-	h.Write([]byte(command))
-	return hex.EncodeToString(h.Sum(nil))[:16] // Use first 16 chars
 }
 
 // ollamaRequest is the request body for ollama API
@@ -84,111 +63,79 @@ type ollamaResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// Client provides access to local LLM services
-type Client struct {
-	config     Config
+// OllamaClient provides access to local Ollama LLM services
+type OllamaClient struct {
+	config     OllamaConfig
 	httpClient *http.Client
 	available  *bool // Cached availability check
 }
 
-// NewClient creates a new LLM client with the given configuration
-func NewClient(config Config) *Client {
-	return &Client{
+// NewOllamaClient creates a new Ollama client with the given configuration
+func NewOllamaClient(config OllamaConfig) *OllamaClient {
+	if config.Model == "" {
+		config.Model = DefaultOllamaModel
+	}
+	if config.APIURL == "" {
+		config.APIURL = OllamaAPIURL
+	}
+	if config.Timeout == 0 {
+		config.Timeout = OllamaTimeout
+	}
+
+	return &OllamaClient{
 		config: config,
 		httpClient: &http.Client{
-			Timeout: RequestTimeout,
+			Timeout: config.Timeout,
 		},
 	}
 }
 
-// NewDefaultClient creates a new LLM client with default configuration
-func NewDefaultClient() *Client {
-	return NewClient(DefaultConfig())
-}
-
 // IsAvailable checks if ollama is installed and running
-func (c *Client) IsAvailable() bool {
+func (c *OllamaClient) IsAvailable() bool {
 	if c.available != nil {
 		return *c.available
 	}
 
+	available := false
+	defer func() { c.available = &available }()
+
 	// Check if ollama command exists
-	_, err := exec.LookPath("ollama")
-	if err != nil {
-		available := false
-		c.available = &available
+	if _, err := exec.LookPath("ollama"); err != nil {
 		return false
 	}
 
 	// Check if ollama server is running by making a simple request
-	resp, err := c.httpClient.Get("http://localhost:11434/api/tags")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:11434/api/tags", nil)
 	if err != nil {
-		available := false
-		c.available = &available
+		return false
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
 		return false
 	}
 	resp.Body.Close()
 
-	available := resp.StatusCode == http.StatusOK
-	c.available = &available
+	available = resp.StatusCode == http.StatusOK
 	return available
 }
 
-// GenerateDescription generates a description for a shell command
-func (c *Client) GenerateDescription(command string) (description string, hash string, err error) {
-	if !c.IsAvailable() {
-		return "", "", fmt.Errorf("ollama is not available")
-	}
-
-	prompt := fmt.Sprintf(c.config.PromptTemplate, command)
-
-	reqBody := ollamaRequest{
-		Model:  c.config.Model,
-		Prompt: prompt,
-		Stream: false,
-	}
-
-	jsonBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", "", fmt.Errorf("marshal request: %w", err)
-	}
-
-	resp, err := c.httpClient.Post(c.config.APIURL, "application/json", bytes.NewReader(jsonBody))
-	if err != nil {
-		return "", "", fmt.Errorf("ollama request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
-	}
-
-	var ollamaResp ollamaResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return "", "", fmt.Errorf("decode response: %w", err)
-	}
-
-	if ollamaResp.Error != "" {
-		return "", "", fmt.Errorf("ollama error: %s", ollamaResp.Error)
-	}
-
-	// Clean up the response - remove newlines and extra whitespace
-	description = strings.TrimSpace(ollamaResp.Response)
-	description = strings.ReplaceAll(description, "\n", " ")
-	description = strings.Join(strings.Fields(description), " ")
-
-	// Truncate if too long (max 100 chars for display)
-	if len(description) > 100 {
-		description = description[:97] + "..."
-	}
-
-	hash = c.config.GenerationHash(command)
-
-	return description, hash, nil
+// GenerationHash creates a cache key from model and prompt
+func (c *OllamaClient) GenerationHash(prompt string) string {
+	h := sha256.New()
+	h.Write([]byte("ollama"))
+	h.Write([]byte("|"))
+	h.Write([]byte(c.config.Model))
+	h.Write([]byte("|"))
+	h.Write([]byte(prompt))
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
-// GenerateText generates text from a raw prompt
-func (c *Client) GenerateText(prompt string) (string, error) {
+// Generate sends a prompt to Ollama and returns the response.
+func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, error) {
 	if !c.IsAvailable() {
 		return "", fmt.Errorf("ollama is not available")
 	}
@@ -201,12 +148,18 @@ func (c *Client) GenerateText(prompt string) (string, error) {
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return "", fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.config.APIURL, "application/json", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.config.APIURL, bytes.NewReader(jsonBody))
 	if err != nil {
-		return "", fmt.Errorf("ollama request: %w", err)
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -216,19 +169,18 @@ func (c *Client) GenerateText(prompt string) (string, error) {
 
 	var ollamaResp ollamaResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
+		return "", fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	if ollamaResp.Error != "" {
 		return "", fmt.Errorf("ollama error: %s", ollamaResp.Error)
 	}
 
-	// Clean up the response
-	text := strings.TrimSpace(ollamaResp.Response)
-	return text, nil
+	response := strings.TrimSpace(ollamaResp.Response)
+	return response, nil
 }
 
-// Config returns the current configuration
-func (c *Client) Config() Config {
+// Config returns the current Ollama configuration
+func (c *OllamaClient) Config() OllamaConfig {
 	return c.config
 }

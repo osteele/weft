@@ -701,8 +701,8 @@ type Model struct {
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
 	jobDependencies map[int64]string
 
-	// LLM description generator (nil if ollama not available or disabled)
-	llmGenerator *llm.Generator
+	// LLM description generator (nil if LLM backend not available or disabled)
+	llmGenerator *llm.DescriptionGenerator
 
 	// App configuration
 	appConfig *config.Config
@@ -815,8 +815,8 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Load app config
 	appCfg, _ := config.Load()
 
-	// Create and start LLM generator if enabled and ollama is available
-	var llmGen *llm.Generator
+	// Create and start LLM generator if enabled and LLM backend is available
+	var llmGen *llm.DescriptionGenerator
 	if appCfg.IsAIEnabled() {
 		genOpts := []llm.GeneratorOption{}
 		if model := appCfg.AIModel(); model != "" {
@@ -6838,7 +6838,7 @@ func hasEnoughRAM(minBytes uint64) bool {
 // generateAllHostSummaries triggers summary generation for the next host that needs one
 // Only generates one at a time to avoid overwhelming the system
 func (m Model) generateAllHostSummaries() tea.Cmd {
-	if m.llmGenerator == nil || !m.llmGenerator.Client().IsAvailable() {
+	if m.llmGenerator == nil || !m.llmGenerator.IsAvailable() {
 		return nil
 	}
 	// Check if any summary is already being generated
@@ -6965,7 +6965,7 @@ func (m Model) generateHostSummary(host, hash string) tea.Cmd {
 
 Status:`, strings.Join(facts, "\n"))
 
-		summary, err := m.llmGenerator.Client().GenerateText(prompt)
+		summary, err := m.llmGenerator.GenerateText(prompt)
 		if err != nil {
 			return hostSummaryGeneratedMsg{host: host, err: err}
 		}
