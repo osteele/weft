@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/core"
@@ -34,14 +33,13 @@ func runResume(cmd *cobra.Command, args []string) error {
 	}
 	defer service.Close()
 
-	var errors []string
-	for _, arg := range args {
-		jobID, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
-			continue
-		}
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
 
+	var errors []string
+	for _, jobID := range jobIDs {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("resume"), oplog.WithJobID(jobID))
 
 		result, err := service.ResumeJob(jobID, ops.TimeoutNormal)

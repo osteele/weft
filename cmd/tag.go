@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/spf13/cobra"
@@ -17,17 +17,17 @@ Tags are free-form labels that help group jobs and track processing state.`,
 }
 
 var tagAddCmd = &cobra.Command{
-	Use:   "add <job-id> <tag>",
+	Use:   "add <job-id>... <tag>",
 	Short: "Add a tag to a job",
-	Args:  usageArgs(cobra.ExactArgs(2)),
+	Args:  usageArgs(cobra.MinimumNArgs(2)),
 	RunE:  runTagAdd,
 }
 
 var tagRemoveCmd = &cobra.Command{
-	Use:     "rm <job-id> <tag>",
+	Use:     "rm <job-id>... <tag>",
 	Aliases: []string{"remove", "delete"},
 	Short:   "Remove a tag from a job",
-	Args:    usageArgs(cobra.ExactArgs(2)),
+	Args:    usageArgs(cobra.MinimumNArgs(2)),
 	RunE:    runTagRemove,
 }
 
@@ -38,11 +38,11 @@ func init() {
 }
 
 func runTagAdd(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	jobIDs, err := ParseJobIDs(args[:len(args)-1])
 	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
+		return err
 	}
-	tag := args[1]
+	tag := args[len(args)-1]
 
 	database, err := db.Open()
 	if err != nil {
@@ -50,20 +50,27 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	if err := db.AddJobTag(database, jobID, tag); err != nil {
-		return err
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		if err := db.AddJobTag(database, jobID, tag); err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		fmt.Printf("Added tag %q to job %d\n", tag, jobID)
 	}
 
-	fmt.Printf("Added tag %q to job %d\n", tag, jobID)
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
 	return nil
 }
 
 func runTagRemove(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	jobIDs, err := ParseJobIDs(args[:len(args)-1])
 	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
+		return err
 	}
-	tag := args[1]
+	tag := args[len(args)-1]
 
 	database, err := db.Open()
 	if err != nil {
@@ -71,10 +78,17 @@ func runTagRemove(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	if err := db.RemoveJobTag(database, jobID, tag); err != nil {
-		return err
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		if err := db.RemoveJobTag(database, jobID, tag); err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		fmt.Printf("Removed tag %q from job %d\n", tag, jobID)
 	}
 
-	fmt.Printf("Removed tag %q from job %d\n", tag, jobID)
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
 	return nil
 }

@@ -9,12 +9,12 @@ import (
 )
 
 // ParseJobIDs parses command-line arguments into a deduplicated, sorted list of job IDs.
-// Supports individual IDs (123) and ranges (123:127 expands to 123,124,125,126,127).
+// Supports individual IDs (123) and ranges (123:127 or 123::127 expands to 123,124,125,126,127).
 // Prints a warning to stderr if duplicates are found.
 //
 // Syntax:
 //   - Single ID: 123
-//   - Range: 123:127 (inclusive, expands to 123, 124, 125, 126, 127)
+//   - Range: 123:127 or 123::127 (inclusive, expands to 123, 124, 125, 126, 127)
 //   - Mixed: 123 125:127 130 (expands to 123, 125, 126, 127, 130)
 func ParseJobIDs(args []string) ([]int64, error) {
 	seen := make(map[int64]bool)
@@ -56,6 +56,14 @@ func ParseJobIDs(args []string) ([]int64, error) {
 
 // parseJobIDArg parses a single argument which may be an ID or a range.
 func parseJobIDArg(arg string) ([]int64, error) {
+	if strings.Count(arg, ":") > 1 {
+		if strings.Contains(arg, "::") && strings.Count(arg, ":") == 2 {
+			arg = strings.Replace(arg, "::", ":", 1)
+		} else {
+			return nil, fmt.Errorf("invalid job ID range %q", arg)
+		}
+	}
+
 	// Check for range syntax (start:end)
 	if idx := strings.Index(arg, ":"); idx >= 0 {
 		startStr := arg[:idx]

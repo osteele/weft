@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -19,7 +18,7 @@ import (
 )
 
 var logCmd = &cobra.Command{
-	Use:     "log <job-id>",
+	Use:     "log <job-id>...",
 	Aliases: []string{"logs", "output"},
 	Short:   "View log output from a job",
 	Long: `View the log file for a specific job.
@@ -94,7 +93,7 @@ func validateLogArgs(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	// Standard mode requires exactly one job ID argument
-	return usageArgs(cobra.ExactArgs(1))(cmd, args)
+	return usageArgs(cobra.MinimumNArgs(1))(cmd, args)
 }
 
 func runLog(cmd *cobra.Command, args []string) error {
@@ -103,9 +102,12 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return runOpsLog(cmd)
 	}
 
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
+		return err
+	}
+	if logFollow && len(jobIDs) > 1 {
+		return fmt.Errorf("--follow can only be used with a single job ID")
 	}
 
 	if logFull {
@@ -130,6 +132,26 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	var errorsList []string
+	for i, jobID := range jobIDs {
+		if len(jobIDs) > 1 {
+			if i > 0 {
+				fmt.Println()
+			}
+			fmt.Printf("Job %d:\n", jobID)
+		}
+		if err := runLogForJob(cmd, database, jobID); err != nil {
+			errorsList = append(errorsList, err.Error())
+		}
+	}
+
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
+	return nil
+}
+
+func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		return fmt.Errorf("get job: %w", err)
@@ -138,16 +160,17 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
-	if logFollow && isTerminalStatus(job.Status) {
+	follow := logFollow
+	if follow && isTerminalStatus(job.Status) {
 		fmt.Fprintf(os.Stderr, "Job %d already completed; showing log output without following.\n", jobID)
-		logFollow = false
+		follow = false
 	}
 
-	defaultTailHint := shouldShowDefaultTailHint(cmd)
+	defaultTailHint := shouldShowDefaultTailHint(cmd, follow)
 	tailHintPrinted := false
 
 	// For terminal jobs, prefer local cache first (unless following)
-	if !logFollow && shouldPreferCachedLog(job.Status) {
+	if !follow && shouldPreferCachedLog(job.Status) {
 		if cached, err := logcache.Read(jobID); err == nil {
 			if defaultTailHint && !tailHintPrinted {
 				printDefaultTailHint(jobID)
@@ -166,7 +189,7 @@ func runLog(cmd *cobra.Command, args []string) error {
 
 	// Check if log file exists (skip when resolver already confirmed it)
 	exists := resolved
-	if logFollow {
+	if follow {
 		if !exists {
 			if err := waitForLogFile(database, job, logFile); err != nil {
 				return err
@@ -184,9 +207,9 @@ func runLog(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build the remote command based on flags
-	remoteCmd := buildLogCommand(logFile)
+	remoteCmd := buildLogCommand(logFile, follow)
 
-	if logFollow {
+	if follow {
 		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
 		sshCmd := exec.Command("ssh", job.Host, remoteCmd)
 		sshCmd.Stdout = os.Stdout
@@ -270,7 +293,7 @@ func shouldPreferCachedLog(status string) bool {
 
 // buildLogCommand constructs the remote command for reading log files
 // based on the provided flags (--from, --to, -n, --grep, -f)
-func buildLogCommand(logFile string) string {
+func buildLogCommand(logFile string, follow bool) string {
 	var cmd string
 
 	// Determine line selection strategy
@@ -284,7 +307,7 @@ func buildLogCommand(logFile string) string {
 		cmd = fmt.Sprintf("tail -n +%d %s | head -n %d", logFrom, logFile, count)
 	} else if logFrom > 0 {
 		// Lines from N onwards
-		if logFollow {
+		if follow {
 			// For follow mode with --from: get from line N then follow
 			// Use -F to retry if file doesn't exist yet, suppress errors
 			cmd = fmt.Sprintf("tail -n +%d -F %s 2>/dev/null", logFrom, logFile)
@@ -294,7 +317,7 @@ func buildLogCommand(logFile string) string {
 	} else if logTo > 0 {
 		// First N lines (up to line N)
 		cmd = fmt.Sprintf("head -n %d %s", logTo, logFile)
-	} else if logFollow {
+	} else if follow {
 		// Follow mode with default or -n lines
 		// Use -F to retry if file doesn't exist yet or gets recreated
 		// Suppress "cannot open" errors (file might not exist yet for new jobs)
@@ -306,7 +329,7 @@ func buildLogCommand(logFile string) string {
 
 	// Add grep filter if specified
 	if logGrep != "" {
-		if logFollow {
+		if follow {
 			// Use --line-buffered for real-time grep output
 			cmd = fmt.Sprintf("%s | grep --line-buffered '%s'", cmd, escapeShellArg(logGrep))
 		} else {
@@ -317,8 +340,8 @@ func buildLogCommand(logFile string) string {
 	return cmd
 }
 
-func shouldShowDefaultTailHint(cmd *cobra.Command) bool {
-	if logFollow || logFull {
+func shouldShowDefaultTailHint(cmd *cobra.Command, follow bool) bool {
+	if follow || logFull {
 		return false
 	}
 	if logFrom > 0 || logTo > 0 {

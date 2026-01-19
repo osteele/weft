@@ -27,21 +27,21 @@ synced into a durable local store for retrieval.`,
 }
 
 var artifactSyncCmd = &cobra.Command{
-	Use:   "sync <job-id>",
-	Short: "Sync artifacts for a job into the local store",
-	Args:  usageArgs(cobra.ExactArgs(1)),
+	Use:   "sync [job-id]...",
+	Short: "Sync artifacts into the local store",
+	Args:  usageArgs(cobra.MinimumNArgs(0)),
 	RunE:  runArtifactSync,
 }
 
 var artifactListCmd = &cobra.Command{
-	Use:   "list <job-id>",
+	Use:   "list <job-id>...",
 	Short: "List cached artifacts for a job",
-	Args:  usageArgs(cobra.ExactArgs(1)),
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
 	RunE:  runArtifactList,
 }
 
 var artifactGetCmd = &cobra.Command{
-	Use:   "get <job-id> <name-or-path>",
+	Use:   "get <job-id>... <name-or-path>",
 	Short: "Retrieve a cached artifact",
 	Long: `Retrieve an artifact from the local cache.
 
@@ -56,7 +56,7 @@ Use --tag with --latest to resolve the job ID from tags.`,
 			}
 			return nil
 		}
-		return cobra.ExactArgs(2)(cmd, args)
+		return cobra.MinimumNArgs(2)(cmd, args)
 	}),
 	RunE: runArtifactGet,
 }
@@ -115,39 +115,100 @@ func init() {
 }
 
 func runArtifactSync(cmd *cobra.Command, args []string) error {
-	jobID, err := parseJobID(args[0])
-	if err != nil {
-		return err
-	}
 	database, err := db.Open()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
+	if len(args) == 0 {
+		return runArtifactSyncOutstanding(cmd, database)
 	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
-	}
-	result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
+
+	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
-		if errors.Is(err, artifacts.ErrManifestMissing) {
-			return fmt.Errorf("artifact manifest not found for job %d", jobID)
-		}
-		if ssh.IsConnectionError(err.Error()) {
-			return fmt.Errorf("host %s unreachable while syncing artifacts", job.Host)
-		}
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Synced %d artifacts (skipped %d)\n", result.Added, result.Skipped)
+
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: get job: %v", jobID, err))
+			continue
+		}
+		if job == nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			continue
+		}
+		result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
+		if err != nil {
+			if errors.Is(err, artifacts.ErrManifestMissing) {
+				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %d", jobID))
+				continue
+			}
+			if ssh.IsConnectionError(err.Error()) {
+				errorsList = append(errorsList, fmt.Sprintf("host %s unreachable while syncing artifacts for job %d", job.Host, jobID))
+				continue
+			}
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		if len(jobIDs) > 1 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced %d artifacts (skipped %d)\n", jobID, result.Added, result.Skipped)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Synced %d artifacts (skipped %d)\n", result.Added, result.Skipped)
+		}
+	}
+
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
+	return nil
+}
+
+func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
+	jobs, err := db.ListJobs(database, "", "", 0, nil, "")
+	if err != nil {
+		return err
+	}
+
+	var totalAdded int
+	var totalSkipped int
+	var syncedJobs int
+
+	for _, job := range jobs {
+		result, err := artifacts.SyncOutstandingJob(database, job, NormalSyncTimeout)
+		if err != nil {
+			if errors.Is(err, artifacts.ErrManifestMissing) {
+				continue
+			}
+			if ssh.IsConnectionError(err.Error()) {
+				fmt.Fprintf(os.Stderr, "Warning: host %s unreachable while syncing artifacts for job %d\n", job.Host, job.ID)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "Warning: failed to sync artifacts for job %d: %v\n", job.ID, err)
+			continue
+		}
+		if result.Added == 0 && result.Skipped == 0 {
+			continue
+		}
+		syncedJobs++
+		totalAdded += result.Added
+		totalSkipped += result.Skipped
+	}
+
+	if totalAdded == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No outstanding artifacts.")
+		return nil
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Synced %d artifacts across %d job(s) (skipped %d)\n", totalAdded, syncedJobs, totalSkipped)
 	return nil
 }
 
 func runArtifactList(cmd *cobra.Command, args []string) error {
-	jobID, err := parseJobID(args[0])
+	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
 		return err
 	}
@@ -157,79 +218,121 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return fmt.Errorf("get job: %w", err)
-	}
-	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
-	}
+	var errorsList []string
+	for i, jobID := range jobIDs {
+		if len(jobIDs) > 1 {
+			if i > 0 {
+				fmt.Fprintln(cmd.OutOrStdout())
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %d:\n", jobID)
+		}
 
-	if artifactListSync {
-		if _, err := artifacts.SyncJob(database, job, NormalSyncTimeout); err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
-			return err
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: get job: %v", jobID, err))
+			continue
+		}
+		if job == nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			continue
+		}
+
+		if artifactListSync {
+			if _, err := artifacts.SyncJob(database, job, NormalSyncTimeout); err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+				errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+				continue
+			}
+		}
+
+		entries, err := db.ListArtifactsByJob(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		if len(entries) == 0 {
+			fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name
+			if name == "" {
+				name = "-"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%d\t%s\n", name, entry.Path, entry.SizeBytes, entry.SHA256)
 		}
 	}
 
-	entries, err := db.ListArtifactsByJob(database, jobID)
-	if err != nil {
-		return err
-	}
-	if len(entries) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
-		return nil
-	}
-	for _, entry := range entries {
-		name := entry.Name
-		if name == "" {
-			name = "-"
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%d\t%s\n", name, entry.Path, entry.SizeBytes, entry.SHA256)
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
 }
 
 func runArtifactGet(cmd *cobra.Command, args []string) error {
 	var token string
-	jobID, err := resolveArtifactJobID(args)
+	if len(artifactTag) > 0 {
+		jobID, err := resolveArtifactJobID(args)
+		if err != nil {
+			return err
+		}
+		token = args[0]
+		return fetchArtifactForJobs(cmd, []int64{jobID}, token)
+	} else {
+		token = args[len(args)-1]
+	}
+
+	jobIDs, err := ParseJobIDs(args[:len(args)-1])
 	if err != nil {
 		return err
 	}
-	if len(artifactTag) > 0 {
-		token = args[0]
-	} else {
-		token = args[1]
-	}
+	return fetchArtifactForJobs(cmd, jobIDs, token)
+}
 
+func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) error {
 	database, err := db.Open()
 	if err != nil {
 		return err
 	}
 	defer database.Close()
 
-	entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("artifact %q not found for job %d", token, jobID)
+	multiple := len(jobIDs) > 1
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, sql.ErrNoRows) {
+				errorsList = append(errorsList, fmt.Sprintf("artifact %q not found for job %d", token, jobID))
+				continue
+			}
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
 		}
-		return err
+
+		localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		dest, err := resolveArtifactOutputPathForJob(localPath, artifactOutput, jobID, multiple)
+		if err != nil {
+			return err
+		}
+		if dest == "-" {
+			if err := copyToWriter(localPath, cmd.OutOrStdout()); err != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			}
+			continue
+		}
+		if err := copyFile(localPath, dest); err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 	}
 
-	localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
-	if err != nil {
-		return err
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
-	dest, err := resolveArtifactOutputPath(localPath, artifactOutput)
-	if err != nil {
-		return err
-	}
-	if dest == "-" {
-		return copyToWriter(localPath, cmd.OutOrStdout())
-	}
-	if err := copyFile(localPath, dest); err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
 	return nil
 }
 
@@ -367,6 +470,29 @@ func resolveArtifactOutputPath(source, output string) (string, error) {
 		return "", err
 	}
 	return output, nil
+}
+
+func resolveArtifactOutputPathForJob(source, output string, jobID int64, multiple bool) (string, error) {
+	if !multiple {
+		return resolveArtifactOutputPath(source, output)
+	}
+	if output == "-" {
+		return "", fmt.Errorf("cannot use stdout when retrieving multiple artifacts")
+	}
+	if output == "" {
+		return fmt.Sprintf("%d-%s", jobID, filepath.Base(source)), nil
+	}
+	info, err := os.Stat(output)
+	if err == nil && info.IsDir() {
+		return filepath.Join(output, fmt.Sprintf("%d-%s", jobID, filepath.Base(source))), nil
+	}
+	if err == nil {
+		return "", fmt.Errorf("output must be a directory when retrieving multiple artifacts")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("output must be an existing directory when retrieving multiple artifacts")
+	}
+	return "", err
 }
 
 func copyFile(src, dest string) error {

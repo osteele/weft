@@ -2,17 +2,17 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
+	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/spf13/cobra"
 )
 
 var markProcessedCmd = &cobra.Command{
-	Use:   "mark-processed <job-id>",
+	Use:   "mark-processed <job-id>...",
 	Short: "Mark a job as processed",
 	Long:  "Mark a job as processed by adding the reserved processed tag.",
-	Args:  usageArgs(cobra.ExactArgs(1)),
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
 	RunE:  runMarkProcessed,
 }
 
@@ -21,9 +21,9 @@ func init() {
 }
 
 func runMarkProcessed(cmd *cobra.Command, args []string) error {
-	jobID, err := strconv.ParseInt(args[0], 10, 64)
+	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
-		return fmt.Errorf("invalid job ID: %s", args[0])
+		return err
 	}
 
 	database, err := db.Open()
@@ -32,10 +32,17 @@ func runMarkProcessed(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
-		return err
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		fmt.Printf("Job %d marked as processed\n", jobID)
 	}
 
-	fmt.Printf("Job %d marked as processed\n", jobID)
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
 	return nil
 }

@@ -189,6 +189,9 @@ remote cleanup.
 # Sync artifacts for job 2073 into the local store
 remote-jobs artifact sync 2073
 
+# Sync all outstanding artifacts across jobs
+remote-jobs artifact sync
+
 # List cached artifacts
 remote-jobs artifact list 2073
 

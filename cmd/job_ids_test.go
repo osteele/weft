@@ -111,6 +111,21 @@ func TestParseJobIDArg(t *testing.T) {
 			want: []int64{10, 11, 12, 13, 14, 15},
 		},
 		{
+			name: "double colon range",
+			arg:  "10::12",
+			want: []int64{10, 11, 12},
+		},
+		{
+			name:    "invalid triple colon",
+			arg:     "10:::12",
+			wantErr: true,
+		},
+		{
+			name:    "invalid multi-colon",
+			arg:     "10:12:14",
+			wantErr: true,
+		},
+		{
 			name:    "range too large",
 			arg:     "1:2000",
 			wantErr: true,

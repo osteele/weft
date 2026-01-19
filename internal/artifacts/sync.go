@@ -84,6 +84,73 @@ func SyncJob(database *sql.DB, job *db.Job, timeout time.Duration) (SyncResult, 
 	return result, nil
 }
 
+// SyncOutstandingJob fetches artifacts that are not already cached locally.
+func SyncOutstandingJob(database *sql.DB, job *db.Job, timeout time.Duration) (SyncResult, error) {
+	manifest, err := FetchManifest(job.Host, job.ID, timeout)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	root := ResolveArtifactRoot(manifest, job.WorkingDir)
+
+	localRoot, err := LocalArtifactsDir()
+	if err != nil {
+		return SyncResult{}, err
+	}
+
+	existing, err := db.ListArtifactsByJob(database, job.ID)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	existingByPath := make(map[string]db.Artifact, len(existing))
+	for _, art := range existing {
+		existingByPath[art.Path] = art
+	}
+
+	result := SyncResult{}
+	for _, spec := range manifest.Artifacts {
+		if strings.TrimSpace(spec.Path) == "" {
+			result.Skipped++
+			continue
+		}
+
+		if art, ok := existingByPath[spec.Path]; ok {
+			if art.StoredPath != "" {
+				localPath := filepath.Join(localRoot, art.StoredPath)
+				if _, err := os.Stat(localPath); err == nil {
+					result.Skipped++
+					continue
+				}
+			}
+		}
+
+		remotePath := ResolveRemotePath(root, spec.Path)
+		storedPath := LocalStoredPath(job.ID, spec.Path)
+		localPath := filepath.Join(localRoot, storedPath)
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return result, err
+		}
+		if err := ssh.CopyFromWithRetry(remotePath, job.Host, localPath); err != nil {
+			return result, err
+		}
+		size, sha, err := hashFile(localPath)
+		if err != nil {
+			return result, err
+		}
+		if err := db.UpsertArtifact(database, db.Artifact{
+			JobID:      job.ID,
+			Name:       spec.Name,
+			Path:       spec.Path,
+			StoredPath: storedPath,
+			SizeBytes:  size,
+			SHA256:     sha,
+		}); err != nil {
+			return result, err
+		}
+		result.Added++
+	}
+	return result, nil
+}
+
 func hashFile(path string) (int64, string, error) {
 	file, err := os.Open(path)
 	if err != nil {

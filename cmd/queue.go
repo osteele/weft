@@ -634,14 +634,13 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	var errors []string
-	for _, arg := range args {
-		jobID, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
-			continue
-		}
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
 
+	var errors []string
+	for _, jobID := range jobIDs {
 		// Get job from database
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {

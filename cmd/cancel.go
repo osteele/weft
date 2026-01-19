@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
@@ -38,16 +37,15 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
+
 	var errors []string
 	var cancelled int
 
-	for _, arg := range args {
-		jobID, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
-			continue
-		}
-
+	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %d not found", jobID))

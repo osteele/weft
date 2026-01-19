@@ -3,7 +3,6 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
@@ -37,15 +36,15 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
+
 	var errors []string
-	for i, arg := range args {
+	for i, jobID := range jobIDs {
 		if i > 0 {
 			fmt.Println("---")
-		}
-		jobID, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("invalid job ID %s", arg))
-			continue
 		}
 		if err := restartJob(database, jobID); err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))

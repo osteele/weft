@@ -43,7 +43,7 @@ and recent failures from the last 24 hours.
 
 Job IDs can be specified individually or as ranges:
   - Single ID: 42
-  - Range: 42:47 (expands to 42, 43, 44, 45, 46, 47)
+  - Range: 42:47 or 42::47 (expands to 42, 43, 44, 45, 46, 47)
   - Mixed: 42 50:52 60 (expands to 42, 50, 51, 52, 60)
 
 Duplicate IDs are automatically removed with a warning.
