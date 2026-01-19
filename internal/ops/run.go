@@ -38,6 +38,22 @@ func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result,
 		return Result{}, fmt.Errorf("set pending status: %w", err)
 	}
 
+	backend, err := ResolveBackend(params.Host, opts.Timeout)
+	if err != nil {
+		if ssh.IsConnectionError(err.Error()) {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+			}, nil
+		}
+		return Result{}, err
+	}
+	if err := db.SetJobBackend(database, jobID, backend); err != nil {
+		return Result{}, fmt.Errorf("set job backend: %w", err)
+	}
+
 	// 3. Retrieve job with pending status set (must be after SetPendingStatus)
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {

@@ -33,6 +33,10 @@ vendor/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Environment files (may contain test server credentials)
+.env
+.env.local
 # TLC state / fingerprint output
 states/
 *.st

@@ -47,6 +47,10 @@ type Job struct {
 	GeneratedDescription string // LLM-generated description for jobs without user descriptions
 	GenerationHash       string // Hash of model+prompt+settings used to generate the description
 	ErrorMessage         string
+	Backend              string // Execution backend ("queue-runner", "slurm")
+	RemoteID             string // Backend-specific job identifier (e.g., SLURM job ID)
+	RemoteState          string // Backend-specific state (e.g., SLURM state)
+	FailureReason        string // Normalized failure reason (e.g., "timeout", "oom")
 	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
@@ -68,9 +72,31 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, queue_name, gpu, cpu_allotment, env_vars, tags, dep_spec, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
+// UsesQueueRunner reports whether this job should be managed by the queue runner backend.
+func (j *Job) UsesQueueRunner() bool {
+	if j == nil {
+		return true
+	}
+	if j.Backend == BackendSlurm {
+		return false
+	}
+	return j.SessionName == ""
+}
+
+// UsesSlurm reports whether this job should be managed by the SLURM backend.
+func (j *Job) UsesSlurm() bool {
+	if j == nil {
+		return false
+	}
+	return j.Backend == BackendSlurm
+}
+
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, cpu_allotment, env_vars, tags, dep_spec, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
 
 const ProcessedTag = "processed"
+
+const BackendQueueRunner = "queue-runner"
+const BackendSlurm = "slurm"
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"
@@ -188,6 +214,26 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add queue_name column for queued jobs
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queue_name TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add backend column for execution backend
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN backend TEXT DEFAULT 'queue-runner'`); err != nil {
+		return err
+	}
+
+	// Migration: add remote_id column for backend-specific job IDs
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN remote_id TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add remote_state column for backend-specific states
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN remote_state TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add failure_reason column for normalized failures
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN failure_reason TEXT`); err != nil {
 		return err
 	}
 
@@ -402,13 +448,17 @@ func migrateStartTimeNullable(db *sql.DB) error {
 			exit_code INTEGER,
 			status TEXT NOT NULL DEFAULT 'running',
 			error_message TEXT,
+			backend TEXT DEFAULT 'queue-runner',
+			remote_id TEXT,
+			remote_state TEXT,
+			failure_reason TEXT,
 			queue_name TEXT,
 			cpu_allotment INTEGER,
 			tags TEXT,
 			tombstoned INTEGER NOT NULL DEFAULT 0
 		)`,
 		`INSERT INTO jobs_new SELECT id, host, session_name, working_dir, command, description,
-			start_time, end_time, exit_code, status, error_message, queue_name, cpu_allotment, NULL, tombstoned FROM jobs`,
+			start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, cpu_allotment, NULL, tombstoned FROM jobs`,
 		`DROP TABLE jobs`,
 		`ALTER TABLE jobs_new RENAME TO jobs`,
 		`CREATE INDEX idx_jobs_host ON jobs(host)`,
@@ -847,10 +897,10 @@ func CountQueueRunnerActiveByHost(db *sql.DB, host string) (int, error) {
 	err := db.QueryRow(
 		`SELECT COUNT(*) FROM jobs
 		 WHERE host = ?
-		 AND session_name IS NULL
+		 AND (backend IS NULL OR backend = ?)
 		 AND status IN (?, ?, ?, ?)
 		 AND tombstoned = 0`,
-		host, StatusQueued, StatusRunning, StatusStarting, StatusPaused,
+		host, BackendQueueRunner, StatusQueued, StatusRunning, StatusStarting, StatusPaused,
 	).Scan(&count)
 	return count, err
 }
@@ -899,6 +949,27 @@ func RecordDraftJob(db *sql.DB, host, workingDir, command, description, queueNam
 // SetJobGPU updates the GPU field for a job
 func SetJobGPU(db *sql.DB, jobID int64, gpu string) error {
 	_, err := db.Exec(`UPDATE jobs SET gpu = ? WHERE id = ?`, gpu, jobID)
+	return err
+}
+
+// SetJobBackend sets the execution backend for a job.
+func SetJobBackend(db *sql.DB, jobID int64, backend string) error {
+	if backend == "" {
+		backend = BackendQueueRunner
+	}
+	_, err := db.Exec(`UPDATE jobs SET backend = ? WHERE id = ?`, backend, jobID)
+	return err
+}
+
+// SetJobRemoteID sets the backend-specific job identifier.
+func SetJobRemoteID(db *sql.DB, jobID int64, remoteID string) error {
+	_, err := db.Exec(`UPDATE jobs SET remote_id = ? WHERE id = ?`, remoteID, jobID)
+	return err
+}
+
+// SetJobRemoteState sets the backend-specific state and optional failure reason.
+func SetJobRemoteState(db *sql.DB, jobID int64, remoteState, failureReason string) error {
+	_, err := db.Exec(`UPDATE jobs SET remote_state = ?, failure_reason = ? WHERE id = ?`, remoteState, failureReason, jobID)
 	return err
 }
 
@@ -1215,6 +1286,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var generatedDesc sql.NullString
 	var generationHash sql.NullString
 	var errorMsg sql.NullString
+	var backend sql.NullString
+	var remoteID sql.NullString
+	var remoteState sql.NullString
+	var failureReason sql.NullString
 	var queueName sql.NullString
 	var gpu sql.NullString
 	var cpuAllotment sql.NullInt64
@@ -1232,7 +1307,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingAt sql.NullInt64
 	var jobMetadata sql.NullString
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1254,6 +1329,18 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if errorMsg.Valid {
 		j.ErrorMessage = errorMsg.String
+	}
+	if backend.Valid {
+		j.Backend = backend.String
+	}
+	if remoteID.Valid {
+		j.RemoteID = remoteID.String
+	}
+	if remoteState.Valid {
+		j.RemoteState = remoteState.String
+	}
+	if failureReason.Valid {
+		j.FailureReason = failureReason.String
 	}
 	if queueName.Valid {
 		j.QueueName = queueName.String
@@ -1299,6 +1386,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.PendingAt = &pendingAt.Int64
 	}
 	j.Metadata = decodeJobMetadata(jobMetadata)
+	if j.Backend == "" {
+		j.Backend = BackendQueueRunner
+	}
 
 	return &j, nil
 }
@@ -1480,6 +1570,10 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var generatedDesc sql.NullString
 		var generationHash sql.NullString
 		var errorMsg sql.NullString
+		var backend sql.NullString
+		var remoteID sql.NullString
+		var remoteState sql.NullString
+		var failureReason sql.NullString
 		var queueName sql.NullString
 		var gpu sql.NullString
 		var cpuAllotment sql.NullInt64
@@ -1497,7 +1591,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingAt sql.NullInt64
 		var jobMetadata sql.NullString
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -1516,6 +1610,18 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if errorMsg.Valid {
 			j.ErrorMessage = errorMsg.String
+		}
+		if backend.Valid {
+			j.Backend = backend.String
+		}
+		if remoteID.Valid {
+			j.RemoteID = remoteID.String
+		}
+		if remoteState.Valid {
+			j.RemoteState = remoteState.String
+		}
+		if failureReason.Valid {
+			j.FailureReason = failureReason.String
 		}
 		if queueName.Valid {
 			j.QueueName = queueName.String
@@ -1561,6 +1667,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.PendingAt = &pendingAt.Int64
 		}
 		j.Metadata = decodeJobMetadata(jobMetadata)
+		if j.Backend == "" {
+			j.Backend = BackendQueueRunner
+		}
 
 		jobs = append(jobs, &j)
 	}
@@ -1751,10 +1860,10 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 // ListHostsWithQueueRunnerJobs returns unique hosts that have queued/running queue-runner jobs.
 func ListHostsWithQueueRunnerJobs(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
-		WHERE session_name IS NULL
+		WHERE (backend IS NULL OR backend = ?)
 		AND status IN (?, ?, ?, ?)
 		AND tombstoned = 0`,
-		StatusQueued, StatusRunning, StatusStarting, StatusPaused)
+		BackendQueueRunner, StatusQueued, StatusRunning, StatusStarting, StatusPaused)
 	if err != nil {
 		return nil, err
 	}
@@ -1815,8 +1924,8 @@ func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
 // These are queue runner jobs (no session name) that are in terminal status (failed, dead)
 // but may have been re-queued and started again.
 func ListPotentiallyRestartedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name IS NULL AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
-	return queryJobs(db, query, host, StatusFailed, StatusDead)
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND (backend IS NULL OR backend = ?) AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, BackendQueueRunner, StatusFailed, StatusDead)
 }
 
 // ListAllQueued returns all queued jobs across all hosts

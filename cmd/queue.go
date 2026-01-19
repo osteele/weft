@@ -333,6 +333,13 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
+		backend, err := ops.ResolveBackend(host, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("resolve backend: %w", err)
+		}
+		if err := db.SetJobBackend(database, jobID, backend); err != nil {
+			return fmt.Errorf("set job backend: %w", err)
+		}
 		if err := db.SetJobEnvVars(database, jobID, queueEnvVars); err != nil {
 			db.DeleteJob(database, jobID)
 			return fmt.Errorf("record draft env vars: %w", err)
@@ -394,7 +401,11 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	if !queueNoStart {
-		_, err := ensureQueueRunnerStarted(host, defaultQueueName)
+		backend, err := ops.ResolveBackend(host, 5*time.Second)
+		if err == nil && backend == db.BackendSlurm {
+			return nil
+		}
+		_, err = ensureQueueRunnerStarted(host, defaultQueueName)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to start queue runner: %v\n", err)
 		}

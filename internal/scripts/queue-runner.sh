@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 32
+# BUILD: 35
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -452,6 +452,16 @@ process_commands() {
                 log_op "cmd.stop"
                 echo "Command: stop requested"
                 ;;
+            restart)
+                # Save state and re-exec to pick up new script version.
+                # Running jobs are tracked in state file and will be recovered.
+                log_op "cmd.restart"
+                echo "Command: restart requested - re-execing to pick up new version"
+                STATE_CURSOR="$ts"
+                STATE_CURSOR_LINE="$line_num"
+                save_state
+                exec bash "$0" "$QUEUE_NAME"
+                ;;
             *)
                 echo "Unknown command: $op"
                 ;;
@@ -487,6 +497,19 @@ job_completed() {
     [ -f "$LOG_DIR/${job_id}.status" ] && return 0
     ls "$LOG_DIR/${job_id}"-*.status &>/dev/null 2>&1 && return 0
     return 1
+}
+
+# Check if a process is stopped (state T)
+# Returns 0 (true) if the process exists and is in stopped state
+process_stopped() {
+    local pid="$1"
+    [ -z "$pid" ] && return 1
+    local state
+    state=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$state" in
+        *T*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 # Check if a job is currently running
@@ -775,6 +798,8 @@ refresh_running_jobs() {
     for job_id in $ids; do
         local status_file="$LOG_DIR/${job_id}.status"
         local pid_file="$LOG_DIR/${job_id}.pid"
+        local pgid_file="$LOG_DIR/${job_id}.pgid"
+
         if [ -f "$status_file" ]; then
             # Record CPU history before removing job from running state
             local samples_json avg_cpu job_data cmd sig
@@ -792,30 +817,58 @@ refresh_running_jobs() {
             changed=true
             continue
         fi
+
+        # Check if the job's process is stopped (state T).
+        # A stopped process is alive but not executing - this can happen if:
+        # - The user sent SIGSTOP (ctrl-z)
+        # - The system's OOM killer stopped it
+        # - Some external process stopped it
+        # We treat stopped jobs as failed since they won't make progress.
+        local pgid=""
+        local pid=""
+        if [ -f "$pgid_file" ]; then
+            pgid=$(cat "$pgid_file" 2>/dev/null)
+        fi
         if [ -f "$pid_file" ]; then
-            local pid
             pid=$(cat "$pid_file" 2>/dev/null | tail -1)
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                continue
+        fi
+
+        # Check PGID first (the actual command), then PID (the wrapper)
+        local check_pid="${pgid:-$pid}"
+        if [ -n "$check_pid" ] && process_stopped "$check_pid"; then
+            echo "Job $job_id process $check_pid is stopped (state T) - marking as failed"
+            log_op "job.stopped_detected" "$job_id" "pid=$check_pid state=T"
+            # Kill the stopped process group to clean up
+            if [ -n "$pgid" ]; then
+                kill -KILL -"$pgid" 2>/dev/null || true
             fi
+            if [ -n "$pid" ] && [ "$pid" != "$pgid" ]; then
+                kill -KILL "$pid" 2>/dev/null || true
+            fi
+            echo "1" > "$status_file"
+            log_op "job.failed" "$job_id" "exit=1 reason=stopped"
+            rm -f "$pid_file" "$pgid_file"
+            remove_running_job "$job_id"
+            changed=true
+            continue
+        fi
+
+        # Check if wrapper process is still running
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            continue
         fi
 
         # Wrapper process is gone - check if orphaned command processes remain
         # and kill them before marking job as failed
-        local pgid_file="$LOG_DIR/${job_id}.pgid"
-        if [ -f "$pgid_file" ]; then
-            local pgid
-            pgid=$(cat "$pgid_file" 2>/dev/null)
-            if [ -n "$pgid" ] && kill -0 "$pgid" 2>/dev/null; then
-                # Process group still running - kill it
-                echo "Killing orphaned process group $pgid for job $job_id"
-                kill -TERM -"$pgid" 2>/dev/null || true
-                sleep 1
-                kill -KILL -"$pgid" 2>/dev/null || true
-                log_op "job.orphan_killed" "$job_id" "pgid=$pgid"
-            fi
-            rm -f "$pgid_file"
+        if [ -f "$pgid_file" ] && [ -n "$pgid" ] && kill -0 "$pgid" 2>/dev/null; then
+            # Process group still running - kill it
+            echo "Killing orphaned process group $pgid for job $job_id"
+            kill -TERM -"$pgid" 2>/dev/null || true
+            sleep 1
+            kill -KILL -"$pgid" 2>/dev/null || true
+            log_op "job.orphan_killed" "$job_id" "pgid=$pgid"
         fi
+        rm -f "$pgid_file"
 
         if [ ! -f "$status_file" ]; then
             echo "1" > "$status_file"
@@ -990,9 +1043,12 @@ while true; do
     fi
 
     # Check capacity before starting
+    # Always allow at least one job when nothing is running, even if its predicted
+    # allotment exceeds the target (otherwise jobs with high allotment never start)
     current_allotment=$(total_local_allotment)
     next_allotment=$(job_allotment_from_data "$POPPED_JOB")
-    if [ $((current_allotment + next_allotment)) -gt "$HOST_UTILIZATION_TARGET" ]; then
+    running_jobs=$(running_count)
+    if [ "$running_jobs" -gt 0 ] && [ $((current_allotment + next_allotment)) -gt "$HOST_UTILIZATION_TARGET" ]; then
         add_pending "$POPPED_JOB"
         save_state
         sleep 5

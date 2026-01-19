@@ -355,7 +355,7 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 
 	for _, job := range jobs {
 		seenJobs[job.ID] = true
-		if job.SessionName == "" {
+		if job.UsesQueueRunner() {
 			queueRunnerJobs = append(queueRunnerJobs, job)
 		} else {
 			tmuxJobs = append(tmuxJobs, job)

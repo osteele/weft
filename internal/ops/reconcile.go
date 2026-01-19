@@ -107,7 +107,7 @@ func Reconcile(database *sql.DB, job *db.Job, remoteStatus string, opts Reconcil
 
 	// Case 5: Job is queued locally but does not exist remotely
 	if job.Status == db.StatusQueued && remoteStatus == "" {
-		if err := applyQueueToRemote(job, opts.Timeout); err != nil {
+		if err := applyQueueToRemote(database, job, opts.Timeout); err != nil {
 			return nil, err
 		}
 		// Set queued_at when job is successfully added to the remote queue
@@ -181,13 +181,16 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 		err = applyKillToRemote(job, timeout)
 		resolvedStatus = db.StatusKilled
 	case db.StatusRunning:
-		if job.Status == db.StatusPaused {
+		if job.UsesSlurm() {
+			err = applyStartToRemote(database, job, timeout)
+			resolvedStatus = db.StatusQueued
+		} else if job.Status == db.StatusPaused {
 			err = applyResumeToRemote(job, timeout)
 		} else {
 			err = applyStartToRemote(database, job, timeout)
 		}
 	case db.StatusQueued:
-		err = applyQueueToRemote(job, timeout)
+		err = applyQueueToRemote(database, job, timeout)
 	case db.StatusPaused:
 		err = applyPauseToRemote(job, timeout)
 	case db.StatusDraft:
@@ -224,8 +227,11 @@ func applyPendingToRemote(database *sql.DB, job *db.Job, targetStatus string, op
 
 // applyKillToRemote kills the job on the remote host.
 func applyKillToRemote(job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		return cancelSlurmJob(job, timeout)
+	}
 	// Queue-runner jobs (no session name) are killed via PID
-	if job.SessionName == "" {
+	if job.UsesQueueRunner() {
 		return killQueueRunnerJob(job, timeout)
 	}
 
@@ -243,10 +249,16 @@ func applyKillToRemote(job *db.Job, timeout time.Duration) error {
 }
 
 func applyPauseToRemote(job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		return fmt.Errorf("pause not supported for slurm jobs")
+	}
 	return signalJobProcess(job, "STOP", timeout)
 }
 
 func applyResumeToRemote(job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		return fmt.Errorf("resume not supported for slurm jobs")
+	}
 	return signalJobProcess(job, "CONT", timeout)
 }
 
@@ -273,6 +285,9 @@ func signalJobProcess(job *db.Job, signal string, timeout time.Duration) error {
 // If the job is already running (queue runner started it before cancel),
 // this also kills the running process.
 func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		return cancelSlurmJob(job, timeout)
+	}
 	queueName := DefaultQueueName
 
 	// Remove from queue file (in case it's still queued)
@@ -340,6 +355,9 @@ func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Durat
 // applyDraftToRemote ensures no remote execution state exists for a draft job.
 // This removes the job from any queue and kills any running process.
 func applyDraftToRemote(job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		return cancelSlurmJob(job, timeout)
+	}
 	queueName := DefaultQueueName
 
 	// Remove from queue if present
@@ -359,15 +377,22 @@ func applyDraftToRemote(job *db.Job, timeout time.Duration) error {
 }
 
 // applyQueueToRemote adds a job to the remote queue file.
-func applyQueueToRemote(job *db.Job, timeout time.Duration) error {
+func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		_, _, err := submitSlurmJob(database, job, timeout)
+		return err
+	}
 	return AppendJobToQueue(job, timeout)
 }
 
 // applyStartToRemote starts a queued or draft job on the remote host.
 func applyStartToRemote(database *sql.DB, job *db.Job, timeout time.Duration) error {
+	if job.UsesSlurm() {
+		return applyQueueToRemote(database, job, timeout)
+	}
 	// For draft jobs, first add to queue
 	if job.Status == db.StatusDraft {
-		if err := applyQueueToRemote(job, timeout); err != nil {
+		if err := applyQueueToRemote(database, job, timeout); err != nil {
 			return fmt.Errorf("queue draft job: %w", err)
 		}
 		// Set queued_at since job is now in queue
@@ -393,8 +418,22 @@ func ProbeRemoteStatus(job *db.Job, timeout time.Duration) (string, error) {
 		timeout = 10 * time.Second
 	}
 
+	if job.UsesSlurm() {
+		info, err := probeSlurmInfo(job, timeout)
+		if err != nil {
+			return "", err
+		}
+		if info == nil {
+			if job.RemoteID == "" {
+				return "", nil
+			}
+			return job.Status, nil
+		}
+		return slurmStateToLocal(job, info), nil
+	}
+
 	// Queue-runner jobs use pattern-based file lookup
-	if job.SessionName == "" {
+	if job.UsesQueueRunner() {
 		return probeQueueRunnerJobStatus(job, timeout)
 	}
 
@@ -465,6 +504,16 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	// Job is locally queued but not found in remote queue, not running, no status file
 	// This means it's orphaned (was removed from queue or never made it there)
 	if job.Status == db.StatusQueued && queued.IsSome() && !queued.Unwrap() {
+		// If job has pending cancel/kill status, return that instead of dead
+		// This allows clean cancellation when the queue runner isn't running
+		if job.PendingStatus != nil {
+			switch *job.PendingStatus {
+			case db.StatusCanceled:
+				return db.StatusCanceled, nil
+			case db.StatusKilled, db.StatusDead:
+				return db.StatusKilled, nil
+			}
+		}
 		return db.StatusDead, nil
 	}
 
@@ -476,7 +525,27 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 // This is the unified entry point that replaces separate sync and deferred ops execution.
 func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*ReconcileResult, error) {
 	// Probe remote state
-	remoteStatus, err := ProbeRemoteStatus(job, opts.Timeout)
+	remoteStatus := ""
+	var err error
+	if job.UsesSlurm() {
+		info, probeErr := probeSlurmInfo(job, opts.Timeout)
+		if probeErr != nil {
+			err = probeErr
+		} else if info != nil {
+			if err := db.SetJobRemoteState(database, job.ID, info.State, info.FailureReason); err != nil {
+				return nil, err
+			}
+			remoteStatus = slurmStateToLocal(job, info)
+		} else {
+			if job.RemoteID == "" {
+				remoteStatus = ""
+			} else {
+				remoteStatus = job.Status
+			}
+		}
+	} else {
+		remoteStatus, err = ProbeRemoteStatus(job, opts.Timeout)
+	}
 	if err != nil {
 		oplog.LogJob(oplog.OpJobProbe, job.ID, job.Host,
 			oplog.WithDetailf("error current=%s", job.Status),

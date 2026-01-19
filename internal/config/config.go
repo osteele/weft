@@ -63,6 +63,9 @@ type Config struct {
 
 	// WebPort is the localhost port for the web UI.
 	WebPort int `yaml:"web_port"`
+
+	// Hosts holds per-host configuration overrides.
+	Hosts map[string]HostConfig `yaml:"hosts"`
 }
 
 // BlockedPattern defines a substring that should not appear in job commands
@@ -82,6 +85,12 @@ type AIConfig struct {
 	// Model specifies the ollama model to use for description generation
 	// Default: "llama3.2"
 	Model string `yaml:"model"`
+}
+
+// HostConfig holds per-host configuration.
+type HostConfig struct {
+	// Backend sets the execution backend for this host ("queue-runner" or "slurm").
+	Backend string `yaml:"backend"`
 }
 
 // DefaultConfig returns the default configuration
@@ -140,6 +149,20 @@ func (c *Config) GetOperationLogMaxSize() int64 {
 		return c.OperationLogMaxSize
 	}
 	return 10 * 1024 * 1024 // Default: 10MB
+}
+
+// HostBackend returns the configured backend for a host, or empty if not set.
+func (c *Config) HostBackend(host string) string {
+	if c == nil || host == "" {
+		return ""
+	}
+	if c.Hosts == nil {
+		return ""
+	}
+	if cfg, ok := c.Hosts[host]; ok {
+		return strings.ToLower(strings.TrimSpace(cfg.Backend))
+	}
+	return ""
 }
 
 var configPath string

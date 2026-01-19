@@ -41,6 +41,32 @@ func setupIntegrationTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+// clearRemoteJobState removes all remote state files for a job ID.
+// This is needed because tests reuse job ID 1 but share the remote queue runner.
+func clearRemoteJobState(t *testing.T, host string, jobID int64) {
+	t.Helper()
+	// Remove status, log, meta, pid, pgid, and samples files for this job
+	cmd := fmt.Sprintf("rm -f ~/.cache/remote-jobs/logs/%d.* ~/.cache/remote-jobs/logs/%d-*.* ~/.cache/remote-jobs/queue/job-%d.json 2>/dev/null || true", jobID, jobID, jobID)
+	_, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+	if err != nil {
+		t.Logf("Warning: could not clear remote state for job %d: %v", jobID, err)
+	}
+}
+
+// stopQueueRunner stops the queue runner on the remote host.
+// Returns true if the runner was stopped, false if it wasn't running.
+func stopQueueRunner(t *testing.T, host string, queueName string) bool {
+	t.Helper()
+	pidFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.runner.pid", queueName)
+	cmd := fmt.Sprintf("if [ -f %s ]; then kill $(cat %s) 2>/dev/null && rm -f %s && echo stopped; else echo not_running; fi", pidFile, pidFile, pidFile)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+	if err != nil {
+		t.Logf("Warning: could not stop queue runner: %v", err)
+		return false
+	}
+	return strings.TrimSpace(stdout) == "stopped"
+}
+
 // ensureQueueRunnerStarted uses the production queuerunner package to start the runner.
 // This ensures tests exercise the same code path as production.
 func ensureQueueRunnerStarted(t *testing.T, host string) (bool, error) {
@@ -235,6 +261,9 @@ func TestIntegration_StateTransition_QueuedToDraft(t *testing.T) {
 	host := getTestHost(t)
 	database := setupIntegrationTestDB(t)
 
+	// Clear any previous state for job ID 1 (tests reuse IDs since each has fresh DB)
+	clearRemoteJobState(t, host, 1)
+
 	// Queue a job
 	params := ops.QueueJobParams{
 		Host:        host,
@@ -279,6 +308,14 @@ func TestIntegration_StateTransition_QueuedToCanceled(t *testing.T) {
 	host := getTestHost(t)
 	database := setupIntegrationTestDB(t)
 
+	// Stop queue runner so jobs stay queued (don't actually run)
+	if stopped := stopQueueRunner(t, host, ops.DefaultQueueName); stopped {
+		t.Log("Stopped queue runner for state transition test")
+	}
+
+	// Clear any previous state for job ID 1 (tests reuse IDs since each has fresh DB)
+	clearRemoteJobState(t, host, 1)
+
 	// Queue a job
 	params := ops.QueueJobParams{
 		Host:        host,
@@ -316,6 +353,9 @@ func TestIntegration_StateTransition_QueuedToCanceled(t *testing.T) {
 func TestIntegration_StateTransition_QueueEntryRemovedOnCancel(t *testing.T) {
 	host := getTestHost(t)
 	database := setupIntegrationTestDB(t)
+
+	// Clear any previous state for job ID 1 (tests reuse IDs since each has fresh DB)
+	clearRemoteJobState(t, host, 1)
 
 	// Queue a job
 	params := ops.QueueJobParams{
@@ -406,4 +446,182 @@ func fetchQueueEntryFromRemote(host, queueName string, jobID int64, timeout time
 		EnvVars:     queueCmd.Job.Env,
 		DepSpec:     queueCmd.Job.Deps,
 	}, nil
+}
+
+// SLURM integration tests
+// These tests run when SLURM_TEST_HOST is set, otherwise they skip.
+//
+// Requirements:
+//   - SLURM_TEST_HOST environment variable set to user@hostname
+//   - SSH_AUTH_SOCK environment variable set to the SSH agent socket
+//   - Host must have SLURM available (sbatch, squeue, sacct)
+//
+// Example: SLURM_TEST_HOST=root@137.66.39.49 go test -v ./internal/ops/... -run "Slurm"
+
+func getSlurmTestHost(t *testing.T) string {
+	host := os.Getenv("SLURM_TEST_HOST")
+	if host == "" {
+		t.Skip("SLURM_TEST_HOST not set - skipping SLURM integration test")
+	}
+	if os.Getenv("SSH_AUTH_SOCK") == "" {
+		t.Skip("SSH_AUTH_SOCK not set - skipping SLURM integration test")
+	}
+	return host
+}
+
+// clearSlurmJobState removes SLURM-related state files for a job ID.
+func clearSlurmJobState(t *testing.T, host string, jobID int64) {
+	t.Helper()
+	cmd := fmt.Sprintf("rm -f ~/.cache/remote-jobs/logs/%d.* 2>/dev/null || true", jobID)
+	_, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+	if err != nil {
+		t.Logf("Warning: could not clear SLURM state for job %d: %v", jobID, err)
+	}
+}
+
+func TestSlurmIntegration_BackendDetection(t *testing.T) {
+	host := getSlurmTestHost(t)
+
+	backend, err := ops.ResolveBackend(host, 10*time.Second)
+	if err != nil {
+		t.Fatalf("ResolveBackend failed: %v", err)
+	}
+
+	if backend != db.BackendSlurm {
+		t.Errorf("Expected backend to be 'slurm', got %s", backend)
+	}
+	t.Logf("Detected backend: %s", backend)
+}
+
+func TestSlurmIntegration_JobLifecycle(t *testing.T) {
+	host := getSlurmTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Clear any previous state for job ID 1
+	clearSlurmJobState(t, host, 1)
+
+	// Queue a quick job
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo 'Hello from SLURM test'; sleep 2; echo 'Done'",
+		Description: "SLURM integration test: job lifecycle",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+
+	jobID := result.JobID
+	t.Logf("Queued job %d on %s, waiting for completion...", jobID, host)
+
+	// Verify job was recorded with correct backend
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID failed: %v", err)
+	}
+	if job.Backend != db.BackendSlurm {
+		t.Errorf("Expected job backend to be 'slurm', got %s", job.Backend)
+	}
+	if job.RemoteID == "" {
+		t.Errorf("Expected job to have a RemoteID (SLURM job ID)")
+	}
+	t.Logf("Job has SLURM ID: %s", job.RemoteID)
+
+	// Wait for job to complete (up to 60 seconds)
+	deadline := time.Now().Add(60 * time.Second)
+	var finalJob *db.Job
+	for time.Now().Before(deadline) {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			t.Fatalf("GetJobByID failed: %v", err)
+		}
+
+		// Sync the job status
+		_, err = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+		if err != nil {
+			t.Logf("SyncJob error (may be transient): %v", err)
+		}
+
+		// Re-fetch after sync
+		job, _ = db.GetJobByID(database, jobID)
+		if db.IsTerminalStatus(job.Status) {
+			finalJob = job
+			break
+		}
+
+		t.Logf("Job status: %s (SLURM state: %s), waiting...", job.Status, job.RemoteState)
+		time.Sleep(3 * time.Second)
+	}
+
+	if finalJob == nil {
+		t.Fatal("Job did not complete within timeout")
+	}
+
+	t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, *finalJob.ExitCode)
+
+	if finalJob.Status != db.StatusCompleted {
+		t.Errorf("Expected job status to be completed, got %s", finalJob.Status)
+	}
+}
+
+func TestSlurmIntegration_JobCancellation(t *testing.T) {
+	host := getSlurmTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Clear any previous state for job ID 1
+	clearSlurmJobState(t, host, 1)
+
+	// Queue a long-running job
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "sleep 120; echo 'This should not run'",
+		Description: "SLURM integration test: job cancellation",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+
+	jobID := result.JobID
+	t.Logf("Queued job %d, will cancel it...", jobID)
+
+	// Get the job to get its SLURM ID
+	job, _ := db.GetJobByID(database, jobID)
+	if job.RemoteID == "" {
+		t.Fatal("Job has no RemoteID")
+	}
+
+	// Wait a moment for job to potentially start
+	time.Sleep(2 * time.Second)
+
+	// Set pending status to canceled
+	if err := db.SetPendingStatus(database, jobID, db.StatusCanceled); err != nil {
+		t.Fatalf("SetPendingStatus failed: %v", err)
+	}
+
+	// Reconcile to apply the cancellation
+	job, _ = db.GetJobByID(database, jobID)
+	_, err = ops.SyncAndReconcile(database, job, ops.ReconcileOptions{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Logf("Reconcile error (may be expected): %v", err)
+	}
+
+	// Wait for cancellation to take effect
+	time.Sleep(5 * time.Second)
+
+	// Sync to get final status
+	job, _ = db.GetJobByID(database, jobID)
+	_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+	job, _ = db.GetJobByID(database, jobID)
+
+	t.Logf("Final status: %s (SLURM state: %s)", job.Status, job.RemoteState)
+
+	// Job should be killed (SLURM cancelled)
+	if job.Status != db.StatusKilled && job.Status != db.StatusCanceled {
+		t.Errorf("Expected job status to be killed or canceled, got %s", job.Status)
+	}
 }

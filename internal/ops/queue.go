@@ -240,6 +240,21 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	if err != nil {
 		return Result{}, fmt.Errorf("record job: %w", err)
 	}
+	backend, err := ResolveBackend(params.Host, opts.Timeout)
+	if err != nil {
+		if ssh.IsConnectionError(err.Error()) {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+			}, nil
+		}
+		return Result{}, err
+	}
+	if err := db.SetJobBackend(database, jobID, backend); err != nil {
+		return Result{}, fmt.Errorf("set job backend: %w", err)
+	}
 	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
 		db.DeleteJob(database, jobID)
 		return Result{}, fmt.Errorf("record env vars: %w", err)
@@ -258,6 +273,33 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 			db.DeleteJob(database, jobID)
 			return Result{}, fmt.Errorf("record CPU allotment: %w", err)
 		}
+	}
+
+	if backend == db.BackendSlurm {
+		if err := db.SetPendingStatus(database, jobID, db.StatusQueued); err != nil {
+			return Result{}, fmt.Errorf("set pending status: %w", err)
+		}
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return Result{}, fmt.Errorf("get job: %w", err)
+		}
+		_, err = Reconcile(database, job, "", ReconcileOptions{Timeout: opts.Timeout})
+		if err != nil {
+			if ssh.IsConnectionError(err.Error()) {
+				return Result{
+					Success:  true,
+					Deferred: true,
+					JobID:    jobID,
+					Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+				}, nil
+			}
+			return Result{}, err
+		}
+		return Result{
+			Success: true,
+			JobID:   jobID,
+			Message: fmt.Sprintf("Job %d submitted", jobID),
+		}, nil
 	}
 
 	// Build queue entry with artifact env vars merged in

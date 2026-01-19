@@ -45,6 +45,25 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 	if err != nil {
 		return Result{}, fmt.Errorf("create job record: %w", err)
 	}
+	backend := orig.Backend
+	if backend == "" {
+		var resolveErr error
+		backend, resolveErr = ResolveBackend(orig.Host, opts.Timeout)
+		if resolveErr != nil {
+			if ssh.IsConnectionError(resolveErr.Error()) {
+				return Result{
+					Success:  true,
+					Deferred: true,
+					JobID:    newJobID,
+					Message:  fmt.Sprintf("Host %s unreachable, job %d will restart on next sync", orig.Host, newJobID),
+				}, nil
+			}
+			return Result{}, resolveErr
+		}
+	}
+	if err := db.SetJobBackend(database, newJobID, backend); err != nil {
+		return Result{}, fmt.Errorf("set job backend: %w", err)
+	}
 
 	// 2. Set pending status to queued
 	if err := db.SetPendingStatus(database, newJobID, db.StatusQueued); err != nil {

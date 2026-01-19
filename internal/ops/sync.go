@@ -157,10 +157,14 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 // SyncJob checks and updates a single job's status, returning true if status changed.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
 func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
-	// Jobs without a session name are managed by the queue runner and should use
-	// pattern-based file lookup (handles restarts with different timestamps).
+	// SLURM-managed jobs use SLURM probes regardless of session name.
+	if job.UsesSlurm() {
+		return SyncSlurmJob(database, job, opts)
+	}
+
+	// Queue-runner jobs use pattern-based file lookup (handles restarts with different timestamps).
 	// Jobs WITH a session name were started via start_now or run and have their own tmux session.
-	if job.SessionName == "" {
+	if job.UsesQueueRunner() {
 		return SyncQueueRunnerJob(database, job, opts)
 	}
 
@@ -293,8 +297,12 @@ func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
-	// Queue-runner managed jobs (no session name) need queue/runner cleanup.
-	if job.SessionName == "" {
+	if job.UsesSlurm() {
+		if err := cancelSlurmJob(job, timeout); err != nil {
+			return false, err
+		}
+	} else if job.UsesQueueRunner() {
+		// Queue-runner managed jobs (no session name) need queue/runner cleanup.
 		handled, err := syncDraftQueueJob(job, timeout)
 		if err != nil {
 			return false, err
@@ -621,8 +629,12 @@ func (sshQueueRemote) ProcessRunning(host string, jobID int64, timeout time.Dura
 }
 
 func (sshQueueRemote) ProcessPaused(host string, jobID int64, timeout time.Duration) Option[bool] {
+	// Check PGID file first (preferred for queue-runner jobs), then fall back to PID file.
+	// The PGID file contains the setsid process which is the actual command's process group leader.
+	// The PID file contains the wrapper bash which may be in a different state than the command.
+	pgidFile := session.SimplePgidFile(jobID)
 	pidPattern := session.PidFilePattern(jobID)
-	cmd := fmt.Sprintf(`pid=$(cat %s 2>/dev/null | head -1); if [ -n "$pid" ]; then state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' '); case "$state" in *T*) echo YES ;; "") echo NO ;; *) echo NO ;; esac; else echo NO; fi`, pidPattern)
+	cmd := fmt.Sprintf(`pgid=$(cat %s 2>/dev/null | head -1); if [ -z "$pgid" ]; then pgid=$(cat %s 2>/dev/null | head -1); fi; if [ -n "$pgid" ]; then state=$(ps -o stat= -p $pgid 2>/dev/null | tr -d ' '); case "$state" in *T*) echo YES ;; "") echo NO ;; *) echo NO ;; esac; else echo NO; fi`, pgidFile, pidPattern)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return None[bool]()

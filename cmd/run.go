@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
@@ -238,6 +239,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
+		backend, err := ops.ResolveBackend(host, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("resolve backend: %w", err)
+		}
+		if err := db.SetJobBackend(database, jobID, backend); err != nil {
+			return fmt.Errorf("set job backend: %w", err)
+		}
 		if err := db.SetJobTags(database, jobID, runTags); err != nil {
 			return fmt.Errorf("set job tags: %w", err)
 		}
@@ -328,13 +336,49 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if res.Deferred {
 			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
 		} else {
-			// Auto-start queue runner (silently ignore offline errors)
-			_, _ = ensureQueueRunnerStarted(host, defaultQueueName)
+			backend, err := ops.ResolveBackend(host, 5*time.Second)
+			if err == nil && backend != db.BackendSlurm {
+				// Auto-start queue runner (silently ignore offline errors)
+				_, _ = ensureQueueRunnerStarted(host, defaultQueueName)
+			}
 		}
 		return nil
 	}
 
 	// --immediate mode: start job now in its own tmux session
+	backend, err := ops.ResolveBackend(host, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("resolve backend: %w", err)
+	}
+	if backend == db.BackendSlurm {
+		res, err := queueJob(database, queueJobOptions{
+			Host:        host,
+			WorkingDir:  workingDir,
+			Command:     command,
+			Description: runDescription,
+			EnvVars:     runEnvVars,
+			Tags:        runTags,
+			QueueName:   defaultQueueName,
+			AutoStart:   false,
+		})
+		if err != nil {
+			return fmt.Errorf("queue job: %w", err)
+		}
+		fmt.Printf("Job #%d submitted to SLURM on %s\n\n", res.JobID, host)
+		fmt.Printf("  Working dir: %s\n", workingDir)
+		fmt.Printf("  Command: %s\n", command)
+		if runDescription != "" {
+			fmt.Printf("  Description: %s\n", runDescription)
+		}
+		if len(runEnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+		}
+		if res.Deferred {
+			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
+		}
+		return nil
+	}
+
 	result, err := startJob(database, startJobOptions{
 		Host:        host,
 		WorkingDir:  workingDir,

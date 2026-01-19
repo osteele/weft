@@ -188,6 +188,21 @@ func SyncQueueRunnerJobWithProber(
 		processResult == remote.ProbeFalse
 
 	if allDefinitelyFalse {
+		// If job has pending cancel/kill status and no remote state, honor the pending status
+		if job.PendingStatus != nil {
+			switch *job.PendingStatus {
+			case db.StatusCanceled:
+				if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusCanceled); err != nil {
+					return false, err
+				}
+				return true, nil
+			case db.StatusKilled, db.StatusDead:
+				if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusKilled); err != nil {
+					return false, err
+				}
+				return true, nil
+			}
+		}
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return false, err
 		}

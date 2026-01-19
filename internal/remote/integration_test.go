@@ -14,18 +14,7 @@ import (
 //   - SSH_TEST_HOST environment variable set to user@hostname
 //   - SSH_AUTH_SOCK environment variable set to the SSH agent socket
 //
-// Current fly.io test server:
-//   - App: remote-jobs-ssh-test
-//   - Dedicated IP: 37.16.31.67
-//   - User: root
-//
-// On macOS with 1Password, find the agent socket:
-//   ls -la /private/tmp/com.apple.launchd.*/Listeners
-//
-// To redeploy or update the fly.io test server:
-//   1. cd /tmp/fly-ssh-test
-//   2. Update Dockerfile if needed (ensure your public key is correct)
-//   3. fly deploy --no-cache
+// See .env.example for test server configuration and connection details.
 
 func getTestHost(t *testing.T) string {
 	host := os.Getenv("SSH_TEST_HOST")

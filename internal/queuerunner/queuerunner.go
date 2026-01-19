@@ -161,8 +161,8 @@ func RunnerCommand(queueName, envPrefix string) string {
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
-// Also upgrades the queue runner script if needed, restarting the runner to pick up changes.
-// Returns true when a new runner was started (or restarted due to upgrade).
+// Also upgrades the queue runner script if needed, signaling the runner to restart.
+// Returns true when a new runner was started.
 func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 	queueName = ops.DefaultQueueName
 	session := fmt.Sprintf("rj-queue-%s", queueName)
@@ -178,22 +178,13 @@ func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 		return false, fmt.Errorf("check session: %w", err)
 	}
 
-	// If runner exists and script was upgraded, restart to pick up new version
+	// If runner exists and script was upgraded, send a restart command.
+	// The runner will re-exec itself to pick up the new version while
+	// preserving state and continuing to monitor any running jobs.
 	if exists && upgraded {
-		// Signal runner to stop gracefully after current job using command queue
-		stopCmd := ops.NewStopCommand()
-		_ = ops.AppendCommand(host, queueName, stopCmd, ops.AppendCommandOptions{}) // Best effort - ignore errors
-
-		// Wait briefly for runner to stop (it will exit after current job)
-		// Don't block too long - let it finish naturally
-		for i := 0; i < 3; i++ {
-			time.Sleep(500 * time.Millisecond)
-			stillExists, _ := ssh.TmuxSessionExists(host, session)
-			if !stillExists {
-				exists = false
-				break
-			}
-		}
+		restartCmd := ops.NewRestartCommand()
+		_ = ops.AppendCommand(host, queueName, restartCmd, ops.AppendCommandOptions{}) // Best effort
+		return false, nil                                                              // Runner will restart itself
 	}
 
 	if exists {

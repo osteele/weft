@@ -17,6 +17,7 @@ const (
 	OpPriority = "priority" // Move a job to the front of the queue
 	OpCancel   = "cancel"   // Remove a job from the queue
 	OpStop     = "stop"     // Graceful shutdown after current job
+	OpRestart  = "restart"  // Re-exec to pick up new script version
 )
 
 // CommandJob contains job data for an add command.
@@ -89,6 +90,15 @@ func NewStopCommand() QueueCommand {
 	return QueueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        OpStop,
+	}
+}
+
+// NewRestartCommand creates a command for the queue runner to re-exec itself.
+// This is used when the script has been upgraded and the runner needs to pick up the new version.
+func NewRestartCommand() QueueCommand {
+	return QueueCommand{
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Op:        OpRestart,
 	}
 }
 

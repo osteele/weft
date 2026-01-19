@@ -17,7 +17,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/remote"
-	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/slack"
 )
 
@@ -709,7 +708,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 			if job == nil {
 				continue
 			}
-			if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+			if job.UsesQueueRunner() && (job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting) {
 				queueRunnerCount++
 			}
 		}
@@ -757,20 +756,14 @@ func ensureQueueRunnerStarted(host string) (bool, error) {
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely.
 func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 	if job.Status == db.StatusQueued {
-		queueName := ops.DefaultQueueName
-		cancelCmd := ops.NewCancelCommand(job.ID)
-		err := ops.AppendCommand(job.Host, queueName, cancelCmd, ops.AppendCommandOptions{Timeout: 5 * time.Second})
-		if err != nil {
+		if err := ops.CancelRemoteJob(job, 5*time.Second); err != nil {
 			return false
 		}
 		_ = db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead)
 		return true
 	}
 
-	sessionName := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, _ := remote.TmuxSessionExistsQuick(job.Host, sessionName)
-	if exists {
-		_ = remote.TmuxKillSession(job.Host, sessionName)
+	if err := ops.CancelRemoteJob(job, 5*time.Second); err == nil {
 		_ = db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead)
 		return true
 	}
