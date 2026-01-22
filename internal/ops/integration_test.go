@@ -566,6 +566,89 @@ func TestSlurmIntegration_JobLifecycle(t *testing.T) {
 	}
 }
 
+// TestIntegration_SyncDetectsRunningProcess verifies that when sync detects a process
+// is running but the local status is still queued/starting, it transitions to running.
+// This tests the fix for handling concurrent job execution where only one job is
+// tracked as "current" in the queue.
+func TestIntegration_SyncDetectsRunningProcess(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Ensure queue runner is running
+	_, err := ensureQueueRunnerStarted(t, host)
+	if err != nil {
+		t.Fatalf("Failed to start queue runner: %v", err)
+	}
+
+	// Queue a job that runs for a while
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "sleep 10; echo done",
+		Description: "Integration test: sync detects running process",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+	jobID := result.JobID
+	t.Logf("Queued job %d", jobID)
+
+	// Wait for job to start running on remote
+	deadline := time.Now().Add(30 * time.Second)
+	var job *db.Job
+	for time.Now().Before(deadline) {
+		job, _ = db.GetJobByID(database, jobID)
+		_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+		job, _ = db.GetJobByID(database, jobID)
+
+		if job.Status == db.StatusRunning {
+			t.Logf("Job is running")
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if job.Status != db.StatusRunning {
+		t.Skipf("Job did not start running in time (status: %s), skipping test", job.Status)
+	}
+
+	// Simulate a race condition: reset local status to queued while job is still running
+	_, err = database.Exec("UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?",
+		db.StatusQueued, db.StatusQueued, jobID)
+	if err != nil {
+		t.Fatalf("Failed to reset job status: %v", err)
+	}
+	t.Logf("Reset job status to queued (simulating race condition)")
+
+	// Now sync should detect the running process and transition back to running
+	job, _ = db.GetJobByID(database, jobID)
+	if job.Status != db.StatusQueued {
+		t.Fatalf("Expected status to be queued after reset, got %s", job.Status)
+	}
+
+	updated, err := ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob failed: %v", err)
+	}
+
+	job, _ = db.GetJobByID(database, jobID)
+	t.Logf("After sync: status=%s, updated=%v", job.Status, updated)
+
+	if job.Status != db.StatusRunning {
+		t.Errorf("Expected sync to detect running process and update status to running, got %s", job.Status)
+	}
+
+	if !updated {
+		t.Errorf("Expected sync to report updated=true when transitioning queued->running")
+	}
+
+	// Clean up: wait for job to complete or cancel it
+	cancelCmd := ops.NewCancelCommand(jobID)
+	_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+}
+
 func TestSlurmIntegration_JobCancellation(t *testing.T) {
 	host := getSlurmTestHost(t)
 	database := setupIntegrationTestDB(t)

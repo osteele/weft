@@ -126,13 +126,23 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 5: Check if process is running via PID
 	processResult := prober.ProbeProcessRunning(job.ID)
 	if processResult == remote.ProbeTrue {
-		if job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
+		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+			return false, err
+		}
+		switch job.Status {
+		case db.StatusQueued, db.StatusStarting:
+			// Job is running but not marked as "current" - this happens when
+			// multiple jobs run concurrently and only one is tracked as "current"
+			if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
 				return false, err
 			}
 			return true, nil
-		}
-		if job.Status == db.StatusPaused {
+		case db.StatusPaused:
 			if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
 				return false, err
 			}
