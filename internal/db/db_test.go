@@ -794,6 +794,43 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 		}
 	})
 
+	t.Run("RecordCompletionByID accepts failed status", func(t *testing.T) {
+		// This tests the race condition recovery: a job was marked failed locally
+		// but the status file on remote shows it actually completed
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-failed", "test", "default")
+		MarkQueuedJobRunning(db, jobID)
+		MarkDeadByID(db, jobID) // Mark as failed (simulating race condition)
+
+		// Now sync finds status file showing completion
+		err := RecordCompletionByID(db, jobID, 0, time.Now().Unix())
+		if err != nil {
+			t.Fatalf("RecordCompletionByID from failed status should not error: %v", err)
+		}
+
+		job, _ := GetJobByID(db, jobID)
+		if job.Status != StatusCompleted {
+			t.Errorf("status = %s, want %s", job.Status, StatusCompleted)
+		}
+	})
+
+	t.Run("RecordCompletionByID accepts dead status", func(t *testing.T) {
+		// Similar to above but starting from dead status
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-dead", "test", "default")
+		MarkQueuedJobRunning(db, jobID)
+		// Simulate marking as dead (using direct SQL since there's no MarkDead function that sets StatusDead)
+		db.Exec("UPDATE jobs SET status = ? WHERE id = ?", StatusDead, jobID)
+
+		err := RecordCompletionByID(db, jobID, 0, time.Now().Unix())
+		if err != nil {
+			t.Fatalf("RecordCompletionByID from dead status should not error: %v", err)
+		}
+
+		job, _ := GetJobByID(db, jobID)
+		if job.Status != StatusCompleted {
+			t.Errorf("status = %s, want %s", job.Status, StatusCompleted)
+		}
+	})
+
 	t.Run("MarkDeadByID updates last_synced_status", func(t *testing.T) {
 		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "test", "default")
 		MarkQueuedJobRunning(db, jobID)

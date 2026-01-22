@@ -664,11 +664,13 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 // RecordCompletionByID updates a job by ID with its exit code and end time.
 // Clears session_name per spec: SessionImpliesRunning (session => status = running).
 // Also updates last_synced_status since recording completion is a sync operation.
+// Note: Also accepts failed/dead status because a status file appearing is authoritative
+// evidence of completion, even if the job was previously marked as failed due to race conditions.
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
-		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		exitCode, endTime, StatusCompleted, StatusCompleted, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
+		 WHERE id = ? AND status IN (?, ?, ?, ?, ?, ?)`,
+		exitCode, endTime, StatusCompleted, StatusCompleted, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused, StatusFailed, StatusDead,
 	)
 	return err
 }
