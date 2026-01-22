@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	"github.com/osteele/remote-jobs/internal/db"
 )
 
@@ -94,6 +95,11 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 	// Build description/command display
 	display := job.EffectiveDescription()
+	// Strip leading backslash-newline (shell line continuation)
+	display = strings.TrimPrefix(display, "\\\n")
+	// Replace all newlines with spaces for single-line display
+	display = strings.ReplaceAll(display, "\n", " ")
+	display = strings.TrimSpace(display)
 
 	// Calculate available width for description
 	// Format: ID(6) + space + Host(10) + space + Status(12) + space + Time(11) + space + Desc
@@ -110,10 +116,10 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 		display,
 	)
 
-	// Truncate to list width if needed
+	// Truncate to list width if needed (using visual width, not byte length)
 	listWidth := m.Width()
-	if listWidth > 0 && len(line) > listWidth {
-		line = line[:listWidth-1] + "…"
+	if listWidth > 0 && runewidth.StringWidth(line) > listWidth {
+		line = truncateToWidth(line, listWidth-1) + "…"
 	}
 
 	// Apply styles
@@ -216,12 +222,33 @@ func formatPendingStatus(status string) string {
 	}
 }
 
-// truncateOrPad truncates or pads a string to the given width
-func truncateOrPad(s string, width int) string {
-	if len(s) > width {
-		return s[:width-1] + "…"
+// truncateToWidth truncates a string to the given visual width (not byte length)
+func truncateToWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
 	}
-	return s + strings.Repeat(" ", width-len(s))
+
+	currentWidth := 0
+	runes := []rune(s)
+
+	for i, r := range runes {
+		charWidth := runewidth.RuneWidth(r)
+		if currentWidth+charWidth > maxWidth {
+			return string(runes[:i])
+		}
+		currentWidth += charWidth
+	}
+
+	return s
+}
+
+// truncateOrPad truncates or pads a string to the given visual width (not byte length)
+func truncateOrPad(s string, width int) string {
+	currentWidth := runewidth.StringWidth(s)
+	if currentWidth > width {
+		return truncateToWidth(s, width-1) + "…"
+	}
+	return s + strings.Repeat(" ", width-currentWidth)
 }
 
 // JobsToListItems converts a slice of jobs to list items
