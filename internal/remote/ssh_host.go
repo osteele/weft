@@ -193,6 +193,12 @@ func (h *SSHHost) IsProcessRunning(jobID int64) (bool, error) {
 // IsProcessPaused checks if the job's process is paused (stopped) via PGID file.
 // The PGID file contains the process group leader (the setsid process), which is
 // what we signal for pause/resume. Falls back to PID file if PGID file doesn't exist.
+//
+// Note on pause detection: When a job is paused via SIGSTOP to the process group,
+// the PGID (process group leader, e.g., "uv" or "python") will have state "T" (stopped),
+// but the parent bash shell (PID) may still show state "S+" (running/sleeping).
+// This is expected because we signal the process GROUP (-pgid), not the wrapper shell.
+// We detect pause by checking the PGID's state, not the shell's state.
 func (h *SSHHost) IsProcessPaused(jobID int64) (bool, error) {
 	pgidFile := session.SimplePgidFile(jobID)
 	pidPattern := session.PidFilePattern(jobID)
