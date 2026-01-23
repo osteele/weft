@@ -52,8 +52,9 @@ func runCancel(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		if job.Status != db.StatusQueued {
-			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only cancel queued jobs (use 'kill' for running jobs)", jobID, job.Status))
+		effectiveStatus := job.EffectiveStatus()
+		if effectiveStatus != db.StatusQueued {
+			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only cancel queued jobs (use 'kill' for running jobs)", jobID, effectiveStatus))
 			continue
 		}
 

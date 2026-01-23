@@ -664,8 +664,9 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check if job is queued (not yet started)
-		if job.Status != db.StatusQueued {
-			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only remove queued jobs", jobID, job.Status))
+		effectiveStatus := job.EffectiveStatus()
+		if effectiveStatus != db.StatusQueued {
+			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only remove queued jobs", jobID, effectiveStatus))
 			continue
 		}
 
@@ -706,8 +707,9 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 	if job == nil {
 		return fmt.Errorf("job %d not found", jobID)
 	}
-	if job.Status != db.StatusQueued {
-		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, job.Status)
+	effectiveStatus := job.EffectiveStatus()
+	if effectiveStatus != db.StatusQueued {
+		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, effectiveStatus)
 	}
 
 	moved, err := queuefile.MoveToFront(job.Host, defaultQueueName, jobID)
@@ -780,15 +782,16 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Handle status change (requeue)
+	effectiveStatus := job.EffectiveStatus()
 	if statusChanged && editStatus == db.StatusQueued {
-		if job.Status == db.StatusQueued {
+		if effectiveStatus == db.StatusQueued {
 			return fmt.Errorf("job %d is already queued", jobID)
 		}
-		if !requeueableStatuses[job.Status] {
-			return fmt.Errorf("cannot change job %d from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", jobID, job.Status)
+		if !requeueableStatuses[effectiveStatus] {
+			return fmt.Errorf("cannot change job %d from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", jobID, effectiveStatus)
 		}
-	} else if job.Status != db.StatusQueued {
-		return fmt.Errorf("job %d has status '%s', can only edit queued jobs", jobID, job.Status)
+	} else if effectiveStatus != db.StatusQueued {
+		return fmt.Errorf("job %d has status '%s', can only edit queued jobs", jobID, effectiveStatus)
 	}
 
 	jobQueueName := defaultQueueName

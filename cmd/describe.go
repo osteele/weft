@@ -84,8 +84,9 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if trying to update command/directory/gpu on non-queued job
-	if (describeCommand != "" || describeDirectory != "" || gpuValue != "") && job.Status != db.StatusQueued {
-		return fmt.Errorf("can only update command/directory/gpu on queued jobs (job %d has status: %s)", jobID, job.Status)
+	effectiveStatus := job.EffectiveStatus()
+	if (describeCommand != "" || describeDirectory != "" || gpuValue != "") && effectiveStatus != db.StatusQueued {
+		return fmt.Errorf("can only update command/directory/gpu on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
 	}
 
 	// Track what was updated

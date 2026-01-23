@@ -15,7 +15,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		return Result{}, fmt.Errorf("job not found")
 	}
 
-	if job.Status == db.StatusDraft {
+	if job.EffectiveStatus() == db.StatusDraft {
 		return Result{
 			Success: true,
 			JobID:   job.ID,

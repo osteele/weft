@@ -193,6 +193,40 @@ func TestCancelQueuedJob_NotQueued(t *testing.T) {
 	}
 }
 
+// TestCancelQueuedJob_UsesEffectiveStatus verifies that CancelQueuedJob checks
+// EffectiveStatus() rather than raw Status, so a queued job with pending=killed
+// is treated as effectively killed (not cancellable).
+func TestCancelQueuedJob_UsesEffectiveStatus(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+
+	// Set pending status to killed - the job is still Status=queued but EffectiveStatus=killed
+	if err := db.SetPendingStatus(database, jobID, db.StatusKilled); err != nil {
+		t.Fatalf("SetPendingStatus failed: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	// Verify the job's raw status is still queued
+	if job.Status != db.StatusQueued {
+		t.Fatalf("expected Status to be queued, got %s", job.Status)
+	}
+
+	// Verify EffectiveStatus returns the pending status
+	if job.EffectiveStatus() != db.StatusKilled {
+		t.Fatalf("expected EffectiveStatus to be killed, got %s", job.EffectiveStatus())
+	}
+
+	// CancelQueuedJob should reject because EffectiveStatus is not queued
+	_, err := CancelQueuedJob(database, job, DefaultOptions())
+	if err == nil {
+		t.Fatal("expected error for job with EffectiveStatus != queued")
+	}
+	if !strings.Contains(err.Error(), "not queued") {
+		t.Errorf("expected error to mention 'not queued', got: %v", err)
+	}
+}
+
 // TestKillQueueRunnerJob_TildeNotSingleQuoted verifies that the kill command
 // for queue-runner jobs doesn't use single-quoted tilde paths, which would
 // prevent shell expansion.

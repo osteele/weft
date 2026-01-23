@@ -76,8 +76,9 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 		return Result{}, fmt.Errorf("job is nil")
 	}
 
-	if job.Status != db.StatusQueued {
-		return Result{}, fmt.Errorf("job %d is not queued (status: %s)", job.ID, job.Status)
+	effectiveStatus := job.EffectiveStatus()
+	if effectiveStatus != db.StatusQueued {
+		return Result{}, fmt.Errorf("job %d is not queued (status: %s)", job.ID, effectiveStatus)
 	}
 
 	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceling queued job"))

@@ -460,7 +460,7 @@ func allJobsSucceeded(requests []jobStatusRequest, final map[int64]*db.Job) bool
 		if job == nil {
 			return false
 		}
-		if job.Status != db.StatusCompleted {
+		if job.EffectiveStatus() != db.StatusCompleted {
 			return false
 		}
 		if job.ExitCode == nil || *job.ExitCode != 0 {

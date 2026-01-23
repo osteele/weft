@@ -67,14 +67,15 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 
 	// Validate job can be retried
-	if !requeueableStatuses[job.Status] {
-		if job.Status == db.StatusQueued {
+	effectiveStatus := job.EffectiveStatus()
+	if !requeueableStatuses[effectiveStatus] {
+		if effectiveStatus == db.StatusQueued {
 			return fmt.Errorf("job is already queued")
 		}
-		if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
-			return fmt.Errorf("job is currently %s; kill it first if you want to retry", job.Status)
+		if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusStarting {
+			return fmt.Errorf("job is currently %s; kill it first if you want to retry", effectiveStatus)
 		}
-		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled jobs can be retried", job.Status)
+		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled jobs can be retried", effectiveStatus)
 	}
 
 	if job.Host == "" {

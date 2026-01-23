@@ -773,6 +773,64 @@ func TestListJobsPendingReconciliation(t *testing.T) {
 // TestSyncFunctionsUpdateLastSyncedStatus verifies that all sync operations
 // update both status and last_synced_status together. This prevents bugs where
 // a job's status shows one thing but last_synced_status shows another.
+func TestEffectiveStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        string
+		pendingStatus *string
+		want          string
+	}{
+		{
+			name:          "no pending status returns actual status",
+			status:        StatusRunning,
+			pendingStatus: nil,
+			want:          StatusRunning,
+		},
+		{
+			name:          "pending status overrides actual status",
+			status:        StatusRunning,
+			pendingStatus: ptr(StatusKilled),
+			want:          StatusKilled,
+		},
+		{
+			name:          "queued with pending canceled",
+			status:        StatusQueued,
+			pendingStatus: ptr(StatusCanceled),
+			want:          StatusCanceled,
+		},
+		{
+			name:          "running with pending paused",
+			status:        StatusRunning,
+			pendingStatus: ptr(StatusPaused),
+			want:          StatusPaused,
+		},
+		{
+			name:          "paused with pending running (resume)",
+			status:        StatusPaused,
+			pendingStatus: ptr(StatusRunning),
+			want:          StatusRunning,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{
+				Status:        tt.status,
+				PendingStatus: tt.pendingStatus,
+			}
+			got := job.EffectiveStatus()
+			if got != tt.want {
+				t.Errorf("EffectiveStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// ptr returns a pointer to the given string (helper for tests)
+func ptr(s string) *string {
+	return &s
+}
+
 func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 	db := setupTestDB(t)
 

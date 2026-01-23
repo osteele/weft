@@ -260,8 +260,9 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check status
-	if job.Status != db.StatusQueued {
-		return fmt.Errorf("can only move queued jobs (job %d has status: %s)", jobID, job.Status)
+	effectiveStatus := job.EffectiveStatus()
+	if effectiveStatus != db.StatusQueued {
+		return fmt.Errorf("can only move queued jobs (job %d has status: %s)", jobID, effectiveStatus)
 	}
 
 	oldHost := job.Host
@@ -308,8 +309,9 @@ func runJobStartNow(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
 			continue
 		}
-		if job.Status != db.StatusQueued {
-			errorsList = append(errorsList, fmt.Sprintf("job %d is not queued (status: %s)", jobID, job.Status))
+		effectiveStatus := job.EffectiveStatus()
+		if effectiveStatus != db.StatusQueued {
+			errorsList = append(errorsList, fmt.Sprintf("job %d is not queued (status: %s)", jobID, effectiveStatus))
 			continue
 		}
 
@@ -393,7 +395,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		// Show created/queued time if different from start time
 		if job.CreatedAt > 0 && job.CreatedAt != job.StartTime {
 			label := "Created"
-			if job.Status == db.StatusQueued {
+			if job.EffectiveStatus() == db.StatusQueued {
 				label = "Queued"
 			}
 			fmt.Printf("%-12s %s\n", label+":", formatUnixTime(job.CreatedAt))

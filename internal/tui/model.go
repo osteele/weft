@@ -7165,7 +7165,7 @@ func (m Model) editJob() tea.Cmd {
 		if job == nil {
 			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
 		}
-		if job.Status != db.StatusQueued {
+		if job.EffectiveStatus() != db.StatusQueued {
 			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("can only edit queued jobs")}
 		}
 

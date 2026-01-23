@@ -566,6 +566,55 @@ func TestSlurmIntegration_JobLifecycle(t *testing.T) {
 	}
 }
 
+// TestIntegration_EffectiveStatusPreventsDoubleCancel verifies that once a job
+// has a pending cancel, subsequent cancel attempts are rejected because
+// EffectiveStatus() returns the pending status rather than the raw status.
+func TestIntegration_EffectiveStatusPreventsDoubleCancel(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Queue a job
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "sleep 30",
+		Description: "Integration test: effective status prevents double cancel",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+	jobID := result.JobID
+	t.Logf("Queued job %d", jobID)
+
+	// First cancel should succeed (sets pending status)
+	job, _ := db.GetJobByID(database, jobID)
+	cancelResult, err := ops.CancelQueuedJob(database, job, ops.ExecuteOptions{Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("First CancelQueuedJob failed: %v", err)
+	}
+	t.Logf("First cancel result: %+v", cancelResult)
+
+	// Re-fetch job to get updated state
+	job, _ = db.GetJobByID(database, jobID)
+
+	// Verify EffectiveStatus shows canceled (either actual or pending)
+	effectiveStatus := job.EffectiveStatus()
+	if effectiveStatus != db.StatusCanceled {
+		t.Errorf("Expected EffectiveStatus to be canceled, got %s (status=%s, pending=%v)",
+			effectiveStatus, job.Status, job.PendingStatus)
+	}
+
+	// Second cancel should fail because EffectiveStatus is no longer queued
+	_, err = ops.CancelQueuedJob(database, job, ops.ExecuteOptions{Timeout: 10 * time.Second})
+	if err == nil {
+		t.Error("Expected second CancelQueuedJob to fail, but it succeeded")
+	} else {
+		t.Logf("Second cancel correctly rejected: %v", err)
+	}
+}
+
 // TestIntegration_SyncDetectsRunningProcess verifies that when sync detects a process
 // is running but the local status is still queued/starting, it transitions to running.
 // This tests the fix for handling concurrent job execution where only one job is

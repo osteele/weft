@@ -96,11 +96,12 @@ func (s *Service) PauseJob(jobID int64, mode ops.TimeoutMode) (OperationResult, 
 	if err != nil {
 		return OperationResult{}, err
 	}
-	if job.Status == db.StatusPaused {
+	effectiveStatus := job.EffectiveStatus()
+	if effectiveStatus == db.StatusPaused {
 		return OperationResult{}, fmt.Errorf("job %d is already paused", job.ID)
 	}
-	if job.Status != db.StatusRunning && job.Status != db.StatusStarting {
-		return OperationResult{}, fmt.Errorf("job %d is %s; only running jobs can be paused", job.ID, job.Status)
+	if effectiveStatus != db.StatusRunning && effectiveStatus != db.StatusStarting {
+		return OperationResult{}, fmt.Errorf("job %d is %s; only running jobs can be paused", job.ID, effectiveStatus)
 	}
 	outcome, err := ops.RequestStatus(s.database, job, db.StatusPaused, resolveMode(mode))
 	if err != nil {
@@ -115,8 +116,9 @@ func (s *Service) ResumeJob(jobID int64, mode ops.TimeoutMode) (OperationResult,
 	if err != nil {
 		return OperationResult{}, err
 	}
-	if job.Status != db.StatusPaused {
-		return OperationResult{}, fmt.Errorf("job %d is %s; only paused jobs can be resumed", job.ID, job.Status)
+	effectiveStatus := job.EffectiveStatus()
+	if effectiveStatus != db.StatusPaused {
+		return OperationResult{}, fmt.Errorf("job %d is %s; only paused jobs can be resumed", job.ID, effectiveStatus)
 	}
 	outcome, err := ops.RequestStatus(s.database, job, db.StatusRunning, resolveMode(mode))
 	if err != nil {
