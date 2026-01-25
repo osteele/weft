@@ -745,6 +745,12 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 
 // ensureQueueRunnerStarted checks if queue runner is running and starts it if not.
 func ensureQueueRunnerStarted(host string) (bool, error) {
+	// Check if jq is available (required for queue runner)
+	jqAvailable, err := queuerunner.CheckJqAvailable(host)
+	if err == nil && !jqAvailable {
+		return false, fmt.Errorf("jq is required but not installed on %s", host)
+	}
+
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)

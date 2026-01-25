@@ -419,6 +419,15 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 // or (false, error) if starting failed.
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	queue = defaultQueueName
+
+	// Check if jq is available (required for queue runner)
+	jqAvailable, err := queuerunner.CheckJqAvailable(host)
+	if err == nil && !jqAvailable {
+		fmt.Fprintf(os.Stderr, "Warning: %s is missing 'jq' - queue runner cannot start.\n", host)
+		fmt.Fprintf(os.Stderr, "Install with: %s\n", queuerunner.JqInstallCommand(host))
+		return false, fmt.Errorf("jq is required but not installed on %s", host)
+	}
+
 	// Deploy notify script if Slack is configured
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)

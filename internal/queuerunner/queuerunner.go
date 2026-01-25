@@ -253,3 +253,18 @@ func (r *Runner) WaitForStop(timeout time.Duration) error {
 func (r *Runner) IsRunning() (bool, error) {
 	return ssh.TmuxSessionExists(r.host, r.SessionName())
 }
+
+// CheckJqAvailable checks if jq is available on the host (in PATH or ~/.local/bin).
+func CheckJqAvailable(host string) (bool, error) {
+	cmd := `(command -v jq >/dev/null 2>&1 || test -x ~/.local/bin/jq) && echo "yes" || echo "no"`
+	stdout, _, err := ssh.Run(host, cmd)
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(stdout) == "yes", nil
+}
+
+// JqInstallCommand returns the command to install jq on a Linux host.
+func JqInstallCommand(host string) string {
+	return fmt.Sprintf("ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", host)
+}

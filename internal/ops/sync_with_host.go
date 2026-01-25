@@ -172,7 +172,9 @@ func SyncQueueRunnerJobWithProber(
 	}
 
 	// Ensure queued job is present in queue if it was recorded locally while host was unreachable.
-	if inQueueResult == remote.ProbeFalse && job.Status == db.StatusQueued && job.PendingStatus == nil {
+	// Check LastSyncedStatus to avoid re-appending jobs that were already synced but not yet
+	// processed by the queue runner (which would cause duplicate entries in the pending array).
+	if inQueueResult == remote.ProbeFalse && job.Status == db.StatusQueued && job.PendingStatus == nil && job.LastSyncedStatus != db.StatusQueued {
 		entry := remote.QueueEntry{
 			JobID:       job.ID,
 			WorkingDir:  job.WorkingDir,

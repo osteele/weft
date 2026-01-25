@@ -78,6 +78,7 @@ type Host struct {
 	QueuedJobCount    int              // Number of jobs waiting in queue
 	CurrentQueueJob   string           // Job ID currently running in queue
 	QueueStopPending  bool             // Whether stop signal file exists
+	JqMissing         bool             // jq is required but not installed on this host
 
 	// Running jobs on this host
 	RunningJobs []HostRunningJob

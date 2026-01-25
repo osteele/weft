@@ -697,6 +697,8 @@ type Model struct {
 
 	// Track hosts that have already shown low disk warning this session
 	lowDiskWarnedHosts map[string]bool
+	// Track hosts that have already shown jq missing warning this session
+	jqMissingWarnedHosts map[string]bool
 
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
 	jobDependencies map[int64]string
@@ -860,6 +862,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostCacheDuration:       opts.HostCacheDuration,
 		hostsQueriedThisSession: make(map[string]bool),
 		lowDiskWarnedHosts:      make(map[string]bool),
+		jqMissingWarnedHosts:    make(map[string]bool),
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
@@ -1241,7 +1244,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case jobStartedNowMsg:
 		if msg.err != nil {
-			return m, m.setFlash(fmt.Sprintf("Start failed: %v", msg.err), true)
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Start failed: %v", msg.err), true), m.refreshJobs())
 		}
 		if msg.deferred {
 			return m, tea.Batch(
@@ -1421,6 +1424,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case queueStatusMsg:
 		// Update queue status for host
+		var jqWarningCmd tea.Cmd
 		for i, h := range m.hosts {
 			if h.Name == msg.hostName {
 				m.hosts[i].QueueStatus = QueueCheckChecked
@@ -1428,10 +1432,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.hosts[i].QueuedJobCount = msg.info.QueuedJobCount
 				m.hosts[i].CurrentQueueJob = msg.info.CurrentJob
 				m.hosts[i].QueueStopPending = msg.info.StopPending
+				m.hosts[i].JqMissing = msg.info.JqMissing
+
+				// Warn if jq is missing (only on first detection this session)
+				if msg.info.JqMissing && !m.jqMissingWarnedHosts[msg.hostName] {
+					m.jqMissingWarnedHosts[msg.hostName] = true
+					jqWarningCmd = m.setFlash(
+						fmt.Sprintf("Warning: %s is missing 'jq' - queue runner cannot start. Install with: ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", msg.hostName, msg.hostName),
+						true,
+					)
+				}
 				break
 			}
 		}
-		return m, nil
+		return m, jqWarningCmd
 
 	case hostJobsGPUMsg:
 		// Update running jobs and GPU mappings for host
@@ -2060,6 +2074,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
+		// Check for pending start first (idempotent behavior)
+		if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning {
+			return m, m.setFlash(fmt.Sprintf("Job %d is already starting (pending)", job.ID), false)
+		}
 		// Use effective status so pending state is respected
 		switch job.EffectiveStatus() {
 		case db.StatusPaused:
@@ -2071,8 +2089,10 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case db.StatusDraft:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=g action=run_draft"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Running draft job %d...", job.ID), false), m.runDraftJob(job))
+		case db.StatusRunning:
+			return m, m.setFlash(fmt.Sprintf("Job %d is already running", job.ID), false)
 		default:
-			return m, m.setFlash("Can only start queued or draft jobs", true)
+			return m, m.setFlash(fmt.Sprintf("Can only start queued or draft jobs (job %d is %s)", job.ID, job.EffectiveStatus()), true)
 		}
 
 	case key.Matches(msg, keys.MoveToFront):
@@ -4282,7 +4302,10 @@ func (m Model) renderHostDetail(height int) string {
 		if host.QueueStatus == QueueCheckChecked {
 			lines = append(lines, "")
 			lines = append(lines, "Queue")
-			if host.QueueRunnerActive {
+			if host.JqMissing {
+				lines = append(lines, "  ⚠ jq missing: Queue runner cannot start")
+				lines = append(lines, "    Install: curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq")
+			} else if host.QueueRunnerActive {
 				lines = append(lines, "  Runner:       Active")
 				if host.CurrentQueueJob != "" {
 					lines = append(lines, fmt.Sprintf("  Current job:  %s", host.CurrentQueueJob))
@@ -5702,6 +5725,7 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 			msg.info.QueuedJobCount = h.QueuedJobCount
 			msg.info.CurrentQueueJob = h.CurrentQueueJob
 			msg.info.QueueStopPending = h.QueueStopPending
+			msg.info.JqMissing = h.JqMissing
 			msg.info.RunningJobs = h.RunningJobs
 			if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
 				msg.info.LastCheck = h.LastCheck
@@ -6751,8 +6775,16 @@ func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
 
 // startQueuedJobNow starts a queued job immediately, bypassing any dependencies
 func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
-	if job == nil || job.Status != db.StatusQueued {
-		return nil
+	if job == nil {
+		return func() tea.Msg {
+			return jobStartedNowMsg{err: fmt.Errorf("no job selected")}
+		}
+	}
+	// Use EffectiveStatus to be consistent with the handler
+	if job.EffectiveStatus() != db.StatusQueued {
+		return func() tea.Msg {
+			return jobStartedNowMsg{jobID: job.ID, err: fmt.Errorf("job %d is %s, not queued", job.ID, job.EffectiveStatus())}
+		}
 	}
 	database := m.database
 	return func() tea.Msg {
@@ -7009,6 +7041,12 @@ func (m Model) startQueue(host string) tea.Cmd {
 // ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
+	// Check if jq is available (required for queue runner)
+	jqAvailable, err := queuerunner.CheckJqAvailable(host)
+	if err == nil && !jqAvailable {
+		return false, fmt.Errorf("jq is required but not installed on %s", host)
+	}
+
 	// Deploy notify script and build env vars if Slack is configured
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)
