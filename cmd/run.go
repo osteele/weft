@@ -30,10 +30,12 @@ Use --immediate (-i) to start a job immediately instead of adding it to the queu
 Examples:
   remote-jobs run cool30 'python train.py'           # Queue job
   remote-jobs run -i cool30 'python train.py'        # Start immediately
+  remote-jobs run --wait cool30 'python train.py'    # Queue and wait for completion
+  remote-jobs run -f cool30 'python train.py'        # Queue and follow log output
   remote-jobs run -m "Training" cool30 'python train.py'
   remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
   remote-jobs run --after 42 cool30 'python eval.py' # Run after job 42
-  remote-jobs run -i -f cool30 'python train.py'     # Start and follow log`,
+  remote-jobs run -i -f cool30 'python train.py'     # Start immediately and follow log`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
 		// --kill mode only needs host
 		if runKillJobID > 0 {
@@ -58,6 +60,7 @@ var (
 	runDraft       bool
 	runFollow      bool
 	runAllow       bool
+	runWait        bool
 	runKillJobID   int64
 	runFrom        int64
 	runTimeout     string
@@ -86,6 +89,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
+	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -162,10 +166,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	printCommandRecommendations(command)
 
 	// Validate flag combinations
-	// --follow and --allow require --immediate (can't follow a queued job)
-	if runFollow && !runImmediate {
-		return fmt.Errorf("--follow requires --immediate (-i) since jobs are queued by default")
-	}
+	// --allow requires --immediate (can't use allow mode with a queued job)
 	if runAllow && !runImmediate {
 		return fmt.Errorf("--allow requires --immediate (-i) since jobs are queued by default")
 	}
@@ -198,6 +199,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if runDraft && (runAfter > 0 || runAfterAny > 0) {
 		return fmt.Errorf("--draft cannot be combined with --after/--depends-on or --after-any")
+	}
+	if runWait && runFollow {
+		return fmt.Errorf("--wait cannot be used with --follow")
+	}
+	if runWait && runAllow {
+		return fmt.Errorf("--wait cannot be used with --allow")
+	}
+	if runWait && runDraft {
+		return fmt.Errorf("--wait cannot be combined with --draft")
 	}
 
 	dirProvided := runDir != ""
@@ -333,6 +343,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if len(runEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
+
+		// Handle --wait: block until job completes
+		if runWait {
+			return waitForQueuedJobCompletion(database, jobID, res.Deferred)
+		}
+
+		// Handle --follow: wait for job to start, then stream logs
+		if runFollow {
+			return followQueuedJob(database, jobID, host, res.Deferred)
+		}
+
+		// Default: show deferred message and return
 		if res.Deferred {
 			fmt.Printf("\nHost %s is unreachable. Job will be queued when host becomes available.\n", host)
 		} else {

@@ -513,14 +513,21 @@ func uniqueHosts(hosts []string) []string {
 func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 	var summaries []string
 	for _, host := range hosts {
-		age := "unknown"
-		if info, err := db.LoadCachedHostInfo(database, host); err == nil && info != nil && info.LastUpdated > 0 {
-			ageDuration := time.Since(time.Unix(info.LastUpdated, 0))
-			if ageDuration < 0 {
-				ageDuration = 0
-			}
-			age = fmt.Sprintf("%s ago", db.FormatDuration(int64(ageDuration.Seconds())))
+		info, err := db.LoadCachedHostInfo(database, host)
+		if err != nil || info == nil || info.LastUpdated == 0 {
+			// Unknown age - include with "unknown" label
+			summaries = append(summaries, fmt.Sprintf("%s: unknown", host))
+			continue
 		}
+		ageDuration := time.Since(time.Unix(info.LastUpdated, 0))
+		if ageDuration < 0 {
+			ageDuration = 0
+		}
+		// Only warn if cache is more than 1 minute old
+		if ageDuration < time.Minute {
+			continue
+		}
+		age := fmt.Sprintf("%s ago", db.FormatDuration(int64(ageDuration.Seconds())))
 		summaries = append(summaries, fmt.Sprintf("%s: %s", host, age))
 	}
 	return summaries
