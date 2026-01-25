@@ -189,6 +189,7 @@ var (
 	queueDir_           string
 	queueDescription    string
 	queueEnvVars        []string
+	queueTags           []string
 	queueAfter          int64
 	queueAfterAny       int64
 	queueNoStart        bool
@@ -260,6 +261,7 @@ func init() {
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
+	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Special: 'exclusive' makes job run alone")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
@@ -344,6 +346,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			db.DeleteJob(database, jobID)
 			return fmt.Errorf("record draft env vars: %w", err)
 		}
+		if len(queueTags) > 0 {
+			if err := db.SetJobTags(database, jobID, queueTags); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft tags: %w", err)
+			}
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -352,6 +360,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		}
 		if len(queueEnvVars) > 0 {
 			fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+		}
+		if len(queueTags) > 0 {
+			fmt.Printf("  Tags: %s\n", strings.Join(queueTags, ", "))
 		}
 		if queueAfter > 0 {
 			fmt.Printf("  After job: %d (will wait for success when queued)\n", queueAfter)
@@ -368,6 +379,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		Command:      command,
 		Description:  queueDescription,
 		EnvVars:      queueEnvVars,
+		Tags:         queueTags,
 		QueueName:    defaultQueueName,
 		Dependencies: deps,
 		AutoStart:    !queueNoStart,
@@ -385,6 +397,9 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	if len(queueEnvVars) > 0 {
 		fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
+	}
+	if len(queueTags) > 0 {
+		fmt.Printf("  Tags: %s\n", strings.Join(queueTags, ", "))
 	}
 	if queueAfter > 0 {
 		fmt.Printf("  After job: %d (will wait for success)\n", queueAfter)

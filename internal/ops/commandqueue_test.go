@@ -338,3 +338,142 @@ func TestStateFilePath(t *testing.T) {
 		t.Errorf("unexpected path: %s", path)
 	}
 }
+
+func TestTagsSerialization(t *testing.T) {
+	tests := []struct {
+		name     string
+		tags     []string
+		wantTags []string
+	}{
+		{
+			name:     "no tags",
+			tags:     nil,
+			wantTags: nil,
+		},
+		{
+			name:     "single tag",
+			tags:     []string{"exclusive"},
+			wantTags: []string{"exclusive"},
+		},
+		{
+			name:     "multiple tags",
+			tags:     []string{"exclusive", "gpu", "experiment-1"},
+			wantTags: []string{"exclusive", "gpu", "experiment-1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewAddCommand(QueueEntry{
+				JobID:   123,
+				Command: "echo hello",
+				Tags:    tt.tags,
+			})
+
+			// Serialize to JSON
+			jsonBytes, err := json.Marshal(cmd)
+			if err != nil {
+				t.Fatalf("failed to marshal: %v", err)
+			}
+
+			// Deserialize and verify tags
+			var roundTrip QueueCommand
+			if err := json.Unmarshal(jsonBytes, &roundTrip); err != nil {
+				t.Fatalf("failed to unmarshal: %v", err)
+			}
+
+			if roundTrip.Job == nil {
+				t.Fatal("job is nil after round-trip")
+			}
+
+			// Check tags match
+			if len(roundTrip.Job.Tags) != len(tt.wantTags) {
+				t.Errorf("tags length mismatch: got %d, want %d", len(roundTrip.Job.Tags), len(tt.wantTags))
+			}
+			for i, tag := range roundTrip.Job.Tags {
+				if tag != tt.wantTags[i] {
+					t.Errorf("tag[%d] mismatch: got %q, want %q", i, tag, tt.wantTags[i])
+				}
+			}
+		})
+	}
+}
+
+func TestJqCanParseTagsFromCommands(t *testing.T) {
+	// Skip if jq is not installed
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+
+	cmd := NewAddCommand(QueueEntry{
+		JobID:   12345,
+		Command: "echo hello",
+		Tags:    []string{"exclusive", "gpu", "experiment-1"},
+	})
+
+	jsonBytes, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	// Test jq extraction of tags
+	jqScript := `echo "$1" | jq -r '.job.tags // [] | index("exclusive") != null'`
+	execCmd := exec.Command("bash", "-c", jqScript, "bash", string(jsonBytes))
+	output, err := execCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("jq parsing failed: %v\noutput: %s", err, output)
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result != "true" {
+		t.Errorf("expected jq to find exclusive tag, got: %s", result)
+	}
+}
+
+func TestExclusiveTagLogic(t *testing.T) {
+	// Skip if jq is not installed
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not installed")
+	}
+
+	// Test the job_has_exclusive_tag function logic
+	tests := []struct {
+		name     string
+		tags     []string
+		expected bool
+	}{
+		{"no tags", nil, false},
+		{"empty tags", []string{}, false},
+		{"other tag", []string{"gpu"}, false},
+		{"exclusive tag", []string{"exclusive"}, true},
+		{"exclusive with others", []string{"gpu", "exclusive", "test"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			jobData := map[string]interface{}{
+				"id":   1,
+				"cmd":  "echo test",
+				"tags": tt.tags,
+			}
+			jsonBytes, _ := json.Marshal(jobData)
+
+			// Test the same jq expression used in queue-runner.sh
+			jqScript := `echo "$1" | jq -e '.tags // [] | index("exclusive") != null' &>/dev/null && echo "true" || echo "false"`
+			execCmd := exec.Command("bash", "-c", jqScript, "bash", string(jsonBytes))
+			output, err := execCmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bash failed: %v\noutput: %s", err, output)
+			}
+
+			result := strings.TrimSpace(string(output))
+			expected := "false"
+			if tt.expected {
+				expected = "true"
+			}
+			if result != expected {
+				t.Errorf("job_has_exclusive_tag: got %s, want %s", result, expected)
+			}
+		})
+	}
+}

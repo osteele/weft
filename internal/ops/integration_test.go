@@ -448,6 +448,203 @@ func fetchQueueEntryFromRemote(host, queueName string, jobID int64, timeout time
 	}, nil
 }
 
+func TestIntegration_ExclusiveTagSynced(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Queue a job with the exclusive tag
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo 'Exclusive test job'",
+		Description: "Integration test: exclusive tag",
+		Tags:        []string{"exclusive", "test"},
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+
+	jobID := result.JobID
+	t.Logf("Queued job %d with exclusive tag", jobID)
+
+	// Verify job was recorded with tags in database
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID failed: %v", err)
+	}
+	if !job.HasTag("exclusive") {
+		t.Errorf("Expected job to have 'exclusive' tag in database, got tags: %v", job.Tags)
+	}
+
+	// Verify tags are synced to remote by checking the commands file
+	commandsFile := fmt.Sprintf("%s/%s.commands", ops.QueueDir, ops.DefaultQueueName)
+	cmd := fmt.Sprintf(`tail -20 %s | grep '"id":%d' | tail -1`, commandsFile, jobID)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Could not read commands file: %v", err)
+	}
+
+	// Parse the JSON to verify tags are present
+	var queueCmd struct {
+		Job struct {
+			ID   int64    `json:"id"`
+			Tags []string `json:"tags"`
+		} `json:"job"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &queueCmd); err != nil {
+		t.Fatalf("Failed to parse queue command JSON: %v\nJSON: %s", err, stdout)
+	}
+
+	if queueCmd.Job.ID != jobID {
+		t.Errorf("Wrong job ID in queue entry: got %d, want %d", queueCmd.Job.ID, jobID)
+	}
+
+	foundExclusive := false
+	for _, tag := range queueCmd.Job.Tags {
+		if tag == "exclusive" {
+			foundExclusive = true
+			break
+		}
+	}
+	if !foundExclusive {
+		t.Errorf("Expected 'exclusive' tag in remote queue entry, got tags: %v", queueCmd.Job.Tags)
+	}
+
+	t.Logf("Verified exclusive tag synced to remote: %v", queueCmd.Job.Tags)
+
+	// Clean up
+	cancelCmd := ops.NewCancelCommand(jobID)
+	_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+}
+
+func TestIntegration_ExclusiveJobRunsAlone(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Ensure queue runner is started
+	started, err := ensureQueueRunnerStarted(t, host)
+	if err != nil {
+		t.Fatalf("Failed to start queue runner: %v", err)
+	}
+	if started {
+		t.Logf("Started queue runner on %s", host)
+	}
+
+	// Queue three jobs rapidly:
+	// 1. Regular job (runs first)
+	// 2. Exclusive job (should wait for job 1, then run alone)
+	// 3. Regular job (should wait for exclusive job)
+
+	params1 := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo 'Job 1 start'; sleep 3; echo 'Job 1 done'",
+		Description: "Integration test: regular job before exclusive",
+	}
+	result1, err := ops.QueueJob(database, params1, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob 1 failed: %v", err)
+	}
+	t.Logf("Queued regular job %d", result1.JobID)
+
+	params2 := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo 'Exclusive job start'; sleep 2; echo 'Exclusive job done'",
+		Description: "Integration test: exclusive job",
+		Tags:        []string{"exclusive"},
+	}
+	result2, err := ops.QueueJob(database, params2, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob 2 (exclusive) failed: %v", err)
+	}
+	t.Logf("Queued exclusive job %d", result2.JobID)
+
+	params3 := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo 'Job 3 start'; sleep 1; echo 'Job 3 done'",
+		Description: "Integration test: regular job after exclusive",
+	}
+	result3, err := ops.QueueJob(database, params3, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob 3 failed: %v", err)
+	}
+	t.Logf("Queued regular job %d", result3.JobID)
+
+	// Wait for all jobs to complete
+	deadline := time.Now().Add(60 * time.Second)
+	allComplete := false
+	for time.Now().Before(deadline) {
+		// Sync all jobs
+		for _, jobID := range []int64{result1.JobID, result2.JobID, result3.JobID} {
+			job, _ := db.GetJobByID(database, jobID)
+			if job != nil {
+				_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+			}
+		}
+
+		// Check if all are complete
+		job1, _ := db.GetJobByID(database, result1.JobID)
+		job2, _ := db.GetJobByID(database, result2.JobID)
+		job3, _ := db.GetJobByID(database, result3.JobID)
+
+		if job1 != nil && job2 != nil && job3 != nil &&
+			db.IsTerminalStatus(job1.Status) &&
+			db.IsTerminalStatus(job2.Status) &&
+			db.IsTerminalStatus(job3.Status) {
+			allComplete = true
+			break
+		}
+
+		t.Logf("Waiting... Job1=%s Job2=%s Job3=%s",
+			job1.Status, job2.Status, job3.Status)
+		time.Sleep(2 * time.Second)
+	}
+
+	if !allComplete {
+		t.Fatal("Jobs did not complete within timeout")
+	}
+
+	// Verify all jobs completed successfully
+	job1, _ := db.GetJobByID(database, result1.JobID)
+	job2, _ := db.GetJobByID(database, result2.JobID)
+	job3, _ := db.GetJobByID(database, result3.JobID)
+
+	if job1.Status != db.StatusCompleted {
+		t.Errorf("Job 1 status: expected completed, got %s", job1.Status)
+	}
+	if job2.Status != db.StatusCompleted {
+		t.Errorf("Job 2 (exclusive) status: expected completed, got %s", job2.Status)
+	}
+	if job3.Status != db.StatusCompleted {
+		t.Errorf("Job 3 status: expected completed, got %s", job3.Status)
+	}
+
+	// Verify timing: job 2 should have started after job 1 ended,
+	// and job 3 should have started after job 2 ended
+	// StartTime is int64 (unix timestamp), EndTime is *int64
+	if job1.EndTime != nil && job2.StartTime > 0 {
+		if job2.StartTime < *job1.EndTime {
+			t.Errorf("Exclusive job started before regular job 1 ended: job1.end=%d, job2.start=%d",
+				*job1.EndTime, job2.StartTime)
+		}
+	}
+	if job2.EndTime != nil && job3.StartTime > 0 {
+		if job3.StartTime < *job2.EndTime {
+			t.Errorf("Job 3 started before exclusive job ended: job2.end=%d, job3.start=%d",
+				*job2.EndTime, job3.StartTime)
+		}
+	}
+
+	t.Logf("All jobs completed successfully in correct order")
+	t.Logf("Job 1: %d - %v", job1.StartTime, job1.EndTime)
+	t.Logf("Job 2 (exclusive): %d - %v", job2.StartTime, job2.EndTime)
+	t.Logf("Job 3: %d - %v", job3.StartTime, job3.EndTime)
+}
+
 // SLURM integration tests
 // These tests run when SLURM_TEST_HOST is set, otherwise they skip.
 //

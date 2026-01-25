@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 35
+# BUILD: 36
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -489,6 +489,32 @@ get_job_data() {
     else
         echo "{}"
     fi
+}
+
+# Check if a job has the "exclusive" tag
+# Jobs with this tag run alone - they wait until no other jobs are running,
+# and no other jobs start while they're running.
+job_has_exclusive_tag() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+    # Check if tags array contains "exclusive"
+    echo "$job_data" | jq -e '.tags // [] | index("exclusive") != null' &>/dev/null
+}
+
+# Check if any running job has the "exclusive" tag
+any_running_exclusive() {
+    local ids
+    ids=$(running_ids)
+    [ -z "$ids" ] && return 1
+
+    local id
+    for id in $ids; do
+        if job_has_exclusive_tag "$id"; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Check if a job is already completed
@@ -1042,12 +1068,28 @@ while true; do
         continue
     fi
 
+    # Check exclusive tag constraints before starting
+    # If any running job has "exclusive" tag, don't start anything else
+    if any_running_exclusive; then
+        add_pending "$POPPED_JOB"
+        save_state
+        sleep 5
+        continue
+    fi
+    # If the next job has "exclusive" tag, wait until no other jobs are running
+    running_jobs=$(running_count)
+    if job_has_exclusive_tag "$POPPED_JOB" && [ "$running_jobs" -gt 0 ]; then
+        add_pending "$POPPED_JOB"
+        save_state
+        sleep 5
+        continue
+    fi
+
     # Check capacity before starting
     # Always allow at least one job when nothing is running, even if its predicted
     # allotment exceeds the target (otherwise jobs with high allotment never start)
     current_allotment=$(total_local_allotment)
     next_allotment=$(job_allotment_from_data "$POPPED_JOB")
-    running_jobs=$(running_count)
     if [ "$running_jobs" -gt 0 ] && [ $((current_allotment + next_allotment)) -gt "$HOST_UTILIZATION_TARGET" ]; then
         add_pending "$POPPED_JOB"
         save_state

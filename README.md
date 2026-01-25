@@ -100,7 +100,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated)
+- `--tag TAG`: Tag to attach to the job (can be repeated). Special tag: `exclusive` makes the job run alone (waits for other jobs to finish, blocks new jobs while running)
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -148,6 +148,9 @@ remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python t
 
 # Tag jobs for later filtering
 remote-jobs run --tag exp-012 --tag notebook-sync deepthought 'python train.py'
+
+# Run a job exclusively (waits until no other jobs are running, blocks others while running)
+remote-jobs run --tag exclusive deepthought 'python large_model.py'
 
 # Run job after another succeeds
 remote-jobs run --after 42 deepthought 'python eval.py'

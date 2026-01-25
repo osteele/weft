@@ -30,6 +30,7 @@ type QueueEntry struct {
 	EnvVars      []string
 	DepSpec      string
 	CPUAllotment *int
+	Tags         []string
 }
 
 // AppendQueueEntryOptions configures the queue append operation
@@ -105,6 +106,7 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 		EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
 		DepSpec:      job.DepSpec,
 		CPUAllotment: job.CPUAllotment,
+		Tags:         job.Tags,
 	}
 	addCmd := NewAddCommand(entry)
 	opts := AppendCommandOptions{Timeout: timeout}
@@ -139,6 +141,7 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 		EnvVars:      params.EnvVars,
 		DepSpec:      params.DepSpec,
 		CPUAllotment: params.Job.CPUAllotment,
+		Tags:         params.Job.Tags,
 	}
 
 	// Use new command queue format
@@ -311,6 +314,7 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		EnvVars:      artifacts.MergeEnvVars(params.EnvVars, jobID),
 		DepSpec:      params.DepSpec,
 		CPUAllotment: params.CPUAllotment,
+		Tags:         params.Tags,
 	}
 
 	// Append to remote queue

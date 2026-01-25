@@ -29,6 +29,7 @@ type CommandJob struct {
 	Env  []string `json:"env,omitempty"`
 	Deps string   `json:"deps,omitempty"`
 	CPU  *int     `json:"cpu,omitempty"`
+	Tags []string `json:"tags,omitempty"`
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -63,6 +64,7 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			Env:  entry.EnvVars,
 			Deps: entry.DepSpec,
 			CPU:  entry.CPUAllotment,
+			Tags: entry.Tags,
 		},
 	}
 }
