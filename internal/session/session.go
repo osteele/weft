@@ -44,6 +44,13 @@ func SimpleSamplesFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.samples", LogDir, jobID)
 }
 
+// SimplePausedFile returns the paused marker file path for a job.
+// This file is created when a job is paused and removed when resumed.
+// The queue runner checks for this file before treating stopped processes as failed.
+func SimplePausedFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.paused", LogDir, jobID)
+}
+
 // ArchiveCommand returns a shell command that archives existing job files by renaming
 // them with their creation date. This should be run before starting a new job run.
 // Example: 123.log -> 123-20260104-095748.log

@@ -64,6 +64,14 @@ func TestMetadataFile(t *testing.T) {
 	}
 }
 
+func TestSimplePausedFile(t *testing.T) {
+	got := SimplePausedFile(42)
+	want := "~/.cache/remote-jobs/logs/42.paused"
+	if got != want {
+		t.Errorf("SimplePausedFile(42) = %q, want %q", got, want)
+	}
+}
+
 func TestLegacyLogFile(t *testing.T) {
 	got := LegacyLogFile("train-gpt2")
 	want := "/tmp/tmux-train-gpt2.log"

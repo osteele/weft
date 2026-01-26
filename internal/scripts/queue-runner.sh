@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 36
+# BUILD: 38
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -675,9 +675,10 @@ start_job() {
     local meta_file="$LOG_DIR/${job_id}.meta"
     local pid_file="$LOG_DIR/${job_id}.pid"
     local pgid_file="$LOG_DIR/${job_id}.pgid"
+    local paused_file="$LOG_DIR/${job_id}.paused"
 
     # Archive any existing files from previous runs
-    for ext in log status meta pid pgid samples; do
+    for ext in log status meta pid pgid samples paused; do
         local f="$LOG_DIR/${job_id}.$ext"
         if [ -f "$f" ]; then
             local mtime ts
@@ -774,7 +775,7 @@ start_job() {
             "$NOTIFY_SCRIPT" "rj-$job_id" "$exit_code" "$(hostname)" "$meta_file" 2>/dev/null || true
         fi
 
-        rm -f "$pid_file" "$pgid_file" "$QUEUE_DIR/job-${job_id}.json"
+        rm -f "$pid_file" "$pgid_file" "$paused_file" "$QUEUE_DIR/job-${job_id}.json"
         exit "$exit_code"
     ) >> "$log_file" 2>&1 &
 
@@ -825,6 +826,7 @@ refresh_running_jobs() {
         local status_file="$LOG_DIR/${job_id}.status"
         local pid_file="$LOG_DIR/${job_id}.pid"
         local pgid_file="$LOG_DIR/${job_id}.pgid"
+        local paused_file="$LOG_DIR/${job_id}.paused"
 
         if [ -f "$status_file" ]; then
             # Record CPU history before removing job from running state
@@ -846,10 +848,11 @@ refresh_running_jobs() {
 
         # Check if the job's process is stopped (state T).
         # A stopped process is alive but not executing - this can happen if:
+        # - The user intentionally paused the job (via TUI) - indicated by .paused file
         # - The user sent SIGSTOP (ctrl-z)
         # - The system's OOM killer stopped it
         # - Some external process stopped it
-        # We treat stopped jobs as failed since they won't make progress.
+        # We treat stopped jobs as failed UNLESS there's a .paused marker file.
         local pgid=""
         local pid=""
         if [ -f "$pgid_file" ]; then
@@ -861,7 +864,13 @@ refresh_running_jobs() {
 
         # Check PGID first (the actual command), then PID (the wrapper)
         local check_pid="${pgid:-$pid}"
+        local paused_file="$LOG_DIR/${job_id}.paused"
         if [ -n "$check_pid" ] && process_stopped "$check_pid"; then
+            # If .paused marker exists, this is an intentional pause - don't kill
+            if [ -f "$paused_file" ]; then
+                # Job is intentionally paused, skip it
+                continue
+            fi
             echo "Job $job_id process $check_pid is stopped (state T) - marking as failed"
             log_op "job.stopped_detected" "$job_id" "pid=$check_pid state=T"
             # Kill the stopped process group to clean up
@@ -873,7 +882,7 @@ refresh_running_jobs() {
             fi
             echo "1" > "$status_file"
             log_op "job.failed" "$job_id" "exit=1 reason=stopped"
-            rm -f "$pid_file" "$pgid_file"
+            rm -f "$pid_file" "$pgid_file" "$paused_file"
             remove_running_job "$job_id"
             changed=true
             continue
@@ -894,7 +903,7 @@ refresh_running_jobs() {
             kill -KILL -"$pgid" 2>/dev/null || true
             log_op "job.orphan_killed" "$job_id" "pgid=$pgid"
         fi
-        rm -f "$pgid_file"
+        rm -f "$pgid_file" "$paused_file"
 
         if [ ! -f "$status_file" ]; then
             echo "1" > "$status_file"

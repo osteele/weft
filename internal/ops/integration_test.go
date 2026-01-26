@@ -175,7 +175,11 @@ func TestIntegration_JobLifecycle(t *testing.T) {
 		t.Fatal("Job did not complete within timeout")
 	}
 
-	t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, *finalJob.ExitCode)
+	if finalJob.ExitCode != nil {
+		t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, *finalJob.ExitCode)
+	} else {
+		t.Logf("Job completed with status: %s, exit code: nil", finalJob.Status)
+	}
 
 	if finalJob.Status != db.StatusCompleted {
 		t.Errorf("Expected job status to be completed, got %s", finalJob.Status)
@@ -756,7 +760,11 @@ func TestSlurmIntegration_JobLifecycle(t *testing.T) {
 		t.Fatal("Job did not complete within timeout")
 	}
 
-	t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, *finalJob.ExitCode)
+	if finalJob.ExitCode != nil {
+		t.Logf("Job completed with status: %s, exit code: %d", finalJob.Status, *finalJob.ExitCode)
+	} else {
+		t.Logf("Job completed with status: %s, exit code: nil", finalJob.Status)
+	}
 
 	if finalJob.Status != db.StatusCompleted {
 		t.Errorf("Expected job status to be completed, got %s", finalJob.Status)
@@ -952,5 +960,131 @@ func TestSlurmIntegration_JobCancellation(t *testing.T) {
 	// Job should be killed (SLURM cancelled)
 	if job.Status != db.StatusKilled && job.Status != db.StatusCanceled {
 		t.Errorf("Expected job status to be killed or canceled, got %s", job.Status)
+	}
+}
+
+// TestIntegration_PausedJobNotKilledByQueueRunner verifies that when a job is paused,
+// the queue runner does not kill it (regression test for the bug where paused jobs
+// were detected as "stopped" and killed).
+func TestIntegration_PausedJobNotKilledByQueueRunner(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	// Ensure queue runner is started
+	started, err := ensureQueueRunnerStarted(t, host)
+	if err != nil {
+		t.Fatalf("Failed to start queue runner: %v", err)
+	}
+	if started {
+		t.Logf("Started queue runner on %s", host)
+	}
+
+	// Queue a job that runs long enough to be paused
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "for i in $(seq 1 30); do echo tick $i; sleep 1; done",
+		Description: "Integration test: pause regression test",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+	jobID := result.JobID
+	t.Logf("Queued job %d", jobID)
+
+	// Wait for job to start running
+	deadline := time.Now().Add(30 * time.Second)
+	var job *db.Job
+	for time.Now().Before(deadline) {
+		job, _ = db.GetJobByID(database, jobID)
+		if job != nil {
+			_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+			job, _ = db.GetJobByID(database, jobID)
+		}
+		if job != nil && job.Status == db.StatusRunning {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if job == nil || job.Status != db.StatusRunning {
+		// Clean up and skip
+		cancelCmd := ops.NewCancelCommand(jobID)
+		_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+		t.Skipf("Job did not start running in time (status: %v), skipping test", job)
+	}
+	t.Logf("Job %d is running, waiting for pgid file...", jobID)
+
+	// Wait a moment for the pgid file to be created (race between status detection and file I/O)
+	time.Sleep(2 * time.Second)
+	t.Log("Pausing job...")
+
+	// Pause the job
+	pauseResult, err := ops.RequestStatus(database, job, db.StatusPaused, ops.TimeoutSync)
+	if err != nil {
+		t.Fatalf("Failed to pause job: %v", err)
+	}
+	if !pauseResult.Success {
+		t.Fatalf("Pause returned success=false: %s", pauseResult.Message)
+	}
+	t.Logf("Paused job %d", jobID)
+
+	// Sync to confirm paused state
+	job, _ = db.GetJobByID(database, jobID)
+	_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+	job, _ = db.GetJobByID(database, jobID)
+	if job.Status != db.StatusPaused {
+		t.Fatalf("Expected job status to be paused after pause, got %s", job.Status)
+	}
+
+	// Wait for queue runner to cycle (it checks every 1-2 seconds)
+	// This is where the bug would trigger - queue runner would see stopped process and kill it
+	t.Log("Waiting for queue runner cycle (5 seconds)...")
+	time.Sleep(5 * time.Second)
+
+	// Sync again and verify job is still paused (not failed)
+	job, _ = db.GetJobByID(database, jobID)
+	_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+	job, _ = db.GetJobByID(database, jobID)
+
+	if job.Status == db.StatusFailed {
+		t.Errorf("REGRESSION: Paused job was marked as failed by queue runner! This is the bug we fixed.")
+	} else if job.Status != db.StatusPaused {
+		t.Errorf("Expected job to still be paused, got %s", job.Status)
+	} else {
+		t.Logf("Job %d is still paused after queue runner cycle - pause protection working", jobID)
+	}
+
+	// Resume the job
+	t.Log("Resuming job...")
+	resumeResult, err := ops.RequestStatus(database, job, db.StatusRunning, ops.TimeoutSync)
+	if err != nil {
+		t.Logf("Warning: resume failed: %v", err)
+	} else if resumeResult.Success {
+		t.Log("Job resumed")
+	}
+
+	// Clean up: wait for job to complete or cancel it
+	deadline = time.Now().Add(45 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ = db.GetJobByID(database, jobID)
+		if job != nil {
+			_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+			job, _ = db.GetJobByID(database, jobID)
+		}
+		if job != nil && db.IsTerminalStatus(job.Status) {
+			t.Logf("Job completed with status: %s", job.Status)
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// If job didn't complete, cancel it
+	if job != nil && !db.IsTerminalStatus(job.Status) {
+		cancelCmd := ops.NewCancelCommand(jobID)
+		_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+		t.Log("Cancelled job that didn't complete in time")
 	}
 }

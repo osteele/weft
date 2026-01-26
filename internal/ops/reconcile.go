@@ -252,6 +252,12 @@ func applyPauseToRemote(job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {
 		return fmt.Errorf("pause not supported for slurm jobs")
 	}
+	// Create .paused marker file so queue runner knows this is intentional
+	pausedFile := session.SimplePausedFile(job.ID)
+	touchCmd := fmt.Sprintf("touch %s", pausedFile)
+	if _, _, err := ssh.RunWithTimeout(job.Host, touchCmd, timeout); err != nil {
+		return fmt.Errorf("create paused marker: %w", err)
+	}
 	return signalJobProcess(job, "STOP", timeout)
 }
 
@@ -259,7 +265,14 @@ func applyResumeToRemote(job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {
 		return fmt.Errorf("resume not supported for slurm jobs")
 	}
-	return signalJobProcess(job, "CONT", timeout)
+	if err := signalJobProcess(job, "CONT", timeout); err != nil {
+		return err
+	}
+	// Remove .paused marker file
+	pausedFile := session.SimplePausedFile(job.ID)
+	rmCmd := fmt.Sprintf("rm -f %s", pausedFile)
+	_, _, _ = ssh.RunWithTimeout(job.Host, rmCmd, timeout) // Best effort
+	return nil
 }
 
 func signalJobProcess(job *db.Job, signal string, timeout time.Duration) error {
