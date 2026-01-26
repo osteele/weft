@@ -665,30 +665,34 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 		hostSynced := false
 		syncOpts := ops.DefaultSyncOptions()
 		for _, job := range activeJobsByHost[host] {
-			changed, err := ops.SyncJobQuick(m.db, job, syncOpts)
+			syncResult, err := ops.SyncJobQuick(m.db, job, syncOpts)
 			if err != nil {
 				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 					oplog.WithDetail("sync-quick-error"),
 					oplog.WithError(err))
 				continue
 			}
-			hostSynced = true
-			if changed {
+			if syncResult.HostContacted {
+				hostSynced = true
+			}
+			if syncResult.Updated {
 				result.Updated++
 			}
 		}
 
 		if drafts, err := db.ListDraftJobsPendingSync(m.db, host); err == nil {
 			for _, job := range drafts {
-				changed, err := ops.SyncDraftJob(m.db, job, syncOpts)
+				syncResult, err := ops.SyncDraftJob(m.db, job, syncOpts)
 				if err != nil {
 					oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 						oplog.WithDetail("sync-draft-error"),
 						oplog.WithError(err))
 					continue
 				}
-				hostSynced = true
-				if changed {
+				if syncResult.HostContacted {
+					hostSynced = true
+				}
+				if syncResult.Updated {
 					result.Updated++
 				}
 			}

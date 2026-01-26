@@ -209,6 +209,7 @@ func (w *SyncWorker) maybeStartSync(host string, state *hostSyncState) {
 
 func (w *SyncWorker) doSync(host string) {
 	result := SyncResult{Host: host}
+	hostSynced := false
 
 	defer func() {
 		w.mu.Lock()
@@ -235,14 +236,17 @@ func (w *SyncWorker) doSync(host string) {
 	// Sync each job
 	syncOpts := ops.DefaultSyncOptions()
 	for _, job := range activeJobs {
-		changed, err := ops.SyncJobQuick(w.database, job, syncOpts)
+		syncResult, err := ops.SyncJobQuick(w.database, job, syncOpts)
 		if err != nil {
 			oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 				oplog.WithDetail("sync-error"),
 				oplog.WithError(err))
 			continue
 		}
-		if changed {
+		if syncResult.HostContacted {
+			hostSynced = true
+		}
+		if syncResult.Updated {
 			result.Updated++
 		}
 	}
@@ -250,14 +254,17 @@ func (w *SyncWorker) doSync(host string) {
 	// Sync draft jobs
 	if drafts, err := db.ListDraftJobsPendingSync(w.database, host); err == nil {
 		for _, job := range drafts {
-			changed, err := ops.SyncDraftJob(w.database, job, syncOpts)
+			syncResult, err := ops.SyncDraftJob(w.database, job, syncOpts)
 			if err != nil {
 				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 					oplog.WithDetail("sync-draft-error"),
 					oplog.WithError(err))
 				continue
 			}
-			if changed {
+			if syncResult.HostContacted {
+				hostSynced = true
+			}
+			if syncResult.Updated {
 				result.Updated++
 			}
 		}
@@ -280,13 +287,18 @@ func (w *SyncWorker) doSync(host string) {
 			if !remote.IsConnectionError(err.Error()) {
 				result.QueueRunnerError = err.Error()
 			}
-		} else if started {
-			result.QueueStarted = true
+		} else {
+			hostSynced = true
+			if started {
+				result.QueueStarted = true
+			}
 		}
 	}
 
-	// Record sync time
-	_ = db.RecordHostSync(w.database, host, time.Now())
+	// Record sync time only if we successfully contacted the host
+	if hostSynced {
+		_ = db.RecordHostSync(w.database, host, time.Now())
+	}
 }
 
 // ensureQueueRunnerStartedWorker uses the existing TUI function

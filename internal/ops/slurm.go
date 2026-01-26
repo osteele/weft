@@ -165,17 +165,19 @@ func probeSlurmInfo(job *db.Job, timeout time.Duration) (*slurmInfo, error) {
 }
 
 // SyncSlurmJob checks and updates a SLURM job's status.
-func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
+func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
 	info, err := probeSlurmInfo(job, timeout)
 	if err != nil {
-		return false, err
+		// SSH error - host not contacted
+		return SyncResult{}, err
 	}
+	// Host was contacted (even if no SLURM info found)
 	if info == nil || info.State == "" {
-		return false, nil
+		return SyncResult{HostContacted: true}, nil
 	}
 	if err := db.SetJobRemoteState(database, job.ID, info.State, info.FailureReason); err != nil {
-		return false, err
+		return SyncResult{HostContacted: true}, err
 	}
 
 	localStatus := slurmStateToLocal(job, info)
@@ -183,11 +185,11 @@ func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 	case db.StatusRunning, db.StatusQueued:
 		if job.Status != localStatus {
 			if err := db.UpdateStatusAndLastSynced(database, job.ID, localStatus); err != nil {
-				return false, err
+				return SyncResult{HostContacted: true}, err
 			}
-			return true, nil
+			return SyncResult{Updated: true, HostContacted: true}, nil
 		}
-		return false, nil
+		return SyncResult{HostContacted: true}, nil
 	case db.StatusCompleted:
 		exitCode := 0
 		if info.ExitCode != nil {
@@ -198,22 +200,22 @@ func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error)
 			endTime = *info.EndTime
 		}
 		if err := RecordJobCompletion(database, job.ID, exitCode, endTime); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
 		CacheCompletedJobLog(job)
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	case db.StatusKilled:
 		if err := db.UpdateStatusAndLastSynced(database, job.ID, db.StatusKilled); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	case db.StatusFailed:
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	default:
-		return false, nil
+		return SyncResult{HostContacted: true}, nil
 	}
 }
 

@@ -55,6 +55,20 @@ type StatusFileResult struct {
 	Mtime   int64
 }
 
+// SyncResult contains the outcome of a sync operation.
+type SyncResult struct {
+	Updated       bool // Whether the job status was updated in the database
+	HostContacted bool // Whether the remote host was successfully contacted
+}
+
+// Merge combines two SyncResults, preserving true values from either.
+func (r SyncResult) Merge(other SyncResult) SyncResult {
+	return SyncResult{
+		Updated:       r.Updated || other.Updated,
+		HostContacted: r.HostContacted || other.HostContacted,
+	}
+}
+
 // ReadStatusFile reads a job's status file and returns its content and modification time.
 // This is the unified way to read status files across all sync paths.
 func ReadStatusFile(host, statusFile string, timeout time.Duration) (*StatusFileResult, error) {
@@ -154,9 +168,10 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 	return func() { queueRemoteClient = prev }
 }
 
-// SyncJob checks and updates a single job's status, returning true if status changed.
+// SyncJob checks and updates a single job's status.
+// Returns SyncResult indicating whether the job was updated and whether the host was contacted.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
-func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
+func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult, err error) {
 	// SLURM-managed jobs use SLURM probes regardless of session name.
 	if job.UsesSlurm() {
 		return SyncSlurmJob(database, job, opts)
@@ -181,7 +196,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 			return
 		}
 		if metaUpdated {
-			updated = true
+			result.Updated = true
 		}
 	}()
 
@@ -190,86 +205,88 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 	exists, err := ssh.TmuxSessionExistsQuickTimeout(job.Host, tmuxSession, timeout)
 	if err != nil {
-		return false, err
+		return SyncResult{}, err
 	}
+	// Successfully contacted host via SSH
+	result.HostContacted = true
 
 	if exists {
 		paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
 		if paused.IsSome() && paused.Unwrap() {
 			if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
-				return false, err
+				return SyncResult{HostContacted: true}, err
 			}
 			switch job.Status {
 			case db.StatusQueued, db.StatusStarting, db.StatusRunning:
 				if err := db.MarkPausedByID(database, job.ID); err != nil {
-					return false, err
+					return SyncResult{HostContacted: true}, err
 				}
-				return true, nil
+				return SyncResult{Updated: true, HostContacted: true}, nil
 			case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
 				if err := db.MarkPausedFromTerminal(database, job.ID); err != nil {
-					return false, err
+					return SyncResult{HostContacted: true}, err
 				}
-				return true, nil
+				return SyncResult{Updated: true, HostContacted: true}, nil
 			case db.StatusPaused:
-				return false, nil
+				return SyncResult{HostContacted: true}, nil
 			}
 		}
 
 		if job.Status == db.StatusPaused {
 			if err := db.MarkRunningFromPaused(database, job.ID); err != nil {
-				return false, err
+				return SyncResult{HostContacted: true}, err
 			}
-			return true, nil
+			return SyncResult{Updated: true, HostContacted: true}, nil
 		}
 
 		// Session is running - update status if still marked as starting
 		if job.Status == db.StatusStarting {
 			if err := db.MarkRunningByID(database, job.ID); err != nil {
-				return false, err
+				return SyncResult{HostContacted: true}, err
 			}
-			return true, nil
+			return SyncResult{Updated: true, HostContacted: true}, nil
 		}
-		return false, nil
+		return SyncResult{HostContacted: true}, nil
 	}
 
 	// Session doesn't exist - if job is still starting, attempt to launch it now.
 	if job.Status == db.StatusStarting {
 		if err := startStartingJob(database, job, timeout); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
 	// Session doesn't exist - check for status file (no retry for sync)
 	// First try exact path (uses job.StartTime)
 	statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-	result, err := ReadStatusFile(job.Host, statusFile, timeout)
+	sfResult, err := ReadStatusFile(job.Host, statusFile, timeout)
 	if err != nil {
-		return false, err
+		return SyncResult{HostContacted: true}, err
 	}
 
-	if result != nil {
+	if sfResult != nil {
 		// Job completed
-		exitCode, err := strconv.Atoi(result.Content)
+		exitCode, err := strconv.Atoi(sfResult.Content)
 		if err != nil {
-			return false, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
+			return SyncResult{HostContacted: true}, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
 		}
-		if err := RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
-			return false, err
+		if err := RecordJobCompletion(database, job.ID, exitCode, sfResult.Mtime); err != nil {
+			return SyncResult{HostContacted: true}, err
 		}
 		CacheCompletedJobLog(job)
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
 	// Session doesn't exist and no status file - this is UNCERTAIN, not dead.
 	// Could be a race condition during job startup/shutdown.
 	// Don't mark dead based on absence of evidence.
-	return false, nil
+	return SyncResult{HostContacted: true}, nil
 }
 
 // SyncQueueRunnerJob checks and updates a queue runner job's status using pattern-based file lookup.
 // Uses multiple SSH calls with trinary logic for maximum accuracy.
-func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (updated bool, err error) {
+func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
 	queueName := DefaultQueueName
 
@@ -284,90 +301,98 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (update
 // Previously optimized for lower latency, now delegates to SyncJob since
 // ControlMaster makes the overhead difference negligible.
 // Kept as a separate entry point to preserve caller intent.
-func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
+func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
 	return SyncJob(database, job, opts)
 }
 
 // SyncDraftJob ensures that a job marked as draft has no remote execution state.
 // It removes queued entries or kills running processes before marking the job clean.
-func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (bool, error) {
+func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
 	if job == nil || job.Status != db.StatusDraft {
-		return false, nil
+		return SyncResult{}, nil
 	}
 
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
 	if job.UsesSlurm() {
 		if err := cancelSlurmJob(job, timeout); err != nil {
-			return false, err
+			return SyncResult{}, err
 		}
+		// SLURM cancel succeeded - host was contacted
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDraft); err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	} else if job.UsesQueueRunner() {
 		// Queue-runner managed jobs (no session name) need queue/runner cleanup.
-		handled, err := syncDraftQueueJob(job, timeout)
+		result, err := syncDraftQueueJob(job, timeout)
 		if err != nil {
-			return false, err
+			return result, err
 		}
-		if !handled {
-			return false, nil
+		if !result.HostContacted {
+			return result, nil
 		}
 	} else {
-		handled, err := syncDraftTmuxJob(job, timeout)
+		result, err := syncDraftTmuxJob(job, timeout)
 		if err != nil {
-			return false, err
+			return result, err
 		}
-		if !handled {
-			return false, nil
+		if !result.HostContacted {
+			return result, nil
 		}
 	}
 
 	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDraft); err != nil {
-		return false, err
+		return SyncResult{HostContacted: true}, err
 	}
-	return true, nil
+	return SyncResult{Updated: true, HostContacted: true}, nil
 }
 
-func syncDraftQueueJob(job *db.Job, timeout time.Duration) (bool, error) {
+func syncDraftQueueJob(job *db.Job, timeout time.Duration) (SyncResult, error) {
 	queueName := DefaultQueueName
 
 	result, err := queueRemoteClient.QuickStatus(job.Host, queueName, job.ID, timeout)
 	if err != nil {
-		return false, err
+		return SyncResult{}, err
 	}
 	if result.Uncertain {
-		return false, nil
+		// Host unreachable or uncertain state
+		return SyncResult{}, nil
 	}
 
+	// Got a definitive result - host was contacted
 	switch result.State {
 	case queueStateRunning, queueStatePaused:
 		if err := applyKillToRemote(job, timeout); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	case queueStateQueued:
 		if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	case queueStateDead:
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	default:
-		return false, nil
+		return SyncResult{HostContacted: true}, nil
 	}
 }
 
-func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (bool, error) {
+func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (SyncResult, error) {
 	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
 	exists, err := ssh.TmuxSessionExistsQuickTimeout(job.Host, tmuxSession, timeout)
 	if err != nil {
-		return false, err
+		return SyncResult{}, err
 	}
+	// Successfully contacted host
 	if exists {
 		if err := applyKillToRemote(job, timeout); err != nil {
-			return false, err
+			return SyncResult{HostContacted: true}, err
 		}
-		return true, nil
+		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
-	return true, nil
+	return SyncResult{Updated: true, HostContacted: true}, nil
 }
 
 // appendQueueEntryForJob ensures the queued job exists in the remote queue.

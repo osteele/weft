@@ -52,7 +52,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		return Result{}, fmt.Errorf("job %d not found after marking draft", job.ID)
 	}
 
-	cleaned, err := SyncDraftJob(database, refreshed, SyncOptions{Timeout: opts.Timeout})
+	syncResult, err := SyncDraftJob(database, refreshed, SyncOptions{Timeout: opts.Timeout})
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return Result{
@@ -65,7 +65,7 @@ func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error
 		return Result{}, err
 	}
 
-	if !cleaned {
+	if !syncResult.HostContacted {
 		return Result{
 			Success:  true,
 			Deferred: true,

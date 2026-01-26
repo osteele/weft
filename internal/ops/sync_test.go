@@ -78,11 +78,11 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 		MetadataResult: map[string]string{"start_time": "1700000000"},
 	}
 
-	changed, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected change when transitioning queued job to running")
 	}
 
@@ -117,11 +117,11 @@ func TestSyncJobMarksStartingAsRunningWhenTmuxAlive(t *testing.T) {
 		t.Fatalf("get job: %v", err)
 	}
 
-	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncJob: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected job transition to running")
 	}
 
@@ -159,11 +159,11 @@ func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
 	})
 
 	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncJob: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected completion change")
 	}
 
@@ -198,13 +198,13 @@ func TestSyncJobNoChangeWhenSessionGoneButNoStatus(t *testing.T) {
 	})
 
 	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncJob: %v", err)
 	}
 	// SyncJob is conservative - doesn't mark dead from just session disappearing
 	// This avoids false positives from race conditions
-	if changed {
+	if syncResult.Updated {
 		t.Fatalf("expected no change for uncertain state")
 	}
 
@@ -235,11 +235,11 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 	}
 	host := &remote.MockHost{}
 
-	changed, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected job to be marked failed")
 	}
 
@@ -270,11 +270,11 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	}
 
 	job, _ := db.GetJobByID(database, jobID)
-	changed, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected completion change")
 	}
 
@@ -318,11 +318,11 @@ func TestSyncDraftJobRemovesQueuedEntry(t *testing.T) {
 		{Contains: ".commands", Stdout: ""},
 	})
 
-	changed, err := SyncDraftJob(database, job, SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncDraftJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncDraftJob queued: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected SyncDraftJob to update queued draft")
 	}
 
@@ -367,11 +367,11 @@ func TestSyncDraftJobKillsTmuxSession(t *testing.T) {
 		{Contains: "tmux kill-session", Stdout: ""},
 	})
 
-	changed, err := SyncDraftJob(database, job, SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncDraftJob(database, job, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncDraftJob tmux: %v", err)
 	}
-	if !changed {
+	if !syncResult.Updated {
 		t.Fatalf("expected SyncDraftJob to update tmux draft")
 	}
 

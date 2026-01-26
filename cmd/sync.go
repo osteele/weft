@@ -159,11 +159,11 @@ func syncHost(database *sql.DB, host string) (int, error) {
 
 	for _, job := range jobs {
 		seenJobs[job.ID] = true
-		changed, err := syncJobFunc(database, job, syncOpts)
+		syncResult, err := syncJobFunc(database, job, syncOpts)
 		if err != nil {
 			return updated, err
 		}
-		if changed {
+		if syncResult.Updated {
 			updated++
 		}
 	}
@@ -231,14 +231,14 @@ func syncHost(database *sql.DB, host string) (int, error) {
 			continue // Already synced above
 		}
 		seenJobs[job.ID] = true
-		changed, err := syncJobFunc(database, job, syncOpts)
+		syncResult, err := syncJobFunc(database, job, syncOpts)
 		if err != nil {
 			if syncVerbose {
 				fmt.Fprintf(os.Stderr, "  Warning: check restarted job %d: %v\n", job.ID, err)
 			}
 			continue
 		}
-		if changed {
+		if syncResult.Updated {
 			updated++
 		}
 	}
@@ -259,11 +259,11 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		if seenJobs[job.ID] {
 			continue // Already synced above
 		}
-		changed, err := ops.SyncDraftJob(database, job, syncOpts)
+		syncResult, err := ops.SyncDraftJob(database, job, syncOpts)
 		if err != nil {
 			return updated, err
 		}
-		if changed {
+		if syncResult.Updated {
 			updated++
 		}
 	}
@@ -373,13 +373,13 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	}
 	for _, job := range tmuxJobs {
 		// Use quick check with timeout
-		changed, err := syncJobQuickFunc(database, job, syncOpts)
+		syncResult, err := syncJobQuickFunc(database, job, syncOpts)
 		if err != nil {
 			failCount++
 			continue // Don't fail entire sync for one job
 		}
 		successCount++
-		if changed {
+		if syncResult.Updated {
 			updated++
 		}
 	}
@@ -442,13 +442,13 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 		if seenJobs[job.ID] {
 			continue
 		}
-		changed, err := ops.SyncDraftJob(database, job, syncOpts)
+		syncResult, err := ops.SyncDraftJob(database, job, syncOpts)
 		if err != nil {
 			failCount++
 			continue // Don't fail entire sync for one job
 		}
 		successCount++
-		if changed {
+		if syncResult.Updated {
 			updated++
 		}
 	}

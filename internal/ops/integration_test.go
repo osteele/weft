@@ -874,19 +874,19 @@ func TestIntegration_SyncDetectsRunningProcess(t *testing.T) {
 		t.Fatalf("Expected status to be queued after reset, got %s", job.Status)
 	}
 
-	updated, err := ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+	syncResult, err := ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
 	if err != nil {
 		t.Fatalf("SyncJob failed: %v", err)
 	}
 
 	job, _ = db.GetJobByID(database, jobID)
-	t.Logf("After sync: status=%s, updated=%v", job.Status, updated)
+	t.Logf("After sync: status=%s, updated=%v", job.Status, syncResult.Updated)
 
 	if job.Status != db.StatusRunning {
 		t.Errorf("Expected sync to detect running process and update status to running, got %s", job.Status)
 	}
 
-	if !updated {
+	if !syncResult.Updated {
 		t.Errorf("Expected sync to report updated=true when transitioning queued->running")
 	}
 
