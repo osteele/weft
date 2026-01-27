@@ -37,7 +37,7 @@ func TestIntegration_SyncWorkerRecordsSyncTimeOnSuccess(t *testing.T) {
 	defer worker.Stop()
 
 	// Create a queued job that will trigger a sync
-	_, err := db.RecordQueued(database, host, "/tmp", "echo test", "test job for sync", "default")
+	_, err := db.RecordQueued(database, host, "/tmp", "echo test", "test job for sync")
 	if err != nil {
 		t.Fatalf("RecordQueued: %v", err)
 	}

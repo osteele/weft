@@ -5925,7 +5925,7 @@ func (m Model) fetchHostInfo(hostName string) tea.Cmd {
 
 func (m Model) fetchQueueStatus(hostName string) tea.Cmd {
 	return func() tea.Msg {
-		runner := queuerunner.NewRunner(hostName, queuefile.DefaultQueueName)
+		runner := queuerunner.NewRunner(hostName)
 		info, err := runner.Status(5 * time.Second)
 		if err != nil {
 			return queueStatusMsg{hostName: hostName, info: &queuerunner.StatusInfo{}}
@@ -6725,7 +6725,6 @@ func (m Model) retryJob(job *db.Job) tea.Cmd {
 		if job.Command == "" {
 			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing command")}
 		}
-		queueName := queuefile.DefaultQueueName
 		workingDir := job.WorkingDir
 		if workingDir == "" {
 			if dir := job.EffectiveWorkingDir(); dir != "" {
@@ -6740,7 +6739,6 @@ func (m Model) retryJob(job *db.Job) tea.Cmd {
 			Command:     job.Command,
 			Description: job.Description,
 			EnvVars:     job.EnvVars,
-			QueueName:   queueName,
 		}, ops.DefaultOptions())
 		if err != nil {
 			return jobRetriedMsg{oldJobID: job.ID, err: err}
@@ -6766,7 +6764,7 @@ func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
 			return err
 		}
 		depJob.DepSpec = newSpec
-		if err := ops.UpdateQueuedJobEntry(depJob, queuefile.DefaultQueueName, depJob.EnvVars, newSpec); err != nil {
+		if err := ops.UpdateQueuedJobEntry(depJob, depJob.EnvVars, newSpec); err != nil {
 			return err
 		}
 	}
@@ -6803,7 +6801,7 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		moved, err := queuefile.MoveToFront(job.Host, queuefile.DefaultQueueName, job.ID)
+		moved, err := queuefile.MoveToFront(job.Host, job.ID)
 		if err == nil && moved {
 			// Update queued_at to be earlier than all other queued jobs
 			_ = db.SetQueuedAtBefore(database, job.ID, job.Host)
@@ -7029,7 +7027,7 @@ func (m Model) pruneJobs() tea.Cmd {
 
 func (m Model) startQueue(host string) tea.Cmd {
 	return func() tea.Msg {
-		runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
+		runner := queuerunner.NewRunner(host)
 		started, err := runner.EnsureStarted("")
 		if err != nil {
 			return queueStartedMsg{host: host, err: err}
@@ -7052,7 +7050,7 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	slack.DeployNotifyScript(host, slackWebhook)
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
-	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
+	runner := queuerunner.NewRunner(host)
 	return runner.EnsureStarted(envVars)
 }
 
@@ -7275,7 +7273,7 @@ func (m Model) editJob() tea.Cmd {
 		}
 
 		if operationalChange {
-			if err := updateRemoteQueueEntry(job.Host, queueName, updatedJob, envVars, depSpec); err != nil {
+			if err := updateRemoteQueueEntry(job.Host, updatedJob, envVars, depSpec); err != nil {
 				if strings.Contains(err.Error(), "host unreachable") {
 					_ = db.SetPendingStatus(database, jobID, db.StatusQueued)
 				}
@@ -7289,14 +7287,12 @@ func (m Model) editJob() tea.Cmd {
 
 // updateRemoteQueueEntry updates a job's entry in the remote queue file.
 // This is a thin wrapper around ops.UpdateQueueEntry.
-func updateRemoteQueueEntry(host, queueName string, job *db.Job, envVars []string, depSpec string) error {
-	queueName = queuefile.DefaultQueueName
+func updateRemoteQueueEntry(host string, job *db.Job, envVars []string, depSpec string) error {
 	return ops.UpdateQueueEntry(ops.UpdateQueueEntryParams{
-		Host:      host,
-		QueueName: queueName,
-		Job:       job,
-		EnvVars:   envVars,
-		DepSpec:   depSpec,
+		Host:    host,
+		Job:     job,
+		EnvVars: envVars,
+		DepSpec: depSpec,
 	})
 }
 

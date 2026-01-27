@@ -321,19 +321,14 @@ func TestCommandLogProcessing(t *testing.T) {
 }
 
 func TestCommandFilePath(t *testing.T) {
-	path := CommandsFilePath("myqueue")
-	if path != "~/.cache/remote-jobs/queue/default.commands" {
-		t.Errorf("unexpected path: %s", path)
-	}
-
-	path = CommandsFilePath("default")
+	path := CommandsFilePath()
 	if path != "~/.cache/remote-jobs/queue/default.commands" {
 		t.Errorf("unexpected path: %s", path)
 	}
 }
 
 func TestStateFilePath(t *testing.T) {
-	path := StateFilePath("myqueue")
+	path := StateFilePath()
 	if path != "~/.cache/remote-jobs/queue/default.state.json" {
 		t.Errorf("unexpected path: %s", path)
 	}

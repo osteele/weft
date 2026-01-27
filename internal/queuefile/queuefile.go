@@ -47,8 +47,7 @@ type jobData struct {
 }
 
 // FetchEntry retrieves the queue file entry for a job ID from the remote host.
-func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
-	queueName = DefaultQueueName
+func FetchEntry(host string, jobID int64) (*Entry, error) {
 	jobFile := jobFilePath(jobID)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null || true", jobFile)
 	stdout, stderr, err := ssh.Run(host, cmd)
@@ -64,7 +63,7 @@ func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
 	}
 	content := strings.TrimSpace(stdout)
 	if content == "" {
-		return nil, fmt.Errorf("job %d not found in queue %s on %s", jobID, queueName, host)
+		return nil, fmt.Errorf("job %d not found in queue on %s", jobID, host)
 	}
 
 	var data jobData
@@ -82,18 +81,17 @@ func FetchEntry(host, queueName string, jobID int64) (*Entry, error) {
 	}, nil
 }
 
-func commandsFilePath(queueName string) string {
+func commandsFilePath() string {
 	return fmt.Sprintf("%s/%s.commands", queueDir, DefaultQueueName)
 }
 
-func stateFilePath(queueName string) string {
+func stateFilePath() string {
 	return fmt.Sprintf("%s/%s.state.json", queueDir, DefaultQueueName)
 }
 
 // appendCommand appends a command to the commands file
-func appendCommand(host, queueName, cmdJSON string) error {
-	queueName = DefaultQueueName
-	commandsFile := commandsFilePath(queueName)
+func appendCommand(host, cmdJSON string) error {
+	commandsFile := commandsFilePath()
 	// Append command to the commands file with locking
 	lockDir := commandsFile + ".lock.d"
 	appendCmd := fmt.Sprintf(
@@ -124,18 +122,16 @@ func appendCommand(host, queueName, cmdJSON string) error {
 }
 
 // RemoveEntry deletes a queued job entry from the remote queue.
-func RemoveEntry(host, queueName string, jobID int64) error {
-	queueName = DefaultQueueName
+func RemoveEntry(host string, jobID int64) error {
 	cmdJSON := fmt.Sprintf(`{"op":"cancel","job_id":%d}`, jobID)
-	return appendCommand(host, queueName, cmdJSON)
+	return appendCommand(host, cmdJSON)
 }
 
 // MoveToFront moves a job to the front of the queue (next to run after current job).
 // Returns true if the job was moved, false if it was already at the front or not found.
-func MoveToFront(host, queueName string, jobID int64) (bool, error) {
-	queueName = DefaultQueueName
+func MoveToFront(host string, jobID int64) (bool, error) {
 	// Check if job is in the pending list
-	stateFile := stateFilePath(queueName)
+	stateFile := stateFilePath()
 	checkCmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s 2>/dev/null && echo YES || echo NO", jobID, stateFile)
 	stdout, stderr, err := ssh.Run(host, checkCmd)
 	if err != nil {
@@ -151,7 +147,7 @@ func MoveToFront(host, queueName string, jobID int64) (bool, error) {
 
 	result := strings.TrimSpace(stdout)
 	if result != "YES" {
-		return false, fmt.Errorf("job %d not found in queue %s", jobID, queueName)
+		return false, fmt.Errorf("job %d not found in queue", jobID)
 	}
 
 	// Check if already at front
@@ -163,7 +159,7 @@ func MoveToFront(host, queueName string, jobID int64) (bool, error) {
 
 	// Send priority command
 	cmdJSON := fmt.Sprintf(`{"op":"priority","job_id":%d}`, jobID)
-	if err := appendCommand(host, queueName, cmdJSON); err != nil {
+	if err := appendCommand(host, cmdJSON); err != nil {
 		return false, err
 	}
 

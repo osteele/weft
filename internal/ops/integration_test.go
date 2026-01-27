@@ -46,7 +46,20 @@ func setupIntegrationTestDB(t *testing.T) *sql.DB {
 func clearRemoteJobState(t *testing.T, host string, jobID int64) {
 	t.Helper()
 	// Remove status, log, meta, pid, pgid, and samples files for this job
-	cmd := fmt.Sprintf("rm -f ~/.cache/remote-jobs/logs/%d.* ~/.cache/remote-jobs/logs/%d-*.* ~/.cache/remote-jobs/queue/job-%d.json 2>/dev/null || true", jobID, jobID, jobID)
+	// Also remove job from the state.json pending array if present
+	cmd := fmt.Sprintf(`
+		rm -f ~/.cache/remote-jobs/logs/%d.* ~/.cache/remote-jobs/logs/%d-*.* ~/.cache/remote-jobs/queue/job-%d.json 2>/dev/null || true
+		# Remove job from state.json pending array
+		if [ -f ~/.cache/remote-jobs/queue/default.state.json ]; then
+			jq 'if .pending then .pending |= map(select(. != %d)) else . end' ~/.cache/remote-jobs/queue/default.state.json > ~/.cache/remote-jobs/queue/default.state.json.tmp 2>/dev/null && \
+			mv ~/.cache/remote-jobs/queue/default.state.json.tmp ~/.cache/remote-jobs/queue/default.state.json 2>/dev/null || true
+		fi
+		# Clear the current job marker if it matches this job
+		current=$(cat ~/.cache/remote-jobs/queue/default.current 2>/dev/null)
+		if [ "$current" = "%d" ]; then
+			echo -n "" > ~/.cache/remote-jobs/queue/default.current 2>/dev/null || true
+		fi
+	`, jobID, jobID, jobID, jobID, jobID)
 	_, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
 		t.Logf("Warning: could not clear remote state for job %d: %v", jobID, err)
@@ -71,7 +84,7 @@ func stopQueueRunner(t *testing.T, host string, queueName string) bool {
 // This ensures tests exercise the same code path as production.
 func ensureQueueRunnerStarted(t *testing.T, host string) (bool, error) {
 	t.Helper()
-	runner := queuerunner.NewRunner(host, ops.DefaultQueueName)
+	runner := queuerunner.NewRunner(host)
 	return runner.EnsureStarted("")
 }
 
@@ -111,12 +124,15 @@ func TestIntegration_QueueJobWithArtifactEnvVars(t *testing.T) {
 
 	// Clean up: cancel the job
 	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 func TestIntegration_JobLifecycle(t *testing.T) {
 	host := getTestHost(t)
 	database := setupIntegrationTestDB(t)
+
+	// Clear any previous state for job ID 1 (tests reuse IDs since each has fresh DB)
+	clearRemoteJobState(t, host, 1)
 
 	// Ensure queue runner is installed and started using production code path
 	started, err := ensureQueueRunnerStarted(t, host)
@@ -256,7 +272,7 @@ func TestIntegration_QueueEntryContainsArtifactEnvVars(t *testing.T) {
 
 	// Clean up
 	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 // State transition tests
@@ -387,7 +403,7 @@ func TestIntegration_StateTransition_QueueEntryRemovedOnCancel(t *testing.T) {
 
 	// Cancel the job - this should append a cancel command
 	cancelCmd := ops.NewCancelCommand(jobID)
-	if err := ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second}); err != nil {
+	if err := ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second}); err != nil {
 		t.Fatalf("AppendCommand (cancel) failed: %v", err)
 	}
 
@@ -520,12 +536,17 @@ func TestIntegration_ExclusiveTagSynced(t *testing.T) {
 
 	// Clean up
 	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 func TestIntegration_ExclusiveJobRunsAlone(t *testing.T) {
 	host := getTestHost(t)
 	database := setupIntegrationTestDB(t)
+
+	// Clear any previous state for jobs 1, 2, 3 (tests reuse IDs since each has fresh DB)
+	clearRemoteJobState(t, host, 1)
+	clearRemoteJobState(t, host, 2)
+	clearRemoteJobState(t, host, 3)
 
 	// Ensure queue runner is started
 	started, err := ensureQueueRunnerStarted(t, host)
@@ -900,7 +921,7 @@ func TestIntegration_SyncDetectsRunningProcess(t *testing.T) {
 
 	// Clean up: wait for job to complete or cancel it
 	cancelCmd := ops.NewCancelCommand(jobID)
-	_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+	_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
 }
 
 func TestSlurmIntegration_JobCancellation(t *testing.T) {
@@ -1012,7 +1033,7 @@ func TestIntegration_PausedJobNotKilledByQueueRunner(t *testing.T) {
 	if job == nil || job.Status != db.StatusRunning {
 		// Clean up and skip
 		cancelCmd := ops.NewCancelCommand(jobID)
-		_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+		_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
 		t.Skipf("Job did not start running in time (status: %v), skipping test", job)
 	}
 	t.Logf("Job %d is running, waiting for pgid file...", jobID)
@@ -1084,7 +1105,7 @@ func TestIntegration_PausedJobNotKilledByQueueRunner(t *testing.T) {
 	// If job didn't complete, cancel it
 	if job != nil && !db.IsTerminalStatus(job.Status) {
 		cancelCmd := ops.NewCancelCommand(jobID)
-		_ = ops.AppendCommand(host, ops.DefaultQueueName, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
+		_ = ops.AppendCommand(host, cancelCmd, ops.AppendCommandOptions{Timeout: 10 * time.Second})
 		t.Log("Cancelled job that didn't complete in time")
 	}
 }

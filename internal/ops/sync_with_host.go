@@ -14,7 +14,6 @@ func SyncQueueRunnerJobWithProber(
 	job *db.Job,
 	prober remote.Prober,
 	host remote.Host,
-	queueName string,
 	opts SyncOptions,
 ) (result SyncResult, err error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
@@ -44,12 +43,12 @@ func SyncQueueRunnerJobWithProber(
 		}
 		CacheCompletedJobLog(job)
 		// Clear the current job marker on remote if it matches this job.
-		clearCurrentJobIfMatches(job.Host, queueName, job.ID, timeout)
+		clearCurrentJobIfMatches(job.Host, job.ID, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
 	// Probe 2: Check if job is the current job in queue runner
-	currentResult := prober.ProbeCurrent(queueName, job.ID)
+	currentResult := prober.ProbeCurrent(job.ID)
 	if currentResult == remote.ProbeTrue {
 		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 			return SyncResult{HostContacted: true}, err
@@ -75,10 +74,10 @@ func SyncQueueRunnerJobWithProber(
 	}
 
 	// Probe 3: Check if job is in queue file (waiting)
-	inQueueResult := prober.ProbeInQueue(queueName, job.ID)
+	inQueueResult := prober.ProbeInQueue(job.ID)
 	if inQueueResult == remote.ProbeTrue {
 		if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
-			if err := host.RemoveFromQueue(queueName, job.ID); err != nil {
+			if err := host.RemoveFromQueue(job.ID); err != nil {
 				return SyncResult{HostContacted: true}, err
 			}
 			finalStatus := db.StatusCanceled
@@ -165,7 +164,7 @@ func SyncQueueRunnerJobWithProber(
 			// Host unreachable - leave pending status for retry when host comes online
 			return SyncResult{HostContacted: false}, nil
 		}
-		if err := startQueuedJobNow(database, job, queueName, timeout); err != nil {
+		if err := startQueuedJobNow(database, job, timeout); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
 		return SyncResult{Updated: true, HostContacted: true}, nil
@@ -183,7 +182,7 @@ func SyncQueueRunnerJobWithProber(
 			EnvVars:     job.EnvVars,
 			DepSpec:     job.DepSpec,
 		}
-		if err := host.AppendToQueue(queueName, entry); err != nil {
+		if err := host.AppendToQueue(entry); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
 		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
@@ -214,6 +213,12 @@ func SyncQueueRunnerJobWithProber(
 				}
 				return SyncResult{Updated: true, HostContacted: true}, nil
 			}
+		}
+		// Don't mark as dead if job was just queued locally - queue runner may not have processed it yet.
+		// This handles the race condition where we just sent an add command but the queue runner
+		// hasn't processed it, and the status file doesn't exist yet.
+		if job.Status == db.StatusQueued && job.LastSyncedStatus == db.StatusQueued {
+			return SyncResult{HostContacted: true}, nil
 		}
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
 			return SyncResult{HostContacted: true}, err

@@ -175,9 +175,7 @@ func isConnectionFailure(stderr string, err error) bool {
 }
 
 func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedInfo, envVars []string) (*startJobResult, error) {
-	queueName := defaultQueueName
-
-	if err := db.UpdateJobStartingToQueued(database, job.ID, queueName); err != nil {
+	if err := db.UpdateJobStartingToQueued(database, job.ID); err != nil {
 		return nil, fmt.Errorf("mark job queued: %w", err)
 	}
 
@@ -201,7 +199,6 @@ type queueJobOptions struct {
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
-	QueueName    string
 	Dependencies []queueDependency
 	AutoStart    bool
 }
@@ -231,7 +228,6 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
 		GPU:         opts.GPU,
-		QueueName:   opts.QueueName,
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 	}
 

@@ -20,7 +20,6 @@ func TestQueueJob_Success(t *testing.T) {
 		WorkingDir:  "/tmp",
 		Command:     "echo success",
 		Description: "test job",
-		QueueName:   "default",
 	}
 	result, err := QueueJob(database, params, DefaultOptions())
 	if err != nil {

@@ -30,10 +30,10 @@ type QueueEntry struct {
 // - Swapping transports (SSH, local exec, containers) without changing sync logic
 type Host interface {
 	// Queue operations
-	IsJobInQueue(queueName string, jobID int64) (bool, error)
-	IsJobCurrent(queueName string, jobID int64) (bool, error)
-	AppendToQueue(queueName string, entry QueueEntry) error
-	RemoveFromQueue(queueName string, jobID int64) error
+	IsJobInQueue(jobID int64) (bool, error)
+	IsJobCurrent(jobID int64) (bool, error)
+	AppendToQueue(entry QueueEntry) error
+	RemoveFromQueue(jobID int64) error
 
 	// Job status operations
 	GetJobCompletion(jobID int64) (*CompletionInfo, error) // nil if not completed
@@ -68,8 +68,8 @@ const (
 // Prober provides low-level probing with trinary results.
 // Used by sync logic that needs to handle uncertainty explicitly.
 type Prober interface {
-	ProbeInQueue(queueName string, jobID int64) ProbeResult
-	ProbeCurrent(queueName string, jobID int64) ProbeResult
+	ProbeInQueue(jobID int64) ProbeResult
+	ProbeCurrent(jobID int64) ProbeResult
 	ProbeCompleted(jobID int64) (ProbeResult, *CompletionInfo)
 	ProbeProcessRunning(jobID int64) ProbeResult
 	ProbeProcessPaused(jobID int64) ProbeResult

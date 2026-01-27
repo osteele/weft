@@ -12,7 +12,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
@@ -466,7 +465,7 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 }
 
 func syncQueueRunnerJobsBatch(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration) (int, error) {
-	return ops.BatchSyncQueueRunnerJobs(database, host, queuefile.DefaultQueueName, jobs, timeout)
+	return ops.BatchSyncQueueRunnerJobs(database, host, jobs, timeout)
 }
 
 // buildStaleDataNote renders a warning that results are from cached data.

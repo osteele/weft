@@ -174,6 +174,20 @@ func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, 
 	}
 	// Host was contacted (even if no SLURM info found)
 	if info == nil || info.State == "" {
+		// Job not found in squeue or sacct - check for status file as fallback.
+		// This handles cases where SLURM accounting is disabled (sacct returns nothing)
+		// but the job wrapper script wrote a status file on completion.
+		completionInfo, err := checkSlurmStatusFile(job, timeout)
+		if err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
+		if completionInfo != nil {
+			if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, completionInfo.EndTime); err != nil {
+				return SyncResult{HostContacted: true}, err
+			}
+			CacheCompletedJobLog(job)
+			return SyncResult{Updated: true, HostContacted: true}, nil
+		}
 		return SyncResult{HostContacted: true}, nil
 	}
 	if err := db.SetJobRemoteState(database, job.ID, info.State, info.FailureReason); err != nil {
@@ -352,4 +366,47 @@ func cancelSlurmJob(job *db.Job, timeout time.Duration) error {
 		return fmt.Errorf("scancel failed: %s", strings.TrimSpace(stderr))
 	}
 	return nil
+}
+
+// checkSlurmStatusFile checks if a SLURM job has written a status file.
+// This is a fallback for when SLURM accounting (sacct) is disabled.
+func checkSlurmStatusFile(job *db.Job, timeout time.Duration) (*slurmCompletionInfo, error) {
+	statusPattern := expandHome(session.StatusFilePattern(job.ID))
+	// Get both exit code content and file mtime in one command
+	cmd := fmt.Sprintf(`f=$(ls %s 2>/dev/null | head -1); if [ -n "$f" ]; then echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)"; fi`, statusPattern)
+	stdout, stderr, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
+	if err != nil {
+		if ssh.IsConnectionError(stderr) {
+			return nil, fmt.Errorf("connection error: %s", strings.TrimSpace(stderr))
+		}
+		return nil, nil // Treat other errors as "not found"
+	}
+
+	output := strings.TrimSpace(stdout)
+	if output == "" {
+		return nil, nil // Status file not found
+	}
+
+	parts := strings.Split(output, "|")
+	if len(parts) < 1 {
+		return nil, nil
+	}
+
+	exitCode, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return nil, nil // Invalid exit code format
+	}
+
+	var endTime int64
+	if len(parts) >= 2 {
+		endTime, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	}
+
+	return &slurmCompletionInfo{ExitCode: exitCode, EndTime: endTime}, nil
+}
+
+// slurmCompletionInfo holds completion info from the status file.
+type slurmCompletionInfo struct {
+	ExitCode int
+	EndTime  int64
 }

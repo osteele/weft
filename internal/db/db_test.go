@@ -362,7 +362,7 @@ func TestGetGPU(t *testing.T) {
 
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
-	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestSetJobEnvVars(t *testing.T) {
 func TestSetJobCPUAllotment(t *testing.T) {
 	database := SetupTestDB(t)
 
-	jobID, err := RecordQueued(database, "host", "/tmp", "echo ok", "desc", "default")
+	jobID, err := RecordQueued(database, "host", "/tmp", "echo ok", "desc")
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestSetJobCPUAllotment(t *testing.T) {
 
 func TestSetJobTags(t *testing.T) {
 	database := SetupTestDB(t)
-	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	exitCode := 1
 
 	makeRunningJob := func(status string) int64 {
-		jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test", "default")
+		jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
 		if err != nil {
 			t.Fatalf("record queued: %v", err)
 		}
@@ -539,7 +539,7 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	}
 
 	jobID := makeRunningJob(StatusRunning)
-	if err := UpdateJobRunningToQueued(database, jobID, "default"); err != nil {
+	if err := UpdateJobRunningToQueued(database, jobID); err != nil {
 		t.Fatalf("UpdateJobRunningToQueued: %v", err)
 	}
 	updated, err := GetJobByID(database, jobID)
@@ -555,7 +555,7 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	}
 
 	jobID = makeRunningJob(StatusStarting)
-	if err := UpdateJobStartingToQueued(database, jobID, "default"); err != nil {
+	if err := UpdateJobStartingToQueued(database, jobID); err != nil {
 		t.Fatalf("UpdateJobStartingToQueued: %v", err)
 	}
 	updated, err = GetJobByID(database, jobID)
@@ -735,9 +735,9 @@ func TestListJobsPendingReconciliation(t *testing.T) {
 	db := setupTestDB(t)
 
 	// Create jobs with different states
-	job1ID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "no pending", "default")
-	job2ID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "has pending", "default")
-	job3ID, _ := RecordQueued(db, "host2", "/tmp", "cmd3", "different host", "default")
+	job1ID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "no pending")
+	job2ID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "has pending")
+	job3ID, _ := RecordQueued(db, "host2", "/tmp", "cmd3", "different host")
 
 	// Set pending status on job2 and job3
 	SetPendingStatus(db, job2ID, StatusKilled)
@@ -835,7 +835,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 	db := setupTestDB(t)
 
 	t.Run("RecordCompletionByID updates last_synced_status", func(t *testing.T) {
-		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "test", "default")
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd1", "test")
 		MarkQueuedJobRunning(db, jobID) // First transition to running
 
 		err := RecordCompletionByID(db, jobID, 0, time.Now().Unix())
@@ -855,7 +855,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 	t.Run("RecordCompletionByID accepts failed status", func(t *testing.T) {
 		// This tests the race condition recovery: a job was marked failed locally
 		// but the status file on remote shows it actually completed
-		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-failed", "test", "default")
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-failed", "test")
 		MarkQueuedJobRunning(db, jobID)
 		MarkDeadByID(db, jobID) // Mark as failed (simulating race condition)
 
@@ -873,7 +873,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 
 	t.Run("RecordCompletionByID accepts dead status", func(t *testing.T) {
 		// Similar to above but starting from dead status
-		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-dead", "test", "default")
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-dead", "test")
 		MarkQueuedJobRunning(db, jobID)
 		// Simulate marking as dead (using direct SQL since there's no MarkDead function that sets StatusDead)
 		db.Exec("UPDATE jobs SET status = ? WHERE id = ?", StatusDead, jobID)
@@ -890,7 +890,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 	})
 
 	t.Run("MarkDeadByID updates last_synced_status", func(t *testing.T) {
-		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "test", "default")
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd2", "test")
 		MarkQueuedJobRunning(db, jobID)
 
 		err := MarkDeadByID(db, jobID)
@@ -908,7 +908,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 	})
 
 	t.Run("MarkQueuedJobRunning updates last_synced_status", func(t *testing.T) {
-		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd3", "test", "default")
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd3", "test")
 
 		err := MarkQueuedJobRunning(db, jobID)
 		if err != nil {
@@ -925,7 +925,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 	})
 
 	t.Run("MarkQueuedByID updates last_synced_status", func(t *testing.T) {
-		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd4", "test", "default")
+		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd4", "test")
 		MarkQueuedJobRunning(db, jobID) // First make it running
 
 		err := MarkQueuedByID(db, jobID) // Then reset to queued (sync found it still queued)

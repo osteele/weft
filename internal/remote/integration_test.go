@@ -32,7 +32,7 @@ func TestSSHHostIntegration_IsJobInQueue(t *testing.T) {
 	sshHost := NewSSHHost(host, 10*time.Second)
 
 	// Test with a non-existent job - should return false without error
-	inQueue, err := sshHost.IsJobInQueue("default", 999999)
+	inQueue, err := sshHost.IsJobInQueue(999999)
 	if err != nil {
 		t.Fatalf("IsJobInQueue failed: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestSSHHostIntegration_IsJobCurrent(t *testing.T) {
 	sshHost := NewSSHHost(host, 10*time.Second)
 
 	// Test with a non-existent job - should return false without error
-	isCurrent, err := sshHost.IsJobCurrent("default", 999999)
+	isCurrent, err := sshHost.IsJobCurrent(999999)
 	if err != nil {
 		t.Fatalf("IsJobCurrent failed: %v", err)
 	}
@@ -116,14 +116,13 @@ func TestSSHProberIntegration_AllProbes(t *testing.T) {
 
 	// Test all probes return definitive results (not unknown) for non-existent job
 	jobID := int64(999999)
-	queueName := "default"
 
-	inQueue := prober.ProbeInQueue(queueName, jobID)
+	inQueue := prober.ProbeInQueue(jobID)
 	if inQueue != ProbeFalse {
 		t.Errorf("ProbeInQueue: expected ProbeFalse, got %v", inQueue)
 	}
 
-	current := prober.ProbeCurrent(queueName, jobID)
+	current := prober.ProbeCurrent(jobID)
 	if current != ProbeFalse {
 		t.Errorf("ProbeCurrent: expected ProbeFalse, got %v", current)
 	}
@@ -154,7 +153,7 @@ func TestSSHHostIntegration_AppendToQueue(t *testing.T) {
 		Command:     "echo test",
 		Description: "test job",
 	}
-	err := sshHost.AppendToQueue("default", entry)
+	err := sshHost.AppendToQueue(entry)
 	if err != nil {
 		t.Fatalf("AppendToQueue failed: %v", err)
 	}
@@ -169,7 +168,7 @@ func TestSSHHostIntegration_AppendToQueue(t *testing.T) {
 	}
 
 	// Clean up by canceling the job
-	err = sshHost.RemoveFromQueue("default", testJobID)
+	err = sshHost.RemoveFromQueue(testJobID)
 	if err != nil {
 		t.Logf("Warning: failed to cancel test job: %v", err)
 	}
@@ -195,7 +194,7 @@ func TestSSHHostIntegration_AppendToQueueWithArtifactEnvVars(t *testing.T) {
 		Description: "env test",
 		EnvVars:     envVars,
 	}
-	err := sshHost.AppendToQueue("default", entry)
+	err := sshHost.AppendToQueue(entry)
 	if err != nil {
 		t.Fatalf("AppendToQueue failed: %v", err)
 	}
@@ -221,7 +220,7 @@ func TestSSHHostIntegration_AppendToQueueWithArtifactEnvVars(t *testing.T) {
 	}
 
 	// Clean up by canceling the job
-	err = sshHost.RemoveFromQueue("default", testJobID)
+	err = sshHost.RemoveFromQueue(testJobID)
 	if err != nil {
 		t.Logf("Warning: failed to cancel test job: %v", err)
 	}

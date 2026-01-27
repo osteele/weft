@@ -10,11 +10,11 @@ type MockProber struct {
 	PausedResult    ProbeResult
 }
 
-func (m *MockProber) ProbeInQueue(queueName string, jobID int64) ProbeResult {
+func (m *MockProber) ProbeInQueue(jobID int64) ProbeResult {
 	return m.InQueueResult
 }
 
-func (m *MockProber) ProbeCurrent(queueName string, jobID int64) ProbeResult {
+func (m *MockProber) ProbeCurrent(jobID int64) ProbeResult {
 	return m.CurrentResult
 }
 
@@ -55,20 +55,20 @@ type MockHost struct {
 	RemoveCalls      []int64
 }
 
-func (m *MockHost) IsJobInQueue(queueName string, jobID int64) (bool, error) {
+func (m *MockHost) IsJobInQueue(jobID int64) (bool, error) {
 	return m.InQueueResult, m.InQueueErr
 }
 
-func (m *MockHost) IsJobCurrent(queueName string, jobID int64) (bool, error) {
+func (m *MockHost) IsJobCurrent(jobID int64) (bool, error) {
 	return m.CurrentResult, m.CurrentErr
 }
 
-func (m *MockHost) AppendToQueue(queueName string, entry QueueEntry) error {
+func (m *MockHost) AppendToQueue(entry QueueEntry) error {
 	m.AppendCalls = append(m.AppendCalls, entry)
 	return nil
 }
 
-func (m *MockHost) RemoveFromQueue(queueName string, jobID int64) error {
+func (m *MockHost) RemoveFromQueue(jobID int64) error {
 	m.RemoveCalls = append(m.RemoveCalls, jobID)
 	return nil
 }

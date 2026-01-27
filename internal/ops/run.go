@@ -26,7 +26,7 @@ func RunJob(database *sql.DB, params RunJobParams, opts ExecuteOptions) (Result,
 	oplog.Log(oplog.OpJobStart, oplog.WithHost(params.Host), oplog.WithDetail("creating new job"))
 
 	// 1. Create job record locally first (so we have an ID)
-	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, "default", "")
+	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, "")
 	if err != nil {
 		oplog.Log(oplog.OpJobStartFailed, oplog.WithHost(params.Host), oplog.WithError(err), oplog.WithDetail("create job record failed"))
 		return Result{}, fmt.Errorf("create job record: %w", err)

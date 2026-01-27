@@ -41,7 +41,7 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 	}
 
 	// 1. Create new job record locally
-	newJobID, err := db.RecordQueuedWithGPU(database, orig.Host, workingDir, command, description, DefaultQueueName, orig.GPU)
+	newJobID, err := db.RecordQueuedWithGPU(database, orig.Host, workingDir, command, description, orig.GPU)
 	if err != nil {
 		return Result{}, fmt.Errorf("create job record: %w", err)
 	}

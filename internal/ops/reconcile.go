@@ -301,10 +301,9 @@ func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {
 		return cancelSlurmJob(job, timeout)
 	}
-	queueName := DefaultQueueName
 
 	// Remove from queue file (in case it's still queued)
-	if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+	if err := removeFromQueueFile(job.Host, job.ID, timeout); err != nil {
 		// Only fail on connection errors, non-connection errors are OK
 		if ssh.IsConnectionError(err.Error()) {
 			return err
@@ -347,10 +346,10 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 }
 
 // removeFromQueueFile removes a job from the remote queue by issuing a cancel command.
-func removeFromQueueFile(host, queueName string, jobID int64, timeout time.Duration) error {
+func removeFromQueueFile(host string, jobID int64, timeout time.Duration) error {
 	cancelCmd := NewCancelCommand(jobID)
 	opts := AppendCommandOptions{Timeout: timeout}
-	if err := AppendCommand(host, queueName, cancelCmd, opts); err != nil {
+	if err := AppendCommand(host, cancelCmd, opts); err != nil {
 		var qaErr *QueueAppendError
 		if e, ok := err.(*QueueAppendError); ok {
 			qaErr = e
@@ -371,10 +370,9 @@ func applyDraftToRemote(job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {
 		return cancelSlurmJob(job, timeout)
 	}
-	queueName := DefaultQueueName
 
 	// Remove from queue if present
-	if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+	if err := removeFromQueueFile(job.Host, job.ID, timeout); err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return err
 		}
@@ -421,7 +419,7 @@ func applyStartToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 	}
 
 	// Signal the queue runner to start this job immediately
-	return startQueuedJobNow(database, job, DefaultQueueName, timeout)
+	return startQueuedJobNow(database, job, timeout)
 }
 
 // ProbeRemoteStatus determines the current status of a job on the remote host.
@@ -496,14 +494,13 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	}
 
 	// Check if job is current in queue runner
-	queueName := DefaultQueueName
-	current := queueRemoteClient.CurrentJob(job.Host, queueName, job.ID, timeout)
+	current := queueRemoteClient.CurrentJob(job.Host, job.ID, timeout)
 	if current.IsSome() && current.Unwrap() {
 		return db.StatusRunning, nil
 	}
 
 	// Check if job is still in queue file
-	queued := queueRemoteClient.InQueue(job.Host, queueName, job.ID, timeout)
+	queued := queueRemoteClient.InQueue(job.Host, job.ID, timeout)
 	if queued.IsSome() && queued.Unwrap() {
 		return db.StatusQueued, nil
 	}
@@ -517,14 +514,16 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 	// Job is locally queued but not found in remote queue, not running, no status file
 	// This means it's orphaned (was removed from queue or never made it there)
 	if job.Status == db.StatusQueued && queued.IsSome() && !queued.Unwrap() {
-		// If job has pending cancel/kill status, return that instead of dead
-		// This allows clean cancellation when the queue runner isn't running
+		// If job has pending cancel/kill/draft status, return that instead of dead
+		// This allows clean cancellation or draft transition when the queue runner isn't running
 		if job.PendingStatus != nil {
 			switch *job.PendingStatus {
 			case db.StatusCanceled:
 				return db.StatusCanceled, nil
 			case db.StatusKilled, db.StatusDead:
 				return db.StatusKilled, nil
+			case db.StatusDraft:
+				return db.StatusDraft, nil
 			}
 		}
 		return db.StatusDead, nil

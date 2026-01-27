@@ -14,7 +14,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/hostinfo"
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/slack"
@@ -759,7 +758,7 @@ func ensureQueueRunnerStarted(host string) (bool, error) {
 	slack.DeployNotifyScript(host, slackWebhook)
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
-	runner := queuerunner.NewRunner(host, queuefile.DefaultQueueName)
+	runner := queuerunner.NewRunner(host)
 	return runner.EnsureStarted(envVars)
 }
 

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,10 @@ const (
 
 	// OllamaTimeout is the timeout for ollama API requests
 	OllamaTimeout = 60 * time.Second
+
+	// ollamaAvailabilityCacheTTL is how long to cache availability check results.
+	// This allows re-checking if Ollama becomes available after initial failure.
+	ollamaAvailabilityCacheTTL = 30 * time.Second
 )
 
 // OllamaConfig holds the configuration for Ollama
@@ -67,7 +72,11 @@ type ollamaResponse struct {
 type OllamaClient struct {
 	config     OllamaConfig
 	httpClient *http.Client
-	available  *bool // Cached availability check
+
+	// Availability cache with thread-safe access
+	availMu       sync.RWMutex
+	available     *bool     // Cached availability check
+	availableTime time.Time // When availability was last checked
 }
 
 // NewOllamaClient creates a new Ollama client with the given configuration
@@ -90,15 +99,36 @@ func NewOllamaClient(config OllamaConfig) *OllamaClient {
 	}
 }
 
-// IsAvailable checks if ollama is installed and running
+// IsAvailable checks if ollama is installed and running.
+// Results are cached for ollamaAvailabilityCacheTTL to allow re-checking
+// if Ollama becomes available after initial failure.
 func (c *OllamaClient) IsAvailable() bool {
-	if c.available != nil {
+	// Fast path: check cache with read lock
+	c.availMu.RLock()
+	if c.available != nil && time.Since(c.availableTime) < ollamaAvailabilityCacheTTL {
+		result := *c.available
+		c.availMu.RUnlock()
+		return result
+	}
+	c.availMu.RUnlock()
+
+	// Slow path: perform check and update cache
+	c.availMu.Lock()
+	defer c.availMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if c.available != nil && time.Since(c.availableTime) < ollamaAvailabilityCacheTTL {
 		return *c.available
 	}
 
-	available := false
-	defer func() { c.available = &available }()
+	available := c.checkAvailability()
+	c.available = &available
+	c.availableTime = time.Now()
+	return available
+}
 
+// checkAvailability performs the actual availability check (not thread-safe, called with lock held)
+func (c *OllamaClient) checkAvailability() bool {
 	// Check if ollama command exists
 	if _, err := exec.LookPath("ollama"); err != nil {
 		return false
@@ -119,8 +149,7 @@ func (c *OllamaClient) IsAvailable() bool {
 	}
 	resp.Body.Close()
 
-	available = resp.StatusCode == http.StatusOK
-	return available
+	return resp.StatusCode == http.StatusOK
 }
 
 // GenerationHash creates a cache key from model and prompt

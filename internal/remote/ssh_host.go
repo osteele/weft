@@ -14,6 +14,8 @@ import (
 const (
 	// QueueDir is the remote directory for queue state files
 	QueueDir = "~/.cache/remote-jobs/queue"
+	// DefaultQueueName is the only queue name used on remote hosts.
+	DefaultQueueName = "default"
 )
 
 // SSHHost implements the Host interface using SSH.
@@ -36,8 +38,8 @@ func NewSSHHost(hostname string, timeout time.Duration) *SSHHost {
 }
 
 // IsJobInQueue checks if a job is in the queue's pending list.
-func (h *SSHHost) IsJobInQueue(queueName string, jobID int64) (bool, error) {
-	stateFile := fmt.Sprintf("%s/%s.state.json", QueueDir, queueName)
+func (h *SSHHost) IsJobInQueue(jobID int64) (bool, error) {
+	stateFile := fmt.Sprintf("%s/%s.state.json", QueueDir, DefaultQueueName)
 	// Redirect jq output to /dev/null to avoid output pollution
 	cmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s >/dev/null 2>&1 && echo YES || echo NO", jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
@@ -48,8 +50,8 @@ func (h *SSHHost) IsJobInQueue(queueName string, jobID int64) (bool, error) {
 }
 
 // IsJobCurrent checks if a job is the currently running job in the queue.
-func (h *SSHHost) IsJobCurrent(queueName string, jobID int64) (bool, error) {
-	currentFile := fmt.Sprintf("%s/%s.current", QueueDir, queueName)
+func (h *SSHHost) IsJobCurrent(jobID int64) (bool, error) {
+	currentFile := fmt.Sprintf("%s/%s.current", QueueDir, DefaultQueueName)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null || true", currentFile)
 	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
 	if err != nil {
@@ -60,7 +62,7 @@ func (h *SSHHost) IsJobCurrent(queueName string, jobID int64) (bool, error) {
 }
 
 // AppendToQueue adds a job to the queue's command log.
-func (h *SSHHost) AppendToQueue(queueName string, entry QueueEntry) error {
+func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 	cmd := queueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        "add",
@@ -80,7 +82,7 @@ func (h *SSHHost) AppendToQueue(queueName string, entry QueueEntry) error {
 		return fmt.Errorf("marshal command: %w", err)
 	}
 
-	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, queueName)
+	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
 	appendCmd := fmt.Sprintf(
 		`mkdir -p %s && printf '%%s\n' %q >> %s`,
 		QueueDir,
@@ -96,7 +98,7 @@ func (h *SSHHost) AppendToQueue(queueName string, entry QueueEntry) error {
 }
 
 // RemoveFromQueue removes a job from the queue by appending a cancel command.
-func (h *SSHHost) RemoveFromQueue(queueName string, jobID int64) error {
+func (h *SSHHost) RemoveFromQueue(jobID int64) error {
 	cmd := queueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        "cancel",
@@ -108,7 +110,7 @@ func (h *SSHHost) RemoveFromQueue(queueName string, jobID int64) error {
 		return fmt.Errorf("marshal command: %w", err)
 	}
 
-	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, queueName)
+	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
 	appendCmd := fmt.Sprintf(
 		`mkdir -p %s && printf '%%s\n' %q >> %s`,
 		QueueDir,

@@ -331,7 +331,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	if queueDraft {
 		gpu := extractGPUFromEnvVars(queueEnvVars)
 		depSpec := encodeQueueDependencies(deps)
-		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, defaultQueueName, gpu, depSpec)
+		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, gpu, depSpec)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
@@ -380,7 +380,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		Description:  queueDescription,
 		EnvVars:      queueEnvVars,
 		Tags:         queueTags,
-		QueueName:    defaultQueueName,
 		Dependencies: deps,
 		AutoStart:    !queueNoStart,
 	})
@@ -450,7 +449,7 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	// Build environment variables for the runner
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
-	runner := queuerunner.NewRunner(host, queue)
+	runner := queuerunner.NewRunner(host)
 	return runner.EnsureStarted(envVars)
 }
 
@@ -474,7 +473,7 @@ func runQueueStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	runner := queuerunner.NewRunner(host, defaultQueueName)
+	runner := queuerunner.NewRunner(host)
 	if err := runner.SendStopSignal(); err != nil {
 		return err
 	}
@@ -601,7 +600,7 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	runner := queuerunner.NewRunner(host, defaultQueueName)
+	runner := queuerunner.NewRunner(host)
 
 	upgraded, err := queuerunner.EnsureScriptUpToDate(host)
 	if err != nil {
@@ -736,7 +735,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, effectiveStatus)
 	}
 
-	moved, err := queuefile.MoveToFront(job.Host, defaultQueueName, jobID)
+	moved, err := queuefile.MoveToFront(job.Host, jobID)
 	if err != nil {
 		if queuefile.IsConnectionError(err) {
 			return fmt.Errorf("host %s unreachable", job.Host)
@@ -817,8 +816,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	} else if effectiveStatus != db.StatusQueued {
 		return fmt.Errorf("job %d has status '%s', can only edit queued jobs", jobID, effectiveStatus)
 	}
-
-	jobQueueName := defaultQueueName
 
 	var updates []string
 
@@ -931,13 +928,13 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			EnvVars:     envVars,
 			DepSpec:     depSpec,
 		}
-		if err := ops.AppendQueueEntry(job.Host, jobQueueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+		if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
 			fmt.Fprintf(os.Stderr, "Warning: could not immediately push to remote queue (will sync later): %v\n", err)
 		}
 	} else {
 		// Job was already queued - update existing entry
-		if err := ops.UpdateQueuedJobEntry(job, jobQueueName, envVars, depSpec); err != nil {
+		if err := ops.UpdateQueuedJobEntry(job, envVars, depSpec); err != nil {
 			return err
 		}
 	}

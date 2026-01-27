@@ -9,7 +9,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -191,7 +190,7 @@ func updateRemoteQueueEntry(host string, job *db.Job) error {
 	}
 	addCmd := ops.NewAddCommand(entry)
 
-	if err := ops.AppendCommand(host, queuefile.DefaultQueueName, addCmd, ops.AppendCommandOptions{}); err != nil {
+	if err := ops.AppendCommand(host, addCmd, ops.AppendCommandOptions{}); err != nil {
 		var qaErr *ops.QueueAppendError
 		if e, ok := err.(*ops.QueueAppendError); ok {
 			qaErr = e

@@ -18,7 +18,7 @@ func TestStartNowWithNonQueuedJob(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	// Create a running job (not queued)
-	jobID, err := db.RecordQueued(database, "testhost", "/tmp", "echo test", "test job", "default")
+	jobID, err := db.RecordQueued(database, "testhost", "/tmp", "echo test", "test job")
 	if err != nil {
 		t.Fatalf("Failed to create job: %v", err)
 	}

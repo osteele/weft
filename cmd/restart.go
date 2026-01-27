@@ -86,7 +86,6 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 
 	oldStatus := job.Status
-	queueName := defaultQueueName
 
 	// Change status to queued
 	if err := db.MarkQueuedByID(database, jobID); err != nil {
@@ -103,7 +102,7 @@ func restartJob(database *sql.DB, jobID int64) error {
 		DepSpec:     job.DepSpec,
 	}
 	deferred := false
-	if err := ops.AppendQueueEntry(job.Host, queueName, entry, ops.AppendQueueEntryOptions{}); err != nil {
+	if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
 		// Best effort - job is queued locally, sync will eventually push it
 		fmt.Printf("Note: could not immediately push to remote queue (will sync later): %v\n", err)
 		deferred = true

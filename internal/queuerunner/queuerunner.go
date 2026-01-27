@@ -155,17 +155,15 @@ func writeScript(host string) error {
 }
 
 // RunnerCommand builds the command to start the queue runner (optionally with env prefix).
-func RunnerCommand(queueName, envPrefix string) string {
-	queueName = ops.DefaultQueueName
-	return fmt.Sprintf("%sbash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envPrefix, queueName)
+func RunnerCommand(envPrefix string) string {
+	return fmt.Sprintf("%sbash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envPrefix, ops.DefaultQueueName)
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
 // Also upgrades the queue runner script if needed, signaling the runner to restart.
 // Returns true when a new runner was started.
-func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
-	queueName = ops.DefaultQueueName
-	session := fmt.Sprintf("rj-queue-%s", queueName)
+func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
+	session := fmt.Sprintf("rj-queue-%s", ops.DefaultQueueName)
 
 	// Always check if script needs upgrade, even if runner is already running
 	upgraded, err := EnsureScriptUpToDate(host)
@@ -183,8 +181,8 @@ func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 	// preserving state and continuing to monitor any running jobs.
 	if exists && upgraded {
 		restartCmd := ops.NewRestartCommand()
-		_ = ops.AppendCommand(host, queueName, restartCmd, ops.AppendCommandOptions{}) // Best effort
-		return false, nil                                                              // Runner will restart itself
+		_ = ops.AppendCommand(host, restartCmd, ops.AppendCommandOptions{}) // Best effort
+		return false, nil                                                   // Runner will restart itself
 	}
 
 	if exists {
@@ -200,34 +198,33 @@ func EnsureRunnerStarted(host, queueName, runnerCmd string) (bool, error) {
 
 // Runner models a queue runner on a specific host/queue combination.
 type Runner struct {
-	host  string
-	queue string
+	host string
 }
 
 // NewRunner creates a runner manager for the given host and queue.
-func NewRunner(host, queue string) *Runner {
-	return &Runner{host: host, queue: queue}
+func NewRunner(host string) *Runner {
+	return &Runner{host: host}
 }
 
 // Host returns the runner host.
 func (r *Runner) Host() string { return r.host }
 
 // Queue returns the queue name.
-func (r *Runner) Queue() string { return r.queue }
+func (r *Runner) Queue() string { return ops.DefaultQueueName }
 
 // SessionName returns the tmux session associated with this runner.
-func (r *Runner) SessionName() string { return fmt.Sprintf("rj-queue-%s", r.queue) }
+func (r *Runner) SessionName() string { return fmt.Sprintf("rj-queue-%s", ops.DefaultQueueName) }
 
 // EnsureStarted ensures the runner is active, deploying scripts and starting tmux if needed.
 func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {
-	runnerCmd := RunnerCommand(r.queue, envPrefix)
-	return EnsureRunnerStarted(r.host, r.queue, runnerCmd)
+	runnerCmd := RunnerCommand(envPrefix)
+	return EnsureRunnerStarted(r.host, runnerCmd)
 }
 
 // SendStopSignal signals the runner to stop after the current job.
 func (r *Runner) SendStopSignal() error {
 	cmd := ops.NewStopCommand()
-	return ops.AppendCommand(r.host, r.queue, cmd, ops.AppendCommandOptions{})
+	return ops.AppendCommand(r.host, cmd, ops.AppendCommandOptions{})
 }
 
 // WaitForStop waits until the runner's tmux session exits or timeout elapses.

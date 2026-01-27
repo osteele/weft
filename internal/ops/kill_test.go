@@ -114,7 +114,7 @@ func TestKillJob_SyncError(t *testing.T) {
 
 func TestCancelQueuedJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
-	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
 	job, _ := db.GetJobByID(database, jobID)
 
 	mockSSHCommands(t, []sshMockResponse{
@@ -147,7 +147,7 @@ func TestCancelQueuedJob_Success(t *testing.T) {
 
 func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	database := db.SetupTestDB(t)
-	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
 	job, _ := db.GetJobByID(database, jobID)
 
 	// Mock immediate connection failure (no sync attempted)
@@ -198,7 +198,7 @@ func TestCancelQueuedJob_NotQueued(t *testing.T) {
 // is treated as effectively killed (not cancellable).
 func TestCancelQueuedJob_UsesEffectiveStatus(t *testing.T) {
 	database := db.SetupTestDB(t)
-	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
 
 	// Set pending status to killed - the job is still Status=queued but EffectiveStatus=killed
 	if err := db.SetPendingStatus(database, jobID, db.StatusKilled); err != nil {
@@ -233,7 +233,7 @@ func TestCancelQueuedJob_UsesEffectiveStatus(t *testing.T) {
 func TestKillQueueRunnerJob_TildeNotSingleQuoted(t *testing.T) {
 	database := db.SetupTestDB(t)
 	// Create a queue-runner job (no session name, has queue name)
-	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
 	// Transition to running (simulating queue runner starting it)
 	db.MarkQueuedJobRunning(database, jobID)
 	job, _ := db.GetJobByID(database, jobID)
@@ -264,7 +264,7 @@ func TestKillQueueRunnerJob_TildeNotSingleQuoted(t *testing.T) {
 func TestReconcileCancelKillsRunningProcess(t *testing.T) {
 	database := db.SetupTestDB(t)
 	// Create a queued job
-	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test", "default")
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
 
 	// Set pending status to canceled (simulating user requesting cancel)
 	if err := db.SetPendingStatus(database, jobID, db.StatusCanceled); err != nil {

@@ -182,7 +182,6 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 				}
 				deps = append(deps, queueDependency{JobID: depJobID, AllowFailure: dep.Optional})
 			}
-			targetQueue := defaultQueueName
 			res, err := queueJob(database, queueJobOptions{
 				Host:         resolved.Host,
 				WorkingDir:   resolved.Dir,
@@ -190,7 +189,6 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 				Description:  resolved.Description,
 				EnvVars:      resolved.EnvVars,
 				Tags:         job.Tags,
-				QueueName:    targetQueue,
 				Dependencies: deps,
 				AutoStart:    !planNoQueueStart,
 			})
@@ -340,14 +338,12 @@ func applyJobDefaults(job plan.Job, defaultDir string, defaultEnv map[string]str
 func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[string]bool) (scheduledPlanJob, error) {
 	label := jobLabel(job)
 	if job.QueueOnly {
-		queueName := defaultQueueName
 		res, err := queueJob(database, queueJobOptions{
 			Host:        job.Host,
 			WorkingDir:  job.Dir,
 			Command:     job.Command,
 			Description: job.Description,
 			EnvVars:     job.EnvVars,
-			QueueName:   queueName,
 			AutoStart:   !planNoQueueStart,
 		})
 		if err != nil {

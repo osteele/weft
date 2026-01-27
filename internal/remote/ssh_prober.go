@@ -27,8 +27,8 @@ func (p *SSHProber) Host() Host {
 
 // ProbeInQueue checks if a job is in the queue's pending list.
 // Returns ProbeUnknown on error, otherwise ProbeTrue or ProbeFalse.
-func (p *SSHProber) ProbeInQueue(queueName string, jobID int64) ProbeResult {
-	result, err := p.host.IsJobInQueue(queueName, jobID)
+func (p *SSHProber) ProbeInQueue(jobID int64) ProbeResult {
+	result, err := p.host.IsJobInQueue(jobID)
 	if err != nil {
 		return ProbeUnknown
 	}
@@ -40,8 +40,8 @@ func (p *SSHProber) ProbeInQueue(queueName string, jobID int64) ProbeResult {
 
 // ProbeCurrent checks if a job is the currently running job.
 // Returns ProbeUnknown on error, otherwise ProbeTrue or ProbeFalse.
-func (p *SSHProber) ProbeCurrent(queueName string, jobID int64) ProbeResult {
-	result, err := p.host.IsJobCurrent(queueName, jobID)
+func (p *SSHProber) ProbeCurrent(jobID int64) ProbeResult {
+	result, err := p.host.IsJobCurrent(jobID)
 	if err != nil {
 		return ProbeUnknown
 	}

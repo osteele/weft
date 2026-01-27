@@ -245,7 +245,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if runDraft {
 		gpu := extractGPUFromEnvVars(runEnvVars)
-		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, defaultQueueName, gpu)
+		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, gpu)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
 		}
@@ -293,7 +293,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Description:  runDescription,
 			EnvVars:      runEnvVars,
 			Tags:         runTags,
-			QueueName:    defaultQueueName,
 			Dependencies: deps,
 			AutoStart:    true,
 		})
@@ -327,7 +326,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Description: runDescription,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
-			QueueName:   defaultQueueName,
 			AutoStart:   true,
 		})
 		if err != nil {
@@ -380,7 +378,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Description: runDescription,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
-			QueueName:   defaultQueueName,
 			AutoStart:   false,
 		})
 		if err != nil {

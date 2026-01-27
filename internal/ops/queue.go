@@ -81,14 +81,13 @@ func (e *QueueAppendError) IsConnectionError() bool {
 }
 
 // AppendQueueEntry adds a job entry to the remote command log (queue runner input).
-func AppendQueueEntry(host, queueName string, entry QueueEntry, opts AppendQueueEntryOptions) error {
+func AppendQueueEntry(host string, entry QueueEntry, opts AppendQueueEntryOptions) error {
 	if entry.Command == "" {
 		return fmt.Errorf("job %d missing command", entry.JobID)
 	}
-	queueName = DefaultQueueName
 	addCmd := NewAddCommand(entry)
 	appendOpts := AppendCommandOptions{Timeout: opts.Timeout}
-	if err := AppendCommand(host, queueName, addCmd, appendOpts); err != nil {
+	if err := AppendCommand(host, addCmd, appendOpts); err != nil {
 		return err
 	}
 	return nil
@@ -110,17 +109,16 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 	}
 	addCmd := NewAddCommand(entry)
 	opts := AppendCommandOptions{Timeout: timeout}
-	return AppendCommand(job.Host, DefaultQueueName, addCmd, opts)
+	return AppendCommand(job.Host, addCmd, opts)
 }
 
 // UpdateQueueEntryParams contains parameters for updating an existing queue entry
 type UpdateQueueEntryParams struct {
-	Host      string
-	QueueName string
-	Job       *db.Job
-	EnvVars   []string
-	DepSpec   string
-	Timeout   time.Duration
+	Host    string
+	Job     *db.Job
+	EnvVars []string
+	DepSpec string
+	Timeout time.Duration
 }
 
 // UpdateQueueEntry updates an existing job's entry in the remote queue file.
@@ -130,8 +128,6 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 	if params.Job == nil {
 		return fmt.Errorf("job is nil")
 	}
-
-	queueName := DefaultQueueName
 
 	entry := QueueEntry{
 		JobID:        params.Job.ID,
@@ -147,7 +143,7 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 	// Use new command queue format
 	addCmd := NewAddCommand(entry)
 	opts := AppendCommandOptions{Timeout: params.Timeout}
-	if err := AppendCommand(params.Host, queueName, addCmd, opts); err != nil {
+	if err := AppendCommand(params.Host, addCmd, opts); err != nil {
 		var qaErr *QueueAppendError
 		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
 			return fmt.Errorf("host unreachable")
@@ -160,11 +156,10 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 
 // UpdateQueuedJobEntry refreshes a queued job entry on the remote host, fetching
 // missing fields from the queue file if necessary.
-func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSpec string) error {
+func UpdateQueuedJobEntry(job *db.Job, envVars []string, depSpec string) error {
 	if job == nil {
 		return fmt.Errorf("job is nil")
 	}
-	queueName = queuefile.DefaultQueueName
 
 	entryJob := &db.Job{
 		ID:          job.ID,
@@ -172,7 +167,6 @@ func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSp
 		WorkingDir:  job.WorkingDir,
 		Command:     job.Command,
 		Description: job.Description,
-		QueueName:   queueName,
 	}
 
 	needEnv := len(envVars) == 0
@@ -180,7 +174,7 @@ func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSp
 	needCmd := entryJob.Command == ""
 
 	if needEnv || needDir || needCmd {
-		entry, err := queuefile.FetchEntry(job.Host, queueName, job.ID)
+		entry, err := queuefile.FetchEntry(job.Host, job.ID)
 		if err != nil {
 			return err
 		}
@@ -199,11 +193,10 @@ func UpdateQueuedJobEntry(job *db.Job, queueName string, envVars []string, depSp
 	}
 
 	return UpdateQueueEntry(UpdateQueueEntryParams{
-		Host:      job.Host,
-		QueueName: queueName,
-		Job:       entryJob,
-		EnvVars:   envVars,
-		DepSpec:   depSpec,
+		Host:    job.Host,
+		Job:     entryJob,
+		EnvVars: envVars,
+		DepSpec: depSpec,
 	})
 }
 
@@ -216,7 +209,6 @@ type QueueJobParams struct {
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
-	QueueName    string
 	DepSpec      string
 	CPUAllotment *int
 }
@@ -225,8 +217,6 @@ type QueueJobParams struct {
 // The job is recorded locally with "queued" status, then appended to the queue file.
 // If the host is unreachable, the operation is deferred until the host comes online.
 func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Result, error) {
-	queueName := DefaultQueueName
-
 	// Extract GPU from env vars if not explicitly set
 	gpu := params.GPU
 	if gpu == "" {
@@ -239,7 +229,7 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	}
 
 	// Record job with queued status
-	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, queueName, gpu)
+	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
 	if err != nil {
 		return Result{}, fmt.Errorf("record job: %w", err)
 	}
@@ -320,7 +310,7 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	// Append to remote queue
 	addCmd := NewAddCommand(entry)
 	appendOpts := AppendCommandOptions{Timeout: opts.Timeout}
-	if err := AppendCommand(params.Host, queueName, addCmd, appendOpts); err != nil {
+	if err := AppendCommand(params.Host, addCmd, appendOpts); err != nil {
 		var qaErr *QueueAppendError
 		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
 			return Result{

@@ -42,13 +42,13 @@ type QueueCommand struct {
 }
 
 // CommandsFileName returns the path to the commands file for a queue.
-func CommandsFileName(queueName string) string {
+func CommandsFileName() string {
 	return fmt.Sprintf("%s.commands", DefaultQueueName)
 }
 
 // CommandsFilePath returns the full remote path to the commands file.
-func CommandsFilePath(queueName string) string {
-	return fmt.Sprintf("%s/%s", QueueDir, CommandsFileName(DefaultQueueName))
+func CommandsFilePath() string {
+	return fmt.Sprintf("%s/%s", QueueDir, CommandsFileName())
 }
 
 // NewAddCommand creates a command to add a job to the queue.
@@ -111,9 +111,7 @@ type AppendCommandOptions struct {
 
 // AppendCommand appends a command to the remote queue's command log.
 // This is append-only - no locking required.
-func AppendCommand(host, queueName string, cmd QueueCommand, opts AppendCommandOptions) error {
-	queueName = DefaultQueueName
-
+func AppendCommand(host string, cmd QueueCommand, opts AppendCommandOptions) error {
 	// Serialize command to JSON (single line)
 	jsonBytes, err := json.Marshal(cmd)
 	if err != nil {
@@ -121,7 +119,7 @@ func AppendCommand(host, queueName string, cmd QueueCommand, opts AppendCommandO
 	}
 	jsonLine := string(jsonBytes)
 
-	commandsFile := CommandsFilePath(queueName)
+	commandsFile := CommandsFilePath()
 
 	// Simple append - no locking needed for append-only log
 	// Use printf to avoid echo interpretation issues
@@ -194,11 +192,11 @@ type RunnerJobState struct {
 }
 
 // StateFileName returns the filename for the runner state file.
-func StateFileName(queueName string) string {
+func StateFileName() string {
 	return fmt.Sprintf("%s.state.json", DefaultQueueName)
 }
 
 // StateFilePath returns the full remote path to the state file.
-func StateFilePath(queueName string) string {
-	return fmt.Sprintf("%s/%s", QueueDir, StateFileName(DefaultQueueName))
+func StateFilePath() string {
+	return fmt.Sprintf("%s/%s", QueueDir, StateFileName())
 }

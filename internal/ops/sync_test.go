@@ -27,11 +27,11 @@ func (m mockQueueRemote) StatusFile(host string, jobID int64, timeout time.Durat
 	return m.statusExitCode, m.statusMtime, m.statusOption
 }
 
-func (m mockQueueRemote) CurrentJob(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
+func (m mockQueueRemote) CurrentJob(host string, jobID int64, timeout time.Duration) Option[bool] {
 	return m.current
 }
 
-func (m mockQueueRemote) InQueue(host, queueName string, jobID int64, timeout time.Duration) Option[bool] {
+func (m mockQueueRemote) InQueue(host string, jobID int64, timeout time.Duration) Option[bool] {
 	return m.inQueue
 }
 
@@ -43,7 +43,7 @@ func (m mockQueueRemote) ProcessPaused(host string, jobID int64, timeout time.Du
 	return m.paused
 }
 
-func (m mockQueueRemote) QuickStatus(host, queueName string, jobID int64, timeout time.Duration) (quickStatus, error) {
+func (m mockQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duration) (quickStatus, error) {
 	return m.quickStatus, nil
 }
 
@@ -58,7 +58,7 @@ func (m mockQueueRemote) Samples(host string, jobID int64, timeout time.Duration
 func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo queued", "queued job", "default")
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo queued", "queued job")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestSyncQueueRunnerJobQueuedToRunning(t *testing.T) {
 		MetadataResult: map[string]string{"start_time": "1700000000"},
 	}
 
-	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestSyncJobNoChangeWhenSessionGoneButNoStatus(t *testing.T) {
 func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	jobID, err := db.RecordQueued(database, "dead-host", "/tmp", "echo dead", "dead job", "default")
+	jobID, err := db.RecordQueued(database, "dead-host", "/tmp", "echo dead", "dead job")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 	}
 	host := &remote.MockHost{}
 
-	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestSyncQueueRunnerJobMarksDeadWhenAllProbesFail(t *testing.T) {
 func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job", "default")
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 	}
 
 	job, _ := db.GetJobByID(database, jobID)
-	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, "default", SyncOptions{Timeout: time.Second})
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second})
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
@@ -294,7 +294,7 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 func TestSyncDraftJobRemovesQueuedEntry(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	jobID, err := db.RecordQueued(database, "draft-queue-host", "/tmp", "echo queued", "draft job", "default")
+	jobID, err := db.RecordQueued(database, "draft-queue-host", "/tmp", "echo queued", "draft job")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}

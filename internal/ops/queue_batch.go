@@ -20,11 +20,10 @@ type queueBatchStatus struct {
 
 // BatchSyncQueueRunnerJobs performs a batched sync for queue-runner jobs on one host/queue.
 // This avoids per-job SSH calls by fetching queue state in a single command.
-func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*db.Job, timeout time.Duration) (int, error) {
+func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration) (int, error) {
 	if len(jobs) == 0 {
 		return 0, nil
 	}
-	queueName = DefaultQueueName
 	jobIDs := make([]int64, 0, len(jobs))
 	jobByID := make(map[int64]*db.Job, len(jobs))
 	for _, job := range jobs {
@@ -38,7 +37,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 		return 0, nil
 	}
 
-	statuses, err := fetchQueueBatchStatus(host, queueName, jobIDs, timeout)
+	statuses, err := fetchQueueBatchStatus(host, jobIDs, timeout)
 	if err != nil {
 		return 0, err
 	}
@@ -57,7 +56,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 		switch status.State {
 		case queueStateQueued:
 			if job.PendingStatus != nil && (*job.PendingStatus == db.StatusCanceled || *job.PendingStatus == db.StatusKilled || *job.PendingStatus == db.StatusDead) {
-				if err := removeFromQueueFile(job.Host, queueName, job.ID, timeout); err != nil {
+				if err := removeFromQueueFile(job.Host, job.ID, timeout); err != nil {
 					return updated, err
 				}
 				finalStatus := db.StatusCanceled
@@ -120,7 +119,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 			}
 		case queueStateDead:
 			if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
-				if err := startQueuedJobNow(database, job, queueName, timeout); err != nil {
+				if err := startQueuedJobNow(database, job, timeout); err != nil {
 					return updated, err
 				}
 				updated++
@@ -149,8 +148,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host, queueName string, jobs []*
 	return updated, nil
 }
 
-func fetchQueueBatchStatus(host, queueName string, jobIDs []int64, timeout time.Duration) (map[int64]queueBatchStatus, error) {
-	queueName = DefaultQueueName
+func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (map[int64]queueBatchStatus, error) {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
@@ -159,7 +157,7 @@ func fetchQueueBatchStatus(host, queueName string, jobIDs []int64, timeout time.
 		idList = append(idList, fmt.Sprintf("%d", id))
 	}
 	idsArg := strings.Join(idList, " ")
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", queueName)
+	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", DefaultQueueName)
 	statusPattern := fmt.Sprintf("%s/$id*.status", session.LogDir)
 	pidPattern := fmt.Sprintf("%s/$id*.pid", session.LogDir)
 	script := fmt.Sprintf(`

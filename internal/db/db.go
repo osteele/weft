@@ -587,21 +587,19 @@ func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 }
 
 // UpdateJobStartingToQueued transitions a starting job to queued state and assigns a queue name.
-func UpdateJobStartingToQueued(db *sql.DB, id int64, queueName string) error {
-	queueName = queuefile.DefaultQueueName
+func UpdateJobStartingToQueued(db *sql.DB, id int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
-		StatusQueued, queueName, id, StatusStarting,
+		StatusQueued, queuefile.DefaultQueueName, id, StatusStarting,
 	)
 	return err
 }
 
 // UpdateJobRunningToQueued transitions a running job back to queued state.
-func UpdateJobRunningToQueued(db *sql.DB, id int64, queueName string) error {
-	queueName = queuefile.DefaultQueueName
+func UpdateJobRunningToQueued(db *sql.DB, id int64) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
-		StatusQueued, queueName, id, StatusRunning,
+		StatusQueued, queuefile.DefaultQueueName, id, StatusRunning,
 	)
 	return err
 }
@@ -910,18 +908,17 @@ func CountQueueRunnerActiveByHost(db *sql.DB, host string) (int, error) {
 
 // RecordQueued records a queued job for sequential execution and returns its ID
 // Note: start_time is NULL until the job actually starts running (set by UpdateQueuedToRunning)
-func RecordQueued(db *sql.DB, host, workingDir, command, description, queueName string) (int64, error) {
-	return RecordQueuedWithGPU(db, host, workingDir, command, description, queuefile.DefaultQueueName, "")
+func RecordQueued(db *sql.DB, host, workingDir, command, description string) (int64, error) {
+	return RecordQueuedWithGPU(db, host, workingDir, command, description, "")
 }
 
 // RecordQueuedWithGPU records a queued job with GPU specification
-func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
-	queueName = queuefile.DefaultQueueName
+func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu string) (int64, error) {
 	now := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
 		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
-		host, workingDir, command, description, now, now, StatusQueued, queueName, gpu,
+		host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu,
 	)
 	if err != nil {
 		return 0, err
@@ -930,18 +927,17 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, que
 }
 
 // RecordDraftJobWithGPU records a job that should remain in draft locally.
-func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, queueName, gpu string) (int64, error) {
-	return RecordDraftJob(db, host, workingDir, command, description, queuefile.DefaultQueueName, gpu, "")
+func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, gpu string) (int64, error) {
+	return RecordDraftJob(db, host, workingDir, command, description, gpu, "")
 }
 
 // RecordDraftJob records a job that should remain in draft locally, with optional dependency.
-func RecordDraftJob(db *sql.DB, host, workingDir, command, description, queueName, gpu, depSpec string) (int64, error) {
-	queueName = queuefile.DefaultQueueName
+func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, depSpec string) (int64, error) {
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, dep_spec, last_synced_status)
 		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-		host, workingDir, command, description, createdAt, StatusDraft, queueName, gpu, depSpec, StatusDraft,
+		host, workingDir, command, description, createdAt, StatusDraft, queuefile.DefaultQueueName, gpu, depSpec, StatusDraft,
 	)
 	if err != nil {
 		return 0, err

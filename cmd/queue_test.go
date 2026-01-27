@@ -11,15 +11,15 @@ import (
 func TestBuildQueueEditDependencies(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	targetID, err := db.RecordQueued(database, "hostA", "/tmp", "echo target", "target", "default")
+	targetID, err := db.RecordQueued(database, "hostA", "/tmp", "echo target", "target")
 	if err != nil {
 		t.Fatalf("record target job: %v", err)
 	}
-	successID, err := db.RecordQueued(database, "hostA", "/tmp", "echo success", "success", "default")
+	successID, err := db.RecordQueued(database, "hostA", "/tmp", "echo success", "success")
 	if err != nil {
 		t.Fatalf("record success job: %v", err)
 	}
-	anyID, err := db.RecordQueued(database, "hostA", "/tmp", "echo any", "any", "default")
+	anyID, err := db.RecordQueued(database, "hostA", "/tmp", "echo any", "any")
 	if err != nil {
 		t.Fatalf("record completion job: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestBuildQueueEditDependencies(t *testing.T) {
 	}
 
 	// Cross-host dependency should fail
-	otherHostID, err := db.RecordQueued(database, "hostB", "/tmp", "echo other", "other", "default")
+	otherHostID, err := db.RecordQueued(database, "hostB", "/tmp", "echo other", "other")
 	if err != nil {
 		t.Fatalf("record other host job: %v", err)
 	}
@@ -59,15 +59,15 @@ func TestBuildQueueEditDependencies(t *testing.T) {
 
 func TestBuildQueueEditDependenciesModes(t *testing.T) {
 	database := db.SetupTestDB(t)
-	targetID, err := db.RecordQueued(database, "hostA", "/tmp", "echo target", "target", "default")
+	targetID, err := db.RecordQueued(database, "hostA", "/tmp", "echo target", "target")
 	if err != nil {
 		t.Fatalf("record target job: %v", err)
 	}
-	jobA, err := db.RecordQueued(database, "hostA", "/tmp", "echo A", "A", "default")
+	jobA, err := db.RecordQueued(database, "hostA", "/tmp", "echo A", "A")
 	if err != nil {
 		t.Fatalf("record job A: %v", err)
 	}
-	jobB, err := db.RecordQueued(database, "hostA", "/tmp", "echo B", "B", "default")
+	jobB, err := db.RecordQueued(database, "hostA", "/tmp", "echo B", "B")
 	if err != nil {
 		t.Fatalf("record job B: %v", err)
 	}
@@ -92,11 +92,11 @@ func TestBuildQueueEditDependenciesModes(t *testing.T) {
 
 func TestBuildQueueEditDependenciesValidation(t *testing.T) {
 	database := db.SetupTestDB(t)
-	targetID, err := db.RecordQueued(database, "hostA", "/tmp", "echo target", "target", "default")
+	targetID, err := db.RecordQueued(database, "hostA", "/tmp", "echo target", "target")
 	if err != nil {
 		t.Fatalf("record target job: %v", err)
 	}
-	jobA, err := db.RecordQueued(database, "hostA", "/tmp", "echo A", "A", "default")
+	jobA, err := db.RecordQueued(database, "hostA", "/tmp", "echo A", "A")
 	if err != nil {
 		t.Fatalf("record job A: %v", err)
 	}
