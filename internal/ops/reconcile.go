@@ -277,10 +277,19 @@ func applyResumeToRemote(job *db.Job, timeout time.Duration) error {
 
 func signalJobProcess(job *db.Job, signal string, timeout time.Duration) error {
 	pgidFile := session.SimplePgidFile(job.ID)
-	// Use the PGID file and negative PID (-$pgid) to signal the entire process group.
-	// The pgid file contains the setsid process PID (which is the process group leader).
-	// This ensures child processes (e.g., Python spawned by uv) also receive the signal.
-	cmd := fmt.Sprintf(`pgid=$(cat %s 2>/dev/null | head -1); if [ -z "$pgid" ]; then echo "pgid not found" >&2; exit 2; fi; if ! ps -p $pgid > /dev/null 2>&1; then echo "process not running" >&2; exit 3; fi; kill -%s -$pgid`, pgidFile, signal)
+	pidPattern := session.PidFilePattern(job.ID)
+	// Try PGID file first (for queue-runner jobs that use setsid).
+	// Then fall back to PID file, but signal the entire process group to reach child processes.
+	// Using ps to get the PGID ensures we signal all processes spawned by the job.
+	cmd := fmt.Sprintf(`pgid=$(cat %s 2>/dev/null | head -1); `+
+		`if [ -n "$pgid" ] && ps -p $pgid > /dev/null 2>&1; then `+
+		`kill -%s -$pgid; exit 0; fi; `+
+		`pid=$(cat %s 2>/dev/null | head -1); `+
+		`if [ -n "$pid" ] && ps -p $pid > /dev/null 2>&1; then `+
+		`pgid=$(ps -o pgid= -p $pid 2>/dev/null | tr -d " "); `+
+		`if [ -n "$pgid" ]; then kill -%s -$pgid; else kill -%s $pid; fi; exit 0; fi; `+
+		`echo "no running process found" >&2; exit 3`,
+		pgidFile, signal, pidPattern, signal, signal)
 	_, stderr, err := ssh.RunWithTimeout(job.Host, cmd, timeout)
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {

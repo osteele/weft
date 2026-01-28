@@ -131,3 +131,43 @@ func TestApplyResumeToRemote_SlurmNotSupported(t *testing.T) {
 		t.Errorf("expected 'not supported' error, got: %v", err)
 	}
 }
+
+func TestSignalJobProcess_PIDFallbackSignalsProcessGroup(t *testing.T) {
+	// Verify that when falling back to PID (no PGID file), we still signal
+	// the process group by looking up the PGID via ps command.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "test-host", "/tmp", "sleep 100", "pgid lookup test")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.MarkRunningByID(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	var capturedCmd string
+	mockSSHFunc(t, func(host, cmd string) (string, string, int) {
+		capturedCmd = cmd
+		return "", "", 0
+	})
+
+	err = signalJobProcess(job, "STOP", time.Second)
+	if err != nil {
+		t.Fatalf("signalJobProcess: %v", err)
+	}
+
+	// Verify the command includes ps -o pgid= to lookup the process group
+	if !strings.Contains(capturedCmd, "ps -o pgid= -p $pid") {
+		t.Errorf("expected command to lookup PGID via ps, got: %s", capturedCmd)
+	}
+
+	// Verify the command signals the process group (negative PGID)
+	if !strings.Contains(capturedCmd, "kill -STOP -$pgid") {
+		t.Errorf("expected command to signal process group with -$pgid, got: %s", capturedCmd)
+	}
+}

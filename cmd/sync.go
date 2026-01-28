@@ -158,12 +158,25 @@ func syncHost(database *sql.DB, host string) (int, error) {
 
 	for _, job := range jobs {
 		seenJobs[job.ID] = true
-		syncResult, err := syncJobFunc(database, job, syncOpts)
-		if err != nil {
-			return updated, err
-		}
-		if syncResult.Updated {
+		// Use SyncAndReconcile for jobs with pending operations (pause, resume, etc.)
+		// to ensure pending status changes are applied
+		if job.PendingStatus != nil {
+			_, err := ops.SyncAndReconcile(database, job, ops.ReconcileOptions{Timeout: syncOpts.Timeout})
+			if err != nil {
+				if syncVerbose {
+					fmt.Fprintf(os.Stderr, "  Warning: reconcile job %d: %v\n", job.ID, err)
+				}
+				continue
+			}
 			updated++
+		} else {
+			syncResult, err := syncJobFunc(database, job, syncOpts)
+			if err != nil {
+				return updated, err
+			}
+			if syncResult.Updated {
+				updated++
+			}
 		}
 	}
 
@@ -175,7 +188,7 @@ func syncHost(database *sql.DB, host string) (int, error) {
 	}
 	for _, job := range pendingJobs {
 		if seenJobs[job.ID] {
-			continue // Already synced above
+			continue // Already reconciled above
 		}
 		seenJobs[job.ID] = true
 		_, err := ops.SyncAndReconcile(database, job, ops.ReconcileOptions{Timeout: syncOpts.Timeout})
