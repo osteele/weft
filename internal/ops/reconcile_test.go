@@ -115,6 +115,42 @@ func TestApplyPauseToRemote_SlurmNotSupported(t *testing.T) {
 	}
 }
 
+func TestApplyPauseToRemote_ConnectionError(t *testing.T) {
+	// Verify that SSH connection errors are properly detected and reported
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "test-host", "/tmp", "sleep 100", "pause conn test")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.MarkRunningByID(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	// Simulate SSH connection error: the error is "exit status 255" but
+	// the actual connection message is in stderr
+	mockSSHFunc(t, func(host, cmd string) (string, string, int) {
+		return "", "Connection closed by 10.1.2.3 port 22", 255
+	})
+
+	err = applyPauseToRemote(job, time.Second)
+	if err == nil {
+		t.Error("expected error for connection failure")
+	}
+	// The error should contain the connection error message, not just "exit status 255"
+	if err != nil && !strings.Contains(err.Error(), "connection error") {
+		t.Errorf("expected 'connection error' in error, got: %v", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "Connection closed") {
+		t.Errorf("expected stderr message in error, got: %v", err)
+	}
+}
+
 func TestApplyResumeToRemote_SlurmNotSupported(t *testing.T) {
 	// Create a mock job with SLURM backend set
 	job := &db.Job{

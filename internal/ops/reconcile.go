@@ -255,7 +255,10 @@ func applyPauseToRemote(job *db.Job, timeout time.Duration) error {
 	// Create .paused marker file so queue runner knows this is intentional
 	pausedFile := session.SimplePausedFile(job.ID)
 	touchCmd := fmt.Sprintf("touch %s", pausedFile)
-	if _, _, err := ssh.RunWithTimeout(job.Host, touchCmd, timeout); err != nil {
+	if _, stderr, err := ssh.RunWithTimeout(job.Host, touchCmd, timeout); err != nil {
+		if ssh.IsConnectionError(stderr) {
+			return fmt.Errorf("connection error: %s", strings.TrimSpace(stderr))
+		}
 		return fmt.Errorf("create paused marker: %w", err)
 	}
 	return signalJobProcess(job, "STOP", timeout)
