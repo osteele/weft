@@ -165,7 +165,10 @@ func Run(host string, command string) (string, string, error) {
 // RunWithContext executes an SSH command with context cancellation support.
 // When the context is cancelled, the SSH process is killed immediately.
 func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {
-	args := append(sshControlMasterArgs(), host, command)
+	args := append(sshControlMasterArgs(),
+		"-o", "ConnectTimeout=10",
+		"-o", "BatchMode=yes",
+		host, command)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
