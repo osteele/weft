@@ -168,6 +168,54 @@ func TestApplyResumeToRemote_SlurmNotSupported(t *testing.T) {
 	}
 }
 
+func TestApplyStartToRemote_PreservesPendingOnFailure(t *testing.T) {
+	// Verify that when starting a draft job fails (e.g., SSH error),
+	// the pending_status is preserved for retry.
+	database := db.SetupTestDB(t)
+
+	// Create a draft job with pending_status=running
+	jobID, err := db.RecordDraftJob(database, "test-host", "/tmp", "sleep 100", "start fail test", "", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetPendingStatus(database, jobID, db.StatusRunning); err != nil {
+		t.Fatalf("set pending status: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	// First call succeeds (queue job), second call fails (start job)
+	callCount := 0
+	mockSSHFunc(t, func(host, cmd string) (string, string, int) {
+		callCount++
+		if callCount <= 2 {
+			// First two calls: queue-related commands succeed
+			return "", "", 0
+		}
+		// Third call (startJobFromRecord) fails with connection error
+		return "", "Connection closed by remote host", 255
+	})
+
+	err = applyStartToRemote(database, job, time.Second)
+	if err == nil {
+		t.Fatal("expected error from applyStartToRemote")
+	}
+
+	// Verify pending_status is still set (for retry)
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.PendingStatus == nil {
+		t.Error("pending_status should be preserved when start fails, but it was cleared")
+	} else if *updated.PendingStatus != db.StatusRunning {
+		t.Errorf("pending_status should be 'running', got '%s'", *updated.PendingStatus)
+	}
+}
+
 func TestSignalJobProcess_PIDFallbackSignalsProcessGroup(t *testing.T) {
 	// Verify that when falling back to PID (no PGID file), we still signal
 	// the process group by looking up the PGID via ps command.

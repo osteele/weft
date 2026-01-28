@@ -422,8 +422,10 @@ func applyStartToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 		if err := db.SetQueuedAtNow(database, job.ID); err != nil {
 			return fmt.Errorf("set queued_at: %w", err)
 		}
-		// Update job status to queued for startQueuedJobNow
-		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+		// Update job status to queued for startQueuedJobNow.
+		// Don't clear pending_status yet - startQueuedJobNow will clear it on success,
+		// and we need it preserved for retry if startQueuedJobNow fails.
+		if err := db.UpdateStatusAndLastSynced(database, job.ID, db.StatusQueued); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}
 	} else if job.Status != db.StatusQueued {
