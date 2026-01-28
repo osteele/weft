@@ -193,6 +193,19 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
 		return false, fmt.Errorf("start queue runner: %s", strings.TrimSpace(stderr))
 	}
+
+	// Health check: wait briefly and verify the session is still alive.
+	// This catches cases where the runner script crashes immediately (e.g., corrupted state file).
+	time.Sleep(2 * time.Second)
+	stillExists, err := ssh.TmuxSessionExists(host, session)
+	if err != nil {
+		// Can't verify - assume it's OK (host might have become unreachable)
+		return true, nil
+	}
+	if !stillExists {
+		return false, fmt.Errorf("queue runner on %s crashed immediately after starting - check runner log: ssh %s 'tail -20 ~/.cache/remote-jobs/queue/runner-default.log'", host, host)
+	}
+
 	return true, nil
 }
 

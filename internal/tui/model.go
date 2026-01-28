@@ -699,6 +699,8 @@ type Model struct {
 	lowDiskWarnedHosts map[string]bool
 	// Track hosts that have already shown jq missing warning this session
 	jqMissingWarnedHosts map[string]bool
+	// Track hosts that have already shown queue runner stopped warning this session
+	queueStoppedWarnedHosts map[string]bool
 
 	// Job dependencies (jobID -> dep_spec like "930" or "930+")
 	jobDependencies map[int64]string
@@ -863,6 +865,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostsQueriedThisSession: make(map[string]bool),
 		lowDiskWarnedHosts:      make(map[string]bool),
 		jqMissingWarnedHosts:    make(map[string]bool),
+		queueStoppedWarnedHosts: make(map[string]bool),
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),
 		progressTracker:         progress.NewTracker(),
@@ -1441,6 +1444,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						fmt.Sprintf("Warning: %s is missing 'jq' - queue runner cannot start. Install with: ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", msg.hostName, msg.hostName),
 						true,
 					)
+				}
+
+				// Warn if queue runner is stopped but there are queued jobs waiting
+				// (only if jq is available - otherwise the jq warning takes precedence)
+				if !msg.info.JqMissing && !msg.info.RunnerActive && !m.queueStoppedWarnedHosts[msg.hostName] {
+					queuedCount, _ := db.CountQueuedByHost(m.database, msg.hostName)
+					if queuedCount > 0 {
+						m.queueStoppedWarnedHosts[msg.hostName] = true
+						jqWarningCmd = m.setFlash(
+							fmt.Sprintf("Warning: Queue runner on %s is not running but %d job(s) are waiting. Press 'S' to start it.", msg.hostName, queuedCount),
+							true,
+						)
+					}
 				}
 				break
 			}
