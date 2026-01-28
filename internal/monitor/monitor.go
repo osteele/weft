@@ -454,8 +454,12 @@ func (m *Monitor) refreshHosts() {
 			cacheAge := time.Since(time.Unix(cachedInfo.LastUpdated, 0))
 			if cacheAge > m.config.HostCacheDuration {
 				host.Status = hostinfo.HostStatusChecking
-				go m.refreshHostInfo(name)
+			} else {
+				// Cache is fresh, assume host is still online while we refresh
+				host.Status = hostinfo.HostStatusOnline
 			}
+			// Always refresh to get current dynamic metrics (CPU load, RAM usage)
+			go m.refreshHostInfo(name)
 		} else {
 			host = &hostinfo.Host{
 				Name:   name,

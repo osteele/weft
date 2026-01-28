@@ -97,6 +97,65 @@ const indexTemplate = `<!doctype html>
       .status-online { color: var(--accent); }
       .status-checking { color: var(--warning); }
       .status-offline { color: var(--danger); }
+      .status-unknown { color: var(--muted); }
+      .host-dimmed { opacity: 0.5; }
+      /* Job status colors - high contrast for white background */
+      .job-running { color: #16a34a; }  /* darker green */
+      .job-completed { color: var(--text); }
+      .job-failed { color: #dc2626; }   /* darker red */
+      .job-pending { color: #ca8a04; }  /* darker yellow/amber */
+      .job-paused { color: #a21caf; }   /* darker magenta */
+      .job-dead { color: #57534e; }     /* darker gray */
+      .job-draft { color: #0891b2; }    /* darker cyan */
+      /* Tags styling */
+      .tags { margin-left: 8px; }
+      .tag {
+        display: inline-block;
+        background: var(--accent-weak);
+        color: var(--accent);
+        font-size: 11px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        margin-left: 4px;
+      }
+      /* Tooltip styling - appears below by default to avoid clipping at top */
+      .has-tooltip { position: relative; }
+      .tooltip {
+        display: none;
+        position: absolute;
+        left: 0;
+        top: 100%;
+        margin-top: 4px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 14px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        z-index: 100;
+        min-width: 360px;
+        max-width: 500px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .has-tooltip:hover .tooltip { display: block; }
+      .tooltip-row {
+        display: flex;
+        gap: 12px;
+        margin-bottom: 4px;
+      }
+      .tooltip-row:last-child { margin-bottom: 0; }
+      .tooltip-label {
+        color: var(--muted);
+        min-width: 70px;
+        flex-shrink: 0;
+      }
+      .tooltip-value {
+        font-family: "SF Mono", "Menlo", "Monaco", monospace;
+        color: var(--text);
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .tooltip-value.wrap { white-space: pre-wrap; max-width: 380px; }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -112,11 +171,13 @@ const indexTemplate = `<!doctype html>
         font-size: 11px;
         color: var(--muted);
       }
-      th, td { padding: 10px 12px; border-bottom: 1px solid var(--border); text-align: left; }
+      th, td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; font-size: 13px; }
+      th { padding: 6px 8px; }
       tr:last-child td { border-bottom: none; }
       td.desc { font-weight: 500; }
       .status { font-variant-numeric: tabular-nums; }
       .nowrap { white-space: nowrap; }
+      tbody tr:hover { background: #f9f8f6; }
       @media (max-width: 720px) {
         th:nth-child(2), td:nth-child(2) { display: none; }
       }
@@ -142,7 +203,7 @@ const indexTemplate = `<!doctype html>
     <main>
       <section class="host-summary">
         {{range .HostSummaries}}
-          <div class="host-card">
+          <div class="host-card{{if .Dimmed}} host-dimmed{{end}}">
             <div class="host-name">
               <span>{{.Name}}</span>
               <span class="{{.Style}}">{{.Status}}</span>
@@ -167,13 +228,13 @@ const indexTemplate = `<!doctype html>
         </thead>
         <tbody>
           {{range .Jobs}}
-            <tr>
+            <tr class="{{.StatusClass}}">
               <td class="nowrap">{{.ID}}</td>
               <td class="nowrap">{{.Host}}</td>
               <td class="status nowrap">{{.Status}}</td>
               <td class="nowrap">{{.Time}}</td>
               {{if $.ShowGPU}}<td class="nowrap">{{.GPU}}</td>{{end}}
-              <td class="desc">{{.Description}}</td>
+              <td class="desc has-tooltip">{{.Description}}{{if .Tags}}<span class="tags">{{range .Tags}}<span class="tag">{{.}}</span>{{end}}</span>{{end}}{{.TooltipHTML}}</td>
             </tr>
           {{end}}
           {{if eq (len .Jobs) 0}}
