@@ -698,6 +698,16 @@ remote-jobs run -e BATCH_SIZE=32 -e LR=0.001 cool30 "python train.py"
 remote-jobs queue add -e TMPDIR=/mnt/data/tmp cool30 "python train.py"
 ```
 
+**Automatic environment file loading**:
+
+The queue runner automatically loads environment files from the job's working directory before executing the command. Files are loaded in this order (later files override earlier ones):
+
+1. `.env` - loaded with auto-export (`set -a`)
+2. `.env.local` - loaded with auto-export (`set -a`)
+3. `.envrc` - loaded without auto-export (for direnv compatibility)
+
+The job log will show "Loading .env" etc. when these files are found and sourced.
+
 ### remote-jobs cleanup
 
 Clean up finished sessions and old log files.
