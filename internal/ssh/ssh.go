@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	gosync "sync"
 	"sync/atomic"
 	"time"
 )
@@ -25,7 +26,34 @@ var (
 	// controlPath is the path pattern for SSH ControlMaster socket
 	// Uses /tmp for cross-platform compatibility
 	controlPath = "/tmp/remote-jobs-ssh-%r@%h:%p"
+
+	// hostSemaphores limits concurrent SSH connections per host to avoid
+	// exceeding the remote sshd's MaxStartups threshold.
+	hostSemaphores   = make(map[string]chan struct{})
+	hostSemaphoresMu gosync.Mutex
+
+	// maxConnsPerHost is the maximum number of concurrent SSH connections
+	// allowed to a single host. Kept low because ControlMaster multiplexes
+	// commands over a single TCP connection once established; we only need
+	// enough concurrency to avoid serializing unrelated callers while the
+	// master socket is being set up.
+	maxConnsPerHost = 4
 )
+
+// acquireHostSlot blocks until a connection slot is available for the given host.
+// Returns a release function that must be called when the SSH call completes.
+func acquireHostSlot(host string) func() {
+	hostSemaphoresMu.Lock()
+	sem, ok := hostSemaphores[host]
+	if !ok {
+		sem = make(chan struct{}, maxConnsPerHost)
+		hostSemaphores[host] = sem
+	}
+	hostSemaphoresMu.Unlock()
+
+	sem <- struct{}{} // block until slot available
+	return func() { <-sem }
+}
 
 // sshControlMasterArgs returns the SSH arguments for connection multiplexing.
 // This enables subsequent SSH connections to the same host to reuse an existing connection.
@@ -74,6 +102,9 @@ func SetRunner(fn RunnerFunc) func() {
 
 // defaultRunner executes SSH commands using exec.Command
 func defaultRunner(host, command string) (string, string, error) {
+	release := acquireHostSlot(host)
+	defer release()
+
 	args := append(sshControlMasterArgs(), host, command)
 	cmd := exec.Command("ssh", args...)
 	var stdout, stderr bytes.Buffer
@@ -165,6 +196,9 @@ func Run(host string, command string) (string, string, error) {
 // RunWithContext executes an SSH command with context cancellation support.
 // When the context is cancelled, the SSH process is killed immediately.
 func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {
+	release := acquireHostSlot(host)
+	defer release()
+
 	args := append(sshControlMasterArgs(),
 		"-o", "ConnectTimeout=10",
 		"-o", "BatchMode=yes",
@@ -192,6 +226,9 @@ func RunWithTimeout(host string, command string, timeout time.Duration) (string,
 
 // defaultRunWithTimeout is the real implementation with timeout handling
 func defaultRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
+	release := acquireHostSlot(host)
+	defer release()
+
 	callNum := sshCallCount.Add(1)
 	start := time.Now()
 
@@ -303,6 +340,9 @@ func RunWithRetryVerbose(host string, command string, verbose bool) (string, str
 
 // RunInteractive runs an SSH command that may require terminal interaction
 func RunInteractive(host string, command string) error {
+	release := acquireHostSlot(host)
+	defer release()
+
 	args := append(sshControlMasterArgs(), host, "-t", command)
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdin = os.Stdin
@@ -313,6 +353,9 @@ func RunInteractive(host string, command string) error {
 
 // RunStreaming runs an SSH command and streams output to the provided writers
 func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
+	release := acquireHostSlot(host)
+	defer release()
+
 	args := append(sshControlMasterArgs(), host, command)
 	cmd := exec.Command("ssh", args...)
 	cmd.Stdout = stdout
@@ -335,12 +378,14 @@ func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) er
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
+		release := acquireHostSlot(host)
 		args := append([]string{"-q"}, scpControlMasterArgs()...)
 		args = append(args, localPath, fmt.Sprintf("%s:%s", host, remotePath))
 		cmd := exec.Command("scp", args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
+		release()
 
 		if err == nil {
 			return nil
@@ -383,12 +428,14 @@ func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) 
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
+		release := acquireHostSlot(host)
 		args := append([]string{"-q"}, scpControlMasterArgs()...)
 		args = append(args, fmt.Sprintf("%s:%s", host, remotePath), localPath)
 		cmd := exec.Command("scp", args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
+		release()
 
 		if err == nil {
 			return nil
