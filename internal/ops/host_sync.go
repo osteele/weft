@@ -45,11 +45,22 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	}
 
 	if opts.UseBatchSync {
-		// Batch mode: separate queue-runner and tmux jobs
+		// Batch mode: separate queue-runner and tmux jobs.
+		// Jobs with PendingStatus need reconciliation, not batch sync,
+		// so they go through SyncAndReconcile to apply pending operations.
 		var queueRunnerJobs, tmuxJobs []*db.Job
 		for _, job := range activeJobs {
 			seenJobs[job.ID] = true
-			if job.UsesQueueRunner() {
+			if job.PendingStatus != nil {
+				res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
+				if err != nil {
+					continue
+				}
+				if res != nil {
+					result.HostContacted = true
+					result.Updated++
+				}
+			} else if job.UsesQueueRunner() {
 				queueRunnerJobs = append(queueRunnerJobs, job)
 			} else {
 				tmuxJobs = append(tmuxJobs, job)

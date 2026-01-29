@@ -27,37 +27,53 @@ var (
 	// Uses /tmp for cross-platform compatibility
 	controlPath = "/tmp/remote-jobs-ssh-%r@%h:%p"
 
-	// hostSemaphores limits concurrent SSH connections per host to avoid
-	// exceeding the remote sshd's MaxStartups threshold.
-	hostSemaphores   = make(map[string]chan struct{})
-	hostSemaphoresMu gosync.Mutex
-
-	// maxConnsPerHost is the maximum number of concurrent SSH connections
-	// allowed to a single host. Kept low because ControlMaster multiplexes
-	// commands over a single TCP connection once established; we only need
-	// enough concurrency to avoid serializing unrelated callers while the
-	// master socket is being set up.
-	maxConnsPerHost = 4
+	// controlMasterOnce tracks per-host ControlMaster establishment.
+	controlMasterOnce   = make(map[string]*gosync.Once)
+	controlMasterOnceMu gosync.Mutex
 )
 
-// acquireHostSlot blocks until a connection slot is available for the given host.
-// Returns a release function that must be called when the SSH call completes.
-func acquireHostSlot(host string) func() {
-	hostSemaphoresMu.Lock()
-	sem, ok := hostSemaphores[host]
+// EnsureControlMaster pre-establishes a ControlMaster SSH connection to the
+// given host. Once a master socket exists, all subsequent SSH commands multiplex
+// over a single TCP connection, avoiding MaxStartups limits. This is called
+// once per host per session via sync.Once.
+func EnsureControlMaster(host string) error {
+	controlMasterOnceMu.Lock()
+	once, ok := controlMasterOnce[host]
 	if !ok {
-		sem = make(chan struct{}, maxConnsPerHost)
-		hostSemaphores[host] = sem
+		once = &gosync.Once{}
+		controlMasterOnce[host] = once
 	}
-	hostSemaphoresMu.Unlock()
+	controlMasterOnceMu.Unlock()
 
-	sem <- struct{}{} // block until slot available
-	return func() { <-sem }
+	var err error
+	once.Do(func() {
+		// Check if master socket already exists
+		checkArgs := append(controlMasterArgs(), "-O", "check", host)
+		if checkCmd := exec.Command("ssh", checkArgs...); checkCmd.Run() == nil {
+			return // master already running
+		}
+
+		// Establish a new master connection in the background
+		args := append(controlMasterArgs(),
+			"-o", "ConnectTimeout=10",
+			"-o", "BatchMode=yes",
+			"-fN", host)
+		cmd := exec.Command("ssh", args...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if e := cmd.Run(); e != nil {
+			err = fmt.Errorf("establish ControlMaster for %s: %s", host, strings.TrimSpace(stderr.String()))
+			// Reset the Once so next call retries
+			controlMasterOnceMu.Lock()
+			controlMasterOnce[host] = &gosync.Once{}
+			controlMasterOnceMu.Unlock()
+		}
+	})
+	return err
 }
 
-// sshControlMasterArgs returns the SSH arguments for connection multiplexing.
-// This enables subsequent SSH connections to the same host to reuse an existing connection.
-func sshControlMasterArgs() []string {
+// controlMasterArgs returns the SSH/SCP arguments for connection multiplexing.
+func controlMasterArgs() []string {
 	return []string{
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPath=" + controlPath,
@@ -65,10 +81,33 @@ func sshControlMasterArgs() []string {
 	}
 }
 
-// scpControlMasterArgs returns the SCP arguments for connection multiplexing.
-// Uses the same socket path as SSH so connections can be shared.
-func scpControlMasterArgs() []string {
-	return sshControlMasterArgs()
+// sshCommand creates an exec.Cmd for SSH to the given host, ensuring a
+// ControlMaster socket exists first. Extra args are inserted before the
+// host destination (e.g. "-o", "BatchMode=yes"). The command to run on
+// the remote host is passed as remoteCmd.
+// All SSH calls should use this instead of exec.Command("ssh", ...) directly.
+func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
+	_ = EnsureControlMaster(host)
+	args := append(controlMasterArgs(), extraArgs...)
+	args = append(args, host, remoteCmd)
+	return exec.Command("ssh", args...)
+}
+
+// sshCommandContext is like sshCommand but with context support.
+func sshCommandContext(ctx context.Context, host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
+	_ = EnsureControlMaster(host)
+	args := append(controlMasterArgs(), extraArgs...)
+	args = append(args, host, remoteCmd)
+	return exec.CommandContext(ctx, "ssh", args...)
+}
+
+// scpCommand creates an exec.Cmd for SCP, ensuring a ControlMaster socket
+// exists for the target host first. Args are the SCP source/destination arguments.
+func scpCommand(host string, args ...string) *exec.Cmd {
+	_ = EnsureControlMaster(host)
+	fullArgs := append([]string{"-q"}, controlMasterArgs()...)
+	fullArgs = append(fullArgs, args...)
+	return exec.Command("scp", fullArgs...)
 }
 
 // RunnerFunc is the type for SSH command execution functions.
@@ -102,11 +141,7 @@ func SetRunner(fn RunnerFunc) func() {
 
 // defaultRunner executes SSH commands using exec.Command
 func defaultRunner(host, command string) (string, string, error) {
-	release := acquireHostSlot(host)
-	defer release()
-
-	args := append(sshControlMasterArgs(), host, command)
-	cmd := exec.Command("ssh", args...)
+	cmd := sshCommand(host, command)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -196,14 +231,9 @@ func Run(host string, command string) (string, string, error) {
 // RunWithContext executes an SSH command with context cancellation support.
 // When the context is cancelled, the SSH process is killed immediately.
 func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {
-	release := acquireHostSlot(host)
-	defer release()
-
-	args := append(sshControlMasterArgs(),
+	cmd := sshCommandContext(ctx, host, command,
 		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		host, command)
-	cmd := exec.CommandContext(ctx, "ssh", args...)
+		"-o", "BatchMode=yes")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -226,9 +256,6 @@ func RunWithTimeout(host string, command string, timeout time.Duration) (string,
 
 // defaultRunWithTimeout is the real implementation with timeout handling
 func defaultRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
-	release := acquireHostSlot(host)
-	defer release()
-
 	callNum := sshCallCount.Add(1)
 	start := time.Now()
 
@@ -242,11 +269,9 @@ func defaultRunWithTimeout(host string, command string, timeout time.Duration) (
 		log.Printf("[SSH #%d] START host=%s timeout=%v cmd=%q", callNum, host, timeout, cmdPreview)
 	}
 
-	args := append(sshControlMasterArgs(),
+	cmd := sshCommand(host, command,
 		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes",
-		host, command)
-	cmd := exec.Command("ssh", args...)
+		"-o", "BatchMode=yes")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -340,11 +365,7 @@ func RunWithRetryVerbose(host string, command string, verbose bool) (string, str
 
 // RunInteractive runs an SSH command that may require terminal interaction
 func RunInteractive(host string, command string) error {
-	release := acquireHostSlot(host)
-	defer release()
-
-	args := append(sshControlMasterArgs(), host, "-t", command)
-	cmd := exec.Command("ssh", args...)
+	cmd := sshCommand(host, command, "-t")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -353,11 +374,7 @@ func RunInteractive(host string, command string) error {
 
 // RunStreaming runs an SSH command and streams output to the provided writers
 func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
-	release := acquireHostSlot(host)
-	defer release()
-
-	args := append(sshControlMasterArgs(), host, command)
-	cmd := exec.Command("ssh", args...)
+	cmd := sshCommand(host, command)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
@@ -378,14 +395,10 @@ func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) er
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		release := acquireHostSlot(host)
-		args := append([]string{"-q"}, scpControlMasterArgs()...)
-		args = append(args, localPath, fmt.Sprintf("%s:%s", host, remotePath))
-		cmd := exec.Command("scp", args...)
+		cmd := scpCommand(host, localPath, fmt.Sprintf("%s:%s", host, remotePath))
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
-		release()
 
 		if err == nil {
 			return nil
@@ -428,14 +441,10 @@ func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) 
 	var lastErr error
 
 	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		release := acquireHostSlot(host)
-		args := append([]string{"-q"}, scpControlMasterArgs()...)
-		args = append(args, fmt.Sprintf("%s:%s", host, remotePath), localPath)
-		cmd := exec.Command("scp", args...)
+		cmd := scpCommand(host, fmt.Sprintf("%s:%s", host, remotePath), localPath)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
-		release()
 
 		if err == nil {
 			return nil

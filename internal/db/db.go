@@ -146,9 +146,11 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
 
-	// Use busy_timeout to wait up to 5 seconds for locks to be released
-	// This allows multiple concurrent processes to access the database
-	connStr := fmt.Sprintf("file:%s?_busy_timeout=5000", dbPath)
+	// Use busy_timeout to wait for locks to be released.
+	// 30 seconds accommodates SSH operations that queue behind the per-host
+	// connection semaphore. The actual wait is typically milliseconds since
+	// SQLite WAL releases write locks between statements.
+	connStr := fmt.Sprintf("file:%s?_busy_timeout=30000", dbPath)
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
