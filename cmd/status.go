@@ -12,7 +12,6 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -215,67 +214,19 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
-	// Queue runner and SLURM jobs don't have tmux sessions to check.
-	// They are managed by their respective backends and synced separately.
-	if job.UsesQueueRunner() || job.UsesSlurm() {
-		// For queued jobs, just display current status - don't mark dead
-		printJobStatus(job, exitOnComplete)
-		return
+	// Sync host to update job status from remote
+	_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
+		Timeout: 15 * time.Second,
+	}, nil)
+	if syncErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
 	}
 
-	// Job is marked as running - verify actual status on remote
-	tmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-	exists, err := ssh.TmuxSessionExists(job.Host, tmuxSession)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Job %d: check session: %v\n", jobID, err)
+	// Re-read job from DB after sync
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		fmt.Fprintf(os.Stderr, "Job %d: failed to reload: %v\n", jobID, err)
 		return
-	}
-
-	if !exists {
-		// Session doesn't exist - check for status file
-		statusFile := session.JobStatusFile(job.ID, job.StartTime, job.SessionName)
-		result, err := ops.ReadStatusFile(job.Host, statusFile, 10*time.Second)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Job %d: read status file: %v\n", jobID, err)
-			return
-		}
-
-		if result != nil {
-			// Job completed, update database
-			exitCodeStr := strings.TrimSpace(result.Content)
-			exitCode, err := strconv.Atoi(exitCodeStr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Job %d: invalid status file contents %q: %v\n", jobID, exitCodeStr, err)
-				if exitOnComplete {
-					os.Exit(ExitFailed)
-				}
-				return
-			}
-			if err := ops.RecordJobCompletion(database, job.ID, exitCode, result.Mtime); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
-			}
-			job.Status = db.StatusCompleted
-			job.ExitCode = &exitCode
-			// Use status file mtime as end time
-			endTime := result.Mtime
-			if endTime == 0 {
-				endTime = time.Now().Unix()
-			}
-			job.EndTime = &endTime
-		} else {
-			// Job terminated unexpectedly
-			if err := db.MarkDeadByID(database, job.ID); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to update database: %v\n", err)
-			}
-			job.Status = db.StatusFailed
-		}
-	} else if exitOnComplete {
-		// Session still running - show last few lines of output (only for single job)
-		output, _ := ssh.TmuxCapturePaneOutput(job.Host, tmuxSession, 5)
-		if output != "" {
-			fmt.Println("Last output:")
-			fmt.Println(output)
-		}
 	}
 
 	printJobStatus(job, exitOnComplete)

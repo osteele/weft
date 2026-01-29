@@ -44,9 +44,9 @@ import (
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/remote"
-	"github.com/osteele/remote-jobs/internal/scripts"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/slack"
+	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 // Default intervals for background operations
@@ -511,16 +511,6 @@ type hostInfoMsg struct {
 type hostDeletedMsg struct {
 	hostName string
 	err      error
-}
-
-type queueStatusMsg struct {
-	hostName string
-	info     *queuerunner.StatusInfo
-}
-
-type hostJobsGPUMsg struct {
-	hostName    string
-	runningJobs []HostRunningJob
 }
 
 type processStatsMsg struct {
@@ -1425,79 +1415,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.hostsQueriedThisSession, msg.hostName)
 		return m, m.setFlash(fmt.Sprintf("Host %s deleted", msg.hostName), false)
 
-	case queueStatusMsg:
-		// Update queue status for host
-		var jqWarningCmd tea.Cmd
-		for i, h := range m.hosts {
-			if h.Name == msg.hostName {
-				m.hosts[i].QueueStatus = QueueCheckChecked
-				m.hosts[i].QueueRunnerActive = msg.info.RunnerActive
-				m.hosts[i].QueuedJobCount = msg.info.QueuedJobCount
-				m.hosts[i].CurrentQueueJob = msg.info.CurrentJob
-				m.hosts[i].QueueStopPending = msg.info.StopPending
-				m.hosts[i].JqMissing = msg.info.JqMissing
-
-				// Warn if jq is missing (only on first detection this session)
-				if msg.info.JqMissing && !m.jqMissingWarnedHosts[msg.hostName] {
-					m.jqMissingWarnedHosts[msg.hostName] = true
-					jqWarningCmd = m.setFlash(
-						fmt.Sprintf("Warning: %s is missing 'jq' - queue runner cannot start. Install with: ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", msg.hostName, msg.hostName),
-						true,
-					)
-				}
-
-				// Warn if queue runner is stopped but there are queued jobs waiting
-				// (only if jq is available - otherwise the jq warning takes precedence)
-				if !msg.info.JqMissing && !msg.info.RunnerActive && !m.queueStoppedWarnedHosts[msg.hostName] {
-					queuedCount, _ := db.CountQueuedByHost(m.database, msg.hostName)
-					if queuedCount > 0 {
-						m.queueStoppedWarnedHosts[msg.hostName] = true
-						jqWarningCmd = m.setFlash(
-							fmt.Sprintf("Warning: Queue runner on %s is not running but %d job(s) are waiting. Press 'S' to start it.", msg.hostName, queuedCount),
-							true,
-						)
-					}
-				}
-				break
-			}
-		}
-		return m, jqWarningCmd
-
-	case hostJobsGPUMsg:
-		// Update running jobs and GPU mappings for host
-		for i, h := range m.hosts {
-			if h.Name == msg.hostName {
-				m.hosts[i].RunningJobs = msg.runningJobs
-				// Update GPU table with job info
-				for j := range m.hosts[i].GPUs {
-					m.hosts[i].GPUs[j].JobID = 0
-					m.hosts[i].GPUs[j].JobLabel = ""
-				}
-				for _, job := range msg.runningJobs {
-					for _, gpu := range job.GPUs {
-						for j := range m.hosts[i].GPUs {
-							if m.hosts[i].GPUs[j].Index == gpu.GPUIndex {
-								m.hosts[i].GPUs[j].JobID = job.ID
-								label := fmt.Sprintf("#%d", job.ID)
-								if job.Description != "" {
-									// Truncate description if too long
-									desc := job.Description
-									if len(desc) > 15 {
-										desc = desc[:12] + "..."
-									}
-									label += " " + desc
-								}
-								m.hosts[i].GPUs[j].JobLabel = label
-								break
-							}
-						}
-					}
-				}
-				break
-			}
-		}
-		return m, nil
-
 	case hostRefreshTickMsg:
 		var cmds []tea.Cmd
 		cmds = append(cmds, m.startHostRefreshTicker())
@@ -1506,7 +1423,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.viewMode == ViewModeHosts {
 				for _, host := range m.hosts {
 					if host != nil {
-						cmds = append(cmds, m.fetchQueueStatus(host.Name))
+						m.requestHostInfoRefresh(host.Name, false)
 					}
 				}
 			}
@@ -1535,9 +1452,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			isOnline := host.Status == HostStatusOnline
 
 			if (inHostsView && needsRefresh) || hasRunningJobs || isOnline {
-				cmds = append(cmds, m.fetchHostInfo(host.Name))
+				m.requestHostInfoRefresh(host.Name, false)
 				if inHostsView {
-					cmds = append(cmds, m.fetchQueueStatus(host.Name))
+					m.requestHostInfoRefresh(host.Name, false)
 				}
 			}
 		}
@@ -1711,6 +1628,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.syncWorker != nil {
 			m.syncWorker.Stop()
 		}
+		// Close SSH session pool
+		ssh.ClosePool()
 		return m, tea.Quit
 
 	case key.Matches(msg, keys.Suspend):
@@ -1732,8 +1651,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for _, host := range m.hosts {
 			// Only refresh if not queried this session or if online (for dynamic data)
 			if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
-				cmds = append(cmds, m.fetchHostInfo(host.Name))
-				cmds = append(cmds, m.fetchQueueStatus(host.Name))
+				m.requestHostInfoRefresh(host.Name, false)
+				m.requestHostInfoRefresh(host.Name, false)
 			}
 		}
 		if m.hostDetailTab == HostDetailTabCPU {
@@ -1752,8 +1671,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for _, host := range m.hosts {
 				// Only refresh if not queried this session or if online (for dynamic data)
 				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
-					cmds = append(cmds, m.fetchHostInfo(host.Name))
-					cmds = append(cmds, m.fetchQueueStatus(host.Name))
+					m.requestHostInfoRefresh(host.Name, false)
+					m.requestHostInfoRefresh(host.Name, false)
 				}
 			}
 			if m.hostDetailTab == HostDetailTabCPU {
@@ -5714,8 +5633,8 @@ func (m Model) handleHostsLoaded(msg hostsLoadedMsg) (Model, tea.Cmd) {
 				cacheAge := time.Since(time.Unix(cachedInfo.LastUpdated, 0))
 				if cacheAge > m.hostCacheDuration && m.monitor == nil {
 					host.Status = HostStatusChecking
-					cmds = append(cmds, m.fetchHostInfo(name))
-					cmds = append(cmds, m.fetchQueueStatus(name))
+					m.requestHostInfoRefresh(name, false)
+					m.requestHostInfoRefresh(name, false)
 				}
 			} else {
 				host = &Host{
@@ -5723,15 +5642,15 @@ func (m Model) handleHostsLoaded(msg hostsLoadedMsg) (Model, tea.Cmd) {
 					Status: HostStatusChecking,
 				}
 				if m.monitor == nil {
-					cmds = append(cmds, m.fetchHostInfo(name))
-					cmds = append(cmds, m.fetchQueueStatus(name))
+					m.requestHostInfoRefresh(name, false)
+					m.requestHostInfoRefresh(name, false)
 				}
 			}
 			m.hosts = append(m.hosts, host)
 		}
 		if !m.hostsQueriedThisSession[name] {
-			cmds = append(cmds, m.fetchHostInfo(name))
-			cmds = append(cmds, m.fetchQueueStatus(name))
+			m.requestHostInfoRefresh(name, false)
+			m.requestHostInfoRefresh(name, false)
 		}
 	}
 	if len(cmds) > 0 {
@@ -5922,111 +5841,14 @@ func (m Model) loadHostSyncTimes() tea.Cmd {
 	}
 }
 
-func (m Model) fetchHostInfo(hostName string) tea.Cmd {
-	database := m.database
-	return func() tea.Msg {
-		host := &Host{
-			Name:   hostName,
-			Status: HostStatusChecking,
-		}
-
-		// Use short timeout to avoid blocking UI
-		stdout, stderr, err := remote.RunWithTimeout(hostName, HostInfoCommand, 10*time.Second)
-		if err != nil {
-			host.Status = HostStatusOffline
-			host.Error = strings.TrimSpace(stderr)
-			if host.Error == "" {
-				host.Error = err.Error()
-			}
-			// Load cached info to preserve static data and LastCheck when offline
-			if cachedInfo, loadErr := db.LoadCachedHostInfo(database, hostName); loadErr == nil && cachedInfo != nil {
-				cachedHost := hostFromCachedInfo(cachedInfo)
-				// Preserve static info from cache
-				host.Arch = cachedHost.Arch
-				host.OS = cachedHost.OS
-				host.Model = cachedHost.Model
-				host.CPUs = cachedHost.CPUs
-				host.CPUModel = cachedHost.CPUModel
-				host.CPUFreq = cachedHost.CPUFreq
-				host.MemTotal = cachedHost.MemTotal
-				host.GPUs = cachedHost.GPUs
-				// Preserve LastCheck from cache (last successful connection)
-				host.LastCheck = cachedHost.LastCheck
-			}
-			return hostInfoMsg{hostName: hostName, info: host}
-		}
-
-		// Parse the output
-		host = ParseHostInfo(stdout)
-		host.Name = hostName
-
-		// Save to cache (ignore errors - caching is best effort)
-		cachedInfo := cachedInfoFromHost(host)
-		db.SaveCachedHostInfo(database, cachedInfo)
-
-		return hostInfoMsg{hostName: hostName, info: host}
-	}
-}
-
-func (m Model) fetchQueueStatus(hostName string) tea.Cmd {
-	return func() tea.Msg {
-		runner := queuerunner.NewRunner(hostName)
-		info, err := runner.Status(5 * time.Second)
-		if err != nil {
-			return queueStatusMsg{hostName: hostName, info: &queuerunner.StatusInfo{}}
-		}
-		return queueStatusMsg{hostName: hostName, info: info}
-	}
-}
-
-func (m Model) fetchHostJobsGPU(hostName string) tea.Cmd {
-	database := m.database
-	return func() tea.Msg {
-		// Get running jobs on this host from database
-		jobs, err := db.GetRunningJobsByHost(database, hostName)
-		if err != nil || len(jobs) == 0 {
-			return hostJobsGPUMsg{hostName: hostName, runningJobs: nil}
-		}
-
-		// Build list of job PID info
-		var jobPIDInfos []remote.JobPIDInfo
-		for _, job := range jobs {
-			pidFile := session.JobPidFile(job.ID, job.StartTime)
-			jobPIDInfos = append(jobPIDInfos, remote.JobPIDInfo{
-				JobID:   job.ID,
-				PIDFile: pidFile,
-			})
-		}
-
-		// Get GPU mappings via SSH script
-		mappings, err := remote.GetJobGPUMappings(hostName, scripts.GPUJobMappingScript, jobPIDInfos)
-		if err != nil {
-			// Don't fail - just return jobs without GPU info
-			mappings = nil
-		}
-
-		// Build mapping from job ID to GPU usage
-		gpuByJob := make(map[int64][]JobGPUUsage)
-		for _, m := range mappings {
-			gpuByJob[m.JobID] = append(gpuByJob[m.JobID], JobGPUUsage{
-				GPUIndex: m.GPUIndex,
-				MemUsed:  fmt.Sprintf("%d", m.MemMiB),
-			})
-		}
-
-		// Build running jobs list with GPU info
-		var runningJobs []HostRunningJob
-		for _, job := range jobs {
-			runningJobs = append(runningJobs, HostRunningJob{
-				ID:          job.ID,
-				Description: job.Description,
-				Command:     job.Command,
-				DeclaredGPU: job.GetGPU(),
-				GPUs:        gpuByJob[job.ID],
-			})
-		}
-
-		return hostJobsGPUMsg{hostName: hostName, runningJobs: runningJobs}
+// requestHostInfoRefresh requests a host info refresh via the sync worker.
+func (m Model) requestHostInfoRefresh(hostName string, priority bool) {
+	if m.syncWorker != nil {
+		m.syncWorker.Request(SyncRequest{
+			Host:     hostName,
+			Rate:     RateRunning,
+			Priority: priority,
+		})
 	}
 }
 
@@ -6704,38 +6526,12 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		// Try to read metadata from remote for more accurate info (best effort)
-		metadataFile := session.JobMetadataFile(job.ID, job.StartTime, job.SessionName)
-		content, _ := remote.ReadFile(job.Host, metadataFile)
-
-		var workingDir, command, description string
-		if content != "" {
-			metadata := session.ParseMetadata(content)
-			workingDir = metadata["working_dir"]
-			command = metadata["command"]
-			description = metadata["description"]
-		}
-
-		// Fall back to job info if metadata missing
-		if workingDir == "" {
-			workingDir = job.WorkingDir
-		}
-		if command == "" {
-			command = job.Command
-		}
-		if description == "" {
-			description = job.Description
-		}
+		workingDir := job.WorkingDir
+		command := job.Command
+		description := job.Description
 
 		if workingDir == "" || command == "" {
 			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("missing working directory or command")}
-		}
-
-		// Kill existing session if running (best effort, ignore errors)
-		oldTmuxSession := session.JobTmuxSession(job.ID, job.SessionName)
-		exists, _ := remote.TmuxSessionExistsQuick(job.Host, oldTmuxSession)
-		if exists {
-			remote.TmuxKillSession(job.Host, oldTmuxSession)
 		}
 
 		// Use ops package to restart job (queues if host offline)
@@ -7223,7 +7019,6 @@ func (m Model) createJob() tea.Cmd {
 
 func (m Model) editJob() tea.Cmd {
 	database := m.database
-	ctx := m.ctx
 	jobID := m.editingJobID
 	newHost := strings.TrimSpace(m.inputs[inputHost].Value())
 	newCommand := strings.TrimSpace(m.inputs[inputCommand].Value())
@@ -7285,12 +7080,9 @@ func (m Model) editJob() tea.Cmd {
 		operationalChange := newWorkingDir != job.WorkingDir || newCommand != job.Command || gpuInput != job.GPU || !equalEnvVars(envVars, job.EnvVars) || !equalCPUAllotment(newAllotment, job.CPUAllotment)
 
 		// Update the remote queue file
-		queueName := queuefile.DefaultQueueName
 		depSpec := m.editingJobDepSpec
 		if depSpec == "" {
-			if data, err := fetchQueueEntryData(ctx, job.Host, queueName, jobID); err == nil && data != nil {
-				depSpec = data.depSpec
-			}
+			depSpec = job.DepSpec
 		}
 		updatedJob := &db.Job{
 			ID:           jobID,
@@ -7382,45 +7174,17 @@ func formatPresetList(presets []int) string {
 	return strings.Join(parts, "/")
 }
 
-func fetchQueueEntryData(ctx context.Context, host, queueName string, jobID int64) (*queueEntryData, error) {
-	queueName = queuefile.DefaultQueueName
-	// Read from new JSON job file format
-	jobFile := fmt.Sprintf("%s/jobs/%d.json", queuerunner.QueueDir(), jobID)
-	cmd := fmt.Sprintf("cat %s 2>/dev/null", jobFile)
-	stdout, _, err := remote.RunWithContext(ctx, host, cmd)
+func fetchQueueEntryData(database *sql.DB, jobID int64) (*queueEntryData, error) {
+	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
-		if err == context.Canceled {
-			return nil, context.Canceled
-		}
-		if remote.IsConnectionError(err.Error()) {
-			return nil, fmt.Errorf("host unreachable")
-		}
 		return nil, err
 	}
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
+	if job == nil {
 		return &queueEntryData{}, nil
 	}
-
-	// Parse JSON using jq-style extraction
-	// Format: {"id":123,"dir":"...","cmd":"...","desc":"...","env":["VAR=val"],"deps":"..."}
-	envCmd := fmt.Sprintf("jq -r '.env // [] | .[]' %s 2>/dev/null", jobFile)
-	envStdout, _, _ := remote.RunWithContext(ctx, host, envCmd)
-	var envVars []string
-	for _, ev := range strings.Split(envStdout, "\n") {
-		ev = strings.TrimSpace(ev)
-		if ev != "" {
-			envVars = append(envVars, ev)
-		}
-	}
-
-	depCmd := fmt.Sprintf("jq -r '.deps // \"\"' %s 2>/dev/null", jobFile)
-	depStdout, _, _ := remote.RunWithContext(ctx, host, depCmd)
-	depSpec := strings.TrimSpace(depStdout)
-
 	return &queueEntryData{
-		envVars: envVars,
-		depSpec: depSpec,
+		envVars: job.EnvVars,
+		depSpec: job.DepSpec,
 	}, nil
 }
 
@@ -7500,23 +7264,19 @@ func (m Model) fetchQueuedJobEnv(job *db.Job) tea.Cmd {
 	if job == nil {
 		return nil
 	}
-	jobCopy := *job
-	ctx := m.ctx
-	queueName := queuefile.DefaultQueueName
+	database := m.database
+	jobID := job.ID
 	return func() tea.Msg {
-		data, err := fetchQueueEntryData(ctx, jobCopy.Host, queueName, jobCopy.ID)
+		data, err := fetchQueueEntryData(database, jobID)
 		if err != nil {
-			if err == context.Canceled {
-				return nil
-			}
-			return jobEnvLoadedMsg{jobID: jobCopy.ID, err: err}
+			return jobEnvLoadedMsg{jobID: jobID, err: err}
 		}
 		if data == nil {
 			data = &queueEntryData{}
 		}
 		envCopy := append([]string(nil), data.envVars...)
 		return jobEnvLoadedMsg{
-			jobID:   jobCopy.ID,
+			jobID:   jobID,
 			envVars: envCopy,
 			depSpec: data.depSpec,
 		}

@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/remote-jobs/internal/queuerunner"
 )
 
 // SyncRate represents the desired sync frequency for a host
@@ -61,6 +62,8 @@ type SyncResult struct {
 	Updated          int
 	QueueStarted     bool
 	QueueRunnerError string
+	HostInfo         *db.CachedHostInfo      // Refreshed host info (nil on error)
+	QueueStatus      *queuerunner.StatusInfo // Queue runner status (nil on error)
 	Error            error
 }
 
@@ -235,6 +238,14 @@ func (w *SyncWorker) doSync(host string) {
 	result.Updated = syncResult.Updated
 	result.QueueStarted = syncResult.QueueStarted
 	result.QueueRunnerError = syncResult.QueueRunnerError
+
+	// Fetch host info and queue status in a single SSH call (best-effort)
+	if hostStatus, err := ops.FetchHostStatusCombined(w.database, host, queuerunner.StatusCommand(), 10*time.Second); err == nil {
+		result.HostInfo = hostStatus.HostInfo
+		if hostStatus.ExtraOutput != "" {
+			result.QueueStatus = queuerunner.ParseStatus(hostStatus.ExtraOutput)
+		}
+	}
 }
 
 // syncResultMsg wraps a SyncResult for the TUI message loop
@@ -335,10 +346,71 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 	m.hostSyncTimes[result.Host] = now
 
 	if result.Error != nil {
+		// Mark host as offline on sync error
+		for i, h := range m.hosts {
+			if h.Name == result.Host {
+				m.hosts[i].Status = HostStatusOffline
+				m.hosts[i].Error = result.Error.Error()
+				break
+			}
+		}
 		return m, m.setFlash(fmt.Sprintf("Sync error (%s): %v", result.Host, result.Error), true)
 	}
 
 	var cmds []tea.Cmd
+
+	// Apply host info from sync result
+	if result.HostInfo != nil {
+		host := hostFromCachedInfo(result.HostInfo)
+		m.hostsQueriedThisSession[result.Host] = true
+		found := false
+		for i, h := range m.hosts {
+			if h.Name == result.Host {
+				// Preserve RunningJobs from existing host
+				host.RunningJobs = h.RunningJobs
+				m.hosts[i] = host
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.hosts = append(m.hosts, host)
+		}
+	}
+
+	// Apply queue status from sync result
+	if result.QueueStatus != nil {
+		for i, h := range m.hosts {
+			if h.Name == result.Host {
+				m.hosts[i].QueueStatus = QueueCheckChecked
+				m.hosts[i].QueueRunnerActive = result.QueueStatus.RunnerActive
+				m.hosts[i].QueuedJobCount = result.QueueStatus.QueuedJobCount
+				m.hosts[i].CurrentQueueJob = result.QueueStatus.CurrentJob
+				m.hosts[i].QueueStopPending = result.QueueStatus.StopPending
+				m.hosts[i].JqMissing = result.QueueStatus.JqMissing
+
+				if result.QueueStatus.JqMissing && !m.jqMissingWarnedHosts[result.Host] {
+					m.jqMissingWarnedHosts[result.Host] = true
+					cmds = append(cmds, m.setFlash(
+						fmt.Sprintf("Warning: %s is missing 'jq' - queue runner cannot start. Install with: ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", result.Host, result.Host),
+						true,
+					))
+				}
+
+				if !result.QueueStatus.JqMissing && !result.QueueStatus.RunnerActive && !m.queueStoppedWarnedHosts[result.Host] {
+					queuedCount, _ := db.CountQueuedByHost(m.database, result.Host)
+					if queuedCount > 0 {
+						m.queueStoppedWarnedHosts[result.Host] = true
+						cmds = append(cmds, m.setFlash(
+							fmt.Sprintf("Warning: Queue runner on %s is not running but %d job(s) are waiting. Press 'S' to start it.", result.Host, queuedCount),
+							true,
+						))
+					}
+				}
+				break
+			}
+		}
+	}
 
 	// Flash message for significant events
 	if result.QueueStarted {

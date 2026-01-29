@@ -487,33 +487,23 @@ func (m *Monitor) refreshHostSyncTimes() {
 }
 
 func (m *Monitor) refreshHostInfo(hostName string) {
-	host := &hostinfo.Host{
-		Name:   hostName,
-		Status: hostinfo.HostStatusChecking,
-	}
-
-	stdout, stderr, err := remote.RunWithTimeout(hostName, hostinfo.HostInfoCommand, 10*time.Second)
+	cachedInfo, err := ops.FetchAndCacheHostInfo(m.db, hostName, 10*time.Second)
 	if err != nil {
-		host.Status = hostinfo.HostStatusOffline
-		host.Error = strings.TrimSpace(stderr)
-		if host.Error == "" {
-			host.Error = err.Error()
+		host := &hostinfo.Host{
+			Name:   hostName,
+			Status: hostinfo.HostStatusOffline,
+			Error:  err.Error(),
 		}
-		if cachedInfo, loadErr := db.LoadCachedHostInfo(m.db, hostName); loadErr == nil && cachedInfo != nil {
-			cachedHost := hostinfo.HostFromCachedInfo(cachedInfo)
+		// Load cached info to preserve static data when offline
+		if cached, loadErr := db.LoadCachedHostInfo(m.db, hostName); loadErr == nil && cached != nil {
+			cachedHost := hostinfo.HostFromCachedInfo(cached)
 			hostinfo.UpdateHostWithCachedStatic(host, cachedHost)
 		}
 		m.updateHostInfo(host)
 		return
 	}
 
-	host = hostinfo.ParseHostInfo(stdout)
-	host.Name = hostName
-
-	if cachedInfo := hostinfo.CachedInfoFromHost(host); cachedInfo != nil {
-		_ = db.SaveCachedHostInfo(m.db, cachedInfo)
-	}
-
+	host := hostinfo.HostFromCachedInfo(cachedInfo)
 	m.updateHostInfo(host)
 }
 

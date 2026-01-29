@@ -146,21 +146,14 @@ func Open() (*sql.DB, error) {
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
 
-	// Use busy_timeout to wait for locks to be released.
-	// 30 seconds accommodates SSH operations that queue behind the per-host
-	// connection semaphore. The actual wait is typically milliseconds since
-	// SQLite WAL releases write locks between statements.
-	connStr := fmt.Sprintf("file:%s?_busy_timeout=30000", dbPath)
+	// Use _pragma DSN parameters to set per-connection PRAGMAs.
+	// modernc.org/sqlite applies these on every new connection from the pool.
+	// - journal_mode(WAL): better concurrent access (TUI + sync + CLI)
+	// - busy_timeout(30000): wait up to 30s for locks instead of failing immediately
+	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)", dbPath)
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
-	}
-
-	// Enable WAL mode FIRST for better concurrent access (TUI + sync + CLI)
-	// Must be done before initSchema since migrations need concurrent write support
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable WAL mode: %w", err)
 	}
 
 	if err := initSchema(db); err != nil {

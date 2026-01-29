@@ -53,6 +53,13 @@ func Execute() error {
 	if executedCmd == nil {
 		executedCmd = rootCmd
 	}
+
+	// Log database lock errors to oplog for observability
+	if strings.Contains(err.Error(), "database is locked") {
+		cmdName := executedCmd.Name()
+		oplog.Log("db_locked", oplog.WithError(err), oplog.WithDetail(cmdName))
+	}
+
 	printCommandError(executedCmd, err)
 	return err
 }

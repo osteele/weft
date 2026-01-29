@@ -420,35 +420,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if result.DeferredToQueue {
-		fmt.Println("SSH connection failed. Job will be added to the remote queue on the next sync.")
-		fmt.Printf("Job ID: %d on %s\n", result.Info.JobID, result.Info.Host)
-		fmt.Printf("Run 'remote-jobs sync %s' when the host is reachable to trigger the start.\n", result.Info.Host)
-		return nil
+	fmt.Printf("Job #%d queued on %s\n", result.Info.JobID, result.Info.Host)
+
+	if runWait {
+		return waitForQueuedJobCompletion(database, result.Info.JobID, false)
 	}
 
-	if result.SlackEnabled {
-		fmt.Println("Slack notifications: enabled")
-	}
-
-	fmt.Println("✓ Session started successfully")
-	fmt.Printf("Job ID: %d\n", result.Info.JobID)
-
-	if runAllow {
-		return streamJobLogAllow(host, result.Info.LogFile, result.Info.JobID)
-	}
-
-	if runFollow {
-		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
-		script := fmt.Sprintf("while [ ! -f %s ]; do sleep 1; done; tail -n 50 -F %s", shellQuote(result.Info.LogFile), shellQuote(result.Info.LogFile))
-		remoteCmd := fmt.Sprintf("sh -c %s", shellQuote(script))
-		sshCmd := exec.Command("ssh", host, remoteCmd)
-		sshCmd.Stdout = os.Stdout
-		sshCmd.Stderr = os.Stderr
-		if err := streamCommandUntilJobDone(database, result.Info.JobID, sshCmd); err != nil {
-			return err
-		}
-		return nil
+	if runFollow || runAllow {
+		return followQueuedJob(database, result.Info.JobID, host, false)
 	}
 
 	if usageHintsEnabled() {

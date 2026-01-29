@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	gosync "sync"
 	"sync/atomic"
 	"time"
 )
@@ -22,91 +21,20 @@ var (
 
 	// sshCallCount tracks total SSH calls for debugging
 	sshCallCount atomic.Int64
-
-	// controlPath is the path pattern for SSH ControlMaster socket
-	// Uses /tmp for cross-platform compatibility
-	controlPath = "/tmp/remote-jobs-ssh-%r@%h:%p"
-
-	// controlMasterOnce tracks per-host ControlMaster establishment.
-	controlMasterOnce   = make(map[string]*gosync.Once)
-	controlMasterOnceMu gosync.Mutex
 )
 
-// EnsureControlMaster pre-establishes a ControlMaster SSH connection to the
-// given host. Once a master socket exists, all subsequent SSH commands multiplex
-// over a single TCP connection, avoiding MaxStartups limits. This is called
-// once per host per session via sync.Once.
-func EnsureControlMaster(host string) error {
-	controlMasterOnceMu.Lock()
-	once, ok := controlMasterOnce[host]
-	if !ok {
-		once = &gosync.Once{}
-		controlMasterOnce[host] = once
-	}
-	controlMasterOnceMu.Unlock()
-
-	var err error
-	once.Do(func() {
-		// Check if master socket already exists
-		checkArgs := append(controlMasterArgs(), "-O", "check", host)
-		if checkCmd := exec.Command("ssh", checkArgs...); checkCmd.Run() == nil {
-			return // master already running
-		}
-
-		// Establish a new master connection in the background
-		args := append(controlMasterArgs(),
-			"-o", "ConnectTimeout=10",
-			"-o", "BatchMode=yes",
-			"-fN", host)
-		cmd := exec.Command("ssh", args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if e := cmd.Run(); e != nil {
-			err = fmt.Errorf("establish ControlMaster for %s: %s", host, strings.TrimSpace(stderr.String()))
-			// Reset the Once so next call retries
-			controlMasterOnceMu.Lock()
-			controlMasterOnce[host] = &gosync.Once{}
-			controlMasterOnceMu.Unlock()
-		}
-	})
-	return err
-}
-
-// controlMasterArgs returns the SSH/SCP arguments for connection multiplexing.
-func controlMasterArgs() []string {
-	return []string{
-		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + controlPath,
-		"-o", "ControlPersist=60",
-	}
-}
-
-// sshCommand creates an exec.Cmd for SSH to the given host, ensuring a
-// ControlMaster socket exists first. Extra args are inserted before the
-// host destination (e.g. "-o", "BatchMode=yes"). The command to run on
-// the remote host is passed as remoteCmd.
-// All SSH calls should use this instead of exec.Command("ssh", ...) directly.
+// sshCommand creates an exec.Cmd for SSH to the given host.
+// Used by RunInteractive, RunStreaming, and RunWithContext which need
+// direct process control. Pool-based callers use Execute instead.
 func sshCommand(host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
-	_ = EnsureControlMaster(host)
-	args := append(controlMasterArgs(), extraArgs...)
+	args := append([]string{}, extraArgs...)
 	args = append(args, host, remoteCmd)
 	return exec.Command("ssh", args...)
 }
 
-// sshCommandContext is like sshCommand but with context support.
-func sshCommandContext(ctx context.Context, host string, remoteCmd string, extraArgs ...string) *exec.Cmd {
-	_ = EnsureControlMaster(host)
-	args := append(controlMasterArgs(), extraArgs...)
-	args = append(args, host, remoteCmd)
-	return exec.CommandContext(ctx, "ssh", args...)
-}
-
-// scpCommand creates an exec.Cmd for SCP, ensuring a ControlMaster socket
-// exists for the target host first. Args are the SCP source/destination arguments.
+// scpCommand creates an exec.Cmd for SCP.
 func scpCommand(host string, args ...string) *exec.Cmd {
-	_ = EnsureControlMaster(host)
-	fullArgs := append([]string{"-q"}, controlMasterArgs()...)
-	fullArgs = append(fullArgs, args...)
+	fullArgs := append([]string{"-q"}, args...)
 	return exec.Command("scp", fullArgs...)
 }
 
@@ -139,14 +67,9 @@ func SetRunner(fn RunnerFunc) func() {
 	}
 }
 
-// defaultRunner executes SSH commands using exec.Command
+// defaultRunner executes SSH commands using the session pool.
 func defaultRunner(host, command string) (string, string, error) {
-	cmd := sshCommand(host, command)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
+	return getDefaultPool().Execute(host, command, 0)
 }
 
 // execCommand is the function used to create exec.Cmd objects.
@@ -229,19 +152,26 @@ func Run(host string, command string) (string, string, error) {
 }
 
 // RunWithContext executes an SSH command with context cancellation support.
-// When the context is cancelled, the SSH process is killed immediately.
+// When the context is cancelled, the command returns context.Canceled.
 func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {
-	cmd := sshCommandContext(ctx, host, command,
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if ctx.Err() == context.Canceled {
-		return stdout.String(), stderr.String(), context.Canceled
+	type result struct {
+		stdout, stderr string
+		err            error
 	}
-	return stdout.String(), stderr.String(), err
+	ch := make(chan result, 1)
+	go func() {
+		stdout, stderr, err := runner(host, command)
+		ch <- result{stdout, stderr, err}
+	}()
+	select {
+	case r := <-ch:
+		if ctx.Err() == context.Canceled {
+			return r.stdout, r.stderr, context.Canceled
+		}
+		return r.stdout, r.stderr, r.err
+	case <-ctx.Done():
+		return "", "", context.Canceled
+	}
 }
 
 // RunWithTimeout executes an SSH command with a timeout and connection options
@@ -254,12 +184,11 @@ func RunWithTimeout(host string, command string, timeout time.Duration) (string,
 	return defaultRunWithTimeout(host, command, timeout)
 }
 
-// defaultRunWithTimeout is the real implementation with timeout handling
+// defaultRunWithTimeout is the real implementation with timeout handling via the pool.
 func defaultRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
 	callNum := sshCallCount.Add(1)
 	start := time.Now()
 
-	// Truncate command for logging (first 80 chars)
 	cmdPreview := command
 	if len(cmdPreview) > 80 {
 		cmdPreview = cmdPreview[:80] + "..."
@@ -269,52 +198,23 @@ func defaultRunWithTimeout(host string, command string, timeout time.Duration) (
 		log.Printf("[SSH #%d] START host=%s timeout=%v cmd=%q", callNum, host, timeout, cmdPreview)
 	}
 
-	cmd := sshCommand(host, command,
-		"-o", "ConnectTimeout=10",
-		"-o", "BatchMode=yes")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	stdout, stderr, err := getDefaultPool().Execute(host, command, timeout)
 
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		if debugSSH {
-			log.Printf("[SSH #%d] START_ERR elapsed=%v err=%v", callNum, time.Since(start), err)
+	if debugSSH {
+		elapsed := time.Since(start)
+		outPreview := stdout
+		if len(outPreview) > 50 {
+			outPreview = outPreview[:50] + "..."
 		}
-		return "", "", err
+		outPreview = strings.ReplaceAll(outPreview, "\n", "\\n")
+		if err != nil {
+			log.Printf("[SSH #%d] DONE elapsed=%v err=%v out=%q", callNum, elapsed, err, outPreview)
+		} else {
+			log.Printf("[SSH #%d] DONE elapsed=%v out=%q", callNum, elapsed, outPreview)
+		}
 	}
 
-	// Wait with timeout
-	// Buffer size 1 prevents goroutine leak if timeout occurs before Wait() completes
-	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	select {
-	case err := <-done:
-		elapsed := time.Since(start)
-		if debugSSH {
-			outPreview := stdout.String()
-			if len(outPreview) > 50 {
-				outPreview = outPreview[:50] + "..."
-			}
-			outPreview = strings.ReplaceAll(outPreview, "\n", "\\n")
-			if err != nil {
-				log.Printf("[SSH #%d] DONE elapsed=%v err=%v out=%q", callNum, elapsed, err, outPreview)
-			} else {
-				log.Printf("[SSH #%d] DONE elapsed=%v out=%q", callNum, elapsed, outPreview)
-			}
-		}
-		return stdout.String(), stderr.String(), err
-	case <-time.After(timeout):
-		cmd.Process.Kill()
-		elapsed := time.Since(start)
-		if debugSSH {
-			log.Printf("[SSH #%d] TIMEOUT elapsed=%v timeout=%v", callNum, elapsed, timeout)
-		}
-		return "", "", fmt.Errorf("ssh command timed out after %v", timeout)
-	}
+	return stdout, stderr, err
 }
 
 // RunWithRetry executes an SSH command with retry logic for connection failures

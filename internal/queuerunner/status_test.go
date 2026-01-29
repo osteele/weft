@@ -109,7 +109,7 @@ STOP:no`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := parseStatus(tt.output)
+			got := ParseStatus(tt.output)
 			if got.JqMissing != tt.want.JqMissing {
 				t.Errorf("JqMissing = %v, want %v", got.JqMissing, tt.want.JqMissing)
 			}

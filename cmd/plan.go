@@ -224,9 +224,6 @@ func scheduleExecutionPlan(database *sql.DB, execPlan *plan.ExecutionPlan, start
 			return nil, err
 		}
 		idToJob[job.ID] = result.Info.JobID
-		if result.DeferredToQueue {
-			fmt.Printf("SSH to %s failed; job %d will be added to the remote queue on next sync\n", resolved.Host, result.Info.JobID)
-		}
 		scheduled = append(scheduled, scheduledPlanJob{
 			Label:   label,
 			Command: resolved.Command,
@@ -372,11 +369,7 @@ func scheduleSingleJob(database *sql.DB, job resolvedPlanJob, startedQueues map[
 	if err != nil {
 		return scheduledPlanJob{}, err
 	}
-	if result.DeferredToQueue {
-		fmt.Printf("SSH to %s failed; job %d will be queued remotely on next sync\n", job.Host, result.Info.JobID)
-		return scheduledPlanJob{Label: label, Command: job.Command, Host: job.Host, JobID: result.Info.JobID}, nil
-	}
-	fmt.Printf("Job %s started as %d on %s\n", label, result.Info.JobID, job.Host)
+	fmt.Printf("Job %s queued as %d on %s\n", label, result.Info.JobID, job.Host)
 	return scheduledPlanJob{Label: label, Command: job.Command, Host: job.Host, JobID: result.Info.JobID}, nil
 }
 

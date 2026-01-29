@@ -18,7 +18,8 @@ type StatusInfo struct {
 	JqMissing      bool // jq is required but not installed
 }
 
-func statusCommand() string {
+// StatusCommand returns the SSH command that gathers queue runner status.
+func StatusCommand() string {
 	queueName := ops.DefaultQueueName
 	return fmt.Sprintf(
 		// Check for jq availability first (check ~/.local/bin/jq as well)
@@ -30,7 +31,8 @@ func statusCommand() string {
 		queueName, queueName, queueName, queueName)
 }
 
-func parseStatus(output string) *StatusInfo {
+// ParseStatus parses the output of StatusCommand into a StatusInfo struct.
+func ParseStatus(output string) *StatusInfo {
 	info := &StatusInfo{}
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -64,11 +66,11 @@ func parseStatus(output string) *StatusInfo {
 
 // FetchStatus queries the remote host for queue status information.
 func FetchStatus(host string, timeout time.Duration) (*StatusInfo, error) {
-	stdout, _, err := ssh.RunWithTimeout(host, statusCommand(), timeout)
+	stdout, _, err := ssh.RunWithTimeout(host, StatusCommand(), timeout)
 	if err != nil {
 		return nil, err
 	}
-	return parseStatus(stdout), nil
+	return ParseStatus(stdout), nil
 }
 
 // Status returns the runner status using the provided timeout.

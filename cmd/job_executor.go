@@ -3,15 +3,12 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/slack"
-	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 // startJobOptions controls how a job is started immediately on the remote host.
@@ -28,23 +25,16 @@ type startJobOptions struct {
 
 // StartJobPreparedInfo exposes metadata about the job once it has an ID.
 type StartJobPreparedInfo struct {
-	JobID        int64
-	Host         string
-	WorkingDir   string
-	Command      string
-	Description  string
-	StartTime    int64
-	TmuxSession  string
-	LogFile      string
-	StatusFile   string
-	MetadataFile string
-	PidFile      string
+	JobID       int64
+	Host        string
+	WorkingDir  string
+	Command     string
+	Description string
 }
 
 // startJobResult reports the outcome of the start operation.
 type startJobResult struct {
 	Info            StartJobPreparedInfo
-	SlackEnabled    bool
 	DeferredToQueue bool
 }
 
@@ -57,126 +47,30 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 		}
 	}
 
-	jobID, err := db.RecordJobStarting(database, opts.Host, opts.WorkingDir, opts.Command, opts.Description)
+	// Always queue — the sync worker / queue runner handles actual execution.
+	res, err := queueJob(database, queueJobOptions{
+		Host:        opts.Host,
+		WorkingDir:  opts.WorkingDir,
+		Command:     opts.Command,
+		Description: opts.Description,
+		EnvVars:     opts.EnvVars,
+		Tags:        opts.Tags,
+		GPU:         extractGPUFromEnvVars(opts.EnvVars),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("create job record: %w", err)
-	}
-	if err := db.SetJobTags(database, jobID, opts.Tags); err != nil {
-		return nil, fmt.Errorf("set job tags: %w", err)
-	}
-
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil || job == nil {
-		return nil, fmt.Errorf("get job: %w", err)
+		return nil, err
 	}
 
 	info := StartJobPreparedInfo{
-		JobID:        jobID,
-		Host:         job.Host,
-		WorkingDir:   job.WorkingDir,
-		Command:      job.Command,
-		Description:  job.Description,
-		StartTime:    job.StartTime,
-		TmuxSession:  session.TmuxSessionName(jobID),
-		LogFile:      session.SimpleLogFile(jobID),
-		StatusFile:   session.SimpleStatusFile(jobID),
-		MetadataFile: session.SimpleMetadataFile(jobID),
-		PidFile:      session.SimplePidFile(jobID),
+		JobID:       res.JobID,
+		Host:        opts.Host,
+		WorkingDir:  opts.WorkingDir,
+		Command:     opts.Command,
+		Description: opts.Description,
 	}
 
 	if opts.OnPrepared != nil {
 		opts.OnPrepared(info)
-	}
-
-	// Check if session already exists
-	exists, err := ssh.TmuxSessionExists(opts.Host, info.TmuxSession)
-	if err != nil {
-		if ssh.IsConnectionError(err.Error()) {
-			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
-		}
-		db.UpdateJobFailed(database, jobID, err.Error())
-		return nil, fmt.Errorf("check session: %w", err)
-	}
-
-	if exists {
-		db.UpdateJobFailed(database, jobID, "Session already exists")
-		return nil, fmt.Errorf("session '%s' already exists on %s", info.TmuxSession, opts.Host)
-	}
-
-	// Create log directory on remote and archive any old files for this job
-	mkdirAndArchive := fmt.Sprintf("mkdir -p %s; %s", session.LogDir, session.ArchiveCommand(jobID))
-	if _, stderr, err := ssh.RunWithRetry(opts.Host, mkdirAndArchive); err != nil {
-		if isConnectionFailure(stderr, err) {
-			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
-		}
-		errMsg := ssh.FriendlyError(opts.Host, stderr, err)
-		db.UpdateJobFailed(database, jobID, errMsg)
-		return nil, fmt.Errorf("%s", errMsg)
-	}
-
-	// Save metadata
-	metadata := session.FormatMetadata(jobID, info.WorkingDir, info.Command, info.Host, info.Description, job.StartTime)
-	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", info.MetadataFile, metadata)
-	if _, _, err := ssh.RunWithRetry(opts.Host, metadataCmd); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to save metadata: %v\n", err)
-	}
-
-	result := &startJobResult{Info: info}
-
-	// Slack notification setup
-	notifyCmd := ""
-	slackWebhook := slack.GetWebhook()
-	if slackWebhook != "" {
-		slack.DeployNotifyScript(opts.Host, slackWebhook)
-		envVars := strings.TrimSpace(slack.BuildRunnerEnvPrefix(slackWebhook))
-		notifyCmd = fmt.Sprintf("; %s '%s' 'rj-%d' $EXIT_CODE '%s' '%s'",
-			envVars, slack.NotifyScriptPath, jobID, info.Host, info.MetadataFile)
-		result.SlackEnabled = true
-	}
-
-	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-		JobID:      jobID,
-		WorkingDir: info.WorkingDir,
-		Command:    info.Command,
-		LogFile:    info.LogFile,
-		StatusFile: info.StatusFile,
-		PidFile:    info.PidFile,
-		NotifyCmd:  notifyCmd,
-		Timeout:    opts.Timeout,
-		EnvVars:    opts.EnvVars,
-	})
-
-	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", info.TmuxSession, escapedCommand)
-	if _, stderr, err := ssh.Run(opts.Host, tmuxCmd); err != nil {
-		if isConnectionFailure(stderr, err) {
-			return deferJobToRemoteQueue(database, job, info, opts.EnvVars)
-		}
-		errMsg := ssh.FriendlyError(opts.Host, stderr, err)
-		db.UpdateJobFailed(database, jobID, errMsg)
-		return nil, fmt.Errorf("%s", errMsg)
-	}
-
-	if err := db.UpdateJobRunning(database, jobID); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to update job status: %v\n", err)
-	}
-
-	return result, nil
-}
-
-func isConnectionFailure(stderr string, err error) bool {
-	if stderr != "" && ssh.IsConnectionError(stderr) {
-		return true
-	}
-	if err != nil && ssh.IsConnectionError(err.Error()) {
-		return true
-	}
-	return false
-}
-
-func deferJobToRemoteQueue(database *sql.DB, job *db.Job, info StartJobPreparedInfo, envVars []string) (*startJobResult, error) {
-	if err := db.UpdateJobStartingToQueued(database, job.ID); err != nil {
-		return nil, fmt.Errorf("mark job queued: %w", err)
 	}
 
 	return &startJobResult{
