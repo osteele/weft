@@ -198,13 +198,20 @@ func (hp *hostPool) discard(_ *Session) {
 	// Nothing to track; the session was already closed by the caller.
 }
 
+const sessionReadyMarker = "---RJ-READY---"
+
 func (hp *hostPool) newSession() (*Session, error) {
+	// Use "echo READY; exec bash -s" so the remote shell signals
+	// readiness before replacing itself with bash. This avoids writing
+	// to stdin before the SSH channel is established (SSH drops data
+	// sent to stdin before the remote shell is ready).
+	remoteCmd := fmt.Sprintf("echo '%s'; exec bash -s", sessionReadyMarker)
 	cmd := exec.Command("ssh",
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=10",
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
-		hp.host, "bash -s")
+		hp.host, remoteCmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -223,17 +230,59 @@ func (hp *hostPool) newSession() (*Session, error) {
 		return nil, fmt.Errorf("ssh pool: start: %w", err)
 	}
 
+	stdoutReader := bufio.NewReader(stdoutPipe)
+
+	if debugSSH {
+		log.Printf("[SSH Pool] new session to %s (pid=%d), waiting for ready...", hp.host, cmd.Process.Pid)
+	}
+
+	// Wait for the ready marker from the remote shell.
+	readyCh := make(chan error, 1)
+	go func() {
+		for {
+			line, readErr := stdoutReader.ReadString('\n')
+			if readErr != nil {
+				readyCh <- fmt.Errorf("ssh pool: read ready marker: %w", readErr)
+				return
+			}
+			if strings.TrimSpace(line) == sessionReadyMarker {
+				readyCh <- nil
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-readyCh:
+		if err != nil {
+			cmd.Process.Kill()
+			// Capture stderr for a more informative error message
+			stderrBytes, _ := io.ReadAll(stderrPipe)
+			stderrMsg := strings.TrimSpace(string(stderrBytes))
+			if stderrMsg != "" {
+				if IsConnectionError(stderrMsg) {
+					return nil, fmt.Errorf("%s is offline", hp.host)
+				}
+				return nil, fmt.Errorf("ssh %s: %s", hp.host, stderrMsg)
+			}
+			return nil, err
+		}
+	case <-time.After(15 * time.Second):
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("ssh pool: session to %s timed out waiting for ready", hp.host)
+	}
+
 	sess := &Session{
 		host:   hp.host,
 		cmd:    cmd,
 		stdin:  stdinPipe,
-		stdout: bufio.NewReader(stdoutPipe),
+		stdout: stdoutReader,
 		stderr: bufio.NewReader(stderrPipe),
 		alive:  true,
 	}
 
 	if debugSSH {
-		log.Printf("[SSH Pool] new session to %s (pid=%d)", hp.host, cmd.Process.Pid)
+		log.Printf("[SSH Pool] session to %s ready (pid=%d)", hp.host, cmd.Process.Pid)
 	}
 
 	return sess, nil
@@ -255,6 +304,10 @@ func (hp *hostPool) closeAll() {
 }
 
 func (s *Session) ping() bool {
+	return s.pingWithTimeout(2 * time.Second)
+}
+
+func (s *Session) pingWithTimeout(timeout time.Duration) bool {
 	if !s.alive {
 		return false
 	}
@@ -286,8 +339,13 @@ func (s *Session) ping() bool {
 	select {
 	case ok := <-done:
 		return ok
-	case <-time.After(2 * time.Second):
+	case <-time.After(timeout):
 		s.alive = false
+		// Kill the SSH process so the leaked goroutine unblocks on the
+		// closed stdout pipe and can exit.
+		if s.cmd.Process != nil {
+			_ = s.cmd.Process.Kill()
+		}
 		return false
 	}
 }
@@ -392,7 +450,7 @@ func (s *Session) execute(command string, timeout time.Duration) (string, string
 	}()
 
 	if timeout <= 0 {
-		timeout = 5 * time.Minute // default max
+		timeout = 30 * time.Second // default max
 	}
 
 	select {
@@ -400,6 +458,12 @@ func (s *Session) execute(command string, timeout time.Duration) (string, string
 		return r.stdout, r.stderr, r.err
 	case <-time.After(timeout):
 		s.alive = false
+		// Kill immediately so the reader goroutine unblocks on closed pipes.
+		// s.close() would wait up to 5s for graceful exit, which is pointless
+		// after a timeout.
+		if s.cmd.Process != nil {
+			_ = s.cmd.Process.Kill()
+		}
 		s.close()
 		return "", "", fmt.Errorf("ssh command timed out after %v", timeout)
 	}

@@ -685,6 +685,9 @@ type Model struct {
 	// Host cache tracking - which hosts have been freshly queried this session
 	hostsQueriedThisSession map[string]bool
 
+	// Host offline hysteresis: only mark offline after consecutive failures
+	hostFailCount map[string]int
+
 	// Track hosts that have already shown low disk warning this session
 	lowDiskWarnedHosts map[string]bool
 	// Track hosts that have already shown jq missing warning this session
@@ -853,6 +856,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostRefreshInterval:     opts.HostRefreshInterval,
 		hostCacheDuration:       opts.HostCacheDuration,
 		hostsQueriedThisSession: make(map[string]bool),
+		hostFailCount:           make(map[string]int),
 		lowDiskWarnedHosts:      make(map[string]bool),
 		jqMissingWarnedHosts:    make(map[string]bool),
 		queueStoppedWarnedHosts: make(map[string]bool),
@@ -2670,7 +2674,7 @@ func (m Model) renderJobList(height int) string {
 		line := lipgloss.JoinHorizontal(lipgloss.Left, segments...)
 		lineWidth := lipgloss.Width(line)
 		if lineWidth < contentWidth {
-			line += strings.Repeat(" ", contentWidth-lineWidth)
+			line += rowStyle.Render(strings.Repeat(" ", contentWidth-lineWidth))
 		}
 		rows = append(rows, line)
 		jobLines++
@@ -5685,10 +5689,21 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 			if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
 				msg.info.LastCheck = h.LastCheck
 			}
+			// Hysteresis: require 3 consecutive failures before marking offline.
+			// This prevents a single SSH timeout from wiping host metrics.
+			if msg.info.Status == HostStatusOffline && h.Status == HostStatusOnline {
+				m.hostFailCount[msg.hostName]++
+				if m.hostFailCount[msg.hostName] < 3 {
+					// Not enough failures yet; keep existing host data
+					break
+				}
+			} else if msg.info.Status == HostStatusOnline {
+				m.hostFailCount[msg.hostName] = 0
+			}
 			// When host goes offline, preserve recent dynamic metrics so the
 			// ticker shows stale values instead of blanking on a single failure.
 			// The renderer's staleThreshold (5 min) handles eventual removal.
-			if msg.info.Status == HostStatusOffline && h.Status == HostStatusOnline {
+			if msg.info.Status == HostStatusOffline {
 				msg.info.LoadAvg = h.LoadAvg
 				msg.info.MemUsed = h.MemUsed
 				msg.info.DiskFree = h.DiskFree

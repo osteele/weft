@@ -69,7 +69,7 @@ func SetRunner(fn RunnerFunc) func() {
 
 // defaultRunner executes SSH commands using the session pool.
 func defaultRunner(host, command string) (string, string, error) {
-	return getDefaultPool().Execute(host, command, 0)
+	return getDefaultPool().Execute(host, command, 30*time.Second)
 }
 
 // execCommand is the function used to create exec.Cmd objects.
@@ -154,23 +154,34 @@ func Run(host string, command string) (string, string, error) {
 // RunWithContext executes an SSH command with context cancellation support.
 // When the context is cancelled, the command returns context.Canceled.
 func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {
+	// Derive a timeout from the context deadline so the pool call
+	// doesn't outlive the context.
+	timeout := 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			return "", "", context.DeadlineExceeded
+		}
+	}
+
 	type result struct {
 		stdout, stderr string
 		err            error
 	}
 	ch := make(chan result, 1)
 	go func() {
-		stdout, stderr, err := runner(host, command)
+		stdout, stderr, err := getDefaultPool().Execute(host, command, timeout)
 		ch <- result{stdout, stderr, err}
 	}()
 	select {
 	case r := <-ch:
-		if ctx.Err() == context.Canceled {
-			return r.stdout, r.stderr, context.Canceled
+		if ctx.Err() != nil {
+			return r.stdout, r.stderr, ctx.Err()
 		}
 		return r.stdout, r.stderr, r.err
 	case <-ctx.Done():
-		return "", "", context.Canceled
+		// The goroutine will finish when its timeout expires (bounded).
+		return "", "", ctx.Err()
 	}
 }
 

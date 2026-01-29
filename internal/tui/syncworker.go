@@ -346,16 +346,20 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 	m.hostSyncTimes[result.Host] = now
 
 	if result.Error != nil {
-		// Mark host as offline on sync error
-		for i, h := range m.hosts {
-			if h.Name == result.Host {
-				m.hosts[i].Status = HostStatusOffline
-				m.hosts[i].Error = result.Error.Error()
-				break
+		// Hysteresis: only mark offline after consecutive failures
+		m.hostFailCount[result.Host]++
+		if m.hostFailCount[result.Host] >= 3 {
+			for i, h := range m.hosts {
+				if h.Name == result.Host {
+					m.hosts[i].Status = HostStatusOffline
+					m.hosts[i].Error = result.Error.Error()
+					break
+				}
 			}
 		}
 		return m, m.setFlash(fmt.Sprintf("Sync error (%s): %v", result.Host, result.Error), true)
 	}
+	m.hostFailCount[result.Host] = 0
 
 	var cmds []tea.Cmd
 
