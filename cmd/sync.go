@@ -12,7 +12,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -40,11 +39,6 @@ var (
 	syncVerbose      bool
 	syncNoQueueStart bool
 	syncTimeout      time.Duration
-)
-
-var (
-	syncJobFunc      = ops.SyncJob
-	syncJobQuickFunc = ops.SyncJobQuick
 )
 
 const (
@@ -147,144 +141,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 // syncHost syncs all active jobs (running and queued) for a host and returns the count of updated jobs
 func syncHost(database *sql.DB, host string) (int, error) {
-	jobs, err := db.ListActiveJobs(database, host)
-	if err != nil {
-		return 0, err
-	}
-
-	syncOpts := ops.SyncOptions{Timeout: syncTimeout}
-	var updated int
-	seenJobs := make(map[int64]bool)
-
-	for _, job := range jobs {
-		seenJobs[job.ID] = true
-		// Use SyncAndReconcile for jobs with pending operations (pause, resume, etc.)
-		// to ensure pending status changes are applied
-		if job.PendingStatus != nil {
-			_, err := ops.SyncAndReconcile(database, job, ops.ReconcileOptions{Timeout: syncOpts.Timeout})
-			if err != nil {
-				if syncVerbose {
-					fmt.Fprintf(os.Stderr, "  Warning: reconcile job %d: %v\n", job.ID, err)
-				}
-				continue
-			}
-			updated++
-		} else {
-			syncResult, err := syncJobFunc(database, job, syncOpts)
-			if err != nil {
-				return updated, err
-			}
-			if syncResult.Updated {
-				updated++
-			}
-		}
-	}
-
-	// Reconcile jobs with pending operations (kill, cancel, etc.)
-	// These may have non-active status but need remote reconciliation
-	pendingJobs, err := db.ListJobsPendingReconciliation(database, host)
-	if err != nil {
-		return updated, err
-	}
-	for _, job := range pendingJobs {
-		if seenJobs[job.ID] {
-			continue // Already reconciled above
-		}
-		seenJobs[job.ID] = true
-		_, err := ops.SyncAndReconcile(database, job, ops.ReconcileOptions{Timeout: syncOpts.Timeout})
-		if err != nil {
-			// Log but continue - don't fail entire sync for one job
-			if syncVerbose {
-				fmt.Fprintf(os.Stderr, "  Warning: reconcile job %d: %v\n", job.ID, err)
-			}
-			continue
-		}
-		updated++
-	}
-
-	// Check jobs that may have been restarted by the queue runner
-	// (failed/dead jobs with queue_name that might be running again)
-	// Optimization: Only check jobs with files modified since our last check
-	lastCheck := db.GetLastRestartCheck(database, host)
-	checkTime := time.Now()
-
-	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
-	if err != nil {
-		return updated, err
-	}
-
-	// If we have a last check time, filter to jobs with recent activity
-	if !lastCheck.IsZero() && len(restartedJobs) > 0 {
-		sshHost := remote.NewSSHHost(host, syncTimeout)
-		recentJobIDs, err := sshHost.GetRecentlyModifiedJobIDs(lastCheck)
-		if err == nil && recentJobIDs != nil {
-			// Build set of recently modified job IDs
-			recentSet := make(map[int64]bool)
-			for _, id := range recentJobIDs {
-				recentSet[id] = true
-			}
-			// Filter to only jobs with recent activity
-			var filtered []*db.Job
-			for _, job := range restartedJobs {
-				if recentSet[job.ID] {
-					filtered = append(filtered, job)
-				}
-			}
-			if syncVerbose && len(restartedJobs) != len(filtered) {
-				fmt.Printf("  Filtered %d potentially restarted jobs to %d with recent activity\n",
-					len(restartedJobs), len(filtered))
-			}
-			restartedJobs = filtered
-		}
-	}
-
-	for _, job := range restartedJobs {
-		if seenJobs[job.ID] {
-			continue // Already synced above
-		}
-		seenJobs[job.ID] = true
-		syncResult, err := syncJobFunc(database, job, syncOpts)
-		if err != nil {
-			if syncVerbose {
-				fmt.Fprintf(os.Stderr, "  Warning: check restarted job %d: %v\n", job.ID, err)
-			}
-			continue
-		}
-		if syncResult.Updated {
-			updated++
-		}
-	}
-
-	// Update last restart check time
-	if err := db.UpdateLastRestartCheck(database, host, checkTime); err != nil {
-		if syncVerbose {
-			fmt.Fprintf(os.Stderr, "  Warning: update restart check time: %v\n", err)
-		}
-	}
-
-	// Clean up draft jobs that still have remote state lingering
-	drafts, err := db.ListDraftJobsPendingSync(database, host)
-	if err != nil {
-		return updated, err
-	}
-	for _, job := range drafts {
-		if seenJobs[job.ID] {
-			continue // Already synced above
-		}
-		syncResult, err := ops.SyncDraftJob(database, job, syncOpts)
-		if err != nil {
-			return updated, err
-		}
-		if syncResult.Updated {
-			updated++
-		}
-	}
-
-	if err := db.RecordHostSync(database, host, time.Now()); err != nil {
-		return updated, err
-	}
-
-	return updated, nil
+	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{
+		Timeout:      syncTimeout,
+		NoQueueStart: true, // Queue runners are started separately in runSync
+	}, nil)
+	return result.Updated, err
 }
 
 // performSyncWithTimeout performs a sync with specified timeout for list/status commands
@@ -352,133 +213,13 @@ func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bo
 // Returns (updated count, error). Only returns error if host is truly unreachable
 // (all SSH calls failed). Individual job sync failures are tolerated.
 func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (int, error) {
-	// This is a simplified version of syncHost that uses quick timeouts
-	jobs, err := db.ListActiveJobs(database, host)
-	if err != nil {
-		return 0, err
-	}
-
-	syncOpts := ops.SyncOptions{Timeout: timeout, SkipSamples: true}
-	var updated int
-	var successCount, failCount int
-	seenJobs := make(map[int64]bool)
-	var queueRunnerJobs []*db.Job
-	var tmuxJobs []*db.Job
-
-	for _, job := range jobs {
-		seenJobs[job.ID] = true
-		if job.UsesQueueRunner() {
-			queueRunnerJobs = append(queueRunnerJobs, job)
-		} else {
-			tmuxJobs = append(tmuxJobs, job)
-		}
-	}
-
-	if len(queueRunnerJobs) > 0 {
-		updatedCount, err := syncQueueRunnerJobsBatch(database, host, queueRunnerJobs, timeout)
-		if err != nil {
-			failCount++
-		} else {
-			successCount++
-			updated += updatedCount
-		}
-	}
-	for _, job := range tmuxJobs {
-		// Use quick check with timeout
-		syncResult, err := syncJobQuickFunc(database, job, syncOpts)
-		if err != nil {
-			failCount++
-			continue // Don't fail entire sync for one job
-		}
-		successCount++
-		if syncResult.Updated {
-			updated++
-		}
-	}
-
-	// Check potentially restarted jobs (failed/dead queue runner jobs)
-	// Optimization: Only check jobs with files modified since our last check
-	lastCheck := db.GetLastRestartCheck(database, host)
-	checkTime := time.Now()
-
-	restartedJobs, err := db.ListPotentiallyRestartedJobs(database, host)
-	if err != nil {
-		return updated, err
-	}
-
-	// If we have a last check time, filter to jobs with recent activity
-	if !lastCheck.IsZero() && len(restartedJobs) > 0 {
-		sshHost := remote.NewSSHHost(host, timeout)
-		recentJobIDs, err := sshHost.GetRecentlyModifiedJobIDs(lastCheck)
-		if err == nil && recentJobIDs != nil {
-			recentSet := make(map[int64]bool)
-			for _, id := range recentJobIDs {
-				recentSet[id] = true
-			}
-			var filtered []*db.Job
-			for _, job := range restartedJobs {
-				if recentSet[job.ID] {
-					filtered = append(filtered, job)
-				}
-			}
-			restartedJobs = filtered
-		}
-	}
-
-	var restartedQueueJobs []*db.Job
-	for _, job := range restartedJobs {
-		if seenJobs[job.ID] {
-			continue
-		}
-		seenJobs[job.ID] = true
-		restartedQueueJobs = append(restartedQueueJobs, job)
-	}
-	if len(restartedQueueJobs) > 0 {
-		updatedCount, err := syncQueueRunnerJobsBatch(database, host, restartedQueueJobs, timeout)
-		if err != nil {
-			failCount++
-		} else {
-			successCount++
-			updated += updatedCount
-		}
-	}
-
-	// Update last restart check time
-	_ = db.UpdateLastRestartCheck(database, host, checkTime)
-
-	drafts, err := db.ListDraftJobsPendingSync(database, host)
-	if err != nil {
-		return updated, err
-	}
-	for _, job := range drafts {
-		if seenJobs[job.ID] {
-			continue
-		}
-		syncResult, err := ops.SyncDraftJob(database, job, syncOpts)
-		if err != nil {
-			failCount++
-			continue // Don't fail entire sync for one job
-		}
-		successCount++
-		if syncResult.Updated {
-			updated++
-		}
-	}
-
-	// Only consider host unreachable if ALL calls failed
-	if successCount == 0 && failCount > 0 {
-		return updated, fmt.Errorf("all %d sync attempts failed", failCount)
-	}
-
-	if err := db.RecordHostSync(database, host, time.Now()); err != nil {
-		return updated, err
-	}
-
-	return updated, nil
-}
-
-func syncQueueRunnerJobsBatch(database *sql.DB, host string, jobs []*db.Job, timeout time.Duration) (int, error) {
-	return ops.BatchSyncQueueRunnerJobs(database, host, jobs, timeout)
+	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{
+		Timeout:      timeout,
+		SkipSamples:  true,
+		UseBatchSync: true,
+		NoQueueStart: true,
+	}, nil)
+	return result.Updated, err
 }
 
 // buildStaleDataNote renders a warning that results are from cached data.

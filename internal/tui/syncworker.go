@@ -9,9 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/remote"
 )
 
 // SyncRate represents the desired sync frequency for a host
@@ -209,7 +207,6 @@ func (w *SyncWorker) maybeStartSync(host string, state *hostSyncState) {
 
 func (w *SyncWorker) doSync(host string) {
 	result := SyncResult{Host: host}
-	hostSynced := false
 
 	defer func() {
 		w.mu.Lock()
@@ -226,84 +223,18 @@ func (w *SyncWorker) doSync(host string) {
 		}
 	}()
 
-	// Get active jobs for this host
-	activeJobs, err := db.ListActiveJobs(w.database, host)
+	syncResult, err := ops.SyncHost(w.database, host, ops.HostSyncOptions{
+		Timeout:      ops.DefaultSyncOptions().Timeout,
+		UseBatchSync: true,
+	}, ensureQueueRunnerStartedTUI)
 	if err != nil {
 		result.Error = err
 		return
 	}
 
-	// Sync each job
-	syncOpts := ops.DefaultSyncOptions()
-	for _, job := range activeJobs {
-		syncResult, err := ops.SyncJobQuick(w.database, job, syncOpts)
-		if err != nil {
-			oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
-				oplog.WithDetail("sync-error"),
-				oplog.WithError(err))
-			continue
-		}
-		if syncResult.HostContacted {
-			hostSynced = true
-		}
-		if syncResult.Updated {
-			result.Updated++
-		}
-	}
-
-	// Sync draft jobs
-	if drafts, err := db.ListDraftJobsPendingSync(w.database, host); err == nil {
-		for _, job := range drafts {
-			syncResult, err := ops.SyncDraftJob(w.database, job, syncOpts)
-			if err != nil {
-				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
-					oplog.WithDetail("sync-draft-error"),
-					oplog.WithError(err))
-				continue
-			}
-			if syncResult.HostContacted {
-				hostSynced = true
-			}
-			if syncResult.Updated {
-				result.Updated++
-			}
-		}
-	}
-
-	// Ensure queue runner is started if there are queued or running queue-runner jobs
-	queueRunnerCount := 0
-	for _, job := range activeJobs {
-		if job == nil {
-			continue
-		}
-		if job.UsesQueueRunner() && (job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused) {
-			queueRunnerCount++
-		}
-	}
-
-	if queueRunnerCount > 0 {
-		started, err := ensureQueueRunnerStartedWorker(host)
-		if err != nil {
-			if !remote.IsConnectionError(err.Error()) {
-				result.QueueRunnerError = err.Error()
-			}
-		} else {
-			hostSynced = true
-			if started {
-				result.QueueStarted = true
-			}
-		}
-	}
-
-	// Record sync time only if we successfully contacted the host
-	if hostSynced {
-		_ = db.RecordHostSync(w.database, host, time.Now())
-	}
-}
-
-// ensureQueueRunnerStartedWorker uses the existing TUI function
-func ensureQueueRunnerStartedWorker(host string) (bool, error) {
-	return ensureQueueRunnerStartedTUI(host)
+	result.Updated = syncResult.Updated
+	result.QueueStarted = syncResult.QueueStarted
+	result.QueueRunnerError = syncResult.QueueRunnerError
 }
 
 // syncResultMsg wraps a SyncResult for the TUI message loop
