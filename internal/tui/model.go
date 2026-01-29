@@ -2705,7 +2705,7 @@ func (m Model) renderJobList(height int) string {
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
 		hostCol := fmt.Sprintf("%-10s", truncate(job.Host, 10))
-		statusCol := fmt.Sprintf("%-12s", status)
+		statusCol := status + strings.Repeat(" ", max(0, 12-lipgloss.Width(status)))
 		timeColFormatted := fmt.Sprintf("%-12s", timeCol)
 
 		prefixPlain := fmt.Sprintf(" %-4d %s %s %s ", job.ID, hostCol, statusCol, timeColFormatted)
@@ -2878,12 +2878,20 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 
 	name := nameStyle.Render(truncate(host.Name, 12))
 
-	// For offline hosts or stale data, just show status symbol and name (no stats)
-	if host.Status != HostStatusOnline || isStale {
+	// Determine whether we have metrics to show.
+	// Online hosts always show metrics. Offline hosts show stale metrics
+	// (preserved from the last successful check) until the stale threshold.
+	hasMetrics := host.Status == HostStatusOnline
+	if !hasMetrics && !isStale && host.LoadAvg != "" {
+		// Recently went offline but we still have metrics from last check
+		hasMetrics = true
+	}
+
+	if !hasMetrics {
 		return statusStyle.Render(statusSymbol) + " " + name
 	}
 
-	// Online hosts with fresh data: show stats including disk
+	// Show stats (fresh or stale)
 	cpuPct, cpuOK := hostCPULoadPercent(host)
 	memPct, memOK := hostMemUsagePercent(host)
 	gpuPct, gpuOK := hostGPULoadPercent(host)
@@ -2901,6 +2909,14 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 		diskText = formatDiskSummary(host)
 	}
 
+	// Use italic style for stale metrics to indicate they're not fresh
+	applyStyle := func(base lipgloss.Style, text string) string {
+		if host.Status != HostStatusOnline {
+			return base.Italic(true).Render(text)
+		}
+		return base.Render(text)
+	}
+
 	cpuStyle := hostSummaryStyleForMetric(cpuPct, cpuOK)
 	memStyle := hostSummaryStyleForMetric(memPct, memOK)
 	gpuStyle := hostSummaryStyleForMetric(gpuPct, gpuOK)
@@ -2912,14 +2928,14 @@ func (m Model) renderHostSummarySegment(host *Host, format hostSummaryFormat) st
 	fields := []string{
 		statusStyle.Render(statusSymbol),
 		name,
-		cpuStyle.Render(cpuText),
-		memStyle.Render(memText),
-		gpuStyle.Render(gpuText),
+		applyStyle(cpuStyle, cpuText),
+		applyStyle(memStyle, memText),
+		applyStyle(gpuStyle, gpuText),
 	}
 
 	// Only add disk if we have disk info
 	if diskText != "" {
-		fields = append(fields, diskStyle.Render(diskText))
+		fields = append(fields, applyStyle(diskStyle, diskText))
 	}
 
 	return strings.Join(fields, " ")
@@ -4966,16 +4982,20 @@ func (m Model) formatStatus(job *db.Job) string {
 
 	switch job.Status {
 	case db.StatusRunning:
-		// Check if status is stale (host not checked in over 1 minute)
-		if m.isJobStatusStale(job) {
-			return "● running?"
-		}
+		stale := m.isJobStatusStale(job)
 		// Show progress percentage if available
 		if prog, ok := m.jobProgress[job.ID]; ok {
 			pct := prog.DisplayPercent()
 			if pct >= 0 {
-				return fmt.Sprintf("● %3d%%", pct)
+				text := fmt.Sprintf("● %3d%%", pct)
+				if stale {
+					return lipgloss.NewStyle().Italic(true).Render(text)
+				}
+				return text
 			}
+		}
+		if stale {
+			return "● running?"
 		}
 		return "● running"
 	case db.StatusPaused:
@@ -5745,6 +5765,15 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 			msg.info.RunningJobs = h.RunningJobs
 			if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
 				msg.info.LastCheck = h.LastCheck
+			}
+			// When host goes offline, preserve recent dynamic metrics so the
+			// ticker shows stale values instead of blanking on a single failure.
+			// The renderer's staleThreshold (5 min) handles eventual removal.
+			if msg.info.Status == HostStatusOffline && h.Status == HostStatusOnline {
+				msg.info.LoadAvg = h.LoadAvg
+				msg.info.MemUsed = h.MemUsed
+				msg.info.DiskFree = h.DiskFree
+				msg.info.DiskTotal = h.DiskTotal
 			}
 			m.hosts[i] = msg.info
 
