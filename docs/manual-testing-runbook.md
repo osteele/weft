@@ -24,7 +24,7 @@ These tests can be run by an agent without human intervention.
 remote-jobs queue add -d "Test: echo hello" studio 'echo "hello world"'
 
 # Wait for completion and check status
-remote-jobs status --watch 5
+remote-jobs status --wait 5
 
 # Verify job completed
 remote-jobs list --status completed --limit 1
@@ -43,7 +43,7 @@ remote-jobs queue add -d "Test: job 2" studio 'echo "job 2"; sleep 2'
 remote-jobs queue add -d "Test: job 3" studio 'echo "job 3"; sleep 2'
 
 # Watch them complete
-remote-jobs status --watch 10
+remote-jobs status --wait 10
 
 # Verify all completed
 remote-jobs list --status completed --limit 3
@@ -103,7 +103,7 @@ remote-jobs show $JOB_ID
 remote-jobs queue add -d "Test: env vars" --env "FOO=bar" --env "BAZ=qux" studio 'echo "FOO=$FOO BAZ=$BAZ"'
 
 # Wait for completion
-remote-jobs status --watch 5
+remote-jobs status --wait 5
 
 # Check logs for env var output
 remote-jobs logs $(remote-jobs list --status completed --limit 1 --json | jq -r '.[0].id')
@@ -177,7 +177,7 @@ ssh studio 'grep "# BUILD:" ~/.cache/remote-jobs/bin/queue-runner.sh | head -1'
 remote-jobs queue add -d "Test: workdir" -C /tmp studio 'pwd'
 
 # Wait and check logs
-remote-jobs status --watch 5
+remote-jobs status --wait 5
 remote-jobs logs $(remote-jobs list --status completed --limit 1 --json | jq -r '.[0].id')
 ```
 
@@ -197,7 +197,7 @@ remote-jobs sync
 
 # Queue and complete a job
 remote-jobs queue add -d "Test: normal job" studio 'echo done'
-remote-jobs status --watch 5
+remote-jobs status --wait 5
 
 # Verify completed status was synced
 remote-jobs list --status completed --limit 1

@@ -189,8 +189,8 @@ remote-jobs plan show plan.yaml
 Every submission prints a "Command to job IDs" map so downstream tooling can
 attach, stream logs, or build additional dependencies.
 
-Add `--watch 10m` (or any Go duration) to keep the CLI running for up to that
-amount of time while syncing statuses. The watch summary reports which plan
+Add `--wait 10m` (or any Go duration) to keep the CLI running for up to that
+amount of time while syncing statuses. The wait summary reports which plan
 items have succeeded, failed, or remain queued/running when the timer expires.
 
 Use `--host <hostname>` to supply a default for any job whose YAML omits the

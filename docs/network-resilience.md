@@ -49,7 +49,7 @@ needing a live SSH connection at that moment.
 
 ## Monitoring while offline
 
-Blocking commands (`remote-jobs status --wait`, `remote-jobs plan submit --watch`)
+Blocking commands (`remote-jobs status --wait`, `remote-jobs plan submit --wait`)
 now treat intermittent SSH failures as informational instead of fatal:
 
 - When a host drops, the CLI prints `Connection to HOST is unavailable. Polling

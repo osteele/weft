@@ -58,7 +58,7 @@ Examples:
   remote-jobs status 42
   remote-jobs status 42:47        # Check jobs 42 through 47
   remote-jobs status 42 --fast    # Quick check with 2s timeout
-  remote-jobs status 42:47 --watch # Wait for jobs 42-47 to complete`,
+  remote-jobs status 42:47 --wait  # Wait for jobs 42-47 to complete`,
 	RunE: runStatus,
 }
 
@@ -68,7 +68,6 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusNoSync, "no-sync", false, "Skip syncing job statuses before checking")
 	statusCmd.Flags().BoolVar(&statusFast, "fast", false, "Use quick 2s timeout (default is 5s)")
 	statusCmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job(s) to complete before returning")
-	statusCmd.Flags().BoolVar(&statusWait, "watch", false, "Wait for the job(s) to complete before returning (synonym for --wait)")
 	statusCmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
 }
 
@@ -524,7 +523,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Println()
 		fmt.Printf("Hints:    remote-jobs log %d        # View job output\n", job.ID)
 		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
-			fmt.Printf("          remote-jobs status %d --watch  # Don't exit until the job completes\n", job.ID)
+			fmt.Printf("          remote-jobs status %d --wait   # Don't exit until the job completes\n", job.ID)
 		}
 	}
 

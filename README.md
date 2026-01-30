@@ -23,7 +23,7 @@ drop. Remote Jobs treats those scenarios as normal operations:
 - Jobs always start locally first, so connection failures never lose metadata.
 - Failed SSH attempts automatically defer work to the host queue (or the local
   pending list) and are replayed by `remote-jobs sync` when the host returns.
-- Blocking commands such as `status --wait` and `plan submit --watch` keep
+- Blocking commands such as `status --wait` and `plan submit --wait` keep
   polling while the host is down and announce when the connection comes back.
 
 See [docs/network-resilience.md](docs/network-resilience.md) for the full story
@@ -239,7 +239,7 @@ groups, and `series` groups. Every block and job may declare `id`, `alias`,
 `depends_on`, and `continue_on_failure`. The CLI resolves these references into
 a DAG, auto-generating IDs (`block0`, `block0.job0`, etc.) when missing, so you
 can declare multi-phase pipelines in a single YAML file. Provide `--host <name>`
-to supply a default host for jobs that omit it, and add `--watch <duration>` to
+to supply a default host for jobs that omit it, and add `--wait <duration>` to
 keep the CLI around and report which jobs finished. See `docs/job-plans.md` for
 the full schema plus dependency examples.
 

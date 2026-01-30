@@ -46,12 +46,12 @@ var planShowCmd = &cobra.Command{
 }
 
 var (
-	planWatchDuration time.Duration
-	planNoQueueStart  bool
-	planDefaultHost   string
-	planValidateHost  string
-	planShowHost      string
-	planShowIDsOnly   bool
+	planWaitDuration time.Duration
+	planNoQueueStart bool
+	planDefaultHost  string
+	planValidateHost string
+	planShowHost     string
+	planShowIDsOnly  bool
 )
 
 func init() {
@@ -59,7 +59,7 @@ func init() {
 	planCmd.AddCommand(planSubmitCmd)
 	planCmd.AddCommand(planValidateCmd)
 	planCmd.AddCommand(planShowCmd)
-	planSubmitCmd.Flags().DurationVar(&planWatchDuration, "watch", 0, "Wait for up to this duration and report job outcomes")
+	planSubmitCmd.Flags().DurationVar(&planWaitDuration, "wait", 0, "Wait for up to this duration and report job outcomes")
 	planSubmitCmd.Flags().BoolVar(&planNoQueueStart, "no-queue-start", false, "Skip auto-starting queue runners for queued jobs")
 	planSubmitCmd.Flags().StringVarP(&planDefaultHost, "host", "H", "", "Default host for jobs that omit the host field")
 	planValidateCmd.Flags().StringVarP(&planValidateHost, "host", "H", "", "Default host for jobs that omit the host field")
@@ -124,8 +124,8 @@ func runPlanSubmit(cmd *cobra.Command, args []string) error {
 	printCommandMap(commandMap)
 	printPlanStatusCommands(scheduled)
 
-	if planWatchDuration > 0 {
-		if err := watchPlanJobs(database, scheduled, planWatchDuration); err != nil {
+	if planWaitDuration > 0 {
+		if err := watchPlanJobs(database, scheduled, planWaitDuration); err != nil {
 			return err
 		}
 	}
@@ -437,8 +437,8 @@ func printPlanStatusCommands(jobs []scheduledPlanJob) {
 	fmt.Println()
 	fmt.Println("Monitor plan progress:")
 	fmt.Printf("  remote-jobs status %s\n", strings.Join(ids, " "))
-	fmt.Printf("  remote-jobs status --watch %s\n", strings.Join(ids, " "))
-	fmt.Printf("  remote-jobs status --watch --wait-timeout 30m %s\n", strings.Join(ids, " "))
+	fmt.Printf("  remote-jobs status --wait %s\n", strings.Join(ids, " "))
+	fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %s\n", strings.Join(ids, " "))
 }
 
 func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Duration) error {
