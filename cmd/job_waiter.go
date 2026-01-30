@@ -27,7 +27,7 @@ func waitForQueuedJobCompletion(database *sql.DB, jobID int64, deferred bool) er
 	}
 
 	if deferred {
-		fmt.Printf("Host %s is unreachable. Waiting for host to come online...\n", job.Host)
+		fmt.Printf("Job saved locally. Waiting for %s to come online...\n", job.Host)
 	}
 
 	// Use existing waitForJobCompletion with connection tracking
@@ -56,7 +56,7 @@ func followQueuedJob(database *sql.DB, jobID int64, host string, deferred bool) 
 	tracker := newHostConnectionTracker()
 
 	if deferred {
-		fmt.Printf("Host %s is unreachable. Waiting for host to come online...\n", host)
+		fmt.Printf("Job saved locally. Waiting for %s to come online...\n", host)
 	}
 
 	// Wait until job is running (or terminal)

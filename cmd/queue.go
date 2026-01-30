@@ -409,8 +409,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	// Auto-start queue runner unless --no-start is specified
 	if result.Deferred {
-		fmt.Printf("\nHost %s is unreachable. This job will be appended to the queue when the host is reachable again.\n", host)
-		fmt.Printf("Run `remote-jobs sync` after %s is online to retry, or wait for the next automatic sync.\n", host)
+		fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
 		return nil
 	}
 
@@ -930,7 +929,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 		if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
-			fmt.Fprintf(os.Stderr, "Warning: could not immediately push to remote queue (will sync later): %v\n", err)
+			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", job.Host)
 		}
 	} else {
 		// Job was already queued - update existing entry

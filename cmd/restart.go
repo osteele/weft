@@ -101,11 +101,9 @@ func restartJob(database *sql.DB, jobID int64) error {
 		EnvVars:     job.EnvVars,
 		DepSpec:     job.DepSpec,
 	}
-	deferred := false
 	if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
 		// Best effort - job is queued locally, sync will eventually push it
-		fmt.Printf("Note: could not immediately push to remote queue (will sync later): %v\n", err)
-		deferred = true
+		fmt.Printf("Job saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", job.Host)
 	}
 
 	fmt.Printf("Restarted job %d on %s\n", jobID, job.Host)
@@ -115,9 +113,6 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 	if len(job.EnvVars) > 0 {
 		fmt.Printf("  Env vars: %s\n", strings.Join(job.EnvVars, ", "))
-	}
-	if deferred {
-		fmt.Printf("Host offline; job will sync once reachable.\n")
 	}
 	return nil
 }

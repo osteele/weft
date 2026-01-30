@@ -257,7 +257,7 @@ func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
 		if err != nil {
 			if ssh.IsConnectionError(err.Error()) {
 				if !warned {
-					fmt.Fprintf(os.Stderr, "Host %s unreachable; waiting for log file...\n", job.Host)
+					fmt.Fprintf(os.Stderr, "%s is offline; waiting for it to come online...\n", job.Host)
 					warned = true
 				}
 				time.Sleep(1 * time.Second)

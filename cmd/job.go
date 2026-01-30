@@ -322,8 +322,7 @@ func runJobStartNow(cmd *cobra.Command, args []string) error {
 		}
 
 		if deferred {
-			fmt.Printf("Host %s unreachable. Job %d will start when the next sync reaches that host.\n", job.Host, jobID)
-			fmt.Printf("Run 'remote-jobs sync %s' once the host is reachable to trigger the start.\n", job.Host)
+			fmt.Printf("Job %d saved locally. %s is offline — it will start on the next sync.\n", jobID, job.Host)
 			continue
 		}
 

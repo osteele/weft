@@ -98,7 +98,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 			if ssh.IsConnectionError(err.Error()) {
 				hostsUnreachable++
 				if syncVerbose {
-					fmt.Printf("  %s: unreachable\n", host)
+					fmt.Printf("  %s: offline\n", host)
 				}
 				continue
 			}
@@ -130,7 +130,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// Print summary
 	if hostsUnreachable > 0 {
-		fmt.Printf("Synced %d job(s) on %d host(s) (%d host(s) unreachable)\n",
+		fmt.Printf("Synced %d job(s) on %d host(s) (%d host(s) offline)\n",
 			totalUpdated, hostsReached, hostsUnreachable)
 	} else {
 		fmt.Printf("Synced %d job(s) on %d host(s)\n", totalUpdated, hostsReached)
@@ -241,7 +241,7 @@ func buildStaleDataNote(database *sql.DB, hosts []string) string {
 	}
 
 	return fmt.Sprintf(
-		"Because %s not currently reachable, these results are from cached data (%s). Try again later. Attempts to use ssh directly or inspect the local or remote filesystem won't reveal newer information.",
+		"Because %s currently offline, these results are from cached data (%s). Try again later. Attempts to use ssh directly or inspect the local or remote filesystem won't reveal newer information.",
 		subject,
 		strings.Join(summaries, ", "),
 	)
