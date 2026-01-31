@@ -20,9 +20,10 @@ import (
 var ErrPoolBusy = errors.New("all pool slots busy")
 
 var (
-	defaultPoolSize = 4
-	defaultPool     *SessionPool
-	poolOnce        sync.Once
+	defaultPoolSize    = 4
+	defaultMaxParallel = 8
+	defaultPool        *SessionPool
+	poolOnce           sync.Once
 )
 
 func init() {
@@ -31,12 +32,17 @@ func init() {
 			defaultPoolSize = n
 		}
 	}
+	if s := os.Getenv("REMOTE_JOBS_SSH_MAX_PARALLEL"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			defaultMaxParallel = n
+		}
+	}
 }
 
 // getDefaultPool returns the global session pool, creating it lazily.
 func getDefaultPool() *SessionPool {
 	poolOnce.Do(func() {
-		defaultPool = NewSessionPool(defaultPoolSize)
+		defaultPool = NewSessionPool(defaultPoolSize, defaultMaxParallel)
 	})
 	return defaultPool
 }
@@ -50,10 +56,11 @@ func ClosePool() {
 
 // SessionPool manages persistent SSH sessions across hosts.
 type SessionPool struct {
-	mu     sync.Mutex
-	hosts  map[string]*hostPool
-	size   int
-	closed bool
+	mu        sync.Mutex
+	hosts     map[string]*hostPool
+	size      int
+	closed    bool
+	globalSem chan struct{} // limits total concurrent SSH operations across all hosts
 }
 
 type hostPool struct {
@@ -86,11 +93,12 @@ func (e *commandError) Error() string {
 	return fmt.Sprintf("exit status %d", e.exitCode)
 }
 
-// NewSessionPool creates a pool with the given per-host size.
-func NewSessionPool(size int) *SessionPool {
+// NewSessionPool creates a pool with the given per-host size and global max parallel limit.
+func NewSessionPool(size int, maxParallel int) *SessionPool {
 	return &SessionPool{
-		hosts: make(map[string]*hostPool),
-		size:  size,
+		hosts:     make(map[string]*hostPool),
+		size:      size,
+		globalSem: make(chan struct{}, maxParallel),
 	}
 }
 
@@ -116,9 +124,21 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 		return "", "", fmt.Errorf("pool is closed")
 	}
 
+	// Acquire global semaphore first
+	if timeout > 0 {
+		select {
+		case p.globalSem <- struct{}{}:
+		case <-time.After(timeout):
+			return "", "", fmt.Errorf("ssh pool: timeout waiting for global slot")
+		}
+	} else {
+		p.globalSem <- struct{}{}
+	}
+	defer func() { <-p.globalSem }()
+
 	hp := p.getHostPool(host)
 
-	// Acquire semaphore (with optional timeout)
+	// Acquire per-host semaphore
 	if timeout > 0 {
 		select {
 		case hp.sem <- struct{}{}:
@@ -141,9 +161,17 @@ func (p *SessionPool) TryExecute(host, command string, timeout time.Duration) (s
 		return "", "", fmt.Errorf("pool is closed")
 	}
 
+	// Non-blocking global semaphore acquire
+	select {
+	case p.globalSem <- struct{}{}:
+	default:
+		return "", "", ErrPoolBusy
+	}
+	defer func() { <-p.globalSem }()
+
 	hp := p.getHostPool(host)
 
-	// Non-blocking semaphore acquire
+	// Non-blocking per-host semaphore acquire
 	select {
 	case hp.sem <- struct{}{}:
 	default:

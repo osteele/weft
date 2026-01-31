@@ -1428,9 +1428,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			if (inHostsView && needsRefresh) || hasRunningJobs || isOnline {
 				m.requestHostInfoRefresh(host.Name, false)
-				if inHostsView {
-					m.requestHostInfoRefresh(host.Name, false)
-				}
 			}
 		}
 		return m, tea.Batch(cmds...)
@@ -1627,7 +1624,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Only refresh if not queried this session or if online (for dynamic data)
 			if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
 				m.requestHostInfoRefresh(host.Name, false)
-				m.requestHostInfoRefresh(host.Name, false)
 			}
 		}
 		if m.hostDetailTab == HostDetailTabCPU {
@@ -1646,7 +1642,6 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			for _, host := range m.hosts {
 				// Only refresh if not queried this session or if online (for dynamic data)
 				if !m.hostsQueriedThisSession[host.Name] || host.Status == HostStatusOnline {
-					m.requestHostInfoRefresh(host.Name, false)
 					m.requestHostInfoRefresh(host.Name, false)
 				}
 			}
@@ -5634,7 +5629,6 @@ func (m Model) handleHostsLoaded(msg hostsLoadedMsg) (Model, tea.Cmd) {
 				if cacheAge > m.hostCacheDuration && m.monitor == nil {
 					host.Status = HostStatusChecking
 					m.requestHostInfoRefresh(name, false)
-					m.requestHostInfoRefresh(name, false)
 				}
 			} else {
 				host = &Host{
@@ -5643,13 +5637,11 @@ func (m Model) handleHostsLoaded(msg hostsLoadedMsg) (Model, tea.Cmd) {
 				}
 				if m.monitor == nil {
 					m.requestHostInfoRefresh(name, false)
-					m.requestHostInfoRefresh(name, false)
 				}
 			}
 			m.hosts = append(m.hosts, host)
 		}
 		if !m.hostsQueriedThisSession[name] {
-			m.requestHostInfoRefresh(name, false)
 			m.requestHostInfoRefresh(name, false)
 		}
 	}

@@ -11,10 +11,10 @@ import (
 func TestPoolIntegrationSSH(t *testing.T) {
 	host := os.Getenv("SSH_TEST_HOST")
 	if host == "" {
-		host = "lm2"
+		host = "cool30"
 	}
 
-	pool := NewSessionPool(2)
+	pool := NewSessionPool(2, 8)
 	defer pool.Close()
 
 	// Test 1: simple echo

@@ -185,7 +185,7 @@ func TestSessionExecuteMultilineOutput(t *testing.T) {
 }
 
 func TestSessionPoolNew(t *testing.T) {
-	pool := NewSessionPool(2)
+	pool := NewSessionPool(2, 8)
 	defer pool.Close()
 
 	if pool.size != 2 {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 38
+# BUILD: 40
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -32,6 +32,12 @@
 #
 
 set -euo pipefail
+
+# Add common user-local paths (non-login shells don't source profile)
+for dir in "$HOME/.local/bin" "$HOME/.cargo/bin" "/usr/local/bin"; do
+    [[ -d "$dir" ]] && [[ ":$PATH:" != *":$dir:"* ]] && PATH="$dir:$PATH"
+done
+export PATH
 
 # Check for jq
 if ! command -v jq &>/dev/null; then
@@ -748,9 +754,13 @@ start_job() {
             [ -n "$env_line" ] && [ "$env_line" != "null" ] && export "$env_line"
         done < <(echo "$env_vars_json" | jq -r '.[]' 2>/dev/null)
 
-        # Use setsid to run command in new session, immune to parent's SIGHUP
-        # Run in background to capture the session leader PID for cleanup
-        setsid bash -c "$command" &
+        # Run command in a new process group, immune to parent's SIGHUP.
+        # Use setsid on Linux; on macOS (no setsid), use perl to call setsid(2).
+        if command -v setsid &>/dev/null; then
+            setsid bash -c "$command" &
+        else
+            perl -e 'use POSIX "setsid"; setsid(); exec @ARGV' bash -c "$command" &
+        fi
         local setsid_pid=$!
         echo "$setsid_pid" > "$pgid_file"
         wait $setsid_pid
