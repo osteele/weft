@@ -10,6 +10,28 @@ import (
 	"github.com/osteele/remote-jobs/internal/remote"
 )
 
+// TryFetchAndCacheHostInfo is like FetchAndCacheHostInfo but returns
+// ssh.ErrPoolBusy immediately if all pool slots are occupied.
+// Use for periodic/best-effort host info refreshes.
+func TryFetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Duration) (*db.CachedHostInfo, error) {
+	stdout, stderr, err := remote.TryRunWithTimeout(hostName, hostinfo.HostInfoCommand, timeout)
+	if err != nil {
+		errMsg := strings.TrimSpace(stderr)
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		return nil, &HostInfoError{Host: hostName, Message: errMsg, Err: err}
+	}
+
+	host := hostinfo.ParseHostInfo(stdout)
+	host.Name = hostName
+
+	cachedInfo := hostinfo.CachedInfoFromHost(host)
+	db.SaveCachedHostInfo(database, cachedInfo)
+
+	return cachedInfo, nil
+}
+
 // FetchAndCacheHostInfo runs the host info command via SSH, parses the output,
 // and saves the result to the DB cache. Returns the cached info or an error.
 func FetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Duration) (*db.CachedHostInfo, error) {

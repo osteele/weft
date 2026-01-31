@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"os/exec"
@@ -44,7 +45,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/remote"
-	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/slack"
 	"github.com/osteele/remote-jobs/internal/ssh"
 )
@@ -511,11 +511,6 @@ type hostInfoMsg struct {
 type hostDeletedMsg struct {
 	hostName string
 	err      error
-}
-
-type processStatsMsg struct {
-	jobID int64
-	stats *remote.ProcessStats
 }
 
 type cpuTopMsg struct {
@@ -1065,34 +1060,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case processStatsMsg:
-		// Accept stats for the currently highlighted job (whether in log mode or not)
-		targetJob := m.getTargetJob()
-		if targetJob != nil && msg.jobID == targetJob.ID {
-			// Only update if we got valid stats (Running=true means process check succeeded)
-			// Don't overwrite good stats with failed fetches
-			if msg.stats.Running || m.processStats == nil || m.processStatsJobID != msg.jobID {
-				// Calculate CPU% from delta if we have a previous sample
-				if m.prevProcessStats != nil && m.processStatsJobID == msg.jobID &&
-					msg.stats.Timestamp > m.prevProcessStats.Timestamp && msg.stats.Running {
-					deltaTicks := (msg.stats.CPUUserTicks + msg.stats.CPUSysTicks) -
-						(m.prevProcessStats.CPUUserTicks + m.prevProcessStats.CPUSysTicks)
-					deltaTime := msg.stats.Timestamp - m.prevProcessStats.Timestamp
-					// CPU% = (ticks / (time_seconds * CLK_TCK)) * 100
-					// CLK_TCK is typically 100, so ticks/time gives rough %
-					if deltaTime > 0 {
-						msg.stats.CPUPct = float64(deltaTicks) / float64(deltaTime)
-					}
-				}
-				if msg.stats.Running {
-					m.prevProcessStats = m.processStats
-				}
-				m.processStats = msg.stats
-				m.processStatsJobID = msg.jobID
-			}
-		}
-		return m, nil
-
 	case cpuTopMsg:
 		if msg.jobView {
 			if m.jobCPUTopRequestedHost != "" && msg.host != m.jobCPUTopRequestedHost {
@@ -1372,18 +1339,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case logTickMsg:
-		var cmds []tea.Cmd
-		cmds = append(cmds, m.startLogTicker())
-		// Refresh logs if in Logs tab with a running job
-		if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
-			cmds = append(cmds, m.fetchSelectedJobLog())
+		// Update the monitor's watched jobs based on current UI state.
+		// The monitor handles the actual SSH polling and emits events.
+		if m.monitor != nil {
+			if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
+				m.monitor.WatchJobLog(m.selectedJob)
+			} else {
+				m.monitor.WatchJobLog(nil)
+			}
+			targetJob := m.getTargetJob()
+			if targetJob != nil && targetJob.Status == db.StatusRunning {
+				m.monitor.WatchJobStats(targetJob)
+			} else {
+				m.monitor.WatchJobStats(nil)
+			}
 		}
-		// Refresh process stats for highlighted running job (even if not in log mode)
-		targetJob := m.getTargetJob()
-		if targetJob != nil && targetJob.Status == db.StatusRunning {
-			cmds = append(cmds, m.fetchProcessStats(targetJob))
-		}
-		return m, tea.Batch(cmds...)
+		return m, m.startLogTicker()
 
 	case createTickMsg:
 		// Only continue ticking if still creating
@@ -1816,13 +1787,35 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.logContent = ""
 						m.logStale = false
 					}
-					var cmds []tea.Cmd
-					cmds = append(cmds, m.fetchSelectedJobLog())
-					// Fetch process stats for running jobs
-					if m.selectedJob.Status == db.StatusRunning {
-						cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+					// For terminal jobs, try local cache first (no SSH needed)
+					if m.selectedJob.Status == db.StatusCompleted || m.selectedJob.Status == db.StatusDead || m.selectedJob.Status == db.StatusFailed || m.selectedJob.Status == db.StatusKilled || m.selectedJob.Status == db.StatusCanceled {
+						if cached, err := logcache.Read(m.selectedJob.ID); err == nil {
+							lines := strings.Split(cached, "\n")
+							if len(lines) > 500 {
+								lines = lines[len(lines)-500:]
+							}
+							content := strings.Join(lines, "\n")
+							m.logContent = content
+							m.logLoading = false
+							m.logStale = false
+							m.logViewport.SetContent(content)
+							prog := progress.FindLastProgress(content)
+							if prog != nil {
+								m.jobProgress[m.selectedJob.ID] = prog
+							}
+						}
 					}
-					return m, tea.Batch(cmds...)
+					// Tell the monitor to start polling for this job's log and stats
+					if m.monitor != nil {
+						m.monitor.WatchJobLog(m.selectedJob)
+						if m.selectedJob.Status == db.StatusRunning {
+							m.monitor.WatchJobStats(m.selectedJob)
+						}
+					} else {
+						// Fallback for non-monitor mode
+						return m, m.fetchSelectedJobLog()
+					}
+					return m, nil
 				}
 			}
 		}
@@ -5449,12 +5442,15 @@ func (m *Model) switchToLogsTab() (Model, tea.Cmd) {
 			m.logContent = ""
 			m.logStale = false
 		}
-		var cmds []tea.Cmd
-		cmds = append(cmds, m.fetchSelectedJobLog())
-		if m.selectedJob.Status == db.StatusRunning {
-			cmds = append(cmds, m.fetchProcessStats(m.selectedJob))
+		if m.monitor != nil {
+			m.monitor.WatchJobLog(m.selectedJob)
+			if m.selectedJob.Status == db.StatusRunning {
+				m.monitor.WatchJobStats(m.selectedJob)
+			}
+		} else {
+			return *m, m.fetchSelectedJobLog()
 		}
-		return *m, tea.Batch(cmds...)
+		return *m, nil
 	}
 	return *m, nil
 }
@@ -5795,6 +5791,14 @@ func (m Model) handleMonitorEvent(msg monitorEventMsg) (Model, tea.Cmd) {
 			queueRunnerErrors: event.SyncResult.QueueRunnerErrors,
 			err:               event.Err,
 		})
+	case monitor.EventJobLogFetched:
+		if event.JobLog != nil {
+			m, cmd = m.handleMonitorJobLog(event.JobLog)
+		}
+	case monitor.EventProcessStatsFetched:
+		if event.ProcessStats != nil {
+			m, cmd = m.handleMonitorProcessStats(event.ProcessStats)
+		}
 	case monitor.EventError:
 		if event.Err != nil {
 			cmd = m.setFlash(fmt.Sprintf("Monitor error: %v", event.Err), true)
@@ -5809,6 +5813,97 @@ func (m Model) handleMonitorEvent(msg monitorEventMsg) (Model, tea.Cmd) {
 	}
 	return m, tea.Batch(cmd, waitCmd)
 }
+
+func (m Model) handleMonitorJobLog(result *monitor.JobLogResult) (Model, tea.Cmd) {
+	m.logLoading = false
+
+	// Extract progress info
+	if result.Err == nil {
+		prog := progress.FindLastProgress(result.Content)
+		if prog != nil {
+			m.jobProgress[result.JobID] = prog
+		}
+	}
+
+	if m.selectedJob == nil || result.JobID != m.selectedJob.ID {
+		return m, nil
+	}
+
+	if result.Err != nil {
+		if result.ConnError {
+			// Try local cache on connection error
+			if cached, err := logcache.Read(result.JobID); err == nil {
+				m.logContent = cached
+				m.logStale = true
+				m.logCache[result.JobID] = cached
+			} else if cached, ok := m.logCache[result.JobID]; ok {
+				m.logContent = cached
+				m.logStale = true
+			} else {
+				m.logContent = fmt.Sprintf("Host %s unreachable", m.selectedJob.Host)
+				m.logStale = false
+			}
+		} else {
+			combined := result.Content + result.Stderr
+			if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
+				msg := "No log file yet"
+				if m.selectedJob.Status == db.StatusCompleted || m.selectedJob.Status == db.StatusFailed || m.selectedJob.Status == db.StatusDead || m.selectedJob.Status == db.StatusKilled || m.selectedJob.Status == db.StatusCanceled {
+					msg = "Log file not found (may have been cleaned up)"
+				}
+				m.logContent = msg
+			} else {
+				m.logContent = fmt.Sprintf("Error: %s", strings.TrimSpace(combined))
+			}
+			m.logStale = false
+		}
+	} else {
+		combined := result.Content
+		if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
+			msg := "No log file yet"
+			if m.selectedJob.Status == db.StatusCompleted || m.selectedJob.Status == db.StatusFailed || m.selectedJob.Status == db.StatusDead || m.selectedJob.Status == db.StatusKilled || m.selectedJob.Status == db.StatusCanceled {
+				msg = "Log file not found (may have been cleaned up)"
+			}
+			m.logContent = msg
+			m.logStale = false
+		} else {
+			m.logCache[result.JobID] = result.Content
+			m.logContent = result.Content
+			m.logStale = false
+		}
+	}
+
+	m.logViewport.SetContent(m.logContent)
+	m.logViewport.GotoBottom()
+	return m, nil
+}
+
+func (m Model) handleMonitorProcessStats(result *monitor.ProcessStatsResult) (Model, tea.Cmd) {
+	targetJob := m.getTargetJob()
+	if targetJob == nil || result.JobID != targetJob.ID || result.Stats == nil {
+		return m, nil
+	}
+
+	stats := result.Stats
+	if stats.Running || m.processStats == nil || m.processStatsJobID != result.JobID {
+		if m.prevProcessStats != nil && m.processStatsJobID == result.JobID &&
+			stats.Timestamp > m.prevProcessStats.Timestamp && stats.Running {
+			deltaTicks := (stats.CPUUserTicks + stats.CPUSysTicks) -
+				(m.prevProcessStats.CPUUserTicks + m.prevProcessStats.CPUSysTicks)
+			deltaTime := stats.Timestamp - m.prevProcessStats.Timestamp
+			if deltaTime > 0 {
+				stats.CPUPct = float64(deltaTicks) / float64(deltaTime)
+			}
+		}
+		if stats.Running {
+			m.prevProcessStats = m.processStats
+		}
+		m.processStats = stats
+		m.processStatsJobID = result.JobID
+	}
+
+	return m, nil
+}
+
 func (m Model) loadHosts() tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
@@ -5894,6 +5989,10 @@ func (m *Model) clearJobSelection() {
 	m.processStatsJobID = 0
 	m.detailViewport.SetContent("")
 	m.detailViewport.GotoTop()
+	if m.monitor != nil {
+		m.monitor.WatchJobLog(nil)
+		m.monitor.WatchJobStats(nil)
+	}
 }
 
 func (m *Model) jumpJobListToTop() tea.Cmd {
@@ -5974,11 +6073,18 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 			m.logContent = ""
 			m.logStale = false
 		}
-		cmds = append(cmds, m.fetchSelectedJobLog())
-		if job.Status == db.StatusRunning {
-			cmds = append(cmds, m.fetchProcessStats(job))
+		if m.monitor != nil {
+			m.monitor.WatchJobLog(job)
+			if job.Status == db.StatusRunning {
+				m.monitor.WatchJobStats(job)
+			}
+		} else {
+			cmds = append(cmds, m.fetchSelectedJobLog())
 		}
-		return tea.Batch(cmds...)
+		if len(cmds) > 0 {
+			return tea.Batch(cmds...)
+		}
+		return nil
 	}
 
 	// Fetch CPU summary if that tab is active
@@ -5988,16 +6094,21 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 		}
 	}
 
-	if _, ok := m.logCache[job.ID]; !ok || job.Status == db.StatusRunning {
-		if cmd := m.fetchJobLog(job); cmd != nil {
-			cmds = append(cmds, cmd)
+	// Pre-fetch log for non-Logs tab (background cache warming)
+	if m.monitor == nil {
+		if _, ok := m.logCache[job.ID]; !ok || job.Status == db.StatusRunning {
+			if cmd := m.fetchJobLog(job); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 
-	// Even if not in Logs tab, fetch stats for running jobs
-	if job.Status == db.StatusRunning {
-		if cmd := m.fetchProcessStats(job); cmd != nil {
-			cmds = append(cmds, cmd)
+	// Update watched stats job for running jobs
+	if m.monitor != nil {
+		if job.Status == db.StatusRunning {
+			m.monitor.WatchJobStats(job)
+		} else {
+			m.monitor.WatchJobStats(nil)
 		}
 	}
 
@@ -6228,10 +6339,10 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 
 		// Fetch the log content
 		// Don't quote path - it contains ~ which needs shell expansion
-		stdout, stderr, err := remote.RunWithContext(ctx, job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
+		stdout, stderr, err := remote.TryRunWithContext(ctx, job.Host, fmt.Sprintf("tail -500 %s 2>&1", logFile))
 		if err != nil {
-			// Context cancelled - exit silently
-			if err == context.Canceled {
+			// Pool busy or context cancelled - exit silently
+			if errors.Is(err, remote.ErrPoolBusy) || err == context.Canceled {
 				return nil
 			}
 			// Check if it's a connection error
@@ -6296,21 +6407,6 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 		return nil
 	}
 	return m.fetchJobLog(m.selectedJob)
-}
-
-func (m Model) fetchProcessStats(job *db.Job) tea.Cmd {
-	if job == nil || job.Status != db.StatusRunning {
-		return nil
-	}
-
-	return func() tea.Msg {
-		pidFile := session.JobPidFile(job.ID, job.StartTime)
-		stats, _ := remote.GetProcessStats(job.Host, pidFile)
-		return processStatsMsg{
-			jobID: job.ID,
-			stats: stats,
-		}
-	}
 }
 
 func (m Model) fetchTopProcesses(host string, jobView bool) tea.Cmd {

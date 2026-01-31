@@ -16,6 +16,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// ErrPoolBusy is returned by TryExecute when all pool slots for a host are occupied.
+var ErrPoolBusy = errors.New("all pool slots busy")
+
 var (
 	defaultPoolSize = 4
 	defaultPool     *SessionPool
@@ -127,7 +130,32 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 	}
 	defer func() { <-hp.sem }()
 
-	// Get or create a session
+	return p.executeWithSemaphore(hp, command, timeout)
+}
+
+// TryExecute runs a command like Execute but returns ErrPoolBusy immediately
+// if all semaphore slots for the host are occupied. Use this for periodic/best-effort
+// callers that should skip rather than queue up.
+func (p *SessionPool) TryExecute(host, command string, timeout time.Duration) (string, string, error) {
+	if p.closed {
+		return "", "", fmt.Errorf("pool is closed")
+	}
+
+	hp := p.getHostPool(host)
+
+	// Non-blocking semaphore acquire
+	select {
+	case hp.sem <- struct{}{}:
+	default:
+		return "", "", ErrPoolBusy
+	}
+	defer func() { <-hp.sem }()
+
+	return p.executeWithSemaphore(hp, command, timeout)
+}
+
+// executeWithSemaphore runs a command after the semaphore has been acquired.
+func (p *SessionPool) executeWithSemaphore(hp *hostPool, command string, timeout time.Duration) (string, string, error) {
 	sess, err := hp.acquire()
 	if err != nil {
 		return "", "", err
@@ -135,13 +163,11 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 
 	stdout, stderr, err := sess.execute(command, timeout)
 	if err != nil {
-		// Command errors (non-zero exit) are normal; session is still healthy
 		var cmdErr *commandError
 		if errors.As(err, &cmdErr) {
 			hp.release(sess)
 			return stdout, stderr, err
 		}
-		// Session-level error: discard the session
 		sess.close()
 		hp.discard(sess)
 		return stdout, stderr, err

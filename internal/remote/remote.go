@@ -24,6 +24,17 @@ func RunWithTimeout(host, command string, timeout time.Duration) (string, string
 	return ssh.RunWithTimeout(host, command, timeout)
 }
 
+func TryRunWithTimeout(host, command string, timeout time.Duration) (string, string, error) {
+	return ssh.TryRunWithTimeout(host, command, timeout)
+}
+
+func TryRunWithContext(ctx context.Context, host, command string) (string, string, error) {
+	return ssh.TryRunWithContext(ctx, host, command)
+}
+
+// ErrPoolBusy is returned when all pool slots for a host are occupied.
+var ErrPoolBusy = ssh.ErrPoolBusy
+
 func ReadFile(host, path string) (string, error) {
 	return ssh.ReadRemoteFile(host, path)
 }
@@ -46,6 +57,10 @@ func TmuxKillSession(host, session string) error {
 
 func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 	return ssh.GetProcessStats(host, pidFile)
+}
+
+func TryGetProcessStats(host, pidFile string) (*ProcessStats, error) {
+	return ssh.TryGetProcessStats(host, pidFile)
 }
 
 func GetTopProcesses(host string, limit int) ([]TopProcess, error) {

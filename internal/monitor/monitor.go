@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -12,10 +13,12 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/hostinfo"
+	"github.com/osteele/remote-jobs/internal/logfiles"
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/remote"
+	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/slack"
 )
 
@@ -25,6 +28,7 @@ const (
 	DefaultSyncIdleInterval    = 60 * time.Second
 	DefaultHostRefreshInterval = 30 * time.Second
 	DefaultHostCacheDuration   = 24 * time.Hour
+	DefaultJobDetailInterval   = 3 * time.Second
 	dbChangeDebounceInterval   = 200 * time.Millisecond
 )
 
@@ -34,6 +38,7 @@ type Config struct {
 	SyncIdleInterval    time.Duration
 	HostRefreshInterval time.Duration
 	HostCacheDuration   time.Duration
+	JobDetailInterval   time.Duration
 }
 
 // DefaultConfig returns the default monitor configuration.
@@ -43,6 +48,7 @@ func DefaultConfig() Config {
 		SyncIdleInterval:    DefaultSyncIdleInterval,
 		HostRefreshInterval: DefaultHostRefreshInterval,
 		HostCacheDuration:   DefaultHostCacheDuration,
+		JobDetailInterval:   DefaultJobDetailInterval,
 	}
 }
 
@@ -55,8 +61,26 @@ const (
 	EventHostInfoUpdated
 	EventHostSyncTimesLoaded
 	EventSyncCompleted
+	EventJobLogFetched
+	EventProcessStatsFetched
 	EventError
 )
+
+// JobLogResult holds the result of a periodic log fetch.
+type JobLogResult struct {
+	JobID     int64
+	Content   string
+	Stderr    string
+	Err       error
+	ConnError bool
+}
+
+// ProcessStatsResult holds the result of a periodic process stats fetch.
+type ProcessStatsResult struct {
+	JobID int64
+	Stats *remote.ProcessStats
+	Err   error
+}
 
 // Event carries monitor updates.
 type Event struct {
@@ -69,6 +93,9 @@ type Event struct {
 	Host            *hostinfo.Host
 	HostSyncTimes   map[string]time.Time
 	SyncResult      SyncResult
+
+	JobLog       *JobLogResult
+	ProcessStats *ProcessStatsResult
 }
 
 // SyncResult captures the outcome of a background sync.
@@ -97,6 +124,8 @@ type Monitor struct {
 	hostSyncTimes           map[string]time.Time
 	lastHostSyncTimes       map[string]time.Time
 	hostsQueriedThisRun     map[string]bool
+	watchedLogJob           *db.Job
+	watchedStatsJob         *db.Job
 	syncForceAll            bool
 	syncPendingAfterCurrent bool
 	syncing                 bool
@@ -159,6 +188,9 @@ func (m *Monitor) Start() {
 
 	m.wg.Add(1)
 	go m.runHostRefreshTicker()
+
+	m.wg.Add(1)
+	go m.runJobDetailTicker()
 }
 
 // Stop stops background tasks.
@@ -261,6 +293,38 @@ func (m *Monitor) RefreshHostInfo(hostName string) {
 	go m.refreshHostInfo(hostName)
 }
 
+// WatchJobLog sets the job whose log should be periodically fetched.
+// Pass nil to stop watching. An immediate fetch is triggered.
+func (m *Monitor) WatchJobLog(job *db.Job) {
+	m.mu.Lock()
+	if job != nil {
+		jobCopy := *job
+		m.watchedLogJob = &jobCopy
+	} else {
+		m.watchedLogJob = nil
+	}
+	m.mu.Unlock()
+	if job != nil {
+		go m.fetchWatchedJobLog()
+	}
+}
+
+// WatchJobStats sets the job whose process stats should be periodically fetched.
+// Pass nil to stop watching. An immediate fetch is triggered.
+func (m *Monitor) WatchJobStats(job *db.Job) {
+	m.mu.Lock()
+	if job != nil {
+		jobCopy := *job
+		m.watchedStatsJob = &jobCopy
+	} else {
+		m.watchedStatsJob = nil
+	}
+	m.mu.Unlock()
+	if job != nil {
+		go m.fetchWatchedProcessStats()
+	}
+}
+
 // RequestSync requests a background sync.
 func (m *Monitor) RequestSync(forceAll bool) {
 	go m.requestSync(forceAll)
@@ -292,6 +356,80 @@ func (m *Monitor) runHostRefreshTicker() {
 			return
 		}
 	}
+}
+
+func (m *Monitor) runJobDetailTicker() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(m.config.JobDetailInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.fetchWatchedJobLog()
+			m.fetchWatchedProcessStats()
+		case <-m.stop:
+			return
+		}
+	}
+}
+
+func (m *Monitor) fetchWatchedJobLog() {
+	m.mu.RLock()
+	job := m.watchedLogJob
+	m.mu.RUnlock()
+	if job == nil {
+		return
+	}
+
+	logFile, _ := logfiles.Resolve(job)
+	cmd := fmt.Sprintf("tail -500 %s 2>&1", logFile)
+	stdout, stderr, err := remote.TryRunWithTimeout(job.Host, cmd, 15*time.Second)
+
+	connError := false
+	if err != nil {
+		if errors.Is(err, remote.ErrPoolBusy) {
+			return
+		}
+		combined := stdout + stderr
+		if remote.IsConnectionError(combined) {
+			connError = true
+		}
+	}
+
+	m.emit(Event{
+		Type: EventJobLogFetched,
+		JobLog: &JobLogResult{
+			JobID:     job.ID,
+			Content:   stdout,
+			Stderr:    stderr,
+			Err:       err,
+			ConnError: connError,
+		},
+	})
+}
+
+func (m *Monitor) fetchWatchedProcessStats() {
+	m.mu.RLock()
+	job := m.watchedStatsJob
+	m.mu.RUnlock()
+	if job == nil || job.Status != db.StatusRunning {
+		return
+	}
+
+	pidFile := session.JobPidFile(job.ID, job.StartTime)
+	stats, err := remote.TryGetProcessStats(job.Host, pidFile)
+	if err != nil && errors.Is(err, remote.ErrPoolBusy) {
+		return
+	}
+
+	m.emit(Event{
+		Type: EventProcessStatsFetched,
+		ProcessStats: &ProcessStatsResult{
+			JobID: job.ID,
+			Stats: stats,
+			Err:   err,
+		},
+	})
 }
 
 func (m *Monitor) runDBWatcher() {
@@ -487,7 +625,10 @@ func (m *Monitor) refreshHostSyncTimes() {
 }
 
 func (m *Monitor) refreshHostInfo(hostName string) {
-	cachedInfo, err := ops.FetchAndCacheHostInfo(m.db, hostName, 10*time.Second)
+	cachedInfo, err := ops.TryFetchAndCacheHostInfo(m.db, hostName, 10*time.Second)
+	if err != nil && errors.Is(err, remote.ErrPoolBusy) {
+		return // Pool busy, skip this refresh cycle
+	}
 	if err != nil {
 		host := &hostinfo.Host{
 			Name:   hostName,

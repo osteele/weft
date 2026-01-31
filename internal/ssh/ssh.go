@@ -95,7 +95,7 @@ const (
 )
 
 // connectionErrorPattern matches SSH connection errors that should trigger retry
-var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|operation timed out|no route to host|host is unreachable|connection refused|connection closed|network is unreachable|could not resolve hostname|name or service not known)`)
+var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|operation timed out|no route to host|host is unreachable|connection refused|connection closed|network is unreachable|could not resolve hostname|name or service not known|is offline)`)
 
 // IsConnectionError checks if the error output indicates a connection failure
 func IsConnectionError(output string) bool {
@@ -181,6 +181,46 @@ func RunWithContext(ctx context.Context, host string, command string) (string, s
 		return r.stdout, r.stderr, r.err
 	case <-ctx.Done():
 		// The goroutine will finish when its timeout expires (bounded).
+		return "", "", ctx.Err()
+	}
+}
+
+// TryRunWithTimeout is like RunWithTimeout but returns ErrPoolBusy immediately
+// if all pool slots for the host are occupied. Use for periodic/best-effort fetches.
+func TryRunWithTimeout(host string, command string, timeout time.Duration) (string, string, error) {
+	if runnerWithTimeout != nil {
+		return runnerWithTimeout(host, command, timeout)
+	}
+	return getDefaultPool().TryExecute(host, command, timeout)
+}
+
+// TryRunWithContext is like RunWithContext but returns ErrPoolBusy immediately
+// if all pool slots for the host are occupied.
+func TryRunWithContext(ctx context.Context, host string, command string) (string, string, error) {
+	timeout := 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			return "", "", context.DeadlineExceeded
+		}
+	}
+
+	type result struct {
+		stdout, stderr string
+		err            error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		stdout, stderr, err := getDefaultPool().TryExecute(host, command, timeout)
+		ch <- result{stdout, stderr, err}
+	}()
+	select {
+	case r := <-ch:
+		if ctx.Err() != nil {
+			return r.stdout, r.stderr, ctx.Err()
+		}
+		return r.stdout, r.stderr, r.err
+	case <-ctx.Done():
 		return "", "", ctx.Err()
 	}
 }
@@ -586,12 +626,9 @@ type TopProcess struct {
 	JobID   int64
 }
 
-// GetProcessStats fetches process statistics from a remote host
-// The pidFile should contain the PID to query
-func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
-	// Build a command that outputs all stats we need in a parseable format
-	// This runs in a single SSH call for efficiency
-	cmd := fmt.Sprintf(`
+// buildProcessStatsCommand returns the shell command to fetch process stats.
+func buildProcessStatsCommand(pidFile string) string {
+	return fmt.Sprintf(`
 		PID=$(cat %s 2>/dev/null)
 		if [ -z "$PID" ]; then
 			echo "PID:NOTFOUND"
@@ -661,12 +698,28 @@ func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
 			fi
 		done
 	`, pidFile)
+}
 
+// GetProcessStats fetches process statistics from a remote host
+// The pidFile should contain the PID to query
+func GetProcessStats(host, pidFile string) (*ProcessStats, error) {
+	cmd := buildProcessStatsCommand(pidFile)
 	stdout, _, err := RunWithTimeout(host, cmd, 15*time.Second)
 	if err != nil {
 		return &ProcessStats{Error: err.Error()}, err
 	}
 
+	return parseProcessStats(stdout), nil
+}
+
+// TryGetProcessStats is like GetProcessStats but returns ErrPoolBusy if
+// all pool slots are occupied. Use for periodic/best-effort fetches.
+func TryGetProcessStats(host, pidFile string) (*ProcessStats, error) {
+	cmd := buildProcessStatsCommand(pidFile)
+	stdout, _, err := TryRunWithTimeout(host, cmd, 15*time.Second)
+	if err != nil {
+		return &ProcessStats{Error: err.Error()}, err
+	}
 	return parseProcessStats(stdout), nil
 }
 
