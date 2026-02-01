@@ -14,19 +14,38 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/osteele/remote-jobs/internal/config"
 )
 
 // ErrPoolBusy is returned by TryExecute when all pool slots for a host are occupied.
 var ErrPoolBusy = errors.New("all pool slots busy")
 
 var (
-	defaultPoolSize    = 4
-	defaultMaxParallel = 8
-	defaultPool        *SessionPool
-	poolOnce           sync.Once
+	defaultPoolSize     = 4
+	defaultMaxParallel  = 8
+	defaultConnTimeout  = 10 // seconds, passed to ssh -o ConnectTimeout
+	defaultReadyTimeout = 15 * time.Second
+	defaultPool         *SessionPool
+	poolOnce            sync.Once
 )
 
 func init() {
+	// Apply config file settings first
+	cfg, _ := config.Load()
+	if cfg != nil {
+		if n := cfg.GetSSHPoolSize(); n > 0 {
+			defaultPoolSize = n
+		}
+		if n := cfg.GetSSHMaxParallel(); n > 0 {
+			defaultMaxParallel = n
+		}
+		if n := cfg.GetSSHConnectTimeout(); n > 0 {
+			defaultConnTimeout = n
+			defaultReadyTimeout = time.Duration(n+5) * time.Second
+		}
+	}
+
+	// Environment variables override config file
 	if s := os.Getenv("REMOTE_JOBS_SSH_POOL_SIZE"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultPoolSize = n
@@ -35,6 +54,12 @@ func init() {
 	if s := os.Getenv("REMOTE_JOBS_SSH_MAX_PARALLEL"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultMaxParallel = n
+		}
+	}
+	if s := os.Getenv("REMOTE_JOBS_SSH_CONNECT_TIMEOUT"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			defaultConnTimeout = n
+			defaultReadyTimeout = time.Duration(n+5) * time.Second
 		}
 	}
 }
@@ -262,7 +287,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 	remoteCmd := fmt.Sprintf("echo '%s'; exec bash -s", sessionReadyMarker)
 	cmd := exec.Command("ssh",
 		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=10",
+		"-o", fmt.Sprintf("ConnectTimeout=%d", defaultConnTimeout),
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
 		hp.host, remoteCmd)
@@ -321,7 +346,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 			}
 			return nil, err
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(defaultReadyTimeout):
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("SSH connection to %s timed out", hp.host)
 	}

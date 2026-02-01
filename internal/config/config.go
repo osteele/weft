@@ -64,6 +64,9 @@ type Config struct {
 	// WebPort is the localhost port for the web UI.
 	WebPort int `yaml:"web_port"`
 
+	// SSH connection settings
+	SSH SSHConfig `yaml:"ssh"`
+
 	// Hosts holds per-host configuration overrides.
 	Hosts map[string]HostConfig `yaml:"hosts"`
 }
@@ -85,6 +88,16 @@ type AIConfig struct {
 	// Model specifies the ollama model to use for description generation
 	// Default: "llama3.2"
 	Model string `yaml:"model"`
+}
+
+// SSHConfig holds SSH connection pool settings.
+type SSHConfig struct {
+	// PoolSize is the number of persistent sessions per host (default: 4).
+	PoolSize int `yaml:"pool_size"`
+	// MaxParallel is the maximum concurrent SSH operations across all hosts (default: 8).
+	MaxParallel int `yaml:"max_parallel"`
+	// ConnectTimeout is the SSH connect timeout in seconds (default: 10).
+	ConnectTimeout int `yaml:"connect_timeout"`
 }
 
 // HostConfig holds per-host configuration.
@@ -149,6 +162,21 @@ func (c *Config) GetOperationLogMaxSize() int64 {
 		return c.OperationLogMaxSize
 	}
 	return 10 * 1024 * 1024 // Default: 10MB
+}
+
+// GetSSHPoolSize returns the configured pool size, or 0 if not set.
+func (c *Config) GetSSHPoolSize() int {
+	return c.SSH.PoolSize
+}
+
+// GetSSHMaxParallel returns the configured max parallel, or 0 if not set.
+func (c *Config) GetSSHMaxParallel() int {
+	return c.SSH.MaxParallel
+}
+
+// GetSSHConnectTimeout returns the configured connect timeout in seconds, or 0 if not set.
+func (c *Config) GetSSHConnectTimeout() int {
+	return c.SSH.ConnectTimeout
 }
 
 // HostBackend returns the configured backend for a host, or empty if not set.

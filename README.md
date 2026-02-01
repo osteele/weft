@@ -1034,6 +1034,28 @@ log_cache_max_age: 7       # Days to keep cached logs (default: 7, 0 to disable)
 
 Cached logs are stored in `~/.cache/remote-jobs/logs/` and automatically pruned during sync.
 
+### SSH Connection
+
+Tune SSH connection pool behavior for slow or unreliable networks:
+
+```yaml
+# ~/.config/remote-jobs/config.yaml
+ssh:
+  pool_size: 4        # Persistent sessions per host (default: 4)
+  max_parallel: 8     # Max concurrent SSH operations across all hosts (default: 8)
+  connect_timeout: 30 # SSH connect timeout in seconds (default: 10)
+```
+
+Environment variables override the config file:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `REMOTE_JOBS_SSH_POOL_SIZE` | Persistent sessions per host | 4 |
+| `REMOTE_JOBS_SSH_MAX_PARALLEL` | Max concurrent SSH operations | 8 |
+| `REMOTE_JOBS_SSH_CONNECT_TIMEOUT` | SSH connect timeout (seconds) | 10 |
+
+Increasing `connect_timeout` also extends the session ready timeout (connect timeout + 5s).
+
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/remote-jobs/jobs.db`. The database records:
