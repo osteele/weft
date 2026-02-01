@@ -63,6 +63,7 @@ type SyncResult struct {
 	QueueStarted     bool
 	QueueRunnerError string
 	HostInfo         *db.CachedHostInfo      // Refreshed host info (nil on error)
+	HostFull         *Host                   // Full host with dynamic metrics (nil on error)
 	QueueStatus      *queuerunner.StatusInfo // Queue runner status (nil on error)
 	Error            error
 }
@@ -242,6 +243,7 @@ func (w *SyncWorker) doSync(host string) {
 	// Fetch host info and queue status in a single SSH call (best-effort)
 	if hostStatus, err := ops.FetchHostStatusCombined(w.database, host, queuerunner.StatusCommand(), 10*time.Second); err == nil {
 		result.HostInfo = hostStatus.HostInfo
+		result.HostFull = hostStatus.Host
 		if hostStatus.ExtraOutput != "" {
 			result.QueueStatus = queuerunner.ParseStatus(hostStatus.ExtraOutput)
 		}
@@ -363,16 +365,20 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 
-	// Apply host info from sync result
-	if result.HostInfo != nil {
-		host := hostFromCachedInfo(result.HostInfo)
+	// Apply host info from sync result (prefer HostFull for dynamic metrics)
+	if result.HostFull != nil || result.HostInfo != nil {
+		var host *Host
+		if result.HostFull != nil {
+			host = result.HostFull
+			host.Status = HostStatusOnline
+		} else {
+			host = hostFromCachedInfo(result.HostInfo)
+		}
 		m.hostsQueriedThisSession[result.Host] = true
 		found := false
 		for i, h := range m.hosts {
 			if h.Name == result.Host {
-				// Preserve RunningJobs from existing host
-				host.RunningJobs = h.RunningJobs
-				m.hosts[i] = host
+				m.hosts[i].UpdateFrom(host)
 				found = true
 				break
 			}

@@ -371,6 +371,87 @@ func parseGPULine(line string) *GPUInfo {
 	return gpu
 }
 
+// UpdateFrom merges non-zero fields from source into h.
+// Zero-valued fields in source are skipped, preserving existing data in h.
+// The Name field is never overwritten (identity field).
+// Status is always overwritten from source.
+func (h *Host) UpdateFrom(source *Host) {
+	if h == nil || source == nil {
+		return
+	}
+	// Status: always overwrite
+	h.Status = source.Status
+
+	if source.Arch != "" {
+		h.Arch = source.Arch
+	}
+	if source.OS != "" {
+		h.OS = source.OS
+	}
+	if source.Model != "" {
+		h.Model = source.Model
+	}
+	if source.CPUs != 0 {
+		h.CPUs = source.CPUs
+	}
+	if source.CPUModel != "" {
+		h.CPUModel = source.CPUModel
+	}
+	if source.CPUFreq != "" {
+		h.CPUFreq = source.CPUFreq
+	}
+	if source.MemTotal != "" {
+		h.MemTotal = source.MemTotal
+	}
+	if source.MemUsed != "" {
+		h.MemUsed = source.MemUsed
+	}
+	if source.LoadAvg != "" {
+		h.LoadAvg = source.LoadAvg
+	}
+	if source.DiskFree != 0 {
+		h.DiskFree = source.DiskFree
+	}
+	if source.DiskTotal != 0 {
+		h.DiskTotal = source.DiskTotal
+	}
+	if source.GPUs != nil {
+		h.GPUs = source.GPUs
+	}
+	if !source.LastCheck.IsZero() {
+		h.LastCheck = source.LastCheck
+	}
+	if source.Error != "" {
+		h.Error = source.Error
+	} else if source.Status == HostStatusOnline {
+		h.Error = ""
+	}
+
+	// Queue fields
+	if source.QueueStatus != QueueCheckUnknown {
+		h.QueueStatus = source.QueueStatus
+	}
+	if source.QueueRunnerActive {
+		h.QueueRunnerActive = source.QueueRunnerActive
+	}
+	if source.QueuedJobCount != 0 {
+		h.QueuedJobCount = source.QueuedJobCount
+	}
+	if source.CurrentQueueJob != "" {
+		h.CurrentQueueJob = source.CurrentQueueJob
+	}
+	if source.QueueStopPending {
+		h.QueueStopPending = source.QueueStopPending
+	}
+	if source.JqMissing {
+		h.JqMissing = source.JqMissing
+	}
+
+	if source.RunningJobs != nil {
+		h.RunningJobs = source.RunningJobs
+	}
+}
+
 // StatusString returns a human-readable status string
 func (h *Host) StatusString() string {
 	switch h.Status {

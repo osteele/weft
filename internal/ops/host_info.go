@@ -13,14 +13,16 @@ import (
 // TryFetchAndCacheHostInfo is like FetchAndCacheHostInfo but returns
 // ssh.ErrPoolBusy immediately if all pool slots are occupied.
 // Use for periodic/best-effort host info refreshes.
-func TryFetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Duration) (*db.CachedHostInfo, error) {
+// Returns both the cached info (static fields persisted to DB) and the full
+// Host struct (includes dynamic metrics like LoadAvg, MemUsed).
+func TryFetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Duration) (*db.CachedHostInfo, *hostinfo.Host, error) {
 	stdout, stderr, err := remote.TryRunWithTimeout(hostName, hostinfo.HostInfoCommand, timeout)
 	if err != nil {
 		errMsg := strings.TrimSpace(stderr)
 		if errMsg == "" {
 			errMsg = err.Error()
 		}
-		return nil, &HostInfoError{Host: hostName, Message: errMsg, Err: err}
+		return nil, nil, &HostInfoError{Host: hostName, Message: errMsg, Err: err}
 	}
 
 	host := hostinfo.ParseHostInfo(stdout)
@@ -29,7 +31,7 @@ func TryFetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Du
 	cachedInfo := hostinfo.CachedInfoFromHost(host)
 	db.SaveCachedHostInfo(database, cachedInfo)
 
-	return cachedInfo, nil
+	return cachedInfo, host, nil
 }
 
 // FetchAndCacheHostInfo runs the host info command via SSH, parses the output,
@@ -56,8 +58,9 @@ func FetchAndCacheHostInfo(database *sql.DB, hostName string, timeout time.Durat
 // HostStatusResult holds both host info and queue status from a single SSH call.
 type HostStatusResult struct {
 	HostInfo    *db.CachedHostInfo
-	HostOutput  string // raw host info output
-	ExtraOutput string // raw extra command output (after separator)
+	Host        *hostinfo.Host // full host with dynamic metrics (LoadAvg, MemUsed, etc.)
+	HostOutput  string         // raw host info output
+	ExtraOutput string         // raw extra command output (after separator)
 }
 
 // separator between host info and extra command output
@@ -91,6 +94,7 @@ func FetchHostStatusCombined(database *sql.DB, hostName string, extraCommand str
 	cachedInfo := hostinfo.CachedInfoFromHost(host)
 	db.SaveCachedHostInfo(database, cachedInfo)
 	result.HostInfo = cachedInfo
+	result.Host = host
 	result.HostOutput = parts[0]
 
 	if len(parts) == 2 {

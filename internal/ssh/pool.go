@@ -121,7 +121,7 @@ func (p *SessionPool) getHostPool(host string) *hostPool {
 // Execute runs a command on a remote host using a pooled session.
 func (p *SessionPool) Execute(host, command string, timeout time.Duration) (string, string, error) {
 	if p.closed {
-		return "", "", fmt.Errorf("pool is closed")
+		return "", "", fmt.Errorf("SSH connection unavailable")
 	}
 
 	// Acquire global semaphore first
@@ -129,7 +129,7 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 		select {
 		case p.globalSem <- struct{}{}:
 		case <-time.After(timeout):
-			return "", "", fmt.Errorf("ssh pool: timeout waiting for global slot")
+			return "", "", fmt.Errorf("SSH connections busy, try again")
 		}
 	} else {
 		p.globalSem <- struct{}{}
@@ -143,7 +143,7 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 		select {
 		case hp.sem <- struct{}{}:
 		case <-time.After(timeout):
-			return "", "", fmt.Errorf("ssh pool: timeout waiting for session to %s", host)
+			return "", "", fmt.Errorf("SSH connection to %s busy, try again", host)
 		}
 	} else {
 		hp.sem <- struct{}{}
@@ -158,7 +158,7 @@ func (p *SessionPool) Execute(host, command string, timeout time.Duration) (stri
 // callers that should skip rather than queue up.
 func (p *SessionPool) TryExecute(host, command string, timeout time.Duration) (string, string, error) {
 	if p.closed {
-		return "", "", fmt.Errorf("pool is closed")
+		return "", "", fmt.Errorf("SSH connection unavailable")
 	}
 
 	// Non-blocking global semaphore acquire
@@ -269,19 +269,19 @@ func (hp *hostPool) newSession() (*Session, error) {
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, fmt.Errorf("ssh pool: stdin pipe: %w", err)
+		return nil, fmt.Errorf("SSH to %s: %w", hp.host, err)
 	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("ssh pool: stdout pipe: %w", err)
+		return nil, fmt.Errorf("SSH to %s: %w", hp.host, err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("ssh pool: stderr pipe: %w", err)
+		return nil, fmt.Errorf("SSH to %s: %w", hp.host, err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("ssh pool: start: %w", err)
+		return nil, fmt.Errorf("SSH to %s failed: %w", hp.host, err)
 	}
 
 	stdoutReader := bufio.NewReader(stdoutPipe)
@@ -296,7 +296,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 		for {
 			line, readErr := stdoutReader.ReadString('\n')
 			if readErr != nil {
-				readyCh <- fmt.Errorf("ssh pool: read ready marker: %w", readErr)
+				readyCh <- fmt.Errorf("SSH connection to %s failed: %w", hp.host, readErr)
 				return
 			}
 			if strings.TrimSpace(line) == sessionReadyMarker {
@@ -323,7 +323,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 		}
 	case <-time.After(15 * time.Second):
 		cmd.Process.Kill()
-		return nil, fmt.Errorf("ssh pool: session to %s timed out waiting for ready", hp.host)
+		return nil, fmt.Errorf("SSH connection to %s timed out", hp.host)
 	}
 
 	sess := &Session{
@@ -519,7 +519,7 @@ func (s *Session) execute(command string, timeout time.Duration) (string, string
 			_ = s.cmd.Process.Kill()
 		}
 		s.close()
-		return "", "", fmt.Errorf("ssh command timed out after %v", timeout)
+		return "", "", fmt.Errorf("command on %s timed out after %v", s.host, timeout)
 	}
 }
 

@@ -137,6 +137,8 @@ type Monitor struct {
 	dbSyncDebounce    *time.Timer
 	started           bool
 	stopped           bool
+
+	hostRefreshing sync.Map // host name → struct{}, guards concurrent refreshHostInfo
 }
 
 // New returns a monitor for the given database.
@@ -288,14 +290,9 @@ func (m *Monitor) RefreshHostSyncTimes() {
 	go m.refreshHostSyncTimes()
 }
 
-// RefreshHostInfo reloads host info from the DB cache.
+// RefreshHostInfo triggers a host info refresh via SSH.
 func (m *Monitor) RefreshHostInfo(hostName string) {
-	cachedInfo, err := db.LoadCachedHostInfo(m.db, hostName)
-	if err != nil || cachedInfo == nil {
-		return
-	}
-	host := hostinfo.HostFromCachedInfo(cachedInfo)
-	m.updateHostInfo(host)
+	go m.refreshHostInfo(hostName)
 }
 
 // WatchJobLog sets the job whose log should be periodically fetched.
@@ -606,6 +603,8 @@ func (m *Monitor) refreshHosts() {
 				Status: hostinfo.HostStatusChecking,
 			}
 		}
+		// Trigger SSH refresh (capped by global semaphore in pool)
+		go m.refreshHostInfo(name)
 		m.hosts = append(m.hosts, host)
 	}
 	m.mu.Unlock()
@@ -625,6 +624,34 @@ func (m *Monitor) refreshHostSyncTimes() {
 	m.emit(Event{Type: EventHostSyncTimesLoaded, HostSyncTimes: times})
 }
 
+func (m *Monitor) refreshHostInfo(hostName string) {
+	if _, loaded := m.hostRefreshing.LoadOrStore(hostName, struct{}{}); loaded {
+		return // already refreshing this host
+	}
+	defer m.hostRefreshing.Delete(hostName)
+
+	_, host, err := ops.TryFetchAndCacheHostInfo(m.db, hostName, 10*time.Second)
+	if err != nil && errors.Is(err, remote.ErrPoolBusy) {
+		return // Pool busy, skip this refresh cycle
+	}
+	if err != nil {
+		offlineHost := &hostinfo.Host{
+			Name:   hostName,
+			Status: hostinfo.HostStatusOffline,
+			Error:  err.Error(),
+		}
+		if cached, loadErr := db.LoadCachedHostInfo(m.db, hostName); loadErr == nil && cached != nil {
+			cachedHost := hostinfo.HostFromCachedInfo(cached)
+			hostinfo.UpdateHostWithCachedStatic(offlineHost, cachedHost)
+		}
+		m.updateHostInfo(offlineHost)
+		return
+	}
+
+	host.Status = hostinfo.HostStatusOnline
+	m.updateHostInfo(host)
+}
+
 func (m *Monitor) updateHostInfo(host *hostinfo.Host) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -632,7 +659,7 @@ func (m *Monitor) updateHostInfo(host *hostinfo.Host) {
 	found := false
 	for i, h := range m.hosts {
 		if h != nil && h.Name == host.Name {
-			m.hosts[i] = host
+			m.hosts[i].UpdateFrom(host)
 			found = true
 			break
 		}
@@ -645,24 +672,42 @@ func (m *Monitor) updateHostInfo(host *hostinfo.Host) {
 }
 
 func (m *Monitor) refreshHostsForStatus() {
-	// Reload host info from DB cache (populated by SyncWorker).
-	// The Monitor no longer initiates SSH connections for host info;
-	// SyncWorker is the sole SSH path.
 	m.mu.RLock()
 	hosts := append([]*hostinfo.Host(nil), m.hosts...)
+	queried := make(map[string]bool, len(m.hostsQueriedThisRun))
+	for key, value := range m.hostsQueriedThisRun {
+		queried[key] = value
+	}
 	m.mu.RUnlock()
+
+	hostsWithRunningJobs := m.runningHosts()
 
 	for _, host := range hosts {
 		if host == nil {
 			continue
 		}
-		cachedInfo, err := db.LoadCachedHostInfo(m.db, host.Name)
-		if err != nil || cachedInfo == nil {
+		needsRefresh := (!queried[host.Name] || host.Status == hostinfo.HostStatusOnline)
+		hasRunningJobs := hostsWithRunningJobs[host.Name]
+		isOnline := host.Status == hostinfo.HostStatusOnline
+		if needsRefresh || hasRunningJobs || isOnline {
+			go m.refreshHostInfo(host.Name)
+		}
+	}
+}
+
+func (m *Monitor) runningHosts() map[string]bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	hosts := make(map[string]bool)
+	for _, job := range m.jobs {
+		if job == nil {
 			continue
 		}
-		updated := hostinfo.HostFromCachedInfo(cachedInfo)
-		m.updateHostInfo(updated)
+		if job.Status == db.StatusRunning || job.Status == db.StatusStarting {
+			hosts[job.Host] = true
+		}
 	}
+	return hosts
 }
 
 func (m *Monitor) requestSync(forceAll bool) {

@@ -236,9 +236,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 			return fmt.Errorf("permission denied reading log for job %d on %s", jobID, job.Host)
 		}
 		if stderr != "" {
-			return fmt.Errorf("read log for job %d: %w", jobID, err)
+			return fmt.Errorf("could not read log for job %d on %s: %s", jobID, job.Host, stderr)
 		}
-		return fmt.Errorf("read log for job %d: %w", jobID, err)
+		return fmt.Errorf("could not read log for job %d on %s: %w", jobID, job.Host, err)
 	}
 
 	// Process carriage returns - progress bars use \r to overwrite lines

@@ -5666,17 +5666,6 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	for i, h := range m.hosts {
 		if h.Name == msg.hostName {
-			msg.info.Name = msg.hostName
-			msg.info.QueueStatus = h.QueueStatus
-			msg.info.QueueRunnerActive = h.QueueRunnerActive
-			msg.info.QueuedJobCount = h.QueuedJobCount
-			msg.info.CurrentQueueJob = h.CurrentQueueJob
-			msg.info.QueueStopPending = h.QueueStopPending
-			msg.info.JqMissing = h.JqMissing
-			msg.info.RunningJobs = h.RunningJobs
-			if msg.info.LastCheck.IsZero() && !h.LastCheck.IsZero() {
-				msg.info.LastCheck = h.LastCheck
-			}
 			// Hysteresis: require 3 consecutive failures before marking offline.
 			// This prevents a single SSH timeout from wiping host metrics.
 			if msg.info.Status == HostStatusOffline && h.Status == HostStatusOnline {
@@ -5688,16 +5677,7 @@ func (m Model) handleHostInfo(msg hostInfoMsg) (Model, tea.Cmd) {
 			} else if msg.info.Status == HostStatusOnline {
 				m.hostFailCount[msg.hostName] = 0
 			}
-			// When host goes offline, preserve recent dynamic metrics so the
-			// ticker shows stale values instead of blanking on a single failure.
-			// The renderer's staleThreshold (5 min) handles eventual removal.
-			if msg.info.Status == HostStatusOffline {
-				msg.info.LoadAvg = h.LoadAvg
-				msg.info.MemUsed = h.MemUsed
-				msg.info.DiskFree = h.DiskFree
-				msg.info.DiskTotal = h.DiskTotal
-			}
-			m.hosts[i] = msg.info
+			m.hosts[i].UpdateFrom(msg.info)
 
 			// Warn if host has low disk space (only on first detection this session)
 			if msg.info.HasLowDiskSpace() && !m.lowDiskWarnedHosts[msg.hostName] {
