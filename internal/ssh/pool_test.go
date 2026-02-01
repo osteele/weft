@@ -167,6 +167,19 @@ func TestSessionExecuteTimeout(t *testing.T) {
 	}
 }
 
+func TestKillAndWaitReapsProcess(t *testing.T) {
+	cmd := exec.Command("bash", "-c", "sleep 30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	killAndWait(cmd)
+
+	if cmd.ProcessState == nil {
+		t.Fatal("expected process state after killAndWait")
+	}
+}
+
 func TestSessionExecuteMultilineOutput(t *testing.T) {
 	sess, err := newLocalSession()
 	if err != nil {

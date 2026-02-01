@@ -285,7 +285,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 	// to stdin before the SSH channel is established (SSH drops data
 	// sent to stdin before the remote shell is ready).
 	remoteCmd := fmt.Sprintf("echo '%s'; exec bash -s", sessionReadyMarker)
-	cmd := exec.Command("ssh",
+	cmd := execCommand("ssh",
 		"-o", "BatchMode=yes",
 		"-o", fmt.Sprintf("ConnectTimeout=%d", defaultConnTimeout),
 		"-o", "ServerAliveInterval=15",
@@ -334,7 +334,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 	select {
 	case err := <-readyCh:
 		if err != nil {
-			cmd.Process.Kill()
+			killAndWait(cmd)
 			// Capture stderr for a more informative error message
 			stderrBytes, _ := io.ReadAll(stderrPipe)
 			stderrMsg := strings.TrimSpace(string(stderrBytes))
@@ -347,7 +347,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 			return nil, err
 		}
 	case <-time.After(defaultReadyTimeout):
-		cmd.Process.Kill()
+		killAndWait(cmd)
 		return nil, fmt.Errorf("SSH connection to %s timed out", hp.host)
 	}
 
@@ -365,6 +365,14 @@ func (hp *hostPool) newSession() (*Session, error) {
 	}
 
 	return sess, nil
+}
+
+func killAndWait(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
 }
 
 func (hp *hostPool) closeAll() {
