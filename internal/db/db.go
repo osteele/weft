@@ -2565,6 +2565,7 @@ const (
 	OpQueueJob        = "queue_job"
 	OpStartQueuedJob  = "start_queued_job"
 	OpUpdateQueuedJob = "update_queued_job"
+	OpMoveToFront     = "move_to_front"
 	OpRunJob          = "run_job"     // Create and run a new job
 	OpRestartJob      = "restart_job" // Restart a completed/dead job
 )

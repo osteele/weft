@@ -222,6 +222,26 @@ func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (
 	return result.Updated, err
 }
 
+func syncHostAfterQueueChange(database *sql.DB, host string) error {
+	if host == "" {
+		return nil
+	}
+	_, err := ops.SyncHost(database, host, ops.HostSyncOptions{
+		Timeout:      ops.TimeoutFast.Duration(),
+		SkipSamples:  true,
+		UseBatchSync: true,
+		NoQueueStart: true,
+	}, nil)
+	return err
+}
+
+func reportQueueChangeSyncFailure(host string, err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Auto-sync failed for %s: %v. Changes are saved locally and will be applied automatically when the host is reachable.\n", host, err)
+}
+
 // buildStaleDataNote renders a warning that results are from cached data.
 func buildStaleDataNote(database *sql.DB, hosts []string) string {
 	names := uniqueHosts(hosts)

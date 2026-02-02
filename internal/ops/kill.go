@@ -6,7 +6,6 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 // KillJob sets the pending status to killed and attempts to reconcile immediately.
@@ -68,9 +67,9 @@ func KillJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error)
 }
 
 // CancelQueuedJob cancels a queued job so it won't run when the queue drains to it.
-// Uses the three-way merge model: sets pending_status to canceled, then tries to
-// remove from remote queue. If successful, status is updated; if not, the
-// pending_status remains for later reconciliation during sync.
+// Uses the three-way merge model: sets pending_status to canceled and reconciles
+// via the sync path. If the host is unreachable, the pending status remains for
+// later reconciliation.
 func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	if job == nil {
 		return Result{}, fmt.Errorf("job is nil")
@@ -83,50 +82,56 @@ func CancelQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result
 
 	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceling queued job"))
 
-	// Set pending status to record user intent
-	if err := db.SetPendingStatus(database, job.ID, db.StatusCanceled); err != nil {
-		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("set pending status failed"))
-		return Result{}, fmt.Errorf("set pending status: %w", err)
-	}
-
-	// Try to remove from remote queue file immediately
-	err := removeFromQueueFile(job.Host, job.ID, opts.Timeout)
-
+	outcome, err := requestJobStatus(database, job, db.StatusCanceled, opts)
 	if err != nil {
-
-		// Connection error - leave pending status for later reconciliation
-
-		if ssh.IsConnectionError(err.Error()) {
-
-			oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host,
-
-				oplog.WithDetail("cancel deferred: connection error"))
-
-			return Result{
-
-				Success: true,
-
-				JobID: job.ID,
-
-				Message: fmt.Sprintf("Job %d cancel pending (host unreachable)", job.ID),
-			}, nil
-
-		}
-
 		return Result{}, err
-
 	}
 
-	// Success - update status and clear pending
-	if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusCanceled); err != nil {
-		return Result{}, fmt.Errorf("update status: %w", err)
+	if !outcome.hostAvailable {
+		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host,
+			oplog.WithDetail("cancel deferred: host unreachable"))
+		return Result{
+			Success:  true,
+			Deferred: true,
+			JobID:    job.ID,
+			Message:  fmt.Sprintf("Job %d cancel pending (host unreachable)", job.ID),
+		}, nil
 	}
 
-	oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceled"))
+	if !outcome.resolved {
+		return Result{
+			Success:  true,
+			Deferred: true,
+			JobID:    job.ID,
+			Message:  fmt.Sprintf("Job %d cancel pending (remote state uncertain)", job.ID),
+		}, nil
+	}
 
-	return Result{
-		Success: true,
-		JobID:   job.ID,
-		Message: fmt.Sprintf("Job %d canceled", job.ID),
-	}, nil
+	switch outcome.currentStatus {
+	case db.StatusCanceled:
+		oplog.LogJob(oplog.OpJobCancel, job.ID, job.Host, oplog.WithDetail("canceled"))
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d canceled", job.ID),
+		}, nil
+	case db.StatusCompleted:
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d already completed", job.ID),
+		}, nil
+	case db.StatusFailed, db.StatusDead, db.StatusKilled:
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d already %s", job.ID, outcome.currentStatus),
+		}, nil
+	default:
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d now %s", job.ID, outcome.currentStatus),
+		}, nil
+	}
 }

@@ -538,6 +538,8 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 				return db.StatusKilled, nil
 			case db.StatusDraft:
 				return db.StatusDraft, nil
+			case db.StatusRunning:
+				return db.StatusQueued, nil
 			}
 		}
 		return db.StatusDead, nil

@@ -734,23 +734,22 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, effectiveStatus)
 	}
 
-	moved, err := queuefile.MoveToFront(job.Host, jobID)
+	result, err := ops.RequestQueuePriority(database, job, ops.DefaultOptions())
 	if err != nil {
-		if queuefile.IsConnectionError(err) {
-			return fmt.Errorf("host %s unreachable", job.Host)
-		}
 		return err
 	}
-
-	if moved {
-		// Update queued_at to be earlier than all other queued jobs
-		if err := db.SetQueuedAtBefore(database, jobID, job.Host); err != nil {
-			// Non-fatal: remote operation succeeded, just log locally
-			fmt.Fprintf(os.Stderr, "Warning: failed to update queue order: %v\n", err)
-		}
+	if result.Deferred {
+		fmt.Printf("Job %d saved locally. %s is offline — it will move to the front automatically when the host is reachable.\n", jobID, job.Host)
+		_ = syncHostAfterQueueChange(database, job.Host)
+		return nil
+	}
+	if result.Moved {
 		fmt.Printf("Job %d moved to front of queue on %s\n", jobID, job.Host)
 	} else {
 		fmt.Printf("Job %d is already at the front of queue on %s\n", jobID, job.Host)
+	}
+	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil {
+		reportQueueChangeSyncFailure(job.Host, syncErr)
 	}
 	return nil
 }
@@ -917,6 +916,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Push to remote queue
+	deferredUpdate := false
 	if wasRequeued {
 		// Job was requeued - create new entry on remote
 		entry := ops.QueueEntry{
@@ -929,21 +929,36 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 		if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
-			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", job.Host)
+			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.Host)
+			deferredUpdate = true
 		}
 	} else {
-		// Job was already queued - update existing entry
-		if err := ops.UpdateQueuedJobEntry(job, envVars, depSpec); err != nil {
+		// Job was already queued - update existing entry via sync path
+		job.EnvVars = envVars
+		job.DepSpec = depSpec
+		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
+		if err != nil {
 			return err
+		}
+		if result.Deferred {
+			fmt.Printf("Job %d saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.ID, job.Host)
+			deferredUpdate = true
 		}
 	}
 
-	fmt.Printf("Updated job %d in queue on %s\n", jobID, job.Host)
+	if deferredUpdate {
+		fmt.Printf("Updated job %d locally (will apply to %s when reachable)\n", jobID, job.Host)
+	} else {
+		fmt.Printf("Updated job %d in queue on %s\n", jobID, job.Host)
+	}
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)
 	}
 	if len(updates) == 0 {
 		fmt.Println("  (no metadata fields changed)")
+	}
+	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !deferredUpdate {
+		reportQueueChangeSyncFailure(job.Host, syncErr)
 	}
 	return nil
 }

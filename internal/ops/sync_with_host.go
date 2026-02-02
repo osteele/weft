@@ -3,6 +3,7 @@ package ops
 import (
 	"database/sql"
 
+	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/remote"
 )
@@ -179,7 +180,7 @@ func SyncQueueRunnerJobWithProber(
 			WorkingDir:  job.WorkingDir,
 			Command:     job.Command,
 			Description: job.Description,
-			EnvVars:     job.EnvVars,
+			EnvVars:     artifacts.MergeEnvVars(job.EnvVars, job.ID),
 			DepSpec:     job.DepSpec,
 		}
 		if err := host.AppendToQueue(entry); err != nil {

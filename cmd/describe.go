@@ -4,12 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 
-	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -140,11 +137,15 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 
 	// If we updated command, directory, or GPU, sync to remote queue file
 	if describeCommand != "" || describeDirectory != "" || gpuValue != "" {
-		if err := updateRemoteQueueEntry(job.Host, job); err != nil {
-			if strings.Contains(err.Error(), "host unreachable") {
-				_ = db.SetPendingStatus(database, jobID, db.StatusQueued)
-			}
-			fmt.Printf("Note: remote host not reachable; changes will sync when host is available\n")
+		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
+		if err != nil {
+			return err
+		}
+		if result.Deferred {
+			fmt.Printf("Note: remote host not reachable; changes will be applied automatically when the host is reachable\n")
+		}
+		if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !result.Deferred {
+			reportQueueChangeSyncFailure(job.Host, syncErr)
 		}
 	}
 
@@ -155,52 +156,6 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		for _, u := range updates {
 			fmt.Printf("  %s\n", u)
 		}
-	}
-
-	return nil
-}
-
-// updateRemoteQueueEntry updates a job's entry in the remote queue file
-func updateRemoteQueueEntry(host string, job *db.Job) error {
-	// Use stored env vars if available, otherwise include GPU assignment if set.
-	envVars := append([]string(nil), job.EnvVars...)
-	hasCUDA := false
-	for _, ev := range envVars {
-		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
-			hasCUDA = true
-			break
-		}
-	}
-	if job.GPU != "" && !hasCUDA {
-		envVars = append(envVars, "CUDA_VISIBLE_DEVICES="+job.GPU)
-	}
-
-	// Merge artifact env vars
-	envVars = artifacts.MergeEnvVars(envVars, job.ID)
-
-	// Use new command queue format
-	entry := ops.QueueEntry{
-		JobID:        job.ID,
-		WorkingDir:   job.WorkingDir,
-		Command:      job.Command,
-		Description:  job.Description,
-		EnvVars:      envVars,
-		DepSpec:      job.DepSpec,
-		CPUAllotment: job.CPUAllotment,
-	}
-	addCmd := ops.NewAddCommand(entry)
-
-	if err := ops.AppendCommand(host, addCmd, ops.AppendCommandOptions{}); err != nil {
-		var qaErr *ops.QueueAppendError
-		if e, ok := err.(*ops.QueueAppendError); ok {
-			qaErr = e
-			if qaErr.IsConnectionError() {
-				return fmt.Errorf("host unreachable")
-			}
-		} else if ssh.IsConnectionError(err.Error()) {
-			return fmt.Errorf("host unreachable")
-		}
-		return fmt.Errorf("update queue entry: %w", err)
 	}
 
 	return nil

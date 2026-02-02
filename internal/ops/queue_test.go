@@ -10,9 +10,11 @@ import (
 
 func TestQueueJob_Success(t *testing.T) {
 	database := db.SetupTestDB(t)
-	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "mkdir", Stdout: ""},
-		{Contains: "printf", Stdout: ""},
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "jq -e") {
+			return "NO\n", "", 0
+		}
+		return "", "", 0
 	})
 
 	params := QueueJobParams{
@@ -106,9 +108,11 @@ func TestQueueJob_PoolTimeout(t *testing.T) {
 
 func TestQueueJob_ExtractsGPU(t *testing.T) {
 	database := db.SetupTestDB(t)
-	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "mkdir", Stdout: ""},
-		{Contains: "printf", Stdout: ""},
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "jq -e") {
+			return "NO\n", "", 0
+		}
+		return "", "", 0
 	})
 
 	params := QueueJobParams{
@@ -131,9 +135,11 @@ func TestQueueJob_ExtractsGPU(t *testing.T) {
 
 func TestQueueJob_DefaultQueueName(t *testing.T) {
 	database := db.SetupTestDB(t)
-	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "mkdir", Stdout: ""},
-		{Contains: "printf", Stdout: ""},
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "jq -e") {
+			return "NO\n", "", 0
+		}
+		return "", "", 0
 	})
 
 	params := QueueJobParams{
@@ -159,6 +165,9 @@ func TestQueueJob_IncludesArtifactEnvVars(t *testing.T) {
 	// Capture the SSH command to verify artifact env vars are included
 	var capturedCommand string
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "jq -e") {
+			return "NO\n", "", 0
+		}
 		if strings.Contains(command, "printf") {
 			capturedCommand = command
 		}

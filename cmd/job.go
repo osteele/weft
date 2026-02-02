@@ -277,6 +277,10 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("set pending status: %w", err)
 	}
 
+	if syncErr := syncHostAfterQueueChange(database, newHost); syncErr != nil {
+		reportQueueChangeSyncFailure(newHost, syncErr)
+	}
+
 	fmt.Printf("Moved job %d: %s → %s\n", jobID, oldHost, newHost)
 	fmt.Printf("Command: %s\n", job.Command)
 	if job.Description != "" {

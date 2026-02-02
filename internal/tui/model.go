@@ -41,7 +41,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/progress"
-	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/queuejob"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
 	"github.com/osteele/remote-jobs/internal/remote"
@@ -465,9 +464,11 @@ type queueStartedMsg struct {
 }
 
 type jobMovedToFrontMsg struct {
-	jobID int64
-	moved bool // false if already at front
-	err   error
+	jobID    int64
+	host     string
+	moved    bool // false if already at front
+	deferred bool
+	err      error
 }
 
 type jobRemovedMsg struct {
@@ -482,8 +483,10 @@ type jobCreatedMsg struct {
 }
 
 type jobEditedMsg struct {
-	jobID int64
-	err   error
+	jobID    int64
+	host     string
+	deferred bool
+	err      error
 }
 
 type jobCreateProgressMsg struct {
@@ -1240,9 +1243,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobMovedToFrontMsg:
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Move to front failed: %v", msg.err), true)
+		} else if msg.deferred {
+			m.requestHostSyncPriority(msg.host)
+			return m, m.setFlash(fmt.Sprintf("Job %d move queued (will sync when host is online)", msg.jobID), false)
 		} else if !msg.moved {
+			m.requestHostSyncPriority(msg.host)
 			return m, m.setFlash(fmt.Sprintf("Job %d is already at the front", msg.jobID), false)
 		}
+		m.requestHostSyncPriority(msg.host)
 		return m, m.setFlash(fmt.Sprintf("Job %d moved to front of queue", msg.jobID), false)
 
 	case descriptionGeneratedMsg:
@@ -1321,7 +1329,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var flashCmd tea.Cmd
 		if msg.err != nil {
 			flashCmd = m.setFlash(fmt.Sprintf("Edit failed: %v", msg.err), true)
+		} else if msg.deferred {
+			m.requestHostSyncPriority(msg.host)
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d updated (will sync when host is online)", msg.jobID), false)
 		} else {
+			m.requestHostSyncPriority(msg.host)
 			flashCmd = m.setFlash(fmt.Sprintf("Job %d updated", msg.jobID), false)
 			m.pendingSelectJobID = msg.jobID
 		}
@@ -5934,6 +5946,17 @@ func (m Model) requestHostInfoRefresh(hostName string, priority bool) {
 	}
 }
 
+func (m Model) requestHostSyncPriority(hostName string) {
+	if m.syncWorker == nil || hostName == "" {
+		return
+	}
+	m.syncWorker.Request(SyncRequest{
+		Host:     hostName,
+		Rate:     RateRunning,
+		Priority: true,
+	})
+}
+
 // getTargetJob returns the job to act on - either the selected job or the highlighted job
 func (m Model) getTargetJob() *db.Job {
 	if !m.jobSelectionActive {
@@ -6688,7 +6711,7 @@ func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
 			return err
 		}
 		depJob.DepSpec = newSpec
-		if err := ops.UpdateQueuedJobEntry(depJob, depJob.EnvVars, newSpec); err != nil {
+		if _, err := ops.RequestQueueUpdate(database, depJob, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
 			return err
 		}
 	}
@@ -6725,12 +6748,11 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		moved, err := queuefile.MoveToFront(job.Host, job.ID)
-		if err == nil && moved {
-			// Update queued_at to be earlier than all other queued jobs
-			_ = db.SetQueuedAtBefore(database, job.ID, job.Host)
+		result, err := ops.RequestQueuePriority(database, job, ops.OptionsForMode(ops.TimeoutFast))
+		if err != nil {
+			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}
 		}
-		return jobMovedToFrontMsg{jobID: job.ID, moved: moved, err: err}
+		return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, moved: result.Moved, deferred: result.Deferred}
 	}
 }
 
@@ -7125,30 +7147,30 @@ func (m Model) editJob() tea.Cmd {
 			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
 		}
 		if job.EffectiveStatus() != db.StatusQueued {
-			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("can only edit queued jobs")}
+			return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("can only edit queued jobs")}
 		}
 
 		// Check if host is being changed - not allowed in edit, use job move instead
 		if newHost != job.Host {
-			return jobEditedMsg{jobID: jobID, err: fmt.Errorf("cannot change host via edit; use 'job move' command")}
+			return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("cannot change host via edit; use 'job move' command")}
 		}
 
 		// Update fields in database
 		if newDescription != job.Description {
 			if err := db.UpdateJobDescription(database, jobID, newDescription); err != nil {
-				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update description: %w", err)}
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update description: %w", err)}
 			}
 		}
 
 		if newWorkingDir != job.WorkingDir {
 			if err := db.UpdateJobWorkingDir(database, jobID, newWorkingDir); err != nil {
-				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update directory: %w", err)}
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update directory: %w", err)}
 			}
 		}
 
 		if newCommand != job.Command {
 			if err := db.UpdateJobCommand(database, jobID, newCommand); err != nil {
-				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update command: %w", err)}
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update command: %w", err)}
 			}
 		}
 
@@ -7167,53 +7189,40 @@ func (m Model) editJob() tea.Cmd {
 		if depSpec == "" {
 			depSpec = job.DepSpec
 		}
-		updatedJob := &db.Job{
-			ID:           jobID,
-			Host:         job.Host,
-			Command:      newCommand,
-			WorkingDir:   newWorkingDir,
-			Description:  newDescription,
-			CPUAllotment: newAllotment,
-		}
-
 		if !equalEnvVars(envVars, job.EnvVars) {
 			if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
-				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update env vars: %w", err)}
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update env vars: %w", err)}
 			}
 		}
 		if gpuInput != job.GPU {
 			if err := db.SetJobGPU(database, jobID, gpuInput); err != nil {
-				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update GPU: %w", err)}
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update GPU: %w", err)}
 			}
 		}
 		if !equalCPUAllotment(newAllotment, job.CPUAllotment) {
 			if err := db.SetJobCPUAllotment(database, jobID, newAllotment); err != nil {
-				return jobEditedMsg{jobID: jobID, err: fmt.Errorf("update CPU allotment: %w", err)}
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update CPU allotment: %w", err)}
 			}
 		}
 
 		if operationalChange {
-			if err := updateRemoteQueueEntry(job.Host, updatedJob, envVars, depSpec); err != nil {
-				if strings.Contains(err.Error(), "host unreachable") {
-					_ = db.SetPendingStatus(database, jobID, db.StatusQueued)
-				}
-				// Non-fatal - the local database was updated
+			job.Command = newCommand
+			job.WorkingDir = newWorkingDir
+			job.Description = newDescription
+			job.EnvVars = envVars
+			job.GPU = gpuInput
+			job.CPUAllotment = newAllotment
+			job.DepSpec = depSpec
+
+			result, err := ops.RequestQueueUpdate(database, job, ops.OptionsForMode(ops.TimeoutFast))
+			if err != nil {
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
 			}
+			return jobEditedMsg{jobID: jobID, host: job.Host, deferred: result.Deferred}
 		}
 
-		return jobEditedMsg{jobID: jobID}
+		return jobEditedMsg{jobID: jobID, host: job.Host}
 	}
-}
-
-// updateRemoteQueueEntry updates a job's entry in the remote queue file.
-// This is a thin wrapper around ops.UpdateQueueEntry.
-func updateRemoteQueueEntry(host string, job *db.Job, envVars []string, depSpec string) error {
-	return ops.UpdateQueueEntry(ops.UpdateQueueEntryParams{
-		Host:    host,
-		Job:     job,
-		EnvVars: envVars,
-		DepSpec: depSpec,
-	})
 }
 
 func parseCPUAllotmentInput(input string) (*int, error) {

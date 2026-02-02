@@ -2,6 +2,7 @@ package queuejob
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuefile"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -20,140 +22,42 @@ const (
 	sshTimeout = 30 * time.Second
 )
 
-// StartNow removes a queued job from the remote queue and starts it immediately.
-// Returns (true, nil) if the start was deferred due to a connection failure.
+// StartNow requests a queued job to start immediately via the sync path.
+// Returns (true, nil) if the start was deferred because the host was unreachable.
 func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if job == nil {
 		return false, fmt.Errorf("job not found")
 	}
 
-	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting queued job directly"))
-
 	// Re-fetch job from DB to get current status (TUI may have stale data)
 	freshJob, err := db.GetJobByID(database, job.ID)
 	if err != nil {
-		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithError(err), oplog.WithDetail("fetch job failed"))
 		return false, fmt.Errorf("fetch job: %w", err)
 	}
 	if freshJob == nil {
-		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr("job not found in database"))
 		return false, fmt.Errorf("job %d not found", job.ID)
 	}
-	if freshJob.Status != db.StatusQueued {
-		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetailf("job already %s", freshJob.Status))
-		return false, fmt.Errorf("job %d is already %s", job.ID, freshJob.Status)
+	if freshJob.EffectiveStatus() != db.StatusQueued {
+		return false, fmt.Errorf("job %d is %s, not queued", job.ID, freshJob.EffectiveStatus())
 	}
-	// Use fresh job data from here on
-	job = freshJob
 
-	entry, err := queuefile.FetchEntry(job.Host, job.ID)
-	entryWasInQueue := err == nil
-	if err != nil {
-		if queuefile.IsConnectionError(err) {
-			return markStartPending(database, job, false)
+	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting job immediately"))
+
+	cancelCmd := ops.NewCancelCommand(job.ID)
+	if err := ops.AppendCommand(job.Host, cancelCmd, ops.AppendCommandOptions{Timeout: sshTimeout}); err != nil {
+		var qaErr *ops.QueueAppendError
+		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("cancel failed, deferring start"))
+			return markStartPending(database, freshJob, false)
 		}
-		// Job not found in remote queue - check if queue runner is already running it
-		if isQueueRunnerRunningJob(job.Host, job.ID) {
-			oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithDetail("queue runner is already running this job"))
-			return false, fmt.Errorf("job %d is already being run by the queue runner", job.ID)
+		if ssh.IsConnectionError(err.Error()) {
+			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("cancel failed, deferring start"))
+			return markStartPending(database, freshJob, false)
 		}
-		// Job not in queue and not being run by queue runner - use database info to start directly
-		entry = &queuefile.Entry{
-			JobID:       job.ID,
-			WorkingDir:  job.WorkingDir,
-			Command:     job.Command,
-			Description: job.Description,
-		}
+		return false, err
 	}
 
-	// Only try to remove from queue if it was actually there
-	if entryWasInQueue {
-		if err := queuefile.RemoveEntry(job.Host, job.ID); err != nil {
-			if queuefile.IsConnectionError(err) {
-				return markStartPending(database, job, false)
-			}
-			return false, err
-		}
-	}
-
-	// Use the session name so sync knows this is a tmux-based job, not a queue runner job
-	tmuxSession := session.TmuxSessionName(job.ID)
-	if err := db.UpdateQueuedToRunningWithSession(database, job.ID, tmuxSession); err != nil {
-		return false, fmt.Errorf("update queued job: %w", err)
-	}
-
-	updated, err := db.GetJobByID(database, job.ID)
-	if err != nil || updated == nil {
-		return false, fmt.Errorf("refresh job after start: %w", err)
-	}
-
-	// Simple file paths (no timestamp in primary files)
-	logFile := session.SimpleLogFile(job.ID)
-	statusFile := session.SimpleStatusFile(job.ID)
-	metadataFile := session.SimpleMetadataFile(job.ID)
-	pidFile := session.SimplePidFile(job.ID)
-
-	// Ensure log directory exists and archive any old files
-	mkdirAndArchive := fmt.Sprintf("mkdir -p %s %s; %s", session.LogDir, artifacts.RemoteArtifactsDir, session.ArchiveCommand(job.ID))
-	if _, stderr, err := ssh.RunWithTimeout(job.Host, mkdirAndArchive, sshTimeout); err != nil {
-		if isConnectionFailure(stderr, err) {
-			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("mkdir failed, deferring start"))
-			return markStartPending(database, job, true)
-		}
-		errMsg := ssh.FriendlyError(job.Host, stderr, err)
-		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("mkdir failed"))
-		db.UpdateJobFailed(database, job.ID, errMsg)
-		return false, fmt.Errorf("%s", errMsg)
-	}
-
-	// Save metadata (use EffectiveDescription to include AI-generated descriptions)
-	metadata := session.FormatMetadata(job.ID, job.WorkingDir, job.Command, job.Host, job.EffectiveDescription(), updated.StartTime)
-	writeMetadata := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
-	if _, stderr, err := ssh.RunWithTimeout(job.Host, writeMetadata, sshTimeout); err != nil {
-		if isConnectionFailure(stderr, err) {
-			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("metadata write failed, deferring start"))
-			return markStartPending(database, job, true)
-		}
-		errMsg := ssh.FriendlyError(job.Host, stderr, err)
-		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("metadata write failed"))
-		db.UpdateJobFailed(database, job.ID, errMsg)
-		return false, fmt.Errorf("%s", errMsg)
-	}
-
-	envVars := artifacts.MergeEnvVars(entry.EnvVars, job.ID)
-	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
-		JobID:      job.ID,
-		WorkingDir: job.WorkingDir,
-		Command:    job.Command,
-		LogFile:    logFile,
-		StatusFile: statusFile,
-		PidFile:    pidFile,
-		EnvVars:    envVars,
-	})
-
-	// Check if tmux session already exists (job may already be running but DB out of sync)
-	checkCmd := fmt.Sprintf("tmux has-session -t '%s' 2>/dev/null && echo exists || echo missing", tmuxSession)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, checkCmd, sshTimeout)
-	if err == nil && strings.TrimSpace(stdout) == "exists" {
-		// Session already exists - job is running, just DB is out of sync
-		return false, fmt.Errorf("job %d is already running (session %s exists)", job.ID, tmuxSession)
-	}
-
-	escapedCommand := ssh.EscapeForSingleQuotes(wrappedCommand)
-	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", tmuxSession, escapedCommand)
-	if _, stderr, err := ssh.RunWithTimeout(job.Host, tmuxCmd, sshTimeout); err != nil {
-		if isConnectionFailure(stderr, err) {
-			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("tmux create failed, deferring start"))
-			return markStartPending(database, job, true)
-		}
-		errMsg := ssh.FriendlyError(job.Host, stderr, err)
-		oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host, oplog.WithErrorStr(errMsg), oplog.WithDetail("tmux create failed"))
-		db.UpdateJobFailed(database, job.ID, errMsg)
-		return false, fmt.Errorf("%s", errMsg)
-	}
-
-	oplog.LogJob(oplog.OpJobStarted, job.ID, job.Host, oplog.WithDetailf("started in session %s", tmuxSession))
-	return false, nil
+	return startJobDirectly(database, freshJob, nil)
 }
 
 // startJobDirectly starts a job without interacting with the remote queue file.
@@ -209,6 +113,8 @@ func startJobDirectly(database *sql.DB, job *db.Job, entry *queuefile.Entry) (bo
 	var envVars []string
 	if entry != nil {
 		envVars = entry.EnvVars
+	} else {
+		envVars = job.EnvVars
 	}
 
 	envVars = artifacts.MergeEnvVars(envVars, job.ID)

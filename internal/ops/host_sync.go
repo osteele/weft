@@ -38,6 +38,14 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	seenJobs := make(map[int64]bool)
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
+	queueOpsResult, err := ProcessDeferredQueueOps(database, host, timeout)
+	if err != nil {
+		return result, err
+	}
+	if queueOpsResult.HostContacted {
+		result.HostContacted = true
+	}
+
 	// Step 1: Sync active jobs
 	activeJobs, err := db.ListActiveJobs(database, host)
 	if err != nil {

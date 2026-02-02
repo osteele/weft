@@ -3,7 +3,6 @@ package ops
 
 import (
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -129,28 +128,13 @@ func UpdateQueueEntry(params UpdateQueueEntryParams) error {
 		return fmt.Errorf("job is nil")
 	}
 
-	entry := QueueEntry{
-		JobID:        params.Job.ID,
-		WorkingDir:   params.Job.WorkingDir,
-		Command:      params.Job.Command,
-		Description:  params.Job.Description,
-		EnvVars:      params.EnvVars,
-		DepSpec:      params.DepSpec,
-		CPUAllotment: params.Job.CPUAllotment,
-		Tags:         params.Job.Tags,
-	}
-
-	// Use new command queue format
-	addCmd := NewAddCommand(entry)
-	opts := AppendCommandOptions{Timeout: params.Timeout}
-	if err := AppendCommand(params.Host, addCmd, opts); err != nil {
-		var qaErr *QueueAppendError
-		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
+	entry := queueEntryForJob(params.Job, params.EnvVars, params.DepSpec)
+	if err := writeQueueJobFile(params.Host, entry, params.Timeout); err != nil {
+		if isQueueConnectionError(err) {
 			return fmt.Errorf("host unreachable")
 		}
 		return fmt.Errorf("update queue entry: %w", err)
 	}
-
 	return nil
 }
 
@@ -233,21 +217,6 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	if err != nil {
 		return Result{}, fmt.Errorf("record job: %w", err)
 	}
-	backend, err := ResolveBackend(params.Host, opts.Timeout)
-	if err != nil {
-		if ssh.IsConnectionError(err.Error()) {
-			return Result{
-				Success:  true,
-				Deferred: true,
-				JobID:    jobID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
-			}, nil
-		}
-		return Result{}, err
-	}
-	if err := db.SetJobBackend(database, jobID, backend); err != nil {
-		return Result{}, fmt.Errorf("set job backend: %w", err)
-	}
 	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
 		db.DeleteJob(database, jobID)
 		return Result{}, fmt.Errorf("record env vars: %w", err)
@@ -268,25 +237,47 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		}
 	}
 
+	backend, err := ResolveBackend(params.Host, opts.Timeout)
+	if err != nil {
+		if ssh.IsConnectionError(err.Error()) {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+			}, nil
+		}
+		return Result{}, err
+	}
+	if err := db.SetJobBackend(database, jobID, backend); err != nil {
+		return Result{}, fmt.Errorf("set job backend: %w", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return Result{}, fmt.Errorf("get job: %w", err)
+	}
+
 	if backend == db.BackendSlurm {
-		if err := db.SetPendingStatus(database, jobID, db.StatusQueued); err != nil {
-			return Result{}, fmt.Errorf("set pending status: %w", err)
-		}
-		job, err := db.GetJobByID(database, jobID)
+		outcome, err := requestJobStatus(database, job, db.StatusQueued, opts)
 		if err != nil {
-			return Result{}, fmt.Errorf("get job: %w", err)
-		}
-		_, err = Reconcile(database, job, "", ReconcileOptions{Timeout: opts.Timeout})
-		if err != nil {
-			if ssh.IsConnectionError(err.Error()) {
-				return Result{
-					Success:  true,
-					Deferred: true,
-					JobID:    jobID,
-					Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
-				}, nil
-			}
 			return Result{}, err
+		}
+		if !outcome.hostAvailable {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+			}, nil
+		}
+		if !outcome.resolved {
+			return Result{
+				Success:  true,
+				Deferred: true,
+				JobID:    jobID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+			}, nil
 		}
 		return Result{
 			Success: true,
@@ -295,31 +286,8 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		}, nil
 	}
 
-	// Build queue entry with artifact env vars merged in
-	entry := QueueEntry{
-		JobID:        jobID,
-		WorkingDir:   params.WorkingDir,
-		Command:      params.Command,
-		Description:  params.Description,
-		EnvVars:      artifacts.MergeEnvVars(params.EnvVars, jobID),
-		DepSpec:      params.DepSpec,
-		CPUAllotment: params.CPUAllotment,
-		Tags:         params.Tags,
-	}
-
-	// Append to remote queue
-	addCmd := NewAddCommand(entry)
-	appendOpts := AppendCommandOptions{Timeout: opts.Timeout}
-	if err := AppendCommand(params.Host, addCmd, appendOpts); err != nil {
-		var qaErr *QueueAppendError
-		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
-			return Result{
-				Success:  true,
-				Deferred: true,
-				JobID:    jobID,
-				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
-			}, nil
-		}
+	syncResult, err := SyncJobQuick(database, job, SyncOptions{Timeout: opts.Timeout})
+	if err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return Result{
 				Success:  true,
@@ -328,12 +296,16 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
 			}, nil
 		}
-		db.DeleteJob(database, jobID)
 		return Result{}, err
 	}
 
-	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
-		return Result{}, fmt.Errorf("update sync state: %w", err)
+	if !syncResult.HostContacted {
+		return Result{
+			Success:  true,
+			Deferred: true,
+			JobID:    jobID,
+			Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
+		}, nil
 	}
 
 	return Result{

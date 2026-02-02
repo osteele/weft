@@ -117,8 +117,11 @@ func TestCancelQueuedJob_Success(t *testing.T) {
 	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
 	job, _ := db.GetJobByID(database, jobID)
 
-	mockSSHCommands(t, []sshMockResponse{
-		{Contains: "printf", Stdout: ""},
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if strings.Contains(command, "jq -e") {
+			return "YES\n", "", 0
+		}
+		return "", "", 0
 	})
 
 	result, err := CancelQueuedJob(database, job, DefaultOptions())
@@ -163,7 +166,9 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	if !result.Success {
 		t.Error("expected Success to be true on deferred")
 	}
-	// CancelQueuedJob doesn't set Deferred flag, it returns a pending message
+	if !result.Deferred {
+		t.Error("expected Deferred to be true on pending cancel")
+	}
 	if result.Message != "Job 1 cancel pending (host unreachable)" {
 		t.Errorf("unexpected message: %q", result.Message)
 	}
