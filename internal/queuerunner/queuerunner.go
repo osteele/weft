@@ -3,6 +3,7 @@ package queuerunner
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -142,11 +143,26 @@ func ensureDirectories(host string) error {
 }
 
 func writeScript(host string) error {
-	// Script content already ends with newline, don't add another
-	writeCmd := fmt.Sprintf("cat > %s << 'SCRIPT_EOF'\n%sSCRIPT_EOF", queueRunnerPath, string(scripts.QueueRunnerScript))
-	if _, stderr, err := ssh.Run(host, writeCmd); err != nil {
-		return fmt.Errorf("write queue runner: %s", strings.TrimSpace(stderr))
+	// Write script to a temp file and scp it to the remote host.
+	// We can't use a heredoc through the pooled SSH session because
+	// heredocs read from stdin, which conflicts with the session's
+	// command-framing protocol.
+	tmpFile, err := os.CreateTemp("", "queue-runner-*.sh")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
 	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(scripts.QueueRunnerScript); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := ssh.CopyToWithRetryVerbose(tmpFile.Name(), host, queueRunnerPath, false); err != nil {
+		return fmt.Errorf("copy queue runner: %w", err)
+	}
+
 	chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
 	if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
 		return fmt.Errorf("chmod queue runner: %s", strings.TrimSpace(stderr))

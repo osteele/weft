@@ -95,7 +95,7 @@ const (
 )
 
 // connectionErrorPattern matches SSH connection errors that should trigger retry
-var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|operation timed out|no route to host|host is unreachable|connection refused|connection closed|network is unreachable|could not resolve hostname|name or service not known|is offline)`)
+var connectionErrorPattern = regexp.MustCompile(`(?i)(connection timed out|connection to \S+ timed out|operation timed out|no route to host|host is unreachable|connection refused|connection closed|network is unreachable|could not resolve hostname|name or service not known|is offline)`)
 
 // IsConnectionError checks if the error output indicates a connection failure
 func IsConnectionError(output string) bool {

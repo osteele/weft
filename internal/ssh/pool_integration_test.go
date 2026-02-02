@@ -11,7 +11,7 @@ import (
 func TestPoolIntegrationSSH(t *testing.T) {
 	host := os.Getenv("SSH_TEST_HOST")
 	if host == "" {
-		host = "cool30"
+		t.Skip("SSH_TEST_HOST not set")
 	}
 
 	pool := NewSessionPool(2, 8)

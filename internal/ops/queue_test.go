@@ -81,9 +81,28 @@ func TestQueueJob_QuickTimeout(t *testing.T) {
 	}
 }
 
-// Note: QueueJob only makes a single SSH call (AppendCommand),
-// so there's no separate "SyncError" case distinct from QuickTimeout.
-// The connection error case is already covered by TestQueueJob_QuickTimeout.
+func TestQueueJob_PoolTimeout(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Mock pool-style timeout (host in error message, not adjacent to "connection")
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		return "", "SSH connection to test-host timed out", 1
+	})
+
+	params := QueueJobParams{
+		Host:        "test-host",
+		WorkingDir:  "/tmp",
+		Command:     "echo success",
+		Description: "test job",
+	}
+	result, err := QueueJob(database, params, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("QueueJob should defer on pool timeout, got error: %v", err)
+	}
+	if !result.Deferred {
+		t.Error("expected Deferred to be true for pool timeout")
+	}
+}
 
 func TestQueueJob_ExtractsGPU(t *testing.T) {
 	database := db.SetupTestDB(t)

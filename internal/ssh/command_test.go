@@ -203,6 +203,11 @@ func TestIsConnectionError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "pool ready timeout",
+			input:    "SSH connection to cool30 timed out",
+			expected: true,
+		},
+		{
 			name:     "permission denied is not connection error",
 			input:    "Permission denied (publickey)",
 			expected: false,
