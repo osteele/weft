@@ -3,7 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/core"
+	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/spf13/cobra"
 )
@@ -11,13 +12,11 @@ import (
 var cancelCmd = &cobra.Command{
 	Use:     "cancel <job-id>...",
 	Aliases: []string{"remove"},
-	Short:   "Cancel one or more queued jobs",
-	Long: `Cancel queued jobs before they start.
+	Short:   "Cancel one or more jobs (queued or running)",
+	Long: `Cancel jobs by removing them from the queue or killing them if running.
 
-This removes jobs from both the remote queue file and the local database.
-Only works for jobs that haven't started yet (status: queued).
-
-For running jobs, use 'remote-jobs kill' instead.
+For queued jobs: removes from both the remote queue file and the local database.
+For running jobs: kills the job process.
 
 Examples:
   remote-jobs cancel 123
@@ -31,11 +30,11 @@ func init() {
 }
 
 func runCancel(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
+	service, err := core.NewService()
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return fmt.Errorf("initialize core service: %w", err)
 	}
-	defer database.Close()
+	defer service.Close()
 
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
@@ -46,28 +45,19 @@ func runCancel(cmd *cobra.Command, args []string) error {
 	var cancelled int
 
 	for _, jobID := range jobIDs {
-		job, err := db.GetJobByID(database, jobID)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("job %d not found", jobID))
-			continue
-		}
+		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("cancel"), oplog.WithJobID(jobID))
 
-		effectiveStatus := job.EffectiveStatus()
-		if effectiveStatus != db.StatusQueued {
-			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only cancel queued jobs (use 'kill' for running jobs)", jobID, effectiveStatus))
-			continue
-		}
-
-		result, err := ops.CancelQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
+		result, err := service.KillJob(jobID, ops.TimeoutNormal)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-		if result.Deferred {
-			fmt.Printf("Job %d: cancel pending (host unreachable)\n", jobID)
-		} else {
-			fmt.Printf("Job %d canceled\n", jobID)
+
+		message := result.Outcome.Message
+		if message == "" {
+			message = fmt.Sprintf("Job %d canceled", jobID)
 		}
+		fmt.Println(message)
 		cancelled++
 	}
 
