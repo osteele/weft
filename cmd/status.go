@@ -69,6 +69,8 @@ func init() {
 	statusCmd.Flags().BoolVar(&statusFast, "fast", false, "Use quick 2s timeout (default is 5s)")
 	statusCmd.Flags().BoolVar(&statusWait, "wait", false, "Wait for the job(s) to complete before returning")
 	statusCmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
+	statusCmd.Flags().DurationVar(&statusWaitTimeout, "timeout", 0, "Alias for --wait-timeout")
+	statusCmd.Flags().MarkHidden("timeout")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {

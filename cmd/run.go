@@ -61,6 +61,7 @@ var (
 	runFollow      bool
 	runAllow       bool
 	runWait        bool
+	runNoWait      bool // explicit no-op flag for tooling compatibility
 	runKillJobID   int64
 	runFrom        int64
 	runTimeout     string
@@ -90,6 +91,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
+	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -208,6 +210,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if runWait && runDraft {
 		return fmt.Errorf("--wait cannot be combined with --draft")
+	}
+	if runWait && runNoWait {
+		return fmt.Errorf("--wait and --no-wait cannot be used together")
 	}
 
 	dirProvided := runDir != ""
