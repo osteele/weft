@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 40
+# BUILD: 41
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -396,6 +396,125 @@ proc_cpu_host_pct() {
     awk -v p="$total_cpu" -v c="$CPU_COUNT" 'BEGIN { if (c < 1) c = 1; printf "%.0f", (p / c) }'
 }
 
+# Collect resource usage for a process tree rooted at a PID.
+# Reads cumulative CPU times from /proc and VmHWM for peak RSS.
+# Outputs "user_ticks sys_ticks peak_rss_kb" (space-separated).
+proc_resource_usage() {
+    local pid="$1"
+    local total_utime=0 total_stime=0 peak_rss=0
+
+    # Build process tree
+    local all_pids="$pid"
+    local queue="$pid"
+    while [ -n "$queue" ]; do
+        local next_queue=""
+        for p in $queue; do
+            local children
+            children=$(pgrep -P "$p" 2>/dev/null || true)
+            if [ -n "$children" ]; then
+                all_pids="$all_pids $children"
+                next_queue="$next_queue $children"
+            fi
+        done
+        queue="$next_queue"
+    done
+
+    for p in $all_pids; do
+        # CPU times from /proc/PID/stat (fields 14=utime, 15=stime in clock ticks)
+        if [ -f "/proc/$p/stat" ]; then
+            local stat_line
+            stat_line=$(cat "/proc/$p/stat" 2>/dev/null || true)
+            if [ -n "$stat_line" ]; then
+                local utime stime
+                utime=$(echo "$stat_line" | awk '{print $14}')
+                stime=$(echo "$stat_line" | awk '{print $15}')
+                total_utime=$((total_utime + utime))
+                total_stime=$((total_stime + stime))
+            fi
+        fi
+        # Peak RSS from /proc/PID/status VmHWM (in kB)
+        if [ -f "/proc/$p/status" ]; then
+            local hwm
+            hwm=$(awk '/^VmHWM:/ {print $2}' "/proc/$p/status" 2>/dev/null || true)
+            if [ -n "$hwm" ] && [ "$hwm" -gt "$peak_rss" ] 2>/dev/null; then
+                peak_rss="$hwm"
+            fi
+        fi
+    done
+
+    echo "$total_utime $total_stime $peak_rss"
+}
+
+# Get GPU memory usage for a process group (max across GPUs).
+# Returns memory in MiB, or empty string if not available.
+proc_gpu_mem_mib() {
+    local pid="$1"
+    if ! command -v nvidia-smi &>/dev/null; then
+        echo ""
+        return
+    fi
+
+    # Build process tree
+    local all_pids="$pid"
+    local queue="$pid"
+    while [ -n "$queue" ]; do
+        local next_queue=""
+        for p in $queue; do
+            local children
+            children=$(pgrep -P "$p" 2>/dev/null || true)
+            if [ -n "$children" ]; then
+                all_pids="$all_pids $children"
+                next_queue="$next_queue $children"
+            fi
+        done
+        queue="$next_queue"
+    done
+
+    # Query nvidia-smi for all processes, sum memory for PIDs in our tree
+    local total_gpu_mem=0
+    local gpu_output
+    gpu_output=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits 2>/dev/null || true)
+    if [ -n "$gpu_output" ]; then
+        while IFS=', ' read -r gpu_pid gpu_mem; do
+            gpu_pid=$(echo "$gpu_pid" | tr -d ' ')
+            gpu_mem=$(echo "$gpu_mem" | tr -d ' ')
+            for p in $all_pids; do
+                if [ "$gpu_pid" = "$p" ] && [ -n "$gpu_mem" ]; then
+                    total_gpu_mem=$((total_gpu_mem + gpu_mem))
+                fi
+            done
+        done <<< "$gpu_output"
+    fi
+
+    if [ "$total_gpu_mem" -gt 0 ]; then
+        echo "$total_gpu_mem"
+    else
+        echo ""
+    fi
+}
+
+# Write .rusage file for a completed job from accumulated RUNNING_JSON data.
+write_rusage_file() {
+    local job_id="$1"
+    local rusage_file="$LOG_DIR/${job_id}.rusage"
+
+    local user_cpu sys_cpu peak_rss max_gpu
+    user_cpu=$(jq -r --arg id "$job_id" '.[$id].rusage_user_cpu // ""' <<< "$RUNNING_JSON")
+    sys_cpu=$(jq -r --arg id "$job_id" '.[$id].rusage_sys_cpu // ""' <<< "$RUNNING_JSON")
+    peak_rss=$(jq -r --arg id "$job_id" '.[$id].rusage_peak_rss // ""' <<< "$RUNNING_JSON")
+    max_gpu=$(jq -r --arg id "$job_id" '.[$id].rusage_max_gpu // ""' <<< "$RUNNING_JSON")
+
+    # Only write if we have at least one value
+    if [ -n "$user_cpu" ] || [ -n "$peak_rss" ] || [ -n "$max_gpu" ]; then
+        {
+            [ -n "$user_cpu" ] && echo "user_cpu_secs=$user_cpu"
+            [ -n "$sys_cpu" ] && echo "sys_cpu_secs=$sys_cpu"
+            [ -n "$peak_rss" ] && echo "peak_rss_kb=$peak_rss"
+            [ -n "$max_gpu" ] && echo "max_gpu_mem_mib=$max_gpu"
+        } > "$rusage_file"
+    fi
+}
+
 # Process new commands from the command log
 process_commands() {
     [ ! -f "$COMMANDS_FILE" ] && return
@@ -684,7 +803,7 @@ start_job() {
     local paused_file="$LOG_DIR/${job_id}.paused"
 
     # Archive any existing files from previous runs
-    for ext in log status meta pid pgid samples paused; do
+    for ext in log status meta pid pgid samples paused rusage; do
         local f="$LOG_DIR/${job_id}.$ext"
         if [ -f "$f" ]; then
             local mtime ts
@@ -851,6 +970,8 @@ refresh_running_jobs() {
                     update_cpu_history "$sig" "$avg_cpu"
                 fi
             fi
+            # Write resource usage file before removing from running state
+            write_rusage_file "$job_id"
             remove_running_job "$job_id"
             changed=true
             continue
@@ -892,6 +1013,7 @@ refresh_running_jobs() {
             fi
             echo "1" > "$status_file"
             log_op "job.failed" "$job_id" "exit=1 reason=stopped"
+            write_rusage_file "$job_id"
             rm -f "$pid_file" "$pgid_file" "$paused_file"
             remove_running_job "$job_id"
             changed=true
@@ -919,6 +1041,7 @@ refresh_running_jobs() {
             echo "1" > "$status_file"
             log_op "job.failed" "$job_id" "exit=1 duration=0"
         fi
+        write_rusage_file "$job_id"
         remove_running_job "$job_id"
         changed=true
     done
@@ -960,6 +1083,60 @@ sample_running_jobs() {
         samples_json=$(jq -c --arg id "$job_id" '.[$id].samples // []' <<< "$RUNNING_JSON")
         samples_json=$(append_sample "$samples_json" "$host_pct")
         RUNNING_JSON=$(jq -c --arg id "$job_id" --argjson samples "$samples_json" '.[$id].samples = $samples' <<< "$RUNNING_JSON")
+
+        # Collect resource usage and update peak values
+        if [ -d "/proc" ]; then
+            local pgid_file="$LOG_DIR/${job_id}.pgid"
+            local rusage_pid="$pid"
+            if [ -f "$pgid_file" ]; then
+                local pgid_val
+                pgid_val=$(cat "$pgid_file" 2>/dev/null)
+                [ -n "$pgid_val" ] && rusage_pid="$pgid_val"
+            fi
+            local rusage_data
+            rusage_data=$(proc_resource_usage "$rusage_pid")
+            local cur_utime cur_stime cur_rss
+            cur_utime=$(echo "$rusage_data" | awk '{print $1}')
+            cur_stime=$(echo "$rusage_data" | awk '{print $2}')
+            cur_rss=$(echo "$rusage_data" | awk '{print $3}')
+
+            # Convert clock ticks to seconds (100 ticks/sec on Linux)
+            local clk_tck=100
+            local user_secs sys_secs
+            user_secs=$(awk -v t="$cur_utime" -v c="$clk_tck" 'BEGIN { printf "%.2f", t / c }')
+            sys_secs=$(awk -v t="$cur_stime" -v c="$clk_tck" 'BEGIN { printf "%.2f", t / c }')
+
+            # CPU times are cumulative, so always update (latest value is the max)
+            RUNNING_JSON=$(jq -c \
+                --arg id "$job_id" \
+                --arg ucpu "$user_secs" \
+                --arg scpu "$sys_secs" \
+                '.[$id].rusage_user_cpu = $ucpu | .[$id].rusage_sys_cpu = $scpu' <<< "$RUNNING_JSON")
+
+            # Peak RSS: keep the max across samples
+            local prev_rss
+            prev_rss=$(jq -r --arg id "$job_id" '.[$id].rusage_peak_rss // "0"' <<< "$RUNNING_JSON")
+            if [ "$cur_rss" -gt "$prev_rss" ] 2>/dev/null; then
+                RUNNING_JSON=$(jq -c \
+                    --arg id "$job_id" \
+                    --arg rss "$cur_rss" \
+                    '.[$id].rusage_peak_rss = $rss' <<< "$RUNNING_JSON")
+            fi
+        fi
+
+        # GPU memory: keep the max across samples
+        local gpu_mem
+        gpu_mem=$(proc_gpu_mem_mib "$pid")
+        if [ -n "$gpu_mem" ]; then
+            local prev_gpu
+            prev_gpu=$(jq -r --arg id "$job_id" '.[$id].rusage_max_gpu // "0"' <<< "$RUNNING_JSON")
+            if [ "$gpu_mem" -gt "$prev_gpu" ] 2>/dev/null; then
+                RUNNING_JSON=$(jq -c \
+                    --arg id "$job_id" \
+                    --arg gpu "$gpu_mem" \
+                    '.[$id].rusage_max_gpu = $gpu' <<< "$RUNNING_JSON")
+            fi
+        fi
 
         local avg
         avg=$(sample_average "$samples_json")

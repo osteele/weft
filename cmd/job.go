@@ -419,6 +419,28 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		if job.ErrorMessage != "" {
 			fmt.Printf("Error:       %s\n", job.ErrorMessage)
 		}
+
+		// Resource usage
+		if job.Metadata != nil && job.Metadata.Resource != nil {
+			r := job.Metadata.Resource
+			if r.UserCPUSecs != nil || r.SysCPUSecs != nil {
+				userStr := "0s"
+				sysStr := "0s"
+				if r.UserCPUSecs != nil {
+					userStr = db.FormatDuration(int64(*r.UserCPUSecs))
+				}
+				if r.SysCPUSecs != nil {
+					sysStr = db.FormatDuration(int64(*r.SysCPUSecs))
+				}
+				fmt.Printf("CPU Time:    %s user, %s sys\n", userStr, sysStr)
+			}
+			if r.PeakRSSKB != nil {
+				fmt.Printf("Peak Memory: %s\n", formatMemoryKB(*r.PeakRSSKB))
+			}
+			if r.MaxGPUMemMiB != nil {
+				fmt.Printf("GPU Memory:  %d MiB (peak)\n", *r.MaxGPUMemMiB)
+			}
+		}
 	}
 
 	if len(errorsList) > 0 {
@@ -429,4 +451,15 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 
 func formatUnixTime(t int64) string {
 	return fmt.Sprintf("%s", time.Unix(t, 0).Format("2006-01-02 15:04:05"))
+}
+
+func formatMemoryKB(kb int64) string {
+	switch {
+	case kb >= 1024*1024:
+		return fmt.Sprintf("%.1f GB", float64(kb)/(1024*1024))
+	case kb >= 1024:
+		return fmt.Sprintf("%.1f MB", float64(kb)/1024)
+	default:
+		return fmt.Sprintf("%d KB", kb)
+	}
 }

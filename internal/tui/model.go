@@ -3284,6 +3284,40 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString("\n")
 	}
 
+	// Resource usage section for completed/failed jobs
+	if job.Metadata != nil && job.Metadata.Resource != nil {
+		r := job.Metadata.Resource
+		hasData := r.UserCPUSecs != nil || r.PeakRSSKB != nil || r.MaxGPUMemMiB != nil
+		if hasData {
+			b.WriteString("\n")
+			b.WriteString(sectionStyle.Render("Resource Usage"))
+			b.WriteString("\n")
+			if r.UserCPUSecs != nil || r.SysCPUSecs != nil {
+				userStr := "0s"
+				sysStr := "0s"
+				if r.UserCPUSecs != nil {
+					userStr = db.FormatDuration(int64(*r.UserCPUSecs))
+				}
+				if r.SysCPUSecs != nil {
+					sysStr = db.FormatDuration(int64(*r.SysCPUSecs))
+				}
+				b.WriteString(labelStyle.Render("CPU Time"))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%s user, %s sys", userStr, sysStr)))
+				b.WriteString("\n")
+			}
+			if r.PeakRSSKB != nil {
+				b.WriteString(labelStyle.Render("Peak Memory"))
+				b.WriteString(valueStyle.Render(tuiFormatMemoryKB(*r.PeakRSSKB)))
+				b.WriteString("\n")
+			}
+			if r.MaxGPUMemMiB != nil {
+				b.WriteString(labelStyle.Render("GPU Memory"))
+				b.WriteString(valueStyle.Render(fmt.Sprintf("%d MiB (peak)", *r.MaxGPUMemMiB)))
+				b.WriteString("\n")
+			}
+		}
+	}
+
 	// Process stats and progress section for running jobs
 	// Reserve a fixed number of lines to prevent log preview from jumping
 	if job.Status == db.StatusRunning {
@@ -3615,6 +3649,17 @@ func parseMiB(mem string) int {
 }
 
 // renderProgressBar renders a progress bar with the given percentage and width
+func tuiFormatMemoryKB(kb int64) string {
+	switch {
+	case kb >= 1024*1024:
+		return fmt.Sprintf("%.1f GB", float64(kb)/(1024*1024))
+	case kb >= 1024:
+		return fmt.Sprintf("%.1f MB", float64(kb)/1024)
+	default:
+		return fmt.Sprintf("%d KB", kb)
+	}
+}
+
 func renderProgressBar(percent int, width int) string {
 	if percent < 0 {
 		percent = 0

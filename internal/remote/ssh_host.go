@@ -238,6 +238,17 @@ func (h *SSHHost) GetJobSamples(jobID int64) (string, error) {
 	return stdout, nil
 }
 
+// GetJobRusage reads the job's resource usage file.
+func (h *SSHHost) GetJobRusage(jobID int64) (string, error) {
+	rusagePattern := session.RusageFilePattern(jobID)
+	cmd := fmt.Sprintf(`f=$(ls -t %s 2>/dev/null | head -1); if [ -n "$f" ]; then cat "$f"; fi`, rusagePattern)
+	stdout, _, err := ssh.RunWithTimeout(h.hostname, cmd, h.timeout)
+	if err != nil {
+		return "", err
+	}
+	return stdout, nil
+}
+
 // TmuxSessionExists checks if a tmux session exists.
 func (h *SSHHost) TmuxSessionExists(sessionName string) (bool, error) {
 	return ssh.TmuxSessionExistsQuickTimeout(h.hostname, sessionName, h.timeout)

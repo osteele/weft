@@ -49,6 +49,8 @@ type MockHost struct {
 	MetadataErr      error
 	SamplesResult    string
 	SamplesErr       error
+	RusageResult     string
+	RusageErr        error
 	TmuxExistsResult bool
 	TmuxExistsErr    error
 	AppendCalls      []QueueEntry
@@ -91,6 +93,10 @@ func (m *MockHost) GetJobMetadata(jobID int64) (map[string]string, error) {
 
 func (m *MockHost) GetJobSamples(jobID int64) (string, error) {
 	return m.SamplesResult, m.SamplesErr
+}
+
+func (m *MockHost) GetJobRusage(jobID int64) (string, error) {
+	return m.RusageResult, m.RusageErr
 }
 
 func (m *MockHost) TmuxSessionExists(sessionName string) (bool, error) {

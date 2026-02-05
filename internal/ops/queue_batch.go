@@ -140,6 +140,8 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 					return updated, err
 				}
 				CacheCompletedJobLog(job)
+				// Fetch resource usage data (best-effort)
+				_, _ = updateJobResourceUsage(database, job, timeout)
 				updated++
 			}
 		}

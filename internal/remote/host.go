@@ -43,6 +43,7 @@ type Host interface {
 	// Metadata operations
 	GetJobMetadata(jobID int64) (map[string]string, error)
 	GetJobSamples(jobID int64) (string, error)
+	GetJobRusage(jobID int64) (string, error)
 
 	// Tmux operations (for non-queue-runner jobs)
 	TmuxSessionExists(sessionName string) (bool, error)

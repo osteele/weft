@@ -51,6 +51,16 @@ func SimplePausedFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.paused", LogDir, jobID)
 }
 
+// SimpleRusageFile returns the resource usage file path for a job (no timestamp)
+func SimpleRusageFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.rusage", LogDir, jobID)
+}
+
+// RusageFilePattern returns a glob pattern to find rusage files for a job ID
+func RusageFilePattern(jobID int64) string {
+	return fmt.Sprintf("%s/%d*.rusage", LogDir, jobID)
+}
+
 // ArchiveCommand returns a shell command that archives existing job files by renaming
 // them with their creation date. This should be run before starting a new job run.
 // Example: 123.log -> 123-20260104-095748.log
@@ -58,7 +68,7 @@ func ArchiveCommand(jobID int64) string {
 	// For each extension, check if file exists and rename it with its mtime
 	// Uses stat to get mtime: stat -c %Y on Linux, stat -f %m on macOS
 	return fmt.Sprintf(`
-		for ext in log status meta pid samples; do
+		for ext in log status meta pid samples rusage; do
 			f="%s/%d.$ext"
 			if [ -f "$f" ]; then
 				mtime=$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)

@@ -158,6 +158,7 @@ type remoteQueue interface {
 	QuickStatus(host string, jobID int64, timeout time.Duration) (quickStatus, error)
 	Metadata(host string, jobID int64, timeout time.Duration) (string, error)
 	Samples(host string, jobID int64, timeout time.Duration) (string, error)
+	Rusage(host string, jobID int64, timeout time.Duration) (string, error)
 }
 
 var queueRemoteClient remoteQueue = sshQueueRemote{}
@@ -275,6 +276,8 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 			return SyncResult{HostContacted: true}, err
 		}
 		CacheCompletedJobLog(job)
+		// Fetch resource usage data (best-effort)
+		_, _ = updateJobResourceUsage(database, job, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
@@ -803,6 +806,16 @@ func (sshQueueRemote) Metadata(host string, jobID int64, timeout time.Duration) 
 func (sshQueueRemote) Samples(host string, jobID int64, timeout time.Duration) (string, error) {
 	samplesPattern := session.SamplesFilePattern(jobID)
 	cmd := fmt.Sprintf(`f=$(ls -t %s 2>/dev/null | head -1); if [ -n "$f" ]; then cat "$f"; fi`, samplesPattern)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
+	if err != nil {
+		return "", err
+	}
+	return stdout, nil
+}
+
+func (sshQueueRemote) Rusage(host string, jobID int64, timeout time.Duration) (string, error) {
+	rusagePattern := session.RusageFilePattern(jobID)
+	cmd := fmt.Sprintf(`f=$(ls -t %s 2>/dev/null | head -1); if [ -n "$f" ]; then cat "$f"; fi`, rusagePattern)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return "", err
