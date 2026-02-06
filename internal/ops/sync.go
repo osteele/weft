@@ -674,6 +674,15 @@ func (sshQueueRemote) ProcessPaused(host string, jobID int64, timeout time.Durat
 	}
 }
 
+// QuickStatus probes the remote host to determine a job's current state.
+//
+// Probe order (each is mutually exclusive via elif):
+//  1. Status file (completed) — definitive, cheapest check
+//  2. Current-job marker — queue runner knows its own state
+//  3. State.json pending array — reliable queue membership
+//  4. Exact PID file — common case for active jobs
+//  5. Pattern-matched PID file — handles restarted/archived jobs
+//  6. Default DEAD — no evidence of running
 func (sshQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duration) (quickStatus, error) {
 	statusPattern := session.StatusFilePattern(jobID)
 	statusFile := session.SimpleStatusFile(jobID)
@@ -685,15 +694,23 @@ func (sshQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duratio
 	// Prioritize exact file (e.g., 2806.status) over archived (2806-*.status) since
 	// ls sorts archived files before current ones lexicographically
 	combinedCmd := fmt.Sprintf(`
+		check_pid_state() {
+			local pid=$1
+			local state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
+			case "$state" in *T*) echo PAUSED ;; "") echo DEAD ;; *) echo RUNNING ;; esac
+		}
+
 		if [ -f %s ]; then
 			status_file=%s
 		else
 			status_file=$(ls %s 2>/dev/null | head -1)
 		fi
+		# 1. Status file (completed)
 		if [ -n "$status_file" ] && [ -f "$status_file" ]; then
 			exit_code=$(cat "$status_file" 2>/dev/null | head -1)
 			mtime=$(stat -c %%Y "$status_file" 2>/dev/null || stat -f %%m "$status_file" 2>/dev/null)
 			echo "${exit_code}|${mtime}"
+		# 2. Current-job marker
 		elif [ -f %s ] && [ "$(cat %s 2>/dev/null)" = "%d" ]; then
 			if [ -f %s ]; then
 				pid_file=%s
@@ -703,54 +720,33 @@ func (sshQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duratio
 			if [ -n "$pid_file" ]; then
 				pid=$(cat "$pid_file" 2>/dev/null | head -1)
 				if [ -n "$pid" ]; then
-					state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
-					if [ -n "$state" ]; then
-						case "$state" in
-							*T*) echo PAUSED ;;
-							*) echo RUNNING ;;
-						esac
-					else
-						echo DEAD
-					fi
+					check_pid_state "$pid"
 				else
 					echo DEAD
 				fi
 			else
 				echo RUNNING
 			fi
-		# Check state file for job in pending array
+		# 3. State.json pending array
 		elif [ -f %s ] && jq -e '.pending | index(%d)' %s >/dev/null 2>&1; then
 			echo QUEUED
+		# 4. Exact PID file
 		elif [ -f %s ]; then
 			pid=$(cat %s 2>/dev/null | head -1)
 			if [ -n "$pid" ]; then
-				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
-				if [ -n "$state" ]; then
-					case "$state" in
-						*T*) echo PAUSED ;;
-						*) echo RUNNING ;;
-					esac
-				else
-					echo DEAD
-				fi
+				check_pid_state "$pid"
 			else
 				echo DEAD
 			fi
+		# 5. Pattern-matched PID file
 		elif pid_file=$(ls %s 2>/dev/null | head -1) && [ -n "$pid_file" ]; then
 			pid=$(cat "$pid_file" 2>/dev/null | head -1)
 			if [ -n "$pid" ]; then
-				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
-				if [ -n "$state" ]; then
-					case "$state" in
-						*T*) echo PAUSED ;;
-						*) echo RUNNING ;;
-					esac
-				else
-					echo DEAD
-				fi
+				check_pid_state "$pid"
 			else
 				echo DEAD
 			fi
+		# 6. Default DEAD
 		else
 			echo DEAD
 		fi

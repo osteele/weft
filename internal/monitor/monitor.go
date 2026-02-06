@@ -17,9 +17,9 @@ import (
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/queuerunner"
-	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/slack"
+	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 // Default intervals for background operations.
@@ -78,7 +78,7 @@ type JobLogResult struct {
 // ProcessStatsResult holds the result of a periodic process stats fetch.
 type ProcessStatsResult struct {
 	JobID int64
-	Stats *remote.ProcessStats
+	Stats *ssh.ProcessStats
 	Err   error
 }
 
@@ -385,15 +385,15 @@ func (m *Monitor) fetchWatchedJobLog() {
 
 	logFile, _ := logfiles.Resolve(job)
 	cmd := fmt.Sprintf("tail -500 %s 2>&1", logFile)
-	stdout, stderr, err := remote.TryRunWithTimeout(job.Host, cmd, 15*time.Second)
+	stdout, stderr, err := ssh.TryRunWithTimeout(job.Host, cmd, 15*time.Second)
 
 	connError := false
 	if err != nil {
-		if errors.Is(err, remote.ErrPoolBusy) {
+		if errors.Is(err, ssh.ErrPoolBusy) {
 			return
 		}
 		combined := stdout + stderr
-		if remote.IsConnectionError(combined) {
+		if ssh.IsConnectionError(combined) {
 			connError = true
 		}
 	}
@@ -419,8 +419,8 @@ func (m *Monitor) fetchWatchedProcessStats() {
 	}
 
 	pidFile := session.JobPidFile(job.ID, job.StartTime)
-	stats, err := remote.TryGetProcessStats(job.Host, pidFile)
-	if err != nil && errors.Is(err, remote.ErrPoolBusy) {
+	stats, err := ssh.TryGetProcessStats(job.Host, pidFile)
+	if err != nil && errors.Is(err, ssh.ErrPoolBusy) {
 		return
 	}
 
@@ -631,7 +631,7 @@ func (m *Monitor) refreshHostInfo(hostName string) {
 	defer m.hostRefreshing.Delete(hostName)
 
 	_, host, err := ops.TryFetchAndCacheHostInfo(m.db, hostName, 10*time.Second)
-	if err != nil && errors.Is(err, remote.ErrPoolBusy) {
+	if err != nil && errors.Is(err, ssh.ErrPoolBusy) {
 		return // Pool busy, skip this refresh cycle
 	}
 	if err != nil {
@@ -857,7 +857,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 		if queueRunnerCount > 0 {
 			started, err := ensureQueueRunnerStarted(host)
 			if err != nil {
-				if !remote.IsConnectionError(err.Error()) {
+				if !ssh.IsConnectionError(err.Error()) {
 					result.QueueRunnerErrors = append(result.QueueRunnerErrors, fmt.Sprintf("%s: %v", host, err))
 				}
 			} else if started {

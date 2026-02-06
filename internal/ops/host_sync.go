@@ -6,6 +6,7 @@ import (
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/remote"
+	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 // HostSyncOptions configures a full host sync.
@@ -241,7 +242,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		if queueRunnerCount > 0 {
 			started, err := ensureQueueRunner(host)
 			if err != nil {
-				if !remote.IsConnectionError(err.Error()) {
+				if !ssh.IsConnectionError(err.Error()) {
 					result.QueueRunnerError = err.Error()
 				}
 			} else {

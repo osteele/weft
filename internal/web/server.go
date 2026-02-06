@@ -17,7 +17,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/logfiles"
 	"github.com/osteele/remote-jobs/internal/monitor"
 	"github.com/osteele/remote-jobs/internal/progress"
-	"github.com/osteele/remote-jobs/internal/remote"
+	"github.com/osteele/remote-jobs/internal/ssh"
 )
 
 type Config struct {
@@ -666,7 +666,7 @@ func (s *Server) fetchJobProgress(job *db.Job) *progress.Progress {
 	defer cancel()
 
 	grepCmd := fmt.Sprintf("grep -i 'Progress:' %s 2>/dev/null | tail -1", logFile)
-	stdout, _, err := remote.RunWithContext(ctx, job.Host, grepCmd)
+	stdout, _, err := ssh.RunWithContext(ctx, job.Host, grepCmd)
 	if err != nil || strings.TrimSpace(stdout) == "" {
 		return nil
 	}
