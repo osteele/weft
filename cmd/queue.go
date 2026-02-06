@@ -194,6 +194,8 @@ var (
 	queueAfterAny       int64
 	queueNoStart        bool
 	queueDraft          bool
+	queueWait           bool
+	queueNoWait         bool
 	queueEditDepends    []string
 	queueEditDependsAny []string
 	queueEditClearDeps  bool
@@ -267,6 +269,8 @@ func init() {
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
 	queueAddCmd.Flags().BoolVar(&queueNoStart, "no-start", false, "Don't auto-start the queue runner")
 	queueAddCmd.Flags().BoolVar(&queueDraft, "draft", false, "Create the job in draft status without syncing to the remote queue")
+	queueAddCmd.Flags().BoolVar(&queueWait, "wait", false, "Wait for job to complete before returning")
+	queueAddCmd.Flags().BoolVar(&queueNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 
 }
 
@@ -312,6 +316,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	if queueAfter > 0 && queueAfterAny > 0 {
 		return fmt.Errorf("cannot use both --after/--depends-on and --after-any")
+	}
+	if queueWait && queueNoWait {
+		return fmt.Errorf("--wait and --no-wait cannot be used together")
+	}
+	if queueWait && queueDraft {
+		return fmt.Errorf("--wait cannot be combined with --draft")
 	}
 
 	var deps []queueDependency
@@ -405,6 +415,11 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	}
 	if queueAfterAny > 0 {
 		fmt.Printf("  After job: %d (will wait for completion)\n", queueAfterAny)
+	}
+
+	// Handle --wait: block until job completes
+	if queueWait {
+		return waitForQueuedJobCompletion(database, result.JobID, result.Deferred)
 	}
 
 	// Auto-start queue runner unless --no-start is specified
