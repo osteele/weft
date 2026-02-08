@@ -19,6 +19,7 @@ type QueueEntry struct {
 	EnvVars      []string
 	DepSpec      string
 	CPUAllotment *int
+	Tags         []string
 }
 
 // Host provides semantic operations on a remote host.

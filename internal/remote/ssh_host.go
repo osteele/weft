@@ -74,6 +74,7 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 			Env:  entry.EnvVars,
 			Deps: entry.DepSpec,
 			CPU:  entry.CPUAllotment,
+			Tags: entry.Tags,
 		},
 	}
 
@@ -329,4 +330,5 @@ type commandJob struct {
 	Env  []string `json:"env,omitempty"`
 	Deps string   `json:"deps,omitempty"`
 	CPU  *int     `json:"cpu,omitempty"`
+	Tags []string `json:"tags,omitempty"`
 }

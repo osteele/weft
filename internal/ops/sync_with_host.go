@@ -178,12 +178,14 @@ func SyncQueueRunnerJobWithProber(
 	// processed by the queue runner (which would cause duplicate entries in the pending array).
 	if inQueueResult == remote.ProbeFalse && job.Status == db.StatusQueued && job.PendingStatus == nil && job.LastSyncedStatus != db.StatusQueued {
 		entry := remote.QueueEntry{
-			JobID:       job.ID,
-			WorkingDir:  job.WorkingDir,
-			Command:     job.Command,
-			Description: job.Description,
-			EnvVars:     artifacts.MergeEnvVars(job.EnvVars, job.ID),
-			DepSpec:     job.DepSpec,
+			JobID:        job.ID,
+			WorkingDir:   job.WorkingDir,
+			Command:      job.Command,
+			Description:  job.Description,
+			EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
+			DepSpec:      job.DepSpec,
+			CPUAllotment: job.CPUAllotment,
+			Tags:         job.Tags,
 		}
 		if err := host.AppendToQueue(entry); err != nil {
 			return SyncResult{HostContacted: true}, err
