@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 41
+# BUILD: 44
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -68,6 +68,18 @@ DECAY_STEP=10
 MIN_ALLOTMENT=10
 MAX_ALLOTMENT=100
 
+# Benchmark tag: system-wide idle thresholds
+BENCHMARK_CPU_THRESHOLD=${REMOTE_JOBS_BENCHMARK_CPU:-5}         # max CPU % (instantaneous)
+BENCHMARK_RAM_THRESHOLD=${REMOTE_JOBS_BENCHMARK_RAM:-20}        # max RAM % (of available)
+BENCHMARK_GPU_THRESHOLD=${REMOTE_JOBS_BENCHMARK_GPU:-5}         # max GPU utilization %
+BENCHMARK_VRAM_THRESHOLD=${REMOTE_JOBS_BENCHMARK_VRAM:-5}       # max VRAM usage %
+BENCHMARK_IDLE_SAMPLES=${REMOTE_JOBS_BENCHMARK_SAMPLES:-3}      # consecutive idle checks required
+BENCHMARK_CHECK_INTERVAL=${REMOTE_JOBS_BENCHMARK_INTERVAL:-10}  # seconds between checks
+
+# Benchmark idle tracking (global, persists across loop iterations)
+BENCHMARK_IDLE_COUNT=0
+BENCHMARK_LAST_REASON=""
+
 SAMPLE_COUNT=$((SAMPLE_WINDOW / SAMPLE_INTERVAL))
 
 CPU_COUNT=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
@@ -86,7 +98,7 @@ extract_command_signature() {
     local cmd="$1"
     # Try to find a Python/shell script name
     local script
-    script=$(echo "$cmd" | grep -oE '[a-zA-Z0-9_/-]+\.(py|sh)' | head -1)
+    script=$(echo "$cmd" | grep -oE '[a-zA-Z0-9_/-]+\.(py|sh)' | head -1 || true)
     if [ -n "$script" ]; then
         # Return just the basename
         basename "$script"
@@ -511,6 +523,7 @@ write_rusage_file() {
             [ -n "$sys_cpu" ] && echo "sys_cpu_secs=$sys_cpu"
             [ -n "$peak_rss" ] && echo "peak_rss_kb=$peak_rss"
             [ -n "$max_gpu" ] && echo "max_gpu_mem_mib=$max_gpu"
+            true  # ensure block exits 0 even if last test fails under set -e
         } > "$rusage_file"
     fi
 }
@@ -635,11 +648,135 @@ any_running_exclusive() {
 
     local id
     for id in $ids; do
-        if job_has_exclusive_tag "$id"; then
+        if job_has_exclusive_or_benchmark_tag "$id"; then
             return 0
         fi
     done
     return 1
+}
+
+# Check if a job has the "benchmark" tag
+job_has_benchmark_tag() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+    echo "$job_data" | jq -e '.tags // [] | index("benchmark") != null' &>/dev/null
+}
+
+# Check if a job has either "exclusive" or "benchmark" tag
+job_has_exclusive_or_benchmark_tag() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+    echo "$job_data" | jq -e '.tags // [] | (index("exclusive") != null or index("benchmark") != null)' &>/dev/null
+}
+
+# Instantaneous CPU usage percentage (of total capacity).
+# Uses /proc/stat delta over 1 second on Linux, falls back to load average on macOS.
+host_cpu_instant_pct() {
+    if [ -f /proc/stat ]; then
+        # Read two samples 1 second apart from /proc/stat
+        local line1 line2
+        line1=$(head -1 /proc/stat)
+        sleep 1
+        line2=$(head -1 /proc/stat)
+        # Parse cpu line: cpu user nice system idle iowait irq softirq steal
+        awk -v l1="$line1" -v l2="$line2" 'BEGIN {
+            split(l1, a); split(l2, b)
+            # Fields 2-9 are user nice system idle iowait irq softirq steal
+            idle1 = a[5] + a[6]; idle2 = b[5] + b[6]
+            total1 = 0; total2 = 0
+            for (i = 2; i <= 9; i++) { total1 += a[i]; total2 += b[i] }
+            dt = total2 - total1
+            if (dt <= 0) { print 0; exit }
+            di = idle2 - idle1
+            printf "%.0f", ((dt - di) * 100.0) / dt
+        }'
+    else
+        # macOS fallback: use load average / CPU count
+        local load
+        load=$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')
+        awk -v load="$load" -v cpus="$CPU_COUNT" 'BEGIN {
+            pct = (load * 100.0) / cpus
+            if (pct > 100) pct = 100
+            printf "%.0f", pct
+        }'
+    fi
+}
+
+# RAM usage percentage (based on "available" memory, not "used").
+host_ram_usage_pct() {
+    if command -v free &>/dev/null; then
+        # Linux: use free -b, "available" column
+        free -b | awk '/^Mem:/ {
+            total = $2; available = $7
+            if (total <= 0) { print 0; exit }
+            printf "%.0f", ((total - available) * 100.0) / total
+        }'
+    else
+        # macOS fallback
+        local page_size free_pages total_bytes
+        page_size=$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)
+        free_pages=$(vm_stat 2>/dev/null | awk '/Pages free/ {gsub(/\./,"",$3); print $3}')
+        total_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+        awk -v ps="$page_size" -v fp="${free_pages:-0}" -v tb="$total_bytes" 'BEGIN {
+            if (tb <= 0) { print 0; exit }
+            free_bytes = fp * ps
+            printf "%.0f", ((tb - free_bytes) * 100.0) / tb
+        }'
+    fi
+}
+
+# Max GPU utilization % across all GPUs. Empty string if nvidia-smi unavailable.
+host_gpu_utilization_pct() {
+    command -v nvidia-smi &>/dev/null || return 0
+    nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null \
+        | awk 'BEGIN {max=0} {v=$1+0; if(v>max) max=v} END {print max}'
+}
+
+# Max VRAM usage % across all GPUs. Empty string if nvidia-smi unavailable.
+host_gpu_vram_pct() {
+    command -v nvidia-smi &>/dev/null || return 0
+    nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null \
+        | awk -F',' 'BEGIN {max=0} {
+            used=$1+0; total=$2+0
+            if (total > 0) { pct = (used * 100.0) / total; if (pct > max) max = pct }
+        } END { printf "%.0f", max }'
+}
+
+# Check if system is idle enough for benchmark jobs.
+# Prints blocking reason to stdout if NOT idle, returns 1.
+# Returns 0 (with no output) if all metrics are below thresholds.
+system_is_idle() {
+    local cpu ram gpu vram reasons=""
+
+    cpu=$(host_cpu_instant_pct)
+    if [ "$cpu" -gt "$BENCHMARK_CPU_THRESHOLD" ]; then
+        reasons="cpu=${cpu}%>${BENCHMARK_CPU_THRESHOLD}%"
+    fi
+
+    ram=$(host_ram_usage_pct)
+    if [ "$ram" -gt "$BENCHMARK_RAM_THRESHOLD" ]; then
+        reasons="${reasons:+$reasons, }ram=${ram}%>${BENCHMARK_RAM_THRESHOLD}%"
+    fi
+
+    if command -v nvidia-smi &>/dev/null; then
+        gpu=$(host_gpu_utilization_pct)
+        if [ -n "$gpu" ] && [ "$gpu" -gt "$BENCHMARK_GPU_THRESHOLD" ]; then
+            reasons="${reasons:+$reasons, }gpu=${gpu}%>${BENCHMARK_GPU_THRESHOLD}%"
+        fi
+
+        vram=$(host_gpu_vram_pct)
+        if [ -n "$vram" ] && [ "$vram" -gt "$BENCHMARK_VRAM_THRESHOLD" ]; then
+            reasons="${reasons:+$reasons, }vram=${vram}%>${BENCHMARK_VRAM_THRESHOLD}%"
+        fi
+    fi
+
+    if [ -n "$reasons" ]; then
+        echo "$reasons"
+        return 1
+    fi
+    return 0
 }
 
 # Check if a job is already completed
@@ -1274,11 +1411,40 @@ while true; do
     fi
     # If the next job has "exclusive" tag, wait until no other jobs are running
     running_jobs=$(running_count)
-    if job_has_exclusive_tag "$POPPED_JOB" && [ "$running_jobs" -gt 0 ]; then
+    if job_has_exclusive_or_benchmark_tag "$POPPED_JOB" && [ "$running_jobs" -gt 0 ]; then
         add_pending "$POPPED_JOB"
         save_state
         sleep 5
         continue
+    fi
+
+    # If next job has "benchmark" tag, wait for system-wide idle
+    if job_has_benchmark_tag "$POPPED_JOB"; then
+        reason=""
+        reason=$(system_is_idle) || true
+        if [ -n "$reason" ]; then
+            # System not idle — log reason (only when it changes)
+            if [ "$reason" != "$BENCHMARK_LAST_REASON" ]; then
+                log_op "benchmark.waiting" "$POPPED_JOB" "$reason"
+                BENCHMARK_LAST_REASON="$reason"
+            fi
+            BENCHMARK_IDLE_COUNT=0
+            add_pending "$POPPED_JOB"
+            save_state
+            sleep "$BENCHMARK_CHECK_INTERVAL"
+            continue
+        fi
+        BENCHMARK_IDLE_COUNT=$((BENCHMARK_IDLE_COUNT + 1))
+        if [ "$BENCHMARK_IDLE_COUNT" -lt "$BENCHMARK_IDLE_SAMPLES" ]; then
+            add_pending "$POPPED_JOB"
+            save_state
+            sleep "$BENCHMARK_CHECK_INTERVAL"
+            continue
+        fi
+        # System confirmed idle
+        log_op "benchmark.idle_confirmed" "$POPPED_JOB" "samples=$BENCHMARK_IDLE_COUNT"
+        BENCHMARK_IDLE_COUNT=0
+        BENCHMARK_LAST_REASON=""
     fi
 
     # Check capacity before starting
