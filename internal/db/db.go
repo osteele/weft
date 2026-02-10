@@ -837,6 +837,18 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 	return err
 }
 
+// RequeueByID resets a job back to queued status for user-initiated requeue.
+// Unlike MarkQueuedByID, this does NOT set last_synced_status to queued,
+// so the sync path will re-append the job to the remote queue if the immediate
+// append fails.
+func RequeueByID(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+		StatusQueued, id,
+	)
+	return err
+}
+
 // SetQueuedAtNow sets queued_at to the current time if it's not already set.
 // Called when a job is successfully added to the remote queue.
 func SetQueuedAtNow(db *sql.DB, jobID int64) error {

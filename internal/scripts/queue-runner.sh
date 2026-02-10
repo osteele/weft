@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 44
+# BUILD: 45
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -239,6 +239,8 @@ save_state() {
 # Add job to pending list (at end)
 add_pending() {
     local job_id="$1"
+    # Remove existing entry to prevent duplicates (same pattern as priority_pending)
+    STATE_PENDING=$(echo "$STATE_PENDING" | grep -v "^${job_id}$" || true)
     if [ -z "$STATE_PENDING" ]; then
         STATE_PENDING="$job_id"
     else

@@ -837,7 +837,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	var oldStatus string
 	if statusChanged && editStatus == db.StatusQueued {
 		oldStatus = job.Status
-		if err := db.MarkQueuedByID(database, jobID); err != nil {
+		if err := db.RequeueByID(database, jobID); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}
 		job.Status = db.StatusQueued
@@ -933,19 +933,18 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	// Push to remote queue
 	deferredUpdate := false
 	if wasRequeued {
-		// Job was requeued - create new entry on remote
-		entry := ops.QueueEntry{
-			JobID:       job.ID,
-			WorkingDir:  job.EffectiveWorkingDir(),
-			Command:     job.Command,
-			Description: job.Description,
-			EnvVars:     envVars,
-			DepSpec:     depSpec,
+		// Reload job to get all fields (including tags, CPU allotment)
+		job, err = db.GetJobByID(database, jobID)
+		if err != nil {
+			return fmt.Errorf("reload job: %w", err)
 		}
-		if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
+		if err := ops.AppendJobToQueue(job, ops.DefaultOptions().Timeout); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
 			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.Host)
 			deferredUpdate = true
+		} else {
+			_ = db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued)
+			_ = db.SetQueuedAtNow(database, job.ID)
 		}
 	} else {
 		// Job was already queued - update existing entry via sync path

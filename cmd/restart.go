@@ -87,22 +87,11 @@ func restartJob(database *sql.DB, jobID int64) error {
 
 	oldStatus := job.Status
 
-	// Change status to queued
-	if err := db.MarkQueuedByID(database, jobID); err != nil {
-		return fmt.Errorf("update status to queued: %w", err)
+	result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
+	if err != nil {
+		return err
 	}
-
-	// Push to remote queue
-	entry := ops.QueueEntry{
-		JobID:       job.ID,
-		WorkingDir:  job.EffectiveWorkingDir(),
-		Command:     job.Command,
-		Description: job.Description,
-		EnvVars:     job.EnvVars,
-		DepSpec:     job.DepSpec,
-	}
-	if err := ops.AppendQueueEntry(job.Host, entry, ops.AppendQueueEntryOptions{}); err != nil {
-		// Best effort - job is queued locally, sync will eventually push it
+	if result.Deferred {
 		fmt.Printf("Job saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", job.Host)
 	}
 
