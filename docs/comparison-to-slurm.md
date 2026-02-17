@@ -10,14 +10,16 @@ Use **remote-jobs** when:
 - You have a few personal machines (like cool30, cool100, studio)
 - You SSH from a laptop that sleeps/travels
 - You want simple job tracking without cluster infrastructure
-- You manually decide resource allocation
+- You need jobs to keep running when your laptop is off
 
 Use **SLURM** when:
 - Shared cluster with multiple users
-- Need automatic resource allocation
+- Need automatic resource allocation across many nodes
 - Want job arrays for parameter sweeps
 - Need accounting/quotas
-- Jobs span multiple nodes
+- Jobs span multiple nodes (MPI)
+
+**Hybrid**: remote-jobs has an experimental SLURM backend that can act as a frontend for SLURM clusters, though this has not been tested recently.
 
 ## Architecture Comparison
 
@@ -26,11 +28,12 @@ Use **SLURM** when:
 | Aspect | remote-jobs | SLURM |
 |--------|-------------|-------|
 | **Architecture** | Decentralized, SSH-based | Centralized cluster management |
-| **Controller** | None (client pulls state) | `slurmctld` daemon + `slurmd` on each node |
+| **Controller** | Autonomous queue runner per host | `slurmctld` daemon + `slurmd` on each node |
 | **Database** | SQLite on client laptop | Cluster-wide state database |
 | **Communication** | Pull model: client queries hosts | Push model: nodes report to controller |
 | **Client Requirements** | SSH access only | Must connect to cluster network |
-| **Daemon Installation** | None required | Requires daemons on all nodes |
+| **Daemon Installation** | None (queue runner auto-deployed) | Requires daemons on all nodes |
+| **SLURM Integration** | Optional: can submit via sbatch | N/A |
 
 ### Key Architectural Difference: Occasionally-Connected Operation
 
@@ -47,6 +50,7 @@ Laptop (may disconnect)
 When laptop disconnects:
    - Queue runners continue processing jobs independently
    - Jobs complete, new queued jobs start automatically
+   - Dependencies are resolved on-host without the laptop
    - Laptop syncs state when it reconnects
 ```
 
@@ -65,45 +69,38 @@ slurmctld ◄────────►│  Node 2 (slurmd)  │◄────
 
 **Why this matters:**
 
-- **remote-jobs**: Your laptop can sleep, lose network, or be off entirely. The remote queue runners are self-sufficient—they read from the queue file, start jobs, handle completions, and log everything locally. When you reconnect, your laptop just syncs state.
+- **remote-jobs**: Your laptop can sleep, lose network, or be off entirely. The remote queue runners are self-sufficient — they read from the queue file, resolve dependencies, start jobs, handle completions, and log everything locally. When you reconnect, your laptop just syncs state.
 
 - **SLURM**: The controller (`slurmctld`) must be reachable for job submission (`sbatch`), status queries (`squeue`), and cancellation (`scancel`). The controller is the single source of truth and orchestrates all job scheduling.
-
-**Could remote-jobs be a layer on top of SLURM?**
-
-Not easily. The occasionally-connected capability is baked into remote-jobs at the architectural level. To achieve the same with SLURM, you'd need to build:
-1. A local queue that caches job submissions when disconnected
-2. A sync mechanism that submits cached jobs when SLURM becomes reachable
-3. Local state caching for offline status viewing
-4. Conflict resolution when local and SLURM state diverge
-
-This would essentially rebuild remote-jobs on top of SLURM, adding complexity without clear benefit for the target use case (personal machines, single user).
 
 ## Feature Comparison
 
 ### 1. Resource Management
 
 **remote-jobs:**
-- Manual host selection
-- No resource allocation
-- No awareness of CPU/GPU/memory availability
+- Manual host selection (user picks which machine)
+- Per-job CPU allotments control concurrency (queue runner keeps total CPU under a target cap)
+- `exclusive` tag for jobs needing sole access to a host's resources
+- `benchmark` tag waits for system-wide idle (CPU, RAM, GPU, VRAM below thresholds)
+- No automatic host selection based on resource requirements
 
 **SLURM:**
 ```bash
 sbatch --gres=gpu:a100:2 --mem=64G --cpus-per-task=16 job.sh
 ```
-- Automatic allocation based on requirements
-- Tracks available resources across cluster
-- Queues jobs until resources available
-- GPU/CPU/memory reservation
+- Automatic allocation based on declared requirements
+- Tracks available resources across the entire cluster
+- Queues jobs until matching resources are available
+- GPU/CPU/memory reservation with cgroups enforcement
 
 ### 2. Scheduling
 
 **remote-jobs:**
-- FIFO queue per host with per-job CPU allotments and a concurrency cap
-- No priority system
-- No fairshare
-- No backfill scheduling
+- FIFO queue per host with concurrent job execution
+- CPU allotment system: each job declares expected CPU usage; the runner starts multiple jobs until the host utilization target is reached
+- Learned CPU history (exponential moving average) for accurate allotment estimates
+- `exclusive` and `benchmark` tags for isolation when needed
+- No priority system, fairshare, or backfill scheduling
 
 **SLURM:**
 - Sophisticated scheduling algorithms
@@ -131,8 +128,20 @@ sbatch --nodes=4 --ntasks-per-node=8 mpi_job.sh
 ### 4. Job Dependencies & Workflows
 
 **remote-jobs:**
-- Sequential queue per host only
-- No dependency tracking between jobs
+```bash
+# Run after job 42 completes successfully
+remote-jobs run --after 42 cool30 'python analyze.py'
+
+# Run regardless of job 42's exit code
+remote-jobs run --after-any 42 cool30 'python cleanup.py'
+
+# YAML plans for multi-job workflows
+remote-jobs plan run workflow.yaml
+```
+- `--after` (success required) and `--after-any` (any completion) dependency flags
+- YAML plan files with `parallel` and `series` blocks for multi-job workflows
+- Dependencies resolved on-host by the queue runner (no laptop needed)
+- No job arrays
 
 **SLURM:**
 ```bash
@@ -145,7 +154,7 @@ sbatch --array=1-100%10 sweep.sh
 # Complex dependency graphs
 sbatch --dependency=afterok:12345:12346,afterany:12347 job.sh
 ```
-- Complex dependency graphs
+- Complex dependency graphs with multiple dependency types
 - Job arrays for parameter sweeps
 - Workflow management (singleton, afternotok, etc.)
 
@@ -153,7 +162,7 @@ sbatch --dependency=afterok:12345:12346,afterany:12347 job.sh
 
 **remote-jobs:**
 - Single user
-- No resource limits
+- No resource limits or quotas
 - No accounting
 - No isolation between users
 
@@ -170,21 +179,28 @@ sbatch --dependency=afterok:12345:12346,afterany:12347 job.sh
 | Feature | remote-jobs | SLURM |
 |---------|-------------|-------|
 | **Submit job** | `remote-jobs run <host> <cmd>` | `sbatch script.sh` |
+| **Queue job** | `remote-jobs queue add <host> <cmd>` | `sbatch script.sh` |
 | **Interactive job** | `ssh <host>` | `srun --pty bash` |
 | **Job array** | Not supported | `--array=1-100` |
 | **Kill job** | `remote-jobs kill <id>` | `scancel <jobid>` |
+| **Pause/resume** | `remote-jobs pause/resume <id>` | `scontrol hold/release` |
 | **Job status** | `remote-jobs job status <id>` | `squeue -j <jobid>` |
 | **Job history** | `remote-jobs job list` | `sacct` |
-| **Modify queued job** | Not supported | `scontrol update job` |
-| **Hold/release** | Not supported | `scontrol hold/release` |
+| **Dependencies** | `--after <id>`, `--after-any <id>` | `--dependency=afterok:<id>` |
+| **Modify queued job** | `remote-jobs queue edit <id>` | `scontrol update job` |
+| **Reorder queue** | `remote-jobs queue front <id>` | Priority/QoS |
+| **Job plans** | `remote-jobs plan run <file>` | Not built-in (workflow managers) |
 
 ### 7. Resource Visibility
 
 **remote-jobs:**
-- `remote-jobs tui` shows host info (cached)
-- `remote-jobs host info <host>` shows system details
-- `remote-jobs host load <host>` shows current load
-- Manual per-host checking
+- TUI with split-screen job list and detail pane
+- Web UI for browser-based monitoring (`remote-jobs web`)
+- Real-time CPU/GPU stats for running jobs
+- Progress tracking (parses `Progress: N%` or `Progress: N/M` from logs)
+- Per-job resource usage sampling
+- Host info and load commands
+- AI-generated job descriptions (via ollama)
 
 **SLURM:**
 ```bash
@@ -202,6 +218,7 @@ sacct <jobid>      # Historical resource usage
 **remote-jobs:**
 - User manages environment setup
 - Command runs in user's shell
+- Environment variables can be passed per job
 - No module system integration
 
 **SLURM:**
@@ -210,6 +227,24 @@ sacct <jobid>      # Historical resource usage
 - Can load specific module versions
 - Reproducible environments
 
+### 9. SLURM Backend
+
+remote-jobs includes an experimental SLURM backend that can submit jobs to SLURM clusters:
+
+```bash
+# If the remote host has SLURM, remote-jobs automatically uses sbatch
+remote-jobs run slurm-host 'python train.py'
+```
+
+- Auto-detects SLURM availability on remote hosts
+- Submits via `sbatch`, tracks via `squeue`/`sacct`, cancels via `scancel`
+- Maps SLURM states to remote-jobs status codes
+- Provides the same offline queueing and TUI on top of SLURM infrastructure
+
+> **Note**: The SLURM backend has not been tested recently and may need updates. The core SSH/tmux-based queue system is the primary and well-tested path.
+
+This means remote-jobs is not strictly an alternative to SLURM — it can also be a more ergonomic frontend for it.
+
 ## What remote-jobs Does Better
 
 ### 1. Works from Disconnected Laptop
@@ -217,8 +252,9 @@ sacct <jobid>      # Historical resource usage
 **remote-jobs:**
 - Queue jobs while laptop is on Wi-Fi
 - Jobs continue running when laptop sleeps
+- Dependencies resolve on-host without the laptop
 - Check status when laptop wakes up
-- No VPN required if hosts are on different networks
+- Offline log cache for viewing completed job output without SSH
 
 **SLURM:**
 - Requires connection to cluster network
@@ -230,8 +266,8 @@ sacct <jobid>      # Historical resource usage
 **remote-jobs:**
 - Install single binary on laptop
 - Just needs SSH keys
-- No daemons on remote hosts
-- Works with any Linux machine you have SSH access to
+- Queue runner script auto-deployed to remote hosts
+- Works with any Linux/macOS machine you have SSH access to
 
 **SLURM:**
 - Install and configure `slurmctld` (controller)
@@ -244,10 +280,12 @@ sacct <jobid>      # Historical resource usage
 
 **remote-jobs:**
 ```bash
-# Host is unreachable right now
+# Host is unreachable right now — no problem
 remote-jobs run cool30 'python train.py'
-# CLI records the job locally and appends it when the host is reachable
+# Job recorded locally, synced when host comes back
 ```
+- All operations (run, kill, queue edits) work offline
+- Deferred operations replay automatically on reconnect
 
 **SLURM:**
 - Controller must be reachable to submit jobs
@@ -256,8 +294,8 @@ remote-jobs run cool30 'python train.py'
 ### 4. Simplicity
 
 **remote-jobs:**
-- Simple mental model: SSH + tmux + database
-- Easy to debug (just SSH to host)
+- Simple mental model: SSH + tmux + SQLite
+- Easy to debug (SSH to host, check queue files)
 - Minimal abstraction
 - Perfect for 2-5 machines
 
@@ -267,146 +305,54 @@ remote-jobs run cool30 'python train.py'
 - Harder to debug
 - Overkill for small setups
 
-### 5. Personal Workflow
+### 5. Personal Workflow Features
 
 **remote-jobs:**
-- Designed for individual researchers
-- TUI optimized for personal job tracking
+- TUI and web UI optimized for personal job tracking
 - Slack notifications to your personal workspace
-- Your laptop is the source of truth
+- AI-generated job descriptions
+- Progress bar parsing from job output
+- Job plans (YAML) for orchestrating multi-step workflows
+- Pause/resume running jobs
 
 **SLURM:**
 - Designed for shared clusters
 - Multi-user features add complexity
 - Centralized job history
+- No built-in progress parsing or AI features
 
-## Potential Enhancements to Bridge the Gap
+## Potential Enhancements
 
-Some features that could make `remote-jobs` more SLURM-like without sacrificing its design philosophy:
+Features that could further bridge the gap without sacrificing remote-jobs' design philosophy:
 
 ### 1. Resource-Aware Scheduling
 
 ```bash
 # Automatically picks cool30 or cool100 based on available GPUs
 remote-jobs run --require gpu:2,mem:32G 'python train.py'
-
-# Pool of hosts, schedules to first available
-remote-jobs queue add --pool ml-cluster 'python train.py'
 ```
-
-**Implementation:**
-- Query host resources during sync
-- Track GPU/CPU/memory availability
-- Schedule to host with required resources
 
 ### 2. Job Arrays
 
 ```bash
 # Submit 100 jobs for hyperparameter sweep
 remote-jobs run --array 1-100 cool30 'python sweep.py --param $TASK_ID'
-
-# Limit concurrent jobs
-remote-jobs run --array 1-100%10 cool30 'python sweep.py --param $TASK_ID'
 ```
 
-**Implementation:**
-- Create multiple job records with array ID
-- Expand `$TASK_ID` environment variable
-- Respect concurrency limit in queue runner
-
-### 3. Job Dependencies
-
-```bash
-# Run after jobs 42 and 43 complete successfully
-remote-jobs run --after 42,43 cool30 'python analyze.py'
-
-# Run regardless of success/failure
-remote-jobs run --after-any 42 cool30 'python cleanup.py'
-```
-
-**Implementation:**
-- Add dependency tracking to database
-- Check dependency status before starting job
-- Support multiple dependency types
-
-### 4. Multi-Host Queue
+### 3. Multi-Host Queue
 
 ```bash
 # Pool = [cool30, cool100, studio], schedules to first available
 remote-jobs queue add --pool ml-cluster 'python train.py'
 ```
 
-**Implementation:**
-- Define host pools in config
-- Queue runner checks all pool hosts
-- Schedule to first host with available resources
-
-### 5. Better Resource Tracking
-
-- Track actual GPU/CPU usage during job execution
-- Show GPU utilization in TUI
-- Suggest underutilized hosts
-- Historical resource usage per job
-
-## Use Case: Your Research Workflow
-
-For managing research jobs on cool30/cool100/studio:
-
-### Why remote-jobs is Ideal
-
-✅ **You're the only user** - No need for multi-user features
-✅ **Work from laptop** - Can queue jobs from anywhere
-✅ **Laptop travels/sleeps** - Jobs persist, sync when reconnected
-✅ **Simple per-host queues** - Sufficient for your workflow
-✅ **Zero infrastructure** - No daemons to maintain
-✅ **Offline queueing** - Queue when host unreachable (e.g., cool30 on Tsinghua network)
-
-### Why SLURM Would Be Overkill
-
-❌ **Requires infrastructure** - Install slurmctld + slurmd on each machine
-❌ **Needs always-on controller** - Can't run from laptop
-❌ **Multi-user complexity** - Features you don't need
-❌ **Network requirements** - Must be on cluster network
-❌ **More to maintain** - Daemons, configs, accounting DB
-
-### What You'd Benefit From
-
-1. **Resource-aware scheduling** - "Run this wherever there's a free GPU"
-2. **Job arrays** - Hyperparameter sweeps
-3. **Better monitoring** - Real-time GPU utilization
-4. **Multi-host queue** - Pool of [cool30, cool100, studio]
-
-## Recent Fixes: Status Synchronization
-
-The sync bug we recently fixed (jobs showing "running" in list but "dead" in status) illustrates a fundamental difference:
-
-### SLURM Approach
-- Centralized controller knows true state
-- Nodes report status to controller
-- Single source of truth
-- No synchronization lag
-
-### remote-jobs Approach (Before Fix)
-- Decentralized: client polls each host
-- Fast sync optimization skipped queue jobs
-- Temporary inconsistency between commands
-- Database could be stale
-
-### remote-jobs Approach (After Fix)
-- Optimized single-command status check
-- Fast sync now includes queue jobs
-- Consistent status across all commands
-- Gets most of SLURM's benefit without centralized infrastructure
-
-The fix demonstrates that with careful optimization, a decentralized architecture can achieve consistency without the complexity of a centralized controller.
-
 ## Conclusion
 
 **remote-jobs** and **SLURM** serve different use cases:
 
-- **remote-jobs**: Personal job management, works from laptop, zero infrastructure
-- **SLURM**: Enterprise HPC, shared resources, complex workflows
+- **remote-jobs**: Personal job management, works from laptop, zero infrastructure, experimental SLURM backend
+- **SLURM**: Enterprise HPC, shared resources, multi-user accounting, multi-node jobs
 
-For individual researchers with a few machines, `remote-jobs` provides the essential features (persistent jobs, queueing, status tracking) with much lower complexity. For large shared clusters, SLURM's centralized architecture and multi-user features are essential.
+For individual researchers with a few machines, `remote-jobs` provides job dependencies, concurrent scheduling, progress tracking, and a TUI/web interface — all with much lower complexity than SLURM. For large shared clusters, SLURM's centralized architecture and multi-user features are essential.
 
-The choice depends on your scale and requirements, not on which tool is "better."
+When a SLURM cluster is available, remote-jobs can in principle sit on top of it via its experimental SLURM backend, adding offline queueing and its own monitoring interface while delegating actual scheduling to SLURM. This backend has not been tested recently and may need updates.
