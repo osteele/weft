@@ -526,7 +526,7 @@ func displayCdRewriteMessage(cmd *cobra.Command, host, dir, command string) {
 
 func formatRewrittenCommand(cmd *cobra.Command, dir, host, command string) string {
 	if len(os.Args) == 0 {
-		return fmt.Sprintf("%s -C %s %s %q", cmd.CommandPath(), dir, host, command)
+		return fmt.Sprintf("%s -C %s %s %s", cmd.CommandPath(), shellQuote(dir), shellQuote(host), shellQuote(command))
 	}
 	nonFlags := cmd.Flags().Args()
 	flagEnd := len(os.Args)
@@ -552,7 +552,7 @@ func shellQuote(s string) string {
 	if s == "" {
 		return "''"
 	}
-	if strings.ContainsAny(s, " \t\n\"'`$\\") {
+	if strings.ContainsAny(s, " \t\n\"'`$\\~") {
 		return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 	}
 	return s
