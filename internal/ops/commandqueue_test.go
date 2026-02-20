@@ -239,6 +239,83 @@ func TestJqCanParseCommands(t *testing.T) {
 	}
 }
 
+func TestBuildAppendShellCommand(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "command with dollar expansion",
+			command: `echo "$(hostname)" && nvidia-smi 2>/dev/null`,
+		},
+		{
+			name:    "command with backticks",
+			command: "echo `date`",
+		},
+		{
+			name:    "command with single quotes",
+			command: `echo 'hello world'`,
+		},
+		{
+			name:    "command with newlines in output",
+			command: "echo \"line1\nline2\nline3\"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewAddCommand(QueueEntry{
+				JobID:   42,
+				Command: tt.command,
+			})
+			jsonBytes, err := json.Marshal(cmd)
+			if err != nil {
+				t.Fatalf("failed to marshal: %v", err)
+			}
+			jsonLine := string(jsonBytes)
+
+			shellCmd := buildAppendShellCommand(jsonLine, "/tmp/test-commands")
+
+			// Execute the shell command and verify the output is valid single-line JSON
+			// with the command preserved exactly
+			tmpDir := t.TempDir()
+			outFile := filepath.Join(tmpDir, "commands")
+
+			// Replace the target path in the command
+			shellCmd = strings.Replace(shellCmd, "/tmp/test-commands", outFile, 1)
+			// Also fix the mkdir path
+			shellCmd = strings.Replace(shellCmd, "mkdir -p "+QueueDir, "mkdir -p "+tmpDir, 1)
+
+			execCmd := exec.Command("bash", "-c", shellCmd)
+			output, err := execCmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("shell command failed: %v\noutput: %s\ncmd: %s", err, output, shellCmd)
+			}
+
+			// Read the file and verify it's exactly one line of valid JSON
+			content, err := os.ReadFile(outFile)
+			if err != nil {
+				t.Fatalf("failed to read output: %v", err)
+			}
+
+			lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+			if len(lines) != 1 {
+				t.Errorf("expected 1 line, got %d:\n%s", len(lines), content)
+			}
+
+			// Verify the JSON is valid and the command is preserved
+			var parsed QueueCommand
+			if err := json.Unmarshal([]byte(lines[0]), &parsed); err != nil {
+				t.Fatalf("output is not valid JSON: %v\nline: %s", err, lines[0])
+			}
+
+			if parsed.Job.Cmd != tt.command {
+				t.Errorf("command not preserved:\ngot:  %q\nwant: %q", parsed.Job.Cmd, tt.command)
+			}
+		})
+	}
+}
+
 func TestCommandLogProcessing(t *testing.T) {
 	// Skip if jq is not installed
 	if _, err := exec.LookPath("jq"); err != nil {

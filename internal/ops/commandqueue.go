@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -120,15 +121,7 @@ func AppendCommand(host string, cmd QueueCommand, opts AppendCommandOptions) err
 	jsonLine := string(jsonBytes)
 
 	commandsFile := CommandsFilePath()
-
-	// Simple append - no locking needed for append-only log
-	// Use printf to avoid echo interpretation issues
-	appendCmd := fmt.Sprintf(
-		`mkdir -p %s && printf '%%s\n' %q >> %s`,
-		QueueDir,
-		jsonLine,
-		commandsFile,
-	)
+	appendCmd := buildAppendShellCommand(jsonLine, commandsFile)
 
 	var stdout, stderr string
 	if opts.Timeout > 0 {
@@ -143,6 +136,20 @@ func AppendCommand(host string, cmd QueueCommand, opts AppendCommandOptions) err
 	}
 
 	return nil
+}
+
+// buildAppendShellCommand constructs a shell command that appends a JSON line
+// to the commands file. Uses single quotes to prevent shell expansion of $(),
+// backticks, and other shell metacharacters in the JSON content.
+func buildAppendShellCommand(jsonLine, commandsFile string) string {
+	// Escape single quotes: replace ' with '\'' (end quote, escaped quote, start quote)
+	escaped := strings.ReplaceAll(jsonLine, "'", `'\''`)
+	return fmt.Sprintf(
+		`mkdir -p %s && printf '%%s\n' '%s' >> %s`,
+		QueueDir,
+		escaped,
+		commandsFile,
+	)
 }
 
 // AppendCommandLocal appends a command to a local commands file (for testing).

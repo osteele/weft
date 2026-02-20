@@ -84,10 +84,12 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 	}
 
 	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
+	// Use single quotes to prevent shell expansion of $(), backticks, etc.
+	escaped := strings.ReplaceAll(string(jsonBytes), "'", `'\''`)
 	appendCmd := fmt.Sprintf(
-		`mkdir -p %s && printf '%%s\n' %q >> %s`,
+		`mkdir -p %s && printf '%%s\n' '%s' >> %s`,
 		QueueDir,
-		string(jsonBytes),
+		escaped,
 		commandsFile,
 	)
 
@@ -112,10 +114,11 @@ func (h *SSHHost) RemoveFromQueue(jobID int64) error {
 	}
 
 	commandsFile := fmt.Sprintf("%s/%s.commands", QueueDir, DefaultQueueName)
+	escaped := strings.ReplaceAll(string(jsonBytes), "'", `'\''`)
 	appendCmd := fmt.Sprintf(
-		`mkdir -p %s && printf '%%s\n' %q >> %s`,
+		`mkdir -p %s && printf '%%s\n' '%s' >> %s`,
 		QueueDir,
-		string(jsonBytes),
+		escaped,
 		commandsFile,
 	)
 
