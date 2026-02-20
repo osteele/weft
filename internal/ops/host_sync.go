@@ -97,6 +97,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		}
 	} else {
 		// Full mode: sync each job individually, using SyncAndReconcile for pending ops
+		consecutiveFailures := 0
 		for _, job := range activeJobs {
 			seenJobs[job.ID] = true
 			if job.PendingStatus != nil {
@@ -106,19 +107,37 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 				}
 				result.HostContacted = true
 				result.Updated++
+				consecutiveFailures = 0
 			} else {
 				syncResult, err := SyncJob(database, job, syncOpts)
 				if err != nil {
+					if ssh.IsConnectionError(err.Error()) && !result.HostContacted {
+						return result, err
+					}
 					return result, err
 				}
 				if syncResult.HostContacted {
 					result.HostContacted = true
+					consecutiveFailures = 0
+				} else {
+					consecutiveFailures++
+					// If we've never contacted the host and have consecutive failures,
+					// the host is likely unreachable — bail out early
+					if !result.HostContacted && consecutiveFailures >= 2 {
+						return result, nil
+					}
 				}
 				if syncResult.Updated {
 					result.Updated++
 				}
 			}
 		}
+	}
+
+	// If the host was never contacted in step 1, skip remaining SSH-dependent steps.
+	// This avoids spending minutes timing out on an unreachable host.
+	if !result.HostContacted {
+		return result, nil
 	}
 
 	// Step 2: Reconcile jobs with pending operations (kill, cancel, etc.)
