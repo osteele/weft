@@ -153,6 +153,10 @@ func (g *DescriptionGenerator) run() {
 
 // processBatch processes a batch of jobs needing descriptions
 func (g *DescriptionGenerator) processBatch() {
+	if !g.client.IsAvailable() {
+		return
+	}
+
 	jobs, err := db.GetJobsNeedingDescriptions(g.db, g.batchSize)
 	if err != nil {
 		log.Printf("llm: error getting jobs: %v", err)
@@ -169,7 +173,7 @@ func (g *DescriptionGenerator) processBatch() {
 		description, hash, err := g.generateDescription(job.Command)
 		if err != nil {
 			log.Printf("llm: error generating description for job %d: %v", job.ID, err)
-			continue
+			return // stop batch — likely all jobs will fail with the same error
 		}
 
 		if err := db.UpdateJobGeneratedDescription(g.db, job.ID, description, hash); err != nil {

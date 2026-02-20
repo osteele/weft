@@ -127,6 +127,13 @@ func (c *OllamaClient) IsAvailable() bool {
 	return available
 }
 
+// tagsResponse is the response from the /api/tags endpoint
+type tagsResponse struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
 // checkAvailability performs the actual availability check (not thread-safe, called with lock held)
 func (c *OllamaClient) checkAvailability() bool {
 	// Check if ollama command exists
@@ -134,7 +141,7 @@ func (c *OllamaClient) checkAvailability() bool {
 		return false
 	}
 
-	// Check if ollama server is running by making a simple request
+	// Check if ollama server is running and the model is available
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -147,9 +154,38 @@ func (c *OllamaClient) checkAvailability() bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+
+	// Check that our model is in the list of available models
+	var tags tagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return false
+	}
+
+	for _, m := range tags.Models {
+		// Model names can be "llama3.2:latest" — match with or without tag
+		name := m.Name
+		if strings.Contains(name, ":") {
+			name = strings.Split(name, ":")[0]
+		}
+		if name == c.config.Model || m.Name == c.config.Model {
+			return true
+		}
+	}
+	return false
+}
+
+// markUnavailable forces the availability cache to false so the generator stops retrying.
+func (c *OllamaClient) markUnavailable() {
+	c.availMu.Lock()
+	defer c.availMu.Unlock()
+	unavailable := false
+	c.available = &unavailable
+	c.availableTime = time.Now()
 }
 
 // GenerationHash creates a cache key from model and prompt
@@ -193,6 +229,11 @@ func (c *OllamaClient) Generate(ctx context.Context, prompt string) (string, err
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		// 404 means the model isn't pulled — mark unavailable to stop retrying
+		if resp.StatusCode == http.StatusNotFound {
+			c.markUnavailable()
+			return "", fmt.Errorf("ollama model %q not found (run: ollama pull %s)", c.config.Model, c.config.Model)
+		}
 		return "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
 	}
 
