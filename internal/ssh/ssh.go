@@ -331,14 +331,15 @@ func RunStreaming(host string, command string, stdout, stderr io.Writer) error {
 	return cmd.Run()
 }
 
-// CopyTo copies a local file to a remote host using scp
+// CopyTo copies a local file to a remote host using scp (single attempt, no retries).
 func CopyTo(localPath, host, remotePath string) error {
-	return CopyToWithRetryVerbose(localPath, host, remotePath, true)
-}
-
-// CopyToWithRetry copies a local file to a remote host with retry logic
-func CopyToWithRetry(localPath, host, remotePath string) error {
-	return CopyToWithRetryVerbose(localPath, host, remotePath, true)
+	cmd := scpCommand(host, localPath, fmt.Sprintf("%s:%s", host, remotePath))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("scp: %s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	return nil
 }
 
 // CopyToWithRetryVerbose copies a local file to a remote host with retry logic

@@ -61,12 +61,27 @@ func BuildRunnerEnvPrefix(slackWebhook string) string {
 }
 
 // DeployNotifyScript deploys the Slack notification script to the remote host.
+// Uses SCP instead of a heredoc because the SSH session pool wraps commands
+// in a subshell, which breaks heredoc delimiter matching.
 func DeployNotifyScript(host, slackWebhook string) {
 	if slackWebhook == "" {
 		return
 	}
-	writeNotifyCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF", NotifyScriptPath, string(scripts.NotifySlackScript))
-	if _, _, err := ssh.Run(host, writeNotifyCmd); err == nil {
-		ssh.Run(host, fmt.Sprintf("chmod +x '%s'", NotifyScriptPath))
+
+	tmpFile, err := os.CreateTemp("", "notify-slack-*.sh")
+	if err != nil {
+		return
 	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(scripts.NotifySlackScript); err != nil {
+		tmpFile.Close()
+		return
+	}
+	tmpFile.Close()
+
+	if err := ssh.CopyTo(tmpFile.Name(), host, NotifyScriptPath); err != nil {
+		return
+	}
+	ssh.Run(host, fmt.Sprintf("chmod +x '%s'", NotifyScriptPath))
 }
