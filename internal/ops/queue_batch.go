@@ -165,9 +165,11 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 	script := fmt.Sprintf(`
 STATE_FILE=%s
 CURRENT=""
+FINISHED="{}"
 if [ -f "$STATE_FILE" ]; then
 	CURRENT=$(jq -r '.current // ""' "$STATE_FILE" 2>/dev/null || echo "")
 	PENDING=$(jq -r '.pending[]?' "$STATE_FILE" 2>/dev/null || true)
+	FINISHED=$(jq -c '.finished // {}' "$STATE_FILE" 2>/dev/null || echo "{}")
 else
 	PENDING=""
 fi
@@ -176,6 +178,12 @@ for id in $PENDING; do
 	pending_map[$id]=1
 done
 	for id in %s; do
+		finished_exit=$(echo "$FINISHED" | jq -r --arg id "$id" '.[$id].exit_code // empty' 2>/dev/null)
+	finished_at=$(echo "$FINISHED" | jq -r --arg id "$id" '.[$id].finished_at // empty' 2>/dev/null)
+	if [ -n "$finished_exit" ]; then
+		echo "JOB|$id|COMPLETED|$finished_exit|$finished_at"
+		continue
+	fi
 		status_file=$(ls %s 2>/dev/null | head -1)
 	if [ -n "$status_file" ]; then
 		exit_code=$(cat "$status_file" 2>/dev/null | head -1)

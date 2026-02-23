@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 45
+# BUILD: 46
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -148,6 +148,10 @@ update_cpu_history() {
 # Running job state (JSON object keyed by job ID)
 RUNNING_JSON="{}"
 
+# Finished job state (JSON object keyed by job ID, records terminal transitions)
+# Each entry: {"exit_code": N, "finished_at": epoch}
+FINISHED_JSON="{}"
+
 CURRENT_JOB_ID=""
 LAST_SAMPLE_TIME=0
 STOP_REQUESTED=false
@@ -211,6 +215,7 @@ load_state() {
         fi
 
         RUNNING_JSON=$(jq -c '.running // {}' "$STATE_FILE")
+        FINISHED_JSON=$(jq -c '.finished // {}' "$STATE_FILE")
     fi
 }
 
@@ -227,13 +232,21 @@ save_state() {
         pending_json=$(echo "$STATE_PENDING" | jq -Rs 'split("\n") | map(select(. != "") | tonumber)')
     fi
 
+    # Prune finished entries older than 24 hours
+    local now
+    now=$(date +%s)
+    local cutoff=$((now - 86400))
+    FINISHED_JSON=$(jq -c --argjson cutoff "$cutoff" \
+        'with_entries(select(.value.finished_at > $cutoff))' <<< "$FINISHED_JSON")
+
     jq -nc \
         --arg cursor "$STATE_CURSOR" \
         --argjson cursor_line "$STATE_CURSOR_LINE" \
         --argjson pending "$pending_json" \
         --argjson current "$current_json" \
         --argjson running "$RUNNING_JSON" \
-        '{cursor:$cursor,cursor_line:$cursor_line,pending:$pending,current:$current,running:$running}' > "$STATE_FILE"
+        --argjson finished "$FINISHED_JSON" \
+        '{cursor:$cursor,cursor_line:$cursor_line,pending:$pending,current:$current,running:$running,finished:$finished}' > "$STATE_FILE"
 }
 
 # Add job to pending list (at end)
@@ -287,6 +300,18 @@ running_contains() {
 remove_running_job() {
     local job_id="$1"
     RUNNING_JSON=$(jq -c --arg id "$job_id" 'del(.[$id])' <<< "$RUNNING_JSON")
+}
+
+# Record a job's terminal state in the finished map
+record_finished() {
+    local job_id="$1"
+    local exit_code="$2"
+    local finished_at="$3"
+    FINISHED_JSON=$(jq -c \
+        --arg id "$job_id" \
+        --argjson ec "$exit_code" \
+        --argjson fa "$finished_at" \
+        '.[$id] = {exit_code: $ec, finished_at: $fa}' <<< "$FINISHED_JSON")
 }
 
 update_current_from_running() {
@@ -1111,6 +1136,11 @@ refresh_running_jobs() {
             fi
             # Write resource usage file before removing from running state
             write_rusage_file "$job_id"
+            # Record in finished map
+            local exit_code finished_at
+            exit_code=$(cat "$status_file" 2>/dev/null | head -1)
+            finished_at=$(stat -c %Y "$status_file" 2>/dev/null || stat -f %m "$status_file" 2>/dev/null || date +%s)
+            record_finished "$job_id" "${exit_code:-1}" "$finished_at"
             remove_running_job "$job_id"
             changed=true
             continue
@@ -1153,6 +1183,7 @@ refresh_running_jobs() {
             echo "1" > "$status_file"
             log_op "job.failed" "$job_id" "exit=1 reason=stopped"
             write_rusage_file "$job_id"
+            record_finished "$job_id" 1 "$(date +%s)"
             rm -f "$pid_file" "$pgid_file" "$paused_file"
             remove_running_job "$job_id"
             changed=true
@@ -1179,6 +1210,13 @@ refresh_running_jobs() {
         if [ ! -f "$status_file" ]; then
             echo "1" > "$status_file"
             log_op "job.failed" "$job_id" "exit=1 duration=0"
+            record_finished "$job_id" 1 "$(date +%s)"
+        else
+            # Status file exists (written between our earlier check and now)
+            local exit_code finished_at
+            exit_code=$(cat "$status_file" 2>/dev/null | head -1)
+            finished_at=$(stat -c %Y "$status_file" 2>/dev/null || stat -f %m "$status_file" 2>/dev/null || date +%s)
+            record_finished "$job_id" "${exit_code:-1}" "$finished_at"
         fi
         write_rusage_file "$job_id"
         remove_running_job "$job_id"

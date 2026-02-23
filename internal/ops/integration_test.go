@@ -46,12 +46,12 @@ func setupIntegrationTestDB(t *testing.T) *sql.DB {
 func clearRemoteJobState(t *testing.T, host string, jobID int64) {
 	t.Helper()
 	// Remove status, log, meta, pid, pgid, and samples files for this job
-	// Also remove job from the state.json pending array if present
+	// Also remove job from the state.json pending array and finished map if present
 	cmd := fmt.Sprintf(`
 		rm -f ~/.cache/remote-jobs/logs/%d.* ~/.cache/remote-jobs/logs/%d-*.* ~/.cache/remote-jobs/queue/job-%d.json 2>/dev/null || true
-		# Remove job from state.json pending array
+		# Remove job from state.json pending array and finished map
 		if [ -f ~/.cache/remote-jobs/queue/default.state.json ]; then
-			jq 'if .pending then .pending |= map(select(. != %d)) else . end' ~/.cache/remote-jobs/queue/default.state.json > ~/.cache/remote-jobs/queue/default.state.json.tmp 2>/dev/null && \
+			jq 'if .pending then .pending |= map(select(. != %d)) else . end | if .finished then .finished |= del(."%d") else . end' ~/.cache/remote-jobs/queue/default.state.json > ~/.cache/remote-jobs/queue/default.state.json.tmp 2>/dev/null && \
 			mv ~/.cache/remote-jobs/queue/default.state.json.tmp ~/.cache/remote-jobs/queue/default.state.json 2>/dev/null || true
 		fi
 		# Clear the current job marker if it matches this job
@@ -59,7 +59,7 @@ func clearRemoteJobState(t *testing.T, host string, jobID int64) {
 		if [ "$current" = "%d" ]; then
 			echo -n "" > ~/.cache/remote-jobs/queue/default.current 2>/dev/null || true
 		fi
-	`, jobID, jobID, jobID, jobID, jobID)
+	`, jobID, jobID, jobID, jobID, jobID, jobID)
 	_, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
 		t.Logf("Warning: could not clear remote state for job %d: %v", jobID, err)
@@ -668,6 +668,220 @@ func TestIntegration_ExclusiveJobRunsAlone(t *testing.T) {
 	t.Logf("Job 1: %d - %v", job1.StartTime, job1.EndTime)
 	t.Logf("Job 2 (exclusive): %d - %v", job2.StartTime, job2.EndTime)
 	t.Logf("Job 3: %d - %v", job3.StartTime, job3.EndTime)
+}
+
+// Finished map tests
+
+func TestIntegration_FinishedMapRecordsCompletion(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	clearRemoteJobState(t, host, 1)
+
+	started, err := ensureQueueRunnerStarted(t, host)
+	if err != nil {
+		t.Fatalf("Failed to start queue runner: %v", err)
+	}
+	if started {
+		t.Logf("Started queue runner on %s", host)
+	}
+
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo done",
+		Description: "Integration test: finished map records completion",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+	jobID := result.JobID
+	t.Logf("Queued job %d, waiting for completion...", jobID)
+
+	// Wait for job to reach terminal state via sync
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ := db.GetJobByID(database, jobID)
+		if job != nil {
+			_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+			job, _ = db.GetJobByID(database, jobID)
+			if db.IsTerminalStatus(job.Status) {
+				break
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Read state.json and verify finished map contains this job
+	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", ops.DefaultQueueName)
+	cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id] // empty' %s 2>/dev/null`, jobID, stateFile)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to read state.json finished map: %v", err)
+	}
+
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" || stdout == "null" {
+		t.Fatalf("Job %d not found in finished map", jobID)
+	}
+
+	// Parse the finished entry
+	var finishedEntry struct {
+		ExitCode   int   `json:"exit_code"`
+		FinishedAt int64 `json:"finished_at"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &finishedEntry); err != nil {
+		t.Fatalf("Failed to parse finished entry: %v (raw: %s)", err, stdout)
+	}
+
+	if finishedEntry.ExitCode != 0 {
+		t.Errorf("Expected exit_code 0, got %d", finishedEntry.ExitCode)
+	}
+	if finishedEntry.FinishedAt <= 0 {
+		t.Errorf("Expected valid finished_at timestamp, got %d", finishedEntry.FinishedAt)
+	}
+	t.Logf("Finished map entry: exit_code=%d, finished_at=%d", finishedEntry.ExitCode, finishedEntry.FinishedAt)
+}
+
+func TestIntegration_FinishedMapRecordsFailure(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	clearRemoteJobState(t, host, 1)
+
+	started, err := ensureQueueRunnerStarted(t, host)
+	if err != nil {
+		t.Fatalf("Failed to start queue runner: %v", err)
+	}
+	if started {
+		t.Logf("Started queue runner on %s", host)
+	}
+
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "exit 1",
+		Description: "Integration test: finished map records failure",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+	jobID := result.JobID
+	t.Logf("Queued job %d, waiting for failure...", jobID)
+
+	// Wait for job to reach terminal state via sync
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _ := db.GetJobByID(database, jobID)
+		if job != nil {
+			_, _ = ops.SyncJob(database, job, ops.SyncOptions{Timeout: 10 * time.Second})
+			job, _ = db.GetJobByID(database, jobID)
+			if db.IsTerminalStatus(job.Status) {
+				break
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Read state.json and verify finished map contains this job with exit_code=1
+	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", ops.DefaultQueueName)
+	cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id] // empty' %s 2>/dev/null`, jobID, stateFile)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to read state.json finished map: %v", err)
+	}
+
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" || stdout == "null" {
+		t.Fatalf("Job %d not found in finished map", jobID)
+	}
+
+	var finishedEntry struct {
+		ExitCode   int   `json:"exit_code"`
+		FinishedAt int64 `json:"finished_at"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &finishedEntry); err != nil {
+		t.Fatalf("Failed to parse finished entry: %v (raw: %s)", err, stdout)
+	}
+
+	if finishedEntry.ExitCode != 1 {
+		t.Errorf("Expected exit_code 1, got %d", finishedEntry.ExitCode)
+	}
+	if finishedEntry.FinishedAt <= 0 {
+		t.Errorf("Expected valid finished_at timestamp, got %d", finishedEntry.FinishedAt)
+	}
+	t.Logf("Finished map entry: exit_code=%d, finished_at=%d", finishedEntry.ExitCode, finishedEntry.FinishedAt)
+}
+
+func TestIntegration_BatchSyncUsesFinishedMap(t *testing.T) {
+	host := getTestHost(t)
+	database := setupIntegrationTestDB(t)
+
+	clearRemoteJobState(t, host, 1)
+
+	started, err := ensureQueueRunnerStarted(t, host)
+	if err != nil {
+		t.Fatalf("Failed to start queue runner: %v", err)
+	}
+	if started {
+		t.Logf("Started queue runner on %s", host)
+	}
+
+	params := ops.QueueJobParams{
+		Host:        host,
+		WorkingDir:  "/tmp",
+		Command:     "echo done",
+		Description: "Integration test: batch sync uses finished map",
+	}
+
+	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("QueueJob failed: %v", err)
+	}
+	jobID := result.JobID
+	t.Logf("Queued job %d, waiting for it to appear in finished map...", jobID)
+
+	// Poll remote state.json finished map directly until job appears
+	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", ops.DefaultQueueName)
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id].exit_code // empty' %s 2>/dev/null`, jobID, stateFile)
+		stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
+		if err == nil && strings.TrimSpace(stdout) != "" {
+			t.Logf("Job %d appeared in finished map with exit_code=%s", jobID, strings.TrimSpace(stdout))
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// Now call BatchSyncQueueRunnerJobs and verify it picks up the completion
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID failed: %v", err)
+	}
+
+	updated, err := ops.BatchSyncQueueRunnerJobs(database, host, []*db.Job{job}, 10*time.Second)
+	if err != nil {
+		t.Fatalf("BatchSyncQueueRunnerJobs failed: %v", err)
+	}
+
+	if updated == 0 {
+		t.Errorf("Expected BatchSyncQueueRunnerJobs to update at least 1 job, got 0")
+	}
+
+	// Verify the local DB shows completed with correct exit code
+	job, _ = db.GetJobByID(database, jobID)
+	if job.Status != db.StatusCompleted {
+		t.Errorf("Expected job status completed, got %s", job.Status)
+	}
+	if job.ExitCode == nil || *job.ExitCode != 0 {
+		t.Errorf("Expected exit code 0, got %v", job.ExitCode)
+	}
+	t.Logf("BatchSync correctly detected completion from finished map: status=%s exit_code=%d", job.Status, *job.ExitCode)
 }
 
 // SLURM integration tests
