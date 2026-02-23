@@ -332,14 +332,26 @@ func (m Model) renderJobList(height int) string {
 		}
 	}
 
+	// Determine project column width based on available space
+	projectWidth := 20
+	if contentWidth < 100 {
+		projectWidth = 12
+	}
+	if contentWidth < 80 {
+		projectWidth = 8
+	}
+	if contentWidth < 60 {
+		projectWidth = 4
+	}
+
 	// Update header based on GPU column visibility
 	if showGPU {
-		header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
-			"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
+		header := fmt.Sprintf("  %-4s %-10s %-*s %-12s %-12s %-4s %s",
+			"ID", "HOST", projectWidth, "PROJECT", "STATUS", "TIME", "GPU", "DESCRIPTION")
 		rows[headerIndex] = headerStyle.Render(header)
 	} else {
-		header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %s",
-			"ID", "HOST", "STATUS", "TIME", "DESCRIPTION")
+		header := fmt.Sprintf("  %-4s %-10s %-*s %-12s %-12s %s",
+			"ID", "HOST", projectWidth, "PROJECT", "STATUS", "TIME", "DESCRIPTION")
 		rows[headerIndex] = headerStyle.Render(header)
 	}
 
@@ -353,7 +365,15 @@ func (m Model) renderJobList(height int) string {
 		statusCol := status + strings.Repeat(" ", max(0, 12-lipgloss.Width(status)))
 		timeColFormatted := fmt.Sprintf("%-12s", timeCol)
 
-		prefixPlain := fmt.Sprintf(" %-4d %s %s %s ", job.ID, hostCol, statusCol, timeColFormatted)
+		project := job.Project()
+		if project == "" {
+			project = "—"
+		} else {
+			project = abbreviateProject(project, projectWidth)
+		}
+		projectCol := fmt.Sprintf("%-*s", projectWidth, truncate(project, projectWidth))
+
+		prefixPlain := fmt.Sprintf("  %-4d %s %s %s %s ", job.ID, hostCol, projectCol, statusCol, timeColFormatted)
 		gpuField := ""
 		if showGPU {
 			gpu := job.GetGPU()
@@ -377,12 +397,20 @@ func (m Model) renderJobList(height int) string {
 			rowStyle = rowStyle.Copy().Background(selectedBg)
 		}
 
-		idSegment := rowStyle.Render(fmt.Sprintf(" %-4d ", job.ID))
+		// Processed indicator: ✓ for processed jobs, space otherwise
+		indicator := " "
+		if job.HasTag(db.ProcessedTag) {
+			indicator = dimStyle.Render("✓")
+		}
+		indicatorSegment := rowStyle.Render(indicator)
+
+		idSegment := rowStyle.Render(fmt.Sprintf("%-4d ", job.ID))
 		hostSegment := rowStyle.Render(fmt.Sprintf("%s ", hostCol))
+		projectSegment := rowStyle.Render(fmt.Sprintf("%s ", projectCol))
 		statusSegment := rowStyle.Render(fmt.Sprintf("%s ", statusCol))
 		timeSegment := rowStyle.Render(fmt.Sprintf("%s ", timeColFormatted))
 
-		segments := []string{idSegment, hostSegment, statusSegment, timeSegment}
+		segments := []string{indicatorSegment, idSegment, hostSegment, projectSegment, statusSegment, timeSegment}
 		if showGPU {
 			segments = append(segments, rowStyle.Render(gpuField))
 		}

@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestJobProject(t *testing.T) {
+	tests := []struct {
+		name       string
+		workingDir string
+		command    string
+		want       string
+	}{
+		{"empty dir", "", "", ""},
+		{"normal path", "/home/user/projects/my-project", "", "my-project"},
+		{"trailing slash", "/home/user/projects/my-project/", "", "my-project"},
+		{"tilde path", "~/projects/my-project", "", "my-project"},
+		{"cd override", "", "cd ~/other-project && python train.py", "other-project"},
+		{"root path", "/", "", "/"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{WorkingDir: tt.workingDir, Command: tt.command}
+			if got := job.Project(); got != tt.want {
+				t.Errorf("Project() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEffectiveDescriptionFromDB(t *testing.T) {
 	tmpfile, err := os.CreateTemp("", "effective-desc-*.db")
 	if err != nil {

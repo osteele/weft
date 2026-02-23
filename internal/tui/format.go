@@ -696,6 +696,72 @@ func wrapText(text string, width int) string {
 	return result.String()
 }
 
+// abbreviateProject shortens a hyphenated project name to fit within maxWidth.
+// It progressively shortens each segment, then drops hyphens, then truncates.
+func abbreviateProject(name string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if len(name) <= maxWidth {
+		return name
+	}
+
+	parts := strings.Split(name, "-")
+	if len(parts) == 1 {
+		// Non-hyphenated: just truncate with ellipsis
+		return truncate(name, maxWidth)
+	}
+
+	// Try progressively shorter segment lengths
+	for segLen := longestSegment(parts) - 1; segLen >= 1; segLen-- {
+		candidate := abbreviateSegments(parts, segLen)
+		if len(candidate) <= maxWidth {
+			return candidate
+		}
+	}
+
+	// Single-char segments with hyphens still too long; drop hyphens (initials)
+	initials := initialString(parts)
+	if len(initials) <= maxWidth {
+		return initials
+	}
+
+	// Even initials too long: truncate with ellipsis
+	return truncate(initials, maxWidth)
+}
+
+func longestSegment(parts []string) int {
+	m := 0
+	for _, p := range parts {
+		if len(p) > m {
+			m = len(p)
+		}
+	}
+	return m
+}
+
+func abbreviateSegments(parts []string, maxSegLen int) string {
+	abbreviated := make([]string, len(parts))
+	for i, p := range parts {
+		if len(p) > maxSegLen {
+			abbreviated[i] = p[:maxSegLen]
+		} else {
+			abbreviated[i] = p
+		}
+	}
+	return strings.Join(abbreviated, "-")
+}
+
+func initialString(parts []string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		if len(p) > 0 {
+			b.WriteByte(p[0])
+		}
+	}
+	return b.String()
+}
+
 // Chroma syntax highlighting for shell commands
 var (
 	shellLexer     chroma.Lexer

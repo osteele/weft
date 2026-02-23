@@ -2051,6 +2051,15 @@ func (j *Job) EffectiveWorkingDir() string {
 	return j.WorkingDir
 }
 
+// Project returns the basename of the job's effective working directory.
+func (j *Job) Project() string {
+	dir := j.EffectiveWorkingDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Base(dir)
+}
+
 // DisplayWorkingDir returns a user-friendly directory string, falling back to
 // the remote home when no explicit directory is set.
 func (j *Job) DisplayWorkingDir() string {

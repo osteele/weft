@@ -2,6 +2,51 @@ package tui
 
 import "testing"
 
+func TestAbbreviateProject(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxWidth int
+		want     string
+	}{
+		// Fits as-is
+		{"fits exactly", "adaptive-storage-placement", 26, "adaptive-storage-placement"},
+		{"fits with room", "adaptive-storage-placement", 30, "adaptive-storage-placement"},
+
+		// Progressive shortening of 3-segment name
+		{"3seg width 14", "adaptive-storage-placement", 14, "adap-stor-plac"},
+		{"3seg width 11", "adaptive-storage-placement", 11, "ada-sto-pla"},
+		{"3seg width 8", "adaptive-storage-placement", 8, "ad-st-pl"},
+		{"3seg width 5", "adaptive-storage-placement", 5, "a-s-p"},
+		{"3seg width 3", "adaptive-storage-placement", 3, "asp"},
+		{"3seg width 2", "adaptive-storage-placement", 2, "a…"},
+
+		// Progressive shortening of 2-segment name
+		{"2seg fits", "markov-attention", 16, "markov-attention"},
+		{"2seg width 9", "markov-attention", 9, "mark-atte"},
+		{"2seg width 7", "markov-attention", 7, "mar-att"},
+		{"2seg width 3", "markov-attention", 3, "m-a"},
+		{"2seg width 2", "markov-attention", 2, "ma"},
+
+		// Non-hyphenated names
+		{"short no hyphen", "LM2", 3, "LM2"},
+		{"short no hyphen truncate", "LM2", 2, "L…"},
+
+		// Edge cases
+		{"empty string", "", 10, ""},
+		{"maxWidth 0", "test", 0, ""},
+		{"maxWidth 1", "adaptive-storage", 1, "…"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := abbreviateProject(tt.input, tt.maxWidth)
+			if got != tt.want {
+				t.Errorf("abbreviateProject(%q, %d) = %q, want %q", tt.input, tt.maxWidth, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTruncateToWidth(t *testing.T) {
 	tests := []struct {
 		name     string
