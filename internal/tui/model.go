@@ -205,6 +205,22 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	inputs[inputHost].Prompt = ""
 	inputs[inputHost].Width = 40
 	inputs[inputHost].CharLimit = 64
+
+	inputs[inputDescription] = textinput.New()
+	inputs[inputDescription].Placeholder = "(optional)"
+	inputs[inputDescription].Prompt = ""
+	inputs[inputDescription].Width = 40
+	inputs[inputDescription].CharLimit = 256
+
+	inputs[inputCommand] = textinput.New()
+	inputs[inputCommand].Placeholder = "e.g., python train.py"
+	inputs[inputCommand].Prompt = ""
+	inputs[inputCommand].Width = 40
+	inputs[inputCommand].CharLimit = 1024
+
+	inputs[inputWorkingDir] = textinput.New()
+	inputs[inputWorkingDir].Placeholder = "(optional)"
+	inputs[inputWorkingDir].Prompt = ""
 	inputs[inputWorkingDir].Width = 40
 	inputs[inputWorkingDir].CharLimit = 256
 
