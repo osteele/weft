@@ -134,13 +134,9 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		}
 	}
 
-	// If the host was never contacted in step 1, skip remaining SSH-dependent steps.
-	// This avoids spending minutes timing out on an unreachable host.
-	if !result.HostContacted {
-		return result, nil
-	}
-
-	// Step 2: Reconcile jobs with pending operations (kill, cancel, etc.)
+	// Step 2: Reconcile jobs with pending operations (kill, cancel, draft→queued, etc.)
+	// This runs before the host-contacted guard so that draft→queued transitions
+	// (which have no active jobs) can contact the host and proceed.
 	pendingJobs, err := db.ListJobsPendingReconciliation(database, host)
 	if err != nil {
 		return result, err
@@ -158,6 +154,12 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			result.HostContacted = true
 			result.Updated++
 		}
+	}
+
+	// If the host was never contacted in steps 1-2, skip remaining SSH-dependent steps.
+	// This avoids spending minutes timing out on an unreachable host.
+	if !result.HostContacted {
+		return result, nil
 	}
 
 	// Step 3: Check for restarted jobs (failed/dead queue-runner jobs that may be running again)

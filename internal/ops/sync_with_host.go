@@ -42,7 +42,7 @@ func SyncQueueRunnerJobWithProber(
 		if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, completionInfo.EndTime); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
-		CacheCompletedJobLog(job)
+		CacheCompletedJobLog(job, timeout)
 		// Fetch resource usage data (best-effort)
 		_, _ = updateJobResourceUsage(database, job, timeout)
 		// Clear the current job marker on remote if it matches this job.

@@ -99,9 +99,14 @@ func RecordJobCompletion(database *sql.DB, jobID int64, exitCode int, mtime int6
 
 // CacheCompletedJobLog attempts to cache a completed job's log file locally.
 // This is best-effort: errors are ignored since caching is optional.
-func CacheCompletedJobLog(job *db.Job) {
+// A zero timeout uses the default SSH timeout.
+func CacheCompletedJobLog(job *db.Job, timeout time.Duration) {
 	if job == nil {
 		return
+	}
+
+	if logcache.Exists(job.ID) {
+		return // Already cached
 	}
 
 	cfg, _ := config.Load()
@@ -114,7 +119,7 @@ func CacheCompletedJobLog(job *db.Job) {
 	logFile := session.JobLogFile(job.ID, job.StartTime, job.SessionName)
 
 	// Try to cache it (ignores errors - caching is best-effort)
-	logcache.CacheFromRemote(job.Host, logFile, job.ID, maxSize)
+	logcache.CacheFromRemote(job.Host, logFile, job.ID, maxSize, timeout)
 }
 
 // DefaultSyncOptions returns default sync options
@@ -275,7 +280,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		if err := RecordJobCompletion(database, job.ID, exitCode, sfResult.Mtime); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
-		CacheCompletedJobLog(job)
+		CacheCompletedJobLog(job, timeout)
 		// Fetch resource usage data (best-effort)
 		_, _ = updateJobResourceUsage(database, job, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil

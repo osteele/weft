@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/logfiles"
@@ -172,19 +174,23 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	defaultTailHint := shouldShowDefaultTailHint(cmd, follow)
 	tailHintPrinted := false
 
-	// For terminal jobs, prefer local cache first (unless following)
+	// For terminal jobs, prefer local cache first (unless following).
+	// Complete caches can serve any request; partial caches only serve default tail views.
 	if !follow && shouldPreferCachedLog(job.Status) {
 		if cached, err := logcache.Read(jobID); err == nil {
-			if defaultTailHint && !tailHintPrinted {
-				printDefaultTailHint(jobID)
-				tailHintPrinted = true
+			isComplete := logcache.IsComplete(jobID)
+			isDefaultTailView := !logFull && logFrom == 0 && logTo == 0 && !cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail")
+			if isComplete || isDefaultTailView {
+				if defaultTailHint && !tailHintPrinted {
+					printDefaultTailHint(jobID)
+					tailHintPrinted = true
+				}
+				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
+				fmt.Print(processCarriageReturns(output))
+				return nil
 			}
-			output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
-			// Process carriage returns - progress bars use \r to overwrite lines
-			fmt.Print(processCarriageReturns(output))
-			return nil
 		}
-		// Fall through to remote fetch if not cached
+		// Fall through to remote fetch if not cached or partial cache can't serve this request
 	}
 
 	// Raise SSH connect timeout to match --timeout so slow connections succeed
@@ -225,7 +231,22 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return streamCommandUntilJobDone(database, job.ID, sshCmd)
 	}
 
-	// Regular mode
+	// For terminal jobs not yet cached, try to fetch the full file for caching.
+	// If the file is small enough, we fetch it entirely and apply filters locally.
+	if shouldPreferCachedLog(job.Status) && !logcache.Exists(jobID) {
+		if fullContent, cached := fetchAndCacheFullLog(job.Host, logFile, jobID); cached {
+			if defaultTailHint && !tailHintPrinted {
+				printDefaultTailHint(jobID)
+				tailHintPrinted = true
+			}
+			output := filterLogContent(fullContent, logFrom, logTo, logLines, logGrep)
+			fmt.Print(processCarriageReturns(output))
+			return nil
+		}
+		// File too large or fetch failed — fall through to filtered remote command
+	}
+
+	// Regular mode: run filtered command on remote
 	var stdout, stderr string
 	if logTimeout > 0 {
 		stdout, stderr, err = ssh.RunWithTimeout(job.Host, remoteCmd, logTimeout)
@@ -254,9 +275,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("could not read log for job %d on %s: %w", jobID, job.Host, err)
 	}
 
-	// Cache the fetched output for terminal jobs so subsequent calls are instant.
+	// Cache partial output for terminal jobs (not marked complete since it's filtered)
 	if shouldPreferCachedLog(job.Status) && !logcache.Exists(jobID) {
-		_ = logcache.Write(jobID, stdout)
+		_ = logcache.WriteWithMeta(jobID, stdout, false)
 	}
 
 	// Process carriage returns - progress bars use \r to overwrite lines
@@ -307,6 +328,55 @@ func shouldPreferCachedLog(status string) bool {
 	default:
 		return false
 	}
+}
+
+// fetchAndCacheFullLog attempts to fetch the full log file from remote and cache it.
+// Returns (content, true) if the file was fetched and cached, or ("", false) if
+// the file is too large or the fetch failed.
+func fetchAndCacheFullLog(host, logFile string, jobID int64) (string, bool) {
+	cfg, _ := config.Load()
+	maxSize := cfg.LogCacheMaxSize
+	if maxSize <= 0 {
+		return "", false
+	}
+
+	// Check file size first
+	sizeCmd := fmt.Sprintf("stat -c %%s %s 2>/dev/null || stat -f %%z %s 2>/dev/null", logFile, logFile)
+	var sizeOut string
+	var err error
+	if logTimeout > 0 {
+		sizeOut, _, err = ssh.RunWithTimeout(host, sizeCmd, logTimeout)
+	} else {
+		sizeOut, _, err = ssh.Run(host, sizeCmd)
+	}
+	if err != nil {
+		return "", false
+	}
+
+	size, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64)
+	if err != nil {
+		return "", false
+	}
+
+	if size > int64(maxSize) {
+		return "", false
+	}
+
+	// Fetch the full file
+	catCmd := fmt.Sprintf("cat %s", logFile)
+	var content string
+	if logTimeout > 0 {
+		content, _, err = ssh.RunWithTimeout(host, catCmd, logTimeout)
+	} else {
+		content, _, err = ssh.Run(host, catCmd)
+	}
+	if err != nil {
+		return "", false
+	}
+
+	// Cache as complete
+	_ = logcache.Write(jobID, content)
+	return content, true
 }
 
 // buildLogCommand constructs the remote command for reading log files

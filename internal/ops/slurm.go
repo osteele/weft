@@ -185,7 +185,7 @@ func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, 
 			if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, completionInfo.EndTime); err != nil {
 				return SyncResult{HostContacted: true}, err
 			}
-			CacheCompletedJobLog(job)
+			CacheCompletedJobLog(job, timeout)
 			return SyncResult{Updated: true, HostContacted: true}, nil
 		}
 		return SyncResult{HostContacted: true}, nil
@@ -216,7 +216,7 @@ func SyncSlurmJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, 
 		if err := RecordJobCompletion(database, job.ID, exitCode, endTime); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
-		CacheCompletedJobLog(job)
+		CacheCompletedJobLog(job, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	case db.StatusKilled:
 		if err := db.UpdateStatusAndLastSynced(database, job.ID, db.StatusKilled); err != nil {

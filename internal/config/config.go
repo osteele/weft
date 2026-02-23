@@ -36,7 +36,7 @@ type Config struct {
 	LogCacheMaxAge int `yaml:"log_cache_max_age"`
 
 	// LogCacheMaxSize is the maximum size of log files to cache (in bytes)
-	// Default: 51200 (50KB). Logs larger than this are not cached.
+	// Default: 1048576 (1MB). Logs larger than this are not cached.
 	LogCacheMaxSize int `yaml:"log_cache_max_size"`
 
 	// ShowUsageHints toggles whether CLI commands print follow-up suggestions
@@ -117,7 +117,7 @@ func DefaultConfig() *Config {
 		HostRefreshInterval: 30,
 		EnableMouse:         false,
 		LogCacheMaxAge:      7,
-		LogCacheMaxSize:     50 * 1024, // 50KB
+		LogCacheMaxSize:     1024 * 1024, // 1MB
 		ShowUsageHints:      true,
 		WebEnabled:          true,
 		WebPort:             8127,
