@@ -488,8 +488,12 @@ func ProbeRemoteStatus(job *db.Job, timeout time.Duration) (string, error) {
 		return db.StatusCompleted, nil
 	}
 
-	// No session, no status file - could be dead or uncertain
-	// Return the current status as "unchanged" since we can't confirm
+	// No session, no status file.
+	// For running/paused jobs, this means the job vanished — report as failed.
+	// For other states, this could be a race during startup.
+	if job.Status == db.StatusRunning || job.Status == db.StatusPaused {
+		return db.StatusFailed, nil
+	}
 	return job.Status, nil
 }
 

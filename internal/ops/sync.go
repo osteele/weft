@@ -281,9 +281,15 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
-	// Session doesn't exist and no status file - this is UNCERTAIN, not dead.
-	// Could be a race condition during job startup/shutdown.
-	// Don't mark dead based on absence of evidence.
+	// Session doesn't exist and no status file.
+	// For running jobs, this means the job vanished (crashed, killed externally, etc.)
+	// For other states (queued, starting), this could be a race during startup.
+	if job.Status == db.StatusRunning || job.Status == db.StatusPaused {
+		if err := db.MarkDeadByID(database, job.ID); err != nil {
+			return SyncResult{HostContacted: true}, err
+		}
+		return SyncResult{Updated: true, HostContacted: true}, nil
+	}
 	return SyncResult{HostContacted: true}, nil
 }
 

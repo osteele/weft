@@ -184,11 +184,10 @@ func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
 	}
 }
 
-func TestSyncJobNoChangeWhenSessionGoneButNoStatus(t *testing.T) {
+func TestSyncJobMarksFailedWhenRunningButSessionGone(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	// Create a running job (not starting) - session gone but no status file
-	// SyncJob is conservative: doesn't mark dead from missing evidence alone
+	// Create a running job - session gone and no status file means it crashed/vanished
 	jobID, err := db.RecordJobStarting(database, "quick-host", "/tmp", "echo quick", "quick job")
 	if err != nil {
 		t.Fatalf("record job: %v", err)
@@ -207,15 +206,41 @@ func TestSyncJobNoChangeWhenSessionGoneButNoStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncJob: %v", err)
 	}
-	// SyncJob is conservative - doesn't mark dead from just session disappearing
-	// This avoids false positives from race conditions
-	if syncResult.Updated {
-		t.Fatalf("expected no change for uncertain state")
+	if !syncResult.Updated {
+		t.Fatalf("expected job to be updated to failed")
 	}
 
 	updated, _ := db.GetJobByID(database, jobID)
-	if updated.Status != db.StatusRunning {
-		t.Fatalf("expected status unchanged (running), got %s", updated.Status)
+	if updated.Status != db.StatusFailed {
+		t.Fatalf("expected status failed, got %s", updated.Status)
+	}
+}
+
+func TestSyncJobNoChangeWhenStartingAndSessionGone(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Create a starting job - session gone is uncertain (race during startup)
+	jobID, err := db.RecordJobStarting(database, "quick-host", "/tmp", "echo quick", "quick job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	sessionName := "session-quick"
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, status = ? WHERE id = ?`, sessionName, db.StatusStarting, jobID); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+		// startStartingJob will try to start the job
+		{Contains: "mkdir -p", Stdout: ""},
+		{Contains: "cat >", Stdout: ""},
+		{Contains: "tmux new-session", Stdout: ""},
+	})
+
+	job, _ := db.GetJobByID(database, jobID)
+	_, err = SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob: %v", err)
 	}
 }
 
