@@ -13,7 +13,6 @@ import (
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/logfiles"
 	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -255,10 +254,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("could not read log for job %d on %s: %w", jobID, job.Host, err)
 	}
 
-	// Cache the full log for terminal jobs so subsequent calls are instant (best-effort).
-	// This fetches the complete file in the background — the SSH session is already warm.
+	// Cache the fetched output for terminal jobs so subsequent calls are instant.
 	if shouldPreferCachedLog(job.Status) && !logcache.Exists(jobID) {
-		ops.CacheCompletedJobLog(job)
+		_ = logcache.Write(jobID, stdout)
 	}
 
 	// Process carriage returns - progress bars use \r to overwrite lines
