@@ -30,6 +30,7 @@ var (
 	statusFast        bool
 	statusWait        bool
 	statusWaitTimeout time.Duration
+	statusSSHTimeout  time.Duration
 )
 
 var statusCmd = &cobra.Command{
@@ -58,6 +59,7 @@ Examples:
   remote-jobs status 42
   remote-jobs status 42:47        # Check jobs 42 through 47
   remote-jobs status 42 --fast    # Quick check with 2s timeout
+  remote-jobs status 42 -t 2m     # Use 2 minute SSH timeout (slow connections)
   remote-jobs status 42:47 --wait  # Wait for jobs 42-47 to complete`,
 	RunE: runStatus,
 }
@@ -71,6 +73,7 @@ func init() {
 	statusCmd.Flags().DurationVar(&statusWaitTimeout, "wait-timeout", 0, "Maximum time to wait for completion (0 = no limit)")
 	statusCmd.Flags().DurationVar(&statusWaitTimeout, "timeout", 0, "Alias for --wait-timeout")
 	statusCmd.Flags().MarkHidden("timeout")
+	statusCmd.Flags().DurationVarP(&statusSSHTimeout, "ssh-timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -98,6 +101,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		tracker = newHostConnectionTracker()
 	}
 
+	// Raise SSH connect timeout for slow connections
+	if statusSSHTimeout > 0 {
+		ssh.SetMinConnectTimeout(statusSSHTimeout)
+	}
+
 	// Check if all requested jobs are already in terminal state - skip sync if so
 	needsSync := false
 	hostsToSync := make(map[string]struct{})
@@ -116,7 +124,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Sync logic: default 5s, fast 2s, full 30s, or skip
+	// Sync logic: default 5s, fast 2s, full 30s, --ssh-timeout overrides, or skip
 	if needsSync {
 		hosts := mapKeys(hostsToSync)
 		if statusSync {
@@ -126,7 +134,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 			// Start queue runners (full sync mode)
 			startQueueRunnersForHosts(database, hosts)
-		} else if statusFast {
+		} else if statusFast && statusSSHTimeout == 0 {
 			// Fast sync (2s timeout) - skip queue starting for speed
 			completed, unreachable := performFastSyncForHosts(database, hosts, false)
 			if !completed {
@@ -135,8 +143,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				}
 			}
 		} else {
-			// Default sync (5s timeout)
-			completed, unreachable := performSyncWithTimeoutForHosts(database, hosts, DefaultSyncTimeout, false)
+			// Use --ssh-timeout if set, otherwise default 5s
+			syncTimeout := DefaultSyncTimeout
+			if statusSSHTimeout > 0 {
+				syncTimeout = statusSSHTimeout
+			}
+			completed, unreachable := performSyncWithTimeoutForHosts(database, hosts, syncTimeout, false)
 			if !completed {
 				if note := buildStaleDataNote(database, unreachable); note != "" {
 					fmt.Fprintln(os.Stderr, note)
@@ -216,8 +228,12 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	}
 
 	// Sync host to update job status from remote
+	syncTimeout := 15 * time.Second
+	if statusSSHTimeout > syncTimeout {
+		syncTimeout = statusSSHTimeout
+	}
 	_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
-		Timeout: 15 * time.Second,
+		Timeout: syncTimeout,
 	}, nil)
 	if syncErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
@@ -550,6 +566,11 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 
 // showActiveJobs displays all active jobs (running, starting, queued) and recent failures
 func showActiveJobs(database *sql.DB) error {
+	// Raise SSH connect timeout for slow connections
+	if statusSSHTimeout > 0 {
+		ssh.SetMinConnectTimeout(statusSSHTimeout)
+	}
+
 	// Sync first if not disabled
 	if !statusNoSync {
 		if statusSync {
@@ -559,10 +580,14 @@ func showActiveJobs(database *sql.DB) error {
 					syncHost(database, host)
 				}
 			}
-		} else if statusFast {
+		} else if statusFast && statusSSHTimeout == 0 {
 			performFastSync(database, false)
 		} else {
-			performSyncWithTimeout(database, DefaultSyncTimeout, false)
+			syncTimeout := DefaultSyncTimeout
+			if statusSSHTimeout > 0 {
+				syncTimeout = statusSSHTimeout
+			}
+			performSyncWithTimeout(database, syncTimeout, false)
 		}
 
 		// Start queue runners on hosts with queued or running queue-runner jobs
