@@ -3,6 +3,7 @@ package logfiles
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -29,6 +30,12 @@ func LocationForJob(job *db.Job) Location {
 // The returned boolean indicates whether the path is a confirmed file (true) or a best-effort
 // fallback (false).
 func Resolve(job *db.Job) (string, bool) {
+	return ResolveWithTimeout(job, 0)
+}
+
+// ResolveWithTimeout is like Resolve but uses the specified timeout for SSH operations.
+// A zero timeout uses the default.
+func ResolveWithTimeout(job *db.Job, timeout time.Duration) (string, bool) {
 	loc := LocationForJob(job)
 	if job == nil {
 		return "", false
@@ -38,7 +45,13 @@ func Resolve(job *db.Job) (string, bool) {
 	}
 
 	findCmd := fmt.Sprintf("ls -t %s 2>/dev/null | head -1", loc.Path)
-	stdout, _, err := ssh.Run(job.Host, findCmd)
+	var stdout string
+	var err error
+	if timeout > 0 {
+		stdout, _, err = ssh.RunWithTimeout(job.Host, findCmd, timeout)
+	} else {
+		stdout, _, err = ssh.Run(job.Host, findCmd)
+	}
 	if err == nil {
 		trimmed := strings.TrimSpace(stdout)
 		if trimmed != "" {

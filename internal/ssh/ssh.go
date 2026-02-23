@@ -568,7 +568,20 @@ func ReadRemoteFile(host, path string) (string, error) {
 // RemoteFileExists checks if a file exists on a remote host
 // Note: path is not quoted to allow tilde expansion
 func RemoteFileExists(host, path string) (bool, error) {
-	stdout, _, err := Run(host, fmt.Sprintf("test -f %s && echo EXISTS || echo NOTEXISTS", path))
+	return RemoteFileExistsWithTimeout(host, path, 0)
+}
+
+// RemoteFileExistsWithTimeout checks if a file exists on a remote host with a specified timeout.
+// A zero timeout uses the default.
+func RemoteFileExistsWithTimeout(host, path string, timeout time.Duration) (bool, error) {
+	cmd := fmt.Sprintf("test -f %s && echo EXISTS || echo NOTEXISTS", path)
+	var stdout string
+	var err error
+	if timeout > 0 {
+		stdout, _, err = RunWithTimeout(host, cmd, timeout)
+	} else {
+		stdout, _, err = Run(host, cmd)
+	}
 	if err != nil {
 		return false, err
 	}

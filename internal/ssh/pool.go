@@ -64,6 +64,17 @@ func init() {
 	}
 }
 
+// SetMinConnectTimeout raises the SSH connect timeout to at least the given
+// duration. It has no effect if the current timeout is already larger. This
+// must be called before the first SSH operation (the pool is created lazily).
+func SetMinConnectTimeout(d time.Duration) {
+	secs := int(d.Seconds())
+	if secs > defaultConnTimeout {
+		defaultConnTimeout = secs
+		defaultReadyTimeout = time.Duration(secs+5) * time.Second
+	}
+}
+
 // getDefaultPool returns the global session pool, creating it lazily.
 func getDefaultPool() *SessionPool {
 	poolOnce.Do(func() {

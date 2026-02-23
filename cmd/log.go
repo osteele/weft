@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/logfiles"
 	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/remote-jobs/internal/ops"
 	"github.com/osteele/remote-jobs/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -33,6 +34,7 @@ Examples:
   remote-jobs log 25 --to 100            # First 100 lines
   remote-jobs log 25 --grep error        # Lines containing "error"
   remote-jobs log 25 -f --grep epoch     # Follow, filter for "epoch"
+  remote-jobs log 25 -t 2m               # Use 2 minute SSH timeout (slow connections)
 
 Operations Log (forensic debugging):
   remote-jobs log --ops                    # Show recent operations
@@ -46,12 +48,13 @@ Operations Log (forensic debugging):
 }
 
 var (
-	logFollow bool
-	logLines  int
-	logFrom   int
-	logTo     int
-	logGrep   string
-	logFull   bool
+	logFollow  bool
+	logLines   int
+	logFrom    int
+	logTo      int
+	logGrep    string
+	logFull    bool
+	logTimeout time.Duration
 
 	// Operations log flags
 	logOps       bool
@@ -73,6 +76,7 @@ func init() {
 	logCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
 	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
 	logCmd.Flags().BoolVar(&logFull, "full", false, "Show the entire log (alias for --from 1)")
+	logCmd.Flags().DurationVarP(&logTimeout, "timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
 
 	// Operations log flags
 	logCmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
@@ -184,8 +188,13 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		// Fall through to remote fetch if not cached
 	}
 
+	// Raise SSH connect timeout to match --timeout so slow connections succeed
+	if logTimeout > 0 {
+		ssh.SetMinConnectTimeout(logTimeout)
+	}
+
 	// Determine log file path using shared resolver
-	logFile, resolved := logfiles.Resolve(job)
+	logFile, resolved := logfiles.ResolveWithTimeout(job, logTimeout)
 
 	// Check if log file exists (skip when resolver already confirmed it)
 	exists := resolved
@@ -197,7 +206,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 			exists = true
 		}
 	} else if !exists {
-		exists, err = ssh.RemoteFileExists(job.Host, logFile)
+		exists, err = ssh.RemoteFileExistsWithTimeout(job.Host, logFile, logTimeout)
 		if err != nil {
 			return fmt.Errorf("check log file: %w", err)
 		}
@@ -218,7 +227,12 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 
 	// Regular mode
-	stdout, stderr, err := ssh.Run(job.Host, remoteCmd)
+	var stdout, stderr string
+	if logTimeout > 0 {
+		stdout, stderr, err = ssh.RunWithTimeout(job.Host, remoteCmd, logTimeout)
+	} else {
+		stdout, stderr, err = ssh.Run(job.Host, remoteCmd)
+	}
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {
 			if cached, cacheErr := logcache.Read(jobID); cacheErr == nil {
@@ -239,6 +253,12 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 			return fmt.Errorf("could not read log for job %d on %s: %s", jobID, job.Host, stderr)
 		}
 		return fmt.Errorf("could not read log for job %d on %s: %w", jobID, job.Host, err)
+	}
+
+	// Cache the full log for terminal jobs so subsequent calls are instant (best-effort).
+	// This fetches the complete file in the background — the SSH session is already warm.
+	if shouldPreferCachedLog(job.Status) && !logcache.Exists(jobID) {
+		ops.CacheCompletedJobLog(job)
 	}
 
 	// Process carriage returns - progress bars use \r to overwrite lines
