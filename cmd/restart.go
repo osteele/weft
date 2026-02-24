@@ -12,11 +12,11 @@ import (
 
 var restartCmd = &cobra.Command{
 	Use:   "restart <job-id>...",
-	Short: "Requeue a killed, dead, failed, or canceled job",
-	Long: `Restart a job by changing its status back to queued.
+	Short: "Restart a killed, dead, failed, canceled, or completed job",
+	Long: `Restart a job by re-running it.
 
-The job keeps its original ID and all metadata. Only jobs with status
-killed, dead, failed, or canceled can be restarted.
+For killed/dead/failed/canceled jobs, the job is requeued with its original ID.
+For completed jobs, a new job is created with the same command and metadata.
 
 Examples:
   remote-jobs restart 42
@@ -68,14 +68,11 @@ func restartJob(database *sql.DB, jobID int64) error {
 
 	// Validate job can be retried
 	effectiveStatus := job.EffectiveStatus()
-	if !requeueableStatuses[effectiveStatus] {
-		if effectiveStatus == db.StatusQueued {
-			return fmt.Errorf("job is already queued")
-		}
-		if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusStarting {
-			return fmt.Errorf("job is currently %s; kill it first if you want to retry", effectiveStatus)
-		}
-		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled jobs can be retried", effectiveStatus)
+	if effectiveStatus == db.StatusQueued {
+		return fmt.Errorf("job is already queued")
+	}
+	if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusStarting {
+		return fmt.Errorf("job is currently %s; kill it first if you want to retry", effectiveStatus)
 	}
 
 	if job.Host == "" {
@@ -83,6 +80,34 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 	if job.Command == "" {
 		return fmt.Errorf("job missing command")
+	}
+
+	// Completed jobs: create a new job with the same metadata
+	if effectiveStatus == db.StatusCompleted {
+		result, err := ops.RestartJob(database, ops.RestartJobParams{
+			OriginalJob:  job,
+			EnvVars:      job.EnvVars,
+			Tags:         job.Tags,
+			DepSpec:      job.DepSpec,
+			CPUAllotment: job.CPUAllotment,
+			Project:      job.Project,
+		}, ops.DefaultOptions())
+		if err != nil {
+			return err
+		}
+		if result.Deferred {
+			fmt.Printf("Job saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", job.Host)
+		}
+		fmt.Printf("Created new job %d from completed job %d on %s\n", result.JobID, jobID, job.Host)
+		if job.Description != "" {
+			fmt.Printf("  Description: %s\n", job.Description)
+		}
+		return nil
+	}
+
+	// Killed/dead/failed/canceled jobs: requeue with same ID
+	if !requeueableStatuses[effectiveStatus] {
+		return fmt.Errorf("cannot retry job with status '%s'; only killed/dead/failed/canceled/completed jobs can be retried", effectiveStatus)
 	}
 
 	oldStatus := job.Status

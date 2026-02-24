@@ -10,11 +10,15 @@ import (
 
 // RestartJobParams contains parameters for restarting a job
 type RestartJobParams struct {
-	OriginalJob *db.Job  // The job to restart
-	WorkingDir  string   // Override working directory (empty = use original)
-	Command     string   // Override command (empty = use original)
-	Description string   // Override description (empty = use original)
-	EnvVars     []string // Environment variables
+	OriginalJob  *db.Job  // The job to restart
+	WorkingDir   string   // Override working directory (empty = use original)
+	Command      string   // Override command (empty = use original)
+	Description  string   // Override description (empty = use original)
+	EnvVars      []string // Environment variables
+	Tags         []string // Job tags
+	DepSpec      string   // Dependency specification
+	CPUAllotment *int     // CPU allotment
+	Project      string   // Project name
 }
 
 // RestartJob creates a new job record based on an existing job and queues it for execution.
@@ -44,6 +48,31 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 	newJobID, err := db.RecordQueuedWithGPU(database, orig.Host, workingDir, command, description, orig.GPU)
 	if err != nil {
 		return Result{}, fmt.Errorf("create job record: %w", err)
+	}
+	if len(params.EnvVars) > 0 {
+		if err := db.SetJobEnvVars(database, newJobID, params.EnvVars); err != nil {
+			return Result{}, fmt.Errorf("set env vars: %w", err)
+		}
+	}
+	if len(params.Tags) > 0 {
+		if err := db.SetJobTags(database, newJobID, params.Tags); err != nil {
+			return Result{}, fmt.Errorf("set tags: %w", err)
+		}
+	}
+	if params.DepSpec != "" {
+		if err := db.SetJobDepSpec(database, newJobID, params.DepSpec); err != nil {
+			return Result{}, fmt.Errorf("set dep spec: %w", err)
+		}
+	}
+	if params.CPUAllotment != nil {
+		if err := db.SetJobCPUAllotment(database, newJobID, params.CPUAllotment); err != nil {
+			return Result{}, fmt.Errorf("set CPU allotment: %w", err)
+		}
+	}
+	if params.Project != "" {
+		if err := db.SetJobProject(database, newJobID, params.Project); err != nil {
+			return Result{}, fmt.Errorf("set project: %w", err)
+		}
 	}
 	backend := orig.Backend
 	if backend == "" {
