@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 46
+# BUILD: 47
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -1054,6 +1054,7 @@ start_job() {
         duration=$((end_time - start_time))
 
         echo "$exit_code" > "$status_file"
+        echo "end_time=$end_time" >> "$meta_file"
         echo "=== END exit=$exit_code $(date) ==="
 
         if [ "$exit_code" -eq 0 ]; then

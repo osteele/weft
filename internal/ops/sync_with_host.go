@@ -36,10 +36,16 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 1: Check if status file exists (job completed)
 	completedResult, completionInfo := prober.ProbeCompleted(job.ID)
 	if completedResult == remote.ProbeTrue && completionInfo != nil {
-		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
-			return SyncResult{HostContacted: true}, err
+		metaEndTime, metaErr := UpdateTimesFromMetadata(database, job, timeout)
+		if metaErr != nil {
+			return SyncResult{HostContacted: true}, metaErr
 		}
-		if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, completionInfo.EndTime); err != nil {
+		// Prefer end_time from metadata (system clock) over status file mtime (NFS clock)
+		endTime := completionInfo.EndTime
+		if metaEndTime > 0 {
+			endTime = metaEndTime
+		}
+		if err := RecordJobCompletion(database, job.ID, completionInfo.ExitCode, endTime); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
 		CacheCompletedJobLog(job, timeout)

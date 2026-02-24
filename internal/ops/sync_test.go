@@ -321,6 +321,170 @@ func TestSyncQueueRunnerJobCompletesJobs(t *testing.T) {
 // (from a previous start_now action that was killed) can still complete correctly
 // when the job re-runs via queue runner and creates a status file with a new timestamp.
 // The sync should fall back to pattern-based lookup after the exact path fails.
+func TestUpdateTimesFromMetadataBothTimes(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "meta-host", "/tmp", "echo test", "meta job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	mock := mockQueueRemote{
+		metadata: "start_time=1700000000\nend_time=1700000300\n",
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	if err != nil {
+		t.Fatalf("UpdateTimesFromMetadata: %v", err)
+	}
+	if endTime != 1700000300 {
+		t.Fatalf("expected end_time 1700000300, got %d", endTime)
+	}
+	if job.StartTime != 1700000000 {
+		t.Fatalf("expected start_time 1700000000, got %d", job.StartTime)
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.StartTime != 1700000000 {
+		t.Fatalf("expected DB start_time 1700000000, got %d", updated.StartTime)
+	}
+}
+
+func TestUpdateTimesFromMetadataOnlyStartTime(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "meta-host", "/tmp", "echo test", "meta job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	mock := mockQueueRemote{
+		metadata: "start_time=1700000000\n",
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	if err != nil {
+		t.Fatalf("UpdateTimesFromMetadata: %v", err)
+	}
+	if endTime != 0 {
+		t.Fatalf("expected end_time 0 (absent), got %d", endTime)
+	}
+	if job.StartTime != 1700000000 {
+		t.Fatalf("expected start_time updated, got %d", job.StartTime)
+	}
+}
+
+func TestUpdateTimesFromMetadataEmptyMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "meta-host", "/tmp", "echo test", "meta job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	mock := mockQueueRemote{
+		metadata: "",
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	if err != nil {
+		t.Fatalf("UpdateTimesFromMetadata: %v", err)
+	}
+	if endTime != 0 {
+		t.Fatalf("expected end_time 0 for empty metadata, got %d", endTime)
+	}
+	if job.StartTime != 0 {
+		t.Fatalf("expected start_time unchanged, got %d", job.StartTime)
+	}
+}
+
+func TestUpdateTimesFromMetadataSkipsStartTimeIfAlreadySet(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "meta-host", "/tmp", "echo test", "meta job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	// Set start_time in DB
+	if _, err := database.Exec(`UPDATE jobs SET start_time = ? WHERE id = ?`, 1700000100, jobID); err != nil {
+		t.Fatalf("update start_time: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	mock := mockQueueRemote{
+		metadata: "start_time=1700000000\nend_time=1700000300\n",
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	if err != nil {
+		t.Fatalf("UpdateTimesFromMetadata: %v", err)
+	}
+	if endTime != 1700000300 {
+		t.Fatalf("expected end_time 1700000300, got %d", endTime)
+	}
+	// start_time should NOT have been overwritten
+	if job.StartTime != 1700000100 {
+		t.Fatalf("expected start_time unchanged at 1700000100, got %d", job.StartTime)
+	}
+}
+
+func TestSyncQueueRunnerJobUsesMetadataEndTime(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo", "queue job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	// Set up queueRemoteClient mock to return metadata with end_time
+	queueMock := mockQueueRemote{
+		metadata: "start_time=1700000500\nend_time=1700001000\n",
+	}
+	restore := setQueueRemoteClientForTesting(queueMock)
+	defer restore()
+
+	// Prober reports completion with status file mtime (NFS clock, skewed behind)
+	exitCode := 0
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeTrue,
+		CompletionInfo:  &remote.CompletionInfo{ExitCode: exitCode, EndTime: 1700000800},
+	}
+	host := &remote.MockHost{}
+
+	job, _ := db.GetJobByID(database, jobID)
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second, SkipSamples: true})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
+	}
+	if !syncResult.Updated {
+		t.Fatalf("expected completion change")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.EndTime == nil || *updated.EndTime != 1700001000 {
+		t.Fatalf("expected end_time from metadata (1700001000), got %v", updated.EndTime)
+	}
+}
+
 func TestSyncDraftJobRemovesQueuedEntry(t *testing.T) {
 	database := db.SetupTestDB(t)
 

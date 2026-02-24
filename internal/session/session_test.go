@@ -107,6 +107,21 @@ description=Training run`
 	}
 }
 
+func TestParseMetadataWithEndTime(t *testing.T) {
+	content := `job_id=42
+start_time=1700000000
+end_time=1700000300`
+
+	result := ParseMetadata(content)
+
+	if result["start_time"] != "1700000000" {
+		t.Errorf("start_time = %q, want %q", result["start_time"], "1700000000")
+	}
+	if result["end_time"] != "1700000300" {
+		t.Errorf("end_time = %q, want %q", result["end_time"], "1700000300")
+	}
+}
+
 func TestFormatMetadata(t *testing.T) {
 	content := FormatMetadata(42, "/mnt/code", "python train.py", "cool30", "Test job", 1234567890)
 

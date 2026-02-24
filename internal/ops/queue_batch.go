@@ -133,10 +133,16 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 			}
 		default:
 			if status.ExitCode != nil {
-				if job.StartTime == 0 {
-					_ = UpdateStartTimeFromMetadata(database, job, timeout)
+				metaEndTime, metaErr := UpdateTimesFromMetadata(database, job, timeout)
+				if metaErr != nil {
+					return updated, metaErr
 				}
-				if err := RecordJobCompletion(database, job.ID, *status.ExitCode, status.Mtime); err != nil {
+				// Prefer end_time from metadata (system clock) over status file mtime (NFS clock)
+				endTime := status.Mtime
+				if metaEndTime > 0 {
+					endTime = metaEndTime
+				}
+				if err := RecordJobCompletion(database, job.ID, *status.ExitCode, endTime); err != nil {
 					return updated, err
 				}
 				CacheCompletedJobLog(job, timeout)

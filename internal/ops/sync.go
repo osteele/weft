@@ -501,40 +501,50 @@ func startQueuedJobNow(database *sql.DB, job *db.Job, timeout time.Duration) err
 	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusRunning)
 }
 
-// UpdateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set
-func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) error {
-	// Only update if start_time is not set
-	if job.StartTime > 0 {
-		return nil
-	}
-
+// UpdateTimesFromMetadata reads the metadata file and updates start_time if unset.
+// Returns the end_time from metadata (0 if absent), which callers can use instead of
+// the status file mtime to avoid NFS clock skew issues.
+func UpdateTimesFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) (int64, error) {
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
 
 	content, err := queueRemoteClient.Metadata(job.Host, job.ID, timeout)
 	if err != nil || strings.TrimSpace(content) == "" {
-		return nil // No metadata file or couldn't read it
+		return 0, nil // No metadata file or couldn't read it
 	}
 
-	// Parse metadata
 	metadata := session.ParseMetadata(content)
-	if startTimeStr, ok := metadata["start_time"]; ok {
-		startTime, err := strconv.ParseInt(startTimeStr, 10, 64)
-		if err != nil {
-			return fmt.Errorf("parse metadata start time for job %d: %w", job.ID, err)
+
+	// Update start_time if not already set
+	if job.StartTime == 0 {
+		if startTimeStr, ok := metadata["start_time"]; ok {
+			startTime, parseErr := strconv.ParseInt(startTimeStr, 10, 64)
+			if parseErr != nil {
+				return 0, fmt.Errorf("parse metadata start time for job %d: %w", job.ID, parseErr)
+			}
+			if startTime > 0 {
+				if dbErr := db.UpdateStartTime(database, job.ID, startTime); dbErr != nil {
+					return 0, fmt.Errorf("update start time for job %d: %w", job.ID, dbErr)
+				}
+				job.StartTime = startTime
+			}
 		}
-		if startTime <= 0 {
-			return nil
-		}
-		// Update database with actual start time from metadata
-		if err := db.UpdateStartTime(database, job.ID, startTime); err != nil {
-			return fmt.Errorf("update start time for job %d: %w", job.ID, err)
-		}
-		// Update in-memory job struct too for current sync cycle
-		job.StartTime = startTime
 	}
-	return nil
+
+	// Parse end_time from metadata (written by queue-runner BUILD >= 47)
+	var endTime int64
+	if endTimeStr, ok := metadata["end_time"]; ok {
+		endTime, _ = strconv.ParseInt(endTimeStr, 10, 64)
+	}
+
+	return endTime, nil
+}
+
+// UpdateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set.
+func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) error {
+	_, err := UpdateTimesFromMetadata(database, job, timeout)
+	return err
 }
 
 // Probe functions for trinary logic
