@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestJobProject(t *testing.T) {
+func TestDeriveProject(t *testing.T) {
 	tests := []struct {
 		name       string
 		workingDir string
@@ -21,11 +21,79 @@ func TestJobProject(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			job := &Job{WorkingDir: tt.workingDir, Command: tt.command}
-			if got := job.Project(); got != tt.want {
-				t.Errorf("Project() = %q, want %q", got, tt.want)
+			if got := DeriveProject(tt.workingDir, tt.command); got != tt.want {
+				t.Errorf("DeriveProject(%q, %q) = %q, want %q", tt.workingDir, tt.command, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestFilterJobsByProject(t *testing.T) {
+	jobs := []*Job{
+		{ID: 1, Project: "alpha"},
+		{ID: 2, Project: "beta"},
+		{ID: 3, Project: "alpha"},
+		{ID: 4, Project: ""}, // no stored project
+		{ID: 5, WorkingDir: "/home/user/gamma", Command: "echo hi"}, // derived from WorkingDir
+	}
+
+	// Filter by "alpha" returns matching stored projects
+	filtered := FilterJobsByProject(jobs, "alpha")
+	if len(filtered) != 2 {
+		t.Errorf("FilterJobsByProject(alpha) got %d jobs, want 2", len(filtered))
+	}
+
+	// Empty filter returns all
+	filtered = FilterJobsByProject(jobs, "")
+	if len(filtered) != 5 {
+		t.Errorf("FilterJobsByProject('') got %d jobs, want 5", len(filtered))
+	}
+
+	// Filter with fallback derivation
+	filtered = FilterJobsByProject(jobs, "gamma")
+	if len(filtered) != 1 || filtered[0].ID != 5 {
+		t.Errorf("FilterJobsByProject(gamma) got %d jobs, want 1 (job 5)", len(filtered))
+	}
+
+	// Non-matching filter
+	filtered = FilterJobsByProject(jobs, "nonexistent")
+	if len(filtered) != 0 {
+		t.Errorf("FilterJobsByProject(nonexistent) got %d jobs, want 0", len(filtered))
+	}
+}
+
+func TestSetJobProjectRoundtrip(t *testing.T) {
+	tmpfile, err := os.CreateTemp("", "project-roundtrip-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	tmpfile.Close()
+	defer os.Remove(tmpfile.Name())
+
+	cleanup := SetDBPath(tmpfile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer database.Close()
+
+	jobID, err := RecordJobStarting(database, "test-host", "/home/user/my-project", "echo hi", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	if err := SetJobProject(database, jobID, "my-project"); err != nil {
+		t.Fatalf("SetJobProject: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Project != "my-project" {
+		t.Errorf("job.Project = %q, want %q", job.Project, "my-project")
 	}
 }
 

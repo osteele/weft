@@ -230,6 +230,11 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
 		return Result{}, fmt.Errorf("record dependencies: %w", err)
 	}
+	if project := db.DeriveProject(params.WorkingDir, params.Command); project != "" {
+		if err := db.SetJobProject(database, jobID, project); err != nil {
+			return Result{}, fmt.Errorf("record project: %w", err)
+		}
+	}
 	if params.CPUAllotment != nil {
 		if err := db.SetJobCPUAllotment(database, jobID, params.CPUAllotment); err != nil {
 			db.DeleteJob(database, jobID)

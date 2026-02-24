@@ -57,6 +57,7 @@ var (
 	listAll         bool
 	listTags        []string
 	listExcludeTags []string
+	listProject     string
 )
 
 const defaultHostSyncWindow = 48 * time.Hour
@@ -75,6 +76,7 @@ func addListFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&listSearch, "filter", "", "Search by description or command (alias for --search)")
 	cmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
 	cmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
+	cmd.Flags().StringVar(&listProject, "project", "", "Filter by project name")
 	cmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
 	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
@@ -164,7 +166,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 {
+		if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
@@ -174,6 +176,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
 		jobs = db.FilterJobsByHosts(jobs, hostFilterHosts)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
+		jobs = db.FilterJobsByProject(jobs, listProject)
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -203,7 +206,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	queryLimit := listLimit
-	if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 {
+	if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || listProject != "" {
 		queryLimit = 0
 	}
 	jobs, err := db.ListJobsWithMaxAgeForHosts(database, status, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
@@ -211,6 +214,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("list jobs: %w", err)
 	}
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
+	jobs = db.FilterJobsByProject(jobs, listProject)
 	if listLimit > 0 && len(jobs) > listLimit {
 		jobs = jobs[:listLimit]
 	}

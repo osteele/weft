@@ -58,6 +58,7 @@ type Job struct {
 	EnvVars              []string
 	Tags                 []string
 	DepSpec              string // Dependency specification (e.g., "42" or "42+" for after-any)
+	Project              string // Basename of working directory (stored at creation time)
 	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
 	QueuedAt             int64  // When job was added to remote queue (for queue ordering)
 	StartTime            int64
@@ -91,7 +92,7 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, cpu_allotment, env_vars, tags, dep_spec, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, cpu_allotment, env_vars, tags, dep_spec, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
 
 const ProcessedTag = "processed"
 
@@ -302,6 +303,16 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add dep_spec column for job dependencies (e.g., "42" or "42+" for after-any)
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN dep_spec TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add project column for storing derived project name
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN project TEXT`); err != nil {
+		return err
+	}
+
+	// Backfill project for recent jobs (last 24 hours)
+	if err := backfillRecentProjects(db); err != nil {
 		return err
 	}
 
@@ -1083,6 +1094,68 @@ func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
 	return err
 }
 
+// SetJobProject sets the project name for a job.
+func SetJobProject(db *sql.DB, jobID int64, project string) error {
+	_, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, project, jobID)
+	return err
+}
+
+// DeriveProject computes the project name from a working directory and command.
+// It checks for a "cd <dir> &&" prefix first, then falls back to the working directory basename.
+func DeriveProject(workingDir, command string) string {
+	_, cdDir := ParseCdPrefix(command)
+	if cdDir != "" {
+		return filepath.Base(cdDir)
+	}
+	if workingDir != "" {
+		return filepath.Base(workingDir)
+	}
+	return ""
+}
+
+// FilterJobsByProject filters jobs by project name. Empty project returns all jobs.
+func FilterJobsByProject(jobs []*Job, project string) []*Job {
+	if project == "" {
+		return jobs
+	}
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		jobProject := job.Project
+		if jobProject == "" {
+			jobProject = DeriveProject(job.WorkingDir, job.Command)
+		}
+		if jobProject == project {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
+}
+
+// backfillRecentProjects populates the project column for recent jobs that don't have it set.
+func backfillRecentProjects(db *sql.DB) error {
+	cutoff := time.Now().Unix() - 86400
+	rows, err := db.Query(`SELECT id, working_dir, command FROM jobs WHERE project IS NULL AND created_at > ?`, cutoff)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var workingDir, command string
+		if err := rows.Scan(&id, &workingDir, &command); err != nil {
+			return err
+		}
+		project := DeriveProject(workingDir, command)
+		if project != "" {
+			if _, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, project, id); err != nil {
+				return err
+			}
+		}
+	}
+	return rows.Err()
+}
+
 // ListQueuedJobsWithDependency returns queued jobs whose dependency list references depID.
 func ListQueuedJobsWithDependency(db *sql.DB, depID int64) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND dep_spec IS NOT NULL AND dep_spec != '' AND tombstoned = 0`, jobSelectColumns)
@@ -1302,6 +1375,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var envVars sql.NullString
 	var tags sql.NullString
 	var depSpec sql.NullString
+	var project sql.NullString
 	var createdAt sql.NullInt64
 	var queuedAt sql.NullInt64
 	var startTime sql.NullInt64
@@ -1313,7 +1387,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingAt sql.NullInt64
 	var jobMetadata sql.NullString
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1362,6 +1436,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	j.Tags = decodeTags(tags)
 	if depSpec.Valid {
 		j.DepSpec = depSpec.String
+	}
+	if project.Valid {
+		j.Project = project.String
 	}
 	if createdAt.Valid {
 		j.CreatedAt = createdAt.Int64
@@ -1586,6 +1663,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var envVars sql.NullString
 		var tags sql.NullString
 		var depSpec sql.NullString
+		var project sql.NullString
 		var createdAt sql.NullInt64
 		var queuedAt sql.NullInt64
 		var startTime sql.NullInt64
@@ -1597,7 +1675,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingAt sql.NullInt64
 		var jobMetadata sql.NullString
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -1643,6 +1721,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		j.Tags = decodeTags(tags)
 		if depSpec.Valid {
 			j.DepSpec = depSpec.String
+		}
+		if project.Valid {
+			j.Project = project.String
 		}
 		if createdAt.Valid {
 			j.CreatedAt = createdAt.Int64
@@ -2049,15 +2130,6 @@ func (j *Job) EffectiveWorkingDir() string {
 		return dir
 	}
 	return j.WorkingDir
-}
-
-// Project returns the basename of the job's effective working directory.
-func (j *Job) Project() string {
-	dir := j.EffectiveWorkingDir()
-	if dir == "" {
-		return ""
-	}
-	return filepath.Base(dir)
 }
 
 // DisplayWorkingDir returns a user-friendly directory string, falling back to
