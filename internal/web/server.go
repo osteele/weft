@@ -183,6 +183,7 @@ type pageData struct {
 	HostSummaries  []hostSummary
 	Jobs           []jobRow
 	ShowGPU        bool
+	ShowProject    bool
 	RefreshSeconds int
 	LastUpdated    string
 	QueryParams    url.Values
@@ -200,6 +201,7 @@ type hostSummary struct {
 type jobRow struct {
 	ID          int64
 	Host        string
+	Project     string
 	Status      string
 	StatusClass string
 	Time        string
@@ -241,6 +243,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	sortJobsForView(filteredJobs, selectedView)
 
 	showGPU := false
+	showProject := false
 	rows := make([]jobRow, 0, len(filteredJobs))
 	for _, job := range filteredJobs {
 		gpu := job.GetGPU()
@@ -249,6 +252,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		if gpu == "" {
 			gpu = "—"
+		}
+		if job.Project != "" {
+			showProject = true
 		}
 		// Get status with progress if available
 		status := formatJobStatus(job)
@@ -263,6 +269,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		rows = append(rows, jobRow{
 			ID:          job.ID,
 			Host:        job.Host,
+			Project:     job.Project,
 			Status:      status,
 			StatusClass: jobStatusClass(job),
 			Time:        formatJobTime(job),
@@ -274,7 +281,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hostFilters := buildHostFilters(hosts)
-	hostSummaries := buildHostSummaries(hosts)
+	hostSummaries := buildHostSummaries(hosts, hostSyncTimes)
 
 	refreshSeconds := refreshIntervalSeconds(jobs, s.monitor)
 	data := pageData{
@@ -286,6 +293,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		HostSummaries:  hostSummaries,
 		Jobs:           rows,
 		ShowGPU:        showGPU,
+		ShowProject:    showProject,
 		RefreshSeconds: refreshSeconds,
 		LastUpdated:    formatLastUpdated(lastUpdated),
 		QueryParams:    r.URL.Query(),
@@ -362,11 +370,15 @@ func buildHostFilters(hosts []*hostinfo.Host) []hostFilterOption {
 	return filters
 }
 
-func buildHostSummaries(hosts []*hostinfo.Host) []hostSummary {
+func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Time) []hostSummary {
 	const staleThreshold = 5 * time.Minute
 	summaries := make([]hostSummary, 0, len(hosts))
 	for _, host := range hosts {
 		if host == nil {
+			continue
+		}
+		// Skip hosts that haven't been synced recently (e.g. decommissioned hosts)
+		if !isHostRecentlySynced(host.Name, hostSyncTimes) {
 			continue
 		}
 		statusClass := hostStatusClass(host.Status)

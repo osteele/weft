@@ -179,7 +179,8 @@ const indexTemplate = `<!doctype html>
       .nowrap { white-space: nowrap; }
       tbody tr:hover { background: #f9f8f6; }
       @media (max-width: 720px) {
-        th:nth-child(2), td:nth-child(2) { display: none; }
+        th:nth-child(2), td:nth-child(2),
+        th.project-col, td.project-col { display: none; }
       }
     </style>
   </head>
@@ -220,6 +221,7 @@ const indexTemplate = `<!doctype html>
           <tr>
             <th class="nowrap">ID</th>
             <th class="nowrap">Host</th>
+            {{if .ShowProject}}<th class="nowrap project-col">Project</th>{{end}}
             <th class="nowrap">Status</th>
             <th class="nowrap">Time</th>
             {{if .ShowGPU}}<th class="nowrap">GPU</th>{{end}}
@@ -231,6 +233,7 @@ const indexTemplate = `<!doctype html>
             <tr class="{{.StatusClass}}">
               <td class="nowrap">{{.ID}}</td>
               <td class="nowrap">{{.Host}}</td>
+              {{if $.ShowProject}}<td class="nowrap project-col">{{.Project}}</td>{{end}}
               <td class="status nowrap">{{.Status}}</td>
               <td class="nowrap">{{.Time}}</td>
               {{if $.ShowGPU}}<td class="nowrap">{{.GPU}}</td>{{end}}
@@ -238,7 +241,7 @@ const indexTemplate = `<!doctype html>
             </tr>
           {{end}}
           {{if eq (len .Jobs) 0}}
-            <tr><td colspan="{{if .ShowGPU}}6{{else}}5{{end}}" class="muted">No jobs match this view.</td></tr>
+            <tr><td colspan="99" class="muted">No jobs match this view.</td></tr>
           {{end}}
         </tbody>
       </table>

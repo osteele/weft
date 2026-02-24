@@ -459,20 +459,22 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 		return ""
 	}
 
-	hostCount := 0
+	// Filter to recently-synced hosts
+	var recentHosts []*Host
 	for _, host := range m.hosts {
-		if host != nil {
-			hostCount++
+		if host != nil && m.isHostRecentlySynced(host.Name) {
+			recentHosts = append(recentHosts, host)
 		}
 	}
 
-	if hostCount == 0 {
+	if len(recentHosts) == 0 {
 		if len(m.hosts) == 0 {
 			return dimStyle.Render(" Hosts: no hosts configured")
 		}
 		return dimStyle.Render(" Hosts: no host data")
 	}
 
+	hostCount := len(recentHosts)
 	label := labelStyle.Render("Hosts")
 	labelWidth := lipgloss.Width(label)
 	separatorWidth := 2 * (hostCount - 1)
@@ -489,10 +491,7 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 	}
 
 	segments := make([]string, 0, hostCount)
-	for _, host := range m.hosts {
-		if host == nil {
-			continue
-		}
+	for _, host := range recentHosts {
 		segments = append(segments, m.renderHostSummarySegment(host, format))
 	}
 
