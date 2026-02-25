@@ -794,7 +794,7 @@ You can also trigger the same action from the TUI by pressing `d`.
 
 Manage job queues for CPU-capped execution on remote hosts.
 
-Jobs added to a queue are scheduled in FIFO order, and the queue runner can run multiple jobs per host while keeping total CPU usage under a target cap. The queue runner runs in a tmux session on the remote host and keeps working when you disconnect. CPU allotments are set in the TUI (presets); the CLI has no setter.
+Jobs added to a queue are scheduled in FIFO order, and the queue runner can run multiple jobs per host while keeping total CPU usage under a target cap. The queue runner runs in a tmux session on the remote host and keeps working when you disconnect. CPU allotments and GPU memory reservations can be set via `remote-jobs job describe --cpu <percent>` and `--gpu-mem <gb>`.
 
 #### remote-jobs queue add
 

@@ -235,6 +235,8 @@ func init() {
 	jobDescribeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 	jobDescribeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU (CUDA_VISIBLE_DEVICES) - queued jobs only")
 	jobDescribeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
+	jobDescribeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
+	jobDescribeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {

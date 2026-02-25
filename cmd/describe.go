@@ -16,15 +16,17 @@ var (
 	describeCommand   string
 	describeGPU       string
 	describeGPUs      string
+	describeGPUMem    int
+	describeCPU       int
 )
 
 var describeCmd = &cobra.Command{
 	Use:   "describe <job-id>",
 	Short: "Set or update job metadata",
-	Long: `Set or update the description, directory, command, or GPU of a job.
+	Long: `Set or update the description, directory, command, GPU, or resource allotments of a job.
 
-For queued jobs, you can also update the working directory, command, and GPU.
-The remote queue file will be updated automatically.
+For queued jobs, you can also update the working directory, command, GPU, and resource
+allotments (GPU memory, CPU). The remote queue file will be updated automatically.
 
 Examples:
   remote-jobs describe 42 -m "Training GPT-2 with lr=0.001"
@@ -33,6 +35,8 @@ Examples:
   remote-jobs describe 42 --command "python train.py --epochs 100"
   remote-jobs describe 42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
   remote-jobs describe 42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
+  remote-jobs describe 42 --gpu-mem 12          # Reserve 12 GB GPU memory per device
+  remote-jobs describe 42 --cpu 50              # Set CPU allotment to 50%
   remote-jobs describe 42 -m "New desc" --command "python new.py"`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runDescribe,
@@ -46,6 +50,8 @@ func init() {
 	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU (CUDA_VISIBLE_DEVICES) - queued jobs only")
 	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
+	describeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
+	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
@@ -79,10 +85,13 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		gpuValue = describeGPUs
 	}
 
-	// Check if trying to update command/directory/gpu on non-queued job
+	hasGPUMem := cmd.Flags().Changed("gpu-mem")
+	hasCPU := cmd.Flags().Changed("cpu")
+
+	// Check if trying to update command/directory/gpu/allotments on non-queued job
 	effectiveStatus := job.EffectiveStatus()
-	if (describeCommand != "" || describeDirectory != "" || gpuValue != "") && effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("can only update command/directory/gpu on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
+	if (describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUMem || hasCPU) && effectiveStatus != db.StatusQueued {
+		return fmt.Errorf("can only update command/directory/gpu/allotments on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
 	}
 
 	// Track what was updated
@@ -135,8 +144,44 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("gpu: %s", gpuValue))
 	}
 
-	// If we updated command, directory, or GPU, sync to remote queue file
-	if describeCommand != "" || describeDirectory != "" || gpuValue != "" {
+	// Update GPU memory reservation if provided (queued jobs only)
+	if hasGPUMem {
+		mem := describeGPUMem
+		var memPtr *int
+		if mem > 0 {
+			memPtr = &mem
+		}
+		if err := db.SetJobGPUMemGB(database, jobID, memPtr); err != nil {
+			return fmt.Errorf("update GPU memory: %w", err)
+		}
+		job.GPUMemGB = memPtr
+		if memPtr != nil {
+			updates = append(updates, fmt.Sprintf("gpu-mem: %d GB", mem))
+		} else {
+			updates = append(updates, "gpu-mem: cleared")
+		}
+	}
+
+	// Update CPU allotment if provided (queued jobs only)
+	if hasCPU {
+		cpu := describeCPU
+		var cpuPtr *int
+		if cpu > 0 {
+			cpuPtr = &cpu
+		}
+		if err := db.SetJobCPUAllotment(database, jobID, cpuPtr); err != nil {
+			return fmt.Errorf("update CPU allotment: %w", err)
+		}
+		job.CPUAllotment = cpuPtr
+		if cpuPtr != nil {
+			updates = append(updates, fmt.Sprintf("cpu: %d%%", cpu))
+		} else {
+			updates = append(updates, "cpu: cleared")
+		}
+	}
+
+	// If we updated command, directory, GPU, or allotments, sync to remote queue file
+	if describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUMem || hasCPU {
 		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
 		if err != nil {
 			return err
