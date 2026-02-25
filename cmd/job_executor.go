@@ -6,9 +6,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/session"
 )
 
 // startJobOptions controls how a job is started immediately on the remote host.

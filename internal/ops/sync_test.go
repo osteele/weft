@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/remote"
-	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/remote"
+	"github.com/osteele/weft/internal/session"
 )
 
 type mockQueueRemote struct {

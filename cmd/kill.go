@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/core"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -16,8 +16,8 @@ var killCmd = &cobra.Command{
 	Long: `Kill running jobs by their IDs.
 
 Examples:
-  remote-jobs kill 42
-  remote-jobs kill 42 43 44`,
+  weft kill 42
+  weft kill 42 43 44`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runKill,
 }

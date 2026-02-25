@@ -7,10 +7,10 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // waitForQueuedJobCompletion waits for a queued job to complete.

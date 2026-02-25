@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/hostinfo"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // TryFetchAndCacheHostInfo is like FetchAndCacheHostInfo but returns

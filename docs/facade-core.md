@@ -35,7 +35,7 @@ interfaces stay thin and resilient while orchestration logic lives in one place.
 
 ## Sync and Reconciliation
 
-* The TUI’s periodic background sync and the CLI’s `remote-jobs sync` command
+* The TUI’s periodic background sync and the CLI’s `weft sync` command
   both call the same reconciliation helpers under the hood.
 * Deferred work (e.g., a kill request issued while a host is offline) is kept as
   pending state in the database until the next sync pass clears it.

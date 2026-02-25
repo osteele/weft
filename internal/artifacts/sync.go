@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // SyncResult captures artifact sync results.

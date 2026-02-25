@@ -11,7 +11,7 @@ import (
 )
 
 // RemoteArtifactsDir is the directory for artifact manifests on remote hosts.
-const RemoteArtifactsDir = "~/.cache/remote-jobs/artifacts"
+const RemoteArtifactsDir = "~/.cache/weft/artifacts"
 
 // RemoteManifestPath returns the remote manifest path for a job.
 func RemoteManifestPath(jobID int64) string {
@@ -24,7 +24,7 @@ func LocalArtifactsDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "remote-jobs", "artifacts"), nil
+	return filepath.Join(home, ".config", "weft", "artifacts"), nil
 }
 
 // LocalJobDir returns the local artifact directory for a job.

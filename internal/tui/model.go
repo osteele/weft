@@ -14,13 +14,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/core"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/llm"
-	"github.com/osteele/remote-jobs/internal/monitor"
-	"github.com/osteele/remote-jobs/internal/progress"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/llm"
+	"github.com/osteele/weft/internal/monitor"
+	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // Model is the main TUI state

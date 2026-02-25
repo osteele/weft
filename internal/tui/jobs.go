@@ -7,9 +7,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/queuejob"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queuejob"
 )
 
 func (m Model) refreshJobs() tea.Cmd {

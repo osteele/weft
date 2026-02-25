@@ -8,12 +8,12 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/logcache"
-	"github.com/osteele/remote-jobs/internal/logfiles"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/progress"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/logfiles"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 func (m Model) createJob() tea.Cmd {

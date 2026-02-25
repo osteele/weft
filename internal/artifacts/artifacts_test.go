@@ -55,7 +55,7 @@ func TestMergeEnvVars(t *testing.T) {
 		if ev == "RJ_JOB_ID=12" {
 			foundNewJobID = true
 		}
-		if ev == "RJ_ARTIFACT_MANIFEST=~/.cache/remote-jobs/artifacts/12.json" {
+		if ev == "RJ_ARTIFACT_MANIFEST=~/.cache/weft/artifacts/12.json" {
 			foundManifest = true
 		}
 	}

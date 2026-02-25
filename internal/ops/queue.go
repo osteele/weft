@@ -7,15 +7,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/artifacts"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/queuefile"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queuefile"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 const (
 	// QueueDir is the remote directory where queue files are stored
-	QueueDir = "~/.cache/remote-jobs/queue"
+	QueueDir = "~/.cache/weft/queue"
 	// DefaultQueueName is the default queue name when none is specified
 	DefaultQueueName = "default"
 	// DefaultGPUMemGB is the default GPU memory reservation when a job uses a GPU

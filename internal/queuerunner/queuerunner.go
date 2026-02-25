@@ -8,15 +8,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/scripts"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/scripts"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 const (
-	queueDir        = "~/.cache/remote-jobs/queue"
-	scriptsDir      = "~/.cache/remote-jobs/scripts"
-	queueRunnerPath = "~/.cache/remote-jobs/scripts/queue-runner.sh"
+	queueDir        = "~/.cache/weft/queue"
+	scriptsDir      = "~/.cache/weft/scripts"
+	queueRunnerPath = "~/.cache/weft/scripts/queue-runner.sh"
 )
 
 // QueueDir returns the remote directory used for queue files.
@@ -172,7 +172,7 @@ func writeScript(host string) error {
 
 // RunnerCommand builds the command to start the queue runner (optionally with env prefix).
 func RunnerCommand(envPrefix string) string {
-	return fmt.Sprintf("%sbash $HOME/.cache/remote-jobs/scripts/queue-runner.sh %s", envPrefix, ops.DefaultQueueName)
+	return fmt.Sprintf("%sbash $HOME/.cache/weft/scripts/queue-runner.sh %s", envPrefix, ops.DefaultQueueName)
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
@@ -219,7 +219,7 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 		return true, nil
 	}
 	if !stillExists {
-		return false, fmt.Errorf("queue runner on %s crashed immediately after starting - check runner log: ssh %s 'tail -20 ~/.cache/remote-jobs/queue/runner-default.log'", host, host)
+		return false, fmt.Errorf("queue runner on %s crashed immediately after starting - check runner log: ssh %s 'tail -20 ~/.cache/weft/queue/runner-default.log'", host, host)
 	}
 
 	return true, nil

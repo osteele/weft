@@ -11,7 +11,7 @@ func SetupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 
 	// Create temp file for test database
-	tmpFile, err := os.CreateTemp("", "remote-jobs-db-test-*.db")
+	tmpFile, err := os.CreateTemp("", "weft-db-test-*.db")
 	if err != nil {
 		t.Fatalf("Failed to create temp file: %v", err)
 	}

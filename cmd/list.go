@@ -8,8 +8,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -25,18 +25,18 @@ By default, only shows jobs from the last 7 days and hosts synced in the last 2 
 Use --all/-a to include older jobs and --all-hosts to include older hosts.
 
 Examples:
-  remote-jobs list                    # Recent jobs (last 7 days)
-  remote-jobs list --all              # All jobs including older
-  remote-jobs list --all-hosts        # Include jobs from older hosts
-  remote-jobs list --running          # Running jobs only
-  remote-jobs list --queued           # Jobs waiting in queue
-  remote-jobs list --running --sync   # Running jobs (sync first)
-  remote-jobs list --host cool30      # Jobs on cool30
-  remote-jobs list --tag exp-012      # Jobs with tag exp-012
-  remote-jobs list --exclude-tag exp-012  # Jobs without tag exp-012
-  remote-jobs list --status unprocessed --tag exp-012
-  remote-jobs list --search training  # Search jobs
-  remote-jobs list --show 42          # Job details`,
+  weft list                    # Recent jobs (last 7 days)
+  weft list --all              # All jobs including older
+  weft list --all-hosts        # Include jobs from older hosts
+  weft list --running          # Running jobs only
+  weft list --queued           # Jobs waiting in queue
+  weft list --running --sync   # Running jobs (sync first)
+  weft list --host cool30      # Jobs on cool30
+  weft list --tag exp-012      # Jobs with tag exp-012
+  weft list --exclude-tag exp-012  # Jobs without tag exp-012
+  weft list --status unprocessed --tag exp-012
+  weft list --search training  # Search jobs
+  weft list --show 42          # Job details`,
 	RunE: runList,
 }
 

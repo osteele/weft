@@ -182,7 +182,7 @@ func TestSSHHostIntegration_AppendToQueueWithArtifactEnvVars(t *testing.T) {
 	testJobID := int64(888889)
 	envVars := []string{
 		"RJ_JOB_ID=888889",
-		"RJ_ARTIFACT_MANIFEST=~/.cache/remote-jobs/artifacts/888889.json",
+		"RJ_ARTIFACT_MANIFEST=~/.cache/weft/artifacts/888889.json",
 		"RJ_ARTIFACT_ROOT=.",
 		"MY_CUSTOM_VAR=test_value",
 	}

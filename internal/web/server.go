@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/hostinfo"
-	"github.com/osteele/remote-jobs/internal/logfiles"
-	"github.com/osteele/remote-jobs/internal/monitor"
-	"github.com/osteele/remote-jobs/internal/progress"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/logfiles"
+	"github.com/osteele/weft/internal/monitor"
+	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 type Config struct {
@@ -285,7 +285,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 	refreshSeconds := refreshIntervalSeconds(jobs, s.monitor)
 	data := pageData{
-		Title:          "remote-jobs",
+		Title:          "weft",
 		Views:          viewOptions,
 		SelectedView:   selectedView,
 		HostFilters:    hostFilters,

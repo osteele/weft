@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fsnotify/fsnotify"
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 func (m Model) startSyncTicker() tea.Cmd {

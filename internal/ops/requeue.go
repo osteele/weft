@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 // RequeueJob changes a job's status to queued and appends it to the remote queue.

@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // DefaultQueueName is used when no explicit queue name is provided.
 const DefaultQueueName = "default"
 
-const queueDir = "~/.cache/remote-jobs/queue"
+const queueDir = "~/.cache/weft/queue"
 
 // Entry represents a job line stored in the remote queue file.
 type Entry struct {

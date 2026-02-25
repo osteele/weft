@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # BUILD: 55
 #
-# Queue runner for remote-jobs
+# Queue runner for weft
 # Uses append-only JSONL command log with jq for parsing.
 #
 # Usage:
@@ -14,21 +14,21 @@
 #   {"ts":"...","op":"stop"}
 #
 # Files:
-#   ~/.cache/remote-jobs/queue/{queue}.commands    - Command log (CLI appends, runner reads)
-#   ~/.cache/remote-jobs/queue/{queue}.state.json  - Runner state (runner writes)
-#   ~/.cache/remote-jobs/queue/{queue}.current     - Currently running job ID
-#   ~/.cache/remote-jobs/queue/{queue}.runner.pid  - Runner process ID
-#   ~/.cache/remote-jobs/queue/runner-{queue}.log  - Runner operations log
-#   ~/.cache/remote-jobs/logs/{job_id}.log         - Job output
-#   ~/.cache/remote-jobs/logs/{job_id}.status      - Exit code
-#   ~/.cache/remote-jobs/logs/{job_id}.meta        - Metadata
-#   ~/.cache/remote-jobs/logs/{job_id}.samples     - CPU samples (epoch + % of total cores)
+#   ~/.cache/weft/queue/{queue}.commands    - Command log (CLI appends, runner reads)
+#   ~/.cache/weft/queue/{queue}.state.json  - Runner state (runner writes)
+#   ~/.cache/weft/queue/{queue}.current     - Currently running job ID
+#   ~/.cache/weft/queue/{queue}.runner.pid  - Runner process ID
+#   ~/.cache/weft/queue/runner-{queue}.log  - Runner operations log
+#   ~/.cache/weft/logs/{job_id}.log         - Job output
+#   ~/.cache/weft/logs/{job_id}.status      - Exit code
+#   ~/.cache/weft/logs/{job_id}.meta        - Metadata
+#   ~/.cache/weft/logs/{job_id}.samples     - CPU samples (epoch + % of total cores)
 #
 # Environment Variables (for Slack notifications):
-#   REMOTE_JOBS_SLACK_WEBHOOK     Slack webhook URL
-#   REMOTE_JOBS_SLACK_NOTIFY      When to notify: "all" (default), "failures", "none"
-#   REMOTE_JOBS_SLACK_MIN_DURATION  Minimum job duration to trigger notification
-#   REMOTE_JOBS_SLACK_VERBOSE=1   Include directory and command in message
+#   WEFT_SLACK_WEBHOOK     Slack webhook URL
+#   WEFT_SLACK_NOTIFY      When to notify: "all" (default), "failures", "none"
+#   WEFT_SLACK_MIN_DURATION  Minimum job duration to trigger notification
+#   WEFT_SLACK_VERBOSE=1   Include directory and command in message
 #
 
 set -euo pipefail
@@ -46,14 +46,14 @@ if ! command -v jq &>/dev/null; then
 fi
 
 QUEUE_NAME="${1:-default}"
-QUEUE_DIR="$HOME/.cache/remote-jobs/queue"
-LOG_DIR="$HOME/.cache/remote-jobs/logs"
+QUEUE_DIR="$HOME/.cache/weft/queue"
+LOG_DIR="$HOME/.cache/weft/logs"
 COMMANDS_FILE="$QUEUE_DIR/${QUEUE_NAME}.commands"
 STATE_FILE="$QUEUE_DIR/${QUEUE_NAME}.state.json"
 CURRENT_FILE="$QUEUE_DIR/${QUEUE_NAME}.current"
 PID_FILE="$QUEUE_DIR/${QUEUE_NAME}.runner.pid"
 RUNNER_LOG="$QUEUE_DIR/runner-${QUEUE_NAME}.log"
-NOTIFY_SCRIPT="/tmp/remote-jobs-notify-slack.sh"
+NOTIFY_SCRIPT="/tmp/weft-notify-slack.sh"
 
 # Concurrency and allotment tuning defaults
 HOST_UTILIZATION_TARGET=80
@@ -69,15 +69,15 @@ MIN_ALLOTMENT=10
 MAX_ALLOTMENT=100
 
 # Benchmark tag: system-wide idle thresholds
-BENCHMARK_CPU_THRESHOLD=${REMOTE_JOBS_BENCHMARK_CPU:-5}         # max CPU % (instantaneous)
-BENCHMARK_RAM_THRESHOLD=${REMOTE_JOBS_BENCHMARK_RAM:-20}        # max RAM % (of available)
-BENCHMARK_GPU_THRESHOLD=${REMOTE_JOBS_BENCHMARK_GPU:-5}         # max GPU utilization %
-BENCHMARK_VRAM_THRESHOLD=${REMOTE_JOBS_BENCHMARK_VRAM:-5}       # max VRAM usage %
-BENCHMARK_IDLE_SAMPLES=${REMOTE_JOBS_BENCHMARK_SAMPLES:-3}      # consecutive idle checks required
-BENCHMARK_CHECK_INTERVAL=${REMOTE_JOBS_BENCHMARK_INTERVAL:-10}  # seconds between checks
+BENCHMARK_CPU_THRESHOLD=${WEFT_BENCHMARK_CPU:-5}         # max CPU % (instantaneous)
+BENCHMARK_RAM_THRESHOLD=${WEFT_BENCHMARK_RAM:-20}        # max RAM % (of available)
+BENCHMARK_GPU_THRESHOLD=${WEFT_BENCHMARK_GPU:-5}         # max GPU utilization %
+BENCHMARK_VRAM_THRESHOLD=${WEFT_BENCHMARK_VRAM:-5}       # max VRAM usage %
+BENCHMARK_IDLE_SAMPLES=${WEFT_BENCHMARK_SAMPLES:-3}      # consecutive idle checks required
+BENCHMARK_CHECK_INTERVAL=${WEFT_BENCHMARK_INTERVAL:-10}  # seconds between checks
 
 # GPU memory reservation defaults
-DEFAULT_GPU_MEM_GB=${REMOTE_JOBS_DEFAULT_GPU_MEM:-20}
+DEFAULT_GPU_MEM_GB=${WEFT_DEFAULT_GPU_MEM:-20}
 
 # Benchmark idle tracking (global, persists across loop iterations)
 BENCHMARK_IDLE_COUNT=0

@@ -1,7 +1,7 @@
 # Remote Jobs
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/osteele/remote-jobs.svg)](https://pkg.go.dev/github.com/osteele/remote-jobs)
-[![Go Report Card](https://goreportcard.com/badge/github.com/osteele/remote-jobs)](https://goreportcard.com/report/github.com/osteele/remote-jobs)
+[![Go Reference](https://pkg.go.dev/badge/github.com/osteele/weft.svg)](https://pkg.go.dev/github.com/osteele/weft)
+[![Go Report Card](https://goreportcard.com/badge/github.com/osteele/weft)](https://goreportcard.com/report/github.com/osteele/weft)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A CLI tool for running persistent tmux sessions on remote hosts that survive SSH disconnections.
@@ -22,7 +22,7 @@ drop. Remote Jobs treats those scenarios as normal operations:
 
 - Jobs always start locally first, so connection failures never lose metadata.
 - Failed SSH attempts automatically defer work to the host queue (or the local
-  pending list) and are replayed by `remote-jobs sync` when the host returns.
+  pending list) and are replayed by `weft sync` when the host returns.
 - Blocking commands such as `status --wait` and `plan submit --wait` keep
   polling while the host is down and announce when the connection comes back.
 
@@ -35,7 +35,7 @@ Remote Jobs was designed for workflows where an automated agent drives the CLI
 while a human keeps an eye on the TUI. Most commands print suggested follow-up
 commands (“next steps”) directly in their output so agents can keep the relevant
 context in their prompt without hunting through reference docs or skills files.
-For example, `remote-jobs run` prints the `status`, `log`, and `start` commands
+For example, `weft run` prints the `status`, `log`, and `start` commands
 that make sense for the job it just created, which agents can copy verbatim. The
 TUI then becomes the dashboard where humans monitor progress, adjust queues, or
 apply manual fixes when needed.
@@ -71,24 +71,24 @@ SLURM, where the controller must be reachable to submit or monitor jobs. See
 ## Installation
 
 ```bash
-go install github.com/osteele/remote-jobs@latest
+go install github.com/osteele/weft@latest
 ```
 
 Or build from source:
 ```bash
-git clone https://github.com/osteele/remote-jobs
-cd remote-jobs
+git clone https://github.com/osteele/weft
+cd weft
 go install .
 ```
 
 ## Commands
 
-### remote-jobs run
+### weft run
 
 Queue a job on a remote host for managed execution.
 
 ```bash
-remote-jobs run [flags] <host> <command...>
+weft run [flags] <host> <command...>
 ```
 
 By default, jobs are added to a queue and scheduled by the queue runner. It can run multiple jobs on a host while keeping total CPU usage under a target cap. Use `--immediate` (`-i`) to start a job immediately.
@@ -108,7 +108,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--timeout DURATION`: Kill job after duration (e.g., "2h", "30m", "1h30m")
 - `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
-- `--kill ID`: Kill a job by ID (synonym for `remote-jobs kill`)
+- `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 
 If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
@@ -117,60 +117,60 @@ reachable again.
 
 Draft jobs (`--draft`) stay entirely local. They’re useful for capturing a job
 definition you want to tweak later or to keep certain jobs from ever syncing to
-the host. When you’re ready to discard the draft, run `remote-jobs job draft <id>`
+the host. When you’re ready to discard the draft, run `weft job draft <id>`
 to toggle the status (or do it from the TUI, described below).
 
 **Examples:**
 ```bash
 # Queue a job (default behavior)
-remote-jobs run deepthought 'python train.py'
+weft run deepthought 'python train.py'
 
 # Start a queued job immediately
-remote-jobs start 123
+weft start 123
 
 # Start immediately instead of queuing
-remote-jobs run -i deepthought 'python train.py'
+weft run -i deepthought 'python train.py'
 
 # With description (recommended)
-remote-jobs run -m "Training GPT-2 with lr=0.001" deepthought 'with-gpu python train.py --lr 0.001'
+weft run -m "Training GPT-2 with lr=0.001" deepthought 'with-gpu python train.py --lr 0.001'
 
 # Explicit working directory
-remote-jobs run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
+weft run -C /mnt/code/LM2 deepthought 'with-gpu python train.py'
 
 # Start immediately and follow log output
-remote-jobs run -i -f -m "Training run" deepthought 'python train.py'
+weft run -i -f -m "Training run" deepthought 'python train.py'
 
 # Stay attached to live output (Ctrl+C detaches, job keeps running)
-remote-jobs run -i --allow -m "Training run" deepthought 'python train.py'
+weft run -i --allow -m "Training run" deepthought 'python train.py'
 
 # Set environment variables
-remote-jobs run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python train.py'
+weft run -e CUDA_VISIBLE_DEVICES=0 -e BATCH_SIZE=32 deepthought 'python train.py'
 
 # Tag jobs for later filtering
-remote-jobs run --tag exp-012 --tag notebook-sync deepthought 'python train.py'
+weft run --tag exp-012 --tag notebook-sync deepthought 'python train.py'
 
 # Run a job exclusively (waits until no other jobs are running, blocks others while running)
-remote-jobs run --tag exclusive deepthought 'python large_model.py'
+weft run --tag exclusive deepthought 'python large_model.py'
 
 # Run a benchmark (exclusive + waits for system-wide idle: low CPU, RAM, GPU, VRAM)
-remote-jobs run --tag benchmark deepthought 'python bench_encode.py'
+weft run --tag benchmark deepthought 'python bench_encode.py'
 
 # Run job after another succeeds
-remote-jobs run --after 42 deepthought 'python eval.py'
+weft run --after 42 deepthought 'python eval.py'
 
 # Run cleanup job after another completes (success or failure)
-remote-jobs run --after-any 42 deepthought 'python cleanup.py'
+weft run --after-any 42 deepthought 'python cleanup.py'
 
 # Kill a job
-remote-jobs run deepthought --kill 42
+weft run deepthought --kill 42
 ```
 
-### remote-jobs artifact
+### weft artifact
 
 Track and retrieve job outputs through a durable local artifact store.
 
 Artifacts are declared by writing a manifest on the remote host. The CLI
-syncs those files into `~/.config/remote-jobs/artifacts/` so they survive
+syncs those files into `~/.config/weft/artifacts/` so they survive
 remote cleanup.
 
 **Manifest format:**
@@ -187,51 +187,51 @@ remote cleanup.
 
 **Environment variables available to job scripts:**
 - `RJ_JOB_ID`
-- `RJ_ARTIFACT_MANIFEST` (default: `~/.cache/remote-jobs/artifacts/<job-id>.json`)
+- `RJ_ARTIFACT_MANIFEST` (default: `~/.cache/weft/artifacts/<job-id>.json`)
 - `RJ_ARTIFACT_ROOT` (default: `.`)
 
 **Examples:**
 ```bash
 # Sync artifacts for job 2073 into the local store
-remote-jobs artifact sync 2073
+weft artifact sync 2073
 
 # Sync all outstanding artifacts across jobs
-remote-jobs artifact sync
+weft artifact sync
 
 # List cached artifacts
-remote-jobs artifact list 2073
+weft artifact list 2073
 
 # Retrieve by name or path
-remote-jobs artifact get 2073 selectivity_results -o ./results.json
-remote-jobs artifact get 2073 output/selectivity_results.json -o ./results.json
+weft artifact get 2073 selectivity_results -o ./results.json
+weft artifact get 2073 output/selectivity_results.json -o ./results.json
 
 # Write artifact to stdout
-remote-jobs artifact get 2073 selectivity_results -o -
-remote-jobs artifact cat 2073 selectivity_results | jq '.metric'
+weft artifact get 2073 selectivity_results -o -
+weft artifact cat 2073 selectivity_results | jq '.metric'
 
 # Resolve latest job by tag
-remote-jobs artifact get --tag exp-012 --latest selectivity_results -o ./results.json
+weft artifact get --tag exp-012 --latest selectivity_results -o ./results.json
 ```
 
 The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
 - Queue runner schedules queued jobs in FIFO order (subject to CPU allotments)
-- Saves job metadata and logs to `~/.cache/remote-jobs/logs/` on the remote host
-- Records the job in a local SQLite database (`~/.config/remote-jobs/jobs.db`)
+- Saves job metadata and logs to `~/.cache/weft/logs/` on the remote host
+- Records the job in a local SQLite database (`~/.config/weft/jobs.db`)
 - Captures exit code when job completes
 - Sends Slack notification on completion (if configured)
 - Returns immediately (non-blocking)
 - Prints the job ID and instructions for starting immediately or monitoring
 
-### remote-jobs plan submit
+### weft plan submit
 
 Submit a YAML job execution plan that can mix one-off jobs, parallel groups,
 and queue-backed series.
 
 ```bash
-remote-jobs plan submit plan.yaml
-remote-jobs plan submit --host studio plan.yaml   # provide default host via CLI
-remote-jobs plan submit - < generated-plan.yaml   # read from stdin / heredoc
+weft plan submit plan.yaml
+weft plan submit --host studio plan.yaml   # provide default host via CLI
+weft plan submit - < generated-plan.yaml   # read from stdin / heredoc
 ```
 
 Plan files must start with `version: 1` to opt into the current schema and
@@ -249,26 +249,26 @@ the full schema plus dependency examples.
 Inspect or lint a plan without running it:
 
 ```bash
-remote-jobs plan validate plan.yaml
-remote-jobs plan show --ids plan.yaml   # show generated IDs, aliases, hosts, deps
+weft plan validate plan.yaml
+weft plan show --ids plan.yaml   # show generated IDs, aliases, hosts, deps
 ```
 
 > **Agents welcome:** Remote Jobs (and the plan syntax in particular) was
 > designed for coding agents as well as humans. The YAML shape is easy for an
 > agent to emit directly from a prompt, so consider giving your agent runtime a
-> skill/instruction that invokes `remote-jobs plan submit` with generated plans.
+> skill/instruction that invokes `weft plan submit` with generated plans.
 > This lets automated assistants spin up, chain, and monitor jobs using the same
 > dependency and queueing logic described below.
 
-### remote-jobs job status
+### weft job status
 
 Check the status of one or more jobs by ID.
 
 ```bash
-remote-jobs job status <job-id>...
-remote-jobs job status --wait 42         # block until the job finishes
-remote-jobs job status --wait --wait-timeout 30m 42
-remote-jobs job status --wait 42 43 44   # wait for all (exits 0 only if all succeed)
+weft job status <job-id>...
+weft job status --wait 42         # block until the job finishes
+weft job status --wait --wait-timeout 30m 42
+weft job status --wait 42 43 44   # wait for all (exits 0 only if all succeed)
 ```
 
 **Job ID syntax:**
@@ -286,9 +286,9 @@ Duplicate IDs are automatically removed with a warning.
 
 **Examples:**
 ```bash
-remote-jobs job status 42           # Check status of job #42
-remote-jobs job status 42 43 44     # Check multiple jobs
-remote-jobs job status 100:105      # Check jobs 100 through 105
+weft job status 42           # Check status of job #42
+weft job status 42 43 44     # Check multiple jobs
+weft job status 100:105      # Check jobs 100 through 105
 ```
 
 This command:
@@ -298,13 +298,13 @@ This command:
 - Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
   The command exits with `0` only if every waited-on job succeeds.
 
-### remote-jobs tui
+### weft tui
 
 Launch an interactive terminal UI for viewing and managing jobs.
 
 ```bash
-remote-jobs tui
-remote-jobs tui --mouse   # enable mouse clicks (disables terminal selection)
+weft tui
+weft tui --mouse   # enable mouse clicks (disables terminal selection)
 ```
 
 The TUI has two views: **Jobs** and **Hosts**.
@@ -389,7 +389,7 @@ Press `l` to view logs:
 - `f`: Cycle job filter (All → Queued/Running → Success → Failure)
 - `Esc`: Clear selection / exit logs view
 
-Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/remote-jobs/config.yaml`) if you prefer clickable rows instead.
+Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/weft/config.yaml`) if you prefer clickable rows instead.
 - `q` or `Ctrl-C`: Quit
 - `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
 
@@ -453,12 +453,12 @@ Shows all hosts that have had jobs, with system info, queue status, and resource
 
 The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 
-### remote-jobs job list
+### weft job list
 
 Query and search job history from the local database.
 
 ```bash
-remote-jobs job list [flags]
+weft job list [flags]
 ```
 
 **Flags:**
@@ -477,52 +477,52 @@ remote-jobs job list [flags]
 
 **Examples:**
 ```bash
-remote-jobs job list                          # Recent jobs
-remote-jobs job list --running                # Running jobs
-remote-jobs job list --running --sync         # Running jobs (sync first)
-remote-jobs job list --host deepthought       # Jobs on deepthought
-remote-jobs job list --tag exp-012            # Jobs with a tag
-remote-jobs job list --status unprocessed     # Jobs missing the processed tag
-remote-jobs job list --search training        # Search jobs
-remote-jobs job list --show 42                # Job details
-remote-jobs job list --cleanup 30             # Remove old jobs
+weft job list                          # Recent jobs
+weft job list --running                # Running jobs
+weft job list --running --sync         # Running jobs (sync first)
+weft job list --host deepthought       # Jobs on deepthought
+weft job list --tag exp-012            # Jobs with a tag
+weft job list --status unprocessed     # Jobs missing the processed tag
+weft job list --search training        # Search jobs
+weft job list --show 42                # Job details
+weft job list --cleanup 30             # Remove old jobs
 ```
 
-### remote-jobs tag
+### weft tag
 
 Attach or remove tags on jobs stored in the local database.
 
 ```bash
-remote-jobs tag add <job-id> <tag>
-remote-jobs tag rm <job-id> <tag>
+weft tag add <job-id> <tag>
+weft tag rm <job-id> <tag>
 ```
 
 **Examples:**
 ```bash
-remote-jobs tag add 42 exp-012
-remote-jobs tag rm 42 exp-012
+weft tag add 42 exp-012
+weft tag rm 42 exp-012
 ```
 
-### remote-jobs mark-processed
+### weft mark-processed
 
 Mark a job as processed by adding the reserved `processed` tag.
 
 ```bash
-remote-jobs mark-processed <job-id>
+weft mark-processed <job-id>
 ```
 
 **Examples:**
 ```bash
-remote-jobs mark-processed 42
-remote-jobs job list --status unprocessed
+weft mark-processed 42
+weft job list --status unprocessed
 ```
 
-### remote-jobs sync
+### weft sync
 
 Sync job statuses from all remote hosts with running jobs.
 
 ```bash
-remote-jobs sync [flags]
+weft sync [flags]
 ```
 
 **Flags:**
@@ -532,16 +532,16 @@ Automatically finds hosts with running jobs and updates their status in the loca
 
 **Examples:**
 ```bash
-remote-jobs sync              # Sync all hosts
-remote-jobs sync --verbose    # Show progress
+weft sync              # Sync all hosts
+weft sync --verbose    # Show progress
 ```
 
-### remote-jobs prune
+### weft prune
 
 Tombstone completed/dead jobs so they disappear from listings, and optionally delete their log files on remote hosts.
 
 ```bash
-remote-jobs prune [flags]
+weft prune [flags]
 ```
 
 **Flags:**
@@ -552,24 +552,24 @@ remote-jobs prune [flags]
 
 **Examples:**
 ```bash
-remote-jobs prune                    # Tombstone all completed/dead jobs
-remote-jobs prune --older-than 7d    # Only tombstone jobs older than 7 days
-remote-jobs prune --older-than 24h   # Only tombstone jobs older than 24 hours
-remote-jobs prune --dry-run          # Preview which jobs would be tombstoned
-remote-jobs prune --dead-only        # Only tombstone dead jobs
-remote-jobs prune --keep-files       # Tombstone locally but keep remote files
+weft prune                    # Tombstone all completed/dead jobs
+weft prune --older-than 7d    # Only tombstone jobs older than 7 days
+weft prune --older-than 24h   # Only tombstone jobs older than 24 hours
+weft prune --dry-run          # Preview which jobs would be tombstoned
+weft prune --dead-only        # Only tombstone dead jobs
+weft prune --keep-files       # Tombstone locally but keep remote files
 
 Tombstoned jobs remain in the database for auditing and can still be viewed with
-`remote-jobs job status <id>` or `remote-jobs log <id>`, but they disappear from
-`remote-jobs list` and the TUI.
+`weft job status <id>` or `weft log <id>`, but they disappear from
+`weft list` and the TUI.
 ```
 
-### remote-jobs log
+### weft log
 
 View the full log file for a job.
 
 ```bash
-remote-jobs log <job-id> [flags]
+weft log <job-id> [flags]
 ```
 
 **Flags:**
@@ -581,14 +581,14 @@ remote-jobs log <job-id> [flags]
 
 **Examples:**
 ```bash
-remote-jobs log 42           # Last 50 lines
-remote-jobs log 42 -f        # Follow (like tail -f)
-remote-jobs log 42 -n 100    # Last 100 lines
-remote-jobs log 42 --from 100 --to 200  # Lines 100-200
-remote-jobs log 42 --from 500           # From line 500 onwards
-remote-jobs log 42 --to 100             # First 100 lines
-remote-jobs log 42 --grep error         # Lines containing "error"
-remote-jobs log 42 -f --grep epoch      # Follow, filter for "epoch"
+weft log 42           # Last 50 lines
+weft log 42 -f        # Follow (like tail -f)
+weft log 42 -n 100    # Last 100 lines
+weft log 42 --from 100 --to 200  # Lines 100-200
+weft log 42 --from 500           # From line 500 onwards
+weft log 42 --to 100             # First 100 lines
+weft log 42 --grep error         # Lines containing "error"
+weft log 42 -f --grep epoch      # Follow, filter for "epoch"
 ```
 
 **Notes:**
@@ -596,61 +596,61 @@ remote-jobs log 42 -f --grep epoch      # Follow, filter for "epoch"
 - `--follow` cannot be used with `--to`
 - `--grep` can be combined with any other option
 
-### remote-jobs job restart
+### weft job restart
 
 Restart a job using its saved metadata.
 
 ```bash
-remote-jobs job restart <job-id>
+weft job restart <job-id>
 ```
 
 This kills the existing session (if any) and starts a new one with the same command and working directory, creating a new job ID.
 
 **Note:** For most use cases, `run --from <id>` is more flexible as it allows overriding settings.
 
-### remote-jobs retry
+### weft retry
 
 Clone a previous job and queue it again with the same host, directory, command, description, and environment variables. Dependencies are not copied so the retried job starts as soon as it reaches the front of the queue.
 
 ```bash
-remote-jobs retry <job-id>
-remote-jobs job retry <job-id>   # Alias
+weft retry <job-id>
+weft job retry <job-id>   # Alias
 ```
 
 The command prints the new job ID and whether it was queued immediately or deferred until the host is online.
 Queued jobs that previously depended on the retried job automatically update their dependency to the new job ID.
 
-### remote-jobs job move
+### weft job move
 
 Move a queued job to a different host.
 
 ```bash
-remote-jobs job move <job-id> <new-host>
+weft job move <job-id> <new-host>
 ```
 
 This command updates the host for a job that hasn't started yet (status=queued). Useful when you've queued work but want to run it on a different machine.
 
 **Examples:**
 ```bash
-remote-jobs job move 42 cool100   # Move job 42 to cool100
-remote-jobs job move 43 studio    # Move job 43 to studio
+weft job move 42 cool100   # Move job 42 to cool100
+weft job move 43 studio    # Move job 43 to studio
 ```
 
-### remote-jobs job start
+### weft job start
 
 Start a queued job immediately, bypassing its queue order. The job is removed
 from the remote queue file, marked as running, and launched right away.
 
 ```bash
-remote-jobs job start <job-id>
-remote-jobs run <job-id>           # Shorthand (same effect)
+weft job start <job-id>
+weft run <job-id>           # Shorthand (same effect)
 ```
 
 Examples:
 ```bash
-remote-jobs run 512                # Start queued job 512 immediately
-remote-jobs job start 512          # Same as above
-remote-jobs job start 9001         # Bypass queue order and run now
+weft run 512                # Start queued job 512 immediately
+weft job start 512          # Same as above
+weft job start 9001         # Bypass queue order and run now
 ```
 
 Only jobs with status `queued` can be started this way. The command preserves
@@ -664,41 +664,41 @@ The `run` command supports several advanced options for more control:
 
 **Copy settings from existing job (`--from`)**:
 ```bash
-remote-jobs run --from <job-id> [<host>] [<command>]
+weft run --from <job-id> [<host>] [<command>]
 ```
 
 Copies command, working directory, and description from an existing job. You can override any of these:
 
 ```bash
-remote-jobs run --from 42                    # Rerun job 42 with same settings
-remote-jobs run --from 42 cool100            # Rerun on different host
-remote-jobs run --from 42 --timeout 4h       # Rerun with longer timeout
-remote-jobs run --from 42 cool100 "python train.py --epochs 200"  # Override everything
+weft run --from 42                    # Rerun job 42 with same settings
+weft run --from 42 cool100            # Rerun on different host
+weft run --from 42 --timeout 4h       # Rerun with longer timeout
+weft run --from 42 cool100 "python train.py --epochs 200"  # Override everything
 ```
 
 **Timeout (`--timeout`)**:
 ```bash
-remote-jobs run --timeout <duration> <host> <command>
+weft run --timeout <duration> <host> <command>
 ```
 
 Automatically kills the job after the specified duration (e.g., "2h", "30m", "1h30m"):
 
 ```bash
-remote-jobs run --timeout 2h cool30 "python train.py"
-remote-jobs run --timeout 30m --from 42      # Retry with timeout
+weft run --timeout 2h cool30 "python train.py"
+weft run --timeout 30m --from 42      # Retry with timeout
 ```
 
 **Environment variables (`-e, --env`)**:
 ```bash
-remote-jobs run -e VAR=value <host> <command>
+weft run -e VAR=value <host> <command>
 ```
 
 Set environment variables for the job. Can be repeated for multiple variables:
 
 ```bash
-remote-jobs run -e CUDA_VISIBLE_DEVICES=0 cool30 "python train.py"
-remote-jobs run -e BATCH_SIZE=32 -e LR=0.001 cool30 "python train.py"
-remote-jobs queue add -e TMPDIR=/mnt/data/tmp cool30 "python train.py"
+weft run -e CUDA_VISIBLE_DEVICES=0 cool30 "python train.py"
+weft run -e BATCH_SIZE=32 -e LR=0.001 cool30 "python train.py"
+weft queue add -e TMPDIR=/mnt/data/tmp cool30 "python train.py"
 ```
 
 **Automatic environment file loading**:
@@ -711,12 +711,12 @@ The queue runner automatically loads environment files from the job's working di
 
 The job log will show "Loading .env" etc. when these files are found and sourced.
 
-### remote-jobs cleanup
+### weft cleanup
 
 Clean up finished sessions and old log files.
 
 ```bash
-remote-jobs cleanup <host> [flags]
+weft cleanup <host> [flags]
 ```
 
 **Flags:**
@@ -727,81 +727,81 @@ remote-jobs cleanup <host> [flags]
 
 **Examples:**
 ```bash
-remote-jobs cleanup deepthought                    # Clean both
-remote-jobs cleanup deepthought --sessions         # Only finished sessions
-remote-jobs cleanup deepthought --logs --older-than 3  # Logs > 3 days old
-remote-jobs cleanup deepthought --dry-run          # Preview only
+weft cleanup deepthought                    # Clean both
+weft cleanup deepthought --sessions         # Only finished sessions
+weft cleanup deepthought --logs --older-than 3  # Logs > 3 days old
+weft cleanup deepthought --dry-run          # Preview only
 ```
 
-### remote-jobs kill
+### weft kill
 
 Kill a running job.
 
 ```bash
-remote-jobs kill <job-id>
+weft kill <job-id>
 ```
 
 **Example:**
 ```bash
-remote-jobs kill 42    # Kill job #42
+weft kill 42    # Kill job #42
 ```
 
-### remote-jobs pause
+### weft pause
 
 Pause a running job (SIGSTOP).
 
 ```bash
-remote-jobs pause <job-id>
+weft pause <job-id>
 ```
 
 **Example:**
 ```bash
-remote-jobs pause 42   # Pause job #42
+weft pause 42   # Pause job #42
 ```
 
-### remote-jobs resume
+### weft resume
 
 Resume a paused job (SIGCONT).
 
 ```bash
-remote-jobs resume <job-id>
+weft resume <job-id>
 ```
 
 **Example:**
 ```bash
-remote-jobs resume 42  # Resume job #42
+weft resume 42  # Resume job #42
 ```
 
-### remote-jobs job draft
+### weft job draft
 
 Move a job into draft status and make sure it never runs remotely (queued or otherwise).
 
 ```bash
-remote-jobs job draft <job-id>
+weft job draft <job-id>
 ```
 
 When you draft a job:
 - Running jobs are killed and removed from the remote host queue/state
 - Queued jobs are removed from queue files so they won’t start later
-- Offline hosts keep the “draft pending” request until the next `remote-jobs sync`
+- Offline hosts keep the “draft pending” request until the next `weft sync`
 - Already-completed jobs simply change status locally
 
 Drafting is handy when you realize a queued job shouldn’t run anymore but you
 want to keep its metadata/log references around for editing or cloning later.
 You can also trigger the same action from the TUI by pressing `d`.
 
-### remote-jobs queue
+### weft queue
 
 Manage job queues for CPU-capped execution on remote hosts.
 
-Jobs added to a queue are scheduled in FIFO order, and the queue runner can run multiple jobs per host while keeping total CPU usage under a target cap. The queue runner runs in a tmux session on the remote host and keeps working when you disconnect. CPU allotments and GPU memory reservations can be set via `remote-jobs job describe --cpu <percent>` and `--gpu-mem <gb>`.
+Jobs added to a queue are scheduled in FIFO order, and the queue runner can run multiple jobs per host while keeping total CPU usage under a target cap. The queue runner runs in a tmux session on the remote host and keeps working when you disconnect. CPU allotments and GPU memory reservations can be set via `weft job describe --cpu <percent>` and `--gpu-mem <gb>`.
 
-#### remote-jobs queue add
+#### weft queue add
 
 Add a job to a remote queue.
 
 ```bash
-remote-jobs queue add [flags] <host> <command...>
+weft queue add [flags] <host> <command...>
 ```
 
 **Flags:**
@@ -814,25 +814,25 @@ remote-jobs queue add [flags] <host> <command...>
 
 Draft queue entries behave like sticky notes: they keep the command, env vars,
 and metadata in your local database while guaranteeing they never reach the
-remote queue runner. Convert them later with `remote-jobs job draft <id>` (or
+remote queue runner. Convert them later with `weft job draft <id>` (or
 the `d` key in the TUI) once you decide they should be eligible to run.
 
 **Examples:**
 ```bash
-remote-jobs queue add cool30 'python train.py --epochs 100'
-remote-jobs queue add -d "Training run 1" cool30 'python train.py'
-remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
-remote-jobs queue add --after 42 cool30 'python eval.py'       # Run after job 42 succeeds
-remote-jobs queue add --after-any 42 cool30 'python cleanup.py' # Run after job 42 completes (success or failure)
+weft queue add cool30 'python train.py --epochs 100'
+weft queue add -d "Training run 1" cool30 'python train.py'
+weft queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
+weft queue add --after 42 cool30 'python eval.py'       # Run after job 42 succeeds
+weft queue add --after-any 42 cool30 'python cleanup.py' # Run after job 42 completes (success or failure)
 ```
 
-#### remote-jobs edit
+#### weft edit
 
 Edit a queued job’s metadata—description, working directory, command, environment variables, or dependencies.  
-`remote-jobs queue edit` is an alias for this command and accepts the same flags.
+`weft queue edit` is an alias for this command and accepts the same flags.
 
 ```bash
-remote-jobs edit [flags] <job-id>
+weft edit [flags] <job-id>
 ```
 
 **Flags:**
@@ -849,20 +849,20 @@ IDs can also be suffixed with `+` or `:any` to mark them as completion-based dep
 
 **Examples:**
 ```bash
-remote-jobs edit 1595 --depends-on 1599
-remote-jobs edit 1600 --depends-on 1400 --depends-on-any 1401
-remote-jobs edit 1700 --clear-depends
-remote-jobs edit 1800 --command "python eval.py" -C ~/project -e FOO=bar
+weft edit 1595 --depends-on 1599
+weft edit 1600 --depends-on 1400 --depends-on-any 1401
+weft edit 1700 --clear-depends
+weft edit 1800 --command "python eval.py" -C ~/project -e FOO=bar
 ```
 
 Changes are validated so you can only depend on jobs that run on the same host. If the host is offline, the update is deferred like other queue operations and reapplied once it reconnects.
 
-#### remote-jobs queue start
+#### weft queue start
 
 Start the queue runner on a remote host.
 
 ```bash
-remote-jobs queue start [flags] <host>
+weft queue start [flags] <host>
 ```
 
 The queue runner:
@@ -873,77 +873,77 @@ The queue runner:
 
 **Examples:**
 ```bash
-remote-jobs queue start cool30
+weft queue start cool30
 ```
 
-#### remote-jobs queue stop
+#### weft queue stop
 
 Stop the queue runner after the current job completes.
 
 ```bash
-remote-jobs queue stop [flags] <host>
+weft queue stop [flags] <host>
 ```
 
 **Examples:**
 ```bash
-remote-jobs queue stop cool30
+weft queue stop cool30
 ```
 
-#### remote-jobs queue list
+#### weft queue list
 
 Show jobs waiting in the queue and the currently running job.
 
 ```bash
-remote-jobs queue list [flags] <host>
+weft queue list [flags] <host>
 ```
 
 **Examples:**
 ```bash
-remote-jobs queue list cool30
+weft queue list cool30
 ```
 
-#### remote-jobs queue status
+#### weft queue status
 
 Show the status of the queue runner.
 
 ```bash
-remote-jobs queue status [flags] <host>
+weft queue status [flags] <host>
 ```
 
 **Examples:**
 ```bash
-remote-jobs queue status cool30
+weft queue status cool30
 ```
 
-#### remote-jobs queue upgrade
+#### weft queue upgrade
 
 Redeploy and restart the queue runner if the remote script is out of date. The
 CLI records a build number on the first line of the embedded script, compares
 it with the version on the host, and restarts the runner only when needed.
 
 ```bash
-remote-jobs queue upgrade cool30
+weft queue upgrade cool30
 ```
 
 #### Queue Workflow Example
 
 ```bash
 # Start the queue runner (does nothing if already running)
-remote-jobs queue start cool30
+weft queue start cool30
 
 # Add jobs to the queue - laptop can disconnect after these commands
-remote-jobs queue add cool30 "python train.py --epochs 100"
-remote-jobs queue add cool30 "python train.py --epochs 200"
-remote-jobs queue add cool30 "python evaluate.py"
+weft queue add cool30 "python train.py --epochs 100"
+weft queue add cool30 "python train.py --epochs 200"
+weft queue add cool30 "python evaluate.py"
 
 # Check queue status (when back online)
-remote-jobs queue status cool30
+weft queue status cool30
 
 # View what's in the queue
-remote-jobs queue list cool30
+weft queue list cool30
 
 # Stop the queue after current job
-remote-jobs queue stop cool30
+weft queue stop cool30
 ```
 
 #### Job Dependencies
@@ -952,19 +952,19 @@ You can create job chains where one job runs after another completes:
 
 ```bash
 # Start the queue runner
-remote-jobs queue start cool30
+weft queue start cool30
 
 # Job 42: Training
-remote-jobs queue add -d "Training" cool30 "python train.py"
+weft queue add -d "Training" cool30 "python train.py"
 
 # Job 43: Evaluate after training succeeds (waits for job 42)
-remote-jobs queue add --after 42 -d "Evaluation" cool30 "python eval.py"
+weft queue add --after 42 -d "Evaluation" cool30 "python eval.py"
 
 # Job 44: Generate report after evaluation (waits for job 43)
-remote-jobs queue add --after 43 -d "Report" cool30 "python report.py"
+weft queue add --after 43 -d "Report" cool30 "python report.py"
 
 # Job 45: Cleanup runs regardless of whether job 42 succeeded or failed
-remote-jobs queue add --after-any 42 -d "Cleanup" cool30 "python cleanup.py"
+weft queue add --after-any 42 -d "Cleanup" cool30 "python cleanup.py"
 
 # Disconnect laptop - jobs run in sequence on the remote host
 ```
@@ -981,14 +981,14 @@ Both flags work entirely on the remote host (no laptop connection needed) and ca
 
 ## Configuration
 
-Configuration is stored in `~/.config/remote-jobs/config.yaml`.
+Configuration is stored in `~/.config/weft/config.yaml`.
 
 ### Default Command
 
-By default, running `remote-jobs` with no arguments shows the help message. You can change this to run a different command:
+By default, running `weft` with no arguments shows the help message. You can change this to run a different command:
 
 ```yaml
-# ~/.config/remote-jobs/config.yaml
+# ~/.config/weft/config.yaml
 default_command: tui
 ```
 
@@ -1003,7 +1003,7 @@ Valid values for `default_command`:
 Customize how often the TUI refreshes data:
 
 ```yaml
-# ~/.config/remote-jobs/config.yaml
+# ~/.config/weft/config.yaml
 sync_interval: 15          # Seconds between job status syncs (default: 15)
 log_refresh_interval: 3    # Seconds between log refreshes for running jobs (default: 3)
 host_refresh_interval: 30  # Seconds between host info refreshes in hosts view (default: 30)
@@ -1014,7 +1014,7 @@ host_refresh_interval: 30  # Seconds between host info refreshes in hosts view (
 The TUI automatically starts a local web UI (localhost only) unless disabled:
 
 ```yaml
-# ~/.config/remote-jobs/config.yaml
+# ~/.config/weft/config.yaml
 web_enabled: true
 web_port: 8127
 ```
@@ -1022,7 +1022,7 @@ web_port: 8127
 You can also run it directly:
 
 ```bash
-remote-jobs web --open
+weft web --open
 ```
 
 ### Log Caching
@@ -1030,19 +1030,19 @@ remote-jobs web --open
 Completed job logs under 50KB are cached locally for faster access without SSH:
 
 ```yaml
-# ~/.config/remote-jobs/config.yaml
+# ~/.config/weft/config.yaml
 log_cache_max_size: 51200  # Maximum log size to cache in bytes (default: 50KB)
 log_cache_max_age: 7       # Days to keep cached logs (default: 7, 0 to disable)
 ```
 
-Cached logs are stored in `~/.cache/remote-jobs/logs/` and automatically pruned during sync.
+Cached logs are stored in `~/.cache/weft/logs/` and automatically pruned during sync.
 
 ### SSH Connection
 
 Tune SSH connection pool behavior for slow or unreliable networks:
 
 ```yaml
-# ~/.config/remote-jobs/config.yaml
+# ~/.config/weft/config.yaml
 ssh:
   pool_size: 4        # Persistent sessions per host (default: 4)
   max_parallel: 8     # Max concurrent SSH operations across all hosts (default: 8)
@@ -1053,15 +1053,15 @@ Environment variables override the config file:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `REMOTE_JOBS_SSH_POOL_SIZE` | Persistent sessions per host | 4 |
-| `REMOTE_JOBS_SSH_MAX_PARALLEL` | Max concurrent SSH operations | 8 |
-| `REMOTE_JOBS_SSH_CONNECT_TIMEOUT` | SSH connect timeout (seconds) | 10 |
+| `WEFT_SSH_POOL_SIZE` | Persistent sessions per host | 4 |
+| `WEFT_SSH_MAX_PARALLEL` | Max concurrent SSH operations | 8 |
+| `WEFT_SSH_CONNECT_TIMEOUT` | SSH connect timeout (seconds) | 10 |
 
 Increasing `connect_timeout` also extends the session ready timeout (connect timeout + 5s).
 
 ## Job Database
 
-Jobs are tracked in a local SQLite database at `~/.config/remote-jobs/jobs.db`. The database records:
+Jobs are tracked in a local SQLite database at `~/.config/weft/jobs.db`. The database records:
 - Unique job ID (used to identify tmux sessions as `rj-{id}`)
 - Host
 - Working directory and command
@@ -1069,7 +1069,7 @@ Jobs are tracked in a local SQLite database at `~/.config/remote-jobs/jobs.db`. 
 - Start time and end time
 - Exit code and status
 
-Log files are stored on remote hosts at `~/.cache/remote-jobs/logs/{id}-{timestamp}.log`.
+Log files are stored on remote hosts at `~/.cache/weft/logs/{id}-{timestamp}.log`.
 
 **Job statuses:**
 - `starting`: Job is being set up (transient state)
@@ -1085,12 +1085,12 @@ The database is automatically created on first use and updated when checking job
 
 View last 50 lines of a job's output (replace `42` with actual job ID):
 ```bash
-remote-jobs log 42
+weft log 42
 ```
 
 Follow log output in real-time:
 ```bash
-remote-jobs log 42 -f
+weft log 42 -f
 ```
 
 ## Web UI (Read-only)
@@ -1098,13 +1098,13 @@ remote-jobs log 42 -f
 Start the read-only web monitor on localhost:
 
 ```bash
-remote-jobs web
+weft web
 ```
 
 Open it in your browser:
 
 ```bash
-remote-jobs web --open
+weft web --open
 ```
 
 Press `Ctrl+C` to stop following.
@@ -1131,13 +1131,13 @@ Use either method:
 
 **Environment variable** (add to your shell profile):
 ```bash
-export REMOTE_JOBS_SLACK_WEBHOOK="https://hooks.slack.com/services/T.../B.../..."
+export WEFT_SLACK_WEBHOOK="https://hooks.slack.com/services/T.../B.../..."
 ```
 
 **Config file:**
 ```bash
-mkdir -p ~/.config/remote-jobs
-echo "SLACK_WEBHOOK=https://hooks.slack.com/services/..." > ~/.config/remote-jobs/config
+mkdir -p ~/.config/weft
+echo "SLACK_WEBHOOK=https://hooks.slack.com/services/..." > ~/.config/weft/config
 ```
 
 ### 3. Optional: Configure When to Notify
@@ -1147,13 +1147,13 @@ By default, you'll receive notifications for all jobs. You can customize this wi
 **Notification Mode:**
 ```bash
 # Notify for all jobs (default)
-export REMOTE_JOBS_SLACK_NOTIFY="all"
+export WEFT_SLACK_NOTIFY="all"
 
 # Notify only for failures
-export REMOTE_JOBS_SLACK_NOTIFY="failures"
+export WEFT_SLACK_NOTIFY="failures"
 
 # Disable notifications
-export REMOTE_JOBS_SLACK_NOTIFY="none"
+export WEFT_SLACK_NOTIFY="none"
 ```
 
 **Minimum Duration Threshold:**
@@ -1162,19 +1162,19 @@ export REMOTE_JOBS_SLACK_NOTIFY="none"
 # (Failed jobs always notify regardless of duration)
 
 # Notify for all jobs regardless of duration
-export REMOTE_JOBS_SLACK_MIN_DURATION="0"
+export WEFT_SLACK_MIN_DURATION="0"
 
 # Only notify for jobs longer than 1 minute
-export REMOTE_JOBS_SLACK_MIN_DURATION="60"
+export WEFT_SLACK_MIN_DURATION="60"
 
 # For longer jobs only (5 minutes)
-export REMOTE_JOBS_SLACK_MIN_DURATION="300"
+export WEFT_SLACK_MIN_DURATION="300"
 ```
 
 **Verbose Mode:**
 ```bash
 # Include working directory and command in notification
-export REMOTE_JOBS_SLACK_VERBOSE="1"
+export WEFT_SLACK_VERBOSE="1"
 ```
 
 ### What You'll Get
@@ -1193,14 +1193,14 @@ Notifications include:
 
 ## How It Works
 
-1. `remote-jobs run` creates a detached tmux session via SSH
+1. `weft run` creates a detached tmux session via SSH
 2. The SSH command returns immediately (non-blocking)
 3. The tmux session continues running on the remote host
 4. You can close your laptop, disconnect, etc.
-5. `remote-jobs log` or `remote-jobs job status` lets you check on the job later
+5. `weft log` or `weft job status` lets you check on the job later
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) - Detailed technical architecture and design
-- [Comparison to SLURM](docs/comparison-to-slurm.md) - How remote-jobs compares to HPC workload managers
+- [Comparison to SLURM](docs/comparison-to-slurm.md) - How weft compares to HPC workload managers
 - [Ideas](docs/IDEAS.md) - Future feature ideas and enhancements

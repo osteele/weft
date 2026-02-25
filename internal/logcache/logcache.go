@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // DefaultMaxAge is the default time to keep cached logs
@@ -33,7 +33,7 @@ func CacheDir() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".cache", "remote-jobs", "logs")
+	return filepath.Join(home, ".cache", "weft", "logs")
 }
 
 // CachePath returns the path to a cached log file for a job

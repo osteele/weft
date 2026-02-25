@@ -14,15 +14,15 @@ the job survives:
 - Dropped VPN tunnels
 
 Metadata, PID files, log files, and status files are written to
-`~/.cache/remote-jobs/logs/` on the host so that the CLI can reconstruct the job
+`~/.cache/weft/logs/` on the host so that the CLI can reconstruct the job
 state even if it was restarted elsewhere.
 
 ## Connection-aware job submission
 
-When you start a job (`remote-jobs run` or `remote-jobs job start`), the CLI
+When you start a job (`weft run` or `weft job start`), the CLI
 records the job locally before touching the remote host. If SSH cannot be
 established, the job is deferred to the remote queue automatically. A
-`remote-jobs sync` (or any command
+`weft sync` (or any command
 that syncs) will add the job back to the host's queue when it becomes
 reachable. No work is lost, and you no longer need a separate retry command.
 
@@ -33,14 +33,14 @@ append operation. If the user didn't disable auto-start and the job has no
 dependencies, the queue runner is automatically started as soon as the host
 comes back so the job begins right away.
 
-Queued jobs that are manually started via `remote-jobs job start` use the same
+Queued jobs that are manually started via `weft job start` use the same
 mechanism. If the host goes down while removing the entry from the queue file,
 the CLI records exactly what happened and replays it later.
 
 ## Syncing
 
 Anything that must touch the remote host (moving queue entries, starting queued
-jobs, or killing sessions) is handled by the reconciliation mechanism. A later `remote-jobs sync`:
+jobs, or killing sessions) is handled by the reconciliation mechanism. A later `weft sync`:
 
 1. Detects that the host is back.
 2. Reconciles the local and remote states.
@@ -49,7 +49,7 @@ needing a live SSH connection at that moment.
 
 ## Monitoring while offline
 
-Blocking commands (`remote-jobs status --wait`, `remote-jobs plan submit --wait`)
+Blocking commands (`weft status --wait`, `weft plan submit --wait`)
 now treat intermittent SSH failures as informational instead of fatal:
 
 - When a host drops, the CLI prints `Connection to HOST is unavailable. Polling
@@ -64,14 +64,14 @@ possible.
 
 ## Offline logs
 
-Completed logs are mirrored into `~/.cache/remote-jobs/logs/` so `remote-jobs log`
+Completed logs are mirrored into `~/.cache/weft/logs/` so `weft log`
 and the TUI can show output even while offline. Entries honor the max-age and
-size limits from `config.yaml`. `remote-jobs sync` keeps the cache fresh and
+size limits from `config.yaml`. `weft sync` keeps the cache fresh and
 prunes expired files, and cache hits are served instantly without touching SSH.
 
 ## Recovering job status
 
-`remote-jobs sync` continuously reconciles local records with the remote host:
+`weft sync` continuously reconciles local records with the remote host:
 
 - Detects tmux sessions that vanished and marks jobs as `failed`.
 - Reads status files to mark jobs as `completed` with their exit code.

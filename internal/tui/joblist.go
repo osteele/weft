@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 // JobItem wraps a db.Job for use in bubbles/list

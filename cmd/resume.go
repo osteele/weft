@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/core"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -16,8 +16,8 @@ var resumeCmd = &cobra.Command{
 	Long: `Resume paused jobs by their IDs (sends SIGCONT).
 
 Examples:
-  remote-jobs resume 42
-  remote-jobs resume 42 43 44`,
+  weft resume 42
+  weft resume 42 43 44`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runResume,
 }

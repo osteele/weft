@@ -7,7 +7,7 @@ import (
 )
 
 // LogDir is the directory for job logs on remote hosts
-const LogDir = "~/.cache/remote-jobs/logs"
+const LogDir = "~/.cache/weft/logs"
 
 // TmuxSessionName returns the tmux session name for a job ID
 func TmuxSessionName(jobID int64) string {

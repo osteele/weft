@@ -200,7 +200,7 @@ func init() {
 	if err != nil {
 		return
 	}
-	configPath = filepath.Join(home, ".config", "remote-jobs", "config.yaml")
+	configPath = filepath.Join(home, ".config", "weft", "config.yaml")
 }
 
 // ConfigPath returns the path to the config file

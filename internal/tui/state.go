@@ -20,7 +20,7 @@ func init() {
 	if err != nil {
 		return
 	}
-	statePath = filepath.Join(home, ".config", "remote-jobs", "tui-state.yaml")
+	statePath = filepath.Join(home, ".config", "weft", "tui-state.yaml")
 }
 
 // LoadState reads the TUI state file, returning empty state if it doesn't exist

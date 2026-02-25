@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestRunJob_Success(t *testing.T) {

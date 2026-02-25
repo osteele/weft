@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/queuerunner"
-	"github.com/osteele/remote-jobs/internal/remote"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queuerunner"
+	"github.com/osteele/weft/internal/remote"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // Integration tests for job lifecycle against a real SSH server.
@@ -48,16 +48,16 @@ func clearRemoteJobState(t *testing.T, host string, jobID int64) {
 	// Remove status, log, meta, pid, pgid, and samples files for this job
 	// Also remove job from the state.json pending array and finished map if present
 	cmd := fmt.Sprintf(`
-		rm -f ~/.cache/remote-jobs/logs/%d.* ~/.cache/remote-jobs/logs/%d-*.* ~/.cache/remote-jobs/queue/job-%d.json 2>/dev/null || true
+		rm -f ~/.cache/weft/logs/%d.* ~/.cache/weft/logs/%d-*.* ~/.cache/weft/queue/job-%d.json 2>/dev/null || true
 		# Remove job from state.json pending array and finished map
-		if [ -f ~/.cache/remote-jobs/queue/default.state.json ]; then
-			jq 'if .pending then .pending |= map(select(. != %d)) else . end | if .finished then .finished |= del(."%d") else . end' ~/.cache/remote-jobs/queue/default.state.json > ~/.cache/remote-jobs/queue/default.state.json.tmp 2>/dev/null && \
-			mv ~/.cache/remote-jobs/queue/default.state.json.tmp ~/.cache/remote-jobs/queue/default.state.json 2>/dev/null || true
+		if [ -f ~/.cache/weft/queue/default.state.json ]; then
+			jq 'if .pending then .pending |= map(select(. != %d)) else . end | if .finished then .finished |= del(."%d") else . end' ~/.cache/weft/queue/default.state.json > ~/.cache/weft/queue/default.state.json.tmp 2>/dev/null && \
+			mv ~/.cache/weft/queue/default.state.json.tmp ~/.cache/weft/queue/default.state.json 2>/dev/null || true
 		fi
 		# Clear the current job marker if it matches this job
-		current=$(cat ~/.cache/remote-jobs/queue/default.current 2>/dev/null)
+		current=$(cat ~/.cache/weft/queue/default.current 2>/dev/null)
 		if [ "$current" = "%d" ]; then
-			echo -n "" > ~/.cache/remote-jobs/queue/default.current 2>/dev/null || true
+			echo -n "" > ~/.cache/weft/queue/default.current 2>/dev/null || true
 		fi
 	`, jobID, jobID, jobID, jobID, jobID, jobID)
 	_, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
@@ -70,7 +70,7 @@ func clearRemoteJobState(t *testing.T, host string, jobID int64) {
 // Returns true if the runner was stopped, false if it wasn't running.
 func stopQueueRunner(t *testing.T, host string, queueName string) bool {
 	t.Helper()
-	pidFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.runner.pid", queueName)
+	pidFile := fmt.Sprintf("~/.cache/weft/queue/%s.runner.pid", queueName)
 	cmd := fmt.Sprintf("if [ -f %s ]; then kill $(cat %s) 2>/dev/null && rm -f %s && echo stopped; else echo not_running; fi", pidFile, pidFile, pidFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -715,7 +715,7 @@ func TestIntegration_FinishedMapRecordsCompletion(t *testing.T) {
 	}
 
 	// Read state.json and verify finished map contains this job
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", ops.DefaultQueueName)
+	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", ops.DefaultQueueName)
 	cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id] // empty' %s 2>/dev/null`, jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -788,7 +788,7 @@ func TestIntegration_FinishedMapRecordsFailure(t *testing.T) {
 	}
 
 	// Read state.json and verify finished map contains this job with exit_code=1
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", ops.DefaultQueueName)
+	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", ops.DefaultQueueName)
 	cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id] // empty' %s 2>/dev/null`, jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
@@ -846,7 +846,7 @@ func TestIntegration_BatchSyncUsesFinishedMap(t *testing.T) {
 	t.Logf("Queued job %d, waiting for it to appear in finished map...", jobID)
 
 	// Poll remote state.json finished map directly until job appears
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", ops.DefaultQueueName)
+	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", ops.DefaultQueueName)
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		cmd := fmt.Sprintf(`jq -r --arg id "%d" '.finished[$id].exit_code // empty' %s 2>/dev/null`, jobID, stateFile)
@@ -908,7 +908,7 @@ func getSlurmTestHost(t *testing.T) string {
 // clearSlurmJobState removes SLURM-related state files for a job ID.
 func clearSlurmJobState(t *testing.T, host string, jobID int64) {
 	t.Helper()
-	cmd := fmt.Sprintf("rm -f ~/.cache/remote-jobs/logs/%d.* 2>/dev/null || true", jobID)
+	cmd := fmt.Sprintf("rm -f ~/.cache/weft/logs/%d.* 2>/dev/null || true", jobID)
 	_, _, err := ssh.RunWithTimeout(host, cmd, 10*time.Second)
 	if err != nil {
 		t.Logf("Warning: could not clear SLURM state for job %d: %v", jobID, err)

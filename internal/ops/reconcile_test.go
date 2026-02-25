@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/session"
 )
 
 func TestApplyPauseToRemote_CreatesMarkerFile(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 // DefaultPromptTemplate is the prompt template for generating descriptions

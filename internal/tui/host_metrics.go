@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/osteele/remote-jobs/internal/hostinfo"
+import "github.com/osteele/weft/internal/hostinfo"
 
 func hostCPULoadPercent(host *Host) (int, bool) {
 	return hostinfo.HostCPULoadPercent(host)

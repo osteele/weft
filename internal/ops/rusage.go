@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 // parseResourceUsage parses key=value content from a .rusage file into a ResourceUsage struct.

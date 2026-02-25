@@ -17,7 +17,7 @@ import (
 
 var (
 	// debugSSH enables verbose logging of SSH commands and timing
-	debugSSH = os.Getenv("REMOTE_JOBS_DEBUG_SSH") != ""
+	debugSSH = os.Getenv("WEFT_DEBUG_SSH") != ""
 
 	// sshCallCount tracks total SSH calls for debugging
 	sshCallCount atomic.Int64
@@ -91,7 +91,7 @@ const (
 	// RetryDelay is the delay between retries
 	RetryDelay = 30 * time.Second
 	// remoteLogDir is where wrapper metadata is stored on the host
-	remoteLogDir = "~/.cache/remote-jobs/logs"
+	remoteLogDir = "~/.cache/weft/logs"
 )
 
 // connectionErrorPattern matches SSH connection errors that should trigger retry
@@ -1024,7 +1024,7 @@ func GetJobGPUMappings(host string, script []byte, jobs []JobPIDInfo) ([]JobGPUM
 	}
 
 	// Write script to remote and execute with arguments
-	remoteScript := "/tmp/remote-jobs-gpu-mapping.sh"
+	remoteScript := "/tmp/weft-gpu-mapping.sh"
 	writeCmd := fmt.Sprintf("cat > '%s' << 'SCRIPT_EOF'\n%s\nSCRIPT_EOF && chmod +x '%s'",
 		remoteScript, string(script), remoteScript)
 

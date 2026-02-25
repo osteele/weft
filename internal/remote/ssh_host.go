@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 const (
 	// QueueDir is the remote directory for queue state files
-	QueueDir = "~/.cache/remote-jobs/queue"
+	QueueDir = "~/.cache/weft/queue"
 	// DefaultQueueName is the only queue name used on remote hosts.
 	DefaultQueueName = "default"
 )

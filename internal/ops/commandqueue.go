@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // Command log operations

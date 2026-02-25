@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // Location describes where a job's log lives on the remote host.

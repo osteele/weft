@@ -8,8 +8,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -30,7 +30,7 @@ var hostInfoCmd = &cobra.Command{
 	Long: `Show system information including CPU, memory, and GPU details.
 
 Example:
-  remote-jobs host info cool30`,
+  weft host info cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runHostInfo,
 }
@@ -41,7 +41,7 @@ var hostJobsCmd = &cobra.Command{
 	Long: `List all active (running and queued) jobs on the specified host.
 
 Example:
-  remote-jobs host jobs cool30`,
+  weft host jobs cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runHostJobs,
 }
@@ -52,7 +52,7 @@ var hostLoadCmd = &cobra.Command{
 	Long: `Show current CPU, memory, and GPU usage for a host.
 
 Example:
-  remote-jobs host load cool30`,
+  weft host load cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runHostLoad,
 }
@@ -86,7 +86,7 @@ func runHostInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n(cached %s ago)\n", db.FormatDuration(cacheAge))
 	} else {
 		fmt.Printf("No cached information for %s\n", host)
-		fmt.Printf("Run 'remote-jobs tui' to fetch and cache host information\n")
+		fmt.Printf("Run 'weft tui' to fetch and cache host information\n")
 	}
 
 	return nil

@@ -63,7 +63,7 @@ Rules:
 - `version` must be `1` for this initial format. Newer versions will add
   backwards-compatible syntax.
 - `kill` (optional) is a list of numeric job IDs. The CLI will call the
-  existing `remote-jobs kill` logic for each ID before scheduling new work.
+  existing `weft kill` logic for each ID before scheduling new work.
 - `jobs` is an ordered list. Entries run in the listed order, except that
   all jobs inside a `parallel` block run independently.
 - Inside `parallel.jobs` and `series.jobs`, you list raw job definitions
@@ -75,7 +75,7 @@ Rules:
   even if one or more dependencies failed (useful for cleanup and alerts).
 - Omit `id` to let the CLI generate one. Blocks fall back to `block0`,
   `block1`, ... while jobs inside inherit `block0.job0`, `block0.job1`, etc.
-  Run `remote-jobs plan show --ids plan.yaml` to inspect the generated IDs.
+  Run `weft plan show --ids plan.yaml` to inspect the generated IDs.
 - `parallel` and `series` blocks can set `dir`, `host`, and `env` to provide
   defaults for nested jobs. A nested `job` entry can still override any field.
 - `series` blocks enforce sequential execution on the remote queue runner.
@@ -102,14 +102,14 @@ Rules:
 | `when` | object | Reserved for future resource triggers (see below). |
 
 Unless `queue_only` or a containing `series` block says otherwise, jobs are
-started immediately via `remote-jobs run`. They behave exactly like a manual
+started immediately via `weft run`. They behave exactly like a manual
 invocation with matching host, command, directory, description, and env vars.
 Jobs inside `parallel` blocks simply have no automatic dependencies, so they
 can run simultaneously as soon as their host accepts connections.
 
 Jobs inside a `series` block are always queued on the remote host. The first
 job in the block is queued without a dependency; subsequent jobs specify the
-prior job's ID via the same mechanism that backs `remote-jobs run --after` and
+prior job's ID via the same mechanism that backs `weft run --after` and
 `--after-any`.
 
 ### Dependency semantics
@@ -122,17 +122,17 @@ prior job's ID via the same mechanism that backs `remote-jobs run --after` and
   block. When `wait: any` is used within a `series` block the implicit dependency
   on the previous job also ignores failures.
 - Cross-host dependencies are not supported. Every referenced job must run on
-  the same host as the dependent job; otherwise `remote-jobs plan submit` and
-  `remote-jobs plan validate` fail with a descriptive error.
+  the same host as the dependent job; otherwise `weft plan submit` and
+  `weft plan validate` fail with a descriptive error.
 - Dependencies form a DAG. Circular references are rejected at submission time.
 - Jobs with dependencies run via the remote queue runner so they can start
   automatically when upstream jobs finish. Jobs without dependencies still
   start immediately unless `queue_only` is set.
 
-Jobs with `queue_only: true` behave like `remote-jobs queue add`. They are
+Jobs with `queue_only: true` behave like `weft queue add`. They are
 written to the specified (or default) remote queue, and the CLI automatically
 starts the queue runner on that host unless you pass `--no-queue-start` to
-`remote-jobs plan submit`.
+`weft plan submit`.
 
 ### Resource-trigger syntax (reserved)
 
@@ -162,10 +162,10 @@ error so that plans do not silently ignore resource constraints.
 Run a plan file with:
 
 ```bash
-remote-jobs plan submit plan.yaml
-remote-jobs plan submit --host studio plan.yaml   # provide default host via CLI
-remote-jobs plan submit - < generated-plan.yaml   # stdin / heredoc
-cat <<'EOF' | remote-jobs plan submit --host studio -
+weft plan submit plan.yaml
+weft plan submit --host studio plan.yaml   # provide default host via CLI
+weft plan submit - < generated-plan.yaml   # stdin / heredoc
+cat <<'EOF' | weft plan submit --host studio -
 version: 1
 jobs:
   - job:
@@ -175,14 +175,14 @@ EOF
 Validate a plan without running anything:
 
 ```bash
-remote-jobs plan validate plan.yaml
+weft plan validate plan.yaml
 ```
 
 List the generated IDs, aliases, hosts, and dependency chains:
 
 ```bash
-remote-jobs plan show --ids plan.yaml
-remote-jobs plan show plan.yaml
+weft plan show --ids plan.yaml
+weft plan show plan.yaml
 ```
 ```
 

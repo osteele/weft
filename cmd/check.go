@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +26,7 @@ Shows:
 - Last 10 lines of output from each session
 
 Example:
-  remote-jobs check cool30`,
+  weft check cool30`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runCheck,
 }

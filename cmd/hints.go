@@ -3,7 +3,7 @@ package cmd
 import (
 	"sync"
 
-	"github.com/osteele/remote-jobs/internal/config"
+	"github.com/osteele/weft/internal/config"
 )
 
 var (

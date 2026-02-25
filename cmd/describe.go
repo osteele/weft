@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"strconv"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -30,15 +30,15 @@ For queued jobs, you can also update the working directory, command, GPU, and re
 allotments (GPU memory, CPU). The remote queue file will be updated automatically.
 
 Examples:
-  remote-jobs describe 42 -m "Training GPT-2 with lr=0.001"
-  remote-jobs describe 42 -m ""  # Clear description
-  remote-jobs describe 42 --directory /new/path
-  remote-jobs describe 42 --command "python train.py --epochs 100"
-  remote-jobs describe 42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
-  remote-jobs describe 42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
-  remote-jobs describe 42 --gpu-mem 12          # Reserve 12 GB GPU memory per device
-  remote-jobs describe 42 --cpu 50              # Set CPU allotment to 50%
-  remote-jobs describe 42 -m "New desc" --command "python new.py"`,
+  weft describe 42 -m "Training GPT-2 with lr=0.001"
+  weft describe 42 -m ""  # Clear description
+  weft describe 42 --directory /new/path
+  weft describe 42 --command "python train.py --epochs 100"
+  weft describe 42 --gpu 1              # Set CUDA_VISIBLE_DEVICES=1
+  weft describe 42 --gpus 0,1           # Set CUDA_VISIBLE_DEVICES=0,1
+  weft describe 42 --gpu-mem 12          # Reserve 12 GB GPU memory per device
+  weft describe 42 --cpu 50              # Set CPU allotment to 50%
+  weft describe 42 -m "New desc" --command "python new.py"`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runDescribe,
 }

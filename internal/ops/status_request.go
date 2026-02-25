@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // RequestStatus sets the target status for a job and attempts immediate reconciliation.

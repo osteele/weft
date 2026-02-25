@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestRequestStatus_ToDraft(t *testing.T) {

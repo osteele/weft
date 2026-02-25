@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 type queueBatchStatus struct {
@@ -165,7 +165,7 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 		idList = append(idList, fmt.Sprintf("%d", id))
 	}
 	idsArg := strings.Join(idList, " ")
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", DefaultQueueName)
+	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", DefaultQueueName)
 	statusPattern := fmt.Sprintf("%s/$id*.status", session.LogDir)
 	pidPattern := fmt.Sprintf("%s/$id*.pid", session.LogDir)
 	script := fmt.Sprintf(`

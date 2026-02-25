@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/logcache"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -26,12 +26,12 @@ with running or queued jobs are synced. Also starts queue runners on hosts
 with queued jobs. Connection failures are silently ignored.
 
 Examples:
-  remote-jobs sync                    # Sync all hosts with active jobs
-  remote-jobs sync studio             # Sync only studio
-  remote-jobs sync cool30 cool100     # Sync specific hosts
-  remote-jobs sync --verbose          # Show progress
-  remote-jobs sync --no-queue-start   # Don't start queue runners
-  remote-jobs sync --timeout 10s      # Use 10 second timeout per host`,
+  weft sync                    # Sync all hosts with active jobs
+  weft sync studio             # Sync only studio
+  weft sync cool30 cool100     # Sync specific hosts
+  weft sync --verbose          # Show progress
+  weft sync --no-queue-start   # Don't start queue runners
+  weft sync --timeout 10s      # Use 10 second timeout per host`,
 	RunE: runSync,
 }
 

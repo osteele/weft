@@ -9,14 +9,14 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/queuefile"
-	"github.com/osteele/remote-jobs/internal/queuerunner"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/slack"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queuefile"
+	"github.com/osteele/weft/internal/queuerunner"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/slack"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -35,7 +35,7 @@ the remote host.
 
 Subcommands:
   add     Add a job to the queue
-  edit    Alias for 'remote-jobs edit'
+  edit    Alias for 'weft edit'
   remove  Remove a queued job before it starts
   start   Start the queue runner
   stop    Stop the queue runner after current job
@@ -53,11 +53,11 @@ The job will be executed when the queue runner reaches it. Jobs run
 in FIFO order.
 
 Examples:
-  remote-jobs queue add cool30 'python train.py --epochs 100'
-  remote-jobs queue add --host cool30 'python train.py --epochs 100'
-  remote-jobs queue add -m "Training run 1" cool30 'python train.py'
-  remote-jobs queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
-  remote-jobs queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes`,
+  weft queue add cool30 'python train.py --epochs 100'
+  weft queue add --host cool30 'python train.py --epochs 100'
+  weft queue add -m "Training run 1" cool30 'python train.py'
+  weft queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
+  weft queue add --after 42 cool30 'python eval.py'  # Run after job 42 completes`,
 	Args: usageArgs(cobra.RangeArgs(1, 2)),
 	RunE: runQueueAdd,
 }
@@ -73,8 +73,8 @@ It continues running even when you disconnect.
 This command is idempotent - safe to call multiple times.
 
 Examples:
-  remote-jobs queue start cool30
-  remote-jobs queue start --host cool30`,
+  weft queue start cool30
+  weft queue start --host cool30`,
 	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueStart,
 }
@@ -88,8 +88,8 @@ This sends a stop signal that the runner will detect after the current
 job finishes. The runner will exit gracefully.
 
 Examples:
-  remote-jobs queue stop cool30
-  remote-jobs queue stop --host cool30`,
+  weft queue stop cool30
+  weft queue stop --host cool30`,
 	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueStop,
 }
@@ -100,8 +100,8 @@ var queueListCmd = &cobra.Command{
 	Long: `Show jobs waiting in the queue and the currently running job.
 
 Examples:
-  remote-jobs queue list cool30
-  remote-jobs queue list --host cool30`,
+  weft queue list cool30
+  weft queue list --host cool30`,
 	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueList,
 }
@@ -114,8 +114,8 @@ var queueStatusCmd = &cobra.Command{
 Displays whether the runner is active, current job (if any), and queue depth.
 
 Examples:
-  remote-jobs queue status cool30
-  remote-jobs queue status --host cool30`,
+  weft queue status cool30
+  weft queue status --host cool30`,
 	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueStatus,
 }
@@ -129,8 +129,8 @@ If the script was updated and the runner is currently running, the command
 will attempt a short restart so the new version is picked up.
 
 Examples:
-  remote-jobs queue update cool30
-  remote-jobs queue update --host cool30`,
+  weft queue update cool30
+  weft queue update --host cool30`,
 	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runQueueUpdate,
 }
@@ -144,8 +144,8 @@ This removes jobs from both the remote queue file and the local database.
 Only works for jobs that haven't started yet (status: queued).
 
 Examples:
-  remote-jobs queue remove 123
-  remote-jobs queue remove 123 124 125`,
+  weft queue remove 123
+  weft queue remove 123 124 125`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runQueueRemove,
 }
@@ -159,7 +159,7 @@ The job will run immediately after the currently running job completes.
 Only works for jobs that haven't started yet (status: queued).
 
 Examples:
-  remote-jobs queue front 123`,
+  weft queue front 123`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runQueueFront,
 }
@@ -170,17 +170,17 @@ var editCmd = &cobra.Command{
 	Long: `Edit a queued job's description, command, directory, environment variables, or dependencies.
 
 Examples:
-  remote-jobs edit 1595 --depends-on 1599
-  remote-jobs edit 1595 --command "python eval.py"
-  remote-jobs edit 1595 --env FOO=bar --env BAZ=qux`,
+  weft edit 1595 --depends-on 1599
+  weft edit 1595 --command "python eval.py"
+  weft edit 1595 --env FOO=bar --env BAZ=qux`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runEdit,
 }
 
 var queueEditCmd = &cobra.Command{
 	Use:   "edit <job-id>",
-	Short: "Alias for 'remote-jobs edit'",
-	Long:  "Alias for 'remote-jobs edit'. All flags are shared with the top-level command.",
+	Short: "Alias for 'weft edit'",
+	Long:  "Alias for 'weft edit'. All flags are shared with the top-level command.",
 	Args:  usageArgs(cobra.ExactArgs(1)),
 	RunE:  runEdit,
 }

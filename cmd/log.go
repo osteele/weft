@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/logcache"
-	"github.com/osteele/remote-jobs/internal/logfiles"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/logfiles"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -26,24 +26,24 @@ var logCmd = &cobra.Command{
 	Long: `View the log file for a specific job.
 
 Examples:
-  remote-jobs log 25           # View log for job #25 (last 50 lines)
-  remote-jobs log 25 -f        # Follow job #25's log
-  remote-jobs log 25 -n 100    # Last 100 lines
-  remote-jobs log 25 --tail 30 # Last 30 lines (alias for -n)
-  remote-jobs log 25 --from 50           # Lines from 50 onwards
-  remote-jobs log 25 --from 50 --to 100  # Lines 50-100
-  remote-jobs log 25 --to 100            # First 100 lines
-  remote-jobs log 25 --grep error        # Lines containing "error"
-  remote-jobs log 25 -f --grep epoch     # Follow, filter for "epoch"
-  remote-jobs log 25 -t 2m               # Use 2 minute SSH timeout (slow connections)
+  weft log 25           # View log for job #25 (last 50 lines)
+  weft log 25 -f        # Follow job #25's log
+  weft log 25 -n 100    # Last 100 lines
+  weft log 25 --tail 30 # Last 30 lines (alias for -n)
+  weft log 25 --from 50           # Lines from 50 onwards
+  weft log 25 --from 50 --to 100  # Lines 50-100
+  weft log 25 --to 100            # First 100 lines
+  weft log 25 --grep error        # Lines containing "error"
+  weft log 25 -f --grep epoch     # Follow, filter for "epoch"
+  weft log 25 -t 2m               # Use 2 minute SSH timeout (slow connections)
 
 Operations Log (forensic debugging):
-  remote-jobs log --ops                    # Show recent operations
-  remote-jobs log --ops --job 1384         # Filter by job ID
-  remote-jobs log --ops --host cool30      # Filter by host
-  remote-jobs log --ops --op job.start     # Filter by operation type
-  remote-jobs log --ops --since 1h         # Operations in last hour
-  remote-jobs log --ops --errors           # Show only errors`,
+  weft log --ops                    # Show recent operations
+  weft log --ops --job 1384         # Filter by job ID
+  weft log --ops --host cool30      # Filter by host
+  weft log --ops --op job.start     # Filter by operation type
+  weft log --ops --since 1h         # Operations in last hour
+  weft log --ops --errors           # Show only errors`,
 	Args: validateLogArgs,
 	RunE: runLog,
 }
@@ -442,7 +442,7 @@ func shouldShowDefaultTailHint(cmd *cobra.Command, follow bool) bool {
 }
 
 func printDefaultTailHint(jobID int64) {
-	fmt.Printf("(showing last %d lines; run 'remote-jobs log %d --full' to see the entire log or adjust -n/--lines)\n\n", logLines, jobID)
+	fmt.Printf("(showing last %d lines; run 'weft log %d --full' to see the entire log or adjust -n/--lines)\n\n", logLines, jobID)
 }
 
 // escapeShellArg escapes a string for use in single quotes in shell

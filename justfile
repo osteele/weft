@@ -1,4 +1,4 @@
-# Remote Jobs - Development Commands
+# Weft - Development Commands
 
 # Default: show available commands
 default:
@@ -6,7 +6,7 @@ default:
 
 # Build the binary
 build:
-    go build -o remote-jobs .
+    go build -o weft .
 
 # Install to $GOPATH/bin
 install:
@@ -47,7 +47,7 @@ check: format lint test
 
 # Clean build artifacts
 clean:
-    rm -f remote-jobs
+    rm -f weft
 
 # Model-check the PlusCal reconciliation spec
 tla-check:

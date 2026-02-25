@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/osteele/remote-jobs/internal/core"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/ops"
 )
 
 // killJobWithService kills or cancels a job using the shared core service. When

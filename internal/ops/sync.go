@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/artifacts"
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/hooks"
-	"github.com/osteele/remote-jobs/internal/logcache"
-	"github.com/osteele/remote-jobs/internal/remote"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hooks"
+	"github.com/osteele/weft/internal/logcache"
+	"github.com/osteele/weft/internal/remote"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // Option represents an optional value that may or may not be present.
@@ -632,7 +632,7 @@ func (sshQueueRemote) StatusFile(host string, jobID int64, timeout time.Duration
 }
 
 func (sshQueueRemote) CurrentJob(host string, jobID int64, timeout time.Duration) Option[bool] {
-	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", DefaultQueueName)
+	currentFile := fmt.Sprintf("~/.cache/weft/queue/%s.current", DefaultQueueName)
 	cmd := fmt.Sprintf("cat %s 2>/dev/null || true", currentFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
@@ -648,7 +648,7 @@ func (sshQueueRemote) CurrentJob(host string, jobID int64, timeout time.Duration
 
 func (sshQueueRemote) InQueue(host string, jobID int64, timeout time.Duration) Option[bool] {
 	// Check new state.json format - job is in pending array
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", DefaultQueueName)
+	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", DefaultQueueName)
 	// Use jq without -e flag; check result value directly to avoid jq output pollution
 	cmd := fmt.Sprintf("jq -e '.pending | index(%d) != null' %s >/dev/null 2>&1 && echo YES || echo NO", jobID, stateFile)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
@@ -721,8 +721,8 @@ func (sshQueueRemote) ProcessPaused(host string, jobID int64, timeout time.Durat
 func (sshQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duration) (quickStatus, error) {
 	statusPattern := session.StatusFilePattern(jobID)
 	statusFile := session.SimpleStatusFile(jobID)
-	currentFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.current", DefaultQueueName)
-	stateFile := fmt.Sprintf("~/.cache/remote-jobs/queue/%s.state.json", DefaultQueueName)
+	currentFile := fmt.Sprintf("~/.cache/weft/queue/%s.current", DefaultQueueName)
+	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", DefaultQueueName)
 	pidPattern := session.PidFilePattern(jobID)
 	pidFile := session.SimplePidFile(jobID)
 	// When status file exists, output "exitcode|mtime" to capture actual completion time

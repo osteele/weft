@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/hostinfo"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
 )
 
 func hostFromCachedInfo(cached *db.CachedHostInfo) *Host {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 func updateJobCPUSamples(database *sql.DB, job *db.Job, timeout time.Duration) (bool, error) {

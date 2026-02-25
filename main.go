@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/osteele/remote-jobs/cmd"
+	"github.com/osteele/weft/cmd"
 )
 
 func main() {

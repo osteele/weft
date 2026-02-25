@@ -7,14 +7,14 @@
 #   notify-slack.sh <session-name> <exit-code> <host> [metadata-file]
 #
 # Configuration:
-#   Set REMOTE_JOBS_SLACK_WEBHOOK environment variable, or
-#   Create ~/.config/remote-jobs/config with: SLACK_WEBHOOK=https://hooks.slack.com/...
+#   Set WEFT_SLACK_WEBHOOK environment variable, or
+#   Create ~/.config/weft/config with: SLACK_WEBHOOK=https://hooks.slack.com/...
 #
 # Environment Variables:
-#   REMOTE_JOBS_SLACK_WEBHOOK     Slack webhook URL (required)
-#   REMOTE_JOBS_SLACK_NOTIFY      When to notify: "all" (default), "failures", "none"
-#   REMOTE_JOBS_SLACK_MIN_DURATION  Minimum job duration in seconds to trigger notification (default: 15)
-#   REMOTE_JOBS_SLACK_VERBOSE=1   Include directory and command in message
+#   WEFT_SLACK_WEBHOOK     Slack webhook URL (required)
+#   WEFT_SLACK_NOTIFY      When to notify: "all" (default), "failures", "none"
+#   WEFT_SLACK_MIN_DURATION  Minimum job duration in seconds to trigger notification (default: 15)
+#   WEFT_SLACK_VERBOSE=1   Include directory and command in message
 #
 
 set -euo pipefail
@@ -30,10 +30,10 @@ HOST="$3"
 METADATA_FILE="${4:-}"
 
 # Get webhook URL from environment or config file
-WEBHOOK_URL="${REMOTE_JOBS_SLACK_WEBHOOK:-}"
+WEBHOOK_URL="${WEFT_SLACK_WEBHOOK:-}"
 
-if [ -z "$WEBHOOK_URL" ] && [ -f ~/.config/remote-jobs/config ]; then
-    WEBHOOK_URL=$(grep '^SLACK_WEBHOOK=' ~/.config/remote-jobs/config 2>/dev/null | cut -d= -f2- || true)
+if [ -z "$WEBHOOK_URL" ] && [ -f ~/.config/weft/config ]; then
+    WEBHOOK_URL=$(grep '^SLACK_WEBHOOK=' ~/.config/weft/config 2>/dev/null | cut -d= -f2- || true)
 fi
 
 if [ -z "$WEBHOOK_URL" ]; then
@@ -74,8 +74,8 @@ if [ -f "$METADATA_FILE" ]; then
 fi
 
 # Get notification settings (defaults: notify all, 15s minimum duration)
-NOTIFY_MODE="${REMOTE_JOBS_SLACK_NOTIFY:-all}"
-MIN_DURATION="${REMOTE_JOBS_SLACK_MIN_DURATION:-15}"
+NOTIFY_MODE="${WEFT_SLACK_NOTIFY:-all}"
+MIN_DURATION="${WEFT_SLACK_MIN_DURATION:-15}"
 
 # Check if we should send notification based on mode
 case "$NOTIFY_MODE" in
@@ -115,7 +115,7 @@ fi
 message="$status_emoji Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text"
 
 # Add verbose info if enabled
-if [ "${REMOTE_JOBS_SLACK_VERBOSE:-}" = "1" ]; then
+if [ "${WEFT_SLACK_VERBOSE:-}" = "1" ]; then
     if [ -n "$working_dir" ]; then
         message="$message\n• Directory: \`$working_dir\`"
     fi

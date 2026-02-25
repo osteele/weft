@@ -66,7 +66,7 @@ func TestMetadataFile(t *testing.T) {
 
 func TestSimplePausedFile(t *testing.T) {
 	got := SimplePausedFile(42)
-	want := "~/.cache/remote-jobs/logs/42.paused"
+	want := "~/.cache/weft/logs/42.paused"
 	if got != want {
 		t.Errorf("SimplePausedFile(42) = %q, want %q", got, want)
 	}
@@ -236,9 +236,9 @@ func TestBuildWrapperCommand_TildeExpansion(t *testing.T) {
 		JobID:      42,
 		WorkingDir: "~/code/project",
 		Command:    "python train.py",
-		LogFile:    "~/.cache/remote-jobs/logs/42.log",
-		StatusFile: "~/.cache/remote-jobs/logs/42.status",
-		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+		LogFile:    "~/.cache/weft/logs/42.log",
+		StatusFile: "~/.cache/weft/logs/42.status",
+		PidFile:    "~/.cache/weft/logs/42.pid",
 		NotifyCmd:  "",
 	}
 
@@ -251,9 +251,9 @@ func TestBuildWrapperCommand_TildeExpansion(t *testing.T) {
 		desc    string
 	}{
 		{"'~/code/project'", "working directory with tilde should not be single-quoted"},
-		{"'~/.cache/remote-jobs/logs/42.log'", "log file with tilde should not be single-quoted"},
-		{"'~/.cache/remote-jobs/logs/42.status'", "status file with tilde should not be single-quoted"},
-		{"'~/.cache/remote-jobs/logs/42.pid'", "pid file with tilde should not be single-quoted"},
+		{"'~/.cache/weft/logs/42.log'", "log file with tilde should not be single-quoted"},
+		{"'~/.cache/weft/logs/42.status'", "status file with tilde should not be single-quoted"},
+		{"'~/.cache/weft/logs/42.pid'", "pid file with tilde should not be single-quoted"},
 	}
 
 	for _, bp := range badPatterns {
@@ -270,10 +270,10 @@ func TestBuildWrapperCommand_TildeExpansion(t *testing.T) {
 		desc    string
 	}{
 		{`cd "$HOME/code/project"`, "working directory should use $HOME with quotes"},
-		{"> ~/.cache/remote-jobs/logs/42.log", "log file should appear unquoted"},
-		{">> ~/.cache/remote-jobs/logs/42.log", "log file should appear unquoted in append"},
-		{"> ~/.cache/remote-jobs/logs/42.status", "status file should appear unquoted"},
-		{"> ~/.cache/remote-jobs/logs/42.pid", "pid file should appear unquoted"},
+		{"> ~/.cache/weft/logs/42.log", "log file should appear unquoted"},
+		{">> ~/.cache/weft/logs/42.log", "log file should appear unquoted in append"},
+		{"> ~/.cache/weft/logs/42.status", "status file should appear unquoted"},
+		{"> ~/.cache/weft/logs/42.pid", "pid file should appear unquoted"},
 	}
 
 	for _, gp := range goodPatterns {
@@ -313,9 +313,9 @@ func TestBuildWrapperCommand_NotifyCmd(t *testing.T) {
 		JobID:      42,
 		WorkingDir: "~/code/project",
 		Command:    "python train.py",
-		LogFile:    "~/.cache/remote-jobs/logs/42.log",
-		StatusFile: "~/.cache/remote-jobs/logs/42.status",
-		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+		LogFile:    "~/.cache/weft/logs/42.log",
+		StatusFile: "~/.cache/weft/logs/42.status",
+		PidFile:    "~/.cache/weft/logs/42.pid",
 		NotifyCmd:  "; notify-slack.sh rj-42 $EXIT_CODE cool30",
 	}
 
@@ -352,9 +352,9 @@ func TestBuildWrapperCommand_CommandPreserved(t *testing.T) {
 				JobID:      1,
 				WorkingDir: "~/code",
 				Command:    tt.command,
-				LogFile:    "~/.cache/remote-jobs/logs/1.log",
-				StatusFile: "~/.cache/remote-jobs/logs/1.status",
-				PidFile:    "~/.cache/remote-jobs/logs/1.pid",
+				LogFile:    "~/.cache/weft/logs/1.log",
+				StatusFile: "~/.cache/weft/logs/1.status",
+				PidFile:    "~/.cache/weft/logs/1.pid",
 			}
 
 			cmd := BuildWrapperCommand(params)
@@ -373,15 +373,15 @@ func TestBuildWrapperCommand_PidCapture(t *testing.T) {
 		JobID:      42,
 		WorkingDir: "~/code",
 		Command:    "python train.py",
-		LogFile:    "~/.cache/remote-jobs/logs/42.log",
-		StatusFile: "~/.cache/remote-jobs/logs/42.status",
-		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+		LogFile:    "~/.cache/weft/logs/42.log",
+		StatusFile: "~/.cache/weft/logs/42.status",
+		PidFile:    "~/.cache/weft/logs/42.pid",
 	}
 
 	cmd := BuildWrapperCommand(params)
 
 	// Must write PID to file using $BASHPID (writes before exec so we get the job's PID)
-	if !strings.Contains(cmd, "echo $BASHPID > ~/.cache/remote-jobs/logs/42.pid") {
+	if !strings.Contains(cmd, "echo $BASHPID > ~/.cache/weft/logs/42.pid") {
 		t.Errorf("BuildWrapperCommand: PID file write not found\nCommand: %s", cmd)
 	}
 
@@ -402,9 +402,9 @@ func TestBuildWrapperCommand_ExitCodeCapture(t *testing.T) {
 		JobID:      42,
 		WorkingDir: "~/code",
 		Command:    "python train.py",
-		LogFile:    "~/.cache/remote-jobs/logs/42.log",
-		StatusFile: "~/.cache/remote-jobs/logs/42.status",
-		PidFile:    "~/.cache/remote-jobs/logs/42.pid",
+		LogFile:    "~/.cache/weft/logs/42.log",
+		StatusFile: "~/.cache/weft/logs/42.status",
+		PidFile:    "~/.cache/weft/logs/42.pid",
 	}
 
 	cmd := BuildWrapperCommand(params)
@@ -415,7 +415,7 @@ func TestBuildWrapperCommand_ExitCodeCapture(t *testing.T) {
 	}
 
 	// Must write exit code to status file
-	if !strings.Contains(cmd, "echo $EXIT_CODE > ~/.cache/remote-jobs/logs/42.status") {
+	if !strings.Contains(cmd, "echo $EXIT_CODE > ~/.cache/weft/logs/42.status") {
 		t.Errorf("BuildWrapperCommand: exit code file write not found\nCommand: %s", cmd)
 	}
 }

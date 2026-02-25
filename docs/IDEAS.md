@@ -60,7 +60,7 @@ done
 Specify CPU, memory, or GPU requirements.
 
 ```bash
-remote-jobs run --cpus 4 --mem 16G --gpu 1 cool30 "train.py"
+weft run --cpus 4 --mem 16G --gpu 1 cool30 "train.py"
 ```
 
 ### Implementation
@@ -89,9 +89,9 @@ Add per-job CPU/memory/thread stats for macOS hosts in the TUI.
 Tag jobs for organization and bulk operations.
 
 ```bash
-remote-jobs run --tag experiment-v2 --tag ablation cool30 "run.py"
-remote-jobs job list --tag experiment-v2
-remote-jobs job kill --tag experiment-v2  # Kill all matching
+weft run --tag experiment-v2 --tag ablation cool30 "run.py"
+weft job list --tag experiment-v2
+weft job kill --tag experiment-v2  # Kill all matching
 ```
 
 ## Notification Channels
@@ -99,7 +99,7 @@ remote-jobs job kill --tag experiment-v2  # Kill all matching
 Beyond Slack, support other notification methods.
 
 ```bash
-remote-jobs run --notify discord --notify email cool30 "long-job.sh"
+weft run --notify discord --notify email cool30 "long-job.sh"
 ```
 
 - Email notifications
@@ -111,14 +111,14 @@ remote-jobs run --notify discord --notify email cool30 "long-job.sh"
 
 Expose a structured way for the CLI to describe “next steps” so autonomous
 agents can more easily keep context. Today commands print helpful follow-up
-lines (“run `remote-jobs status 42` next”), but the format is unstructured text.
+lines (“run `weft status 42` next”), but the format is unstructured text.
 
 ### Idea
 - Emit a machine-readable block (JSON or YAML) that mirrors the human-readable
   hints so agent runtimes can parse and insert them into their memories.
 - Allow users to opt into different verbosity levels (minimal vs. verbose hints)
   so humans don’t feel overwhelmed while agents still get the detail they need.
-- Let `remote-jobs plan` emit suggested commands for every job ID it creates,
+- Let `weft plan` emit suggested commands for every job ID it creates,
   making agent chaining even easier.
 
 ### Benefits
@@ -129,14 +129,14 @@ lines (“run `remote-jobs status 42` next”), but the format is unstructured t
 
 ## Reconnectable Stay-Attached Mode
 
-Extend the `remote-jobs run --allow` pipeline so the CLI can automatically
+Extend the `weft run --allow` pipeline so the CLI can automatically
 reconnect if the SSH tail session drops and expose a standalone
-`remote-jobs attach <job-id>` command to resume streaming logs later.
+`weft attach <job-id>` command to resume streaming logs later.
 
 ### Enhancements
 - Detect lost SSH tail sessions, print a notice, and retry a limited number of
   times before giving up.
-- Provide a `remote-jobs attach` helper that reuses the wait-and-tail logic
+- Provide a `weft attach` helper that reuses the wait-and-tail logic
   without starting a new job.
 - Surface clearer status when the job finishes while attached (prompt to exit
   or keep streaming for post-run logs).
@@ -147,7 +147,7 @@ Provide better tooling around the “occasionally connected” design so users a
 agents can see exactly what is queued for each host.
 
 ### Possibilities
-- `remote-jobs ops list` showing pending deferred operations, their age, and the
+- `weft ops list` showing pending deferred operations, their age, and the
   command that created them.
 - TUI panel that highlights hosts with a large backlog so humans know which
   machines need attention.
@@ -191,13 +191,13 @@ including when the original host is offline.
 
 ```bash
 # Move queued job 42 from cool30 to cool100
-remote-jobs job move 42 cool100
+weft job move 42 cool100
 ```
 
 ### Requirements
 - Update the job's host in the database immediately.
 - Remove the job from the original host queue (or queue the removal for the
-  next `remote-jobs sync` if the host is unreachable).
+  next `weft sync` if the host is unreachable).
 - Append the job to the target host's queue with the same metadata/env vars.
 - Validate that the job is still queued and hasn't started.
 - Provide clear user feedback when operations are deferred due to network
@@ -214,14 +214,14 @@ Save common job configurations as templates.
 
 ```bash
 # Save current job as template
-remote-jobs job save-template 42 "gpu-training"
+weft job save-template 42 "gpu-training"
 
 # Use template
-remote-jobs run --template gpu-training cool30 "train.py --epochs 100"
+weft run --template gpu-training cool30 "train.py --epochs 100"
 ```
 
 ### Storage
-- Store in `~/.config/remote-jobs/templates/`
+- Store in `~/.config/weft/templates/`
 - Template includes: working directory, env vars, timeouts, notification settings
 - Allow overriding specific fields
 
@@ -231,7 +231,7 @@ Automatically select best host based on load, availability, resources.
 
 ```bash
 # Run on any host from a group
-remote-jobs run --hosts cool30,cool100,studio "benchmark.py"
+weft run --hosts cool30,cool100,studio "benchmark.py"
 ```
 
 ### Implementation
@@ -246,7 +246,7 @@ Run the same command with different parameters (like SLURM job arrays).
 
 ```bash
 # Run with different parameters
-remote-jobs run --array 1-10 cool30 "process.py --task \$TASK_ID"
+weft run --array 1-10 cool30 "process.py --task \$TASK_ID"
 
 # Creates 10 jobs with TASK_ID=1..10
 ```

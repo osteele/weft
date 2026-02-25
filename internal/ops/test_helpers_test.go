@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 type sshMockResponse struct {

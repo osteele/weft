@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 const hostRecentSyncWindow = 48 * time.Hour

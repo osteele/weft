@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Migration script for remote-jobs queue runner v2
+# Migration script for weft queue runner v2
 # Converts from old TSV queue format to new JSONL command log format.
 #
 # Usage:
@@ -20,8 +20,8 @@
 set -euo pipefail
 
 QUEUE_NAME="${1:-default}"
-QUEUE_DIR="$HOME/.cache/remote-jobs/queue"
-LOG_DIR="$HOME/.cache/remote-jobs/logs"
+QUEUE_DIR="$HOME/.cache/weft/queue"
+LOG_DIR="$HOME/.cache/weft/logs"
 
 OLD_QUEUE_FILE="$QUEUE_DIR/${QUEUE_NAME}.queue"
 NEW_COMMANDS_FILE="$QUEUE_DIR/${QUEUE_NAME}.commands"
@@ -174,7 +174,7 @@ echo "  State:    $STATE_FILE"
 echo "  Backup:   $backup_file"
 echo ""
 echo "To start the new queue runner:"
-echo "  bash ~/.cache/remote-jobs/scripts/queue-runner-v2.sh $QUEUE_NAME"
+echo "  bash ~/.cache/weft/scripts/queue-runner-v2.sh $QUEUE_NAME"
 echo ""
-echo "Or via remote-jobs CLI (after updating to new version):"
-echo "  remote-jobs queue start $QUEUE_NAME"
+echo "Or via weft CLI (after updating to new version):"
+echo "  weft queue start $QUEUE_NAME"

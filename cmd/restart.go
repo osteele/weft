@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -19,8 +19,8 @@ For killed/dead/failed/canceled jobs, the job is requeued with its original ID.
 For completed jobs, a new job is created with the same command and metadata.
 
 Examples:
-  remote-jobs restart 42
-  remote-jobs restart 42 43 44`,
+  weft restart 42
+  weft restart 42 43 44`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runRestart,
 }

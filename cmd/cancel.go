@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/osteele/remote-jobs/internal/core"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -19,8 +19,8 @@ For queued jobs: removes from both the remote queue file and the local database.
 For running jobs: kills the job process.
 
 Examples:
-  remote-jobs cancel 123
-  remote-jobs cancel 123 124 125`,
+  weft cancel 123
+  weft cancel 123 124 125`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runCancel,
 }

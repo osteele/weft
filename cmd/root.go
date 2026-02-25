@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -16,7 +16,7 @@ import (
 var Version = "dev"
 
 var rootCmd = &cobra.Command{
-	Use:   "remote-jobs",
+	Use:   "weft",
 	Short: "Manage long-running jobs on remote hosts",
 	Long: `Run long-running jobs on remote hosts.
 
@@ -82,7 +82,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("remote-jobs %s\n", Version)
+		fmt.Printf("weft %s\n", Version)
 	},
 }
 

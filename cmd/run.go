@@ -11,11 +11,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/session"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -28,14 +28,14 @@ By default, jobs are added to a queue and run sequentially.
 Use --immediate (-i) to start a job immediately instead of adding it to the queue.
 
 Examples:
-  remote-jobs run cool30 'python train.py'           # Queue job
-  remote-jobs run -i cool30 'python train.py'        # Start immediately
-  remote-jobs run --wait cool30 'python train.py'    # Queue and wait for completion
-  remote-jobs run -f cool30 'python train.py'        # Queue and follow log output
-  remote-jobs run -m "Training" cool30 'python train.py'
-  remote-jobs run -C /mnt/code/LM2 cool30 'python train.py'
-  remote-jobs run --after 42 cool30 'python eval.py' # Run after job 42
-  remote-jobs run -i -f cool30 'python train.py'     # Start immediately and follow log`,
+  weft run cool30 'python train.py'           # Queue job
+  weft run -i cool30 'python train.py'        # Start immediately
+  weft run --wait cool30 'python train.py'    # Queue and wait for completion
+  weft run -f cool30 'python train.py'        # Queue and follow log output
+  weft run -m "Training" cool30 'python train.py'
+  weft run -C /mnt/code/LM2 cool30 'python train.py'
+  weft run --after 42 cool30 'python eval.py' # Run after job 42
+  weft run -i -f cool30 'python train.py'     # Start immediately and follow log`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
 		// --kill mode only needs host
 		if runKillJobID > 0 {
@@ -86,7 +86,7 @@ func init() {
 	runCmd.Flags().MarkHidden("description")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	runCmd.Flags().BoolVar(&runAllow, "allow", false, "Stream the job log live and stay attached until interrupted")
-	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'remote-jobs kill')")
+	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
@@ -157,7 +157,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	} else {
 		// Normal mode: require host and command
 		if len(args) < 2 {
-			return usageErrorf("usage: remote-jobs run <host> <command>")
+			return usageErrorf("usage: weft run <host> <command>")
 		}
 		host = args[0]
 		command = args[1]
@@ -463,12 +463,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if usageHintsEnabled() {
 		fmt.Printf("\nMonitor progress:\n")
-		fmt.Printf("  remote-jobs status %d                   # Check status\n", result.Info.JobID)
-		fmt.Printf("  remote-jobs status --wait %d            # Wait for completion\n", result.Info.JobID)
-		fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
+		fmt.Printf("  weft status %d                   # Check status\n", result.Info.JobID)
+		fmt.Printf("  weft status --wait %d            # Wait for completion\n", result.Info.JobID)
+		fmt.Printf("  weft status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
 		fmt.Printf("\nView log:\n")
-		fmt.Printf("  remote-jobs log %d                      # View log\n", result.Info.JobID)
-		fmt.Printf("  remote-jobs log %d -f                   # Follow log\n", result.Info.JobID)
+		fmt.Printf("  weft log %d                      # View log\n", result.Info.JobID)
+		fmt.Printf("  weft log %d -f                   # Follow log\n", result.Info.JobID)
 	}
 
 	return nil
@@ -645,8 +645,8 @@ func streamJobLogAllow(host, logFile string, jobID int64) error {
 func printDetachedInstructions(jobID int64) {
 	fmt.Printf("Job %d continues running.\n", jobID)
 	if usageHintsEnabled() {
-		fmt.Printf("View logs later: remote-jobs log %d -f\n", jobID)
-		fmt.Printf("Check status:   remote-jobs job status %d\n", jobID)
+		fmt.Printf("View logs later: weft log %d -f\n", jobID)
+		fmt.Printf("Check status:   weft job status %d\n", jobID)
 	}
 }
 

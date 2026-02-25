@@ -11,9 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/artifacts"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 

@@ -69,7 +69,7 @@ stateDiagram-v2
 ## Directory Structure
 
 ```
-remote-jobs/
+weft/
 ├── main.go                 # Entry point
 ├── cmd/                    # CLI commands (Cobra)
 │   ├── root.go            # Root command, default command handling
@@ -127,12 +127,12 @@ Built with [Cobra](https://github.com/spf13/cobra), the CLI provides subcommands
 **Command Flow:**
 
 ```
-remote-jobs run [--from ID] [--timeout DURATION] <host> <command>
+weft run [--from ID] [--timeout DURATION] <host> <command>
     │
     ├── 0. (If --from) Copy settings from existing job (can override)
     ├── 1. Create job record in SQLite (status: "starting" or "queued")
     ├── 2. Generate unique tmux session name (rj-{job_id})
-    ├── 3. Create log directory on remote (~/.cache/remote-jobs/logs/)
+    ├── 3. Create log directory on remote (~/.cache/weft/logs/)
     ├── 4. Save metadata file on remote
     ├── 5. Build wrapper command (cd, logging, exit code, timeout monitor)
     ├── 6. SSH: tmux new-session -d -s 'rj-N' bash -c '...'
@@ -149,7 +149,7 @@ remote-jobs run [--from ID] [--timeout DURATION] <host> <command>
 - If SSH fails during setup, the job is marked as "dead" with the error message
 - Connection failures automatically record the job locally and defer the queue
   append so it starts once the host is back online—no special retry flag needed.
-- `remote-jobs run --from <id>` lets you copy settings into a brand-new job when
+- `weft run --from <id>` lets you copy settings into a brand-new job when
   you want to make edits before re-running.
 
 ### 2. Operations Layer (`internal/ops/`)
@@ -249,7 +249,7 @@ Manages tmux session naming and remote file paths.
 | Item | Pattern | Example |
 |------|---------|---------|
 | Tmux session | `rj-{job_id}` | `rj-42` |
-| Log file | `~/.cache/remote-jobs/logs/{job_id}-{timestamp}.log` | `42-20251213-143025.log` |
+| Log file | `~/.cache/weft/logs/{job_id}-{timestamp}.log` | `42-20251213-143025.log` |
 | Status file | `.../{job_id}-{timestamp}.status` | Contains exit code |
 | Metadata file | `.../{job_id}-{timestamp}.meta` | Key=value pairs |
 | PID file | `.../{job_id}-{timestamp}.pid` | Process ID |
@@ -344,7 +344,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 
 ### 7. Configuration (`internal/config/`)
 
-YAML configuration at `~/.config/remote-jobs/config.yaml`:
+YAML configuration at `~/.config/weft/config.yaml`:
 
 ```yaml
 default_command: tui    # "help", "list", "tui", or "web"
@@ -357,11 +357,11 @@ web_port: 8127
 
 ### 8. Log Cache (`internal/logcache/`)
 
-Remote log files are mirrored into `~/.cache/remote-jobs/logs/` whenever a job
-finishes (or the queue runner writes a status file) so that `remote-jobs log`
+Remote log files are mirrored into `~/.cache/weft/logs/` whenever a job
+finishes (or the queue runner writes a status file) so that `weft log`
 and the TUI can fall back to an offline copy. The cache honors the configurable
-age/size caps, prunes stale entries during `remote-jobs sync`, and quietly skips
-files that are too large. When you run `remote-jobs log JOB_ID`, the CLI serves
+age/size caps, prunes stale entries during `weft sync`, and quietly skips
+files that are too large. When you run `weft log JOB_ID`, the CLI serves
 cached bytes immediately and only re-fetches from SSH if the cache misses or
 the job is still running.
 
@@ -381,12 +381,12 @@ missing descriptions and asks an [ollama](https://ollama.com/) model to produce
 one. Each description stores a hash of the model/prompt/settings combination so
 future runs can skip already processed commands. The TUI registers a callback
 so rows update live the moment an AI description is written, and any manual
-`remote-jobs describe` edits override the generated text permanently.
+`weft describe` edits override the generated text permanently.
 
 ### 11. Queue Helpers (`internal/queuejob/`, `internal/plan/`)
 
 Queue-heavy workflows use dedicated helpers. `internal/queuejob` knows how to
-update the append-only command log in `~/.cache/remote-jobs/queue/*.commands`,
+update the append-only command log in `~/.cache/weft/queue/*.commands`,
 rehydrate metadata, and start a job immediately even if it never reached the
 remote queue (pending deferred op). `internal/plan` parses YAML plans, expands
 IDs/aliases, validates per-host dependency DAGs, and emits queue operations that
@@ -399,7 +399,7 @@ local/remote state consistent even when connections flap.
 ### Starting a Job
 
 ```
-User: remote-jobs run cool30 'python train.py'
+User: weft run cool30 'python train.py'
                     │
                     ▼
 ┌───────────────────────────────────────────────────────────────┐
@@ -421,7 +421,7 @@ User: remote-jobs run cool30 'python train.py'
 │ internal/session/session.go                                    │
 │ 4. Generate paths:                                             │
 │    - tmuxSession = "rj-42"                                     │
-│    - logFile = "~/.cache/remote-jobs/logs/42-20251213-...log" │
+│    - logFile = "~/.cache/weft/logs/42-20251213-...log" │
 │    - statusFile, metadataFile, pidFile                         │
 └───────────────────────────────────────────────────────────────┘
                     │
@@ -430,7 +430,7 @@ User: remote-jobs run cool30 'python train.py'
 │ internal/ssh/ssh.go                                            │
 │ 5. ssh cool30 "tmux has-session -t 'rj-42' ..."               │
 │    (check session doesn't exist)                               │
-│ 6. ssh cool30 "mkdir -p ~/.cache/remote-jobs/logs"            │
+│ 6. ssh cool30 "mkdir -p ~/.cache/weft/logs"            │
 │ 7. ssh cool30 "cat > ...meta << 'EOF'\n...\nEOF"              │
 │ 8. ssh cool30 "tmux new-session -d -s 'rj-42' bash -c '...'"  │
 └───────────────────────────────────────────────────────────────┘
@@ -445,7 +445,7 @@ User: remote-jobs run cool30 'python train.py'
 ### Checking Job Status
 
 ```
-User: remote-jobs sync
+User: weft sync
             │
             ▼
 ┌────────────────────────────────────────────────────────┐
@@ -499,19 +499,19 @@ User: remote-jobs sync
 
 | Path | Purpose |
 |------|---------|
-| `~/.config/remote-jobs/jobs.db` | SQLite database |
-| `~/.config/remote-jobs/config.yaml` | Configuration |
-| `~/.config/remote-jobs/config` | Legacy config (Slack webhook) |
+| `~/.config/weft/jobs.db` | SQLite database |
+| `~/.config/weft/config.yaml` | Configuration |
+| `~/.config/weft/config` | Legacy config (Slack webhook) |
 
 ### Remote (Server)
 
 | Path | Purpose |
 |------|---------|
-| `~/.cache/remote-jobs/logs/{id}-{ts}.log` | Job output |
-| `~/.cache/remote-jobs/logs/{id}-{ts}.status` | Exit code |
-| `~/.cache/remote-jobs/logs/{id}-{ts}.meta` | Metadata |
-| `~/.cache/remote-jobs/logs/{id}-{ts}.pid` | Process ID |
-| `/tmp/remote-jobs-notify-slack.sh` | Notification script (deployed at runtime) |
+| `~/.cache/weft/logs/{id}-{ts}.log` | Job output |
+| `~/.cache/weft/logs/{id}-{ts}.status` | Exit code |
+| `~/.cache/weft/logs/{id}-{ts}.meta` | Metadata |
+| `~/.cache/weft/logs/{id}-{ts}.pid` | Process ID |
+| `/tmp/weft-notify-slack.sh` | Notification script (deployed at runtime) |
 
 ## Design Decisions
 
@@ -615,21 +615,21 @@ The queue system allows jobs to run on a remote host without requiring the local
 
 ### Remote Queue Runner
 
-Jobs enqueued via `remote-jobs queue add`, `remote-jobs run`, or plan
+Jobs enqueued via `weft queue add`, `weft run`, or plan
 `series` blocks are executed by a small bash daemon that lives on each host.
 
 - The script is embedded in the binary (`internal/scripts/queue-runner.sh`) and
-  deployed on demand to `~/.cache/remote-jobs/scripts/queue-runner.sh`.
+  deployed on demand to `~/.cache/weft/scripts/queue-runner.sh`.
 - A tmux session named `rj-queue-{queue}` runs the script so it keeps running
   even when you disconnect.
 - Queue data is purely file-based to avoid keeping a network service running:
-  - `~/.cache/remote-jobs/queue/{queue}.commands`: append-only JSONL command log.
-  - `~/.cache/remote-jobs/queue/{queue}.state.json`: runner state (pending list,
+  - `~/.cache/weft/queue/{queue}.commands`: append-only JSONL command log.
+  - `~/.cache/weft/queue/{queue}.state.json`: runner state (pending list,
     running jobs, current job).
-  - `~/.cache/remote-jobs/queue/{queue}.current`: ID of the most recently
+  - `~/.cache/weft/queue/{queue}.current`: ID of the most recently
     started job (used by `status`/`sync` to detect runner progress).
-  - `~/.cache/remote-jobs/queue/{queue}.runner.pid`: PID of the runner itself.
-  - `~/.cache/remote-jobs/queue/{queue}.stop`: Presence signals the runner to
+  - `~/.cache/weft/queue/{queue}.runner.pid`: PID of the runner itself.
+  - `~/.cache/weft/queue/{queue}.stop`: Presence signals the runner to
     exit after the current jobs complete.
 - Each queue entry includes environment variables, dependency metadata, and
   optional CPU allotment so the runner can schedule concurrent jobs while
@@ -637,7 +637,7 @@ Jobs enqueued via `remote-jobs queue add`, `remote-jobs run`, or plan
 
 ```mermaid
 flowchart TD
-    A[CLI queues job] --> B["Append JSON command to ~/.cache/remote-jobs/queue/{queue}.commands"]
+    A[CLI queues job] --> B["Append JSON command to ~/.cache/weft/queue/{queue}.commands"]
     B --> C["rj-queue-{queue} tmux session"]
     C --> D{Queue runner loop}
     D -->|Read pending list| E[Update .state.json / .current]
@@ -652,7 +652,7 @@ flowchart TD
 
 **Activity Notes**
 
-- Dependencies: The runner inspects `~/.cache/remote-jobs/logs/{dep}-*.status`
+- Dependencies: The runner inspects `~/.cache/weft/logs/{dep}-*.status`
   files. If they are missing it re-queues the job at the end. If a dependency
   failed and the spec required success, the job is marked skipped by writing a
   log/status pair.

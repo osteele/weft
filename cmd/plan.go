@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/core"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/oplog"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/plan"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/plan"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -436,9 +436,9 @@ func printPlanStatusCommands(jobs []scheduledPlanJob) {
 	}
 	fmt.Println()
 	fmt.Println("Monitor plan progress:")
-	fmt.Printf("  remote-jobs status %s\n", strings.Join(ids, " "))
-	fmt.Printf("  remote-jobs status --wait %s\n", strings.Join(ids, " "))
-	fmt.Printf("  remote-jobs status --wait --wait-timeout 30m %s\n", strings.Join(ids, " "))
+	fmt.Printf("  weft status %s\n", strings.Join(ids, " "))
+	fmt.Printf("  weft status --wait %s\n", strings.Join(ids, " "))
+	fmt.Printf("  weft status --wait --wait-timeout 30m %s\n", strings.Join(ids, " "))
 }
 
 func watchPlanJobs(database *sql.DB, jobs []scheduledPlanJob, duration time.Duration) error {

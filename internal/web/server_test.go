@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/hostinfo"
+	"github.com/osteele/weft/internal/hostinfo"
 )
 
 func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {

@@ -1,4 +1,4 @@
-module github.com/osteele/remote-jobs
+module github.com/osteele/weft
 
 go 1.25.4
 

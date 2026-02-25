@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -55,12 +55,12 @@ Exit codes (single job only):
   3: Job not found
 
 Examples:
-  remote-jobs status              # Show all active jobs
-  remote-jobs status 42
-  remote-jobs status 42:47        # Check jobs 42 through 47
-  remote-jobs status 42 --fast    # Quick check with 2s timeout
-  remote-jobs status 42 -t 2m     # Use 2 minute SSH timeout (slow connections)
-  remote-jobs status 42:47 --wait  # Wait for jobs 42-47 to complete`,
+  weft status              # Show all active jobs
+  weft status 42
+  weft status 42:47        # Check jobs 42 through 47
+  weft status 42 --fast    # Quick check with 2s timeout
+  weft status 42 -t 2m     # Use 2 minute SSH timeout (slow connections)
+  weft status 42:47 --wait  # Wait for jobs 42-47 to complete`,
 	RunE: runStatus,
 }
 
@@ -534,14 +534,14 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
 	}
 
-	fmt.Printf("Details:  remote-jobs info %d  # Show directory, command, env vars\n", job.ID)
+	fmt.Printf("Details:  weft info %d  # Show directory, command, env vars\n", job.ID)
 
 	// Print usage hints
 	if exitOnComplete && usageHintsEnabled() {
 		fmt.Println()
-		fmt.Printf("Hints:    remote-jobs log %d        # View job output\n", job.ID)
+		fmt.Printf("Hints:    weft log %d        # View job output\n", job.ID)
 		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
-			fmt.Printf("          remote-jobs status %d --wait   # Don't exit until the job completes\n", job.ID)
+			fmt.Printf("          weft status %d --wait   # Don't exit until the job completes\n", job.ID)
 		}
 	}
 

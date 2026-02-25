@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestBuildQueueEditDependencies(t *testing.T) {

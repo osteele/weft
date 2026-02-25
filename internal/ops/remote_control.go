@@ -3,7 +3,7 @@ package ops
 import (
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/weft/internal/db"
 )
 
 // CancelRemoteJob attempts to remove a queued job or stop a running job on the remote backend.

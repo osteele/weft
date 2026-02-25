@@ -15,8 +15,8 @@ func TestTildeExpansion(t *testing.T) {
 	}{
 		{
 			name:    "tilde path should not be quoted",
-			path:    "~/.cache/remote-jobs/logs/test.log",
-			command: "tail -50 ~/.cache/remote-jobs/logs/test.log",
+			path:    "~/.cache/weft/logs/test.log",
+			command: "tail -50 ~/.cache/weft/logs/test.log",
 		},
 		{
 			name:    "absolute path works unquoted",
@@ -86,9 +86,9 @@ func TestReadRemoteFileCommand(t *testing.T) {
 	}{
 		{
 			name:        "tilde path not quoted",
-			path:        "~/.cache/remote-jobs/logs/test.log",
-			wantPattern: "cat ~/.cache/remote-jobs/logs/test.log",
-			badPattern:  "'~/.cache/remote-jobs/logs/test.log'",
+			path:        "~/.cache/weft/logs/test.log",
+			wantPattern: "cat ~/.cache/weft/logs/test.log",
+			badPattern:  "'~/.cache/weft/logs/test.log'",
 		},
 		{
 			name:        "absolute path not quoted",
@@ -134,9 +134,9 @@ func TestRemoteFileExistsCommand(t *testing.T) {
 	}{
 		{
 			name:        "tilde path not quoted",
-			path:        "~/.cache/remote-jobs/status.txt",
-			wantPattern: "test -f ~/.cache/remote-jobs/status.txt",
-			badPattern:  "'~/.cache/remote-jobs/status.txt'",
+			path:        "~/.cache/weft/status.txt",
+			wantPattern: "test -f ~/.cache/weft/status.txt",
+			badPattern:  "'~/.cache/weft/status.txt'",
 		},
 	}
 

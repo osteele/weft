@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/osteele/remote-jobs/internal/hostinfo"
+import "github.com/osteele/weft/internal/hostinfo"
 
 type Host = hostinfo.Host
 type HostStatus = hostinfo.HostStatus

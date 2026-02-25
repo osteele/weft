@@ -4,7 +4,7 @@ This document collects the details behind two related usability features:
 staying attached to a job’s live logs without risking the remote process, and
 surfacing structured progress information in the TUI.
 
-## Live Log Streaming (`remote-jobs run --allow`)
+## Live Log Streaming (`weft run --allow`)
 
 `--allow` lets you keep the CLI process attached to a job’s output after it has
 been launched in tmux. Unlike traditional `ssh <cmd>` sessions, the job keeps
@@ -16,14 +16,14 @@ tails the log file the wrapper script already writes.
 - Provide an opt-in flag that mirrors `tail -f` behavior while preserving the
   resilience guarantees of tmux-based execution.
 - Make it obvious how to detach (`Ctrl+C`) and how to resume watching logs later
-  (`remote-jobs log <id> -f`).
+  (`weft log <id> -f`).
 - Avoid inventing new on-host plumbing by reusing the existing log + wrapper
   workflow.
 
 ### CLI Experience
 
 ```
-remote-jobs run --allow cool30 "python train.py --lr 1e-4"
+weft run --allow cool30 "python train.py --lr 1e-4"
 ```
 
 1. The command prints the usual metadata (job ID, host, working dir).
@@ -33,7 +33,7 @@ remote-jobs run --allow cool30 "python train.py --lr 1e-4"
    ```
 3. Stdout/stderr stream directly until you interrupt the CLI or close the
    terminal.
-4. When the stream stops, hints remind you to use `remote-jobs log` / `status`.
+4. When the stream stops, hints remind you to use `weft log` / `status`.
 
 ### Flag Semantics
 

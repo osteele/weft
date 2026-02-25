@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
 )
 
 // hookTimeout is the maximum time a hook script may run before being killed.
@@ -40,7 +40,7 @@ func hookPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "remote-jobs", "hooks", "on-job-complete")
+	return filepath.Join(home, ".config", "weft", "hooks", "on-job-complete")
 }
 
 // RunOnJobComplete invokes the on-job-complete hook if it exists and is executable.

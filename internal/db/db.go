@@ -32,7 +32,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/queuefile"
+	"github.com/osteele/weft/internal/queuefile"
 	_ "modernc.org/sqlite"
 )
 
@@ -138,7 +138,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	dbPath = filepath.Join(home, ".config", "remote-jobs", "jobs.db")
+	dbPath = filepath.Join(home, ".config", "weft", "jobs.db")
 }
 
 // Open opens the database, creating it if necessary

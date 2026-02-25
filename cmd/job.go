@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/queuejob"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queuejob"
 	"github.com/spf13/cobra"
 )
 
@@ -68,8 +68,8 @@ Shows job metadata including command, host, status, exit code, and timing.
 Supports checking multiple jobs at once.
 
 Examples:
-  remote-jobs job status 42          # Single job
-  remote-jobs job status 42 43 44    # Multiple jobs`,
+  weft job status 42          # Single job
+  weft job status 42 43 44    # Multiple jobs`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runStatus,
 }
@@ -110,8 +110,8 @@ This command only works for jobs with status=queued that haven't started yet.
 It updates the host in the database and removes/adds the job from/to queue files.
 
 Examples:
-  remote-jobs job move 42 cool100   # Move job 42 to cool100
-  remote-jobs job move 43 studio    # Move job 43 to studio`,
+  weft job move 42 cool100   # Move job 42 to cool100
+  weft job move 43 studio    # Move job 43 to studio`,
 	Args: usageArgs(cobra.ExactArgs(2)),
 	RunE: runJobMove,
 }
@@ -134,7 +134,7 @@ var jobInfoCmd = &cobra.Command{
 environment variables, and timing information.
 
 Examples:
-  remote-jobs job info 42`,
+  weft job info 42`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runJobInfo,
 }
@@ -149,7 +149,7 @@ environment variables, and timing information.
 This is an alias for 'job info'.
 
 Examples:
-  remote-jobs info 42`,
+  weft info 42`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runJobInfo,
 }
@@ -164,7 +164,7 @@ environment variables, and timing information.
 This is an alias for 'job info'.
 
 Examples:
-  remote-jobs show 42`,
+  weft show 42`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runJobInfo,
 }
@@ -181,7 +181,7 @@ and launches the job right away.
 This is an alias for 'job start'.
 
 Examples:
-  remote-jobs start 42`,
+  weft start 42`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runJobStartNow,
 }

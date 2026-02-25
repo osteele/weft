@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/oplog"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
 )
 
 // KillJob sets the pending status to killed and attempts to reconcile immediately.

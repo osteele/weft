@@ -6,11 +6,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/monitor"
-	"github.com/osteele/remote-jobs/internal/tui"
-	"github.com/osteele/remote-jobs/internal/web"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/monitor"
+	"github.com/osteele/weft/internal/tui"
+	"github.com/osteele/weft/internal/web"
 	"github.com/spf13/cobra"
 )
 

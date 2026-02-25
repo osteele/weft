@@ -25,7 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Environment variables display**: Job details now show environment variables
   extracted from `export VAR=value && ` command prefixes
 - **Mouse support**: Click on jobs in the list to select them
-- **`remote-jobs status` command**: Re-enabled as a top-level command (synonym for
+- **`weft status` command**: Re-enabled as a top-level command (synonym for
   `job status`)
 
 ### Changed

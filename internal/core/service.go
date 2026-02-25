@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ops"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 )
 
 // Service owns job orchestration for both CLI and TUI facades. It encapsulates

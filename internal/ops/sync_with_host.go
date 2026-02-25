@@ -3,9 +3,9 @@ package ops
 import (
 	"database/sql"
 
-	"github.com/osteele/remote-jobs/internal/artifacts"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/remote"
+	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/remote"
 )
 
 // SyncQueueRunnerJobWithProber syncs a queue runner job using the provided Prober and Host.

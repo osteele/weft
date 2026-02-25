@@ -134,7 +134,7 @@ var (
 // DefaultLogPath returns the default path for the operations log.
 func DefaultLogPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".cache", "remote-jobs", "operations.log")
+	return filepath.Join(home, ".cache", "weft", "operations.log")
 }
 
 // DefaultMaxSize is the default maximum log file size (10MB).

@@ -11,10 +11,10 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/queuerunner"
-	"github.com/osteele/remote-jobs/internal/slack"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/queuerunner"
+	"github.com/osteele/weft/internal/slack"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 func (m Model) loadHosts() tea.Cmd {

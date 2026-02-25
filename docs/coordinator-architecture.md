@@ -1,13 +1,17 @@
-# Coordinator Architecture
+# Weft — Coordinator Architecture
 
-This document describes the planned evolution of remote-jobs from a
-laptop-centric architecture to a coordinator-based architecture with resource
-inventory and data locality awareness.
+Weft is forked from weft to evolve from a laptop-centric job runner into
+a coordinator-based workload scheduler with resource inventory and data locality
+awareness.
+
+The name "weft" comes from weaving — the weft is the thread actively carried
+through the warp (the fixed infrastructure). Workloads are weft threads woven
+across a fabric of compute resources.
 
 ## Motivation
 
-The current architecture splits scheduling policy across two execution contexts
-that can't always talk to each other:
+The current weft architecture splits scheduling policy across two
+execution contexts that can't always talk to each other:
 
 - **Laptop CLI** makes host placement decisions and communicates job intent to
   remote hosts via SSH
@@ -125,7 +129,7 @@ If the coordinator is unreachable, the laptop falls back to local placement
 The laptop becomes an intent-writing client. A job submission looks like:
 
 ```
-remote-jobs run --gpu-class A100 --input hf:meta-llama/Llama-3-8B 'python train.py'
+weft run --gpu-class A100 --input hf:meta-llama/Llama-3-8B 'python train.py'
 ```
 
 This writes an intent record locally and syncs it to the coordinator:
@@ -169,7 +173,7 @@ YAML files describe what each host has. Format inspired by
 llm-performance-models but simplified for scheduling needs:
 
 ```yaml
-# ~/.config/remote-jobs/hosts/cool100.yaml
+# config/hosts/cool100.yaml
 name: cool100
 compute_backend: cuda
 gpus:
@@ -187,32 +191,6 @@ storage:
   - path: /home
     capacity: "2 TiB"
     read_bw: "7 GB/s"
-```
-
-```yaml
-# ~/.config/remote-jobs/hosts/cool30.yaml
-name: cool30
-compute_backend: cuda
-gpus:
-  - name: RTX 3090
-    class: RTX3090
-    memory: "24 GiB"
-    indices: [0]
-cpu_cores: 48
-memory: "128 GiB"
-```
-
-```yaml
-# ~/.config/remote-jobs/hosts/studio.yaml
-name: studio
-compute_backend: mps
-gpus:
-  - name: M2 Max
-    class: M2Max
-    memory: "96 GiB"   # unified memory
-    indices: [0]
-cpu_cores: 12
-memory: "96 GiB"
 ```
 
 ### Dynamic state
@@ -266,7 +244,7 @@ CREATE TABLE host_data (
 Jobs declare what data they need and produce:
 
 ```
-remote-jobs run \
+weft run \
   --input hf:meta-llama/Llama-3-8B \
   --output checkpoint:llama-ft-v1:checkpoints/ \
   'python train.py'
@@ -345,18 +323,18 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 ### Lifecycle
 
-- Started via `remote-jobs coordinator start` (runs in tmux on studio)
-- Watches `~/.cache/remote-jobs/intents/` for new intent files
+- Started via `weft coordinator start` (runs in tmux on studio)
+- Watches `~/.cache/weft/intents/` for new intent files
 - Polls host state every 15-30 seconds
 - Dispatches jobs to queue runners via the existing JSONL append mechanism
-- Logs decisions to `~/.cache/remote-jobs/coordinator.log`
+- Logs decisions to `~/.cache/weft/coordinator.log`
 
 ### Detection by CLI
 
 The laptop CLI checks if the coordinator is running:
 ```bash
-ssh studio 'test -f ~/.cache/remote-jobs/coordinator.pid && \
-  kill -0 $(cat ~/.cache/remote-jobs/coordinator.pid) 2>/dev/null'
+ssh studio 'test -f ~/.cache/weft/coordinator.pid && \
+  kill -0 $(cat ~/.cache/weft/coordinator.pid) 2>/dev/null'
 ```
 
 If running: write intent file, let coordinator handle placement.
@@ -380,46 +358,48 @@ Laptop SQLite ──(intent sync)──▶ Studio SQLite (coordinator, authorita
 
 ## Migration Phases
 
-### Phase 1: Resource Inventory
+### Phase 1: Resource Inventory and Project Setup
 
-Add static host capability descriptions. No behavioral changes.
+Rename the project, set up host capability descriptions. No behavioral changes
+to job execution.
 
-- New: `internal/inventory/` package (HostSpec, GPUSpec types)
-- New: Host YAML files in `~/.config/remote-jobs/hosts/`
-- Extend: `internal/config/` to load inventory
-- Extend: `cmd/host.go` to display inventory data
-- Command: `remote-jobs host list` shows GPU specs, VRAM, disk
+- Rename module, binary, CLI references from weft to weft
+- Create `internal/inventory/` package (HostSpec, GPUSpec types)
+- Create host YAML files for cool30, cool100, studio
+- Extend `internal/config/` to load inventory
+- Add `weft host list` showing GPU specs, VRAM, storage
+- Wire inventory into `internal/hostinfo/`
 
 ### Phase 2: Data Locality Tracking
 
 Track what data exists on which hosts.
 
-- New: `internal/dataloc/` package (DataAsset, HostDataEntry types)
-- New: SQLite tables (data_assets, host_data)
-- New: HuggingFace cache scanner
-- Extend: artifact system to register outputs in host_data
-- Command: `remote-jobs host data cool30` shows cached models/datasets
+- Create `internal/dataloc/` package (DataAsset, HostDataEntry types)
+- Add SQLite tables (data_assets, host_data)
+- HuggingFace cache scanner
+- Extend artifact system to register outputs in host_data
+- Add `weft host data <host>` command
+- Add `--input` and `--output` flags to `weft run`
 
 ### Phase 3: Intent-Based Job Submission
 
 Allow jobs without explicit host. Local placement scoring.
 
-- Make host optional in `remote-jobs run`
-- New: `internal/placement/` package (scoring, constraints)
-- New: `internal/intent/` package (intent file writer)
-- New: `pending_placement` job status
-- New: `--input` and `--output` flags on `remote-jobs run`
+- Make host optional in `weft run`
+- Create `internal/placement/` package (scoring, constraints)
+- Create `internal/intent/` package (intent file writer)
+- Add `pending_placement` job status
 - Local placement works from laptop when online
 
 ### Phase 4: Coordinator Daemon
 
 The always-on scheduler on studio.
 
-- New: `cmd/coordinator.go` (start/stop/status subcommands)
-- New: `internal/coordinator/` package (main loop, dispatch, watcher)
+- `weft coordinator start/stop/status` subcommands
+- `internal/coordinator/` package (main loop, dispatch, watcher)
 - CLI detects coordinator and switches to intent-only mode
 - Coordinator dispatches to queue runners via existing JSONL append
-- Coordinator absorbs cross-host scheduling (exclusive, benchmark)
+- Coordinator absorbs cross-host scheduling
 
 ### Phase 5: Smart Scheduling and Data Transfer
 
@@ -427,19 +407,19 @@ Transfer-cost-aware decisions, data pre-staging, research integration.
 
 - Transfer cost estimation using inventory bandwidth specs
 - Pre-staging: coordinator issues download/rsync before dispatch
-- Artifact-aware job chaining (place downstream near upstream output)
-- Integration hooks for llm-performance-models (runtime prediction)
+- Artifact-aware job chaining
+- Integration hooks for llm-performance-models
 - Web dashboard: cluster overview, data locality map, decision log
 
 ### Phase Dependencies
 
 ```
-Phase 1 (Inventory) ──┐
-                       ├── Phase 3 (Intent submission) ──┐
-Phase 2 (Data Loc) ───┘                                  │
-                                                          ├── Phase 5 (Smart scheduling)
-                                              Phase 4 ────┘
-                                           (Coordinator)
+Phase 1 (Inventory + Setup) ──┐
+                               ├── Phase 3 (Intent submission) ──┐
+Phase 2 (Data Locality) ──────┘                                  │
+                                                                  ├── Phase 5
+                                                      Phase 4 ───┘
+                                                   (Coordinator)
 ```
 
 Phases 1 and 2 can proceed in parallel. Phase 3 requires Phase 1. Phase 4
@@ -450,11 +430,11 @@ requires Phases 1-3. Phase 5 requires Phase 4.
 - **Coordinator HA**: If studio goes down, should another host take over? Or is
   graceful degradation (laptop does local placement) sufficient?
 - **Queue runner simplification**: As the coordinator absorbs scheduling logic,
-  how much of queue-runner.sh can be simplified? Should the coordinator
-  eventually talk directly to tmux instead of through the queue runner?
+  how much of queue-runner.sh can be simplified?
 - **Multi-user**: Could multiple laptops write intents to the same coordinator?
-  (Not a current requirement, but the intent model supports it naturally.)
 - **Performance model integration depth**: Should the coordinator call
   llm-performance-models as a library, or consume pre-computed estimates?
-- **Artifact garbage collection**: When should cached data be evicted from hosts
-  to free disk space? Who decides?
+- **Artifact garbage collection**: When should cached data be evicted from hosts?
+- **Relationship to weft**: Should weft be able to interoperate with
+  existing weft installations (same queue runner, same DB format), or
+  is a clean break preferred?

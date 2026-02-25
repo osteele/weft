@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/session"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -18,10 +18,10 @@ var cleanupCmd = &cobra.Command{
 	Long: `Clean up finished sessions and old log files on a remote host.
 
 Examples:
-  remote-jobs cleanup cool30                    # Clean both
-  remote-jobs cleanup cool30 --sessions         # Only finished sessions
-  remote-jobs cleanup cool30 --logs --older-than 3  # Logs > 3 days old
-  remote-jobs cleanup cool30 --dry-run          # Preview only`,
+  weft cleanup cool30                    # Clean both
+  weft cleanup cool30 --sessions         # Only finished sessions
+  weft cleanup cool30 --logs --older-than 3  # Logs > 3 days old
+  weft cleanup cool30 --dry-run          # Preview only`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runCleanup,
 }
@@ -187,9 +187,9 @@ func cleanupOldLogs(host string) (int, error) {
 		}
 	}
 
-	// Find new log files in ~/.cache/remote-jobs/logs
+	// Find new log files in ~/.cache/weft/logs
 	// Note: path not quoted to allow tilde expansion
-	newFindCmd := fmt.Sprintf("find ~/.cache/remote-jobs/logs -maxdepth 1 -type f -mtime +%d 2>/dev/null", cleanupOlderThan)
+	newFindCmd := fmt.Sprintf("find ~/.cache/weft/logs -maxdepth 1 -type f -mtime +%d 2>/dev/null", cleanupOlderThan)
 	stdout, _, err = ssh.Run(host, newFindCmd)
 	if err != nil {
 		return 0, fmt.Errorf("list logs on %s: %w", host, err)

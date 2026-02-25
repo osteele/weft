@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/config"
-	"github.com/osteele/remote-jobs/internal/db"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 func ResolveBackend(host string, timeout time.Duration) (string, error) {
@@ -56,7 +56,7 @@ func probeBackend(host string, timeout time.Duration) (string, error) {
 }
 
 func hasQueueRunner(host string, timeout time.Duration) (bool, error) {
-	cmd := "test -f ~/.cache/remote-jobs/scripts/queue-runner.sh"
+	cmd := "test -f ~/.cache/weft/scripts/queue-runner.sh"
 	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {

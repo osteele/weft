@@ -31,7 +31,7 @@ func NewDefaultClient() Generator {
 			cfg.AppTitle = title
 		}
 		if cfg.AppTitle == "" {
-			cfg.AppTitle = "remote-jobs"
+			cfg.AppTitle = "weft"
 		}
 		return NewOpenRouterClient(cfg)
 	}

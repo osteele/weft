@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/remote-jobs/internal/ops"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // StatusInfo captures queue runner state and queue depth.
@@ -25,9 +25,9 @@ func StatusCommand() string {
 		// Check for jq availability first (check ~/.local/bin/jq as well)
 		`(command -v jq >/dev/null 2>&1 || test -x ~/.local/bin/jq) && echo "JQ:yes" || echo "JQ:no"; `+
 			`tmux has-session -t 'rj-queue-%s' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; `+
-			`PATH="$HOME/.local/bin:$PATH" jq -r '.current // ""' ~/.cache/remote-jobs/queue/%s.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
-			`PATH="$HOME/.local/bin:$PATH" jq -r '.pending | length // 0' ~/.cache/remote-jobs/queue/%s.state.json 2>/dev/null | sed 's/^/DEPTH:/' || echo "DEPTH:0"; `+
-			`test -f ~/.cache/remote-jobs/queue/%s.stop && echo "STOP:yes" || echo "STOP:no"`,
+			`PATH="$HOME/.local/bin:$PATH" jq -r '.current // ""' ~/.cache/weft/queue/%s.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
+			`PATH="$HOME/.local/bin:$PATH" jq -r '.pending | length // 0' ~/.cache/weft/queue/%s.state.json 2>/dev/null | sed 's/^/DEPTH:/' || echo "DEPTH:0"; `+
+			`test -f ~/.cache/weft/queue/%s.stop && echo "STOP:yes" || echo "STOP:no"`,
 		queueName, queueName, queueName, queueName)
 }
 

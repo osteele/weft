@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/osteele/remote-jobs/internal/config"
+	"github.com/osteele/weft/internal/config"
 )
 
 // ErrPoolBusy is returned by TryExecute when all pool slots for a host are occupied.
@@ -46,17 +46,17 @@ func init() {
 	}
 
 	// Environment variables override config file
-	if s := os.Getenv("REMOTE_JOBS_SSH_POOL_SIZE"); s != "" {
+	if s := os.Getenv("WEFT_SSH_POOL_SIZE"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultPoolSize = n
 		}
 	}
-	if s := os.Getenv("REMOTE_JOBS_SSH_MAX_PARALLEL"); s != "" {
+	if s := os.Getenv("WEFT_SSH_MAX_PARALLEL"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultMaxParallel = n
 		}
 	}
-	if s := os.Getenv("REMOTE_JOBS_SSH_CONNECT_TIMEOUT"); s != "" {
+	if s := os.Getenv("WEFT_SSH_CONNECT_TIMEOUT"); s != "" {
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			defaultConnTimeout = n
 			defaultReadyTimeout = time.Duration(n+5) * time.Second

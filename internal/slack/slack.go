@@ -1,4 +1,4 @@
-// Package slack provides Slack notification configuration for remote-jobs.
+// Package slack provides Slack notification configuration for weft.
 package slack
 
 import (
@@ -7,17 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/osteele/remote-jobs/internal/scripts"
-	"github.com/osteele/remote-jobs/internal/ssh"
+	"github.com/osteele/weft/internal/scripts"
+	"github.com/osteele/weft/internal/ssh"
 )
 
 // NotifyScriptPath is where the notification script is deployed on remote hosts.
-const NotifyScriptPath = "/tmp/remote-jobs-notify-slack.sh"
+const NotifyScriptPath = "/tmp/weft-notify-slack.sh"
 
 // GetWebhook returns the Slack webhook URL from environment or config file.
 func GetWebhook() string {
 	// Check environment variable first
-	if webhook := os.Getenv("REMOTE_JOBS_SLACK_WEBHOOK"); webhook != "" {
+	if webhook := os.Getenv("WEFT_SLACK_WEBHOOK"); webhook != "" {
 		return webhook
 	}
 
@@ -27,7 +27,7 @@ func GetWebhook() string {
 		return ""
 	}
 
-	configFile := filepath.Join(home, ".config", "remote-jobs", "config")
+	configFile := filepath.Join(home, ".config", "weft", "config")
 	content, err := os.ReadFile(configFile)
 	if err != nil {
 		return ""
@@ -46,15 +46,15 @@ func GetWebhook() string {
 func BuildRunnerEnvPrefix(slackWebhook string) string {
 	envVars := ""
 	if slackWebhook != "" {
-		envVars = fmt.Sprintf("REMOTE_JOBS_SLACK_WEBHOOK='%s' ", slackWebhook)
-		if v := os.Getenv("REMOTE_JOBS_SLACK_VERBOSE"); v == "1" {
-			envVars += "REMOTE_JOBS_SLACK_VERBOSE=1 "
+		envVars = fmt.Sprintf("WEFT_SLACK_WEBHOOK='%s' ", slackWebhook)
+		if v := os.Getenv("WEFT_SLACK_VERBOSE"); v == "1" {
+			envVars += "WEFT_SLACK_VERBOSE=1 "
 		}
-		if v := os.Getenv("REMOTE_JOBS_SLACK_NOTIFY"); v != "" {
-			envVars += fmt.Sprintf("REMOTE_JOBS_SLACK_NOTIFY='%s' ", v)
+		if v := os.Getenv("WEFT_SLACK_NOTIFY"); v != "" {
+			envVars += fmt.Sprintf("WEFT_SLACK_NOTIFY='%s' ", v)
 		}
-		if v := os.Getenv("REMOTE_JOBS_SLACK_MIN_DURATION"); v != "" {
-			envVars += fmt.Sprintf("REMOTE_JOBS_SLACK_MIN_DURATION='%s' ", v)
+		if v := os.Getenv("WEFT_SLACK_MIN_DURATION"); v != "" {
+			envVars += fmt.Sprintf("WEFT_SLACK_MIN_DURATION='%s' ", v)
 		}
 	}
 	return envVars
