@@ -67,7 +67,8 @@ func TestRunOnJobComplete_FiresWithEnvVars(t *testing.T) {
 		"echo \"JOB_HOST=$JOB_HOST\" >> " + outputFile + "\n" +
 		"echo \"JOB_STATUS=$JOB_STATUS\" >> " + outputFile + "\n" +
 		"echo \"JOB_DESCRIPTION=$JOB_DESCRIPTION\" >> " + outputFile + "\n" +
-		"echo \"JOB_DIR=$JOB_DIR\" >> " + outputFile + "\n"
+		"echo \"JOB_DIR=$JOB_DIR\" >> " + outputFile + "\n" +
+		"echo \"JOB_PROJECT=$JOB_PROJECT\" >> " + outputFile + "\n"
 
 	if err := os.WriteFile(hookScript, []byte(script), 0755); err != nil {
 		t.Fatal(err)
@@ -79,6 +80,7 @@ func TestRunOnJobComplete_FiresWithEnvVars(t *testing.T) {
 		Status:      db.StatusCompleted,
 		Description: "test job",
 		WorkingDir:  "/home/user/project",
+		Project:     "my-project",
 	}
 
 	// Call runHook directly (synchronous) to test env vars
@@ -96,6 +98,7 @@ func TestRunOnJobComplete_FiresWithEnvVars(t *testing.T) {
 		"JOB_STATUS":      "completed",
 		"JOB_DESCRIPTION": "test job",
 		"JOB_DIR":         "/home/user/project",
+		"JOB_PROJECT":     "my-project",
 	}
 
 	for key, val := range expected {

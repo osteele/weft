@@ -73,6 +73,7 @@ func runHook(path string, job *db.Job) {
 		fmt.Sprintf("JOB_STATUS=%s", job.Status),
 		fmt.Sprintf("JOB_DESCRIPTION=%s", job.EffectiveDescription()),
 		fmt.Sprintf("JOB_DIR=%s", job.WorkingDir),
+		fmt.Sprintf("JOB_PROJECT=%s", job.Project),
 	)
 
 	oplog.LogJob("hook.on-job-complete", job.ID, job.Host,
