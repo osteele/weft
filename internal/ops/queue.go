@@ -18,6 +18,8 @@ const (
 	QueueDir = "~/.cache/remote-jobs/queue"
 	// DefaultQueueName is the default queue name when none is specified
 	DefaultQueueName = "default"
+	// DefaultGPUMemGB is the default GPU memory reservation when a job uses a GPU
+	DefaultGPUMemGB = 20
 )
 
 // QueueEntry represents a job entry to be added to a remote queue
@@ -220,6 +222,15 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		}
 	}
 
+	// Apply default GPU memory reservation when GPU is involved but no explicit reservation.
+	// This ensures env-var-based GPU jobs (e.g., --env CUDA_VISIBLE_DEVICES=0) get the same
+	// default reservation as --gpu flag jobs.
+	gpuMemGB := params.GPUMemGB
+	if gpuMemGB == nil && (gpu != "" || params.GPUClass != "") {
+		defaultMem := DefaultGPUMemGB
+		gpuMemGB = &defaultMem
+	}
+
 	// Record job with queued status
 	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
 	if err != nil {
@@ -249,8 +260,8 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 			return Result{}, fmt.Errorf("record CPU allotment: %w", err)
 		}
 	}
-	if params.GPUMemGB != nil {
-		if err := db.SetJobGPUMemGB(database, jobID, params.GPUMemGB); err != nil {
+	if gpuMemGB != nil {
+		if err := db.SetJobGPUMemGB(database, jobID, gpuMemGB); err != nil {
 			db.DeleteJob(database, jobID)
 			return Result{}, fmt.Errorf("record GPU memory: %w", err)
 		}

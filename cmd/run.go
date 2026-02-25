@@ -73,7 +73,7 @@ var (
 	runGPUClass    string
 )
 
-const defaultGPUMemGB = 20
+const defaultGPUMemGB = ops.DefaultGPUMemGB
 
 func init() {
 	rootCmd.AddCommand(runCmd)
