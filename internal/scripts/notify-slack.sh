@@ -82,6 +82,12 @@ if [ -f "$METADATA_FILE" ]; then
     description=$(grep '^description=' "$METADATA_FILE" | cut -d= -f2- || true)
 fi
 
+# Derive project name from display_dir (basename of the directory)
+project=""
+if [ -n "$display_dir" ]; then
+    project=$(basename "$display_dir")
+fi
+
 # Get notification settings (defaults: notify all, 15s minimum duration)
 NOTIFY_MODE="${REMOTE_JOBS_SLACK_NOTIFY:-all}"
 MIN_DURATION="${REMOTE_JOBS_SLACK_MIN_DURATION:-15}"
@@ -145,14 +151,17 @@ slack_code() {
 }
 
 # Build message using actual newlines (will be escaped for JSON later)
-# Format with description: :emoji: *Description* (job *rj-123* on `host`) completed successfully in Xm Ys.
-# Format without:          :emoji: Job *rj-123* on `host` completed successfully in Xm Ys.
-#                          Directory: `~/code/project`
-#                          Command: `python train.py`
+# Format with project+desc: :emoji: [project] *Description* (job *rj-123* on `host`) completed successfully in Xm Ys.
+# Format with project only: :emoji: [project] Job *rj-123* on `host` completed successfully in Xm Ys.
+# Format without project:   :emoji: Job *rj-123* on `host` completed successfully in Xm Ys.
+project_prefix=""
+if [ -n "$project" ]; then
+    project_prefix="[$project] "
+fi
 if [ -n "$description" ]; then
-    message="$status_emoji *$description* (job *$SESSION_NAME* on \`$HOST\`) $status_text$duration_text."
+    message="$status_emoji ${project_prefix}*$description* (job *$SESSION_NAME* on \`$HOST\`) $status_text$duration_text."
 else
-    message="$status_emoji Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text."
+    message="$status_emoji ${project_prefix}Job *$SESSION_NAME* on \`$HOST\` $status_text$duration_text."
 fi
 if [ -n "$display_dir" ]; then
     dir_formatted=$(slack_code "$display_dir")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 49
+# BUILD: 50
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
