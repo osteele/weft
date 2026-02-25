@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/remote-jobs/internal/artifacts"
 	"github.com/osteele/remote-jobs/internal/config"
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/hooks"
 	"github.com/osteele/remote-jobs/internal/logcache"
 	"github.com/osteele/remote-jobs/internal/remote"
 	"github.com/osteele/remote-jobs/internal/session"
@@ -178,6 +179,19 @@ func setQueueRemoteClientForTesting(client remoteQueue) func() {
 // Returns SyncResult indicating whether the job was updated and whether the host was contacted.
 // This is the full sync version that uses multiple SSH calls for maximum accuracy.
 func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult, err error) {
+	oldStatus := job.Status
+	defer func() {
+		if err != nil || !result.Updated {
+			return
+		}
+		updated, fetchErr := db.GetJobByID(database, job.ID)
+		if fetchErr != nil || updated == nil {
+			return
+		}
+		if hooks.ShouldFireHook(oldStatus, updated.Status) {
+			hooks.RunOnJobComplete(updated)
+		}
+	}()
 	// SLURM-managed jobs use SLURM probes regardless of session name.
 	if job.UsesSlurm() {
 		return SyncSlurmJob(database, job, opts)

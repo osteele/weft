@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/remote-jobs/internal/db"
+	"github.com/osteele/remote-jobs/internal/hooks"
 	"github.com/osteele/remote-jobs/internal/oplog"
 	"github.com/osteele/remote-jobs/internal/session"
 	"github.com/osteele/remote-jobs/internal/ssh"
@@ -576,6 +577,7 @@ func probeQueueRunnerJobStatus(job *db.Job, timeout time.Duration) (string, erro
 // SyncAndReconcile probes remote state and reconciles with local state.
 // This is the unified entry point that replaces separate sync and deferred ops execution.
 func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*ReconcileResult, error) {
+	oldStatus := job.Status
 	// Probe remote state
 	remoteStatus := ""
 	var err error
@@ -610,5 +612,18 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 		oplog.WithDetailf("result=%s current=%s", remoteStatus, job.Status))
 
 	// Reconcile the three states
-	return Reconcile(database, job, remoteStatus, opts)
+	result, reconcileErr := Reconcile(database, job, remoteStatus, opts)
+	if reconcileErr != nil {
+		return nil, reconcileErr
+	}
+
+	// Fire hook if job transitioned from non-terminal to terminal
+	if result != nil && result.NewStatus != "" && hooks.ShouldFireHook(oldStatus, result.NewStatus) {
+		updated, fetchErr := db.GetJobByID(database, job.ID)
+		if fetchErr == nil && updated != nil {
+			hooks.RunOnJobComplete(updated)
+		}
+	}
+
+	return result, nil
 }
