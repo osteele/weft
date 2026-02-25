@@ -324,10 +324,10 @@ func (m Model) renderJobList(height int) string {
 		end = start + contentHeight
 	}
 
-	// Check if any visible jobs have GPU specified
+	// Check if any visible jobs have GPU or GPU class specified
 	showGPU := false
 	for i := start; i < end; i++ {
-		if m.jobs[i].GetGPU() != "" {
+		if m.jobs[i].GetGPU() != "" || m.jobs[i].GPUClass != "" {
 			showGPU = true
 			break
 		}
@@ -381,6 +381,9 @@ func (m Model) renderJobList(height int) string {
 		gpuField := ""
 		if showGPU {
 			gpu := job.GetGPU()
+			if gpu == "" && job.GPUClass != "" {
+				gpu = job.GPUClass
+			}
 			if gpu == "" {
 				gpu = "—"
 			}

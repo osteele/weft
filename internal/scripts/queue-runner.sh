@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 50
+# BUILD: 51
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -108,6 +108,15 @@ if command -v nvidia-smi &>/dev/null; then
     GPU_TOTAL_MEM_GB=$(nvidia-smi --query-gpu=index,memory.total --format=csv,noheader,nounits 2>/dev/null \
         | awk -F', ' '{ idx=$1+0; gb=int(($2+0)/1024); printf "%d %d\n", idx, gb }' \
         | jq -Rn '[inputs | split(" ") | {(.[0]): (.[1] | tonumber)}] | add // {}') || GPU_TOTAL_MEM_GB='{}'
+fi
+
+# Discover per-GPU model names (JSON object keyed by device index, values are model name strings)
+# e.g. {"0": "NVIDIA A100-PCIE-80GB", "1": "NVIDIA A100-PCIE-80GB", "2": "NVIDIA GeForce RTX 2080 Ti"}
+GPU_CLASS_MAP='{}'
+if command -v nvidia-smi &>/dev/null; then
+    GPU_CLASS_MAP=$(nvidia-smi --query-gpu=index,name --format=csv,noheader 2>/dev/null \
+        | awk -F', ' '{ idx=$1+0; name=$2; printf "%d\t%s\n", idx, name }' \
+        | jq -Rn '[inputs | split("\t") | {(.[0]): .[1]}] | add // {}') || GPU_CLASS_MAP='{}'
 fi
 
 # Extract a signature from a command for CPU history lookup.
@@ -835,6 +844,17 @@ total_gpu_mem_reserved() {
 # Returns 1 (false) if any device is oversubscribed.
 can_start_gpu_job() {
     local job_id="$1"
+
+    # Check if this is a GPU class-based job
+    local gpu_class
+    gpu_class=$(job_gpu_class "$job_id")
+    if [ -n "$gpu_class" ]; then
+        local mem_per_device
+        mem_per_device=$(job_gpu_mem "$job_id")
+        pick_best_gpu_for_class "$gpu_class" "$mem_per_device"
+        return $?
+    fi
+
     local mem_per_device
     mem_per_device=$(job_gpu_mem "$job_id")
 
@@ -859,6 +879,65 @@ can_start_gpu_job() {
         fi
     done
 
+    return 0
+}
+
+# Get device indices matching a GPU class name (case-insensitive substring match).
+# Returns space-separated device indices.
+gpu_class_devices() {
+    local class_name="$1"
+    local lower_class
+    lower_class=$(echo "$class_name" | tr '[:upper:]' '[:lower:]')
+    echo "$GPU_CLASS_MAP" | jq -r --arg cls "$lower_class" '
+        to_entries[]
+        | select(.value | ascii_downcase | contains($cls))
+        | .key
+    ' | tr '\n' ' ' | sed 's/ $//'
+}
+
+# Read gpu_class from a job's JSON data.
+job_gpu_class() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+    echo "$job_data" | jq -r '.gpu_class // ""'
+}
+
+# Pick the best GPU device for a given class based on least reserved VRAM.
+# Sets PICKED_GPU global on success, returns 0.
+# Returns 1 if no device of the class has enough memory.
+PICKED_GPU=""
+pick_best_gpu_for_class() {
+    local class_name="$1"
+    local mem_required="${2:-0}"
+    PICKED_GPU=""
+
+    local devices
+    devices=$(gpu_class_devices "$class_name")
+    if [ -z "$devices" ]; then
+        return 1
+    fi
+
+    local best_device="" best_available=-1
+    for device in $devices; do
+        local total_mem reserved available
+        total_mem=$(echo "$GPU_TOTAL_MEM_GB" | jq -r --arg d "$device" '.[$d] // 0')
+        reserved=$(total_gpu_mem_reserved "$device")
+        available=$((total_mem - reserved))
+        if [ "$mem_required" -gt "$available" ]; then
+            continue
+        fi
+        if [ "$available" -gt "$best_available" ]; then
+            best_available=$available
+            best_device=$device
+        fi
+    done
+
+    if [ -z "$best_device" ]; then
+        return 1
+    fi
+
+    PICKED_GPU="$best_device"
     return 0
 }
 
@@ -1179,6 +1258,22 @@ start_job() {
     local env_vars_json
     env_vars_json=$(echo "$job_data" | jq -r '.env // []')
 
+    # Resolve GPU class to a specific device at start time
+    local resolved_gpu_device=""
+    local gpu_class
+    gpu_class=$(job_gpu_class "$job_id")
+    if [ -n "$gpu_class" ]; then
+        local mem_per_device
+        mem_per_device=$(job_gpu_mem "$job_id")
+        if pick_best_gpu_for_class "$gpu_class" "$mem_per_device"; then
+            resolved_gpu_device="$PICKED_GPU"
+            echo "  GPU class '$gpu_class' resolved to device $resolved_gpu_device"
+        else
+            echo "Job $job_id: no available GPU device for class '$gpu_class', re-queuing"
+            return 2
+        fi
+    fi
+
     (
         # Ignore SIGHUP so job survives if queue runner is killed/restarted
         trap '' HUP
@@ -1200,6 +1295,11 @@ start_job() {
         while IFS= read -r env_line; do
             [ -n "$env_line" ] && [ "$env_line" != "null" ] && export "$env_line"
         done < <(echo "$env_vars_json" | jq -r '.[]' 2>/dev/null)
+
+        # Inject resolved GPU device for class-based jobs
+        if [ -n "$resolved_gpu_device" ]; then
+            export CUDA_VISIBLE_DEVICES="$resolved_gpu_device"
+        fi
 
         # Run command in a new process group, immune to parent's SIGHUP.
         # Use setsid on Linux; on macOS (no setsid), use perl to call setsid(2).
@@ -1245,7 +1345,12 @@ start_job() {
 
     # Resolve GPU reservation for this job
     local gpu_devices_str gpu_mem_gb gpu_devices_json
-    gpu_devices_str=$(job_gpu_devices "$job_id")
+    if [ -n "$resolved_gpu_device" ]; then
+        # GPU class job: use the resolved device
+        gpu_devices_str="$resolved_gpu_device"
+    else
+        gpu_devices_str=$(job_gpu_devices "$job_id")
+    fi
     gpu_mem_gb=$(job_gpu_mem "$job_id")
     if [ -n "$gpu_devices_str" ]; then
         gpu_devices_json=$(echo "$gpu_devices_str" | tr ' ' '\n' | jq -Rn '[inputs | select(length > 0)]')

@@ -36,7 +36,9 @@ func queueEnvVarsForJob(job *db.Job, envVars []string) []string {
 		envVars = job.EnvVars
 	}
 	merged := append([]string(nil), envVars...)
-	if job.GPU != "" && !hasCUDAEnvVar(merged) {
+	// Only inject CUDA_VISIBLE_DEVICES for explicit GPU device jobs.
+	// GPU class-based jobs resolve the device at runtime on the remote host.
+	if job.GPU != "" && job.GPUClass == "" && !hasCUDAEnvVar(merged) {
 		merged = append(merged, "CUDA_VISIBLE_DEVICES="+job.GPU)
 	}
 	return artifacts.MergeEnvVars(merged, job.ID)
@@ -61,6 +63,7 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry 
 		DepSpec:      depSpec,
 		CPUAllotment: job.CPUAllotment,
 		GPU:          job.GPU,
+		GPUClass:     job.GPUClass,
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
 	}
@@ -68,16 +71,17 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry 
 
 func writeQueueJobFile(host string, entry QueueEntry, timeout time.Duration) error {
 	job := CommandJob{
-		ID:     entry.JobID,
-		Dir:    entry.WorkingDir,
-		Cmd:    entry.Command,
-		Desc:   entry.Description,
-		Env:    entry.EnvVars,
-		Deps:   entry.DepSpec,
-		CPU:    entry.CPUAllotment,
-		GPU:    entry.GPU,
-		GPUMem: entry.GPUMemGB,
-		Tags:   entry.Tags,
+		ID:       entry.JobID,
+		Dir:      entry.WorkingDir,
+		Cmd:      entry.Command,
+		Desc:     entry.Description,
+		Env:      entry.EnvVars,
+		Deps:     entry.DepSpec,
+		CPU:      entry.CPUAllotment,
+		GPU:      entry.GPU,
+		GPUClass: entry.GPUClass,
+		GPUMem:   entry.GPUMemGB,
+		Tags:     entry.Tags,
 	}
 	payload, err := json.Marshal(job)
 	if err != nil {

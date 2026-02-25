@@ -52,7 +52,7 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	gpu := extractGPUFromEnvVars(opts.EnvVars)
 	gpuMem := opts.GPUMemGB
 	if gpuMem == nil {
-		gpuMem = resolveGPUMemGB(0, gpu)
+		gpuMem = resolveGPUMemGB(0, gpu, "")
 	}
 	res, err := queueJob(database, queueJobOptions{
 		Host:        opts.Host,
@@ -100,6 +100,7 @@ type queueJobOptions struct {
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
+	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	Dependencies []queueDependency
 	AutoStart    bool
@@ -110,18 +111,31 @@ type queueDependency struct {
 	AllowFailure bool
 }
 
-// resolveGPUMemGB returns the GPU memory reservation based on explicit flag and GPU presence.
-// If gpuMemFlag > 0, use it. If GPU is involved but no explicit flag, default to defaultGPUMemGB.
+// resolveGPUMemGB returns the GPU memory reservation based on explicit flag, GPU, and GPU class.
+// If gpuMemFlag > 0, use it. If GPU or GPU class is involved but no explicit flag, default to defaultGPUMemGB.
 // Returns nil if no GPU involvement.
-func resolveGPUMemGB(gpuMemFlag int, gpu string) *int {
+func resolveGPUMemGB(gpuMemFlag int, gpu string, gpuClass string) *int {
 	if gpuMemFlag > 0 {
 		return &gpuMemFlag
 	}
-	if gpu != "" {
+	if gpu != "" || gpuClass != "" {
 		defaultMem := defaultGPUMemGB
 		return &defaultMem
 	}
 	return nil
+}
+
+// isNumericGPU returns true if the string looks like a GPU device index (digits and commas only).
+func isNumericGPU(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c != ',' && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // extractGPUFromEnvVars finds and returns the CUDA_VISIBLE_DEVICES value from env vars
@@ -144,6 +158,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
 		GPU:         opts.GPU,
+		GPUClass:    opts.GPUClass,
 		GPUMemGB:    opts.GPUMemGB,
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 	}

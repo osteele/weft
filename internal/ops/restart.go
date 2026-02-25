@@ -49,6 +49,11 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 	if err != nil {
 		return Result{}, fmt.Errorf("create job record: %w", err)
 	}
+	if orig.GPUClass != "" {
+		if err := db.SetJobGPUClass(database, newJobID, orig.GPUClass); err != nil {
+			return Result{}, fmt.Errorf("set GPU class: %w", err)
+		}
+	}
 	if len(params.EnvVars) > 0 {
 		if err := db.SetJobEnvVars(database, newJobID, params.EnvVars); err != nil {
 			return Result{}, fmt.Errorf("set env vars: %w", err)

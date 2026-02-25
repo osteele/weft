@@ -53,6 +53,7 @@ type Job struct {
 	FailureReason        string // Normalized failure reason (e.g., "timeout", "oom")
 	QueueName            string // Name of the queue this job belongs to (empty for non-queued jobs)
 	GPU                  string // CUDA_VISIBLE_DEVICES value (e.g., "0", "0,1")
+	GPUClass             string // GPU class name (e.g., "A100") — resolved to device at runtime
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
 	GPUMemGB             *int   // GPU memory reservation in GB per device (nil = use default)
 	Metadata             *JobMetadata
@@ -93,7 +94,7 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
 
 const ProcessedTag = "processed"
 
@@ -247,6 +248,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add gpu column for CUDA_VISIBLE_DEVICES
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add gpu_class column for GPU class-based scheduling (e.g., "A100")
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu_class TEXT`); err != nil {
 		return err
 	}
 
@@ -975,6 +981,12 @@ func SetJobGPU(db *sql.DB, jobID int64, gpu string) error {
 	return err
 }
 
+// SetJobGPUClass updates the GPU class field for a job
+func SetJobGPUClass(db *sql.DB, jobID int64, gpuClass string) error {
+	_, err := db.Exec(`UPDATE jobs SET gpu_class = ? WHERE id = ?`, gpuClass, jobID)
+	return err
+}
+
 // SetJobBackend sets the execution backend for a job.
 func SetJobBackend(db *sql.DB, jobID int64, backend string) error {
 	if backend == "" {
@@ -1387,6 +1399,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var failureReason sql.NullString
 	var queueName sql.NullString
 	var gpu sql.NullString
+	var gpuClass sql.NullString
 	var cpuAllotment sql.NullInt64
 	var gpuMemGB sql.NullInt64
 	var envVars sql.NullString
@@ -1404,7 +1417,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingAt sql.NullInt64
 	var jobMetadata sql.NullString
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1444,6 +1457,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 	if gpu.Valid {
 		j.GPU = gpu.String
+	}
+	if gpuClass.Valid {
+		j.GPUClass = gpuClass.String
 	}
 	if cpuAllotment.Valid {
 		val := int(cpuAllotment.Int64)
@@ -1680,6 +1696,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var failureReason sql.NullString
 		var queueName sql.NullString
 		var gpu sql.NullString
+		var gpuClass sql.NullString
 		var cpuAllotment sql.NullInt64
 		var gpuMemGB sql.NullInt64
 		var envVars sql.NullString
@@ -1697,7 +1714,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingAt sql.NullInt64
 		var jobMetadata sql.NullString
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -1734,6 +1751,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		}
 		if gpu.Valid {
 			j.GPU = gpu.String
+		}
+		if gpuClass.Valid {
+			j.GPUClass = gpuClass.String
 		}
 		if cpuAllotment.Valid {
 			val := int(cpuAllotment.Int64)

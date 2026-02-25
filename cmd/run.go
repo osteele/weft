@@ -70,6 +70,7 @@ var (
 	runAfter       int64
 	runAfterAny    int64
 	runGPUMem      int
+	runGPUClass    string
 )
 
 const defaultGPUMemGB = 20
@@ -94,6 +95,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
+	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class to use (e.g., A100, 2080); scheduler picks best available device")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 }
@@ -277,9 +279,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Resolve GPU and GPU memory reservation
+	// Resolve GPU, GPU class, and GPU memory reservation
 	gpu := extractGPUFromEnvVars(runEnvVars)
-	gpuMemGB := resolveGPUMemGB(runGPUMem, gpu)
+	gpuClass := runGPUClass
+	// Non-numeric --gpu values (e.g., "A100") are treated as GPU class names
+	if gpu != "" && !isNumericGPU(gpu) {
+		gpuClass = gpu
+		gpu = ""
+	}
+	gpuMemGB := resolveGPUMemGB(runGPUMem, gpu, gpuClass)
 
 	// Handle --after/--depends-on and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {
@@ -307,6 +315,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			EnvVars:      runEnvVars,
 			Tags:         runTags,
 			GPU:          gpu,
+			GPUClass:     gpuClass,
 			GPUMemGB:     gpuMemGB,
 			Dependencies: deps,
 			AutoStart:    true,
@@ -342,6 +351,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
 			GPU:         gpu,
+			GPUClass:    gpuClass,
 			GPUMemGB:    gpuMemGB,
 			AutoStart:   true,
 		})
@@ -396,6 +406,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
 			GPU:         gpu,
+			GPUClass:    gpuClass,
 			GPUMemGB:    gpuMemGB,
 			AutoStart:   false,
 		})

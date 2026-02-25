@@ -18,6 +18,7 @@ var (
 	describeGPUs      string
 	describeGPUMem    int
 	describeCPU       int
+	describeGPUClass  string
 )
 
 var describeCmd = &cobra.Command{
@@ -52,6 +53,7 @@ func init() {
 	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
 	describeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+	describeCmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "Set GPU class (e.g., A100); scheduler picks best available device")
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {
@@ -85,12 +87,20 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		gpuValue = describeGPUs
 	}
 
+	// Handle non-numeric --gpu as GPU class (e.g., "A100")
+	gpuClassValue := describeGPUClass
+	if gpuValue != "" && !isNumericGPU(gpuValue) {
+		gpuClassValue = gpuValue
+		gpuValue = ""
+	}
+
 	hasGPUMem := cmd.Flags().Changed("gpu-mem")
 	hasCPU := cmd.Flags().Changed("cpu")
+	hasGPUClass := gpuClassValue != ""
 
 	// Check if trying to update command/directory/gpu/allotments on non-queued job
 	effectiveStatus := job.EffectiveStatus()
-	if (describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUMem || hasCPU) && effectiveStatus != db.StatusQueued {
+	if (describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU) && effectiveStatus != db.StatusQueued {
 		return fmt.Errorf("can only update command/directory/gpu/allotments on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
 	}
 
@@ -144,6 +154,22 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("gpu: %s", gpuValue))
 	}
 
+	// Update GPU class if provided (queued jobs only)
+	if hasGPUClass {
+		if err := db.SetJobGPUClass(database, jobID, gpuClassValue); err != nil {
+			return fmt.Errorf("update GPU class: %w", err)
+		}
+		// Clear explicit GPU when switching to class-based scheduling
+		if job.GPU != "" {
+			if err := db.SetJobGPU(database, jobID, ""); err != nil {
+				return fmt.Errorf("clear GPU field: %w", err)
+			}
+			job.GPU = ""
+		}
+		job.GPUClass = gpuClassValue
+		updates = append(updates, fmt.Sprintf("gpu-class: %s", gpuClassValue))
+	}
+
 	// Update GPU memory reservation if provided (queued jobs only)
 	if hasGPUMem {
 		mem := describeGPUMem
@@ -181,7 +207,7 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 	}
 
 	// If we updated command, directory, GPU, or allotments, sync to remote queue file
-	if describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUMem || hasCPU {
+	if describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU {
 		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
 		if err != nil {
 			return err

@@ -30,6 +30,7 @@ type QueueEntry struct {
 	DepSpec      string
 	CPUAllotment *int
 	GPU          string
+	GPUClass     string
 	GPUMemGB     *int
 	Tags         []string
 }
@@ -107,6 +108,7 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 		DepSpec:      job.DepSpec,
 		CPUAllotment: job.CPUAllotment,
 		GPU:          job.GPU,
+		GPUClass:     job.GPUClass,
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
 	}
@@ -197,6 +199,7 @@ type QueueJobParams struct {
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
+	GPUClass     string // GPU class name (e.g., "A100") — resolved to device at runtime
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	DepSpec      string
 	CPUAllotment *int
@@ -250,6 +253,12 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		if err := db.SetJobGPUMemGB(database, jobID, params.GPUMemGB); err != nil {
 			db.DeleteJob(database, jobID)
 			return Result{}, fmt.Errorf("record GPU memory: %w", err)
+		}
+	}
+	if params.GPUClass != "" {
+		if err := db.SetJobGPUClass(database, jobID, params.GPUClass); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record GPU class: %w", err)
 		}
 	}
 
