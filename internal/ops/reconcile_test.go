@@ -216,6 +216,103 @@ func TestApplyStartToRemote_PreservesPendingOnFailure(t *testing.T) {
 	}
 }
 
+func TestReconcile_RequeueOverTerminalRemote(t *testing.T) {
+	// When a job is requeued (pending_status=queued) but the remote still has
+	// a terminal status from the previous run, reconcile should apply the
+	// requeue rather than accepting the stale terminal state.
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "test-host", "/tmp", "sleep 100", "requeue test")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.MarkRunningByID(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	// Simulate: job was killed, then requeued
+	if err := db.RequeueByID(database, jobID); err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	// Verify requeue set pending_status
+	if job.PendingStatus == nil || *job.PendingStatus != db.StatusQueued {
+		t.Fatalf("expected pending_status=queued after requeue, got %v", job.PendingStatus)
+	}
+
+	// Mock SSH: queue append succeeds
+	mockSSHFunc(t, func(host, cmd string) (string, string, int) {
+		return "", "", 0
+	})
+
+	// Remote reports "completed" (stale status file from previous run)
+	result, err := Reconcile(database, job, db.StatusCompleted, ReconcileOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// Should have applied the requeue, not accepted the terminal state
+	if result.NewStatus != db.StatusQueued {
+		t.Errorf("expected status queued after reconcile, got %s", result.NewStatus)
+	}
+	if !result.Conflict {
+		t.Error("expected conflict flag to be set")
+	}
+	if !strings.Contains(result.Resolution, "requeued over stale terminal") {
+		t.Errorf("expected requeue resolution, got: %s", result.Resolution)
+	}
+
+	// Verify the job status in DB
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if updated.Status != db.StatusQueued {
+		t.Errorf("expected job status queued in DB, got %s", updated.Status)
+	}
+	if updated.PendingStatus != nil {
+		t.Errorf("expected pending_status cleared after successful requeue, got %v", *updated.PendingStatus)
+	}
+}
+
+func TestReconcile_NoPendingAcceptsTerminalRemote(t *testing.T) {
+	// When there's no local intent (no pending_status), a terminal remote
+	// state should be accepted normally (this is the pre-existing behavior).
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "test-host", "/tmp", "sleep 100", "terminal test")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.MarkRunningByID(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	// Set last_synced_status so base != remote triggers Case 2
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusRunning); err != nil {
+		t.Fatalf("update last synced: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	// No pending status — pure sync
+	result, err := Reconcile(database, job, db.StatusCompleted, ReconcileOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if result.NewStatus != db.StatusCompleted {
+		t.Errorf("expected status completed, got %s", result.NewStatus)
+	}
+}
+
 func TestSignalJobProcess_PIDFallbackSignalsProcessGroup(t *testing.T) {
 	// Verify that when falling back to PID (no PGID file), we still signal
 	// the process group by looking up the PGID via ps command.

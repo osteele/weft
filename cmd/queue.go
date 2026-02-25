@@ -882,6 +882,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("update env vars: %w", err)
 		}
 		job.EnvVars = newEnv
+		// Update GPU field to match CUDA_VISIBLE_DEVICES in env vars
+		gpu := extractGPUFromEnvVars(newEnv)
+		if err := db.SetJobGPU(database, jobID, gpu); err != nil {
+			return fmt.Errorf("update gpu from env: %w", err)
+		}
+		job.GPU = gpu
 		if len(newEnv) == 0 {
 			updates = append(updates, "env vars cleared")
 		} else {
@@ -943,7 +949,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.Host)
 			deferredUpdate = true
 		} else {
-			_ = db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued)
+			_ = db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued)
 			_ = db.SetQueuedAtNow(database, job.ID)
 		}
 	} else {

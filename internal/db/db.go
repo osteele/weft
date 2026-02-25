@@ -854,8 +854,8 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 // append fails.
 func RequeueByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
-		StatusQueued, id,
+		`UPDATE jobs SET status = ?, pending_status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+		StatusQueued, StatusQueued, id,
 	)
 	return err
 }
@@ -2206,7 +2206,14 @@ func stripExportPrefix(cmd string) string {
 // GetGPU returns the GPU (CUDA_VISIBLE_DEVICES) value for this job.
 // First checks the database GPU field, then falls back to parsing the command.
 func (j *Job) GetGPU() string {
-	// Prefer the database field if set
+	// Env vars (set via --env flag) take precedence as the most recent user intent
+	for _, ev := range j.EnvVars {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+		}
+	}
+
+	// Then check the database field
 	if j.GPU != "" {
 		return j.GPU
 	}

@@ -663,6 +663,64 @@ func TestGetGPU_DatabaseFieldTakesPrecedence(t *testing.T) {
 	}
 }
 
+func TestGetGPU_EnvVars(t *testing.T) {
+	tests := []struct {
+		name    string
+		gpu     string
+		envVars []string
+		command string
+		want    string
+	}{
+		{
+			name:    "env vars only",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=1"},
+			command: "python train.py",
+			want:    "1",
+		},
+		{
+			name:    "env vars multiple GPUs",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=0,1"},
+			command: "python train.py",
+			want:    "0,1",
+		},
+		{
+			name:    "env vars override database field",
+			gpu:     "3",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=1"},
+			command: "python train.py",
+			want:    "1",
+		},
+		{
+			name:    "env vars override command",
+			envVars: []string{"CUDA_VISIBLE_DEVICES=1"},
+			command: "CUDA_VISIBLE_DEVICES=0 python train.py",
+			want:    "1",
+		},
+		{
+			name:    "env vars with other vars",
+			envVars: []string{"FOO=bar", "CUDA_VISIBLE_DEVICES=2", "BAZ=qux"},
+			command: "python train.py",
+			want:    "2",
+		},
+		{
+			name:    "env vars without CUDA",
+			envVars: []string{"FOO=bar"},
+			command: "python train.py",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := &Job{GPU: tt.gpu, EnvVars: tt.envVars, Command: tt.command}
+			got := job.GetGPU()
+			if got != tt.want {
+				t.Errorf("GetGPU() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeCommand(t *testing.T) {
 	tests := []struct {
 		name       string

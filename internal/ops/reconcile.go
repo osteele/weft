@@ -131,6 +131,26 @@ func resolveConflict(database *sql.DB, job *db.Job, base, local, remote string, 
 		oplog.WithDetailf("conflict: base=%s local=%s remote=%s", base, local, remote))
 
 	if db.IsTerminalStatus(remote) {
+		// If local intent is to requeue, the terminal state is from the previous run.
+		// Apply the requeue rather than accepting stale completion.
+		if local == db.StatusQueued {
+			result, err := applyPendingToRemote(database, job, local, opts)
+			if err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					return &ReconcileResult{
+						Action:     "none",
+						Conflict:   true,
+						Resolution: "deferred: connection error",
+						Error:      err,
+					}, nil
+				}
+				return nil, err
+			}
+			result.Conflict = true
+			result.Resolution = fmt.Sprintf("requeued over stale terminal state %s", remote)
+			return result, nil
+		}
+
 		// Remote reached a terminal state - accept it
 		if err := db.ClearPendingAndUpdateStatus(database, job.ID, remote); err != nil {
 			return nil, err
