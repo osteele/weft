@@ -60,7 +60,8 @@ total_gpu_mem_reserved() {
     ' <<< "$RUNNING_JSON"
 }
 
-# Extract gpu_class_devices function from the script
+# Extract functions from the script
+eval "$(sed -n '/^device_has_running_job()/,/^}/p' "$SCRIPT")"
 eval "$(sed -n '/^gpu_class_devices()/,/^}/p' "$SCRIPT")"
 eval "$(sed -n '/^pick_best_gpu_for_class()/,/^}/p' "$SCRIPT")"
 # PICKED_GPU is set by pick_best_gpu_for_class
@@ -113,6 +114,25 @@ assert_fail "nonexistent class fails" pick_best_gpu_for_class "V100" 10
 RUNNING_JSON='{}'
 assert_ok "2080 with 5GB request" pick_best_gpu_for_class "2080" 5
 assert_eq "picks device 2" "2" "$PICKED_GPU"
+
+echo ""
+echo "=== device_has_running_job ==="
+
+RUNNING_JSON='{"99": {"gpu_devices": ["1"], "gpu_mem_gb": 10}}'
+assert_ok "device 1 has a running job" device_has_running_job "1"
+assert_fail "device 0 has no running job" device_has_running_job "0"
+
+echo ""
+echo "=== GPU device exclusivity ==="
+
+# Even with plenty of VRAM, a device with a running job should be skipped
+RUNNING_JSON='{"99": {"gpu_devices": ["0"], "gpu_mem_gb": 10}}'
+assert_ok "A100 skips occupied device 0, picks device 1" pick_best_gpu_for_class "A100" 10
+assert_eq "picks device 1 (device 0 occupied)" "1" "$PICKED_GPU"
+
+# Both A100 devices occupied — should fail even with VRAM available
+RUNNING_JSON='{"99": {"gpu_devices": ["0"], "gpu_mem_gb": 10}, "100": {"gpu_devices": ["1"], "gpu_mem_gb": 10}}'
+assert_fail "A100 fails when both devices occupied" pick_best_gpu_for_class "A100" 10
 
 echo ""
 echo "=== Results ==="

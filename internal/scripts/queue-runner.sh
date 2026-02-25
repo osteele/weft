@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 51
+# BUILD: 55
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -282,6 +282,33 @@ load_state() {
 
         RUNNING_JSON=$(jq -c '.running // {}' "$STATE_FILE")
         FINISHED_JSON=$(jq -c '.finished // {}' "$STATE_FILE")
+
+        # Backfill null gpu_devices from job JSON files for running entries.
+        # This handles jobs that were started before GPU tracking was added,
+        # or where the running state snapshot predates a gpu_devices patch.
+        local patched="false"
+        local null_gpu_jobs
+        null_gpu_jobs=$(jq -r 'to_entries[] | select(.value.gpu_devices == null) | .key' <<< "$RUNNING_JSON" 2>/dev/null)
+        for job_id in $null_gpu_jobs; do
+            local job_file="$QUEUE_DIR/job-${job_id}.json"
+            if [ -f "$job_file" ]; then
+                local file_devices
+                file_devices=$(jq -c '.gpu_devices // empty' "$job_file" 2>/dev/null)
+                if [ -n "$file_devices" ] && [ "$file_devices" != "null" ]; then
+                    local new_running
+                    new_running=$(jq -c --arg id "$job_id" --argjson devs "$file_devices" \
+                        '.[$id].gpu_devices = $devs' <<< "$RUNNING_JSON" 2>/dev/null)
+                    if [ -n "$new_running" ]; then
+                        RUNNING_JSON="$new_running"
+                        patched="true"
+                        log_op "state.backfill_gpu" "job=$job_id devices=$file_devices"
+                    fi
+                fi
+            fi
+        done
+        if [ "$patched" = "true" ]; then
+            save_state
+        fi
     fi
 }
 
@@ -839,9 +866,18 @@ total_gpu_mem_reserved() {
     ' <<< "$RUNNING_JSON"
 }
 
-# Check if a job can start based on GPU memory availability.
-# Returns 0 (true) if all target devices have enough headroom.
-# Returns 1 (false) if any device is oversubscribed.
+# Check if any running remote-job is already using a specific GPU device.
+# Returns 0 (true) if a remote-job is on this device, 1 (false) if free.
+device_has_running_job() {
+    local device="$1"
+    jq -e --arg dev "$device" '
+        any(.[]; (.gpu_devices // []) | index($dev))
+    ' <<< "$RUNNING_JSON" >/dev/null 2>&1
+}
+
+# Check if a job can start based on GPU device exclusivity and VRAM safety.
+# Policy: (1) no other remote-job on the target device, (2) enough free VRAM.
+# Returns 0 (true) if the job can start, 1 (false) otherwise.
 can_start_gpu_job() {
     local job_id="$1"
 
@@ -855,27 +891,31 @@ can_start_gpu_job() {
         return $?
     fi
 
-    local mem_per_device
-    mem_per_device=$(job_gpu_mem "$job_id")
-
-    # No GPU reservation — always allowed
-    if [ "$mem_per_device" -eq 0 ] 2>/dev/null; then
-        return 0
-    fi
-
     local devices
     devices=$(job_gpu_devices "$job_id")
     if [ -z "$devices" ]; then
+        # No GPU devices — always allowed (CPU-only job)
         return 0
     fi
 
+    local mem_per_device
+    mem_per_device=$(job_gpu_mem "$job_id")
+
     for device in $devices; do
-        local total_mem reserved available
-        total_mem=$(echo "$GPU_TOTAL_MEM_GB" | jq -r --arg d "$device" '.[$d] // 0')
-        reserved=$(total_gpu_mem_reserved "$device")
-        available=$((total_mem - reserved))
-        if [ "$mem_per_device" -gt "$available" ]; then
+        # Primary gate: no other remote-job on this device
+        if device_has_running_job "$device"; then
             return 1
+        fi
+
+        # Secondary gate: enough free VRAM (OOM safety, skip if no reservation)
+        if [ "$mem_per_device" -gt 0 ] 2>/dev/null; then
+            local total_mem reserved available
+            total_mem=$(echo "$GPU_TOTAL_MEM_GB" | jq -r --arg d "$device" '.[$d] // 0')
+            reserved=$(total_gpu_mem_reserved "$device")
+            available=$((total_mem - reserved))
+            if [ "$mem_per_device" -gt "$available" ]; then
+                return 1
+            fi
         fi
     done
 
@@ -903,9 +943,9 @@ job_gpu_class() {
     echo "$job_data" | jq -r '.gpu_class // ""'
 }
 
-# Pick the best GPU device for a given class based on least reserved VRAM.
+# Pick the best GPU device for a given class with no other remote-job running.
 # Sets PICKED_GPU global on success, returns 0.
-# Returns 1 if no device of the class has enough memory.
+# Returns 1 if no device of the class is free and has enough memory.
 PICKED_GPU=""
 pick_best_gpu_for_class() {
     local class_name="$1"
@@ -920,6 +960,11 @@ pick_best_gpu_for_class() {
 
     local best_device="" best_available=-1
     for device in $devices; do
+        # Skip devices that already have a remote-job running
+        if device_has_running_job "$device"; then
+            continue
+        fi
+
         local total_mem reserved available
         total_mem=$(echo "$GPU_TOTAL_MEM_GB" | jq -r --arg d "$device" '.[$d] // 0')
         reserved=$(total_gpu_mem_reserved "$device")

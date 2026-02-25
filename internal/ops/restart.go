@@ -54,6 +54,11 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 			return Result{}, fmt.Errorf("set GPU class: %w", err)
 		}
 	}
+	if orig.GPUMemGB != nil {
+		if err := db.SetJobGPUMemGB(database, newJobID, orig.GPUMemGB); err != nil {
+			return Result{}, fmt.Errorf("set GPU mem: %w", err)
+		}
+	}
 	if len(params.EnvVars) > 0 {
 		if err := db.SetJobEnvVars(database, newJobID, params.EnvVars); err != nil {
 			return Result{}, fmt.Errorf("set env vars: %w", err)

@@ -206,6 +206,7 @@ var (
 	editClearEnv        bool
 	editStatus          string
 	editRetry           bool
+	editGPUClass        string
 	queueHost           string // Shared --host flag for queue subcommands
 )
 
@@ -778,10 +779,11 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	statusChanged := cmd.Flags().Changed("status") || editRetry
 	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
+	gpuClassChanged := cmd.Flags().Changed("gpu-class")
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--command/--directory/--env/--status/--retry or dependency flags")
+		return usageErrorf("no changes specified; use --message/--command/--directory/--env/--status/--retry/--gpu-class or dependency flags")
 	}
 	if queueEditClearDeps && dependsChanged {
 		return fmt.Errorf("cannot combine --clear-depends with --depends-on flags")
@@ -892,6 +894,38 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "env vars cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("env vars: %s", strings.Join(newEnv, ", ")))
+		}
+	}
+
+	if gpuClassChanged {
+		if err := db.SetJobGPUClass(database, jobID, editGPUClass); err != nil {
+			return fmt.Errorf("update GPU class: %w", err)
+		}
+		job.GPUClass = editGPUClass
+		// Clear GPU device pin when setting a class, so the scheduler picks the best device
+		if editGPUClass != "" && !envChanged {
+			if err := db.SetJobGPU(database, jobID, ""); err != nil {
+				return fmt.Errorf("clear GPU device: %w", err)
+			}
+			job.GPU = ""
+			// Remove CUDA_VISIBLE_DEVICES from env vars since class-based scheduling sets it
+			var filteredEnv []string
+			for _, e := range job.EnvVars {
+				if !strings.HasPrefix(e, "CUDA_VISIBLE_DEVICES=") {
+					filteredEnv = append(filteredEnv, e)
+				}
+			}
+			if len(filteredEnv) != len(job.EnvVars) {
+				if err := db.SetJobEnvVars(database, jobID, filteredEnv); err != nil {
+					return fmt.Errorf("update env vars: %w", err)
+				}
+				job.EnvVars = filteredEnv
+			}
+		}
+		if editGPUClass == "" {
+			updates = append(updates, "GPU class cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("GPU class: %s", editGPUClass))
 		}
 	}
 
@@ -1129,4 +1163,5 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&queueEditClearDeps, "clear-depends", false, "Remove all dependencies from the job")
 	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
+	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "Set GPU class (e.g., A100, 2080)")
 }
