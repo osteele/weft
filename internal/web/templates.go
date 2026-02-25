@@ -6,7 +6,6 @@ const indexTemplate = `<!doctype html>
     <meta charset="utf-8">
     <title>{{.Title}}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    {{if gt .RefreshSeconds 0}}<meta http-equiv="refresh" content="{{.RefreshSeconds}}">{{end}}
     <style>
       :root {
         color-scheme: light;
@@ -184,7 +183,7 @@ const indexTemplate = `<!doctype html>
       }
     </style>
   </head>
-  <body>
+  <body data-refresh="{{.RefreshSeconds}}">
     <header>
       <div class="title-row">
         <h1>{{.Title}}</h1>
@@ -246,6 +245,34 @@ const indexTemplate = `<!doctype html>
         </tbody>
       </table>
     </main>
+    <script>
+      (function() {
+        var interval = parseInt(document.body.getAttribute('data-refresh'), 10);
+        if (!interval) return;
+        var timer = setInterval(refresh, interval * 1000);
+        function refresh() {
+          fetch(window.location.href)
+            .then(function(r) { return r.text(); })
+            .then(function(html) {
+              var doc = new DOMParser().parseFromString(html, 'text/html');
+              var newMain = doc.querySelector('main');
+              var oldMain = document.querySelector('main');
+              if (newMain && oldMain) oldMain.innerHTML = newMain.innerHTML;
+              var newMuted = doc.querySelector('.title-row .muted');
+              var oldMuted = document.querySelector('.title-row .muted');
+              if (newMuted && oldMuted) oldMuted.textContent = newMuted.textContent;
+              var newInterval = parseInt(doc.body.getAttribute('data-refresh'), 10);
+              if (newInterval && newInterval !== interval) {
+                clearInterval(timer);
+                interval = newInterval;
+                document.body.setAttribute('data-refresh', newInterval);
+                timer = setInterval(refresh, interval * 1000);
+              }
+            })
+            .catch(function() {});
+        }
+      })();
+    </script>
   </body>
 </html>
 `
