@@ -60,20 +60,24 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry 
 		EnvVars:      queueEnvVarsForJob(job, envVars),
 		DepSpec:      depSpec,
 		CPUAllotment: job.CPUAllotment,
+		GPU:          job.GPU,
+		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
 	}
 }
 
 func writeQueueJobFile(host string, entry QueueEntry, timeout time.Duration) error {
 	job := CommandJob{
-		ID:   entry.JobID,
-		Dir:  entry.WorkingDir,
-		Cmd:  entry.Command,
-		Desc: entry.Description,
-		Env:  entry.EnvVars,
-		Deps: entry.DepSpec,
-		CPU:  entry.CPUAllotment,
-		Tags: entry.Tags,
+		ID:     entry.JobID,
+		Dir:    entry.WorkingDir,
+		Cmd:    entry.Command,
+		Desc:   entry.Description,
+		Env:    entry.EnvVars,
+		Deps:   entry.DepSpec,
+		CPU:    entry.CPUAllotment,
+		GPU:    entry.GPU,
+		GPUMem: entry.GPUMemGB,
+		Tags:   entry.Tags,
 	}
 	payload, err := json.Marshal(job)
 	if err != nil {

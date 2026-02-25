@@ -411,6 +411,126 @@ func TestStateFilePath(t *testing.T) {
 	}
 }
 
+func TestGPUFieldsSerialization(t *testing.T) {
+	tenGB := 10
+	tests := []struct {
+		name    string
+		gpu     string
+		gpuMem  *int
+		wantGPU string
+		wantMem *int
+	}{
+		{
+			name:    "no GPU fields",
+			gpu:     "",
+			gpuMem:  nil,
+			wantGPU: "",
+			wantMem: nil,
+		},
+		{
+			name:    "GPU only",
+			gpu:     "0",
+			gpuMem:  nil,
+			wantGPU: "0",
+			wantMem: nil,
+		},
+		{
+			name:    "GPU with memory",
+			gpu:     "0,1",
+			gpuMem:  &tenGB,
+			wantGPU: "0,1",
+			wantMem: &tenGB,
+		},
+		{
+			name:    "memory without GPU",
+			gpu:     "",
+			gpuMem:  &tenGB,
+			wantGPU: "",
+			wantMem: &tenGB,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewAddCommand(QueueEntry{
+				JobID:    123,
+				Command:  "echo hello",
+				GPU:      tt.gpu,
+				GPUMemGB: tt.gpuMem,
+			})
+
+			jsonBytes, err := json.Marshal(cmd)
+			if err != nil {
+				t.Fatalf("failed to marshal: %v", err)
+			}
+
+			var roundTrip QueueCommand
+			if err := json.Unmarshal(jsonBytes, &roundTrip); err != nil {
+				t.Fatalf("failed to unmarshal: %v", err)
+			}
+
+			if roundTrip.Job == nil {
+				t.Fatal("job is nil after round-trip")
+			}
+
+			if roundTrip.Job.GPU != tt.wantGPU {
+				t.Errorf("GPU mismatch: got %q, want %q", roundTrip.Job.GPU, tt.wantGPU)
+			}
+
+			if tt.wantMem == nil {
+				if roundTrip.Job.GPUMem != nil {
+					t.Errorf("GPUMem: got %d, want nil", *roundTrip.Job.GPUMem)
+				}
+			} else {
+				if roundTrip.Job.GPUMem == nil {
+					t.Errorf("GPUMem: got nil, want %d", *tt.wantMem)
+				} else if *roundTrip.Job.GPUMem != *tt.wantMem {
+					t.Errorf("GPUMem mismatch: got %d, want %d", *roundTrip.Job.GPUMem, *tt.wantMem)
+				}
+			}
+		})
+	}
+}
+
+func TestGPUFieldsOmittedWhenEmpty(t *testing.T) {
+	cmd := NewAddCommand(QueueEntry{
+		JobID:   123,
+		Command: "echo hello",
+	})
+
+	jsonBytes, err := json.Marshal(cmd)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	jsonStr := string(jsonBytes)
+	if strings.Contains(jsonStr, `"gpu"`) {
+		t.Error("GPU field should be omitted when empty")
+	}
+	if strings.Contains(jsonStr, `"gpu_mem"`) {
+		t.Error("gpu_mem field should be omitted when nil")
+	}
+}
+
+func TestNewAddCommandWiresGPUFields(t *testing.T) {
+	tenGB := 10
+	entry := QueueEntry{
+		JobID:    42,
+		Command:  "python train.py",
+		GPU:      "0,1",
+		GPUMemGB: &tenGB,
+	}
+
+	cmd := NewAddCommand(entry)
+
+	if cmd.Job.GPU != "0,1" {
+		t.Errorf("GPU not wired: got %q, want %q", cmd.Job.GPU, "0,1")
+	}
+	if cmd.Job.GPUMem == nil || *cmd.Job.GPUMem != 10 {
+		t.Errorf("GPUMem not wired: got %v, want 10", cmd.Job.GPUMem)
+	}
+}
+
 func TestTagsSerialization(t *testing.T) {
 	tests := []struct {
 		name     string

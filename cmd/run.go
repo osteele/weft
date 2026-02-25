@@ -69,7 +69,10 @@ var (
 	runTags        []string
 	runAfter       int64
 	runAfterAny    int64
+	runGPUMem      int
 )
+
+const defaultGPUMemGB = 20
 
 func init() {
 	rootCmd.AddCommand(runCmd)
@@ -90,6 +93,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
+	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 }
@@ -273,6 +277,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Resolve GPU and GPU memory reservation
+	gpu := extractGPUFromEnvVars(runEnvVars)
+	gpuMemGB := resolveGPUMemGB(runGPUMem, gpu)
+
 	// Handle --after/--depends-on and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {
 		deps := []queueDependency{}
@@ -298,6 +306,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Description:  runDescription,
 			EnvVars:      runEnvVars,
 			Tags:         runTags,
+			GPU:          gpu,
+			GPUMemGB:     gpuMemGB,
 			Dependencies: deps,
 			AutoStart:    true,
 		})
@@ -331,6 +341,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Description: runDescription,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
+			GPU:         gpu,
+			GPUMemGB:    gpuMemGB,
 			AutoStart:   true,
 		})
 		if err != nil {
@@ -383,6 +395,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Description: runDescription,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
+			GPU:         gpu,
+			GPUMemGB:    gpuMemGB,
 			AutoStart:   false,
 		})
 		if err != nil {
@@ -410,6 +424,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		Description: runDescription,
 		EnvVars:     runEnvVars,
 		Tags:        runTags,
+		GPUMemGB:    gpuMemGB,
 		Timeout:     runTimeout,
 		OnPrepared: func(info StartJobPreparedInfo) {
 			fmt.Printf("Starting job %d on %s\n", info.JobID, info.Host)

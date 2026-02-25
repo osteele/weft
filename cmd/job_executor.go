@@ -19,6 +19,7 @@ type startJobOptions struct {
 	Description string
 	EnvVars     []string
 	Tags        []string
+	GPUMemGB    *int
 	Timeout     string
 	OnPrepared  func(info StartJobPreparedInfo)
 }
@@ -48,6 +49,11 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 	}
 
 	// Always queue — the sync worker / queue runner handles actual execution.
+	gpu := extractGPUFromEnvVars(opts.EnvVars)
+	gpuMem := opts.GPUMemGB
+	if gpuMem == nil {
+		gpuMem = resolveGPUMemGB(0, gpu)
+	}
 	res, err := queueJob(database, queueJobOptions{
 		Host:        opts.Host,
 		WorkingDir:  opts.WorkingDir,
@@ -55,7 +61,8 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 		Description: opts.Description,
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
-		GPU:         extractGPUFromEnvVars(opts.EnvVars),
+		GPU:         gpu,
+		GPUMemGB:    gpuMem,
 	})
 	if err != nil {
 		return nil, err
@@ -93,6 +100,7 @@ type queueJobOptions struct {
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
+	GPUMemGB     *int   // GPU memory reservation in GB per device
 	Dependencies []queueDependency
 	AutoStart    bool
 }
@@ -100,6 +108,20 @@ type queueJobOptions struct {
 type queueDependency struct {
 	JobID        int64
 	AllowFailure bool
+}
+
+// resolveGPUMemGB returns the GPU memory reservation based on explicit flag and GPU presence.
+// If gpuMemFlag > 0, use it. If GPU is involved but no explicit flag, default to defaultGPUMemGB.
+// Returns nil if no GPU involvement.
+func resolveGPUMemGB(gpuMemFlag int, gpu string) *int {
+	if gpuMemFlag > 0 {
+		return &gpuMemFlag
+	}
+	if gpu != "" {
+		defaultMem := defaultGPUMemGB
+		return &defaultMem
+	}
+	return nil
 }
 
 // extractGPUFromEnvVars finds and returns the CUDA_VISIBLE_DEVICES value from env vars
@@ -122,6 +144,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
 		GPU:         opts.GPU,
+		GPUMemGB:    opts.GPUMemGB,
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 	}
 

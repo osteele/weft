@@ -432,6 +432,40 @@ func TestSetJobCPUAllotment(t *testing.T) {
 	}
 }
 
+func TestSetJobGPUMemGB(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host", "/tmp", "echo ok", "desc")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	gpuMem := 20
+	if err := SetJobGPUMemGB(database, jobID, &gpuMem); err != nil {
+		t.Fatalf("set gpu mem: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB == nil || *job.GPUMemGB != gpuMem {
+		t.Fatalf("expected GPU mem %d, got %#v", gpuMem, job.GPUMemGB)
+	}
+
+	if err := SetJobGPUMemGB(database, jobID, nil); err != nil {
+		t.Fatalf("clear gpu mem: %v", err)
+	}
+
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.GPUMemGB != nil {
+		t.Fatalf("expected GPU mem cleared, got %#v", job.GPUMemGB)
+	}
+}
+
 func TestSetJobTags(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 47
+# BUILD: 49
 #
 # Queue runner for remote-jobs
 # Uses append-only JSONL command log with jq for parsing.
@@ -76,6 +76,9 @@ BENCHMARK_VRAM_THRESHOLD=${REMOTE_JOBS_BENCHMARK_VRAM:-5}       # max VRAM usage
 BENCHMARK_IDLE_SAMPLES=${REMOTE_JOBS_BENCHMARK_SAMPLES:-3}      # consecutive idle checks required
 BENCHMARK_CHECK_INTERVAL=${REMOTE_JOBS_BENCHMARK_INTERVAL:-10}  # seconds between checks
 
+# GPU memory reservation defaults
+DEFAULT_GPU_MEM_GB=${REMOTE_JOBS_DEFAULT_GPU_MEM:-20}
+
 # Benchmark idle tracking (global, persists across loop iterations)
 BENCHMARK_IDLE_COUNT=0
 BENCHMARK_LAST_REASON=""
@@ -90,6 +93,21 @@ DEFAULT_ALLOTMENT=$(awk -v cores="$DEFAULT_ALLOTMENT_CORES" -v cpus="$CPU_COUNT"
 CPU_HISTORY_FILE="$QUEUE_DIR/cpu-history.json"
 if [ ! -f "$CPU_HISTORY_FILE" ]; then
     echo '{}' > "$CPU_HISTORY_FILE"
+fi
+
+# GPU memory history: learned GPU memory usage (MiB) by command signature
+GPU_HISTORY_FILE="$QUEUE_DIR/gpu-history.json"
+if [ ! -f "$GPU_HISTORY_FILE" ]; then
+    echo '{}' > "$GPU_HISTORY_FILE"
+fi
+
+# Discover per-GPU total memory (JSON object keyed by device index, values in GB)
+# e.g. {"0": 80, "1": 24}
+GPU_TOTAL_MEM_GB='{}'
+if command -v nvidia-smi &>/dev/null; then
+    GPU_TOTAL_MEM_GB=$(nvidia-smi --query-gpu=index,memory.total --format=csv,noheader,nounits 2>/dev/null \
+        | awk -F', ' '{ idx=$1+0; gb=int(($2+0)/1024); printf "%d %d\n", idx, gb }' \
+        | jq -Rn '[inputs | split(" ") | {(.[0]): (.[1] | tonumber)}] | add // {}') || GPU_TOTAL_MEM_GB='{}'
 fi
 
 # Extract a signature from a command for CPU history lookup.
@@ -143,6 +161,45 @@ update_cpu_history() {
         && mv "${CPU_HISTORY_FILE}.tmp" "$CPU_HISTORY_FILE"
 
     log_op "cpu_history.update" "" "sig=$sig avg=$new_avg count=$new_count observed=$observed_cpu"
+}
+
+# Look up historical GPU memory usage (MiB) for a command signature.
+# Returns the learned average in MiB, or empty if no history.
+get_gpu_history() {
+    local sig="$1"
+    [ -z "$sig" ] && return
+    jq -r --arg sig "$sig" '.[$sig].avg_mib // empty' "$GPU_HISTORY_FILE" 2>/dev/null
+}
+
+# Update GPU memory history with observed peak usage (exponential moving average).
+# observed_mib: peak GPU memory in MiB from the .rusage high-water mark.
+update_gpu_history() {
+    local sig="$1"
+    local observed_mib="$2"
+    [ -z "$sig" ] || [ -z "$observed_mib" ] && return
+    # Skip zero observations (job may not have used GPU despite having CUDA_VISIBLE_DEVICES)
+    [ "$observed_mib" -eq 0 ] 2>/dev/null && return
+
+    local current_avg current_count new_avg new_count
+    current_avg=$(jq -r --arg sig "$sig" '.[$sig].avg_mib // 0' "$GPU_HISTORY_FILE" 2>/dev/null)
+    current_count=$(jq -r --arg sig "$sig" '.[$sig].count // 0' "$GPU_HISTORY_FILE" 2>/dev/null)
+
+    # Exponential moving average with alpha=0.3 for recent bias, or simple avg if few samples.
+    # Use the MAX of observed and average to be conservative (we'd rather over-reserve than OOM).
+    if [ "$current_count" -lt 3 ]; then
+        new_avg=$(awk -v old="$current_avg" -v new="$observed_mib" -v n="$current_count" \
+            'BEGIN { avg = (old * n + new) / (n + 1); printf "%.0f", avg }')
+    else
+        new_avg=$(awk -v old="$current_avg" -v new="$observed_mib" \
+            'BEGIN { avg = old * 0.7 + new * 0.3; printf "%.0f", avg }')
+    fi
+    new_count=$((current_count + 1))
+
+    jq --arg sig "$sig" --argjson avg "$new_avg" --argjson count "$new_count" \
+        '.[$sig] = {avg_mib: $avg, count: $count}' "$GPU_HISTORY_FILE" > "${GPU_HISTORY_FILE}.tmp" \
+        && mv "${GPU_HISTORY_FILE}.tmp" "$GPU_HISTORY_FILE"
+
+    log_op "gpu_history.update" "" "sig=$sig avg_mib=$new_avg count=$new_count observed_mib=$observed_mib"
 }
 
 # Running job state (JSON object keyed by job ID)
@@ -698,6 +755,113 @@ job_has_exclusive_or_benchmark_tag() {
     echo "$job_data" | jq -e '.tags // [] | (index("exclusive") != null or index("benchmark") != null)' &>/dev/null
 }
 
+# Get GPU device list for a job. Returns space-separated device indices.
+# Checks: 1) "gpu" field in job JSON, 2) CUDA_VISIBLE_DEVICES in env vars.
+job_gpu_devices() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+
+    # 1. Check explicit "gpu" field
+    local gpu_field
+    gpu_field=$(echo "$job_data" | jq -r '.gpu // ""')
+    if [ -n "$gpu_field" ]; then
+        echo "$gpu_field" | tr ',' ' '
+        return
+    fi
+
+    # 2. Check CUDA_VISIBLE_DEVICES in env vars
+    local cvd
+    cvd=$(echo "$job_data" | jq -r '.env // [] | map(select(startswith("CUDA_VISIBLE_DEVICES="))) | first // "" | sub("CUDA_VISIBLE_DEVICES="; "")')
+    if [ -n "$cvd" ]; then
+        echo "$cvd" | tr ',' ' '
+        return
+    fi
+}
+
+# Get GPU memory reservation (GB per device) for a job.
+# Checks: 1) explicit "gpu_mem" field, 2) default if job has GPU devices.
+# Returns 0 if no GPU involvement.
+job_gpu_mem() {
+    local job_id="$1"
+    local job_data
+    job_data=$(get_job_data "$job_id")
+
+    # 1. Check explicit gpu_mem field
+    local gpu_mem
+    gpu_mem=$(echo "$job_data" | jq -r '.gpu_mem // empty' 2>/dev/null)
+    if [ -n "$gpu_mem" ] && [[ "$gpu_mem" =~ ^[0-9]+$ ]]; then
+        echo "$gpu_mem"
+        return
+    fi
+
+    # Check if job has GPU devices
+    local devices
+    devices=$(job_gpu_devices "$job_id")
+    if [ -z "$devices" ]; then
+        echo "0"
+        return
+    fi
+
+    # 2. Check GPU memory history for similar commands
+    local cmd sig historical_mib
+    cmd=$(echo "$job_data" | jq -r '.cmd // ""')
+    sig=$(extract_command_signature "$cmd")
+    if [ -n "$sig" ]; then
+        historical_mib=$(get_gpu_history "$sig")
+        if [ -n "$historical_mib" ] && [ "$historical_mib" -gt 0 ] 2>/dev/null; then
+            # Convert MiB to GB, round up, add 20% headroom
+            local gb_with_headroom
+            gb_with_headroom=$(awk -v mib="$historical_mib" 'BEGIN { gb = mib / 1024 * 1.2; if (gb < 1) gb = 1; printf "%.0f", gb + 0.5 }')
+            echo "$gb_with_headroom"
+            return
+        fi
+    fi
+
+    # 3. Fall back to default
+    echo "$DEFAULT_GPU_MEM_GB"
+}
+
+# Sum GPU memory reserved by running jobs on a specific device.
+total_gpu_mem_reserved() {
+    local device="$1"
+    jq -r --arg dev "$device" '
+        [.[]? | select(.gpu_devices // [] | index($dev)) | .gpu_mem_gb // 0] | add // 0
+    ' <<< "$RUNNING_JSON"
+}
+
+# Check if a job can start based on GPU memory availability.
+# Returns 0 (true) if all target devices have enough headroom.
+# Returns 1 (false) if any device is oversubscribed.
+can_start_gpu_job() {
+    local job_id="$1"
+    local mem_per_device
+    mem_per_device=$(job_gpu_mem "$job_id")
+
+    # No GPU reservation — always allowed
+    if [ "$mem_per_device" -eq 0 ] 2>/dev/null; then
+        return 0
+    fi
+
+    local devices
+    devices=$(job_gpu_devices "$job_id")
+    if [ -z "$devices" ]; then
+        return 0
+    fi
+
+    for device in $devices; do
+        local total_mem reserved available
+        total_mem=$(echo "$GPU_TOTAL_MEM_GB" | jq -r --arg d "$device" '.[$d] // 0')
+        reserved=$(total_gpu_mem_reserved "$device")
+        available=$((total_mem - reserved))
+        if [ "$mem_per_device" -gt "$available" ]; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
 # Instantaneous CPU usage percentage (of total capacity).
 # Uses /proc/stat delta over 1 second on Linux, falls back to load average on macOS.
 host_cpu_instant_pct() {
@@ -1078,13 +1242,26 @@ start_job() {
 
     local local_allotment
     local_allotment=$(job_allotment_from_data "$job_id")
+
+    # Resolve GPU reservation for this job
+    local gpu_devices_str gpu_mem_gb gpu_devices_json
+    gpu_devices_str=$(job_gpu_devices "$job_id")
+    gpu_mem_gb=$(job_gpu_mem "$job_id")
+    if [ -n "$gpu_devices_str" ]; then
+        gpu_devices_json=$(echo "$gpu_devices_str" | tr ' ' '\n' | jq -Rn '[inputs | select(length > 0)]')
+    else
+        gpu_devices_json='[]'
+    fi
+
     RUNNING_JSON=$(jq -nc \
         --argjson running "$RUNNING_JSON" \
         --arg id "$job_id" \
         --argjson started_at "$start_time" \
         --argjson warmup_until "$((start_time + WARMUP_DURATION))" \
         --argjson local_allotment "$local_allotment" \
-        '$running + {($id): {started_at: $started_at, warmup_until: $warmup_until, local_allotment: $local_allotment, samples: [], over_hist: [], under_hist: []}}')
+        --argjson gpu_devices "$gpu_devices_json" \
+        --argjson gpu_mem_gb "$gpu_mem_gb" \
+        '$running + {($id): {started_at: $started_at, warmup_until: $warmup_until, local_allotment: $local_allotment, gpu_devices: $gpu_devices, gpu_mem_gb: $gpu_mem_gb, samples: [], over_hist: [], under_hist: []}}')
 
     CURRENT_JOB_ID="$job_id"
     echo "$CURRENT_JOB_ID" > "$CURRENT_FILE"
@@ -1123,16 +1300,22 @@ refresh_running_jobs() {
         local paused_file="$LOG_DIR/${job_id}.paused"
 
         if [ -f "$status_file" ]; then
-            # Record CPU history before removing job from running state
+            # Record CPU and GPU history before removing job from running state
             local samples_json avg_cpu job_data cmd sig
             samples_json=$(jq -c --arg id "$job_id" '.[$id].samples // []' <<< "$RUNNING_JSON")
             avg_cpu=$(sample_average "$samples_json")
-            if [ -n "$avg_cpu" ] && [ "$avg_cpu" != "0" ]; then
-                job_data=$(get_job_data "$job_id")
-                cmd=$(echo "$job_data" | jq -r '.cmd // ""')
-                sig=$(extract_command_signature "$cmd")
-                if [ -n "$sig" ]; then
+            job_data=$(get_job_data "$job_id")
+            cmd=$(echo "$job_data" | jq -r '.cmd // ""')
+            sig=$(extract_command_signature "$cmd")
+            if [ -n "$sig" ]; then
+                if [ -n "$avg_cpu" ] && [ "$avg_cpu" != "0" ]; then
                     update_cpu_history "$sig" "$avg_cpu"
+                fi
+                # Record GPU memory history from high-water mark
+                local max_gpu_mib
+                max_gpu_mib=$(jq -r --arg id "$job_id" '.[$id].rusage_max_gpu // ""' <<< "$RUNNING_JSON")
+                if [ -n "$max_gpu_mib" ] && [ "$max_gpu_mib" -gt 0 ] 2>/dev/null; then
+                    update_gpu_history "$sig" "$max_gpu_mib"
                 fi
             fi
             # Write resource usage file before removing from running state
@@ -1494,6 +1677,14 @@ while true; do
     current_allotment=$(total_local_allotment)
     next_allotment=$(job_allotment_from_data "$POPPED_JOB")
     if [ "$running_jobs" -gt 0 ] && [ $((current_allotment + next_allotment)) -gt "$HOST_UTILIZATION_TARGET" ]; then
+        add_pending "$POPPED_JOB"
+        save_state
+        sleep 5
+        continue
+    fi
+
+    # Check GPU memory capacity before starting
+    if [ "$running_jobs" -gt 0 ] && ! can_start_gpu_job "$POPPED_JOB"; then
         add_pending "$POPPED_JOB"
         save_state
         sleep 5

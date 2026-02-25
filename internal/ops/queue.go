@@ -29,6 +29,8 @@ type QueueEntry struct {
 	EnvVars      []string
 	DepSpec      string
 	CPUAllotment *int
+	GPU          string
+	GPUMemGB     *int
 	Tags         []string
 }
 
@@ -104,6 +106,8 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 		EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
 		DepSpec:      job.DepSpec,
 		CPUAllotment: job.CPUAllotment,
+		GPU:          job.GPU,
+		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
 	}
 	addCmd := NewAddCommand(entry)
@@ -193,6 +197,7 @@ type QueueJobParams struct {
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
+	GPUMemGB     *int   // GPU memory reservation in GB per device
 	DepSpec      string
 	CPUAllotment *int
 }
@@ -239,6 +244,12 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		if err := db.SetJobCPUAllotment(database, jobID, params.CPUAllotment); err != nil {
 			db.DeleteJob(database, jobID)
 			return Result{}, fmt.Errorf("record CPU allotment: %w", err)
+		}
+	}
+	if params.GPUMemGB != nil {
+		if err := db.SetJobGPUMemGB(database, jobID, params.GPUMemGB); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record GPU memory: %w", err)
 		}
 	}
 

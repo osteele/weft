@@ -23,14 +23,16 @@ const (
 
 // CommandJob contains job data for an add command.
 type CommandJob struct {
-	ID   int64    `json:"id"`
-	Dir  string   `json:"dir,omitempty"`
-	Cmd  string   `json:"cmd"`
-	Desc string   `json:"desc,omitempty"`
-	Env  []string `json:"env,omitempty"`
-	Deps string   `json:"deps,omitempty"`
-	CPU  *int     `json:"cpu,omitempty"`
-	Tags []string `json:"tags,omitempty"`
+	ID     int64    `json:"id"`
+	Dir    string   `json:"dir,omitempty"`
+	Cmd    string   `json:"cmd"`
+	Desc   string   `json:"desc,omitempty"`
+	Env    []string `json:"env,omitempty"`
+	Deps   string   `json:"deps,omitempty"`
+	CPU    *int     `json:"cpu,omitempty"`
+	GPU    string   `json:"gpu,omitempty"`     // CUDA_VISIBLE_DEVICES value (e.g. "0" or "0,1")
+	GPUMem *int     `json:"gpu_mem,omitempty"` // GPU memory reservation in GB per device
+	Tags   []string `json:"tags,omitempty"`
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -58,14 +60,16 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        OpAdd,
 		Job: &CommandJob{
-			ID:   entry.JobID,
-			Dir:  entry.WorkingDir,
-			Cmd:  entry.Command,
-			Desc: entry.Description,
-			Env:  entry.EnvVars,
-			Deps: entry.DepSpec,
-			CPU:  entry.CPUAllotment,
-			Tags: entry.Tags,
+			ID:     entry.JobID,
+			Dir:    entry.WorkingDir,
+			Cmd:    entry.Command,
+			Desc:   entry.Description,
+			Env:    entry.EnvVars,
+			Deps:   entry.DepSpec,
+			CPU:    entry.CPUAllotment,
+			GPU:    entry.GPU,
+			GPUMem: entry.GPUMemGB,
+			Tags:   entry.Tags,
 		},
 	}
 }
@@ -190,12 +194,14 @@ type RunnerState struct {
 
 // RunnerJobState captures per-job runtime state for concurrent execution.
 type RunnerJobState struct {
-	StartedAt      int64 `json:"started_at"`
-	WarmupUntil    int64 `json:"warmup_until"`
-	LocalAllotment int   `json:"local_allotment"`
-	Samples        []int `json:"samples,omitempty"`
-	OverCount      int   `json:"over_count"`
-	UnderCount     int   `json:"under_count"`
+	StartedAt      int64    `json:"started_at"`
+	WarmupUntil    int64    `json:"warmup_until"`
+	LocalAllotment int      `json:"local_allotment"`
+	Samples        []int    `json:"samples,omitempty"`
+	OverCount      int      `json:"over_count"`
+	UnderCount     int      `json:"under_count"`
+	GPUDevices     []string `json:"gpu_devices,omitempty"` // Which GPU indices this job uses
+	GPUMemGB       int      `json:"gpu_mem_gb,omitempty"`  // Reserved GB per device
 }
 
 // StateFileName returns the filename for the runner state file.
