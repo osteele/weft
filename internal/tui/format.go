@@ -697,7 +697,8 @@ func wrapText(text string, width int) string {
 }
 
 // abbreviateProject shortens a hyphenated project name to fit within maxWidth.
-// It progressively shortens each segment, then drops hyphens, then truncates.
+// It iteratively shortens the longest segment first, preserving shorter segments,
+// then falls back to initials, then truncates.
 func abbreviateProject(name string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
@@ -712,12 +713,37 @@ func abbreviateProject(name string, maxWidth int) string {
 		return truncate(name, maxWidth)
 	}
 
-	// Try progressively shorter segment lengths
-	for segLen := longestSegment(parts) - 1; segLen >= 1; segLen-- {
-		candidate := abbreviateSegments(parts, segLen)
-		if len(candidate) <= maxWidth {
-			return candidate
+	// Shorten the longest segment first, one char at a time
+	lens := make([]int, len(parts))
+	for i, p := range parts {
+		lens[i] = len(p)
+	}
+	hyphens := len(parts) - 1
+	for sumInts(lens)+hyphens > maxWidth {
+		// Find last segment with max length (last wins ties,
+		// so earlier segments are preserved first)
+		maxIdx := 0
+		for i := 1; i < len(lens); i++ {
+			if lens[i] >= lens[maxIdx] {
+				maxIdx = i
+			}
 		}
+		if lens[maxIdx] <= 1 {
+			break
+		}
+		lens[maxIdx]--
+	}
+
+	var b strings.Builder
+	for i, p := range parts {
+		if i > 0 {
+			b.WriteByte('-')
+		}
+		b.WriteString(p[:lens[i]])
+	}
+	candidate := b.String()
+	if len(candidate) <= maxWidth {
+		return candidate
 	}
 
 	// Single-char segments with hyphens still too long; drop hyphens (initials)
@@ -730,26 +756,12 @@ func abbreviateProject(name string, maxWidth int) string {
 	return truncate(initials, maxWidth)
 }
 
-func longestSegment(parts []string) int {
-	m := 0
-	for _, p := range parts {
-		if len(p) > m {
-			m = len(p)
-		}
+func sumInts(a []int) int {
+	s := 0
+	for _, v := range a {
+		s += v
 	}
-	return m
-}
-
-func abbreviateSegments(parts []string, maxSegLen int) string {
-	abbreviated := make([]string, len(parts))
-	for i, p := range parts {
-		if len(p) > maxSegLen {
-			abbreviated[i] = p[:maxSegLen]
-		} else {
-			abbreviated[i] = p
-		}
-	}
-	return strings.Join(abbreviated, "-")
+	return s
 }
 
 func initialString(parts []string) string {

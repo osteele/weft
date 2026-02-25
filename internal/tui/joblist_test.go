@@ -28,6 +28,12 @@ func TestAbbreviateProject(t *testing.T) {
 		{"2seg width 3", "markov-attention", 3, "m-a"},
 		{"2seg width 2", "markov-attention", 2, "ma"},
 
+		// Unequal segments: preserves shorter segments
+		{"unequal width 12", "head-type-ontology", 12, "head-typ-ont"},
+		{"unequal width 8", "head-type-ontology", 8, "he-ty-on"},
+		{"unequal width 5", "head-type-ontology", 5, "h-t-o"},
+		{"unequal width 3", "head-type-ontology", 3, "hto"},
+
 		// Non-hyphenated names
 		{"short no hyphen", "LM2", 3, "LM2"},
 		{"short no hyphen truncate", "LM2", 2, "L…"},
