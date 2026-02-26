@@ -247,3 +247,37 @@ func TestRemoveStaleEntries_OnlyAffectsSpecifiedHost(t *testing.T) {
 		t.Errorf("cool30 entry should survive, got %d", len(entries))
 	}
 }
+
+func TestListAllAssets(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+
+	// Record assets on multiple hosts
+	assets := []HostDataEntry{
+		{Host: "cool30", Asset: DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now},
+		{Host: "cool100", Asset: DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now},
+		{Host: "cool100", Asset: DataAsset{Kind: AssetHFDataset, ID: "allenai/dolma"}, LastSeen: now},
+	}
+	for _, a := range assets {
+		if err := RecordAsset(db, a); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+	}
+
+	all, err := ListAllAssets(db)
+	if err != nil {
+		t.Fatalf("ListAllAssets: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(all))
+	}
+
+	// Ordered by kind, id, host — datasets come before models alphabetically
+	if all[0].Asset.Kind != AssetHFDataset {
+		t.Errorf("first entry should be dataset, got %s", all[0].Asset.Kind)
+	}
+	// The two model entries should be grouped together
+	if all[1].Asset.ID != all[2].Asset.ID {
+		t.Errorf("model entries should be grouped: got %s and %s", all[1].Asset.ID, all[2].Asset.ID)
+	}
+}

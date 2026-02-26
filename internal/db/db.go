@@ -59,10 +59,12 @@ type Job struct {
 	Metadata             *JobMetadata
 	EnvVars              []string
 	Tags                 []string
-	DepSpec              string // Dependency specification (e.g., "42" or "42+" for after-any)
-	Project              string // Basename of working directory (stored at creation time)
-	CreatedAt            int64  // When the job was created/queued (0 for legacy jobs)
-	QueuedAt             int64  // When job was added to remote queue (for queue ordering)
+	DepSpec              string   // Dependency specification (e.g., "42" or "42+" for after-any)
+	Inputs               []string // Data asset refs consumed by this job (e.g., "hf:meta-llama/Llama-3-8B")
+	Outputs              []string // Data asset refs produced by this job
+	Project              string   // Basename of working directory (stored at creation time)
+	CreatedAt            int64    // When the job was created/queued (0 for legacy jobs)
+	QueuedAt             int64    // When job was added to remote queue (for queue ordering)
 	StartTime            int64
 	EndTime              *int64
 	ExitCode             *int
@@ -94,7 +96,7 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
 
 const ProcessedTag = "processed"
 
@@ -330,6 +332,14 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add queued_at column for queue ordering (independent of job ID)
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queued_at INTEGER`); err != nil {
+		return err
+	}
+
+	// Migration: add inputs/outputs columns for data locality tracking
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN inputs TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN outputs TEXT`); err != nil {
 		return err
 	}
 
@@ -1141,6 +1151,29 @@ func SetJobDepSpec(db *sql.DB, jobID int64, depSpec string) error {
 	return err
 }
 
+// SetJobInputs sets the data asset inputs for a job (stored as JSON array).
+func SetJobInputs(db *sql.DB, jobID int64, inputs []string) error {
+	return setJobStringSlice(db, jobID, "inputs", inputs)
+}
+
+// SetJobOutputs sets the data asset outputs for a job (stored as JSON array).
+func SetJobOutputs(db *sql.DB, jobID int64, outputs []string) error {
+	return setJobStringSlice(db, jobID, "outputs", outputs)
+}
+
+func setJobStringSlice(db *sql.DB, jobID int64, column string, values []string) error {
+	if len(values) == 0 {
+		_, err := db.Exec(fmt.Sprintf(`UPDATE jobs SET %s = NULL WHERE id = ?`, column), jobID)
+		return err
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf(`UPDATE jobs SET %s = ? WHERE id = ?`, column), string(data), jobID)
+	return err
+}
+
 // SetJobProject sets the project name for a job.
 func SetJobProject(db *sql.DB, jobID int64, project string) error {
 	_, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, project, jobID)
@@ -1424,6 +1457,8 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var envVars sql.NullString
 	var tags sql.NullString
 	var depSpec sql.NullString
+	var inputs sql.NullString
+	var outputs sql.NullString
 	var project sql.NullString
 	var createdAt sql.NullInt64
 	var queuedAt sql.NullInt64
@@ -1436,7 +1471,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingAt sql.NullInt64
 	var jobMetadata sql.NullString
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1493,6 +1528,8 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if depSpec.Valid {
 		j.DepSpec = depSpec.String
 	}
+	j.Inputs = decodeStringSlice(inputs)
+	j.Outputs = decodeStringSlice(outputs)
 	if project.Valid {
 		j.Project = project.String
 	}
@@ -1530,6 +1567,22 @@ func scanJob(row *sql.Row) (*Job, error) {
 	}
 
 	return &j, nil
+}
+
+// decodeStringSlice converts a stored JSON array string into a Go slice.
+func decodeStringSlice(value sql.NullString) []string {
+	if !value.Valid {
+		return nil
+	}
+	raw := strings.TrimSpace(value.String)
+	if raw == "" {
+		return nil
+	}
+	var result []string
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil
+	}
+	return result
 }
 
 // decodeEnvVars converts the stored env_vars JSON (or legacy newline-separated values) into a slice.
@@ -1721,6 +1774,8 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var envVars sql.NullString
 		var tags sql.NullString
 		var depSpec sql.NullString
+		var inputs sql.NullString
+		var outputs sql.NullString
 		var project sql.NullString
 		var createdAt sql.NullInt64
 		var queuedAt sql.NullInt64
@@ -1733,7 +1788,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingAt sql.NullInt64
 		var jobMetadata sql.NullString
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -1787,6 +1842,8 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if depSpec.Valid {
 			j.DepSpec = depSpec.String
 		}
+		j.Inputs = decodeStringSlice(inputs)
+		j.Outputs = decodeStringSlice(outputs)
 		if project.Valid {
 			j.Project = project.String
 		}

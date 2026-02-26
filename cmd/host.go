@@ -49,16 +49,20 @@ Example:
 }
 
 var hostDataCmd = &cobra.Command{
-	Use:   "data <host>",
-	Short: "Show data assets on a host",
-	Long: `Show HuggingFace models, datasets, and other data assets known to exist on a host.
+	Use:   "data [host]",
+	Short: "Show data assets on hosts",
+	Long: `Show HuggingFace models, datasets, and other data assets known to exist on hosts.
 
-Use --scan to scan the remote host's HF cache and update the local database.
+Without a host argument, shows a cross-host map of all known assets.
+With a host argument, shows assets on that specific host.
+
+Use --scan with a host to scan the remote host's HF cache and update the local database.
 
 Examples:
-  weft host data cool100          # Show cached data inventory
+  weft host data                  # Show cross-host asset map
+  weft host data cool100          # Show cached data inventory for cool100
   weft host data cool100 --scan   # Scan remote HF cache and update`,
-	Args: usageArgs(cobra.ExactArgs(1)),
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runHostData,
 }
 
@@ -252,13 +256,18 @@ func runHostLoad(cmd *cobra.Command, args []string) error {
 }
 
 func runHostData(cmd *cobra.Command, args []string) error {
-	host := args[0]
-
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	// Cross-host map when no host specified
+	if len(args) == 0 {
+		return runHostDataMap(database)
+	}
+
+	host := args[0]
 
 	if hostDataScan {
 		fmt.Printf("Scanning HuggingFace cache on %s...\n", host)
@@ -297,6 +306,51 @@ func runHostData(cmd *cobra.Command, args []string) error {
 	for _, e := range entries {
 		age := time.Since(e.LastSeen)
 		fmt.Fprintf(w, "%s\t%s\t%s ago\n", e.Asset.Kind, e.Asset.ID, db.FormatDuration(int64(age.Seconds())))
+	}
+	w.Flush()
+
+	return nil
+}
+
+func runHostDataMap(database *sql.DB) error {
+	entries, err := dataloc.ListAllAssets(database)
+	if err != nil {
+		return fmt.Errorf("list assets: %w", err)
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No data assets known on any host")
+		fmt.Println("Run 'weft host data <host> --scan' to discover assets, or sync will auto-scan")
+		return nil
+	}
+
+	// Group by asset
+	type assetKey struct {
+		Kind dataloc.AssetKind
+		ID   string
+	}
+	type assetInfo struct {
+		key   assetKey
+		hosts []string
+	}
+
+	seen := make(map[assetKey]*assetInfo)
+	var order []assetKey
+	for _, e := range entries {
+		k := assetKey{e.Asset.Kind, e.Asset.ID}
+		if info, ok := seen[k]; ok {
+			info.hosts = append(info.hosts, e.Host)
+		} else {
+			seen[k] = &assetInfo{key: k, hosts: []string{e.Host}}
+			order = append(order, k)
+		}
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "KIND\tID\tHOSTS\n")
+	for _, k := range order {
+		info := seen[k]
+		fmt.Fprintf(w, "%s\t%s\t%s\n", k.Kind, k.ID, strings.Join(info.hosts, ", "))
 	}
 	w.Flush()
 

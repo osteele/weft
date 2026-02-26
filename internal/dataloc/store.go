@@ -77,6 +77,19 @@ func RemoveStaleEntries(db *sql.DB, host string, before time.Time) (int64, error
 	return result.RowsAffected()
 }
 
+// ListAllAssets returns all data assets across all hosts, ordered by kind and ID.
+func ListAllAssets(db *sql.DB) ([]HostDataEntry, error) {
+	rows, err := db.Query(`
+		SELECT host, asset_kind, asset_id, path, size_bytes, last_seen
+		FROM host_data ORDER BY asset_kind, asset_id, host
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntries(rows)
+}
+
 func scanEntries(rows *sql.Rows) ([]HostDataEntry, error) {
 	var entries []HostDataEntry
 	for rows.Next() {

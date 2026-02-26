@@ -1034,3 +1034,81 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 		}
 	})
 }
+
+func TestSetJobInputsOutputs(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	// Set inputs
+	inputs := []string{"hf:meta-llama/Llama-3-8B", "hf-dataset:allenai/dolma"}
+	if err := SetJobInputs(database, jobID, inputs); err != nil {
+		t.Fatalf("set inputs: %v", err)
+	}
+
+	// Set outputs
+	outputs := []string{"checkpoint:llama-ft-v1"}
+	if err := SetJobOutputs(database, jobID, outputs); err != nil {
+		t.Fatalf("set outputs: %v", err)
+	}
+
+	// Read back
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if len(job.Inputs) != 2 {
+		t.Fatalf("inputs len = %d, want 2", len(job.Inputs))
+	}
+	if job.Inputs[0] != "hf:meta-llama/Llama-3-8B" {
+		t.Errorf("inputs[0] = %q, want %q", job.Inputs[0], "hf:meta-llama/Llama-3-8B")
+	}
+	if job.Inputs[1] != "hf-dataset:allenai/dolma" {
+		t.Errorf("inputs[1] = %q, want %q", job.Inputs[1], "hf-dataset:allenai/dolma")
+	}
+
+	if len(job.Outputs) != 1 {
+		t.Fatalf("outputs len = %d, want 1", len(job.Outputs))
+	}
+	if job.Outputs[0] != "checkpoint:llama-ft-v1" {
+		t.Errorf("outputs[0] = %q, want %q", job.Outputs[0], "checkpoint:llama-ft-v1")
+	}
+
+	// Clear inputs
+	if err := SetJobInputs(database, jobID, nil); err != nil {
+		t.Fatalf("clear inputs: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after clear: %v", err)
+	}
+	if len(job.Inputs) != 0 {
+		t.Fatalf("expected inputs cleared, got %v", job.Inputs)
+	}
+	if len(job.Outputs) != 1 {
+		t.Fatalf("outputs should still be set, got %v", job.Outputs)
+	}
+}
+
+func TestJobInputsOutputsEmptyByDefault(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.Inputs != nil {
+		t.Errorf("expected nil inputs for new job, got %v", job.Inputs)
+	}
+	if job.Outputs != nil {
+		t.Errorf("expected nil outputs for new job, got %v", job.Outputs)
+	}
+}

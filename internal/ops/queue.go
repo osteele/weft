@@ -274,6 +274,18 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 			return Result{}, fmt.Errorf("record GPU class: %w", err)
 		}
 	}
+	if len(params.Inputs) > 0 {
+		if err := db.SetJobInputs(database, jobID, params.Inputs); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record inputs: %w", err)
+		}
+	}
+	if len(params.Outputs) > 0 {
+		if err := db.SetJobOutputs(database, jobID, params.Outputs); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record outputs: %w", err)
+		}
+	}
 
 	backend, err := ResolveBackend(params.Host, opts.Timeout)
 	if err != nil {

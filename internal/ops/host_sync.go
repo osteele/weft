@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
@@ -280,5 +281,28 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		_ = db.RecordHostSync(database, host, time.Now())
 	}
 
+	// Step 7: Auto-scan HF caches for data locality tracking
+	if result.HostContacted {
+		scanHFCacheDuringSync(database, host)
+	}
+
 	return result, nil
+}
+
+// scanHFCacheDuringSync scans the remote HF cache and records discovered assets.
+// Failures are silently ignored to avoid disrupting the sync flow.
+func scanHFCacheDuringSync(database *sql.DB, host string) {
+	assets, err := dataloc.ScanHFCache(host)
+	if err != nil {
+		return
+	}
+	now := time.Now()
+	for _, asset := range assets {
+		entry := dataloc.HostDataEntry{
+			Host:     host,
+			Asset:    asset,
+			LastSeen: now,
+		}
+		_ = dataloc.RecordAsset(database, entry)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
@@ -80,6 +81,7 @@ var (
 	runGPUClass    string
 	runInputs      []string
 	runOutputs     []string
+	runDryRun      bool
 )
 
 const defaultGPUMemGB = ops.DefaultGPUMemGB
@@ -109,6 +111,7 @@ func init() {
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	runCmd.Flags().StringSliceVar(&runOutputs, "output", nil, "Output data asset (e.g., checkpoint:llama-ft-v1), can be repeated")
+	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Show placement scores without submitting the job")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -238,17 +241,37 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--wait and --no-wait cannot be used together")
 	}
 
+	// Placement scoring (used for auto-placement and dry-run)
+	placementConstraints := placement.Constraints{
+		GPUClass: runGPUClass,
+		GPUMemGB: runGPUMem,
+		Inputs:   runInputs,
+	}
+
+	if runDryRun {
+		scores, err := placement.ScoreHosts(database, placementConstraints)
+		if err != nil {
+			return fmt.Errorf("placement scoring: %w", err)
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintf(w, "HOST\tSCORE\tELIGIBLE\tREASONS\n")
+		for _, s := range scores {
+			eligible := "yes"
+			if !s.Eligible {
+				eligible = "no"
+			}
+			fmt.Fprintf(w, "%s\t%.1f\t%s\t%s\n", s.Host, s.Total, eligible, strings.Join(s.Reasons, "; "))
+		}
+		w.Flush()
+		return nil
+	}
+
 	// Auto-place if no host specified
 	if host == "" {
 		if runImmediate {
 			return fmt.Errorf("--immediate requires an explicit host")
 		}
-		constraints := placement.Constraints{
-			GPUClass: runGPUClass,
-			GPUMemGB: runGPUMem,
-			Inputs:   runInputs,
-		}
-		bestHost, reasons, err := placement.BestHost(database, constraints)
+		bestHost, reasons, err := placement.BestHost(database, placementConstraints)
 		if err != nil {
 			return fmt.Errorf("auto-placement failed: %w", err)
 		}
