@@ -318,6 +318,24 @@ func ReadEntries(path string) ([]Entry, error) {
 	return entries, nil
 }
 
+// ReadRecent returns the last n entries from the default log file.
+// Returns entries in chronological order (oldest first).
+func ReadRecent(n int) ([]Entry, error) {
+	return ReadRecentFrom(DefaultLogPath(), n)
+}
+
+// ReadRecentFrom returns the last n entries from the given log file.
+func ReadRecentFrom(path string, n int) ([]Entry, error) {
+	entries, err := ReadEntries(path)
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 || len(entries) <= n {
+		return entries, nil
+	}
+	return entries[len(entries)-n:], nil
+}
+
 // FilterOptions for filtering log entries.
 type FilterOptions struct {
 	JobID      int64

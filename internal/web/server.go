@@ -79,6 +79,10 @@ func (s *Server) Start() (string, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/cluster", s.handleCluster)
+	mux.HandleFunc("/api/hosts", s.handleAPIHosts)
+	mux.HandleFunc("/api/coordinator", s.handleAPICoordinator)
+	mux.HandleFunc("/api/oplog", s.handleAPIOplog)
 	s.server = &http.Server{
 		Handler: mux,
 	}
@@ -209,6 +213,11 @@ type jobRow struct {
 	Description string
 	Tags        []string
 	TooltipHTML template.HTML
+}
+
+func (s *Server) handleCluster(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(clusterTemplate))
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
