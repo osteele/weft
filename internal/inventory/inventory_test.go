@@ -289,6 +289,40 @@ func TestAllHostsHaveValidOSArch(t *testing.T) {
 	}
 }
 
+func TestParseNetworkBW(t *testing.T) {
+	tests := []struct {
+		input string
+		want  float64
+	}{
+		{"1Gbps", 1e9 / 8},
+		{"10Gbps", 10e9 / 8},
+		{"100Mbps", 100e6 / 8},
+		{"", 0},
+		{"garbage", 0},
+	}
+	for _, tt := range tests {
+		got := ParseNetworkBW(tt.input)
+		if got != tt.want {
+			t.Errorf("ParseNetworkBW(%q) = %g, want %g", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestAllHostsHaveNetworkBW(t *testing.T) {
+	hosts, err := LoadEmbeddedHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range hosts {
+		if h.NetworkBW == "" {
+			t.Errorf("host %s has no network_bw", h.Name)
+		}
+		if h.NetworkBWBytesPerSec() <= 0 {
+			t.Errorf("host %s has unparseable network_bw: %q", h.Name, h.NetworkBW)
+		}
+	}
+}
+
 func TestHostNamesAreUnique(t *testing.T) {
 	hosts, err := LoadEmbeddedHosts()
 	if err != nil {

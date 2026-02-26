@@ -2,6 +2,7 @@ package placement
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,6 +257,88 @@ func TestSortScores(t *testing.T) {
 	}
 	if scores[2].Host != "a" {
 		t.Errorf("expected a last (ineligible), got %s", scores[2].Host)
+	}
+}
+
+func TestTransferCostScoring(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+
+	// Place a large model (15GB) on cool30 only
+	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
+		Host:      "cool30",
+		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "big-model/15gb"},
+		SizeBytes: 15_000_000_000, // 15GB
+		LastSeen:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scores, err := ScoreHosts(db, Constraints{
+		Inputs: []string{"hf:big-model/15gb"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// cool30 has the data locally — should score highest
+	cool30 := findScore(scores, "cool30")
+	cool100 := findScore(scores, "cool100")
+	studio := findScore(scores, "studio")
+
+	if !cool30.Eligible || !cool100.Eligible || !studio.Eligible {
+		t.Error("all hosts should be eligible with no hard constraints")
+	}
+
+	if cool30.Total <= cool100.Total {
+		t.Errorf("cool30 (%.2f) should score higher than cool100 (%.2f) — cool30 has data local", cool30.Total, cool100.Total)
+	}
+
+	// cool100 has 10Gbps, studio has 1Gbps — cool100 should get less penalty
+	if cool100.Total <= studio.Total {
+		t.Errorf("cool100 (%.2f) should score higher than studio (%.2f) — cool100 has 10x bandwidth", cool100.Total, studio.Total)
+	}
+
+	// Verify reason strings mention transfer
+	hasTransferReason := false
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "transfer") {
+			hasTransferReason = true
+			break
+		}
+	}
+	if !hasTransferReason {
+		t.Errorf("cool100 reasons should mention transfer, got: %v", cool100.Reasons)
+	}
+}
+
+func TestTransferCostScoring_AllLocal(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+
+	// Place data on cool100
+	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
+		Host:      "cool100",
+		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model-a"},
+		SizeBytes: 5_000_000_000,
+		LastSeen:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	scores, err := ScoreHosts(db, Constraints{
+		Inputs: []string{"hf:model-a"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// cool100 should have no transfer penalty
+	cool100 := findScore(scores, "cool100")
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "transfer") {
+			t.Errorf("cool100 should not have transfer reason when data is local, got: %v", cool100.Reasons)
+		}
 	}
 }
 

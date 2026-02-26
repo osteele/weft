@@ -3,6 +3,7 @@ os: linux
 arch: amd64
 cpu_cores: 16
 memory: 64GB
+network_bw: "1Gbps"
 gpus:
   - name: RTX 3090
     class: rtx3090

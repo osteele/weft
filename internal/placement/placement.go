@@ -5,6 +5,7 @@ package placement
 import (
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 
@@ -101,9 +102,11 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
 		s.Reasons = append(s.Reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
 	}
 
-	// Soft factor: data locality
+	// Soft factor: data locality + transfer cost
 	if db != nil && len(c.Inputs) > 0 {
 		localCount := 0
+		var totalMissingBytes int64
+		missingCount := 0
 		for _, ref := range c.Inputs {
 			asset, ok := dataloc.ParseAssetRef(ref)
 			if !ok {
@@ -113,17 +116,41 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
 			if err != nil {
 				continue
 			}
+			isLocal := false
 			for _, e := range entries {
 				if e.Host == host.Name {
+					isLocal = true
 					localCount++
 					break
 				}
+			}
+			if !isLocal && len(entries) > 0 {
+				// Use the largest known size across hosts
+				var maxSize int64
+				for _, e := range entries {
+					if e.SizeBytes > maxSize {
+						maxSize = e.SizeBytes
+					}
+				}
+				totalMissingBytes += maxSize
+				missingCount++
 			}
 		}
 		if localCount > 0 {
 			localityScore := float64(localCount) / float64(len(c.Inputs)) * 5.0
 			s.Total += localityScore
 			s.Reasons = append(s.Reasons, fmt.Sprintf("%d/%d inputs local", localCount, len(c.Inputs)))
+		}
+
+		// Transfer cost penalty for non-local inputs
+		if missingCount > 0 && totalMissingBytes > 0 {
+			bw := host.NetworkBWBytesPerSec()
+			if bw > 0 {
+				transferTimeSec := float64(totalMissingBytes) / bw
+				penalty := math.Min(transferTimeSec/60.0, 5.0)
+				s.Total -= penalty
+				s.Reasons = append(s.Reasons, fmt.Sprintf("~%.1fmin transfer for %d missing inputs", transferTimeSec/60.0, missingCount))
+			}
 		}
 	}
 

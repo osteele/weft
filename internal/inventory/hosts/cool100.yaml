@@ -3,6 +3,7 @@ os: linux
 arch: amd64
 cpu_cores: 64
 memory: 256GB
+network_bw: "10Gbps"
 gpus:
   - name: A100 80GB PCIe
     class: a100

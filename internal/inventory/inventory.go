@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,12 +22,52 @@ type GPUSpec struct {
 
 // HostSpec describes the static capabilities of a host.
 type HostSpec struct {
-	Name     string    `yaml:"name"`
-	OS       string    `yaml:"os"`
-	Arch     string    `yaml:"arch"`
-	CPUCores int       `yaml:"cpu_cores"`
-	Memory   string    `yaml:"memory"`
-	GPUs     []GPUSpec `yaml:"gpus"`
+	Name      string    `yaml:"name"`
+	OS        string    `yaml:"os"`
+	Arch      string    `yaml:"arch"`
+	CPUCores  int       `yaml:"cpu_cores"`
+	Memory    string    `yaml:"memory"`
+	NetworkBW string    `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
+	GPUs      []GPUSpec `yaml:"gpus"`
+}
+
+// NetworkBWBytesPerSec returns the network bandwidth in bytes per second.
+// Returns 0 if the bandwidth is not set or cannot be parsed.
+func (h *HostSpec) NetworkBWBytesPerSec() float64 {
+	return ParseNetworkBW(h.NetworkBW)
+}
+
+// ParseNetworkBW parses a bandwidth string like "1Gbps" or "10Gbps" and
+// returns bytes per second. Returns 0 for unparseable values.
+func ParseNetworkBW(s string) float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, "bps")
+
+	var value float64
+	var unit string
+	n, _ := fmt.Sscanf(s, "%f%s", &value, &unit)
+	if n == 0 {
+		return 0
+	}
+	if n == 1 {
+		// bare number, assume bits per second
+		return value / 8
+	}
+
+	switch unit {
+	case "g":
+		return value * 1e9 / 8
+	case "m":
+		return value * 1e6 / 8
+	case "k":
+		return value * 1e3 / 8
+	default:
+		return value / 8
+	}
 }
 
 // TotalGPUs returns the total number of GPU devices on the host.

@@ -3,6 +3,7 @@ os: darwin
 arch: arm64
 cpu_cores: 12
 memory: 96GB
+network_bw: "1Gbps"
 gpus:
   - name: M2 Max
     class: m2max
