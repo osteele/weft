@@ -98,6 +98,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
 			s.Reasons = append(s.Reasons, fmt.Sprintf("no GPU with >=%dGB", c.GPUMemGB))
 			return s
 		}
+		s.Reasons = append(s.Reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
 	}
 
 	// Soft factor: data locality
