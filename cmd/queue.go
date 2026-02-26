@@ -566,7 +566,7 @@ func runQueueStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	runnerSession := fmt.Sprintf("rj-queue-%s", defaultQueueName)
+	runnerSession := fmt.Sprintf("weft-queue-%s", defaultQueueName)
 
 	// Check if runner is active
 	exists, err := ssh.TmuxSessionExists(host, runnerSession)

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
@@ -63,11 +64,12 @@ func BestHost(db *sql.DB, constraints Constraints) (string, []string, error) {
 func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
-	// Hard constraint: GPU class
+	// Hard constraint: GPU class (normalized: strip spaces/punctuation, case-insensitive)
 	if c.GPUClass != "" {
+		norm := normalizeGPUClass(c.GPUClass)
 		found := false
 		for _, gpu := range host.GPUs {
-			if strings.EqualFold(gpu.Class, c.GPUClass) {
+			if normalizeGPUClass(gpu.Class) == norm {
 				found = true
 				break
 			}
@@ -157,6 +159,18 @@ func parseMemGB(s string) int {
 	var n int
 	fmt.Sscanf(s, "%d", &n)
 	return n
+}
+
+// normalizeGPUClass strips spaces, punctuation, and lowercases for fuzzy matching.
+// e.g. "RTX 3090", "rtx3090", "rtx-3090" all normalize to "rtx3090".
+func normalizeGPUClass(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func describeConstraints(c Constraints) string {

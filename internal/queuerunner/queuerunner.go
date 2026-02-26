@@ -184,7 +184,7 @@ func RunnerCommand(envPrefix string) string {
 // Also upgrades the queue runner script if needed, signaling the runner to restart.
 // Returns true when a new runner was started.
 func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
-	session := fmt.Sprintf("rj-queue-%s", ops.DefaultQueueName)
+	session := fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName)
 
 	// Always check if script needs upgrade, even if runner is already running
 	upgraded, err := EnsureScriptUpToDate(host)
@@ -247,7 +247,7 @@ func (r *Runner) Host() string { return r.host }
 func (r *Runner) Queue() string { return ops.DefaultQueueName }
 
 // SessionName returns the tmux session associated with this runner.
-func (r *Runner) SessionName() string { return fmt.Sprintf("rj-queue-%s", ops.DefaultQueueName) }
+func (r *Runner) SessionName() string { return fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName) }
 
 // EnsureStarted ensures the runner is active, deploying scripts and starting tmux if needed.
 func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {

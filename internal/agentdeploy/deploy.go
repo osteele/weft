@@ -38,14 +38,18 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, fmt.Errorf("create remote bin dir: %s", strings.TrimSpace(stderr))
 	}
 
-	if err := ssh.CopyTo(binaryPath, host, remoteAgentPath); err != nil {
+	// Deploy via temp file + atomic rename. On Linux, you can't overwrite a
+	// running binary, but rename(2) atomically replaces the directory entry
+	// while the old inode remains open for the running process. When the runner
+	// receives a restart command and calls syscall.Exec, it picks up the new binary.
+	tmpPath := remoteAgentPath + ".tmp"
+	if err := ssh.CopyTo(binaryPath, host, tmpPath); err != nil {
 		return false, fmt.Errorf("deploy agent to %s: %w", host, err)
 	}
 
-	// Make executable
-	chmodCmd := fmt.Sprintf("chmod +x %s", remoteAgentPath)
-	if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
-		return false, fmt.Errorf("chmod agent: %s", strings.TrimSpace(stderr))
+	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", tmpPath, tmpPath, remoteAgentPath)
+	if _, stderr, err := ssh.Run(host, installCmd); err != nil {
+		return false, fmt.Errorf("install agent: %s", strings.TrimSpace(stderr))
 	}
 
 	return true, nil
