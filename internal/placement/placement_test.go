@@ -342,6 +342,118 @@ func TestTransferCostScoring_AllLocal(t *testing.T) {
 	}
 }
 
+func TestUtilizationScoring_PrefersIdleHost(t *testing.T) {
+	db := setupTestDB(t)
+
+	metrics := map[string]*HostMetrics{
+		"cool30":  {GPUPercent: 90, CPUPercent: 80},
+		"cool100": {GPUPercent: 10, CPUPercent: 5},
+		"studio":  {GPUPercent: 50, CPUPercent: 40},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, Constraints{}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool30 := findScore(scores, "cool30")
+	cool100 := findScore(scores, "cool100")
+
+	if cool100.Total <= cool30.Total {
+		t.Errorf("cool100 (%.2f, 10%% GPU) should score higher than cool30 (%.2f, 90%% GPU)", cool100.Total, cool30.Total)
+	}
+}
+
+func TestUtilizationScoring_QueueDepth(t *testing.T) {
+	db := setupTestDB(t)
+
+	metrics := map[string]*HostMetrics{
+		"cool30":  {QueueDepth: 0},
+		"cool100": {QueueDepth: 5},
+		"studio":  {QueueDepth: 2},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, Constraints{}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool30 := findScore(scores, "cool30")
+	cool100 := findScore(scores, "cool100")
+	studio := findScore(scores, "studio")
+
+	if cool30.Total <= studio.Total {
+		t.Errorf("cool30 (%.2f, 0 queued) should score higher than studio (%.2f, 2 queued)", cool30.Total, studio.Total)
+	}
+	if studio.Total <= cool100.Total {
+		t.Errorf("studio (%.2f, 2 queued) should score higher than cool100 (%.2f, 5 queued)", studio.Total, cool100.Total)
+	}
+
+	// Verify reason string
+	hasQueueReason := false
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "queued") {
+			hasQueueReason = true
+			break
+		}
+	}
+	if !hasQueueReason {
+		t.Errorf("cool100 reasons should mention queue depth, got: %v", cool100.Reasons)
+	}
+}
+
+func TestUtilizationScoring_NilMetrics(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Nil metrics should work the same as ScoreHosts
+	scoresWithNil, err := ScoreHostsWithMetrics(db, Constraints{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoresWithout, err := ScoreHosts(db, Constraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range scoresWithNil {
+		if scoresWithNil[i].Total != scoresWithout[i].Total {
+			t.Errorf("host %s: nil metrics score %.2f != no-metrics score %.2f",
+				scoresWithNil[i].Host, scoresWithNil[i].Total, scoresWithout[i].Total)
+		}
+	}
+}
+
+func TestUtilizationScoring_CombinedWithConstraints(t *testing.T) {
+	db := setupTestDB(t)
+
+	// cool100 is the only host with A100, but it's heavily loaded
+	metrics := map[string]*HostMetrics{
+		"cool100": {GPUPercent: 95, CPUPercent: 90, QueueDepth: 3},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// cool100 should still be the only eligible host despite load
+	cool100 := findScore(scores, "cool100")
+	if !cool100.Eligible {
+		t.Error("cool100 should be eligible (only host with A100)")
+	}
+
+	// Verify it has utilization reasons
+	hasGPUReason := false
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "GPU") && strings.Contains(r, "loaded") {
+			hasGPUReason = true
+		}
+	}
+	if !hasGPUReason {
+		t.Errorf("cool100 should have GPU load reason, got: %v", cool100.Reasons)
+	}
+}
+
 func findScore(scores []Score, host string) Score {
 	for _, s := range scores {
 		if s.Host == host {

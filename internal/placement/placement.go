@@ -20,6 +20,15 @@ type Constraints struct {
 	Inputs   []string // Asset refs the job reads (for locality scoring)
 }
 
+// HostMetrics holds live utilization data for a host, used for soft scoring.
+// All fields are optional; -1 or 0 means "unknown/unavailable".
+type HostMetrics struct {
+	CPUPercent int // 0-100, from load average / core count
+	GPUPercent int // 0-100, max utilization across GPUs
+	RAMPercent int // 0-100
+	QueueDepth int // number of queued (pending) jobs
+}
+
 // Score represents the placement score for a single host.
 type Score struct {
 	Host     string
@@ -30,8 +39,14 @@ type Score struct {
 
 // ScoreHosts evaluates all inventory hosts against the given constraints
 // and returns scores sorted best-first. Ineligible hosts are included
-// but marked accordingly.
+// but marked accordingly. Does not consider live utilization.
 func ScoreHosts(db *sql.DB, constraints Constraints) ([]Score, error) {
+	return ScoreHostsWithMetrics(db, constraints, nil)
+}
+
+// ScoreHostsWithMetrics evaluates hosts with optional live utilization data.
+// The metrics map is keyed by host name. Nil or missing entries are skipped.
+func ScoreHostsWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) ([]Score, error) {
 	hosts, err := inventory.LoadEmbeddedHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
@@ -39,7 +54,11 @@ func ScoreHosts(db *sql.DB, constraints Constraints) ([]Score, error) {
 
 	var scores []Score
 	for _, h := range hosts {
-		score := scoreHost(db, h, constraints)
+		var m *HostMetrics
+		if metrics != nil {
+			m = metrics[h.Name]
+		}
+		score := scoreHost(db, h, constraints, m)
 		scores = append(scores, score)
 	}
 
@@ -50,7 +69,12 @@ func ScoreHosts(db *sql.DB, constraints Constraints) ([]Score, error) {
 
 // BestHost returns the best eligible host, or an error if none qualify.
 func BestHost(db *sql.DB, constraints Constraints) (string, []string, error) {
-	scores, err := ScoreHosts(db, constraints)
+	return BestHostWithMetrics(db, constraints, nil)
+}
+
+// BestHostWithMetrics returns the best eligible host considering live metrics.
+func BestHostWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) (string, []string, error) {
+	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
 	if err != nil {
 		return "", nil, err
 	}
@@ -62,7 +86,7 @@ func BestHost(db *sql.DB, constraints Constraints) (string, []string, error) {
 	return "", nil, fmt.Errorf("no eligible host found for constraints: %s", describeConstraints(constraints))
 }
 
-func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
+func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
 	// Hard constraint: GPU class (normalized: strip spaces/punctuation, case-insensitive)
@@ -151,6 +175,30 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
 				s.Total -= penalty
 				s.Reasons = append(s.Reasons, fmt.Sprintf("~%.1fmin transfer for %d missing inputs", transferTimeSec/60.0, missingCount))
 			}
+		}
+	}
+
+	// Soft factor: current utilization (prefer less-loaded hosts)
+	if metrics != nil {
+		// GPU utilization: up to -3 penalty for fully loaded GPUs
+		if metrics.GPUPercent > 0 {
+			gpuPenalty := float64(metrics.GPUPercent) / 100.0 * 3.0
+			s.Total -= gpuPenalty
+			s.Reasons = append(s.Reasons, fmt.Sprintf("GPU %d%% loaded", metrics.GPUPercent))
+		}
+
+		// CPU utilization: up to -1 penalty
+		if metrics.CPUPercent > 0 {
+			cpuPenalty := float64(metrics.CPUPercent) / 100.0 * 1.0
+			s.Total -= cpuPenalty
+			s.Reasons = append(s.Reasons, fmt.Sprintf("CPU %d%% loaded", metrics.CPUPercent))
+		}
+
+		// Queue depth: -0.5 per queued job (up to -3)
+		if metrics.QueueDepth > 0 {
+			queuePenalty := math.Min(float64(metrics.QueueDepth)*0.5, 3.0)
+			s.Total -= queuePenalty
+			s.Reasons = append(s.Reasons, fmt.Sprintf("%d jobs queued", metrics.QueueDepth))
 		}
 	}
 
