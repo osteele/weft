@@ -88,8 +88,12 @@ go install .
 Queue a job on a remote host for managed execution.
 
 ```bash
-weft run [flags] <host> <command...>
+weft run [flags] [host] <command...>
 ```
+
+The host is optional when a coordinator is running — the placement engine
+automatically selects the best host based on GPU constraints, data locality,
+current utilization, and queue depth.
 
 By default, jobs are added to a queue and scheduled by the queue runner. It can run multiple jobs on a host while keeping total CPU usage under a target cap. Use `--immediate` (`-i`) to start a job immediately.
 
@@ -109,6 +113,10 @@ Use `start <job-id>` to start a queued job immediately.
 - `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
+- `--input ASSET`: Declare a data input (e.g., `hf:meta-llama/Llama-3-8B`). Influences placement scoring and triggers pre-staging
+- `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`). Recorded on successful completion for downstream jobs
+- `--gpu-class CLASS`: Require a specific GPU class (e.g., `A100`, `RTX3090`)
+- `--gpu-mem GB`: Require minimum GPU memory in GB
 
 If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
@@ -979,6 +987,92 @@ Both flags work entirely on the remote host (no laptop connection needed) and ca
 > `cool30` that waits on a job recorded on `studio`, the CLI errors immediately
 > instead of queuing work that can never start.
 
+## Coordinator
+
+The coordinator is an always-on daemon (running on studio) that centralizes job
+placement decisions. When active, `weft run` writes intent files instead of
+directly dispatching to hosts — the coordinator picks the best host and
+dispatches the job.
+
+```bash
+# Start the coordinator daemon
+weft coordinator start
+
+# Check coordinator status
+weft coordinator status
+
+# Stop the coordinator
+weft coordinator stop
+```
+
+### Placement Scoring
+
+When a job has no explicit host, the coordinator scores all eligible hosts:
+
+1. **Hard constraints** (pass/fail): GPU class match, GPU memory fit, compute
+   backend compatibility (CUDA vs MPS)
+2. **Data locality** (+2 per local input): prefer hosts that already have
+   required data cached
+3. **Transfer cost** (up to -5): penalize hosts that would need large data
+   transfers, estimated from asset sizes and host network bandwidth
+4. **Utilization** (up to -4): penalize hosts with high GPU/CPU utilization or
+   deep job queues
+5. **Explicit host** (+10): strong preference when user specifies a host
+
+### Pre-staging
+
+Before dispatching a job, the coordinator pre-stages missing input data via
+rsync. If a job needs `hf:meta-llama/Llama-3-8B` and it exists on cool30 but
+not cool100, the coordinator transfers it before dispatch. Pre-staging is
+best-effort — dispatch proceeds even if transfers fail.
+
+### Data Locality
+
+The system tracks what data exists on which hosts:
+
+- **HuggingFace models/datasets**: Scanned from `~/.cache/huggingface` during
+  host sync (`weft sync`)
+- **Job outputs**: Declared via `--output` flags, recorded automatically when
+  jobs complete successfully
+- **Manual assets**: Registered via `weft host data`
+
+```bash
+# Scan a host's HF cache
+weft host data --scan cool30
+
+# List data assets on a host
+weft host data cool30
+```
+
+### Crash Safety
+
+Processed intent IDs are persisted to SQLite. If the coordinator crashes and
+restarts, it will not re-dispatch intents it already handled. Entries older than
+7 days are cleaned up automatically.
+
+## Cluster Dashboard
+
+The web UI includes a `/cluster` page showing:
+
+- **Host cards** with GPU specs, memory, and online/offline status
+- **GPU utilization bars** with live data when the monitor is running
+- **Coordinator status** (running/stopped, queue depth, processed count)
+- **Recent decisions** from the operations log (placements, transfers, errors)
+
+```bash
+# Start web UI and open cluster dashboard
+weft web --open
+# Then navigate to http://localhost:8127/cluster
+```
+
+### API Endpoints
+
+The web UI exposes JSON API endpoints:
+
+- `GET /api/hosts` — host inventory with live GPU utilization
+- `GET /api/coordinator` — coordinator status (running, queue depth)
+- `GET /api/oplog` — recent operations log entries
+
 ## Configuration
 
 Configuration is stored in `~/.config/weft/config.yaml`.
@@ -1107,6 +1201,11 @@ Open it in your browser:
 weft web --open
 ```
 
+The web UI has two pages:
+- **Jobs** (`/`) — job list with status, host, duration, and log links
+- **Cluster** (`/cluster`) — host overview with GPU utilization, coordinator
+  status, and recent placement decisions
+
 Press `Ctrl+C` to stop following.
 
 ## Slack Notifications
@@ -1202,5 +1301,6 @@ Notifications include:
 ## Documentation
 
 - [Architecture](docs/architecture.md) - Detailed technical architecture and design
+- [Coordinator Architecture](docs/coordinator-architecture.md) - Coordinator daemon design, placement scoring, and migration phases
 - [Comparison to SLURM](docs/comparison-to-slurm.md) - How weft compares to HPC workload managers
 - [Ideas](docs/IDEAS.md) - Future feature ideas and enhancements

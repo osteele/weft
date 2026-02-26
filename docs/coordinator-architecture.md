@@ -282,20 +282,23 @@ type PlacementScore struct {
 Scoring factors (in priority order):
 
 1. **Hard constraints** (pass/fail):
-   - GPU class match (job requires A100, host has A100)
+   - GPU class match (job requires A100, host has A100) — fuzzy matching
    - GPU memory fit (job needs 40GB, GPU has 80GB)
    - Compute backend (CUDA vs MPS)
 
 2. **Soft factors** (weighted scoring):
-   - Data locality: prefer host with required inputs already cached
-   - Current utilization: prefer less-loaded host
-   - Queue depth: prefer host with fewer pending jobs
-   - Transfer cost: penalize hosts that need data staged
+   - Data locality: +2 per input already cached on host
+   - Transfer cost: -0 to -5 based on missing data size and host bandwidth
+   - GPU utilization: up to -3 for high GPU load
+   - CPU utilization: up to -1 for high CPU load
+   - Queue depth: -0.5 per pending job (capped at -3)
+   - Explicit host preference: +10 when user specifies a host
 
 3. **Future factors** (research integration):
    - Predicted runtime from llm-performance-models roofline
    - Power/energy cost
    - Opportunity cost (small job on A100 when 2080 Ti suffices)
+   - MPS vs CUDA performance differential for studio placement
 
 ## Coordinator Daemon
 
@@ -391,25 +394,28 @@ Allow jobs without explicit host. Local placement scoring.
 - Add `pending_placement` job status
 - Local placement works from laptop when online
 
-### Phase 4: Coordinator Daemon
+### Phase 4: Coordinator Daemon ✅
 
 The always-on scheduler on studio.
 
-- `weft coordinator start/stop/status` subcommands
-- `internal/coordinator/` package (main loop, dispatch, watcher)
-- CLI detects coordinator and switches to intent-only mode
-- Coordinator dispatches to queue runners via existing JSONL append
-- Coordinator absorbs cross-host scheduling
+- ✅ `weft coordinator start/stop/status` subcommands
+- ✅ `internal/coordinator/` package (main loop, dispatch, watcher)
+- ✅ CLI detects coordinator and switches to intent-only mode
+- ✅ Coordinator dispatches to queue runners via existing JSONL append
+- ✅ Coordinator absorbs cross-host scheduling
 
-### Phase 5: Smart Scheduling and Data Transfer
+### Phase 5: Smart Scheduling and Data Transfer ✅
 
-Transfer-cost-aware decisions, data pre-staging, research integration.
+Transfer-cost-aware decisions, data pre-staging, web dashboard.
 
-- Transfer cost estimation using inventory bandwidth specs
-- Pre-staging: coordinator issues download/rsync before dispatch
-- Artifact-aware job chaining
-- Integration hooks for llm-performance-models
-- Web dashboard: cluster overview, data locality map, decision log
+- ✅ Transfer cost estimation using inventory bandwidth specs (`internal/placement/`)
+- ✅ Pre-staging: coordinator rsyncs missing inputs before dispatch (`internal/prestage/`)
+- ✅ Utilization-aware scoring: GPU/CPU load and queue depth penalties (`internal/placement/`)
+- ✅ Post-job artifact recording: declared outputs tracked on completion (`internal/ops/artifacts.go`)
+- ✅ HF cache scanner: detailed output with sizes (`internal/dataloc/hfscan.go`)
+- ✅ Web dashboard: cluster overview with live GPU bars, coordinator status, oplog (`internal/web/`)
+- ✅ Crash-safe idempotency: processed intents persisted to SQLite (`internal/coordinator/processed.go`)
+- 🔮 Integration hooks for llm-performance-models (future)
 
 ### Phase Dependencies
 
