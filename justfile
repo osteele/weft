@@ -45,9 +45,41 @@ lint:
 # Check: format, lint, test
 check: format lint test
 
+# Build agent binary for a target (default: current platform)
+build-agent target="local":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p dist
+    VERSION=$(jj log --no-graph -r 'ancestors(@, 50)' -T 'commit_id.short(12) ++ "\n"' --limit 1 cmd/agent/ internal/ 2>/dev/null || echo "dev")
+    LDFLAGS="-X main.version=${VERSION}"
+    case "{{ target }}" in
+        local)
+            go build -ldflags "${LDFLAGS}" -o dist/weft-agent ./cmd/agent
+            echo "Built dist/weft-agent (version: ${VERSION})"
+            ;;
+        linux-amd64)
+            GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/weft-agent-linux-amd64 ./cmd/agent
+            echo "Built dist/weft-agent-linux-amd64 (version: ${VERSION})"
+            ;;
+        darwin-arm64)
+            GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o dist/weft-agent-darwin-arm64 ./cmd/agent
+            echo "Built dist/weft-agent-darwin-arm64 (version: ${VERSION})"
+            ;;
+        all)
+            GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/weft-agent-linux-amd64 ./cmd/agent
+            GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o dist/weft-agent-darwin-arm64 ./cmd/agent
+            echo "Built all agent binaries (version: ${VERSION})"
+            ;;
+        *)
+            echo "Unknown target: {{ target }}. Use: local, linux-amd64, darwin-arm64, all"
+            exit 1
+            ;;
+    esac
+
 # Clean build artifacts
 clean:
     rm -f weft
+    rm -rf dist
 
 # Model-check the PlusCal reconciliation spec
 tla-check:

@@ -1,0 +1,10 @@
+name: studio
+os: darwin
+arch: arm64
+cpu_cores: 12
+memory: 96GB
+gpus:
+  - name: M2 Max
+    class: m2max
+    memory: 96GB
+    indices: [0]

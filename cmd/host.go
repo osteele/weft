@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -46,6 +47,17 @@ Example:
 	RunE: runHostJobs,
 }
 
+var hostListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all known hosts and their capabilities",
+	Long: `List all hosts from the embedded inventory with OS, architecture, and GPU specs.
+
+Example:
+  weft host list`,
+	Args: cobra.NoArgs,
+	RunE: runHostList,
+}
+
 var hostLoadCmd = &cobra.Command{
 	Use:   "load <host>",
 	Short: "Show current load and resource usage",
@@ -61,6 +73,7 @@ func init() {
 	rootCmd.AddCommand(hostCmd)
 	hostCmd.AddCommand(hostInfoCmd)
 	hostCmd.AddCommand(hostJobsCmd)
+	hostCmd.AddCommand(hostListCmd)
 	hostCmd.AddCommand(hostLoadCmd)
 }
 
@@ -216,4 +229,34 @@ func runHostLoad(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func runHostList(cmd *cobra.Command, args []string) error {
+	hosts, err := inventory.LoadEmbeddedHosts()
+	if err != nil {
+		return fmt.Errorf("load inventory: %w", err)
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "NAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
+
+	for _, h := range hosts {
+		gpuSummary := formatGPUSummary(h.GPUs)
+		fmt.Fprintf(w, "%s\t%s/%s\t%d cores\t%s\t%s\n",
+			h.Name, h.OS, h.Arch, h.CPUCores, h.Memory, gpuSummary)
+	}
+
+	w.Flush()
+	return nil
+}
+
+func formatGPUSummary(gpus []inventory.GPUSpec) string {
+	if len(gpus) == 0 {
+		return "none"
+	}
+	var parts []string
+	for _, g := range gpus {
+		parts = append(parts, fmt.Sprintf("%dx %s (%s)", len(g.Indices), g.Name, g.Memory))
+	}
+	return strings.Join(parts, ", ")
 }

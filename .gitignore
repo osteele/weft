@@ -1,6 +1,9 @@
 # Binary
 weft
 
+# Build output
+dist/
+
 # Go build artifacts
 *.exe
 *.exe~

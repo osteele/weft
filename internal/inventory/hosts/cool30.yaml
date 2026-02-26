@@ -1,0 +1,10 @@
+name: cool30
+os: linux
+arch: amd64
+cpu_cores: 16
+memory: 64GB
+gpus:
+  - name: RTX 3090
+    class: rtx3090
+    memory: 24GB
+    indices: [0]

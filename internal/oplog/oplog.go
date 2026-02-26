@@ -35,6 +35,9 @@ const (
 	OpDeferredExec   = "op.deferred.exec"
 	OpTUIAction      = "tui.action"
 	OpCLICommand     = "cli.command"
+	OpAgentStart     = "agent.start"
+	OpAgentStop      = "agent.stop"
+	OpAgentVersion   = "agent.version"
 )
 
 // Entry represents a single log entry in JSONL format.
