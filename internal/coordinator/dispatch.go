@@ -3,11 +3,38 @@ package coordinator
 import (
 	"database/sql"
 	"fmt"
+	"log"
+	"time"
 
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/prestage"
 )
+
+// prestageInputs runs pre-staging for the intent's inputs on the target host.
+// Logs transfers but does not block dispatch on failure (graceful degradation).
+func prestageInputs(database *sql.DB, i *intent.Intent, host string, logger *log.Logger) {
+	if len(i.Job.Inputs) == 0 {
+		return
+	}
+
+	plan, err := prestage.BuildPlan(database, host, i.Job.Inputs)
+	if err != nil {
+		logger.Printf("prestage plan for %s: %v", i.IntentID, err)
+		return
+	}
+	if len(plan.Transfers) == 0 {
+		return
+	}
+
+	logger.Printf("pre-staging %d inputs (%d bytes) to %s for intent %s",
+		len(plan.Transfers), plan.TotalBytes(), host, i.IntentID)
+
+	if err := prestage.Execute(plan, 10*time.Minute); err != nil {
+		logger.Printf("prestage failed for %s (continuing with dispatch): %v", i.IntentID, err)
+	}
+}
 
 // dispatchIntent creates a job record and appends it to the remote queue.
 // Returns the job ID and any error.
