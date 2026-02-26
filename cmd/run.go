@@ -13,22 +13,29 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/session"
 	"github.com/spf13/cobra"
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run [flags] <host> <command>",
+	Use:   "run [flags] [host] <command>",
 	Short: "Queue a job on a remote host",
 	Long: `Queue a job on a remote host for sequential execution.
+
+If host is omitted, automatic placement selects the best host based on
+GPU constraints (--gpu-class, --gpu-mem) and data locality (--input).
 
 By default, jobs are added to a queue and run sequentially.
 Use --immediate (-i) to start a job immediately instead of adding it to the queue.
 
 Examples:
-  weft run cool30 'python train.py'           # Queue job
+  weft run cool30 'python train.py'           # Queue on specific host
+  weft run 'python train.py'                  # Auto-place on best host
+  weft run --gpu-class a100 'python train.py' # Auto-place on A100 host
   weft run -i cool30 'python train.py'        # Start immediately
   weft run --wait cool30 'python train.py'    # Queue and wait for completion
   weft run -f cool30 'python train.py'        # Queue and follow log output
@@ -44,9 +51,9 @@ Examples:
 			}
 			return nil
 		}
-		// Normal mode needs exactly host + command
-		if len(args) != 2 {
-			return fmt.Errorf("requires <host> <command>")
+		// Need at least command; host is optional (1 or 2 args)
+		if len(args) < 1 || len(args) > 2 {
+			return fmt.Errorf("requires [host] <command>")
 		}
 		return nil
 	}),
@@ -159,12 +166,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 			command = args[1]
 		}
 	} else {
-		// Normal mode: require host and command
-		if len(args) < 2 {
-			return usageErrorf("usage: weft run <host> <command>")
+		// Determine if we have host+command (2 args) or just command (1 arg)
+		if len(args) == 2 {
+			host = args[0]
+			command = args[1]
+		} else if len(args) == 1 {
+			// Single arg: is it a known host name, or a command?
+			if inventory.FindHost(args[0]) != nil {
+				return usageErrorf("'%s' looks like a host name. Usage: weft run <host> <command>", args[0])
+			}
+			command = args[0]
+			// host will be resolved via placement below
 		}
-		host = args[0]
-		command = args[1]
 	}
 
 	// Validate command against blocked patterns
@@ -223,6 +236,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if runWait && runNoWait {
 		return fmt.Errorf("--wait and --no-wait cannot be used together")
+	}
+
+	// Auto-place if no host specified
+	if host == "" {
+		if runImmediate {
+			return fmt.Errorf("--immediate requires an explicit host")
+		}
+		constraints := placement.Constraints{
+			GPUClass: runGPUClass,
+			GPUMemGB: runGPUMem,
+			Inputs:   runInputs,
+		}
+		bestHost, reasons, err := placement.BestHost(database, constraints)
+		if err != nil {
+			return fmt.Errorf("auto-placement failed: %w", err)
+		}
+		host = bestHost
+		fmt.Printf("Auto-placed on %s (%s)\n", host, strings.Join(reasons, "; "))
 	}
 
 	dirProvided := runDir != ""
