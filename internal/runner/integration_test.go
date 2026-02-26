@@ -310,3 +310,293 @@ func TestIntegration_GoRunnerStateCompatibility(t *testing.T) {
 
 	t.Logf("State file parsed successfully: cursor_line=%d, pending=%v", runnerState.CursorLine, runnerState.Pending)
 }
+
+// skipIfNoAgent checks if the agent binary is deployed and skips the test if not.
+func skipIfNoAgent(t *testing.T, host string) {
+	t.Helper()
+	result := sshRunMayFail(t, host, fmt.Sprintf("test -x %s && echo exists || echo missing", remoteBinPath))
+	if result != "exists" {
+		t.Skip("Agent binary not deployed")
+	}
+}
+
+// startTestRunner starts a Go runner in a tmux session and returns a cleanup function.
+func startTestRunner(t *testing.T, host, sessionSuffix string) func() {
+	t.Helper()
+	session := fmt.Sprintf("rj-gotest-%s-%s", sessionSuffix, testQueueName)
+	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' '%s run-queue %s'", session, remoteBinPath, testQueueName)
+	sshRun(t, host, tmuxCmd)
+	time.Sleep(3 * time.Second)
+	return func() {
+		sshRunMayFail(t, host, fmt.Sprintf("tmux kill-session -t '%s' 2>/dev/null", session))
+	}
+}
+
+// submitJob submits a job to the test queue and returns the command used.
+func submitJob(t *testing.T, host string, jobID int64, cmd string, tags []string) {
+	t.Helper()
+	addCmd := ops.QueueCommand{
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		Op:        ops.OpAdd,
+		Job: &ops.CommandJob{
+			ID:   jobID,
+			Dir:  "/tmp",
+			Cmd:  cmd,
+			Tags: tags,
+		},
+	}
+	data, _ := json.Marshal(addCmd)
+	escaped := strings.ReplaceAll(string(data), "'", `'\''`)
+	appendCmd := fmt.Sprintf("printf '%%s\\n' '%s' >> %s/%s.commands", escaped, remoteQueueDir, testQueueName)
+	sshRun(t, host, appendCmd)
+}
+
+// sendCommand sends a queue command (priority, cancel, stop) to the test queue.
+func sendCommand(t *testing.T, host string, cmd ops.QueueCommand) {
+	t.Helper()
+	data, _ := json.Marshal(cmd)
+	escaped := strings.ReplaceAll(string(data), "'", `'\''`)
+	appendCmd := fmt.Sprintf("printf '%%s\\n' '%s' >> %s/%s.commands", escaped, remoteQueueDir, testQueueName)
+	sshRun(t, host, appendCmd)
+}
+
+// waitForJobStatus waits until the job's status file appears or timeout.
+func waitForJobStatus(t *testing.T, host string, jobID int64, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		result := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.status 2>/dev/null", remoteLogDir, jobID))
+		if result != "" {
+			return strings.TrimSpace(result)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatalf("Job %d did not complete within %s", jobID, timeout)
+	return ""
+}
+
+// cleanupJobFiles removes log/status/meta files for test job IDs.
+func cleanupJobFiles(t *testing.T, host string, jobIDs ...int64) {
+	t.Helper()
+	for _, id := range jobIDs {
+		sshRunMayFail(t, host, fmt.Sprintf("rm -f %s/%d.* 2>/dev/null", remoteLogDir, id))
+	}
+}
+
+// TestIntegration_GoRunnerJobCancel verifies that canceling a queued job
+// prevents it from running while the currently running job completes normally.
+func TestIntegration_GoRunnerJobCancel(t *testing.T) {
+	host := getTestHost(t)
+	skipIfNoAgent(t, host)
+	cleanupTestQueue(t, host)
+
+	jobA := int64(999010)
+	jobB := int64(999011)
+	cleanupJobFiles(t, host, jobA, jobB)
+	sshRun(t, host, fmt.Sprintf("mkdir -p %s %s", remoteQueueDir, remoteLogDir))
+
+	cleanup := startTestRunner(t, host, "cancel")
+	defer cleanup()
+
+	// Submit job A (sleeps 8s) and job B (quick echo)
+	submitJob(t, host, jobA, "echo 'job-a-start'; sleep 8; echo 'job-a-done'", nil)
+	time.Sleep(3 * time.Second) // Let runner pick up job A
+
+	submitJob(t, host, jobB, "echo 'job-b-should-not-run'", nil)
+	time.Sleep(1 * time.Second)
+
+	// Cancel job B before it starts
+	sendCommand(t, host, ops.NewCancelCommand(jobB))
+
+	// Wait for job A to complete
+	statusA := waitForJobStatus(t, host, jobA, 30*time.Second)
+	if statusA != "0" {
+		t.Errorf("Job A expected exit code 0, got %s", statusA)
+	}
+
+	// Wait a bit for runner to process any remaining queue
+	time.Sleep(5 * time.Second)
+
+	// Verify job B was never executed (no status file)
+	statusB := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.status 2>/dev/null", remoteLogDir, jobB))
+	if statusB != "" {
+		t.Errorf("Job B should not have run (was canceled), but got status: %s", statusB)
+	}
+
+	// Verify job B has no log file
+	logB := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.log 2>/dev/null", remoteLogDir, jobB))
+	if logB != "" {
+		t.Errorf("Job B should have no log file, but got:\n%s", logB)
+	}
+
+	sendCommand(t, host, ops.NewStopCommand())
+	t.Log("Go runner cancel test passed")
+}
+
+// TestIntegration_GoRunnerJobPriority verifies that moving a job to the front
+// of the queue causes it to run before other pending jobs.
+func TestIntegration_GoRunnerJobPriority(t *testing.T) {
+	host := getTestHost(t)
+	skipIfNoAgent(t, host)
+	cleanupTestQueue(t, host)
+
+	jobA := int64(999020)
+	jobB := int64(999021)
+	jobC := int64(999022)
+	cleanupJobFiles(t, host, jobA, jobB, jobC)
+	sshRun(t, host, fmt.Sprintf("mkdir -p %s %s", remoteQueueDir, remoteLogDir))
+
+	// Submit all three jobs BEFORE starting the runner, so priority takes effect
+	submitJob(t, host, jobA, "sleep 3; echo 'done-a'", nil)
+	submitJob(t, host, jobB, "sleep 3; echo 'done-b'", nil)
+	submitJob(t, host, jobC, "sleep 3; echo 'done-c'", nil)
+
+	// Prioritize C before starting runner
+	sendCommand(t, host, ops.NewPriorityCommand(jobC))
+
+	// Now start the runner
+	cleanup := startTestRunner(t, host, "priority")
+	defer cleanup()
+
+	// Wait for C to complete first (it was prioritized)
+	statusC := waitForJobStatus(t, host, jobC, 30*time.Second)
+	if statusC != "0" {
+		t.Errorf("Job C expected exit code 0, got %s", statusC)
+	}
+
+	// At this point, A and B should not be done yet (or just starting)
+	// Check that C finished before A and B by looking at meta file timestamps
+	metaC := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.meta 2>/dev/null", remoteLogDir, jobC))
+	if !strings.Contains(metaC, fmt.Sprintf("job_id=%d", jobC)) {
+		t.Errorf("Job C meta file missing or incorrect: %s", metaC)
+	}
+
+	// Wait for all to finish
+	waitForJobStatus(t, host, jobA, 30*time.Second)
+	waitForJobStatus(t, host, jobB, 30*time.Second)
+
+	// Verify C started before A by comparing meta start_time values
+	metaA := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.meta 2>/dev/null", remoteLogDir, jobA))
+	startC := extractMetaField(metaC, "start_time")
+	startA := extractMetaField(metaA, "start_time")
+	if startC != "" && startA != "" && startC > startA {
+		t.Errorf("Job C (priority) should have started before A: C=%s, A=%s", startC, startA)
+	}
+
+	sendCommand(t, host, ops.NewStopCommand())
+	t.Log("Go runner priority test passed")
+}
+
+// extractMetaField extracts a field value from meta file content (key=value format).
+func extractMetaField(meta, key string) string {
+	for _, line := range strings.Split(meta, "\n") {
+		if strings.HasPrefix(line, key+"=") {
+			return strings.TrimPrefix(line, key+"=")
+		}
+	}
+	return ""
+}
+
+// TestIntegration_GoRunnerExclusiveTag verifies that a job tagged "exclusive"
+// runs alone — no other job starts until it completes.
+func TestIntegration_GoRunnerExclusiveTag(t *testing.T) {
+	host := getTestHost(t)
+	skipIfNoAgent(t, host)
+	cleanupTestQueue(t, host)
+
+	jobExcl := int64(999030)
+	jobNext := int64(999031)
+	cleanupJobFiles(t, host, jobExcl, jobNext)
+	sshRun(t, host, fmt.Sprintf("mkdir -p %s %s", remoteQueueDir, remoteLogDir))
+
+	cleanup := startTestRunner(t, host, "exclusive")
+	defer cleanup()
+
+	// Submit exclusive job (sleeps 5s) then a non-exclusive job
+	submitJob(t, host, jobExcl, "echo 'excl-start'; sleep 5; echo 'excl-done'", []string{"exclusive"})
+	time.Sleep(1 * time.Second)
+	submitJob(t, host, jobNext, "echo 'next-done'", nil)
+
+	// Wait for both to complete
+	statusExcl := waitForJobStatus(t, host, jobExcl, 30*time.Second)
+	if statusExcl != "0" {
+		t.Errorf("Exclusive job expected exit code 0, got %s", statusExcl)
+	}
+
+	statusNext := waitForJobStatus(t, host, jobNext, 30*time.Second)
+	if statusNext != "0" {
+		t.Errorf("Next job expected exit code 0, got %s", statusNext)
+	}
+
+	// Verify exclusive job finished before next job started
+	metaExcl := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.meta 2>/dev/null", remoteLogDir, jobExcl))
+	metaNext := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.meta 2>/dev/null", remoteLogDir, jobNext))
+
+	endExcl := extractMetaField(metaExcl, "end_time")
+	startNext := extractMetaField(metaNext, "start_time")
+
+	if endExcl != "" && startNext != "" && endExcl > startNext {
+		t.Errorf("Exclusive job should have ended before next job started: excl_end=%s, next_start=%s", endExcl, startNext)
+	}
+
+	sendCommand(t, host, ops.NewStopCommand())
+	t.Log("Go runner exclusive tag test passed")
+}
+
+// TestIntegration_GoRunnerMultipleJobs verifies that the runner can execute
+// multiple non-exclusive jobs sequentially and all complete successfully.
+func TestIntegration_GoRunnerMultipleJobs(t *testing.T) {
+	host := getTestHost(t)
+	skipIfNoAgent(t, host)
+	cleanupTestQueue(t, host)
+
+	jobA := int64(999040)
+	jobB := int64(999041)
+	cleanupJobFiles(t, host, jobA, jobB)
+	sshRun(t, host, fmt.Sprintf("mkdir -p %s %s", remoteQueueDir, remoteLogDir))
+
+	cleanup := startTestRunner(t, host, "multi")
+	defer cleanup()
+
+	// Submit two quick jobs
+	submitJob(t, host, jobA, "echo 'multi-a-output'", nil)
+	submitJob(t, host, jobB, "echo 'multi-b-output'", nil)
+
+	// Wait for both to complete
+	statusA := waitForJobStatus(t, host, jobA, 30*time.Second)
+	if statusA != "0" {
+		t.Errorf("Job A expected exit code 0, got %s", statusA)
+	}
+
+	statusB := waitForJobStatus(t, host, jobB, 30*time.Second)
+	if statusB != "0" {
+		t.Errorf("Job B expected exit code 0, got %s", statusB)
+	}
+
+	// Verify both produced log output
+	logA := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.log 2>/dev/null", remoteLogDir, jobA))
+	if !strings.Contains(logA, "multi-a-output") {
+		t.Errorf("Job A log should contain output, got:\n%s", logA)
+	}
+
+	logB := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%d.log 2>/dev/null", remoteLogDir, jobB))
+	if !strings.Contains(logB, "multi-b-output") {
+		t.Errorf("Job B log should contain output, got:\n%s", logB)
+	}
+
+	// Verify state file shows both as finished
+	stateContent := sshRunMayFail(t, host, fmt.Sprintf("cat %s/%s.state.json 2>/dev/null", remoteQueueDir, testQueueName))
+	if stateContent != "" {
+		var state map[string]any
+		if err := json.Unmarshal([]byte(stateContent), &state); err != nil {
+			t.Errorf("State file is not valid JSON: %v", err)
+		} else {
+			if pending, ok := state["pending"].([]any); ok && len(pending) > 0 {
+				t.Errorf("Expected empty pending list, got %v", pending)
+			}
+		}
+	}
+
+	sendCommand(t, host, ops.NewStopCommand())
+	t.Log("Go runner multiple jobs test passed")
+}

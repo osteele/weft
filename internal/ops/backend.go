@@ -56,7 +56,7 @@ func probeBackend(host string, timeout time.Duration) (string, error) {
 }
 
 func hasQueueRunner(host string, timeout time.Duration) (bool, error) {
-	cmd := "test -f ~/.cache/weft/scripts/queue-runner.sh"
+	cmd := "test -x ~/.cache/weft/bin/weft-agent"
 	_, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		if ssh.IsConnectionError(stderr) {

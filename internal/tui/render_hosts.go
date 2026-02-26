@@ -436,10 +436,7 @@ func (m Model) renderHostDetail(height int) string {
 		if host.QueueStatus == QueueCheckChecked {
 			lines = append(lines, "")
 			lines = append(lines, "Queue")
-			if host.JqMissing {
-				lines = append(lines, "  ⚠ jq missing: Queue runner cannot start")
-				lines = append(lines, "    Install: curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq")
-			} else if host.QueueRunnerActive {
+			if host.QueueRunnerActive {
 				lines = append(lines, "  Runner:       Active")
 				if host.CurrentQueueJob != "" {
 					lines = append(lines, fmt.Sprintf("  Current job:  %s", host.CurrentQueueJob))

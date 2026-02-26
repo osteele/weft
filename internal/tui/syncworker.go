@@ -397,17 +397,8 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 				m.hosts[i].QueuedJobCount = result.QueueStatus.QueuedJobCount
 				m.hosts[i].CurrentQueueJob = result.QueueStatus.CurrentJob
 				m.hosts[i].QueueStopPending = result.QueueStatus.StopPending
-				m.hosts[i].JqMissing = result.QueueStatus.JqMissing
 
-				if result.QueueStatus.JqMissing && !m.jqMissingWarnedHosts[result.Host] {
-					m.jqMissingWarnedHosts[result.Host] = true
-					cmds = append(cmds, m.setFlash(
-						fmt.Sprintf("Warning: %s is missing 'jq' - queue runner cannot start. Install with: ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", result.Host, result.Host),
-						true,
-					))
-				}
-
-				if !result.QueueStatus.JqMissing && !result.QueueStatus.RunnerActive && !m.queueStoppedWarnedHosts[result.Host] {
+				if !result.QueueStatus.RunnerActive && !m.queueStoppedWarnedHosts[result.Host] {
 					queuedCount, _ := db.CountQueuedByHost(m.database, result.Host)
 					if queuedCount > 0 {
 						m.queueStoppedWarnedHosts[result.Host] = true

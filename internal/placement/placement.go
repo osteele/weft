@@ -67,20 +67,20 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints) Score {
 	// Hard constraint: GPU class (normalized: strip spaces/punctuation, case-insensitive)
 	if c.GPUClass != "" {
 		norm := normalizeGPUClass(c.GPUClass)
-		found := false
+		var matchedName string
 		for _, gpu := range host.GPUs {
 			if normalizeGPUClass(gpu.Class) == norm {
-				found = true
+				matchedName = gpu.Name
 				break
 			}
 		}
-		if !found {
+		if matchedName == "" {
 			s.Eligible = false
 			s.Reasons = append(s.Reasons, fmt.Sprintf("no %s GPU", c.GPUClass))
 			return s
 		}
 		s.Total += 10
-		s.Reasons = append(s.Reasons, fmt.Sprintf("has %s GPU", c.GPUClass))
+		s.Reasons = append(s.Reasons, fmt.Sprintf("has %s GPU", matchedName))
 	}
 
 	// Hard constraint: GPU memory

@@ -147,8 +147,6 @@ type Model struct {
 
 	// Track hosts that have already shown low disk warning this session
 	lowDiskWarnedHosts map[string]bool
-	// Track hosts that have already shown jq missing warning this session
-	jqMissingWarnedHosts map[string]bool
 	// Track hosts that have already shown queue runner stopped warning this session
 	queueStoppedWarnedHosts map[string]bool
 
@@ -315,7 +313,6 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostsQueriedThisSession: make(map[string]bool),
 		hostFailCount:           make(map[string]int),
 		lowDiskWarnedHosts:      make(map[string]bool),
-		jqMissingWarnedHosts:    make(map[string]bool),
 		queueStoppedWarnedHosts: make(map[string]bool),
 		logCache:                make(map[int64]string),
 		jobDependencies:         make(map[int64]string),

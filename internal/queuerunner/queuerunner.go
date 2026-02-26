@@ -1,22 +1,16 @@
 package queuerunner
 
 import (
-	"bytes"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/ops"
-	"github.com/osteele/weft/internal/scripts"
 	"github.com/osteele/weft/internal/ssh"
 )
 
 const (
-	queueDir        = "~/.cache/weft/queue"
-	scriptsDir      = "~/.cache/weft/scripts"
-	queueRunnerPath = "~/.cache/weft/scripts/queue-runner.sh"
+	queueDir = "~/.cache/weft/queue"
 )
 
 // QueueDir returns the remote directory used for queue files.
@@ -24,186 +18,21 @@ func QueueDir() string {
 	return queueDir
 }
 
-var (
-	localBuildHeader = secondLine(scripts.QueueRunnerScript)
-	localBuildNumber = parseBuildHeader(localBuildHeader)
-)
-
-func secondLine(data []byte) string {
-	buf := bytes.NewBuffer(data)
-	// Skip first line (shebang)
-	if _, err := buf.ReadString('\n'); err != nil {
-		return ""
-	}
-	// Read second line (BUILD header)
-	line, err := buf.ReadString('\n')
-	if err != nil && len(line) == 0 {
-		return ""
-	}
-	return strings.TrimSpace(line)
-}
-
-func parseBuildHeader(line string) int {
-	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "# BUILD:") {
-		return -1
-	}
-	rest := strings.TrimSpace(strings.TrimPrefix(line, "# BUILD:"))
-	n, err := strconv.Atoi(rest)
-	if err != nil {
-		return -1
-	}
-	return n
-}
-
-// LocalBuildNumber returns the embedded queue runner build number.
-func LocalBuildNumber() int {
-	return localBuildNumber
-}
-
-// RemoteBuildNumber returns the build number from the remote script (or -1 if missing).
-func RemoteBuildNumber(host string) (int, error) {
-	header, err := readRemoteHeader(host)
-	if err != nil {
-		return -1, err
-	}
-	if header == "" {
-		return -1, nil
-	}
-	return parseBuildHeader(header), nil
-}
-
-func readRemoteHeader(host string) (string, error) {
-	// Read line 2 (BUILD header is after shebang)
-	cmd := fmt.Sprintf("sed -n '2p' %s 2>/dev/null || true", queueRunnerPath)
-	stdout, stderr, err := ssh.Run(host, cmd)
-	if err != nil {
-		return "", fmt.Errorf("read remote version: %s", strings.TrimSpace(stderr))
-	}
-	return strings.TrimSpace(stdout), nil
-}
-
-func remoteFileSize(host string) (int, error) {
-	cmd := fmt.Sprintf("wc -c < %s 2>/dev/null || echo 0", queueRunnerPath)
-	stdout, _, err := ssh.Run(host, cmd)
-	if err != nil {
-		return 0, err
-	}
-	size, err := strconv.Atoi(strings.TrimSpace(stdout))
-	if err != nil {
-		return 0, nil // Treat parse errors as size 0
-	}
-	return size, nil
-}
-
-// EnsureScriptUpToDate deploys the queue runner script if the remote build is older
-// or if the file sizes differ (failsafe for when BUILD number wasn't bumped).
-// Returns true if a new script was deployed.
-func EnsureScriptUpToDate(host string) (bool, error) {
-	remoteBuild, err := RemoteBuildNumber(host)
-	if err != nil {
-		return false, err
-	}
-
-	needsDeploy := false
-
-	// Deploy when remote is missing or older
-	if remoteBuild < localBuildNumber || remoteBuild == -1 {
-		needsDeploy = true
-	}
-
-	// Failsafe: also deploy if BUILD numbers match but file sizes differ
-	// (catches forgotten BUILD bumps without causing ping-pong between different versions)
-	if !needsDeploy && remoteBuild == localBuildNumber {
-		remoteSize, err := remoteFileSize(host)
-		if err == nil && remoteSize != len(scripts.QueueRunnerScript) {
-			needsDeploy = true
-		}
-	}
-
-	if !needsDeploy {
-		return false, nil
-	}
-
-	if err := ensureDirectories(host); err != nil {
-		return false, err
-	}
-	if err := writeScript(host); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func ensureDirectories(host string) error {
-	cmd := fmt.Sprintf("mkdir -p %s %s", queueDir, scriptsDir)
-	if _, stderr, err := ssh.Run(host, cmd); err != nil {
-		return fmt.Errorf("create directories: %s", strings.TrimSpace(stderr))
-	}
-	return nil
-}
-
-func writeScript(host string) error {
-	// Write script to a temp file and scp it to the remote host.
-	// We can't use a heredoc through the pooled SSH session because
-	// heredocs read from stdin, which conflicts with the session's
-	// command-framing protocol.
-	tmpFile, err := os.CreateTemp("", "queue-runner-*.sh")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.Write(scripts.QueueRunnerScript); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	tmpFile.Close()
-
-	if err := ssh.CopyToWithRetryVerbose(tmpFile.Name(), host, queueRunnerPath, false); err != nil {
-		return fmt.Errorf("copy queue runner: %w", err)
-	}
-
-	chmodCmd := fmt.Sprintf("chmod +x %s", queueRunnerPath)
-	if _, stderr, err := ssh.Run(host, chmodCmd); err != nil {
-		return fmt.Errorf("chmod queue runner: %s", strings.TrimSpace(stderr))
-	}
-	return nil
-}
-
 const agentBinaryPath = "$HOME/.cache/weft/bin/weft-agent"
 
-// RunnerCommand builds the command to start the queue runner (optionally with env prefix).
-// Prefers the Go agent binary if available, falling back to the bash script.
+// RunnerCommand builds the command to start the Go queue runner.
 func RunnerCommand(envPrefix string) string {
-	return fmt.Sprintf(
-		"%sif [ -x %s ]; then %s run-queue %s; else bash $HOME/.cache/weft/scripts/queue-runner.sh %s; fi",
-		envPrefix, agentBinaryPath, agentBinaryPath, ops.DefaultQueueName, ops.DefaultQueueName)
+	return fmt.Sprintf("%s%s run-queue %s", envPrefix, agentBinaryPath, ops.DefaultQueueName)
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
-// Also upgrades the queue runner script if needed, signaling the runner to restart.
 // Returns true when a new runner was started.
 func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 	session := fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName)
 
-	// Always check if script needs upgrade, even if runner is already running
-	upgraded, err := EnsureScriptUpToDate(host)
-	if err != nil {
-		return false, err
-	}
-
 	exists, err := ssh.TmuxSessionExists(host, session)
 	if err != nil {
 		return false, fmt.Errorf("check session: %w", err)
-	}
-
-	// If runner exists and script was upgraded, send a restart command.
-	// The runner will re-exec itself to pick up the new version while
-	// preserving state and continuing to monitor any running jobs.
-	if exists && upgraded {
-		restartCmd := ops.NewRestartCommand()
-		_ = ops.AppendCommand(host, restartCmd, ops.AppendCommandOptions{}) // Best effort
-		return false, nil                                                   // Runner will restart itself
 	}
 
 	if exists {
@@ -216,11 +45,9 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 	}
 
 	// Health check: wait briefly and verify the session is still alive.
-	// This catches cases where the runner script crashes immediately (e.g., corrupted state file).
 	time.Sleep(2 * time.Second)
 	stillExists, err := ssh.TmuxSessionExists(host, session)
 	if err != nil {
-		// Can't verify - assume it's OK (host might have become unreachable)
 		return true, nil
 	}
 	if !stillExists {
@@ -249,7 +76,7 @@ func (r *Runner) Queue() string { return ops.DefaultQueueName }
 // SessionName returns the tmux session associated with this runner.
 func (r *Runner) SessionName() string { return fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName) }
 
-// EnsureStarted ensures the runner is active, deploying scripts and starting tmux if needed.
+// EnsureStarted ensures the runner is active, starting tmux if needed.
 func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {
 	runnerCmd := RunnerCommand(envPrefix)
 	return EnsureRunnerStarted(r.host, runnerCmd)
@@ -283,19 +110,4 @@ func (r *Runner) WaitForStop(timeout time.Duration) error {
 // IsRunning reports whether the runner tmux session exists.
 func (r *Runner) IsRunning() (bool, error) {
 	return ssh.TmuxSessionExists(r.host, r.SessionName())
-}
-
-// CheckJqAvailable checks if jq is available on the host (in PATH or ~/.local/bin).
-func CheckJqAvailable(host string) (bool, error) {
-	cmd := `(command -v jq >/dev/null 2>&1 || test -x ~/.local/bin/jq) && echo "yes" || echo "no"`
-	stdout, _, err := ssh.Run(host, cmd)
-	if err != nil {
-		return false, err
-	}
-	return strings.TrimSpace(stdout) == "yes", nil
-}
-
-// JqInstallCommand returns the command to install jq on a Linux host.
-func JqInstallCommand(host string) string {
-	return fmt.Sprintf("ssh %s 'mkdir -p ~/.local/bin && curl -sL https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64 -o ~/.local/bin/jq && chmod +x ~/.local/bin/jq'", host)
 }

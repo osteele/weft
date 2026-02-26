@@ -449,14 +449,6 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	queue = defaultQueueName
 
-	// Check if jq is available (required for queue runner)
-	jqAvailable, err := queuerunner.CheckJqAvailable(host)
-	if err == nil && !jqAvailable {
-		fmt.Fprintf(os.Stderr, "Warning: %s is missing 'jq' - queue runner cannot start.\n", host)
-		fmt.Fprintf(os.Stderr, "Install with: %s\n", queuerunner.JqInstallCommand(host))
-		return false, fmt.Errorf("jq is required but not installed on %s", host)
-	}
-
 	// Deploy notify script if Slack is configured
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)
@@ -615,63 +607,7 @@ func runQueueUpdate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	runner := queuerunner.NewRunner(host)
-
-	upgraded, err := queuerunner.EnsureScriptUpToDate(host)
-	if err != nil {
-		return fmt.Errorf("update queue runner script: %w", err)
-	}
-
-	running, err := runner.IsRunning()
-	if err != nil {
-		return fmt.Errorf("check queue runner: %w", err)
-	}
-
-	if !upgraded {
-		if running {
-			fmt.Printf("Queue runner on %s is already up to date (build %d) and running.\n", host, queuerunner.LocalBuildNumber())
-		} else {
-			fmt.Printf("Queue runner script on %s is already up to date (build %d).\n", host, queuerunner.LocalBuildNumber())
-		}
-		return nil
-	}
-
-	fmt.Printf("Updated queue runner script on %s (build %d).\n", host, queuerunner.LocalBuildNumber())
-	if !running {
-		return nil
-	}
-
-	if err := runner.SendStopSignal(); err != nil {
-		return fmt.Errorf("signal queue runner stop: %w", err)
-	}
-
-	stopped := false
-	for i := 0; i < 3; i++ {
-		time.Sleep(500 * time.Millisecond)
-		stillRunning, err := runner.IsRunning()
-		if err != nil {
-			return fmt.Errorf("check queue runner: %w", err)
-		}
-		if !stillRunning {
-			stopped = true
-			break
-		}
-	}
-
-	if !stopped {
-		fmt.Printf("Queue runner on %s will pick up the update after the current job completes.\n", host)
-		return nil
-	}
-
-	started, err := runner.EnsureStarted("")
-	if err != nil {
-		return fmt.Errorf("restart queue runner: %w", err)
-	}
-	if started {
-		fmt.Printf("Queue runner on %s restarted.\n", host)
-	} else {
-		fmt.Printf("Queue runner on %s is already running.\n", host)
-	}
+	fmt.Printf("The queue runner is now a Go binary. Use 'weft sync %s' to deploy the latest agent binary.\n", host)
 	return nil
 }
 

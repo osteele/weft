@@ -78,7 +78,6 @@ type Host struct {
 	QueuedJobCount    int              // Number of jobs waiting in queue
 	CurrentQueueJob   string           // Job ID currently running in queue
 	QueueStopPending  bool             // Whether stop signal file exists
-	JqMissing         bool             // jq is required but not installed on this host
 
 	// Running jobs on this host
 	RunningJobs []HostRunningJob
@@ -443,10 +442,6 @@ func (h *Host) UpdateFrom(source *Host) {
 	if source.QueueStopPending {
 		h.QueueStopPending = source.QueueStopPending
 	}
-	if source.JqMissing {
-		h.JqMissing = source.JqMissing
-	}
-
 	if source.RunningJobs != nil {
 		h.RunningJobs = source.RunningJobs
 	}

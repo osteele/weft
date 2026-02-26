@@ -151,12 +151,6 @@ func (m Model) startQueue(host string) tea.Cmd {
 // ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
-	// Check if jq is available (required for queue runner)
-	jqAvailable, err := queuerunner.CheckJqAvailable(host)
-	if err == nil && !jqAvailable {
-		return false, fmt.Errorf("jq is required but not installed on %s", host)
-	}
-
 	// Deploy notify script and build env vars if Slack is configured
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)
