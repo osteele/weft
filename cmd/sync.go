@@ -10,7 +10,9 @@ import (
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
@@ -124,6 +126,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Deploy agent binary to reachable hosts that need updates
 	deployAgentsToHosts(hosts)
 
+	// Sync placement outcomes for pending_placement jobs
+	placementUpdated := syncPlacementOutcomes(database, syncVerbose)
+	totalUpdated += placementUpdated
+
 	// Prune old cached log files
 	cfg, _ := config.Load()
 	if cfg.LogCacheMaxAge > 0 {
@@ -151,6 +157,57 @@ func syncHost(database *sql.DB, host string) (int, error) {
 		NoQueueStart: true, // Queue runners are started separately in runSync
 	}, nil)
 	return result.Updated, err
+}
+
+// syncPlacementOutcomes checks for jobs in pending_placement status and polls
+// the coordinator for placement outcomes. Returns the number of jobs updated.
+func syncPlacementOutcomes(database *sql.DB, verbose bool) int {
+	jobs, err := db.ListJobs(database, db.StatusPendingPlacement, "", 100, nil, "")
+	if err != nil || len(jobs) == 0 {
+		return 0
+	}
+
+	config := coordinator.DefaultConfig()
+	updated := 0
+
+	for _, job := range jobs {
+		intentID := job.RemoteID
+		if intentID == "" {
+			continue
+		}
+
+		outcome, err := intent.ReadOutcome(coordinatorHost, config.ArchiveDir, intentID)
+		if err != nil {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "  placement check for job %d: %v\n", job.ID, err)
+			}
+			continue
+		}
+		if outcome == nil {
+			continue // no outcome yet
+		}
+
+		// Update local job with placement result
+		if outcome.Host != "" {
+			if err := db.SetJobPlacement(database, job.ID, outcome.Host, strings.Join(outcome.Reasons, "; ")); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: update placement for job %d: %v\n", job.ID, err)
+				continue
+			}
+			// Transition to queued status now that we know the host
+			if _, err := database.Exec("UPDATE jobs SET host = ?, status = ? WHERE id = ?", outcome.Host, db.StatusQueued, job.ID); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: update host for job %d: %v\n", job.ID, err)
+				continue
+			}
+			updated++
+			if verbose {
+				fmt.Printf("  job %d placed on %s (%s)\n", job.ID, outcome.Host, strings.Join(outcome.Reasons, "; "))
+			}
+		} else if outcome.Error != "" {
+			fmt.Fprintf(os.Stderr, "Warning: placement failed for job %d: %s\n", job.ID, outcome.Error)
+		}
+	}
+
+	return updated
 }
 
 // performSyncWithTimeout performs a sync with specified timeout for list/status commands

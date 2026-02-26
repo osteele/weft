@@ -45,11 +45,26 @@ var coordinatorStatusCmd = &cobra.Command{
 	RunE:  runCoordinatorStatus,
 }
 
+var coordinatorInstallCmd = &cobra.Command{
+	Use:   "install",
+	Short: "Install coordinator as a launchd service (macOS)",
+	Long:  `Creates a launchd plist so the coordinator starts automatically on login and restarts if it crashes.`,
+	RunE:  runCoordinatorInstall,
+}
+
+var coordinatorUninstallCmd = &cobra.Command{
+	Use:   "uninstall",
+	Short: "Remove coordinator launchd service",
+	RunE:  runCoordinatorUninstall,
+}
+
 func init() {
 	rootCmd.AddCommand(coordinatorCmd)
 	coordinatorCmd.AddCommand(coordinatorStartCmd)
 	coordinatorCmd.AddCommand(coordinatorStopCmd)
 	coordinatorCmd.AddCommand(coordinatorStatusCmd)
+	coordinatorCmd.AddCommand(coordinatorInstallCmd)
+	coordinatorCmd.AddCommand(coordinatorUninstallCmd)
 }
 
 func runCoordinatorStart(cmd *cobra.Command, args []string) error {
@@ -131,5 +146,34 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Status: running (PID %d)\n", pid)
 	fmt.Printf("Intent dir: %s\n", config.IntentDir)
 	fmt.Printf("Log: %s\n", config.LogPath)
+	if coordinator.IsInstalled() {
+		fmt.Printf("Launchd: installed (%s)\n", coordinator.PlistPath())
+	}
+	return nil
+}
+
+func runCoordinatorInstall(cmd *cobra.Command, args []string) error {
+	if coordinator.IsInstalled() {
+		fmt.Printf("Already installed at %s\n", coordinator.PlistPath())
+		return nil
+	}
+	if err := coordinator.Install(); err != nil {
+		return fmt.Errorf("install: %w", err)
+	}
+	fmt.Printf("Installed coordinator launchd service\n")
+	fmt.Printf("  Plist: %s\n", coordinator.PlistPath())
+	fmt.Println("The coordinator will start automatically on login.")
+	return nil
+}
+
+func runCoordinatorUninstall(cmd *cobra.Command, args []string) error {
+	if !coordinator.IsInstalled() {
+		fmt.Println("Not installed")
+		return nil
+	}
+	if err := coordinator.Uninstall(); err != nil {
+		return fmt.Errorf("uninstall: %w", err)
+	}
+	fmt.Println("Uninstalled coordinator launchd service")
 	return nil
 }

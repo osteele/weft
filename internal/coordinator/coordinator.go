@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/intent"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
@@ -85,6 +86,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	oplog.Log(oplog.OpCoordinatorStart)
 	c.logger.Println("coordinator started")
+
+	// Seed host state from inventory so all known hosts are tracked from the start
+	c.seedHostState()
 
 	// Ensure intent and archive directories exist
 	for _, dir := range []string{c.config.IntentDir, c.config.ArchiveDir} {
@@ -212,6 +216,7 @@ func (c *Coordinator) handleIntentFile(path string) {
 	c.logger.Printf("dispatched intent %s as job %d on %s", i.IntentID, jobID, host)
 	oplog.LogJob(oplog.OpCoordinatorDispatch, jobID, host, oplog.WithDetailf("intent=%s reasons=%s", i.IntentID, strings.Join(reasons, "; ")))
 	c.archiveIntent(path)
+	c.writeOutcome(i.IntentID, jobID, host, reasons, "")
 }
 
 // probeHosts checks connectivity to all known hosts.
@@ -256,6 +261,49 @@ func (c *Coordinator) probeHost(host string) bool {
 	}
 
 	return online
+}
+
+// seedHostState populates the host state map from the embedded inventory
+// and probes each host for initial connectivity.
+func (c *Coordinator) seedHostState() {
+	hosts, err := inventory.LoadEmbeddedHosts()
+	if err != nil {
+		c.logger.Printf("load inventory: %v", err)
+		return
+	}
+
+	c.mu.Lock()
+	for _, h := range hosts {
+		if _, ok := c.hostState[h.Name]; !ok {
+			c.hostState[h.Name] = &HostState{Name: h.Name}
+		}
+	}
+	c.mu.Unlock()
+
+	// Probe all hosts in parallel for fast startup
+	var wg sync.WaitGroup
+	for _, h := range hosts {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			c.probeHost(name)
+		}(h.Name)
+	}
+	wg.Wait()
+
+	// Log results
+	c.mu.Lock()
+	var online, offline []string
+	for name, hs := range c.hostState {
+		if hs.Online {
+			online = append(online, name)
+		} else {
+			offline = append(offline, name)
+		}
+	}
+	c.mu.Unlock()
+
+	c.logger.Printf("hosts online: %v, offline: %v", online, offline)
 }
 
 // markHostOffline updates a host's state to offline.
@@ -312,6 +360,10 @@ func (c *Coordinator) drainRetryQueue() {
 
 // syncAllHosts runs SyncHost for each known host.
 func (c *Coordinator) syncAllHosts() {
+	if c.db == nil {
+		return
+	}
+
 	c.mu.Lock()
 	hosts := make([]string, 0, len(c.hostState))
 	for name, hs := range c.hostState {
@@ -328,6 +380,22 @@ func (c *Coordinator) syncAllHosts() {
 		if err != nil {
 			c.logger.Printf("sync %s: %v", host, err)
 		}
+	}
+}
+
+// writeOutcome writes a placement outcome file so the submitting laptop can
+// learn which host was chosen.
+func (c *Coordinator) writeOutcome(intentID string, jobID int64, host string, reasons []string, errMsg string) {
+	outcome := &intent.Outcome{
+		IntentID: intentID,
+		JobID:    jobID,
+		Host:     host,
+		Reasons:  reasons,
+		Error:    errMsg,
+		Time:     time.Now(),
+	}
+	if err := intent.WriteOutcome(c.config.ArchiveDir, outcome); err != nil {
+		c.logger.Printf("write outcome for %s: %v", intentID, err)
 	}
 }
 

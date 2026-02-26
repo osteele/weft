@@ -879,6 +879,11 @@ func submitIntent(database *sql.DB, command, dir, description string, envVars, t
 		},
 	}
 
+	// Store intent ID in remote_id for outcome polling
+	if err := db.SetJobRemoteID(database, jobID, i.IntentID); err != nil {
+		return fmt.Errorf("store intent ID: %w", err)
+	}
+
 	// Write intent to coordinator
 	if err := intent.WriteIntent(coordinatorHost, i); err != nil {
 		// If coordinator write fails, fall back to local placement info
