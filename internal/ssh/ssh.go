@@ -151,6 +151,18 @@ func Run(host string, command string) (string, string, error) {
 	return runner(host, command)
 }
 
+// RunWithStdin executes an SSH command with data piped to stdin.
+// Returns stdout, stderr, and error.
+func RunWithStdin(host, command, stdin string) (string, string, error) {
+	cmd := sshCommand(host, command)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	return stdoutBuf.String(), stderrBuf.String(), err
+}
+
 // RunWithContext executes an SSH command with context cancellation support.
 // When the context is cancelled, the command returns context.Canceled.
 func RunWithContext(ctx context.Context, host string, command string) (string, string, error) {

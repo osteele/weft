@@ -133,6 +133,9 @@ const StatusPaused = "paused"
 // StatusDraft indicates a job that exists locally but should not run remotely
 const StatusDraft = "draft"
 
+// StatusPendingPlacement indicates a job submitted to the coordinator but not yet placed on a host
+const StatusPendingPlacement = "pending_placement"
+
 var dbPath string
 
 func init() {
@@ -340,6 +343,14 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN outputs TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add placement columns for coordinator-based job placement
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_host TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_reasons TEXT`); err != nil {
 		return err
 	}
 
@@ -729,6 +740,25 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 		`UPDATE jobs SET end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
 		endTime, StatusFailed, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
+	)
+	return err
+}
+
+// MarkPendingPlacement sets a job's status to pending_placement.
+// Used when submitting a job to the coordinator for host assignment.
+func MarkPendingPlacement(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ? WHERE id = ?`,
+		StatusPendingPlacement, id,
+	)
+	return err
+}
+
+// SetJobPlacement records the coordinator's placement decision.
+func SetJobPlacement(db *sql.DB, jobID int64, host string, reasons string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET placement_host = ?, placement_reasons = ? WHERE id = ?`,
+		host, reasons, jobID,
 	)
 	return err
 }

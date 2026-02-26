@@ -38,6 +38,14 @@ const (
 	OpAgentStart     = "agent.start"
 	OpAgentStop      = "agent.stop"
 	OpAgentVersion   = "agent.version"
+
+	// Coordinator operations
+	OpCoordinatorStart    = "coordinator.start"
+	OpCoordinatorStop     = "coordinator.stop"
+	OpCoordinatorDispatch = "coordinator.dispatched"
+	OpCoordinatorDeferred = "coordinator.deferred"
+	OpCoordinatorRetry    = "coordinator.retry"
+	OpCoordinatorError    = "coordinator.error"
 )
 
 // Entry represents a single log entry in JSONL format.

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,13 +13,17 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/session"
+	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
 
@@ -271,6 +276,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if runImmediate {
 			return fmt.Errorf("--immediate requires an explicit host")
 		}
+
+		// Try coordinator-based placement first
+		if !runDraft && coordinatorReachable() {
+			return submitIntent(database, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
+		}
+
+		// Fall back to local placement
 		bestHost, reasons, err := placement.BestHost(database, placementConstraints)
 		if err != nil {
 			return fmt.Errorf("auto-placement failed: %w", err)
@@ -773,4 +785,117 @@ func printCommandRecommendations(command string) bool {
 		return true
 	}
 	return false
+}
+
+// coordinatorHost is the host where the coordinator daemon runs.
+const coordinatorHost = "studio"
+
+// coordinatorReachable checks if the coordinator daemon is running on studio.
+// It checks for the PID file via SSH with a short timeout for fast fail.
+func coordinatorReachable() bool {
+	config := coordinator.DefaultConfig()
+	cmd := fmt.Sprintf("test -f %s && kill -0 $(cat %s) 2>/dev/null && echo YES || echo NO",
+		config.PIDFile, config.PIDFile)
+	stdout, _, err := ssh.RunWithTimeout(coordinatorHost, cmd, 3*time.Second)
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(stdout) == "YES"
+}
+
+// submitIntent writes a placement intent to the coordinator and records the job locally.
+func submitIntent(database *sql.DB, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
+	// Resolve working directory
+	workingDir := dir
+	if workingDir == "" {
+		var err error
+		workingDir, err = session.DefaultWorkingDir()
+		if err != nil {
+			return fmt.Errorf("get working dir: %w", err)
+		}
+	}
+
+	// Record job locally with pending_placement status
+	jobID, err := db.RecordQueuedWithGPU(database, "", workingDir, command, description, "")
+	if err != nil {
+		return fmt.Errorf("record job: %w", err)
+	}
+	if err := db.MarkPendingPlacement(database, jobID); err != nil {
+		return fmt.Errorf("set pending_placement: %w", err)
+	}
+	if len(tags) > 0 {
+		if err := db.SetJobTags(database, jobID, tags); err != nil {
+			return fmt.Errorf("set tags: %w", err)
+		}
+	}
+	if len(envVars) > 0 {
+		if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
+			return fmt.Errorf("set env vars: %w", err)
+		}
+	}
+	if len(inputs) > 0 {
+		if err := db.SetJobInputs(database, jobID, inputs); err != nil {
+			return fmt.Errorf("set inputs: %w", err)
+		}
+	}
+	if len(outputs) > 0 {
+		if err := db.SetJobOutputs(database, jobID, outputs); err != nil {
+			return fmt.Errorf("set outputs: %w", err)
+		}
+	}
+
+	// Build intent
+	var gpuMemPtr *int
+	if gpuMemGB > 0 {
+		gpuMemPtr = &gpuMemGB
+	}
+
+	depSpec := ""
+	if depAfter > 0 {
+		depSpec = fmt.Sprintf("%d", depAfter)
+	}
+
+	hostname, _ := os.Hostname()
+	i := &intent.Intent{
+		Timestamp: time.Now(),
+		Op:        "place",
+		IntentID:  uuid.New().String(),
+		Source:    hostname,
+		Job: intent.IntentJob{
+			ID:      jobID,
+			Cmd:     command,
+			Dir:     workingDir,
+			Desc:    description,
+			Env:     envVars,
+			Inputs:  inputs,
+			Outputs: outputs,
+			Constraints: intent.IntentConstraints{
+				GPUClass: gpuClass,
+				GPUMemGB: gpuMemGB,
+			},
+			Tags:     tags,
+			DepSpec:  depSpec,
+			GPUMemGB: gpuMemPtr,
+		},
+	}
+
+	// Write intent to coordinator
+	if err := intent.WriteIntent(coordinatorHost, i); err != nil {
+		// If coordinator write fails, fall back to local placement info
+		fmt.Fprintf(os.Stderr, "Warning: could not submit intent to coordinator: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Job %d saved locally with pending_placement status\n", jobID)
+		return nil
+	}
+
+	oplog.Log(oplog.OpCLICommand, oplog.WithDetailf("intent submitted id=%s job=%d", i.IntentID, jobID))
+
+	fmt.Printf("Intent %s submitted to coordinator\n", i.IntentID)
+	fmt.Printf("Job #%d saved locally (pending placement)\n\n", jobID)
+	fmt.Printf("  Working dir: %s\n", workingDir)
+	fmt.Printf("  Command: %s\n", command)
+	if description != "" {
+		fmt.Printf("  Description: %s\n", description)
+	}
+
+	return nil
 }
