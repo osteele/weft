@@ -289,20 +289,17 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	return result, nil
 }
 
-// scanHFCacheDuringSync scans the remote HF cache and records discovered assets.
-// Failures are silently ignored to avoid disrupting the sync flow.
+// scanHFCacheDuringSync scans the remote HF cache and records discovered assets
+// with their paths and sizes. Failures are silently ignored to avoid disrupting
+// the sync flow.
 func scanHFCacheDuringSync(database *sql.DB, host string) {
-	assets, err := dataloc.ScanHFCache(host)
+	entries, err := dataloc.ScanHFCacheDetailed(host)
 	if err != nil {
 		return
 	}
 	now := time.Now()
-	for _, asset := range assets {
-		entry := dataloc.HostDataEntry{
-			Host:     host,
-			Asset:    asset,
-			LastSeen: now,
-		}
+	for _, entry := range entries {
+		entry.LastSeen = now
 		_ = dataloc.RecordAsset(database, entry)
 	}
 }

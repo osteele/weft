@@ -271,21 +271,18 @@ func runHostData(cmd *cobra.Command, args []string) error {
 
 	if hostDataScan {
 		fmt.Printf("Scanning HuggingFace cache on %s...\n", host)
-		assets, err := dataloc.ScanHFCache(host)
+		entries, err := dataloc.ScanHFCacheDetailed(host)
 		if err != nil {
 			return fmt.Errorf("scan HF cache: %w", err)
 		}
 		now := time.Now()
-		for _, asset := range assets {
-			if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
-				Host:     host,
-				Asset:    asset,
-				LastSeen: now,
-			}); err != nil {
+		for _, entry := range entries {
+			entry.LastSeen = now
+			if err := dataloc.RecordAsset(database, entry); err != nil {
 				return fmt.Errorf("record asset: %w", err)
 			}
 		}
-		fmt.Printf("Found %d asset(s)\n", len(assets))
+		fmt.Printf("Found %d asset(s)\n", len(entries))
 	}
 
 	entries, err := dataloc.ListHostAssets(database, host)
