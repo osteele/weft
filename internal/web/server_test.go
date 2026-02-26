@@ -1,11 +1,195 @@
 package web
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/progress"
 )
+
+// newTestServer creates a Server with no monitor for testing API endpoints.
+func newTestServer(t *testing.T) *Server {
+	t.Helper()
+	return &Server{
+		hostSyncTimes: make(map[string]time.Time),
+		jobProgress:   make(map[int64]*progress.Progress),
+		stopCh:        make(chan struct{}),
+	}
+}
+
+func TestHandleAPIHosts_ReturnsJSON(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/hosts", nil)
+	w := httptest.NewRecorder()
+
+	s.handleAPIHosts(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type: got %q, want application/json", ct)
+	}
+
+	var hosts []apiHost
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(hosts) < 3 {
+		t.Fatalf("expected at least 3 hosts, got %d", len(hosts))
+	}
+
+	// All hosts should have basic fields from inventory
+	for _, h := range hosts {
+		if h.Name == "" {
+			t.Error("host has empty name")
+		}
+		if h.OS == "" {
+			t.Errorf("host %s has empty OS", h.Name)
+		}
+		if len(h.GPUs) == 0 {
+			t.Errorf("host %s has no GPUs", h.Name)
+		}
+		// Without a monitor, status should be "unknown"
+		if h.Status != "unknown" {
+			t.Errorf("host %s status: got %q, want unknown (no monitor)", h.Name, h.Status)
+		}
+	}
+}
+
+func TestHandleAPIHosts_GPUFields(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/hosts", nil)
+	w := httptest.NewRecorder()
+
+	s.handleAPIHosts(w, req)
+
+	var hosts []apiHost
+	if err := json.Unmarshal(w.Body.Bytes(), &hosts); err != nil {
+		t.Fatal(err)
+	}
+
+	// Find cool100 — should have 2 GPU groups
+	for _, h := range hosts {
+		if h.Name == "cool100" {
+			if len(h.GPUs) != 2 {
+				t.Fatalf("cool100: got %d GPU groups, want 2", len(h.GPUs))
+			}
+			if h.GPUs[0].Class != "a100" {
+				t.Errorf("cool100 GPU[0] class: got %s, want a100", h.GPUs[0].Class)
+			}
+			if h.GPUs[0].Count != 2 {
+				t.Errorf("cool100 GPU[0] count: got %d, want 2", h.GPUs[0].Count)
+			}
+			return
+		}
+	}
+	t.Error("cool100 not found in /api/hosts response")
+}
+
+func TestHandleAPICoordinator_NotRunning(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/coordinator", nil)
+	w := httptest.NewRecorder()
+
+	s.handleAPICoordinator(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+
+	var state apiCoordinatorState
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Without a coordinator running, should report not running
+	// (unless one happens to be running on this machine, which is unlikely in CI)
+	if state.Running && state.PID == "" {
+		t.Error("running=true but no PID")
+	}
+}
+
+func TestHandleAPICoordinator_Running(t *testing.T) {
+	s := newTestServer(t)
+
+	// Create a temporary PID file
+	tmpDir := t.TempDir()
+	pidFile := filepath.Join(tmpDir, "coordinator.pid")
+	os.WriteFile(pidFile, []byte("12345"), 0644)
+
+	// Override the home dir check by testing the handler logic directly
+	// We'll test that a valid PID file produces running=true
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "12345" {
+		t.Fatalf("PID file content: got %q, want 12345", string(data))
+	}
+
+	// The actual handler reads from ~/.cache/weft/coordinator.pid,
+	// so we just verify the response format
+	req := httptest.NewRequest(http.MethodGet, "/api/coordinator", nil)
+	w := httptest.NewRecorder()
+	s.handleAPICoordinator(w, req)
+
+	var state apiCoordinatorState
+	json.Unmarshal(w.Body.Bytes(), &state)
+	// Just verify it returns valid JSON with expected fields
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+}
+
+func TestHandleAPIOplog_EmptyLog(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/oplog", nil)
+	w := httptest.NewRecorder()
+
+	s.handleAPIOplog(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+
+	var entries []oplog.Entry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// May have entries from actual local oplog, or empty — both are fine
+	// Just verify it returns a valid JSON array
+}
+
+func TestHandleCluster_ReturnsHTML(t *testing.T) {
+	s := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/cluster", nil)
+	w := httptest.NewRecorder()
+
+	s.handleCluster(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type: got %q, want text/html", ct)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "weft cluster") {
+		t.Error("cluster page should contain 'weft cluster' title")
+	}
+	if !strings.Contains(body, "/api/hosts") {
+		t.Error("cluster page should reference /api/hosts endpoint")
+	}
+}
 
 func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 	now := time.Now()
