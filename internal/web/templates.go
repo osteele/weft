@@ -228,10 +228,19 @@ const clusterTemplate = `<!doctype html>
           if (h.gpus && h.gpus.length) {
             gpuHTML = '<div class="gpu-list">';
             h.gpus.forEach(function(g) {
+              var util = g.utilization || 0;
+              var barWidth = util + '%';
+              var memLabel = g.mem_used && g.mem_total ? g.mem_used + ' / ' + g.mem_total : g.memory;
+              var countLabel = g.count > 1 ? g.count + 'x ' : '';
+              var tempLabel = g.temperature > 0 ? ' ' + g.temperature + '°C' : '';
               gpuHTML += '<div class="gpu-item">' +
-                '<span class="gpu-name">' + g.name + '</span>' +
-                '<div class="gpu-bar-track"><div class="gpu-bar-fill" style="width:0%"></div></div>' +
-                '<span class="gpu-mem">' + g.memory + '</span>' +
+                '<span class="gpu-name">' + countLabel + g.name + '</span>' +
+                '<div class="gpu-bar-track"><div class="gpu-bar-fill" style="width:' + barWidth + '"></div></div>' +
+                '<span class="gpu-mem">' + util + '%' + tempLabel + '</span>' +
+                '</div>' +
+                '<div class="gpu-item" style="margin-top:-2px">' +
+                '<span class="gpu-name"></span>' +
+                '<span class="gpu-mem" style="min-width:auto;text-align:left;flex:1;font-size:11px">' + memLabel + '</span>' +
                 '</div>';
             });
             gpuHTML += '</div>';
