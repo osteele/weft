@@ -617,11 +617,12 @@ func SyncAndReconcile(database *sql.DB, job *db.Job, opts ReconcileOptions) (*Re
 		return nil, reconcileErr
 	}
 
-	// Fire hook if job transitioned from non-terminal to terminal
+	// Fire hook and record outputs if job transitioned from non-terminal to terminal
 	if result != nil && result.NewStatus != "" && hooks.ShouldFireHook(oldStatus, result.NewStatus) {
 		updated, fetchErr := db.GetJobByID(database, job.ID)
 		if fetchErr == nil && updated != nil {
 			hooks.RunOnJobComplete(updated)
+			RecordJobOutputs(database, updated)
 		}
 	}
 

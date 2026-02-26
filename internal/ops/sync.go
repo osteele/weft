@@ -190,6 +190,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		}
 		if hooks.ShouldFireHook(oldStatus, updated.Status) {
 			hooks.RunOnJobComplete(updated)
+			RecordJobOutputs(database, updated)
 		}
 	}()
 	// SLURM-managed jobs use SLURM probes regardless of session name.
