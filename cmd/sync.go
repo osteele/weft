@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
@@ -118,6 +120,9 @@ func runSync(cmd *cobra.Command, args []string) error {
 	if !syncNoQueueStart {
 		startQueueRunnersForQueuedHosts(database)
 	}
+
+	// Deploy agent binary to reachable hosts that need updates
+	deployAgentsToHosts(hosts)
 
 	// Prune old cached log files
 	cfg, _ := config.Load()
@@ -304,4 +309,25 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 		summaries = append(summaries, fmt.Sprintf("%s: %s", host, age))
 	}
 	return summaries
+}
+
+// deployAgentsToHosts deploys the agent binary to hosts that have an outdated
+// or missing version. Errors are logged as warnings — agent deploy is best-effort.
+func deployAgentsToHosts(hosts []string) {
+	for _, host := range hosts {
+		spec := inventory.FindHost(host)
+		if spec == nil {
+			continue // Host not in inventory, skip agent deploy
+		}
+		deployed, err := agentdeploy.EnsureAgentUpToDate(host, *spec)
+		if err != nil {
+			if !ssh.IsConnectionError(err.Error()) {
+				fmt.Fprintf(os.Stderr, "Warning: agent deploy to %s failed: %v\n", host, err)
+			}
+			continue
+		}
+		if deployed && syncVerbose {
+			fmt.Printf("  %s: agent binary updated\n", host)
+		}
+	}
 }
