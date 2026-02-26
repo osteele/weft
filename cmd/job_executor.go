@@ -104,6 +104,8 @@ type queueJobOptions struct {
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	Dependencies []queueDependency
 	AutoStart    bool
+	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
+	Outputs      []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
 }
 
 type queueDependency struct {
@@ -161,6 +163,8 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		GPUClass:    opts.GPUClass,
 		GPUMemGB:    opts.GPUMemGB,
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
+		Inputs:      opts.Inputs,
+		Outputs:     opts.Outputs,
 	}
 
 	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{})

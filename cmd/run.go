@@ -71,6 +71,8 @@ var (
 	runAfterAny    int64
 	runGPUMem      int
 	runGPUClass    string
+	runInputs      []string
+	runOutputs     []string
 )
 
 const defaultGPUMemGB = ops.DefaultGPUMemGB
@@ -98,6 +100,8 @@ func init() {
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class to use (e.g., A100, 2080); scheduler picks best available device")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
+	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
+	runCmd.Flags().StringSliceVar(&runOutputs, "output", nil, "Output data asset (e.g., checkpoint:llama-ft-v1), can be repeated")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -319,6 +323,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUMemGB:     gpuMemGB,
 			Dependencies: deps,
 			AutoStart:    true,
+			Inputs:       runInputs,
+			Outputs:      runOutputs,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -354,6 +360,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUClass:    gpuClass,
 			GPUMemGB:    gpuMemGB,
 			AutoStart:   true,
+			Inputs:      runInputs,
+			Outputs:     runOutputs,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -409,6 +417,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			GPUClass:    gpuClass,
 			GPUMemGB:    gpuMemGB,
 			AutoStart:   false,
+			Inputs:      runInputs,
+			Outputs:     runOutputs,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)

@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ssh"
@@ -47,6 +48,22 @@ Example:
 	RunE: runHostJobs,
 }
 
+var hostDataCmd = &cobra.Command{
+	Use:   "data <host>",
+	Short: "Show data assets on a host",
+	Long: `Show HuggingFace models, datasets, and other data assets known to exist on a host.
+
+Use --scan to scan the remote host's HF cache and update the local database.
+
+Examples:
+  weft host data cool100          # Show cached data inventory
+  weft host data cool100 --scan   # Scan remote HF cache and update`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runHostData,
+}
+
+var hostDataScan bool
+
 var hostListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all known hosts and their capabilities",
@@ -71,10 +88,13 @@ Example:
 
 func init() {
 	rootCmd.AddCommand(hostCmd)
+	hostCmd.AddCommand(hostDataCmd)
 	hostCmd.AddCommand(hostInfoCmd)
 	hostCmd.AddCommand(hostJobsCmd)
 	hostCmd.AddCommand(hostListCmd)
 	hostCmd.AddCommand(hostLoadCmd)
+
+	hostDataCmd.Flags().BoolVar(&hostDataScan, "scan", false, "Scan remote HF cache and update local database")
 }
 
 func runHostInfo(cmd *cobra.Command, args []string) error {
@@ -227,6 +247,58 @@ func runHostLoad(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+
+	return nil
+}
+
+func runHostData(cmd *cobra.Command, args []string) error {
+	host := args[0]
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if hostDataScan {
+		fmt.Printf("Scanning HuggingFace cache on %s...\n", host)
+		assets, err := dataloc.ScanHFCache(host)
+		if err != nil {
+			return fmt.Errorf("scan HF cache: %w", err)
+		}
+		now := time.Now()
+		for _, asset := range assets {
+			if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+				Host:     host,
+				Asset:    asset,
+				LastSeen: now,
+			}); err != nil {
+				return fmt.Errorf("record asset: %w", err)
+			}
+		}
+		fmt.Printf("Found %d asset(s)\n", len(assets))
+	}
+
+	entries, err := dataloc.ListHostAssets(database, host)
+	if err != nil {
+		return fmt.Errorf("list assets: %w", err)
+	}
+
+	if len(entries) == 0 {
+		fmt.Printf("No data assets known on %s\n", host)
+		if !hostDataScan {
+			fmt.Printf("Run with --scan to discover HuggingFace models and datasets\n")
+		}
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "KIND\tID\tLAST SEEN\n")
+	for _, e := range entries {
+		age := time.Since(e.LastSeen)
+		fmt.Fprintf(w, "%s\t%s\t%s ago\n", e.Asset.Kind, e.Asset.ID, db.FormatDuration(int64(age.Seconds())))
+	}
+	w.Flush()
 
 	return nil
 }

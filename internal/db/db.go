@@ -410,6 +410,25 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create host_data table for data locality tracking
+	hostDataSchema := `
+	CREATE TABLE IF NOT EXISTS host_data (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		host TEXT NOT NULL,
+		asset_kind TEXT NOT NULL,
+		asset_id TEXT NOT NULL,
+		path TEXT DEFAULT '',
+		size_bytes INTEGER DEFAULT 0,
+		last_seen INTEGER NOT NULL,
+		UNIQUE(host, asset_kind, asset_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_host_data_host ON host_data(host);
+	CREATE INDEX IF NOT EXISTS idx_host_data_asset ON host_data(asset_kind, asset_id);
+	`
+	if _, err := db.Exec(hostDataSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 

@@ -1,0 +1,94 @@
+package dataloc
+
+import (
+	"database/sql"
+	"time"
+)
+
+// InitSchema creates the data locality tables if they don't exist.
+func InitSchema(db *sql.DB) error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS host_data (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		host TEXT NOT NULL,
+		asset_kind TEXT NOT NULL,
+		asset_id TEXT NOT NULL,
+		path TEXT DEFAULT '',
+		size_bytes INTEGER DEFAULT 0,
+		last_seen INTEGER NOT NULL,
+		UNIQUE(host, asset_kind, asset_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_host_data_host ON host_data(host);
+	CREATE INDEX IF NOT EXISTS idx_host_data_asset ON host_data(asset_kind, asset_id);
+	`
+	_, err := db.Exec(schema)
+	return err
+}
+
+// RecordAsset upserts a host data entry, updating last_seen if it already exists.
+func RecordAsset(db *sql.DB, entry HostDataEntry) error {
+	_, err := db.Exec(`
+		INSERT INTO host_data (host, asset_kind, asset_id, path, size_bytes, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(host, asset_kind, asset_id) DO UPDATE SET
+			path = excluded.path,
+			size_bytes = excluded.size_bytes,
+			last_seen = excluded.last_seen
+	`, entry.Host, string(entry.Asset.Kind), entry.Asset.ID,
+		entry.Path, entry.SizeBytes, entry.LastSeen.Unix())
+	return err
+}
+
+// ListHostAssets returns all data assets known to exist on a host.
+func ListHostAssets(db *sql.DB, host string) ([]HostDataEntry, error) {
+	rows, err := db.Query(`
+		SELECT host, asset_kind, asset_id, path, size_bytes, last_seen
+		FROM host_data WHERE host = ? ORDER BY asset_kind, asset_id
+	`, host)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntries(rows)
+}
+
+// FindAssetHosts returns all hosts that have a given asset.
+func FindAssetHosts(db *sql.DB, asset DataAsset) ([]HostDataEntry, error) {
+	rows, err := db.Query(`
+		SELECT host, asset_kind, asset_id, path, size_bytes, last_seen
+		FROM host_data WHERE asset_kind = ? AND asset_id = ?
+		ORDER BY last_seen DESC
+	`, string(asset.Kind), asset.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanEntries(rows)
+}
+
+// RemoveStaleEntries deletes entries that haven't been seen since the given time.
+func RemoveStaleEntries(db *sql.DB, host string, before time.Time) (int64, error) {
+	result, err := db.Exec(`
+		DELETE FROM host_data WHERE host = ? AND last_seen < ?
+	`, host, before.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func scanEntries(rows *sql.Rows) ([]HostDataEntry, error) {
+	var entries []HostDataEntry
+	for rows.Next() {
+		var e HostDataEntry
+		var kind string
+		var lastSeen int64
+		if err := rows.Scan(&e.Host, &kind, &e.Asset.ID, &e.Path, &e.SizeBytes, &lastSeen); err != nil {
+			return nil, err
+		}
+		e.Asset.Kind = AssetKind(kind)
+		e.LastSeen = time.Unix(lastSeen, 0)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}

@@ -205,6 +205,8 @@ type QueueJobParams struct {
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	DepSpec      string
 	CPUAllotment *int
+	Inputs       []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
+	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
 }
 
 // QueueJob creates a job record and adds it to the remote queue.
