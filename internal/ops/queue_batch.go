@@ -13,9 +13,10 @@ import (
 )
 
 type queueBatchStatus struct {
-	State    queueState
-	ExitCode *int
-	Mtime    int64
+	State      queueState
+	ExitCode   *int
+	Mtime      int64
+	GPUDevices string
 }
 
 // BatchSyncQueueRunnerJobs performs a batched sync for queue-runner jobs on one host/queue.
@@ -101,6 +102,9 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 				}
 				updated++
 			}
+			if status.GPUDevices != "" {
+				syncGPUDevicesToMetadata(database, job, status.GPUDevices)
+			}
 		case queueStatePaused:
 			if job.StartTime == 0 {
 				_ = UpdateStartTimeFromMetadata(database, job, timeout)
@@ -116,6 +120,9 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 					return updated, err
 				}
 				updated++
+			}
+			if status.GPUDevices != "" {
+				syncGPUDevicesToMetadata(database, job, status.GPUDevices)
 			}
 		case queueStateDead:
 			if job.PendingStatus != nil && *job.PendingStatus == db.StatusRunning && job.Status == db.StatusQueued {
@@ -172,10 +179,12 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 STATE_FILE=%s
 CURRENT=""
 FINISHED="{}"
+RUNNING_STATE="{}"
 if [ -f "$STATE_FILE" ]; then
 	CURRENT=$(jq -r '.current // ""' "$STATE_FILE" 2>/dev/null || echo "")
 	PENDING=$(jq -r '.pending[]?' "$STATE_FILE" 2>/dev/null || true)
 	FINISHED=$(jq -c '.finished // {}' "$STATE_FILE" 2>/dev/null || echo "{}")
+	RUNNING_STATE=$(jq -c '.running // {}' "$STATE_FILE" 2>/dev/null || echo "{}")
 else
 	PENDING=""
 fi
@@ -183,6 +192,9 @@ declare -A pending_map
 for id in $PENDING; do
 	pending_map[$id]=1
 done
+gpu_devs_for() {
+	jq -r --arg id "$1" '.[$id].gpu_devices // [] | join(",")' <<< "$RUNNING_STATE" 2>/dev/null
+}
 	for id in %s; do
 		finished_exit=$(echo "$FINISHED" | jq -r --arg id "$id" '.[$id].exit_code // empty' 2>/dev/null)
 	finished_at=$(echo "$FINISHED" | jq -r --arg id "$id" '.[$id].finished_at // empty' 2>/dev/null)
@@ -198,6 +210,7 @@ done
 		continue
 	fi
 	if [ "$CURRENT" = "$id" ]; then
+		GPU_DEVS=$(gpu_devs_for "$id")
 		pid_file=$(ls %s 2>/dev/null | head -1)
 		if [ -n "$pid_file" ]; then
 			pid=$(cat "$pid_file" 2>/dev/null | head -1)
@@ -205,20 +218,21 @@ done
 				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
 				if [ -n "$state" ]; then
 					case "$state" in
-						*T*) echo "JOB|$id|PAUSED" ;;
-						*) echo "JOB|$id|CURRENT" ;;
+						*T*) echo "JOB|$id|PAUSED|$GPU_DEVS" ;;
+						*) echo "JOB|$id|CURRENT|$GPU_DEVS" ;;
 					esac
 					continue
 				fi
 			fi
 		fi
-		echo "JOB|$id|CURRENT"
+		echo "JOB|$id|CURRENT|$GPU_DEVS"
 		continue
 	fi
 	if [ -n "${pending_map[$id]+x}" ]; then
 		echo "JOB|$id|QUEUED"
 		continue
 	fi
+	GPU_DEVS=$(gpu_devs_for "$id")
 	pid_file=$(ls %s 2>/dev/null | head -1)
 	if [ -n "$pid_file" ]; then
 		pid=$(cat "$pid_file" 2>/dev/null | head -1)
@@ -226,8 +240,8 @@ done
 			state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
 			if [ -n "$state" ]; then
 				case "$state" in
-					*T*) echo "JOB|$id|PAUSED" ;;
-					*) echo "JOB|$id|RUNNING" ;;
+					*T*) echo "JOB|$id|PAUSED|$GPU_DEVS" ;;
+					*) echo "JOB|$id|RUNNING|$GPU_DEVS" ;;
 				esac
 				continue
 			fi
@@ -273,9 +287,17 @@ done
 			}
 			results[id] = queueBatchStatus{ExitCode: &exitCode, Mtime: mtime}
 		case "CURRENT", "RUNNING":
-			results[id] = queueBatchStatus{State: queueStateRunning}
+			gpuDevs := ""
+			if len(parts) >= 4 {
+				gpuDevs = parts[3]
+			}
+			results[id] = queueBatchStatus{State: queueStateRunning, GPUDevices: gpuDevs}
 		case "PAUSED":
-			results[id] = queueBatchStatus{State: queueStatePaused}
+			gpuDevs := ""
+			if len(parts) >= 4 {
+				gpuDevs = parts[3]
+			}
+			results[id] = queueBatchStatus{State: queueStatePaused, GPUDevices: gpuDevs}
 		case "QUEUED":
 			results[id] = queueBatchStatus{State: queueStateQueued}
 		case "DEAD":
@@ -284,4 +306,21 @@ done
 	}
 
 	return results, nil
+}
+
+// syncGPUDevicesToMetadata persists the assigned GPU devices to the job's metadata
+// if they differ from what's already stored.
+func syncGPUDevicesToMetadata(database *sql.DB, job *db.Job, gpuDevices string) {
+	meta := job.Metadata
+	if meta == nil {
+		meta = &db.JobMetadata{}
+	}
+	if meta.Resource == nil {
+		meta.Resource = &db.ResourceUsage{}
+	}
+	if meta.Resource.GPUDevices != gpuDevices {
+		meta.Resource.GPUDevices = gpuDevices
+		_ = db.SetJobMetadata(database, job.ID, meta)
+		job.Metadata = meta
+	}
 }

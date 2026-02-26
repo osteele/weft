@@ -6,13 +6,14 @@ import (
 
 func TestParseResourceUsage(t *testing.T) {
 	tests := []struct {
-		name          string
-		content       string
-		wantNil       bool
-		wantUserCPU   *float64
-		wantSysCPU    *float64
-		wantPeakRSS   *int64
-		wantMaxGPUMem *int64
+		name           string
+		content        string
+		wantNil        bool
+		wantUserCPU    *float64
+		wantSysCPU     *float64
+		wantPeakRSS    *int64
+		wantMaxGPUMem  *int64
+		wantGPUDevices string
 	}{
 		{
 			name:    "empty content",
@@ -25,12 +26,13 @@ func TestParseResourceUsage(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name:          "all fields",
-			content:       "user_cpu_secs=123.45\nsys_cpu_secs=67.89\npeak_rss_kb=1048576\nmax_gpu_mem_mib=8192\n",
-			wantUserCPU:   floatPtr(123.45),
-			wantSysCPU:    floatPtr(67.89),
-			wantPeakRSS:   int64Ptr(1048576),
-			wantMaxGPUMem: int64Ptr(8192),
+			name:           "all fields",
+			content:        "user_cpu_secs=123.45\nsys_cpu_secs=67.89\npeak_rss_kb=1048576\nmax_gpu_mem_mib=8192\ngpu_devices=0,1\n",
+			wantUserCPU:    floatPtr(123.45),
+			wantSysCPU:     floatPtr(67.89),
+			wantPeakRSS:    int64Ptr(1048576),
+			wantMaxGPUMem:  int64Ptr(8192),
+			wantGPUDevices: "0,1",
 		},
 		{
 			name:        "cpu only",
@@ -47,6 +49,16 @@ func TestParseResourceUsage(t *testing.T) {
 			name:          "gpu only",
 			content:       "max_gpu_mem_mib=16384\n",
 			wantMaxGPUMem: int64Ptr(16384),
+		},
+		{
+			name:           "gpu devices only",
+			content:        "gpu_devices=0\n",
+			wantGPUDevices: "0",
+		},
+		{
+			name:           "gpu devices multiple",
+			content:        "gpu_devices=0,1\n",
+			wantGPUDevices: "0,1",
 		},
 		{
 			name:    "invalid values ignored",
@@ -101,6 +113,9 @@ func TestParseResourceUsage(t *testing.T) {
 			checkFloat64Ptr(t, "SysCPUSecs", result.SysCPUSecs, tt.wantSysCPU)
 			checkInt64Ptr(t, "PeakRSSKB", result.PeakRSSKB, tt.wantPeakRSS)
 			checkInt64Ptr(t, "MaxGPUMemMiB", result.MaxGPUMemMiB, tt.wantMaxGPUMem)
+			if result.GPUDevices != tt.wantGPUDevices {
+				t.Errorf("GPUDevices: expected %q, got %q", tt.wantGPUDevices, result.GPUDevices)
+			}
 		})
 	}
 }

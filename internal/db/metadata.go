@@ -19,6 +19,7 @@ type ResourceUsage struct {
 	SysCPUSecs   *float64 `json:"sys_cpu_secs,omitempty"`
 	PeakRSSKB    *int64   `json:"peak_rss_kb,omitempty"`
 	MaxGPUMemMiB *int64   `json:"max_gpu_mem_mib,omitempty"`
+	GPUDevices   string   `json:"gpu_devices,omitempty"` // assigned CUDA device indices, e.g. "0" or "0,1"
 }
 
 // JobCPUStats summarizes CPU samples as percent of total cores.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# BUILD: 55
+# BUILD: 56
 #
 # Queue runner for weft
 # Uses append-only JSONL command log with jq for parsing.
@@ -630,19 +630,21 @@ write_rusage_file() {
     local job_id="$1"
     local rusage_file="$LOG_DIR/${job_id}.rusage"
 
-    local user_cpu sys_cpu peak_rss max_gpu
+    local user_cpu sys_cpu peak_rss max_gpu gpu_devs
     user_cpu=$(jq -r --arg id "$job_id" '.[$id].rusage_user_cpu // ""' <<< "$RUNNING_JSON")
     sys_cpu=$(jq -r --arg id "$job_id" '.[$id].rusage_sys_cpu // ""' <<< "$RUNNING_JSON")
     peak_rss=$(jq -r --arg id "$job_id" '.[$id].rusage_peak_rss // ""' <<< "$RUNNING_JSON")
     max_gpu=$(jq -r --arg id "$job_id" '.[$id].rusage_max_gpu // ""' <<< "$RUNNING_JSON")
+    gpu_devs=$(jq -r --arg id "$job_id" '.[$id].gpu_devices // [] | join(",")' <<< "$RUNNING_JSON")
 
     # Only write if we have at least one value
-    if [ -n "$user_cpu" ] || [ -n "$peak_rss" ] || [ -n "$max_gpu" ]; then
+    if [ -n "$user_cpu" ] || [ -n "$peak_rss" ] || [ -n "$max_gpu" ] || [ -n "$gpu_devs" ]; then
         {
             [ -n "$user_cpu" ] && echo "user_cpu_secs=$user_cpu"
             [ -n "$sys_cpu" ] && echo "sys_cpu_secs=$sys_cpu"
             [ -n "$peak_rss" ] && echo "peak_rss_kb=$peak_rss"
             [ -n "$max_gpu" ] && echo "max_gpu_mem_mib=$max_gpu"
+            [ -n "$gpu_devs" ] && echo "gpu_devices=$gpu_devs"
             true  # ensure block exits 0 even if last test fails under set -e
         } > "$rusage_file"
     fi

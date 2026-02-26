@@ -53,6 +53,9 @@ func parseResourceUsage(content string) *db.ResourceUsage {
 				ru.MaxGPUMemMiB = &v
 				hasField = true
 			}
+		case "gpu_devices":
+			ru.GPUDevices = value
+			hasField = true
 		}
 	}
 

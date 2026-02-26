@@ -382,7 +382,11 @@ func (m Model) renderJobList(height int) string {
 		if showGPU {
 			gpu := job.GetGPU()
 			if gpu == "" && job.GPUClass != "" {
-				gpu = job.GPUClass
+				if job.Metadata != nil && job.Metadata.Resource != nil && job.Metadata.Resource.GPUDevices != "" {
+					gpu = job.Metadata.Resource.GPUDevices
+				} else {
+					gpu = job.GPUClass
+				}
 			}
 			if gpu == "" {
 				gpu = "—"
