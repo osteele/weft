@@ -1,0 +1,208 @@
+package runner
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/osteele/weft/internal/ops"
+)
+
+// JobPaths holds all file paths for a job.
+type JobPaths struct {
+	Log     string
+	Status  string
+	Meta    string
+	PID     string
+	PGID    string
+	Samples string
+	Paused  string
+	Rusage  string
+}
+
+// NewJobPaths returns file paths for all job-related files.
+func NewJobPaths(logDir string, jobID int64) JobPaths {
+	return JobPaths{
+		Log:     filepath.Join(logDir, fmt.Sprintf("%d.log", jobID)),
+		Status:  filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)),
+		Meta:    filepath.Join(logDir, fmt.Sprintf("%d.meta", jobID)),
+		PID:     filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID)),
+		PGID:    filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID)),
+		Samples: filepath.Join(logDir, fmt.Sprintf("%d.samples", jobID)),
+		Paused:  filepath.Join(logDir, fmt.Sprintf("%d.paused", jobID)),
+		Rusage:  filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
+	}
+}
+
+// ArchiveExistingFiles renames existing job files with a timestamp suffix.
+func ArchiveExistingFiles(logDir string, jobID int64) {
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage"}
+	for _, ext := range extensions {
+		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		ts := info.ModTime().Format("20060102-150405")
+		newPath := filepath.Join(logDir, fmt.Sprintf("%d-%s.%s", jobID, ts, ext))
+		os.Rename(path, newPath)
+	}
+}
+
+// WriteMetaFile writes the job metadata file.
+func WriteMetaFile(paths JobPaths, jobID int64, workingDir, command, description, queueName string, startTime int64) error {
+	hostname, _ := os.Hostname()
+	var lines []string
+	lines = append(lines, fmt.Sprintf("job_id=%d", jobID))
+	lines = append(lines, fmt.Sprintf("working_dir=%s", workingDir))
+	lines = append(lines, fmt.Sprintf("command=%s", command))
+	lines = append(lines, fmt.Sprintf("start_time=%d", startTime))
+	lines = append(lines, fmt.Sprintf("host=%s", hostname))
+	if description != "" {
+		lines = append(lines, fmt.Sprintf("description=%s", description))
+	}
+	lines = append(lines, fmt.Sprintf("queue=%s", queueName))
+	return os.WriteFile(paths.Meta, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+// WriteLogHeader writes the initial header block to the log file.
+func WriteLogHeader(paths JobPaths, jobID int64, workingDir, command string) error {
+	header := fmt.Sprintf("=== START %s ===\njob_id: %d\ncd: %s\ncmd: %s\n===\n",
+		time.Now().Format(time.UnixDate), jobID, workingDir, command)
+	return os.WriteFile(paths.Log, []byte(header), 0644)
+}
+
+// WriteLogFooter appends the end marker to the log file.
+func WriteLogFooter(paths JobPaths, exitCode int) error {
+	footer := fmt.Sprintf("=== END exit=%d %s ===\n", exitCode, time.Now().Format(time.UnixDate))
+	f, err := os.OpenFile(paths.Log, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(footer)
+	return err
+}
+
+// WriteStatusFile writes the exit code to the status file.
+func WriteStatusFile(paths JobPaths, exitCode int) error {
+	return os.WriteFile(paths.Status, []byte(fmt.Sprintf("%d\n", exitCode)), 0644)
+}
+
+// ReadStatusFile reads the exit code from a status file. Returns -1 if not found.
+func ReadStatusFile(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return -1, false
+	}
+	s := strings.TrimSpace(string(data))
+	var code int
+	if _, err := fmt.Sscanf(s, "%d", &code); err != nil {
+		return -1, false
+	}
+	return code, true
+}
+
+// JobCompleted checks if a job has a status file (indicating completion).
+func JobCompleted(logDir string, jobID int64) bool {
+	path := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	// Check archived status files
+	pattern := filepath.Join(logDir, fmt.Sprintf("%d-*.status", jobID))
+	matches, _ := filepath.Glob(pattern)
+	return len(matches) > 0
+}
+
+// WriteRusageFile writes resource usage data for a completed job.
+func WriteRusageFile(paths JobPaths, rs RunningJobState) error {
+	var lines []string
+	if rs.RusageUserCPU != "" {
+		lines = append(lines, "user_cpu_secs="+rs.RusageUserCPU)
+	}
+	if rs.RusageSysCPU != "" {
+		lines = append(lines, "sys_cpu_secs="+rs.RusageSysCPU)
+	}
+	if rs.RusagePeakRSS != "" {
+		lines = append(lines, "peak_rss_kb="+rs.RusagePeakRSS)
+	}
+	if rs.RusageMaxGPU != "" {
+		lines = append(lines, "max_gpu_mem_mib="+rs.RusageMaxGPU)
+	}
+	if len(rs.GPUDevices) > 0 {
+		lines = append(lines, "gpu_devices="+strings.Join(rs.GPUDevices, ","))
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return os.WriteFile(paths.Rusage, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+// WriteSample appends a sample line to the samples file.
+func WriteSample(paths JobPaths, epoch int64, cpuPct int, gpuMiB *int) error {
+	f, err := os.OpenFile(paths.Samples, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	line := fmt.Sprintf("%d %d", epoch, cpuPct)
+	if gpuMiB != nil {
+		line += fmt.Sprintf(" %d", *gpuMiB)
+	}
+	_, err = fmt.Fprintln(f, line)
+	return err
+}
+
+// GetJobGPUDevices extracts GPU device indices from a CommandJob.
+// Checks: 1) "gpu" field, 2) CUDA_VISIBLE_DEVICES in env vars.
+func GetJobGPUDevices(job *ops.CommandJob) []string {
+	if job.GPU != "" {
+		return splitCSV(job.GPU)
+	}
+	for _, ev := range job.Env {
+		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
+			val := strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+			if val != "" {
+				return splitCSV(val)
+			}
+		}
+	}
+	return nil
+}
+
+// GetJobGPUMem returns the GPU memory reservation in GB per device.
+func GetJobGPUMem(job *ops.CommandJob, defaultGB int) int {
+	if job.GPUMem != nil {
+		return *job.GPUMem
+	}
+	devices := GetJobGPUDevices(job)
+	if len(devices) == 0 && job.GPUClass == "" {
+		return 0
+	}
+	return defaultGB
+}
+
+// HasTag checks if a job has a specific tag.
+func HasTag(job *ops.CommandJob, tag string) bool {
+	for _, t := range job.Tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}

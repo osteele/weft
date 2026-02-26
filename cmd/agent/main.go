@@ -7,6 +7,8 @@ import (
 	"syscall"
 
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/runner"
 )
 
 // version is set via -ldflags "-X main.version=<commit-hash>"
@@ -28,6 +30,16 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle run-queue subcommand
+	if len(os.Args) > 1 && os.Args[1] == "run-queue" {
+		queueName := ops.DefaultQueueName
+		if len(os.Args) > 2 {
+			queueName = os.Args[2]
+		}
+		runQueue(queueName)
+		return
+	}
+
 	// Initialize ops logging
 	if err := oplog.Init(agentLogPath(), 0); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to init ops log: %v\n", err)
@@ -47,4 +59,13 @@ func main() {
 	sig := <-sigCh
 	oplog.Log(oplog.OpAgentStop, oplog.WithDetailf("signal: %s", sig))
 	fmt.Printf("\nReceived %s, shutting down.\n", sig)
+}
+
+func runQueue(queueName string) {
+	cfg := runner.DefaultConfig(queueName)
+	r := runner.New(cfg)
+	if err := r.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)
+		os.Exit(1)
+	}
 }

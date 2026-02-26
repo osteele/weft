@@ -34,6 +34,22 @@ test-integration:
     fi
     go test -v ./internal/ops/... -run "Integration" -skip "TestSlurmIntegration" -timeout 300s
 
+# Run Go runner integration tests (requires .env with SSH_TEST_HOST and deployed agent)
+test-runner-integration:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f .env ]; then
+        export $(grep -v '^#' .env | xargs)
+    fi
+    if [ -z "${SSH_TEST_HOST:-}" ]; then
+        echo "SSH_TEST_HOST not set. Create .env file with SSH_TEST_HOST=user@host"
+        exit 1
+    fi
+    echo "Deploying agent binary to ${SSH_TEST_HOST}..."
+    go run . sync "${SSH_TEST_HOST}" 2>/dev/null || true
+    echo "Running Go runner integration tests..."
+    go test -v ./internal/runner/... -run "Integration" -timeout 120s
+
 # Format code
 format:
     go fmt ./...

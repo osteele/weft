@@ -170,9 +170,14 @@ func writeScript(host string) error {
 	return nil
 }
 
+const agentBinaryPath = "$HOME/.cache/weft/bin/weft-agent"
+
 // RunnerCommand builds the command to start the queue runner (optionally with env prefix).
+// Prefers the Go agent binary if available, falling back to the bash script.
 func RunnerCommand(envPrefix string) string {
-	return fmt.Sprintf("%sbash $HOME/.cache/weft/scripts/queue-runner.sh %s", envPrefix, ops.DefaultQueueName)
+	return fmt.Sprintf(
+		"%sif [ -x %s ]; then %s run-queue %s; else bash $HOME/.cache/weft/scripts/queue-runner.sh %s; fi",
+		envPrefix, agentBinaryPath, agentBinaryPath, ops.DefaultQueueName, ops.DefaultQueueName)
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
