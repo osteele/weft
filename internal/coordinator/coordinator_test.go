@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,7 +11,21 @@ import (
 
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ssh"
+	_ "modernc.org/sqlite"
 )
+
+func setupCoordTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	if err := initProcessedTable(database); err != nil {
+		t.Fatal(err)
+	}
+	return database
+}
 
 func TestIdempotency(t *testing.T) {
 	// Set up SSH mock to avoid real SSH calls
@@ -19,15 +34,19 @@ func TestIdempotency(t *testing.T) {
 	})
 	defer cleanup()
 
+	database := setupCoordTestDB(t)
+
 	dir := t.TempDir()
 	config := DefaultConfig()
 	config.IntentDir = filepath.Join(dir, "intents")
 	config.ArchiveDir = filepath.Join(dir, "intents", "archive")
 
-	c := New(nil, config) // nil db since we're just testing idempotency
+	c := New(database, config)
 
-	// Mark an intent as processed
-	c.processed["test-intent-1"] = true
+	// Mark an intent as processed in the DB
+	if err := markProcessed(database, "test-intent-1"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Write an intent file with the same ID
 	i := &intent.Intent{
@@ -181,7 +200,8 @@ func TestCoordinatorRunCancellation(t *testing.T) {
 	})
 	defer cleanup()
 
-	c := New(nil, config)
+	database := setupCoordTestDB(t)
+	c := New(database, config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()

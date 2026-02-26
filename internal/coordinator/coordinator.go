@@ -53,7 +53,6 @@ type Coordinator struct {
 	config     Config
 	hostState  map[string]*HostState
 	retryQueue *retryQueue
-	processed  map[string]bool // idempotency: intent_id -> processed
 	mu         sync.Mutex
 	logger     *log.Logger
 }
@@ -65,7 +64,6 @@ func New(database *sql.DB, config Config) *Coordinator {
 		config:     config,
 		hostState:  make(map[string]*HostState),
 		retryQueue: newRetryQueue(),
-		processed:  make(map[string]bool),
 		logger:     log.New(os.Stderr, "[coordinator] ", log.LstdFlags),
 	}
 }
@@ -83,6 +81,13 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		c.logger.Printf("oplog init failed (continuing): %v", err)
 	}
 	defer oplog.Close()
+
+	// Initialize processed intents table for crash-safe idempotency
+	if err := initProcessedTable(c.db); err != nil {
+		return fmt.Errorf("init processed_intents table: %w", err)
+	}
+	// Clean up entries older than 7 days
+	_ = cleanupOldProcessed(c.db, 7*24*time.Hour)
 
 	oplog.Log(oplog.OpCoordinatorStart)
 	c.logger.Println("coordinator started")
@@ -158,16 +163,15 @@ func (c *Coordinator) handleIntentFile(path string) {
 		return
 	}
 
-	// Idempotency check
-	c.mu.Lock()
-	if c.processed[i.IntentID] {
-		c.mu.Unlock()
+	// Idempotency check (persisted to DB for crash safety)
+	if isProcessed(c.db, i.IntentID) {
 		c.logger.Printf("skip duplicate intent %s", i.IntentID)
 		c.archiveIntent(path)
 		return
 	}
-	c.processed[i.IntentID] = true
-	c.mu.Unlock()
+	if err := markProcessed(c.db, i.IntentID); err != nil {
+		c.logger.Printf("mark intent %s processed: %v", i.IntentID, err)
+	}
 
 	// Resolve host
 	host, reasons, err := resolveHost(c.db, i)
