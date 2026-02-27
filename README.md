@@ -1300,6 +1300,7 @@ Notifications include:
 
 ## Documentation
 
+- [Workflow Guide](docs/workflow-guide.md) - Common workflows with examples (pipelines, sweeps, cloud GPU, data locality)
 - [Architecture](docs/architecture.md) - Detailed technical architecture and design
 - [Coordinator Architecture](docs/coordinator-architecture.md) - Coordinator daemon design, placement scoring, and migration phases
 - [Comparison to SLURM](docs/comparison-to-slurm.md) - How weft compares to HPC workload managers

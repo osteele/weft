@@ -23,7 +23,7 @@ func ResolveBackend(host string, timeout time.Duration) (string, error) {
 func normalizeBackend(backend string) string {
 	backend = strings.ToLower(strings.TrimSpace(backend))
 	switch backend {
-	case db.BackendQueueRunner, db.BackendSlurm:
+	case db.BackendQueueRunner, db.BackendSlurm, db.BackendVastai:
 		return backend
 	default:
 		return ""

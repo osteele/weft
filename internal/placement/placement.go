@@ -202,6 +202,23 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		}
 	}
 
+	// Soft factor: performance multiplier (penalize slower hosts)
+	if c.GPUClass != "" {
+		gpuFactor := host.GPUPerformance()
+		if gpuFactor < 1.0 {
+			penalty := (1.0 - gpuFactor) * 5.0
+			s.Total -= penalty
+			s.Reasons = append(s.Reasons, fmt.Sprintf("GPU perf %.2fx (-%.1f)", gpuFactor, penalty))
+		}
+	} else {
+		cpuFactor := host.CPUPerformance()
+		if cpuFactor < 1.0 {
+			penalty := (1.0 - cpuFactor) * 3.0
+			s.Total -= penalty
+			s.Reasons = append(s.Reasons, fmt.Sprintf("CPU perf %.2fx (-%.1f)", cpuFactor, penalty))
+		}
+	}
+
 	// Base score for eligible hosts (ensures non-zero)
 	if s.Eligible {
 		s.Total += 1

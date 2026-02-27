@@ -17,7 +17,7 @@ import (
 
 func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Ignore mouse events when in input mode or showing overlays
-	if m.inputMode || m.showHelp || m.restarting || m.creatingJob {
+	if m.inputMode || m.showHelp || m.showCloudMenu || m.restarting || m.creatingJob {
 		return m, nil
 	}
 
@@ -111,6 +111,11 @@ func (m Model) handleMouseClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Cloud menu overlay - intercept all keys
+	if m.showCloudMenu {
+		return m.handleCloudMenuKeyPress(msg)
+	}
+
 	// Help overlay - dismiss with ? or Esc
 	if m.showHelp {
 		if key.Matches(msg, keys.Help) || key.Matches(msg, keys.Escape) {
@@ -653,6 +658,19 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash("Sync requested", false)
 		}
 		return m, nil
+
+	case key.Matches(msg, keys.Cloud):
+		if m.viewMode != ViewModeJobs {
+			return m, nil
+		}
+		job := m.getTargetJob()
+		if job == nil {
+			return m, m.setFlash("No job selected", true)
+		}
+		if job.Status != db.StatusQueued {
+			return m, m.setFlash("Cloud GPU only available for queued jobs", true)
+		}
+		return m, m.openCloudMenu(job)
 	}
 
 	// Host view specific key bindings (handled after the switch)

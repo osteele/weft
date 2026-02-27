@@ -4,6 +4,8 @@ arch: amd64
 cpu_cores: 64
 memory: 256GB
 network_bw: "10Gbps"
+cpu_factor: 1.0
+gpu_factor: 1.0
 gpus:
   - name: A100 80GB PCIe
     class: a100

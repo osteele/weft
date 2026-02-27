@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/inventory"
 	_ "modernc.org/sqlite"
 )
 
@@ -380,13 +381,10 @@ func TestUtilizationScoring_QueueDepth(t *testing.T) {
 
 	cool30 := findScore(scores, "cool30")
 	cool100 := findScore(scores, "cool100")
-	studio := findScore(scores, "studio")
 
-	if cool30.Total <= studio.Total {
-		t.Errorf("cool30 (%.2f, 0 queued) should score higher than studio (%.2f, 2 queued)", cool30.Total, studio.Total)
-	}
-	if studio.Total <= cool100.Total {
-		t.Errorf("studio (%.2f, 2 queued) should score higher than cool100 (%.2f, 5 queued)", studio.Total, cool100.Total)
+	// cool30 with 0 queued should beat cool100 with 5 queued
+	if cool30.Total <= cool100.Total {
+		t.Errorf("cool30 (%.2f, 0 queued) should score higher than cool100 (%.2f, 5 queued)", cool30.Total, cool100.Total)
 	}
 
 	// Verify reason string
@@ -451,6 +449,97 @@ func TestUtilizationScoring_CombinedWithConstraints(t *testing.T) {
 	}
 	if !hasGPUReason {
 		t.Errorf("cool100 should have GPU load reason, got: %v", cool100.Reasons)
+	}
+}
+
+func TestPerformanceFactor_GPUJob(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Use RTX 3090 class — cool30 is the only eligible host, but
+	// we test the performance penalty is applied by checking reasons.
+	// For a broader GPU test, use GPUMemGB to keep multiple hosts eligible.
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "rtx3090"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool30 := findScore(scores, "cool30")
+	if !cool30.Eligible {
+		t.Fatal("cool30 should be eligible for rtx3090")
+	}
+
+	// cool30 has gpu_factor=0.3, so it should get a GPU perf penalty
+	hasGPUPerf := false
+	for _, r := range cool30.Reasons {
+		if strings.Contains(r, "GPU perf") {
+			hasGPUPerf = true
+		}
+	}
+	if !hasGPUPerf {
+		t.Errorf("cool30 should have GPU perf reason, got: %v", cool30.Reasons)
+	}
+}
+
+func TestPerformanceFactor_CPUOnlyJob(t *testing.T) {
+	db := setupTestDB(t)
+
+	scores, err := ScoreHosts(db, Constraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100 := findScore(scores, "cool100")
+	cool30 := findScore(scores, "cool30")
+	studio := findScore(scores, "studio")
+
+	if cool100.Total <= cool30.Total {
+		t.Errorf("cool100 (%.2f) should score higher than cool30 (%.2f) for CPU job", cool100.Total, cool30.Total)
+	}
+	if cool30.Total <= studio.Total {
+		t.Errorf("cool30 (%.2f) should score higher than studio (%.2f) for CPU job", cool30.Total, studio.Total)
+	}
+}
+
+func TestPerformanceFactor_StudioWinsWithBacklog(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Give cool30 and cool100 heavy queue depth so studio can overcome perf penalty
+	metrics := map[string]*HostMetrics{
+		"cool30":  {QueueDepth: 6, GPUPercent: 80},
+		"cool100": {QueueDepth: 6, GPUPercent: 90},
+		"studio":  {QueueDepth: 0, GPUPercent: 0},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, Constraints{}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	studio := findScore(scores, "studio")
+	cool30 := findScore(scores, "cool30")
+	cool100 := findScore(scores, "cool100")
+
+	if studio.Total <= cool30.Total {
+		t.Errorf("studio (%.2f) should beat cool30 (%.2f) when cool30 is heavily loaded", studio.Total, cool30.Total)
+	}
+	if studio.Total <= cool100.Total {
+		t.Errorf("studio (%.2f) should beat cool100 (%.2f) when cool100 is heavily loaded", studio.Total, cool100.Total)
+	}
+}
+
+func TestAllHostsHavePerformanceFactors(t *testing.T) {
+	hosts, err := inventory.LoadEmbeddedHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, h := range hosts {
+		if h.CPUFactor == 0 {
+			t.Errorf("host %s has no cpu_factor set", h.Name)
+		}
+		if h.GPUFactor == 0 {
+			t.Errorf("host %s has no gpu_factor set", h.Name)
+		}
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/llm"
 	"github.com/osteele/weft/internal/monitor"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -131,6 +132,14 @@ type Model struct {
 
 	// Help overlay
 	showHelp bool
+
+	// Cloud menu overlay
+	showCloudMenu      bool
+	cloudMenuJob       *db.Job
+	cloudMenuOfferings []placement.CloudOffering
+	cloudMenuCursor    int
+	cloudMenuLoading   bool
+	cloudMenuConfirm   bool // true when showing cost confirmation
 
 	// Configurable intervals
 	syncActiveInterval  time.Duration
@@ -917,6 +926,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashExpiry = time.Time{}
 		}
 		return m, nil
+
+	case cloudOffersLoadedMsg:
+		m.cloudMenuLoading = false
+		if msg.err != nil {
+			m.showCloudMenu = false
+			return m, m.setFlash(fmt.Sprintf("Cloud GPU: %v", msg.err), true)
+		}
+		m.cloudMenuOfferings = msg.offerings
+		return m, nil
+
+	case cloudJobProgressMsg:
+		return m, m.setFlash(fmt.Sprintf("Cloud job %d: %s", msg.jobID, msg.phase), false)
+
+	case cloudJobCompletedMsg:
+		if msg.err != nil {
+			return m, tea.Batch(
+				m.setFlash(fmt.Sprintf("Cloud job failed: %v", msg.err), true),
+				m.refreshJobs(),
+			)
+		}
+		costStr := ""
+		if msg.cost > 0 {
+			costStr = fmt.Sprintf(" (cost: $%.2f)", msg.cost)
+		}
+		return m, tea.Batch(
+			m.setFlash(fmt.Sprintf("Cloud job completed (exit %d)%s", msg.exitCode, costStr), false),
+			m.refreshJobs(),
+		)
 	}
 
 	return m, nil
@@ -962,6 +999,11 @@ func (m Model) View() string {
 			flashView,
 			statusView,
 		)
+	}
+
+	// Show cloud menu overlay
+	if m.showCloudMenu {
+		return m.renderCloudMenu(mainView)
 	}
 
 	// Show help overlay

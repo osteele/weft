@@ -62,7 +62,7 @@ heterogeneous GPUs, and modeling data transfer costs — all with real workloads
 │  │   Daemon     │──│ (primary)│  │  Inventory   │               │
 │  └──────┬───────┘  └──────────┘  └─────────────┘               │
 │         │                                                        │
-│         │ Makes all placement & scheduling decisions             │
+│         │ Makes placement & priority decisions                    │
 │         │ Watches intent dir, polls host state                   │
 │         │                                                        │
 │         ├── SSH ──────────────────────┐                           │
@@ -73,9 +73,9 @@ heterogeneous GPUs, and modeling data transfer costs — all with real workloads
 ┌───────────────────────┐  ┌───────────────────────┐
 │      cool30           │  │      cool100          │
 │  ┌────────────────┐   │  │  ┌────────────────┐   │
-│  │  Queue Runner  │   │  │  │  Queue Runner  │   │
-│  │  (execution    │   │  │  │  (execution    │   │
-│  │   mechanics)   │   │  │  │   mechanics)   │   │
+│  │  Edge Agent    │   │  │  │  Edge Agent    │   │
+│  │  (local sched, │   │  │  │  (local sched, │   │
+│  │   execution)   │   │  │  │   execution)   │   │
 │  └────────────────┘   │  │  └────────────────┘   │
 │  RTX 3090 (24GB)      │  │  2x A100 80GB         │
 │                       │  │  8x RTX 2080 Ti       │
@@ -95,16 +95,70 @@ SQLite replication was considered but rejected because the coordinator needs to
 enrich intents with placement decisions before they become jobs — this is not a
 simple replication problem.
 
-### Coordinator sits above queue runners (initially)
+### Federated scheduling: coordinator + edge agents
 
-The queue runner handles local execution concerns (tmux sessions, log files,
-process monitoring, GPU device allocation at job start time) that would be
-expensive to rewrite immediately. The coordinator owns **placement** (which host)
-and **scheduling order** (which job next) while delegating **execution
-mechanics** to existing queue runners via the same JSONL append interface.
+The system uses **federated scheduling** inspired by Borg/Kubernetes and Mesos,
+where authority is divided between central and local agents by information
+locality:
 
-Over time, the coordinator can absorb more queue runner responsibilities,
-especially cross-host scheduling (exclusive jobs, benchmark coordination).
+- **Coordinator** (studio): Cluster-wide view. Owns **placement** (which host)
+  and **priority ordering** (which job next). Knows cross-host data locations,
+  cluster queue state, and host capabilities. Does not need moment-to-moment GPU
+  utilization.
+
+- **Edge agents** (cool30, cool100, studio queue runners): Host-local authority.
+  Own **execution timing** (when to start a placed job), exclusive/benchmark
+  coordination on local GPUs, resource enforcement, and measurement collection.
+  Can autonomously defer jobs (e.g., system is hot, benchmark running) without
+  asking the coordinator.
+
+The contract between coordinator and edge agent:
+- Coordinator sends: "run this job, priority X, inputs Y"
+- Edge agent sends back: "accepted / deferred / completed / failed" + measurements
+- Edge agent has full autonomy over *when* and *how* within its host
+
+This separation means each agent decides based on what it can best observe.
+The coordinator might place a job on cool100 for data locality, but the edge
+agent defers it because a benchmark is running. Neither needs the other's full
+context to make a good decision.
+
+The existing queue runners (`queue-runner.sh`) already implement the edge agent
+role — they handle tmux sessions, log files, process monitoring, GPU device
+allocation, exclusive job coordination, and benchmark idle detection.
+
+### Coordinator–edge agent contract
+
+The coordinator and edge agents operate at the **job level**: the coordinator
+decides *what* runs *where*, and the edge agent decides *when* and *how*. This
+differs from Mesos's resource-level contract, where the master offers raw
+resources and frameworks decide what to place on them.
+
+A key property: the edge agent maintains a **local buffer of upcoming work**, so
+disconnections don't stall execution. This comes from the HPC/batch world rather
+than from Mesos (where accepted tasks start immediately with no local queue).
+
+Whether the buffer is filled by push (coordinator appends to remote queue) or
+pull (edge agent requests work) is an implementation detail — the information
+flow is the same either way.
+
+The contract includes:
+
+- **Placement decisions**: Which jobs are assigned to this host, with priority
+  ordering
+- **Queue depth guidance**: How much work buffer the edge should maintain (the
+  coordinator knows cluster-wide balance; the edge knows local throughput)
+- **Job metadata**: Input data requirements, resource constraints, tags
+  (exclusive, benchmark) that inform the edge agent's local scheduling
+- **Status feedback**: The edge agent reports job lifecycle events (accepted,
+  deferred, started, completed, failed) and measurements back to the coordinator
+
+The edge agent has **deferral authority**: it can delay a placed job based on
+local conditions (benchmark running, GPU thermal throttling, exclusive lock held)
+without asking the coordinator. The coordinator sees deferral as a status update
+and factors it into future placement decisions.
+
+The current implementation uses push (JSONL append over SSH), inherited from the
+original laptop-driven model. The contract is designed to be transport-agnostic.
 
 ### Coordinator learns host state via SSH polling
 
@@ -289,6 +343,7 @@ Scoring factors (in priority order):
 2. **Soft factors** (weighted scoring):
    - Data locality: +2 per input already cached on host
    - Transfer cost: -0 to -5 based on missing data size and host bandwidth
+   - Performance factor: up to -5 for GPU jobs, up to -3 for CPU jobs (based on host cpu_factor/gpu_factor relative to baseline)
    - GPU utilization: up to -3 for high GPU load
    - CPU utilization: up to -1 for high CPU load
    - Queue depth: -0.5 per pending job (capped at -3)
@@ -415,6 +470,7 @@ Transfer-cost-aware decisions, data pre-staging, web dashboard.
 - ✅ HF cache scanner: detailed output with sizes (`internal/dataloc/hfscan.go`)
 - ✅ Web dashboard: cluster overview with live GPU bars, coordinator status, oplog (`internal/web/`)
 - ✅ Crash-safe idempotency: processed intents persisted to SQLite (`internal/coordinator/processed.go`)
+- ✅ Cloud GPU bursting: Vast.ai CLI wrapper, TUI cloud menu, cost estimation (`internal/vastai/`, `internal/placement/cloud_offers.go`)
 - 🔮 Integration hooks for llm-performance-models (future)
 
 ### Phase Dependencies

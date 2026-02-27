@@ -6,6 +6,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/monitor"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -206,4 +207,29 @@ type jobEnvLoadedMsg struct {
 type hostSyncTimesLoadedMsg struct {
 	times map[string]time.Time
 	err   error
+}
+
+// Cloud menu messages
+type cloudOffersLoadedMsg struct {
+	job       *db.Job
+	offerings []placement.CloudOffering
+	err       error
+}
+
+type cloudJobLaunchedMsg struct {
+	jobID      int64
+	instanceID int
+	err        error
+}
+
+type cloudJobProgressMsg struct {
+	jobID int64
+	phase string // "creating", "syncing", "running", "collecting", "destroying"
+}
+
+type cloudJobCompletedMsg struct {
+	jobID    int64
+	exitCode int
+	cost     float64
+	err      error
 }

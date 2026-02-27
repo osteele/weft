@@ -69,6 +69,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"p", "Pause running job"},
 			{"d", "Toggle draft/queue status"},
 			{"g", "Start queued/draft job now or resume paused"},
+			{"c", "Cloud GPU options (queued jobs)"},
 			{"G", "Generate AI description"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
@@ -1252,7 +1253,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft c:cloud P:prune")
 
 	// Right-align the help text
 	gap := m.width - lipgloss.Width(help) - 2

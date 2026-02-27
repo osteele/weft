@@ -70,6 +70,8 @@ type Job struct {
 	ExitCode             *int
 	Status               string
 	Tombstoned           bool
+	Cost                 *float64 // Actual cost in dollars (for cloud-run jobs)
+	VastaiInstanceID     *int     // Vast.ai instance ID (for vastai backend jobs)
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -102,6 +104,7 @@ const ProcessedTag = "processed"
 
 const BackendQueueRunner = "queue-runner"
 const BackendSlurm = "slurm"
+const BackendVastai = "vastai"
 
 // StatusStarting indicates a job is being set up
 const StatusStarting = "starting"

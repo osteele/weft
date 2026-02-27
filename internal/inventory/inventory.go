@@ -29,6 +29,24 @@ type HostSpec struct {
 	Memory    string    `yaml:"memory"`
 	NetworkBW string    `yaml:"network_bw"` // e.g. "1Gbps", "10Gbps"
 	GPUs      []GPUSpec `yaml:"gpus"`
+	CPUFactor float64   `yaml:"cpu_factor"` // relative CPU perf (1.0 = baseline)
+	GPUFactor float64   `yaml:"gpu_factor"` // relative GPU perf (1.0 = baseline)
+}
+
+// CPUPerformance returns the CPU performance factor, defaulting to 1.0 if unset.
+func (h *HostSpec) CPUPerformance() float64 {
+	if h.CPUFactor == 0 {
+		return 1.0
+	}
+	return h.CPUFactor
+}
+
+// GPUPerformance returns the GPU performance factor, defaulting to 1.0 if unset.
+func (h *HostSpec) GPUPerformance() float64 {
+	if h.GPUFactor == 0 {
+		return 1.0
+	}
+	return h.GPUFactor
 }
 
 // NetworkBWBytesPerSec returns the network bandwidth in bytes per second.

@@ -155,6 +155,7 @@ type keyMap struct {
 	Sort            key.Binding
 	RegenerateDesc  key.Binding
 	ToggleSummaries key.Binding
+	Cloud           key.Binding
 }
 
 var (
@@ -293,6 +294,10 @@ var (
 		ToggleSummaries: key.NewBinding(
 			key.WithKeys("D"),
 			key.WithHelp("D", "toggle AI host summaries"),
+		),
+		Cloud: key.NewBinding(
+			key.WithKeys("c"),
+			key.WithHelp("c", "cloud GPU options"),
 		),
 	}
 	localUserName = detectLocalUsername()
