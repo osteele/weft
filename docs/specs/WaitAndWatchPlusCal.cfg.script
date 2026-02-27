@@ -1,9 +1,0 @@
-#!/bin/sh
-cat <<'CFG'
-SPECIFICATION Spec
-CONSTANT ReportModeConst = "all"
-CONSTRAINT StateConstraint
-INVARIANT TypeInvariant
-INVARIANT WaitCompletion
-INVARIANT TimeoutCompletion
-CFG

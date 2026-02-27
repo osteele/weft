@@ -1,8 +1,0 @@
-#!/bin/sh
-cat <<'CFG'
-SPECIFICATION Spec
-CONSTRAINT StateConstraint
-INVARIANT TypeInvariant
-INVARIANT TailCompletion
-INVARIANT TimeoutCompletion
-CFG

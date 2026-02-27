@@ -1,6 +1,0 @@
-#!/bin/sh
-cat <<'EOF'
-SPECIFICATION Spec
-CONSTANT defaultInitValue = Draft
-CONSTRAINT StateConstraint
-EOF
