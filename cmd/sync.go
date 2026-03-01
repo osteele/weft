@@ -130,16 +130,16 @@ func runSync(cmd *cobra.Command, args []string) error {
 		startQueueRunnersForQueuedHosts(database)
 	}
 
+	// Prune old cached log files and placement outcomes need config
+	cfg, _ := config.Load()
+
 	// Sync placement outcomes for pending_placement jobs
-	placementUpdated := syncPlacementOutcomes(database, syncVerbose)
+	placementUpdated := syncPlacementOutcomes(cfg, database, syncVerbose)
 	totalUpdated += placementUpdated
 
 	// Check Vast.ai instances for completed results (CLI fallback for coordinator)
-	vastaiUpdated := syncVastaiInstances(database, syncVerbose)
+	vastaiUpdated := syncVastaiInstances(cfg, database, syncVerbose)
 	totalUpdated += vastaiUpdated
-
-	// Prune old cached log files
-	cfg, _ := config.Load()
 	if cfg.LogCacheMaxAge > 0 {
 		maxAge := time.Duration(cfg.LogCacheMaxAge) * 24 * time.Hour
 		if pruned, err := logcache.Prune(maxAge); err == nil && pruned > 0 && syncVerbose {
@@ -169,13 +169,12 @@ func syncHost(database *sql.DB, host string) (int, error) {
 
 // syncPlacementOutcomes checks for jobs in pending_placement status and polls
 // the coordinator for placement outcomes. Returns the number of jobs updated.
-func syncPlacementOutcomes(database *sql.DB, verbose bool) int {
+func syncPlacementOutcomes(cfg *config.Config, database *sql.DB, verbose bool) int {
 	jobs, err := db.ListJobs(database, db.StatusPendingPlacement, "", 100, nil, "")
 	if err != nil || len(jobs) == 0 {
 		return 0
 	}
 
-	cfg, _ := config.Load()
 	coordHost := cfg.GetCoordinatorHost()
 	coordConfig := coordinator.DefaultConfig()
 	updated := 0
@@ -380,8 +379,7 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 
 // syncVastaiInstances checks for completed Vast.ai job results in R2.
 // This is a CLI fallback for when the coordinator is not running.
-func syncVastaiInstances(database *sql.DB, verbose bool) int {
-	cfg, _ := config.Load()
+func syncVastaiInstances(cfg *config.Config, database *sql.DB, verbose bool) int {
 	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
 		return 0
 	}

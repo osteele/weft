@@ -445,18 +445,8 @@ func printDefaultTailHint(jobID int64) {
 	fmt.Printf("(showing last %d lines; run 'weft log %d --full' to see the entire log or adjust -n/--lines)\n\n", logLines, jobID)
 }
 
-// escapeShellArg escapes a string for use in single quotes in shell
 func escapeShellArg(s string) string {
-	// Replace single quotes with '\'' (end quote, escaped quote, start quote)
-	result := ""
-	for _, c := range s {
-		if c == '\'' {
-			result += "'\\''"
-		} else {
-			result += string(c)
-		}
-	}
-	return result
+	return strings.ReplaceAll(s, "'", `'\''`)
 }
 
 // filterLogContent applies line range and grep filters to cached log content
@@ -512,24 +502,19 @@ func filterLogContent(content string, from, to, lines int, grepPattern string) s
 	// Apply grep filter if specified
 	if grepPattern != "" {
 		re, err := regexp.Compile(grepPattern)
-		if err != nil {
-			// Fall back to simple substring match
-			var filtered []string
-			for _, line := range result {
-				if strings.Contains(line, grepPattern) {
-					filtered = append(filtered, line)
-				}
+		match := func(line string) bool {
+			if err != nil {
+				return strings.Contains(line, grepPattern)
 			}
-			result = filtered
-		} else {
-			var filtered []string
-			for _, line := range result {
-				if re.MatchString(line) {
-					filtered = append(filtered, line)
-				}
-			}
-			result = filtered
+			return re.MatchString(line)
 		}
+		var filtered []string
+		for _, line := range result {
+			if match(line) {
+				filtered = append(filtered, line)
+			}
+		}
+		result = filtered
 	}
 
 	if len(result) == 0 {

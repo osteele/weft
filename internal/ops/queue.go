@@ -90,11 +90,7 @@ func AppendQueueEntry(host string, entry QueueEntry, opts AppendQueueEntryOption
 		return fmt.Errorf("job %d missing command", entry.JobID)
 	}
 	addCmd := NewAddCommand(entry)
-	appendOpts := AppendCommandOptions{Timeout: opts.Timeout}
-	if err := AppendCommand(host, addCmd, appendOpts); err != nil {
-		return err
-	}
-	return nil
+	return AppendCommand(host, addCmd, AppendCommandOptions{Timeout: opts.Timeout})
 }
 
 // AppendJobToQueue adds an existing job to the remote queue.

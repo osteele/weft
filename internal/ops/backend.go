@@ -12,10 +12,8 @@ import (
 
 func ResolveBackend(host string, timeout time.Duration) (string, error) {
 	cfg, _ := config.Load()
-	if cfg != nil {
-		if backend := normalizeBackend(cfg.HostBackend(host)); backend != "" {
-			return backend, nil
-		}
+	if backend := normalizeBackend(cfg.HostBackend(host)); backend != "" {
+		return backend, nil
 	}
 	return probeBackend(host, timeout)
 }

@@ -112,9 +112,6 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			} else {
 				syncResult, err := SyncJob(database, job, syncOpts)
 				if err != nil {
-					if ssh.IsConnectionError(err.Error()) && !result.HostContacted {
-						return result, err
-					}
 					return result, err
 				}
 				if syncResult.HostContacted {
@@ -276,13 +273,9 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		}
 	}
 
-	// Step 6: Record host sync time if we contacted the host
+	// Step 6: Record host sync time and scan HF caches
 	if result.HostContacted {
 		_ = db.RecordHostSync(database, host, time.Now())
-	}
-
-	// Step 7: Auto-scan HF caches for data locality tracking
-	if result.HostContacted {
 		scanHFCacheDuringSync(database, host)
 	}
 

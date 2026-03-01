@@ -32,7 +32,7 @@ func Execute() error {
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
-		if cfg != nil && cfg.DefaultCommand != "" && cfg.DefaultCommand != "help" {
+		if cfg.DefaultCommand != "" && cfg.DefaultCommand != "help" {
 			// Insert the default command as the first argument
 			os.Args = append(os.Args, cfg.DefaultCommand)
 		}
@@ -67,14 +67,9 @@ func Execute() error {
 // initOpLog initializes the operation logger based on config.
 func initOpLog() {
 	cfg, err := config.Load()
-	if err != nil {
-		return // Silently continue without logging on config error
-	}
-	if cfg == nil || !cfg.IsOperationLogEnabled() {
+	if err != nil || !cfg.IsOperationLogEnabled() {
 		return
 	}
-	// Initialize with default path and configured max size
-	// Errors are ignored - logging is best-effort
 	oplog.Init(oplog.DefaultLogPath(), cfg.GetOperationLogMaxSize())
 }
 

@@ -212,27 +212,9 @@ func (c *Config) GetOperationLogMaxSize() int64 {
 	return 10 * 1024 * 1024 // Default: 10MB
 }
 
-// GetSSHPoolSize returns the configured pool size, or 0 if not set.
-func (c *Config) GetSSHPoolSize() int {
-	return c.SSH.PoolSize
-}
-
-// GetSSHMaxParallel returns the configured max parallel, or 0 if not set.
-func (c *Config) GetSSHMaxParallel() int {
-	return c.SSH.MaxParallel
-}
-
-// GetSSHConnectTimeout returns the configured connect timeout in seconds, or 0 if not set.
-func (c *Config) GetSSHConnectTimeout() int {
-	return c.SSH.ConnectTimeout
-}
-
 // HostBackend returns the configured backend for a host, or empty if not set.
 func (c *Config) HostBackend(host string) string {
 	if c == nil || host == "" {
-		return ""
-	}
-	if c.Hosts == nil {
 		return ""
 	}
 	if cfg, ok := c.Hosts[host]; ok {

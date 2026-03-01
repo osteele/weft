@@ -33,13 +33,13 @@ func init() {
 	// Apply config file settings first
 	cfg, _ := config.Load()
 	if cfg != nil {
-		if n := cfg.GetSSHPoolSize(); n > 0 {
+		if n := cfg.SSH.PoolSize; n > 0 {
 			defaultPoolSize = n
 		}
-		if n := cfg.GetSSHMaxParallel(); n > 0 {
+		if n := cfg.SSH.MaxParallel; n > 0 {
 			defaultMaxParallel = n
 		}
-		if n := cfg.GetSSHConnectTimeout(); n > 0 {
+		if n := cfg.SSH.ConnectTimeout; n > 0 {
 			defaultConnTimeout = n
 			defaultReadyTimeout = time.Duration(n+5) * time.Second
 		}

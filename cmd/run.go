@@ -275,8 +275,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Route through coordinator for all non-immediate, non-draft submissions
-	if !runImmediate && !runDraft && coordinatorReachable() {
-		return submitIntent(database, host, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
+	if !runImmediate && !runDraft && coordinatorReachable(cfg) {
+		return submitIntent(cfg, database, host, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
 	}
 
 	// Coordinator unreachable — fall back to direct submission
@@ -708,13 +708,7 @@ func maybeWarnHomePrefixedDir(host, dir string) {
 func pathHasHomePrefix(dir, home string) bool {
 	dirClean := filepath.Clean(dir)
 	homeClean := filepath.Clean(home)
-	if dirClean == homeClean {
-		return true
-	}
-	if strings.HasPrefix(dirClean, homeClean+string(os.PathSeparator)) {
-		return true
-	}
-	return false
+	return dirClean == homeClean || strings.HasPrefix(dirClean, homeClean+string(os.PathSeparator))
 }
 
 func streamJobLogAllow(host, logFile string, jobID int64) error {
@@ -816,8 +810,7 @@ func printCommandRecommendations(command string) bool {
 
 // coordinatorReachable checks if the coordinator daemon is running.
 // It checks for the PID file via SSH with a short timeout for fast fail.
-func coordinatorReachable() bool {
-	cfg, _ := config.Load()
+func coordinatorReachable(cfg *config.Config) bool {
 	host := cfg.GetCoordinatorHost()
 	coordConfig := coordinator.DefaultConfig()
 	cmd := fmt.Sprintf("test -f %s && kill -0 $(cat %s) 2>/dev/null && echo YES || echo NO",
@@ -831,7 +824,7 @@ func coordinatorReachable() bool {
 
 // submitIntent writes a placement intent to the coordinator and records the job locally.
 // host may be empty (auto-placement) or an explicit host name (passed as a constraint).
-func submitIntent(database *sql.DB, host, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
+func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
 	// Resolve working directory
 	workingDir := dir
 	if workingDir == "" {
@@ -860,8 +853,7 @@ func submitIntent(database *sql.DB, host, command, dir, description string, envV
 	// Sync sources to coordinator (hop 1: CLI → coordinator)
 	if !runNoSync {
 		if localDir := resolveLocalDir(workingDir); localDir != "" {
-			cfg2, _ := config.Load()
-			syncHost := cfg2.GetCoordinatorHost()
+			syncHost := cfg.GetCoordinatorHost()
 			hostname, _ := os.Hostname()
 			if hostname != syncHost {
 				if err := srcsync.SyncSources(syncHost, localDir, workingDir); err != nil {
@@ -941,7 +933,6 @@ func submitIntent(database *sql.DB, host, command, dir, description string, envV
 	}
 
 	// Write intent to coordinator
-	cfg, _ := config.Load()
 	if err := intent.WriteIntent(cfg.GetCoordinatorHost(), i); err != nil {
 		// If coordinator write fails, fall back to local placement info
 		fmt.Fprintf(os.Stderr, "Warning: could not submit intent to coordinator: %v\n", err)

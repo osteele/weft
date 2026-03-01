@@ -475,11 +475,7 @@ func runQueueStart(cmd *cobra.Command, args []string) error {
 	}
 
 	_, err = ensureQueueRunnerStarted(host, defaultQueueName)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func runQueueStop(cmd *cobra.Command, args []string) error {
@@ -489,11 +485,7 @@ func runQueueStop(cmd *cobra.Command, args []string) error {
 	}
 
 	runner := queuerunner.NewRunner(host)
-	if err := runner.SendStopSignal(); err != nil {
-		return err
-	}
-
-	return nil
+	return runner.SendStopSignal()
 }
 
 func runQueueList(cmd *cobra.Command, args []string) error {
@@ -909,11 +901,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	envVars := job.EnvVars
-	if envChanged {
-		envVars = job.EnvVars
-	}
-
 	// Push to remote queue
 	deferredUpdate := false
 	if wasRequeued {
@@ -932,7 +919,6 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 	} else {
 		// Job was already queued - update existing entry via sync path
-		job.EnvVars = envVars
 		job.DepSpec = depSpec
 		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
 		if err != nil {
