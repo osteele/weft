@@ -26,7 +26,7 @@ var exportTrainingDataCmd = &cobra.Command{
 	Long: `Export completed job data as JSONL, including time series telemetry.
 
 Each line is a JSON object with job metadata and an embedded timeseries array.
-This format is designed for consumption by job-predictor and similar ML tools.
+This format is designed for consumption by job-estimator and similar ML tools.
 
 Examples:
   weft export training-data --output training-data.jsonl
@@ -41,7 +41,7 @@ func init() {
 	exportTrainingDataCmd.Flags().StringVar(&exportSince, "since", "", "Only include jobs started after this date (YYYY-MM-DD)")
 }
 
-// trainingDataRecord is the JSONL output format for job-predictor.
+// trainingDataRecord is the JSONL output format for job-estimator.
 type trainingDataRecord struct {
 	JobID      int64                 `json:"job_id"`
 	Host       string                `json:"host"`

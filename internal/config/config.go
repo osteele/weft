@@ -70,7 +70,7 @@ type Config struct {
 	// Hosts holds per-host configuration overrides.
 	Hosts map[string]HostConfig `yaml:"hosts"`
 
-	// Predictor holds job-predictor configuration for duration/resource estimation
+	// Predictor holds job-estimator configuration for duration/resource estimation
 	Predictor PredictorConfig `yaml:"predictor"`
 
 	// Vastai holds Vast.ai cloud GPU and R2 result storage configuration
@@ -142,9 +142,9 @@ type HostConfig struct {
 	Backend string `yaml:"backend"`
 }
 
-// PredictorConfig holds configuration for the job-predictor integration.
+// PredictorConfig holds configuration for the job-estimator integration.
 type PredictorConfig struct {
-	// ProjectPath is the path to the job-predictor Python project checkout.
+	// ProjectPath is the path to the job-estimator Python project checkout.
 	ProjectPath string `yaml:"project_path"`
 	// ModelDir overrides the default model directory (~/.cache/weft/models).
 	ModelDir string `yaml:"model_dir"`

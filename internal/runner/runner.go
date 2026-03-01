@@ -639,7 +639,7 @@ func (r *Runner) sampleRunningJobs() {
 			}
 		}
 
-		// Write timeseries sample (full telemetry for job-predictor)
+		// Write timeseries sample (full telemetry for job-estimator)
 		sample := TimeseriesSample{
 			Ts:     now.Unix(),
 			CPUPct: hostPct,

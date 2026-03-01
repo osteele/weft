@@ -1,4 +1,4 @@
-// Package predictor shells out to the job-predictor Python CLI to train
+// Package predictor shells out to the job-estimator Python CLI to train
 // models and predict job duration, peak RSS, and peak GPU memory.
 package predictor
 
@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// Config controls how the predictor finds and invokes job-predictor.
+// Config controls how the predictor finds and invokes job-estimator.
 type Config struct {
-	// ProjectPath is the path to the job-predictor Python project checkout.
+	// ProjectPath is the path to the job-estimator Python project checkout.
 	ProjectPath string `yaml:"project_path"`
 	// ModelDir is where trained models are stored.
 	// Default: ~/.cache/weft/models
@@ -99,13 +99,13 @@ func NeedsRetrain(cfg Config, currentJobCount int) bool {
 	return currentJobCount-meta.JobCount >= cfg.retrainInterval()
 }
 
-// Train shells out to job-predictor train with the configured DB paths.
+// Train shells out to job-estimator train with the configured DB paths.
 func Train(cfg Config) error {
 	if cfg.ProjectPath == "" {
 		return fmt.Errorf("predictor: project_path not configured")
 	}
 
-	args := []string{"run", "--project", cfg.ProjectPath, "job-predictor", "train"}
+	args := []string{"run", "--project", cfg.ProjectPath, "job-estimator", "train"}
 	for _, db := range cfg.DBPaths {
 		args = append(args, "--db", db)
 	}
@@ -116,14 +116,14 @@ func Train(cfg Config) error {
 	return cmd.Run()
 }
 
-// Predict shells out to job-predictor predict and parses the JSON result.
+// Predict shells out to job-estimator predict and parses the JSON result.
 func Predict(cfg Config, host, project, gpuClass, command string) (*Result, error) {
 	if cfg.ProjectPath == "" {
 		return nil, fmt.Errorf("predictor: project_path not configured")
 	}
 
 	args := []string{
-		"run", "--project", cfg.ProjectPath, "job-predictor", "predict",
+		"run", "--project", cfg.ProjectPath, "job-estimator", "predict",
 		"--model-dir", cfg.modelDir(),
 		"--command", command,
 	}
