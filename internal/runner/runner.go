@@ -447,6 +447,12 @@ func (r *Runner) waitForJob(jobID int64, jobIDStr string, proc *Process, paths J
 	WriteStatusFile(paths, exitCode)
 	WriteLogFooter(paths, exitCode)
 
+	// On failure, detect the failure reason (OOM, GPU OOM, etc.) and write it
+	if exitCode != 0 {
+		reason := DetectFailureReason(exitCode)
+		WriteFailureReasonFile(paths, reason)
+	}
+
 	// Append end_time to meta file
 	if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
 		fmt.Fprintf(f, "end_time=%d\n", endTime)
@@ -457,8 +463,9 @@ func (r *Runner) waitForJob(jobID int64, jobIDStr string, proc *Process, paths J
 		oplog.LogJob(oplog.OpJobCompleted, jobID, "", oplog.WithDetailf("exit=0 duration=%ds", duration))
 		fmt.Printf("Job %d completed successfully\n", jobID)
 	} else {
-		oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("exit=%d duration=%ds", exitCode, duration))
-		fmt.Printf("Job %d failed with exit code %d\n", jobID, exitCode)
+		reason := ReadFailureReasonFile(paths.FailureReason)
+		oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("exit=%d duration=%ds reason=%s", exitCode, duration, reason))
+		fmt.Printf("Job %d failed with exit code %d (%s)\n", jobID, exitCode, reason)
 	}
 
 	// Write rusage
@@ -671,7 +678,10 @@ func (r *Runner) jobAllotment(job *ops.CommandJob) int {
 	if job.CPU != nil && *job.CPU > 0 {
 		return *job.CPU
 	}
-	// Fall back to default
+	// GPU jobs get a lower default (GPU-bound, need fewer CPU cores)
+	if job.GPU != "" || job.GPUClass != "" || job.GPUMem != nil {
+		return r.cpuConfig.DefaultGPUAllotment(r.cpuCount)
+	}
 	return r.cpuConfig.DefaultAllotment(r.cpuCount)
 }
 

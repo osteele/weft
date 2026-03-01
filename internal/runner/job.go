@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -12,33 +13,35 @@ import (
 
 // JobPaths holds all file paths for a job.
 type JobPaths struct {
-	Log     string
-	Status  string
-	Meta    string
-	PID     string
-	PGID    string
-	Samples string
-	Paused  string
-	Rusage  string
+	Log           string
+	Status        string
+	Meta          string
+	PID           string
+	PGID          string
+	Samples       string
+	Paused        string
+	Rusage        string
+	FailureReason string
 }
 
 // NewJobPaths returns file paths for all job-related files.
 func NewJobPaths(logDir string, jobID int64) JobPaths {
 	return JobPaths{
-		Log:     filepath.Join(logDir, fmt.Sprintf("%d.log", jobID)),
-		Status:  filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)),
-		Meta:    filepath.Join(logDir, fmt.Sprintf("%d.meta", jobID)),
-		PID:     filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID)),
-		PGID:    filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID)),
-		Samples: filepath.Join(logDir, fmt.Sprintf("%d.samples", jobID)),
-		Paused:  filepath.Join(logDir, fmt.Sprintf("%d.paused", jobID)),
-		Rusage:  filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
+		Log:           filepath.Join(logDir, fmt.Sprintf("%d.log", jobID)),
+		Status:        filepath.Join(logDir, fmt.Sprintf("%d.status", jobID)),
+		Meta:          filepath.Join(logDir, fmt.Sprintf("%d.meta", jobID)),
+		PID:           filepath.Join(logDir, fmt.Sprintf("%d.pid", jobID)),
+		PGID:          filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID)),
+		Samples:       filepath.Join(logDir, fmt.Sprintf("%d.samples", jobID)),
+		Paused:        filepath.Join(logDir, fmt.Sprintf("%d.paused", jobID)),
+		Rusage:        filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
+		FailureReason: filepath.Join(logDir, fmt.Sprintf("%d.failure_reason", jobID)),
 	}
 }
 
 // ArchiveExistingFiles renames existing job files with a timestamp suffix.
 func ArchiveExistingFiles(logDir string, jobID int64) {
-	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage"}
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason"}
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
 		info, err := os.Stat(path)
@@ -139,6 +142,92 @@ func WriteRusageFile(paths JobPaths, rs RunningJobState) error {
 		return nil
 	}
 	return os.WriteFile(paths.Rusage, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+}
+
+// WriteFailureReasonFile writes a failure reason file for a failed job.
+func WriteFailureReasonFile(paths JobPaths, reason string) error {
+	if reason == "" {
+		return nil
+	}
+	return os.WriteFile(paths.FailureReason, []byte(reason+"\n"), 0644)
+}
+
+// ReadFailureReasonFile reads the failure reason from a file. Returns empty string if not found.
+func ReadFailureReasonFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// DetectFailureReason examines the system state to determine why a job failed.
+// It checks the exit code, dmesg for OOM kills, and nvidia-smi for GPU OOM.
+func DetectFailureReason(exitCode int) string {
+	// Exit code 137 = SIGKILL (classic OOM killer)
+	if exitCode == 137 {
+		if checkDmesgOOM() {
+			return "oom"
+		}
+		return "oom" // SIGKILL is almost always OOM
+	}
+
+	// Exit code 139 = SIGSEGV
+	if exitCode == 139 {
+		return "segfault"
+	}
+
+	// Check dmesg for OOM regardless of exit code (best-effort, requires permissions)
+	if checkDmesgOOM() {
+		return "oom"
+	}
+
+	// Check nvidia-smi for GPU OOM (only on Linux where nvidia-smi is available)
+	if checkGPUOOM() {
+		return "gpu_oom"
+	}
+
+	if exitCode == 1 {
+		return "error"
+	}
+	return fmt.Sprintf("exit_%d", exitCode)
+}
+
+// checkDmesgOOM checks recent dmesg output for OOM killer messages.
+func checkDmesgOOM() bool {
+	cmd := exec.Command("dmesg", "--time-format=reltime", "--level=err,crit,alert,emerg")
+	out, err := cmd.Output()
+	if err != nil {
+		// Fallback: try without flags (older kernels, macOS won't have dmesg)
+		cmd = exec.Command("dmesg")
+		out, err = cmd.Output()
+		if err != nil {
+			return false
+		}
+	}
+
+	output := string(out)
+	return strings.Contains(output, "Out of memory") ||
+		strings.Contains(output, "oom-kill") ||
+		strings.Contains(output, "Killed process") ||
+		strings.Contains(output, "invoked oom-killer")
+}
+
+// checkGPUOOM checks nvidia-smi for GPU memory errors.
+func checkGPUOOM() bool {
+	cmd := exec.Command("nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader")
+	_, err := cmd.Output()
+	if err != nil {
+		// nvidia-smi not available or failed — check if the error itself indicates OOM
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			stderr := string(exitErr.Stderr)
+			if strings.Contains(stderr, "out of memory") || strings.Contains(stderr, "CUDA_ERROR_OUT_OF_MEMORY") {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // WriteSample appends a sample line to the samples file.

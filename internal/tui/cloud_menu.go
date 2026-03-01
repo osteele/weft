@@ -193,44 +193,69 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 	}
 }
 
-// launchCloudJob creates a Vast.ai instance and runs the job on it.
+// launchCloudJob creates a Vast.ai instance and launches the job in fire-and-forget mode.
+// The instance will upload results to R2 and self-destruct when done.
 func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) tea.Cmd {
 	return func() tea.Msg {
 		if offering.Offer == nil {
-			return cloudJobCompletedMsg{
+			return cloudJobLaunchedMsg{
 				jobID: job.ID,
 				err:   fmt.Errorf("no offer data"),
+			}
+		}
+
+		// Check R2 config
+		r2Cfg := m.appConfig.Vastai.R2
+		if r2Cfg.Bucket == "" || r2Cfg.AccessKeyID == "" {
+			return cloudJobLaunchedMsg{
+				jobID: job.ID,
+				err:   fmt.Errorf("R2 not configured (set vastai.r2 in config.yaml)"),
 			}
 		}
 
 		client := vastai.NewClient()
 		offer := *offering.Offer
 
+		image := m.appConfig.Vastai.DefaultImage
+		if image == "" {
+			image = "nvidia/cuda:12.2-devel-ubuntu22.04"
+		}
+
 		opts := vastai.CreateOpts{
-			Image:      "nvidia/cuda:12.2-devel-ubuntu22.04",
+			Image:      image,
 			DiskGB:     50,
 			SSHEnabled: true,
-			OnStartCmd: "curl -LsSf https://astral.sh/uv/install.sh | sh",
+			OnStartCmd: "curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash",
 		}
 
 		progress := func(phase string) {
-			// TODO: send cloudJobProgressMsg back to the TUI
-			// For now, progress is not wired up to the TUI event loop
 			_ = phase
 		}
 
-		result, err := vastai.RunJobOnInstance(client, offer, opts, job.WorkingDir, job.Command, job.Inputs, progress)
+		vastR2 := vastai.R2Config{
+			AccountID:       r2Cfg.AccountID,
+			AccessKeyID:     r2Cfg.AccessKeyID,
+			SecretAccessKey: r2Cfg.SecretAccessKey,
+			Bucket:          r2Cfg.Bucket,
+		}
+
+		result, err := vastai.LaunchJobOnInstance(client, offer, opts, job.WorkingDir, job.Command, job.Inputs, job.ID, vastR2, progress)
 		if err != nil {
-			return cloudJobCompletedMsg{
+			return cloudJobLaunchedMsg{
 				jobID: job.ID,
 				err:   err,
 			}
 		}
 
-		return cloudJobCompletedMsg{
-			jobID:    job.ID,
-			exitCode: result.ExitCode,
-			cost:     result.ActualCost,
+		// Persist instance ID to DB immediately
+		if dbErr := db.SetJobVastaiInstance(m.database, job.ID, result.InstanceID); dbErr != nil {
+			// Instance is already running — log but don't fail
+			_ = dbErr
+		}
+
+		return cloudJobLaunchedMsg{
+			jobID:      job.ID,
+			instanceID: result.InstanceID,
 		}
 	}
 }

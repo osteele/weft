@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -129,6 +133,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Sync placement outcomes for pending_placement jobs
 	placementUpdated := syncPlacementOutcomes(database, syncVerbose)
 	totalUpdated += placementUpdated
+
+	// Check Vast.ai instances for completed results (CLI fallback for coordinator)
+	vastaiUpdated := syncVastaiInstances(database, syncVerbose)
+	totalUpdated += vastaiUpdated
 
 	// Prune old cached log files
 	cfg, _ := config.Load()
@@ -366,6 +374,113 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 		summaries = append(summaries, fmt.Sprintf("%s: %s", host, age))
 	}
 	return summaries
+}
+
+// syncVastaiInstances checks for completed Vast.ai job results in R2.
+// This is a CLI fallback for when the coordinator is not running.
+func syncVastaiInstances(database *sql.DB, verbose bool) int {
+	cfg, _ := config.Load()
+	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
+		return 0
+	}
+
+	jobs, err := db.ListActiveVastaiJobs(database)
+	if err != nil || len(jobs) == 0 {
+		return 0
+	}
+
+	if verbose {
+		fmt.Printf("Checking %d active Vast.ai job(s)...\n", len(jobs))
+	}
+
+	r2Cfg := r2Config(cfg)
+	r2Client, err := r2.New(r2Cfg)
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: R2 client: %v\n", err)
+		}
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	updated := 0
+	completedJobIDs, err := r2Client.ListCompleted(ctx, "jobs/")
+	if err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: R2 list: %v\n", err)
+		}
+		return 0
+	}
+
+	// Build lookup of active job IDs
+	activeJobIDs := make(map[string]bool)
+	for _, j := range jobs {
+		activeJobIDs[fmt.Sprintf("%d", j.ID)] = true
+	}
+
+	for _, jobIDStr := range completedJobIDs {
+		if !activeJobIDs[jobIDStr] {
+			continue
+		}
+
+		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
+		prefix := fmt.Sprintf("jobs/%d", jobID)
+
+		// Download results to temp dir
+		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-vastai-%d-*", jobID))
+		if err != nil {
+			continue
+		}
+
+		if err := r2Client.DownloadResults(ctx, prefix+"/results/", tmpDir); err != nil {
+			os.RemoveAll(tmpDir)
+			continue
+		}
+
+		// Read exit code
+		exitCodeBytes, err := os.ReadFile(filepath.Join(tmpDir, "exit_code"))
+		if err != nil {
+			os.RemoveAll(tmpDir)
+			continue
+		}
+		exitCode, _ := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
+
+		// Read end time
+		endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
+		endTimeUnix, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
+
+		status := db.StatusCompleted
+		if exitCode != 0 {
+			status = db.StatusFailed
+		}
+
+		_, _ = database.Exec(
+			`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
+			status, exitCode, endTimeUnix, status, jobID,
+		)
+		updated++
+
+		if verbose {
+			fmt.Printf("  Vast.ai job %d: %s (exit %d)\n", jobID, status, exitCode)
+		}
+
+		// Cleanup
+		_ = r2Client.DeletePrefix(ctx, prefix+"/")
+		os.RemoveAll(tmpDir)
+	}
+
+	return updated
+}
+
+func r2Config(cfg *config.Config) r2.Config {
+	return r2.Config{
+		AccountID:       cfg.Vastai.R2.AccountID,
+		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
+		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
+		Bucket:          cfg.Vastai.R2.Bucket,
+	}
 }
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated

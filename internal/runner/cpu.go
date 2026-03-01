@@ -9,33 +9,35 @@ import (
 
 // CPUConfig holds tuning parameters for CPU-based concurrency control.
 type CPUConfig struct {
-	HostUtilizationTarget int // Maximum total allotment % before blocking new jobs
-	DefaultAllotmentCores int // Default cores per job (converted to % of total)
-	WarmupDuration        int // Seconds before sampling starts for a new job
-	SampleInterval        int // Seconds between CPU samples
-	SampleWindow          int // Seconds of sample history to keep
-	HysteresisWindow      int // Number of over/under decisions to keep
-	HysteresisThreshold   int // How many must agree before adjusting
-	IncreaseStep          int // Allotment % increase per adjustment
-	DecayStep             int // Allotment % decrease per adjustment
-	MinAllotment          int // Minimum allotment %
-	MaxAllotment          int // Maximum allotment %
+	HostUtilizationTarget    int // Maximum total allotment % before blocking new jobs
+	DefaultAllotmentCores    int // Default cores per job (converted to % of total)
+	DefaultGPUAllotmentCores int // Default cores for GPU jobs (lower since GPU-bound)
+	WarmupDuration           int // Seconds before sampling starts for a new job
+	SampleInterval           int // Seconds between CPU samples
+	SampleWindow             int // Seconds of sample history to keep
+	HysteresisWindow         int // Number of over/under decisions to keep
+	HysteresisThreshold      int // How many must agree before adjusting
+	IncreaseStep             int // Allotment % increase per adjustment
+	DecayStep                int // Allotment % decrease per adjustment
+	MinAllotment             int // Minimum allotment %
+	MaxAllotment             int // Maximum allotment %
 }
 
 // DefaultCPUConfig returns the default CPU configuration matching the bash runner.
 func DefaultCPUConfig() CPUConfig {
 	return CPUConfig{
-		HostUtilizationTarget: 80,
-		DefaultAllotmentCores: 7,
-		WarmupDuration:        120,
-		SampleInterval:        15,
-		SampleWindow:          60,
-		HysteresisWindow:      5,
-		HysteresisThreshold:   3,
-		IncreaseStep:          10,
-		DecayStep:             10,
-		MinAllotment:          10,
-		MaxAllotment:          100,
+		HostUtilizationTarget:    80,
+		DefaultAllotmentCores:    7,
+		DefaultGPUAllotmentCores: 2,
+		WarmupDuration:           120,
+		SampleInterval:           15,
+		SampleWindow:             60,
+		HysteresisWindow:         5,
+		HysteresisThreshold:      3,
+		IncreaseStep:             10,
+		DecayStep:                10,
+		MinAllotment:             10,
+		MaxAllotment:             100,
 	}
 }
 
@@ -58,6 +60,22 @@ func (cfg CPUConfig) DefaultAllotment(cpuCount int) int {
 		return 60
 	}
 	pct := (cfg.DefaultAllotmentCores * 100) / cpuCount
+	if pct < 1 {
+		pct = 1
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	return pct
+}
+
+// DefaultGPUAllotment calculates the default CPU allotment percentage for a GPU job.
+// GPU jobs are GPU-bound, so they need fewer CPU cores.
+func (cfg CPUConfig) DefaultGPUAllotment(cpuCount int) int {
+	if cpuCount <= 0 {
+		return 15
+	}
+	pct := (cfg.DefaultGPUAllotmentCores * 100) / cpuCount
 	if pct < 1 {
 		pct = 1
 	}

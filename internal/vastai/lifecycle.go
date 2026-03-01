@@ -115,6 +115,90 @@ func RunJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir stri
 	}, nil
 }
 
+// LaunchResult contains the instance info from a fire-and-forget launch.
+type LaunchResult struct {
+	InstanceID int
+}
+
+// LaunchJobOnInstance creates a Vast.ai instance, syncs files, deploys the
+// wrapper script, and starts it via nohup. It returns immediately after the
+// wrapper is started — the instance will upload results to R2 and self-destruct.
+//
+// The caller must persist the instance ID to the job record BEFORE calling this,
+// so that the instance can be recovered if the TUI dies.
+func LaunchJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir string, command string, inputs []string, jobID int64, r2Cfg R2Config, progress ProgressFunc) (*LaunchResult, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+
+	// 1. Create instance
+	progress("creating instance")
+	inst, err := client.CreateInstance(offer.ID, opts)
+	if err != nil {
+		return nil, fmt.Errorf("create instance: %w", err)
+	}
+	instanceID := inst.ID
+
+	// 2. Wait for instance to be ready
+	progress("waiting for instance")
+	inst, err = client.WaitReady(instanceID, 5*time.Minute)
+	if err != nil {
+		// Destroy on setup failure
+		_ = client.DestroyInstance(instanceID)
+		return nil, fmt.Errorf("wait ready: %w", err)
+	}
+
+	sshTarget := fmt.Sprintf("root@%s", inst.SSHHost)
+	sshPort := strconv.Itoa(inst.SSHPort)
+	sshOpts := []string{"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-p", sshPort}
+
+	// 3. Rsync working directory to instance
+	if workDir != "" {
+		progress("syncing working directory")
+		if err := rsyncTo(workDir, sshTarget, "/workspace/", sshPort); err != nil {
+			_ = client.DestroyInstance(instanceID)
+			return nil, fmt.Errorf("rsync working dir: %w", err)
+		}
+	}
+
+	// 4. Rsync input assets
+	for _, input := range inputs {
+		progress(fmt.Sprintf("syncing input: %s", input))
+		if err := rsyncTo(input, sshTarget, "/data/", sshPort); err != nil {
+			_ = client.DestroyInstance(instanceID)
+			return nil, fmt.Errorf("rsync input %s: %w", input, err)
+		}
+	}
+
+	// 5. Write rclone config for R2 access
+	progress("configuring R2")
+	rcloneConf := GenerateRcloneConfig(r2Cfg)
+	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
+	if _, err := sshRun(sshTarget, sshOpts, setupCmd); err != nil {
+		_ = client.DestroyInstance(instanceID)
+		return nil, fmt.Errorf("write rclone config: %w", err)
+	}
+
+	// 6. Deploy wrapper script
+	progress("deploying wrapper")
+	wrapper := GenerateWrapper(jobID, command, r2Cfg.Bucket)
+	deployCmd := fmt.Sprintf("cat > /workspace/.weft-runner.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x /workspace/.weft-runner.sh", wrapper)
+	if _, err := sshRun(sshTarget, sshOpts, deployCmd); err != nil {
+		_ = client.DestroyInstance(instanceID)
+		return nil, fmt.Errorf("deploy wrapper: %w", err)
+	}
+
+	// 7. Start wrapper via nohup (fire-and-forget)
+	progress("starting job")
+	startCmd := fmt.Sprintf("nohup bash /workspace/.weft-runner.sh %d </dev/null >/dev/null 2>&1 &", jobID)
+	if _, err := sshRun(sshTarget, sshOpts, startCmd); err != nil {
+		_ = client.DestroyInstance(instanceID)
+		return nil, fmt.Errorf("start wrapper: %w", err)
+	}
+
+	return &LaunchResult{InstanceID: instanceID}, nil
+}
+
 // rsyncTo syncs a local directory to a remote path via SSH.
 func rsyncTo(localPath, sshTarget, remotePath, port string) error {
 	// Ensure trailing slash for directory contents

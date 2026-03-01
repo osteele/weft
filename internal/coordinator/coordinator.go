@@ -129,6 +129,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	syncTicker := time.NewTicker(c.config.SyncInterval)
 	defer syncTicker.Stop()
 
+	vastaiSweepTicker := time.NewTicker(60 * time.Second)
+	defer vastaiSweepTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -150,6 +153,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 		case <-syncTicker.C:
 			c.syncAllHosts()
+
+		case <-vastaiSweepTicker.C:
+			c.sweepVastaiResults()
 		}
 	}
 }

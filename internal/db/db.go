@@ -98,7 +98,7 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id`
 
 const ProcessedTag = "processed"
 
@@ -354,6 +354,16 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_reasons TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add cost column for cloud job cost tracking
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN cost REAL`); err != nil {
+		return err
+	}
+
+	// Migration: add vastai_instance_id column for Vast.ai instance tracking
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN vastai_instance_id INTEGER`); err != nil {
 		return err
 	}
 
@@ -764,6 +774,34 @@ func SetJobPlacement(db *sql.DB, jobID int64, host string, reasons string) error
 		host, reasons, jobID,
 	)
 	return err
+}
+
+// SetJobVastaiInstance stores the Vast.ai instance ID and backend on a job record.
+// This should be called immediately after creating the instance, before any other work.
+func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET vastai_instance_id = ?, backend = ? WHERE id = ?`,
+		instanceID, BackendVastai, jobID,
+	)
+	return err
+}
+
+// SetJobCost updates the actual cost for a cloud-run job.
+func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
+	_, err := db.Exec(`UPDATE jobs SET cost = ? WHERE id = ?`, cost, jobID)
+	return err
+}
+
+// ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID
+// and are in a non-terminal status.
+func ListActiveVastaiJobs(db *sql.DB) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE backend = ? AND vastai_instance_id IS NOT NULL AND status NOT IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY id`, jobSelectColumns)
+	rows, err := db.Query(query, BackendVastai, StatusCompleted, StatusFailed, StatusKilled, StatusCanceled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanJobs(rows)
 }
 
 // MarkJobDraftPending updates a job to draft status locally and records pending cleanup.
@@ -1503,8 +1541,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingStatus sql.NullString
 	var pendingAt sql.NullInt64
 	var jobMetadata sql.NullString
+	var cost sql.NullFloat64
+	var vastaiInstanceID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1595,6 +1635,13 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.PendingAt = &pendingAt.Int64
 	}
 	j.Metadata = decodeJobMetadata(jobMetadata)
+	if cost.Valid {
+		j.Cost = &cost.Float64
+	}
+	if vastaiInstanceID.Valid {
+		val := int(vastaiInstanceID.Int64)
+		j.VastaiInstanceID = &val
+	}
 	if j.Backend == "" {
 		j.Backend = BackendQueueRunner
 	}
@@ -1820,8 +1867,10 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingStatus sql.NullString
 		var pendingAt sql.NullInt64
 		var jobMetadata sql.NullString
+		var cost sql.NullFloat64
+		var vastaiInstanceID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID)
 		if err != nil {
 			return nil, err
 		}
@@ -1909,6 +1958,13 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.PendingAt = &pendingAt.Int64
 		}
 		j.Metadata = decodeJobMetadata(jobMetadata)
+		if cost.Valid {
+			j.Cost = &cost.Float64
+		}
+		if vastaiInstanceID.Valid {
+			val := int(vastaiInstanceID.Int64)
+			j.VastaiInstanceID = &val
+		}
 		if j.Backend == "" {
 			j.Backend = BackendQueueRunner
 		}

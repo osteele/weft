@@ -72,6 +72,35 @@ type Config struct {
 
 	// Predictor holds job-predictor configuration for duration/resource estimation
 	Predictor PredictorConfig `yaml:"predictor"`
+
+	// Vastai holds Vast.ai cloud GPU and R2 result storage configuration
+	Vastai VastaiConfig `yaml:"vastai"`
+}
+
+// VastaiConfig holds Vast.ai cloud GPU settings.
+type VastaiConfig struct {
+	// Enabled controls whether Vast.ai cloud GPU options are available
+	Enabled bool `yaml:"enabled"`
+	// SpendingLimit is the maximum cost per job in dollars
+	SpendingLimit float64 `yaml:"spending_limit"`
+	// DefaultImage is the Docker image for cloud instances
+	DefaultImage string `yaml:"default_image"`
+	// MaxRuntime is the auto-kill threshold (e.g., "4h")
+	MaxRuntime string `yaml:"max_runtime"`
+	// R2 holds Cloudflare R2 result storage configuration
+	R2 R2Config `yaml:"r2"`
+}
+
+// R2Config holds Cloudflare R2 credentials and bucket settings.
+type R2Config struct {
+	// AccountID is the Cloudflare account ID
+	AccountID string `yaml:"account_id"`
+	// AccessKeyID is the R2 API access key
+	AccessKeyID string `yaml:"access_key_id"`
+	// SecretAccessKey is the R2 API secret key
+	SecretAccessKey string `yaml:"secret_access_key"`
+	// Bucket is the R2 bucket name for storing results
+	Bucket string `yaml:"bucket"`
 }
 
 // BlockedPattern defines a substring that should not appear in job commands

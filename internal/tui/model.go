@@ -936,6 +936,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cloudMenuOfferings = msg.offerings
 		return m, nil
 
+	case cloudJobLaunchedMsg:
+		if msg.err != nil {
+			return m, tea.Batch(
+				m.setFlash(fmt.Sprintf("Cloud launch failed: %v", msg.err), true),
+				m.refreshJobs(),
+			)
+		}
+		return m, tea.Batch(
+			m.setFlash(fmt.Sprintf("Cloud job launched (instance %d) — results via R2", msg.instanceID), false),
+			m.refreshJobs(),
+		)
+
 	case cloudJobProgressMsg:
 		return m, m.setFlash(fmt.Sprintf("Cloud job %d: %s", msg.jobID, msg.phase), false)
 
