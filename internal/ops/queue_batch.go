@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -177,95 +176,9 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 		idList = append(idList, fmt.Sprintf("%d", id))
 	}
 	idsArg := strings.Join(idList, " ")
-	stateFile := fmt.Sprintf("~/.cache/weft/queue/%s.state.json", DefaultQueueName)
-	statusPattern := fmt.Sprintf("%s/$id*.status", session.LogDir)
-	pidPattern := fmt.Sprintf("%s/$id*.pid", session.LogDir)
-	failureReasonPattern := fmt.Sprintf("%s/$id*.failure_reason", session.LogDir)
-	script := fmt.Sprintf(`
-STATE_FILE=%s
-CURRENT=""
-FINISHED="{}"
-RUNNING_STATE="{}"
-if [ -f "$STATE_FILE" ]; then
-	CURRENT=$(jq -r '.current // ""' "$STATE_FILE" 2>/dev/null || echo "")
-	PENDING=$(jq -r '.pending[]?' "$STATE_FILE" 2>/dev/null || true)
-	FINISHED=$(jq -c '.finished // {}' "$STATE_FILE" 2>/dev/null || echo "{}")
-	RUNNING_STATE=$(jq -c '.running // {}' "$STATE_FILE" 2>/dev/null || echo "{}")
-else
-	PENDING=""
-fi
-declare -A pending_map
-for id in $PENDING; do
-	pending_map[$id]=1
-done
-gpu_devs_for() {
-	jq -r --arg id "$1" '.[$id].gpu_devices // [] | join(",")' <<< "$RUNNING_STATE" 2>/dev/null
-}
-read_failure_reason() {
-	local fr_file=$(ls %s 2>/dev/null | head -1)
-	if [ -n "$fr_file" ]; then
-		cat "$fr_file" 2>/dev/null | head -1
-	fi
-}
-	for id in %s; do
-		finished_exit=$(echo "$FINISHED" | jq -r --arg id "$id" '.[$id].exit_code // empty' 2>/dev/null)
-	finished_at=$(echo "$FINISHED" | jq -r --arg id "$id" '.[$id].finished_at // empty' 2>/dev/null)
-	if [ -n "$finished_exit" ]; then
-		fr=$(read_failure_reason)
-		echo "JOB|$id|COMPLETED|$finished_exit|$finished_at|$fr"
-		continue
-	fi
-		status_file=$(ls %s 2>/dev/null | head -1)
-	if [ -n "$status_file" ]; then
-		exit_code=$(cat "$status_file" 2>/dev/null | head -1)
-		mtime=$(stat -c %%Y "$status_file" 2>/dev/null || stat -f %%m "$status_file" 2>/dev/null)
-		fr=$(read_failure_reason)
-		echo "JOB|$id|COMPLETED|$exit_code|$mtime|$fr"
-		continue
-	fi
-	if [ "$CURRENT" = "$id" ]; then
-		GPU_DEVS=$(gpu_devs_for "$id")
-		pid_file=$(ls %s 2>/dev/null | head -1)
-		if [ -n "$pid_file" ]; then
-			pid=$(cat "$pid_file" 2>/dev/null | head -1)
-			if [ -n "$pid" ]; then
-				state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
-				if [ -n "$state" ]; then
-					case "$state" in
-						*T*) echo "JOB|$id|PAUSED|$GPU_DEVS" ;;
-						*) echo "JOB|$id|CURRENT|$GPU_DEVS" ;;
-					esac
-					continue
-				fi
-			fi
-		fi
-		echo "JOB|$id|CURRENT|$GPU_DEVS"
-		continue
-	fi
-	if [ -n "${pending_map[$id]+x}" ]; then
-		echo "JOB|$id|QUEUED"
-		continue
-	fi
-	GPU_DEVS=$(gpu_devs_for "$id")
-	pid_file=$(ls %s 2>/dev/null | head -1)
-	if [ -n "$pid_file" ]; then
-		pid=$(cat "$pid_file" 2>/dev/null | head -1)
-		if [ -n "$pid" ]; then
-			state=$(ps -o stat= -p $pid 2>/dev/null | tr -d ' ')
-			if [ -n "$state" ]; then
-				case "$state" in
-					*T*) echo "JOB|$id|PAUSED|$GPU_DEVS" ;;
-					*) echo "JOB|$id|RUNNING|$GPU_DEVS" ;;
-				esac
-				continue
-			fi
-		fi
-	fi
-	echo "JOB|$id|DEAD"
-done
-`, stateFile, failureReasonPattern, idsArg, statusPattern, pidPattern, pidPattern)
 
-	cmd := fmt.Sprintf("bash -c %s", ssh.EscapeForSingleQuotes(script))
+	agentPath := "~/.cache/weft/bin/weft-agent"
+	cmd := fmt.Sprintf("%s batch-status --queue %s %s", agentPath, DefaultQueueName, idsArg)
 	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
 		return nil, err

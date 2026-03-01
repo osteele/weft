@@ -40,6 +40,13 @@ func main() {
 		return
 	}
 
+	// Handle batch-status subcommand
+	if len(os.Args) > 1 && os.Args[1] == "batch-status" {
+		queueName, jobIDs := parseBatchStatusArgs(os.Args[2:])
+		batchStatus(queueName, jobIDs)
+		return
+	}
+
 	// Initialize ops logging
 	if err := oplog.Init(agentLogPath(), 0); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to init ops log: %v\n", err)

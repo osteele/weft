@@ -8,23 +8,57 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
-// LocalAgentVersion returns the jj commit hash of the latest change
-// touching agent-relevant source files (cmd/agent/ or internal/).
+// LocalAgentVersion returns the commit hash of the working copy.
+// Prefers jj (which includes uncommitted changes in the working copy commit),
+// falls back to git HEAD if jj is unavailable.
 func LocalAgentVersion() (string, error) {
+	// Try jj first — the working copy always has a commit, even with dirty files
+	if version, err := jjVersion(); err == nil {
+		return version, nil
+	}
+
+	// Fall back to git HEAD
+	if version, err := gitVersion(); err == nil {
+		return version, nil
+	}
+
+	return "", fmt.Errorf("neither jj nor git repository found")
+}
+
+func jjVersion() (string, error) {
+	rootCmd := exec.Command("jj", "workspace", "root")
+	rootOut, err := rootCmd.Output()
+	if err != nil {
+		return "", err
+	}
+	repoRoot := strings.TrimSpace(string(rootOut))
+
 	cmd := exec.Command("jj", "log",
 		"--no-graph",
-		"-r", "ancestors(@, 50)",
-		"-T", `commit_id.short(12) ++ "\n"`,
-		"--limit", "1",
-		"cmd/agent/", "internal/",
+		"-r", "@",
+		"-T", `commit_id.short(12)`,
 	)
+	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("jj log: %w", err)
+		return "", err
 	}
 	version := strings.TrimSpace(string(out))
 	if version == "" {
-		return "", fmt.Errorf("no commits found touching agent sources")
+		return "", fmt.Errorf("empty jj commit id")
+	}
+	return version, nil
+}
+
+func gitVersion() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--short=12", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return "", fmt.Errorf("empty git commit id")
 	}
 	return version, nil
 }
