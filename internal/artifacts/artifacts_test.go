@@ -48,6 +48,8 @@ func TestMergeEnvVars(t *testing.T) {
 	found := false
 	foundManifest := false
 	foundNewJobID := false
+	foundWeftJobID := false
+	foundWeftManifest := false
 	for _, ev := range merged {
 		if ev == "RJ_JOB_ID=5" {
 			found = true
@@ -58,6 +60,12 @@ func TestMergeEnvVars(t *testing.T) {
 		if ev == "RJ_ARTIFACT_MANIFEST=~/.cache/weft/artifacts/12.json" {
 			foundManifest = true
 		}
+		if ev == "WEFT_JOB_ID=12" {
+			foundWeftJobID = true
+		}
+		if ev == "WEFT_ARTIFACT_MANIFEST=~/.cache/weft/artifacts/12.json" {
+			foundWeftManifest = true
+		}
 	}
 	if !found {
 		t.Fatalf("expected existing RJ_JOB_ID preserved")
@@ -67,5 +75,11 @@ func TestMergeEnvVars(t *testing.T) {
 	}
 	if !foundManifest {
 		t.Fatalf("expected RJ_ARTIFACT_MANIFEST to be added")
+	}
+	if !foundWeftJobID {
+		t.Fatalf("expected WEFT_JOB_ID to be added")
+	}
+	if !foundWeftManifest {
+		t.Fatalf("expected WEFT_ARTIFACT_MANIFEST to be added")
 	}
 }

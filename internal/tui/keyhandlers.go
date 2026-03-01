@@ -398,7 +398,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=kill"))
 			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
-		case db.StatusQueued:
+		case db.StatusQueued, db.StatusPendingPlacement:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=cancel"))
 			return m, tea.Batch(m.setFlash("Cancelling queued job...", false), m.cancelQueuedJob(job))
 		case db.StatusCompleted:

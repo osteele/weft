@@ -215,9 +215,10 @@ remote cleanup.
 ```
 
 **Environment variables available to job scripts:**
-- `RJ_JOB_ID`
-- `RJ_ARTIFACT_MANIFEST` (default: `~/.cache/weft/artifacts/<job-id>.json`)
-- `RJ_ARTIFACT_ROOT` (default: `.`)
+- `WEFT_JOB_ID` — the job ID
+- `WEFT_ARTIFACT_MANIFEST` — path to the artifact manifest (default: `~/.cache/weft/artifacts/<job-id>.json`)
+- `WEFT_ARTIFACT_ROOT` — artifact root directory (default: `.`)
+- `RJ_JOB_ID`, `RJ_ARTIFACT_MANIFEST`, `RJ_ARTIFACT_ROOT` — legacy aliases (same values)
 
 **Examples:**
 ```bash

@@ -37,10 +37,15 @@ func LocalJobDir(jobID int64) (string, error) {
 }
 
 // JobEnvVars returns environment variables injected into job shells.
+// Both WEFT_* and legacy RJ_* prefixes are set for backward compatibility.
 func JobEnvVars(jobID int64) []string {
+	manifest := RemoteManifestPath(jobID)
 	return []string{
+		fmt.Sprintf("WEFT_JOB_ID=%d", jobID),
+		fmt.Sprintf("WEFT_ARTIFACT_MANIFEST=%s", manifest),
+		"WEFT_ARTIFACT_ROOT=.",
 		fmt.Sprintf("RJ_JOB_ID=%d", jobID),
-		fmt.Sprintf("RJ_ARTIFACT_MANIFEST=%s", RemoteManifestPath(jobID)),
+		fmt.Sprintf("RJ_ARTIFACT_MANIFEST=%s", manifest),
 		"RJ_ARTIFACT_ROOT=.",
 	}
 }

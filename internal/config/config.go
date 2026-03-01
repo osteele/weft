@@ -75,6 +75,10 @@ type Config struct {
 
 	// Vastai holds Vast.ai cloud GPU and R2 result storage configuration
 	Vastai VastaiConfig `yaml:"vastai"`
+
+	// CoordinatorHost is the host where the coordinator daemon runs.
+	// Default: "studio"
+	CoordinatorHost string `yaml:"coordinator_host"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
@@ -273,6 +277,44 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// AutomapDirs returns the list of local directory prefixes that should be
+// auto-mapped to the same path on remote hosts. When -C is not specified and
+// CWD is under one of these prefixes, the working directory is automatically
+// set to the corresponding remote path. Reads from ~/.config/weft/automap.txt
+// (one prefix per line), falling back to ["~/code", "~/src"].
+func AutomapDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return []string{"~/code", "~/src"}
+	}
+
+	automapPath := filepath.Join(home, ".config", "weft", "automap.txt")
+	data, err := os.ReadFile(automapPath)
+	if err != nil {
+		return []string{"~/code", "~/src"}
+	}
+
+	var dirs []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			dirs = append(dirs, line)
+		}
+	}
+	if len(dirs) == 0 {
+		return []string{"~/code", "~/src"}
+	}
+	return dirs
+}
+
+// GetCoordinatorHost returns the configured coordinator host, defaulting to "studio".
+func (c *Config) GetCoordinatorHost() string {
+	if c.CoordinatorHost != "" {
+		return c.CoordinatorHost
+	}
+	return "studio"
 }
 
 // ValidateCommand checks if a command contains any blocked patterns.

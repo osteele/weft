@@ -56,6 +56,8 @@ func (m Model) formatStatus(job *db.Job) string {
 		return "✖ canceled"
 	case db.StatusDraft:
 		return "  Draft"
+	case db.StatusPendingPlacement:
+		return "⧗ placing"
 	default:
 		return job.Status
 	}
@@ -125,6 +127,8 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 	case db.StatusCanceled:
 		return deadStyle
 	case db.StatusStarting:
+		return pendingStyle
+	case db.StatusPendingPlacement:
 		return pendingStyle
 	default:
 		return lipgloss.NewStyle()

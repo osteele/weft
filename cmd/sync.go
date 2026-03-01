@@ -175,7 +175,9 @@ func syncPlacementOutcomes(database *sql.DB, verbose bool) int {
 		return 0
 	}
 
-	config := coordinator.DefaultConfig()
+	cfg, _ := config.Load()
+	coordHost := cfg.GetCoordinatorHost()
+	coordConfig := coordinator.DefaultConfig()
 	updated := 0
 
 	for _, job := range jobs {
@@ -184,7 +186,7 @@ func syncPlacementOutcomes(database *sql.DB, verbose bool) int {
 			continue
 		}
 
-		outcome, err := intent.ReadOutcome(coordinatorHost, config.ArchiveDir, intentID)
+		outcome, err := intent.ReadOutcome(coordHost, coordConfig.ArchiveDir, intentID)
 		if err != nil {
 			if verbose {
 				fmt.Fprintf(os.Stderr, "  placement check for job %d: %v\n", job.ID, err)

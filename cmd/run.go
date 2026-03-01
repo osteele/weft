@@ -306,6 +306,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Set defaults
 	workingDir := runDir
 	if workingDir == "" {
+		// Try automap: if CWD is under a known prefix, use the tilde-relative path
+		home, _ := os.UserHomeDir()
+		cwd, _ := os.Getwd()
+		if home != "" && cwd != "" {
+			for _, prefix := range config.AutomapDirs() {
+				expanded := strings.Replace(prefix, "~", home, 1)
+				if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
+					workingDir = prefix + "/" + rel
+					fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected working directory: %s\n", workingDir)
+					break
+				}
+			}
+		}
+	}
+	if workingDir == "" {
 		var err error
 		workingDir, err = session.DefaultWorkingDir()
 		if err != nil {
@@ -787,16 +802,15 @@ func printCommandRecommendations(command string) bool {
 	return false
 }
 
-// coordinatorHost is the host where the coordinator daemon runs.
-const coordinatorHost = "studio"
-
-// coordinatorReachable checks if the coordinator daemon is running on studio.
+// coordinatorReachable checks if the coordinator daemon is running.
 // It checks for the PID file via SSH with a short timeout for fast fail.
 func coordinatorReachable() bool {
-	config := coordinator.DefaultConfig()
+	cfg, _ := config.Load()
+	host := cfg.GetCoordinatorHost()
+	coordConfig := coordinator.DefaultConfig()
 	cmd := fmt.Sprintf("test -f %s && kill -0 $(cat %s) 2>/dev/null && echo YES || echo NO",
-		config.PIDFile, config.PIDFile)
-	stdout, _, err := ssh.RunWithTimeout(coordinatorHost, cmd, 3*time.Second)
+		coordConfig.PIDFile, coordConfig.PIDFile)
+	stdout, _, err := ssh.RunWithTimeout(host, cmd, 3*time.Second)
 	if err != nil {
 		return false
 	}
@@ -807,6 +821,21 @@ func coordinatorReachable() bool {
 func submitIntent(database *sql.DB, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
 	// Resolve working directory
 	workingDir := dir
+	if workingDir == "" {
+		// Try automap: if CWD is under a known prefix, use the tilde-relative path
+		home, _ := os.UserHomeDir()
+		cwd, _ := os.Getwd()
+		if home != "" && cwd != "" {
+			for _, prefix := range config.AutomapDirs() {
+				expanded := strings.Replace(prefix, "~", home, 1)
+				if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
+					workingDir = prefix + "/" + rel
+					fmt.Fprintf(os.Stderr, "Auto-detected working directory: %s\n", workingDir)
+					break
+				}
+			}
+		}
+	}
 	if workingDir == "" {
 		var err error
 		workingDir, err = session.DefaultWorkingDir()
@@ -885,7 +914,8 @@ func submitIntent(database *sql.DB, command, dir, description string, envVars, t
 	}
 
 	// Write intent to coordinator
-	if err := intent.WriteIntent(coordinatorHost, i); err != nil {
+	cfg, _ := config.Load()
+	if err := intent.WriteIntent(cfg.GetCoordinatorHost(), i); err != nil {
 		// If coordinator write fails, fall back to local placement info
 		fmt.Fprintf(os.Stderr, "Warning: could not submit intent to coordinator: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Job %d saved locally with pending_placement status\n", jobID)
