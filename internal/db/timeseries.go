@@ -1,0 +1,107 @@
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"strings"
+)
+
+// TimeseriesSample represents a single telemetry sample for a job.
+type TimeseriesSample struct {
+	Ts             int64  `json:"ts"`
+	CPUPct         int    `json:"cpu_pct"`
+	RSSKB          int64  `json:"rss_kb"`
+	GPUMiB         int    `json:"gpu_mib,omitempty"`
+	HostRSSKB      int64  `json:"host_rss_kb,omitempty"`
+	HostMemTotalKB int64  `json:"host_mem_total_kb,omitempty"`
+	GPUUtilPct     int    `json:"gpu_util_pct,omitempty"`
+	GPUMemUsedMiB  int    `json:"gpu_mem_used_mib,omitempty"`
+	GPUMemTotalMiB int    `json:"gpu_mem_total_mib,omitempty"`
+	Tenant         string `json:"tenant,omitempty"`
+}
+
+// InsertTimeseries bulk-inserts time series samples for a job.
+// Existing samples (same job_id + ts) are silently skipped.
+func InsertTimeseries(database *sql.DB, jobID int64, samples []TimeseriesSample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+
+	tx, err := database.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Build batch insert with OR IGNORE for idempotency
+	const batchSize = 100
+	for i := 0; i < len(samples); i += batchSize {
+		end := i + batchSize
+		if end > len(samples) {
+			end = len(samples)
+		}
+		batch := samples[i:end]
+
+		var placeholders []string
+		var args []any
+		for _, s := range batch {
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args, jobID, s.Ts, s.CPUPct, s.RSSKB, s.GPUMiB,
+				s.HostRSSKB, s.HostMemTotalKB, s.GPUUtilPct, s.GPUMemUsedMiB, s.GPUMemTotalMiB, s.Tenant)
+		}
+
+		query := `INSERT OR IGNORE INTO job_timeseries
+			(job_id, ts, cpu_pct, rss_kb, gpu_mib, host_rss_kb, host_mem_total_kb, gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib, tenant)
+			VALUES ` + strings.Join(placeholders, ", ")
+
+		if _, err := tx.Exec(query, args...); err != nil {
+			return fmt.Errorf("insert timeseries batch: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetTimeseries reads all time series samples for a job, ordered by timestamp.
+func GetTimeseries(database *sql.DB, jobID int64) ([]TimeseriesSample, error) {
+	rows, err := database.Query(`
+		SELECT ts, cpu_pct, rss_kb, gpu_mib, host_rss_kb, host_mem_total_kb,
+		       gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib, tenant
+		FROM job_timeseries
+		WHERE job_id = ?
+		ORDER BY ts`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("query timeseries: %w", err)
+	}
+	defer rows.Close()
+
+	var samples []TimeseriesSample
+	for rows.Next() {
+		var s TimeseriesSample
+		var tenant sql.NullString
+		if err := rows.Scan(&s.Ts, &s.CPUPct, &s.RSSKB, &s.GPUMiB,
+			&s.HostRSSKB, &s.HostMemTotalKB, &s.GPUUtilPct, &s.GPUMemUsedMiB, &s.GPUMemTotalMiB,
+			&tenant); err != nil {
+			return nil, fmt.Errorf("scan timeseries row: %w", err)
+		}
+		if tenant.Valid {
+			s.Tenant = tenant.String
+		}
+		samples = append(samples, s)
+	}
+	return samples, rows.Err()
+}
+
+// GetTimeseriesLastTS returns the latest timestamp for a job's timeseries data.
+// Returns 0 if no samples exist.
+func GetTimeseriesLastTS(database *sql.DB, jobID int64) (int64, error) {
+	var ts sql.NullInt64
+	err := database.QueryRow(`SELECT MAX(ts) FROM job_timeseries WHERE job_id = ?`, jobID).Scan(&ts)
+	if err != nil {
+		return 0, fmt.Errorf("query max ts: %w", err)
+	}
+	if ts.Valid {
+		return ts.Int64, nil
+	}
+	return 0, nil
+}

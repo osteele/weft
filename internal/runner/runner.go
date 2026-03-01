@@ -639,6 +639,30 @@ func (r *Runner) sampleRunningJobs() {
 			}
 		}
 
+		// Write timeseries sample (full telemetry for job-predictor)
+		sample := TimeseriesSample{
+			Ts:     now.Unix(),
+			CPUPct: hostPct,
+			GPUMiB: gpuMem,
+			Tenant: "multi",
+		}
+		// Current RSS (not peak)
+		rusagePIDForTS := pid
+		if pgid, ok := ReadPIDFile(paths.PGID); ok {
+			rusagePIDForTS = pgid
+		}
+		sample.RSSKB = ProcCurrentRSSKB(rusagePIDForTS)
+		// Host-wide memory
+		hostTotal, hostUsed := HostMemoryKB()
+		sample.HostMemTotal = hostTotal
+		sample.HostRSSKB = hostUsed
+		// Host-wide GPU utilization
+		gpuUtil, gpuMemUsed, gpuMemTotal := HostGPUUtilization()
+		sample.GPUUtilPct = gpuUtil
+		sample.GPUMemUsed = gpuMemUsed
+		sample.GPUMemTotal = gpuMemTotal
+		WriteTimeseriesSample(paths, sample)
+
 		// CPU allotment hysteresis
 		newAllotment, newOverHist, newUnderHist := r.cpuConfig.AdjustAllotment(
 			rs.LocalAllotment, rs.Samples, rs.OverHist, rs.UnderHist, r.state.TotalAllotment())

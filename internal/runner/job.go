@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,21 @@ type JobPaths struct {
 	Paused        string
 	Rusage        string
 	FailureReason string
+	Timeseries    string
+}
+
+// TimeseriesSample holds a single time-series telemetry sample for a running job.
+type TimeseriesSample struct {
+	Ts           int64  `json:"ts"`
+	CPUPct       int    `json:"cpu_pct"`
+	RSSKB        int64  `json:"rss_kb"`
+	GPUMiB       int    `json:"gpu_mib,omitempty"`
+	HostRSSKB    int64  `json:"host_rss_kb,omitempty"`
+	HostMemTotal int64  `json:"host_mem_total_kb,omitempty"`
+	GPUUtilPct   int    `json:"gpu_util_pct,omitempty"`
+	GPUMemUsed   int    `json:"gpu_mem_used_mib,omitempty"`
+	GPUMemTotal  int    `json:"gpu_mem_total_mib,omitempty"`
+	Tenant       string `json:"tenant"`
 }
 
 // NewJobPaths returns file paths for all job-related files.
@@ -36,12 +52,13 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 		Paused:        filepath.Join(logDir, fmt.Sprintf("%d.paused", jobID)),
 		Rusage:        filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
 		FailureReason: filepath.Join(logDir, fmt.Sprintf("%d.failure_reason", jobID)),
+		Timeseries:    filepath.Join(logDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)),
 	}
 }
 
 // ArchiveExistingFiles renames existing job files with a timestamp suffix.
 func ArchiveExistingFiles(logDir string, jobID int64) {
-	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason"}
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl"}
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
 		info, err := os.Stat(path)
@@ -282,6 +299,22 @@ func HasTag(job *ops.CommandJob, tag string) bool {
 		}
 	}
 	return false
+}
+
+// WriteTimeseriesSample appends a single JSON line to the timeseries file.
+func WriteTimeseriesSample(paths JobPaths, sample TimeseriesSample) error {
+	f, err := os.OpenFile(paths.Timeseries, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	data, err := json.Marshal(sample)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	_, err = f.Write(data)
+	return err
 }
 
 func splitCSV(s string) []string {

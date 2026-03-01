@@ -463,6 +463,28 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create job_timeseries table for per-sample telemetry data
+	timeseriesSchema := `
+	CREATE TABLE IF NOT EXISTS job_timeseries (
+		job_id INTEGER NOT NULL,
+		ts INTEGER NOT NULL,
+		cpu_pct INTEGER,
+		rss_kb INTEGER,
+		gpu_mib INTEGER,
+		host_rss_kb INTEGER,
+		host_mem_total_kb INTEGER,
+		gpu_util_pct INTEGER,
+		gpu_mem_used_mib INTEGER,
+		gpu_mem_total_mib INTEGER,
+		tenant TEXT,
+		PRIMARY KEY (job_id, ts)
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_timeseries_job ON job_timeseries(job_id);
+	`
+	if _, err := db.Exec(timeseriesSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 

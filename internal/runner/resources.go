@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -80,6 +81,136 @@ func ProcResourceUsage(pid int) (userTicks, sysTicks, peakRSSKB int64) {
 // TicksToSeconds converts clock ticks to seconds (100 ticks/sec on Linux).
 func TicksToSeconds(ticks int64) string {
 	return fmt.Sprintf("%.2f", float64(ticks)/100.0)
+}
+
+// ProcCurrentRSSKB returns the current RSS (not peak) of a process tree in KB.
+// Reads VmRSS from /proc/{pid}/status and sums across the tree.
+// Returns 0 on non-Linux or if /proc is unavailable.
+func ProcCurrentRSSKB(pid int) int64 {
+	if _, err := os.Stat("/proc"); err != nil {
+		return 0
+	}
+	pids := GetProcessTree(pid)
+	var totalRSS int64
+	for _, p := range pids {
+		statusPath := fmt.Sprintf("/proc/%d/status", p)
+		data, err := os.ReadFile(statusPath)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "VmRSS:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					rss, _ := strconv.ParseInt(fields[1], 10, 64)
+					totalRSS += rss
+				}
+			}
+		}
+	}
+	return totalRSS
+}
+
+// HostMemoryKB returns (totalKB, usedKB) for system memory.
+// On Linux reads /proc/meminfo; on macOS uses sysctl + vm_stat.
+// Returns (0, 0) if unable to determine.
+func HostMemoryKB() (totalKB, usedKB int64) {
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/proc/meminfo")
+		if err != nil {
+			return 0, 0
+		}
+		var memTotal, memAvailable int64
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			switch fields[0] {
+			case "MemTotal:":
+				memTotal, _ = strconv.ParseInt(fields[1], 10, 64)
+			case "MemAvailable:":
+				memAvailable, _ = strconv.ParseInt(fields[1], 10, 64)
+			}
+		}
+		if memTotal > 0 {
+			return memTotal, memTotal - memAvailable
+		}
+		return 0, 0
+	}
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		if err != nil {
+			return 0, 0
+		}
+		memBytes, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+		totalKB = memBytes / 1024
+
+		// vm_stat reports pages; page size is typically 16384 on Apple Silicon, 4096 on Intel
+		vmOut, err := exec.Command("vm_stat").Output()
+		if err != nil {
+			return totalKB, 0
+		}
+		var pageSize int64 = 16384
+		var pagesActive, pagesWired, pagesCompressed int64
+		for _, line := range strings.Split(string(vmOut), "\n") {
+			if strings.HasPrefix(line, "Mach Virtual Memory Statistics") {
+				// "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
+				if idx := strings.Index(line, "page size of "); idx >= 0 {
+					rest := line[idx+len("page size of "):]
+					if spIdx := strings.Index(rest, " "); spIdx > 0 {
+						pageSize, _ = strconv.ParseInt(rest[:spIdx], 10, 64)
+					}
+				}
+			}
+			fields := strings.SplitN(line, ":", 2)
+			if len(fields) != 2 {
+				continue
+			}
+			val := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(fields[1]), "."))
+			n, _ := strconv.ParseInt(val, 10, 64)
+			switch strings.TrimSpace(fields[0]) {
+			case "Pages active":
+				pagesActive = n
+			case "Pages wired down":
+				pagesWired = n
+			case "Pages occupied by compressor":
+				pagesCompressed = n
+			}
+		}
+		usedKB = (pagesActive + pagesWired + pagesCompressed) * pageSize / 1024
+		return totalKB, usedKB
+	}
+	return 0, 0
+}
+
+// HostGPUUtilization returns system-wide GPU metrics by parsing nvidia-smi.
+// Returns (gpuUtilPct, gpuMemUsedMiB, gpuMemTotalMiB).
+// Returns (0, 0, 0) if nvidia-smi is not available.
+func HostGPUUtilization() (gpuUtilPct int, gpuMemUsedMiB int, gpuMemTotalMiB int) {
+	out, err := exec.Command("nvidia-smi",
+		"--query-gpu=utilization.gpu,memory.used,memory.total",
+		"--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return 0, 0, 0
+	}
+	// Sum across all GPUs (take max utilization, sum memory)
+	var maxUtil int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Split(line, ",")
+		if len(fields) < 3 {
+			continue
+		}
+		util, _ := strconv.Atoi(strings.TrimSpace(fields[0]))
+		memUsed, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
+		memTotal, _ := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if util > maxUtil {
+			maxUtil = util
+		}
+		gpuMemUsedMiB += memUsed
+		gpuMemTotalMiB += memTotal
+	}
+	return maxUtil, gpuMemUsedMiB, gpuMemTotalMiB
 }
 
 // ProcGPUMemMiB returns the total GPU memory used by a process tree in MiB.
