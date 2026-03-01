@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -87,6 +88,7 @@ var (
 	runInputs      []string
 	runOutputs     []string
 	runDryRun      bool
+	runNoSync      bool
 )
 
 const defaultGPUMemGB = ops.DefaultGPUMemGB
@@ -117,6 +119,7 @@ func init() {
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	runCmd.Flags().StringSliceVar(&runOutputs, "output", nil, "Output data asset (e.g., checkpoint:llama-ft-v1), can be repeated")
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Show placement scores without submitting the job")
+	runCmd.Flags().BoolVar(&runNoSync, "no-sync", false, "Skip source sync before submission")
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -271,18 +274,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Auto-place if no host specified
+	// Route through coordinator for all non-immediate, non-draft submissions
+	if !runImmediate && !runDraft && coordinatorReachable() {
+		return submitIntent(database, host, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
+	}
+
+	// Coordinator unreachable — fall back to direct submission
 	if host == "" {
 		if runImmediate {
 			return fmt.Errorf("--immediate requires an explicit host")
 		}
 
-		// Try coordinator-based placement first
-		if !runDraft && coordinatorReachable() {
-			return submitIntent(database, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
-		}
-
-		// Fall back to local placement
+		// Local placement
 		bestHost, reasons, err := placement.BestHost(database, placementConstraints)
 		if err != nil {
 			return fmt.Errorf("auto-placement failed: %w", err)
@@ -330,6 +333,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if dirProvided {
 		maybeWarnHomePrefixedDir(host, workingDir)
+	}
+
+	// Sync sources directly to target host (fallback path, coordinator unreachable)
+	if !runNoSync && !runDryRun && !runDraft && host != "" {
+		if localDir := resolveLocalDir(workingDir); localDir != "" {
+			if err := srcsync.SyncSources(host, localDir, workingDir); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: source sync failed: %v\n", err)
+			}
+		}
 	}
 
 	// Log CLI command invocation
@@ -818,7 +830,8 @@ func coordinatorReachable() bool {
 }
 
 // submitIntent writes a placement intent to the coordinator and records the job locally.
-func submitIntent(database *sql.DB, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
+// host may be empty (auto-placement) or an explicit host name (passed as a constraint).
+func submitIntent(database *sql.DB, host, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
 	// Resolve working directory
 	workingDir := dir
 	if workingDir == "" {
@@ -841,6 +854,20 @@ func submitIntent(database *sql.DB, command, dir, description string, envVars, t
 		workingDir, err = session.DefaultWorkingDir()
 		if err != nil {
 			return fmt.Errorf("get working dir: %w", err)
+		}
+	}
+
+	// Sync sources to coordinator (hop 1: CLI → coordinator)
+	if !runNoSync {
+		if localDir := resolveLocalDir(workingDir); localDir != "" {
+			cfg2, _ := config.Load()
+			syncHost := cfg2.GetCoordinatorHost()
+			hostname, _ := os.Hostname()
+			if hostname != syncHost {
+				if err := srcsync.SyncSources(syncHost, localDir, workingDir); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: source sync to coordinator failed: %v\n", err)
+				}
+			}
 		}
 	}
 
@@ -933,4 +960,32 @@ func submitIntent(database *sql.DB, command, dir, description string, envVars, t
 	}
 
 	return nil
+}
+
+// resolveLocalDir converts a tilde-prefixed working directory back to a local
+// absolute path using the automap directory prefixes. Returns "" if the path
+// cannot be resolved to a local directory.
+func resolveLocalDir(workingDir string) string {
+	if workingDir == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	for _, prefix := range config.AutomapDirs() {
+		expanded := strings.Replace(prefix, "~", home, 1)
+		if strings.HasPrefix(workingDir, prefix+"/") {
+			rel := workingDir[len(prefix)+1:]
+			return filepath.Join(expanded, rel)
+		}
+		if workingDir == prefix {
+			return expanded
+		}
+	}
+	// If workingDir is already an absolute path, use it directly
+	if filepath.IsAbs(workingDir) {
+		return workingDir
+	}
+	return ""
 }

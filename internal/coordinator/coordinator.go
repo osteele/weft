@@ -209,6 +209,9 @@ func (c *Coordinator) handleIntentFile(path string) {
 	// Pre-stage missing inputs (best-effort, does not block dispatch)
 	prestageInputs(c.db, i, host, c.logger)
 
+	// Sync sources from coordinator to target host
+	syncSources(i, host, c.logger)
+
 	// Dispatch
 	jobID, err := dispatchIntent(c.db, i, host)
 	if err != nil {

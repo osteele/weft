@@ -4,12 +4,16 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/prestage"
+	srcsync "github.com/osteele/weft/internal/sync"
 )
 
 // prestageInputs runs pre-staging for the intent's inputs on the target host.
@@ -79,4 +83,34 @@ func resolveHost(database *sql.DB, i *intent.Intent) (string, []string, error) {
 		return "", nil, fmt.Errorf("placement: %w", err)
 	}
 	return host, reasons, nil
+}
+
+// syncSources rsyncs the intent's working directory from the coordinator to the
+// target host. Failures are logged but do not block dispatch.
+func syncSources(i *intent.Intent, host string, logger *log.Logger) {
+	dir := i.Job.Dir
+	if dir == "" {
+		return
+	}
+
+	// Expand ~ to coordinator's home directory for the local path
+	localDir := dir
+	if strings.HasPrefix(dir, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			logger.Printf("sync sources: cannot resolve home dir: %v", err)
+			return
+		}
+		localDir = filepath.Join(home, dir[2:])
+	}
+
+	// Check that the directory exists on the coordinator
+	if _, err := os.Stat(localDir); os.IsNotExist(err) {
+		logger.Printf("sync sources: %s not found on coordinator, skipping", localDir)
+		return
+	}
+
+	if err := srcsync.SyncSources(host, localDir, dir); err != nil {
+		logger.Printf("sync sources to %s for intent %s: %v (continuing)", host, i.IntentID, err)
+	}
 }
