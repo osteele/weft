@@ -69,6 +69,9 @@ type Config struct {
 
 	// Hosts holds per-host configuration overrides.
 	Hosts map[string]HostConfig `yaml:"hosts"`
+
+	// Predictor holds job-predictor configuration for duration/resource estimation
+	Predictor PredictorConfig `yaml:"predictor"`
 }
 
 // BlockedPattern defines a substring that should not appear in job commands
@@ -104,6 +107,18 @@ type SSHConfig struct {
 type HostConfig struct {
 	// Backend sets the execution backend for this host ("queue-runner" or "slurm").
 	Backend string `yaml:"backend"`
+}
+
+// PredictorConfig holds configuration for the job-predictor integration.
+type PredictorConfig struct {
+	// ProjectPath is the path to the job-predictor Python project checkout.
+	ProjectPath string `yaml:"project_path"`
+	// ModelDir overrides the default model directory (~/.cache/weft/models).
+	ModelDir string `yaml:"model_dir"`
+	// RetrainInterval is how many new completed jobs trigger a retrain (default: 50).
+	RetrainInterval int `yaml:"retrain_interval"`
+	// DBPaths lists additional job database paths for training.
+	DBPaths []string `yaml:"db_paths"`
 }
 
 // DefaultConfig returns the default configuration
