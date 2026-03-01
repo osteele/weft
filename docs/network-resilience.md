@@ -1,6 +1,6 @@
 # Network Resilience
 
-Remote Jobs is built for workflows where laptops roam between Wi-Fi networks,
+Weft is built for workflows where laptops roam between Wi-Fi networks,
 SSH servers hiccup, and VPNs flap. This document explains the main techniques
 the CLI uses to keep jobs alive and observable despite unreliable links.
 
@@ -83,7 +83,7 @@ the host is reachable again.
 
 ## Summary
 
-Remote Jobs expects unreliable networks. Jobs keep running on the host, all
+Weft expects unreliable networks. Jobs keep running on the host, all
 operations are queued locally when a host is down, and sync/watch commands are
 explicitly connection-aware. Together these primitives let you start work from
 any network, wander freely, and come back later knowing the CLI has been

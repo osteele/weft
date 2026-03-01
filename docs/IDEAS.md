@@ -2,6 +2,12 @@
 
 Ideas for future enhancements that are not currently prioritized.
 
+**Already implemented** (kept here for historical reference):
+- Job Tags — `--tag` flag, `weft tag add/rm`, TUI filtering
+- Multi-Host Scheduling — coordinator placement scoring with GPU, data locality, utilization
+- Web UI — cluster dashboard at `/cluster` with host cards, GPU bars, coordinator status
+- Resource-Aware Scheduling — placement engine scores GPU class, memory, utilization
+
 ## Disk Full Recovery
 
 When the disk fills up during job execution, the queue runner can get into an inconsistent state because it can't write state files.

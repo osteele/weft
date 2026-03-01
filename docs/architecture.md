@@ -1,31 +1,51 @@
-# Remote Jobs Architecture
+# Weft Architecture
 
-This document describes the architecture and design of the Remote Jobs CLI tool.
+This document describes the architecture and design of weft. For the
+coordinator-specific design (placement scoring, data locality, pre-staging),
+see [coordinator-architecture.md](coordinator-architecture.md).
 
 ## Overview
 
-Remote Jobs is a CLI tool for managing persistent tmux sessions on remote hosts. It solves the problem of long-running jobs terminating when SSH connections drop due to network issues, laptop closure, or session timeouts.
+Weft is a coordinator-based workload scheduler for GPU compute clusters. It has
+three main components:
+
+1. **CLI / TUI** (laptop) — submits jobs as intents, monitors status
+2. **Coordinator** (studio) — scores hosts, pre-stages data, dispatches jobs
+3. **Go agent** (each remote host) — autonomous queue runner with GPU management
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          Local Machine                               │
+│                       Laptop (CLI / TUI)                             │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
 │  │   CLI (cmd)  │───▶│   Database   │    │   Config (YAML)      │  │
-│  │              │    │   (SQLite)   │    │                      │  │
+│  │              │    │   (SQLite)   │    │   Host Inventory     │  │
 │  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
 │         │                                                           │
-│         │ SSH                                                       │
+│         │ Intent files (via SSH)                                     │
 │         ▼                                                           │
 ├─────────────────────────────────────────────────────────────────────┤
-│                         Remote Host(s)                               │
+│                    Coordinator (studio)                               │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │    tmux      │───▶│   Job Logs   │    │   Slack Notify       │  │
-│  │   Session    │    │   (.log)     │    │   (on completion)    │  │
+│  │   Placement  │───▶│  Pre-staging │    │   Intent Watcher     │  │
+│  │   Scoring    │    │   (rsync)    │    │   (fsnotify)         │  │
+│  └──────┬───────┘    └──────────────┘    └──────────────────────┘  │
+│         │                                                           │
+│         │ SSH dispatch                                              │
+│         ▼                                                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                      Remote Host(s)                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │  Go Agent    │───▶│   Job Logs   │    │   Slack Notify       │  │
+│  │  (weft-agent)│    │   (.log)     │    │   (on completion)    │  │
 │  └──────────────┘    └──────────────┘    └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+When the coordinator is unreachable, the CLI falls back to local placement
+scoring and direct SSH dispatch — the same job submission works either way.
 
 ### Facades vs Core
 
@@ -73,49 +93,38 @@ weft/
 ├── main.go                 # Entry point
 ├── cmd/                    # CLI commands (Cobra)
 │   ├── root.go            # Root command, default command handling
-│   ├── job.go             # Job subcommand (groups job operations)
-│   ├── run.go             # Start jobs (supports --from, --timeout)
-│   ├── log.go             # View job logs
-│   ├── kill.go            # Kill running jobs
-│   ├── status.go          # Check job status (via job subcommand)
-│   ├── list.go            # Query job history (via job subcommand)
-│   ├── restart.go         # Restart jobs (via job subcommand)
-│   ├── describe.go        # Set job description (via job subcommand)
-│   ├── sync.go            # Sync job statuses
-│   ├── cleanup.go         # Clean up finished sessions
-│   ├── prune.go           # Remove old jobs
+│   ├── run.go             # Start jobs (supports --from, --timeout, --input, --output)
+│   ├── host.go            # Host inventory and data locality commands
+│   ├── coordinator.go     # Coordinator daemon management
+│   ├── sync.go            # Sync job statuses + deploy agent binary
 │   ├── queue.go           # Queue commands (add, start, stop, list)
 │   ├── tui.go             # Launch interactive TUI
-│   ├── embed.go           # Embedded files (notify script)
-│   └── notify-slack.sh    # Slack notification script (embedded)
+│   └── ...                # job, kill, log, restart, cleanup, prune, etc.
+├── cmd/agent/              # Go agent binary (deployed to remote hosts)
+│   └── main.go            # Entry point for weft-agent run-queue
 ├── internal/
-│   ├── config/            # Configuration management
-│   │   └── config.go      # YAML config loading
-│   ├── db/                # Database operations
-│   │   ├── db.go          # Job CRUD, queries, migrations
-│   │   └── db_test.go     # Database tests
+│   ├── coordinator/       # Coordinator daemon (intent watcher, dispatch)
+│   ├── placement/         # Placement scoring (GPU, data locality, utilization)
+│   ├── inventory/         # Host YAML specs (embedded), GPU/CPU capabilities
+│   ├── dataloc/           # Data locality tracking (HF cache scanner, asset DB)
+│   ├── prestage/          # Pre-staging (rsync missing data before dispatch)
+│   ├── runner/            # Go queue runner (replaces bash queue-runner.sh)
+│   ├── agentdeploy/       # Cross-compile and deploy agent binary to hosts
+│   ├── vastai/            # Vast.ai cloud GPU CLI wrapper
+│   ├── db/                # Database operations (SQLite)
 │   ├── ops/               # Unified job operations (CLI + TUI)
-│   │   ├── ops.go         # Queue-and-execute pattern, deferred ops
-│   │   ├── kill.go        # Kill job operations
-│   │   ├── run.go         # Run/restart job operations
-│   │   └── ops_test.go    # Operation tests
+│   ├── ssh/               # SSH operations and connection pool
 │   ├── session/           # Session/file path management
-│   │   ├── session.go     # Tmux naming, file paths, metadata
-│   │   └── session_test.go
-│   ├── ssh/               # SSH operations
-│   │   ├── ssh.go         # SSH commands, retry logic, process stats
-│   │   └── command_test.go
+│   ├── tui/               # Terminal UI (Bubble Tea)
+│   ├── web/               # Web dashboard (cluster overview, API endpoints)
+│   ├── config/            # Configuration management
 │   ├── logcache/          # Offline cache for finished job logs
-│   ├── progress/          # Progress parsing + incremental log tracking
-│   ├── llm/               # Background AI description generator
-│   ├── queuejob/          # Helpers for starting/moving queued jobs
-│   ├── plan/              # Plan parser, DAG builder, executor
-│   └── tui/               # Terminal UI
-│       ├── model.go       # Bubble Tea model, update loop, views
-│       ├── host.go        # Host info parsing
-│       └── styles.go      # Lipgloss styling
+│   ├── oplog/             # Structured operation logging (JSON lines)
+│   └── ...                # progress, llm, queuejob, plan, etc.
 └── docs/
-    └── architecture.md    # This document
+    ├── architecture.md    # This document
+    ├── coordinator-architecture.md  # Coordinator design and migration phases
+    └── workflow-guide.md  # Common workflows with examples
 ```
 
 ## Core Components

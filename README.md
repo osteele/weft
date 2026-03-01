@@ -1,24 +1,58 @@
-# Remote Jobs
+# Weft
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/osteele/weft.svg)](https://pkg.go.dev/github.com/osteele/weft)
 [![Go Report Card](https://goreportcard.com/badge/github.com/osteele/weft)](https://goreportcard.com/report/github.com/osteele/weft)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A CLI tool for running persistent tmux sessions on remote hosts that survive SSH disconnections.
+A coordinator-based workload scheduler for GPU compute clusters, with resource
+inventory, data locality awareness, and automatic job placement.
 
-## Problem Solved
+## Overview
 
-When running long-running training jobs or analysis scripts on remote machines via SSH, the job terminates if:
-- You close your laptop
-- Your network disconnects
-- SSH times out
+Weft manages jobs across a cluster of GPU hosts. Submit a job from your laptop
+without specifying a host, and the coordinator places it on the best available
+machine based on GPU capabilities, data locality, current utilization, and queue
+depth. Jobs run in tmux sessions that survive SSH disconnections, laptop sleep,
+and network outages.
 
-Remote Jobs uses tmux to create persistent sessions that continue running even when you disconnect.
+```
+Laptop (CLI / TUI)
+   │
+   ├──intent──> Coordinator (studio, always-on)
+   │              ├── Scores hosts via placement engine
+   │              ├── Pre-stages missing data (rsync between hosts)
+   │              └── Dispatches to best host's queue
+   │
+   └──fallback──> Direct SSH (when coordinator unreachable)
+                    └── Local placement scoring, queue directly
+
+Remote Hosts (cool30, cool100)
+   └── Go agent (autonomous)
+        ├── Discovers and executes queued jobs
+        ├── Manages GPU allocation and exclusive jobs
+        ├── Logs output, captures exit codes
+        └── Processes next job when current completes
+```
+
+### Key features
+
+- **Automatic placement**: Omit the host and let the coordinator pick the best
+  one based on GPU class, memory, data locality, and current load
+- **Data locality**: Declare `--input hf:model-name` and the coordinator prefers
+  hosts with the data cached, or pre-stages it via rsync
+- **Occasionally connected**: Jobs are recorded locally first and synced when
+  hosts are reachable — your laptop can sleep, travel, or disconnect
+- **Graceful degradation**: When the coordinator is unreachable, the CLI falls
+  back to local placement scoring and direct SSH dispatch
+- **Cloud bursting**: Press `c` in the TUI on a queued job to compare local
+  wait time against Vast.ai cloud GPU cost/time estimates
+- **Cluster dashboard**: Web UI at `localhost:8127/cluster` shows host cards,
+  live GPU utilization, coordinator status, and recent placement decisions
 
 ### Designed for unreliable networks
 
 Laptops move between Wi-Fi networks, VPNs flap, and SSH servers occasionally
-drop. Remote Jobs treats those scenarios as normal operations:
+drop. Weft treats those scenarios as normal operations:
 
 - Jobs always start locally first, so connection failures never lose metadata.
 - Failed SSH attempts automatically defer work to the host queue (or the local
@@ -31,42 +65,29 @@ on how the CLI keeps itself useful while you roam across networks.
 
 ### Agents-first ergonomics
 
-Remote Jobs was designed for workflows where an automated agent drives the CLI
-while a human keeps an eye on the TUI. Most commands print suggested follow-up
-commands (“next steps”) directly in their output so agents can keep the relevant
-context in their prompt without hunting through reference docs or skills files.
-For example, `weft run` prints the `status`, `log`, and `start` commands
-that make sense for the job it just created, which agents can copy verbatim. The
-TUI then becomes the dashboard where humans monitor progress, adjust queues, or
-apply manual fixes when needed.
+Weft was designed for workflows where an automated agent drives the CLI while a
+human keeps an eye on the TUI. Most commands print suggested follow-up commands
+(“next steps”) directly in their output so agents can keep the relevant context
+in their prompt without hunting through reference docs or skills files. For
+example, `weft run` prints the `status`, `log`, and `start` commands that make
+sense for the job it just created, which agents can copy verbatim. The TUI then
+becomes the dashboard where humans monitor progress, adjust queues, or apply
+manual fixes when needed.
 
-### Occasionally connected workflow
+### Architecture
 
-The queue runner lives on each remote host and operates autonomously. Once you
-queue a job, the remote host handles execution, completion, logging, and
-starting the next queued job—all without any connection to your laptop.
+Weft has three components:
 
-```
-Laptop (may sleep, travel, disconnect)
-   │
-   └──SSH──> Remote Host
-              └── queue-runner (autonomous)
-                   ├── Reads from queue file
-                   ├── Starts jobs in tmux sessions
-                   ├── Logs output, captures exit codes
-                   └── Processes next job when current completes
-```
+1. **CLI / TUI** (laptop) — submits jobs, monitors status, provides interactive
+   dashboard
+2. **Coordinator** (studio, always-on) — watches for intent files, runs
+   placement scoring, pre-stages data, dispatches to host queues
+3. **Go agent** (each remote host) — autonomous queue runner managing job
+   execution, GPU allocation, and resource monitoring
 
-Every action is recorded locally first—jobs, queue operations, even "start this
-queued job now"—and synchronized with the remote host whenever it's reachable.
-If a host is offline the CLI keeps showing the most recent known state, queues
-the requested mutations, and replays them on the next connection. This approach
-lets agents submit work in bulk without waiting for SSH, while humans can rely
-on the TUI to show what will happen once hosts come back.
-
-This architecture is fundamentally different from centralized job managers like
-SLURM, where the controller must be reachable to submit or monitor jobs. See
-[Comparison to SLURM](docs/comparison-to-slurm.md) for a detailed analysis.
+The coordinator is optional. Without it, the CLI places jobs directly using the
+same scoring logic. See [Comparison to SLURM](docs/comparison-to-slurm.md) for
+how this differs from centralized job managers.
 
 ## Installation
 
@@ -76,7 +97,7 @@ go install github.com/osteele/weft@latest
 
 Or build from source:
 ```bash
-git clone https://github.com/osteele/weft
+jj git clone https://github.com/osteele/weft
 cd weft
 go install .
 ```
@@ -261,7 +282,7 @@ weft plan validate plan.yaml
 weft plan show --ids plan.yaml   # show generated IDs, aliases, hosts, deps
 ```
 
-> **Agents welcome:** Remote Jobs (and the plan syntax in particular) was
+> **Agents welcome:** Weft (and the plan syntax in particular) was
 > designed for coding agents as well as humans. The YAML shape is easy for an
 > agent to emit directly from a prompt, so consider giving your agent runtime a
 > skill/instruction that invokes `weft plan submit` with generated plans.
@@ -874,7 +895,7 @@ weft queue start [flags] <host>
 ```
 
 The queue runner:
-- Runs in a tmux session (`rj-queue-default`)
+- Runs in a tmux session (`weft-queue-default`)
 - Processes queued jobs in FIFO order with a CPU cap
 - Continues running even when you disconnect
 - Sends Slack notifications (if configured)
@@ -1156,7 +1177,7 @@ Increasing `connect_timeout` also extends the session ready timeout (connect tim
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/weft/jobs.db`. The database records:
-- Unique job ID (used to identify tmux sessions as `rj-{id}`)
+- Unique job ID (used to identify tmux sessions as `weft-{id}`)
 - Host
 - Working directory and command
 - Optional description
@@ -1216,7 +1237,7 @@ To receive Slack notifications when jobs complete:
 
 1. Go to [https://api.slack.com/apps](https://api.slack.com/apps)
 2. Click "Create New App" → "From scratch"
-3. Name your app (e.g., "Remote Jobs") and select your workspace
+3. Name your app (e.g., "Weft") and select your workspace
 4. In the sidebar, click "Incoming Webhooks"
 5. Toggle "Activate Incoming Webhooks" to On
 6. Click "Add New Webhook to Workspace" at the bottom
@@ -1292,11 +1313,11 @@ Notifications include:
 
 ## How It Works
 
-1. `weft run` creates a detached tmux session via SSH
-2. The SSH command returns immediately (non-blocking)
-3. The tmux session continues running on the remote host
-4. You can close your laptop, disconnect, etc.
-5. `weft log` or `weft job status` lets you check on the job later
+1. `weft run` writes an intent file (or queues directly if coordinator is unreachable)
+2. The coordinator scores hosts and dispatches the job to the best one
+3. The Go agent on the remote host picks up the job, allocates GPU, runs it in tmux
+4. Your laptop can sleep, disconnect, or travel — the agent runs autonomously
+5. `weft tui`, `weft log`, or `weft job status` lets you monitor from anywhere
 
 ## Documentation
 

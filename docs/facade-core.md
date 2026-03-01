@@ -1,6 +1,6 @@
 # CLI, TUI, and Core Responsibilities
 
-Remote Jobs now divides responsibilities across three layers so that user
+Weft divides responsibilities across three layers so that user
 interfaces stay thin and resilient while orchestration logic lives in one place.
 
 ## Core (`internal/core`)
