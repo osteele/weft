@@ -9,8 +9,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/queuerunner"
@@ -444,10 +446,16 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 }
 
 // ensureQueueRunnerStarted checks if the queue runner is running and starts it if not.
+// It also ensures the agent binary is up-to-date before starting.
 // Returns (true, nil) if the runner was started, (false, nil) if already running,
 // or (false, error) if starting failed.
 func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	queue = defaultQueueName
+
+	// Deploy agent binary if out of date
+	if spec := inventory.FindHost(host); spec != nil {
+		agentdeploy.EnsureAgentUpToDate(host, *spec) //nolint:errcheck // best-effort
+	}
 
 	// Deploy notify script if Slack is configured
 	slackWebhook := slack.GetWebhook()

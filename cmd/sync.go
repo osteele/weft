@@ -118,13 +118,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Deploy agent binary to reachable hosts that need updates (before starting runners)
+	deployAgentsToHosts(hosts)
+
 	// Start queue runners on hosts with queued jobs (unless --no-queue-start)
 	if !syncNoQueueStart {
 		startQueueRunnersForQueuedHosts(database)
 	}
-
-	// Deploy agent binary to reachable hosts that need updates
-	deployAgentsToHosts(hosts)
 
 	// Sync placement outcomes for pending_placement jobs
 	placementUpdated := syncPlacementOutcomes(database, syncVerbose)

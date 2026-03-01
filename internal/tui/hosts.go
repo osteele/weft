@@ -11,7 +11,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/ssh"
@@ -149,8 +151,14 @@ func (m Model) startQueue(host string) tea.Cmd {
 }
 
 // ensureQueueRunnerStartedTUI checks if queue runner is running and starts it if not.
+// It also ensures the agent binary is up-to-date before starting.
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
+	// Deploy agent binary if out of date
+	if spec := inventory.FindHost(host); spec != nil {
+		agentdeploy.EnsureAgentUpToDate(host, *spec) //nolint:errcheck // best-effort
+	}
+
 	// Deploy notify script and build env vars if Slack is configured
 	slackWebhook := slack.GetWebhook()
 	slack.DeployNotifyScript(host, slackWebhook)
