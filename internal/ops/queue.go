@@ -35,6 +35,7 @@ type QueueEntry struct {
 	GPUClass     string
 	GPUMemGB     *int
 	Tags         []string
+	OutputDirs   []string
 }
 
 // AppendQueueEntryOptions configures the queue append operation
@@ -109,6 +110,7 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 		GPUClass:     job.GPUClass,
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
+		OutputDirs:   job.OutputDirs,
 	}
 	addCmd := NewAddCommand(entry)
 	opts := AppendCommandOptions{Timeout: timeout}
@@ -201,6 +203,7 @@ type QueueJobParams struct {
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	DepSpec      string
 	CPUAllotment *int
+	OutputDirs   []string // convention-based output directories from .weft.yaml
 	Inputs       []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
 }
@@ -280,6 +283,12 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		if err := db.SetJobOutputs(database, jobID, params.Outputs); err != nil {
 			db.DeleteJob(database, jobID)
 			return Result{}, fmt.Errorf("record outputs: %w", err)
+		}
+	}
+	if len(params.OutputDirs) > 0 {
+		if err := db.SetJobOutputDirs(database, jobID, params.OutputDirs); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record output dirs: %w", err)
 		}
 	}
 

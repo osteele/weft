@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 )
@@ -474,7 +475,18 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		f.Close()
 	}
 
+	// Log completion and discover outputs
+	var outputFiles []OutputFile
 	if ei.ExitCode == 0 {
+		dirs := rj.Data.OutputDirs
+		if len(dirs) == 0 {
+			dirs = config.DefaultOutputDirs
+		}
+		if discovered, err := DiscoverOutputs(rj.Data.Dir, dirs); err == nil && len(discovered) > 0 {
+			outputFiles = discovered
+			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
+			fmt.Printf("Job %d: discovered %d output files\n", jobID, len(discovered))
+		}
 		oplog.LogJob(oplog.OpJobCompleted, jobID, "", oplog.WithDetailf("exit=0 duration=%ds", duration))
 		fmt.Printf("Job %d completed successfully\n", jobID)
 	} else {
@@ -493,7 +505,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	r.processesMu.Unlock()
 	WriteRusageFile(paths, rs)
 	killReason := ReadKillReasonFile(paths.KillReason)
-	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, startTime, endTime)
+	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, startTime, endTime, outputFiles)
 
 	// Record finished and remove from running
 	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)
@@ -570,7 +582,7 @@ func (r *Runner) refreshRunningJobs() {
 			rs := r.state.Running[jobIDStr]
 			WriteRusageFile(paths, rs)
 			endTime := time.Now().Unix()
-			WriteCompletionRecord(paths, stoppedEI, rs, "stopped_detected", "stopped", rs.StartedAt, endTime)
+			WriteCompletionRecord(paths, stoppedEI, rs, "stopped_detected", "stopped", rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 			r.state.RemoveRunning(jobIDStr)
 			CleanupPIDFiles(paths)
@@ -598,7 +610,7 @@ func (r *Runner) refreshRunningJobs() {
 			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail("exit=1 duration=0"))
 			endTime := time.Now().Unix()
 			rs := r.state.Running[jobIDStr]
-			WriteCompletionRecord(paths, orphanEI, rs, "orphan", "orphan", rs.StartedAt, endTime)
+			WriteCompletionRecord(paths, orphanEI, rs, "orphan", "orphan", rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 		}
 		rs := r.state.Running[jobIDStr]

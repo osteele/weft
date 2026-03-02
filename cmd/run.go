@@ -214,6 +214,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Load output directories from .weft.yaml for convention-based output collection
+	outputDirs := config.ProjectOutputDirs(resolveLocalDir(runDir))
+
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
 
@@ -466,6 +469,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			AutoStart:    true,
 			Inputs:       runInputs,
 			Outputs:      runOutputs,
+			OutputDirs:   outputDirs,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -503,6 +507,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			AutoStart:   true,
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
+			OutputDirs:  outputDirs,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -560,6 +565,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			AutoStart:   false,
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
+			OutputDirs:  outputDirs,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)

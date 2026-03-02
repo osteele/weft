@@ -307,10 +307,11 @@ type CompletionRecord struct {
 	LastHeartbeat    int64            `json:"last_heartbeat,omitempty"`
 	LastSample       int64            `json:"last_sample,omitempty"`
 	EndTime          int64            `json:"end_time"`
+	OutputFiles      []OutputFile     `json:"output_files,omitempty"`
 }
 
 // WriteCompletionRecord writes a structured completion.json for post-mortem analysis.
-func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, killReason, failureReason string, startTime, endTime int64) error {
+func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, killReason, failureReason string, startTime, endTime int64, outputFiles []OutputFile) error {
 	peakRSS := rs.RusagePeakRSS
 	if peakRSS == 0 && rs.PeakRSSFromTS > 0 {
 		peakRSS = rs.PeakRSSFromTS
@@ -328,6 +329,7 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 		LastHeartbeat:    rs.LastHeartbeat,
 		LastSample:       rs.LastSample,
 		EndTime:          endTime,
+		OutputFiles:      outputFiles,
 	}
 	if ei.Signaled {
 		rec.Signal = fmt.Sprintf("%d", int(ei.Signal))

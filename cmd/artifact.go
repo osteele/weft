@@ -10,10 +10,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -144,6 +148,11 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 		result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
+				// Try convention-based output sync instead
+				if syncErr := syncJobOutputs(job); syncErr == nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced convention-based outputs\n", jobID)
+					continue
+				}
 				errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %d", jobID))
 				continue
 			}
@@ -249,7 +258,11 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-		if len(entries) == 0 {
+
+		// Also show job-output assets from host_data
+		outputAssets, _ := listJobOutputAssets(database, jobID)
+
+		if len(entries) == 0 && len(outputAssets) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 			continue
 		}
@@ -259,6 +272,9 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 				name = "-"
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%d\t%s\n", name, entry.Path, entry.SizeBytes, entry.SHA256)
+		}
+		for _, a := range outputAssets {
+			fmt.Fprintf(cmd.OutOrStdout(), "output\t%s\t%d\t%s\n", a.Path, a.SizeBytes, a.Host)
 		}
 	}
 
@@ -572,4 +588,84 @@ func upsertArtifactSpec(specs []artifacts.ArtifactSpec, spec artifacts.ArtifactS
 		}
 	}
 	return append(specs, spec)
+}
+
+// listJobOutputAssets returns job-output entries from the host_data table for a given job.
+// Asset IDs have the format "<jobID>/<relative-path>".
+func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry, error) {
+	prefix := fmt.Sprintf("%d/", jobID)
+	all, err := dataloc.ListAllAssets(database)
+	if err != nil {
+		return nil, err
+	}
+	var results []dataloc.HostDataEntry
+	for _, entry := range all {
+		if entry.Asset.Kind == dataloc.AssetJobOutput && strings.HasPrefix(entry.Asset.ID, prefix) {
+			results = append(results, entry)
+		}
+	}
+	return results, nil
+}
+
+// syncJobOutputs rsyncs convention-based output directories from a remote host to the local working dir.
+func syncJobOutputs(job *db.Job) error {
+	if job.Host == "" || job.WorkingDir == "" {
+		return nil
+	}
+
+	// Read completion record from remote to get output files
+	completionPath := fmt.Sprintf("~/.cache/weft/logs/%d.completion.json", job.ID)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, fmt.Sprintf("cat %s 2>/dev/null", completionPath), NormalSyncTimeout)
+	if err != nil {
+		return nil
+	}
+
+	var rec runner.CompletionRecord
+	if err := json.Unmarshal([]byte(stdout), &rec); err != nil {
+		return nil
+	}
+
+	if len(rec.OutputFiles) == 0 {
+		return nil
+	}
+
+	// Extract unique top-level directories from output file paths
+	dirSet := map[string]bool{}
+	for _, f := range rec.OutputFiles {
+		topDir := strings.SplitN(f.RelPath, "/", 2)[0]
+		dirSet[topDir] = true
+	}
+	dirs := make([]string, 0, len(dirSet))
+	for d := range dirSet {
+		dirs = append(dirs, d)
+	}
+
+	localDir := resolveLocalDir(job.WorkingDir)
+	if localDir == "" {
+		return nil
+	}
+
+	totalMB := runner.TotalSizeMB(rec.OutputFiles)
+	return srcsync.SyncOutputsBack(job.Host, job.WorkingDir, localDir, dirs, totalMB, 0)
+}
+
+// recordJobOutputAssets records discovered output files as job-output assets in the host_data table.
+func recordJobOutputAssets(database *sql.DB, jobID int64, host string, files []runner.OutputFile) error {
+	for _, f := range files {
+		assetID := fmt.Sprintf("%d/%s", jobID, f.RelPath)
+		entry := dataloc.HostDataEntry{
+			Host: host,
+			Asset: dataloc.DataAsset{
+				Kind: dataloc.AssetJobOutput,
+				ID:   assetID,
+			},
+			Path:      f.RelPath,
+			SizeBytes: f.SizeBytes,
+			LastSeen:  time.Now(),
+		}
+		if err := dataloc.RecordAsset(database, entry); err != nil {
+			return err
+		}
+	}
+	return nil
 }

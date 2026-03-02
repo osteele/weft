@@ -106,6 +106,7 @@ type queueJobOptions struct {
 	AutoStart    bool
 	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs      []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
+	OutputDirs   []string // Convention-based output directories from .weft.yaml
 }
 
 type queueDependency struct {
@@ -165,6 +166,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 		Inputs:      opts.Inputs,
 		Outputs:     opts.Outputs,
+		OutputDirs:  opts.OutputDirs,
 	}
 
 	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{})

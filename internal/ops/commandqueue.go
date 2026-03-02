@@ -23,17 +23,18 @@ const (
 
 // CommandJob contains job data for an add command.
 type CommandJob struct {
-	ID       int64    `json:"id"`
-	Dir      string   `json:"dir,omitempty"`
-	Cmd      string   `json:"cmd"`
-	Desc     string   `json:"desc,omitempty"`
-	Env      []string `json:"env,omitempty"`
-	Deps     string   `json:"deps,omitempty"`
-	CPU      *int     `json:"cpu,omitempty"`
-	GPU      string   `json:"gpu,omitempty"`       // CUDA_VISIBLE_DEVICES value (e.g. "0" or "0,1")
-	GPUClass string   `json:"gpu_class,omitempty"` // GPU class name (e.g. "A100") — resolved to device at runtime
-	GPUMem   *int     `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
-	Tags     []string `json:"tags,omitempty"`
+	ID         int64    `json:"id"`
+	Dir        string   `json:"dir,omitempty"`
+	Cmd        string   `json:"cmd"`
+	Desc       string   `json:"desc,omitempty"`
+	Env        []string `json:"env,omitempty"`
+	Deps       string   `json:"deps,omitempty"`
+	CPU        *int     `json:"cpu,omitempty"`
+	GPU        string   `json:"gpu,omitempty"`       // CUDA_VISIBLE_DEVICES value (e.g. "0" or "0,1")
+	GPUClass   string   `json:"gpu_class,omitempty"` // GPU class name (e.g. "A100") — resolved to device at runtime
+	GPUMem     *int     `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
+	Tags       []string `json:"tags,omitempty"`
+	OutputDirs []string `json:"output_dirs,omitempty"` // convention-based output directories from .weft.yaml
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -61,17 +62,18 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        OpAdd,
 		Job: &CommandJob{
-			ID:       entry.JobID,
-			Dir:      entry.WorkingDir,
-			Cmd:      entry.Command,
-			Desc:     entry.Description,
-			Env:      entry.EnvVars,
-			Deps:     entry.DepSpec,
-			CPU:      entry.CPUAllotment,
-			GPU:      entry.GPU,
-			GPUClass: entry.GPUClass,
-			GPUMem:   entry.GPUMemGB,
-			Tags:     entry.Tags,
+			ID:         entry.JobID,
+			Dir:        entry.WorkingDir,
+			Cmd:        entry.Command,
+			Desc:       entry.Description,
+			Env:        entry.EnvVars,
+			Deps:       entry.DepSpec,
+			CPU:        entry.CPUAllotment,
+			GPU:        entry.GPU,
+			GPUClass:   entry.GPUClass,
+			GPUMem:     entry.GPUMemGB,
+			Tags:       entry.Tags,
+			OutputDirs: entry.OutputDirs,
 		},
 	}
 }

@@ -11,6 +11,7 @@ const (
 	AssetHFModel    AssetKind = "hf-model"
 	AssetHFDataset  AssetKind = "hf-dataset"
 	AssetCheckpoint AssetKind = "checkpoint"
+	AssetJobOutput  AssetKind = "job-output"
 )
 
 // DataAsset represents a data asset that exists on one or more hosts.
@@ -37,6 +38,8 @@ func ParseAssetRef(ref string) (DataAsset, bool) {
 				return DataAsset{Kind: AssetHFDataset, ID: id}, true
 			case "checkpoint":
 				return DataAsset{Kind: AssetCheckpoint, ID: id}, true
+			case "job-output":
+				return DataAsset{Kind: AssetJobOutput, ID: id}, true
 			default:
 				return DataAsset{}, false
 			}
@@ -95,6 +98,8 @@ func (a DataAsset) String() string {
 		return "hf-dataset:" + a.ID
 	case AssetCheckpoint:
 		return "checkpoint:" + a.ID
+	case AssetJobOutput:
+		return "job-output:" + a.ID
 	default:
 		return string(a.Kind) + ":" + a.ID
 	}
