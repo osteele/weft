@@ -360,6 +360,85 @@ func TestGetGPU(t *testing.T) {
 	}
 }
 
+func TestParseGPUFromCommandString(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"no GPU", "python train.py", ""},
+		{"env prefix", "env CUDA_VISIBLE_DEVICES=0 python train.py", "0"},
+		{"inline assignment", "CUDA_VISIBLE_DEVICES=4 python train.py", "4"},
+		{"multiple GPUs", "env CUDA_VISIBLE_DEVICES=0,1,2 python train.py", "0,1,2"},
+		{"other env vars only", "env FOO=bar python train.py", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseGPUFromCommandString(tt.command)
+			if got != tt.want {
+				t.Errorf("ParseGPUFromCommandString(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRecordQueuedAutoPopulatesGPU(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Insert a job with CUDA_VISIBLE_DEVICES in the command but no explicit GPU
+	jobID, err := RecordQueuedWithGPU(database, "hostA", "/tmp", "CUDA_VISIBLE_DEVICES=0 python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.GPU != "0" {
+		t.Errorf("GPU = %q, want %q", job.GPU, "0")
+	}
+}
+
+func TestRecordDraftAutoPopulatesGPU(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordDraftJob(database, "hostA", "/tmp", "env CUDA_VISIBLE_DEVICES=1,2 python train.py", "test", "", "")
+	if err != nil {
+		t.Fatalf("record draft: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.GPU != "1,2" {
+		t.Errorf("GPU = %q, want %q", job.GPU, "1,2")
+	}
+}
+
+func TestRecordQueuedExplicitGPUNotOverridden(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Explicit GPU should not be overridden by command parsing
+	jobID, err := RecordQueuedWithGPU(database, "hostA", "/tmp", "CUDA_VISIBLE_DEVICES=0 python train.py", "test", "3")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.GPU != "3" {
+		t.Errorf("GPU = %q, want %q (explicit GPU should not be overridden)", job.GPU, "3")
+	}
+}
+
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

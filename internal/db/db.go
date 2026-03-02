@@ -301,11 +301,6 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: populate gpu column from existing commands
-	if err := migrateGPUFromCommands(db); err != nil {
-		return err
-	}
-
 	// Migration: make start_time nullable for queued jobs
 	// SQLite doesn't support ALTER COLUMN, so we need to recreate the table
 	if err := migrateStartTimeNullable(db); err != nil {
@@ -597,49 +592,6 @@ func isDuplicateColumnError(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
-}
-
-// migrateGPUFromCommands populates the gpu column from existing command strings
-func migrateGPUFromCommands(db *sql.DB) error {
-	// Only migrate jobs that have CUDA_VISIBLE_DEVICES in their command but no gpu set
-	rows, err := db.Query(`SELECT id, command FROM jobs WHERE gpu IS NULL OR gpu = ''`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type jobUpdate struct {
-		id  int64
-		gpu string
-	}
-	var updates []jobUpdate
-
-	for rows.Next() {
-		var id int64
-		var command string
-		if err := rows.Scan(&id, &command); err != nil {
-			return err
-		}
-
-		// Parse GPU from command using a temporary Job struct
-		job := &Job{Command: command}
-		if gpu := job.parseGPUFromCommand(); gpu != "" {
-			updates = append(updates, jobUpdate{id: id, gpu: gpu})
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	// Apply updates
-	for _, u := range updates {
-		if _, err := db.Exec(`UPDATE jobs SET gpu = ? WHERE id = ?`, u.gpu, u.id); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 // RecordStart records a new job start and returns its ID
@@ -1078,6 +1030,9 @@ func RecordQueued(db *sql.DB, host, workingDir, command, description string) (in
 
 // RecordQueuedWithGPU records a queued job with GPU specification
 func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu string) (int64, error) {
+	if gpu == "" {
+		gpu = ParseGPUFromCommandString(command)
+	}
 	now := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
@@ -1097,6 +1052,9 @@ func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, g
 
 // RecordDraftJob records a job that should remain in draft locally, with optional dependency.
 func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, depSpec string) (int64, error) {
+	if gpu == "" {
+		gpu = ParseGPUFromCommandString(command)
+	}
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, dep_spec, last_synced_status)
@@ -2489,13 +2447,15 @@ func stripExportPrefix(cmd string) string {
 	return cmd
 }
 
+const cudaVisibleDevicesPrefix = "CUDA_VISIBLE_DEVICES="
+
 // GetGPU returns the GPU (CUDA_VISIBLE_DEVICES) value for this job.
 // First checks the database GPU field, then falls back to parsing the command.
 func (j *Job) GetGPU() string {
 	// Env vars (set via --env flag) take precedence as the most recent user intent
 	for _, ev := range j.EnvVars {
-		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
-			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
+		if val, ok := strings.CutPrefix(ev, cudaVisibleDevicesPrefix); ok {
+			return val
 		}
 	}
 
@@ -2508,6 +2468,31 @@ func (j *Job) GetGPU() string {
 	return j.parseGPUFromCommand()
 }
 
+// ParseGPUFromCommandString extracts CUDA_VISIBLE_DEVICES from a command string.
+// This standalone function works without a Job struct and is used at job insertion
+// time to auto-populate the gpu column.
+func ParseGPUFromCommandString(command string) string {
+	// Check for env prefix: "env CUDA_VISIBLE_DEVICES=0 ..."
+	_, envVars := ParseEnvPrefix(command)
+	for _, ev := range envVars {
+		if val, ok := strings.CutPrefix(ev, cudaVisibleDevicesPrefix); ok {
+			return val
+		}
+	}
+
+	// Check inline assignment: "CUDA_VISIBLE_DEVICES=0 python ..."
+	for _, part := range strings.Fields(command) {
+		if val, ok := strings.CutPrefix(part, cudaVisibleDevicesPrefix); ok {
+			return val
+		}
+		if !strings.Contains(part, "=") {
+			break
+		}
+	}
+
+	return ""
+}
+
 // parseGPUFromCommand extracts CUDA_VISIBLE_DEVICES from the job's command.
 // Returns empty string if not found.
 func (j *Job) parseGPUFromCommand() string {
@@ -2517,30 +2502,15 @@ func (j *Job) parseGPUFromCommand() string {
 		cmd = afterCd
 	}
 
-	// First check for env prefix: "env CUDA_VISIBLE_DEVICES=0 ..."
-	_, envVars := ParseEnvPrefix(cmd)
-	for _, ev := range envVars {
-		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
-			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
-		}
+	// Try the standalone parser first (handles env prefix and inline assignment)
+	if gpu := ParseGPUFromCommandString(cmd); gpu != "" {
+		return gpu
 	}
 
-	// Then check exports (handles cd prefix first)
+	// Then check exports (handles cd prefix first) — requires Job struct
 	for _, ev := range j.ParseExportVars() {
-		if strings.HasPrefix(ev, "CUDA_VISIBLE_DEVICES=") {
-			return strings.TrimPrefix(ev, "CUDA_VISIBLE_DEVICES=")
-		}
-	}
-
-	// Check in command itself for inline assignment: "CUDA_VISIBLE_DEVICES=0 python ..."
-	parts := strings.Fields(cmd)
-	for _, part := range parts {
-		if strings.HasPrefix(part, "CUDA_VISIBLE_DEVICES=") {
-			return strings.TrimPrefix(part, "CUDA_VISIBLE_DEVICES=")
-		}
-		// Stop at first non-assignment
-		if !strings.Contains(part, "=") {
-			break
+		if val, ok := strings.CutPrefix(ev, cudaVisibleDevicesPrefix); ok {
+			return val
 		}
 	}
 
