@@ -86,8 +86,8 @@ func TestWriteRusageFile(t *testing.T) {
 	rs := RunningJobState{
 		RusageUserCPU: "10.50",
 		RusageSysCPU:  "2.30",
-		RusagePeakRSS: "524288",
-		RusageMaxGPU:  "8192",
+		RusagePeakRSS: 524288,
+		RusageMaxGPU:  8192,
 		GPUDevices:    []string{"0", "1"},
 	}
 

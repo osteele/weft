@@ -39,13 +39,13 @@ type RunningJobState struct {
 	// Resource usage tracking (updated during sampling)
 	RusageUserCPU string `json:"rusage_user_cpu,omitempty"`
 	RusageSysCPU  string `json:"rusage_sys_cpu,omitempty"`
-	RusagePeakRSS string `json:"rusage_peak_rss,omitempty"`
-	RusageMaxGPU  string `json:"rusage_max_gpu,omitempty"`
+	RusagePeakRSS int64  `json:"rusage_peak_rss,omitempty"`
+	RusageMaxGPU  int    `json:"rusage_max_gpu,omitempty"`
 
 	// High-water marks (updated during sampling)
-	PeakHostMemRatio float64 `json:"peak_host_mem_ratio,omitempty"`
-	PeakRSSFromTS    int64   `json:"peak_rss_from_ts,omitempty"`
-	PeakMemPressure  string  `json:"peak_mem_pressure,omitempty"`
+	PeakHostMemRatio float64          `json:"peak_host_mem_ratio,omitempty"`
+	PeakRSSFromTS    int64            `json:"peak_rss_from_ts,omitempty"`
+	PeakMemPressure  MemPressureLevel `json:"peak_mem_pressure,omitempty"`
 
 	// Heartbeat / liveness (updated during sampling)
 	LastHeartbeat int64 `json:"last_heartbeat,omitempty"`

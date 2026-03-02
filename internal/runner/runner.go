@@ -638,21 +638,15 @@ func (r *Runner) sampleRunningJobs() {
 			rs.RusageUserCPU = TicksToSeconds(userTicks)
 			rs.RusageSysCPU = TicksToSeconds(sysTicks)
 
-			peakRSSStr := strconv.FormatInt(peakRSS, 10)
-			if rs.RusagePeakRSS == "" || peakRSS > mustParseInt64(rs.RusagePeakRSS) {
-				rs.RusagePeakRSS = peakRSSStr
+			if peakRSS > rs.RusagePeakRSS {
+				rs.RusagePeakRSS = peakRSS
 			}
 		}
 
 		// GPU memory sampling
 		gpuMem := ProcGPUMemMiB(pid)
-		if gpuMem > 0 {
-			gpuMemStr := strconv.Itoa(gpuMem)
-			if rs.RusageMaxGPU == "" {
-				rs.RusageMaxGPU = gpuMemStr
-			} else if prev, _ := strconv.Atoi(rs.RusageMaxGPU); gpuMem > prev {
-				rs.RusageMaxGPU = gpuMemStr
-			}
+		if gpuMem > rs.RusageMaxGPU {
+			rs.RusageMaxGPU = gpuMem
 		}
 
 		// Write timeseries sample (full telemetry for job-estimator)
@@ -682,11 +676,11 @@ func (r *Runner) sampleRunningJobs() {
 		// Memory pressure (reuses already-fetched host memory values)
 		pressure := MemoryPressureFromUsage(hostTotal, hostUsed)
 		sample.MemPressure = string(pressure)
-		if MemPressureSeverity(pressure) > MemPressureSeverity(MemPressureLevel(rs.PeakMemPressure)) {
-			if rs.PeakMemPressure != "" && rs.PeakMemPressure != string(MemPressureNormal) {
+		if MemPressureSeverity(pressure) > MemPressureSeverity(rs.PeakMemPressure) {
+			if rs.PeakMemPressure != "" && rs.PeakMemPressure != MemPressureNormal {
 				oplog.LogJob("job.mem_pressure", jobID, "", oplog.WithDetailf("level=%s", pressure))
 			}
-			rs.PeakMemPressure = string(pressure)
+			rs.PeakMemPressure = pressure
 		}
 
 		WriteTimeseriesSample(paths, sample)

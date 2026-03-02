@@ -225,14 +225,14 @@ func WriteRusageFile(paths JobPaths, rs RunningJobState) error {
 	if rs.RusageSysCPU != "" {
 		lines = append(lines, "sys_cpu_secs="+rs.RusageSysCPU)
 	}
-	if rs.RusagePeakRSS != "" {
-		lines = append(lines, "peak_rss_kb="+rs.RusagePeakRSS)
+	if rs.RusagePeakRSS > 0 {
+		lines = append(lines, fmt.Sprintf("peak_rss_kb=%d", rs.RusagePeakRSS))
 	}
 	if rs.PeakRSSFromTS > 0 {
 		lines = append(lines, fmt.Sprintf("peak_rss_from_ts_kb=%d", rs.PeakRSSFromTS))
 	}
-	if rs.RusageMaxGPU != "" {
-		lines = append(lines, "max_gpu_mem_mib="+rs.RusageMaxGPU)
+	if rs.RusageMaxGPU > 0 {
+		lines = append(lines, fmt.Sprintf("max_gpu_mem_mib=%d", rs.RusageMaxGPU))
 	}
 	if len(rs.GPUDevices) > 0 {
 		lines = append(lines, "gpu_devices="+strings.Join(rs.GPUDevices, ","))
@@ -241,7 +241,7 @@ func WriteRusageFile(paths JobPaths, rs RunningJobState) error {
 		lines = append(lines, fmt.Sprintf("peak_host_mem_ratio=%.4f", rs.PeakHostMemRatio))
 	}
 	if rs.PeakMemPressure != "" {
-		lines = append(lines, "peak_mem_pressure="+rs.PeakMemPressure)
+		lines = append(lines, "peak_mem_pressure="+string(rs.PeakMemPressure))
 	}
 	if len(lines) == 0 {
 		return nil
@@ -293,29 +293,33 @@ func WriteHeartbeat(paths JobPaths, epoch int64) error {
 
 // CompletionRecord is the structured post-mortem record written as .completion.json.
 type CompletionRecord struct {
-	ExitCode         int     `json:"exit_code"`
-	Signal           string  `json:"signal,omitempty"`
-	SignalName       string  `json:"signal_name,omitempty"`
-	CoreDump         bool    `json:"core_dump,omitempty"`
-	WallTimeSecs     int64   `json:"wall_time_secs"`
-	PeakRSSKB        string  `json:"peak_rss_kb,omitempty"`
-	MaxGPUMemMiB     string  `json:"max_gpu_mem_mib,omitempty"`
-	PeakHostMemRatio float64 `json:"peak_host_mem_ratio,omitempty"`
-	PeakMemPressure  string  `json:"peak_mem_pressure,omitempty"`
-	KillReason       string  `json:"kill_reason,omitempty"`
-	FailureReason    string  `json:"failure_reason,omitempty"`
-	LastHeartbeat    int64   `json:"last_heartbeat,omitempty"`
-	LastSample       int64   `json:"last_sample,omitempty"`
-	EndTime          int64   `json:"end_time"`
+	ExitCode         int              `json:"exit_code"`
+	Signal           string           `json:"signal,omitempty"`
+	SignalName       string           `json:"signal_name,omitempty"`
+	CoreDump         bool             `json:"core_dump,omitempty"`
+	WallTimeSecs     int64            `json:"wall_time_secs"`
+	PeakRSSKB        int64            `json:"peak_rss_kb,omitempty"`
+	MaxGPUMemMiB     int              `json:"max_gpu_mem_mib,omitempty"`
+	PeakHostMemRatio float64          `json:"peak_host_mem_ratio,omitempty"`
+	PeakMemPressure  MemPressureLevel `json:"peak_mem_pressure,omitempty"`
+	KillReason       string           `json:"kill_reason,omitempty"`
+	FailureReason    string           `json:"failure_reason,omitempty"`
+	LastHeartbeat    int64            `json:"last_heartbeat,omitempty"`
+	LastSample       int64            `json:"last_sample,omitempty"`
+	EndTime          int64            `json:"end_time"`
 }
 
 // WriteCompletionRecord writes a structured completion.json for post-mortem analysis.
 func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, killReason, failureReason string, startTime, endTime int64) error {
+	peakRSS := rs.RusagePeakRSS
+	if peakRSS == 0 && rs.PeakRSSFromTS > 0 {
+		peakRSS = rs.PeakRSSFromTS
+	}
 	rec := CompletionRecord{
 		ExitCode:         ei.ExitCode,
 		CoreDump:         ei.CoreDump,
 		WallTimeSecs:     endTime - startTime,
-		PeakRSSKB:        rs.RusagePeakRSS,
+		PeakRSSKB:        peakRSS,
 		MaxGPUMemMiB:     rs.RusageMaxGPU,
 		PeakHostMemRatio: rs.PeakHostMemRatio,
 		PeakMemPressure:  rs.PeakMemPressure,
@@ -328,9 +332,6 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 	if ei.Signaled {
 		rec.Signal = fmt.Sprintf("%d", int(ei.Signal))
 		rec.SignalName = ei.SignalName()
-	}
-	if rs.PeakRSSFromTS > 0 && rec.PeakRSSKB == "" {
-		rec.PeakRSSKB = fmt.Sprintf("%d", rs.PeakRSSFromTS)
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
