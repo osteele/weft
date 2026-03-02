@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
@@ -113,4 +115,20 @@ func syncSources(i *intent.Intent, host string, logger *log.Logger) {
 	if err := srcsync.SyncSources(host, localDir, dir); err != nil {
 		logger.Printf("sync sources to %s for intent %s: %v (continuing)", host, i.IntentID, err)
 	}
+
+	// Sync extra file paths (from --input flags and .weft.yaml)
+	extraPaths := collectIntentExtraPaths(i, localDir)
+	if len(extraPaths) > 0 {
+		if err := srcsync.SyncExtraPaths(host, extraPaths); err != nil {
+			logger.Printf("sync extra paths to %s for intent %s: %v (continuing)", host, i.IntentID, err)
+		}
+	}
+}
+
+// collectIntentExtraPaths gathers file paths to sync from the intent's inputs
+// and the project's .weft.yaml config.
+func collectIntentExtraPaths(i *intent.Intent, localDir string) []string {
+	_, filePaths := dataloc.ClassifyInputs(i.Job.Inputs)
+	filePaths = append(filePaths, config.ProjectExtraPaths(localDir)...)
+	return filePaths
 }

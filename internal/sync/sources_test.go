@@ -8,7 +8,7 @@ import (
 
 func TestDefaultExcludes(t *testing.T) {
 	excludes := DefaultExcludes()
-	required := []string{".git", ".jj", ".venv", "__pycache__", "node_modules", ".DS_Store", "build", "dist"}
+	required := []string{".git", ".jj", ".venv", "__pycache__", "node_modules", ".DS_Store", "build", "dist", ".weft.yaml"}
 	for _, pattern := range required {
 		if !slices.Contains(excludes, pattern) {
 			t.Errorf("DefaultExcludes() missing expected pattern %q", pattern)
@@ -82,6 +82,62 @@ func TestBuildRsyncArgs(t *testing.T) {
 				if !strings.Contains(joined, flag) {
 					t.Errorf("args missing expected flag %q in: %s", flag, joined)
 				}
+			}
+		})
+	}
+}
+
+func TestBuildExtraPathRsyncArgs(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      string
+		localDir  string
+		remoteDir string
+		wantSrc   string
+		wantDst   string
+	}{
+		{
+			name:      "tilde path",
+			host:      "cool30",
+			localDir:  "/Users/osteele/sources/vidur/data",
+			remoteDir: "~/sources/vidur/data",
+			wantSrc:   "/Users/osteele/sources/vidur/data/",
+			wantDst:   "cool30:~/sources/vidur/data/",
+		},
+		{
+			name:      "absolute path",
+			host:      "cool100",
+			localDir:  "/data/profiling",
+			remoteDir: "/data/profiling",
+			wantSrc:   "/data/profiling/",
+			wantDst:   "cool100:/data/profiling/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := BuildExtraPathRsyncArgs(tt.host, tt.localDir, tt.remoteDir)
+
+			// Must NOT contain --delete
+			for _, arg := range args {
+				if arg == "--delete" {
+					t.Error("BuildExtraPathRsyncArgs should not use --delete")
+				}
+			}
+
+			// Must start with -az
+			if len(args) < 1 || args[0] != "-az" {
+				t.Errorf("args should start with -az, got: %v", args)
+			}
+
+			// Check source and destination
+			src := args[len(args)-2]
+			dst := args[len(args)-1]
+			if src != tt.wantSrc {
+				t.Errorf("source = %q, want %q", src, tt.wantSrc)
+			}
+			if dst != tt.wantDst {
+				t.Errorf("destination = %q, want %q", dst, tt.wantDst)
 			}
 		})
 	}

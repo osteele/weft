@@ -54,6 +54,71 @@ func TestDataAsset_String(t *testing.T) {
 	}
 }
 
+func TestParseInputRef(t *testing.T) {
+	tests := []struct {
+		input     string
+		wantAsset bool
+		wantPath  string
+	}{
+		// Asset refs
+		{"hf:meta-llama/Llama-3-8B", true, ""},
+		{"hf-dataset:wikitext", true, ""},
+		{"checkpoint:llama-ft-v1", true, ""},
+		// File paths
+		{"~/sources/vidur/data/", false, "~/sources/vidur/data/"},
+		{"/absolute/path/to/data", false, "/absolute/path/to/data"},
+		{"./relative/path", false, "./relative/path"},
+		{"relative/path", false, "relative/path"},
+		// Edge cases: unknown prefix treated as file path
+		{"unknown:something", false, "unknown:something"},
+		{"", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			ref := ParseInputRef(tt.input)
+			if ref.IsAsset() != tt.wantAsset {
+				t.Errorf("ParseInputRef(%q).IsAsset() = %v, want %v", tt.input, ref.IsAsset(), tt.wantAsset)
+			}
+			if !tt.wantAsset && ref.FilePath != tt.wantPath {
+				t.Errorf("ParseInputRef(%q).FilePath = %q, want %q", tt.input, ref.FilePath, tt.wantPath)
+			}
+		})
+	}
+}
+
+func TestClassifyInputs(t *testing.T) {
+	inputs := []string{
+		"hf:meta-llama/Llama-3-8B",
+		"~/sources/vidur/data/",
+		"hf-dataset:wikitext",
+		"/tmp/local-data",
+	}
+	assetRefs, filePaths := ClassifyInputs(inputs)
+
+	if len(assetRefs) != 2 {
+		t.Errorf("got %d asset refs, want 2: %v", len(assetRefs), assetRefs)
+	}
+	if len(filePaths) != 2 {
+		t.Errorf("got %d file paths, want 2: %v", len(filePaths), filePaths)
+	}
+	if len(assetRefs) > 0 && assetRefs[0] != "hf:meta-llama/Llama-3-8B" {
+		t.Errorf("first asset ref = %q, want %q", assetRefs[0], "hf:meta-llama/Llama-3-8B")
+	}
+	if len(filePaths) > 0 && filePaths[0] != "~/sources/vidur/data/" {
+		t.Errorf("first file path = %q, want %q", filePaths[0], "~/sources/vidur/data/")
+	}
+}
+
+func TestClassifyInputs_Empty(t *testing.T) {
+	assetRefs, filePaths := ClassifyInputs(nil)
+	if assetRefs != nil {
+		t.Errorf("expected nil asset refs for nil input, got %v", assetRefs)
+	}
+	if filePaths != nil {
+		t.Errorf("expected nil file paths for nil input, got %v", filePaths)
+	}
+}
+
 func TestParseAssetRef_Roundtrip(t *testing.T) {
 	refs := []string{
 		"hf:meta-llama/Llama-3-8B",

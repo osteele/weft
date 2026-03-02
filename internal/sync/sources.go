@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -49,6 +50,8 @@ func DefaultExcludes() []string {
 		".vscode", ".claude", ".env",
 		// AI/dev guidance files
 		"CLAUDE.md", "AGENTS.md", "WARP.md",
+		// Weft project config
+		".weft.yaml",
 	}
 }
 
@@ -82,8 +85,60 @@ func SyncSources(host, localDir, remoteDir string) error {
 	return nil
 }
 
+// BuildExtraPathRsyncArgs constructs rsync arguments for syncing an extra path
+// to a remote host. Unlike BuildRsyncArgs, this does NOT use --delete since the
+// remote directory may contain content from other sources.
+func BuildExtraPathRsyncArgs(host, localDir, remoteDir string) []string {
+	args := []string{"-az"}
+	// Ensure trailing slash so rsync syncs contents, not the directory itself
+	src := strings.TrimRight(localDir, "/") + "/"
+	dst := host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	args = append(args, src, dst)
+	return args
+}
+
+// SyncExtraPaths rsyncs a list of local paths to the same paths on a remote host.
+// Paths may use ~ (expanded locally via os.UserHomeDir). Each path is synced
+// independently. Unlike SyncSources, --delete is NOT used since the remote
+// directory may contain content from other sources.
+func SyncExtraPaths(host string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+
+	for _, p := range paths {
+		localPath := p
+		remotePath := p
+
+		// Expand ~ in local path
+		if strings.HasPrefix(localPath, "~/") {
+			localPath = filepath.Join(home, localPath[2:])
+		}
+
+		fmt.Fprintf(os.Stderr, "Syncing extra path %s to %s...\n", p, host)
+		start := time.Now()
+
+		if err := syncFunc(host, localPath, remotePath, nil); err != nil {
+			return fmt.Errorf("rsync extra path %s to %s: %w", p, host, err)
+		}
+
+		fmt.Fprintf(os.Stderr, "Synced extra path (%.1fs)\n", time.Since(start).Seconds())
+	}
+	return nil
+}
+
 func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error {
-	args := BuildRsyncArgs(host, localDir, remoteDir, excludes)
+	var args []string
+	if excludes != nil {
+		args = BuildRsyncArgs(host, localDir, remoteDir, excludes)
+	} else {
+		args = BuildExtraPathRsyncArgs(host, localDir, remoteDir)
+	}
 	cmd := exec.Command("rsync", args...)
 	cmd.Stderr = os.Stderr
 

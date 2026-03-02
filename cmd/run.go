@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/inventory"
@@ -337,9 +338,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Sync sources directly to target host (fallback path, coordinator unreachable)
 	if !runNoSync && !runDryRun && !runDraft && host != "" {
-		if localDir := resolveLocalDir(workingDir); localDir != "" {
+		localDir := resolveLocalDir(workingDir)
+		if localDir != "" {
 			if err := srcsync.SyncSources(host, localDir, workingDir); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: source sync failed: %v\n", err)
+			}
+		}
+
+		// Sync extra file paths from --input flags and .weft.yaml
+		extraPaths := collectExtraPaths(runInputs, localDir)
+		if len(extraPaths) > 0 {
+			if err := srcsync.SyncExtraPaths(host, extraPaths); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: extra path sync failed: %v\n", err)
 			}
 		}
 	}
@@ -852,12 +862,21 @@ func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, desc
 
 	// Sync sources to coordinator (hop 1: CLI → coordinator)
 	if !runNoSync {
-		if localDir := resolveLocalDir(workingDir); localDir != "" {
-			syncHost := cfg.GetCoordinatorHost()
-			hostname, _ := os.Hostname()
-			if hostname != syncHost {
+		syncHost := cfg.GetCoordinatorHost()
+		hostname, _ := os.Hostname()
+		if hostname != syncHost {
+			localDir := resolveLocalDir(workingDir)
+			if localDir != "" {
 				if err := srcsync.SyncSources(syncHost, localDir, workingDir); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: source sync to coordinator failed: %v\n", err)
+				}
+			}
+
+			// Sync extra file paths from --input flags and .weft.yaml
+			extraPaths := collectExtraPaths(inputs, localDir)
+			if len(extraPaths) > 0 {
+				if err := srcsync.SyncExtraPaths(syncHost, extraPaths); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: extra path sync to coordinator failed: %v\n", err)
 				}
 			}
 		}
@@ -951,6 +970,15 @@ func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, desc
 	}
 
 	return nil
+}
+
+// collectExtraPaths gathers file paths to sync from --input flags and .weft.yaml.
+// It classifies --input values into asset refs (ignored here) and file paths,
+// then merges with extra_paths from the project config if found.
+func collectExtraPaths(inputs []string, localDir string) []string {
+	_, filePaths := dataloc.ClassifyInputs(inputs)
+	filePaths = append(filePaths, config.ProjectExtraPaths(localDir)...)
+	return filePaths
 }
 
 // resolveLocalDir converts a tilde-prefixed working directory back to a local
