@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -52,6 +53,28 @@ type Meta struct {
 // Configured returns true if the predictor has a project path set.
 func (c *Config) Configured() bool {
 	return c.ProjectPath != ""
+}
+
+// BuildConfig creates a Config and ensures the weft DB is always included
+// in DBPaths. This is the canonical way to construct a predictor Config
+// from application config values.
+func BuildConfig(projectPath, modelDir string, retrainInterval int, dbPaths []string) Config {
+	cfg := Config{
+		ProjectPath:     projectPath,
+		ModelDir:        modelDir,
+		RetrainInterval: retrainInterval,
+		DBPaths:         append([]string(nil), dbPaths...),
+	}
+
+	home, err := os.UserHomeDir()
+	if err == nil {
+		weftDB := filepath.Join(home, ".config", "weft", "jobs.db")
+		if !slices.Contains(cfg.DBPaths, weftDB) {
+			cfg.DBPaths = append(cfg.DBPaths, weftDB)
+		}
+	}
+
+	return cfg
 }
 
 func (c *Config) modelDir() string {

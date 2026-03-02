@@ -195,7 +195,7 @@ func (c *Coordinator) handleIntentFile(path string) {
 	}
 
 	// Resolve host
-	host, reasons, err := resolveHost(c.db, i)
+	host, reasons, err := resolveHost(c.db, i, c.appConfig)
 	if err != nil {
 		c.logger.Printf("resolve host for intent %s: %v", i.IntentID, err)
 		oplog.Log(oplog.OpCoordinatorError, oplog.WithDetailf("resolve host intent=%s", i.IntentID), oplog.WithError(err))

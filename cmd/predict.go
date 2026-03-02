@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/predictor"
@@ -78,28 +76,10 @@ func runPredict(cmd *cobra.Command, args []string) error {
 }
 
 func buildPredictorConfig(cfg *config.Config) predictor.Config {
-	pcfg := predictor.Config{
-		ProjectPath:     cfg.Predictor.ProjectPath,
-		ModelDir:        cfg.Predictor.ModelDir,
-		RetrainInterval: cfg.Predictor.RetrainInterval,
-		DBPaths:         cfg.Predictor.DBPaths,
-	}
-
-	// Always include weft's own DB
-	home, err := os.UserHomeDir()
-	if err == nil {
-		weftDB := filepath.Join(home, ".config", "weft", "jobs.db")
-		found := false
-		for _, p := range pcfg.DBPaths {
-			if p == weftDB {
-				found = true
-				break
-			}
-		}
-		if !found {
-			pcfg.DBPaths = append(pcfg.DBPaths, weftDB)
-		}
-	}
-
-	return pcfg
+	return predictor.BuildConfig(
+		cfg.Predictor.ProjectPath,
+		cfg.Predictor.ModelDir,
+		cfg.Predictor.RetrainInterval,
+		cfg.Predictor.DBPaths,
+	)
 }

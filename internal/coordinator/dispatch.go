@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/prestage"
 	srcsync "github.com/osteele/weft/internal/sync"
 )
@@ -68,8 +69,9 @@ func dispatchIntent(database *sql.DB, i *intent.Intent, host string) (int64, err
 
 // resolveHost determines which host should run the job described by the intent.
 // If the intent specifies a host constraint, that host is used directly.
-// Otherwise, placement scoring selects the best host.
-func resolveHost(database *sql.DB, i *intent.Intent) (string, []string, error) {
+// Otherwise, placement scoring selects the best host, using the predictor
+// for duration and resource estimates when configured.
+func resolveHost(database *sql.DB, i *intent.Intent, cfg *config.Config) (string, []string, error) {
 	if i.Job.Constraints.Host != "" {
 		return i.Job.Constraints.Host, []string{"explicit host"}, nil
 	}
@@ -78,13 +80,58 @@ func resolveHost(database *sql.DB, i *intent.Intent) (string, []string, error) {
 		GPUClass: i.Job.Constraints.GPUClass,
 		GPUMemGB: i.Job.Constraints.GPUMemGB,
 		Inputs:   i.Job.Inputs,
+		Command:  i.Job.Cmd,
+		Project:  projectFromIntentDir(i.Job.Dir),
 	}
 
-	host, reasons, err := placement.BestHost(database, constraints)
+	predict := buildJobPredictorFromConfig(cfg, constraints)
+
+	host, reasons, err := placement.BestHostWithPredictor(database, constraints, nil, predict)
 	if err != nil {
 		return "", nil, fmt.Errorf("placement: %w", err)
 	}
 	return host, reasons, nil
+}
+
+// buildJobPredictorFromConfig creates a JobPredictor from the app config and constraints.
+func buildJobPredictorFromConfig(cfg *config.Config, c placement.Constraints) placement.JobPredictor {
+	if cfg == nil {
+		return nil
+	}
+	pcfg := predictor.BuildConfig(
+		cfg.Predictor.ProjectPath,
+		cfg.Predictor.ModelDir,
+		cfg.Predictor.RetrainInterval,
+		cfg.Predictor.DBPaths,
+	)
+	if !pcfg.Configured() || c.Command == "" {
+		return nil
+	}
+	return placement.NewJobPredictor(func(host string) *placement.RawPrediction {
+		result, err := predictor.Predict(pcfg, host, c.Project, c.GPUClass, c.Command)
+		if err != nil {
+			return nil
+		}
+		raw := &placement.RawPrediction{}
+		if result.DurationS != nil {
+			raw.DurationS = &placement.RawPredictionField{Mean: result.DurationS.Mean, Upper: result.DurationS.Upper}
+		}
+		if result.PeakRSSKB != nil {
+			raw.PeakRSSKB = &placement.RawPredictionField{Mean: result.PeakRSSKB.Mean, Upper: result.PeakRSSKB.Upper}
+		}
+		if result.MaxGPUMemMiB != nil {
+			raw.MaxGPUMemMiB = &placement.RawPredictionField{Mean: result.MaxGPUMemMiB.Mean, Upper: result.MaxGPUMemMiB.Upper}
+		}
+		return raw
+	})
+}
+
+// projectFromIntentDir extracts a project name from an intent's working directory.
+func projectFromIntentDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Base(dir)
 }
 
 // syncSources rsyncs the intent's working directory from the coordinator to the

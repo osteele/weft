@@ -24,6 +24,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -269,10 +270,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		GPUClass: runGPUClass,
 		GPUMemGB: runGPUMem,
 		Inputs:   runInputs,
+		Command:  command,
+		Project:  projectFromDir(runDir),
 	}
 
+	// Build predictor closure if configured
+	predict := buildJobPredictor(cfg, placementConstraints)
+
 	if runDryRun {
-		scores, err := placement.ScoreHosts(database, placementConstraints)
+		scores, err := placement.ScoreHostsWithPredictor(database, placementConstraints, nil, predict)
 		if err != nil {
 			return fmt.Errorf("placement scoring: %w", err)
 		}
@@ -316,8 +322,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		bestHost, reasons, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
 		if err != nil {
 			if errors.Is(err, placement.ErrNoReachableHost) {
-				// No hosts responded — fall back to static placement and let defer handle it
-				bestHost, reasons, err = placement.BestHost(database, placementConstraints)
+				// No hosts responded — fall back to predictor-aware static placement
+				bestHost, reasons, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
 				if err != nil {
 					return fmt.Errorf("auto-placement failed: %w", err)
 				}
@@ -1015,6 +1021,46 @@ func collectExtraPaths(inputs []string, localDir string) []string {
 	_, filePaths := dataloc.ClassifyInputs(inputs)
 	filePaths = append(filePaths, config.ProjectExtraPaths(localDir)...)
 	return filePaths
+}
+
+// buildJobPredictor creates a placement.JobPredictor from the app config and constraints.
+// Returns nil if the predictor is not configured or no command is set.
+func buildJobPredictor(cfg *config.Config, c placement.Constraints) placement.JobPredictor {
+	pcfg := buildPredictorConfig(cfg)
+	if !pcfg.Configured() || c.Command == "" {
+		return nil
+	}
+	return placement.NewJobPredictor(func(host string) *placement.RawPrediction {
+		result, err := predictor.Predict(pcfg, host, c.Project, c.GPUClass, c.Command)
+		if err != nil {
+			return nil
+		}
+		raw := &placement.RawPrediction{}
+		if result.DurationS != nil {
+			raw.DurationS = &placement.RawPredictionField{Mean: result.DurationS.Mean, Upper: result.DurationS.Upper}
+		}
+		if result.PeakRSSKB != nil {
+			raw.PeakRSSKB = &placement.RawPredictionField{Mean: result.PeakRSSKB.Mean, Upper: result.PeakRSSKB.Upper}
+		}
+		if result.MaxGPUMemMiB != nil {
+			raw.MaxGPUMemMiB = &placement.RawPredictionField{Mean: result.MaxGPUMemMiB.Mean, Upper: result.MaxGPUMemMiB.Upper}
+		}
+		return raw
+	})
+}
+
+// projectFromDir extracts a short project name from a working directory path.
+// E.g. "~/code/research/llm-performance-models" → "llm-performance-models".
+// Returns "" if the directory is empty.
+func projectFromDir(dir string) string {
+	if dir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		return filepath.Base(cwd)
+	}
+	return filepath.Base(dir)
 }
 
 // resolveLocalDir converts a tilde-prefixed working directory back to a local

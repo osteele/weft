@@ -492,11 +492,11 @@ func TestPerformanceFactor_CPUOnlyJob(t *testing.T) {
 	cool30 := findScore(scores, "cool30")
 	studio := findScore(scores, "studio")
 
-	if cool100.Total <= cool30.Total {
-		t.Errorf("cool100 (%.2f) should score higher than cool30 (%.2f) for CPU job", cool100.Total, cool30.Total)
+	if cool100.Total <= studio.Total {
+		t.Errorf("cool100 (%.2f) should score higher than studio (%.2f) for CPU job", cool100.Total, studio.Total)
 	}
-	if cool30.Total <= studio.Total {
-		t.Errorf("cool30 (%.2f) should score higher than studio (%.2f) for CPU job", cool30.Total, studio.Total)
+	if studio.Total <= cool30.Total {
+		t.Errorf("studio (%.2f) should score higher than cool30 (%.2f) for CPU job", studio.Total, cool30.Total)
 	}
 }
 
@@ -539,6 +539,210 @@ func TestAllHostsHavePerformanceFactors(t *testing.T) {
 		}
 		if h.GPUFactor == 0 {
 			t.Errorf("host %s has no gpu_factor set", h.Name)
+		}
+	}
+}
+
+func TestPredictorDurationScoring(t *testing.T) {
+	db := setupTestDB(t)
+
+	// studio is faster (730s) than cool30 (1137s)
+	predict := func(host string) *JobPrediction {
+		switch host {
+		case "studio":
+			d := 730.0
+			return &JobPrediction{DurationS: &d}
+		case "cool30":
+			d := 1137.0
+			return &JobPrediction{DurationS: &d}
+		case "cool100":
+			d := 600.0
+			return &JobPrediction{DurationS: &d}
+		}
+		return nil
+	}
+
+	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test cmd"}, nil, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	studio := findScore(scores, "studio")
+	cool30 := findScore(scores, "cool30")
+	cool100 := findScore(scores, "cool100")
+
+	// cool100 (600s) should be fastest, studio (730s) second, cool30 (1137s) slowest
+	if cool100.Total <= studio.Total {
+		t.Errorf("cool100 (%.2f) should score higher than studio (%.2f)", cool100.Total, studio.Total)
+	}
+	if studio.Total <= cool30.Total {
+		t.Errorf("studio (%.2f) should score higher than cool30 (%.2f)", studio.Total, cool30.Total)
+	}
+
+	// Check that predicted duration appears in reasons
+	hasPredicted := false
+	for _, r := range studio.Reasons {
+		if strings.Contains(r, "predicted") {
+			hasPredicted = true
+			break
+		}
+	}
+	if !hasPredicted {
+		t.Errorf("studio reasons should mention prediction, got: %v", studio.Reasons)
+	}
+}
+
+func TestPredictorDurationScoring_SingleHostSkipped(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Only one host has prediction — should not apply duration scoring
+	predict := func(host string) *JobPrediction {
+		if host == "cool30" {
+			d := 1000.0
+			return &JobPrediction{DurationS: &d}
+		}
+		return nil
+	}
+
+	scoresWithPredictor, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoresWithout, err := ScoreHosts(db, Constraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// With only 1 prediction, scores should be the same as without predictor
+	cool30With := findScore(scoresWithPredictor, "cool30")
+	cool30Without := findScore(scoresWithout, "cool30")
+	if cool30With.Total != cool30Without.Total {
+		t.Errorf("single prediction should not change scores: got %.2f vs %.2f", cool30With.Total, cool30Without.Total)
+	}
+}
+
+func TestPredictorResourceHardConstraint_RSS(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Predict RSS that exceeds cool30's 64GB
+	predict := func(host string) *JobPrediction {
+		rss := 50.0 * 1024 * 1024   // 50 GiB in KB — mean
+		upper := 70.0 * 1024 * 1024 // 70 GiB in KB — upper bound
+		if host == "cool30" {
+			return &JobPrediction{
+				PeakRSSKB:      &rss,
+				PeakRSSKBUpper: &upper,
+			}
+		}
+		return nil
+	}
+
+	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool30 := findScore(scores, "cool30")
+	if cool30.Eligible {
+		t.Error("cool30 should be ineligible when predicted RSS exceeds 64GB RAM")
+	}
+
+	hasRSSReason := false
+	for _, r := range cool30.Reasons {
+		if strings.Contains(r, "RSS") && strings.Contains(r, "exceeds") {
+			hasRSSReason = true
+		}
+	}
+	if !hasRSSReason {
+		t.Errorf("cool30 reasons should mention RSS exceeding RAM, got: %v", cool30.Reasons)
+	}
+}
+
+func TestPredictorResourceSoftConstraint_TightRAM(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Predict 50 GiB RSS on cool100 which has 256GB total but only 60 GiB free
+	rss := 50.0 * 1024 * 1024 // 50 GiB in KB
+	predict := func(host string) *JobPrediction {
+		if host == "cool100" {
+			return &JobPrediction{PeakRSSKB: &rss}
+		}
+		return nil
+	}
+
+	metrics := map[string]*HostMetrics{
+		"cool100": {FreeRAMKB: 60 * 1024 * 1024}, // 60 GiB free
+	}
+
+	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100 := findScore(scores, "cool100")
+	// 50/60 = 83% > 80% threshold, should get penalty
+	hasTightRAM := false
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "tight RAM") {
+			hasTightRAM = true
+		}
+	}
+	if !hasTightRAM {
+		t.Errorf("cool100 reasons should mention tight RAM fit, got: %v", cool100.Reasons)
+	}
+}
+
+func TestPredictorNilPredictor(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Nil predictor should behave identically to ScoreHostsWithMetrics
+	scoresWithPredictor, err := ScoreHostsWithPredictor(db, Constraints{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoresWithout, err := ScoreHostsWithMetrics(db, Constraints{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range scoresWithPredictor {
+		if scoresWithPredictor[i].Total != scoresWithout[i].Total {
+			t.Errorf("host %s: nil predictor score %.2f != no-predictor score %.2f",
+				scoresWithPredictor[i].Host, scoresWithPredictor[i].Total, scoresWithout[i].Total)
+		}
+	}
+}
+
+func TestPredictorRemovesStaticPerfPenalty(t *testing.T) {
+	db := setupTestDB(t)
+
+	// With predictor, static CPU perf penalties should be removed for hosts with predictions
+	predict := func(host string) *JobPrediction {
+		switch host {
+		case "cool100":
+			d := 500.0
+			return &JobPrediction{DurationS: &d}
+		case "cool30":
+			d := 800.0
+			return &JobPrediction{DurationS: &d}
+		case "studio":
+			d := 600.0
+			return &JobPrediction{DurationS: &d}
+		}
+		return nil
+	}
+
+	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hosts with predictions should not have CPU perf reasons
+	for _, s := range scores {
+		for _, r := range s.Reasons {
+			if strings.Contains(r, "CPU perf") {
+				t.Errorf("host %s should not have CPU perf reason when predictor is active, got: %s", s.Host, r)
+			}
 		}
 	}
 }

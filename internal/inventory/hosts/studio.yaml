@@ -4,7 +4,7 @@ arch: arm64
 cpu_cores: 12
 memory: 96GB
 network_bw: "1Gbps"
-cpu_factor: 0.3
+cpu_factor: 0.8
 gpu_factor: 0.15
 gpus:
   - name: M2 Max
