@@ -42,11 +42,10 @@ func StartProcess(command, workingDir string, envVars []string, logFile string) 
 		cmd.Dir = workingDir
 	}
 
-	// Build environment: start with current env, then overlay job env
-	cmd.Env = os.Environ()
-	for _, ev := range envVars {
-		cmd.Env = append(cmd.Env, ev)
-	}
+	// Build environment: start with current env, then overlay job env.
+	// Later entries override earlier ones with the same key (last-writer-wins),
+	// which is critical for CUDA_VISIBLE_DEVICES set by GPU class resolution.
+	cmd.Env = mergeEnvVars(os.Environ(), envVars)
 
 	if err := cmd.Start(); err != nil {
 		logF.Close()
@@ -65,6 +64,36 @@ func StartProcess(command, workingDir string, envVars []string, logFile string) 
 		PID:  pid,
 		PGID: pgid,
 	}, nil
+}
+
+// mergeEnvVars combines base and overlay env vars with last-writer-wins semantics.
+// If the same key appears in both base and overlay (or multiple times in overlay),
+// the last occurrence wins. This ensures that e.g. CUDA_VISIBLE_DEVICES from GPU
+// class resolution overrides any earlier value from dotenv or the parent process.
+func mergeEnvVars(base, overlay []string) []string {
+	// Track key positions for deduplication
+	keyIndex := make(map[string]int, len(base)+len(overlay))
+	result := make([]string, 0, len(base)+len(overlay))
+
+	addVar := func(ev string) {
+		key, _, _ := strings.Cut(ev, "=")
+		if idx, exists := keyIndex[key]; exists {
+			// Replace existing entry in-place
+			result[idx] = ev
+		} else {
+			keyIndex[key] = len(result)
+			result = append(result, ev)
+		}
+	}
+
+	for _, ev := range base {
+		addVar(ev)
+	}
+	for _, ev := range overlay {
+		addVar(ev)
+	}
+
+	return result
 }
 
 // WritePIDFiles writes the PID and PGID files for a job.
