@@ -886,6 +886,140 @@ func TestGPUJobsQueued_Penalty(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_GPUGeneration_Ampere(t *testing.T) {
+	db := setupTestDB(t)
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "ampere"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool100":
+			// Has A100 (Ampere) and RTX 2080 Ti (Turing) — should match on A100
+			if !s.Eligible {
+				t.Error("cool100 should be eligible for ampere (has A100)")
+			}
+		case "cool30":
+			// Has RTX 3090 (Ampere)
+			if !s.Eligible {
+				t.Error("cool30 should be eligible for ampere (has RTX 3090)")
+			}
+		case "studio":
+			// M2 Max — Apple, not Ampere
+			if s.Eligible {
+				t.Error("studio should not be eligible for ampere (has M2 Max)")
+			}
+		}
+	}
+}
+
+func TestScoreHosts_GPUGeneration_AmpereMin(t *testing.T) {
+	db := setupTestDB(t)
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "ampere+"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool100":
+			// Has A100 (Ampere) — matches ampere+
+			if !s.Eligible {
+				t.Error("cool100 should be eligible for ampere+ (has A100)")
+			}
+		case "cool30":
+			// Has RTX 3090 (Ampere) — matches ampere+
+			if !s.Eligible {
+				t.Error("cool30 should be eligible for ampere+ (has RTX 3090)")
+			}
+		case "studio":
+			// M2 Max — cross-family, should not match
+			if s.Eligible {
+				t.Error("studio should not be eligible for ampere+ (cross-family)")
+			}
+		}
+	}
+}
+
+func TestScoreHosts_GPUGeneration_Turing(t *testing.T) {
+	db := setupTestDB(t)
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "turing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool100":
+			// Has RTX 2080 Ti (Turing) — should match
+			if !s.Eligible {
+				t.Error("cool100 should be eligible for turing (has RTX 2080 Ti)")
+			}
+		case "cool30":
+			// RTX 3090 is Ampere, not Turing
+			if s.Eligible {
+				t.Error("cool30 should not be eligible for turing (RTX 3090 is Ampere)")
+			}
+		case "studio":
+			if s.Eligible {
+				t.Error("studio should not be eligible for turing")
+			}
+		}
+	}
+}
+
+func TestScoreHosts_GPUGeneration_ModelPromotedToGen(t *testing.T) {
+	db := setupTestDB(t)
+
+	// "a100+" should promote A100 to Ampere generation, matching Ampere and newer
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "a100+"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool100":
+			if !s.Eligible {
+				t.Error("cool100 should be eligible for a100+ (A100 is Ampere)")
+			}
+		case "cool30":
+			// RTX 3090 is also Ampere — should match a100+ (= ampere+)
+			if !s.Eligible {
+				t.Error("cool30 should be eligible for a100+ (RTX 3090 is Ampere)")
+			}
+		case "studio":
+			if s.Eligible {
+				t.Error("studio should not be eligible for a100+ (cross-family)")
+			}
+		}
+	}
+}
+
+func TestScoreHosts_GPUClass_BackwardCompat(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Plain "a100" (no +) should still exact-match only A100
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "a100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool100":
+			if !s.Eligible {
+				t.Error("cool100 should be eligible for exact a100")
+			}
+		case "cool30":
+			if s.Eligible {
+				t.Error("cool30 should NOT be eligible for exact a100 (has RTX 3090)")
+			}
+		}
+	}
+}
+
 func findScore(scores []Score, host string) Score {
 	for _, s := range scores {
 		if s.Host == host {

@@ -1093,5 +1093,5 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&queueEditClearDeps, "clear-depends", false, "Remove all dependencies from the job")
 	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
-	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "Set GPU class (e.g., A100, 2080)")
+	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 }

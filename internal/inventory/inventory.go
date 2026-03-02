@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -95,6 +96,18 @@ func (h *HostSpec) TotalGPUs() int {
 		total += len(g.Indices)
 	}
 	return total
+}
+
+// NormalizeGPUClass strips spaces, punctuation, and lowercases for fuzzy matching.
+// e.g. "RTX 3090", "rtx3090", "rtx-3090" all normalize to "rtx3090".
+func NormalizeGPUClass(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // LoadEmbeddedHosts parses all embedded host YAML files and returns the specs.

@@ -9,7 +9,6 @@ import (
 	"math"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
@@ -254,12 +253,13 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
-	// Hard constraint: GPU class (normalized: strip spaces/punctuation, case-insensitive)
+	// Hard constraint: GPU class (supports exact model, generation, or minimum generation)
+	var gc gpuConstraint
 	if c.GPUClass != "" {
-		norm := normalizeGPUClass(c.GPUClass)
+		gc = parseGPUConstraint(c.GPUClass)
 		var matchedName string
 		for _, gpu := range host.GPUs {
-			if normalizeGPUClass(gpu.Class) == norm {
+			if gc.matchesGPU(gpu.Class) {
 				matchedName = gpu.Name
 				break
 			}
@@ -375,7 +375,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 
 		// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
 		if c.GPUClass != "" && len(metrics.GPUDeviceFreeMemMiB) > 0 {
-			s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB)
+			s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB, gc)
 		}
 	}
 
@@ -588,22 +588,12 @@ func parseMemGB(s string) int {
 	return n
 }
 
-// normalizeGPUClass strips spaces, punctuation, and lowercases for fuzzy matching.
-// e.g. "RTX 3090", "rtx3090", "rtx-3090" all normalize to "rtx3090".
-func normalizeGPUClass(s string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+// normalizeGPUClass is a package-local alias for inventory.NormalizeGPUClass.
+var normalizeGPUClass = inventory.NormalizeGPUClass
 
 // applyPerDeviceGPUMemScoring penalizes a host based on how many of its
 // matching-class GPUs have enough free VRAM for the job.
-func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, deviceFreeMem map[string]int64) {
-	norm := normalizeGPUClass(c.GPUClass)
+func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, deviceFreeMem map[string]int64, gc gpuConstraint) {
 
 	// Determine required memory in MiB
 	var requiredMiB int64
@@ -615,7 +605,7 @@ func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constrain
 	totalMatching := 0
 	withEnough := 0
 	for _, gpu := range host.GPUs {
-		if normalizeGPUClass(gpu.Class) != norm {
+		if !gc.matchesGPU(gpu.Class) {
 			continue
 		}
 		for _, idx := range gpu.Indices {

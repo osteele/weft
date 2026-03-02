@@ -53,7 +53,7 @@ func init() {
 	describeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
 	describeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	describeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
-	describeCmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "Set GPU class (e.g., A100); scheduler picks best available device")
+	describeCmd.Flags().StringVar(&describeGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 }
 
 func runDescribe(cmd *cobra.Command, args []string) error {

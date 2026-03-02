@@ -5,8 +5,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"unicode"
 
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 )
 
@@ -142,17 +142,8 @@ func PerDeviceGPUMemUsedMiB() map[string]DeviceMemInfo {
 	return result
 }
 
-// normalizeGPUClass strips non-alphanumeric characters and lowercases for fuzzy matching.
-// e.g. "RTX 3090", "rtx3090", "rtx-3090" all normalize to "rtx3090".
-func normalizeGPUClass(s string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+// normalizeGPUClass is a package-local alias for inventory.NormalizeGPUClass.
+var normalizeGPUClass = inventory.NormalizeGPUClass
 
 // DevicesByClass returns device indices matching a GPU class name.
 // Uses normalized matching: strips non-alphanumeric characters and lowercases
