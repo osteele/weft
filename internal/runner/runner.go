@@ -228,7 +228,6 @@ func (r *Runner) tryStartNextJob() {
 	if !ok {
 		return
 	}
-	jobIDStr := strconv.FormatInt(jobID, 10)
 
 	// Load job data
 	job, err := ReadJobFile(r.queueDir, jobID)
@@ -293,9 +292,11 @@ func (r *Runner) tryStartNextJob() {
 		r.gpuInv.RefreshDeviceMemSnapshot()
 	}
 
-	// Check GPU capacity
+	// Check GPU capacity and resolve devices
+	var resolvedGPUDevices []string
 	if runningCount > 0 {
-		canStart, _ := r.gpuInv.CanStartGPUJob(r.state, rj)
+		var canStart bool
+		canStart, resolvedGPUDevices = r.gpuInv.CanStartGPUJob(r.state, rj)
 		if !canStart {
 			r.state.AddPending(jobID)
 			r.state.Save(r.stateFile)
@@ -304,7 +305,7 @@ func (r *Runner) tryStartNextJob() {
 	}
 
 	// Start the job
-	err = r.startJob(jobID, jobIDStr, job)
+	err = r.startJob(jobID, job, resolvedGPUDevices)
 	if err == errRequeue {
 		r.state.AddPending(jobID)
 	} else if err != nil {
@@ -315,7 +316,8 @@ func (r *Runner) tryStartNextJob() {
 
 var errRequeue = fmt.Errorf("requeue")
 
-func (r *Runner) startJob(jobID int64, jobIDStr string, job *ops.CommandJob) error {
+func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevices []string) error {
+	jobIDStr := strconv.FormatInt(jobID, 10)
 	command := job.Cmd
 	if command == "" {
 		fmt.Printf("Job %d: no command found, skipping\n", jobID)
@@ -368,11 +370,16 @@ func (r *Runner) startJob(jobID int64, jobIDStr string, job *ops.CommandJob) err
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command)
 
-	// Resolve GPU devices
+	// Resolve GPU devices (use pre-resolved if available, otherwise resolve now)
 	rj := &RunnerJob{Data: job, ID: jobID}
 	var gpuDevices []string
 
-	if job.GPUClass != "" {
+	if len(preResolvedGPUDevices) > 0 {
+		gpuDevices = preResolvedGPUDevices
+		if job.GPUClass != "" {
+			fmt.Printf("  GPU class '%s' resolved to device %s\n", job.GPUClass, gpuDevices[0])
+		}
+	} else if job.GPUClass != "" {
 		memPerDevice := GetJobGPUMem(job, DefaultGPUMemGB)
 		device, ok := r.gpuInv.PickBestGPUForClass(r.state, job.GPUClass, memPerDevice)
 		if !ok {
@@ -424,7 +431,7 @@ func (r *Runner) startJob(jobID int64, jobIDStr string, job *ops.CommandJob) err
 	r.processesMu.Unlock()
 
 	// Start wait goroutine
-	go r.waitForJob(jobID, jobIDStr, proc, paths, startTime, rj)
+	go r.waitForJob(jobID, proc, paths, startTime, rj)
 
 	// Update running state
 	allotment := r.jobAllotment(job)
@@ -442,7 +449,8 @@ func (r *Runner) startJob(jobID int64, jobIDStr string, job *ops.CommandJob) err
 	return nil
 }
 
-func (r *Runner) waitForJob(jobID int64, jobIDStr string, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob) {
+func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob) {
+	jobIDStr := strconv.FormatInt(jobID, 10)
 	err := proc.Cmd.Wait()
 	ei := ExtractExitInfo(err)
 

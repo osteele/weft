@@ -227,22 +227,16 @@ func MemPressureSeverity(level MemPressureLevel) int {
 // Returns (gpuUtilPct, gpuMemUsedMiB, gpuMemTotalMiB).
 // Returns (0, 0, 0) if nvidia-smi is not available.
 func HostGPUUtilization() (gpuUtilPct int, gpuMemUsedMiB int, gpuMemTotalMiB int) {
-	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=utilization.gpu,memory.used,memory.total",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
+	rows := queryNvidiaSmi("--query-gpu=utilization.gpu,memory.used,memory.total", 3)
+	if rows == nil {
 		return 0, 0, 0
 	}
 	// Sum across all GPUs (take max utilization, sum memory)
 	var maxUtil int
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Split(line, ",")
-		if len(fields) < 3 {
-			continue
-		}
-		util, _ := strconv.Atoi(strings.TrimSpace(fields[0]))
-		memUsed, _ := strconv.Atoi(strings.TrimSpace(fields[1]))
-		memTotal, _ := strconv.Atoi(strings.TrimSpace(fields[2]))
+	for _, parts := range rows {
+		util, _ := strconv.Atoi(parts[0])
+		memUsed, _ := strconv.Atoi(parts[1])
+		memTotal, _ := strconv.Atoi(parts[2])
 		if util > maxUtil {
 			maxUtil = util
 		}

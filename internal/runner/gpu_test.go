@@ -6,6 +6,93 @@ import (
 	"github.com/osteele/weft/internal/ops"
 )
 
+func TestParseNvidiaSmiOutput(t *testing.T) {
+	tests := []struct {
+		name       string
+		out        string
+		fieldCount int
+		wantRows   int
+		wantFirst  []string
+	}{
+		{
+			name:       "standard 3-field output",
+			out:        "0, NVIDIA A100-PCIE-80GB, 81920\n1, NVIDIA A100-PCIE-80GB, 81920\n",
+			fieldCount: 3,
+			wantRows:   2,
+			wantFirst:  []string{"0", "NVIDIA A100-PCIE-80GB", "81920"},
+		},
+		{
+			name:       "single field",
+			out:        "42\n95\n",
+			fieldCount: 1,
+			wantRows:   2,
+			wantFirst:  []string{"42"},
+		},
+		{
+			name:       "empty output",
+			out:        "",
+			fieldCount: 3,
+			wantRows:   0,
+		},
+		{
+			name:       "blank lines skipped",
+			out:        "\n0, name, 1024\n\n",
+			fieldCount: 3,
+			wantRows:   1,
+			wantFirst:  []string{"0", "name", "1024"},
+		},
+		{
+			name:       "short line skipped",
+			out:        "0, name\n0, name, 1024\n",
+			fieldCount: 3,
+			wantRows:   1,
+			wantFirst:  []string{"0", "name", "1024"},
+		},
+		{
+			name:       "whitespace trimmed",
+			out:        "  0 ,  NVIDIA A100 ,  81920 \n",
+			fieldCount: 3,
+			wantRows:   1,
+			wantFirst:  []string{"0", "NVIDIA A100", "81920"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows := parseNvidiaSmiOutput(tt.out, tt.fieldCount)
+			if len(rows) != tt.wantRows {
+				t.Fatalf("got %d rows, want %d", len(rows), tt.wantRows)
+			}
+			if tt.wantFirst != nil && len(rows) > 0 {
+				for i, want := range tt.wantFirst {
+					if rows[0][i] != want {
+						t.Errorf("rows[0][%d] = %q, want %q", i, rows[0][i], want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeGPUClass(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"RTX 3090", "rtx3090"},
+		{"rtx-3090", "rtx3090"},
+		{"rtx3090", "rtx3090"},
+		{"A100", "a100"},
+		{"NVIDIA A100-PCIE-80GB", "nvidiaa100pcie80gb"},
+	}
+	for _, tt := range tests {
+		got := normalizeGPUClass(tt.input)
+		if got != tt.want {
+			t.Errorf("normalizeGPUClass(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestDevicesByClass(t *testing.T) {
 	inv := &GPUInventory{
 		Devices: []GPUInfo{
@@ -26,6 +113,10 @@ func TestDevicesByClass(t *testing.T) {
 		{"3090", 1},
 		{"RTX", 2}, // Matches both 2080 and 3090
 		{"H100", 0},
+		{"rtx-3090", 1},  // Normalized: hyphen stripped
+		{"RTX 3090", 1},  // Normalized: space stripped
+		{"rtx3090", 1},   // Normalized: already clean
+		{"a100-pcie", 2}, // Normalized: hyphen stripped
 	}
 
 	for _, tt := range tests {

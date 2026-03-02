@@ -107,6 +107,7 @@ type Score struct {
 	Eligible          bool    // Passes all hard constraints
 	Reasons           []string
 	staticPerfPenalty float64 // penalty from cpu_factor/gpu_factor, tracked for reversal
+	staticPerfReason  string  // the exact reason string added with the penalty
 }
 
 // ScoreHosts evaluates all inventory hosts against the given constraints
@@ -374,7 +375,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 
 		// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
 		if c.GPUClass != "" && len(metrics.GPUDeviceFreeMemMiB) > 0 {
-			s.applyPerDeviceGPUMemScoring(host, c, metrics)
+			s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB)
 		}
 	}
 
@@ -383,17 +384,21 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		gpuFactor := host.GPUPerformance()
 		if gpuFactor < 1.0 {
 			penalty := (1.0 - gpuFactor) * 5.0
+			reason := fmt.Sprintf("GPU perf %.2fx (-%.1f)", gpuFactor, penalty)
 			s.Total -= penalty
 			s.staticPerfPenalty = penalty
-			s.Reasons = append(s.Reasons, fmt.Sprintf("GPU perf %.2fx (-%.1f)", gpuFactor, penalty))
+			s.staticPerfReason = reason
+			s.Reasons = append(s.Reasons, reason)
 		}
 	} else {
 		cpuFactor := host.CPUPerformance()
 		if cpuFactor < 1.0 {
 			penalty := (1.0 - cpuFactor) * 3.0
+			reason := fmt.Sprintf("CPU perf %.2fx (-%.1f)", cpuFactor, penalty)
 			s.Total -= penalty
 			s.staticPerfPenalty = penalty
-			s.Reasons = append(s.Reasons, fmt.Sprintf("CPU perf %.2fx (-%.1f)", cpuFactor, penalty))
+			s.staticPerfReason = reason
+			s.Reasons = append(s.Reasons, reason)
 		}
 	}
 
@@ -472,14 +477,17 @@ func removeStaticPerfPenalty(s *Score) {
 	s.Total += s.staticPerfPenalty
 	s.staticPerfPenalty = 0
 
-	// Remove the perf reason from display
-	filtered := s.Reasons[:0]
-	for _, r := range s.Reasons {
-		if !strings.Contains(r, "CPU perf") && !strings.Contains(r, "GPU perf") {
-			filtered = append(filtered, r)
+	// Remove the stored perf reason from display
+	if s.staticPerfReason != "" {
+		filtered := s.Reasons[:0]
+		for _, r := range s.Reasons {
+			if r != s.staticPerfReason {
+				filtered = append(filtered, r)
+			}
 		}
+		s.Reasons = filtered
+		s.staticPerfReason = ""
 	}
-	s.Reasons = filtered
 }
 
 // applyResourceHardConstraints marks a host ineligible if predicted resource
@@ -594,7 +602,7 @@ func normalizeGPUClass(s string) string {
 
 // applyPerDeviceGPUMemScoring penalizes a host based on how many of its
 // matching-class GPUs have enough free VRAM for the job.
-func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, metrics *HostMetrics) {
+func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, deviceFreeMem map[string]int64) {
 	norm := normalizeGPUClass(c.GPUClass)
 
 	// Determine required memory in MiB
@@ -613,7 +621,7 @@ func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constrain
 		for _, idx := range gpu.Indices {
 			totalMatching++
 			idxStr := fmt.Sprintf("%d", idx)
-			freeMiB, ok := metrics.GPUDeviceFreeMemMiB[idxStr]
+			freeMiB, ok := deviceFreeMem[idxStr]
 			if !ok {
 				// No data for this device — assume it's available
 				withEnough++

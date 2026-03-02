@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/osteele/weft/internal/ops"
 )
@@ -26,42 +27,87 @@ type DeviceMemInfo struct {
 type GPUInventory struct {
 	Devices           []GPUInfo
 	DeviceMemSnapshot map[string]DeviceMemInfo // actual per-device memory, refreshed each tick
+	hasNvidiaSmi      bool                     // cached LookPath result from DiscoverGPUs
+}
+
+// parseNvidiaSmiOutput parses nvidia-smi CSV output into rows of trimmed fields.
+// Each line is split into at most fieldCount fields using ", " as delimiter.
+// Lines with fewer than fieldCount fields are skipped.
+func parseNvidiaSmiOutput(out string, fieldCount int) [][]string {
+	var rows [][]string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ", ", fieldCount)
+		if len(parts) < fieldCount {
+			continue
+		}
+		for i := range parts {
+			parts[i] = strings.TrimSpace(parts[i])
+		}
+		rows = append(rows, parts)
+	}
+	return rows
+}
+
+// queryNvidiaSmi runs nvidia-smi with the given query flag and parses the output.
+// Returns nil if nvidia-smi is not available or the command fails.
+func queryNvidiaSmi(queryFlag string, fieldCount int) [][]string {
+	if _, err := exec.LookPath("nvidia-smi"); err != nil {
+		return nil
+	}
+	return execNvidiaSmi(queryFlag, fieldCount)
+}
+
+// queryNvidiaSmiCached runs nvidia-smi using the cached LookPath result.
+func (inv *GPUInventory) queryNvidiaSmiCached(queryFlag string, fieldCount int) [][]string {
+	if !inv.hasNvidiaSmi {
+		return nil
+	}
+	return execNvidiaSmi(queryFlag, fieldCount)
+}
+
+// execNvidiaSmi runs nvidia-smi and parses the output (no LookPath check).
+func execNvidiaSmi(queryFlag string, fieldCount int) [][]string {
+	out, err := exec.Command("nvidia-smi",
+		queryFlag,
+		"--format=csv,noheader,nounits").Output()
+	if err != nil {
+		return nil
+	}
+	return parseNvidiaSmiOutput(string(out), fieldCount)
 }
 
 // DiscoverGPUs runs nvidia-smi to discover available GPU devices.
 // Returns an empty inventory if nvidia-smi is not available.
+// Populates both Devices and an initial DeviceMemSnapshot in a single query.
 func DiscoverGPUs() *GPUInventory {
 	inv := &GPUInventory{}
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
 		return inv
 	}
+	inv.hasNvidiaSmi = true
 
-	// Query index, name, and total memory in one call
-	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=index,name,memory.total",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
+	rows := inv.queryNvidiaSmiCached("--query-gpu=index,name,memory.used,memory.total", 4)
+	if rows == nil {
 		return inv
 	}
 
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ", ", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		idx := strings.TrimSpace(parts[0])
-		name := strings.TrimSpace(parts[1])
-		memMiB, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
-		memGB := memMiB / 1024
+	inv.DeviceMemSnapshot = make(map[string]DeviceMemInfo, len(rows))
+	for _, parts := range rows {
+		idx := parts[0]
+		name := parts[1]
+		usedMiB, _ := strconv.Atoi(parts[2])
+		totalMiB, _ := strconv.Atoi(parts[3])
+		memGB := totalMiB / 1024
 
 		inv.Devices = append(inv.Devices, GPUInfo{
 			Index:      idx,
 			Name:       name,
 			TotalMemGB: memGB,
 		})
+		inv.DeviceMemSnapshot[idx] = DeviceMemInfo{UsedMiB: usedMiB, TotalMiB: totalMiB}
 	}
 
 	return inv
@@ -71,46 +117,51 @@ func DiscoverGPUs() *GPUInventory {
 // and stores the result in DeviceMemSnapshot. Safe to call on non-GPU hosts
 // (sets an empty map).
 func (inv *GPUInventory) RefreshDeviceMemSnapshot() {
-	inv.DeviceMemSnapshot = PerDeviceGPUMemUsedMiB()
+	result := make(map[string]DeviceMemInfo)
+	rows := inv.queryNvidiaSmiCached("--query-gpu=index,memory.used,memory.total", 3)
+	for _, parts := range rows {
+		idx := parts[0]
+		used, _ := strconv.Atoi(parts[1])
+		total, _ := strconv.Atoi(parts[2])
+		result[idx] = DeviceMemInfo{UsedMiB: used, TotalMiB: total}
+	}
+	inv.DeviceMemSnapshot = result
 }
 
 // PerDeviceGPUMemUsedMiB queries nvidia-smi for actual per-device memory usage.
 // Returns an empty map if nvidia-smi is unavailable.
 func PerDeviceGPUMemUsedMiB() map[string]DeviceMemInfo {
 	result := make(map[string]DeviceMemInfo)
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		return result
-	}
-
-	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=index,memory.used,memory.total",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return result
-	}
-
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ", ", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		idx := strings.TrimSpace(parts[0])
-		used, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-		total, _ := strconv.Atoi(strings.TrimSpace(parts[2]))
+	rows := queryNvidiaSmi("--query-gpu=index,memory.used,memory.total", 3)
+	for _, parts := range rows {
+		idx := parts[0]
+		used, _ := strconv.Atoi(parts[1])
+		total, _ := strconv.Atoi(parts[2])
 		result[idx] = DeviceMemInfo{UsedMiB: used, TotalMiB: total}
 	}
 	return result
 }
 
-// DevicesByClass returns device indices matching a GPU class name (case-insensitive substring match).
+// normalizeGPUClass strips non-alphanumeric characters and lowercases for fuzzy matching.
+// e.g. "RTX 3090", "rtx3090", "rtx-3090" all normalize to "rtx3090".
+func normalizeGPUClass(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// DevicesByClass returns device indices matching a GPU class name.
+// Uses normalized matching: strips non-alphanumeric characters and lowercases
+// both the class name and device name before substring comparison.
 func (inv *GPUInventory) DevicesByClass(className string) []string {
-	lower := strings.ToLower(className)
+	norm := normalizeGPUClass(className)
 	var result []string
 	for _, d := range inv.Devices {
-		if strings.Contains(strings.ToLower(d.Name), lower) {
+		if strings.Contains(normalizeGPUClass(d.Name), norm) {
 			result = append(result, d.Index)
 		}
 	}
@@ -253,14 +304,8 @@ type RunnerJob struct {
 // QueryGPUProcessMemory queries nvidia-smi for GPU memory usage by process PIDs.
 // Returns total GPU memory in MiB used by any of the given PIDs.
 func QueryGPUProcessMemory(pids []int) int {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		return 0
-	}
-
-	out, err := exec.Command("nvidia-smi",
-		"--query-compute-apps=pid,used_memory",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
+	rows := queryNvidiaSmi("--query-compute-apps=pid,used_memory", 2)
+	if rows == nil {
 		return 0
 	}
 
@@ -270,20 +315,13 @@ func QueryGPUProcessMemory(pids []int) int {
 	}
 
 	total := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
-		}
-		parts := strings.SplitN(line, ", ", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	for _, parts := range rows {
+		pid, err := strconv.Atoi(parts[0])
 		if err != nil {
 			continue
 		}
 		if pidSet[pid] {
-			mem, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+			mem, _ := strconv.Atoi(parts[1])
 			total += mem
 		}
 	}

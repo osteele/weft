@@ -186,15 +186,13 @@ func hostRAMUsagePct() int {
 
 // hostGPUUtilizationPct returns max GPU utilization across all GPUs.
 func hostGPUUtilizationPct() int {
-	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=utilization.gpu",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
+	rows := queryNvidiaSmi("--query-gpu=utilization.gpu", 1)
+	if rows == nil {
 		return 0
 	}
 	maxUtil := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		n, _ := strconv.Atoi(strings.TrimSpace(line))
+	for _, parts := range rows {
+		n, _ := strconv.Atoi(parts[0])
 		if n > maxUtil {
 			maxUtil = n
 		}
@@ -204,20 +202,14 @@ func hostGPUUtilizationPct() int {
 
 // hostGPUVRAMPct returns max VRAM usage percentage across all GPUs.
 func hostGPUVRAMPct() int {
-	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=memory.used,memory.total",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
+	rows := queryNvidiaSmi("--query-gpu=memory.used,memory.total", 2)
+	if rows == nil {
 		return 0
 	}
 	maxPct := 0
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		parts := strings.SplitN(line, ",", 2)
-		if len(parts) < 2 {
-			continue
-		}
-		used, _ := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-		total, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	for _, parts := range rows {
+		used, _ := strconv.ParseFloat(parts[0], 64)
+		total, _ := strconv.ParseFloat(parts[1], 64)
 		if total > 0 {
 			pct := int(used * 100 / total)
 			if pct > maxPct {
