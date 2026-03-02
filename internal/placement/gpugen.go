@@ -119,21 +119,21 @@ const (
 	constraintMinGen
 )
 
-// gpuConstraint represents a parsed --gpu-class value.
-type gpuConstraint struct {
+// GPUConstraint represents a parsed --gpu-class value.
+type GPUConstraint struct {
 	mode       gpuConstraintMode
 	normalized string        // normalizeGPUClass of the base (without '+')
 	generation GPUGeneration // resolved generation (for gen/min-gen modes)
 }
 
-// parseGPUConstraint parses a --gpu-class value into a constraint.
+// ParseGPUConstraint parses a --gpu-class value into a constraint.
 // Examples:
 //
 //	"a100"    → exact model match
 //	"ampere"  → exact generation match
 //	"ampere+" → minimum generation (Ampere or newer)
 //	"a100+"   → minimum generation (promotes model to its generation)
-func parseGPUConstraint(s string) gpuConstraint {
+func ParseGPUConstraint(s string) GPUConstraint {
 	minMode := strings.HasSuffix(s, "+")
 	if minMode {
 		s = strings.TrimSuffix(s, "+")
@@ -147,45 +147,76 @@ func parseGPUConstraint(s string) gpuConstraint {
 		if minMode {
 			mode = constraintMinGen
 		}
-		return gpuConstraint{mode: mode, normalized: norm, generation: gen}
+		return GPUConstraint{mode: mode, normalized: norm, generation: gen}
 	}
 
 	// Check if it's a known GPU model — if '+' was used, promote to generation
 	if minMode {
 		if gen := generationOf(norm); gen != GenUnknown {
-			return gpuConstraint{mode: constraintMinGen, normalized: norm, generation: gen}
+			return GPUConstraint{mode: constraintMinGen, normalized: norm, generation: gen}
 		}
 	}
 
 	// Fall back to exact model match ('+' on unknown model treated as exact)
-	return gpuConstraint{mode: constraintExactModel, normalized: norm}
+	return GPUConstraint{mode: constraintExactModel, normalized: norm}
 }
 
-// matchesGPU returns true if the inventory GPU class satisfies this constraint.
-func (c gpuConstraint) matchesGPU(inventoryClass string) bool {
+// matchesGeneration checks whether invGen satisfies the constraint's generation
+// requirement. For exact-gen mode it requires equality; for min-gen mode it
+// requires invGen >= the constraint generation within the same family.
+func (c GPUConstraint) matchesGeneration(invGen GPUGeneration) bool {
+	if invGen == GenUnknown {
+		return false
+	}
+	if c.mode == constraintExactGen {
+		return invGen == c.generation
+	}
+	// constraintMinGen: block cross-family comparison
+	if c.generation.isNVIDIA() != invGen.isNVIDIA() || c.generation.isApple() != invGen.isApple() {
+		return false
+	}
+	return invGen >= c.generation
+}
+
+// MatchesGPU returns true if the inventory GPU class satisfies this constraint.
+func (c GPUConstraint) MatchesGPU(inventoryClass string) bool {
 	invNorm := normalizeGPUClass(inventoryClass)
 
 	switch c.mode {
 	case constraintExactModel:
 		return invNorm == c.normalized
+	case constraintExactGen, constraintMinGen:
+		return c.matchesGeneration(generationOf(invNorm))
+	}
+	return false
+}
 
-	case constraintExactGen:
-		invGen := generationOf(invNorm)
-		if invGen == GenUnknown {
-			return false
-		}
-		return invGen == c.generation
+// MatchesGPUFullName returns true if a full nvidia-smi GPU name (e.g.
+// "NVIDIA A100-PCIE-80GB") satisfies this constraint. For exact model mode
+// it uses substring matching on the normalized full name. For generation
+// modes it identifies the GPU model from the full name and applies generation
+// comparison.
+func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
+	normFull := normalizeGPUClass(fullName)
 
-	case constraintMinGen:
-		invGen := generationOf(invNorm)
-		if invGen == GenUnknown {
+	switch c.mode {
+	case constraintExactModel:
+		return strings.Contains(normFull, c.normalized)
+
+	case constraintExactGen, constraintMinGen:
+		// Identify the GPU model by finding which known class is a substring
+		// of the normalized full name. Use the longest match to avoid e.g.
+		// "a10" matching before "a100".
+		bestClass := ""
+		for class := range gpuClassToGeneration {
+			if strings.Contains(normFull, class) && len(class) > len(bestClass) {
+				bestClass = class
+			}
+		}
+		if bestClass == "" {
 			return false
 		}
-		// Cross-family comparison blocked
-		if c.generation.isNVIDIA() != invGen.isNVIDIA() || c.generation.isApple() != invGen.isApple() {
-			return false
-		}
-		return invGen >= c.generation
+		return c.matchesGeneration(gpuClassToGeneration[bestClass])
 	}
 	return false
 }

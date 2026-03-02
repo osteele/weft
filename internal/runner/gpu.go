@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
 )
 
 // GPUInfo describes a single GPU device.
@@ -142,17 +142,14 @@ func PerDeviceGPUMemUsedMiB() map[string]DeviceMemInfo {
 	return result
 }
 
-// normalizeGPUClass is a package-local alias for inventory.NormalizeGPUClass.
-var normalizeGPUClass = inventory.NormalizeGPUClass
-
 // DevicesByClass returns device indices matching a GPU class name.
-// Uses normalized matching: strips non-alphanumeric characters and lowercases
-// both the class name and device name before substring comparison.
+// Supports exact model names (e.g. "a100"), generation names (e.g. "ampere"),
+// and minimum generation constraints (e.g. "ampere+").
 func (inv *GPUInventory) DevicesByClass(className string) []string {
-	norm := normalizeGPUClass(className)
+	constraint := placement.ParseGPUConstraint(className)
 	var result []string
 	for _, d := range inv.Devices {
-		if strings.Contains(normalizeGPUClass(d.Name), norm) {
+		if constraint.MatchesGPUFullName(d.Name) {
 			result = append(result, d.Index)
 		}
 	}

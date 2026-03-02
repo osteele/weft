@@ -254,12 +254,12 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 	s := Score{Host: host.Name, Eligible: true}
 
 	// Hard constraint: GPU class (supports exact model, generation, or minimum generation)
-	var gc gpuConstraint
+	var gc GPUConstraint
 	if c.GPUClass != "" {
-		gc = parseGPUConstraint(c.GPUClass)
+		gc = ParseGPUConstraint(c.GPUClass)
 		var matchedName string
 		for _, gpu := range host.GPUs {
-			if gc.matchesGPU(gpu.Class) {
+			if gc.MatchesGPU(gpu.Class) {
 				matchedName = gpu.Name
 				break
 			}
@@ -591,7 +591,7 @@ var normalizeGPUClass = inventory.NormalizeGPUClass
 
 // applyPerDeviceGPUMemScoring penalizes a host based on how many of its
 // matching-class GPUs have enough free VRAM for the job.
-func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, deviceFreeMem map[string]int64, gc gpuConstraint) {
+func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, deviceFreeMem map[string]int64, gc GPUConstraint) {
 
 	// Determine required memory in MiB
 	var requiredMiB int64
@@ -603,7 +603,7 @@ func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constrain
 	totalMatching := 0
 	withEnough := 0
 	for _, gpu := range host.GPUs {
-		if !gc.matchesGPU(gpu.Class) {
+		if !gc.MatchesGPU(gpu.Class) {
 			continue
 		}
 		for _, idx := range gpu.Indices {

@@ -3,6 +3,7 @@ package runner
 import (
 	"testing"
 
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 )
 
@@ -86,9 +87,9 @@ func TestNormalizeGPUClass(t *testing.T) {
 		{"NVIDIA A100-PCIE-80GB", "nvidiaa100pcie80gb"},
 	}
 	for _, tt := range tests {
-		got := normalizeGPUClass(tt.input)
+		got := inventory.NormalizeGPUClass(tt.input)
 		if got != tt.want {
-			t.Errorf("normalizeGPUClass(%q) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("NormalizeGPUClass(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }
@@ -107,6 +108,7 @@ func TestDevicesByClass(t *testing.T) {
 		className string
 		wantCount int
 	}{
+		// Exact model (substring match on normalized full name)
 		{"A100", 2},
 		{"a100", 2},
 		{"2080", 1},
@@ -117,6 +119,16 @@ func TestDevicesByClass(t *testing.T) {
 		{"RTX 3090", 1},  // Normalized: space stripped
 		{"rtx3090", 1},   // Normalized: already clean
 		{"a100-pcie", 2}, // Normalized: hyphen stripped
+
+		// Generation matching
+		{"ampere", 3}, // A100 (x2) + RTX 3090 (all Ampere)
+		{"turing", 1}, // Only RTX 2080 Ti
+		{"hopper", 0}, // None
+
+		// Minimum generation matching
+		{"ampere+", 3}, // A100 (x2) + RTX 3090 (all Ampere+)
+		{"turing+", 4}, // All 4 devices (Turing+)
+		{"hopper+", 0}, // None
 	}
 
 	for _, tt := range tests {

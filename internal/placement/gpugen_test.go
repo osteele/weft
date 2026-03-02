@@ -81,15 +81,15 @@ func TestParseGPUConstraint(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		c := parseGPUConstraint(tt.input)
+		c := ParseGPUConstraint(tt.input)
 		if c.mode != tt.mode {
-			t.Errorf("parseGPUConstraint(%q).mode = %d, want %d", tt.input, c.mode, tt.mode)
+			t.Errorf("ParseGPUConstraint(%q).mode = %d, want %d", tt.input, c.mode, tt.mode)
 		}
 		if c.mode != constraintExactModel && c.generation != tt.gen {
-			t.Errorf("parseGPUConstraint(%q).generation = %d, want %d", tt.input, c.generation, tt.gen)
+			t.Errorf("ParseGPUConstraint(%q).generation = %d, want %d", tt.input, c.generation, tt.gen)
 		}
 		if c.normalized != tt.norm {
-			t.Errorf("parseGPUConstraint(%q).normalized = %q, want %q", tt.input, c.normalized, tt.norm)
+			t.Errorf("ParseGPUConstraint(%q).normalized = %q, want %q", tt.input, c.normalized, tt.norm)
 		}
 	}
 }
@@ -150,10 +150,53 @@ func TestMatchesGPU(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		c := parseGPUConstraint(tt.constraint)
-		got := c.matchesGPU(tt.inventory)
+		c := ParseGPUConstraint(tt.constraint)
+		got := c.MatchesGPU(tt.inventory)
 		if got != tt.want {
-			t.Errorf("parseGPUConstraint(%q).matchesGPU(%q) = %v, want %v", tt.constraint, tt.inventory, got, tt.want)
+			t.Errorf("ParseGPUConstraint(%q).MatchesGPU(%q) = %v, want %v", tt.constraint, tt.inventory, got, tt.want)
+		}
+	}
+}
+
+func TestMatchesGPUFullName(t *testing.T) {
+	tests := []struct {
+		constraint string
+		fullName   string
+		want       bool
+	}{
+		// Exact model — substring match on normalized full name
+		{"a100", "NVIDIA A100-PCIE-80GB", true},
+		{"a100", "NVIDIA GeForce RTX 3090", false},
+		{"rtx3090", "NVIDIA GeForce RTX 3090", true},
+		{"3090", "NVIDIA GeForce RTX 3090", true},
+
+		// Generation — identify model from full name
+		{"ampere", "NVIDIA A100-PCIE-80GB", true},
+		{"ampere", "NVIDIA GeForce RTX 3090", true},
+		{"ampere", "NVIDIA GeForce RTX 2080 Ti", false},
+		{"turing", "NVIDIA GeForce RTX 2080 Ti", true},
+		{"turing", "NVIDIA A100-PCIE-80GB", false},
+
+		// Minimum generation
+		{"ampere+", "NVIDIA A100-PCIE-80GB", true},
+		{"ampere+", "NVIDIA GeForce RTX 3090", true},
+		{"ampere+", "NVIDIA GeForce RTX 2080 Ti", false}, // Turing < Ampere
+		{"turing+", "NVIDIA GeForce RTX 2080 Ti", true},
+		{"turing+", "NVIDIA A100-PCIE-80GB", true},   // Ampere > Turing
+		{"turing+", "NVIDIA GeForce RTX 3090", true}, // Ampere > Turing
+		{"hopper+", "NVIDIA A100-PCIE-80GB", false},  // Ampere < Hopper
+
+		// Unknown full name
+		{"ampere+", "Some Unknown GPU", false},
+		{"ampere", "Some Unknown GPU", false},
+	}
+
+	for _, tt := range tests {
+		c := ParseGPUConstraint(tt.constraint)
+		got := c.MatchesGPUFullName(tt.fullName)
+		if got != tt.want {
+			t.Errorf("ParseGPUConstraint(%q).MatchesGPUFullName(%q) = %v, want %v",
+				tt.constraint, tt.fullName, got, tt.want)
 		}
 	}
 }
