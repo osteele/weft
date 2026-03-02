@@ -101,12 +101,12 @@ func NewJobPredictor(predict func(host string) *RawPrediction) JobPredictor {
 
 // Score represents the placement score for a single host.
 type Score struct {
-	Host              string
-	Total             float64 // Higher is better
-	Eligible          bool    // Passes all hard constraints
-	Reasons           []string
-	staticPerfPenalty float64 // penalty from cpu_factor/gpu_factor, tracked for reversal
-	staticPerfReason  string  // the exact reason string added with the penalty
+	Host             string
+	Total            float64 // Higher is better
+	Eligible         bool    // Passes all hard constraints
+	Reasons          []string
+	staticPerfDelta  float64 // score delta from cpu_factor/gpu_factor, tracked for reversal
+	staticPerfReason string  // the exact reason string added with the delta
 }
 
 // ScoreHosts evaluates all inventory hosts against the given constraints
@@ -379,27 +379,11 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		}
 	}
 
-	// Soft factor: performance multiplier (penalize slower hosts)
+	// Soft factor: performance multiplier (weighted by cpu_factor or gpu_factor)
 	if c.GPUClass != "" {
-		gpuFactor := host.GPUPerformance()
-		if gpuFactor < 1.0 {
-			penalty := (1.0 - gpuFactor) * 5.0
-			reason := fmt.Sprintf("GPU perf %.2fx (-%.1f)", gpuFactor, penalty)
-			s.Total -= penalty
-			s.staticPerfPenalty = penalty
-			s.staticPerfReason = reason
-			s.Reasons = append(s.Reasons, reason)
-		}
+		applyPerfScoring(&s, "GPU", host.GPUPerformance(), 5.0)
 	} else {
-		cpuFactor := host.CPUPerformance()
-		if cpuFactor < 1.0 {
-			penalty := (1.0 - cpuFactor) * 3.0
-			reason := fmt.Sprintf("CPU perf %.2fx (-%.1f)", cpuFactor, penalty)
-			s.Total -= penalty
-			s.staticPerfPenalty = penalty
-			s.staticPerfReason = reason
-			s.Reasons = append(s.Reasons, reason)
-		}
+		applyPerfScoring(&s, "CPU", host.CPUPerformance(), 3.0)
 	}
 
 	// Base score for eligible hosts (ensures non-zero)
@@ -459,8 +443,8 @@ func applyDurationScoring(scores []Score, predictions map[string]*JobPrediction)
 		bonus := (1.0 - (d.duration-minDur)/spread) * maxBonus
 		scores[d.index].Total += bonus
 
-		// Remove the static perf penalty since predictor subsumes it
-		removeStaticPerfPenalty(&scores[d.index])
+		// Remove the static perf scoring since predictor subsumes it
+		removeStaticPerfScoring(&scores[d.index])
 
 		durMin := d.duration / 60.0
 		scores[d.index].Reasons = append(scores[d.index].Reasons,
@@ -468,14 +452,28 @@ func applyDurationScoring(scores []Score, predictions map[string]*JobPrediction)
 	}
 }
 
-// removeStaticPerfPenalty reverses the cpu_factor/gpu_factor penalty that was
-// applied in scoreHost, since the predictor has better per-host data.
-func removeStaticPerfPenalty(s *Score) {
-	if s.staticPerfPenalty == 0 {
+// applyPerfScoring adds a score contribution proportional to the host's
+// performance factor. The weight controls how much performance matters
+// relative to other scoring factors.
+func applyPerfScoring(s *Score, label string, factor float64, weight float64) {
+	score := factor * weight
+	s.Total += score
+	s.staticPerfDelta = score
+	if factor != 1.0 {
+		reason := fmt.Sprintf("%s perf %.2fx (%+.1f)", label, factor, score)
+		s.staticPerfReason = reason
+		s.Reasons = append(s.Reasons, reason)
+	}
+}
+
+// removeStaticPerfScoring reverses the cpu_factor/gpu_factor contribution that
+// was applied in scoreHost, since the predictor has better per-host data.
+func removeStaticPerfScoring(s *Score) {
+	if s.staticPerfDelta == 0 {
 		return
 	}
-	s.Total += s.staticPerfPenalty
-	s.staticPerfPenalty = 0
+	s.Total -= s.staticPerfDelta
+	s.staticPerfDelta = 0
 
 	// Remove the stored perf reason from display
 	if s.staticPerfReason != "" {

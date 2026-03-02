@@ -2,6 +2,7 @@ package placement
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -295,9 +296,13 @@ func TestTransferCostScoring(t *testing.T) {
 		t.Errorf("cool30 (%.2f) should score higher than cool100 (%.2f) — cool30 has data local", cool30.Total, cool100.Total)
 	}
 
-	// cool100 has 10Gbps, studio has 1Gbps — cool100 should get less penalty
-	if cool100.Total <= studio.Total {
-		t.Errorf("cool100 (%.2f) should score higher than studio (%.2f) — cool100 has 10x bandwidth", cool100.Total, studio.Total)
+	// cool100 has 10Gbps, studio has 1Gbps — cool100 should get a smaller transfer penalty.
+	// Compare transfer penalties directly rather than total scores, which also include CPU perf.
+	cool100Transfer := extractTransferMinutes(cool100.Reasons)
+	studioTransfer := extractTransferMinutes(studio.Reasons)
+	if cool100Transfer >= studioTransfer {
+		t.Errorf("cool100 transfer (%.1fmin) should be less than studio (%.1fmin) — cool100 has 10x bandwidth",
+			cool100Transfer, studioTransfer)
 	}
 
 	// Verify reason strings mention transfer
@@ -492,11 +497,11 @@ func TestPerformanceFactor_CPUOnlyJob(t *testing.T) {
 	cool30 := findScore(scores, "cool30")
 	studio := findScore(scores, "studio")
 
-	if cool100.Total <= studio.Total {
-		t.Errorf("cool100 (%.2f) should score higher than studio (%.2f) for CPU job", cool100.Total, studio.Total)
+	if studio.Total <= cool100.Total {
+		t.Errorf("studio (%.2f) should score higher than cool100 (%.2f) for CPU job", studio.Total, cool100.Total)
 	}
-	if studio.Total <= cool30.Total {
-		t.Errorf("studio (%.2f) should score higher than cool30 (%.2f) for CPU job", studio.Total, cool30.Total)
+	if cool100.Total <= cool30.Total {
+		t.Errorf("cool100 (%.2f) should score higher than cool30 (%.2f) for CPU job", cool100.Total, cool30.Total)
 	}
 }
 
@@ -1027,4 +1032,15 @@ func findScore(scores []Score, host string) Score {
 		}
 	}
 	return Score{}
+}
+
+// extractTransferMinutes parses the transfer time from a reason like "~2.0min transfer for 1 missing inputs".
+func extractTransferMinutes(reasons []string) float64 {
+	for _, r := range reasons {
+		var mins float64
+		if _, err := fmt.Sscanf(r, "~%fmin transfer", &mins); err == nil {
+			return mins
+		}
+	}
+	return 0
 }

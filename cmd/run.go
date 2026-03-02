@@ -327,12 +327,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				if err != nil {
 					return fmt.Errorf("auto-placement failed: %w", err)
 				}
-				fmt.Printf("Queued job on %s\n", bestHost)
 			} else {
 				return fmt.Errorf("auto-placement failed: %w", err)
 			}
-		} else {
-			fmt.Printf("Queued job on %s\n", bestHost)
 		}
 		host = bestHost
 	}
