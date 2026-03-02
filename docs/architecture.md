@@ -108,7 +108,7 @@ weft/
 │   ├── inventory/         # Host YAML specs (embedded), GPU/CPU capabilities
 │   ├── dataloc/           # Data locality tracking (HF cache scanner, asset DB)
 │   ├── prestage/          # Pre-staging (rsync missing data before dispatch)
-│   ├── runner/            # Go queue runner (replaces bash queue-runner.sh)
+│   ├── runner/            # Go queue runner (production agent)
 │   ├── agentdeploy/       # Cross-compile and deploy agent binary to hosts
 │   ├── vastai/            # Vast.ai cloud GPU CLI wrapper
 │   ├── db/                # Database operations (SQLite)
@@ -622,15 +622,15 @@ The queue system allows jobs to run on a remote host without requiring the local
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Remote Queue Runner
+### Remote Queue Runner (Go Agent)
 
 Jobs enqueued via `weft queue add`, `weft run`, or plan
-`series` blocks are executed by a small bash daemon that lives on each host.
+`series` blocks are executed by the Go agent (`weft-agent`) on each host.
 
-- The script is embedded in the binary (`internal/scripts/queue-runner.sh`) and
-  deployed on demand to `~/.cache/weft/scripts/queue-runner.sh`.
-- A tmux session named `rj-queue-{queue}` runs the script so it keeps running
-  even when you disconnect.
+- The agent binary is cross-compiled and deployed via `internal/agentdeploy/`
+  to `~/.cache/weft/bin/weft-agent` on remote hosts.
+- A tmux session named `rj-queue-{queue}` runs `weft-agent run-queue` so it
+  keeps running even when you disconnect.
 - Queue data is purely file-based to avoid keeping a network service running:
   - `~/.cache/weft/queue/{queue}.commands`: append-only JSONL command log.
   - `~/.cache/weft/queue/{queue}.state.json`: runner state (pending list,
@@ -688,7 +688,7 @@ execution. This is a frequent source of bugs and requires careful attention.
 2. **Local shell** → interprets SSH command
 3. **SSH transport** → passes to remote shell
 4. **Remote shell** → executes command or appends to queue log
-5. **Queue runner (bash)** → reads queue log/state, parses jobs, executes job
+5. **Go agent** → reads queue log/state, parses jobs, executes job
 
 ### Current Escaping Strategy
 
@@ -698,15 +698,15 @@ Queue commands are stored as JSONL entries in the `.commands` file:
 {"ts":"...","op":"add","job":{"id":123,"dir":"...","cmd":"...","desc":"...","env":["..."],"deps":"...","cpu":60}}
 ```
 
-On the remote side, `queue-runner.sh`:
+On the remote side, the Go agent (`weft-agent run-queue`):
 1. Reads each JSONL line from the command log
-2. Uses `jq` to parse the `job` object
-3. Executes the command string as provided (JSON escaping is handled by `jq`)
+2. Parses the JSON `job` object natively in Go
+3. Executes the command string as provided
 
 ### Known Bug Pattern
 
 With the JSONL format, the main failure mode is malformed JSON or a truncated
-command log line. These show up as `jq` parse errors in the runner logs.
+command log line. These show up as parse errors in the agent logs.
 
 ### Architectural Alternatives
 
@@ -727,4 +727,4 @@ parsing rules.
 
 `TestQueueEntryShellParsing` in `internal/ops/queue_test.go` verifies that
 queue entries with multi-line commands survive the full escaping round-trip
-by actually running bash to parse them the same way `queue-runner.sh` does.
+by actually running bash to parse them the same way the queue runner does.

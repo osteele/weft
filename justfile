@@ -12,13 +12,17 @@ build:
 install:
     go install .
 
-# Run tests
+# Run tests (skips slow build tests; use test-all for full suite)
 test:
+    go test -short ./...
+
+# Run all tests including slow build tests
+test-all:
     go test ./...
 
 # Run tests with verbose output
 test-verbose:
-    go test -v ./...
+    go test -short -v ./...
 
 # Run integration tests (requires .env with SSH_TEST_HOST)
 # Note: SLURM tests skipped due to SLURM scheduler issues on test server

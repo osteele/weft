@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+// SyncFunc is the function signature for syncing sources to a remote host.
+// Tests can replace it with SetSyncFunc to avoid spawning rsync processes.
+type SyncFunc func(host, localDir, remoteDir string, excludes []string) error
+
+var syncFunc SyncFunc = defaultSyncFunc
+
+// SetSyncFunc replaces the sync execution function.
+// Returns a cleanup function that restores the original.
+func SetSyncFunc(fn SyncFunc) func() {
+	original := syncFunc
+	syncFunc = fn
+	return func() { syncFunc = original }
+}
+
 // DefaultExcludes returns the hardcoded rsync exclude patterns for source syncing.
 // These cover common build artifacts, caches, and tool-specific directories.
 func DefaultExcludes() []string {
@@ -60,14 +74,21 @@ func SyncSources(host, localDir, remoteDir string) error {
 	fmt.Fprintf(os.Stderr, "Syncing sources to %s:%s...\n", host, remoteDir)
 	start := time.Now()
 
-	args := BuildRsyncArgs(host, localDir, remoteDir, DefaultExcludes())
+	if err := syncFunc(host, localDir, remoteDir, DefaultExcludes()); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "Synced (%.1fs)\n", time.Since(start).Seconds())
+	return nil
+}
+
+func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error {
+	args := BuildRsyncArgs(host, localDir, remoteDir, excludes)
 	cmd := exec.Command("rsync", args...)
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rsync to %s:%s: %w", host, remoteDir, err)
 	}
-
-	fmt.Fprintf(os.Stderr, "Synced (%.1fs)\n", time.Since(start).Seconds())
 	return nil
 }

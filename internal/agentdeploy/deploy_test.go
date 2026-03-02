@@ -107,30 +107,49 @@ func TestEnsureBuilt_CacheHit(t *testing.T) {
 	}
 }
 
-func TestEnsureBuilt_CacheMiss_NativeBuild(t *testing.T) {
-	// Build for the native platform (should succeed without cross-compilation issues)
-	version := "test-native-build-" + t.Name()
-	path := CachePath(version, "darwin", "arm64")
+func TestEnsureBuilt_CacheMiss_InvokesBuild(t *testing.T) {
+	var captured struct {
+		root, ldflags, outputPath, goos, goarch string
+	}
+
+	cleanup := SetBuildFunc(func(root, ldflags, outputPath, goos, goarch string) error {
+		captured.root = root
+		captured.ldflags = ldflags
+		captured.outputPath = outputPath
+		captured.goos = goos
+		captured.goarch = goarch
+		// Write a fake binary so EnsureBuilt succeeds
+		return os.WriteFile(outputPath, []byte("fake-agent"), 0o755)
+	})
+	defer cleanup()
+
+	version := "test-mock-build-" + t.Name()
+	path := CachePath(version, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(version, "darwin", "arm64")
+	got, err := EnsureBuilt(version, "linux", "amd64")
 	if err != nil {
-		t.Fatalf("EnsureBuilt native: %v", err)
+		t.Fatalf("EnsureBuilt: %v", err)
 	}
 	if got != path {
 		t.Errorf("got %s, want %s", got, path)
 	}
 
-	// Verify the binary exists and is executable
-	info, err := os.Stat(got)
-	if err != nil {
-		t.Fatalf("stat built binary: %v", err)
+	// Verify build was called with correct arguments
+	if captured.goos != "linux" {
+		t.Errorf("GOOS = %q, want %q", captured.goos, "linux")
 	}
-	if info.Size() == 0 {
-		t.Error("built binary is empty")
+	if captured.goarch != "amd64" {
+		t.Errorf("GOARCH = %q, want %q", captured.goarch, "amd64")
 	}
-	if info.Mode()&0o111 == 0 {
-		t.Error("built binary is not executable")
+	if !strings.Contains(captured.ldflags, version) {
+		t.Errorf("ldflags %q should contain version %q", captured.ldflags, version)
+	}
+	if captured.outputPath != path {
+		t.Errorf("output path = %q, want %q", captured.outputPath, path)
+	}
+	if captured.root == "" {
+		t.Error("root directory should not be empty")
 	}
 }
 
@@ -163,7 +182,69 @@ func TestEnsureBuilt_CacheHit_SkipsBuild(t *testing.T) {
 	}
 }
 
-func TestEnsureBuilt_CrossCompile_LinuxAmd64(t *testing.T) {
+func TestEnsureBuilt_CrossCompile_CorrectArgs(t *testing.T) {
+	var captured struct {
+		goos, goarch string
+	}
+
+	cleanup := SetBuildFunc(func(root, ldflags, outputPath, goos, goarch string) error {
+		captured.goos = goos
+		captured.goarch = goarch
+		return os.WriteFile(outputPath, []byte("fake-agent"), 0o755)
+	})
+	defer cleanup()
+
+	version := "test-cross-" + t.Name()
+	path := CachePath(version, "linux", "amd64")
+	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
+
+	_, err := EnsureBuilt(version, "linux", "amd64")
+	if err != nil {
+		t.Fatalf("EnsureBuilt: %v", err)
+	}
+
+	if captured.goos != "linux" {
+		t.Errorf("GOOS = %q, want %q", captured.goos, "linux")
+	}
+	if captured.goarch != "amd64" {
+		t.Errorf("GOARCH = %q, want %q", captured.goarch, "amd64")
+	}
+}
+
+func TestEnsureBuilt_RealBuild_NativePlatform(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow build test in short mode")
+	}
+	// Build for the native platform (should succeed without cross-compilation issues)
+	version := "test-native-build-" + t.Name()
+	path := CachePath(version, "darwin", "arm64")
+	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
+
+	got, err := EnsureBuilt(version, "darwin", "arm64")
+	if err != nil {
+		t.Fatalf("EnsureBuilt native: %v", err)
+	}
+	if got != path {
+		t.Errorf("got %s, want %s", got, path)
+	}
+
+	// Verify the binary exists and is executable
+	info, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat built binary: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("built binary is empty")
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Error("built binary is not executable")
+	}
+}
+
+func TestEnsureBuilt_RealBuild_CrossCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow cross-compile test in short mode")
+	}
 	version := "test-cross-linux-" + t.Name()
 	path := CachePath(version, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })

@@ -122,9 +122,9 @@ The coordinator might place a job on cool100 for data locality, but the edge
 agent defers it because a benchmark is running. Neither needs the other's full
 context to make a good decision.
 
-The existing queue runners (`queue-runner.sh`) already implement the edge agent
-role — they handle tmux sessions, log files, process monitoring, GPU device
-allocation, exclusive job coordination, and benchmark idle detection.
+The Go agent (`weft-agent`) already implements the edge agent role — it handles
+tmux sessions, log files, process monitoring, GPU device allocation, exclusive
+job coordination, and benchmark idle detection.
 
 ### Coordinator–edge agent contract
 
@@ -491,8 +491,9 @@ requires Phases 1-3. Phase 5 requires Phase 4.
 
 - **Coordinator HA**: If studio goes down, should another host take over? Or is
   graceful degradation (laptop does local placement) sufficient?
-- **Queue runner simplification**: As the coordinator absorbs scheduling logic,
-  how much of queue-runner.sh can be simplified?
+- **Agent simplification**: As the coordinator absorbs scheduling logic,
+  how much of the Go agent can be simplified? (The bash queue-runner.sh has
+  already been fully replaced by the Go agent.)
 - **Multi-user**: Could multiple laptops write intents to the same coordinator?
 - **Performance model integration depth**: Should the coordinator call
   llm-performance-models as a library, or consume pre-computed estimates?

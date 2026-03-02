@@ -166,7 +166,7 @@ When `cpu_allotment` is changed in the DB:
 ### Queue runner
 
 - Extend state format in `internal/ops/commandqueue.go` (RunnerState).
-- Update `internal/scripts/queue-runner.sh`:
+- Update Go agent (`internal/runner/`):
   - Track multiple running jobs and per-job state.
   - Add warm-up gating before starting a new job.
   - Periodically sample CPU and update local allotments (hysteresis + decay).

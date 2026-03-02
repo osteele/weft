@@ -92,8 +92,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	oplog.Log(oplog.OpCoordinatorStart)
 	c.logger.Println("coordinator started")
 
-	// Seed host state from inventory so all known hosts are tracked from the start
-	c.seedHostState()
+	// Seed host state from inventory so all known hosts are tracked from the start.
+	// Run in a goroutine so the event loop starts immediately while probes complete.
+	go c.seedHostState()
 
 	// Ensure intent and archive directories exist
 	for _, dir := range []string{c.config.IntentDir, c.config.ArchiveDir} {

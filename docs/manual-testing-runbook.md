@@ -130,43 +130,40 @@ weft show $JOB_ID
 
 #### 7. Queue Runner Auto-Start
 
-**Purpose**: Verify queue runner starts automatically when jobs are queued.
+**Purpose**: Verify Go agent starts automatically when jobs are queued.
 
 ```bash
 # Stop queue runner if running
 weft queue stop studio
 
 # Verify stopped
-ssh studio 'ps aux | grep queue-runner' | grep -v grep || echo "Runner stopped"
+ssh studio 'ps aux | grep weft-agent' | grep -v grep || echo "Agent stopped"
 
-# Queue a job (should auto-start runner)
+# Queue a job (should auto-start agent)
 weft queue add -d "Test: auto-start" studio 'echo "started"'
 
-# Verify runner started
-ssh studio 'ps aux | grep queue-runner' | grep -v grep
+# Verify agent started
+ssh studio 'ps aux | grep weft-agent' | grep -v grep
 ```
 
-**Expected**: Queue runner process is running after queueing a job.
+**Expected**: Go agent process is running after queueing a job.
 
-#### 8. Script Build Number Upgrade
+#### 8. Agent Binary Deployment
 
-**Purpose**: Verify queue runner script is upgraded when build number increases.
+**Purpose**: Verify Go agent binary is deployed and up to date.
 
 ```bash
-# Check current remote script build number
-ssh studio 'grep "# BUILD:" ~/.cache/weft/bin/queue-runner.sh | head -1'
+# Check current remote agent version
+ssh studio '~/.cache/weft/bin/weft-agent --version'
 
-# View local build number
-grep "# BUILD:" internal/scripts/queue-runner.sh | head -1
-
-# Install with force-upgrade
+# Deploy with force-upgrade
 weft queue start --install studio
 
 # Verify updated
-ssh studio 'grep "# BUILD:" ~/.cache/weft/bin/queue-runner.sh | head -1'
+ssh studio '~/.cache/weft/bin/weft-agent --version'
 ```
 
-**Expected**: Remote script build number matches local.
+**Expected**: Remote agent version matches local build.
 
 #### 9. Job with Working Directory
 
@@ -287,16 +284,16 @@ These tests require human intervention (network changes, manual process manipula
 
 **Expected**: Job is marked as `dead` (process no longer running after reboot).
 
-#### 14. Queue Runner Crash Recovery
+#### 14. Agent Crash Recovery
 
-**Purpose**: Verify system recovers if queue runner crashes.
+**Purpose**: Verify system recovers if the Go agent crashes.
 
 **Steps**:
 
 1. Queue a job
-2. Find and kill the queue runner process:
+2. Find and kill the agent process:
    ```bash
-   ssh studio 'pkill -f queue-runner'
+   ssh studio 'pkill -f weft-agent'
    ```
 3. Queue another job:
    ```bash
@@ -326,10 +323,10 @@ ssh studio 'cat ~/.cache/weft/queue/default.state.json'
 ssh studio 'cat ~/.cache/weft/queue/default.commands'
 ```
 
-### Check If Runner Is Alive
+### Check If Agent Is Alive
 
 ```bash
-ssh studio 'ps aux | grep queue-runner | grep -v grep'
+ssh studio 'ps aux | grep weft-agent | grep -v grep'
 ```
 
 ### Check Job Logs

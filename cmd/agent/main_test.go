@@ -24,6 +24,9 @@ func TestAgentLogPath(t *testing.T) {
 }
 
 func TestVersionFlag(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow build test in short mode")
+	}
 	// Build the agent binary
 	tmpDir := t.TempDir()
 	bin := filepath.Join(tmpDir, "weft-agent")

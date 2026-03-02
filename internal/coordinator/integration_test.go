@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
 )
 
 // Integration tests for the coordinator daemon.
@@ -143,6 +144,12 @@ func TestIntegrationCatchupOnStartup(t *testing.T) {
 		return "", "", nil
 	})
 	defer cleanup()
+
+	// Mock rsync to prevent real process spawning (which would hang on unreachable hosts)
+	syncCleanup := srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		return nil
+	})
+	defer syncCleanup()
 
 	database := db.SetupTestDB(t)
 

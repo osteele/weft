@@ -8,6 +8,20 @@ import (
 	"strings"
 )
 
+// BuildFunc is the function signature for building the agent binary.
+// Tests can replace it with SetBuildFunc to avoid slow compilation.
+type BuildFunc func(root, ldflags, outputPath, goos, goarch string) error
+
+var buildFunc BuildFunc = defaultBuildFunc
+
+// SetBuildFunc replaces the build execution function.
+// Returns a cleanup function that restores the original.
+func SetBuildFunc(fn BuildFunc) func() {
+	original := buildFunc
+	buildFunc = fn
+	return func() { buildFunc = original }
+}
+
 // CachePath returns the local cache path for a built agent binary.
 // Layout: ~/.cache/weft/builds/<version>/<goos>-<goarch>/weft-agent
 func CachePath(version, goos, goarch string) string {
@@ -51,16 +65,19 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 	}
 
 	ldflags := fmt.Sprintf("-X main.version=%s", version)
-	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", path, "./cmd/agent")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
+	if err := buildFunc(root, ldflags, path, goos, goarch); err != nil {
 		os.Remove(path) // clean up partial build
 		return "", fmt.Errorf("cross-compile agent for %s/%s: %w", goos, goarch, err)
 	}
 
 	return path, nil
+}
+
+func defaultBuildFunc(root, ldflags, outputPath, goos, goarch string) error {
+	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", outputPath, "./cmd/agent")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
