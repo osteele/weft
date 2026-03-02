@@ -4,14 +4,19 @@ package placement
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
 )
+
+// ErrNoReachableHost is returned when all eligible hosts are unreachable.
+var ErrNoReachableHost = errors.New("no eligible host is reachable")
 
 // Constraints describes hard requirements for a job placement.
 type Constraints struct {
@@ -84,6 +89,36 @@ func BestHostWithMetrics(db *sql.DB, constraints Constraints, metrics map[string
 		}
 	}
 	return "", nil, fmt.Errorf("no eligible host found for constraints: %s", describeConstraints(constraints))
+}
+
+// BestReachableHost returns the best eligible host that is also reachable via SSH.
+// It scores hosts, probes eligible ones in parallel, and returns the highest-scored
+// reachable host. Returns ErrNoReachableHost if no eligible host responds.
+func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Duration) (string, []string, error) {
+	scores, err := ScoreHosts(db, constraints)
+	if err != nil {
+		return "", nil, err
+	}
+
+	var eligible []string
+	for _, s := range scores {
+		if s.Eligible {
+			eligible = append(eligible, s.Host)
+		}
+	}
+	if len(eligible) == 0 {
+		return "", nil, fmt.Errorf("no eligible host found for constraints: %s", describeConstraints(constraints))
+	}
+
+	liveness := ProbeHosts(eligible, probeTimeout)
+
+	for _, s := range scores {
+		if s.Eligible && liveness[s.Host] {
+			return s.Host, s.Reasons, nil
+		}
+	}
+
+	return "", nil, ErrNoReachableHost
 }
 
 func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics) Score {

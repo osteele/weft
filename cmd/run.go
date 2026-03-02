@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -275,14 +276,26 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("placement scoring: %w", err)
 		}
+
+		// Probe all scored hosts for liveness
+		allHosts := make([]string, len(scores))
+		for i, s := range scores {
+			allHosts[i] = s.Host
+		}
+		liveness := placement.ProbeHosts(allHosts, 5*time.Second)
+
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintf(w, "HOST\tSCORE\tELIGIBLE\tREASONS\n")
+		fmt.Fprintf(w, "HOST\tSCORE\tELIGIBLE\tONLINE\tREASONS\n")
 		for _, s := range scores {
 			eligible := "yes"
 			if !s.Eligible {
 				eligible = "no"
 			}
-			fmt.Fprintf(w, "%s\t%.1f\t%s\t%s\n", s.Host, s.Total, eligible, strings.Join(s.Reasons, "; "))
+			online := "yes"
+			if !liveness[s.Host] {
+				online = "no"
+			}
+			fmt.Fprintf(w, "%s\t%.1f\t%s\t%s\t%s\n", s.Host, s.Total, eligible, online, strings.Join(s.Reasons, "; "))
 		}
 		w.Flush()
 		return nil
@@ -299,13 +312,23 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--immediate requires an explicit host")
 		}
 
-		// Local placement
-		bestHost, reasons, err := placement.BestHost(database, placementConstraints)
+		// Liveness-aware placement: probe eligible hosts and pick the best reachable one
+		bestHost, reasons, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
 		if err != nil {
-			return fmt.Errorf("auto-placement failed: %w", err)
+			if errors.Is(err, placement.ErrNoReachableHost) {
+				// No hosts responded — fall back to static placement and let defer handle it
+				bestHost, reasons, err = placement.BestHost(database, placementConstraints)
+				if err != nil {
+					return fmt.Errorf("auto-placement failed: %w", err)
+				}
+				fmt.Printf("Auto-placed on %s (%s) — no hosts were reachable, job will be deferred\n", bestHost, strings.Join(reasons, "; "))
+			} else {
+				return fmt.Errorf("auto-placement failed: %w", err)
+			}
+		} else {
+			fmt.Printf("Auto-placed on %s (%s)\n", bestHost, strings.Join(reasons, "; "))
 		}
 		host = bestHost
-		fmt.Printf("Auto-placed on %s (%s)\n", host, strings.Join(reasons, "; "))
 	}
 
 	dirProvided := runDir != ""
