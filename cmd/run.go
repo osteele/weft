@@ -319,20 +319,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		// Liveness-aware placement: probe eligible hosts and pick the best reachable one
-		bestHost, reasons, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
+		bestHost, _, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
 		if err != nil {
 			if errors.Is(err, placement.ErrNoReachableHost) {
 				// No hosts responded — fall back to predictor-aware static placement
-				bestHost, reasons, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
+				bestHost, _, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
 				if err != nil {
 					return fmt.Errorf("auto-placement failed: %w", err)
 				}
-				fmt.Printf("Auto-placed on %s (%s) — no hosts were reachable, job will be deferred\n", bestHost, strings.Join(reasons, "; "))
+				fmt.Printf("Queued job on %s\n", bestHost)
 			} else {
 				return fmt.Errorf("auto-placement failed: %w", err)
 			}
 		} else {
-			fmt.Printf("Auto-placed on %s (%s)\n", bestHost, strings.Join(reasons, "; "))
+			fmt.Printf("Queued job on %s\n", bestHost)
 		}
 		host = bestHost
 	}
@@ -346,7 +346,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		command = parsedCmd
 		runDir = parsedDir
 		dirProvided = true
-		displayCdRewriteMessage(cmd, host, runDir, command)
 	}
 
 	// Set defaults
@@ -383,7 +382,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		localDir := resolveLocalDir(workingDir)
 		if localDir != "" {
 			if err := srcsync.SyncSources(host, localDir, workingDir); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: source sync failed: %v\n", err)
+				_ = err // sync failure is expected in occasionally-connected design
 			}
 		}
 
@@ -391,7 +390,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		extraPaths := collectExtraPaths(runInputs, localDir)
 		if len(extraPaths) > 0 {
 			if err := srcsync.SyncExtraPaths(host, extraPaths); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: extra path sync failed: %v\n", err)
+				_ = err // sync failure is expected in occasionally-connected design
 			}
 		}
 	}
@@ -694,41 +693,6 @@ func parseCdPrefix(command string) (dir string, remaining string) {
 	return "", command
 }
 
-func displayCdRewriteMessage(cmd *cobra.Command, host, dir, command string) {
-	if !usageHintsEnabled() {
-		return
-	}
-	rendered := formatRewrittenCommand(cmd, dir, host, command)
-	if rendered == "" {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "\nDetected \"cd %s &&\" in the command. The job will run as though you had invoked:\n  %s\n", dir, rendered)
-}
-
-func formatRewrittenCommand(cmd *cobra.Command, dir, host, command string) string {
-	if len(os.Args) == 0 {
-		return fmt.Sprintf("%s -C %s --host %s %s", cmd.CommandPath(), shellQuote(dir), shellQuote(host), shellQuote(command))
-	}
-	nonFlags := cmd.Flags().Args()
-	flagEnd := len(os.Args)
-	if len(nonFlags) > 0 && flagEnd >= len(nonFlags) {
-		flagEnd = len(os.Args) - len(nonFlags)
-	}
-	if flagEnd < 1 {
-		flagEnd = len(os.Args)
-	}
-	pieces := make([]string, 0, flagEnd+5)
-	pieces = append(pieces, os.Args[0])
-	if flagEnd > 1 {
-		pieces = append(pieces, os.Args[1:flagEnd]...)
-	}
-	pieces = append(pieces, "-C", dir, "--host", host, command)
-	for i, part := range pieces {
-		pieces[i] = shellQuote(part)
-	}
-	return strings.Join(pieces, " ")
-}
-
 func shellQuote(s string) string {
 	if s == "" {
 		return "''"
@@ -807,19 +771,8 @@ func printCommandRecommendations(command string) bool {
 	}
 	var recommendations []string
 
-	// Check for "cd /path && " prefix
-	trimmed := strings.TrimSpace(command)
-	if strings.HasPrefix(trimmed, "cd ") {
-		// Extract the directory for the recommendation
-		dir, _ := parseCdPrefix(command)
-		if dir != "" {
-			recommendations = append(recommendations,
-				fmt.Sprintf("Tip: Instead of 'cd %s && ...', consider using -C %q to set the working directory.\n"+
-					"     This ensures ~ is expanded on the remote host, not locally.", dir, dir))
-		}
-	}
-
 	// Check for "VAR=value " prefix (environment variable)
+	trimmed := strings.TrimSpace(command)
 	if idx := strings.Index(trimmed, "="); idx > 0 && idx < len(trimmed)-1 {
 		// Check if it looks like VAR=value at the start (VAR must be valid identifier)
 		prefix := trimmed[:idx]
@@ -910,7 +863,7 @@ func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, desc
 			localDir := resolveLocalDir(workingDir)
 			if localDir != "" {
 				if err := srcsync.SyncSources(syncHost, localDir, workingDir); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: source sync to coordinator failed: %v\n", err)
+					_ = err // sync failure is expected in occasionally-connected design
 				}
 			}
 
@@ -918,7 +871,7 @@ func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, desc
 			extraPaths := collectExtraPaths(inputs, localDir)
 			if len(extraPaths) > 0 {
 				if err := srcsync.SyncExtraPaths(syncHost, extraPaths); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: extra path sync to coordinator failed: %v\n", err)
+					_ = err // sync failure is expected in occasionally-connected design
 				}
 			}
 		}

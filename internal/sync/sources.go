@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // SyncFunc is the function signature for syncing sources to a remote host.
@@ -72,16 +71,10 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 
 // SyncSources rsyncs localDir to host:remoteDir with standard excludes.
 // localDir is an absolute local path. remoteDir may contain ~ (rsync expands it).
-// Progress and timing are printed to stderr. Returns error on failure.
 func SyncSources(host, localDir, remoteDir string) error {
-	fmt.Fprintf(os.Stderr, "Syncing sources to %s:%s...\n", host, remoteDir)
-	start := time.Now()
-
 	if err := syncFunc(host, localDir, remoteDir, DefaultExcludes()); err != nil {
 		return err
 	}
-
-	fmt.Fprintf(os.Stderr, "Synced (%.1fs)\n", time.Since(start).Seconds())
 	return nil
 }
 
@@ -120,14 +113,9 @@ func SyncExtraPaths(host string, paths []string) error {
 			localPath = filepath.Join(home, localPath[2:])
 		}
 
-		fmt.Fprintf(os.Stderr, "Syncing extra path %s to %s...\n", p, host)
-		start := time.Now()
-
 		if err := syncFunc(host, localPath, remotePath, nil); err != nil {
 			return fmt.Errorf("rsync extra path %s to %s: %w", p, host, err)
 		}
-
-		fmt.Fprintf(os.Stderr, "Synced extra path (%.1fs)\n", time.Since(start).Seconds())
 	}
 	return nil
 }
@@ -140,7 +128,7 @@ func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error 
 		args = BuildExtraPathRsyncArgs(host, localDir, remoteDir)
 	}
 	cmd := exec.Command("rsync", args...)
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = nil
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rsync to %s:%s: %w", host, remoteDir, err)
