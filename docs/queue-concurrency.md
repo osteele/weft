@@ -191,6 +191,51 @@ When `cpu_allotment` is changed in the DB:
   `DEFAULT_ALLOTMENT_CORES` (converted to percent per host) on start.
 - No backfill required.
 
+## GPU Concurrency Model
+
+GPU jobs are scheduled **one per device**. Unlike CPU jobs, where multiple jobs
+can share cores and the allotment system tracks utilization, GPU jobs get
+exclusive access to their assigned device.
+
+### Rationale
+
+The constraint is **compute, not memory**. GPU workloads (training, inference,
+benchmarks) typically saturate the device's SMs/warps/threads. Even if two jobs
+fit in VRAM, they would contend for execution resources and both slow down.
+There is no practical way to partition GPU compute across jobs the way OS
+scheduling partitions CPU cores.
+
+CPU jobs, by contrast, are often single-threaded or use a small number of cores
+(a Python script, a data pipeline), so a multi-core host can run several
+concurrently. The allotment system (above) manages this.
+
+### Scheduling behavior
+
+- `DeviceHasRunningJob` rejects any device that already has a running job.
+- `PickBestGPUForClass` skips occupied devices when resolving `--gpu-class`.
+- CPU-only jobs (no `gpu`, `gpu_class`, or `gpu_mem` fields) bypass the GPU
+  gate entirely and are governed only by the CPU allotment rules.
+- GPU jobs and CPU jobs can run concurrently on the same host, as long as they
+  use different resources (GPU device vs CPU cores).
+
+### Multi-tenancy and memory checks
+
+On shared machines (e.g. cool100), other users may have jobs running on GPUs
+outside our control. The one-job-per-device rule applies only to *our own* jobs
+— we don't wait for a device to be completely vacant before starting, because:
+
+- Other users don't coordinate with us and may start jobs at any time.
+- They are just as likely to land on a GPU after we've started as before.
+- Waiting for total vacancy on a shared machine would block indefinitely.
+
+This is an intermediate cooperation stance: we avoid contending with our own
+jobs (where we can control scheduling), but accept mutual slowdown with other
+users' jobs on shared devices.
+
+The memory tracking (`GPUMemGB`, `TotalGPUMemReserved`) supports this model —
+it ensures we don't stack our own jobs' memory on a device, even though we
+can't prevent external memory pressure.
+
 ## Testing Strategy (MVP)
 
 - Unit tests for DB migration + CRUD (`internal/db/db_test.go`).

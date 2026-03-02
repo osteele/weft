@@ -3,7 +3,6 @@ package runner
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -116,6 +115,15 @@ func (r *Runner) Run() error {
 	go func() {
 		sig := <-sigCh
 		oplog.Log(oplog.OpQueueStop, oplog.WithDetailf("signal: %s", sig))
+		// Write kill reason for all running jobs before shutdown
+		r.processesMu.Lock()
+		ids := r.state.RunningIDs()
+		r.processesMu.Unlock()
+		for _, jobIDStr := range ids {
+			jobID := mustParseInt64(jobIDStr)
+			paths := NewJobPaths(r.logDir, jobID)
+			WriteKillReasonFile(paths, "runner_shutdown")
+		}
 		close(r.stopCh)
 	}()
 
@@ -415,7 +423,6 @@ func (r *Runner) startJob(jobID int64, jobIDStr string, job *ops.CommandJob) err
 	// Update running state
 	allotment := r.jobAllotment(job)
 	gpuMemGB := GetJobGPUMem(job, DefaultGPUMemGB)
-	_ = rj
 
 	r.state.AddRunning(jobIDStr, RunningJobState{
 		StartedAt:      startTime,
@@ -431,26 +438,20 @@ func (r *Runner) startJob(jobID int64, jobIDStr string, job *ops.CommandJob) err
 
 func (r *Runner) waitForJob(jobID int64, jobIDStr string, proc *Process, paths JobPaths, startTime int64, rj *RunnerJob) {
 	err := proc.Cmd.Wait()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			exitCode = 1
-		}
-	}
+	ei := ExtractExitInfo(err)
 
 	endTime := time.Now().Unix()
 	duration := endTime - startTime
 
 	// Write status and log footer
-	WriteStatusFile(paths, exitCode)
-	WriteLogFooter(paths, exitCode)
+	WriteStatusFile(paths, ei)
+	WriteLogFooter(paths, ei)
 
-	// On failure, detect the failure reason (OOM, GPU OOM, etc.) and write it
-	if exitCode != 0 {
-		reason := DetectFailureReason(exitCode)
-		WriteFailureReasonFile(paths, reason)
+	// On failure, detect the failure reason using signal-aware detection
+	var failureReason string
+	if ei.ExitCode != 0 {
+		failureReason = DetectFailureReasonFromExitInfo(ei)
+		WriteFailureReasonFile(paths, failureReason)
 	}
 
 	// Append end_time to meta file
@@ -459,24 +460,29 @@ func (r *Runner) waitForJob(jobID int64, jobIDStr string, proc *Process, paths J
 		f.Close()
 	}
 
-	if exitCode == 0 {
+	if ei.ExitCode == 0 {
 		oplog.LogJob(oplog.OpJobCompleted, jobID, "", oplog.WithDetailf("exit=0 duration=%ds", duration))
 		fmt.Printf("Job %d completed successfully\n", jobID)
 	} else {
 		reason := ReadFailureReasonFile(paths.FailureReason)
-		oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("exit=%d duration=%ds reason=%s", exitCode, duration, reason))
-		fmt.Printf("Job %d failed with exit code %d (%s)\n", jobID, exitCode, reason)
+		detail := fmt.Sprintf("exit=%d duration=%ds reason=%s", ei.ExitCode, duration, reason)
+		if ei.Signaled {
+			detail += fmt.Sprintf(" signal=%s", ei.SignalName())
+		}
+		oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail(detail))
+		fmt.Printf("Job %d failed with exit code %d (%s)\n", jobID, ei.ExitCode, reason)
 	}
 
-	// Write rusage
+	// Write rusage and completion record
 	r.processesMu.Lock()
-	if rs, ok := r.state.Running[jobIDStr]; ok {
-		WriteRusageFile(paths, rs)
-	}
+	rs := r.state.Running[jobIDStr]
 	r.processesMu.Unlock()
+	WriteRusageFile(paths, rs)
+	killReason := ReadKillReasonFile(paths.KillReason)
+	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, startTime, endTime)
 
 	// Record finished and remove from running
-	r.state.RecordFinished(jobIDStr, exitCode, endTime)
+	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)
 	r.state.RemoveRunning(jobIDStr)
 
 	// Cleanup
@@ -535,6 +541,8 @@ func (r *Runner) refreshRunningJobs() {
 			fmt.Printf("Job %d process %d is stopped (state T) - marking as failed\n", jobID, checkPID)
 			oplog.LogJob("job.stopped_detected", jobID, "", oplog.WithDetailf("pid=%d state=T", checkPID))
 
+			WriteKillReasonFile(paths, "stopped_detected")
+
 			if hasPGID {
 				KillProcessGroup(pgid)
 			}
@@ -542,11 +550,14 @@ func (r *Runner) refreshRunningJobs() {
 				syscall.Kill(pid, syscall.SIGKILL)
 			}
 
-			os.WriteFile(paths.Status, []byte("1\n"), 0644)
+			stoppedEI := ExitInfo{ExitCode: 1}
+			WriteStatusFile(paths, stoppedEI)
 			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail("exit=1 reason=stopped"))
 			rs := r.state.Running[jobIDStr]
 			WriteRusageFile(paths, rs)
-			r.state.RecordFinished(jobIDStr, 1, time.Now().Unix())
+			endTime := time.Now().Unix()
+			WriteCompletionRecord(paths, stoppedEI, rs, "stopped_detected", "stopped", rs.StartedAt, endTime)
+			r.state.RecordFinished(jobIDStr, 1, endTime)
 			r.state.RemoveRunning(jobIDStr)
 			CleanupPIDFiles(paths)
 			changed = true
@@ -560,6 +571,7 @@ func (r *Runner) refreshRunningJobs() {
 
 		// Wrapper gone — kill orphaned process group
 		if hasPGID && CheckPIDAlive(pgid) {
+			WriteKillReasonFile(paths, "orphan")
 			fmt.Printf("Killing orphaned process group %d for job %d\n", pgid, jobID)
 			KillProcessGroup(pgid)
 			oplog.LogJob("job.orphan_killed", jobID, "", oplog.WithDetailf("pgid=%d", pgid))
@@ -567,9 +579,13 @@ func (r *Runner) refreshRunningJobs() {
 
 		// Mark as failed
 		if _, err := os.Stat(paths.Status); err != nil {
-			os.WriteFile(paths.Status, []byte("1\n"), 0644)
+			orphanEI := ExitInfo{ExitCode: 1}
+			WriteStatusFile(paths, orphanEI)
 			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail("exit=1 duration=0"))
-			r.state.RecordFinished(jobIDStr, 1, time.Now().Unix())
+			endTime := time.Now().Unix()
+			rs := r.state.Running[jobIDStr]
+			WriteCompletionRecord(paths, orphanEI, rs, "orphan", "orphan", rs.StartedAt, endTime)
+			r.state.RecordFinished(jobIDStr, 1, endTime)
 		}
 		rs := r.state.Running[jobIDStr]
 		WriteRusageFile(paths, rs)
@@ -651,7 +667,8 @@ func (r *Runner) sampleRunningJobs() {
 		if pgid, ok := ReadPIDFile(paths.PGID); ok {
 			rusagePIDForTS = pgid
 		}
-		sample.RSSKB = ProcCurrentRSSKB(rusagePIDForTS)
+		currentRSS := ProcCurrentRSSKB(rusagePIDForTS)
+		sample.RSSKB = currentRSS
 		// Host-wide memory
 		hostTotal, hostUsed := HostMemoryKB()
 		sample.HostMemTotal = hostTotal
@@ -661,7 +678,34 @@ func (r *Runner) sampleRunningJobs() {
 		sample.GPUUtilPct = gpuUtil
 		sample.GPUMemUsed = gpuMemUsed
 		sample.GPUMemTotal = gpuMemTotal
+
+		// Memory pressure (reuses already-fetched host memory values)
+		pressure := MemoryPressureFromUsage(hostTotal, hostUsed)
+		sample.MemPressure = string(pressure)
+		if MemPressureSeverity(pressure) > MemPressureSeverity(MemPressureLevel(rs.PeakMemPressure)) {
+			if rs.PeakMemPressure != "" && rs.PeakMemPressure != string(MemPressureNormal) {
+				oplog.LogJob("job.mem_pressure", jobID, "", oplog.WithDetailf("level=%s", pressure))
+			}
+			rs.PeakMemPressure = string(pressure)
+		}
+
 		WriteTimeseriesSample(paths, sample)
+
+		// Track high-water marks
+		if hostTotal > 0 {
+			ratio := float64(hostUsed) / float64(hostTotal)
+			if ratio > rs.PeakHostMemRatio {
+				rs.PeakHostMemRatio = ratio
+			}
+		}
+		if currentRSS > rs.PeakRSSFromTS {
+			rs.PeakRSSFromTS = currentRSS
+		}
+
+		// Write heartbeat
+		rs.LastHeartbeat = now.Unix()
+		rs.LastSample = now.Unix()
+		WriteHeartbeat(paths, now.Unix())
 
 		// CPU allotment hysteresis
 		newAllotment, newOverHist, newUnderHist := r.cpuConfig.AdjustAllotment(

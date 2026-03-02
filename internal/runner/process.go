@@ -130,11 +130,12 @@ func KillProcessGroup(pgid int) {
 	syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
-// CleanupPIDFiles removes PID, PGID, and paused files for a job.
+// CleanupPIDFiles removes PID, PGID, paused, and heartbeat files for a job.
 func CleanupPIDFiles(paths JobPaths) {
 	os.Remove(paths.PID)
 	os.Remove(paths.PGID)
 	os.Remove(paths.Paused)
+	os.Remove(paths.Heartbeat)
 }
 
 // GetProcessTree returns all PIDs in the process tree rooted at the given PID.

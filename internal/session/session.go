@@ -56,6 +56,21 @@ func SimpleRusageFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.rusage", LogDir, jobID)
 }
 
+// SimpleKillReasonFile returns the kill reason file path for a job (no timestamp)
+func SimpleKillReasonFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.kill_reason", LogDir, jobID)
+}
+
+// SimpleHeartbeatFile returns the heartbeat file path for a job (no timestamp)
+func SimpleHeartbeatFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.heartbeat", LogDir, jobID)
+}
+
+// SimpleCompletionFile returns the completion JSON file path for a job (no timestamp)
+func SimpleCompletionFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.completion.json", LogDir, jobID)
+}
+
 // SimpleTimeseriesFile returns the timeseries JSONL file path for a job
 func SimpleTimeseriesFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.timeseries.jsonl", LogDir, jobID)
@@ -78,7 +93,7 @@ func ArchiveCommand(jobID int64) string {
 	// For each extension, check if file exists and rename it with its mtime
 	// Uses stat to get mtime: stat -c %Y on Linux, stat -f %m on macOS
 	return fmt.Sprintf(`
-		for ext in log status meta pid samples rusage timeseries.jsonl; do
+		for ext in log status meta pid samples rusage timeseries.jsonl kill_reason heartbeat completion.json; do
 			f="%s/%d.$ext"
 			if [ -f "$f" ]; then
 				mtime=$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)
@@ -350,7 +365,8 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 	timeoutMonitor := ""
 	if params.Timeout != "" {
 		// Timeout monitor runs in background and kills job if timeout exceeded
-		// Uses GNU date for seconds since epoch (portable across Linux)
+		// Writes kill reason before sending the kill signal
+		killReasonFile := SimpleKillReasonFile(params.JobID)
 		timeoutMonitor = fmt.Sprintf(
 			`{ START_TIME=$(date +%%s); TIMEOUT_SECONDS=$(echo '%s' | `+
 				`sed 's/h/*3600+/g;s/m/*60+/g;s/s/*1+/g;s/+$//' | bc); `+
@@ -358,9 +374,10 @@ func BuildWrapperCommand(params WrapperCommandParams) string {
 				`ELAPSED=$(($(date +%%s) - START_TIME)); `+
 				`if [ $ELAPSED -ge $TIMEOUT_SECONDS ]; then `+
 				`echo "=== TIMEOUT after %s ===" >> %s; `+
+				`echo "timeout" > %s; `+
 				`kill $(cat %s 2>/dev/null) 2>/dev/null; break; fi; `+
 				`sleep 10; done; } & `,
-			params.Timeout, params.PidFile, params.Timeout, params.LogFile, params.PidFile)
+			params.Timeout, params.PidFile, params.Timeout, params.LogFile, killReasonFile, params.PidFile)
 	}
 
 	// Log working dir - use "(home)" if none specified

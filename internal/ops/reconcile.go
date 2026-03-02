@@ -351,12 +351,14 @@ func applyCancelToRemote(job *db.Job, timeout time.Duration) error {
 func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 	pidFile := session.JobPidFile(job.ID, job.StartTime)
 	pgidFile := session.SimplePgidFile(job.ID)
+	killReasonFile := session.SimpleKillReasonFile(job.ID)
 
-	// Kill both the wrapper process (pid file) and the command's process group (pgid file).
-	// The pgid file contains the setsid process PID, which is also the process group leader.
-	// Using kill -TERM -pgid sends SIGTERM to all processes in the group.
+	// Write kill reason before sending signals, then kill both the wrapper process
+	// (pid file) and the command's process group (pgid file).
 	// Note: pidFile contains ~ which must NOT be single-quoted (prevents expansion)
 	killCmd := fmt.Sprintf(`
+		# Write kill reason before sending signals
+		echo "user_kill" > %s
 		# Kill wrapper process
 		if [ -f %s ]; then kill $(cat %s) 2>/dev/null || true; fi
 		# Kill process group (setsid tree) - the minus sign targets the whole group
@@ -369,7 +371,7 @@ func killQueueRunnerJob(job *db.Job, timeout time.Duration) error {
 			fi
 			rm -f %s
 		fi
-	`, pidFile, pidFile, pgidFile, pgidFile, pgidFile)
+	`, killReasonFile, pidFile, pidFile, pgidFile, pgidFile, pgidFile)
 
 	_, stderr, err := ssh.RunWithTimeout(job.Host, killCmd, timeout)
 	if err != nil && ssh.IsConnectionError(stderr) {

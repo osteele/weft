@@ -41,6 +41,15 @@ type RunningJobState struct {
 	RusageSysCPU  string `json:"rusage_sys_cpu,omitempty"`
 	RusagePeakRSS string `json:"rusage_peak_rss,omitempty"`
 	RusageMaxGPU  string `json:"rusage_max_gpu,omitempty"`
+
+	// High-water marks (updated during sampling)
+	PeakHostMemRatio float64 `json:"peak_host_mem_ratio,omitempty"`
+	PeakRSSFromTS    int64   `json:"peak_rss_from_ts,omitempty"`
+	PeakMemPressure  string  `json:"peak_mem_pressure,omitempty"`
+
+	// Heartbeat / liveness (updated during sampling)
+	LastHeartbeat int64 `json:"last_heartbeat,omitempty"`
+	LastSample    int64 `json:"last_sample,omitempty"`
 }
 
 // FinishedJobState records terminal state for deduplication.

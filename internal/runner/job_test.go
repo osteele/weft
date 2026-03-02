@@ -51,13 +51,13 @@ func TestWriteStatusFile_ReadStatusFile(t *testing.T) {
 	dir := t.TempDir()
 	paths := NewJobPaths(dir, 42)
 
-	WriteStatusFile(paths, 0)
+	WriteStatusFile(paths, ExitInfo{ExitCode: 0})
 	code, ok := ReadStatusFile(paths.Status)
 	if !ok || code != 0 {
 		t.Errorf("expected 0, got %d (ok=%v)", code, ok)
 	}
 
-	WriteStatusFile(paths, 137)
+	WriteStatusFile(paths, ExitInfo{ExitCode: 137, Signaled: true, Signal: 9})
 	code, ok = ReadStatusFile(paths.Status)
 	if !ok || code != 137 {
 		t.Errorf("expected 137, got %d (ok=%v)", code, ok)

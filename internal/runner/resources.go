@@ -184,6 +184,45 @@ func HostMemoryKB() (totalKB, usedKB int64) {
 	return 0, 0
 }
 
+// MemPressureLevel represents system memory pressure.
+type MemPressureLevel string
+
+const (
+	MemPressureNormal   MemPressureLevel = "normal"
+	MemPressureWarn     MemPressureLevel = "warn"
+	MemPressureCritical MemPressureLevel = "critical"
+)
+
+// MemoryPressureFromUsage returns the memory pressure level from pre-computed host memory values.
+// >90% used → critical, >75% used → warn, else normal.
+// Returns "normal" if totalKB is 0.
+func MemoryPressureFromUsage(totalKB, usedKB int64) MemPressureLevel {
+	if totalKB == 0 {
+		return MemPressureNormal
+	}
+	ratio := float64(usedKB) / float64(totalKB)
+	if ratio > 0.90 {
+		return MemPressureCritical
+	}
+	if ratio > 0.75 {
+		return MemPressureWarn
+	}
+	return MemPressureNormal
+}
+
+// MemPressureSeverity returns a numeric severity for comparing pressure levels.
+// critical=2, warn=1, normal=0.
+func MemPressureSeverity(level MemPressureLevel) int {
+	switch level {
+	case MemPressureCritical:
+		return 2
+	case MemPressureWarn:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // HostGPUUtilization returns system-wide GPU metrics by parsing nvidia-smi.
 // Returns (gpuUtilPct, gpuMemUsedMiB, gpuMemTotalMiB).
 // Returns (0, 0, 0) if nvidia-smi is not available.
