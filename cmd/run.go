@@ -30,38 +30,40 @@ import (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run [flags] [host] <command>",
+	Use:   "run [flags] <command>",
 	Short: "Queue a job on a remote host",
 	Long: `Queue a job on a remote host for sequential execution.
 
-If host is omitted, automatic placement selects the best host based on
+If --host is omitted, automatic placement selects the best host based on
 GPU constraints (--gpu-class, --gpu-mem) and data locality (--input).
 
 By default, jobs are added to a queue and run sequentially.
 Use --immediate (-i) to start a job immediately instead of adding it to the queue.
 
 Examples:
-  weft run cool30 'python train.py'           # Queue on specific host
-  weft run 'python train.py'                  # Auto-place on best host
-  weft run --gpu-class a100 'python train.py' # Auto-place on A100 host
-  weft run -i cool30 'python train.py'        # Start immediately
-  weft run --wait cool30 'python train.py'    # Queue and wait for completion
-  weft run -f cool30 'python train.py'        # Queue and follow log output
-  weft run -m "Training" cool30 'python train.py'
-  weft run -C /mnt/code/LM2 cool30 'python train.py'
-  weft run --after 42 cool30 'python eval.py' # Run after job 42
-  weft run -i -f cool30 'python train.py'     # Start immediately and follow log`,
+  weft run 'python train.py'                           # Auto-place on best host
+  weft run --gpu-class a100 'python train.py'           # Place on A100 host
+  weft run --host cool30 'python train.py'              # Explicit host
+  weft run -m "Training" --host cool30 'python train.py'
+  weft run --after 42 'python eval.py'                  # Run after job 42
+  weft run --wait --host cool30 'python train.py'       # Queue and wait for completion
+  weft run -f --host cool30 'python train.py'           # Queue and follow log output
+  weft run -i --host cool30 'python train.py'           # Start immediately and follow log`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
-		// --kill mode only needs host
+		// --kill mode: no positional args needed (host is looked up from the job)
 		if runKillJobID > 0 {
-			if len(args) < 1 {
-				return fmt.Errorf("requires host argument")
+			return nil
+		}
+		// --from mode: 0 args (copies from source job) or 1 arg (command override)
+		if runFrom > 0 {
+			if len(args) > 1 {
+				return fmt.Errorf("--from accepts at most one positional argument (command override)")
 			}
 			return nil
 		}
-		// Need at least command; host is optional (1 or 2 args)
+		// Normal mode: 1 arg (command), or 2 args (deprecated positional host + command)
 		if len(args) < 1 || len(args) > 2 {
-			return fmt.Errorf("requires [host] <command>")
+			return fmt.Errorf("requires <command> argument")
 		}
 		return nil
 	}),
@@ -69,6 +71,7 @@ Examples:
 }
 
 var (
+	runHost        string
 	runDir         string
 	runDescription string
 	runImmediate   bool
@@ -97,6 +100,7 @@ const defaultGPUMemGB = ops.DefaultGPUMemGB
 func init() {
 	rootCmd.AddCommand(runCmd)
 
+	runCmd.Flags().StringVarP(&runHost, "host", "H", "", "Remote host to run on (default: auto-place)")
 	runCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
 	runCmd.Flags().BoolVar(&runDraft, "draft", false, "Create the job in draft status without contacting remote hosts")
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path)")
@@ -146,6 +150,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	var host, command string
 
+	// --host flag takes priority
+	host = runHost
+
 	// Handle --from mode: copy settings from existing job
 	if runFrom > 0 {
 		fromJob, err := db.GetJobByID(database, runFrom)
@@ -157,7 +164,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		// Copy settings from existing job
-		host = fromJob.Host
+		if host == "" {
+			host = fromJob.Host
+		}
 		command = fromJob.Command
 		if runDir == "" {
 			runDir = fromJob.WorkingDir
@@ -169,23 +178,27 @@ func runRun(cmd *cobra.Command, args []string) error {
 			runTags = append([]string(nil), fromJob.Tags...)
 		}
 
-		// Allow overriding host from command line
+		// Allow overriding command from positional arg
 		if len(args) > 0 {
-			host = args[0]
-		}
-		// Allow overriding command from command line
-		if len(args) > 1 {
-			command = args[1]
+			command = args[0]
 		}
 	} else {
-		// Determine if we have host+command (2 args) or just command (1 arg)
+		// Parse positional args
 		if len(args) == 2 {
-			host = args[0]
-			command = args[1]
+			// Backward compat: 2 args where first looks like a known host
+			if inventory.FindHost(args[0]) != nil {
+				if host == "" {
+					host = args[0]
+					fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: positional host is deprecated. Use: weft run --host %s '%s'\n", args[0], args[1])
+				}
+				command = args[1]
+			} else {
+				return usageErrorf("unexpected argument %q (use --host to specify a host)", args[0])
+			}
 		} else if len(args) == 1 {
 			// Single arg: is it a known host name, or a command?
 			if inventory.FindHost(args[0]) != nil {
-				return usageErrorf("'%s' looks like a host name. Usage: weft run <host> <command>", args[0])
+				return usageErrorf("'%s' looks like a host name. Usage: weft run --host %s <command>", args[0], args[0])
 			}
 			command = args[0]
 			// host will be resolved via placement below
@@ -665,7 +678,7 @@ func displayCdRewriteMessage(cmd *cobra.Command, host, dir, command string) {
 
 func formatRewrittenCommand(cmd *cobra.Command, dir, host, command string) string {
 	if len(os.Args) == 0 {
-		return fmt.Sprintf("%s -C %s %s %s", cmd.CommandPath(), shellQuote(dir), shellQuote(host), shellQuote(command))
+		return fmt.Sprintf("%s -C %s --host %s %s", cmd.CommandPath(), shellQuote(dir), shellQuote(host), shellQuote(command))
 	}
 	nonFlags := cmd.Flags().Args()
 	flagEnd := len(os.Args)
@@ -675,12 +688,12 @@ func formatRewrittenCommand(cmd *cobra.Command, dir, host, command string) strin
 	if flagEnd < 1 {
 		flagEnd = len(os.Args)
 	}
-	pieces := make([]string, 0, flagEnd+4)
+	pieces := make([]string, 0, flagEnd+5)
 	pieces = append(pieces, os.Args[0])
 	if flagEnd > 1 {
 		pieces = append(pieces, os.Args[1:flagEnd]...)
 	}
-	pieces = append(pieces, "-C", dir, host, command)
+	pieces = append(pieces, "-C", dir, "--host", host, command)
 	for i, part := range pieces {
 		pieces[i] = shellQuote(part)
 	}
