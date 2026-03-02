@@ -287,6 +287,12 @@ func (r *Runner) tryStartNextJob() {
 		}
 	}
 
+	// Refresh actual GPU memory snapshot before GPU checks (only for GPU jobs)
+	jobHasGPU := job.GPUClass != "" || len(GetJobGPUDevices(job)) > 0
+	if jobHasGPU {
+		r.gpuInv.RefreshDeviceMemSnapshot()
+	}
+
 	// Check GPU capacity
 	if runningCount > 0 {
 		canStart, _ := r.gpuInv.CanStartGPUJob(r.state, rj)

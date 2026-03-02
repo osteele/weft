@@ -747,6 +747,145 @@ func TestPredictorRemovesStaticPerfPenalty(t *testing.T) {
 	}
 }
 
+func TestGPUMemoryPressure_PenalizesLoadedHost(t *testing.T) {
+	db := setupTestDB(t)
+
+	// cool100 has A100s at indices 0 and 1
+	// Simulate: device 0 mostly full, device 1 has space
+	metricsLoaded := map[string]*HostMetrics{
+		"cool100": {
+			GPUDeviceFreeMemMiB: map[string]int64{
+				"0": 5 * 1024,  // 5GB free
+				"1": 70 * 1024, // 70GB free
+			},
+		},
+	}
+
+	scoresLoaded, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metricsLoaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Same host but with both devices having plenty of free VRAM
+	metricsFree := map[string]*HostMetrics{
+		"cool100": {
+			GPUDeviceFreeMemMiB: map[string]int64{
+				"0": 75 * 1024,
+				"1": 75 * 1024,
+			},
+		},
+	}
+
+	scoresFree, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metricsFree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100Loaded := findScore(scoresLoaded, "cool100")
+	cool100Free := findScore(scoresFree, "cool100")
+
+	if cool100Loaded.Total >= cool100Free.Total {
+		t.Errorf("loaded cool100 (%.2f) should score lower than free cool100 (%.2f)",
+			cool100Loaded.Total, cool100Free.Total)
+	}
+}
+
+func TestGPUMemoryPressure_NoDeviceHasEnough(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Both A100s on cool100 are nearly full
+	metrics := map[string]*HostMetrics{
+		"cool100": {
+			GPUDeviceFreeMemMiB: map[string]int64{
+				"0": 5 * 1024,  // 5GB free
+				"1": 10 * 1024, // 10GB free
+			},
+		},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100 := findScore(scores, "cool100")
+	// Should still be eligible (defeasible) but with a strong penalty
+	if !cool100.Eligible {
+		t.Error("cool100 should still be eligible (memory pressure is defeasible)")
+	}
+
+	hasVRAMReason := false
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "VRAM") {
+			hasVRAMReason = true
+			break
+		}
+	}
+	if !hasVRAMReason {
+		t.Errorf("cool100 reasons should mention VRAM, got: %v", cool100.Reasons)
+	}
+}
+
+func TestGPUMemoryPressure_NilMetrics(t *testing.T) {
+	db := setupTestDB(t)
+
+	// No metrics at all — should not add any GPU memory penalty
+	scoresWithNil, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoresWithout, err := ScoreHosts(db, Constraints{GPUClass: "a100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100Nil := findScore(scoresWithNil, "cool100")
+	cool100Without := findScore(scoresWithout, "cool100")
+
+	if cool100Nil.Total != cool100Without.Total {
+		t.Errorf("nil metrics should not change score: %.2f vs %.2f",
+			cool100Nil.Total, cool100Without.Total)
+	}
+}
+
+func TestGPUJobsQueued_Penalty(t *testing.T) {
+	db := setupTestDB(t)
+
+	metricsQueued := map[string]*HostMetrics{
+		"cool100": {GPUJobsQueued: 3},
+	}
+	metricsEmpty := map[string]*HostMetrics{
+		"cool100": {GPUJobsQueued: 0},
+	}
+
+	scoresQueued, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metricsQueued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoresEmpty, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metricsEmpty)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100Queued := findScore(scoresQueued, "cool100")
+	cool100Empty := findScore(scoresEmpty, "cool100")
+
+	if cool100Queued.Total >= cool100Empty.Total {
+		t.Errorf("cool100 with GPU jobs queued (%.2f) should score lower than without (%.2f)",
+			cool100Queued.Total, cool100Empty.Total)
+	}
+
+	hasReason := false
+	for _, r := range cool100Queued.Reasons {
+		if strings.Contains(r, "GPU jobs queued") {
+			hasReason = true
+		}
+	}
+	if !hasReason {
+		t.Errorf("cool100 reasons should mention GPU jobs queued, got: %v", cool100Queued.Reasons)
+	}
+}
+
 func findScore(scores []Score, host string) Score {
 	for _, s := range scores {
 		if s.Host == host {

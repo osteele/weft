@@ -36,6 +36,14 @@ type HostMetrics struct {
 	QueueDepth    int   // number of queued (pending) jobs
 	FreeRAMKB     int64 // available RAM in KB; 0 = unknown
 	FreeGPUMemMiB int64 // available GPU memory in MiB; 0 = unknown
+
+	// Per-GPU free memory in MiB, keyed by device index (e.g. "0", "1").
+	// Used for per-device placement scoring when GPUClass constraint is set.
+	GPUDeviceFreeMemMiB map[string]int64
+
+	// Number of GPU jobs queued for this host's GPU class.
+	// Used for soft penalty to spread load across hosts.
+	GPUJobsQueued int
 }
 
 // JobPrediction holds predicted resource needs for a job on a specific host.
@@ -356,6 +364,18 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 			s.Total -= queuePenalty
 			s.Reasons = append(s.Reasons, fmt.Sprintf("%d jobs queued", metrics.QueueDepth))
 		}
+
+		// GPU jobs queued: -0.5 per queued GPU job (up to -2)
+		if metrics.GPUJobsQueued > 0 {
+			gpuQueuePenalty := math.Min(float64(metrics.GPUJobsQueued)*0.5, 2.0)
+			s.Total -= gpuQueuePenalty
+			s.Reasons = append(s.Reasons, fmt.Sprintf("%d GPU jobs queued", metrics.GPUJobsQueued))
+		}
+
+		// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
+		if c.GPUClass != "" && len(metrics.GPUDeviceFreeMemMiB) > 0 {
+			s.applyPerDeviceGPUMemScoring(host, c, metrics)
+		}
 	}
 
 	// Soft factor: performance multiplier (penalize slower hosts)
@@ -570,6 +590,58 @@ func normalizeGPUClass(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// applyPerDeviceGPUMemScoring penalizes a host based on how many of its
+// matching-class GPUs have enough free VRAM for the job.
+func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constraints, metrics *HostMetrics) {
+	norm := normalizeGPUClass(c.GPUClass)
+
+	// Determine required memory in MiB
+	var requiredMiB int64
+	if c.GPUMemGB > 0 {
+		requiredMiB = int64(c.GPUMemGB) * 1024
+	}
+
+	// Count matching-class devices and how many have enough free VRAM
+	totalMatching := 0
+	withEnough := 0
+	for _, gpu := range host.GPUs {
+		if normalizeGPUClass(gpu.Class) != norm {
+			continue
+		}
+		for _, idx := range gpu.Indices {
+			totalMatching++
+			idxStr := fmt.Sprintf("%d", idx)
+			freeMiB, ok := metrics.GPUDeviceFreeMemMiB[idxStr]
+			if !ok {
+				// No data for this device — assume it's available
+				withEnough++
+				continue
+			}
+			if requiredMiB == 0 || freeMiB >= requiredMiB {
+				withEnough++
+			}
+		}
+	}
+
+	if totalMatching == 0 {
+		return
+	}
+
+	if withEnough == 0 {
+		// No matching device has enough VRAM — strong penalty (defeasible)
+		s.Total -= 5.0
+		s.Reasons = append(s.Reasons,
+			fmt.Sprintf("0/%d %ss have enough free VRAM", totalMatching, c.GPUClass))
+	} else if withEnough < totalMatching {
+		// Some but not all — moderate penalty scaled by fraction unavailable
+		fraction := float64(totalMatching-withEnough) / float64(totalMatching)
+		penalty := fraction * 3.0
+		s.Total -= penalty
+		s.Reasons = append(s.Reasons,
+			fmt.Sprintf("%d/%d %ss have enough free VRAM", withEnough, totalMatching, c.GPUClass))
+	}
 }
 
 func describeConstraints(c Constraints) string {

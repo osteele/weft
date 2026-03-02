@@ -147,6 +147,117 @@ func TestCanStartGPUJob_ExplicitGPU(t *testing.T) {
 	}
 }
 
+func TestPickBestGPUForClass_ActualMemory(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+			{Index: "1", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+		},
+		// Device 0 has 60GB used by an external process, only 20GB free
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 60 * 1024, TotalMiB: 80 * 1024},
+			"1": {UsedMiB: 5 * 1024, TotalMiB: 80 * 1024},
+		},
+	}
+	state := NewState()
+
+	// Job needs 30GB — device 0 should be rejected (only 20GB free), device 1 picked
+	device, ok := inv.PickBestGPUForClass(state, "A100", 30)
+	if !ok {
+		t.Fatal("expected a device")
+	}
+	if device != "1" {
+		t.Errorf("expected device 1 (75GB free), got %s", device)
+	}
+}
+
+func TestPickBestGPUForClass_AllDevicesFull(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+			{Index: "1", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+		},
+		// Both devices have external processes consuming most VRAM
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 75 * 1024, TotalMiB: 80 * 1024},
+			"1": {UsedMiB: 70 * 1024, TotalMiB: 80 * 1024},
+		},
+	}
+	state := NewState()
+
+	// Job needs 20GB — neither device has enough actual free memory
+	_, ok := inv.PickBestGPUForClass(state, "A100", 20)
+	if ok {
+		t.Error("expected no device available (both full from external processes)")
+	}
+}
+
+func TestPickBestGPUForClass_NoSnapshot(t *testing.T) {
+	// When no snapshot is available, should fall back to reservation-only checks
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+		},
+	}
+	state := NewState()
+
+	device, ok := inv.PickBestGPUForClass(state, "A100", 40)
+	if !ok {
+		t.Fatal("expected device when no snapshot available")
+	}
+	if device != "0" {
+		t.Errorf("expected 0, got %s", device)
+	}
+}
+
+func TestCanStartGPUJob_ExplicitGPU_ActualMemory(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100", TotalMemGB: 80},
+		},
+		// Device 0 has external memory pressure — only 10GB free
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 70 * 1024, TotalMiB: 80 * 1024},
+		},
+	}
+	state := NewState()
+
+	job := &RunnerJob{
+		Data: &ops.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
+		ID:   1,
+	}
+	// Default GPU mem is 20GB, device only has 10GB free → rejected
+	canStart, _ := inv.CanStartGPUJob(state, job)
+	if canStart {
+		t.Error("should not start when device has insufficient actual VRAM")
+	}
+}
+
+func TestCanStartGPUJob_ExplicitGPU_ActualMemory_OK(t *testing.T) {
+	inv := &GPUInventory{
+		Devices: []GPUInfo{
+			{Index: "0", Name: "NVIDIA A100", TotalMemGB: 80},
+		},
+		// Device 0 has plenty of free memory
+		DeviceMemSnapshot: map[string]DeviceMemInfo{
+			"0": {UsedMiB: 10 * 1024, TotalMiB: 80 * 1024},
+		},
+	}
+	state := NewState()
+
+	job := &RunnerJob{
+		Data: &ops.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
+		ID:   1,
+	}
+	canStart, devices := inv.CanStartGPUJob(state, job)
+	if !canStart {
+		t.Error("should be able to start with enough actual VRAM")
+	}
+	if len(devices) != 1 || devices[0] != "0" {
+		t.Errorf("expected [0], got %v", devices)
+	}
+}
+
 func TestGetJobGPUDevices(t *testing.T) {
 	tests := []struct {
 		name string
