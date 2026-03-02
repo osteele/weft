@@ -79,6 +79,18 @@ type Config struct {
 	// CoordinatorHost is the host where the coordinator daemon runs.
 	// Default: "studio"
 	CoordinatorHost string `yaml:"coordinator_host"`
+
+	// Remediation holds auto-remediation configuration for failed jobs
+	Remediation RemediationConfig `yaml:"remediation"`
+}
+
+// RemediationConfig holds configuration for automatic job failure remediation.
+type RemediationConfig struct {
+	// CodingAgent is the command to invoke for code fixes (e.g., "claude -p").
+	// Empty means no coding agent is used (opt-out by default).
+	CodingAgent string `yaml:"coding_agent"`
+	// CodingAgentDir is the working directory for the agent (defaults to job's working dir).
+	CodingAgentDir string `yaml:"coding_agent_dir"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.

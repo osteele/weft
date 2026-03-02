@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -253,6 +254,15 @@ func showJob(database *sql.DB, id int64) error {
 	if job.ExitCode != nil {
 		fmt.Printf("Exit Code:    %d\n", *job.ExitCode)
 	}
+	if job.ErrorDiagnosis != "" {
+		d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
+		if err == nil && d != nil {
+			fmt.Printf("Diagnosis:    %s (%s/%s)\n", d.Message, d.Category, d.Pattern)
+			if job.RetryCount > 0 {
+				fmt.Printf("Retried:      %d time(s)\n", job.RetryCount)
+			}
+		}
+	}
 
 	return nil
 }
@@ -278,6 +288,11 @@ func printJobs(jobs []*db.Job) error {
 				status = "completed ✓"
 			} else {
 				status = fmt.Sprintf("failed (%d)", *job.ExitCode)
+				if job.RetryCount > 0 {
+					status += " retried"
+				} else if job.ErrorDiagnosis != "" {
+					status += " diagnosed"
+				}
 			}
 		}
 

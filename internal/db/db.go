@@ -72,6 +72,8 @@ type Job struct {
 	Tombstoned           bool
 	Cost                 *float64 // Actual cost in dollars (for cloud-run jobs)
 	VastaiInstanceID     *int     // Vast.ai instance ID (for vastai backend jobs)
+	ErrorDiagnosis       string   // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
+	RetryCount           int      // Number of auto-remediation retries attempted
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -98,7 +100,7 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count`
 
 const ProcessedTag = "processed"
 
@@ -364,6 +366,16 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add vastai_instance_id column for Vast.ai instance tracking
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN vastai_instance_id INTEGER`); err != nil {
+		return err
+	}
+
+	// Migration: add error_diagnosis column for auto-remediation diagnosis
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN error_diagnosis TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add retry_count column for auto-remediation retry tracking
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0`); err != nil {
 		return err
 	}
 
@@ -1565,8 +1577,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var jobMetadata sql.NullString
 	var cost sql.NullFloat64
 	var vastaiInstanceID sql.NullInt64
+	var errorDiagnosis sql.NullString
+	var retryCount sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1663,6 +1677,12 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if vastaiInstanceID.Valid {
 		val := int(vastaiInstanceID.Int64)
 		j.VastaiInstanceID = &val
+	}
+	if errorDiagnosis.Valid {
+		j.ErrorDiagnosis = errorDiagnosis.String
+	}
+	if retryCount.Valid {
+		j.RetryCount = int(retryCount.Int64)
 	}
 	if j.Backend == "" {
 		j.Backend = BackendQueueRunner
@@ -1891,8 +1911,10 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var jobMetadata sql.NullString
 		var cost sql.NullFloat64
 		var vastaiInstanceID sql.NullInt64
+		var errorDiagnosis sql.NullString
+		var retryCount sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
 		if err != nil {
 			return nil, err
 		}
@@ -1986,6 +2008,12 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if vastaiInstanceID.Valid {
 			val := int(vastaiInstanceID.Int64)
 			j.VastaiInstanceID = &val
+		}
+		if errorDiagnosis.Valid {
+			j.ErrorDiagnosis = errorDiagnosis.String
+		}
+		if retryCount.Valid {
+			j.RetryCount = int(retryCount.Int64)
 		}
 		if j.Backend == "" {
 			j.Backend = BackendQueueRunner
@@ -2112,6 +2140,31 @@ func ListRecentFailed(db *sql.DB, limit int) ([]*Job, error) {
 		ORDER BY end_time DESC
 		LIMIT ?`, jobSelectColumns)
 	return queryJobs(db, query, cutoff, StatusCompleted, StatusFailed, StatusDead, limit)
+}
+
+// UpdateErrorDiagnosis stores an error diagnosis and increments retry count for a job.
+func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET error_diagnosis = ?, retry_count = ? WHERE id = ?`,
+		diagnosis, retryCount, id,
+	)
+	return err
+}
+
+// ListRecentFailedUndiagnosed returns recently failed jobs that have not been diagnosed yet.
+// These are completed jobs with non-zero exit code, retry_count == 0, and no error_diagnosis.
+func ListRecentFailedUndiagnosed(db *sql.DB, limit int) ([]*Job, error) {
+	cutoff := time.Now().Add(-24 * time.Hour).Unix()
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE tombstoned = 0
+		AND end_time > ?
+		AND status = ?
+		AND exit_code IS NOT NULL AND exit_code != 0
+		AND (retry_count IS NULL OR retry_count = 0)
+		AND (error_diagnosis IS NULL OR error_diagnosis = '')
+		ORDER BY end_time DESC
+		LIMIT ?`, jobSelectColumns)
+	return queryJobs(db, query, cutoff, StatusCompleted, limit)
 }
 
 // ListUniqueRunningHosts returns all unique hosts with running jobs

@@ -14,22 +14,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 )
 
 // Config holds coordinator daemon configuration.
 type Config struct {
-	IntentDir     string        // where intent files are written (default: ~/.cache/weft/intents/)
-	ArchiveDir    string        // where processed intents are moved (default: ~/.cache/weft/intents/archive/)
-	PIDFile       string        // PID file path (default: ~/.cache/weft/coordinator.pid)
-	LogPath       string        // operation log path
-	PollInterval  time.Duration // host state polling interval (default: 30s)
-	RetryInterval time.Duration // retry queue drain interval (default: 15s)
-	SyncInterval  time.Duration // full host sync interval (default: 60s)
+	IntentDir           string        // where intent files are written (default: ~/.cache/weft/intents/)
+	ArchiveDir          string        // where processed intents are moved (default: ~/.cache/weft/intents/archive/)
+	PIDFile             string        // PID file path (default: ~/.cache/weft/coordinator.pid)
+	LogPath             string        // operation log path
+	PollInterval        time.Duration // host state polling interval (default: 30s)
+	RetryInterval       time.Duration // retry queue drain interval (default: 15s)
+	SyncInterval        time.Duration // full host sync interval (default: 60s)
+	RemediationInterval time.Duration // failed job diagnosis interval (default: 30s)
 }
 
 // DefaultConfig returns a Config with default values.
@@ -37,13 +41,14 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".cache", "weft")
 	return Config{
-		IntentDir:     filepath.Join(cacheDir, "intents"),
-		ArchiveDir:    filepath.Join(cacheDir, "intents", "archive"),
-		PIDFile:       filepath.Join(cacheDir, "coordinator.pid"),
-		LogPath:       filepath.Join(cacheDir, "coordinator-operations.log"),
-		PollInterval:  30 * time.Second,
-		RetryInterval: 15 * time.Second,
-		SyncInterval:  60 * time.Second,
+		IntentDir:           filepath.Join(cacheDir, "intents"),
+		ArchiveDir:          filepath.Join(cacheDir, "intents", "archive"),
+		PIDFile:             filepath.Join(cacheDir, "coordinator.pid"),
+		LogPath:             filepath.Join(cacheDir, "coordinator-operations.log"),
+		PollInterval:        30 * time.Second,
+		RetryInterval:       15 * time.Second,
+		SyncInterval:        60 * time.Second,
+		RemediationInterval: 30 * time.Second,
 	}
 }
 
@@ -51,6 +56,7 @@ func DefaultConfig() Config {
 type Coordinator struct {
 	db         *sql.DB
 	config     Config
+	appConfig  *config.Config
 	hostState  map[string]*HostState
 	retryQueue *retryQueue
 	mu         sync.Mutex
@@ -58,10 +64,12 @@ type Coordinator struct {
 }
 
 // New creates a new Coordinator.
-func New(database *sql.DB, config Config) *Coordinator {
+func New(database *sql.DB, cfg Config) *Coordinator {
+	appCfg, _ := config.Load()
 	return &Coordinator{
 		db:         database,
-		config:     config,
+		config:     cfg,
+		appConfig:  appCfg,
 		hostState:  make(map[string]*HostState),
 		retryQueue: newRetryQueue(),
 		logger:     log.New(os.Stderr, "[coordinator] ", log.LstdFlags),
@@ -133,6 +141,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	vastaiSweepTicker := time.NewTicker(60 * time.Second)
 	defer vastaiSweepTicker.Stop()
 
+	remediationTicker := time.NewTicker(c.config.RemediationInterval)
+	defer remediationTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -157,6 +168,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 		case <-vastaiSweepTicker.C:
 			c.sweepVastaiResults()
+
+		case <-remediationTicker.C:
+			c.checkFailedJobs()
 		}
 	}
 }
@@ -398,6 +412,84 @@ func (c *Coordinator) syncAllHosts() {
 			c.logger.Printf("sync %s: %v", host, err)
 		}
 	}
+}
+
+// checkFailedJobs scans for recently failed jobs, diagnoses errors, and
+// attempts auto-remediation when possible.
+func (c *Coordinator) checkFailedJobs() {
+	jobs, err := db.ListRecentFailedUndiagnosed(c.db, 10)
+	if err != nil {
+		c.logger.Printf("list failed jobs for remediation: %v", err)
+		return
+	}
+	if len(jobs) == 0 {
+		return
+	}
+
+	// Fetch logs in parallel (bounded to avoid SSH overload)
+	type jobLog struct {
+		job        *db.Job
+		logContent string
+	}
+	results := make(chan jobLog, len(jobs))
+	sem := make(chan struct{}, 4) // max 4 concurrent SSH calls
+
+	var wg sync.WaitGroup
+	for _, job := range jobs {
+		wg.Add(1)
+		go func(j *db.Job) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			logContent := c.fetchJobLog(j)
+			results <- jobLog{job: j, logContent: logContent}
+		}(job)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for jl := range results {
+		if jl.logContent == "" {
+			c.logger.Printf("no log content for job %d on %s, skipping diagnosis", jl.job.ID, jl.job.Host)
+			continue
+		}
+
+		ctx := remediation.RemediationContext{
+			DB:         c.db,
+			Job:        jl.job,
+			LogContent: jl.logContent,
+			Logger:     c.logger,
+			Config:     c.appConfig,
+		}
+
+		result := remediation.AttemptRemediation(ctx)
+		if result == nil {
+			continue
+		}
+
+		oplog.LogJob(oplog.OpCoordinatorDiagnosis, jl.job.ID, jl.job.Host,
+			oplog.WithDetailf("pattern=%s category=%s", result.Diagnosis.Pattern, result.Diagnosis.Category))
+
+		if result.Retried {
+			c.logger.Printf("remediated job %d: %s", jl.job.ID, result.Action)
+			oplog.LogJob(oplog.OpCoordinatorRemediation, jl.job.ID, jl.job.Host,
+				oplog.WithDetailf("action=%s", result.Action))
+		} else {
+			c.logger.Printf("diagnosed job %d: %s (action: %s)", jl.job.ID, result.Diagnosis.Message, result.Action)
+		}
+	}
+}
+
+// fetchJobLog retrieves the last 200 lines of a job's log from the remote host.
+func (c *Coordinator) fetchJobLog(job *db.Job) string {
+	cmd := fmt.Sprintf("tail -200 ~/.cache/weft/logs/%d-*.log 2>/dev/null", job.ID)
+	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 10*time.Second)
+	if err != nil {
+		return ""
+	}
+	return stdout
 }
 
 // writeOutcome writes a placement outcome file so the submitting laptop can

@@ -46,6 +46,11 @@ const (
 	OpCoordinatorDeferred = "coordinator.deferred"
 	OpCoordinatorRetry    = "coordinator.retry"
 	OpCoordinatorError    = "coordinator.error"
+
+	// Auto-remediation operations
+	OpCoordinatorDiagnosis   = "coordinator.diagnosis"
+	OpCoordinatorRemediation = "coordinator.remediation"
+	OpCoordinatorAgentInvoke = "coordinator.agent.invoke"
 )
 
 // Entry represents a single log entry in JSONL format.

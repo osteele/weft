@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -534,6 +535,11 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		fmt.Printf("Exit:     %d\n", *job.ExitCode)
 	}
 
+	// Show remediation info for failed jobs
+	if job.ErrorDiagnosis != "" {
+		printDiagnosisSummary(job)
+	}
+
 	fmt.Printf("Details:  weft info %d  # Show directory, command, env vars\n", job.ID)
 
 	// Print usage hints
@@ -707,5 +713,32 @@ func printFailedJobSummary(job *db.Job) {
 		}
 	}
 
-	fmt.Printf("  %4d  %-10s  %-8s  %s\n", job.ID, job.Host, reason, desc)
+	// Show remediation indicator
+	if job.RetryCount > 0 {
+		reason += " (retried)"
+	} else if job.ErrorDiagnosis != "" {
+		reason += " (diagnosed)"
+	}
+
+	fmt.Printf("  %4d  %-10s  %-14s  %s\n", job.ID, job.Host, reason, desc)
+}
+
+// printDiagnosisSummary prints the auto-remediation diagnosis for a failed job.
+func printDiagnosisSummary(job *db.Job) {
+	d, err := remediation.UnmarshalDiagnosis(job.ErrorDiagnosis)
+	if err != nil || d == nil {
+		return
+	}
+
+	fmt.Printf("Diagnosis: %s (%s)\n", d.Message, d.Pattern)
+	if d.Remediable {
+		if job.RetryCount > 0 {
+			fmt.Printf("Remediation: auto-retried (retry #%d)\n", job.RetryCount)
+		} else {
+			fmt.Printf("Remediation: remediable but not retried\n")
+		}
+	}
+	if len(d.MissingAssets) > 0 {
+		fmt.Printf("Missing:   %s\n", strings.Join(d.MissingAssets, ", "))
+	}
 }

@@ -1066,6 +1066,32 @@ weft host data --scan cool30
 weft host data cool30
 ```
 
+### Auto-Remediation
+
+The coordinator automatically diagnoses failed jobs by scanning their logs for
+known error patterns and, when possible, fixes the issue and retries.
+
+**Data errors** (auto-retried):
+- Missing HuggingFace model/dataset: pre-stages the data from another host, then retries
+- Missing file in working directory: re-syncs sources, then retries
+
+**Code errors** (diagnosed, optionally fixed):
+- `ModuleNotFoundError`, `ImportError`, `AttributeError`, `NameError`, `SyntaxError`
+- If a coding agent is configured, it attempts to fix the code and retry
+
+**Environment errors** (diagnosed only):
+- GPU out of memory, CUDA errors
+
+Jobs are retried at most once to prevent loops. Diagnoses are stored in the
+database (`error_diagnosis` column) for inspection.
+
+To enable the coding agent for code fixes, add to `~/.config/weft/config.yaml`:
+
+```yaml
+remediation:
+  coding_agent: "claude -p --allowedTools Edit Read Grep Glob Bash"
+```
+
 ### Crash Safety
 
 Processed intent IDs are persisted to SQLite. If the coordinator crashes and
