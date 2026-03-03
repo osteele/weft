@@ -398,7 +398,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=kill"))
 			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
-		case db.StatusQueued, db.StatusPendingPlacement:
+		case db.StatusQueued, db.StatusPendingPlacement, db.StatusNeedsRental:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=cancel"))
 			return m, tea.Batch(m.setFlash("Cancelling queued job...", false), m.cancelQueuedJob(job))
 		case db.StatusCompleted:
@@ -667,7 +667,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
-		if job.Status != db.StatusQueued {
+		if job.Status != db.StatusQueued && job.Status != db.StatusNeedsRental {
 			return m, m.setFlash("Cloud GPU only available for queued jobs", true)
 		}
 		return m, m.openCloudMenu(job)

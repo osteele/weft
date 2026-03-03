@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -53,6 +54,7 @@ func BuildPlan(db *sql.DB, targetHost string, inputs []string) (*Plan, error) {
 
 		entries, err := dataloc.FindAssetHosts(db, asset)
 		if err != nil {
+			log.Printf("prestage: failed to find asset hosts for %v: %v", asset, err)
 			continue
 		}
 

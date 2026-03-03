@@ -297,8 +297,23 @@ history in `weft list` or the TUI.
 
 ## Bursting to cloud GPUs
 
-When local GPUs are busy and you don't want to wait, weft can run a queued job
-on a Vast.ai cloud instance.
+When local GPUs are busy or no local host has the right hardware, weft can run
+jobs on a Vast.ai cloud instance.
+
+### Automatic acceptance for unplaceable jobs
+
+If you request a GPU that no local host has, weft accepts the job instead of
+rejecting it:
+
+```
+laptop$ weft run --gpu-class hopper+ 'python train.py'
+No local host matches constraints: gpu-class=hopper+
+Job #4820 accepted (needs rental host)
+Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.
+```
+
+The job appears in the TUI with status `$ needs rental`. From there, press `c`
+to open the cloud menu and pick a Vast.ai instance, or `k` to cancel.
 
 ### Prerequisites
 
@@ -310,7 +325,7 @@ vastai set api-key YOUR_API_KEY
 ### Using the TUI cloud menu
 
 1. Open the TUI: `weft tui`
-2. Navigate to a **queued** job
+2. Navigate to a **queued** or **needs rental** job
 3. Press `c` to open the cloud GPU menu
 
 ```
@@ -324,10 +339,11 @@ vastai set api-key YOUR_API_KEY
 └──────────────────────────────────────────────────────────────┘
 ```
 
-The **Free** option keeps the job in the local queue. Vast.ai options show
-estimated cost and time. Select with Enter, confirm the cost, and weft handles
-the full lifecycle: instance creation, rsync, `uv sync`, job execution, output
-collection, and teardown.
+For **queued** jobs, the **Free** option keeps the job in the local queue.
+For **needs rental** jobs, the local option is omitted since no local host
+can run the job. Vast.ai options show estimated cost and time. Select with
+Enter, confirm the cost, and weft handles the full lifecycle: instance creation,
+rsync, `uv sync`, job execution, output collection, and teardown.
 
 If the job has `--gpu-class` or `--gpu-mem` constraints, the cloud search
 respects them — only matching offers appear.

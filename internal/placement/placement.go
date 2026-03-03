@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -17,6 +18,9 @@ import (
 
 // ErrNoReachableHost is returned when all eligible hosts are unreachable.
 var ErrNoReachableHost = errors.New("no eligible host is reachable")
+
+// ErrNoEligibleHost is returned when no host in the inventory satisfies the job constraints.
+var ErrNoEligibleHost = errors.New("no eligible host found")
 
 // Constraints describes hard requirements for a job placement.
 type Constraints struct {
@@ -223,7 +227,7 @@ func bestFromScores(scores []Score, constraints Constraints) (string, []string, 
 			return s.Host, s.Reasons, nil
 		}
 	}
-	return "", nil, fmt.Errorf("no eligible host found for constraints: %s", describeConstraints(constraints))
+	return "", nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
 }
 
 // BestReachableHost returns the best eligible host that is also reachable via SSH.
@@ -244,7 +248,7 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 		}
 	}
 	if len(eligible) == 0 {
-		return "", nil, fmt.Errorf("no eligible host found for constraints: %s", describeConstraints(constraints))
+		return "", nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
 	}
 
 	// Collect live metrics (also proves reachability)
@@ -321,6 +325,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 			}
 			entries, err := dataloc.FindAssetHosts(db, asset)
 			if err != nil {
+				log.Printf("placement: failed to find asset hosts for %v: %v", asset, err)
 				continue
 			}
 			isLocal := false
@@ -657,7 +662,7 @@ func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constrain
 	}
 }
 
-func describeConstraints(c Constraints) string {
+func DescribeConstraints(c Constraints) string {
 	var parts []string
 	if c.GPUClass != "" {
 		parts = append(parts, "gpu-class="+c.GPUClass)

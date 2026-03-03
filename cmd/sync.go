@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -451,10 +452,13 @@ func syncVastaiInstances(cfg *config.Config, database *sql.DB, verbose bool) int
 		endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
 		endTimeUnix, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
 
-		_, _ = database.Exec(
+		if _, err := database.Exec(
 			`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
 			db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, jobID,
-		)
+		); err != nil {
+			log.Printf("sync: failed to update Vast.ai job %d status: %v", jobID, err)
+			continue
+		}
 		updated++
 
 		if verbose {

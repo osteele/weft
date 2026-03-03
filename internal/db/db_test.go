@@ -439,6 +439,36 @@ func TestRecordQueuedExplicitGPUNotOverridden(t *testing.T) {
 	}
 }
 
+func TestRecordNeedsRentalJob(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	if err != nil {
+		t.Fatalf("record needs rental: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.Status != StatusNeedsRental {
+		t.Errorf("Status = %q, want %q", job.Status, StatusNeedsRental)
+	}
+	if job.Host != "" {
+		t.Errorf("Host = %q, want empty", job.Host)
+	}
+	if job.Command != "python train.py" {
+		t.Errorf("Command = %q, want %q", job.Command, "python train.py")
+	}
+	if job.Description != "GPU training" {
+		t.Errorf("Description = %q, want %q", job.Description, "GPU training")
+	}
+	if job.WorkingDir != "/tmp/project" {
+		t.Errorf("WorkingDir = %q, want %q", job.WorkingDir, "/tmp/project")
+	}
+}
+
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

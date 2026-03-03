@@ -74,12 +74,18 @@ set of states. The CLI records each transition so commands such as `status`,
 | `canceled`  | Queued job was explicitly removed before it started.                        |
 | `queued`    | Job was added to a remote queue and awaits the queue runner.                |
 | `pending`   | Local intent recorded (kill/start/change) awaiting reconciliation.          |
+| `draft`     | Job saved locally but not yet submitted to a remote host.                   |
+| `pending_placement` | Job submitted to the coordinator but not yet placed on a host.     |
+| `needs_rental` | No local host matches constraints; awaiting cloud GPU launch via TUI.   |
 
 ```mermaid
 stateDiagram-v2
     [*] --> queued : run (queued by default) / plan series
     [*] --> starting : run
+    [*] --> needs_rental : run (no eligible local host)
     queued --> starting : queue runner / job start
+    needs_rental --> queued : cloud menu launch
+    needs_rental --> canceled : user cancel
     starting --> running : tmux session ready
     starting --> dead : setup error
     running --> completed : status file written

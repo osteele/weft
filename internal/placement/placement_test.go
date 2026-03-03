@@ -2,6 +2,7 @@ package placement
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -247,6 +248,25 @@ func TestBestHost_Impossible(t *testing.T) {
 	_, _, err := BestHost(db, Constraints{GPUClass: "nonexistent"})
 	if err == nil {
 		t.Error("expected error for impossible constraints")
+	}
+}
+
+func TestBestHost_NoEligibleHostError(t *testing.T) {
+	db := setupTestDB(t)
+	_, _, err := BestHost(db, Constraints{GPUClass: "nonexistent"})
+	if !errors.Is(err, ErrNoEligibleHost) {
+		t.Errorf("expected ErrNoEligibleHost, got %v", err)
+	}
+}
+
+func TestBestFromScores_NoEligible(t *testing.T) {
+	scores := []Score{
+		{Host: "a", Eligible: false, Total: 5, Reasons: []string{"no GPU"}},
+		{Host: "b", Eligible: false, Total: 3, Reasons: []string{"no GPU"}},
+	}
+	_, _, err := bestFromScores(scores, Constraints{GPUClass: "h100"})
+	if !errors.Is(err, ErrNoEligibleHost) {
+		t.Errorf("expected ErrNoEligibleHost, got %v", err)
 	}
 }
 

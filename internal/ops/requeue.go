@@ -3,6 +3,7 @@ package ops
 import (
 	"database/sql"
 	"fmt"
+	"log"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -37,7 +38,9 @@ func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, err
 	if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
 		return Result{}, fmt.Errorf("update synced status: %w", err)
 	}
-	_ = db.SetQueuedAtNow(database, job.ID)
+	if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+		log.Printf("requeue: failed to update queued_at for job %d: %v", job.ID, err)
+	}
 
 	return Result{
 		Success: true,

@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -914,8 +915,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.Host)
 			deferredUpdate = true
 		} else {
-			_ = db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued)
-			_ = db.SetQueuedAtNow(database, job.ID)
+			if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
+				log.Printf("queue: failed to clear pending status for job %d: %v", job.ID, err)
+			}
+			if err := db.SetQueuedAtNow(database, job.ID); err != nil {
+				log.Printf("queue: failed to update queued_at for job %d: %v", job.ID, err)
+			}
 		}
 	} else {
 		// Job was already queued - update existing entry via sync path

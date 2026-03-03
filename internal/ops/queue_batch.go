@@ -3,6 +3,7 @@ package ops
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -83,7 +84,9 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 			}
 		case queueStateRunning:
 			if job.StartTime == 0 {
-				_, _ = UpdateStartTimeFromMetadata(database, job, timeout)
+				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+					log.Printf("sync: failed to update start time for job %d: %v", job.ID, err)
+				}
 			}
 			switch job.Status {
 			case db.StatusQueued:
@@ -112,7 +115,9 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 			}
 		case queueStatePaused:
 			if job.StartTime == 0 {
-				_, _ = UpdateStartTimeFromMetadata(database, job, timeout)
+				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+					log.Printf("sync: failed to update start time for job %d: %v", job.ID, err)
+				}
 			}
 			switch job.Status {
 			case db.StatusQueued, db.StatusStarting, db.StatusRunning:
@@ -162,13 +167,19 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				}
 				// Record failure reason if present
 				if status.FailureReason != "" {
-					_ = db.SetJobRemoteState(database, job.ID, "", status.FailureReason)
+					if err := db.SetJobRemoteState(database, job.ID, "", status.FailureReason); err != nil {
+						log.Printf("sync: failed to record failure reason for job %d: %v", job.ID, err)
+					}
 				}
 				CacheCompletedJobLog(job, timeout)
 				// Fetch resource usage data (best-effort)
-				_, _ = updateJobResourceUsage(database, job, timeout)
+				if _, err := updateJobResourceUsage(database, job, timeout); err != nil {
+					log.Printf("sync: failed to update resource usage for job %d: %v", job.ID, err)
+				}
 				// Sync timeseries telemetry (best-effort)
-				_ = syncJobTimeseries(database, job, timeout)
+				if err := syncJobTimeseries(database, job, timeout); err != nil {
+					log.Printf("sync: failed to sync timeseries for job %d: %v", job.ID, err)
+				}
 				updated++
 			}
 		}
@@ -261,7 +272,9 @@ func syncGPUDevicesToMetadata(database *sql.DB, job *db.Job, gpuDevices string) 
 	}
 	if meta.Resource.GPUDevices != gpuDevices {
 		meta.Resource.GPUDevices = gpuDevices
-		_ = db.SetJobMetadata(database, job.ID, meta)
+		if err := db.SetJobMetadata(database, job.ID, meta); err != nil {
+			log.Printf("sync: failed to update GPU devices metadata for job %d: %v", job.ID, err)
+		}
 		job.Metadata = meta
 	}
 }

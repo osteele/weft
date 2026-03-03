@@ -228,28 +228,36 @@ func (c *Coordinator) checkOrphanedVastaiInstances(cfg *config.Config) {
 		if err != nil {
 			// Instance not found — mark job as failed
 			c.logger.Printf("vastai sweep: instance %d not found for job %d, marking failed", instanceID, job.ID)
-			_, _ = c.db.Exec(
+			if _, err := c.db.Exec(
 				`UPDATE jobs SET status = ?, failure_reason = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
 				db.StatusFailed, "orphaned", time.Now().Unix(), db.StatusFailed, job.ID,
-			)
+			); err \!= nil {
+				c.logger.Printf("vastai sweep: failed to mark job %d as orphaned: %v", job.ID, err)
+			}
 			continue
 		}
 
 		if inst.Status == "running" {
 			// Still running past max runtime — destroy it
 			c.logger.Printf("vastai sweep: destroying orphaned instance %d (job %d, age %v)", instanceID, job.ID, age)
-			_ = client.DestroyInstance(instanceID)
-			_, _ = c.db.Exec(
+			if err := client.DestroyInstance(instanceID); err \!= nil {
+				c.logger.Printf("vastai sweep: failed to destroy instance %d: %v", instanceID, err)
+			}
+			if _, err := c.db.Exec(
 				`UPDATE jobs SET status = ?, failure_reason = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
 				db.StatusFailed, "timeout", time.Now().Unix(), db.StatusFailed, job.ID,
-			)
+			); err \!= nil {
+				c.logger.Printf("vastai sweep: failed to mark job %d as timed out: %v", job.ID, err)
+			}
 			oplog.LogJob(oplog.OpJobKill, job.ID, "", oplog.WithDetailf("vastai orphan timeout instance=%d", instanceID))
 		} else if inst.Status == "exited" || inst.Status == "error" {
 			// Instance already exited but no results in R2 — mark failed
-			_, _ = c.db.Exec(
+			if _, err := c.db.Exec(
 				`UPDATE jobs SET status = ?, failure_reason = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
 				db.StatusFailed, "instance_exited", time.Now().Unix(), db.StatusFailed, job.ID,
-			)
+			); err \!= nil {
+				c.logger.Printf("vastai sweep: failed to mark job %d as instance_exited: %v", job.ID, err)
+			}
 		}
 	}
 }

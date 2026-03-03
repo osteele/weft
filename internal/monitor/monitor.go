@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -767,6 +768,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 	for _, host := range hosts {
 		jobs, err := db.ListActiveJobs(m.db, host)
 		if err != nil {
+			log.Printf("monitor: failed to list active jobs for %s: %v", host, err)
 			continue
 		}
 		activeJobsByHost[host] = jobs
@@ -871,7 +873,9 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 			m.lastHostSyncTimes[host] = now
 			m.hostSyncTimes[host] = now
 			m.mu.Unlock()
-			_ = db.RecordHostSync(m.db, host, now)
+			if err := db.RecordHostSync(m.db, host, now); err != nil {
+				log.Printf("monitor: failed to record host sync for %s: %v", host, err)
+			}
 		}
 	}
 
@@ -901,12 +905,16 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 		if err := ops.CancelRemoteJob(job, 5*time.Second); err != nil {
 			return false
 		}
-		_ = db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead)
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
+			log.Printf("monitor: failed to update tombstoned job %d status: %v", job.ID, err)
+		}
 		return true
 	}
 
 	if err := ops.CancelRemoteJob(job, 5*time.Second); err == nil {
-		_ = db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead)
+		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
+			log.Printf("monitor: failed to update tombstoned job %d status: %v", job.ID, err)
+		}
 		return true
 	}
 	return false

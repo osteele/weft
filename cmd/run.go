@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -351,6 +352,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return submitIntent(cfg, database, host, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
 	}
 
+	// Parse "cd /path && command" pattern to extract working directory
+	// Only if -C/--directory wasn't explicitly provided
+	dirProvided := runDir != ""
+	parsedDir, parsedCmd := parseCdPrefix(command)
+	if parsedDir != "" && runDir == "" {
+		command = parsedCmd
+		runDir = parsedDir
+		dirProvided = true
+	}
+
+	// Resolve working directory
+	workingDir, err := resolveWorkingDir(runDir, cmd.ErrOrStderr())
+	if err != nil {
+		return fmt.Errorf("get working dir: %w", err)
+	}
+
 	// Coordinator unreachable — fall back to direct submission
 	if host == "" {
 		if runImmediate {
@@ -364,49 +381,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 				// No hosts responded — fall back to predictor-aware static placement
 				bestHost, _, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
 				if err != nil {
+					if errors.Is(err, placement.ErrNoEligibleHost) {
+						return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
+					}
 					return fmt.Errorf("auto-placement failed: %w", err)
 				}
+			} else if errors.Is(err, placement.ErrNoEligibleHost) {
+				return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
 			} else {
 				return fmt.Errorf("auto-placement failed: %w", err)
 			}
 		}
 		host = bestHost
-	}
-
-	dirProvided := runDir != ""
-
-	// Parse "cd /path && command" pattern to extract working directory
-	// Only if -C/--directory wasn't explicitly provided
-	parsedDir, parsedCmd := parseCdPrefix(command)
-	if parsedDir != "" && runDir == "" {
-		command = parsedCmd
-		runDir = parsedDir
-		dirProvided = true
-	}
-
-	// Set defaults
-	workingDir := runDir
-	if workingDir == "" {
-		// Try automap: if CWD is under a known prefix, use the tilde-relative path
-		home, _ := os.UserHomeDir()
-		cwd, _ := os.Getwd()
-		if home != "" && cwd != "" {
-			for _, prefix := range config.AutomapDirs() {
-				expanded := strings.Replace(prefix, "~", home, 1)
-				if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
-					workingDir = prefix + "/" + rel
-					fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected working directory: %s\n", workingDir)
-					break
-				}
-			}
-		}
-	}
-	if workingDir == "" {
-		var err error
-		workingDir, err = session.DefaultWorkingDir()
-		if err != nil {
-			return fmt.Errorf("get working dir: %w", err)
-		}
 	}
 
 	if dirProvided {
@@ -669,6 +655,87 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 // killJob kills a job by ID (used by --kill flag)
 
+// resolveWorkingDir resolves the effective working directory for a job submission.
+// If dir is non-empty it is returned as-is. Otherwise it tries automap from the
+// current working directory, then falls back to session.DefaultWorkingDir.
+// logDest receives an "Auto-detected" message when automap fires; nil suppresses it.
+func resolveWorkingDir(dir string, logDest io.Writer) (string, error) {
+	if dir != "" {
+		return dir, nil
+	}
+	home, _ := os.UserHomeDir()
+	cwd, _ := os.Getwd()
+	if home != "" && cwd != "" {
+		for _, prefix := range config.AutomapDirs() {
+			expanded := strings.Replace(prefix, "~", home, 1)
+			if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
+				resolved := prefix + "/" + rel
+				if logDest != nil {
+					fmt.Fprintf(logDest, "Auto-detected working directory: %s\n", resolved)
+				}
+				return resolved, nil
+			}
+		}
+	}
+	return session.DefaultWorkingDir()
+}
+
+// recordNeedsRentalJob creates a needs_rental job when no local host matches constraints.
+func recordNeedsRentalJob(cmd *cobra.Command, database *sql.DB, constraints placement.Constraints, workingDir, command, description string, envVars, tags, outputs []string, produces, needs []string) error {
+	jobID, err := db.RecordNeedsRentalJob(database, workingDir, command, description)
+	if err != nil {
+		return fmt.Errorf("record needs-rental job: %w", err)
+	}
+
+	// Set metadata on the job
+	if constraints.GPUClass != "" {
+		if err := db.SetJobGPUClass(database, jobID, constraints.GPUClass); err != nil {
+			return fmt.Errorf("set gpu class: %w", err)
+		}
+	}
+	if constraints.GPUMemGB > 0 {
+		if err := db.SetJobGPUMemGB(database, jobID, &constraints.GPUMemGB); err != nil {
+			return fmt.Errorf("set gpu mem: %w", err)
+		}
+	}
+	if len(tags) > 0 {
+		if err := db.SetJobTags(database, jobID, tags); err != nil {
+			return fmt.Errorf("set tags: %w", err)
+		}
+	}
+	if len(envVars) > 0 {
+		if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
+			return fmt.Errorf("set env vars: %w", err)
+		}
+	}
+	if len(constraints.Inputs) > 0 {
+		if err := db.SetJobInputs(database, jobID, constraints.Inputs); err != nil {
+			return fmt.Errorf("set inputs: %w", err)
+		}
+	}
+	if len(outputs) > 0 {
+		if err := db.SetJobOutputs(database, jobID, outputs); err != nil {
+			return fmt.Errorf("set outputs: %w", err)
+		}
+	}
+	if len(produces) > 0 {
+		if err := db.SetJobProduces(database, jobID, produces); err != nil {
+			return fmt.Errorf("set produces: %w", err)
+		}
+	}
+	if len(needs) > 0 {
+		if err := db.SetJobNeeds(database, jobID, needs); err != nil {
+			return fmt.Errorf("set needs: %w", err)
+		}
+	}
+
+	constraintDesc := placement.DescribeConstraints(constraints)
+	fmt.Fprintf(cmd.OutOrStdout(), "No local host matches constraints: %s\n", constraintDesc)
+	fmt.Fprintf(cmd.OutOrStdout(), "Job #%d accepted (needs rental host)\n", jobID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.\n")
+	return nil
+}
+
 // parseCdPrefix extracts "cd /path && " or "cd /path; " prefix from a command.
 // Returns (directory, remaining_command) if found, or ("", original_command) if not.
 func parseCdPrefix(command string) (dir string, remaining string) {
@@ -870,28 +937,9 @@ func coordinatorReachable(cfg *config.Config) bool {
 // host may be empty (auto-placement) or an explicit host name (passed as a constraint).
 func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
 	// Resolve working directory
-	workingDir := dir
-	if workingDir == "" {
-		// Try automap: if CWD is under a known prefix, use the tilde-relative path
-		home, _ := os.UserHomeDir()
-		cwd, _ := os.Getwd()
-		if home != "" && cwd != "" {
-			for _, prefix := range config.AutomapDirs() {
-				expanded := strings.Replace(prefix, "~", home, 1)
-				if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
-					workingDir = prefix + "/" + rel
-					fmt.Fprintf(os.Stderr, "Auto-detected working directory: %s\n", workingDir)
-					break
-				}
-			}
-		}
-	}
-	if workingDir == "" {
-		var err error
-		workingDir, err = session.DefaultWorkingDir()
-		if err != nil {
-			return fmt.Errorf("get working dir: %w", err)
-		}
+	workingDir, err := resolveWorkingDir(dir, os.Stderr)
+	if err != nil {
+		return fmt.Errorf("get working dir: %w", err)
 	}
 
 	// Sync sources to coordinator (hop 1: CLI → coordinator)

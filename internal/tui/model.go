@@ -933,7 +933,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showCloudMenu = false
 			return m, m.setFlash(fmt.Sprintf("Cloud GPU: %v", msg.err), true)
 		}
-		m.cloudMenuOfferings = msg.offerings
+		offerings := msg.offerings
+		// For needs_rental jobs, no local host can run this job — omit local option
+		if m.cloudMenuJob != nil && m.cloudMenuJob.Status == db.StatusNeedsRental {
+			filtered := offerings[:0]
+			for _, o := range offerings {
+				if o.Source != "local" {
+					filtered = append(filtered, o)
+				}
+			}
+			offerings = filtered
+		}
+		m.cloudMenuOfferings = offerings
 		return m, nil
 
 	case cloudJobLaunchedMsg:

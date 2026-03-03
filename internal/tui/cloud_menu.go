@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -249,8 +250,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 
 		// Persist instance ID to DB immediately
 		if dbErr := db.SetJobVastaiInstance(m.database, job.ID, result.InstanceID); dbErr != nil {
-			// Instance is already running — log but don't fail
-			_ = dbErr
+			log.Printf("cloud: failed to persist Vast.ai instance ID for job %d: %v", job.ID, dbErr)
 		}
 
 		return cloudJobLaunchedMsg{

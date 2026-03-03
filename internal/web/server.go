@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -88,7 +89,9 @@ func (s *Server) Start() (string, error) {
 	}
 
 	go func() {
-		_ = s.server.Serve(listener)
+		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
+			log.Printf("web: server error: %v", err)
+		}
 	}()
 
 	return "http://" + listener.Addr().String(), nil
