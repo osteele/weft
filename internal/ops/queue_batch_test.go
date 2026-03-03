@@ -78,18 +78,17 @@ func TestBatchSyncDeadReportKillsRunningJob(t *testing.T) {
 	}
 }
 
-// TestBatchSyncDeadKillsQueuedJobWithoutSyncedStatus validates that a queued job
-// whose last_synced_status is NOT "queued" (e.g. empty — never synced to remote)
-// IS marked dead. This covers the case where the job exists in the DB but was
-// never actually sent to the remote.
-func TestBatchSyncDeadKillsQueuedJobWithoutSyncedStatus(t *testing.T) {
+// TestBatchSyncDeadProtectsQueuedJobWithSyncedStatus validates that a queued job
+// whose last_synced_status is "queued" (set at INSERT time) is protected from
+// being marked dead by batch sync. This is the normal case for newly-queued jobs.
+func TestBatchSyncDeadProtectsQueuedJobWithSyncedStatus(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "unsent job")
+	jobID, err := db.RecordQueued(database, "batch-host", "/tmp", "echo test", "new job")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
-	// last_synced_status is empty — job was never synced to remote
+	// last_synced_status is "queued" — set at INSERT time by RecordQueuedWithGPU
 
 	job, _ := db.GetJobByID(database, jobID)
 	jobByID := map[int64]*db.Job{jobID: job}
@@ -101,13 +100,13 @@ func TestBatchSyncDeadKillsQueuedJobWithoutSyncedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyBatchStatuses: %v", err)
 	}
-	if updated != 1 {
-		t.Fatalf("expected 1 update, got %d", updated)
+	if updated != 0 {
+		t.Fatalf("expected 0 updates (job should be protected), got %d", updated)
 	}
 
 	result, _ := db.GetJobByID(database, jobID)
-	if result.Status != db.StatusFailed {
-		t.Fatalf("expected status failed, got %s", result.Status)
+	if result.Status != db.StatusQueued {
+		t.Fatalf("expected status queued (protected), got %s", result.Status)
 	}
 }
 

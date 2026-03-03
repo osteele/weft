@@ -1172,6 +1172,59 @@ func TestSetJobInputsOutputs(t *testing.T) {
 	}
 }
 
+func TestRecordQueuedSetsLastSyncedStatus(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.LastSyncedStatus != StatusQueued {
+		t.Errorf("last_synced_status = %q, want %q", job.LastSyncedStatus, StatusQueued)
+	}
+}
+
+func TestUpdateLastSyncedStatusSkipsTerminalJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	for _, terminalStatus := range []string{StatusFailed, StatusDead, StatusKilled, StatusCanceled} {
+		t.Run(terminalStatus, func(t *testing.T) {
+			jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+			if err != nil {
+				t.Fatalf("record queued: %v", err)
+			}
+
+			// Set job to terminal status
+			_, err = database.Exec("UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?",
+				terminalStatus, terminalStatus, jobID)
+			if err != nil {
+				t.Fatalf("set terminal status: %v", err)
+			}
+
+			// Attempt to overwrite last_synced_status
+			err = UpdateLastSyncedStatus(database, jobID, StatusQueued)
+			if err != nil {
+				t.Fatalf("UpdateLastSyncedStatus: %v", err)
+			}
+
+			job, err := GetJobByID(database, jobID)
+			if err != nil {
+				t.Fatalf("get job: %v", err)
+			}
+
+			if job.LastSyncedStatus != terminalStatus {
+				t.Errorf("last_synced_status = %q, want %q (should not be overwritten)", job.LastSyncedStatus, terminalStatus)
+			}
+		})
+	}
+}
+
 func TestJobInputsOutputsEmptyByDefault(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

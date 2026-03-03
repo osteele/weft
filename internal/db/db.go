@@ -916,8 +916,8 @@ func ClearPendingStatus(db *sql.DB, jobID int64) error {
 // UpdateLastSyncedStatus updates the base status (what remote was at last sync).
 func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET last_synced_status = ? WHERE id = ?`,
-		status, jobID,
+		`UPDATE jobs SET last_synced_status = ? WHERE id = ? AND status NOT IN (?, ?, ?, ?)`,
+		status, jobID, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
 	)
 	return err
 }
@@ -1051,9 +1051,9 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu
 	}
 	now := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
-		host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu, last_synced_status)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+		host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu, StatusQueued,
 	)
 	if err != nil {
 		return 0, err
