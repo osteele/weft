@@ -142,6 +142,18 @@ func PerDeviceGPUMemUsedMiB() map[string]DeviceMemInfo {
 	return result
 }
 
+// LogInventory logs the discovered GPU devices for diagnostics.
+func (inv *GPUInventory) LogInventory() {
+	if len(inv.Devices) == 0 {
+		fmt.Println("GPU inventory: no devices discovered")
+		return
+	}
+	fmt.Printf("GPU inventory: %d devices\n", len(inv.Devices))
+	for _, d := range inv.Devices {
+		fmt.Printf("  [%s] %s (%dGB)\n", d.Index, d.Name, d.TotalMemGB)
+	}
+}
+
 // DevicesByClass returns device indices matching a GPU class name.
 // Supports exact model names (e.g. "a100"), generation names (e.g. "ampere"),
 // and minimum generation constraints (e.g. "ampere+").
@@ -245,6 +257,7 @@ func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, mem
 	if bestDevice == "" {
 		return "", false
 	}
+	fmt.Printf("  GPU class '%s': selected device %s (%d MiB free)\n", className, bestDevice, bestFreeMiB)
 	return bestDevice, true
 }
 

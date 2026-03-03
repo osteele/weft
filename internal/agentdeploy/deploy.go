@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -50,6 +51,14 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", tmpPath, tmpPath, remoteAgentPath)
 	if _, stderr, err := ssh.Run(host, installCmd); err != nil {
 		return false, fmt.Errorf("install agent: %s", strings.TrimSpace(stderr))
+	}
+
+	// Signal the running agent to re-exec with the new binary.
+	// Best-effort: if the agent isn't running, the restart command will be
+	// picked up when it next starts.
+	restartCmd := ops.NewRestartCommand()
+	if err := ops.AppendCommand(host, restartCmd, ops.AppendCommandOptions{}); err != nil {
+		fmt.Printf("warning: could not send restart command to %s: %v\n", host, err)
 	}
 
 	return true, nil

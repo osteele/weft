@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/osteele/weft/internal/inventory"
@@ -358,6 +359,126 @@ func TestCanStartGPUJob_ExplicitGPU_ActualMemory_OK(t *testing.T) {
 	}
 	if len(devices) != 1 || devices[0] != "0" {
 		t.Errorf("expected [0], got %v", devices)
+	}
+}
+
+// cool100-like mixed GPU inventory: A100 at indices 0,1 + RTX 2080 Ti at indices 2-9
+func newMixedGPUInventory() *GPUInventory {
+	devices := []GPUInfo{
+		{Index: "0", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+		{Index: "1", Name: "NVIDIA A100-PCIE-80GB", TotalMemGB: 80},
+	}
+	for i := 2; i <= 9; i++ {
+		devices = append(devices, GPUInfo{
+			Index:      fmt.Sprintf("%d", i),
+			Name:       "NVIDIA GeForce RTX 2080 Ti",
+			TotalMemGB: 11,
+		})
+	}
+	return &GPUInventory{Devices: devices}
+}
+
+func TestPickBestGPUForClass_MixedGPUHost_OnlyReturnsMatchingClass(t *testing.T) {
+	inv := newMixedGPUInventory()
+	state := NewState()
+
+	// Mark both A100 devices (0, 1) as occupied
+	state.AddRunning("100", RunningJobState{GPUDevices: []string{"0"}, GPUMemGB: 20})
+	state.AddRunning("101", RunningJobState{GPUDevices: []string{"1"}, GPUMemGB: 20})
+
+	// All A100s busy — must NOT fall back to a 2080 Ti
+	device, ok := inv.PickBestGPUForClass(state, "a100", 20)
+	if ok {
+		t.Errorf("expected no available A100, but got device %s (must not fall back to 2080 Ti)", device)
+	}
+}
+
+func TestCanStartGPUJob_GPUClass_MixedHost_AllClassDevicesBusy(t *testing.T) {
+	inv := newMixedGPUInventory()
+	state := NewState()
+
+	// Mark both A100 devices as busy
+	state.AddRunning("100", RunningJobState{GPUDevices: []string{"0"}, GPUMemGB: 20})
+	state.AddRunning("101", RunningJobState{GPUDevices: []string{"1"}, GPUMemGB: 20})
+
+	job := &RunnerJob{
+		Data: &ops.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"},
+		ID:   200,
+	}
+
+	canStart, devices := inv.CanStartGPUJob(state, job)
+	if canStart {
+		t.Errorf("should not start A100 job when all A100s are busy, but got devices %v", devices)
+	}
+}
+
+func TestCanStartGPUJob_GPUClass_MixedHost_SelectsCorrectDevice(t *testing.T) {
+	inv := newMixedGPUInventory()
+	state := NewState()
+
+	job := &RunnerJob{
+		Data: &ops.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"},
+		ID:   200,
+	}
+
+	canStart, devices := inv.CanStartGPUJob(state, job)
+	if !canStart {
+		t.Fatal("expected job to start on free A100")
+	}
+	if len(devices) != 1 {
+		t.Fatalf("expected exactly 1 device, got %v", devices)
+	}
+
+	// Device must be an A100 index (0 or 1), never a 2080 Ti index (2-9)
+	dev := devices[0]
+	if dev != "0" && dev != "1" {
+		t.Errorf("expected A100 device (0 or 1), got %s — job was assigned to a 2080 Ti", dev)
+	}
+}
+
+func TestDevicesByClass_MixedHost_GenerationConstraint(t *testing.T) {
+	inv := newMixedGPUInventory()
+
+	// "ampere" should match A100s (indices 0, 1) but NOT 2080 Ti (Turing, indices 2-9)
+	devices := inv.DevicesByClass("ampere")
+
+	// Build a set of returned indices for easy checking
+	devSet := make(map[string]bool, len(devices))
+	for _, d := range devices {
+		devSet[d] = true
+	}
+
+	// A100s must be included
+	if !devSet["0"] || !devSet["1"] {
+		t.Errorf("ampere should include A100 indices 0 and 1, got %v", devices)
+	}
+
+	// 2080 Ti indices (2-9) must NOT be included
+	for i := 2; i <= 9; i++ {
+		idx := fmt.Sprintf("%d", i)
+		if devSet[idx] {
+			t.Errorf("ampere should NOT include 2080 Ti at index %s, got %v", idx, devices)
+		}
+	}
+}
+
+// TestGPUClassJob_ResolutionAndEnv_MixedHost verifies that GPU class resolution
+// produces the correct CUDA_VISIBLE_DEVICES value on a mixed-GPU host.
+func TestGPUClassJob_ResolutionAndEnv_MixedHost(t *testing.T) {
+	inv := newMixedGPUInventory()
+	state := NewState()
+
+	job := &ops.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"}
+	memPerDevice := GetJobGPUMem(job, DefaultGPUMemGB)
+	device, ok := inv.PickBestGPUForClass(state, job.GPUClass, memPerDevice)
+	if !ok {
+		t.Fatal("expected A100 device from PickBestGPUForClass")
+	}
+
+	// FormatGPUDeviceEnv must produce a value pointing at an A100
+	cudaEnv := FormatGPUDeviceEnv([]string{device})
+	if cudaEnv != "CUDA_VISIBLE_DEVICES=0" && cudaEnv != "CUDA_VISIBLE_DEVICES=1" {
+		t.Errorf("expected CUDA_VISIBLE_DEVICES=0 or =1, got %q", cudaEnv)
 	}
 }
 

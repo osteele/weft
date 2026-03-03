@@ -97,6 +97,7 @@ func (r *Runner) Run() error {
 
 	// Discover hardware
 	r.gpuInv = DiscoverGPUs()
+	r.gpuInv.LogInventory()
 	r.cpuCount = DetectCPUCount()
 	r.cmdProc = NewCommandProcessor(r.commandsFile, r.queueDir)
 
@@ -377,18 +378,13 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 
 	if len(preResolvedGPUDevices) > 0 {
 		gpuDevices = preResolvedGPUDevices
-		if job.GPUClass != "" {
-			fmt.Printf("  GPU class '%s' resolved to device %s\n", job.GPUClass, gpuDevices[0])
-		}
 	} else if job.GPUClass != "" {
 		memPerDevice := GetJobGPUMem(job, DefaultGPUMemGB)
 		device, ok := r.gpuInv.PickBestGPUForClass(r.state, job.GPUClass, memPerDevice)
 		if !ok {
-			fmt.Printf("Job %d: no available GPU device for class '%s', re-queuing\n", jobID, job.GPUClass)
 			return errRequeue
 		}
 		gpuDevices = []string{device}
-		fmt.Printf("  GPU class '%s' resolved to device %s\n", job.GPUClass, device)
 	} else {
 		gpuDevices = GetJobGPUDevices(job)
 	}
@@ -412,7 +408,8 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 
 	// Inject resolved GPU device
 	if len(gpuDevices) > 0 && job.GPUClass != "" {
-		envVars = append(envVars, FormatGPUDeviceEnv(gpuDevices))
+		cudaEnv := FormatGPUDeviceEnv(gpuDevices)
+		envVars = append(envVars, cudaEnv)
 	}
 
 	// Start the process

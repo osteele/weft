@@ -1025,6 +1025,53 @@ func TestScoreHosts_GPUClass_BackwardCompat(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_GPUClass_A100_MixedHost_OnlyCountsMatchingGPUs(t *testing.T) {
+	db := setupTestDB(t)
+
+	// cool100 has A100s at indices 0-1 and 2080 Tis at indices 2-9.
+	// Simulate: A100s are full (0 MiB free) but 2080 Tis have plenty free.
+	// With GPUClass "a100", scoring should only consider A100 devices.
+	metrics := map[string]*HostMetrics{
+		"cool100": {
+			GPUDeviceFreeMemMiB: map[string]int64{
+				"0": 0,         // A100 #0: full
+				"1": 0,         // A100 #1: full
+				"2": 10 * 1024, // 2080 Ti: 10GB free
+				"3": 10 * 1024,
+				"4": 10 * 1024,
+				"5": 10 * 1024,
+				"6": 10 * 1024,
+				"7": 10 * 1024,
+				"8": 10 * 1024,
+				"9": 10 * 1024,
+			},
+		},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100 := findScore(scores, "cool100")
+	if !cool100.Eligible {
+		t.Fatal("cool100 should be eligible (has A100s)")
+	}
+
+	// With both A100s full and GPUClass "a100", scoring must show 0/2 A100s
+	// have enough VRAM — the 2080 Ti free memory should NOT inflate the score.
+	hasCorrectVRAMReason := false
+	for _, r := range cool100.Reasons {
+		// Expect "0/2 a100s have enough free VRAM"
+		if strings.Contains(r, "0/2") && strings.Contains(r, "VRAM") {
+			hasCorrectVRAMReason = true
+		}
+	}
+	if !hasCorrectVRAMReason {
+		t.Errorf("cool100 should report 0/2 A100s with enough VRAM (2080 Tis should not count), got reasons: %v", cool100.Reasons)
+	}
+}
+
 func findScore(scores []Score, host string) Score {
 	for _, s := range scores {
 		if s.Host == host {
