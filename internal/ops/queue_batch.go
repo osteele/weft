@@ -137,7 +137,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				updated++
 				continue
 			}
-			if isRecentlyQueuedJob(job) {
+			if isQueuedAndActive(job) {
 				continue
 			}
 			if job.Status != db.StatusDead && job.Status != db.StatusFailed && job.Status != db.StatusKilled && job.Status != db.StatusCanceled {

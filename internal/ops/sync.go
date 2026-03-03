@@ -325,14 +325,6 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncRe
 	return SyncQueueRunnerJobWithProber(database, job, prober, host, opts)
 }
 
-// SyncJobQuick syncs a job with the same logic as SyncJob.
-// Previously optimized for lower latency, now delegates to SyncJob since
-// ControlMaster makes the overhead difference negligible.
-// Kept as a separate entry point to preserve caller intent.
-func SyncJobQuick(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
-	return SyncJob(database, job, opts)
-}
-
 // SyncDraftJob ensures that a job marked as draft has no remote execution state.
 // It removes queued entries or kills running processes before marking the job clean.
 func SyncDraftJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
@@ -419,14 +411,6 @@ func syncDraftTmuxJob(job *db.Job, timeout time.Duration) (SyncResult, error) {
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 	return SyncResult{Updated: true, HostContacted: true}, nil
-}
-
-// appendQueueEntryForJob ensures the queued job exists in the remote queue.
-func appendQueueEntryForJob(database *sql.DB, job *db.Job, timeout time.Duration) error {
-	if err := AppendJobToQueue(job, timeout); err != nil {
-		return err
-	}
-	return db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued)
 }
 
 // startJobFromRecord starts a job using the data stored in the job record.

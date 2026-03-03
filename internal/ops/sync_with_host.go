@@ -3,7 +3,6 @@ package ops
 import (
 	"database/sql"
 
-	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remote"
 )
@@ -183,34 +182,8 @@ func SyncQueueRunnerJobWithProber(
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
-	// Ensure queued job is present in queue if it was recorded locally while host was unreachable.
-	// Check LastSyncedStatus to avoid re-appending jobs that were already synced but not yet
-	// processed by the queue runner (which would cause duplicate entries in the pending array).
-	if inQueueResult == remote.ProbeFalse && job.Status == db.StatusQueued && job.PendingStatus == nil && job.LastSyncedStatus != db.StatusQueued {
-		entry := remote.QueueEntry{
-			JobID:        job.ID,
-			WorkingDir:   job.WorkingDir,
-			Command:      job.Command,
-			Description:  job.Description,
-			EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
-			DepSpec:      job.DepSpec,
-			CPUAllotment: job.CPUAllotment,
-			GPU:          job.GPU,
-			GPUClass:     job.GPUClass,
-			GPUMemGB:     job.GPUMemGB,
-			Tags:         job.Tags,
-			OutputDirs:   job.OutputDirs,
-			Produces:     job.Produces,
-			Needs:        job.Needs,
-		}
-		if err := host.AppendToQueue(entry); err != nil {
-			return SyncResult{HostContacted: true}, err
-		}
-		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
-			return SyncResult{HostContacted: true}, err
-		}
-		return SyncResult{Updated: true, HostContacted: true}, nil
-	}
+	// Queue-ensure for unsynced queued jobs is now handled by
+	// ensureQueuedJobsOnRemote in SyncHost, which runs after all sync paths.
 
 	// Only mark dead if ALL probes returned definitive false (not unknown)
 	allDefinitelyFalse := completedResult == remote.ProbeFalse &&
@@ -235,7 +208,7 @@ func SyncQueueRunnerJobWithProber(
 				return SyncResult{Updated: true, HostContacted: true}, nil
 			}
 		}
-		if isRecentlyQueuedJob(job) {
+		if isQueuedAndActive(job) {
 			return SyncResult{HostContacted: true}, nil
 		}
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
@@ -249,12 +222,12 @@ func SyncQueueRunnerJobWithProber(
 	return SyncResult{HostContacted: hostReachable}, nil
 }
 
-// isRecentlyQueuedJob returns true if the job was queued locally and synced to the
-// remote queue, but may not yet be processed by the queue runner. Callers should
-// avoid marking such jobs as dead — the runner may simply not have read the
-// commands file yet.
-func isRecentlyQueuedJob(job *db.Job) bool {
-	return job.Status == db.StatusQueued && job.LastSyncedStatus == db.StatusQueued
+// isQueuedAndActive returns true if the job is queued locally without pending
+// operations. Such jobs should not be marked dead — they are either waiting
+// for the queue runner to process them, or waiting for ensureQueuedJobsOnRemote
+// (in SyncHost) to push them to the remote queue.
+func isQueuedAndActive(job *db.Job) bool {
+	return job.Status == db.StatusQueued && job.PendingStatus == nil
 }
 
 // applyGPUDevicesFromMetadata extracts GPU device info from a pre-fetched metadata

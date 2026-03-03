@@ -486,7 +486,10 @@ func TestSyncQueueRunnerJobUsesMetadataEndTime(t *testing.T) {
 	}
 }
 
-func TestSyncQueueRunnerJobPreservesGPUFields(t *testing.T) {
+// TestSyncQueueRunnerJobProtectsUnsyncedQueuedJob verifies that an unsynced queued
+// job is NOT marked dead when all probes return false. The actual queue-ensure
+// happens in ensureQueuedJobsOnRemote (called from SyncHost).
+func TestSyncQueueRunnerJobProtectsUnsyncedQueuedJob(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueued(database, "gpu-host", "/tmp", "python train.py", "gpu job")
@@ -494,21 +497,12 @@ func TestSyncQueueRunnerJobPreservesGPUFields(t *testing.T) {
 		t.Fatalf("record queued job: %v", err)
 	}
 
-	// Set GPU and resource fields via SQL (RecordQueued doesn't set these)
-	_, err = database.Exec(
-		`UPDATE jobs SET gpu='2', gpu_class='a100', gpu_mem_gb=80,
-		 output_dirs='["out/"]', produces='["model.pt"]', needs='["data.csv:1"]'
-		 WHERE id = ?`, jobID)
-	if err != nil {
-		t.Fatalf("update GPU fields: %v", err)
-	}
-
 	job, err := db.GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
 
-	// All probes false triggers the "not in queue, re-append" path
+	// All probes false — job not yet on remote
 	prober := &remote.MockProber{
 		CompletedResult: remote.ProbeFalse,
 		CurrentResult:   remote.ProbeFalse,
@@ -522,32 +516,19 @@ func TestSyncQueueRunnerJobPreservesGPUFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
 	}
-	if !syncResult.Updated {
-		t.Fatalf("expected sync to re-append the job")
+
+	// Job should NOT be updated (not marked dead)
+	if syncResult.Updated {
+		t.Fatal("expected sync NOT to update the job (should be protected as recently queued)")
+	}
+	if !syncResult.HostContacted {
+		t.Fatal("expected HostContacted to be true")
 	}
 
-	if len(host.AppendCalls) != 1 {
-		t.Fatalf("expected 1 AppendToQueue call, got %d", len(host.AppendCalls))
-	}
-
-	entry := host.AppendCalls[0]
-	if entry.GPU != "2" {
-		t.Errorf("GPU: got %q, want %q", entry.GPU, "2")
-	}
-	if entry.GPUClass != "a100" {
-		t.Errorf("GPUClass: got %q, want %q", entry.GPUClass, "a100")
-	}
-	if entry.GPUMemGB == nil || *entry.GPUMemGB != 80 {
-		t.Errorf("GPUMemGB: got %v, want 80", entry.GPUMemGB)
-	}
-	if len(entry.OutputDirs) != 1 || entry.OutputDirs[0] != "out/" {
-		t.Errorf("OutputDirs: got %v, want [out/]", entry.OutputDirs)
-	}
-	if len(entry.Produces) != 1 || entry.Produces[0] != "model.pt" {
-		t.Errorf("Produces: got %v, want [model.pt]", entry.Produces)
-	}
-	if len(entry.Needs) != 1 || entry.Needs[0] != "data.csv:1" {
-		t.Errorf("Needs: got %v, want [data.csv:1]", entry.Needs)
+	// Verify job is still queued
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusQueued {
+		t.Errorf("expected job to remain queued, got %s", updated.Status)
 	}
 }
 

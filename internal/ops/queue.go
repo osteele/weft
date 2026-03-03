@@ -359,8 +359,7 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		}, nil
 	}
 
-	syncResult, err := SyncJobQuick(database, job, SyncOptions{Timeout: opts.Timeout})
-	if err != nil {
+	if err := AppendJobToQueue(job, opts.Timeout); err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return Result{
 				Success:  true,
@@ -371,14 +370,8 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		}
 		return Result{}, err
 	}
-
-	if !syncResult.HostContacted {
-		return Result{
-			Success:  true,
-			Deferred: true,
-			JobID:    jobID,
-			Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
-		}, nil
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		return Result{}, err
 	}
 
 	return Result{

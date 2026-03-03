@@ -803,7 +803,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 		hostSynced := false
 		syncOpts := ops.DefaultSyncOptions()
 		for _, job := range activeJobsByHost[host] {
-			syncResult, err := ops.SyncJobQuick(m.db, job, syncOpts)
+			syncResult, err := ops.SyncJob(m.db, job, syncOpts)
 			if err != nil {
 				oplog.LogJob(oplog.OpJobSync, job.ID, job.Host,
 					oplog.WithDetail("sync-quick-error"),

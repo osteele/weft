@@ -85,7 +85,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			// Don't fail entire sync for batch error
 		}
 		for _, job := range tmuxJobs {
-			syncResult, err := SyncJobQuick(database, job, syncOpts)
+			syncResult, err := SyncJob(database, job, syncOpts)
 			if err != nil {
 				continue
 			}
@@ -129,6 +129,16 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 					result.Updated++
 				}
 			}
+		}
+	}
+
+	// Ensure locally-queued jobs exist on the remote queue.
+	// This catches jobs that were recorded locally while the host was
+	// unreachable, or that the batch status path couldn't detect.
+	if result.HostContacted {
+		ensured, err := ensureQueuedJobsOnRemote(database, activeJobs, timeout)
+		if err == nil {
+			result.Updated += ensured
 		}
 	}
 
@@ -280,6 +290,27 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	}
 
 	return result, nil
+}
+
+// ensureQueuedJobsOnRemote appends locally-queued jobs to the remote queue
+// when they haven't been synced yet. This handles the case where a job was
+// recorded locally while the host was unreachable, or where the batch status
+// sync path didn't push the job to the remote queue.
+func ensureQueuedJobsOnRemote(database *sql.DB, jobs []*db.Job, timeout time.Duration) (int, error) {
+	ensured := 0
+	for _, job := range jobs {
+		if job.Status != db.StatusQueued || job.PendingStatus != nil || job.LastSyncedStatus == db.StatusQueued {
+			continue
+		}
+		if err := AppendJobToQueue(job, timeout); err != nil {
+			return ensured, err
+		}
+		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
+			return ensured, err
+		}
+		ensured++
+	}
+	return ensured, nil
 }
 
 // scanHFCacheDuringSync scans the remote HF cache and records discovered assets
