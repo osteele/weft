@@ -1051,9 +1051,9 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu
 	}
 	now := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu, last_synced_status)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-		host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu, StatusQueued,
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
+		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+		host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu,
 	)
 	if err != nil {
 		return 0, err

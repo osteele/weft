@@ -1185,8 +1185,8 @@ func TestRecordQueuedSetsLastSyncedStatus(t *testing.T) {
 		t.Fatalf("get job: %v", err)
 	}
 
-	if job.LastSyncedStatus != StatusQueued {
-		t.Errorf("last_synced_status = %q, want %q", job.LastSyncedStatus, StatusQueued)
+	if job.LastSyncedStatus != "" {
+		t.Errorf("last_synced_status = %q, want empty", job.LastSyncedStatus)
 	}
 }
 

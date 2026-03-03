@@ -79,8 +79,8 @@ func TestBatchSyncDeadReportKillsRunningJob(t *testing.T) {
 }
 
 // TestBatchSyncDeadProtectsQueuedJobWithSyncedStatus validates that a queued job
-// whose last_synced_status is "queued" (set at INSERT time) is protected from
-// being marked dead by batch sync. This is the normal case for newly-queued jobs.
+// whose last_synced_status is "queued" (set after first sync) is protected from
+// being marked dead by batch sync. This is the normal case for synced jobs.
 func TestBatchSyncDeadProtectsQueuedJobWithSyncedStatus(t *testing.T) {
 	database := db.SetupTestDB(t)
 
@@ -88,7 +88,10 @@ func TestBatchSyncDeadProtectsQueuedJobWithSyncedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
-	// last_synced_status is "queued" — set at INSERT time by RecordQueuedWithGPU
+	// Simulate the job having been synced to the remote queue
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
 
 	job, _ := db.GetJobByID(database, jobID)
 	jobByID := map[int64]*db.Job{jobID: job}
