@@ -109,6 +109,33 @@ func TestScoreHosts_GPUMemory(t *testing.T) {
 	}
 }
 
+func TestScoreHosts_GPUMemOnly_UsesGPUScoring(t *testing.T) {
+	db := setupTestDB(t)
+	// When only GPUMemGB is set (no GPUClass), scoring should use GPU performance
+	// factors, not CPU factors. This ensures cool30 (gpu_factor=0.3) is scored
+	// as a GPU host rather than being penalized by its low cpu_factor=0.5.
+	scores, err := ScoreHosts(db, Constraints{GPUMemGB: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool30":
+			if !s.Eligible {
+				t.Error("cool30 should be eligible (RTX 3090 has 24GB)")
+			}
+			if !strings.Contains(s.staticPerfReason, "GPU") {
+				t.Errorf("cool30 should use GPU perf scoring, got %q", s.staticPerfReason)
+			}
+		case "cool100":
+			if !s.Eligible {
+				t.Error("cool100 should be eligible (A100 has 80GB)")
+			}
+		}
+	}
+}
+
 func TestScoreHosts_DataLocality(t *testing.T) {
 	db := setupTestDB(t)
 	now := time.Now()
@@ -997,6 +1024,56 @@ func TestScoreHosts_GPUGeneration_ModelPromotedToGen(t *testing.T) {
 		case "studio":
 			if s.Eligible {
 				t.Error("studio should not be eligible for a100+ (cross-family)")
+			}
+		}
+	}
+}
+
+func TestScoreHosts_GPUFamily_Nvidia(t *testing.T) {
+	db := setupTestDB(t)
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "nvidia"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "cool100":
+			if !s.Eligible {
+				t.Error("cool100 should be eligible for nvidia (has A100 and RTX 2080 Ti)")
+			}
+		case "cool30":
+			if !s.Eligible {
+				t.Error("cool30 should be eligible for nvidia (has RTX 3090)")
+			}
+		case "studio":
+			if s.Eligible {
+				t.Error("studio should not be eligible for nvidia (has Apple M2 Max)")
+			}
+		}
+	}
+}
+
+func TestScoreHosts_GPUFamily_Apple(t *testing.T) {
+	db := setupTestDB(t)
+	scores, err := ScoreHosts(db, Constraints{GPUClass: "apple"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		switch s.Host {
+		case "studio":
+			if !s.Eligible {
+				t.Error("studio should be eligible for apple (has M2 Max)")
+			}
+		case "cool100":
+			if s.Eligible {
+				t.Error("cool100 should not be eligible for apple (has NVIDIA GPUs)")
+			}
+		case "cool30":
+			if s.Eligible {
+				t.Error("cool30 should not be eligible for apple (has NVIDIA GPU)")
 			}
 		}
 	}

@@ -374,13 +374,13 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		}
 
 		// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
-		if c.GPUClass != "" && len(metrics.GPUDeviceFreeMemMiB) > 0 {
+		if (c.GPUClass != "" || c.GPUMemGB > 0) && len(metrics.GPUDeviceFreeMemMiB) > 0 {
 			s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB, gc)
 		}
 	}
 
 	// Soft factor: performance multiplier (weighted by cpu_factor or gpu_factor)
-	if c.GPUClass != "" {
+	if c.GPUClass != "" || c.GPUMemGB > 0 {
 		applyPerfScoring(&s, "GPU", host.GPUPerformance(), 5.0)
 	} else {
 		applyPerfScoring(&s, "CPU", host.CPUPerformance(), 3.0)
