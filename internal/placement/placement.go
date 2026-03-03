@@ -127,6 +127,8 @@ type Score struct {
 	Reasons          []string
 	staticPerfDelta  float64 // score delta from cpu_factor/gpu_factor, tracked for reversal
 	staticPerfReason string  // the exact reason string added with the delta
+	queuePenalty     float64 // score delta from queue depth, tracked for MC reversal
+	queueReason      string  // the exact reason string added with the penalty
 }
 
 // ScoreHosts evaluates all inventory hosts against the given constraints
@@ -190,7 +192,14 @@ func ScoreHostsWithPredictor(db *sql.DB, constraints Constraints, metrics map[st
 		applyResourceSoftConstraints(&scores[i], p, m)
 	}
 
-	applyDurationScoring(scores, predictions)
+	// Try Monte Carlo scoring first; fall back to deterministic if <2 hosts have predictions
+	estimates := SimulateCompletionTimes(scores, predictions, metrics, DefaultMonteCarloConfig())
+	if len(estimates) >= 2 {
+		ApplyMonteCarloScoring(scores, estimates)
+	} else {
+		applyDurationScoring(scores, predictions)
+	}
+
 	sortScores(scores)
 	return scores, nil
 }
@@ -396,7 +405,10 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		if metrics.QueueDepth > 0 {
 			queuePenalty := math.Min(float64(metrics.QueueDepth)*0.5, 3.0)
 			s.Total -= queuePenalty
-			s.Reasons = append(s.Reasons, fmt.Sprintf("%d jobs queued", metrics.QueueDepth))
+			s.queuePenalty = queuePenalty
+			reason := fmt.Sprintf("%d jobs queued", metrics.QueueDepth)
+			s.queueReason = reason
+			s.Reasons = append(s.Reasons, reason)
 		}
 
 		// GPU jobs queued: -0.5 per queued GPU job (up to -2)

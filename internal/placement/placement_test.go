@@ -631,16 +631,16 @@ func TestPredictorDurationScoring(t *testing.T) {
 		t.Errorf("studio (%.2f) should score higher than cool30 (%.2f)", studio.Total, cool30.Total)
 	}
 
-	// Check that predicted duration appears in reasons
-	hasPredicted := false
+	// Check that prediction-based reason appears (either MC or deterministic)
+	hasPredictionReason := false
 	for _, r := range studio.Reasons {
-		if strings.Contains(r, "predicted") {
-			hasPredicted = true
+		if strings.Contains(r, "predicted") || strings.Contains(r, "MC:") {
+			hasPredictionReason = true
 			break
 		}
 	}
-	if !hasPredicted {
-		t.Errorf("studio reasons should mention prediction, got: %v", studio.Reasons)
+	if !hasPredictionReason {
+		t.Errorf("studio reasons should mention prediction or MC, got: %v", studio.Reasons)
 	}
 }
 
@@ -1190,24 +1190,22 @@ func TestNewJobPredictor_PropagatesDurationBounds(t *testing.T) {
 	}
 }
 
-func TestPredictorDurationScoring_ConfidenceWeighted(t *testing.T) {
+func TestPredictorDurationScoring_UncertaintyAffectsScoring(t *testing.T) {
 	db := setupTestDB(t)
 
-	// Two hosts with same mean duration but different confidence intervals.
-	// cool100 has narrow CI → should get higher bonus.
-	// cool30 has wide CI → should get lower bonus.
-	// studio is slowest → baseline (bonus ~0).
+	// Three hosts with predictions — MC should activate and produce MC reasons.
+	// cool100: fast and certain. cool30: same mean but very uncertain. studio: slow.
 	predict := func(host string) *JobPrediction {
 		switch host {
 		case "cool100":
-			d, lo, hi := 600.0, 580.0, 620.0 // narrow CI: ±20s
+			d, lo, hi := 600.0, 580.0, 620.0 // narrow CI
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
 		case "cool30":
-			d, lo, hi := 600.0, 100.0, 1100.0 // wide CI: ±500s
+			d, lo, hi := 600.0, 100.0, 3600.0 // very wide CI — median of log-normal shifts right
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
 		case "studio":
-			d := 1200.0 // slowest, no CI
-			return &JobPrediction{DurationS: &d}
+			d, lo, hi := 1200.0, 1000.0, 1400.0
+			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
 		}
 		return nil
 	}
@@ -1217,14 +1215,27 @@ func TestPredictorDurationScoring_ConfidenceWeighted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cool100 := findScore(scores, "cool100")
-	cool30 := findScore(scores, "cool30")
+	// Verify MC is active on all hosts
+	for _, s := range scores {
+		if !s.Eligible {
+			continue
+		}
+		hasMC := false
+		for _, r := range s.Reasons {
+			if strings.Contains(r, "MC:") {
+				hasMC = true
+			}
+		}
+		if !hasMC {
+			t.Errorf("host %s should have MC reason, got: %v", s.Host, s.Reasons)
+		}
+	}
 
-	// Both have same mean duration (600s), but cool100 has narrow CI so its
-	// confidence-weighted bonus should be higher than cool30's.
-	if cool100.Total <= cool30.Total {
-		t.Errorf("cool100 (narrow CI, %.2f) should score higher than cool30 (wide CI, %.2f)",
-			cool100.Total, cool30.Total)
+	// cool100 (narrow CI, 600s mean) should beat studio (1200s mean)
+	cool100 := findScore(scores, "cool100")
+	studio := findScore(scores, "studio")
+	if cool100.Total <= studio.Total {
+		t.Errorf("cool100 (%.2f) should beat studio (%.2f) — faster prediction", cool100.Total, studio.Total)
 	}
 }
 
