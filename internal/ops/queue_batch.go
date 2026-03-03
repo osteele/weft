@@ -43,6 +43,11 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 		return 0, err
 	}
 
+	return applyBatchStatuses(database, jobIDs, jobByID, statuses, timeout)
+}
+
+// applyBatchStatuses processes pre-fetched batch statuses for a set of jobs.
+func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.Job, statuses map[int64]queueBatchStatus, timeout time.Duration) (int, error) {
 	var updated int
 	for _, jobID := range jobIDs {
 		job := jobByID[jobID]
@@ -130,6 +135,9 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 					return updated, err
 				}
 				updated++
+				continue
+			}
+			if isRecentlyQueuedJob(job) {
 				continue
 			}
 			if job.Status != db.StatusDead && job.Status != db.StatusFailed && job.Status != db.StatusKilled && job.Status != db.StatusCanceled {

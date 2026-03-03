@@ -779,3 +779,46 @@ func TestSyncDraftJobKillsTmuxSession(t *testing.T) {
 		t.Fatalf("expected last synced draft, got %s", updated.LastSyncedStatus)
 	}
 }
+
+// TestSyncQueueRunnerJobDoesNotMarkRecentlyQueuedDead validates that a queued job
+// whose last_synced_status is "queued" is NOT marked dead when all probes return false.
+// This protects against the race where a job was appended to the commands file but
+// the queue runner hasn't processed it into its state yet.
+func TestSyncQueueRunnerJobDoesNotMarkRecentlyQueuedDead(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "queue-host", "/tmp", "echo test", "recently queued")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	// Simulate that the job was already synced to the remote queue
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("update last synced status: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+
+	// All probes false — job not in runner state, no process, no status file
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeFalse,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeFalse,
+		PausedResult:    remote.ProbeFalse,
+	}
+	host := &remote.MockHost{}
+
+	syncResult, err := SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second, SkipSamples: true})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
+	}
+	if syncResult.Updated {
+		t.Fatalf("expected no update for recently-queued job")
+	}
+
+	// Job should still be queued, not failed
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusQueued {
+		t.Fatalf("expected queued status, got %s", updated.Status)
+	}
+}

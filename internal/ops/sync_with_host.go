@@ -235,10 +235,7 @@ func SyncQueueRunnerJobWithProber(
 				return SyncResult{Updated: true, HostContacted: true}, nil
 			}
 		}
-		// Don't mark as dead if job was just queued locally - queue runner may not have processed it yet.
-		// This handles the race condition where we just sent an add command but the queue runner
-		// hasn't processed it, and the status file doesn't exist yet.
-		if job.Status == db.StatusQueued && job.LastSyncedStatus == db.StatusQueued {
+		if isRecentlyQueuedJob(job) {
 			return SyncResult{HostContacted: true}, nil
 		}
 		if err := db.MarkDeadByID(database, job.ID); err != nil {
@@ -250,6 +247,14 @@ func SyncQueueRunnerJobWithProber(
 	// At least one probe returned unknown - don't change status
 	// Return whether host was actually reachable
 	return SyncResult{HostContacted: hostReachable}, nil
+}
+
+// isRecentlyQueuedJob returns true if the job was queued locally and synced to the
+// remote queue, but may not yet be processed by the queue runner. Callers should
+// avoid marking such jobs as dead — the runner may simply not have read the
+// commands file yet.
+func isRecentlyQueuedJob(job *db.Job) bool {
+	return job.Status == db.StatusQueued && job.LastSyncedStatus == db.StatusQueued
 }
 
 // applyGPUDevicesFromMetadata extracts GPU device info from a pre-fetched metadata
