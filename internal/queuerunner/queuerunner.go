@@ -25,10 +25,15 @@ func RunnerCommand(envPrefix string) string {
 	return fmt.Sprintf("%s%s run-queue %s", envPrefix, agentBinaryPath, ops.DefaultQueueName)
 }
 
+// RunnerSessionName returns the tmux session name for the queue runner.
+func RunnerSessionName() string {
+	return fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName)
+}
+
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
 // Returns true when a new runner was started.
 func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
-	session := fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName)
+	session := RunnerSessionName()
 
 	exists, err := ssh.TmuxSessionExists(host, session)
 	if err != nil {
@@ -74,7 +79,7 @@ func (r *Runner) Host() string { return r.host }
 func (r *Runner) Queue() string { return ops.DefaultQueueName }
 
 // SessionName returns the tmux session associated with this runner.
-func (r *Runner) SessionName() string { return fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName) }
+func (r *Runner) SessionName() string { return RunnerSessionName() }
 
 // EnsureStarted ensures the runner is active, starting tmux if needed.
 func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {

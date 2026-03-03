@@ -501,6 +501,9 @@ func printJobStatusLine(job *db.Job) {
 func printJobStatus(job *db.Job, exitOnComplete bool) {
 	fmt.Printf("Job ID:   %d\n", job.ID)
 	fmt.Printf("Host:     %s\n", job.Host)
+	if gpuDev := job.GPUDevice(); gpuDev != "" {
+		fmt.Printf("GPU:      %s\n", gpuDev)
+	}
 	fmt.Printf("Status:   %s\n", job.Status)
 
 	if job.Description != "" {
@@ -686,7 +689,7 @@ func printJobSummary(job *db.Job) {
 	if len(desc) > 60 {
 		desc = desc[:57] + "..."
 	}
-	fmt.Printf("  %4d  %-10s  %s\n", job.ID, job.Host, desc)
+	fmt.Printf("  %4d  %-14s  %s\n", job.ID, job.HostWithGPU(), desc)
 }
 
 func printFailedJobSummary(job *db.Job) {

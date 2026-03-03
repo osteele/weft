@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/osteele/weft/internal/ops"
@@ -208,6 +209,142 @@ func TestProcessCommands_MissingFile(t *testing.T) {
 	if result.StopRequested || result.RestartRequested {
 		t.Error("expected no-op for missing file")
 	}
+}
+
+func intPtr(n int) *int { return &n }
+
+// assertResourceFields checks all GPU and artifact fields on a CommandJob.
+func assertResourceFields(t *testing.T, got *ops.CommandJob, gpu, gpuClass string, gpuMem int, outputDirs, produces, needs []string) {
+	t.Helper()
+	if got.GPU != gpu {
+		t.Errorf("GPU: got %q, want %q", got.GPU, gpu)
+	}
+	if got.GPUClass != gpuClass {
+		t.Errorf("GPUClass: got %q, want %q", got.GPUClass, gpuClass)
+	}
+	if got.GPUMem == nil || *got.GPUMem != gpuMem {
+		t.Errorf("GPUMem: got %v, want %d", got.GPUMem, gpuMem)
+	}
+	if !slices.Equal(got.OutputDirs, outputDirs) {
+		t.Errorf("OutputDirs: got %v, want %v", got.OutputDirs, outputDirs)
+	}
+	if !slices.Equal(got.Produces, produces) {
+		t.Errorf("Produces: got %v, want %v", got.Produces, produces)
+	}
+	if !slices.Equal(got.Needs, needs) {
+		t.Errorf("Needs: got %v, want %v", got.Needs, needs)
+	}
+}
+
+func TestWriteJobFileMergesGPUFields(t *testing.T) {
+	dir := t.TempDir()
+
+	// First write: all GPU fields populated
+	job1 := &ops.CommandJob{
+		ID:         50,
+		Cmd:        "python train.py",
+		GPU:        "2",
+		GPUClass:   "a100",
+		GPUMem:     intPtr(80),
+		OutputDirs: []string{"out/"},
+		Produces:   []string{"model.pt"},
+		Needs:      []string{"data.csv:1"},
+	}
+	if err := writeJobFile(dir, job1); err != nil {
+		t.Fatalf("first writeJobFile: %v", err)
+	}
+
+	// Second write: empty GPU fields (simulating duplicate add without resource data)
+	job2 := &ops.CommandJob{
+		ID:  50,
+		Cmd: "python train.py",
+	}
+	if err := writeJobFile(dir, job2); err != nil {
+		t.Fatalf("second writeJobFile: %v", err)
+	}
+
+	// Read back and verify GPU fields were preserved from first write
+	got, err := ReadJobFile(dir, 50)
+	if err != nil {
+		t.Fatalf("ReadJobFile: %v", err)
+	}
+	assertResourceFields(t, got, "2", "a100", 80, []string{"out/"}, []string{"model.pt"}, []string{"data.csv:1"})
+}
+
+func TestWriteJobFileNewDataTakesPrecedence(t *testing.T) {
+	dir := t.TempDir()
+
+	// First write
+	job1 := &ops.CommandJob{
+		ID:       50,
+		Cmd:      "python train.py",
+		GPU:      "2",
+		GPUClass: "a100",
+		GPUMem:   intPtr(80),
+	}
+	if err := writeJobFile(dir, job1); err != nil {
+		t.Fatalf("first writeJobFile: %v", err)
+	}
+
+	// Second write with different GPU fields — new non-empty data wins
+	job2 := &ops.CommandJob{
+		ID:       50,
+		Cmd:      "python train.py",
+		GPU:      "3",
+		GPUClass: "h100",
+		GPUMem:   intPtr(40),
+	}
+	if err := writeJobFile(dir, job2); err != nil {
+		t.Fatalf("second writeJobFile: %v", err)
+	}
+
+	got, err := ReadJobFile(dir, 50)
+	if err != nil {
+		t.Fatalf("ReadJobFile: %v", err)
+	}
+	if got.GPU != "3" {
+		t.Errorf("GPU: got %q, want %q", got.GPU, "3")
+	}
+	if got.GPUClass != "h100" {
+		t.Errorf("GPUClass: got %q, want %q", got.GPUClass, "h100")
+	}
+	if got.GPUMem == nil || *got.GPUMem != 40 {
+		t.Errorf("GPUMem: got %v, want 40", got.GPUMem)
+	}
+}
+
+func TestProcessCommands_AddWithGPUFields(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	cmd := ops.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        ops.OpAdd,
+		Job: &ops.CommandJob{
+			ID:         50,
+			Cmd:        "python train.py",
+			GPU:        "1",
+			GPUClass:   "a100",
+			GPUMem:     intPtr(80),
+			OutputDirs: []string{"out/"},
+			Produces:   []string{"model.pt"},
+			Needs:      []string{"data.csv:1"},
+		},
+	}
+	appendCmd(t, cmdFile, cmd)
+
+	cp := NewCommandProcessor(cmdFile, dir)
+	_, err := cp.ProcessCommands(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadJobFile(dir, 50)
+	if err != nil {
+		t.Fatalf("ReadJobFile: %v", err)
+	}
+	assertResourceFields(t, got, "1", "a100", 80, []string{"out/"}, []string{"model.pt"}, []string{"data.csv:1"})
 }
 
 func appendCmd(t *testing.T, path string, cmd ops.QueueCommand) {

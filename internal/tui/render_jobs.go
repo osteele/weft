@@ -290,7 +290,7 @@ func (m Model) renderJobList(height int) string {
 	}
 
 	// Header
-	header := fmt.Sprintf(" %-4s %-10s %-12s %-12s %-4s %s",
+	header := fmt.Sprintf(" %-4s %-14s %-12s %-12s %-4s %s",
 		"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
 	headerIndex := len(rows)
 	rows = append(rows, headerStyle.Render(header))
@@ -348,11 +348,11 @@ func (m Model) renderJobList(height int) string {
 
 	// Update header based on GPU column visibility
 	if showGPU {
-		header := fmt.Sprintf("  %-4s %-10s %-*s %-12s %-12s %-4s %s",
+		header := fmt.Sprintf("  %-4s %-14s %-*s %-12s %-12s %-4s %s",
 			"ID", "HOST", projectWidth, "PROJECT", "STATUS", "TIME", "GPU", "DESCRIPTION")
 		rows[headerIndex] = headerStyle.Render(header)
 	} else {
-		header := fmt.Sprintf("  %-4s %-10s %-*s %-12s %-12s %s",
+		header := fmt.Sprintf("  %-4s %-14s %-*s %-12s %-12s %s",
 			"ID", "HOST", projectWidth, "PROJECT", "STATUS", "TIME", "DESCRIPTION")
 		rows[headerIndex] = headerStyle.Render(header)
 	}
@@ -363,7 +363,12 @@ func (m Model) renderJobList(height int) string {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
-		hostCol := fmt.Sprintf("%-10s", truncate(job.Host, 10))
+		gpuDev := job.GPUDevice()
+		hostStr := job.Host
+		if gpuDev != "" {
+			hostStr = job.HostWithGPU()
+		}
+		hostCol := fmt.Sprintf("%-14s", truncate(hostStr, 14))
 		statusCol := status + strings.Repeat(" ", max(0, 12-lipgloss.Width(status)))
 		timeColFormatted := fmt.Sprintf("%-12s", timeCol)
 
@@ -381,13 +386,9 @@ func (m Model) renderJobList(height int) string {
 		prefixPlain := fmt.Sprintf("  %-4d %s %s %s %s ", job.ID, hostCol, projectCol, statusCol, timeColFormatted)
 		gpuField := ""
 		if showGPU {
-			gpu := job.GetGPU()
+			gpu := gpuDev
 			if gpu == "" && job.GPUClass != "" {
-				if job.Metadata != nil && job.Metadata.Resource != nil && job.Metadata.Resource.GPUDevices != "" {
-					gpu = job.Metadata.Resource.GPUDevices
-				} else {
-					gpu = job.GPUClass
-				}
+				gpu = job.GPUClass
 			}
 			if gpu == "" {
 				gpu = "—"

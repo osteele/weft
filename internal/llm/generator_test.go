@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -8,6 +9,10 @@ import (
 )
 
 func TestGeneratorIntegration(t *testing.T) {
+	if os.Getenv("LLM_TEST") == "" {
+		t.Skip("set LLM_TEST=1 to run LLM integration tests")
+	}
+
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
 		t.Skip("LLM backend not available")
@@ -66,6 +71,10 @@ func TestGeneratorIntegration(t *testing.T) {
 }
 
 func TestBackgroundGenerator(t *testing.T) {
+	if os.Getenv("LLM_TEST") == "" {
+		t.Skip("set LLM_TEST=1 to run LLM integration tests")
+	}
+
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
 		t.Skip("LLM backend not available")

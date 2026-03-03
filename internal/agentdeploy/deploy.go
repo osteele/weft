@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -39,10 +39,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, fmt.Errorf("create remote bin dir: %s", strings.TrimSpace(stderr))
 	}
 
-	// Deploy via temp file + atomic rename. On Linux, you can't overwrite a
-	// running binary, but rename(2) atomically replaces the directory entry
-	// while the old inode remains open for the running process. When the runner
-	// receives a restart command and calls syscall.Exec, it picks up the new binary.
+	// Deploy via temp file + atomic rename to avoid partial writes.
 	tmpPath := remoteAgentPath + ".tmp"
 	if err := ssh.CopyTo(binaryPath, host, tmpPath); err != nil {
 		return false, fmt.Errorf("deploy agent to %s: %w", host, err)
@@ -53,12 +50,12 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, fmt.Errorf("install agent: %s", strings.TrimSpace(stderr))
 	}
 
-	// Signal the running agent to re-exec with the new binary.
-	// Best-effort: if the agent isn't running, the restart command will be
-	// picked up when it next starts.
-	restartCmd := ops.NewRestartCommand()
-	if err := ops.AppendCommand(host, restartCmd, ops.AppendCommandOptions{}); err != nil {
-		fmt.Printf("warning: could not send restart command to %s: %v\n", host, err)
+	// Kill the runner tmux session so EnsureRunnerStarted (called later)
+	// recreates it with the new binary. We don't rely on the restart command +
+	// syscall.Exec because NFS silly-rename keeps the old inode open, causing
+	// the re-exec'd process to still run the old binary.
+	if err := ssh.TmuxKillSession(host, queuerunner.RunnerSessionName()); err != nil {
+		fmt.Printf("warning: failed to kill runner session on %s: %v\n", host, err)
 	}
 
 	return true, nil

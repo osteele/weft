@@ -3,10 +3,15 @@ package llm
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 )
 
 func TestClientAvailability(t *testing.T) {
+	if os.Getenv("LLM_TEST") == "" {
+		t.Skip("set LLM_TEST=1 to run LLM integration tests")
+	}
+
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
 		t.Skip("LLM backend not available")
@@ -15,6 +20,10 @@ func TestClientAvailability(t *testing.T) {
 }
 
 func TestGenerateDescription(t *testing.T) {
+	if os.Getenv("LLM_TEST") == "" {
+		t.Skip("set LLM_TEST=1 to run LLM integration tests")
+	}
+
 	client := NewDefaultClient()
 	if !client.IsAvailable() {
 		t.Skip("LLM backend not available")

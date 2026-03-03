@@ -67,14 +67,20 @@ func (h *SSHHost) AppendToQueue(entry QueueEntry) error {
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Op:        "add",
 		Job: &commandJob{
-			ID:   entry.JobID,
-			Dir:  entry.WorkingDir,
-			Cmd:  entry.Command,
-			Desc: entry.Description,
-			Env:  entry.EnvVars,
-			Deps: entry.DepSpec,
-			CPU:  entry.CPUAllotment,
-			Tags: entry.Tags,
+			ID:         entry.JobID,
+			Dir:        entry.WorkingDir,
+			Cmd:        entry.Command,
+			Desc:       entry.Description,
+			Env:        entry.EnvVars,
+			Deps:       entry.DepSpec,
+			CPU:        entry.CPUAllotment,
+			GPU:        entry.GPU,
+			GPUClass:   entry.GPUClass,
+			GPUMem:     entry.GPUMemGB,
+			Tags:       entry.Tags,
+			OutputDirs: entry.OutputDirs,
+			Produces:   entry.Produces,
+			Needs:      entry.Needs,
 		},
 	}
 
@@ -326,12 +332,18 @@ type queueCommand struct {
 }
 
 type commandJob struct {
-	ID   int64    `json:"id"`
-	Dir  string   `json:"dir,omitempty"`
-	Cmd  string   `json:"cmd"`
-	Desc string   `json:"desc,omitempty"`
-	Env  []string `json:"env,omitempty"`
-	Deps string   `json:"deps,omitempty"`
-	CPU  *int     `json:"cpu,omitempty"`
-	Tags []string `json:"tags,omitempty"`
+	ID         int64    `json:"id"`
+	Dir        string   `json:"dir,omitempty"`
+	Cmd        string   `json:"cmd"`
+	Desc       string   `json:"desc,omitempty"`
+	Env        []string `json:"env,omitempty"`
+	Deps       string   `json:"deps,omitempty"`
+	CPU        *int     `json:"cpu,omitempty"`
+	GPU        string   `json:"gpu,omitempty"`
+	GPUClass   string   `json:"gpu_class,omitempty"`
+	GPUMem     *int     `json:"gpu_mem,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	OutputDirs []string `json:"output_dirs,omitempty"`
+	Produces   []string `json:"produces,omitempty"`
+	Needs      []string `json:"needs,omitempty"`
 }

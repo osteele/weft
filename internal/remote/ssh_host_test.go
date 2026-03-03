@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -454,6 +455,104 @@ func TestGetRecentlyModifiedJobIDsShellCommand(t *testing.T) {
 	if count200 > 1 {
 		t.Errorf("job ID 200 appeared %d times, expected 1 (deduplication failed)", count200)
 	}
+}
+
+// =============================================================================
+// commandJob JSON serialization tests
+// =============================================================================
+
+// TestCommandJobSerializesAllFields verifies that all resource fields on
+// commandJob survive a JSON round-trip. This catches missing or misspelled
+// struct tags.
+func TestCommandJobSerializesAllFields(t *testing.T) {
+	gpuMem := 80
+	cpu := 4
+	job := commandJob{
+		ID:         42,
+		Dir:        "/tmp/train",
+		Cmd:        "python train.py",
+		Desc:       "training run",
+		Env:        []string{"FOO=bar"},
+		Deps:       "10",
+		CPU:        &cpu,
+		GPU:        "0,1",
+		GPUClass:   "a100",
+		GPUMem:     &gpuMem,
+		Tags:       []string{"exclusive", "benchmark"},
+		OutputDirs: []string{"output/", "results/"},
+		Produces:   []string{"output/model.pt"},
+		Needs:      []string{"data.csv:1"},
+	}
+
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+
+	// Verify all expected keys exist with correct values
+	checks := []struct {
+		key  string
+		want interface{}
+	}{
+		{"id", float64(42)},
+		{"dir", "/tmp/train"},
+		{"cmd", "python train.py"},
+		{"desc", "training run"},
+		{"deps", "10"},
+		{"gpu", "0,1"},
+		{"gpu_class", "a100"},
+		{"gpu_mem", float64(80)},
+		{"cpu", float64(4)},
+	}
+	for _, c := range checks {
+		v, ok := m[c.key]
+		if !ok {
+			t.Errorf("missing key %q in JSON output", c.key)
+			continue
+		}
+		if v != c.want {
+			t.Errorf("key %q: got %v, want %v", c.key, v, c.want)
+		}
+	}
+
+	// Verify array fields
+	arrayChecks := []struct {
+		key  string
+		want []string
+	}{
+		{"tags", []string{"exclusive", "benchmark"}},
+		{"output_dirs", []string{"output/", "results/"}},
+		{"produces", []string{"output/model.pt"}},
+		{"needs", []string{"data.csv:1"}},
+		{"env", []string{"FOO=bar"}},
+	}
+	for _, c := range arrayChecks {
+		v, ok := m[c.key]
+		if !ok {
+			t.Errorf("missing key %q in JSON output", c.key)
+			continue
+		}
+		arr, ok := v.([]interface{})
+		if !ok {
+			t.Errorf("key %q: expected array, got %T", c.key, v)
+			continue
+		}
+		if len(arr) != len(c.want) {
+			t.Errorf("key %q: got %d elements, want %d", c.key, len(arr), len(c.want))
+			continue
+		}
+		for i, want := range c.want {
+			if arr[i] != want {
+				t.Errorf("key %q[%d]: got %v, want %v", c.key, i, arr[i], want)
+			}
+		}
+	}
+
 }
 
 // =============================================================================

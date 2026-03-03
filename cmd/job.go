@@ -392,8 +392,14 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		}
 
 		// Show GPU if present
-		if gpu := job.GetGPU(); gpu != "" {
-			fmt.Printf("GPU:         %s\n", gpu)
+		if gpuDev := job.GPUDevice(); gpuDev != "" {
+			if job.GPUClass != "" {
+				fmt.Printf("GPU:         %s (class: %s)\n", gpuDev, job.GPUClass)
+			} else {
+				fmt.Printf("GPU:         %s\n", gpuDev)
+			}
+		} else if job.GPUClass != "" {
+			fmt.Printf("GPU Class:   %s\n", job.GPUClass)
 		}
 
 		// Show timing info

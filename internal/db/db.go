@@ -2511,6 +2511,24 @@ func (j *Job) GetGPU() string {
 	return j.parseGPUFromCommand()
 }
 
+// GPUDevice returns the resolved GPU device indices for this job.
+// Checks metadata (synced from runner) first, then falls back to the
+// explicit GPU field / command parsing via GetGPU.
+func (j *Job) GPUDevice() string {
+	if j.Metadata != nil && j.Metadata.Resource != nil && j.Metadata.Resource.GPUDevices != "" {
+		return j.Metadata.Resource.GPUDevices
+	}
+	return j.GetGPU()
+}
+
+// HostWithGPU returns "host:gpu" if GPU devices are known, otherwise just the host.
+func (j *Job) HostWithGPU() string {
+	if gpuDev := j.GPUDevice(); gpuDev != "" {
+		return fmt.Sprintf("%s:%s", j.Host, gpuDev)
+	}
+	return j.Host
+}
+
 // ParseGPUFromCommandString extracts CUDA_VISIBLE_DEVICES from a command string.
 // This standalone function works without a Job struct and is used at job insertion
 // time to auto-populate the gpu column.

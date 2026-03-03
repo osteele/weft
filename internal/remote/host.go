@@ -19,7 +19,13 @@ type QueueEntry struct {
 	EnvVars      []string
 	DepSpec      string
 	CPUAllotment *int
+	GPU          string
+	GPUClass     string
+	GPUMemGB     *int
 	Tags         []string
+	OutputDirs   []string
+	Produces     []string
+	Needs        []string
 }
 
 // Host provides semantic operations on a remote host.

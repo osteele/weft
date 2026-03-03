@@ -191,7 +191,13 @@ func SyncQueueRunnerJobWithProber(
 			EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
 			DepSpec:      job.DepSpec,
 			CPUAllotment: job.CPUAllotment,
+			GPU:          job.GPU,
+			GPUClass:     job.GPUClass,
+			GPUMemGB:     job.GPUMemGB,
 			Tags:         job.Tags,
+			OutputDirs:   job.OutputDirs,
+			Produces:     job.Produces,
+			Needs:        job.Needs,
 		}
 		if err := host.AppendToQueue(entry); err != nil {
 			return SyncResult{HostContacted: true}, err
