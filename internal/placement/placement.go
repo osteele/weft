@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,11 @@ type Constraints struct {
 	Inputs   []string // Asset refs the job reads (for locality scoring)
 	Command  string   // For predictor-based scoring; empty = skip
 	Project  string   // For predictor-based scoring; empty = skip
+}
+
+// NeedsGPU returns true if the constraints require GPU resources.
+func (c Constraints) NeedsGPU() bool {
+	return c.GPUClass != "" || c.GPUMemGB > 0
 }
 
 // HostMetrics holds live utilization data for a host, used for soft scoring.
@@ -221,16 +227,18 @@ func bestFromScores(scores []Score, constraints Constraints) (string, []string, 
 }
 
 // BestReachableHost returns the best eligible host that is also reachable via SSH.
-// It scores hosts, probes eligible ones in parallel, and returns the highest-scored
-// reachable host. Returns ErrNoReachableHost if no eligible host responds.
+// It collects live metrics from eligible hosts (which also proves reachability),
+// scores them with utilization data, and returns the highest-scored reachable host.
+// Returns ErrNoReachableHost if no eligible host responds.
 func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Duration) (string, []string, error) {
-	scores, err := ScoreHosts(db, constraints)
+	// First pass: static scoring to determine eligible hosts
+	hosts, err := inventory.LoadEmbeddedHosts()
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("load inventory: %w", err)
 	}
-
+	staticScores := scoreAll(db, hosts, constraints, nil)
 	var eligible []string
-	for _, s := range scores {
+	for _, s := range staticScores {
 		if s.Eligible {
 			eligible = append(eligible, s.Host)
 		}
@@ -239,10 +247,20 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 		return "", nil, fmt.Errorf("no eligible host found for constraints: %s", describeConstraints(constraints))
 	}
 
-	liveness := ProbeHosts(eligible, probeTimeout)
+	// Collect live metrics (also proves reachability)
+	metrics := CollectMetrics(db, eligible, probeTimeout)
+	if len(metrics) == 0 {
+		return "", nil, ErrNoReachableHost
+	}
+
+	// Re-score with live metrics
+	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
+	if err != nil {
+		return "", nil, err
+	}
 
 	for _, s := range scores {
-		if s.Eligible && liveness[s.Host] {
+		if s.Eligible && metrics[s.Host] != nil {
 			return s.Host, s.Reasons, nil
 		}
 	}
@@ -374,13 +392,13 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		}
 
 		// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
-		if (c.GPUClass != "" || c.GPUMemGB > 0) && len(metrics.GPUDeviceFreeMemMiB) > 0 {
+		if c.NeedsGPU() && len(metrics.GPUDeviceFreeMemMiB) > 0 {
 			s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB, gc)
 		}
 	}
 
 	// Soft factor: performance multiplier (weighted by cpu_factor or gpu_factor)
-	if c.GPUClass != "" || c.GPUMemGB > 0 {
+	if c.NeedsGPU() {
 		applyPerfScoring(&s, "GPU", host.GPUPerformance(), 5.0)
 	} else {
 		applyPerfScoring(&s, "CPU", host.CPUPerformance(), 3.0)
@@ -608,8 +626,7 @@ func (s *Score) applyPerDeviceGPUMemScoring(host inventory.HostSpec, c Constrain
 		}
 		for _, idx := range gpu.Indices {
 			totalMatching++
-			idxStr := fmt.Sprintf("%d", idx)
-			freeMiB, ok := deviceFreeMem[idxStr]
+			freeMiB, ok := deviceFreeMem[strconv.Itoa(idx)]
 			if !ok {
 				// No data for this device — assume it's available
 				withEnough++

@@ -112,7 +112,7 @@ func TestScoreHosts_GPUMemory(t *testing.T) {
 func TestScoreHosts_GPUMemOnly_UsesGPUScoring(t *testing.T) {
 	db := setupTestDB(t)
 	// When only GPUMemGB is set (no GPUClass), scoring should use GPU performance
-	// factors, not CPU factors. This ensures cool30 (gpu_factor=0.3) is scored
+	// factors, not CPU factors. This ensures cool30 (gpu_factor=0.6) is scored
 	// as a GPU host rather than being penalized by its low cpu_factor=0.5.
 	scores, err := ScoreHosts(db, Constraints{GPUMemGB: 24})
 	if err != nil {
@@ -500,7 +500,7 @@ func TestPerformanceFactor_GPUJob(t *testing.T) {
 		t.Fatal("cool30 should be eligible for rtx3090")
 	}
 
-	// cool30 has gpu_factor=0.3, so it should get a GPU perf penalty
+	// cool30 has gpu_factor=0.6, so it should get a GPU perf penalty
 	hasGPUPerf := false
 	for _, r := range cool30.Reasons {
 		if strings.Contains(r, "GPU perf") {
