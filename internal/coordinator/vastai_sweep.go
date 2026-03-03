@@ -94,19 +94,16 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	}
 	endTimeUnix, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
 
-	// Determine status
-	status := db.StatusCompleted
+	// Detect failure reason for non-zero exit codes (OOM, etc.)
 	failureReason := ""
 	if exitCode != 0 {
-		status = db.StatusFailed
-		// Check for OOM indicators in debug info
 		failureReason = detectFailureReason(tmpDir, exitCode)
 	}
 
-	// Update job in DB
+	// Update job in DB — always StatusCompleted; exit code stored separately
 	_, err = c.db.Exec(
 		`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ? WHERE id = ?`,
-		status, exitCode, endTimeUnix, status, failureReason, jobID,
+		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, jobID,
 	)
 	if err != nil {
 		c.logger.Printf("vastai sweep: update job %d: %v", jobID, err)
@@ -132,7 +129,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		c.logger.Printf("vastai sweep: cleanup R2 for job %d: %v", jobID, err)
 	}
 
-	c.logger.Printf("vastai sweep: processed job %d (exit=%d, status=%s)", jobID, exitCode, status)
+	c.logger.Printf("vastai sweep: processed job %d (exit=%d, status=%s)", jobID, exitCode, db.StatusCompleted)
 	if exitCode == 0 {
 		oplog.LogJob(oplog.OpJobCompleted, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
 	} else {

@@ -234,7 +234,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 	if exists {
 		paused := queueRemoteClient.ProcessPaused(job.Host, job.ID, timeout)
 		if paused.IsSome() && paused.Unwrap() {
-			if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+			if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 				return SyncResult{HostContacted: true}, err
 			}
 			switch job.Status {
@@ -288,9 +288,9 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 
 	if sfResult != nil {
 		// Job completed
-		exitCode, err := strconv.Atoi(sfResult.Content)
-		if err != nil {
-			return SyncResult{HostContacted: true}, fmt.Errorf("parse exit code for job %d on %s: %w", job.ID, job.Host, err)
+		var exitCode int
+		if _, err := fmt.Sscanf(sfResult.Content, "%d", &exitCode); err != nil {
+			return SyncResult{HostContacted: true}, fmt.Errorf("parse exit code for job %d on %s from %q: %w", job.ID, job.Host, sfResult.Content, err)
 		}
 		if err := RecordJobCompletion(database, job.ID, exitCode, sfResult.Mtime); err != nil {
 			return SyncResult{HostContacted: true}, err
@@ -517,16 +517,16 @@ func startQueuedJobNow(database *sql.DB, job *db.Job, timeout time.Duration) err
 }
 
 // UpdateTimesFromMetadata reads the metadata file and updates start_time if unset.
-// Returns the end_time from metadata (0 if absent), which callers can use instead of
-// the status file mtime to avoid NFS clock skew issues.
-func UpdateTimesFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) (int64, error) {
+// Returns the end_time from metadata (0 if absent) and the parsed metadata map,
+// which callers can use to avoid redundant SSH calls for the same data.
+func UpdateTimesFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) (int64, map[string]string, error) {
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
 
 	content, err := queueRemoteClient.Metadata(job.Host, job.ID, timeout)
 	if err != nil || strings.TrimSpace(content) == "" {
-		return 0, nil // No metadata file or couldn't read it
+		return 0, nil, nil // No metadata file or couldn't read it
 	}
 
 	metadata := session.ParseMetadata(content)
@@ -536,11 +536,11 @@ func UpdateTimesFromMetadata(database *sql.DB, job *db.Job, timeout time.Duratio
 		if startTimeStr, ok := metadata["start_time"]; ok {
 			startTime, parseErr := strconv.ParseInt(startTimeStr, 10, 64)
 			if parseErr != nil {
-				return 0, fmt.Errorf("parse metadata start time for job %d: %w", job.ID, parseErr)
+				return 0, nil, fmt.Errorf("parse metadata start time for job %d: %w", job.ID, parseErr)
 			}
 			if startTime > 0 {
 				if dbErr := db.UpdateStartTime(database, job.ID, startTime); dbErr != nil {
-					return 0, fmt.Errorf("update start time for job %d: %w", job.ID, dbErr)
+					return 0, nil, fmt.Errorf("update start time for job %d: %w", job.ID, dbErr)
 				}
 				job.StartTime = startTime
 			}
@@ -553,13 +553,14 @@ func UpdateTimesFromMetadata(database *sql.DB, job *db.Job, timeout time.Duratio
 		endTime, _ = strconv.ParseInt(endTimeStr, 10, 64)
 	}
 
-	return endTime, nil
+	return endTime, metadata, nil
 }
 
 // UpdateStartTimeFromMetadata reads the metadata file for a queued job and updates its start_time if not already set.
-func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) error {
-	_, err := UpdateTimesFromMetadata(database, job, timeout)
-	return err
+// Returns the parsed metadata map for reuse by callers that need additional fields.
+func UpdateStartTimeFromMetadata(database *sql.DB, job *db.Job, timeout time.Duration) (map[string]string, error) {
+	_, metadata, err := UpdateTimesFromMetadata(database, job, timeout)
+	return metadata, err
 }
 
 // Probe functions for trinary logic
@@ -813,8 +814,8 @@ func (sshQueueRemote) QuickStatus(host string, jobID int64, timeout time.Duratio
 	default:
 		// Parse "exitcode|mtime" format
 		parts := strings.Split(result, "|")
-		exitCode, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-		if err != nil {
+		var exitCode int
+		if _, err := fmt.Sscanf(parts[0], "%d", &exitCode); err != nil {
 			return quickStatus{State: queueStateUnknown, Uncertain: true}, nil
 		}
 		var mtime int64

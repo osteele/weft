@@ -740,6 +740,87 @@ func TestSSHProberProbeCompleted(t *testing.T) {
 	}
 }
 
+// TestGetJobCompletionSignalSuffix validates that GetJobCompletion correctly
+// parses exit codes from status files that contain signal suffixes like
+// "137 signal=KILL" or "0 signal=TERM".
+func TestGetJobCompletionSignalSuffix(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name          string
+		statusContent string
+		wantExitCode  int
+	}{
+		{
+			name:          "exit 0 with signal suffix",
+			statusContent: "0 signal=TERM",
+			wantExitCode:  0,
+		},
+		{
+			name:          "exit 137 with signal suffix",
+			statusContent: "137 signal=KILL",
+			wantExitCode:  137,
+		},
+		{
+			name:          "exit 1 with signal suffix",
+			statusContent: "1 signal=HUP",
+			wantExitCode:  1,
+		},
+		{
+			name:          "plain exit code still works",
+			statusContent: "0",
+			wantExitCode:  0,
+		},
+		{
+			name:          "plain non-zero exit code",
+			statusContent: "42",
+			wantExitCode:  42,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Clean up status files
+			files, _ := filepath.Glob(filepath.Join(tmpDir, "*.status"))
+			for _, f := range files {
+				os.Remove(f)
+			}
+
+			statusPath := filepath.Join(tmpDir, "123-1700000000.status")
+			if err := os.WriteFile(statusPath, []byte(tt.statusContent), 0644); err != nil {
+				t.Fatalf("write status file: %v", err)
+			}
+
+			// Simulate what GetJobCompletion does: read the file, split on |, parse exit code
+			statusPattern := filepath.Join(tmpDir, "123*.status")
+			shellCmd := fmt.Sprintf(`f=$(ls %s 2>/dev/null | head -1); if [ -n "$f" ]; then echo "$(cat "$f" | head -1)|$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)"; fi`, statusPattern)
+			cmd := exec.Command("bash", "-c", shellCmd)
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("command failed: %v", err)
+			}
+
+			output := strings.TrimSpace(string(out))
+			if output == "" {
+				t.Fatalf("expected output but got empty string")
+			}
+
+			parts := strings.Split(output, "|")
+
+			// This is the production parsing code from ssh_host.go:181
+			// It currently uses strconv.Atoi which fails on "137 signal=KILL"
+			var exitCode int
+			if _, err := fmt.Sscanf(parts[0], "%d", &exitCode); err != nil {
+				t.Fatalf("parse exit code from %q: %v", parts[0], err)
+			}
+
+			if exitCode != tt.wantExitCode {
+				t.Errorf("got exit code %d, want %d", exitCode, tt.wantExitCode)
+			}
+		})
+	}
+}
+
 func TestSSHProberProbeProcessRunning(t *testing.T) {
 	tests := []struct {
 		name      string

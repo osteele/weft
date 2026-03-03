@@ -78,7 +78,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 			}
 		case queueStateRunning:
 			if job.StartTime == 0 {
-				_ = UpdateStartTimeFromMetadata(database, job, timeout)
+				_, _ = UpdateStartTimeFromMetadata(database, job, timeout)
 			}
 			switch job.Status {
 			case db.StatusQueued:
@@ -107,7 +107,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 			}
 		case queueStatePaused:
 			if job.StartTime == 0 {
-				_ = UpdateStartTimeFromMetadata(database, job, timeout)
+				_, _ = UpdateStartTimeFromMetadata(database, job, timeout)
 			}
 			switch job.Status {
 			case db.StatusQueued, db.StatusStarting, db.StatusRunning:
@@ -140,7 +140,7 @@ func BatchSyncQueueRunnerJobs(database *sql.DB, host string, jobs []*db.Job, tim
 			}
 		default:
 			if status.ExitCode != nil {
-				metaEndTime, metaErr := UpdateTimesFromMetadata(database, job, timeout)
+				metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
 				if metaErr != nil {
 					return updated, metaErr
 				}

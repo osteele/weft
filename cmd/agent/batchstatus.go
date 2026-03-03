@@ -43,7 +43,8 @@ func batchStatus(queueName string, jobIDs []int64) {
 		statusFile := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
 		if statusContent, err := os.ReadFile(statusFile); err == nil {
 			exitCodeStr := strings.TrimSpace(string(statusContent))
-			exitCode, _ := strconv.Atoi(exitCodeStr)
+			var exitCode int
+			fmt.Sscanf(exitCodeStr, "%d", &exitCode)
 			mtime := fileMtime(statusFile)
 			fr := readFailureReason(logDir, jobID)
 			fmt.Printf("JOB|%d|COMPLETED|%d|%d|%s\n", jobID, exitCode, mtime, fr)

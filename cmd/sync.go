@@ -451,19 +451,14 @@ func syncVastaiInstances(cfg *config.Config, database *sql.DB, verbose bool) int
 		endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
 		endTimeUnix, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
 
-		status := db.StatusCompleted
-		if exitCode != 0 {
-			status = db.StatusFailed
-		}
-
 		_, _ = database.Exec(
 			`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
-			status, exitCode, endTimeUnix, status, jobID,
+			db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, jobID,
 		)
 		updated++
 
 		if verbose {
-			fmt.Printf("  Vast.ai job %d: %s (exit %d)\n", jobID, status, exitCode)
+			fmt.Printf("  Vast.ai job %d: %s (exit %d)\n", jobID, db.StatusCompleted, exitCode)
 		}
 
 		// Cleanup

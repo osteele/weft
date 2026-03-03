@@ -36,7 +36,7 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 1: Check if status file exists (job completed)
 	completedResult, completionInfo := prober.ProbeCompleted(job.ID)
 	if completedResult == remote.ProbeTrue && completionInfo != nil {
-		metaEndTime, metaErr := UpdateTimesFromMetadata(database, job, timeout)
+		metaEndTime, _, metaErr := UpdateTimesFromMetadata(database, job, timeout)
 		if metaErr != nil {
 			return SyncResult{HostContacted: true}, metaErr
 		}
@@ -59,9 +59,11 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 2: Check if job is the current job in queue runner
 	currentResult := prober.ProbeCurrent(job.ID)
 	if currentResult == remote.ProbeTrue {
-		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+		metadata, err := UpdateStartTimeFromMetadata(database, job, timeout)
+		if err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
+		applyGPUDevicesFromMetadata(database, job, metadata)
 		switch job.Status {
 		case db.StatusQueued:
 			if err := db.MarkQueuedJobRunning(database, job.ID); err != nil {
@@ -112,7 +114,7 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 4: Check if process is paused via PID
 	pausedResult := prober.ProbeProcessPaused(job.ID)
 	if pausedResult == remote.ProbeTrue {
-		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+		if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
 		switch job.Status {
@@ -134,9 +136,11 @@ func SyncQueueRunnerJobWithProber(
 	// Probe 5: Check if process is running via PID
 	processResult := prober.ProbeProcessRunning(job.ID)
 	if processResult == remote.ProbeTrue {
-		if err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
+		metadata, err := UpdateStartTimeFromMetadata(database, job, timeout)
+		if err != nil {
 			return SyncResult{HostContacted: true}, err
 		}
+		applyGPUDevicesFromMetadata(database, job, metadata)
 		switch job.Status {
 		case db.StatusQueued, db.StatusStarting:
 			// Job is running but not marked as "current" - this happens when
@@ -246,4 +250,15 @@ func SyncQueueRunnerJobWithProber(
 	// At least one probe returned unknown - don't change status
 	// Return whether host was actually reachable
 	return SyncResult{HostContacted: hostReachable}, nil
+}
+
+// applyGPUDevicesFromMetadata extracts GPU device info from a pre-fetched metadata
+// map and persists it to the job's metadata. Best-effort; nil map is a no-op.
+func applyGPUDevicesFromMetadata(database *sql.DB, job *db.Job, metadata map[string]string) {
+	if metadata == nil {
+		return
+	}
+	if gpuDevices, ok := metadata["gpu_devices"]; ok && gpuDevices != "" {
+		syncGPUDevicesToMetadata(database, job, gpuDevices)
+	}
 }

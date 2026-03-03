@@ -178,9 +178,9 @@ func (h *SSHHost) GetJobCompletion(jobID int64) (*CompletionInfo, error) {
 		return nil, fmt.Errorf("invalid status file format: %q", output)
 	}
 
-	exitCode, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return nil, fmt.Errorf("parse exit code: %w", err)
+	var exitCode int
+	if _, err := fmt.Sscanf(parts[0], "%d", &exitCode); err != nil {
+		return nil, fmt.Errorf("parse exit code from %q: %w", parts[0], err)
 	}
 
 	var mtime int64

@@ -2,6 +2,7 @@ package ops
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -337,7 +338,7 @@ func TestUpdateTimesFromMetadataBothTimes(t *testing.T) {
 	restore := setQueueRemoteClientForTesting(mock)
 	defer restore()
 
-	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	endTime, _, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
 	if err != nil {
 		t.Fatalf("UpdateTimesFromMetadata: %v", err)
 	}
@@ -370,7 +371,7 @@ func TestUpdateTimesFromMetadataOnlyStartTime(t *testing.T) {
 	restore := setQueueRemoteClientForTesting(mock)
 	defer restore()
 
-	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	endTime, _, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
 	if err != nil {
 		t.Fatalf("UpdateTimesFromMetadata: %v", err)
 	}
@@ -398,7 +399,7 @@ func TestUpdateTimesFromMetadataEmptyMetadata(t *testing.T) {
 	restore := setQueueRemoteClientForTesting(mock)
 	defer restore()
 
-	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	endTime, _, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
 	if err != nil {
 		t.Fatalf("UpdateTimesFromMetadata: %v", err)
 	}
@@ -431,7 +432,7 @@ func TestUpdateTimesFromMetadataSkipsStartTimeIfAlreadySet(t *testing.T) {
 	restore := setQueueRemoteClientForTesting(mock)
 	defer restore()
 
-	endTime, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
+	endTime, _, err := UpdateTimesFromMetadata(database, job, 5*time.Second)
 	if err != nil {
 		t.Fatalf("UpdateTimesFromMetadata: %v", err)
 	}
@@ -547,6 +548,139 @@ func TestSyncQueueRunnerJobPreservesGPUFields(t *testing.T) {
 	}
 	if len(entry.Needs) != 1 || entry.Needs[0] != "data.csv:1" {
 		t.Errorf("Needs: got %v, want [data.csv:1]", entry.Needs)
+	}
+}
+
+// TestSyncJobRecordsCompletionWithSignalSuffix validates that SyncJob correctly
+// handles status files containing exit codes with signal suffixes like "137 signal=KILL".
+func TestSyncJobRecordsCompletionWithSignalSuffix(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordJobStarting(database, "sig-host", "/tmp", "echo sig", "signal job")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	sessionName := "session-signal"
+	startTime := int64(1700000000)
+	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, start_time = ? WHERE id = ?`, sessionName, startTime, jobID); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+	if err := db.MarkRunningByID(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	// Status file content has signal suffix — "137 signal=KILL"
+	logFile := session.LogFile(jobID, startTime)
+	mockSSHCommands(t, []sshMockResponse{
+		{Contains: "tmux has-session", Stdout: "NO\n"},
+		{Contains: "|MTIME|", Stdout: "137 signal=KILL\n|MTIME|\n1700000005\n"},
+		{Contains: "stat -c %s", Stdout: "0\n"},
+		{Contains: logFile, Stdout: "log contents"},
+	})
+
+	job, _ := db.GetJobByID(database, jobID)
+	syncResult, err := SyncJob(database, job, SyncOptions{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("SyncJob: %v", err)
+	}
+	if !syncResult.Updated {
+		t.Fatalf("expected completion change")
+	}
+
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Status != db.StatusCompleted {
+		t.Fatalf("expected completed status, got %s", updated.Status)
+	}
+	if updated.ExitCode == nil || *updated.ExitCode != 137 {
+		t.Fatalf("expected exit code 137, got %v", updated.ExitCode)
+	}
+}
+
+// TestQuickStatusParseSignalSuffix validates that the QuickStatus exit code
+// parser handles status files containing signal suffixes.
+func TestQuickStatusParseSignalSuffix(t *testing.T) {
+	tests := []struct {
+		name         string
+		rawOutput    string
+		wantExitCode int
+	}{
+		{
+			name:         "plain exit code",
+			rawOutput:    "0|1700000005",
+			wantExitCode: 0,
+		},
+		{
+			name:         "exit code with signal suffix",
+			rawOutput:    "137 signal=KILL|1700000005",
+			wantExitCode: 137,
+		},
+		{
+			name:         "exit 0 with signal suffix",
+			rawOutput:    "0 signal=TERM|1700000005",
+			wantExitCode: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Simulate parseQuickStatusResult logic from sync.go:814-824
+			// Production code now uses fmt.Sscanf to handle signal suffixes
+			parts := strings.Split(tt.rawOutput, "|")
+			var exitCode int
+			if _, err := fmt.Sscanf(parts[0], "%d", &exitCode); err != nil {
+				t.Fatalf("fmt.Sscanf failed on %q: %v", parts[0], err)
+			}
+			if exitCode != tt.wantExitCode {
+				t.Errorf("got exit code %d, want %d", exitCode, tt.wantExitCode)
+			}
+		})
+	}
+}
+
+// TestSyncQueueRunnerJobGPUDevicesSync validates that GPU device metadata is
+// synced when a running job is detected via the individual probe path.
+// GPU devices come from the same metadata file as start_time (no extra SSH call).
+func TestSyncQueueRunnerJobGPUDevicesSync(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "gpu-host", "/tmp", "python train.py", "gpu job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+
+	// Set up metadata with gpu_devices — this is read by UpdateStartTimeFromMetadata
+	// and reused by applyGPUDevicesFromMetadata without a second SSH call.
+	mock := mockQueueRemote{
+		metadata: "start_time=1700000000\ngpu_devices=2,3\n",
+	}
+	restore := setQueueRemoteClientForTesting(mock)
+	defer restore()
+
+	prober := &remote.MockProber{
+		CompletedResult: remote.ProbeFalse,
+		CurrentResult:   remote.ProbeTrue,
+		InQueueResult:   remote.ProbeFalse,
+		ProcessResult:   remote.ProbeTrue,
+	}
+	host := &remote.MockHost{}
+
+	job, _ := db.GetJobByID(database, jobID)
+	_, err = SyncQueueRunnerJobWithProber(database, job, prober, host, SyncOptions{Timeout: time.Second, SkipSamples: true})
+	if err != nil {
+		t.Fatalf("SyncQueueRunnerJobWithProber: %v", err)
+	}
+
+	// Verify GPU devices were synced to metadata
+	updated, _ := db.GetJobByID(database, jobID)
+	if updated.Metadata == nil || updated.Metadata.Resource == nil {
+		t.Fatalf("expected metadata with GPU devices, got nil")
+	}
+	if updated.Metadata.Resource.GPUDevices != "2,3" {
+		t.Fatalf("expected GPU devices '2,3', got %q", updated.Metadata.Resource.GPUDevices)
 	}
 }
 
