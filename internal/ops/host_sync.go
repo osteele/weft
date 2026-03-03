@@ -217,7 +217,9 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		}
 		if len(restartedQueueJobs) > 0 {
 			updatedCount, err := BatchSyncQueueRunnerJobs(database, host, restartedQueueJobs, timeout)
-			if err == nil {
+			if err != nil {
+				log.Printf("sync: batch sync of restarted jobs failed for %s: %v", host, err)
+			} else {
 				result.Updated += updatedCount
 				result.HostContacted = true
 			}
