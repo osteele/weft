@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -387,6 +388,14 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 		gpuDevices = []string{device}
 	} else {
 		gpuDevices = GetJobGPUDevices(job)
+	}
+
+	// Write gpu_devices to meta file so the coordinator can discover them
+	if len(gpuDevices) > 0 {
+		if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
+			fmt.Fprintf(f, "gpu_devices=%s\n", strings.Join(gpuDevices, ","))
+			f.Close()
+		}
 	}
 
 	// Build environment
