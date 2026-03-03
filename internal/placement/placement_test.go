@@ -1169,6 +1169,101 @@ func TestScoreHosts_GPUClass_A100_MixedHost_OnlyCountsMatchingGPUs(t *testing.T)
 	}
 }
 
+func TestNewJobPredictor_PropagatesDurationBounds(t *testing.T) {
+	predict := NewJobPredictor(func(host string) *RawPrediction {
+		return &RawPrediction{
+			DurationS: &RawPredictionField{Mean: 600, Lower: 500, Upper: 700},
+		}
+	})
+	jp := predict("cool100")
+	if jp == nil {
+		t.Fatal("expected non-nil prediction")
+	}
+	if jp.DurationS == nil || *jp.DurationS != 600 {
+		t.Errorf("DurationS = %v, want 600", jp.DurationS)
+	}
+	if jp.DurationSLower == nil || *jp.DurationSLower != 500 {
+		t.Errorf("DurationSLower = %v, want 500", jp.DurationSLower)
+	}
+	if jp.DurationSUpper == nil || *jp.DurationSUpper != 700 {
+		t.Errorf("DurationSUpper = %v, want 700", jp.DurationSUpper)
+	}
+}
+
+func TestPredictorDurationScoring_ConfidenceWeighted(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Two hosts with same mean duration but different confidence intervals.
+	// cool100 has narrow CI → should get higher bonus.
+	// cool30 has wide CI → should get lower bonus.
+	// studio is slowest → baseline (bonus ~0).
+	predict := func(host string) *JobPrediction {
+		switch host {
+		case "cool100":
+			d, lo, hi := 600.0, 580.0, 620.0 // narrow CI: ±20s
+			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
+		case "cool30":
+			d, lo, hi := 600.0, 100.0, 1100.0 // wide CI: ±500s
+			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
+		case "studio":
+			d := 1200.0 // slowest, no CI
+			return &JobPrediction{DurationS: &d}
+		}
+		return nil
+	}
+
+	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100 := findScore(scores, "cool100")
+	cool30 := findScore(scores, "cool30")
+
+	// Both have same mean duration (600s), but cool100 has narrow CI so its
+	// confidence-weighted bonus should be higher than cool30's.
+	if cool100.Total <= cool30.Total {
+		t.Errorf("cool100 (narrow CI, %.2f) should score higher than cool30 (wide CI, %.2f)",
+			cool100.Total, cool30.Total)
+	}
+}
+
+func TestPredictorResourceSoftConstraint_UpperBound(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Predicted mean RSS is 40 GiB (below 80% of 60 GiB free = 48 GiB).
+	// But upper bound is 55 GiB (above 80% threshold).
+	// The soft constraint should trigger using the upper bound.
+	meanKB := 40.0 * 1024 * 1024
+	upperKB := 55.0 * 1024 * 1024
+	predict := func(host string) *JobPrediction {
+		if host == "cool100" {
+			return &JobPrediction{PeakRSSKB: &meanKB, PeakRSSKBUpper: &upperKB}
+		}
+		return nil
+	}
+
+	metrics := map[string]*HostMetrics{
+		"cool100": {FreeRAMKB: 60 * 1024 * 1024}, // 60 GiB free
+	}
+
+	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool100 := findScore(scores, "cool100")
+	hasTightRAM := false
+	for _, r := range cool100.Reasons {
+		if strings.Contains(r, "tight RAM") {
+			hasTightRAM = true
+		}
+	}
+	if !hasTightRAM {
+		t.Errorf("upper bound (55 GiB) exceeds 80%% of free (60 GiB), should trigger tight RAM penalty; reasons: %v", cool100.Reasons)
+	}
+}
+
 func findScore(scores []Score, host string) Score {
 	for _, s := range scores {
 		if s.Host == host {

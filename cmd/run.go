@@ -1077,13 +1077,13 @@ func buildJobPredictor(cfg *config.Config, c placement.Constraints) placement.Jo
 		}
 		raw := &placement.RawPrediction{}
 		if result.DurationS != nil {
-			raw.DurationS = &placement.RawPredictionField{Mean: result.DurationS.Mean, Upper: result.DurationS.Upper}
+			raw.DurationS = &placement.RawPredictionField{Mean: result.DurationS.Mean, Lower: result.DurationS.Lower, Upper: result.DurationS.Upper}
 		}
 		if result.PeakRSSKB != nil {
-			raw.PeakRSSKB = &placement.RawPredictionField{Mean: result.PeakRSSKB.Mean, Upper: result.PeakRSSKB.Upper}
+			raw.PeakRSSKB = &placement.RawPredictionField{Mean: result.PeakRSSKB.Mean, Lower: result.PeakRSSKB.Lower, Upper: result.PeakRSSKB.Upper}
 		}
 		if result.MaxGPUMemMiB != nil {
-			raw.MaxGPUMemMiB = &placement.RawPredictionField{Mean: result.MaxGPUMemMiB.Mean, Upper: result.MaxGPUMemMiB.Upper}
+			raw.MaxGPUMemMiB = &placement.RawPredictionField{Mean: result.MaxGPUMemMiB.Mean, Lower: result.MaxGPUMemMiB.Lower, Upper: result.MaxGPUMemMiB.Upper}
 		}
 		return raw
 	})

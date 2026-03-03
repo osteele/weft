@@ -57,10 +57,15 @@ type HostMetrics struct {
 
 // JobPrediction holds predicted resource needs for a job on a specific host.
 type JobPrediction struct {
-	DurationS    *float64 // predicted wall-clock seconds (nil = unknown)
-	PeakRSSKB    *float64 // predicted peak RSS in KB (nil = unknown)
-	MaxGPUMemMiB *float64 // predicted peak GPU memory in MiB (nil = unknown)
-	// Upper bounds (95% CI) for hard constraint checking
+	DurationS      *float64 // predicted wall-clock seconds (nil = unknown)
+	DurationSLower *float64 // p10 lower bound
+	DurationSUpper *float64 // p90 upper bound
+	PeakRSSKB      *float64 // predicted peak RSS in KB (nil = unknown)
+	MaxGPUMemMiB   *float64 // predicted peak GPU memory in MiB (nil = unknown)
+	// Lower bounds (p10) for optimistic estimates
+	PeakRSSKBLower    *float64
+	MaxGPUMemMiBLower *float64
+	// Upper bounds (p90) for hard constraint checking
 	PeakRSSKBUpper    *float64
 	MaxGPUMemMiBUpper *float64
 }
@@ -72,6 +77,7 @@ type JobPredictor func(host string) *JobPrediction
 // RawPredictionField holds a point estimate with uncertainty bounds.
 type RawPredictionField struct {
 	Mean  float64
+	Lower float64
 	Upper float64
 }
 
@@ -96,13 +102,17 @@ func NewJobPredictor(predict func(host string) *RawPrediction) JobPredictor {
 		jp := &JobPrediction{}
 		if raw.DurationS != nil {
 			jp.DurationS = &raw.DurationS.Mean
+			jp.DurationSLower = &raw.DurationS.Lower
+			jp.DurationSUpper = &raw.DurationS.Upper
 		}
 		if raw.PeakRSSKB != nil {
 			jp.PeakRSSKB = &raw.PeakRSSKB.Mean
+			jp.PeakRSSKBLower = &raw.PeakRSSKB.Lower
 			jp.PeakRSSKBUpper = &raw.PeakRSSKB.Upper
 		}
 		if raw.MaxGPUMemMiB != nil {
 			jp.MaxGPUMemMiB = &raw.MaxGPUMemMiB.Mean
+			jp.MaxGPUMemMiBLower = &raw.MaxGPUMemMiB.Lower
 			jp.MaxGPUMemMiBUpper = &raw.MaxGPUMemMiB.Upper
 		}
 		return jp
@@ -463,15 +473,31 @@ func applyDurationScoring(scores []Score, predictions map[string]*JobPrediction)
 	const maxBonus = 3.0
 	for _, d := range durations {
 		// Linear: fastest gets maxBonus, slowest gets 0
-		bonus := (1.0 - (d.duration-minDur)/spread) * maxBonus
+		rawBonus := (1.0 - (d.duration-minDur)/spread) * maxBonus
+
+		// Scale bonus by confidence: narrow CI → full bonus, wide CI → reduced bonus
+		p := predictions[scores[d.index].Host]
+		weight := 1.0
+		if p.DurationSLower != nil && p.DurationSUpper != nil && d.duration > 0 {
+			intervalRatio := (*p.DurationSUpper - *p.DurationSLower) / d.duration
+			weight = math.Max(0, math.Min(1, 1-0.25*intervalRatio))
+		}
+		bonus := rawBonus * weight
+
 		scores[d.index].Total += bonus
 
 		// Remove the static perf scoring since predictor subsumes it
 		removeStaticPerfScoring(&scores[d.index])
 
 		durMin := d.duration / 60.0
-		scores[d.index].Reasons = append(scores[d.index].Reasons,
-			fmt.Sprintf("predicted %.0fm (+%.1f)", durMin, bonus))
+		if p.DurationSLower != nil && p.DurationSUpper != nil {
+			halfSpread := (d.duration - *p.DurationSLower) / 60.0
+			scores[d.index].Reasons = append(scores[d.index].Reasons,
+				fmt.Sprintf("predicted %.0fm (\u00b1%.0fm, +%.1f)", durMin, halfSpread, bonus))
+		} else {
+			scores[d.index].Reasons = append(scores[d.index].Reasons,
+				fmt.Sprintf("predicted %.0fm (+%.1f)", durMin, bonus))
+		}
 	}
 }
 
@@ -558,26 +584,36 @@ func applyResourceSoftConstraints(s *Score, p *JobPrediction, m *HostMetrics) {
 	}
 
 	// RAM headroom: penalize if predicted RSS > 80% of free RAM
-	if p.PeakRSSKB != nil && m.FreeRAMKB > 0 {
-		ratio := *p.PeakRSSKB / float64(m.FreeRAMKB)
+	// Prefer upper bound for conservative estimate; fall back to mean
+	rssEstimate := p.PeakRSSKBUpper
+	if rssEstimate == nil {
+		rssEstimate = p.PeakRSSKB
+	}
+	if rssEstimate != nil && m.FreeRAMKB > 0 {
+		ratio := *rssEstimate / float64(m.FreeRAMKB)
 		if ratio > 0.8 {
 			penalty := math.Min((ratio-0.8)/0.2*2.0, 2.0)
 			s.Total -= penalty
 			s.Reasons = append(s.Reasons,
 				fmt.Sprintf("tight RAM fit (predicted %.1f GiB, %.1f GiB free)",
-					*p.PeakRSSKB/(1024*1024), float64(m.FreeRAMKB)/(1024*1024)))
+					*rssEstimate/(1024*1024), float64(m.FreeRAMKB)/(1024*1024)))
 		}
 	}
 
 	// GPU memory headroom
-	if p.MaxGPUMemMiB != nil && m.FreeGPUMemMiB > 0 {
-		ratio := *p.MaxGPUMemMiB / float64(m.FreeGPUMemMiB)
+	// Prefer upper bound for conservative estimate; fall back to mean
+	gpuEstimate := p.MaxGPUMemMiBUpper
+	if gpuEstimate == nil {
+		gpuEstimate = p.MaxGPUMemMiB
+	}
+	if gpuEstimate != nil && m.FreeGPUMemMiB > 0 {
+		ratio := *gpuEstimate / float64(m.FreeGPUMemMiB)
 		if ratio > 0.8 {
 			penalty := math.Min((ratio-0.8)/0.2*2.0, 2.0)
 			s.Total -= penalty
 			s.Reasons = append(s.Reasons,
 				fmt.Sprintf("tight GPU mem fit (predicted %.1f GiB, %.1f GiB free)",
-					*p.MaxGPUMemMiB/1024, float64(m.FreeGPUMemMiB)/1024))
+					*gpuEstimate/1024, float64(m.FreeGPUMemMiB)/1024))
 		}
 	}
 }
