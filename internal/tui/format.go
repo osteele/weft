@@ -537,6 +537,18 @@ func formatStartTime(startTime int64) string {
 	return t.Format("01/02 15:04")
 }
 
+// gpuColumnText returns the text for the GPU column: GPUClass, or "≥NGB" if
+// only GPUMemGB is set, or "—" if neither.
+func gpuColumnText(job *db.Job) string {
+	if job.GPUClass != "" {
+		return job.GPUClass
+	}
+	if job.GPUMemGB != nil {
+		return fmt.Sprintf("≥%dGB", *job.GPUMemGB)
+	}
+	return "—"
+}
+
 // formatJobTime formats the time column for a job, showing either start time or queue time
 func formatJobTime(job *db.Job) string {
 	// Show end time for any job that has completed/terminated

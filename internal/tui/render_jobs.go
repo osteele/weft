@@ -328,7 +328,7 @@ func (m Model) renderJobList(height int) string {
 	// Check if any visible jobs have GPU or GPU class specified
 	showGPU := false
 	for i := start; i < end; i++ {
-		if m.jobs[i].GetGPU() != "" || m.jobs[i].GPUClass != "" {
+		if m.jobs[i].GetGPU() != "" || m.jobs[i].GPUClass != "" || m.jobs[i].GPUMemGB != nil {
 			showGPU = true
 			break
 		}
@@ -348,7 +348,7 @@ func (m Model) renderJobList(height int) string {
 
 	// Update header based on GPU column visibility
 	if showGPU {
-		header := fmt.Sprintf("  %-4s %-14s %-*s %-12s %-12s %-4s %s",
+		header := fmt.Sprintf("  %-4s %-14s %-*s %-12s %-12s %-6s %s",
 			"ID", "HOST", projectWidth, "PROJECT", "STATUS", "TIME", "GPU", "DESCRIPTION")
 		rows[headerIndex] = headerStyle.Render(header)
 	} else {
@@ -363,9 +363,8 @@ func (m Model) renderJobList(height int) string {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
-		gpuDev := job.GPUDevice()
 		hostStr := job.Host
-		if gpuDev != "" {
+		if job.GPUDevice() != "" {
 			hostStr = job.HostWithGPU()
 		}
 		hostCol := fmt.Sprintf("%-14s", truncate(hostStr, 14))
@@ -386,14 +385,8 @@ func (m Model) renderJobList(height int) string {
 		prefixPlain := fmt.Sprintf("  %-4d %s %s %s %s ", job.ID, hostCol, projectCol, statusCol, timeColFormatted)
 		gpuField := ""
 		if showGPU {
-			gpu := gpuDev
-			if gpu == "" && job.GPUClass != "" {
-				gpu = job.GPUClass
-			}
-			if gpu == "" {
-				gpu = "—"
-			}
-			gpuField = fmt.Sprintf("%-4s ", truncate(gpu, 4))
+			gpu := gpuColumnText(job)
+			gpuField = fmt.Sprintf("%-6s ", truncate(gpu, 6))
 			prefixPlain += gpuField
 		}
 
