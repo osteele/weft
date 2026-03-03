@@ -8,22 +8,24 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
-// LocalAgentVersion returns the commit hash of the working copy.
-// Prefers jj (which includes uncommitted changes in the working copy commit),
-// falls back to git HEAD if jj is unavailable.
+// LocalAgentVersion returns a stable version string for the agent binary.
+// Uses the most recent commit that touched agent source files (cmd/agent/ or
+// internal/), so unrelated file changes don't trigger a cross-compile.
+// Prefers jj, falls back to git HEAD if jj is unavailable.
 func LocalAgentVersion() (string, error) {
-	// Try jj first — the working copy always has a commit, even with dirty files
 	if version, err := jjVersion(); err == nil {
 		return version, nil
 	}
 
-	// Fall back to git HEAD
 	if version, err := gitVersion(); err == nil {
 		return version, nil
 	}
 
 	return "", fmt.Errorf("neither jj nor git repository found")
 }
+
+// agentSourcePaths are the directories whose changes affect the agent binary.
+var agentSourcePaths = []string{"cmd/agent/", "internal/"}
 
 func jjVersion() (string, error) {
 	rootCmd := exec.Command("jj", "workspace", "root")
@@ -33,11 +35,26 @@ func jjVersion() (string, error) {
 	}
 	repoRoot := strings.TrimSpace(string(rootOut))
 
-	cmd := exec.Command("jj", "log",
-		"--no-graph",
-		"-r", "@",
+	// Find the most recent ancestor that touched agent source files.
+	// This avoids cache misses from unrelated file changes in the jj working copy.
+	args := []string{
+		"log", "--no-graph",
+		"-r", "ancestors(@, 200)",
 		"-T", `commit_id.short(12)`,
-	)
+		"--limit", "1",
+	}
+	args = append(args, agentSourcePaths...)
+	if version, err := jjLog(repoRoot, args...); err == nil && version != "" {
+		return version, nil
+	}
+
+	// Fallback: no ancestor touched agent paths (e.g., brand new repo).
+	return jjLog(repoRoot, "log", "--no-graph", "-r", "@", "-T", `commit_id.short(12)`)
+}
+
+// jjLog runs a jj command in repoRoot and returns the trimmed output.
+func jjLog(repoRoot string, args ...string) (string, error) {
+	cmd := exec.Command("jj", args...)
 	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
