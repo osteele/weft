@@ -389,24 +389,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
-	// Sync sources directly to target host (fallback path, coordinator unreachable)
-	if !runNoSync && !runDryRun && !runDraft && host != "" {
-		localDir := resolveLocalDir(workingDir)
-		if localDir != "" {
-			if err := srcsync.SyncSources(host, localDir, workingDir); err != nil {
-				_ = err // sync failure is expected in occasionally-connected design
-			}
-		}
-
-		// Sync extra file paths from --input flags and .weft.yaml
-		extraPaths := collectExtraPaths(runInputs, localDir)
-		if len(extraPaths) > 0 {
-			if err := srcsync.SyncExtraPaths(host, extraPaths); err != nil {
-				_ = err // sync failure is expected in occasionally-connected design
-			}
-		}
-	}
-
 	// Log CLI command invocation
 	mode := "queue"
 	if runImmediate {
@@ -502,6 +484,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 		if res.Deferred {
 			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
+		} else if !runNoSync && host != "" {
+			syncSourcesToHost(host, workingDir, runInputs)
 		}
 		return nil
 	}
@@ -553,6 +537,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if res.Deferred {
 			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
 		} else {
+			// Sync sources now that we know the host is reachable
+			if !runNoSync && host != "" {
+				syncSourcesToHost(host, workingDir, runInputs)
+			}
+
 			backend, err := ops.ResolveBackend(host, 5*time.Second)
 			if err == nil && backend != db.BackendSlurm {
 				// Auto-start queue runner (silently ignore offline errors)
@@ -601,6 +590,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
 		}
 		return nil
+	}
+
+	// Sync sources before starting immediate job (host is known reachable)
+	if !runNoSync && host != "" {
+		syncSourcesToHost(host, workingDir, runInputs)
 	}
 
 	result, err := startJob(database, startJobOptions{
@@ -1021,6 +1015,23 @@ func buildJobPredictor(cfg *config.Config, c placement.Constraints) placement.Jo
 		}
 		return raw
 	})
+}
+
+// syncSourcesToHost syncs source files and extra paths to the remote host.
+// Errors are silently ignored since sync failure is non-fatal.
+func syncSourcesToHost(host, workingDir string, inputs []string) {
+	localDir := resolveLocalDir(workingDir)
+	if localDir != "" {
+		if err := srcsync.SyncSources(host, localDir, workingDir); err != nil {
+			_ = err // sync failure is non-fatal
+		}
+	}
+	extraPaths := collectExtraPaths(inputs, localDir)
+	if len(extraPaths) > 0 {
+		if err := srcsync.SyncExtraPaths(host, extraPaths); err != nil {
+			_ = err // sync failure is non-fatal
+		}
+	}
 }
 
 // projectFromDir extracts a short project name from a working directory path.
