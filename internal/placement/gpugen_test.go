@@ -76,6 +76,12 @@ func TestParseGPUConstraint(t *testing.T) {
 		{"rtx3090+", constraintMinGen, GenAmpere, "rtx3090"},
 		{"h100+", constraintMinGen, GenHopper, "h100"},
 
+		// Family matching
+		{"nvidia", constraintFamily, GenUnknown, "nvidia"},
+		{"nvidia+", constraintFamily, GenUnknown, "nvidia"},
+		{"apple", constraintFamily, GenUnknown, "apple"},
+		{"NVIDIA", constraintFamily, GenUnknown, "nvidia"},
+
 		// Unknown model with '+' falls back to exact model
 		{"unknowngpu+", constraintExactModel, GenUnknown, "unknowngpu"},
 	}
@@ -144,9 +150,27 @@ func TestMatchesGPU(t *testing.T) {
 		{"applem2+", "m1max", false}, // M1 < M2
 		{"applem3+", "m2max", false}, // M2 < M3
 
+		// Family matching — nvidia
+		{"nvidia", "a100", true},
+		{"nvidia", "rtx3090", true},
+		{"nvidia", "rtx2080ti", true},
+		{"nvidia", "h100", true},
+		{"nvidia", "rtx4090", true},
+		{"nvidia", "m2max", false},
+		{"nvidia", "m1pro", false},
+
+		// Family matching — apple
+		{"apple", "m2max", true},
+		{"apple", "m1pro", true},
+		{"apple", "m3max", true},
+		{"apple", "m4", true},
+		{"apple", "a100", false},
+		{"apple", "rtx3090", false},
+
 		// Unknown inventory class
 		{"ampere+", "somethingweird", false},
 		{"ampere", "somethingweird", false},
+		{"nvidia", "somethingweird", false},
 	}
 
 	for _, tt := range tests {
@@ -186,9 +210,16 @@ func TestMatchesGPUFullName(t *testing.T) {
 		{"turing+", "NVIDIA GeForce RTX 3090", true}, // Ampere > Turing
 		{"hopper+", "NVIDIA A100-PCIE-80GB", false},  // Ampere < Hopper
 
+		// Family matching on full names
+		{"nvidia", "NVIDIA A100-PCIE-80GB", true},
+		{"nvidia", "NVIDIA GeForce RTX 3090", true},
+		{"nvidia", "NVIDIA GeForce RTX 2080 Ti", true},
+		{"apple", "NVIDIA A100-PCIE-80GB", false},
+
 		// Unknown full name
 		{"ampere+", "Some Unknown GPU", false},
 		{"ampere", "Some Unknown GPU", false},
+		{"nvidia", "Some Unknown GPU", false},
 	}
 
 	for _, tt := range tests {

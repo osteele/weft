@@ -117,7 +117,14 @@ const (
 	constraintExactModel gpuConstraintMode = iota
 	constraintExactGen
 	constraintMinGen
+	constraintFamily
 )
+
+// familyCheckers maps family names to their membership test function.
+var familyCheckers = map[string]func(GPUGeneration) bool{
+	"nvidia": GPUGeneration.isNVIDIA,
+	"apple":  GPUGeneration.isApple,
+}
 
 // GPUConstraint represents a parsed --gpu-class value.
 type GPUConstraint struct {
@@ -141,6 +148,11 @@ func ParseGPUConstraint(s string) GPUConstraint {
 
 	norm := normalizeGPUClass(s)
 
+	// Check if it's a family name (e.g., "nvidia", "apple")
+	if _, ok := familyCheckers[norm]; ok {
+		return GPUConstraint{mode: constraintFamily, normalized: norm}
+	}
+
 	// Check if it's a generation name
 	if gen, ok := generationNames[norm]; ok {
 		mode := constraintExactGen
@@ -163,19 +175,24 @@ func ParseGPUConstraint(s string) GPUConstraint {
 
 // matchesGeneration checks whether invGen satisfies the constraint's generation
 // requirement. For exact-gen mode it requires equality; for min-gen mode it
-// requires invGen >= the constraint generation within the same family.
+// requires invGen >= the constraint generation within the same family; for
+// family mode it checks family membership.
 func (c GPUConstraint) matchesGeneration(invGen GPUGeneration) bool {
 	if invGen == GenUnknown {
 		return false
 	}
-	if c.mode == constraintExactGen {
+	switch c.mode {
+	case constraintExactGen:
 		return invGen == c.generation
+	case constraintFamily:
+		return familyCheckers[c.normalized](invGen)
+	default:
+		// constraintMinGen: block cross-family comparison
+		if c.generation.isNVIDIA() != invGen.isNVIDIA() || c.generation.isApple() != invGen.isApple() {
+			return false
+		}
+		return invGen >= c.generation
 	}
-	// constraintMinGen: block cross-family comparison
-	if c.generation.isNVIDIA() != invGen.isNVIDIA() || c.generation.isApple() != invGen.isApple() {
-		return false
-	}
-	return invGen >= c.generation
 }
 
 // MatchesGPU returns true if the inventory GPU class satisfies this constraint.
@@ -185,7 +202,7 @@ func (c GPUConstraint) MatchesGPU(inventoryClass string) bool {
 	switch c.mode {
 	case constraintExactModel:
 		return invNorm == c.normalized
-	case constraintExactGen, constraintMinGen:
+	case constraintExactGen, constraintMinGen, constraintFamily:
 		return c.matchesGeneration(generationOf(invNorm))
 	}
 	return false
@@ -203,7 +220,7 @@ func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
 	case constraintExactModel:
 		return strings.Contains(normFull, c.normalized)
 
-	case constraintExactGen, constraintMinGen:
+	case constraintExactGen, constraintMinGen, constraintFamily:
 		// Identify the GPU model by finding which known class is a substring
 		// of the normalized full name. Use the longest match to avoid e.g.
 		// "a10" matching before "a100".

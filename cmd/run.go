@@ -38,14 +38,18 @@ var runCmd = &cobra.Command{
 	Long: `Queue a job on a remote host for sequential execution.
 
 If --host is omitted, automatic placement selects the best host based on
-GPU constraints (--gpu-class, --gpu-mem) and data locality (--input).
+GPU constraints (--gpu, --gpu-class, --gpu-mem) and data locality (--input).
 
 By default, jobs are added to a queue and run sequentially.
 Use --immediate (-i) to start a job immediately instead of adding it to the queue.
 
 Examples:
   weft run 'python train.py'                           # Auto-place on best host
-  weft run --gpu-class a100 'python train.py'           # Place on A100 host
+  weft run --gpu nvidia 'python train.py'              # Any NVIDIA GPU
+  weft run --gpu nvidia>=24GB 'python train.py'        # Any NVIDIA GPU with 24+ GB
+  weft run --gpu ampere+ 'python train.py'             # Ampere or newer
+  weft run --gpu a100 'python train.py'                # Place on A100 host
+  weft run --gpu-class a100 --gpu-mem 60 'python ...'  # Separate flags still work
   weft run --host cool30 'python train.py'              # Explicit host
   weft run -m "Training" --host cool30 'python train.py'
   weft run --after 42 'python eval.py'                  # Run after job 42
@@ -90,6 +94,7 @@ var (
 	runTags        []string
 	runAfter       int64
 	runAfterAny    int64
+	runGPU         string
 	runGPUMem      int
 	runGPUClass    string
 	runInputs      []string
@@ -122,6 +127,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
+	runCmd.Flags().StringVar(&runGPU, "gpu", "", "GPU constraint: class, generation, or family (e.g., a100, ampere+, nvidia); append >=NGB for memory (e.g., nvidia>=24GB)")
 	runCmd.Flags().IntVar(&runGPUMem, "gpu-mem", 0, "GPU memory reservation in GB per device (default: 20 when GPU is used)")
 	runCmd.Flags().StringVar(&runGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
 	runCmd.Flags().BoolVar(&runWait, "wait", false, "Wait for job to complete before returning")
@@ -271,6 +277,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if runWait && runNoWait {
 		return fmt.Errorf("--wait and --no-wait cannot be used together")
+	}
+
+	// Resolve --gpu into --gpu-class (and optionally --gpu-mem)
+	if runGPU != "" {
+		if runGPUClass != "" {
+			return fmt.Errorf("--gpu and --gpu-class cannot be used together")
+		}
+		parsedClass, parsedMem, err := parseGPUFlag(runGPU)
+		if err != nil {
+			return fmt.Errorf("--gpu: %w", err)
+		}
+		runGPUClass = parsedClass
+		if parsedMem > 0 {
+			if runGPUMem > 0 {
+				return fmt.Errorf("--gpu with >=NGB and --gpu-mem cannot be used together")
+			}
+			runGPUMem = parsedMem
+		}
 	}
 
 	// Validate --needs entries have valid path:version format
