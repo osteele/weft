@@ -136,8 +136,14 @@ Use `start <job-id>` to start a queued job immediately.
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
 - `--input ASSET`: Declare a data input (e.g., `hf:meta-llama/Llama-3-8B`). Influences placement scoring and triggers pre-staging
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`). Recorded on successful completion for downstream jobs
-- `--gpu-class CLASS`: Require a specific GPU class (e.g., `A100`, `RTX3090`)
+- `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
+- `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `ampere+`)
 - `--gpu-mem GB`: Require minimum GPU memory in GB
+- `--produces PATH`: Artifact path this job produces (repeatable, e.g., `output/model.pt`)
+- `--needs PATH:VERSION`: Artifact path:version this job needs (repeatable, e.g., `output/model.pt:100`)
+- `--dry-run`: Show placement scores without submitting the job
+- `--no-sync`: Skip source sync before submission
+- `--wait`: Wait for the job to complete before returning
 
 If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
@@ -404,24 +410,34 @@ Press `l` to view logs:
 
 **Keyboard shortcuts:**
 - `↑/↓`: Navigate job list
+- `Space`/`b`/`t`: Page down / page up / jump to top
 - `l`: Toggle logs view (shows full logs, navigate between jobs while viewing)
+- `Tab`/`Shift+Tab`: Cycle detail tabs
 - `s`: Sync job statuses from remote hosts
 - `n`: Create new job (opens input form)
+- `e`: Edit queued job
+- `E`: Edit & restart (opens new job form pre-filled with job's parameters)
 - `r`: Restart highlighted job
-- `R`: Edit & restart (opens new job form pre-filled with job's parameters)
-- `k`: Kill highlighted job
+- `y`: Retry job (clone and re-queue)
+- `k`: Kill running / cancel queued or needs-rental job
+- `p`: Pause running job
+- `g`: Start queued job now / resume paused
 - `d`: Mark highlighted job as draft (removes remote queue entries or kills running jobs)
+- `c`: Cloud GPU options (queued or needs-rental jobs)
+- `F`: Move job to front of queue
+- `G`: Generate AI description
 - `P`: Prune completed/dead jobs from database
 - `S`: Start queue runner (for queued jobs)
-- `g`: Start queued job now (bypasses `--after` dependency)
 - `x`: Remove job from list
-- `h` or `Tab`: Switch to hosts view
+- `h` or `←/→`: Switch between Jobs and Hosts views
 - `f`: Cycle job filter (All → Queued/Running → Success → Failure)
+- `H`: Cycle host filter
+- `o`: Cycle sort order
 - `Esc`: Clear selection / exit logs view
-
-Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/weft/config.yaml`) if you prefer clickable rows instead.
 - `q` or `Ctrl-C`: Quit
 - `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
+
+Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/weft/config.yaml`) if you prefer clickable rows instead.
 
 **Log caching:** When a host goes offline, the TUI shows the last successfully fetched log content with a "(cached - host offline)" indicator.
 
@@ -463,7 +479,12 @@ Shows all hosts that have had jobs, with system info, queue status, and resource
 
 **Keyboard shortcuts:**
 - `↑/↓`: Navigate host list
-- `j` or `Tab`: Switch to jobs view
+- `i`: Info tab
+- `G`: GPU summary tab
+- `D`: Toggle AI host summaries
+- `S`: Start queue runner on selected host
+- `0`–`9`: Select GPU tab by hardware index
+- `j` or `←/→`: Switch to jobs view
 - `q`: Quit
 
 **Queue status icons:**
@@ -1025,6 +1046,10 @@ weft coordinator status
 
 # Stop the coordinator
 weft coordinator stop
+
+# Install/uninstall as a launchd service (macOS)
+weft coordinator install
+weft coordinator uninstall
 ```
 
 ### Placement Scoring
@@ -1097,6 +1122,25 @@ remediation:
 Processed intent IDs are persisted to SQLite. If the coordinator crashes and
 restarts, it will not re-dispatch intents it already handled. Entries older than
 7 days are cleaned up automatically.
+
+## Job Estimation
+
+Weft can predict job duration and resource usage based on historical data.
+
+```bash
+# Predict duration/resources for a command on a specific host
+weft predict --host cool100 'python train.py'
+
+# Force retrain models from all configured job databases
+weft retrain
+
+# Export training data for external analysis
+weft export training-data
+```
+
+Models are stored at `~/.cache/weft/models/` and auto-retrain when 50+ new
+jobs complete. Configure the training data source via `predictor.project_path`
+in `~/.config/weft/config.yaml`.
 
 ## Cluster Dashboard
 
@@ -1201,6 +1245,23 @@ Environment variables override the config file:
 
 Increasing `connect_timeout` also extends the session ready timeout (connect timeout + 5s).
 
+### Vast.ai Cloud GPU
+
+Configure cloud GPU bursting with Vast.ai and optional R2 result upload:
+
+```yaml
+# ~/.config/weft/config.yaml
+vastai:
+  default_image: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+  r2:
+    bucket: "my-results-bucket"
+    account_id: "..."
+    access_key_id: "..."
+    secret_access_key: "..."
+```
+
+Requires the `vastai` CLI: `pip install vastai && vastai set api-key YOUR_KEY`.
+
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/weft/jobs.db`. The database records:
@@ -1219,6 +1280,7 @@ Log files are stored on remote hosts at `~/.cache/weft/logs/{id}-{timestamp}.log
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
 - `queued`: Job waiting in a remote queue for scheduling
+- `needs_rental`: No local host matches constraints; awaiting cloud GPU launch via TUI
 - `failed`: Job failed to start (e.g., connection error)
 
 The database is automatically created on first use and updated when checking job status.

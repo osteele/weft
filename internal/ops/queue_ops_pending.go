@@ -2,10 +2,10 @@ package ops
 
 import (
 	"database/sql"
-	"log"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -207,13 +207,13 @@ func RequestQueueUpdate(database *sql.DB, job *db.Job, opts ExecuteOptions) (Res
 				Message:  fmt.Sprintf("Job %d update pending (host unreachable)", job.ID),
 			}, nil
 		}
-		if delErr := db.DeletePendingOperation(database, job.ID, db.OpUpdateQueuedJob); delErr \!= nil {
+		if delErr := db.DeletePendingOperation(database, job.ID, db.OpUpdateQueuedJob); delErr != nil {
 			log.Printf("sync: failed to delete pending op for job %d: %v", job.ID, delErr)
 		}
 		return Result{}, err
 	}
 
-	if err := db.DeletePendingOperation(database, job.ID, db.OpUpdateQueuedJob); err \!= nil {
+	if err := db.DeletePendingOperation(database, job.ID, db.OpUpdateQueuedJob); err != nil {
 		log.Printf("sync: failed to delete pending op for job %d: %v", job.ID, err)
 	}
 	return Result{
@@ -246,17 +246,17 @@ func RequestQueuePriority(database *sql.DB, job *db.Job, opts ExecuteOptions) (Q
 		if isQueueConnectionError(err) {
 			return QueuePriorityResult{Deferred: true}, nil
 		}
-		if delErr := db.DeletePendingOperation(database, job.ID, db.OpMoveToFront); delErr \!= nil {
+		if delErr := db.DeletePendingOperation(database, job.ID, db.OpMoveToFront); delErr != nil {
 			log.Printf("sync: failed to delete pending op for job %d: %v", job.ID, delErr)
 		}
 		return QueuePriorityResult{}, err
 	}
 
-	if err := db.DeletePendingOperation(database, job.ID, db.OpMoveToFront); err \!= nil {
+	if err := db.DeletePendingOperation(database, job.ID, db.OpMoveToFront); err != nil {
 		log.Printf("sync: failed to delete pending op for job %d: %v", job.ID, err)
 	}
 	if moved {
-		if err := db.SetQueuedAtBefore(database, job.ID, job.Host); err \!= nil {
+		if err := db.SetQueuedAtBefore(database, job.ID, job.Host); err != nil {
 			log.Printf("sync: failed to update queued_at for job %d: %v", job.ID, err)
 		}
 	}
@@ -289,7 +289,7 @@ func ProcessDeferredQueueOps(database *sql.DB, host string, timeout time.Duratio
 				}
 				return result, err
 			}
-			if err := db.DeleteDeferredOperation(database, op.ID); err \!= nil {
+			if err := db.DeleteDeferredOperation(database, op.ID); err != nil {
 				log.Printf("sync: failed to delete deferred op %d: %v", op.ID, err)
 			}
 			result.HostContacted = true
@@ -310,11 +310,11 @@ func ProcessDeferredQueueOps(database *sql.DB, host string, timeout time.Duratio
 				return result, err
 			}
 			if moved {
-				if err := db.SetQueuedAtBefore(database, job.ID, job.Host); err \!= nil {
+				if err := db.SetQueuedAtBefore(database, job.ID, job.Host); err != nil {
 					log.Printf("sync: failed to update queued_at for job %d: %v", job.ID, err)
 				}
 			}
-			if err := db.DeleteDeferredOperation(database, op.ID); err \!= nil {
+			if err := db.DeleteDeferredOperation(database, op.ID); err != nil {
 				log.Printf("sync: failed to delete deferred op %d: %v", op.ID, err)
 			}
 			result.HostContacted = true

@@ -435,25 +435,48 @@ The TUI shows stale data with a visual indicator when a host is unreachable.
 
 ## TUI keyboard reference
 
+### Jobs view
+
 | Key | Action |
 |-----|--------|
-| `↑/↓` | Navigate job/host list |
+| `↑/↓` | Navigate job list |
+| `Space` | Page down |
+| `b` | Page up |
+| `t` | Jump to top |
 | `l` | Toggle log view |
-| `Tab` | Cycle detail tabs (Details / Logs / CPU) |
+| `Tab`/`Shift+Tab` | Cycle detail tabs (Details / Logs / CPU) |
 | `f` | Cycle job filters (Recent / All / Active / Succeeded / Failed) |
 | `H` | Cycle host filter |
 | `o` | Cycle sort order |
 | `n` | New job |
 | `e` | Edit queued job |
+| `E` | Edit & restart (new job form pre-populated from selected job) |
 | `r` | Refresh / sync |
 | `g` | Start queued job now / resume paused |
-| `k` | Kill running / cancel queued |
+| `p` | Pause running job |
+| `k` | Kill running / cancel queued or needs-rental |
 | `d` | Toggle draft / queued status |
-| `c` | Cloud GPU options (queued jobs) |
+| `c` | Cloud GPU options (queued or needs-rental jobs) |
+| `F` | Move job to front of queue |
+| `G` | Generate AI description |
 | `R` | Restart job |
 | `y` | Retry job |
 | `x` | Remove job |
 | `P` | Prune old jobs |
 | `←/→` | Switch between Jobs and Hosts views |
 | `?` | Help overlay |
+| `Ctrl+Z` | Suspend (return to shell, resume with `fg`) |
+| `q` | Quit |
+
+### Hosts view
+
+| Key | Action |
+|-----|--------|
+| `↑/↓` | Navigate host list |
+| `i` | Info tab |
+| `G` | GPU summary tab |
+| `D` | Toggle AI host summaries |
+| `S` | Start queue runner on selected host |
+| `0`–`9` | Select GPU tab by hardware index |
+| `←/→` | Switch between Jobs and Hosts views |
 | `q` | Quit |
