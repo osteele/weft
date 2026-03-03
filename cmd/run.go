@@ -25,6 +25,7 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -93,6 +94,8 @@ var (
 	runGPUClass    string
 	runInputs      []string
 	runOutputs     []string
+	runProduces    []string
+	runNeeds       []string
 	runDryRun      bool
 	runNoSync      bool
 )
@@ -125,6 +128,8 @@ func init() {
 	runCmd.Flags().BoolVar(&runNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
 	runCmd.Flags().StringSliceVar(&runInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
 	runCmd.Flags().StringSliceVar(&runOutputs, "output", nil, "Output data asset (e.g., checkpoint:llama-ft-v1), can be repeated")
+	runCmd.Flags().StringSliceVar(&runProduces, "produces", nil, "Artifact path this job produces (repeatable, e.g., output/model.pt or output/model.pt:100)")
+	runCmd.Flags().StringSliceVar(&runNeeds, "needs", nil, "Artifact path:version this job needs (repeatable, e.g., output/model.pt:100)")
 	runCmd.Flags().BoolVar(&runDryRun, "dry-run", false, "Show placement scores without submitting the job")
 	runCmd.Flags().BoolVar(&runNoSync, "no-sync", false, "Skip source sync before submission")
 }
@@ -266,6 +271,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 	if runWait && runNoWait {
 		return fmt.Errorf("--wait and --no-wait cannot be used together")
+	}
+
+	// Validate --needs entries have valid path:version format
+	for _, spec := range runNeeds {
+		if _, err := runner.ParseNeedsSpec(spec); err != nil {
+			return fmt.Errorf("--needs: %w", err)
+		}
 	}
 
 	// Placement scoring (used for auto-placement and dry-run)
@@ -470,6 +482,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Inputs:       runInputs,
 			Outputs:      runOutputs,
 			OutputDirs:   outputDirs,
+			Produces:     runProduces,
+			Needs:        runNeeds,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -508,6 +522,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
+			Produces:    runProduces,
+			Needs:       runNeeds,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)
@@ -566,6 +582,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
+			Produces:    runProduces,
+			Needs:       runNeeds,
 		})
 		if err != nil {
 			return fmt.Errorf("queue job: %w", err)

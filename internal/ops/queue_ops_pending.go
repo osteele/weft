@@ -66,6 +66,8 @@ func queueEntryForJob(job *db.Job, envVars []string, depSpec string) QueueEntry 
 		GPUClass:     job.GPUClass,
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
+		Produces:     job.Produces,
+		Needs:        job.Needs,
 	}
 }
 
@@ -82,6 +84,8 @@ func writeQueueJobFile(host string, entry QueueEntry, timeout time.Duration) err
 		GPUClass: entry.GPUClass,
 		GPUMem:   entry.GPUMemGB,
 		Tags:     entry.Tags,
+		Produces: entry.Produces,
+		Needs:    entry.Needs,
 	}
 	payload, err := json.Marshal(job)
 	if err != nil {

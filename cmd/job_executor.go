@@ -107,6 +107,8 @@ type queueJobOptions struct {
 	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs      []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
 	OutputDirs   []string // Convention-based output directories from .weft.yaml
+	Produces     []string // Artifact specs this job produces
+	Needs        []string // Artifact specs this job needs
 }
 
 type queueDependency struct {
@@ -167,6 +169,8 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Inputs:      opts.Inputs,
 		Outputs:     opts.Outputs,
 		OutputDirs:  opts.OutputDirs,
+		Produces:    opts.Produces,
+		Needs:       opts.Needs,
 	}
 
 	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{})

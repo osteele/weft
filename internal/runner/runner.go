@@ -333,7 +333,7 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	}
 
 	// Check dependencies
-	depResult := CheckDependencies(job.Deps, r.logDir)
+	depResult := CheckDependencies(job.Deps, job.Needs, r.logDir)
 	switch depResult.Result {
 	case DepWaiting:
 		fmt.Printf("Job %d: waiting for dependencies\n", jobID)
@@ -461,6 +461,19 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	// Write status and log footer
 	WriteStatusFile(paths, ei)
 	WriteLogFooter(paths, ei)
+
+	// Write artifact satisfied files for producer jobs
+	for _, spec := range rj.Data.Produces {
+		parsed := ParseProducesSpec(spec)
+		version := parsed.Version
+		if version == 0 {
+			version = jobID
+		}
+		satisfiedPath := ArtifactSatisfiedFile(r.logDir, parsed.Path, version)
+		if err := os.WriteFile(satisfiedPath, []byte(fmt.Sprintf("%d\n", ei.ExitCode)), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Job %d: failed to write artifact satisfied file %s: %v\n", jobID, satisfiedPath, err)
+		}
+	}
 
 	// On failure, detect the failure reason using signal-aware detection
 	var failureReason string

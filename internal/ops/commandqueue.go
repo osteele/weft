@@ -35,6 +35,8 @@ type CommandJob struct {
 	GPUMem     *int     `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
 	Tags       []string `json:"tags,omitempty"`
 	OutputDirs []string `json:"output_dirs,omitempty"` // convention-based output directories from .weft.yaml
+	Produces   []string `json:"produces,omitempty"`    // artifact specs this job produces
+	Needs      []string `json:"needs,omitempty"`       // artifact specs this job needs
 }
 
 // QueueCommand represents a command in the append-only command log.
@@ -74,6 +76,8 @@ func NewAddCommand(entry QueueEntry) QueueCommand {
 			GPUMem:     entry.GPUMemGB,
 			Tags:       entry.Tags,
 			OutputDirs: entry.OutputDirs,
+			Produces:   entry.Produces,
+			Needs:      entry.Needs,
 		},
 	}
 }

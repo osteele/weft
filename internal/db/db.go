@@ -63,6 +63,8 @@ type Job struct {
 	Inputs               []string // Data asset refs consumed by this job (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs              []string // Data asset refs produced by this job
 	OutputDirs           []string // Convention-based output directories from .weft.yaml
+	Produces             []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
+	Needs                []string // Artifact specs this job needs (e.g., "output/model.pt:100")
 	Project              string   // Basename of working directory (stored at creation time)
 	CreatedAt            int64    // When the job was created/queued (0 for legacy jobs)
 	QueuedAt             int64    // When job was added to remote queue (for queue ordering)
@@ -101,7 +103,7 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count`
 
 const ProcessedTag = "processed"
 
@@ -377,6 +379,14 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add output_dirs column for convention-based output collection
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN output_dirs TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add produces/needs columns for artifact-based job dependencies
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN produces TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN needs TEXT`); err != nil {
 		return err
 	}
 
@@ -1235,6 +1245,16 @@ func SetJobOutputDirs(db *sql.DB, jobID int64, dirs []string) error {
 	return setJobStringSlice(db, jobID, "output_dirs", dirs)
 }
 
+// SetJobProduces sets the artifact specs this job produces (stored as JSON array).
+func SetJobProduces(db *sql.DB, jobID int64, produces []string) error {
+	return setJobStringSlice(db, jobID, "produces", produces)
+}
+
+// SetJobNeeds sets the artifact specs this job needs (stored as JSON array).
+func SetJobNeeds(db *sql.DB, jobID int64, needs []string) error {
+	return setJobStringSlice(db, jobID, "needs", needs)
+}
+
 func setJobStringSlice(db *sql.DB, jobID int64, column string, values []string) error {
 	if len(values) == 0 {
 		_, err := db.Exec(fmt.Sprintf(`UPDATE jobs SET %s = NULL WHERE id = ?`, column), jobID)
@@ -1534,6 +1554,8 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var inputs sql.NullString
 	var outputs sql.NullString
 	var outputDirs sql.NullString
+	var produces sql.NullString
+	var needs sql.NullString
 	var project sql.NullString
 	var createdAt sql.NullInt64
 	var queuedAt sql.NullInt64
@@ -1550,7 +1572,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var errorDiagnosis sql.NullString
 	var retryCount sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1610,6 +1632,8 @@ func scanJob(row *sql.Row) (*Job, error) {
 	j.Inputs = decodeStringSlice(inputs)
 	j.Outputs = decodeStringSlice(outputs)
 	j.OutputDirs = decodeStringSlice(outputDirs)
+	j.Produces = decodeStringSlice(produces)
+	j.Needs = decodeStringSlice(needs)
 	if project.Valid {
 		j.Project = project.String
 	}
@@ -1870,6 +1894,8 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var inputs sql.NullString
 		var outputs sql.NullString
 		var outputDirs sql.NullString
+		var produces sql.NullString
+		var needs sql.NullString
 		var project sql.NullString
 		var createdAt sql.NullInt64
 		var queuedAt sql.NullInt64
@@ -1886,7 +1912,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var errorDiagnosis sql.NullString
 		var retryCount sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
 		if err != nil {
 			return nil, err
 		}
@@ -1943,6 +1969,8 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		j.Inputs = decodeStringSlice(inputs)
 		j.Outputs = decodeStringSlice(outputs)
 		j.OutputDirs = decodeStringSlice(outputDirs)
+		j.Produces = decodeStringSlice(produces)
+		j.Needs = decodeStringSlice(needs)
 		if project.Valid {
 			j.Project = project.String
 		}

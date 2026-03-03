@@ -36,6 +36,8 @@ type QueueEntry struct {
 	GPUMemGB     *int
 	Tags         []string
 	OutputDirs   []string
+	Produces     []string
+	Needs        []string
 }
 
 // AppendQueueEntryOptions configures the queue append operation
@@ -111,6 +113,8 @@ func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 		GPUMemGB:     job.GPUMemGB,
 		Tags:         job.Tags,
 		OutputDirs:   job.OutputDirs,
+		Produces:     job.Produces,
+		Needs:        job.Needs,
 	}
 	addCmd := NewAddCommand(entry)
 	opts := AppendCommandOptions{Timeout: timeout}
@@ -206,6 +210,8 @@ type QueueJobParams struct {
 	OutputDirs   []string // convention-based output directories from .weft.yaml
 	Inputs       []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
+	Produces     []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
+	Needs        []string // Artifact specs this job needs (e.g., "output/model.pt:100")
 }
 
 // QueueJob creates a job record and adds it to the remote queue.
@@ -289,6 +295,18 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		if err := db.SetJobOutputDirs(database, jobID, params.OutputDirs); err != nil {
 			db.DeleteJob(database, jobID)
 			return Result{}, fmt.Errorf("record output dirs: %w", err)
+		}
+	}
+	if len(params.Produces) > 0 {
+		if err := db.SetJobProduces(database, jobID, params.Produces); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record produces: %w", err)
+		}
+	}
+	if len(params.Needs) > 0 {
+		if err := db.SetJobNeeds(database, jobID, params.Needs); err != nil {
+			db.DeleteJob(database, jobID)
+			return Result{}, fmt.Errorf("record needs: %w", err)
 		}
 	}
 
