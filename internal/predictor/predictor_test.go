@@ -1,0 +1,175 @@
+package predictor
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestBuildConfig(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	weftDB := filepath.Join(home, ".config", "weft", "jobs.db")
+
+	t.Run("auto appends weft DB", func(t *testing.T) {
+		cfg := BuildConfig("/path/to/project", "/models", 50, []string{"/other/db.sqlite"})
+		found := false
+		for _, p := range cfg.DBPaths {
+			if p == weftDB {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("weft DB %q not found in DBPaths: %v", weftDB, cfg.DBPaths)
+		}
+	})
+
+	t.Run("no duplicates when already present", func(t *testing.T) {
+		cfg := BuildConfig("/path/to/project", "/models", 50, []string{weftDB})
+		count := 0
+		for _, p := range cfg.DBPaths {
+			if p == weftDB {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("weft DB appears %d times, want 1", count)
+		}
+	})
+
+	t.Run("empty dbPaths gets weft DB", func(t *testing.T) {
+		cfg := BuildConfig("/path", "/models", 50, nil)
+		if len(cfg.DBPaths) != 1 || cfg.DBPaths[0] != weftDB {
+			t.Errorf("expected [%q], got %v", weftDB, cfg.DBPaths)
+		}
+	})
+
+	t.Run("does not mutate input slice", func(t *testing.T) {
+		input := []string{"/a.db"}
+		_ = BuildConfig("/path", "/models", 50, input)
+		if len(input) != 1 {
+			t.Errorf("input slice was mutated: %v", input)
+		}
+	})
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		name string
+		pred *Prediction
+		want string
+	}{
+		{"nil prediction", nil, "unknown"},
+		{"seconds", &Prediction{Mean: 45, Lower: 30, Upper: 60}, "~45s (95% CI: 30s – 1m)"},
+		{"minutes", &Prediction{Mean: 300, Lower: 240, Upper: 360}, "~5m (95% CI: 4m – 6m)"},
+		{"hours", &Prediction{Mean: 7200, Lower: 3600, Upper: 10800}, "~2h (95% CI: 1h – 3h)"},
+		{"hours and minutes", &Prediction{Mean: 5400, Lower: 3600, Upper: 7200}, "~1h 30m (95% CI: 1h – 2h)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDuration(tt.pred)
+			if got != tt.want {
+				t.Errorf("FormatDuration() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatMemory(t *testing.T) {
+	tests := []struct {
+		name string
+		pred *Prediction
+		unit string
+		want string
+	}{
+		{"nil prediction", nil, "GiB", "unknown"},
+		{"GiB", &Prediction{Mean: 2048, Lower: 1024, Upper: 3072}, "GiB", "~2.0 GiB (95% CI: 1.0 – 3.0 GiB)"},
+		{"MiB", &Prediction{Mean: 512, Lower: 256, Upper: 768}, "MiB", "~512.0 MiB (95% CI: 256.0 – 768.0 MiB)"},
+		{"GB", &Prediction{Mean: 2000, Lower: 1000, Upper: 3000}, "GB", "~2.0 GB (95% CI: 1.0 – 3.0 GB)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatMemory(tt.pred, tt.unit)
+			if got != tt.want {
+				t.Errorf("FormatMemory() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatDur(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"below minute", 30 * time.Second, "30s"},
+		{"exactly one minute", time.Minute, "1m"},
+		{"59 seconds", 59 * time.Second, "59s"},
+		{"exactly one hour", time.Hour, "1h"},
+		{"hour and minutes", 90 * time.Minute, "1h 30m"},
+		{"zero", 0, "0s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatDur(tt.d)
+			if got != tt.want {
+				t.Errorf("formatDur(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNeedsRetrain(t *testing.T) {
+	t.Run("missing meta file triggers retrain", func(t *testing.T) {
+		cfg := Config{
+			ProjectPath:     "/path",
+			ModelDir:        t.TempDir(),
+			RetrainInterval: 50,
+		}
+		if !NeedsRetrain(cfg, 100) {
+			t.Error("expected NeedsRetrain=true for missing meta")
+		}
+	})
+
+	t.Run("stale meta triggers retrain", func(t *testing.T) {
+		dir := t.TempDir()
+		meta := Meta{TrainedAt: "2024-01-01", JobCount: 50}
+		data, _ := json.Marshal(meta)
+		os.WriteFile(filepath.Join(dir, "meta.json"), data, 0644)
+
+		cfg := Config{
+			ProjectPath:     "/path",
+			ModelDir:        dir,
+			RetrainInterval: 50,
+		}
+		// 100 current - 50 trained = 50, which is >= interval of 50
+		if !NeedsRetrain(cfg, 100) {
+			t.Error("expected NeedsRetrain=true for stale meta")
+		}
+	})
+
+	t.Run("fresh meta does not trigger retrain", func(t *testing.T) {
+		dir := t.TempDir()
+		meta := Meta{TrainedAt: "2024-01-01", JobCount: 80}
+		data, _ := json.Marshal(meta)
+		os.WriteFile(filepath.Join(dir, "meta.json"), data, 0644)
+
+		cfg := Config{
+			ProjectPath:     "/path",
+			ModelDir:        dir,
+			RetrainInterval: 50,
+		}
+		// 100 current - 80 trained = 20, which is < 50
+		if NeedsRetrain(cfg, 100) {
+			t.Error("expected NeedsRetrain=false for fresh meta")
+		}
+	})
+}
