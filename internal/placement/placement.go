@@ -320,6 +320,23 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 	return nil, ErrNoReachableHost
 }
 
+// PlaceWithFallback tries live placement first, falls back to static scoring,
+// and returns ErrNoEligibleHost if no host matches at all.
+// This encapsulates the common BestReachableHost → BestHostWithPredictor fallback chain.
+func PlaceWithFallback(db *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
+	result, err := BestReachableHost(db, constraints, 5*time.Second)
+	if err == nil {
+		return result, nil
+	}
+	if errors.Is(err, ErrNoReachableHost) {
+		return BestHostWithPredictor(db, constraints, nil, predict)
+	}
+	if errors.Is(err, ErrNoEligibleHost) {
+		return nil, err
+	}
+	return nil, err
+}
+
 func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics) Score {
 	s := Score{Host: host.Name, Eligible: true}
 

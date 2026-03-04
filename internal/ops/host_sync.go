@@ -143,10 +143,15 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// Ensure locally-queued jobs exist on the remote queue.
 	// This catches jobs that were recorded locally while the host was
 	// unreachable, or that the batch status path couldn't detect.
-	if result.HostContacted {
-		ensured, err := ensureQueuedJobsOnRemote(database, activeJobs, timeout)
+	// Runs regardless of HostContacted so brand-new jobs with no other
+	// active jobs on the host can still be pushed.
+	{
+		ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout)
 		if err == nil {
 			result.Updated += ensured
+			if contacted {
+				result.HostContacted = true
+			}
 		}
 	}
 
@@ -309,33 +314,85 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	return result, nil
 }
 
-// ensureQueuedJobsOnRemote appends locally-queued jobs to the remote queue
-// when they haven't been synced yet. This handles the case where a job was
-// recorded locally while the host was unreachable, or where the batch status
-// sync path didn't push the job to the remote queue.
-//
-// Source files are synced to the remote host before each job is appended,
-// ensuring the working directory exists on the target before the job starts.
-func ensureQueuedJobsOnRemote(database *sql.DB, jobs []*db.Job, timeout time.Duration) (int, error) {
-	ensured := 0
-	for _, job := range jobs {
-		if job.Status != db.StatusQueued || job.PendingStatus != nil || job.LastSyncedStatus == db.StatusQueued {
-			continue
+// ensureQueuedJobsOnRemote pushes locally-queued jobs to the remote host.
+// It fetches its own job list via ListUnsyncedQueuedJobs, resolves the backend
+// once per host, syncs sources (deduplicated by working directory), and appends
+// jobs to the remote queue (or submits via sbatch for Slurm hosts).
+// Returns (ensured count, host contacted, error).
+func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Duration) (int, bool, error) {
+	jobs, err := db.ListUnsyncedQueuedJobs(database, host)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(jobs) == 0 {
+		return 0, false, nil
+	}
+
+	// Resolve backend once for this host (all jobs share the same backend).
+	backend := jobs[0].Backend
+	contacted := false
+	if backend == "" {
+		var err error
+		backend, err = ResolveBackend(host, timeout)
+		if err != nil {
+			if ssh.IsConnectionError(err.Error()) {
+				return 0, false, nil
+			}
+			return 0, false, err
 		}
-		// Sync sources before pushing the job to the remote queue.
-		if job.WorkingDir != "" {
+		contacted = true
+	}
+
+	ensured := 0
+	syncedDirs := make(map[string]bool)
+	for _, job := range jobs {
+		// Set backend if not yet stored
+		if job.Backend == "" {
+			if err := db.SetJobBackend(database, job.ID, backend); err != nil {
+				return ensured, contacted, err
+			}
+			job.Backend = backend
+		}
+
+		// Sync sources, deduplicated by working directory
+		if job.WorkingDir != "" && !syncedDirs[job.WorkingDir] {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
 			srcsync.SyncSourcesToHost(job.Host, localDir, job.WorkingDir, job.Inputs)
+			syncedDirs[job.WorkingDir] = true
 		}
+
+		// Route Slurm jobs to sbatch
+		if job.Backend == db.BackendSlurm {
+			outcome, err := requestJobStatus(database, job, db.StatusQueued, ExecuteOptions{Timeout: timeout})
+			if err != nil {
+				return ensured, contacted, err
+			}
+			if !outcome.hostAvailable {
+				return ensured, contacted, nil
+			}
+			contacted = true
+			if outcome.resolved {
+				if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
+					return ensured, contacted, err
+				}
+				ensured++
+			}
+			continue
+		}
+
 		if err := AppendJobToQueue(job, timeout); err != nil {
-			return ensured, err
+			if ssh.IsConnectionError(err.Error()) {
+				return ensured, contacted, nil
+			}
+			return ensured, contacted, err
 		}
+		contacted = true
 		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
-			return ensured, err
+			return ensured, contacted, err
 		}
 		ensured++
 	}
-	return ensured, nil
+	return ensured, contacted, nil
 }
 
 // scanHFCacheDuringSync scans the remote HF cache and records discovered assets

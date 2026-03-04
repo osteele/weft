@@ -214,10 +214,10 @@ type QueueJobParams struct {
 	Needs        []string // Artifact specs this job needs (e.g., "output/model.pt:100")
 }
 
-// QueueJob creates a job record and adds it to the remote queue.
-// The job is recorded locally with "queued" status, then appended to the queue file.
-// If the host is unreachable, the operation is deferred until the host comes online.
-func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Result, error) {
+// RecordQueuedJob records a job in the local database with "queued" status.
+// This is DB-only — no SSH or remote operations are performed.
+// The job will be pushed to the remote host by SyncHost on the next sync cycle.
+func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
 	// Extract GPU from env vars if not explicitly set
 	gpu := params.GPU
 	if gpu == "" {
@@ -230,8 +230,6 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	}
 
 	// Apply default GPU memory reservation when GPU is involved but no explicit reservation.
-	// This ensures env-var-based GPU jobs (e.g., --env CUDA_VISIBLE_DEVICES=0) get the same
-	// default reservation as --gpu flag jobs.
 	gpuMemGB := params.GPUMemGB
 	if gpuMemGB == nil && (gpu != "" || params.GPUClass != "") {
 		defaultMem := DefaultGPUMemGB
@@ -241,73 +239,85 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 	// Record job with queued status
 	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
 	if err != nil {
-		return Result{}, fmt.Errorf("record job: %w", err)
+		return 0, fmt.Errorf("record job: %w", err)
 	}
 	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
 		db.DeleteJob(database, jobID)
-		return Result{}, fmt.Errorf("record env vars: %w", err)
+		return 0, fmt.Errorf("record env vars: %w", err)
 	}
 	if len(params.Tags) > 0 {
 		if err := db.SetJobTags(database, jobID, params.Tags); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record tags: %w", err)
+			return 0, fmt.Errorf("record tags: %w", err)
 		}
 	}
 	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
-		return Result{}, fmt.Errorf("record dependencies: %w", err)
+		return 0, fmt.Errorf("record dependencies: %w", err)
 	}
 	if project := db.DeriveProject(params.WorkingDir, params.Command); project != "" {
 		if err := db.SetJobProject(database, jobID, project); err != nil {
-			return Result{}, fmt.Errorf("record project: %w", err)
+			return 0, fmt.Errorf("record project: %w", err)
 		}
 	}
 	if params.CPUAllotment != nil {
 		if err := db.SetJobCPUAllotment(database, jobID, params.CPUAllotment); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record CPU allotment: %w", err)
+			return 0, fmt.Errorf("record CPU allotment: %w", err)
 		}
 	}
 	if gpuMemGB != nil {
 		if err := db.SetJobGPUMemGB(database, jobID, gpuMemGB); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record GPU memory: %w", err)
+			return 0, fmt.Errorf("record GPU memory: %w", err)
 		}
 	}
 	if params.GPUClass != "" {
 		if err := db.SetJobGPUClass(database, jobID, params.GPUClass); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record GPU class: %w", err)
+			return 0, fmt.Errorf("record GPU class: %w", err)
 		}
 	}
 	if len(params.Inputs) > 0 {
 		if err := db.SetJobInputs(database, jobID, params.Inputs); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record inputs: %w", err)
+			return 0, fmt.Errorf("record inputs: %w", err)
 		}
 	}
 	if len(params.Outputs) > 0 {
 		if err := db.SetJobOutputs(database, jobID, params.Outputs); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record outputs: %w", err)
+			return 0, fmt.Errorf("record outputs: %w", err)
 		}
 	}
 	if len(params.OutputDirs) > 0 {
 		if err := db.SetJobOutputDirs(database, jobID, params.OutputDirs); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record output dirs: %w", err)
+			return 0, fmt.Errorf("record output dirs: %w", err)
 		}
 	}
 	if len(params.Produces) > 0 {
 		if err := db.SetJobProduces(database, jobID, params.Produces); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record produces: %w", err)
+			return 0, fmt.Errorf("record produces: %w", err)
 		}
 	}
 	if len(params.Needs) > 0 {
 		if err := db.SetJobNeeds(database, jobID, params.Needs); err != nil {
 			db.DeleteJob(database, jobID)
-			return Result{}, fmt.Errorf("record needs: %w", err)
+			return 0, fmt.Errorf("record needs: %w", err)
 		}
+	}
+
+	return jobID, nil
+}
+
+// QueueJob creates a job record and adds it to the remote queue.
+// The job is recorded locally with "queued" status, then appended to the queue file.
+// If the host is unreachable, the operation is deferred until the host comes online.
+func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Result, error) {
+	jobID, err := RecordQueuedJob(database, params)
+	if err != nil {
+		return Result{}, err
 	}
 
 	backend, err := ResolveBackend(params.Host, opts.Timeout)

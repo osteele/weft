@@ -24,7 +24,6 @@ import (
 	"github.com/osteele/weft/internal/scheduler"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
-	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -357,7 +356,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("submit job: %w", submitErr)
 		}
 		if submitResult.NeedsRental {
-			return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
+			return recordNeedsRentalJob(cmd, database, needsRentalParams{
+				Constraints: placementConstraints,
+				WorkingDir:  workingDir,
+				Command:     command,
+				Description: runDescription,
+				EnvVars:     runEnvVars,
+				Tags:        runTags,
+				Outputs:     runOutputs,
+				Produces:    runProduces,
+				Needs:       runNeeds,
+			})
 		}
 
 		jobID := submitResult.JobID
@@ -385,19 +394,17 @@ func runRun(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
 
+		// Push the job to the remote host before waiting/following.
+		deferred := !syncHostQuietly(database, host, runNoSync)
+
 		if runWait {
-			return waitForQueuedJobCompletion(database, jobID, submitResult.Deferred)
+			return waitForQueuedJobCompletion(database, jobID, deferred)
 		}
 		if runFollow {
-			return followQueuedJob(database, jobID, host, submitResult.Deferred)
+			return followQueuedJob(database, jobID, host, deferred)
 		}
-		if submitResult.Deferred {
+		if deferred {
 			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
-		} else if host != "" {
-			backend, backendErr := ops.ResolveBackend(host, 5*time.Second)
-			if backendErr == nil && backend != db.BackendSlurm {
-				_, _ = ensureQueueRunnerStarted(host, defaultQueueName)
-			}
 		}
 		return nil
 	}
@@ -406,21 +413,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Placement for non-scheduler paths (--draft, --after)
 	if host == "" {
-		result, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
+		result, err := placement.PlaceWithFallback(database, placementConstraints, predict)
 		if err != nil {
-			if errors.Is(err, placement.ErrNoReachableHost) {
-				result, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
-				if err != nil {
-					if errors.Is(err, placement.ErrNoEligibleHost) {
-						return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
-					}
-					return fmt.Errorf("auto-placement failed: %w", err)
-				}
-			} else if errors.Is(err, placement.ErrNoEligibleHost) {
-				return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
-			} else {
-				return fmt.Errorf("auto-placement failed: %w", err)
+			if errors.Is(err, placement.ErrNoEligibleHost) {
+				return recordNeedsRentalJob(cmd, database, needsRentalParams{
+					Constraints: placementConstraints,
+					WorkingDir:  workingDir,
+					Command:     command,
+					Description: runDescription,
+					EnvVars:     runEnvVars,
+					Tags:        runTags,
+					Outputs:     runOutputs,
+					Produces:    runProduces,
+					Needs:       runNeeds,
+				})
 			}
+			return fmt.Errorf("auto-placement failed: %w", err)
 		}
 		host = result.Host
 
@@ -521,11 +529,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("  After job: %d (%s)\n", afterID, waitType)
 
-		if res.Deferred {
-			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
-		} else if !runNoSync && host != "" {
-			syncSourcesToHost(host, workingDir, runInputs)
-		}
+		syncAndReportOffline(database, host, runNoSync)
 		return nil
 	}
 
@@ -590,56 +594,69 @@ func buildPlacementMeta(result *placement.PlacementResult, predict placement.Job
 	return meta
 }
 
+// needsRentalParams bundles parameters for recording a needs-rental job.
+type needsRentalParams struct {
+	Constraints placement.Constraints
+	WorkingDir  string
+	Command     string
+	Description string
+	EnvVars     []string
+	Tags        []string
+	Outputs     []string
+	Produces    []string
+	Needs       []string
+}
+
 // recordNeedsRentalJob creates a needs_rental job when no local host matches constraints.
-func recordNeedsRentalJob(cmd *cobra.Command, database *sql.DB, constraints placement.Constraints, workingDir, command, description string, envVars, tags, outputs []string, produces, needs []string) error {
-	jobID, err := db.RecordNeedsRentalJob(database, workingDir, command, description)
+func recordNeedsRentalJob(cmd *cobra.Command, database *sql.DB, p needsRentalParams) error {
+	jobID, err := db.RecordNeedsRentalJob(database, p.WorkingDir, p.Command, p.Description)
 	if err != nil {
 		return fmt.Errorf("record needs-rental job: %w", err)
 	}
 
 	// Set metadata on the job
-	if constraints.GPUClass != "" {
-		if err := db.SetJobGPUClass(database, jobID, constraints.GPUClass); err != nil {
+	if p.Constraints.GPUClass != "" {
+		if err := db.SetJobGPUClass(database, jobID, p.Constraints.GPUClass); err != nil {
 			return fmt.Errorf("set gpu class: %w", err)
 		}
 	}
-	if constraints.GPUMemGB > 0 {
-		if err := db.SetJobGPUMemGB(database, jobID, &constraints.GPUMemGB); err != nil {
+	if p.Constraints.GPUMemGB > 0 {
+		if err := db.SetJobGPUMemGB(database, jobID, &p.Constraints.GPUMemGB); err != nil {
 			return fmt.Errorf("set gpu mem: %w", err)
 		}
 	}
-	if len(tags) > 0 {
-		if err := db.SetJobTags(database, jobID, tags); err != nil {
+	if len(p.Tags) > 0 {
+		if err := db.SetJobTags(database, jobID, p.Tags); err != nil {
 			return fmt.Errorf("set tags: %w", err)
 		}
 	}
-	if len(envVars) > 0 {
-		if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
+	if len(p.EnvVars) > 0 {
+		if err := db.SetJobEnvVars(database, jobID, p.EnvVars); err != nil {
 			return fmt.Errorf("set env vars: %w", err)
 		}
 	}
-	if len(constraints.Inputs) > 0 {
-		if err := db.SetJobInputs(database, jobID, constraints.Inputs); err != nil {
+	if len(p.Constraints.Inputs) > 0 {
+		if err := db.SetJobInputs(database, jobID, p.Constraints.Inputs); err != nil {
 			return fmt.Errorf("set inputs: %w", err)
 		}
 	}
-	if len(outputs) > 0 {
-		if err := db.SetJobOutputs(database, jobID, outputs); err != nil {
+	if len(p.Outputs) > 0 {
+		if err := db.SetJobOutputs(database, jobID, p.Outputs); err != nil {
 			return fmt.Errorf("set outputs: %w", err)
 		}
 	}
-	if len(produces) > 0 {
-		if err := db.SetJobProduces(database, jobID, produces); err != nil {
+	if len(p.Produces) > 0 {
+		if err := db.SetJobProduces(database, jobID, p.Produces); err != nil {
 			return fmt.Errorf("set produces: %w", err)
 		}
 	}
-	if len(needs) > 0 {
-		if err := db.SetJobNeeds(database, jobID, needs); err != nil {
+	if len(p.Needs) > 0 {
+		if err := db.SetJobNeeds(database, jobID, p.Needs); err != nil {
 			return fmt.Errorf("set needs: %w", err)
 		}
 	}
 
-	constraintDesc := placement.DescribeConstraints(constraints)
+	constraintDesc := placement.DescribeConstraints(p.Constraints)
 	fmt.Fprintf(cmd.OutOrStdout(), "No local host matches constraints: %s\n", constraintDesc)
 	fmt.Fprintf(cmd.OutOrStdout(), "Job #%d accepted (needs rental host)\n", jobID)
 	fmt.Fprintf(cmd.OutOrStdout(), "Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.\n")
@@ -807,9 +824,27 @@ func coordinatorReachable(cfg *config.Config) bool {
 	return strings.TrimSpace(stdout) == "YES"
 }
 
-// syncSourcesToHost syncs source files and extra paths to the remote host.
-// Errors are silently ignored since sync failure is non-fatal.
-func syncSourcesToHost(host, workingDir string, inputs []string) {
-	localDir := workdir.ResolveLocal(workingDir)
-	srcsync.SyncSourcesToHost(host, localDir, workingDir, inputs)
+// syncHostQuietly syncs a host to push queued jobs to the remote.
+// Returns true if the host was contacted, false if offline or skipped.
+func syncHostQuietly(database *sql.DB, host string, noSync bool) bool {
+	if host == "" || noSync {
+		return false
+	}
+	syncResult, _ := ops.SyncHost(database, host, ops.HostSyncOptions{
+		Timeout: 10 * time.Second,
+	}, func(h string) (bool, error) {
+		return ensureQueueRunnerStarted(h, defaultQueueName)
+	})
+	return syncResult.HostContacted
+}
+
+// syncAndReportOffline syncs a host and prints an offline message if unreachable.
+func syncAndReportOffline(database *sql.DB, host string, noSync bool) {
+	if noSync {
+		fmt.Printf("\nSync skipped (--no-sync). Job will be sent to the remote queue on the next background sync.\n")
+		return
+	}
+	if !syncHostQuietly(database, host, false) && host != "" {
+		fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
+	}
 }

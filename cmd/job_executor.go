@@ -88,7 +88,7 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 
 type queueJobResult struct {
 	JobID    int64
-	Deferred bool
+	Deferred bool // Always false — kept for callers that check it
 }
 
 // queueJobOptions controls adding a job to a remote queue.
@@ -153,7 +153,8 @@ func extractGPUFromEnvVars(envVars []string) string {
 	return ""
 }
 
-// queueJob delegates to ops.QueueJob, converting CLI types to ops types.
+// queueJob records a job locally via RecordQueuedJob (DB-only, no SSH).
+// The caller is responsible for calling syncAndReportOffline to push to the remote.
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 	params := ops.QueueJobParams{
 		Host:        opts.Host,
@@ -173,14 +174,13 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Needs:       opts.Needs,
 	}
 
-	result, err := ops.QueueJob(database, params, ops.ExecuteOptions{})
+	jobID, err := ops.RecordQueuedJob(database, params)
 	if err != nil {
 		return nil, err
 	}
 
 	return &queueJobResult{
-		JobID:    result.JobID,
-		Deferred: result.Deferred,
+		JobID: jobID,
 	}, nil
 }
 

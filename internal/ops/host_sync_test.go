@@ -11,41 +11,25 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	// Create a queued job with no LastSyncedStatus (simulates job recorded while host offline)
-	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "unsynced job")
+	_, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "unsynced job")
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("get job: %v", err)
-	}
-
-	// Verify precondition: LastSyncedStatus is empty
-	if job.LastSyncedStatus == db.StatusQueued {
-		t.Fatal("expected LastSyncedStatus != queued before test")
-	}
-
-	// Mock SSH so AppendJobToQueue succeeds
+	// Mock SSH so AppendJobToQueue and ResolveBackend succeed
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
 		return "", "", 0
 	})
 
-	ensured, err := ensureQueuedJobsOnRemote(database, []*db.Job{job}, 5*time.Second)
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
 	if ensured != 1 {
 		t.Errorf("expected 1 job ensured, got %d", ensured)
 	}
-
-	// Verify LastSyncedStatus is now queued
-	updated, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("get updated job: %v", err)
-	}
-	if updated.LastSyncedStatus != db.StatusQueued {
-		t.Errorf("expected LastSyncedStatus=queued, got %q", updated.LastSyncedStatus)
+	if !contacted {
+		t.Error("expected contacted=true")
 	}
 }
 
@@ -62,18 +46,16 @@ func TestEnsureQueuedJobsOnRemote_SkipsAlreadySynced(t *testing.T) {
 		t.Fatalf("update last synced status: %v", err)
 	}
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("get job: %v", err)
-	}
-
 	// No SSH mock needed — should skip without making SSH calls
-	ensured, err := ensureQueuedJobsOnRemote(database, []*db.Job{job}, 5*time.Second)
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
 	if ensured != 0 {
 		t.Errorf("expected 0 jobs ensured (already synced), got %d", ensured)
+	}
+	if contacted {
+		t.Error("expected contacted=false for already synced")
 	}
 }
 
@@ -91,16 +73,14 @@ func TestEnsureQueuedJobsOnRemote_SkipsPendingStatus(t *testing.T) {
 		t.Fatalf("set pending status: %v", err)
 	}
 
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("get job: %v", err)
-	}
-
-	ensured, err := ensureQueuedJobsOnRemote(database, []*db.Job{job}, 5*time.Second)
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
 	if ensured != 0 {
 		t.Errorf("expected 0 jobs ensured (has pending status), got %d", ensured)
+	}
+	if contacted {
+		t.Error("expected contacted=false for pending status")
 	}
 }

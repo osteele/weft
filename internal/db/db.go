@@ -2350,6 +2350,13 @@ func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
+// ListUnsyncedQueuedJobs returns queued jobs on a host that haven't been pushed
+// to the remote queue yet (last_synced_status is not 'queued' and no pending operation).
+func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND (last_synced_status IS NULL OR last_synced_status != ?) AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusQueued, StatusQueued)
+}
+
 // ListDraftJobsPendingSync returns draft jobs that still need remote cleanup.
 func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?) ORDER BY id ASC`, jobSelectColumns)

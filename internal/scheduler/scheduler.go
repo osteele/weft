@@ -34,7 +34,6 @@ type SubmitResult struct {
 	JobID            int64
 	Host             string   // Host the job was placed on
 	PlacementReasons []string // Why this host was chosen
-	Deferred         bool     // True if host was offline and job was deferred
 	NeedsRental      bool     // True if no eligible host found
 	PlacementResult  *placement.PlacementResult
 }
