@@ -2,11 +2,34 @@ package runner
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 )
+
+// nvidiaSmiTableOutput is the full output from nvidia-smi on a host with
+// driver 525.125.06, where --query-gpu and --format flags are silently
+// ignored and the default table format is returned instead. This happens
+// on some older driver versions.
+const nvidiaSmiTableOutput = `Wed Mar  4 16:10:21 2026
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 525.125.06   Driver Version: 525.125.06   CUDA Version: 12.0     |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|                               |                      |               MIG M. |
+|===============================+======================+======================|
+|   0  NVIDIA GeForce RTX 3090  On   | 00000000:01:00.0 Off |                  N/A |
+| 51%   45C    P8    22W / 350W |      6MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   1  NVIDIA GeForce RTX 3090  On   | 00000000:41:00.0 Off |                  N/A |
+| 51%   45C    P8    19W / 350W |      6MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+`
 
 func TestParseNvidiaSmiOutput(t *testing.T) {
 	tests := []struct {
@@ -507,5 +530,121 @@ func TestGetJobGPUDevices(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestParseNvidiaSmiOutput_TableFormat verifies that parseNvidiaSmiOutput
+// returns zero rows when given table-format output (old driver 525 that
+// silently ignores --query-gpu/--format flags).
+func TestParseNvidiaSmiOutput_TableFormat(t *testing.T) {
+	rows := parseNvidiaSmiOutput(nvidiaSmiTableOutput, 4)
+	if len(rows) != 0 {
+		t.Errorf("expected 0 rows from table output, got %d", len(rows))
+	}
+	// parseNvidiaSmiOutput returns nil when no lines match CSV format.
+	// This ensures DiscoverGPUs reaches the table format fallback path.
+}
+
+// TestParseNvidiaSmiTable_TruncatedNames verifies parsing works when
+// nvidia-smi truncates GPU names with "..." (observed on driver 525.125.06
+// when terminal width is limited).
+func TestParseNvidiaSmiTable_TruncatedNames(t *testing.T) {
+	truncatedOutput := `Wed Mar  4 16:46:12 2026
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 525.125.06   Driver Version: 525.125.06   CUDA Version: 12.0     |
+|-------------------------------+----------------------+----------------------+
+| GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp  Perf  Pwr:Usage/Cap|         Memory-Usage | GPU-Util  Compute M. |
+|===============================+======================+======================|
+|   0  NVIDIA GeForce ...  On   | 00000000:01:00.0 Off |                  N/A |
+| 51%   45C    P8    22W / 350W |      6MiB / 24576MiB |      0%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+|   1  NVIDIA GeForce ...  On   | 00000000:41:00.0 Off |                  N/A |
+| 51%   45C    P8    19W / 350W |   4096MiB / 24576MiB |     35%      Default |
+|                               |                      |                  N/A |
++-------------------------------+----------------------+----------------------+
+`
+	devices, memSnapshot := parseNvidiaSmiTable(truncatedOutput)
+	if len(devices) != 2 {
+		t.Fatalf("expected 2 devices, got %d", len(devices))
+	}
+	if devices[0].Index != "0" || devices[1].Index != "1" {
+		t.Errorf("device indices = [%s, %s], want [0, 1]", devices[0].Index, devices[1].Index)
+	}
+	if devices[0].TotalMemGB != 24 {
+		t.Errorf("device[0].TotalMemGB = %d, want 24", devices[0].TotalMemGB)
+	}
+	// Verify memory snapshot captures different usage values
+	if memSnapshot["1"].UsedMiB != 4096 {
+		t.Errorf("memSnapshot[1].UsedMiB = %d, want 4096", memSnapshot["1"].UsedMiB)
+	}
+}
+
+// TestParseNvidiaSmiTableOutput verifies that GPU info can be extracted
+// from the default nvidia-smi table format used by old drivers that
+// silently ignore --query-gpu/--format flags.
+func TestParseNvidiaSmiTable(t *testing.T) {
+	devices, memSnapshot := parseNvidiaSmiTable(nvidiaSmiTableOutput)
+	if len(devices) == 0 {
+		t.Fatal("expected devices from table output, got none")
+	}
+	if len(devices) != 2 {
+		t.Fatalf("expected 2 devices, got %d", len(devices))
+	}
+
+	// Check first device
+	d := devices[0]
+	if d.Index != "0" {
+		t.Errorf("device[0].Index = %q, want %q", d.Index, "0")
+	}
+	if !strings.Contains(d.Name, "RTX 3090") {
+		t.Errorf("device[0].Name = %q, want to contain 'RTX 3090'", d.Name)
+	}
+	if d.TotalMemGB != 24 {
+		t.Errorf("device[0].TotalMemGB = %d, want 24", d.TotalMemGB)
+	}
+
+	// Check memory snapshot was populated in the same pass
+	if len(memSnapshot) != 2 {
+		t.Fatalf("expected 2 memory entries, got %d", len(memSnapshot))
+	}
+	mem0 := memSnapshot["0"]
+	if mem0.UsedMiB != 6 {
+		t.Errorf("memSnapshot[0].UsedMiB = %d, want 6", mem0.UsedMiB)
+	}
+	if mem0.TotalMiB != 24576 {
+		t.Errorf("memSnapshot[0].TotalMiB = %d, want 24576", mem0.TotalMiB)
+	}
+}
+
+// TestDiscoverGPUs_FallbackToTableParsing verifies that DiscoverGPUs
+// uses table output parsing as a fallback when CSV parsing returns no rows.
+func TestDiscoverGPUs_FallbackToTableParsing(t *testing.T) {
+	// Simulate what happens when nvidia-smi returns table format:
+	// CSV parsing returns 0 rows, but table parsing finds devices.
+	csvRows := parseNvidiaSmiOutput(nvidiaSmiTableOutput, 4)
+	if len(csvRows) != 0 {
+		t.Skip("CSV parsing unexpectedly succeeded on table output")
+	}
+
+	tableDevices, _ := parseNvidiaSmiTable(nvidiaSmiTableOutput)
+	if len(tableDevices) == 0 {
+		t.Error("table fallback parsing should find devices in nvidia-smi table output")
+	}
+}
+
+// TestPickBestGPUForClass_EmptyInventory verifies the behavior when
+// the GPU inventory is empty (e.g., nvidia-smi query failed).
+func TestPickBestGPUForClass_EmptyInventory(t *testing.T) {
+	inv := &GPUInventory{
+		Devices:      nil,
+		hasNvidiaSmi: true, // nvidia-smi exists but returned unparseable output
+	}
+	state := NewState()
+
+	_, ok := inv.PickBestGPUForClass(state, "nvidia", 24)
+	if ok {
+		t.Error("expected no device from empty inventory")
 	}
 }

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -98,7 +99,6 @@ func (r *Runner) Run() error {
 
 	// Discover hardware
 	r.gpuInv = DiscoverGPUs()
-	r.gpuInv.LogInventory()
 	r.cpuCount = DetectCPUCount()
 	r.cmdProc = NewCommandProcessor(r.commandsFile, r.queueDir)
 
@@ -308,11 +308,16 @@ func (r *Runner) tryStartNextJob() {
 	}
 
 	// Start the job
+	log.Printf("Job %d: starting (runningCount=%d, gpuClass=%q, resolvedGPU=%v)",
+		jobID, runningCount, job.GPUClass, resolvedGPUDevices)
 	err = r.startJob(jobID, job, resolvedGPUDevices)
 	if err == errRequeue {
+		log.Printf("Job %d: requeued", jobID)
 		r.state.AddPending(jobID)
 	} else if err != nil {
 		fmt.Fprintf(os.Stderr, "Job %d: start failed: %v\n", jobID, err)
+	} else {
+		log.Printf("Job %d: started successfully", jobID)
 	}
 	r.state.Save(r.stateFile)
 }
@@ -429,14 +434,17 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	}
 
 	// Start the process
+	log.Printf("Job %d: launching process", jobID)
 	proc, err := StartProcess(command, job.Dir, envVars, paths.Log)
 	if err != nil {
 		oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithError(err))
+		log.Printf("Job %d: start failed: %v", jobID, err)
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
 		return fmt.Errorf("start process: %w", err)
 	}
 
 	// Write PID/PGID files
+	log.Printf("Job %d: started PID=%d, writing PID files", jobID, proc.PID)
 	proc.WritePIDFiles(paths)
 
 	// Track the process
@@ -467,6 +475,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	err := proc.Cmd.Wait()
 	ei := ExtractExitInfo(err)
+	log.Printf("Job %d: process exited (code=%d, signal=%v, err=%v)", jobID, ei.ExitCode, ei.Signaled, err)
 
 	endTime := time.Now().Unix()
 	duration := endTime - startTime

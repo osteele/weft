@@ -2,6 +2,7 @@ package agentdeploy
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -260,6 +261,46 @@ func TestEnsureBuilt_RealBuild_CrossCompile(t *testing.T) {
 	}
 	if info.Size() == 0 {
 		t.Error("cross-compiled binary is empty")
+	}
+}
+
+// TestLocalAgentVersion_ExcludesWorkingCopy verifies that the local agent
+// version is based on committed revisions, not the jj working copy.
+// The working copy gets a new commit_id on every jj snapshot, so including
+// it causes perpetual version mismatches → agent redeploy → runner session
+// kill/restart on every TUI sync cycle.
+func TestLocalAgentVersion_ExcludesWorkingCopy(t *testing.T) {
+	// This test only works in a jj repo
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj not installed")
+	}
+	rootCmd := exec.Command("jj", "workspace", "root")
+	if _, err := rootCmd.Output(); err != nil {
+		t.Skip("not in a jj repo")
+	}
+
+	version, err := LocalAgentVersion()
+	if err != nil {
+		t.Fatalf("LocalAgentVersion: %v", err)
+	}
+	if version == "" {
+		t.Fatal("LocalAgentVersion returned empty string")
+	}
+
+	// Get the working copy's commit_id
+	wcCmd := exec.Command("jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short(12)")
+	wcOut, err := wcCmd.Output()
+	if err != nil {
+		t.Fatalf("get working copy commit: %v", err)
+	}
+	wcCommit := strings.TrimSpace(string(wcOut))
+
+	// The agent version must NOT be the working copy's commit_id.
+	// If it is, every jj snapshot will change the version, causing
+	// perpetual agent redeploys.
+	if version == wcCommit {
+		t.Errorf("LocalAgentVersion() = %q matches working copy commit_id; "+
+			"should use a committed ancestor instead to avoid perpetual redeploys", version)
 	}
 }
 

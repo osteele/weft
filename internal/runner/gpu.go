@@ -2,7 +2,9 @@ package runner
 
 import (
 	"fmt"
+	"log"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -79,9 +81,64 @@ func execNvidiaSmi(queryFlag string, fieldCount int) [][]string {
 	return parseNvidiaSmiOutput(string(out), fieldCount)
 }
 
+// nvidiaSmiTableGPULine matches lines like:
+//
+//	|   0  NVIDIA GeForce RTX 3090  On   | 00000000:01:00.0 Off |     N/A |
+var nvidiaSmiTableGPULine = regexp.MustCompile(`\|\s+(\d+)\s+(NVIDIA\s+\S+(?:\s+\S+)*?)\s+(?:On|Off)\s+\|`)
+
+// nvidiaSmiTableMemLine matches lines like:
+//
+//	| 51%   45C    P8    22W / 350W |      6MiB / 24576MiB |      0%      Default |
+var nvidiaSmiTableMemLine = regexp.MustCompile(`\|\s+\d+%\s+\d+C\s+\w+\s+\d+W\s*/\s*\d+W\s*\|\s+(\d+)MiB\s*/\s*(\d+)MiB\s*\|`)
+
+// parseNvidiaSmiTable parses the default nvidia-smi table format that some old
+// drivers (e.g. 525.x) return when they silently ignore --query-gpu and --format
+// flags. Returns both device info and per-device memory usage in a single pass.
+func parseNvidiaSmiTable(out string) ([]GPUInfo, map[string]DeviceMemInfo) {
+	lines := strings.Split(out, "\n")
+
+	var devices []GPUInfo
+	memSnapshot := make(map[string]DeviceMemInfo)
+	for i, line := range lines {
+		m := nvidiaSmiTableGPULine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		idx := m[1]
+		name := strings.TrimSpace(m[2])
+
+		// The memory line immediately follows the GPU name line
+		if i+1 < len(lines) {
+			mm := nvidiaSmiTableMemLine.FindStringSubmatch(lines[i+1])
+			if mm != nil {
+				usedMiB, _ := strconv.Atoi(mm[1])
+				totalMiB, _ := strconv.Atoi(mm[2])
+				devices = append(devices, GPUInfo{
+					Index:      idx,
+					Name:       name,
+					TotalMemGB: totalMiB / 1024,
+				})
+				memSnapshot[idx] = DeviceMemInfo{UsedMiB: usedMiB, TotalMiB: totalMiB}
+			}
+		}
+	}
+	return devices, memSnapshot
+}
+
+// execNvidiaSmiRaw runs nvidia-smi with no extra flags and returns stdout.
+func execNvidiaSmiRaw() (string, error) {
+	out, err := exec.Command("nvidia-smi").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // DiscoverGPUs runs nvidia-smi to discover available GPU devices.
 // Returns an empty inventory if nvidia-smi is not available.
 // Populates both Devices and an initial DeviceMemSnapshot in a single query.
+// Falls back to parsing the default table format when the CSV query flags
+// are silently ignored (observed on driver 525.x).
 func DiscoverGPUs() *GPUInventory {
 	inv := &GPUInventory{}
 	if _, err := exec.LookPath("nvidia-smi"); err != nil {
@@ -90,40 +147,71 @@ func DiscoverGPUs() *GPUInventory {
 	inv.hasNvidiaSmi = true
 
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,name,memory.used,memory.total", 4)
-	if rows == nil {
+	if rows != nil {
+		log.Printf("GPU discovery: nvidia-smi CSV query returned %d device(s)\n", len(rows))
+		inv.DeviceMemSnapshot = make(map[string]DeviceMemInfo, len(rows))
+		for _, parts := range rows {
+			idx := parts[0]
+			name := parts[1]
+			usedMiB, _ := strconv.Atoi(parts[2])
+			totalMiB, _ := strconv.Atoi(parts[3])
+			memGB := totalMiB / 1024
+
+			inv.Devices = append(inv.Devices, GPUInfo{
+				Index:      idx,
+				Name:       name,
+				TotalMemGB: memGB,
+			})
+			inv.DeviceMemSnapshot[idx] = DeviceMemInfo{UsedMiB: usedMiB, TotalMiB: totalMiB}
+		}
+		inv.LogInventory()
 		return inv
 	}
 
-	inv.DeviceMemSnapshot = make(map[string]DeviceMemInfo, len(rows))
-	for _, parts := range rows {
-		idx := parts[0]
-		name := parts[1]
-		usedMiB, _ := strconv.Atoi(parts[2])
-		totalMiB, _ := strconv.Atoi(parts[3])
-		memGB := totalMiB / 1024
-
-		inv.Devices = append(inv.Devices, GPUInfo{
-			Index:      idx,
-			Name:       name,
-			TotalMemGB: memGB,
-		})
-		inv.DeviceMemSnapshot[idx] = DeviceMemInfo{UsedMiB: usedMiB, TotalMiB: totalMiB}
+	// Fallback: CSV query returned no rows. Some old drivers (e.g. 525.x)
+	// silently ignore --query-gpu/--format and return the default table.
+	// Try parsing the table format instead.
+	log.Println("GPU discovery: nvidia-smi CSV query returned 0 rows, trying table format fallback")
+	tableOut, err := execNvidiaSmiRaw()
+	if err != nil {
+		log.Printf("GPU discovery: nvidia-smi raw command failed: %v\n", err)
+		return inv
+	}
+	devices, memSnapshot := parseNvidiaSmiTable(tableOut)
+	if len(devices) == 0 {
+		log.Println("GPU discovery: table format fallback found 0 devices")
+		return inv
 	}
 
+	log.Printf("GPU discovery: table format fallback found %d device(s)\n", len(devices))
+	inv.Devices = devices
+	inv.DeviceMemSnapshot = memSnapshot
+	inv.LogInventory()
 	return inv
 }
 
 // RefreshDeviceMemSnapshot queries nvidia-smi for actual per-device memory usage
 // and stores the result in DeviceMemSnapshot. Safe to call on non-GPU hosts
-// (sets an empty map).
+// (sets an empty map). Falls back to table format parsing on old drivers.
 func (inv *GPUInventory) RefreshDeviceMemSnapshot() {
 	result := make(map[string]DeviceMemInfo)
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,memory.used,memory.total", 3)
-	for _, parts := range rows {
-		idx := parts[0]
-		used, _ := strconv.Atoi(parts[1])
-		total, _ := strconv.Atoi(parts[2])
-		result[idx] = DeviceMemInfo{UsedMiB: used, TotalMiB: total}
+	if rows != nil {
+		for _, parts := range rows {
+			idx := parts[0]
+			used, _ := strconv.Atoi(parts[1])
+			total, _ := strconv.Atoi(parts[2])
+			result[idx] = DeviceMemInfo{UsedMiB: used, TotalMiB: total}
+		}
+		inv.DeviceMemSnapshot = result
+		return
+	}
+
+	// Fallback to table format for old drivers
+	if tableOut, err := execNvidiaSmiRaw(); err == nil {
+		if _, memInfo := parseNvidiaSmiTable(tableOut); len(memInfo) > 0 {
+			result = memInfo
+		}
 	}
 	inv.DeviceMemSnapshot = result
 }
@@ -145,12 +233,12 @@ func PerDeviceGPUMemUsedMiB() map[string]DeviceMemInfo {
 // LogInventory logs the discovered GPU devices for diagnostics.
 func (inv *GPUInventory) LogInventory() {
 	if len(inv.Devices) == 0 {
-		fmt.Println("GPU inventory: no devices discovered")
+		log.Println("GPU inventory: no devices discovered")
 		return
 	}
-	fmt.Printf("GPU inventory: %d devices\n", len(inv.Devices))
+	log.Printf("GPU inventory: %d devices\n", len(inv.Devices))
 	for _, d := range inv.Devices {
-		fmt.Printf("  [%s] %s (%dGB)\n", d.Index, d.Name, d.TotalMemGB)
+		log.Printf("  [%s] %s (%dGB)\n", d.Index, d.Name, d.TotalMemGB)
 	}
 }
 
@@ -215,12 +303,15 @@ func (inv *GPUInventory) deviceMemCheck(state *State, device string, memRequired
 		return 0, false
 	}
 
-	// Check actual VRAM usage if snapshot is available
+	// Check actual VRAM usage if snapshot is available.
+	// Allow up to 512 MiB of driver/display overhead when the job requests
+	// the full physical capacity (e.g., gpu_mem=24 on a 24GB GPU).
+	const driverOverheadMiB = 512
 	freeMiB = totalMem * 1024 // fallback: use static total in MiB
 	if info, found := inv.DeviceMemSnapshot[device]; found {
 		freeMiB = info.TotalMiB - info.UsedMiB
 		memRequiredMiB := memRequiredGB * 1024
-		if memRequiredMiB > freeMiB {
+		if memRequiredMiB > freeMiB+driverOverheadMiB {
 			return 0, false
 		}
 	}
@@ -234,6 +325,7 @@ func (inv *GPUInventory) deviceMemCheck(state *State, device string, memRequired
 func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, memRequired int) (string, bool) {
 	candidates := inv.DevicesByClass(className)
 	if len(candidates) == 0 {
+		log.Printf("  GPU class '%s': no matching devices in inventory (%d total devices)\n", className, len(inv.Devices))
 		return "", false
 	}
 
@@ -242,10 +334,12 @@ func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, mem
 
 	for _, device := range candidates {
 		if DeviceHasRunningJob(state, device) {
+			log.Printf("  GPU class '%s': device %s busy (running job)\n", className, device)
 			continue
 		}
 		freeMiB, ok := inv.deviceMemCheck(state, device, memRequired)
 		if !ok {
+			log.Printf("  GPU class '%s': device %s rejected (need %dGB, free %d MiB)\n", className, device, memRequired, freeMiB)
 			continue
 		}
 		if freeMiB > bestFreeMiB {
@@ -257,7 +351,7 @@ func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, mem
 	if bestDevice == "" {
 		return "", false
 	}
-	fmt.Printf("  GPU class '%s': selected device %s (%d MiB free)\n", className, bestDevice, bestFreeMiB)
+	log.Printf("  GPU class '%s': selected device %s (%d MiB free)\n", className, bestDevice, bestFreeMiB)
 	return bestDevice, true
 }
 

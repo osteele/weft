@@ -231,6 +231,12 @@ func (c GPUConstraint) MatchesGPUFullName(fullName string) bool {
 			}
 		}
 		if bestClass == "" {
+			// No known model found. For family constraints, check if the name
+			// starts with the family prefix (e.g., "nvidia" matches "nvidiageforce..."
+			// even when the model name is truncated by nvidia-smi).
+			if c.mode == constraintFamily {
+				return strings.HasPrefix(normFull, c.normalized)
+			}
 			return false
 		}
 		return c.matchesGeneration(gpuClassToGeneration[bestClass])

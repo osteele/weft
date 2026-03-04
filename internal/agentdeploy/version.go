@@ -35,11 +35,13 @@ func jjVersion() (string, error) {
 	}
 	repoRoot := strings.TrimSpace(string(rootOut))
 
-	// Find the most recent ancestor that touched agent source files.
-	// This avoids cache misses from unrelated file changes in the jj working copy.
+	// Find the most recent committed ancestor that touched agent source files.
+	// Use @- (parent of working copy) to exclude the working copy itself,
+	// because the working copy gets a new commit_id on every jj snapshot,
+	// which would cause perpetual version mismatches and agent redeploys.
 	args := []string{
 		"log", "--no-graph",
-		"-r", "ancestors(@, 200)",
+		"-r", "ancestors(@-, 200)",
 		"-T", `commit_id.short(12)`,
 		"--limit", "1",
 	}
@@ -49,7 +51,7 @@ func jjVersion() (string, error) {
 	}
 
 	// Fallback: no ancestor touched agent paths (e.g., brand new repo).
-	return jjLog(repoRoot, "log", "--no-graph", "-r", "@", "-T", `commit_id.short(12)`)
+	return jjLog(repoRoot, "log", "--no-graph", "-r", "@-", "-T", `commit_id.short(12)`)
 }
 
 // jjLog runs a jj command in repoRoot and returns the trimmed output.

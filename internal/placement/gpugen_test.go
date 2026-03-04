@@ -216,6 +216,11 @@ func TestMatchesGPUFullName(t *testing.T) {
 		{"nvidia", "NVIDIA GeForce RTX 2080 Ti", true},
 		{"apple", "NVIDIA A100-PCIE-80GB", false},
 
+		// Truncated names from nvidia-smi on old drivers (525.x)
+		{"nvidia", "NVIDIA GeForce ...", true},
+		{"apple", "NVIDIA GeForce ...", false},
+		{"ampere", "NVIDIA GeForce ...", false}, // can't determine generation from truncated name
+
 		// Unknown full name
 		{"ampere+", "Some Unknown GPU", false},
 		{"ampere", "Some Unknown GPU", false},
