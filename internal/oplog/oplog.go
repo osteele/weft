@@ -47,6 +47,10 @@ const (
 	OpCoordinatorRetry    = "coordinator.retry"
 	OpCoordinatorError    = "coordinator.error"
 
+	// Placement telemetry
+	OpPlacementDecided = "placement.decided"
+	OpHostMetrics      = "host.metrics"
+
 	// Auto-remediation operations
 	OpCoordinatorDiagnosis   = "coordinator.diagnosis"
 	OpCoordinatorRemediation = "coordinator.remediation"

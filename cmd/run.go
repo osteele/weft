@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -369,17 +370,18 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Coordinator unreachable — fall back to direct submission
+	var placementResult *placement.PlacementResult
 	if host == "" {
 		if runImmediate {
 			return fmt.Errorf("--immediate requires an explicit host")
 		}
 
 		// Liveness-aware placement: probe eligible hosts and pick the best reachable one
-		bestHost, _, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
+		result, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
 		if err != nil {
 			if errors.Is(err, placement.ErrNoReachableHost) {
 				// No hosts responded — fall back to predictor-aware static placement
-				bestHost, _, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
+				result, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
 				if err != nil {
 					if errors.Is(err, placement.ErrNoEligibleHost) {
 						return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
@@ -392,7 +394,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("auto-placement failed: %w", err)
 			}
 		}
-		host = bestHost
+		placementResult = result
+		host = result.Host
+
+		// Log placement decision
+		oplog.Log(oplog.OpPlacementDecided,
+			oplog.WithHost(host),
+			oplog.WithDetail(placement.FormatPlacementDetail(result)))
 	}
 
 	if dirProvided {
@@ -523,6 +531,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("queue job: %w", err)
 		}
 		jobID := res.JobID
+
+		// Store placement telemetry if auto-placement was used
+		if placementResult != nil {
+			meta := buildPlacementMeta(placementResult, predict)
+			if err := db.SetJobPlacementMeta(database, jobID, meta); err != nil {
+				log.Printf("warning: failed to save placement meta: %v", err)
+			}
+		}
+
 		fmt.Printf("Job #%d queued on %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -678,6 +695,35 @@ func resolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 		}
 	}
 	return session.DefaultWorkingDir()
+}
+
+// buildPlacementMeta extracts telemetry from a placement result and optional predictor.
+func buildPlacementMeta(result *placement.PlacementResult, predict placement.JobPredictor) *db.PlacementMeta {
+	meta := &db.PlacementMeta{}
+
+	// Extract prediction for the selected host
+	if predict != nil {
+		p := predict(result.Host)
+		if p != nil {
+			meta.PredictedDurationS = p.DurationS
+			meta.PredictedRSSKB = p.PeakRSSKB
+			meta.PredictedGPUMemMiB = p.MaxGPUMemMiB
+		}
+	}
+
+	// Extract selected and runner-up scores in a single pass
+	foundRunnerUp := false
+	for _, s := range result.Scores {
+		if s.Host == result.Host {
+			meta.SelectedScore = s.Total
+		} else if !foundRunnerUp && s.Eligible {
+			meta.RunnerUpHost = s.Host
+			meta.RunnerUpScore = s.Total
+			foundRunnerUp = true
+		}
+	}
+
+	return meta
 }
 
 // recordNeedsRentalJob creates a needs_rental job when no local host matches constraints.

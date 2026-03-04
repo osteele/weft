@@ -61,13 +61,16 @@ func TestBestReachableHost(t *testing.T) {
 	})
 	defer cleanup()
 
-	host, _, err := BestReachableHost(db, Constraints{}, 5*time.Second)
+	result, err := BestReachableHost(db, Constraints{}, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Should pick one of the online hosts (cool30 or cool100)
-	if host != "cool30" && host != "cool100" {
-		t.Errorf("expected cool30 or cool100, got %s", host)
+	if result.Host != "cool30" && result.Host != "cool100" {
+		t.Errorf("expected cool30 or cool100, got %s", result.Host)
+	}
+	if len(result.Scores) == 0 {
+		t.Error("expected scores in PlacementResult")
 	}
 }
 
@@ -103,15 +106,15 @@ func TestBestReachableHost_SkipsOfflineBest(t *testing.T) {
 	})
 	defer cleanup()
 
-	host, _, err := BestReachableHost(db, Constraints{}, 5*time.Second)
+	result, err := BestReachableHost(db, Constraints{}, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if host == bestHost {
+	if result.Host == bestHost {
 		t.Errorf("should not pick offline host %s", bestHost)
 	}
-	if host != secondHost {
-		t.Errorf("expected second-best host %s, got %s", secondHost, host)
+	if result.Host != secondHost {
+		t.Errorf("expected second-best host %s, got %s", secondHost, result.Host)
 	}
 }
 
@@ -123,7 +126,7 @@ func TestBestReachableHost_AllOffline(t *testing.T) {
 	})
 	defer cleanup()
 
-	_, _, err := BestReachableHost(db, Constraints{}, 5*time.Second)
+	_, err := BestReachableHost(db, Constraints{}, 5*time.Second)
 	if !errors.Is(err, ErrNoReachableHost) {
 		t.Errorf("expected ErrNoReachableHost, got %v", err)
 	}
@@ -138,7 +141,7 @@ func TestBestReachableHost_GPUConstraint(t *testing.T) {
 	})
 	defer cleanup()
 
-	_, _, err := BestReachableHost(db, Constraints{GPUClass: "a100"}, 5*time.Second)
+	_, err := BestReachableHost(db, Constraints{GPUClass: "a100"}, 5*time.Second)
 	if !errors.Is(err, ErrNoReachableHost) {
 		t.Errorf("expected ErrNoReachableHost when only eligible host is offline, got %v", err)
 	}

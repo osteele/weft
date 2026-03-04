@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/intent"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/predictor"
@@ -86,11 +87,17 @@ func resolveHost(database *sql.DB, i *intent.Intent, cfg *config.Config) (string
 
 	predict := buildJobPredictorFromConfig(cfg, constraints)
 
-	host, reasons, err := placement.BestHostWithPredictor(database, constraints, nil, predict)
+	result, err := placement.BestHostWithPredictor(database, constraints, nil, predict)
 	if err != nil {
 		return "", nil, fmt.Errorf("placement: %w", err)
 	}
-	return host, reasons, nil
+
+	// Log placement decision
+	oplog.Log(oplog.OpPlacementDecided,
+		oplog.WithHost(result.Host),
+		oplog.WithDetail(placement.FormatPlacementDetail(result)))
+
+	return result.Host, result.Reasons, nil
 }
 
 // buildJobPredictorFromConfig creates a JobPredictor from the app config and constraints.

@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/oplog"
 )
 
 // ErrNoReachableHost is returned when all eligible hosts are unreachable.
@@ -119,6 +121,14 @@ func NewJobPredictor(predict func(host string) *RawPrediction) JobPredictor {
 	}
 }
 
+// PlacementResult holds the full output of a placement decision.
+type PlacementResult struct {
+	Host    string
+	Reasons []string
+	Scores  []Score
+	Metrics map[string]*HostMetrics // nil when no live metrics were collected
+}
+
 // Score represents the placement score for a single host.
 type Score struct {
 	Host             string
@@ -218,46 +228,51 @@ func scoreAll(db *sql.DB, hosts []inventory.HostSpec, constraints Constraints, m
 }
 
 // BestHostWithPredictor returns the best eligible host considering predictor and metrics.
-func BestHostWithPredictor(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) (string, []string, error) {
+func BestHostWithPredictor(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) (*PlacementResult, error) {
 	scores, err := ScoreHostsWithPredictor(db, constraints, metrics, predict)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	return bestFromScores(scores, constraints)
+	return bestFromScores(scores, constraints, metrics)
 }
 
 // BestHost returns the best eligible host, or an error if none qualify.
-func BestHost(db *sql.DB, constraints Constraints) (string, []string, error) {
+func BestHost(db *sql.DB, constraints Constraints) (*PlacementResult, error) {
 	return BestHostWithMetrics(db, constraints, nil)
 }
 
 // BestHostWithMetrics returns the best eligible host considering live metrics.
-func BestHostWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) (string, []string, error) {
+func BestHostWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) (*PlacementResult, error) {
 	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	return bestFromScores(scores, constraints)
+	return bestFromScores(scores, constraints, metrics)
 }
 
-func bestFromScores(scores []Score, constraints Constraints) (string, []string, error) {
+func bestFromScores(scores []Score, constraints Constraints, metrics map[string]*HostMetrics) (*PlacementResult, error) {
 	for _, s := range scores {
 		if s.Eligible {
-			return s.Host, s.Reasons, nil
+			return &PlacementResult{
+				Host:    s.Host,
+				Reasons: s.Reasons,
+				Scores:  scores,
+				Metrics: metrics,
+			}, nil
 		}
 	}
-	return "", nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
+	return nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
 }
 
 // BestReachableHost returns the best eligible host that is also reachable via SSH.
 // It collects live metrics from eligible hosts (which also proves reachability),
 // scores them with utilization data, and returns the highest-scored reachable host.
 // Returns ErrNoReachableHost if no eligible host responds.
-func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Duration) (string, []string, error) {
+func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Duration) (*PlacementResult, error) {
 	// First pass: static scoring to determine eligible hosts
 	hosts, err := inventory.LoadEmbeddedHosts()
 	if err != nil {
-		return "", nil, fmt.Errorf("load inventory: %w", err)
+		return nil, fmt.Errorf("load inventory: %w", err)
 	}
 	staticScores := scoreAll(db, hosts, constraints, nil)
 	var eligible []string
@@ -267,28 +282,42 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 		}
 	}
 	if len(eligible) == 0 {
-		return "", nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
+		return nil, fmt.Errorf("no eligible host found for constraints: %s: %w", DescribeConstraints(constraints), ErrNoEligibleHost)
 	}
 
 	// Collect live metrics (also proves reachability)
 	metrics := CollectMetrics(db, eligible, probeTimeout)
 	if len(metrics) == 0 {
-		return "", nil, ErrNoReachableHost
+		return nil, ErrNoReachableHost
+	}
+
+	// Log host metrics to oplog for offline analysis
+	for _, host := range eligible {
+		if m, ok := metrics[host]; ok {
+			oplog.Log(oplog.OpHostMetrics,
+				oplog.WithHost(host),
+				oplog.WithDetail(FormatHostMetricsDetail(m)))
+		}
 	}
 
 	// Re-score with live metrics
 	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	for _, s := range scores {
 		if s.Eligible && metrics[s.Host] != nil {
-			return s.Host, s.Reasons, nil
+			return &PlacementResult{
+				Host:    s.Host,
+				Reasons: s.Reasons,
+				Scores:  scores,
+				Metrics: metrics,
+			}, nil
 		}
 	}
 
-	return "", nil, ErrNoReachableHost
+	return nil, ErrNoReachableHost
 }
 
 func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics) Score {
@@ -732,4 +761,71 @@ func DescribeConstraints(c Constraints) string {
 		return "none"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// FormatPlacementDetail builds a compact detail string for oplog entries.
+func FormatPlacementDetail(result *PlacementResult) string {
+	if result == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("selected=")
+	b.WriteString(result.Host)
+
+	// Scores
+	if len(result.Scores) > 0 {
+		b.WriteString(" scores=")
+		for i, s := range result.Scores {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, "%s:%.1f", s.Host, s.Total)
+			if !s.Eligible {
+				b.WriteString("(x)")
+			}
+		}
+	}
+
+	// Metrics summary (sorted for deterministic output)
+	if len(result.Metrics) > 0 {
+		metricHosts := make([]string, 0, len(result.Metrics))
+		for host := range result.Metrics {
+			metricHosts = append(metricHosts, host)
+		}
+		sort.Strings(metricHosts)
+		b.WriteString(" metrics=")
+		for i, host := range metricHosts {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			m := result.Metrics[host]
+			fmt.Fprintf(&b, "%s:{cpu:%d,gpu:%d,q:%d}", host, m.CPUPercent, m.GPUPercent, m.QueueDepth)
+		}
+	}
+
+	return b.String()
+}
+
+// FormatHostMetricsDetail builds a compact detail string for a single host's metrics oplog entry.
+func FormatHostMetricsDetail(m *HostMetrics) string {
+	if m == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "cpu=%d gpu=%d ram=%d q=%d", m.CPUPercent, m.GPUPercent, m.RAMPercent, m.QueueDepth)
+	if len(m.GPUDeviceFreeMemMiB) > 0 {
+		indices := make([]string, 0, len(m.GPUDeviceFreeMemMiB))
+		for idx := range m.GPUDeviceFreeMemMiB {
+			indices = append(indices, idx)
+		}
+		sort.Strings(indices)
+		b.WriteString(" gpu_free=")
+		for i, idx := range indices {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, "%s:%d", idx, m.GPUDeviceFreeMemMiB[idx])
+		}
+	}
+	return b.String()
 }

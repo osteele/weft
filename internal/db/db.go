@@ -73,10 +73,11 @@ type Job struct {
 	ExitCode             *int
 	Status               string
 	Tombstoned           bool
-	Cost                 *float64 // Actual cost in dollars (for cloud-run jobs)
-	VastaiInstanceID     *int     // Vast.ai instance ID (for vastai backend jobs)
-	ErrorDiagnosis       string   // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
-	RetryCount           int      // Number of auto-remediation retries attempted
+	Cost                 *float64       // Actual cost in dollars (for cloud-run jobs)
+	VastaiInstanceID     *int           // Vast.ai instance ID (for vastai backend jobs)
+	ErrorDiagnosis       string         // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
+	RetryCount           int            // Number of auto-remediation retries attempted
+	PlacementMeta        *PlacementMeta // Placement telemetry (predictions, scores)
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -103,7 +104,17 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count`
+// PlacementMeta holds placement telemetry stored as JSON on the job record.
+type PlacementMeta struct {
+	PredictedDurationS *float64 `json:"pred_dur_s,omitempty"`
+	PredictedRSSKB     *float64 `json:"pred_rss_kb,omitempty"`
+	PredictedGPUMemMiB *float64 `json:"pred_gpu_mib,omitempty"`
+	SelectedScore      float64  `json:"score"`
+	RunnerUpHost       string   `json:"runner_up,omitempty"`
+	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
+}
+
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta`
 
 const ProcessedTag = "processed"
 
@@ -390,6 +401,11 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN needs TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add placement_meta column for placement telemetry
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_meta TEXT`); err != nil {
 		return err
 	}
 
@@ -795,6 +811,38 @@ func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
 func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
 	_, err := db.Exec(`UPDATE jobs SET cost = ? WHERE id = ?`, cost, jobID)
 	return err
+}
+
+// SetJobPlacementMeta stores placement telemetry on a job record.
+func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
+	encoded, err := encodePlacementMeta(meta)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE jobs SET placement_meta = ? WHERE id = ?`, encoded, jobID)
+	return err
+}
+
+func encodePlacementMeta(meta *PlacementMeta) (any, error) {
+	if meta == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("encode placement_meta: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodePlacementMeta(value sql.NullString) *PlacementMeta {
+	if !value.Valid || value.String == "" {
+		return nil
+	}
+	var meta PlacementMeta
+	if err := json.Unmarshal([]byte(value.String), &meta); err != nil {
+		return nil
+	}
+	return &meta
 }
 
 // ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID
@@ -1589,8 +1637,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var vastaiInstanceID sql.NullInt64
 	var errorDiagnosis sql.NullString
 	var retryCount sql.NullInt64
+	var placementMeta sql.NullString
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1697,6 +1746,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if retryCount.Valid {
 		j.RetryCount = int(retryCount.Int64)
 	}
+	j.PlacementMeta = decodePlacementMeta(placementMeta)
 	if j.Backend == "" {
 		j.Backend = BackendQueueRunner
 	}
@@ -1929,8 +1979,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var vastaiInstanceID sql.NullInt64
 		var errorDiagnosis sql.NullString
 		var retryCount sql.NullInt64
+		var placementMeta sql.NullString
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta)
 		if err != nil {
 			return nil, err
 		}
@@ -2034,6 +2085,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if retryCount.Valid {
 			j.RetryCount = int(retryCount.Int64)
 		}
+		j.PlacementMeta = decodePlacementMeta(placementMeta)
 		if j.Backend == "" {
 			j.Backend = BackendQueueRunner
 		}
