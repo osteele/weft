@@ -9,6 +9,8 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // HostSyncOptions configures a full host sync.
@@ -311,11 +313,19 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 // when they haven't been synced yet. This handles the case where a job was
 // recorded locally while the host was unreachable, or where the batch status
 // sync path didn't push the job to the remote queue.
+//
+// Source files are synced to the remote host before each job is appended,
+// ensuring the working directory exists on the target before the job starts.
 func ensureQueuedJobsOnRemote(database *sql.DB, jobs []*db.Job, timeout time.Duration) (int, error) {
 	ensured := 0
 	for _, job := range jobs {
 		if job.Status != db.StatusQueued || job.PendingStatus != nil || job.LastSyncedStatus == db.StatusQueued {
 			continue
+		}
+		// Sync sources before pushing the job to the remote queue.
+		if job.WorkingDir != "" {
+			localDir := workdir.ResolveLocal(job.WorkingDir)
+			srcsync.SyncSourcesToHost(job.Host, localDir, job.WorkingDir, job.Inputs)
 		}
 		if err := AppendJobToQueue(job, timeout); err != nil {
 			return ensured, err

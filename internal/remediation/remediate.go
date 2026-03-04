@@ -98,7 +98,7 @@ func remediateData(ctx RemediationContext, diagnosis *ErrorDiagnosis, diagJSON s
 		return retryJob(ctx, diagJSON, fmt.Sprintf("pre-staged %v and retried", diagnosis.MissingAssets))
 
 	case "missing_file":
-		if ctx.Job.WorkingDir != "" {
+		if ctx.Job.WorkingDir != "" && !remotesync.IsLocalHost(host) {
 			if err := remotesync.SyncSources(host, ctx.Job.WorkingDir, ctx.Job.WorkingDir); err != nil {
 				ctx.Logger.Printf("re-sync sources for job %d: %v", ctx.Job.ID, err)
 			}
@@ -123,7 +123,7 @@ func remediateCode(ctx RemediationContext, diagnosis *ErrorDiagnosis, diagJSON s
 
 		if agentResult.Success && agentResult.Patch != "" {
 			host := ctx.Job.Host
-			if ctx.Job.WorkingDir != "" {
+			if ctx.Job.WorkingDir != "" && !remotesync.IsLocalHost(host) {
 				if err := remotesync.SyncSources(host, ctx.Job.WorkingDir, ctx.Job.WorkingDir); err != nil {
 					ctx.Logger.Printf("re-sync after agent for job %d: %v", ctx.Job.ID, err)
 				}

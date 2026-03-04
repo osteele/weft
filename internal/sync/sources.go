@@ -1,12 +1,14 @@
 package sync
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/config"
 )
@@ -141,7 +143,14 @@ func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error 
 	} else {
 		args = BuildExtraPathRsyncArgs(host, localDir, remoteDir)
 	}
-	cmd := exec.Command("rsync", args...)
+
+	// Use a timeout so a slow or unresponsive host doesn't block the caller
+	// indefinitely. Rsync's own --timeout covers data stalls but not initial
+	// SSH connection hangs, so we use a context deadline for the whole process.
+	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "rsync", args...)
 	cmd.Stderr = nil
 
 	if err := cmd.Run(); err != nil {
@@ -149,3 +158,7 @@ func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error 
 	}
 	return nil
 }
+
+// rsyncTimeout is the maximum time to wait for a single rsync operation.
+// This prevents indefinite hangs when the remote host is unresponsive.
+const rsyncTimeout = 30 * time.Second

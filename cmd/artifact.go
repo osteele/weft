@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -640,7 +641,7 @@ func syncJobOutputs(job *db.Job) error {
 		dirs = append(dirs, d)
 	}
 
-	localDir := resolveLocalDir(job.WorkingDir)
+	localDir := workdir.ResolveLocal(job.WorkingDir)
 	if localDir == "" {
 		return nil
 	}

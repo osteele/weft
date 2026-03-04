@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/logfiles"
@@ -140,6 +143,10 @@ type Monitor struct {
 	stopped           bool
 
 	hostRefreshing sync.Map // host name → struct{}, guards concurrent refreshHostInfo
+
+	// Optional embedded coordinator services
+	remediator *services.Remediator
+	svcCancel  context.CancelFunc
 }
 
 // New returns a monitor for the given database.
@@ -153,6 +160,14 @@ func New(database *sql.DB, cfg Config) *Monitor {
 		lastHostSyncTimes:   make(map[string]time.Time),
 		hostsQueriedThisRun: make(map[string]bool),
 	}
+}
+
+// EnableRemediation starts the remediator service that diagnoses failed jobs
+// and attempts auto-remediation. This enables coordinator-level diagnostics
+// without requiring a separate coordinator daemon.
+func (m *Monitor) EnableRemediation(appConfig *config.Config) {
+	logger := log.New(log.Writer(), "[remediator] ", log.LstdFlags)
+	m.remediator = services.NewRemediator(m.db, logger, appConfig, 30*time.Second)
 }
 
 // Config returns the monitor configuration.
@@ -194,11 +209,25 @@ func (m *Monitor) Start() {
 
 	m.wg.Add(1)
 	go m.runJobDetailTicker()
+
+	// Start optional embedded coordinator services
+	if m.remediator != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		m.svcCancel = cancel
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.remediator.Start(ctx)
+		}()
+	}
 }
 
 // Stop stops background tasks.
 func (m *Monitor) Stop() {
 	m.stopOnce.Do(func() {
+		if m.svcCancel != nil {
+			m.svcCancel()
+		}
 		m.mu.Lock()
 		m.stopped = true
 		if m.dbRefreshDebounce != nil {

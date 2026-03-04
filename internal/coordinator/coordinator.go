@@ -11,16 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/intent"
-	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
-	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -57,23 +53,39 @@ type Coordinator struct {
 	db         *sql.DB
 	config     Config
 	appConfig  *config.Config
-	hostState  map[string]*HostState
-	retryQueue *retryQueue
-	mu         sync.Mutex
+	hostState  *services.HostStateManager
+	retryQueue *services.RetryQueue
 	logger     *log.Logger
+
+	// Composable services
+	prober       *services.HostProber
+	syncer       *services.HostSyncer
+	remediator   *services.Remediator
+	retryDrainer *services.RetryDrainer
 }
 
 // New creates a new Coordinator.
 func New(database *sql.DB, cfg Config) *Coordinator {
 	appCfg, _ := config.Load()
-	return &Coordinator{
+	logger := log.New(os.Stderr, "[coordinator] ", log.LstdFlags)
+	hostState := services.NewHostStateManager(logger)
+	retryQueue := services.NewRetryQueue()
+
+	c := &Coordinator{
 		db:         database,
 		config:     cfg,
 		appConfig:  appCfg,
-		hostState:  make(map[string]*HostState),
-		retryQueue: newRetryQueue(),
-		logger:     log.New(os.Stderr, "[coordinator] ", log.LstdFlags),
+		hostState:  hostState,
+		retryQueue: retryQueue,
+		logger:     logger,
 	}
+
+	c.prober = services.NewHostProber(hostState, cfg.PollInterval)
+	c.syncer = services.NewHostSyncer(database, hostState, logger, cfg.SyncInterval)
+	c.remediator = services.NewRemediator(database, logger, appCfg, cfg.RemediationInterval)
+	c.retryDrainer = services.NewRetryDrainer(retryQueue, hostState, c.dispatchIntent, logger, cfg.RetryInterval)
+
+	return c
 }
 
 // Run starts the coordinator event loop. It blocks until the context is cancelled.
@@ -102,7 +114,8 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	// Seed host state from inventory so all known hosts are tracked from the start.
 	// Run in a goroutine so the event loop starts immediately while probes complete.
-	go c.seedHostState()
+	c.hostState.SeedFromInventory()
+	go c.prober.ProbeAllParallel()
 
 	// Ensure intent and archive directories exist
 	for _, dir := range []string{c.config.IntentDir, c.config.ArchiveDir} {
@@ -129,20 +142,16 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		return fmt.Errorf("start watcher: %w", err)
 	}
 
-	pollTicker := time.NewTicker(c.config.PollInterval)
-	defer pollTicker.Stop()
-
-	retryTicker := time.NewTicker(c.config.RetryInterval)
-	defer retryTicker.Stop()
-
-	syncTicker := time.NewTicker(c.config.SyncInterval)
-	defer syncTicker.Stop()
+	// Start composable background services
+	svcCtx, svcCancel := context.WithCancel(ctx)
+	defer svcCancel()
+	go c.prober.Start(svcCtx)
+	go c.syncer.Start(svcCtx)
+	go c.remediator.Start(svcCtx)
+	go c.retryDrainer.Start(svcCtx)
 
 	vastaiSweepTicker := time.NewTicker(60 * time.Second)
 	defer vastaiSweepTicker.Stop()
-
-	remediationTicker := time.NewTicker(c.config.RemediationInterval)
-	defer remediationTicker.Stop()
 
 	for {
 		select {
@@ -157,20 +166,8 @@ func (c *Coordinator) Run(ctx context.Context) error {
 			}
 			c.handleIntentFile(path)
 
-		case <-pollTicker.C:
-			c.probeHosts()
-
-		case <-retryTicker.C:
-			c.drainRetryQueue()
-
-		case <-syncTicker.C:
-			c.syncAllHosts()
-
 		case <-vastaiSweepTicker.C:
 			c.sweepVastaiResults()
-
-		case <-remediationTicker.C:
-			c.checkFailedJobs()
 		}
 	}
 }
@@ -205,14 +202,9 @@ func (c *Coordinator) handleIntentFile(path string) {
 	c.logger.Printf("intent %s -> host %s (%s)", i.IntentID, host, strings.Join(reasons, "; "))
 
 	// Check if host is online
-	c.mu.Lock()
-	hs := c.hostState[host]
-	hostOnline := hs != nil && hs.Online
-	c.mu.Unlock()
-
-	if !hostOnline {
+	if !c.hostState.IsOnline(host) {
 		// Probe host before giving up
-		if !c.probeHost(host) {
+		if !c.hostState.ProbeHost(host) {
 			c.logger.Printf("host %s offline, deferring intent %s", host, i.IntentID)
 			oplog.Log(oplog.OpCoordinatorDeferred, oplog.WithHost(host), oplog.WithDetailf("intent=%s", i.IntentID))
 			c.retryQueue.Add(i, host)
@@ -235,7 +227,7 @@ func (c *Coordinator) handleIntentFile(path string) {
 			c.logger.Printf("host %s unreachable during dispatch, deferring intent %s", host, i.IntentID)
 			oplog.Log(oplog.OpCoordinatorDeferred, oplog.WithHost(host), oplog.WithDetailf("intent=%s dispatch_err", i.IntentID))
 			c.retryQueue.Add(i, host)
-			c.markHostOffline(host)
+			c.hostState.MarkOffline(host)
 		} else {
 			c.logger.Printf("dispatch intent %s to %s: %v", i.IntentID, host, err)
 			oplog.Log(oplog.OpCoordinatorError, oplog.WithHost(host), oplog.WithDetailf("dispatch intent=%s", i.IntentID), oplog.WithError(err))
@@ -250,246 +242,9 @@ func (c *Coordinator) handleIntentFile(path string) {
 	c.writeOutcome(i.IntentID, jobID, host, reasons, "")
 }
 
-// probeHosts checks connectivity to all known hosts.
-func (c *Coordinator) probeHosts() {
-	c.mu.Lock()
-	hosts := make([]string, 0, len(c.hostState))
-	for name := range c.hostState {
-		hosts = append(hosts, name)
-	}
-	c.mu.Unlock()
-
-	for _, host := range hosts {
-		c.probeHost(host)
-	}
-}
-
-// probeHost checks if a host is reachable via SSH. Returns true if online.
-func (c *Coordinator) probeHost(host string) bool {
-	_, _, err := ssh.RunWithTimeout(host, "true", 5*time.Second)
-	online := err == nil
-
-	c.mu.Lock()
-	hs, ok := c.hostState[host]
-	if !ok {
-		hs = &HostState{Name: host}
-		c.hostState[host] = hs
-	}
-	wasOnline := hs.Online
-	hs.Online = online
-	hs.LastProbe = time.Now()
-	if online {
-		hs.LastOnline = time.Now()
-	}
-	c.mu.Unlock()
-
-	if online && !wasOnline {
-		c.logger.Printf("host %s came online", host)
-		oplog.Log(oplog.OpHostConnect, oplog.WithHost(host))
-	} else if !online && wasOnline {
-		c.logger.Printf("host %s went offline", host)
-		oplog.Log(oplog.OpHostTimeout, oplog.WithHost(host))
-	}
-
-	return online
-}
-
-// seedHostState populates the host state map from the embedded inventory
-// and probes each host for initial connectivity.
-func (c *Coordinator) seedHostState() {
-	hosts, err := inventory.LoadEmbeddedHosts()
-	if err != nil {
-		c.logger.Printf("load inventory: %v", err)
-		return
-	}
-
-	c.mu.Lock()
-	for _, h := range hosts {
-		if _, ok := c.hostState[h.Name]; !ok {
-			c.hostState[h.Name] = &HostState{Name: h.Name}
-		}
-	}
-	c.mu.Unlock()
-
-	// Probe all hosts in parallel for fast startup
-	var wg sync.WaitGroup
-	for _, h := range hosts {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
-			c.probeHost(name)
-		}(h.Name)
-	}
-	wg.Wait()
-
-	// Log results
-	c.mu.Lock()
-	var online, offline []string
-	for name, hs := range c.hostState {
-		if hs.Online {
-			online = append(online, name)
-		} else {
-			offline = append(offline, name)
-		}
-	}
-	c.mu.Unlock()
-
-	c.logger.Printf("hosts online: %v, offline: %v", online, offline)
-}
-
-// markHostOffline updates a host's state to offline.
-func (c *Coordinator) markHostOffline(host string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	hs, ok := c.hostState[host]
-	if !ok {
-		hs = &HostState{Name: host}
-		c.hostState[host] = hs
-	}
-	hs.Online = false
-	hs.LastProbe = time.Now()
-}
-
-// drainRetryQueue attempts to dispatch deferred intents for hosts that are now online.
-func (c *Coordinator) drainRetryQueue() {
-	if c.retryQueue.Len() == 0 {
-		return
-	}
-
-	// Get list of online hosts
-	c.mu.Lock()
-	onlineHosts := make(map[string]bool)
-	for name, hs := range c.hostState {
-		if hs.Online {
-			onlineHosts[name] = true
-		}
-	}
-	c.mu.Unlock()
-
-	for host := range onlineHosts {
-		items := c.retryQueue.DrainForHost(host)
-		for _, item := range items {
-			c.logger.Printf("retrying intent %s on %s", item.intent.IntentID, host)
-			oplog.Log(oplog.OpCoordinatorRetry, oplog.WithHost(host), oplog.WithDetailf("intent=%s", item.intent.IntentID))
-
-			jobID, err := dispatchIntent(c.db, item.intent, host)
-			if err != nil {
-				if isSSHConnectionError(err) {
-					c.retryQueue.Add(item.intent, host)
-					c.markHostOffline(host)
-					break // stop retrying this host
-				}
-				c.logger.Printf("retry dispatch intent %s: %v", item.intent.IntentID, err)
-				oplog.Log(oplog.OpCoordinatorError, oplog.WithHost(host), oplog.WithDetailf("retry intent=%s", item.intent.IntentID), oplog.WithError(err))
-				continue
-			}
-			c.logger.Printf("retry dispatched intent %s as job %d on %s", item.intent.IntentID, jobID, host)
-			oplog.LogJob(oplog.OpCoordinatorDispatch, jobID, host, oplog.WithDetailf("retry intent=%s", item.intent.IntentID))
-		}
-	}
-}
-
-// syncAllHosts runs SyncHost for each known host.
-func (c *Coordinator) syncAllHosts() {
-	if c.db == nil {
-		return
-	}
-
-	c.mu.Lock()
-	hosts := make([]string, 0, len(c.hostState))
-	for name, hs := range c.hostState {
-		if hs.Online {
-			hosts = append(hosts, name)
-		}
-	}
-	c.mu.Unlock()
-
-	for _, host := range hosts {
-		_, err := ops.SyncHost(c.db, host, ops.HostSyncOptions{
-			Timeout: 30 * time.Second,
-		}, nil)
-		if err != nil {
-			c.logger.Printf("sync %s: %v", host, err)
-		}
-	}
-}
-
-// checkFailedJobs scans for recently failed jobs, diagnoses errors, and
-// attempts auto-remediation when possible.
-func (c *Coordinator) checkFailedJobs() {
-	jobs, err := db.ListRecentFailedUndiagnosed(c.db, 10)
-	if err != nil {
-		c.logger.Printf("list failed jobs for remediation: %v", err)
-		return
-	}
-	if len(jobs) == 0 {
-		return
-	}
-
-	// Fetch logs in parallel (bounded to avoid SSH overload)
-	type jobLog struct {
-		job        *db.Job
-		logContent string
-	}
-	results := make(chan jobLog, len(jobs))
-	sem := make(chan struct{}, 4) // max 4 concurrent SSH calls
-
-	var wg sync.WaitGroup
-	for _, job := range jobs {
-		wg.Add(1)
-		go func(j *db.Job) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			logContent := c.fetchJobLog(j)
-			results <- jobLog{job: j, logContent: logContent}
-		}(job)
-	}
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	for jl := range results {
-		if jl.logContent == "" {
-			c.logger.Printf("no log content for job %d on %s, skipping diagnosis", jl.job.ID, jl.job.Host)
-			continue
-		}
-
-		ctx := remediation.RemediationContext{
-			DB:         c.db,
-			Job:        jl.job,
-			LogContent: jl.logContent,
-			Logger:     c.logger,
-			Config:     c.appConfig,
-		}
-
-		result := remediation.AttemptRemediation(ctx)
-		if result == nil {
-			continue
-		}
-
-		oplog.LogJob(oplog.OpCoordinatorDiagnosis, jl.job.ID, jl.job.Host,
-			oplog.WithDetailf("pattern=%s category=%s", result.Diagnosis.Pattern, result.Diagnosis.Category))
-
-		if result.Retried {
-			c.logger.Printf("remediated job %d: %s", jl.job.ID, result.Action)
-			oplog.LogJob(oplog.OpCoordinatorRemediation, jl.job.ID, jl.job.Host,
-				oplog.WithDetailf("action=%s", result.Action))
-		} else {
-			c.logger.Printf("diagnosed job %d: %s (action: %s)", jl.job.ID, result.Diagnosis.Message, result.Action)
-		}
-	}
-}
-
-// fetchJobLog retrieves the last 200 lines of a job's log from the remote host.
-func (c *Coordinator) fetchJobLog(job *db.Job) string {
-	cmd := fmt.Sprintf("tail -200 ~/.cache/weft/logs/%d-*.log 2>/dev/null", job.ID)
-	stdout, _, err := ssh.RunWithTimeout(job.Host, cmd, 10*time.Second)
-	if err != nil {
-		return ""
-	}
-	return stdout
+// dispatchIntent dispatches an intent to a host. Used as a callback for RetryDrainer.
+func (c *Coordinator) dispatchIntent(i *intent.Intent, host string) (int64, error) {
+	return dispatchIntent(c.db, i, host)
 }
 
 // writeOutcome writes a placement outcome file so the submitting laptop can
@@ -528,14 +283,8 @@ func (c *Coordinator) writePIDFile() error {
 }
 
 // HostStates returns a snapshot of all tracked host states.
-func (c *Coordinator) HostStates() map[string]HostState {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	result := make(map[string]HostState, len(c.hostState))
-	for name, hs := range c.hostState {
-		result[name] = *hs
-	}
-	return result
+func (c *Coordinator) HostStates() map[string]services.HostState {
+	return c.hostState.Snapshot()
 }
 
 // RetryQueueLen returns the number of items in the retry queue.

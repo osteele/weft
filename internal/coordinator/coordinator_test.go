@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/ssh"
 	_ "modernc.org/sqlite"
@@ -90,7 +91,7 @@ func TestHostStateTransitions(t *testing.T) {
 	c := New(nil, DefaultConfig())
 
 	// Initially probe — should be online
-	if !c.probeHost("testhost") {
+	if !c.hostState.ProbeHost("testhost") {
 		t.Error("expected host to be online")
 	}
 
@@ -101,7 +102,7 @@ func TestHostStateTransitions(t *testing.T) {
 
 	// Host goes offline
 	hostOnline = false
-	if c.probeHost("testhost") {
+	if c.hostState.ProbeHost("testhost") {
 		t.Error("expected host to be offline")
 	}
 
@@ -112,13 +113,13 @@ func TestHostStateTransitions(t *testing.T) {
 
 	// Host comes back online
 	hostOnline = true
-	if !c.probeHost("testhost") {
+	if !c.hostState.ProbeHost("testhost") {
 		t.Error("expected host to be online again")
 	}
 }
 
 func TestRetryQueue(t *testing.T) {
-	q := newRetryQueue()
+	q := services.NewRetryQueue()
 
 	i1 := &intent.Intent{IntentID: "a"}
 	i2 := &intent.Intent{IntentID: "b"}
@@ -136,7 +137,7 @@ func TestRetryQueue(t *testing.T) {
 	if len(drained) != 2 {
 		t.Fatalf("DrainForHost(host1) = %d items, want 2", len(drained))
 	}
-	if drained[0].intent.IntentID != "a" || drained[1].intent.IntentID != "c" {
+	if drained[0].Intent.IntentID != "a" || drained[1].Intent.IntentID != "c" {
 		t.Error("unexpected drained intents")
 	}
 

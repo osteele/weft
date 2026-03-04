@@ -80,6 +80,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	monCfg.HostRefreshInterval = opts.HostRefreshInterval
 
 	mon := monitor.New(database, monCfg)
+	// Enable embedded remediation so failed jobs get diagnosed
+	// even without the coordinator daemon running.
+	mon.EnableRemediation(cfg)
 	mon.Start()
 	defer mon.Stop()
 	opts.Monitor = mon

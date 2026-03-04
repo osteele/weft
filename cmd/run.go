@@ -8,29 +8,24 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
-	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
-	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/runner"
+	"github.com/osteele/weft/internal/scheduler"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -42,8 +37,9 @@ var runCmd = &cobra.Command{
 If --host is omitted, automatic placement selects the best host based on
 GPU constraints (--gpu, --gpu-class, --gpu-mem) and data locality (--input).
 
-By default, jobs are added to a queue and run sequentially.
-Use --immediate (-i) to start a job immediately instead of adding it to the queue.
+Jobs are routed through a scheduler that handles placement and dispatch.
+If a coordinator daemon is running, jobs are submitted as intents; otherwise
+placement and dispatch happen in-process.
 
 Examples:
   weft run 'python train.py'                           # Auto-place on best host
@@ -56,8 +52,7 @@ Examples:
   weft run -m "Training" --host cool30 'python train.py'
   weft run --after 42 'python eval.py'                  # Run after job 42
   weft run --wait --host cool30 'python train.py'       # Queue and wait for completion
-  weft run -f --host cool30 'python train.py'           # Queue and follow log output
-  weft run -i --host cool30 'python train.py'           # Start immediately and follow log`,
+  weft run -f --host cool30 'python train.py'           # Queue and follow log output`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
 		// --kill mode: no positional args needed (host is looked up from the job)
 		if runKillJobID > 0 {
@@ -83,15 +78,12 @@ var (
 	runHost        string
 	runDir         string
 	runDescription string
-	runImmediate   bool
 	runDraft       bool
 	runFollow      bool
-	runAllow       bool
 	runWait        bool
 	runNoWait      bool // explicit no-op flag for tooling compatibility
 	runKillJobID   int64
 	runFrom        int64
-	runTimeout     string
 	runEnvVars     []string
 	runTags        []string
 	runAfter       int64
@@ -113,17 +105,14 @@ func init() {
 	rootCmd.AddCommand(runCmd)
 
 	runCmd.Flags().StringVarP(&runHost, "host", "H", "", "Remote host to run on (default: auto-place)")
-	runCmd.Flags().BoolVarP(&runImmediate, "immediate", "i", false, "Start job immediately instead of queuing")
 	runCmd.Flags().BoolVar(&runDraft, "draft", false, "Create the job in draft status without contacting remote hosts")
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path)")
 	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	runCmd.Flags().MarkHidden("description")
 	runCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
-	runCmd.Flags().BoolVar(&runAllow, "allow", false, "Stream the job log live and stay attached until interrupted")
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
-	runCmd.Flags().StringVar(&runTimeout, "timeout", "", "Kill job after duration (e.g., \"2h\", \"30m\", \"1h30m\")")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
 	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
@@ -228,51 +217,29 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load output directories from .weft.yaml for convention-based output collection
-	outputDirs := config.ProjectOutputDirs(resolveLocalDir(runDir))
+	outputDirs := config.ProjectOutputDirs(workdir.ResolveLocal(runDir))
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
 
 	// Validate flag combinations
-	// --allow requires --immediate (can't use allow mode with a queued job)
-	if runAllow && !runImmediate {
-		return fmt.Errorf("--allow requires --immediate (-i) since jobs are queued by default")
-	}
 	if runFollow && runAfter > 0 {
 		return fmt.Errorf("--follow cannot be used with --after/--depends-on")
-	}
-	if runAllow && runAfter > 0 {
-		return fmt.Errorf("--allow cannot be used with --after/--depends-on")
 	}
 	if runFollow && runAfterAny > 0 {
 		return fmt.Errorf("--follow cannot be used with --after-any")
 	}
-	if runAllow && runAfterAny > 0 {
-		return fmt.Errorf("--allow cannot be used with --after-any")
-	}
 	if runAfter > 0 && runAfterAny > 0 {
 		return fmt.Errorf("cannot use both --after/--depends-on and --after-any")
 	}
-	if runAllow && runFollow {
-		return fmt.Errorf("--allow cannot be used with --follow")
-	}
-	if runImmediate && (runAfter > 0 || runAfterAny > 0) {
-		return fmt.Errorf("--immediate cannot be used with --after/--depends-on or --after-any")
-	}
-	if runDraft && runImmediate {
-		return fmt.Errorf("--draft cannot be combined with --immediate")
-	}
-	if runDraft && (runFollow || runAllow) {
-		return fmt.Errorf("--draft cannot be combined with --follow/--allow")
+	if runDraft && runFollow {
+		return fmt.Errorf("--draft cannot be combined with --follow")
 	}
 	if runDraft && (runAfter > 0 || runAfterAny > 0) {
 		return fmt.Errorf("--draft cannot be combined with --after/--depends-on or --after-any")
 	}
 	if runWait && runFollow {
 		return fmt.Errorf("--wait cannot be used with --follow")
-	}
-	if runWait && runAllow {
-		return fmt.Errorf("--wait cannot be used with --allow")
 	}
 	if runWait && runDraft {
 		return fmt.Errorf("--wait cannot be combined with --draft")
@@ -312,11 +279,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		GPUMemGB: runGPUMem,
 		Inputs:   runInputs,
 		Command:  command,
-		Project:  projectFromDir(runDir),
+		Project:  workdir.ProjectName(runDir),
 	}
 
 	// Build predictor closure if configured
-	predict := buildJobPredictor(cfg, placementConstraints)
+	predict := placement.BuildJobPredictorFromConfig(cfg, placementConstraints)
 
 	if runDryRun {
 		scores, err := placement.ScoreHostsWithPredictor(database, placementConstraints, nil, predict)
@@ -348,11 +315,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Route through coordinator for all non-immediate, non-draft submissions
-	if !runImmediate && !runDraft && coordinatorReachable(cfg) {
-		return submitIntent(cfg, database, host, command, runDir, runDescription, runEnvVars, runTags, runInputs, runOutputs, runGPUClass, runGPUMem, runAfter)
-	}
-
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided
 	dirProvided := runDir != ""
@@ -369,18 +331,84 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("get working dir: %w", err)
 	}
 
-	// Coordinator unreachable — fall back to direct submission
-	var placementResult *placement.PlacementResult
-	if host == "" {
-		if runImmediate {
-			return fmt.Errorf("--immediate requires an explicit host")
+	// Route through scheduler for non-draft, non-dependency submissions
+	if !runDraft && runAfter == 0 && runAfterAny == 0 {
+		sched := scheduler.SelectScheduler(database, coordinatorReachable(cfg),
+			scheduler.WithConfig(cfg))
+
+		submitResult, submitErr := sched.Submit(context.Background(), &scheduler.SubmitRequest{
+			Host:        host,
+			Command:     command,
+			WorkingDir:  workingDir,
+			Description: runDescription,
+			EnvVars:     runEnvVars,
+			Tags:        runTags,
+			Inputs:      runInputs,
+			Outputs:     runOutputs,
+			GPUClass:    runGPUClass,
+			GPUMemGB:    runGPUMem,
+			DepAfter:    runAfter,
+			Produces:    runProduces,
+			Needs:       runNeeds,
+			OutputDirs:  outputDirs,
+			NoSync:      runNoSync,
+		})
+		if submitErr != nil {
+			return fmt.Errorf("submit job: %w", submitErr)
+		}
+		if submitResult.NeedsRental {
+			return recordNeedsRentalJob(cmd, database, placementConstraints, workingDir, command, runDescription, runEnvVars, runTags, runOutputs, runProduces, runNeeds)
 		}
 
-		// Liveness-aware placement: probe eligible hosts and pick the best reachable one
+		jobID := submitResult.JobID
+		host = submitResult.Host
+
+		// Store placement telemetry if auto-placement was used
+		if submitResult.PlacementResult != nil {
+			meta := buildPlacementMeta(submitResult.PlacementResult, predict)
+			if err := db.SetJobPlacementMeta(database, jobID, meta); err != nil {
+				log.Printf("warning: failed to save placement meta: %v", err)
+			}
+		}
+
+		if host != "" {
+			fmt.Printf("Job #%d queued on %s\n\n", jobID, host)
+		} else {
+			fmt.Printf("Job #%d saved locally (pending placement)\n\n", jobID)
+		}
+		fmt.Printf("  Working dir: %s\n", workingDir)
+		fmt.Printf("  Command: %s\n", command)
+		if runDescription != "" {
+			fmt.Printf("  Description: %s\n", runDescription)
+		}
+		if len(runEnvVars) > 0 {
+			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+		}
+
+		if runWait {
+			return waitForQueuedJobCompletion(database, jobID, submitResult.Deferred)
+		}
+		if runFollow {
+			return followQueuedJob(database, jobID, host, submitResult.Deferred)
+		}
+		if submitResult.Deferred {
+			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
+		} else if host != "" {
+			backend, backendErr := ops.ResolveBackend(host, 5*time.Second)
+			if backendErr == nil && backend != db.BackendSlurm {
+				_, _ = ensureQueueRunnerStarted(host, defaultQueueName)
+			}
+		}
+		return nil
+	}
+
+	// Below: --draft or dependency modes only
+
+	// Placement for non-scheduler paths (--draft, --after)
+	if host == "" {
 		result, err := placement.BestReachableHost(database, placementConstraints, 5*time.Second)
 		if err != nil {
 			if errors.Is(err, placement.ErrNoReachableHost) {
-				// No hosts responded — fall back to predictor-aware static placement
 				result, err = placement.BestHostWithPredictor(database, placementConstraints, nil, predict)
 				if err != nil {
 					if errors.Is(err, placement.ErrNoEligibleHost) {
@@ -394,10 +422,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("auto-placement failed: %w", err)
 			}
 		}
-		placementResult = result
 		host = result.Host
 
-		// Log placement decision
 		oplog.Log(oplog.OpPlacementDecided,
 			oplog.WithHost(host),
 			oplog.WithDetail(placement.FormatPlacementDetail(result)))
@@ -407,12 +433,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
-	// Log CLI command invocation
-	mode := "queue"
-	if runImmediate {
-		mode = "immediate"
-	}
-	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=%s cmd=%s", mode, command))
+	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=queue cmd=%s", command))
 
 	if runDraft {
 		gpu := extractGPUFromEnvVars(runEnvVars)
@@ -508,165 +529,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Default behavior: queue job for sequential execution (unless --immediate)
-	if !runImmediate {
-		res, err := queueJob(database, queueJobOptions{
-			Host:        host,
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: runDescription,
-			EnvVars:     runEnvVars,
-			Tags:        runTags,
-			GPU:         gpu,
-			GPUClass:    gpuClass,
-			GPUMemGB:    gpuMemGB,
-			AutoStart:   true,
-			Inputs:      runInputs,
-			Outputs:     runOutputs,
-			OutputDirs:  outputDirs,
-			Produces:    runProduces,
-			Needs:       runNeeds,
-		})
-		if err != nil {
-			return fmt.Errorf("queue job: %w", err)
-		}
-		jobID := res.JobID
-
-		// Store placement telemetry if auto-placement was used
-		if placementResult != nil {
-			meta := buildPlacementMeta(placementResult, predict)
-			if err := db.SetJobPlacementMeta(database, jobID, meta); err != nil {
-				log.Printf("warning: failed to save placement meta: %v", err)
-			}
-		}
-
-		fmt.Printf("Job #%d queued on %s\n\n", jobID, host)
-		fmt.Printf("  Working dir: %s\n", workingDir)
-		fmt.Printf("  Command: %s\n", command)
-		if runDescription != "" {
-			fmt.Printf("  Description: %s\n", runDescription)
-		}
-		if len(runEnvVars) > 0 {
-			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
-		}
-
-		// Handle --wait: block until job completes
-		if runWait {
-			return waitForQueuedJobCompletion(database, jobID, res.Deferred)
-		}
-
-		// Handle --follow: wait for job to start, then stream logs
-		if runFollow {
-			return followQueuedJob(database, jobID, host, res.Deferred)
-		}
-
-		// Default: show deferred message and return
-		if res.Deferred {
-			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
-		} else {
-			// Sync sources now that we know the host is reachable
-			if !runNoSync && host != "" {
-				syncSourcesToHost(host, workingDir, runInputs)
-			}
-
-			backend, err := ops.ResolveBackend(host, 5*time.Second)
-			if err == nil && backend != db.BackendSlurm {
-				// Auto-start queue runner (silently ignore offline errors)
-				_, _ = ensureQueueRunnerStarted(host, defaultQueueName)
-			}
-		}
-		return nil
-	}
-
-	// --immediate mode: start job now in its own tmux session
-	backend, err := ops.ResolveBackend(host, 5*time.Second)
-	if err != nil {
-		return fmt.Errorf("resolve backend: %w", err)
-	}
-	if backend == db.BackendSlurm {
-		res, err := queueJob(database, queueJobOptions{
-			Host:        host,
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: runDescription,
-			EnvVars:     runEnvVars,
-			Tags:        runTags,
-			GPU:         gpu,
-			GPUClass:    gpuClass,
-			GPUMemGB:    gpuMemGB,
-			AutoStart:   false,
-			Inputs:      runInputs,
-			Outputs:     runOutputs,
-			OutputDirs:  outputDirs,
-			Produces:    runProduces,
-			Needs:       runNeeds,
-		})
-		if err != nil {
-			return fmt.Errorf("queue job: %w", err)
-		}
-		fmt.Printf("Job #%d submitted to SLURM on %s\n\n", res.JobID, host)
-		fmt.Printf("  Working dir: %s\n", workingDir)
-		fmt.Printf("  Command: %s\n", command)
-		if runDescription != "" {
-			fmt.Printf("  Description: %s\n", runDescription)
-		}
-		if len(runEnvVars) > 0 {
-			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
-		}
-		if res.Deferred {
-			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
-		}
-		return nil
-	}
-
-	// Sync sources before starting immediate job (host is known reachable)
-	if !runNoSync && host != "" {
-		syncSourcesToHost(host, workingDir, runInputs)
-	}
-
-	result, err := startJob(database, startJobOptions{
-		Host:        host,
-		WorkingDir:  workingDir,
-		Command:     command,
-		Description: runDescription,
-		EnvVars:     runEnvVars,
-		Tags:        runTags,
-		GPUMemGB:    gpuMemGB,
-		Timeout:     runTimeout,
-		OnPrepared: func(info StartJobPreparedInfo) {
-			fmt.Printf("Starting job %d on %s\n", info.JobID, info.Host)
-			fmt.Printf("Working directory: %s\n", info.WorkingDir)
-			fmt.Printf("Command: %s\n", info.Command)
-			if info.Description != "" {
-				fmt.Printf("Description: %s\n", info.Description)
-			}
-			fmt.Println()
-		},
-	})
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Job #%d queued on %s\n", result.Info.JobID, result.Info.Host)
-
-	if runWait {
-		return waitForQueuedJobCompletion(database, result.Info.JobID, false)
-	}
-
-	if runFollow || runAllow {
-		return followQueuedJob(database, result.Info.JobID, host, false)
-	}
-
-	if usageHintsEnabled() {
-		fmt.Printf("\nMonitor progress:\n")
-		fmt.Printf("  weft status %d                   # Check status\n", result.Info.JobID)
-		fmt.Printf("  weft status --wait %d            # Wait for completion\n", result.Info.JobID)
-		fmt.Printf("  weft status --wait --wait-timeout 30m %d  # Wait with timeout\n", result.Info.JobID)
-		fmt.Printf("\nView log:\n")
-		fmt.Printf("  weft log %d                      # View log\n", result.Info.JobID)
-		fmt.Printf("  weft log %d -f                   # Follow log\n", result.Info.JobID)
-	}
-
+	// This path is unreachable — all branches above return early.
+	// --draft and --after paths are handled above; default queue path uses scheduler.
 	return nil
 }
 
@@ -879,42 +743,6 @@ func pathHasHomePrefix(dir, home string) bool {
 	return dirClean == homeClean || strings.HasPrefix(dirClean, homeClean+string(os.PathSeparator))
 }
 
-func streamJobLogAllow(host, logFile string, jobID int64) error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	fmt.Printf("\nFollowing live output (Ctrl+C to stop streaming; job keeps running)...\n\n")
-	waitAndTail := fmt.Sprintf("sh -c 'while [ ! -f %s ]; do sleep 1; done; tail -n +1 -F %s'", logFile, logFile)
-	sshCmd := exec.CommandContext(ctx, "ssh", host, waitAndTail)
-	sshCmd.Stdout = os.Stdout
-	sshCmd.Stderr = os.Stderr
-	sshCmd.Stdin = nil
-
-	err := sshCmd.Run()
-	if ctx.Err() != nil {
-		fmt.Printf("\nDetached from log stream.\n")
-		printDetachedInstructions(jobID)
-		return nil
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "\nLog streaming stopped with error: %v\n", err)
-		printDetachedInstructions(jobID)
-		return err
-	}
-
-	fmt.Printf("\nLog streaming finished.\n")
-	printDetachedInstructions(jobID)
-	return nil
-}
-
-func printDetachedInstructions(jobID int64) {
-	fmt.Printf("Job %d continues running.\n", jobID)
-	if usageHintsEnabled() {
-		fmt.Printf("View logs later: weft log %d -f\n", jobID)
-		fmt.Printf("Check status:   weft job status %d\n", jobID)
-	}
-}
-
 // printCommandRecommendations checks for common command patterns and suggests
 // better alternatives using CLI flags. Returns true if any recommendations were printed.
 func printCommandRecommendations(command string) bool {
@@ -979,217 +807,9 @@ func coordinatorReachable(cfg *config.Config) bool {
 	return strings.TrimSpace(stdout) == "YES"
 }
 
-// submitIntent writes a placement intent to the coordinator and records the job locally.
-// host may be empty (auto-placement) or an explicit host name (passed as a constraint).
-func submitIntent(cfg *config.Config, database *sql.DB, host, command, dir, description string, envVars, tags, inputs, outputs []string, gpuClass string, gpuMemGB int, depAfter int64) error {
-	// Resolve working directory
-	workingDir, err := resolveWorkingDir(dir, os.Stderr)
-	if err != nil {
-		return fmt.Errorf("get working dir: %w", err)
-	}
-
-	// Sync sources to coordinator (hop 1: CLI → coordinator)
-	if !runNoSync {
-		syncHost := cfg.GetCoordinatorHost()
-		hostname, _ := os.Hostname()
-		if hostname != syncHost {
-			localDir := resolveLocalDir(workingDir)
-			if localDir != "" {
-				if err := srcsync.SyncSources(syncHost, localDir, workingDir); err != nil {
-					_ = err // sync failure is expected in occasionally-connected design
-				}
-			}
-
-			// Sync extra file paths from --input flags and .weft.yaml
-			extraPaths := collectExtraPaths(inputs, localDir)
-			if len(extraPaths) > 0 {
-				if err := srcsync.SyncExtraPaths(syncHost, extraPaths); err != nil {
-					_ = err // sync failure is expected in occasionally-connected design
-				}
-			}
-		}
-	}
-
-	// Record job locally with pending_placement status
-	jobID, err := db.RecordQueuedWithGPU(database, "", workingDir, command, description, "")
-	if err != nil {
-		return fmt.Errorf("record job: %w", err)
-	}
-	if err := db.MarkPendingPlacement(database, jobID); err != nil {
-		return fmt.Errorf("set pending_placement: %w", err)
-	}
-	if len(tags) > 0 {
-		if err := db.SetJobTags(database, jobID, tags); err != nil {
-			return fmt.Errorf("set tags: %w", err)
-		}
-	}
-	if len(envVars) > 0 {
-		if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
-			return fmt.Errorf("set env vars: %w", err)
-		}
-	}
-	if len(inputs) > 0 {
-		if err := db.SetJobInputs(database, jobID, inputs); err != nil {
-			return fmt.Errorf("set inputs: %w", err)
-		}
-	}
-	if len(outputs) > 0 {
-		if err := db.SetJobOutputs(database, jobID, outputs); err != nil {
-			return fmt.Errorf("set outputs: %w", err)
-		}
-	}
-
-	// Build intent
-	var gpuMemPtr *int
-	if gpuMemGB > 0 {
-		gpuMemPtr = &gpuMemGB
-	}
-
-	depSpec := ""
-	if depAfter > 0 {
-		depSpec = fmt.Sprintf("%d", depAfter)
-	}
-
-	hostname, _ := os.Hostname()
-	i := &intent.Intent{
-		Timestamp: time.Now(),
-		Op:        "place",
-		IntentID:  uuid.New().String(),
-		Source:    hostname,
-		Job: intent.IntentJob{
-			ID:      jobID,
-			Cmd:     command,
-			Dir:     workingDir,
-			Desc:    description,
-			Env:     envVars,
-			Inputs:  inputs,
-			Outputs: outputs,
-			Constraints: intent.IntentConstraints{
-				GPUClass: gpuClass,
-				GPUMemGB: gpuMemGB,
-			},
-			Tags:     tags,
-			DepSpec:  depSpec,
-			GPUMemGB: gpuMemPtr,
-		},
-	}
-
-	// Store intent ID in remote_id for outcome polling
-	if err := db.SetJobRemoteID(database, jobID, i.IntentID); err != nil {
-		return fmt.Errorf("store intent ID: %w", err)
-	}
-
-	// Write intent to coordinator
-	if err := intent.WriteIntent(cfg.GetCoordinatorHost(), i); err != nil {
-		// If coordinator write fails, fall back to local placement info
-		fmt.Fprintf(os.Stderr, "Warning: could not submit intent to coordinator: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Job %d saved locally with pending_placement status\n", jobID)
-		return nil
-	}
-
-	oplog.Log(oplog.OpCLICommand, oplog.WithDetailf("intent submitted id=%s job=%d", i.IntentID, jobID))
-
-	fmt.Printf("Intent %s submitted to coordinator\n", i.IntentID)
-	fmt.Printf("Job #%d saved locally (pending placement)\n\n", jobID)
-	fmt.Printf("  Working dir: %s\n", workingDir)
-	fmt.Printf("  Command: %s\n", command)
-	if description != "" {
-		fmt.Printf("  Description: %s\n", description)
-	}
-
-	return nil
-}
-
-// collectExtraPaths gathers file paths to sync from --input flags and .weft.yaml.
-// It classifies --input values into asset refs (ignored here) and file paths,
-// then merges with extra_paths from the project config if found.
-func collectExtraPaths(inputs []string, localDir string) []string {
-	_, filePaths := dataloc.ClassifyInputs(inputs)
-	filePaths = append(filePaths, config.ProjectExtraPaths(localDir)...)
-	return filePaths
-}
-
-// buildJobPredictor creates a placement.JobPredictor from the app config and constraints.
-// Returns nil if the predictor is not configured or no command is set.
-func buildJobPredictor(cfg *config.Config, c placement.Constraints) placement.JobPredictor {
-	pcfg := buildPredictorConfig(cfg)
-	if !pcfg.Configured() || c.Command == "" {
-		return nil
-	}
-	return placement.NewJobPredictor(func(host string) *placement.RawPrediction {
-		result, err := predictor.Predict(pcfg, host, c.Project, c.GPUClass, c.Command)
-		if err != nil {
-			return nil
-		}
-		raw := &placement.RawPrediction{}
-		if result.DurationS != nil {
-			raw.DurationS = &placement.RawPredictionField{Mean: result.DurationS.Mean, Lower: result.DurationS.Lower, Upper: result.DurationS.Upper}
-		}
-		if result.PeakRSSKB != nil {
-			raw.PeakRSSKB = &placement.RawPredictionField{Mean: result.PeakRSSKB.Mean, Lower: result.PeakRSSKB.Lower, Upper: result.PeakRSSKB.Upper}
-		}
-		if result.MaxGPUMemMiB != nil {
-			raw.MaxGPUMemMiB = &placement.RawPredictionField{Mean: result.MaxGPUMemMiB.Mean, Lower: result.MaxGPUMemMiB.Lower, Upper: result.MaxGPUMemMiB.Upper}
-		}
-		return raw
-	})
-}
-
 // syncSourcesToHost syncs source files and extra paths to the remote host.
 // Errors are silently ignored since sync failure is non-fatal.
 func syncSourcesToHost(host, workingDir string, inputs []string) {
-	localDir := resolveLocalDir(workingDir)
-	if localDir != "" {
-		if err := srcsync.SyncSources(host, localDir, workingDir); err != nil {
-			_ = err // sync failure is non-fatal
-		}
-	}
-	extraPaths := collectExtraPaths(inputs, localDir)
-	if len(extraPaths) > 0 {
-		if err := srcsync.SyncExtraPaths(host, extraPaths); err != nil {
-			_ = err // sync failure is non-fatal
-		}
-	}
-}
-
-// projectFromDir extracts a short project name from a working directory path.
-// E.g. "~/code/research/llm-performance-models" → "llm-performance-models".
-// Returns "" if the directory is empty.
-func projectFromDir(dir string) string {
-	if dir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return ""
-		}
-		return filepath.Base(cwd)
-	}
-	return filepath.Base(dir)
-}
-
-// resolveLocalDir converts a tilde-prefixed working directory back to a local
-// absolute path using the automap directory prefixes. Returns "" if the path
-// cannot be resolved to a local directory.
-func resolveLocalDir(workingDir string) string {
-	if workingDir == "" {
-		return ""
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ""
-	}
-	for _, prefix := range config.AutomapDirs() {
-		expanded := strings.Replace(prefix, "~", home, 1)
-		if strings.HasPrefix(workingDir, prefix+"/") {
-			rel := workingDir[len(prefix)+1:]
-			return filepath.Join(expanded, rel)
-		}
-		if workingDir == prefix {
-			return expanded
-		}
-	}
-	// If workingDir is already an absolute path, use it directly
-	if filepath.IsAbs(workingDir) {
-		return workingDir
-	}
-	return ""
+	localDir := workdir.ResolveLocal(workingDir)
+	srcsync.SyncSourcesToHost(host, localDir, workingDir, inputs)
 }

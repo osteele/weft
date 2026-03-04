@@ -60,6 +60,7 @@ func runWeb(cmd *cobra.Command, args []string) error {
 	}
 
 	mon := monitor.New(database, monCfg)
+	mon.EnableRemediation(cfg)
 	mon.Start()
 	defer mon.Stop()
 
