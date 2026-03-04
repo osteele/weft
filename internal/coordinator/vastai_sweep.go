@@ -191,6 +191,127 @@ func writeVastaiLogsToCache(jobID int64, tmpDir string) {
 	}
 }
 
+// sweepCampaignResults polls R2 for completed campaign markers and processes results.
+func (c *Coordinator) sweepCampaignResults() {
+	cfg, err := config.Load()
+	if err != nil || cfg.Vastai.R2.Bucket == "" {
+		return
+	}
+
+	r2Cfg := r2.Config{
+		AccountID:       cfg.Vastai.R2.AccountID,
+		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
+		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
+		Bucket:          cfg.Vastai.R2.Bucket,
+	}
+
+	r2Client, err := r2.New(r2Cfg)
+	if err != nil {
+		c.logger.Printf("campaign sweep: r2 client: %v", err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Check for completed campaigns
+	completedIDs, err := r2Client.ListCompleted(ctx, "campaigns/")
+	if err != nil {
+		c.logger.Printf("campaign sweep: list completed: %v", err)
+		return
+	}
+
+	for _, idStr := range completedIDs {
+		campaignID, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		campaign, err := db.GetCampaign(c.db, campaignID)
+		if err != nil || campaign == nil {
+			continue
+		}
+		if campaign.Status != db.CampaignStatusRunning {
+			continue
+		}
+
+		// Process each job in the campaign
+		jobs, err := db.GetCampaignJobs(c.db, campaignID)
+		if err != nil {
+			c.logger.Printf("campaign sweep: get jobs for campaign %d: %v", campaignID, err)
+			continue
+		}
+
+		allSucceeded := true
+		for _, job := range jobs {
+			if job.Status == db.StatusCompleted {
+				continue // already processed
+			}
+			c.processCompletedVastaiJob(ctx, r2Client, job.ID)
+
+			// Re-read to check exit code
+			updated, err := db.GetJobByID(c.db, job.ID)
+			if err == nil && updated != nil && updated.ExitCode != nil && *updated.ExitCode != 0 {
+				allSucceeded = false
+			}
+		}
+
+		// Update campaign status
+		status := db.CampaignStatusCompleted
+		if !allSucceeded {
+			status = db.CampaignStatusFailed
+		}
+		if err := db.UpdateCampaignStatus(c.db, campaignID, status); err != nil {
+			c.logger.Printf("campaign sweep: update campaign %d status: %v", campaignID, err)
+		}
+
+		// Clean up R2 campaign marker
+		prefix := fmt.Sprintf("campaigns/%d/", campaignID)
+		if err := r2Client.DeletePrefix(ctx, prefix); err != nil {
+			c.logger.Printf("campaign sweep: cleanup R2 for campaign %d: %v", campaignID, err)
+		}
+
+		c.logger.Printf("campaign sweep: processed campaign %d (status=%s, jobs=%d)", campaignID, status, len(jobs))
+	}
+
+	// Enforce budget/time limits on running campaigns
+	c.checkCampaignLimits(cfg)
+}
+
+// checkCampaignLimits destroys instances for campaigns that exceed budget or time limits.
+func (c *Coordinator) checkCampaignLimits(cfg *config.Config) {
+	campaigns, err := db.ListCampaigns(c.db)
+	if err != nil {
+		return
+	}
+
+	client := vastai.NewClient()
+	if err := client.Available(); err != nil {
+		return
+	}
+
+	for _, campaign := range campaigns {
+		if campaign.Status != db.CampaignStatusRunning {
+			continue
+		}
+
+		// Check time limit
+		if campaign.MaxTimeSeconds > 0 && campaign.LaunchedAt != nil {
+			elapsed := time.Since(time.Unix(*campaign.LaunchedAt, 0))
+			if elapsed > time.Duration(campaign.MaxTimeSeconds)*time.Second {
+				c.logger.Printf("campaign sweep: campaign %d exceeded time limit (%v), destroying", campaign.ID, elapsed)
+				if campaign.InstanceID != "" {
+					instanceID, _ := strconv.Atoi(campaign.InstanceID)
+					if instanceID > 0 {
+						_ = client.DestroyInstance(instanceID)
+					}
+				}
+				_ = db.UpdateCampaignStatus(c.db, campaign.ID, db.CampaignStatusFailed)
+			}
+		}
+	}
+}
+
 // checkOrphanedVastaiInstances looks for jobs that have been running too long
 // or have instances that are no longer active.
 func (c *Coordinator) checkOrphanedVastaiInstances(cfg *config.Config) {

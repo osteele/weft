@@ -72,7 +72,7 @@ func RunJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir stri
 	// 5. Install dependencies
 	progress("installing dependencies")
 	installCmd := "cd /workspace && uv sync 2>&1"
-	if _, err := sshRun(sshTarget, sshOpts, installCmd); err != nil {
+	if _, err := SSHRun(sshTarget, sshOpts, installCmd); err != nil {
 		// Non-fatal: uv might not be needed, or project might not use it
 		// The onstart-cmd should have installed uv
 	}
@@ -81,7 +81,7 @@ func RunJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir stri
 	progress("running job")
 	startTime := time.Now()
 	jobCmd := fmt.Sprintf("cd /workspace && %s", command)
-	output, err := sshRun(sshTarget, sshOpts, jobCmd)
+	output, err := SSHRun(sshTarget, sshOpts, jobCmd)
 	runtime := time.Since(startTime)
 
 	exitCode := 0
@@ -174,7 +174,7 @@ func LaunchJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir s
 	progress("configuring R2")
 	rcloneConf := GenerateRcloneConfig(r2Cfg)
 	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
-	if _, err := sshRun(sshTarget, sshOpts, setupCmd); err != nil {
+	if _, err := SSHRun(sshTarget, sshOpts, setupCmd); err != nil {
 		_ = client.DestroyInstance(instanceID)
 		return nil, fmt.Errorf("write rclone config: %w", err)
 	}
@@ -183,7 +183,7 @@ func LaunchJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir s
 	progress("deploying wrapper")
 	wrapper := GenerateWrapper(jobID, command, r2Cfg.Bucket)
 	deployCmd := fmt.Sprintf("cat > /workspace/.weft-runner.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x /workspace/.weft-runner.sh", wrapper)
-	if _, err := sshRun(sshTarget, sshOpts, deployCmd); err != nil {
+	if _, err := SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
 		_ = client.DestroyInstance(instanceID)
 		return nil, fmt.Errorf("deploy wrapper: %w", err)
 	}
@@ -191,7 +191,7 @@ func LaunchJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir s
 	// 7. Start wrapper via nohup (fire-and-forget)
 	progress("starting job")
 	startCmd := fmt.Sprintf("nohup bash /workspace/.weft-runner.sh %d </dev/null >/dev/null 2>&1 &", jobID)
-	if _, err := sshRun(sshTarget, sshOpts, startCmd); err != nil {
+	if _, err := SSHRun(sshTarget, sshOpts, startCmd); err != nil {
 		_ = client.DestroyInstance(instanceID)
 		return nil, fmt.Errorf("start wrapper: %w", err)
 	}
@@ -233,8 +233,8 @@ func rsyncFrom(sshTarget, remotePath, localPath, port string) error {
 	return nil
 }
 
-// sshRun executes a command on a remote host via SSH.
-func sshRun(target string, sshOpts []string, command string) (string, error) {
+// SSHRun executes a command on a remote host via SSH.
+func SSHRun(target string, sshOpts []string, command string) (string, error) {
 	args := append([]string{}, sshOpts...)
 	args = append(args, target, command)
 	cmd := exec.Command("ssh", args...)

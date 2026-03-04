@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -289,6 +290,11 @@ func (m Model) renderJobList(height int) string {
 		rows = append(rows, hostSummary)
 	}
 
+	rentalBanner := m.renderUnplaceableBanner(contentWidth)
+	if rentalBanner != "" {
+		rows = append(rows, rentalBanner)
+	}
+
 	// Header
 	header := fmt.Sprintf(" %-4s %-14s %-12s %-12s %-4s %s",
 		"ID", "HOST", "STATUS", "TIME", "GPU", "DESCRIPTION")
@@ -311,6 +317,9 @@ func (m Model) renderJobList(height int) string {
 	}
 	contentHeight := contentTarget - 2 // header + filter
 	if hostSummary != "" {
+		contentHeight--
+	}
+	if rentalBanner != "" {
 		contentHeight--
 	}
 	if contentHeight < 0 {
@@ -364,7 +373,9 @@ func (m Model) renderJobList(height int) string {
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
 		hostStr := job.Host
-		if job.GPUDevice() != "" {
+		if job.CampaignID != nil && hostStr == "" {
+			hostStr = "vastai:" + gpuColumnText(job)
+		} else if job.GPUDevice() != "" {
 			hostStr = job.HostWithGPU()
 		}
 		hostCol := fmt.Sprintf("%-14s", truncate(hostStr, 14))
@@ -535,6 +546,38 @@ func (m Model) renderInlineHostSummary(maxWidth int) string {
 		" ",
 		segmentView,
 	)
+}
+
+var bannerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+
+func (m Model) renderUnplaceableBanner(maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+
+	groups := campaign.GroupByGPUSupremum(m.allJobs)
+	if len(groups) == 0 {
+		return ""
+	}
+
+	total := 0
+	var specs []string
+	for _, g := range groups {
+		total += len(g.Jobs)
+		specs = append(specs, fmt.Sprintf("%d\u00d7 %s", len(g.Jobs), g.GPUSpec()))
+	}
+
+	jobWord := "jobs"
+	if total == 1 {
+		jobWord = "job"
+	}
+	text := fmt.Sprintf("\u26a0 %d %s need rental GPUs (%s)  [c] cloud", total, jobWord, strings.Join(specs, ", "))
+
+	rendered := bannerStyle.Render(text)
+	if lipgloss.Width(rendered) > maxWidth {
+		rendered = bannerStyle.Render(truncate(text, maxWidth))
+	}
+	return rendered
 }
 
 func (m Model) renderLogPanel(height int) string {

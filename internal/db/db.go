@@ -78,6 +78,7 @@ type Job struct {
 	ErrorDiagnosis       string         // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
 	RetryCount           int            // Number of auto-remediation retries attempted
 	PlacementMeta        *PlacementMeta // Placement telemetry (predictions, scores)
+	CampaignID           *int64         // Campaign ID if this job is part of a cloud campaign
 
 	// Three-way merge state for reconciliation
 	LastSyncedStatus string  // Base: what remote was at last successful sync
@@ -114,7 +115,7 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, campaign_id`
 
 const ProcessedTag = "processed"
 
@@ -524,6 +525,33 @@ func initSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_job_timeseries_job ON job_timeseries(job_id);
 	`
 	if _, err := db.Exec(timeseriesSchema); err != nil {
+		return err
+	}
+
+	// Create campaigns table for batch cloud GPU launches
+	campaignsSchema := `
+	CREATE TABLE IF NOT EXISTS campaigns (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		status TEXT NOT NULL DEFAULT 'planned',
+		provider TEXT NOT NULL DEFAULT 'vastai',
+		gpu_spec TEXT,
+		gpu_class TEXT,
+		gpu_mem_gb INTEGER,
+		instance_id TEXT,
+		max_spend_cents INTEGER,
+		max_time_seconds INTEGER,
+		actual_spend_cents INTEGER,
+		created_at INTEGER NOT NULL,
+		launched_at INTEGER,
+		ended_at INTEGER
+	);
+	`
+	if _, err := db.Exec(campaignsSchema); err != nil {
+		return err
+	}
+
+	// Migration: add campaign_id column to jobs for campaign association
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN campaign_id INTEGER`); err != nil {
 		return err
 	}
 
@@ -1638,8 +1666,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var errorDiagnosis sql.NullString
 	var retryCount sql.NullInt64
 	var placementMeta sql.NullString
+	var campaignID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &campaignID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1747,6 +1776,9 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.RetryCount = int(retryCount.Int64)
 	}
 	j.PlacementMeta = decodePlacementMeta(placementMeta)
+	if campaignID.Valid {
+		j.CampaignID = &campaignID.Int64
+	}
 	if j.Backend == "" {
 		j.Backend = BackendQueueRunner
 	}
@@ -1980,8 +2012,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var errorDiagnosis sql.NullString
 		var retryCount sql.NullInt64
 		var placementMeta sql.NullString
+		var campaignID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &campaignID)
 		if err != nil {
 			return nil, err
 		}
@@ -2086,6 +2119,9 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.RetryCount = int(retryCount.Int64)
 		}
 		j.PlacementMeta = decodePlacementMeta(placementMeta)
+		if campaignID.Valid {
+			j.CampaignID = &campaignID.Int64
+		}
 		if j.Backend == "" {
 			j.Backend = BackendQueueRunner
 		}
