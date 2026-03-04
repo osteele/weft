@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"log"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -94,6 +96,12 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if useMouse {
 		programOpts = append(programOpts, tea.WithMouseCellMotion())
 	}
+
+	// Redirect log output away from the terminal while the TUI is running,
+	// since log.Printf writes to stderr and corrupts the alternate screen.
+	origLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(origLogOutput)
 
 	p := tea.NewProgram(model, programOpts...)
 
