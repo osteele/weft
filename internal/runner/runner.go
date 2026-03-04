@@ -401,14 +401,16 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	// Build environment
 	var envVars []string
 
+	// Expand ~ in working directory
+	expandedDir := job.Dir
+	if len(expandedDir) > 1 && expandedDir[0] == '~' {
+		home, _ := os.UserHomeDir()
+		expandedDir = home + expandedDir[1:]
+	}
+
 	// Load dotenv files from working directory
-	if job.Dir != "" {
-		dir := job.Dir
-		if len(dir) > 1 && dir[0] == '~' {
-			home, _ := os.UserHomeDir()
-			dir = home + dir[1:]
-		}
-		dotenvVars, _ := LoadDotenvFiles(dir)
+	if expandedDir != "" {
+		dotenvVars, _ := LoadDotenvFiles(expandedDir)
 		envVars = append(envVars, dotenvVars...)
 	}
 
@@ -419,6 +421,11 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	if len(gpuDevices) > 0 && job.GPUClass != "" {
 		cudaEnv := FormatGPUDeviceEnv(gpuDevices)
 		envVars = append(envVars, cudaEnv)
+	}
+
+	// Prepend environment setup command if detected
+	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
+		command = setupCmd + " && " + command
 	}
 
 	// Start the process
