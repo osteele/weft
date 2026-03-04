@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 )
@@ -31,6 +34,7 @@ type Constraints struct {
 	Inputs   []string // Asset refs the job reads (for locality scoring)
 	Command  string   // For predictor-based scoring; empty = skip
 	Project  string   // For predictor-based scoring; empty = skip
+	Tags     []string // Job tags; "benchmark" triggers idle-host requirement
 }
 
 // NeedsGPU returns true if the constraints require GPU resources.
@@ -376,6 +380,17 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 			return s
 		}
 		s.Reasons = append(s.Reasons, fmt.Sprintf("has GPU with >=%dGB", c.GPUMemGB))
+	}
+
+	// Hard constraint: benchmark jobs require an idle host
+	if hasBenchmarkTag(c.Tags) {
+		reason := benchmarkIdleCheck(db, host.Name, metrics)
+		if reason != "" {
+			s.Eligible = false
+			s.Reasons = append(s.Reasons, reason)
+			return s
+		}
+		s.Reasons = append(s.Reasons, "host idle (benchmark)")
 	}
 
 	// Soft factor: data locality + transfer cost
@@ -767,6 +782,9 @@ func DescribeConstraints(c Constraints) string {
 	if len(c.Inputs) > 0 {
 		parts = append(parts, fmt.Sprintf("%d inputs", len(c.Inputs)))
 	}
+	if hasBenchmarkTag(c.Tags) {
+		parts = append(parts, "benchmark")
+	}
 	if c.Command != "" {
 		cmd := c.Command
 		if len(cmd) > 40 {
@@ -845,4 +863,54 @@ func FormatHostMetricsDetail(m *HostMetrics) string {
 		}
 	}
 	return b.String()
+}
+
+// Benchmark idle thresholds — reads the same env vars as runner.DefaultBenchmarkConfig()
+// to stay in sync without creating an import cycle.
+var (
+	benchmarkCPUThreshold = intFromEnvOrDefault("WEFT_BENCHMARK_CPU", 5)
+	benchmarkGPUThreshold = intFromEnvOrDefault("WEFT_BENCHMARK_GPU", 5)
+	benchmarkRAMThreshold = intFromEnvOrDefault("WEFT_BENCHMARK_RAM", 20)
+)
+
+func intFromEnvOrDefault(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return defaultVal
+}
+
+// hasBenchmarkTag returns true if tags contain "benchmark".
+func hasBenchmarkTag(tags []string) bool {
+	return slices.Contains(tags, "benchmark")
+}
+
+// benchmarkIdleCheck returns a non-empty reason string if the host is not idle
+// enough for a benchmark job. Returns "" if the host is idle.
+func benchmarkIdleCheck(database *sql.DB, host string, metrics *HostMetrics) string {
+	if metrics == nil {
+		return "no live metrics (benchmark requires idle verification)"
+	}
+
+	// Check for active weft jobs on this host
+	if database != nil {
+		active, err := db.CountQueueRunnerActiveByHost(database, host)
+		if err == nil && active > 0 {
+			return fmt.Sprintf("%d active weft jobs (benchmark requires idle host)", active)
+		}
+	}
+
+	if metrics.CPUPercent > benchmarkCPUThreshold {
+		return fmt.Sprintf("CPU %d%% > %d%% (benchmark requires idle host)", metrics.CPUPercent, benchmarkCPUThreshold)
+	}
+	if metrics.GPUPercent > benchmarkGPUThreshold {
+		return fmt.Sprintf("GPU %d%% > %d%% (benchmark requires idle host)", metrics.GPUPercent, benchmarkGPUThreshold)
+	}
+	if metrics.RAMPercent > benchmarkRAMThreshold {
+		return fmt.Sprintf("RAM %d%% > %d%% (benchmark requires idle host)", metrics.RAMPercent, benchmarkRAMThreshold)
+	}
+
+	return ""
 }

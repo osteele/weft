@@ -28,6 +28,7 @@ func (s *LocalScheduler) Submit(_ context.Context, req *SubmitRequest) (*SubmitR
 		Inputs:   req.Inputs,
 		Command:  req.Command,
 		Project:  workdir.ProjectName(req.WorkingDir),
+		Tags:     req.Tags,
 	}
 
 	var cfg *config.Config

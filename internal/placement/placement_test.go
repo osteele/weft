@@ -1297,3 +1297,130 @@ func extractTransferMinutes(reasons []string) float64 {
 	}
 	return 0
 }
+
+func TestBenchmarkTag_NoMetrics_Ineligible(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{"benchmark"}}
+
+	// Without metrics, benchmark jobs should be ineligible (can't verify idle)
+	scores, err := ScoreHosts(db, constraints)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		if s.Eligible {
+			t.Errorf("host %s should be ineligible for benchmark without metrics", s.Host)
+		}
+		hasReason := false
+		for _, r := range s.Reasons {
+			if strings.Contains(r, "no live metrics") {
+				hasReason = true
+			}
+		}
+		if !hasReason {
+			t.Errorf("host %s should have 'no live metrics' reason, got: %v", s.Host, s.Reasons)
+		}
+	}
+}
+
+func TestBenchmarkTag_IdleHost_Eligible(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{"benchmark"}}
+
+	metrics := map[string]*HostMetrics{
+		"cool30":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+		"cool100": {CPUPercent: 2, GPUPercent: 1, RAMPercent: 10},
+		"studio":  {CPUPercent: 3, GPUPercent: 0, RAMPercent: 15},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		if !s.Eligible {
+			t.Errorf("host %s should be eligible for benchmark when idle, reasons: %v", s.Host, s.Reasons)
+		}
+	}
+}
+
+func TestBenchmarkTag_BusyHost_Ineligible(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{"benchmark"}}
+
+	metrics := map[string]*HostMetrics{
+		"cool30":  {CPUPercent: 50, GPUPercent: 0, RAMPercent: 5},  // CPU too high
+		"cool100": {CPUPercent: 1, GPUPercent: 30, RAMPercent: 10}, // GPU too high
+		"studio":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 50},  // RAM too high
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		if s.Eligible {
+			t.Errorf("host %s should be ineligible for benchmark when busy, reasons: %v", s.Host, s.Reasons)
+		}
+	}
+}
+
+func TestBenchmarkTag_MixedHosts_OnlyIdleEligible(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{"benchmark"}}
+
+	metrics := map[string]*HostMetrics{
+		"cool30":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},    // idle
+		"cool100": {CPUPercent: 50, GPUPercent: 80, RAMPercent: 60}, // busy
+		"studio":  {CPUPercent: 2, GPUPercent: 0, RAMPercent: 10},   // idle
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cool30 := findScore(scores, "cool30")
+	cool100 := findScore(scores, "cool100")
+	studio := findScore(scores, "studio")
+
+	if !cool30.Eligible {
+		t.Error("cool30 should be eligible (idle)")
+	}
+	if cool100.Eligible {
+		t.Error("cool100 should be ineligible (busy)")
+	}
+	if !studio.Eligible {
+		t.Error("studio should be eligible (idle)")
+	}
+}
+
+func TestNonBenchmarkTag_IgnoresIdleCheck(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{"exclusive"}}
+
+	// Even without metrics, non-benchmark tagged jobs should be eligible
+	scores, err := ScoreHosts(db, constraints)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range scores {
+		if !s.Eligible {
+			t.Errorf("host %s should be eligible for non-benchmark tagged job", s.Host)
+		}
+	}
+}
+
+func TestDescribeConstraints_IncludesBenchmark(t *testing.T) {
+	desc := DescribeConstraints(Constraints{
+		GPUClass: "a100",
+		Tags:     []string{"benchmark"},
+	})
+	if !strings.Contains(desc, "benchmark") {
+		t.Errorf("DescribeConstraints should mention benchmark, got: %s", desc)
+	}
+}

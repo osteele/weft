@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queuerunner"
 )
 
@@ -141,6 +143,9 @@ func (w *SyncWorker) run() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	benchTicker := time.NewTicker(60 * time.Second)
+	defer benchTicker.Stop()
+
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -151,6 +156,53 @@ func (w *SyncWorker) run() {
 
 		case <-ticker.C:
 			w.processQueue()
+
+		case <-benchTicker.C:
+			w.checkBenchmarkReplacement()
+		}
+	}
+}
+
+// checkBenchmarkReplacement looks for needs_rental benchmark jobs and tries to
+// place them on hosts that have become idle since the original placement failed.
+func (w *SyncWorker) checkBenchmarkReplacement() {
+	jobs, err := db.ListNeedsRentalJobs(w.database)
+	if err != nil {
+		log.Printf("benchmark re-placement: list needs_rental: %v", err)
+		return
+	}
+
+	for _, j := range jobs {
+		if !j.HasTag("benchmark") || (j.CampaignID != nil && *j.CampaignID != 0) {
+			continue
+		}
+
+		constraints := placement.Constraints{
+			GPUClass: j.GPUClass,
+			Inputs:   j.Inputs,
+			Tags:     j.Tags,
+		}
+		if j.GPUMemGB != nil {
+			constraints.GPUMemGB = *j.GPUMemGB
+		}
+
+		result, err := placement.PlaceWithFallback(w.database, constraints, nil)
+		if err != nil {
+			continue
+		}
+
+		promoted, err := db.PromoteNeedsRentalToQueued(w.database, j.ID, result.Host)
+		if err != nil {
+			log.Printf("benchmark re-placement: promote job %d: %v", j.ID, err)
+			continue
+		}
+		if promoted {
+			log.Printf("benchmark re-placement: promoted job %d to %s", j.ID, result.Host)
+			// Trigger a sync for the target host
+			select {
+			case w.results <- SyncResult{Host: result.Host, Updated: 1}:
+			default:
+			}
 		}
 	}
 }

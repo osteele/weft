@@ -469,6 +469,54 @@ func TestRecordNeedsRentalJob(t *testing.T) {
 	}
 }
 
+func TestPromoteNeedsRentalToQueued(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	if err != nil {
+		t.Fatalf("record needs rental: %v", err)
+	}
+
+	// Promote to queued
+	promoted, err := PromoteNeedsRentalToQueued(database, jobID, "cool30")
+	if err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if !promoted {
+		t.Error("expected promotion to succeed")
+	}
+
+	// Verify job is now queued with host
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Errorf("Status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.Host != "cool30" {
+		t.Errorf("Host = %q, want %q", job.Host, "cool30")
+	}
+
+	// Second promotion should be a no-op (already queued)
+	promoted, err = PromoteNeedsRentalToQueued(database, jobID, "cool100")
+	if err != nil {
+		t.Fatalf("second promote: %v", err)
+	}
+	if promoted {
+		t.Error("second promotion should fail (job already queued)")
+	}
+
+	// Host should remain cool30
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after second promote: %v", err)
+	}
+	if job.Host != "cool30" {
+		t.Errorf("Host = %q, want %q (should not change)", job.Host, "cool30")
+	}
+}
+
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

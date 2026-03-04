@@ -132,6 +132,24 @@ func ListNeedsRentalJobs(db *sql.DB) ([]*Job, error) {
 	return queryJobs(db, query, StatusNeedsRental)
 }
 
+// PromoteNeedsRentalToQueued atomically promotes a needs_rental job to queued
+// with a host assignment. Returns true if the job was updated (false if it was
+// already claimed by a campaign or changed status).
+func PromoteNeedsRentalToQueued(database *sql.DB, jobID int64, host string) (bool, error) {
+	result, err := database.Exec(
+		`UPDATE jobs SET status = ?, host = ? WHERE id = ? AND status = ? AND tombstoned = 0`,
+		StatusQueued, host, jobID, StatusNeedsRental,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetCampaignJobCounts returns a map from campaign ID to job count.
 func GetCampaignJobCounts(db *sql.DB) (map[int64]int, error) {
 	rows, err := db.Query(`SELECT campaign_id, COUNT(*) FROM jobs WHERE campaign_id IS NOT NULL AND tombstoned = 0 GROUP BY campaign_id`)

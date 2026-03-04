@@ -80,6 +80,7 @@ func resolveHost(database *sql.DB, i *intent.Intent, cfg *config.Config) (string
 		Inputs:   i.Job.Inputs,
 		Command:  i.Job.Cmd,
 		Project:  workdir.ProjectName(i.Job.Dir),
+		Tags:     i.Job.Tags,
 	}
 
 	predict := placement.BuildJobPredictorFromConfig(cfg, constraints)

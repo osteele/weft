@@ -279,6 +279,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		Inputs:   runInputs,
 		Command:  command,
 		Project:  workdir.ProjectName(runDir),
+		Tags:     runTags,
 	}
 
 	// Build predictor closure if configured
