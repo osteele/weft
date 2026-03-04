@@ -55,15 +55,15 @@ func TestGroupByGPUSupremum_Empty(t *testing.T) {
 	}
 }
 
-func TestCampaignGroupGPUSpec(t *testing.T) {
+func TestInstanceGroupGPUSpec(t *testing.T) {
 	tests := []struct {
-		group CampaignGroup
+		group InstanceGroup
 		want  string
 	}{
-		{CampaignGroup{GPUClass: "H100", GPUMemGB: 80}, "H100 \u226580GB"},
-		{CampaignGroup{GPUClass: "A100"}, "A100"},
-		{CampaignGroup{GPUMemGB: 24}, "\u226524GB"},
-		{CampaignGroup{}, "GPU"},
+		{InstanceGroup{GPUClass: "H100", GPUMemGB: 80}, "H100 ≥80GB"},
+		{InstanceGroup{GPUClass: "A100"}, "A100"},
+		{InstanceGroup{GPUMemGB: 24}, "≥24GB"},
+		{InstanceGroup{}, "GPU"},
 	}
 	for _, tt := range tests {
 		got := tt.group.GPUSpec()

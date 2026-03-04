@@ -9,9 +9,9 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-// CampaignGroup represents a group of jobs that share compatible GPU requirements
+// InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
-type CampaignGroup struct {
+type InstanceGroup struct {
 	GPUClass string // Normalized GPU class (uppercase), e.g. "H100"
 	GPUMemGB int    // Supremum of GPU memory across all jobs in the group
 	Jobs     []*db.Job
@@ -23,13 +23,13 @@ type CampaignGroup struct {
 // are grouped by memory tier alone.
 //
 // Returns groups sorted by descending GPU memory.
-func GroupByGPUSupremum(jobs []*db.Job) []CampaignGroup {
+func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 	type groupKey struct {
 		class  string
 		hasGPU bool // distinguishes "" class with mem vs "" class without mem
 	}
 
-	groups := make(map[groupKey]*CampaignGroup)
+	groups := make(map[groupKey]*InstanceGroup)
 
 	for _, job := range jobs {
 		if job.Status != db.StatusNeedsRental {
@@ -45,7 +45,7 @@ func GroupByGPUSupremum(jobs []*db.Job) []CampaignGroup {
 		key := groupKey{class: class, hasGPU: class != "" || mem > 0}
 		g, ok := groups[key]
 		if !ok {
-			g = &CampaignGroup{GPUClass: class}
+			g = &InstanceGroup{GPUClass: class}
 			groups[key] = g
 		}
 		g.Jobs = append(g.Jobs, job)
@@ -54,7 +54,7 @@ func GroupByGPUSupremum(jobs []*db.Job) []CampaignGroup {
 		}
 	}
 
-	result := make([]CampaignGroup, 0, len(groups))
+	result := make([]InstanceGroup, 0, len(groups))
 	for _, g := range groups {
 		result = append(result, *g)
 	}
@@ -70,14 +70,14 @@ func GroupByGPUSupremum(jobs []*db.Job) []CampaignGroup {
 }
 
 // GPUSpec returns a human-readable GPU spec string for the group.
-func (g CampaignGroup) GPUSpec() string {
+func (g InstanceGroup) GPUSpec() string {
 	switch {
 	case g.GPUClass != "" && g.GPUMemGB > 0:
-		return g.GPUClass + " \u2265" + strconv.Itoa(g.GPUMemGB) + "GB"
+		return g.GPUClass + " ≥" + strconv.Itoa(g.GPUMemGB) + "GB"
 	case g.GPUClass != "":
 		return g.GPUClass
 	case g.GPUMemGB > 0:
-		return "\u2265" + strconv.Itoa(g.GPUMemGB) + "GB"
+		return "≥" + strconv.Itoa(g.GPUMemGB) + "GB"
 	default:
 		return "GPU"
 	}

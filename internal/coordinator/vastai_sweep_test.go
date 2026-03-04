@@ -1,9 +1,14 @@
 package coordinator
 
 import (
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/osteele/weft/internal/vastai"
+	_ "modernc.org/sqlite"
 )
 
 func TestDetectFailureReason_OOM(t *testing.T) {
@@ -76,4 +81,35 @@ func TestDetectFailureReason_OOM(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCheckCloudInstanceLimitsHandlesUnavailableClient(t *testing.T) {
+	database, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+
+	// Minimal schema: ListCloudInstances runs before Available(), so the table must exist.
+	if _, err := database.Exec(`CREATE TABLE cloud_instances (
+		id INTEGER PRIMARY KEY,
+		campaign_id INTEGER, status TEXT, provider TEXT, gpu_spec TEXT,
+		gpu_class TEXT, gpu_mem_gb INTEGER, vastai_instance_id TEXT,
+		max_spend_cents INTEGER, max_time_seconds INTEGER, actual_spend_cents INTEGER,
+		created_at INTEGER, launched_at INTEGER, ended_at INTEGER
+	)`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	c := &Coordinator{
+		db: database,
+		VastaiClient: &vastai.MockClient{
+			AvailableFunc: func() error {
+				return fmt.Errorf("vastai CLI not installed")
+			},
+		},
+	}
+
+	// Should return early without panic when client.Available() fails
+	c.checkCloudInstanceLimits(nil)
 }

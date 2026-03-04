@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/vastai"
@@ -136,9 +137,8 @@ func (m *Model) openCloudMenu(job *db.Job) tea.Cmd {
 
 // fetchCloudOffers fetches Vast.ai offers and builds the offerings list.
 func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
+	client := m.vastaiClient
 	return func() tea.Msg {
-		client := vastai.NewClient()
-
 		// Check if vastai CLI is available
 		if err := client.Available(); err != nil {
 			return cloudOffersLoadedMsg{
@@ -194,10 +194,11 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 	}
 }
 
-// launchCloudJob creates a Vast.ai instance and launches the job in fire-and-forget mode.
-// The instance will upload results to R2 and self-destruct when done.
+// launchCloudJob creates a campaign for a single job, launches it on Vast.ai,
+// and tracks it through the campaign system.
 func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) tea.Cmd {
 	return func() tea.Msg {
+		client := m.vastaiClient
 		if offering.Offer == nil {
 			return cloudJobLaunchedMsg{
 				jobID: job.ID,
@@ -214,23 +215,18 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			}
 		}
 
-		client := vastai.NewClient()
 		offer := *offering.Offer
 
 		image := m.appConfig.Vastai.DefaultImage
 		if image == "" {
-			image = "nvidia/cuda:12.2-devel-ubuntu22.04"
+			image = vastai.DefaultImage
 		}
 
-		opts := vastai.CreateOpts{
+		createOpts := vastai.CreateOpts{
 			Image:      image,
 			DiskGB:     50,
 			SSHEnabled: true,
 			OnStartCmd: "curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash",
-		}
-
-		progress := func(phase string) {
-			_ = phase
 		}
 
 		vastR2 := vastai.R2Config{
@@ -240,7 +236,24 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			Bucket:          r2Cfg.Bucket,
 		}
 
-		result, err := vastai.LaunchJobOnInstance(client, offer, opts, job.WorkingDir, job.Command, job.Inputs, job.ID, vastR2, progress)
+		// Create a single-job campaign group
+		gpuClass := job.GPUClass
+		gpuMemGB := 0
+		if job.GPUMemGB != nil {
+			gpuMemGB = *job.GPUMemGB
+		}
+		group := campaign.InstanceGroup{
+			GPUClass: gpuClass,
+			GPUMemGB: gpuMemGB,
+			Jobs:     []*db.Job{job},
+		}
+
+		campaignID, err := campaign.LaunchInstance(
+			client, m.database, nil, group, offer, campaign.LaunchOpts{}, vastR2, createOpts,
+			func(phase string) {
+				log.Printf("cloud: job %d instance: %s", job.ID, phase)
+			},
+		)
 		if err != nil {
 			return cloudJobLaunchedMsg{
 				jobID: job.ID,
@@ -248,14 +261,9 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			}
 		}
 
-		// Persist instance ID to DB immediately
-		if dbErr := db.SetJobVastaiInstance(m.database, job.ID, result.InstanceID); dbErr != nil {
-			log.Printf("cloud: failed to persist Vast.ai instance ID for job %d: %v", job.ID, dbErr)
-		}
-
 		return cloudJobLaunchedMsg{
 			jobID:      job.ID,
-			instanceID: result.InstanceID,
+			instanceID: int(campaignID),
 		}
 	}
 }

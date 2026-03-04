@@ -373,7 +373,7 @@ func (m Model) renderJobList(height int) string {
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
 		hostStr := job.Host
-		if job.CampaignID != nil && hostStr == "" {
+		if job.CloudInstanceID != nil && hostStr == "" {
 			hostStr = "vastai:" + gpuColumnText(job)
 		} else if job.GPUDevice() != "" {
 			hostStr = job.HostWithGPU()

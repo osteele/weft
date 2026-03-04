@@ -173,7 +173,7 @@ func (w *SyncWorker) checkBenchmarkReplacement() {
 	}
 
 	for _, j := range jobs {
-		if !j.HasTag("benchmark") || (j.CampaignID != nil && *j.CampaignID != 0) {
+		if !j.HasTag("benchmark") || (j.CloudInstanceID != nil && *j.CloudInstanceID != 0) {
 			continue
 		}
 

@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+// VastaiClient is the interface for interacting with the Vast.ai API.
+type VastaiClient interface {
+	Available() error
+	SearchOffers(constraints OfferConstraints) ([]Offer, error)
+	CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
+	ShowInstance(instanceID int) (*Instance, error)
+	WaitReady(instanceID int, timeout time.Duration) (*Instance, error)
+	DestroyInstance(instanceID int) error
+}
+
+var _ VastaiClient = (*Client)(nil)
+
 // Client wraps the vastai CLI tool.
 type Client struct {
 	// CLIPath is the path to the vastai binary. Defaults to "vastai".

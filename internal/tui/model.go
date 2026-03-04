@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/vastai"
 )
 
 // Model is the main TUI state
@@ -140,6 +141,7 @@ type Model struct {
 	cloudMenuCursor    int
 	cloudMenuLoading   bool
 	cloudMenuConfirm   bool // true when showing cost confirmation
+	vastaiClient       vastai.VastaiClient
 
 	// Configurable intervals
 	syncActiveInterval  time.Duration
@@ -337,6 +339,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostSummaryTimes:        make(map[string]time.Time),
 		hostSummaryPending:      make(map[string]bool),
 		initialSyncNeeded:       true, // Trigger priority sync after jobs load
+		vastaiClient:            vastai.NewClient(),
 	}
 
 	if opts.Monitor != nil {

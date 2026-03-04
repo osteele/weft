@@ -14,7 +14,6 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // sweepVastaiResults polls R2 for completed Vast.ai job results and processes them.
@@ -115,8 +114,6 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	if err == nil && job != nil && job.StartTime > 0 {
 		runtime := time.Duration(endTimeUnix-job.StartTime) * time.Second
 		if job.VastaiInstanceID != nil {
-			// Estimate cost from runtime (we don't have cost_per_hour stored,
-			// but the instance info might be available via the API)
 			_ = runtime // Cost calculation requires offer data; handled at launch
 		}
 	}
@@ -138,14 +135,11 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 }
 
 // detectFailureReason examines debug artifacts to determine why a job failed.
-// It checks for OOM indicators in dmesg, nvidia-smi output, and exit codes.
 func detectFailureReason(tmpDir string, exitCode int) string {
-	// Exit code 137 = SIGKILL (often OOM)
 	if exitCode == 137 {
 		return "oom"
 	}
 
-	// Check dmesg for OOM killer
 	dmesgPath := filepath.Join(tmpDir, "debug", "dmesg.log")
 	if dmesgBytes, err := os.ReadFile(dmesgPath); err == nil {
 		dmesg := string(dmesgBytes)
@@ -154,7 +148,6 @@ func detectFailureReason(tmpDir string, exitCode int) string {
 		}
 	}
 
-	// Check nvidia-smi for GPU memory issues
 	nvidiaSmiPath := filepath.Join(tmpDir, "debug", "nvidia-smi.log")
 	if nvBytes, err := os.ReadFile(nvidiaSmiPath); err == nil {
 		nvOutput := string(nvBytes)
@@ -192,6 +185,7 @@ func writeVastaiLogsToCache(jobID int64, tmpDir string) {
 }
 
 // sweepCampaignResults polls R2 for completed campaign markers and processes results.
+// "campaign" in R2 paths refers to the wrapper script running on a single cloud instance.
 func (c *Coordinator) sweepCampaignResults() {
 	cfg, err := config.Load()
 	if err != nil || cfg.Vastai.R2.Bucket == "" {
@@ -207,38 +201,38 @@ func (c *Coordinator) sweepCampaignResults() {
 
 	r2Client, err := r2.New(r2Cfg)
 	if err != nil {
-		c.logger.Printf("campaign sweep: r2 client: %v", err)
+		c.logger.Printf("instance sweep: r2 client: %v", err)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Check for completed campaigns
+	// Check for completed cloud instances (the R2 path uses "campaigns/" for legacy reasons)
 	completedIDs, err := r2Client.ListCompleted(ctx, "campaigns/")
 	if err != nil {
-		c.logger.Printf("campaign sweep: list completed: %v", err)
+		c.logger.Printf("instance sweep: list completed: %v", err)
 		return
 	}
 
 	for _, idStr := range completedIDs {
-		campaignID, err := strconv.ParseInt(idStr, 10, 64)
+		instanceID, err := strconv.ParseInt(idStr, 10, 64)
 		if err != nil {
 			continue
 		}
 
-		campaign, err := db.GetCampaign(c.db, campaignID)
-		if err != nil || campaign == nil {
+		ci, err := db.GetCloudInstance(c.db, instanceID)
+		if err != nil || ci == nil {
 			continue
 		}
-		if campaign.Status != db.CampaignStatusRunning {
+		if ci.Status != db.CloudInstanceStatusRunning {
 			continue
 		}
 
-		// Process each job in the campaign
-		jobs, err := db.GetCampaignJobs(c.db, campaignID)
+		// Process each job in the cloud instance
+		jobs, err := db.GetCloudInstanceJobs(c.db, instanceID)
 		if err != nil {
-			c.logger.Printf("campaign sweep: get jobs for campaign %d: %v", campaignID, err)
+			c.logger.Printf("instance sweep: get jobs for instance %d: %v", instanceID, err)
 			continue
 		}
 
@@ -256,57 +250,57 @@ func (c *Coordinator) sweepCampaignResults() {
 			}
 		}
 
-		// Update campaign status
-		status := db.CampaignStatusCompleted
+		// Update cloud instance status
+		status := db.CloudInstanceStatusCompleted
 		if !allSucceeded {
-			status = db.CampaignStatusFailed
+			status = db.CloudInstanceStatusFailed
 		}
-		if err := db.UpdateCampaignStatus(c.db, campaignID, status); err != nil {
-			c.logger.Printf("campaign sweep: update campaign %d status: %v", campaignID, err)
+		if err := db.UpdateCloudInstanceStatus(c.db, instanceID, status); err != nil {
+			c.logger.Printf("instance sweep: update instance %d status: %v", instanceID, err)
 		}
 
-		// Clean up R2 campaign marker
-		prefix := fmt.Sprintf("campaigns/%d/", campaignID)
+		// Clean up R2 marker
+		prefix := fmt.Sprintf("campaigns/%d/", instanceID)
 		if err := r2Client.DeletePrefix(ctx, prefix); err != nil {
-			c.logger.Printf("campaign sweep: cleanup R2 for campaign %d: %v", campaignID, err)
+			c.logger.Printf("instance sweep: cleanup R2 for instance %d: %v", instanceID, err)
 		}
 
-		c.logger.Printf("campaign sweep: processed campaign %d (status=%s, jobs=%d)", campaignID, status, len(jobs))
+		c.logger.Printf("instance sweep: processed instance %d (status=%s, jobs=%d)", instanceID, status, len(jobs))
 	}
 
-	// Enforce budget/time limits on running campaigns
-	c.checkCampaignLimits(cfg)
+	// Enforce budget/time limits on running cloud instances
+	c.checkCloudInstanceLimits(cfg)
 }
 
-// checkCampaignLimits destroys instances for campaigns that exceed budget or time limits.
-func (c *Coordinator) checkCampaignLimits(cfg *config.Config) {
-	campaigns, err := db.ListCampaigns(c.db)
+// checkCloudInstanceLimits destroys instances that exceed budget or time limits.
+func (c *Coordinator) checkCloudInstanceLimits(cfg *config.Config) {
+	instances, err := db.ListCloudInstances(c.db)
 	if err != nil {
 		return
 	}
 
-	client := vastai.NewClient()
+	client := c.vastaiClient()
 	if err := client.Available(); err != nil {
 		return
 	}
 
-	for _, campaign := range campaigns {
-		if campaign.Status != db.CampaignStatusRunning {
+	for _, ci := range instances {
+		if ci.Status != db.CloudInstanceStatusRunning {
 			continue
 		}
 
 		// Check time limit
-		if campaign.MaxTimeSeconds > 0 && campaign.LaunchedAt != nil {
-			elapsed := time.Since(time.Unix(*campaign.LaunchedAt, 0))
-			if elapsed > time.Duration(campaign.MaxTimeSeconds)*time.Second {
-				c.logger.Printf("campaign sweep: campaign %d exceeded time limit (%v), destroying", campaign.ID, elapsed)
-				if campaign.InstanceID != "" {
-					instanceID, _ := strconv.Atoi(campaign.InstanceID)
+		if ci.MaxTimeSeconds > 0 && ci.LaunchedAt != nil {
+			elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
+			if elapsed > time.Duration(ci.MaxTimeSeconds)*time.Second {
+				c.logger.Printf("instance sweep: instance %d exceeded time limit (%v), destroying", ci.ID, elapsed)
+				if ci.VastaiInstanceID != "" {
+					instanceID, _ := strconv.Atoi(ci.VastaiInstanceID)
 					if instanceID > 0 {
 						_ = client.DestroyInstance(instanceID)
 					}
 				}
-				_ = db.UpdateCampaignStatus(c.db, campaign.ID, db.CampaignStatusFailed)
+				_ = db.UpdateCloudInstanceStatus(c.db, ci.ID, db.CloudInstanceStatusFailed)
 			}
 		}
 	}
@@ -328,7 +322,7 @@ func (c *Coordinator) checkOrphanedVastaiInstances(cfg *config.Config) {
 		}
 	}
 
-	client := vastai.NewClient()
+	client := c.vastaiClient()
 	if err := client.Available(); err != nil {
 		return // vastai CLI not available on coordinator
 	}
@@ -347,7 +341,6 @@ func (c *Coordinator) checkOrphanedVastaiInstances(cfg *config.Config) {
 		instanceID := *job.VastaiInstanceID
 		inst, err := client.ShowInstance(instanceID)
 		if err != nil {
-			// Instance not found — mark job as failed
 			c.logger.Printf("vastai sweep: instance %d not found for job %d, marking failed", instanceID, job.ID)
 			if _, err := c.db.Exec(
 				`UPDATE jobs SET status = ?, failure_reason = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
@@ -359,7 +352,6 @@ func (c *Coordinator) checkOrphanedVastaiInstances(cfg *config.Config) {
 		}
 
 		if inst.Status == "running" {
-			// Still running past max runtime — destroy it
 			c.logger.Printf("vastai sweep: destroying orphaned instance %d (job %d, age %v)", instanceID, job.ID, age)
 			if err := client.DestroyInstance(instanceID); err != nil {
 				c.logger.Printf("vastai sweep: failed to destroy instance %d: %v", instanceID, err)
@@ -372,7 +364,6 @@ func (c *Coordinator) checkOrphanedVastaiInstances(cfg *config.Config) {
 			}
 			oplog.LogJob(oplog.OpJobKill, job.ID, "", oplog.WithDetailf("vastai orphan timeout instance=%d", instanceID))
 		} else if inst.Status == "exited" || inst.Status == "error" {
-			// Instance already exited but no results in R2 — mark failed
 			if _, err := c.db.Exec(
 				`UPDATE jobs SET status = ?, failure_reason = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
 				db.StatusFailed, "instance_exited", time.Now().Unix(), db.StatusFailed, job.ID,

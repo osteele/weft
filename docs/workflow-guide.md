@@ -298,7 +298,7 @@ history in `weft list` or the TUI.
 ## Bursting to cloud GPUs
 
 When local GPUs are busy or no local host has the right hardware, weft can run
-jobs on a Vast.ai cloud instance.
+jobs on Vast.ai cloud instances.
 
 ### Automatic acceptance for unplaceable jobs
 
@@ -309,11 +309,12 @@ rejecting it:
 laptop$ weft run --gpu-class hopper+ 'python train.py'
 No local host matches constraints: gpu-class=hopper+
 Job #4820 accepted (needs rental host)
-Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.
+Use 'weft campaign launch' or press 'c' in the TUI to launch on a cloud GPU.
 ```
 
 The job appears in the TUI with status `$ needs rental`. From there, press `c`
-to open the cloud menu and pick a Vast.ai instance, or `k` to cancel.
+to open the cloud menu for a single job, or use `weft campaign launch` to batch-
+launch all `needs_rental` jobs at once.
 
 ### Prerequisites
 
@@ -322,7 +323,40 @@ pip install vastai
 vastai set api-key YOUR_API_KEY
 ```
 
-### Using the TUI cloud menu
+### Using `weft campaign launch`
+
+The campaign launcher groups `needs_rental` jobs by GPU requirements, searches
+for Vast.ai offers in parallel, and launches instances concurrently:
+
+```
+laptop$ weft campaign launch
+```
+
+The interactive TUI shows jobs grouped by GPU class with checkboxes. Deselect
+jobs you don't want to launch, review cost estimates, and press Enter. Weft
+creates a campaign (batch record), provisions one instance per GPU group **in
+parallel**, then segues into watch mode.
+
+```
+laptop$ weft campaign launch --dry-run    # Preview without launching
+laptop$ weft campaign launch --no-watch   # Launch and exit immediately
+```
+
+After launch, monitor and manage:
+
+```
+laptop$ weft campaign watch <id>          # Live status updates
+laptop$ weft campaign list                # List campaigns
+laptop$ weft campaign show <id>           # Campaign details
+laptop$ weft campaign terminate <id>      # Destroy all instances
+laptop$ weft instance ssh <id>            # SSH into an instance
+```
+
+See [docs/campaigns.md](campaigns.md) for the full campaign guide.
+
+### Using the TUI cloud menu (single job)
+
+For launching a single job from the TUI:
 
 1. Open the TUI: `weft tui`
 2. Navigate to a **queued** or **needs rental** job

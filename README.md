@@ -45,7 +45,9 @@ Remote Hosts (cool30, cool100)
 - **Graceful degradation**: When the coordinator is unreachable, the CLI falls
   back to local placement scoring and direct SSH dispatch
 - **Cloud bursting**: Press `c` in the TUI on a queued job to compare local
-  wait time against Vast.ai cloud GPU cost/time estimates
+  wait time against Vast.ai cloud GPU cost/time estimates, or use
+  `weft campaign launch` to batch-launch jobs on cloud GPUs with parallel
+  instance provisioning
 - **Cluster dashboard**: Web UI at `localhost:8127/cluster` shows host cards,
   live GPU utilization, coordinator status, and recent placement decisions
 
@@ -1411,6 +1413,8 @@ Notifications include:
 ## Documentation
 
 - [Workflow Guide](docs/workflow-guide.md) - Common workflows with examples (pipelines, sweeps, cloud GPU, data locality)
+- [Campaigns](docs/campaigns.md) - Cloud GPU campaign system: launching, monitoring, and managing batch cloud deployments
+- [Campaign Roadmap](docs/ROADMAP.md) - Remaining gaps for llm-performance-models integration
 - [Architecture](docs/architecture.md) - Detailed technical architecture and design
 - [Coordinator Architecture](docs/coordinator-architecture.md) - Coordinator daemon design, placement scoring, and migration phases
 - [Comparison to SLURM](docs/comparison-to-slurm.md) - How weft compares to HPC workload managers

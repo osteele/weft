@@ -22,7 +22,7 @@ type ProgressFunc func(phase string)
 
 // RunJobOnInstance handles the full lifecycle of running a job on Vast.ai:
 // create instance, wait for ready, sync files, run command, collect output, destroy.
-func RunJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir string, command string, inputs []string, progress ProgressFunc) (*JobResult, error) {
+func RunJobOnInstance(client VastaiClient, offer Offer, opts CreateOpts, workDir string, command string, inputs []string, progress ProgressFunc) (*JobResult, error) {
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -126,7 +126,7 @@ type LaunchResult struct {
 //
 // The caller must persist the instance ID to the job record BEFORE calling this,
 // so that the instance can be recovered if the TUI dies.
-func LaunchJobOnInstance(client *Client, offer Offer, opts CreateOpts, workDir string, command string, inputs []string, jobID int64, r2Cfg R2Config, progress ProgressFunc) (*LaunchResult, error) {
+func LaunchJobOnInstance(client VastaiClient, offer Offer, opts CreateOpts, workDir string, command string, inputs []string, jobID int64, r2Cfg R2Config, progress ProgressFunc) (*LaunchResult, error) {
 	if progress == nil {
 		progress = func(string) {}
 	}

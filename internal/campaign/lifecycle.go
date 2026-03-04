@@ -9,17 +9,20 @@ import (
 	"github.com/osteele/weft/internal/vastai"
 )
 
-// LaunchOpts configures a campaign launch.
+// LaunchOpts configures an instance launch.
 type LaunchOpts struct {
 	MaxSpendCents  int
 	MaxTimeSeconds int
 }
 
-// LaunchCampaign creates a campaign record, provisions a Vast.ai instance,
-// deploys the multi-job wrapper, and starts it. Returns the campaign ID.
-func LaunchCampaign(
+// LaunchInstance creates a cloud instance record, provisions a Vast.ai instance,
+// deploys the multi-job wrapper, and starts it. Returns the cloud instance ID.
+// If campaignID is non-nil, the cloud instance is associated with that campaign batch.
+func LaunchInstance(
+	client vastai.VastaiClient,
 	database *sql.DB,
-	group CampaignGroup,
+	campaignID *int64,
+	group InstanceGroup,
 	offer vastai.Offer,
 	opts LaunchOpts,
 	r2Cfg vastai.R2Config,
@@ -30,9 +33,10 @@ func LaunchCampaign(
 		progress = func(string) {}
 	}
 
-	// Create campaign record
-	campaign := &db.Campaign{
-		Status:         db.CampaignStatusPlanned,
+	// Create cloud instance record
+	instance := &db.CloudInstance{
+		CampaignID:     campaignID,
+		Status:         db.CloudInstanceStatusPlanned,
 		Provider:       "vastai",
 		GPUSpec:        group.GPUSpec(),
 		GPUClass:       group.GPUClass,
@@ -40,21 +44,21 @@ func LaunchCampaign(
 		MaxSpendCents:  opts.MaxSpendCents,
 		MaxTimeSeconds: opts.MaxTimeSeconds,
 	}
-	campaignID, err := db.CreateCampaign(database, campaign)
+	instanceID, err := db.CreateCloudInstance(database, instance)
 	if err != nil {
-		return 0, fmt.Errorf("create campaign: %w", err)
+		return 0, fmt.Errorf("create cloud instance: %w", err)
 	}
 
-	// Associate jobs with campaign
+	// Associate jobs with cloud instance
 	for _, job := range group.Jobs {
-		if err := db.SetJobCampaignID(database, job.ID, campaignID); err != nil {
-			return campaignID, fmt.Errorf("set campaign_id for job %d: %w", job.ID, err)
+		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
+			return instanceID, fmt.Errorf("set cloud_instance_id for job %d: %w", job.ID, err)
 		}
 	}
 
 	// Update status to launching
-	if err := db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusLaunching); err != nil {
-		return campaignID, fmt.Errorf("update campaign status: %w", err)
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusLaunching); err != nil {
+		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 
 	// Build campaign wrapper
@@ -65,32 +69,31 @@ func LaunchCampaign(
 			Command: job.EffectiveCommand(),
 		})
 	}
-	wrapper := vastai.GenerateCampaignWrapper(campaignID, campaignJobs, r2Cfg.Bucket, false)
+	wrapper := vastai.GenerateCampaignWrapper(instanceID, campaignJobs, r2Cfg.Bucket, false)
 
 	// Create Vast.ai instance
-	client := vastai.NewClient()
-
 	progress("creating instance")
 	inst, err := client.CreateInstance(offer.ID, createOpts)
 	if err != nil {
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return campaignID, fmt.Errorf("create instance: %w", err)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("create instance: %w", err)
 	}
 
-	// Record instance ID
-	if err := db.SetCampaignInstanceID(database, campaignID, fmt.Sprintf("%d", inst.ID)); err != nil {
+	// Record Vast.ai instance ID
+	if err := db.SetCloudInstanceVastaiID(database, instanceID, fmt.Sprintf("%d", inst.ID)); err != nil {
 		_ = client.DestroyInstance(inst.ID)
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return campaignID, fmt.Errorf("record instance ID: %w", err)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("record vastai instance ID: %w", err)
 	}
 
 	// Wait for instance ready
 	progress("waiting for instance")
-	inst, err = client.WaitReady(inst.ID, 5*time.Minute)
+	vastaiInstanceID := inst.ID
+	inst, err = client.WaitReady(vastaiInstanceID, 5*time.Minute)
 	if err != nil {
-		_ = client.DestroyInstance(inst.ID)
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return campaignID, fmt.Errorf("wait ready: %w", err)
+		_ = client.DestroyInstance(vastaiInstanceID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("wait ready: %w", err)
 	}
 
 	sshTarget := fmt.Sprintf("root@%s", inst.SSHHost)
@@ -103,32 +106,32 @@ func LaunchCampaign(
 	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
 	if _, err := vastai.SSHRun(sshTarget, sshOpts, setupCmd); err != nil {
 		_ = client.DestroyInstance(inst.ID)
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return campaignID, fmt.Errorf("write rclone config: %w", err)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("write rclone config: %w", err)
 	}
 
-	// Deploy campaign wrapper
-	progress("deploying campaign wrapper")
+	// Deploy wrapper script
+	progress("deploying wrapper")
 	deployCmd := fmt.Sprintf("cat > /workspace/.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x /workspace/.weft-campaign.sh", wrapper)
 	if _, err := vastai.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
 		_ = client.DestroyInstance(inst.ID)
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return campaignID, fmt.Errorf("deploy wrapper: %w", err)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("deploy wrapper: %w", err)
 	}
 
-	// Start campaign via nohup
-	progress("starting campaign")
+	// Start via nohup
+	progress("starting jobs")
 	startCmd := "nohup bash /workspace/.weft-campaign.sh </dev/null >/dev/null 2>&1 &"
 	if _, err := vastai.SSHRun(sshTarget, sshOpts, startCmd); err != nil {
 		_ = client.DestroyInstance(inst.ID)
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return campaignID, fmt.Errorf("start campaign: %w", err)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("start wrapper: %w", err)
 	}
 
 	// Update status to running
-	if err := db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning); err != nil {
-		return campaignID, fmt.Errorf("update campaign status: %w", err)
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusRunning); err != nil {
+		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 
-	return campaignID, nil
+	return instanceID, nil
 }

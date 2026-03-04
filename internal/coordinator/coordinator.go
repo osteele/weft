@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/intent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/vastai"
 )
 
 // Config holds coordinator daemon configuration.
@@ -62,6 +63,17 @@ type Coordinator struct {
 	syncer       *services.HostSyncer
 	remediator   *services.Remediator
 	retryDrainer *services.RetryDrainer
+
+	// VastaiClient is the Vast.ai API client. If nil, vastaiClient() creates one.
+	VastaiClient vastai.VastaiClient
+}
+
+// vastaiClient returns the configured VastaiClient or creates a default one.
+func (c *Coordinator) vastaiClient() vastai.VastaiClient {
+	if c.VastaiClient != nil {
+		return c.VastaiClient
+	}
+	return vastai.NewClient()
 }
 
 // New creates a new Coordinator.
