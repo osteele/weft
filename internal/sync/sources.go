@@ -5,7 +5,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/osteele/weft/internal/config"
 )
 
 // SyncFunc is the function signature for syncing sources to a remote host.
@@ -45,6 +48,8 @@ func DefaultExcludes() []string {
 		".coverage", "htmlcov", ".ipynb_checkpoints",
 		// Generic build outputs
 		"out", "target", "bin", "*.so", "cache", ".cache",
+		// Job output directories (created by running jobs, not source files)
+		"output", "outputs",
 		// Editor and tool configs
 		".vscode", ".claude", ".env",
 		// AI/dev guidance files
@@ -52,6 +57,14 @@ func DefaultExcludes() []string {
 		// Weft project config
 		".weft.yaml",
 	}
+}
+
+// rsyncSrcDst returns the source and destination arguments for rsync,
+// ensuring trailing slashes so rsync syncs contents, not the directory itself.
+func rsyncSrcDst(host, localDir, remoteDir string) (src, dst string) {
+	src = strings.TrimRight(localDir, "/") + "/"
+	dst = host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	return
 }
 
 // BuildRsyncArgs constructs the rsync argument list for syncing sources to a remote host.
@@ -62,9 +75,7 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 	for _, pattern := range excludes {
 		args = append(args, "--exclude", pattern)
 	}
-	// Ensure trailing slash so rsync syncs contents, not the directory itself
-	src := strings.TrimRight(localDir, "/") + "/"
-	dst := host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	src, dst := rsyncSrcDst(host, localDir, remoteDir)
 	args = append(args, src, dst)
 	return args
 }
@@ -72,10 +83,15 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 // SyncSources rsyncs localDir to host:remoteDir with standard excludes.
 // localDir is an absolute local path. remoteDir may contain ~ (rsync expands it).
 func SyncSources(host, localDir, remoteDir string) error {
-	if err := syncFunc(host, localDir, remoteDir, DefaultExcludes()); err != nil {
-		return err
+	excludes := DefaultExcludes()
+	// Also exclude project-specific output dirs from .weft.yaml
+	for _, dir := range config.ProjectOutputDirs(localDir) {
+		dir = strings.TrimSuffix(dir, "/")
+		if !slices.Contains(excludes, dir) {
+			excludes = append(excludes, dir)
+		}
 	}
-	return nil
+	return syncFunc(host, localDir, remoteDir, excludes)
 }
 
 // BuildExtraPathRsyncArgs constructs rsync arguments for syncing an extra path
@@ -83,9 +99,7 @@ func SyncSources(host, localDir, remoteDir string) error {
 // remote directory may contain content from other sources.
 func BuildExtraPathRsyncArgs(host, localDir, remoteDir string) []string {
 	args := []string{"-az"}
-	// Ensure trailing slash so rsync syncs contents, not the directory itself
-	src := strings.TrimRight(localDir, "/") + "/"
-	dst := host + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	src, dst := rsyncSrcDst(host, localDir, remoteDir)
 	args = append(args, src, dst)
 	return args
 }
