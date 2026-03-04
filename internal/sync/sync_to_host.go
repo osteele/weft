@@ -10,24 +10,24 @@ import (
 // SyncSourcesToHost syncs source files and extra paths to a remote host.
 // localDir is the absolute local path; remoteDir is the path on the remote host.
 // Skips syncing when the target host is the local machine (same hostname)
-// to avoid rsyncing a directory to itself.
-// Errors are silently ignored since sync failure is non-fatal.
-func SyncSourcesToHost(host, localDir, remoteDir string, inputs []string) {
+// to avoid rsyncing a directory to itself, and returns nil.
+func SyncSourcesToHost(host, localDir, remoteDir string, inputs []string) error {
 	if localDir == "" {
-		return
+		return nil
 	}
 	if IsLocalHost(host) {
-		return
+		return nil
 	}
 	if err := SyncSources(host, localDir, remoteDir); err != nil {
-		_ = err // sync failure is non-fatal
+		return err
 	}
 	extraPaths := CollectExtraPaths(inputs, localDir)
 	if len(extraPaths) > 0 {
 		if err := SyncExtraPaths(host, extraPaths); err != nil {
-			_ = err // sync failure is non-fatal
+			return err
 		}
 	}
+	return nil
 }
 
 var (

@@ -117,5 +117,7 @@ func syncSources(i *intent.Intent, host string, logger *log.Logger) {
 		return
 	}
 
-	srcsync.SyncSourcesToHost(host, localDir, dir, i.Job.Inputs)
+	if err := srcsync.SyncSourcesToHost(host, localDir, dir, i.Job.Inputs); err != nil {
+		logger.Printf("sync sources to %s failed for %s: %v", host, dir, err)
+	}
 }

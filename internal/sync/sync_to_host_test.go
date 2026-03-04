@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
@@ -41,14 +42,37 @@ func TestSyncSourcesToHostSkipsLocalHost(t *testing.T) {
 	defer cleanup()
 
 	// Should skip sync when host is localhost
-	SyncSourcesToHost(hostname, "/tmp/test", "~/test", nil)
+	if err := SyncSourcesToHost(hostname, "/tmp/test", "~/test", nil); err != nil {
+		t.Errorf("SyncSourcesToHost for localhost returned unexpected error: %v", err)
+	}
 	if synced {
 		t.Error("SyncSourcesToHost should skip sync when target is local host")
 	}
 
 	// Should sync when host is remote
-	SyncSourcesToHost("cool30", "/tmp/test", "~/test", nil)
+	if err := SyncSourcesToHost("cool30", "/tmp/test", "~/test", nil); err != nil {
+		t.Errorf("SyncSourcesToHost for remote host returned unexpected error: %v", err)
+	}
 	if !synced {
 		t.Error("SyncSourcesToHost should sync when target is remote host")
+	}
+}
+
+func TestSyncSourcesToHostReturnsError(t *testing.T) {
+	cleanup := SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		return fmt.Errorf("connection timeout")
+	})
+	defer cleanup()
+
+	err := SyncSourcesToHost("cool30", "/tmp/test", "~/test", nil)
+	if err == nil {
+		t.Error("SyncSourcesToHost should return error when sync fails")
+	}
+}
+
+func TestSyncSourcesToHostEmptyLocalDir(t *testing.T) {
+	err := SyncSourcesToHost("cool30", "", "~/test", nil)
+	if err != nil {
+		t.Errorf("SyncSourcesToHost with empty localDir should return nil, got: %v", err)
 	}
 }

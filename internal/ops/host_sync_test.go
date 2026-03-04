@@ -1,10 +1,12 @@
 package ops
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	srcsync "github.com/osteele/weft/internal/sync"
 )
 
 func TestEnsureQueuedJobsOnRemote(t *testing.T) {
@@ -15,6 +17,11 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued job: %v", err)
 	}
+
+	// Mock sync so rsync doesn't actually run
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		return nil
+	}))
 
 	// Mock SSH so AppendJobToQueue and ResolveBackend succeed
 	mockSSHFunc(t, func(host, command string) (string, string, int) {
@@ -30,6 +37,43 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 	}
 	if !contacted {
 		t.Error("expected contacted=true")
+	}
+}
+
+func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "sync-fail job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	// Mock sync to fail
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		return fmt.Errorf("rsync timeout")
+	}))
+
+	// Mock SSH — should never be called since sync fails first
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		t.Error("SSH should not be called when sync fails")
+		return "", "", 0
+	})
+
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	}
+	if ensured != 0 {
+		t.Errorf("expected 0 jobs ensured (sync failed), got %d", ensured)
+	}
+
+	// Job should still be unsynced in the database
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.LastSyncedStatus != "" {
+		t.Errorf("expected LastSyncedStatus empty (unsynced), got %q", job.LastSyncedStatus)
 	}
 }
 

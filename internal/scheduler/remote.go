@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -39,7 +40,9 @@ func (s *RemoteScheduler) Submit(_ context.Context, req *SubmitRequest) (*Submit
 	if !req.NoSync && !srcsync.IsLocalHost(coordHost) {
 		localDir := workdir.ResolveLocal(req.WorkingDir)
 		if localDir != "" {
-			srcsync.SyncSourcesToHost(coordHost, localDir, req.WorkingDir, req.Inputs)
+			if err := srcsync.SyncSourcesToHost(coordHost, localDir, req.WorkingDir, req.Inputs); err != nil {
+				log.Printf("sync: source sync to coordinator failed for %s: %v", req.WorkingDir, err)
+			}
 		}
 	}
 
