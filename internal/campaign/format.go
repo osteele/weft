@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // FormatResolvedGPU formats the GPU constraint and resolved name.
@@ -132,8 +132,8 @@ func formatDurationShort(d time.Duration) string {
 	return fmt.Sprintf("%dh %dm", h, m)
 }
 
-// FormatSSHCommand returns the SSH command string for a Vast.ai instance.
-func FormatSSHCommand(inst *vastai.Instance) string {
+// FormatSSHCommand returns the SSH command string for a cloud instance.
+func FormatSSHCommand(inst *cloud.Instance) string {
 	return fmt.Sprintf("ssh -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@%s",
 		inst.SSHPort, inst.SSHHost)
 }

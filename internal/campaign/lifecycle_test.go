@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // setupTestDB creates an in-memory SQLite database for testing.
@@ -40,6 +40,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 		max_time_seconds INTEGER,
 		actual_spend_cents INTEGER,
 		vastai_instance_id TEXT,
+		provider_instance_id TEXT,
+		data_center TEXT,
 		created_at INTEGER,
 		ready_at INTEGER,
 		launched_at INTEGER,
@@ -70,27 +72,27 @@ func TestLaunchInstanceHappyPath(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	// Mock client that simulates successful launch
-	mockClient := &vastai.MockClient{
-		CreateInstanceFunc: func(offerID int, opts vastai.CreateOpts) (*vastai.Instance, error) {
-			return &vastai.Instance{
-				ID:          12345,
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			return &cloud.Instance{
+				ProviderID:  "12345",
 				Status:      "loading",
 				SSHHost:     "192.168.1.100",
 				SSHPort:     10022,
 				CostPerHour: 0.50,
 			}, nil
 		},
-		WaitReadyFunc: func(instanceID int, timeout time.Duration) (*vastai.Instance, error) {
-			return &vastai.Instance{
-				ID:          instanceID,
+		WaitReadyFunc: func(instanceID string, timeout time.Duration) (*cloud.Instance, error) {
+			return &cloud.Instance{
+				ProviderID:  instanceID,
 				Status:      "running",
 				SSHHost:     "192.168.1.100",
 				SSHPort:     10022,
 				CostPerHour: 0.50,
 			}, nil
 		},
-		DestroyInstanceFunc: func(instanceID int) error {
+		DestroyInstanceFunc: func(instanceID string) error {
 			return nil
 		},
 	}
@@ -107,22 +109,23 @@ func TestLaunchInstanceHappyPath(t *testing.T) {
 		Jobs:     []*db.Job{job},
 	}
 
-	offer := vastai.Offer{
-		ID:          999,
+	offer := cloud.Offer{
+		ProviderID:  "999",
+		Provider:    cloud.ProviderVastai,
 		GPUName:     "RTX_4090",
 		NumGPUs:     1,
 		GPUMemGB:    24,
 		CostPerHour: 0.50,
 	}
 
-	r2Cfg := vastai.R2Config{
+	r2Cfg := cloud.R2Config{
 		AccountID:       "test-account",
 		AccessKeyID:     "test-key",
 		SecretAccessKey: "test-secret",
 		Bucket:          "test-bucket",
 	}
 
-	createOpts := vastai.CreateOpts{
+	createOpts := cloud.CreateOpts{
 		Image:      "nvidia/cuda:12.2-devel-ubuntu22.04",
 		DiskGB:     50,
 		SSHEnabled: true,
@@ -145,9 +148,9 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	// Mock client where CreateInstance fails
-	mockClient := &vastai.MockClient{
-		CreateInstanceFunc: func(offerID int, opts vastai.CreateOpts) (*vastai.Instance, error) {
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
 			return nil, errors.New("API error: insufficient balance")
 		},
 	}
@@ -164,9 +167,9 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 		Jobs:     []*db.Job{job},
 	}
 
-	offer := vastai.Offer{ID: 999}
-	r2Cfg := vastai.R2Config{Bucket: "test"}
-	createOpts := vastai.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+	r2Cfg := cloud.R2Config{Bucket: "test"}
+	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
 
 	_, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
@@ -187,15 +190,15 @@ func TestLaunchInstanceWaitTimeouts(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	// Mock client where WaitReady times out
-	mockClient := &vastai.MockClient{
-		CreateInstanceFunc: func(offerID int, opts vastai.CreateOpts) (*vastai.Instance, error) {
-			return &vastai.Instance{ID: 12345}, nil
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			return &cloud.Instance{ProviderID: "12345"}, nil
 		},
-		WaitReadyFunc: func(instanceID int, timeout time.Duration) (*vastai.Instance, error) {
-			return nil, fmt.Errorf("instance %d not ready after %v", instanceID, timeout)
+		WaitReadyFunc: func(instanceID string, timeout time.Duration) (*cloud.Instance, error) {
+			return nil, fmt.Errorf("instance %s not ready after %v", instanceID, timeout)
 		},
-		DestroyInstanceFunc: func(instanceID int) error {
+		DestroyInstanceFunc: func(instanceID string) error {
 			return nil
 		},
 	}
@@ -206,9 +209,9 @@ func TestLaunchInstanceWaitTimeouts(t *testing.T) {
 		Jobs:     []*db.Job{{ID: 101}},
 	}
 
-	offer := vastai.Offer{ID: 999}
-	r2Cfg := vastai.R2Config{Bucket: "test"}
-	createOpts := vastai.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+	r2Cfg := cloud.R2Config{Bucket: "test"}
+	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
 
 	_, err := LaunchInstance(
 		mockClient, database, nil, group, offer,

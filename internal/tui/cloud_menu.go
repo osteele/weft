@@ -9,9 +9,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // handleCloudMenuKeyPress handles key events when the cloud menu overlay is active.
@@ -135,20 +135,19 @@ func (m *Model) openCloudMenu(job *db.Job) tea.Cmd {
 	return m.fetchCloudOffers(job)
 }
 
-// fetchCloudOffers fetches Vast.ai offers and builds the offerings list.
+// fetchCloudOffers fetches cloud offers from all enabled providers and builds the offerings list.
 func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
-	client := m.vastaiClient
+	clients := m.cloudClients
 	return func() tea.Msg {
-		// Check if vastai CLI is available
-		if err := client.Available(); err != nil {
+		if len(clients) == 0 {
 			return cloudOffersLoadedMsg{
 				job: job,
-				err: fmt.Errorf("Vast.ai not available: %w", err),
+				err: fmt.Errorf("no cloud providers available"),
 			}
 		}
 
 		// Build constraints from job metadata
-		constraints := vastai.OfferConstraints{
+		constraints := cloud.OfferConstraints{
 			MinReliability: 0.95,
 			NumGPUs:        1,
 		}
@@ -159,8 +158,8 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 			constraints.GPUClass = job.GPUClass
 		}
 
-		// Search for offers
-		offers, err := client.SearchOffers(constraints)
+		// Search for offers across all providers
+		offers, err := cloud.SearchAllProviders(clients, constraints)
 		if err != nil {
 			return cloudOffersLoadedMsg{
 				job: job,
@@ -168,22 +167,22 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 			}
 		}
 
-		// Limit to top 5 by cost
+		// Sort and limit to top 5 by cost
+		cloud.SortOffersByCost(offers)
 		if len(offers) > 5 {
 			offers = offers[:5]
 		}
 
 		// Build offerings with local option
-		// Estimate local queue: count queued jobs ahead of this one on the same host
 		queueDepth := 0
-		avgJobMin := 15.0 // default estimate
+		avgJobMin := 15.0
 
 		offerings := placement.BuildCloudOfferings(
-			"local GPU", // will be overridden by host spec if available
-			24.0,        // default GPU mem
+			"local GPU",
+			24.0,
 			queueDepth,
 			avgJobMin,
-			0, // no DLPerf data for local
+			0,
 			offers,
 		)
 
@@ -194,11 +193,10 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 	}
 }
 
-// launchCloudJob creates a campaign for a single job, launches it on Vast.ai,
+// launchCloudJob creates a campaign for a single job, launches it on a cloud provider,
 // and tracks it through the campaign system.
 func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) tea.Cmd {
 	return func() tea.Msg {
-		client := m.vastaiClient
 		if offering.Offer == nil {
 			return cloudJobLaunchedMsg{
 				jobID: job.ID,
@@ -217,19 +215,37 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 
 		offer := *offering.Offer
 
-		image := m.appConfig.Vastai.DefaultImage
-		if image == "" {
-			image = vastai.DefaultImage
+		// Find the right client for this offer's provider
+		var client cloud.Client
+		for _, c := range m.cloudClients {
+			if c.Provider() == offer.Provider {
+				client = c
+				break
+			}
+		}
+		if client == nil && len(m.cloudClients) > 0 {
+			client = m.cloudClients[0]
+		}
+		if client == nil {
+			return cloudJobLaunchedMsg{
+				jobID: job.ID,
+				err:   fmt.Errorf("no cloud client for provider %s", offer.Provider),
+			}
 		}
 
-		createOpts := vastai.CreateOpts{
+		image := m.appConfig.Vastai.DefaultImage
+		if image == "" {
+			image = cloud.DefaultImage
+		}
+
+		createOpts := cloud.CreateOpts{
 			Image:      image,
 			DiskGB:     50,
 			SSHEnabled: true,
 			OnStartCmd: "curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash",
 		}
 
-		vastR2 := vastai.R2Config{
+		cloudR2 := cloud.R2Config{
 			AccountID:       r2Cfg.AccountID,
 			AccessKeyID:     r2Cfg.AccessKeyID,
 			SecretAccessKey: r2Cfg.SecretAccessKey,
@@ -249,7 +265,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		}
 
 		campaignID, err := campaign.LaunchInstance(
-			client, m.database, nil, group, offer, campaign.LaunchOpts{}, vastR2, createOpts,
+			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts,
 			func(phase string) {
 				log.Printf("cloud: job %d instance: %s", job.ID, phase)
 			},

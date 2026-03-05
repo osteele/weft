@@ -5,15 +5,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 func TestEstimateCosts_NoPredictions(t *testing.T) {
 	groupOffers := []GroupOffer{
 		{
 			Group: InstanceGroup{GPUClass: "A100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1}, {ID: 2}, {ID: 3}}},
-			Offer: &vastai.Offer{GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 1.50},
+			Offer: &cloud.Offer{GPUName: "A100 PCIE", GPUMemGB: 80, CostPerHour: 1.50},
 		},
 	}
 

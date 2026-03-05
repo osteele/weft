@@ -415,10 +415,10 @@ func (c *Coordinator) checkCloudInstanceLimits(cfg *config.Config) {
 			elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
 			if elapsed > time.Duration(ci.MaxTimeSeconds)*time.Second {
 				c.logger.Printf("instance sweep: instance %d exceeded time limit (%v), destroying", ci.ID, elapsed)
-				if ci.VastaiInstanceID != "" {
-					instanceID, _ := strconv.Atoi(ci.VastaiInstanceID)
-					if instanceID > 0 {
-						_ = client.DestroyInstance(instanceID)
+				providerInstID := ci.EffectiveProviderID()
+				if providerInstID != "" {
+					if cl := c.cloudClient(ci.Provider); cl != nil {
+						_ = cl.DestroyInstance(providerInstID)
 					}
 				}
 				_ = db.UpdateCloudInstanceStatus(c.db, ci.ID, db.CloudInstanceStatusFailed)

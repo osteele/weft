@@ -76,6 +76,9 @@ type Config struct {
 	// Vastai holds Vast.ai cloud GPU and R2 result storage configuration
 	Vastai VastaiConfig `yaml:"vastai"`
 
+	// Runpod holds Runpod cloud GPU configuration
+	Runpod RunpodConfig `yaml:"runpod"`
+
 	// CoordinatorHost is the host where the coordinator daemon runs.
 	// Default: "studio"
 	CoordinatorHost string `yaml:"coordinator_host"`
@@ -117,6 +120,18 @@ type R2Config struct {
 	SecretAccessKey string `yaml:"secret_access_key"`
 	// Bucket is the R2 bucket name for storing results
 	Bucket string `yaml:"bucket"`
+}
+
+// RunpodConfig holds Runpod cloud GPU settings.
+type RunpodConfig struct {
+	// Enabled controls whether Runpod cloud GPU options are available
+	Enabled bool `yaml:"enabled"`
+	// SpendingLimit is the maximum cost per job in dollars
+	SpendingLimit float64 `yaml:"spending_limit"`
+	// DefaultImage is the Docker image for cloud instances
+	DefaultImage string `yaml:"default_image"`
+	// MaxRuntime is the auto-kill threshold (e.g., "4h")
+	MaxRuntime string `yaml:"max_runtime"`
 }
 
 // BlockedPattern defines a substring that should not appear in job commands

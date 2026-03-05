@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
-	"github.com/osteele/weft/internal/vastai"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
 )
 
 // watchInstancesPlain prints line-oriented status updates for cloud instances.
 // Suitable for non-TTY output and parsing by coding agents.
 func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
-	client := vastai.NewClient()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -35,6 +35,8 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 		go func(instanceID int64) {
 			defer wg.Done()
 
+			// Look up the provider from the DB to get the right client
+			client := clientForInstance(database, instanceID)
 			ch := campaign.WatchInstance(ctx, client, database, instanceID, 2*time.Second, 10*time.Second)
 			var prev campaign.InstanceUpdate
 
@@ -50,4 +52,13 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 
 	wg.Wait()
 	return nil
+}
+
+// clientForInstance creates a cloud.Client based on the provider stored in the DB.
+func clientForInstance(database *sql.DB, instanceID int64) cloud.Client {
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil || ci == nil {
+		return cloudClientForDBInstance("vastai") // fallback
+	}
+	return cloudClientForDBInstance(ci.Provider)
 }

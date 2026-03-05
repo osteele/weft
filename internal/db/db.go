@@ -616,11 +616,18 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE cloud_instances ADD COLUMN inet_down_mbps REAL`,
 		`ALTER TABLE cloud_instances ADD COLUMN inet_up_mbps REAL`,
 		`ALTER TABLE cloud_instances ADD COLUMN cuda_version REAL`,
+		`ALTER TABLE cloud_instances ADD COLUMN provider_instance_id TEXT`,
+		`ALTER TABLE cloud_instances ADD COLUMN data_center TEXT`,
 	}
 	for _, stmt := range cloudInstanceMigrations {
 		if err := addColumnIfMissing(db, stmt); err != nil {
 			return err
 		}
+	}
+
+	// Backfill provider_instance_id from vastai_instance_id
+	if _, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`); err != nil {
+		return err
 	}
 
 	return nil

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 func TestFormatResolvedGPU(t *testing.T) {
@@ -72,7 +72,7 @@ func TestFormatCostTable(t *testing.T) {
 	offers := []GroupOffer{
 		{
 			Group: InstanceGroup{GPUClass: "A100", GPUMemGB: 80, Jobs: make([]*db.Job, 7)},
-			Offer: &vastai.Offer{GPUName: "RTX_A6000", GPUMemGB: 48, CostPerHour: 0.45},
+			Offer: &cloud.Offer{GPUName: "RTX_A6000", GPUMemGB: 48, CostPerHour: 0.45},
 		},
 		{
 			Group: InstanceGroup{GPUClass: "H100", GPUMemGB: 80, Jobs: make([]*db.Job, 3)},
@@ -106,7 +106,7 @@ func TestFormatCostTable_NoOffers(t *testing.T) {
 }
 
 func TestFormatSSHCommand(t *testing.T) {
-	inst := &vastai.Instance{SSHHost: "ssh6.vast.ai", SSHPort: 34567}
+	inst := &cloud.Instance{SSHHost: "ssh6.vast.ai", SSHPort: 34567}
 	cmd := FormatSSHCommand(inst)
 	if !strings.Contains(cmd, "ssh -p 34567") {
 		t.Errorf("SSH command should contain port, got %q", cmd)
@@ -123,11 +123,11 @@ func TestTotalEstimatedCost(t *testing.T) {
 	offers := []GroupOffer{
 		{
 			Group: InstanceGroup{Jobs: make([]*db.Job, 7)},
-			Offer: &vastai.Offer{CostPerHour: 0.45},
+			Offer: &cloud.Offer{CostPerHour: 0.45},
 		},
 		{
 			Group: InstanceGroup{Jobs: make([]*db.Job, 3)},
-			Offer: &vastai.Offer{CostPerHour: 2.10},
+			Offer: &cloud.Offer{CostPerHour: 2.10},
 		},
 		{
 			Group: InstanceGroup{Jobs: make([]*db.Job, 5)},

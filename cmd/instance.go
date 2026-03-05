@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 	"github.com/spf13/cobra"
 )
 
@@ -39,15 +39,15 @@ var instanceStatusCmd = &cobra.Command{
 var instanceTerminateCmd = &cobra.Command{
 	Use:     "terminate <id> [id...]",
 	Aliases: []string{"cancel"},
-	Short:   "Terminate cloud instances and destroy their Vast.ai instances",
+	Short:   "Terminate cloud instances and destroy their cloud instances",
 	Args:    cobra.MinimumNArgs(1),
 	RunE:    runInstanceTerminate,
 }
 
 var instanceSSHCmd = &cobra.Command{
 	Use:   "ssh <id>",
-	Short: "SSH into a cloud instance's Vast.ai instance",
-	Long: `Waits for the cloud instance's Vast.ai instance to be ready, then connects
+	Short: "SSH into a cloud instance",
+	Long: `Waits for the cloud instance to be ready, then connects
 via SSH. Use --print to print the SSH command instead of connecting.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runInstanceSSH,
@@ -85,7 +85,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	jobCounts, _ := db.GetCloudInstanceJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "ID\tSTATUS\tGPU SPEC\tJOBS\tVASTAI ID\tCREATED\tACTUAL COST\n")
+	fmt.Fprintf(w, "ID\tSTATUS\tPROVIDER\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
 
 	for _, inst := range instances {
 		created := time.Unix(inst.CreatedAt, 0).Format("01/02 15:04")
@@ -100,13 +100,18 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 			gpuSpec = inst.GPUClass
 		}
 
-		vastaiID := inst.VastaiInstanceID
-		if vastaiID == "" {
-			vastaiID = "—"
+		providerInstID := inst.EffectiveProviderID()
+		if providerInstID == "" {
+			providerInstID = "—"
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			inst.ID, inst.Status, gpuSpec, jobCounts[inst.ID], vastaiID, created, costStr)
+		dc := inst.DataCenter
+		if dc == "" {
+			dc = "—"
+		}
+
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			inst.ID, inst.Status, inst.Provider, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
 	}
 	w.Flush()
 	return nil
@@ -118,8 +123,6 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
-
-	client := vastai.NewClient()
 
 	for i, arg := range args {
 		if i > 0 {
@@ -145,23 +148,27 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			gpuSpec = ci.GPUClass
 		}
 		fmt.Printf("Instance %d — %s — %s\n", ci.ID, gpuSpec, ci.Status)
+		fmt.Printf("  Provider: %s\n", ci.Provider)
 
-		// Vast.ai instance info
-		var inst *vastai.Instance
-		if ci.VastaiInstanceID != "" {
-			var instID int
-			if _, scanErr := fmt.Sscanf(ci.VastaiInstanceID, "%d", &instID); scanErr == nil {
-				if !campaign.IsInstanceTerminal(ci.Status) {
-					inst, _ = client.ShowInstance(instID)
-				}
+		// Cloud instance info
+		providerInstID := ci.EffectiveProviderID()
+		var inst *cloud.Instance
+		if providerInstID != "" {
+			client := cloudClientForDBInstance(ci.Provider)
+			if !campaign.IsInstanceTerminal(ci.Status) {
+				inst, _ = client.ShowInstance(providerInstID)
 			}
 			if inst != nil {
-				fmt.Printf("  Vastai:    %s (%s)\n", ci.VastaiInstanceID, inst.Status)
+				fmt.Printf("  Instance: %s (%s)\n", providerInstID, inst.Status)
 			} else {
-				fmt.Printf("  Vastai:    %s\n", ci.VastaiInstanceID)
+				fmt.Printf("  Instance: %s\n", providerInstID)
 			}
 		} else {
-			fmt.Printf("  Vastai:    (provisioning...)\n")
+			fmt.Printf("  Instance: (provisioning...)\n")
+		}
+
+		if ci.DataCenter != "" {
+			fmt.Printf("  Location: %s\n", ci.DataCenter)
 		}
 
 		// Uptime and cost
@@ -173,13 +180,13 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				uptime = time.Since(time.Unix(*ci.LaunchedAt, 0))
 			}
 			uptime = uptime.Truncate(time.Minute)
-			fmt.Printf("  Uptime:    %s\n", uptime)
+			fmt.Printf("  Uptime:   %s\n", uptime)
 
 			if inst != nil && inst.CostPerHour > 0 {
 				cost := uptime.Hours() * inst.CostPerHour
-				fmt.Printf("  Cost:      $%.2f ($%.2f/hr)\n", cost, inst.CostPerHour)
+				fmt.Printf("  Cost:     $%.2f ($%.2f/hr)\n", cost, inst.CostPerHour)
 			} else if ci.ActualSpendCents > 0 {
-				fmt.Printf("  Cost:      $%.2f\n", float64(ci.ActualSpendCents)/100)
+				fmt.Printf("  Cost:     $%.2f\n", float64(ci.ActualSpendCents)/100)
 			}
 		}
 
@@ -195,7 +202,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 					completed++
 				}
 			}
-			fmt.Printf("  Jobs:      %d/%d completed\n", completed, len(jobs))
+			fmt.Printf("  Jobs:     %d/%d completed\n", completed, len(jobs))
 			for _, j := range jobs {
 				desc := j.Description
 				if desc == "" {
@@ -238,10 +245,7 @@ func runInstanceTerminate(cmd *cobra.Command, args []string) error {
 }
 
 // terminateInstancesParallel terminates multiple cloud instances in parallel.
-// Returns the count of successfully terminated instances and any errors.
 func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
-	client := vastai.NewClient()
-
 	var mu sync.Mutex
 	var terminated int
 	var errors []error
@@ -273,12 +277,11 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 				return
 			}
 
-			// Destroy Vast.ai instance
-			if ci.VastaiInstanceID != "" {
-				var instID int
-				if _, err := fmt.Sscanf(ci.VastaiInstanceID, "%d", &instID); err == nil {
-					_ = client.DestroyInstance(instID) // best-effort
-				}
+			// Destroy cloud instance
+			providerInstID := ci.EffectiveProviderID()
+			if providerInstID != "" {
+				client := cloudClientForDBInstance(ci.Provider)
+				_ = client.DestroyInstance(providerInstID) // best-effort
 			}
 
 			if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCancelled); err != nil {
@@ -299,8 +302,8 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 			mu.Lock()
 			terminated++
 			instanceInfo := ""
-			if ci.VastaiInstanceID != "" {
-				instanceInfo = fmt.Sprintf(", destroyed vastai %s", ci.VastaiInstanceID)
+			if providerInstID != "" {
+				instanceInfo = fmt.Sprintf(", destroyed %s %s", ci.Provider, providerInstID)
 			}
 			fmt.Printf("Cancelled instance %d%s, %d jobs reset to needs_rental\n", instanceID, instanceInfo, resetCount)
 			mu.Unlock()
@@ -331,13 +334,15 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("instance %d not found", id)
 	}
 
-	if ci.VastaiInstanceID == "" {
+	providerInstID := ci.EffectiveProviderID()
+
+	if providerInstID == "" {
 		fmt.Println("Waiting for instance...")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
-		for ci.VastaiInstanceID == "" {
+		for providerInstID == "" {
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("timed out waiting for instance")
@@ -347,19 +352,16 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				return fmt.Errorf("get instance: %w", err)
 			}
+			providerInstID = ci.EffectiveProviderID()
 		}
 	}
 
-	// Get Vast.ai instance info
-	client := vastai.NewClient()
-	var instID int
-	if _, err := fmt.Sscanf(ci.VastaiInstanceID, "%d", &instID); err != nil {
-		return fmt.Errorf("parse vastai instance ID %q: %w", ci.VastaiInstanceID, err)
-	}
+	// Get cloud instance info
+	client := cloudClientForDBInstance(ci.Provider)
 
 	// Wait for instance to be ready
 	fmt.Println("Waiting for instance...")
-	inst, err := client.WaitReady(instID, 5*time.Minute)
+	inst, err := client.WaitReady(providerInstID, 5*time.Minute)
 	if err != nil {
 		return fmt.Errorf("wait for instance: %w", err)
 	}
@@ -374,7 +376,7 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	return execSSH(inst)
 }
 
-func execSSH(inst *vastai.Instance) error {
+func execSSH(inst *cloud.Instance) error {
 	args := []string{
 		"ssh",
 		"-p", fmt.Sprintf("%d", inst.SSHPort),

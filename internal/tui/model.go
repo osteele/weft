@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/core"
 	"github.com/osteele/weft/internal/db"
@@ -21,9 +22,39 @@ import (
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/vastai"
 )
+
+// buildCloudClients creates cloud clients from the app config.
+func buildCloudClients(cfg *config.Config) []cloud.Client {
+	var clients []cloud.Client
+
+	if cfg != nil && cfg.Vastai.Enabled {
+		vc := vastai.NewClient()
+		if vc.Available() == nil {
+			clients = append(clients, vastai.NewCloudClient(vc))
+		}
+	}
+
+	if cfg != nil && cfg.Runpod.Enabled {
+		rc := runpod.NewCloudClient()
+		if rc.Available() == nil {
+			clients = append(clients, rc)
+		}
+	}
+
+	// Fallback: if no providers explicitly enabled, try vastai
+	if len(clients) == 0 && (cfg == nil || (!cfg.Vastai.Enabled && !cfg.Runpod.Enabled)) {
+		vc := vastai.NewClient()
+		if vc.Available() == nil {
+			clients = append(clients, vastai.NewCloudClient(vc))
+		}
+	}
+
+	return clients
+}
 
 // Model is the main TUI state
 type Model struct {
@@ -141,7 +172,7 @@ type Model struct {
 	cloudMenuCursor    int
 	cloudMenuLoading   bool
 	cloudMenuConfirm   bool // true when showing cost confirmation
-	vastaiClient       vastai.VastaiClient
+	cloudClients       []cloud.Client
 
 	// Configurable intervals
 	syncActiveInterval  time.Duration
@@ -339,7 +370,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostSummaryTimes:        make(map[string]time.Time),
 		hostSummaryPending:      make(map[string]bool),
 		initialSyncNeeded:       true, // Trigger priority sync after jobs load
-		vastaiClient:            vastai.NewClient(),
+		cloudClients:            buildCloudClients(appCfg),
 	}
 
 	if opts.Monitor != nil {

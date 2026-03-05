@@ -13,9 +13,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 	"github.com/spf13/cobra"
 )
 
@@ -159,8 +159,8 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Interactive TUI
-	client := vastai.NewClient()
-	model := newLaunchModel(database, client, cfg, groups, opts)
+	clients := buildCloudClients(cfg)
+	model := newLaunchModel(database, clients, cfg, groups, opts)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {
@@ -183,14 +183,14 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
 func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts) error {
-	client := vastai.NewClient()
-	if err := client.Available(); err != nil {
-		return fmt.Errorf("vastai CLI not available: %w", err)
+	clients := buildCloudClients(cfg)
+	if len(clients) == 0 {
+		return fmt.Errorf("no cloud providers available (check vastai/runpod CLI)")
 	}
 
 	// Fetch offers in parallel
 	fmt.Println("Searching for GPU offers...")
-	groupOffers := campaign.FetchGroupOffers(client, groups)
+	groupOffers := campaign.FetchGroupOffers(clients, groups)
 
 	// Print plan summary with cost estimates
 	totalJobs := 0
@@ -213,20 +213,20 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		}
 	}
 
-	r2Cfg := vastai.R2Config{
+	r2Cfg := cloud.R2Config{
 		AccountID:       cfg.Vastai.R2.AccountID,
 		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
 		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
 		Bucket:          cfg.Vastai.R2.Bucket,
 	}
 
-	createOpts := vastai.CreateOpts{
+	createOpts := cloud.CreateOpts{
 		Image:      cfg.Vastai.DefaultImage,
 		DiskGB:     50,
 		SSHEnabled: true,
 	}
 	if createOpts.Image == "" {
-		createOpts.Image = vastai.DefaultImage
+		createOpts.Image = cloud.DefaultImage
 	}
 
 	// Create campaign batch
@@ -249,8 +249,17 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		offer := *groupOffers[i].Offer
 
 		wg.Add(1)
-		go func(group campaign.InstanceGroup, ofr vastai.Offer) {
+		go func(group campaign.InstanceGroup, ofr cloud.Offer) {
 			defer wg.Done()
+
+			// Find the appropriate client for this offer's provider
+			client := cloudClientForProvider(clients, ofr.Provider)
+			if client == nil {
+				mu.Lock()
+				launchErrors = append(launchErrors, fmt.Errorf("%s: no client for provider %s", group.GPUSpec(), ofr.Provider))
+				mu.Unlock()
+				return
+			}
 
 			cID, err := campaign.LaunchInstance(
 				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
@@ -306,8 +315,8 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 }
 
 func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
-	client := vastai.NewClient()
-	groupOffers := campaign.FetchGroupOffers(client, groups)
+	clients := buildCloudClients(cfg)
+	groupOffers := campaign.FetchGroupOffers(clients, groups)
 
 	predCfg := buildPredictorConfig(cfg)
 	estimates := campaign.EstimateCosts(groupOffers, &predCfg)

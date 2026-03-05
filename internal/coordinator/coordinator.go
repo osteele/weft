@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/intent"
@@ -64,8 +65,29 @@ type Coordinator struct {
 	remediator   *services.Remediator
 	retryDrainer *services.RetryDrainer
 
-	// VastaiClient is the Vast.ai API client. If nil, vastaiClient() creates one.
+	// CloudClients holds the cloud provider clients. If nil, defaults are created.
+	CloudClients []cloud.Client
+
+	// VastaiClient is the Vast.ai API client (legacy). If nil, vastaiClient() creates one.
 	VastaiClient vastai.VastaiClient
+}
+
+// cloudClient returns a cloud.Client for the given provider, or nil if not available.
+func (c *Coordinator) cloudClient(provider string) cloud.Client {
+	for _, cl := range c.CloudClients {
+		if string(cl.Provider()) == provider {
+			return cl
+		}
+	}
+	// Fallback: create from VastaiClient field or default
+	if provider == string(cloud.ProviderVastai) {
+		inner := c.VastaiClient
+		if inner == nil {
+			inner = vastai.NewClient()
+		}
+		return vastai.NewCloudClient(inner)
+	}
+	return nil
 }
 
 // vastaiClient returns the configured VastaiClient or creates a default one.

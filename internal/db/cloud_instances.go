@@ -10,7 +10,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		max_spend_cents, max_time_seconds, actual_spend_cents,
 		created_at, ready_at, launched_at, ended_at,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
-		inet_down_mbps, inet_up_mbps, cuda_version`
+		inet_down_mbps, inet_up_mbps, cuda_version,
+		provider_instance_id, data_center`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -24,21 +25,23 @@ const (
 
 // CloudInstance represents a single cloud GPU deployment (e.g. one Vast.ai instance).
 type CloudInstance struct {
-	ID               int64
-	CampaignID       *int64
-	Status           string
-	Provider         string
-	GPUSpec          string
-	GPUClass         string
-	GPUMemGB         int
-	VastaiInstanceID string
-	MaxSpendCents    int
-	MaxTimeSeconds   int
-	ActualSpendCents int
-	CreatedAt        int64
-	ReadyAt          *int64 // Vast.ai instance ready (before SSH setup)
-	LaunchedAt       *int64
-	EndedAt          *int64
+	ID                 int64
+	CampaignID         *int64
+	Status             string
+	Provider           string
+	GPUSpec            string
+	GPUClass           string
+	GPUMemGB           int
+	VastaiInstanceID   string // legacy; use ProviderInstanceID for new code
+	ProviderInstanceID string // provider-neutral instance ID
+	MaxSpendCents      int
+	MaxTimeSeconds     int
+	ActualSpendCents   int
+	CreatedAt          int64
+	ReadyAt            *int64 // cloud instance ready (before SSH setup)
+	LaunchedAt         *int64
+	EndedAt            *int64
+	DataCenter         string // data center / geolocation of the instance
 
 	// Offer metadata (captured at launch)
 	ResolvedGPUName  string
@@ -49,6 +52,14 @@ type CloudInstance struct {
 	InetDownMbps     float64
 	InetUpMbps       float64
 	CUDAVersion      float64
+}
+
+// EffectiveProviderID returns ProviderInstanceID, falling back to VastaiInstanceID for legacy records.
+func (c *CloudInstance) EffectiveProviderID() string {
+	if c.ProviderInstanceID != "" {
+		return c.ProviderInstanceID
+	}
+	return c.VastaiInstanceID
 }
 
 // CreateCloudInstance inserts a new cloud instance record and returns its ID.
@@ -127,9 +138,22 @@ func SetCloudInstanceReadyAt(db *sql.DB, id int64) error {
 	return err
 }
 
+// SetCloudInstanceProviderID sets the provider-neutral instance ID for a cloud instance.
+// Also sets vastai_instance_id for backwards compatibility when the provider is vastai.
+func SetCloudInstanceProviderID(db *sql.DB, id int64, providerID string) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = ?, vastai_instance_id = ? WHERE id = ?`, providerID, providerID, id)
+	return err
+}
+
 // SetCloudInstanceVastaiID sets the Vast.ai instance ID for a cloud instance.
+// Deprecated: use SetCloudInstanceProviderID instead.
 func SetCloudInstanceVastaiID(db *sql.DB, id int64, vastaiID string) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET vastai_instance_id = ? WHERE id = ?`, vastaiID, id)
+	return SetCloudInstanceProviderID(db, id, vastaiID)
+}
+
+// SetCloudInstanceDataCenter sets the data center/geolocation for a cloud instance.
+func SetCloudInstanceDataCenter(db *sql.DB, id int64, dc string) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET data_center = ? WHERE id = ?`, dc, id)
 	return err
 }
 
@@ -249,6 +273,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var resolvedGPUName sql.NullString
 	var costPerHourCents, numGPUs sql.NullInt64
 	var dlPerf, reliability, inetDown, inetUp, cudaVersion sql.NullFloat64
+	var providerInstanceID, dataCenter sql.NullString
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -256,6 +281,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&c.CreatedAt, &readyAt, &launchedAt, &endedAt,
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
 		&inetDown, &inetUp, &cudaVersion,
+		&providerInstanceID, &dataCenter,
 	)
 	if err != nil {
 		return nil, err
@@ -317,6 +343,12 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	}
 	if cudaVersion.Valid {
 		c.CUDAVersion = cudaVersion.Float64
+	}
+	if providerInstanceID.Valid {
+		c.ProviderInstanceID = providerInstanceID.String
+	}
+	if dataCenter.Valid {
+		c.DataCenter = dataCenter.String
 	}
 	return &c, nil
 }

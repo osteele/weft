@@ -16,6 +16,7 @@ type Offer struct {
 	DiskSpace         float64 `json:"disk_space"`    // GB available
 	CUDAVersion       float64 `json:"cuda_max_good"` // max supported CUDA version
 	DLPerf            float64 `json:"dlperf"`        // deep learning perf score
+	Geolocation       string  `json:"geolocation"`   // data center location
 	Verified          bool    `json:"verified"`
 }
 

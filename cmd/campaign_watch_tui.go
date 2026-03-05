@@ -11,8 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 type watchModel struct {
@@ -20,7 +20,7 @@ type watchModel struct {
 	updates     map[int64]campaign.InstanceUpdate // latest update per instance
 	channels    map[int64]<-chan campaign.InstanceUpdate
 	database    *sql.DB
-	client      vastai.VastaiClient
+	clients     map[int64]cloud.Client // per-instance client (looked up from DB provider)
 	spinner     spinner.Model
 	done        bool
 	err         error
@@ -43,17 +43,23 @@ type watchUpdateMsg struct {
 	closed     bool // true if channel was closed
 }
 
-func newWatchModel(database *sql.DB, client vastai.VastaiClient, instanceIDs []int64) watchModel {
+func newWatchModel(database *sql.DB, instanceIDs []int64) watchModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Build per-instance clients from DB provider field
+	clients := make(map[int64]cloud.Client)
+	for _, id := range instanceIDs {
+		clients[id] = clientForInstance(database, id)
+	}
 
 	return watchModel{
 		instanceIDs: instanceIDs,
 		updates:     make(map[int64]campaign.InstanceUpdate),
 		channels:    make(map[int64]<-chan campaign.InstanceUpdate),
 		database:    database,
-		client:      client,
+		clients:     clients,
 		spinner:     s,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -65,7 +71,8 @@ func (m watchModel) Init() tea.Cmd {
 	cmds = append(cmds, m.spinner.Tick)
 
 	for _, id := range m.instanceIDs {
-		ch := campaign.WatchInstance(m.ctx, m.client, m.database, id, 2*time.Second, 10*time.Second)
+		client := m.clients[id]
+		ch := campaign.WatchInstance(m.ctx, client, m.database, id, 2*time.Second, 10*time.Second)
 		m.channels[id] = ch
 		cmds = append(cmds, waitForUpdate(id, ch))
 	}
@@ -156,14 +163,15 @@ func (m watchModel) View() string {
 		b.WriteString(watchTitleStyle.Render(header))
 		b.WriteString("\n")
 
-		if ci.VastaiInstanceID != "" {
-			instLine := fmt.Sprintf("  Vastai: %s", ci.VastaiInstanceID)
+		providerInstID := ci.EffectiveProviderID()
+		if providerInstID != "" {
+			instLine := fmt.Sprintf("  %s: %s", ci.Provider, providerInstID)
 			if u.Instance != nil {
 				instLine += fmt.Sprintf(" (%s)", u.Instance.Status)
 			}
 			b.WriteString(instLine + "\n")
 		} else {
-			b.WriteString("  Vastai: (provisioning...)\n")
+			b.WriteString(fmt.Sprintf("  %s: (provisioning...)\n", ci.Provider))
 		}
 
 		if u.Instance != nil && u.Instance.SSHHost != "" {
@@ -218,8 +226,7 @@ func (m watchModel) View() string {
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
 func watchInstances(database *sql.DB, instanceIDs []int64) error {
-	client := vastai.NewClient()
-	model := newWatchModel(database, client, instanceIDs)
+	model := newWatchModel(database, instanceIDs)
 	p := tea.NewProgram(model)
 	_, err := p.Run()
 	return err

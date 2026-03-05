@@ -7,26 +7,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // InstanceUpdate is a snapshot of cloud instance + job state.
 type InstanceUpdate struct {
 	CloudInstance *db.CloudInstance
 	Jobs          []*db.Job
-	Instance      *vastai.Instance // nil if not yet provisioned
+	Instance      *cloud.Instance // nil if not yet provisioned
 }
 
-// WatchInstance polls DB and Vast.ai, sends updates on the returned channel.
+// WatchInstance polls DB and cloud provider, sends updates on the returned channel.
 // Closes the channel when the instance reaches a terminal state or ctx is cancelled.
-func WatchInstance(ctx context.Context, client vastai.VastaiClient, database *sql.DB, cloudInstanceID int64, dbInterval, vastaiInterval time.Duration) <-chan InstanceUpdate {
+func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, cloudInstanceID int64, dbInterval, providerInterval time.Duration) <-chan InstanceUpdate {
 	ch := make(chan InstanceUpdate, 1)
 
 	go func() {
 		defer close(ch)
-		var lastVastaiPoll time.Time
-		var cachedInstance *vastai.Instance
+		var lastProviderPoll time.Time
+		var cachedInstance *cloud.Instance
 
 		for {
 			select {
@@ -47,15 +47,13 @@ func WatchInstance(ctx context.Context, client vastai.VastaiClient, database *sq
 
 			jobs, _ := db.GetCloudInstanceJobs(database, cloudInstanceID)
 
-			// Refresh Vast.ai instance info periodically
-			if ci.VastaiInstanceID != "" && time.Since(lastVastaiPoll) >= vastaiInterval {
-				var instID int
-				if _, err := fmt.Sscanf(ci.VastaiInstanceID, "%d", &instID); err == nil {
-					if inst, err := client.ShowInstance(instID); err == nil {
-						cachedInstance = inst
-					}
+			// Refresh cloud instance info periodically
+			providerInstID := ci.EffectiveProviderID()
+			if providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
+				if inst, err := client.ShowInstance(providerInstID); err == nil {
+					cachedInstance = inst
 				}
-				lastVastaiPoll = time.Now()
+				lastProviderPoll = time.Now()
 			}
 
 			update := InstanceUpdate{
@@ -95,8 +93,9 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 
 	if prev.CloudInstance == nil || prev.CloudInstance.Status != curr.CloudInstance.Status {
 		line := fmt.Sprintf("instance %d: status=%s", id, curr.CloudInstance.Status)
-		if curr.CloudInstance.VastaiInstanceID != "" {
-			line += fmt.Sprintf(" vastai=%s", curr.CloudInstance.VastaiInstanceID)
+		providerInstID := curr.CloudInstance.EffectiveProviderID()
+		if providerInstID != "" {
+			line += fmt.Sprintf(" provider_id=%s", providerInstID)
 		}
 		if curr.Instance != nil && curr.Instance.SSHHost != "" {
 			line += fmt.Sprintf(" ssh=\"%s\"", FormatSSHCommand(curr.Instance))

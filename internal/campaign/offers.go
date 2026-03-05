@@ -1,22 +1,22 @@
 package campaign
 
 import (
-	"sort"
 	"sync"
 
-	"github.com/osteele/weft/internal/vastai"
+	"github.com/osteele/weft/internal/cloud"
 )
 
-// GroupOffer pairs an instance group with its best Vast.ai offer.
+// GroupOffer pairs an instance group with its best cloud offer.
 type GroupOffer struct {
 	Group InstanceGroup
-	Offer *vastai.Offer // nil if no offers found
+	Offer *cloud.Offer // nil if no offers found
 	Err   error
 }
 
-// FetchGroupOffers searches Vast.ai for the best (cheapest) offer per group, in parallel.
+// FetchGroupOffers searches cloud providers for the best (cheapest) offer per group, in parallel.
+// Accepts multiple cloud clients and merges offers across all providers.
 // Returns results in the same order as the input groups.
-func FetchGroupOffers(client vastai.VastaiClient, groups []InstanceGroup) []GroupOffer {
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup) []GroupOffer {
 	results := make([]GroupOffer, len(groups))
 	var wg sync.WaitGroup
 
@@ -26,11 +26,12 @@ func FetchGroupOffers(client vastai.VastaiClient, groups []InstanceGroup) []Grou
 		go func(idx int, group InstanceGroup) {
 			defer wg.Done()
 
-			constraints := vastai.OfferConstraints{
+			constraints := cloud.OfferConstraints{
 				GPUClass:    group.GPUClass,
 				MinGPUMemGB: group.GPUMemGB,
 			}
-			offers, err := client.SearchOffers(constraints)
+
+			offers, err := cloud.SearchAllProviders(clients, constraints)
 			if err != nil {
 				results[idx].Err = err
 				return
@@ -48,7 +49,7 @@ func FetchGroupOffers(client vastai.VastaiClient, groups []InstanceGroup) []Grou
 }
 
 // cheapestOffer returns the offer with the lowest cost per hour.
-func cheapestOffer(offers []vastai.Offer) vastai.Offer {
+func cheapestOffer(offers []cloud.Offer) cloud.Offer {
 	best := offers[0]
 	for _, o := range offers[1:] {
 		if o.CostPerHour < best.CostPerHour {
@@ -56,11 +57,4 @@ func cheapestOffer(offers []vastai.Offer) vastai.Offer {
 		}
 	}
 	return best
-}
-
-// SortOffersByCost sorts offers by ascending cost per hour.
-func SortOffersByCost(offers []vastai.Offer) {
-	sort.Slice(offers, func(i, j int) bool {
-		return offers[i].CostPerHour < offers[j].CostPerHour
-	})
 }

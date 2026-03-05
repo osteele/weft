@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // LaunchOpts configures an instance launch.
@@ -15,19 +15,20 @@ type LaunchOpts struct {
 	MaxTimeSeconds int
 }
 
-// LaunchInstance creates a cloud instance record, provisions a Vast.ai instance,
-// deploys the multi-job wrapper, and starts it. Returns the cloud instance ID.
+// LaunchInstance creates a cloud instance record, provisions an instance via
+// the given cloud client, deploys the multi-job wrapper, and starts it.
+// Returns the cloud instance ID.
 // If campaignID is non-nil, the cloud instance is associated with that campaign batch.
 func LaunchInstance(
-	client vastai.VastaiClient,
+	client cloud.Client,
 	database *sql.DB,
 	campaignID *int64,
 	group InstanceGroup,
-	offer vastai.Offer,
+	offer cloud.Offer,
 	opts LaunchOpts,
-	r2Cfg vastai.R2Config,
-	createOpts vastai.CreateOpts,
-	progress vastai.ProgressFunc,
+	r2Cfg cloud.R2Config,
+	createOpts cloud.CreateOpts,
+	progress cloud.ProgressFunc,
 ) (int64, error) {
 	if progress == nil {
 		progress = func(string) {}
@@ -37,7 +38,7 @@ func LaunchInstance(
 	instance := &db.CloudInstance{
 		CampaignID:       campaignID,
 		Status:           db.CloudInstanceStatusPlanned,
-		Provider:         "vastai",
+		Provider:         string(client.Provider()),
 		GPUSpec:          group.GPUSpec(),
 		GPUClass:         group.GPUClass,
 		GPUMemGB:         group.GPUMemGB,
@@ -73,36 +74,41 @@ func LaunchInstance(
 	}
 
 	// Build campaign wrapper
-	var campaignJobs []vastai.CampaignJob
+	var campaignJobs []cloud.CampaignJob
 	for _, job := range group.Jobs {
-		campaignJobs = append(campaignJobs, vastai.CampaignJob{
+		campaignJobs = append(campaignJobs, cloud.CampaignJob{
 			ID:      job.ID,
 			Command: job.EffectiveCommand(),
 		})
 	}
-	wrapper := vastai.GenerateCampaignWrapper(instanceID, campaignJobs, r2Cfg.Bucket, false)
+	wrapper := cloud.GenerateCampaignWrapper(client, instanceID, campaignJobs, r2Cfg.Bucket, false)
 
-	// Create Vast.ai instance
+	// Create cloud instance
 	progress("creating instance")
-	inst, err := client.CreateInstance(offer.ID, createOpts)
+	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
 	if err != nil {
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("create instance: %w", err)
 	}
 
-	// Record Vast.ai instance ID
-	if err := db.SetCloudInstanceVastaiID(database, instanceID, fmt.Sprintf("%d", inst.ID)); err != nil {
-		_ = client.DestroyInstance(inst.ID)
+	// Record provider instance ID
+	if err := db.SetCloudInstanceProviderID(database, instanceID, inst.ProviderID); err != nil {
+		_ = client.DestroyInstance(inst.ProviderID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("record vastai instance ID: %w", err)
+		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
+	}
+
+	// Record data center if available
+	if offer.DataCenter != "" {
+		_ = db.SetCloudInstanceDataCenter(database, instanceID, offer.DataCenter)
 	}
 
 	// Wait for instance ready
 	progress("waiting for instance")
-	vastaiInstanceID := inst.ID
-	inst, err = client.WaitReady(vastaiInstanceID, 5*time.Minute)
+	providerInstID := inst.ProviderID
+	inst, err = client.WaitReady(providerInstID, 5*time.Minute)
 	if err != nil {
-		_ = client.DestroyInstance(vastaiInstanceID)
+		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("wait ready: %w", err)
 	}
@@ -116,28 +122,29 @@ func LaunchInstance(
 
 	// Deploy rclone config
 	progress("configuring R2")
-	rcloneConf := vastai.GenerateRcloneConfig(r2Cfg)
+	rcloneConf := cloud.GenerateRcloneConfig(r2Cfg)
 	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
-	if _, err := vastai.SSHRun(sshTarget, sshOpts, setupCmd); err != nil {
-		_ = client.DestroyInstance(inst.ID)
+	if _, err := cloud.SSHRun(sshTarget, sshOpts, setupCmd); err != nil {
+		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("write rclone config: %w", err)
 	}
 
 	// Deploy wrapper script
 	progress("deploying wrapper")
-	deployCmd := fmt.Sprintf("cat > /workspace/.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x /workspace/.weft-campaign.sh", wrapper)
-	if _, err := vastai.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
-		_ = client.DestroyInstance(inst.ID)
+	wsPath := client.WorkspacePath()
+	deployCmd := fmt.Sprintf("cat > %s.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x %s.weft-campaign.sh", wsPath, wrapper, wsPath)
+	if _, err := cloud.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
+		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("deploy wrapper: %w", err)
 	}
 
 	// Start via nohup
 	progress("starting jobs")
-	startCmd := "nohup bash /workspace/.weft-campaign.sh </dev/null >/dev/null 2>&1 &"
-	if _, err := vastai.SSHRun(sshTarget, sshOpts, startCmd); err != nil {
-		_ = client.DestroyInstance(inst.ID)
+	startCmd := fmt.Sprintf("nohup bash %s.weft-campaign.sh </dev/null >/dev/null 2>&1 &", wsPath)
+	if _, err := cloud.SSHRun(sshTarget, sshOpts, startCmd); err != nil {
+		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("start wrapper: %w", err)
 	}

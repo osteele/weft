@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 func TestFormatPlainUpdate_Initial(t *testing.T) {
@@ -25,8 +25,8 @@ func TestFormatPlainUpdate_Initial(t *testing.T) {
 	if !strings.Contains(output, "status=launching") {
 		t.Errorf("should contain status, got %q", output)
 	}
-	if !strings.Contains(output, "vastai=12345678") {
-		t.Errorf("should contain vastai instance ID, got %q", output)
+	if !strings.Contains(output, "provider_id=12345678") {
+		t.Errorf("should contain provider instance ID, got %q", output)
 	}
 }
 
@@ -38,10 +38,10 @@ func TestFormatPlainUpdate_WithSSH(t *testing.T) {
 			Status:           db.CloudInstanceStatusRunning,
 			VastaiInstanceID: "12345678",
 		},
-		Instance: &vastai.Instance{
-			ID:      12345678,
-			SSHHost: "ssh6.vast.ai",
-			SSHPort: 34567,
+		Instance: &cloud.Instance{
+			ProviderID: "12345678",
+			SSHHost:    "ssh6.vast.ai",
+			SSHPort:    34567,
 		},
 	}
 

@@ -10,9 +10,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/vastai"
 )
 
 // Styles for the launch TUI (allocated once, not per-render).
@@ -49,7 +49,7 @@ type launchModel struct {
 
 	instanceIDs []int64
 	database    *sql.DB
-	client      vastai.VastaiClient
+	clients     []cloud.Client
 	appConfig   *config.Config
 	launchOpts  campaign.LaunchOpts
 
@@ -73,7 +73,7 @@ type launchPhaseMsg struct {
 	phase string
 }
 
-func newLaunchModel(database *sql.DB, client vastai.VastaiClient, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts) launchModel {
 	// Build flat list of items
 	var items []listItem
 	selected := make(map[int64]bool)
@@ -113,7 +113,7 @@ func newLaunchModel(database *sql.DB, client vastai.VastaiClient, cfg *config.Co
 		selected:   selected,
 		loading:    true,
 		database:   database,
-		client:     client,
+		clients:    clients,
 		appConfig:  cfg,
 		launchOpts: opts,
 		spinner:    s,
@@ -129,12 +129,12 @@ func (m launchModel) Init() tea.Cmd {
 
 func (m launchModel) fetchOffers() tea.Cmd {
 	groups := m.groups
-	client := m.client
+	clients := m.clients
 	return func() tea.Msg {
-		if err := client.Available(); err != nil {
-			return offersLoadedMsg{err: fmt.Errorf("vastai CLI not available: %w", err)}
+		if len(clients) == 0 {
+			return offersLoadedMsg{err: fmt.Errorf("no cloud providers available")}
 		}
-		offers := campaign.FetchGroupOffers(client, groups)
+		offers := campaign.FetchGroupOffers(clients, groups)
 		return offersLoadedMsg{offers: offers}
 	}
 }
@@ -289,25 +289,25 @@ func (m launchModel) launchInstances() tea.Cmd {
 	}
 
 	database := m.database
-	client := m.client
+	clients := m.clients
 	cfg := m.appConfig
 	opts := m.launchOpts
 
 	return func() tea.Msg {
-		r2Cfg := vastai.R2Config{
+		r2Cfg := cloud.R2Config{
 			AccountID:       cfg.Vastai.R2.AccountID,
 			AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
 			SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
 			Bucket:          cfg.Vastai.R2.Bucket,
 		}
 
-		createOpts := vastai.CreateOpts{
+		createOpts := cloud.CreateOpts{
 			Image:      cfg.Vastai.DefaultImage,
 			DiskGB:     50,
 			SSHEnabled: true,
 		}
 		if createOpts.Image == "" {
-			createOpts.Image = vastai.DefaultImage
+			createOpts.Image = cloud.DefaultImage
 		}
 
 		// Create campaign batch record
@@ -326,7 +326,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		var wg sync.WaitGroup
 
 		for i, fg := range filteredGroups {
-			var offer vastai.Offer
+			var offer cloud.Offer
 			if i < len(filteredOffers) && filteredOffers[i].Offer != nil {
 				offer = *filteredOffers[i].Offer
 			} else {
@@ -337,8 +337,16 @@ func (m launchModel) launchInstances() tea.Cmd {
 			}
 
 			wg.Add(1)
-			go func(group campaign.InstanceGroup, ofr vastai.Offer) {
+			go func(group campaign.InstanceGroup, ofr cloud.Offer) {
 				defer wg.Done()
+
+				client := cloudClientForProvider(clients, ofr.Provider)
+				if client == nil {
+					mu.Lock()
+					launchErrors = append(launchErrors, fmt.Errorf("no client for provider %s", ofr.Provider))
+					mu.Unlock()
+					return
+				}
 
 				cID, err := campaign.LaunchInstance(
 					client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
@@ -364,12 +372,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
 			return instancesLaunchedMsg{err: launchErrors[0]}
 		}
-		if len(launchErrors) > 0 {
-			// Partial success
-			_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
-		} else {
-			_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
-		}
+		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
 
 		return instancesLaunchedMsg{instanceIDs: instanceIDs}
 	}
