@@ -1,0 +1,91 @@
+package campaign
+
+import (
+	"time"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/predictor"
+)
+
+// DefaultSetupOverhead is the flat time estimate for instance boot, env setup, and teardown.
+const DefaultSetupOverhead = 10 * time.Minute
+
+// DefaultJobDuration is the fallback duration when no prediction is available.
+const DefaultJobDuration = 1 * time.Hour
+
+// CostEstimate holds the cost projection for one instance group.
+type CostEstimate struct {
+	Group         InstanceGroup
+	Offer         GroupOffer
+	JobDurations  map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
+	SetupOverhead time.Duration
+	TotalTime     time.Duration
+	TotalCost     float64
+	HasPrediction bool // false = fell back to DefaultJobDuration
+}
+
+// EstimateCosts computes per-group cost estimates using the predictor for duration.
+// If predCfg is nil or not configured, falls back to 1hr/job estimates.
+func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEstimate {
+	estimates := make([]CostEstimate, len(groupOffers))
+
+	for i, go_ := range groupOffers {
+		est := CostEstimate{
+			Group:         go_.Group,
+			Offer:         go_,
+			SetupOverhead: DefaultSetupOverhead,
+			JobDurations:  make(map[int64]time.Duration),
+		}
+
+		if go_.Offer == nil {
+			estimates[i] = est
+			continue
+		}
+
+		hasPrediction := false
+		var totalJobTime time.Duration
+
+		for _, job := range go_.Group.Jobs {
+			dur := predictJobDuration(predCfg, go_.Offer.GPUName, job)
+			if dur > 0 {
+				est.JobDurations[job.ID] = dur
+				totalJobTime += dur
+				hasPrediction = true
+			} else {
+				totalJobTime += DefaultJobDuration
+			}
+		}
+
+		est.HasPrediction = hasPrediction
+		est.TotalTime = totalJobTime + est.SetupOverhead
+		est.TotalCost = est.TotalTime.Hours() * go_.Offer.CostPerHour
+
+		estimates[i] = est
+	}
+
+	return estimates
+}
+
+// predictJobDuration calls the predictor for a single job.
+// Returns 0 if predictor is not configured or prediction fails.
+func predictJobDuration(predCfg *predictor.Config, gpuClass string, job *db.Job) time.Duration {
+	if predCfg == nil || !predCfg.Configured() {
+		return 0
+	}
+
+	result, err := predictor.Predict(*predCfg, "", job.Project, gpuClass, job.Command)
+	if err != nil || result == nil || result.DurationS == nil {
+		return 0
+	}
+
+	return time.Duration(result.DurationS.Mean) * time.Second
+}
+
+// TotalEstimatedCostFromEstimates returns the total cost across all estimates.
+func TotalEstimatedCostFromEstimates(estimates []CostEstimate) float64 {
+	var total float64
+	for _, est := range estimates {
+		total += est.TotalCost
+	}
+	return total
+}

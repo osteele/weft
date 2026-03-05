@@ -25,6 +25,10 @@ func GenerateCampaignWrapper(campaignID int64, jobs []CampaignJob, r2Bucket stri
 	b.WriteString(fmt.Sprintf("R2_BUCKET=%q\n", r2Bucket))
 	b.WriteString("CAMPAIGN_FAILED=0\n\n")
 
+	// Phase timing: campaign start
+	b.WriteString("# Phase timing\n")
+	b.WriteString("date -u +%s > /tmp/phase_start\n\n")
+
 	for i, job := range jobs {
 		b.WriteString(fmt.Sprintf("# === Job %d (ID: %d) ===\n", i+1, job.ID))
 		b.WriteString(fmt.Sprintf("JOB_ID=%d\n", job.ID))
@@ -36,8 +40,24 @@ func GenerateCampaignWrapper(campaignID int64, jobs []CampaignJob, r2Bucket stri
 
 		b.WriteString("echo \"[campaign] Starting job $JOB_ID\"\n")
 		b.WriteString("cd /workspace\n")
+
+		// Cache-state probes before job
+		b.WriteString("du -sb ~/.cache/huggingface 2>/dev/null | cut -f1 > /tmp/cache_hf_$JOB_ID || echo 0 > /tmp/cache_hf_$JOB_ID\n")
+		b.WriteString("du -sb ~/.cache/uv 2>/dev/null | cut -f1 > /tmp/cache_uv_$JOB_ID || echo 0 > /tmp/cache_uv_$JOB_ID\n")
+
+		b.WriteString("date -u +%s > /tmp/phase_run_start_$JOB_ID\n")
+
+		// Start GPU monitor for this job
+		b.WriteString("(while true; do\n")
+		b.WriteString("    nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits >> /tmp/gpu_monitor_$JOB_ID.csv 2>/dev/null\n")
+		b.WriteString("    sleep 5\n")
+		b.WriteString("done) &\n")
+		b.WriteString("GPU_MONITOR_PID=$!\n")
+
 		b.WriteString(fmt.Sprintf("{ %s ; } > /tmp/stdout-$JOB_ID.log 2> /tmp/stderr-$JOB_ID.log\n", job.Command))
 		b.WriteString("JOB_EXIT=$?\n")
+		b.WriteString("kill $GPU_MONITOR_PID 2>/dev/null; wait $GPU_MONITOR_PID 2>/dev/null\n")
+		b.WriteString("date -u +%s > /tmp/phase_run_end_$JOB_ID\n")
 		b.WriteString("echo $JOB_EXIT > /tmp/exit-$JOB_ID\n")
 		b.WriteString("date -u +%s > /tmp/end-$JOB_ID\n\n")
 
@@ -45,6 +65,10 @@ func GenerateCampaignWrapper(campaignID int64, jobs []CampaignJob, r2Bucket stri
 		b.WriteString("# Upload job results\n")
 		b.WriteString("mkdir -p /tmp/results-$JOB_ID\n")
 		b.WriteString("cp /tmp/stdout-$JOB_ID.log /tmp/stderr-$JOB_ID.log /tmp/exit-$JOB_ID /tmp/end-$JOB_ID /tmp/results-$JOB_ID/\n")
+		b.WriteString("cp /tmp/phase_run_start_$JOB_ID /tmp/phase_run_end_$JOB_ID /tmp/results-$JOB_ID/ 2>/dev/null\n")
+		b.WriteString("cp /tmp/cache_hf_$JOB_ID /tmp/cache_uv_$JOB_ID /tmp/gpu_monitor_$JOB_ID.csv /tmp/results-$JOB_ID/ 2>/dev/null\n")
+		b.WriteString("du -sb /tmp/results-$JOB_ID/ 2>/dev/null | cut -f1 > /tmp/results-$JOB_ID/upload_results_bytes\n")
+		b.WriteString("du -sb /workspace/ 2>/dev/null | cut -f1 > /tmp/results-$JOB_ID/upload_workspace_bytes\n")
 		b.WriteString("if [ $JOB_EXIT -ne 0 ]; then\n")
 		b.WriteString("    mkdir -p /tmp/results-$JOB_ID/debug\n")
 		b.WriteString("    nvidia-smi > /tmp/results-$JOB_ID/debug/nvidia-smi.log 2>/dev/null\n")
@@ -61,6 +85,13 @@ func GenerateCampaignWrapper(campaignID int64, jobs []CampaignJob, r2Bucket stri
 		}
 		b.WriteString("\n")
 	}
+
+	// Upload campaign-level phase timing
+	b.WriteString("# Upload campaign phase timing\n")
+	b.WriteString("date -u +%s > /tmp/phase_end\n")
+	b.WriteString("mkdir -p /tmp/campaign-results\n")
+	b.WriteString("cp /tmp/phase_start /tmp/phase_end /tmp/campaign-results/\n")
+	b.WriteString("rclone copy /tmp/campaign-results/ \"r2:$R2_BUCKET/campaigns/$CAMPAIGN_ID/results/\" 2>/dev/null\n\n")
 
 	// Campaign completion marker
 	b.WriteString("# Campaign completion marker\n")

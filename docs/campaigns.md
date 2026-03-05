@@ -164,11 +164,14 @@ This creates a campaign with a single instance for that job.
 2. **Setup**: Once the instance is running, weft deploys rclone configuration
    and a wrapper script via SSH.
 3. **Execution**: The wrapper script runs each assigned job sequentially,
-   capturing stdout/stderr and exit codes.
+   capturing stdout/stderr, exit codes, phase timing, cache state, and GPU
+   utilization.
 4. **Result upload**: On completion, the wrapper uploads results (logs, exit
-   code, debug artifacts) to R2 under `campaigns/<instance-id>/`.
+   code, phase timings, GPU monitor data, debug artifacts) to R2 under
+   `jobs/<job-id>/`.
 5. **Sweep**: The coordinator's sweep loop polls R2 for completed markers,
-   downloads results, updates job statuses, and cleans up R2.
+   downloads results, extracts phase timings and GPU stats into the
+   `job_phase_timings` table, updates job statuses, and cleans up R2.
 6. **Teardown**: The instance self-destructs after the wrapper completes.
    Time/budget limits also trigger automatic destruction.
 
@@ -203,13 +206,63 @@ vastai:
     secret_access_key: "..."
 ```
 
+## Cost estimation
+
+When launching a campaign, weft estimates the total cost per GPU group. If the
+job-duration predictor is configured (`predictor.project_path` in config), each
+job's predicted duration is summed with a 10-minute setup overhead. Otherwise a
+default of 1 hour per job is used. The cost table shows:
+
+- Resolved GPU name (e.g., "HOPPER+ → H200 NVL")
+- Number of jobs, GPU memory, hourly rate
+- Estimated duration and total cost
+
+## Data collection
+
+The wrapper scripts collect data for duration prediction and cost analysis:
+
+### Phase timing
+
+Each job records timestamps for wrapper start, setup start/end, run start/end,
+and upload start/end. These are stored in the `job_phase_timings` table, allowing
+the predictor to model setup, execution, and upload phases independently.
+
+### Cache-state probes (campaign wrapper)
+
+Before each job in a campaign, the wrapper records the size of `~/.cache/huggingface`
+and `~/.cache/uv`. This lets the predictor distinguish cold-cache first jobs from
+warm-cache subsequent jobs.
+
+### GPU monitoring
+
+During job execution, a background `nvidia-smi` sampling loop (5s interval)
+records GPU utilization and memory usage. The sweep loop extracts peak GPU memory,
+mean GPU utilization, and peak GPU utilization from the CSV and stores them in
+`job_phase_timings`.
+
+### Upload sizes
+
+The wrapper records the byte sizes of the results directory and workspace before
+uploading, so upload duration can be correlated with transfer size.
+
+### Campaign job position
+
+Jobs in a campaign are assigned a 0-based `campaign_job_index` indicating their
+position in the execution sequence. This lets the predictor use position as a
+feature (index 0 = cold caches, index 1+ = warm caches).
+
 ## DB schema
 
-Campaigns use two tables:
+Campaigns use three tables:
 
 - **`campaigns`**: Batch record with status (`planned`, `launching`, `running`,
   `completed`, `failed`, `cancelled`)
 - **`cloud_instances`**: Individual Vast.ai deployments linked to a campaign,
-  tracking GPU spec, spend limits, Vast.ai instance ID, and actual cost
+  tracking GPU spec, resolved GPU name, cost per hour, bandwidth, reliability,
+  spend limits, Vast.ai instance ID, and lifecycle timestamps
+  (`created_at`, `ready_at`, `launched_at`, `ended_at`)
+- **`job_phase_timings`**: Per-job phase timestamps, cache state, upload sizes,
+  and GPU monitoring summaries
 
-Jobs link to cloud instances via `cloud_instance_id`.
+Jobs link to cloud instances via `cloud_instance_id` and record their campaign
+position via `campaign_job_index`.

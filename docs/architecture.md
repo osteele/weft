@@ -116,7 +116,8 @@ weft/
 │   ├── prestage/          # Pre-staging (rsync missing data before dispatch)
 │   ├── runner/            # Go queue runner (production agent)
 │   ├── agentdeploy/       # Cross-compile and deploy agent binary to hosts
-│   ├── vastai/            # Vast.ai cloud GPU CLI wrapper
+│   ├── campaign/          # Cloud GPU campaigns (launch, cost estimation, formatting)
+│   ├── vastai/            # Vast.ai cloud GPU CLI wrapper and wrapper scripts
 │   ├── db/                # Database operations (SQLite)
 │   ├── ops/               # Unified job operations (CLI + TUI)
 │   ├── ssh/               # SSH operations and connection pool

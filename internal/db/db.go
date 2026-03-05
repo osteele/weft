@@ -576,6 +576,53 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create job_phase_timings table
+	jobPhaseTimingsSchema := `
+	CREATE TABLE IF NOT EXISTS job_phase_timings (
+		job_id INTEGER PRIMARY KEY REFERENCES jobs(id),
+		wrapper_start INTEGER,
+		setup_start INTEGER,
+		setup_end INTEGER,
+		run_start INTEGER,
+		run_end INTEGER,
+		upload_start INTEGER,
+		upload_end INTEGER,
+		upload_results_bytes INTEGER,
+		upload_workspace_bytes INTEGER,
+		cache_hf_bytes INTEGER,
+		cache_uv_bytes INTEGER,
+		peak_gpu_mem_mib INTEGER,
+		mean_gpu_util INTEGER,
+		peak_gpu_util INTEGER
+	);
+	`
+	if _, err := db.Exec(jobPhaseTimingsSchema); err != nil {
+		return err
+	}
+
+	// Migration: add campaign_job_index to jobs
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN campaign_job_index INTEGER`); err != nil {
+		return err
+	}
+
+	// Migration: add offer metadata and phase timing columns to cloud_instances
+	cloudInstanceMigrations := []string{
+		`ALTER TABLE cloud_instances ADD COLUMN ready_at INTEGER`,
+		`ALTER TABLE cloud_instances ADD COLUMN resolved_gpu_name TEXT`,
+		`ALTER TABLE cloud_instances ADD COLUMN cost_per_hour_cents INTEGER`,
+		`ALTER TABLE cloud_instances ADD COLUMN num_gpus INTEGER`,
+		`ALTER TABLE cloud_instances ADD COLUMN dl_perf REAL`,
+		`ALTER TABLE cloud_instances ADD COLUMN reliability REAL`,
+		`ALTER TABLE cloud_instances ADD COLUMN inet_down_mbps REAL`,
+		`ALTER TABLE cloud_instances ADD COLUMN inet_up_mbps REAL`,
+		`ALTER TABLE cloud_instances ADD COLUMN cuda_version REAL`,
+	}
+	for _, stmt := range cloudInstanceMigrations {
+		if err := addColumnIfMissing(db, stmt); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 

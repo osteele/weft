@@ -8,6 +8,23 @@ import (
 	"github.com/osteele/weft/internal/vastai"
 )
 
+func TestFormatResolvedGPU(t *testing.T) {
+	tests := []struct {
+		gpuSpec, resolvedName, want string
+	}{
+		{"L40S", "L40S", "L40S"},                              // exact match
+		{"l40s", "L40S", "L40S"},                              // case-insensitive match
+		{"HOPPER+", "H200 NVL", "HOPPER+ → H200 NVL"},         // constraint differs
+		{"A100 ≥80GB", "A100 PCIE", "A100 ≥80GB → A100 PCIE"}, // constraint with mem
+	}
+	for _, tt := range tests {
+		got := FormatResolvedGPU(tt.gpuSpec, tt.resolvedName)
+		if got != tt.want {
+			t.Errorf("FormatResolvedGPU(%q, %q) = %q, want %q", tt.gpuSpec, tt.resolvedName, got, tt.want)
+		}
+	}
+}
+
 func TestFormatJobLine(t *testing.T) {
 	job := &db.Job{ID: 88, Description: "EXP-030: Idle power investigation"}
 	line := FormatJobLine(job)

@@ -145,7 +145,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Dry run: print plan table
 	if campaignLaunchDryRun {
-		return runDryRunPlan(groups)
+		return runDryRunPlan(cfg, groups)
 	}
 
 	// Check R2 config before entering interactive mode
@@ -192,13 +192,16 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Println("Searching for GPU offers...")
 	groupOffers := campaign.FetchGroupOffers(client, groups)
 
-	// Print plan summary
+	// Print plan summary with cost estimates
 	totalJobs := 0
 	for _, g := range groups {
 		totalJobs += len(g.Jobs)
 	}
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groups))
-	fmt.Println(campaign.FormatCostTable(groupOffers))
+
+	predCfg := buildPredictorConfig(cfg)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg)
+	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Check all groups have offers
 	for _, go_ := range groupOffers {
@@ -302,33 +305,44 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	return nil
 }
 
-func runDryRunPlan(groups []campaign.InstanceGroup) error {
+func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
 	client := vastai.NewClient()
 	groupOffers := campaign.FetchGroupOffers(client, groups)
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "GROUP\tGPU SPEC\tJOBS\tJOB IDS\tBEST OFFER\tCOST/HR\n")
+	predCfg := buildPredictorConfig(cfg)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg)
 
-	for i, go_ := range groupOffers {
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tCOST/HR\tEST TIME\tEST COST\n")
+
+	for i, est := range estimates {
+		go_ := groupOffers[i]
 		jobIDs := campaign.FormatJobIDs(go_.Group.Jobs, 5)
 
-		offerStr := "—"
+		gpuStr := go_.Group.GPUSpec()
+		memStr := "—"
 		costStr := "—"
+		durStr := "—"
+		estCostStr := "—"
 		if go_.Err != nil {
-			offerStr = fmt.Sprintf("error: %v", go_.Err)
+			gpuStr = fmt.Sprintf("%s (error: %v)", go_.Group.GPUSpec(), go_.Err)
 		} else if go_.Offer != nil {
-			offerStr = fmt.Sprintf("%s %dGB (id:%d)", go_.Offer.GPUName, int(go_.Offer.GPUMemGB), go_.Offer.ID)
+			gpuStr = campaign.FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName)
+			memStr = fmt.Sprintf("%dGB", int(go_.Offer.GPUMemGB))
 			costStr = fmt.Sprintf("$%.2f/hr", go_.Offer.CostPerHour)
+			durStr = campaign.FormatEstDuration(est.TotalTime, est.HasPrediction)
+			estCostStr = fmt.Sprintf("~$%.2f", est.TotalCost)
 		} else {
-			offerStr = "no offers found"
+			gpuStr = fmt.Sprintf("%s (no offers)", go_.Group.GPUSpec())
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%s\n",
-			i+1, go_.Group.GPUSpec(), len(go_.Group.Jobs), jobIDs, offerStr, costStr)
+		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+			i+1, gpuStr, len(go_.Group.Jobs), jobIDs, memStr, costStr, durStr, estCostStr)
 	}
 	w.Flush()
 
-	fmt.Println()
+	total := campaign.TotalEstimatedCostFromEstimates(estimates)
+	fmt.Printf("\nEstimated total: ~$%.2f\n", total)
 	fmt.Println("To launch interactively: weft campaign launch")
 	return nil
 }
@@ -436,9 +450,9 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	var id int64
-	if _, err := fmt.Sscanf(args[0], "%d", &id); err != nil {
-		return fmt.Errorf("invalid campaign ID: %s", args[0])
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid campaign ID %q: %w", args[0], err)
 	}
 
 	c, err := db.GetCampaign(database, id)
@@ -486,11 +500,8 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 func parseLaunchOpts() campaign.LaunchOpts {
 	opts := campaign.LaunchOpts{}
 	if campaignLaunchMaxSpend != "" {
+		cleaned := strings.TrimPrefix(campaignLaunchMaxSpend, "$")
 		var dollars float64
-		cleaned := campaignLaunchMaxSpend
-		if len(cleaned) > 0 && cleaned[0] == '$' {
-			cleaned = cleaned[1:]
-		}
 		if _, err := fmt.Sscanf(cleaned, "%f", &dollars); err == nil {
 			opts.MaxSpendCents = int(dollars * 100)
 		}

@@ -25,7 +25,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 		gpu_class TEXT,
 		gpu_mem_gb INTEGER,
 		command TEXT,
-		cloud_instance_id INTEGER
+		cloud_instance_id INTEGER,
+		campaign_job_index INTEGER
 	);
 	CREATE TABLE cloud_instances (
 		id INTEGER PRIMARY KEY,
@@ -40,8 +41,17 @@ func setupTestDB(t *testing.T) *sql.DB {
 		actual_spend_cents INTEGER,
 		vastai_instance_id TEXT,
 		created_at INTEGER,
+		ready_at INTEGER,
 		launched_at INTEGER,
-		ended_at INTEGER
+		ended_at INTEGER,
+		resolved_gpu_name TEXT,
+		cost_per_hour_cents INTEGER,
+		num_gpus INTEGER,
+		dl_perf REAL,
+		reliability REAL,
+		inet_down_mbps REAL,
+		inet_up_mbps REAL,
+		cuda_version REAL
 	);
 	CREATE TABLE campaigns (
 		id INTEGER PRIMARY KEY,

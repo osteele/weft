@@ -5,6 +5,13 @@ import (
 	"time"
 )
 
+// cloudInstanceSelectColumns is the column list for SELECT queries on cloud_instances.
+const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id,
+		max_spend_cents, max_time_seconds, actual_spend_cents,
+		created_at, ready_at, launched_at, ended_at,
+		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
+		inet_down_mbps, inet_up_mbps, cuda_version`
+
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
 	CloudInstanceStatusPlanned   = "planned"
@@ -29,18 +36,34 @@ type CloudInstance struct {
 	MaxTimeSeconds   int
 	ActualSpendCents int
 	CreatedAt        int64
+	ReadyAt          *int64 // Vast.ai instance ready (before SSH setup)
 	LaunchedAt       *int64
 	EndedAt          *int64
+
+	// Offer metadata (captured at launch)
+	ResolvedGPUName  string
+	CostPerHourCents int
+	NumGPUs          int
+	DLPerf           float64
+	Reliability      float64
+	InetDownMbps     float64
+	InetUpMbps       float64
+	CUDAVersion      float64
 }
 
 // CreateCloudInstance inserts a new cloud instance record and returns its ID.
 func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 	now := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO cloud_instances (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO cloud_instances (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
+		 max_spend_cents, max_time_seconds, created_at,
+		 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
+		 inet_down_mbps, inet_up_mbps, cuda_version)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 		c.MaxSpendCents, c.MaxTimeSeconds, now,
+		c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
+		c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
 	)
 	if err != nil {
 		return 0, err
@@ -51,10 +74,7 @@ func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 // GetCloudInstance retrieves a cloud instance by ID.
 func GetCloudInstance(db *sql.DB, id int64) (*CloudInstance, error) {
 	row := db.QueryRow(
-		`SELECT id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id,
-		        max_spend_cents, max_time_seconds, actual_spend_cents,
-		        created_at, launched_at, ended_at
-		 FROM cloud_instances WHERE id = ?`, id,
+		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE id = ?`, id,
 	)
 	c, err := scanCloudInstanceFrom(row)
 	if err == sql.ErrNoRows {
@@ -66,10 +86,7 @@ func GetCloudInstance(db *sql.DB, id int64) (*CloudInstance, error) {
 // ListCloudInstances returns all cloud instances ordered by creation time descending.
 func ListCloudInstances(db *sql.DB) ([]*CloudInstance, error) {
 	rows, err := db.Query(
-		`SELECT id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id,
-		        max_spend_cents, max_time_seconds, actual_spend_cents,
-		        created_at, launched_at, ended_at
-		 FROM cloud_instances ORDER BY created_at DESC`,
+		`SELECT ` + cloudInstanceSelectColumns + ` FROM cloud_instances ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, err
@@ -103,6 +120,13 @@ func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string) error {
 	}
 }
 
+// SetCloudInstanceReadyAt records when the Vast.ai instance became ready.
+func SetCloudInstanceReadyAt(db *sql.DB, id int64) error {
+	now := time.Now().Unix()
+	_, err := db.Exec(`UPDATE cloud_instances SET ready_at = ? WHERE id = ?`, now, id)
+	return err
+}
+
 // SetCloudInstanceVastaiID sets the Vast.ai instance ID for a cloud instance.
 func SetCloudInstanceVastaiID(db *sql.DB, id int64, vastaiID string) error {
 	_, err := db.Exec(`UPDATE cloud_instances SET vastai_instance_id = ? WHERE id = ?`, vastaiID, id)
@@ -118,6 +142,12 @@ func SetCloudInstanceActualSpend(db *sql.DB, id int64, cents int) error {
 // SetJobCloudInstanceID associates a job with a cloud instance.
 func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 	_, err := db.Exec(`UPDATE jobs SET cloud_instance_id = ? WHERE id = ?`, instanceID, jobID)
+	return err
+}
+
+// SetJobCampaignIndex sets the 0-based position of a job within its campaign sequence.
+func SetJobCampaignIndex(db *sql.DB, jobID int64, index int) error {
+	_, err := db.Exec(`UPDATE jobs SET campaign_job_index = ? WHERE id = ?`, index, jobID)
 	return err
 }
 
@@ -187,10 +217,7 @@ func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 // GetCampaignInstances returns all cloud instances for a campaign.
 func GetCampaignInstances(db *sql.DB, campaignID int64) ([]*CloudInstance, error) {
 	rows, err := db.Query(
-		`SELECT id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id,
-		        max_spend_cents, max_time_seconds, actual_spend_cents,
-		        created_at, launched_at, ended_at
-		 FROM cloud_instances WHERE campaign_id = ? ORDER BY created_at ASC`, campaignID,
+		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE campaign_id = ? ORDER BY created_at ASC`, campaignID,
 	)
 	if err != nil {
 		return nil, err
@@ -218,12 +245,17 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var campaignID sql.NullInt64
 	var gpuSpec, gpuClass, vastaiInstanceID sql.NullString
 	var gpuMemGB, maxSpend, maxTime, actualSpend sql.NullInt64
-	var launchedAt, endedAt sql.NullInt64
+	var readyAt, launchedAt, endedAt sql.NullInt64
+	var resolvedGPUName sql.NullString
+	var costPerHourCents, numGPUs sql.NullInt64
+	var dlPerf, reliability, inetDown, inetUp, cudaVersion sql.NullFloat64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
 		&vastaiInstanceID, &maxSpend, &maxTime, &actualSpend,
-		&c.CreatedAt, &launchedAt, &endedAt,
+		&c.CreatedAt, &readyAt, &launchedAt, &endedAt,
+		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
+		&inetDown, &inetUp, &cudaVersion,
 	)
 	if err != nil {
 		return nil, err
@@ -253,11 +285,38 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	if actualSpend.Valid {
 		c.ActualSpendCents = int(actualSpend.Int64)
 	}
+	if readyAt.Valid {
+		c.ReadyAt = &readyAt.Int64
+	}
 	if launchedAt.Valid {
 		c.LaunchedAt = &launchedAt.Int64
 	}
 	if endedAt.Valid {
 		c.EndedAt = &endedAt.Int64
+	}
+	if resolvedGPUName.Valid {
+		c.ResolvedGPUName = resolvedGPUName.String
+	}
+	if costPerHourCents.Valid {
+		c.CostPerHourCents = int(costPerHourCents.Int64)
+	}
+	if numGPUs.Valid {
+		c.NumGPUs = int(numGPUs.Int64)
+	}
+	if dlPerf.Valid {
+		c.DLPerf = dlPerf.Float64
+	}
+	if reliability.Valid {
+		c.Reliability = reliability.Float64
+	}
+	if inetDown.Valid {
+		c.InetDownMbps = inetDown.Float64
+	}
+	if inetUp.Valid {
+		c.InetUpMbps = inetUp.Float64
+	}
+	if cudaVersion.Valid {
+		c.CUDAVersion = cudaVersion.Float64
 	}
 	return &c, nil
 }

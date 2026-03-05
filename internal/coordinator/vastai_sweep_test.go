@@ -96,7 +96,9 @@ func TestCheckCloudInstanceLimitsHandlesUnavailableClient(t *testing.T) {
 		campaign_id INTEGER, status TEXT, provider TEXT, gpu_spec TEXT,
 		gpu_class TEXT, gpu_mem_gb INTEGER, vastai_instance_id TEXT,
 		max_spend_cents INTEGER, max_time_seconds INTEGER, actual_spend_cents INTEGER,
-		created_at INTEGER, launched_at INTEGER, ended_at INTEGER
+		created_at INTEGER, ready_at INTEGER, launched_at INTEGER, ended_at INTEGER,
+		resolved_gpu_name TEXT, cost_per_hour_cents INTEGER, num_gpus INTEGER,
+		dl_perf REAL, reliability REAL, inet_down_mbps REAL, inet_up_mbps REAL, cuda_version REAL
 	)`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}

@@ -23,16 +23,37 @@ func GenerateWrapper(jobID int64, command string, r2Bucket string) string {
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("set -o pipefail\n\n")
 
-	b.WriteString(fmt.Sprintf("JOB_ID=%q\n", fmt.Sprintf("%d", jobID)))
+	b.WriteString(fmt.Sprintf("JOB_ID=\"%d\"\n", jobID))
 	b.WriteString(fmt.Sprintf("R2_BUCKET=%q\n", r2Bucket))
 	b.WriteString(`R2_PREFIX="jobs/$JOB_ID"`)
 	b.WriteString("\n\n")
 
-	// Run the actual job command
-	b.WriteString("# Run the job command\n")
+	// Phase timing: wrapper start
+	b.WriteString("# Phase timing\n")
+	b.WriteString("date -u +%s > /tmp/phase_start\n\n")
+
+	// Setup phase (pre-job)
+	b.WriteString("# --- Setup phase ---\n")
+	b.WriteString("date -u +%s > /tmp/phase_setup_start\n")
 	b.WriteString("cd /workspace\n")
+	b.WriteString("date -u +%s > /tmp/phase_setup_end\n\n")
+
+	// Job execution phase
+	b.WriteString("# --- Job execution phase ---\n")
+	b.WriteString("date -u +%s > /tmp/phase_run_start\n")
+
+	// Start GPU monitor in background
+	b.WriteString("# GPU monitoring\n")
+	b.WriteString("(while true; do\n")
+	b.WriteString("    nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits >> /tmp/gpu_monitor.csv 2>/dev/null\n")
+	b.WriteString("    sleep 5\n")
+	b.WriteString("done) &\n")
+	b.WriteString("GPU_MONITOR_PID=$!\n\n")
+
 	b.WriteString(fmt.Sprintf("{ %s ; } > /tmp/stdout.log 2> /tmp/stderr.log\n", command))
-	b.WriteString("EXIT_CODE=$?\n\n")
+	b.WriteString("EXIT_CODE=$?\n")
+	b.WriteString("kill $GPU_MONITOR_PID 2>/dev/null; wait $GPU_MONITOR_PID 2>/dev/null\n")
+	b.WriteString("date -u +%s > /tmp/phase_run_end\n\n")
 
 	// Capture metadata
 	b.WriteString("# Capture metadata\n")
@@ -55,7 +76,18 @@ func GenerateWrapper(jobID int64, command string, r2Bucket string) string {
 	b.WriteString("# Assemble results\n")
 	b.WriteString("mkdir -p /tmp/results\n")
 	b.WriteString("cp /tmp/stdout.log /tmp/stderr.log /tmp/exit_code /tmp/end_time /tmp/instance_id /tmp/results/\n")
+	b.WriteString("cp /tmp/phase_* /tmp/results/\n")
+	b.WriteString("cp /tmp/gpu_monitor.csv /tmp/results/ 2>/dev/null\n")
 	b.WriteString("[ -d /tmp/debug ] && cp -r /tmp/debug /tmp/results/\n\n")
+
+	// Record upload sizes
+	b.WriteString("# Record upload sizes\n")
+	b.WriteString("du -sb /tmp/results/ 2>/dev/null | cut -f1 > /tmp/results/upload_results_bytes\n")
+	b.WriteString("du -sb /workspace/ 2>/dev/null | cut -f1 > /tmp/results/upload_workspace_bytes\n\n")
+
+	// Upload phase
+	b.WriteString("# --- Upload phase ---\n")
+	b.WriteString("date -u +%s > /tmp/results/phase_upload_start\n")
 
 	// Upload results to R2 with retry
 	b.WriteString("# Upload results to R2 (retry up to 3 times)\n")
@@ -68,7 +100,8 @@ func GenerateWrapper(jobID int64, command string, r2Bucket string) string {
 	// Upload workspace outputs
 	b.WriteString("# Upload workspace outputs to R2\n")
 	b.WriteString(`rclone copy /workspace/ "r2:$R2_BUCKET/$R2_PREFIX/workspace/" 2>/dev/null`)
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	b.WriteString("date -u +%s > /tmp/phase_upload_end\n\n")
 
 	// Write completion marker
 	b.WriteString("# Write completion marker\n")

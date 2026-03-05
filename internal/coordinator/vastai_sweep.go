@@ -16,24 +16,31 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
-// sweepVastaiResults polls R2 for completed Vast.ai job results and processes them.
-// It also checks for orphaned instances that should be destroyed.
-func (c *Coordinator) sweepVastaiResults() {
+// loadR2Client creates an R2 client from the app config.
+// Returns nil, nil if R2 is not configured.
+func (c *Coordinator) loadR2Client() (*r2.Client, *config.Config, error) {
 	cfg, err := config.Load()
 	if err != nil || cfg.Vastai.R2.Bucket == "" {
-		return // R2 not configured
+		return nil, cfg, nil
 	}
-
-	r2Cfg := r2.Config{
+	client, err := r2.New(r2.Config{
 		AccountID:       cfg.Vastai.R2.AccountID,
 		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
 		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
 		Bucket:          cfg.Vastai.R2.Bucket,
-	}
+	})
+	return client, cfg, err
+}
 
-	r2Client, err := r2.New(r2Cfg)
+// sweepVastaiResults polls R2 for completed Vast.ai job results and processes them.
+// It also checks for orphaned instances that should be destroyed.
+func (c *Coordinator) sweepVastaiResults() {
+	r2Client, cfg, err := c.loadR2Client()
 	if err != nil {
 		c.logger.Printf("r2 client: %v", err)
+		return
+	}
+	if r2Client == nil {
 		return
 	}
 
@@ -109,12 +116,10 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		return
 	}
 
-	// Compute and record cost
-	job, err := db.GetJobByID(c.db, jobID)
-	if err == nil && job != nil && job.StartTime > 0 {
-		runtime := time.Duration(endTimeUnix-job.StartTime) * time.Second
-		if job.VastaiInstanceID != nil {
-			_ = runtime // Cost calculation requires offer data; handled at launch
+	// Extract and store phase timing data
+	if timings := extractPhaseTimings(jobID, tmpDir); timings != nil {
+		if err := db.UpsertJobPhaseTimings(c.db, timings); err != nil {
+			c.logger.Printf("vastai sweep: store phase timings for job %d: %v", jobID, err)
 		}
 	}
 
@@ -162,6 +167,131 @@ func detectFailureReason(tmpDir string, exitCode int) string {
 	return fmt.Sprintf("exit_%d", exitCode)
 }
 
+// extractPhaseTimings reads phase_* files and GPU monitor CSV from the results dir.
+// Returns nil if no phase files are found (non-instrumented wrapper).
+func extractPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
+	t := &db.JobPhaseTimings{JobID: jobID}
+	found := false
+
+	readInt64 := func(name string) *int64 {
+		data, err := os.ReadFile(filepath.Join(tmpDir, name))
+		if err != nil {
+			return nil
+		}
+		v, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		if err != nil {
+			return nil
+		}
+		return &v
+	}
+
+	readTimestamp := func(name string) *int64 {
+		v := readInt64(name)
+		if v != nil {
+			found = true
+		}
+		return v
+	}
+
+	// Phase timestamps (single-job wrapper names)
+	t.WrapperStart = readTimestamp("phase_start")
+	t.SetupStart = readTimestamp("phase_setup_start")
+	t.SetupEnd = readTimestamp("phase_setup_end")
+	t.RunStart = readTimestamp("phase_run_start")
+	t.RunEnd = readTimestamp("phase_run_end")
+	t.UploadStart = readTimestamp("phase_upload_start")
+	t.UploadEnd = readTimestamp("phase_upload_end")
+
+	// Campaign wrapper uses per-job names: phase_run_start_$JOB_ID
+	if t.RunStart == nil {
+		t.RunStart = readTimestamp(fmt.Sprintf("phase_run_start_%d", jobID))
+	}
+	if t.RunEnd == nil {
+		t.RunEnd = readTimestamp(fmt.Sprintf("phase_run_end_%d", jobID))
+	}
+
+	// Upload sizes
+	t.UploadResultsBytes = readInt64("upload_results_bytes")
+	t.UploadWorkspaceBytes = readInt64("upload_workspace_bytes")
+
+	// Cache state probes
+	t.CacheHFBytes = readInt64(fmt.Sprintf("cache_hf_%d", jobID))
+	t.CacheUVBytes = readInt64(fmt.Sprintf("cache_uv_%d", jobID))
+
+	// GPU monitor summary — single-job wrapper writes gpu_monitor.csv,
+	// campaign wrapper writes gpu_monitor_$JOB_ID.csv
+	gpuMonitorPath := filepath.Join(tmpDir, fmt.Sprintf("gpu_monitor_%d.csv", jobID))
+	if _, err := os.Stat(gpuMonitorPath); err != nil {
+		gpuMonitorPath = filepath.Join(tmpDir, "gpu_monitor.csv")
+	}
+	gpuPeak, gpuMean, gpuPeakUtil := parseGPUMonitor(gpuMonitorPath)
+	if gpuPeak >= 0 {
+		v := int(gpuPeak)
+		t.PeakGPUMemMiB = &v
+	}
+	if gpuMean >= 0 {
+		v := int(gpuMean)
+		t.MeanGPUUtil = &v
+	}
+	if gpuPeakUtil >= 0 {
+		v := int(gpuPeakUtil)
+		t.PeakGPUUtil = &v
+	}
+
+	if !found {
+		return nil
+	}
+	return t
+}
+
+// parseGPUMonitor reads a GPU monitor CSV and returns peak mem (MiB), mean util (%), peak util (%).
+// Returns -1 for each value if the file doesn't exist or can't be parsed.
+func parseGPUMonitor(path string) (peakMemMiB, meanUtil, peakUtil float64) {
+	peakMemMiB, meanUtil, peakUtil = -1, -1, -1
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 {
+		return
+	}
+
+	var totalUtil float64
+	var count int
+	var maxMem, maxUtil float64
+
+	for _, line := range lines {
+		fields := strings.Split(line, ",")
+		if len(fields) < 2 {
+			continue
+		}
+		// Fields: utilization.gpu, memory.used (from nvidia-smi --query-gpu)
+		util, err1 := strconv.ParseFloat(strings.TrimSpace(fields[0]), 64)
+		mem, err2 := strconv.ParseFloat(strings.TrimSpace(fields[1]), 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		count++
+		totalUtil += util
+		if mem > maxMem {
+			maxMem = mem
+		}
+		if util > maxUtil {
+			maxUtil = util
+		}
+	}
+
+	if count > 0 {
+		peakMemMiB = maxMem
+		meanUtil = totalUtil / float64(count)
+		peakUtil = maxUtil
+	}
+	return
+}
+
 // writeVastaiLogsToCache writes stdout/stderr from R2 results into the local log cache.
 func writeVastaiLogsToCache(jobID int64, tmpDir string) {
 	stdoutPath := filepath.Join(tmpDir, "stdout.log")
@@ -187,21 +317,12 @@ func writeVastaiLogsToCache(jobID int64, tmpDir string) {
 // sweepCampaignResults polls R2 for completed campaign markers and processes results.
 // "campaign" in R2 paths refers to the wrapper script running on a single cloud instance.
 func (c *Coordinator) sweepCampaignResults() {
-	cfg, err := config.Load()
-	if err != nil || cfg.Vastai.R2.Bucket == "" {
-		return
-	}
-
-	r2Cfg := r2.Config{
-		AccountID:       cfg.Vastai.R2.AccountID,
-		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
-		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
-		Bucket:          cfg.Vastai.R2.Bucket,
-	}
-
-	r2Client, err := r2.New(r2Cfg)
+	r2Client, cfg, err := c.loadR2Client()
 	if err != nil {
 		c.logger.Printf("instance sweep: r2 client: %v", err)
+		return
+	}
+	if r2Client == nil {
 		return
 	}
 

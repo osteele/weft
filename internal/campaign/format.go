@@ -3,10 +3,31 @@ package campaign
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/vastai"
 )
+
+// FormatResolvedGPU formats the GPU constraint and resolved name.
+// When the constraint matches the resolved name (normalized), shows just the resolved name.
+// Otherwise shows "CONSTRAINT → RESOLVED".
+func FormatResolvedGPU(gpuSpec string, resolvedName string) string {
+	// Normalize for comparison: strip non-alphanumeric, lowercase
+	norm := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	if norm(gpuSpec) == norm(resolvedName) {
+		return resolvedName
+	}
+	return gpuSpec + " → " + resolvedName
+}
 
 // FormatJobLine returns a display line for a job in the launch selector.
 // Format: "  88  EXP-030: Idle power investigation (sole-tenant A100)"
@@ -35,10 +56,10 @@ func FormatCostTable(groupOffers []GroupOffer) string {
 		estCost := float64(jobs) * go_.Offer.CostPerHour
 		totalCost += estCost
 
-		b.WriteString(fmt.Sprintf("%-10s %d jobs  %s %dGB   $%.2f/hr  ~$%.2f\n",
-			go_.Group.GPUSpec(),
+		gpuLabel := FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName)
+		b.WriteString(fmt.Sprintf("%-18s %d jobs  %dGB   $%.2f/hr  ~$%.2f\n",
+			gpuLabel,
 			jobs,
-			go_.Offer.GPUName,
 			int(go_.Offer.GPUMemGB),
 			go_.Offer.CostPerHour,
 			estCost,
@@ -51,6 +72,64 @@ func FormatCostTable(groupOffers []GroupOffer) string {
 
 	b.WriteString(fmt.Sprintf("%40s Total: ~$%.2f\n", "", totalCost))
 	return b.String()
+}
+
+// FormatCostTableWithEstimates returns a cost table using predictor-based duration estimates.
+func FormatCostTableWithEstimates(estimates []CostEstimate) string {
+	var b strings.Builder
+	var totalCost float64
+	hasAny := false
+
+	for _, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+		hasAny = true
+		totalCost += est.TotalCost
+
+		gpuLabel := FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName)
+		durStr := FormatEstDuration(est.TotalTime, est.HasPrediction)
+		b.WriteString(fmt.Sprintf("%-18s %d jobs  %dGB   $%.2f/hr  %s  ~$%.2f\n",
+			gpuLabel,
+			len(est.Group.Jobs),
+			int(est.Offer.Offer.GPUMemGB),
+			est.Offer.Offer.CostPerHour,
+			durStr,
+			est.TotalCost,
+		))
+	}
+
+	if !hasAny {
+		return "  No offers found for any group.\n"
+	}
+
+	b.WriteString(fmt.Sprintf("%50s Total: ~$%.2f\n", "", totalCost))
+	return b.String()
+}
+
+// FormatEstDuration formats a duration with an indicator of whether it's predicted.
+func FormatEstDuration(d time.Duration, hasPrediction bool) string {
+	s := formatDurationShort(d)
+	if hasPrediction {
+		return "~" + s
+	}
+	return "~" + s + " (est)"
+}
+
+// formatDurationShort formats a duration as a compact string like "2h 15m".
+func formatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if h == 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %dm", h, m)
 }
 
 // FormatSSHCommand returns the SSH command string for a Vast.ai instance.

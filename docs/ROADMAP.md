@@ -39,8 +39,8 @@ instead of maintaining its own provisioning infrastructure.
 |-----|----------|-------------|---------------------|
 | Seed vs target distinction | Medium | Separate seed instance (downloads everything first) from target instances (receive copies). Seed can be a different GPU type. | `--seed-gpu`, `--seed-instance` flags |
 | External donor support | Medium | Reuse a pre-seeded instance as copy source without destroying it. | `--donor-instance ID` flag |
-| Phase tracking in DB | Medium | Per-instance sub-statuses: provisioning → copying → seeded → running → done. Currently only: planned → launching → running → completed. | State file with per-GPU status tracking |
-| Per-GPU cost tracking | Medium | Track actual spend per instance (hourly rate × uptime), not just budget limits. Report total campaign cost at end. | Cost summary with per-GPU breakdown |
+| Phase tracking in DB | Medium | Per-instance sub-statuses: provisioning → copying → seeded → running → done. Currently only: planned → launching → running → completed. **Partial**: `job_phase_timings` table now stores per-job phase timestamps (setup, run, upload), cache state, and GPU stats. Instance-level sub-statuses still use the original set. | State file with per-GPU status tracking |
+| Per-GPU cost tracking | Medium | Track actual spend per instance (hourly rate × uptime), not just budget limits. Report total campaign cost at end. **Partial**: `cloud_instances` now stores `cost_per_hour_cents` and lifecycle timestamps (`ready_at`, `launched_at`, `ended_at`). Cost estimation uses predictor-based durations when available. `actual_spend_cents` not yet computed. | Cost summary with per-GPU breakdown |
 | Resume interrupted campaigns | Medium | `--resume` flag to replay from DB state, skipping completed phases. | `--resume` flag, JSON state file |
 | Seed-first validation | Medium | `--seed-first`: calibrate on seed instance before fanning out copies, to validate scripts work before provisioning N instances. | `--seed-first` flag |
 

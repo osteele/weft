@@ -49,7 +49,7 @@ func (c *Client) Available() error {
 
 // SearchOffers queries available GPU offers matching constraints.
 func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
-	filter := buildSearchFilter(constraints)
+	filter, postFilter := buildSearchFilter(constraints)
 	args := []string{"search", "offers", "--raw"}
 	if filter != "" {
 		args = append(args, filter)
@@ -68,6 +68,11 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 	// Compute derived fields
 	for i := range offers {
 		offers[i].GPUMemGB = float64(offers[i].GPUMemMB) / 1024.0
+	}
+
+	// Apply GPU class post-filter for generation/family constraints
+	if postFilter != nil {
+		offers = postFilter(offers)
 	}
 
 	return offers, nil
@@ -177,11 +182,23 @@ func (c *Client) run(args ...string) ([]byte, error) {
 }
 
 // buildSearchFilter constructs a vastai search filter string from constraints.
-func buildSearchFilter(c OfferConstraints) string {
+// Returns the filter string and an optional post-filter function for generation constraints.
+func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	var parts []string
+	var postFilter func([]Offer) []Offer
 
 	if c.GPUClass != "" {
-		parts = append(parts, fmt.Sprintf("gpu_name=%s", c.GPUClass))
+		vastaiNames, pf := resolveGPUFilter(c.GPUClass)
+		if len(vastaiNames) == 1 {
+			parts = append(parts, fmt.Sprintf("gpu_name=%s", vastaiNames[0]))
+		} else if len(vastaiNames) > 1 {
+			// Multiple exact names: use the first one in search, post-filter for all
+			// (Vast.ai doesn't support OR in gpu_name filter)
+			postFilter = makePostFilter(vastaiNames)
+		} else {
+			// No specific names — generation/family constraint uses post-filter
+			postFilter = pf
+		}
 	}
 	if c.MinGPUMemGB > 0 {
 		parts = append(parts, fmt.Sprintf("gpu_ram>=%d", c.MinGPUMemGB*1024)) // API uses MB
@@ -202,33 +219,7 @@ func buildSearchFilter(c OfferConstraints) string {
 	parts = append(parts, "direct_port_count>=1")
 	parts = append(parts, "verified=true")
 
-	return strings.Join(parts, " ")
-}
-
-// parseOffers parses JSON search offer results.
-func parseOffers(data []byte) ([]Offer, error) {
-	var offers []Offer
-	if err := json.Unmarshal(data, &offers); err != nil {
-		return nil, err
-	}
-	for i := range offers {
-		offers[i].GPUMemGB = float64(offers[i].GPUMemMB) / 1024.0
-	}
-	return offers, nil
-}
-
-// parseInstances parses JSON instance list results.
-func parseInstances(data []byte) ([]Instance, error) {
-	var instances []Instance
-	if err := json.Unmarshal(data, &instances); err != nil {
-		return nil, err
-	}
-	return instances, nil
-}
-
-// parseJSON unmarshals JSON data into the given target.
-func parseJSON(data []byte, v any) error {
-	return json.Unmarshal(data, v)
+	return strings.Join(parts, " "), postFilter
 }
 
 func truncate(s string, max int) string {

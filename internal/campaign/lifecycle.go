@@ -33,26 +33,37 @@ func LaunchInstance(
 		progress = func(string) {}
 	}
 
-	// Create cloud instance record
+	// Create cloud instance record with offer metadata
 	instance := &db.CloudInstance{
-		CampaignID:     campaignID,
-		Status:         db.CloudInstanceStatusPlanned,
-		Provider:       "vastai",
-		GPUSpec:        group.GPUSpec(),
-		GPUClass:       group.GPUClass,
-		GPUMemGB:       group.GPUMemGB,
-		MaxSpendCents:  opts.MaxSpendCents,
-		MaxTimeSeconds: opts.MaxTimeSeconds,
+		CampaignID:       campaignID,
+		Status:           db.CloudInstanceStatusPlanned,
+		Provider:         "vastai",
+		GPUSpec:          group.GPUSpec(),
+		GPUClass:         group.GPUClass,
+		GPUMemGB:         group.GPUMemGB,
+		MaxSpendCents:    opts.MaxSpendCents,
+		MaxTimeSeconds:   opts.MaxTimeSeconds,
+		ResolvedGPUName:  offer.GPUName,
+		CostPerHourCents: int(offer.CostPerHour * 100),
+		NumGPUs:          offer.NumGPUs,
+		DLPerf:           offer.DLPerf,
+		Reliability:      offer.Reliability,
+		InetDownMbps:     offer.DownloadBandwidth,
+		InetUpMbps:       offer.UploadBandwidth,
+		CUDAVersion:      offer.CUDAVersion,
 	}
 	instanceID, err := db.CreateCloudInstance(database, instance)
 	if err != nil {
 		return 0, fmt.Errorf("create cloud instance: %w", err)
 	}
 
-	// Associate jobs with cloud instance
-	for _, job := range group.Jobs {
+	// Associate jobs with cloud instance and record campaign position
+	for i, job := range group.Jobs {
 		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
 			return instanceID, fmt.Errorf("set cloud_instance_id for job %d: %w", job.ID, err)
+		}
+		if err := db.SetJobCampaignIndex(database, job.ID, i); err != nil {
+			return instanceID, fmt.Errorf("set campaign_job_index for job %d: %w", job.ID, err)
 		}
 	}
 
@@ -95,6 +106,9 @@ func LaunchInstance(
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("wait ready: %w", err)
 	}
+
+	// Record when instance became ready (before SSH setup)
+	_ = db.SetCloudInstanceReadyAt(database, instanceID)
 
 	sshTarget := fmt.Sprintf("root@%s", inst.SSHHost)
 	sshPort := fmt.Sprintf("%d", inst.SSHPort)

@@ -1,6 +1,8 @@
 package vastai
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -54,9 +56,12 @@ const createInstanceJSON = `{
 }`
 
 func TestParseSearchOffers(t *testing.T) {
-	offers, err := parseOffers([]byte(searchOffersJSON))
-	if err != nil {
-		t.Fatalf("parseOffers: %v", err)
+	var offers []Offer
+	if err := json.Unmarshal([]byte(searchOffersJSON), &offers); err != nil {
+		t.Fatalf("unmarshal offers: %v", err)
+	}
+	for i := range offers {
+		offers[i].GPUMemGB = float64(offers[i].GPUMemMB) / 1024.0
 	}
 	if len(offers) != 2 {
 		t.Fatalf("expected 2 offers, got %d", len(offers))
@@ -89,9 +94,9 @@ func TestParseSearchOffers(t *testing.T) {
 }
 
 func TestParseShowInstances(t *testing.T) {
-	instances, err := parseInstances([]byte(showInstancesJSON))
-	if err != nil {
-		t.Fatalf("parseInstances: %v", err)
+	var instances []Instance
+	if err := json.Unmarshal([]byte(showInstancesJSON), &instances); err != nil {
+		t.Fatalf("unmarshal instances: %v", err)
 	}
 	if len(instances) != 1 {
 		t.Fatalf("expected 1 instance, got %d", len(instances))
@@ -117,8 +122,8 @@ func TestParseCreateInstance(t *testing.T) {
 		NewContract int  `json:"new_contract"`
 		Success     bool `json:"success"`
 	}
-	if err := parseJSON([]byte(createInstanceJSON), &resp); err != nil {
-		t.Fatalf("parse create response: %v", err)
+	if err := json.Unmarshal([]byte(createInstanceJSON), &resp); err != nil {
+		t.Fatalf("unmarshal create response: %v", err)
 	}
 	if resp.NewContract != 99999 {
 		t.Errorf("NewContract = %d, want 99999", resp.NewContract)
@@ -145,7 +150,7 @@ func TestBuildSearchFilter(t *testing.T) {
 				GPUClass:    "RTX_4090",
 				MinGPUMemGB: 24,
 			},
-			wantParts: []string{"gpu_name=RTX_4090", "gpu_ram>=24576", "num_gpus=1"},
+			wantParts: []string{"gpu_name=RTX 4090", "gpu_ram>=24576", "num_gpus=1"},
 		},
 		{
 			name: "with reliability",
@@ -165,25 +170,12 @@ func TestBuildSearchFilter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filter := buildSearchFilter(tt.constraints)
+			filter, _ := buildSearchFilter(tt.constraints)
 			for _, part := range tt.wantParts {
-				if !containsSubstring(filter, part) {
+				if !strings.Contains(filter, part) {
 					t.Errorf("filter %q missing part %q", filter, part)
 				}
 			}
 		})
 	}
-}
-
-func containsSubstring(s, sub string) bool {
-	return len(s) >= len(sub) && searchString(s, sub)
-}
-
-func searchString(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
