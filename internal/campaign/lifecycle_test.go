@@ -68,29 +68,26 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
-func TestLaunchInstanceHappyPath(t *testing.T) {
+func TestLaunchInstancePreSSHPhases(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
+	var createdOfferID string
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
+			createdOfferID = offerID
 			return &cloud.Instance{
 				ProviderID:  "12345",
 				Status:      "loading",
-				SSHHost:     "192.168.1.100",
-				SSHPort:     10022,
+				SSHHost:     "127.0.0.1",
+				SSHPort:     19999,
 				CostPerHour: 0.50,
 			}, nil
 		},
 		WaitReadyFunc: func(instanceID string, timeout time.Duration) (*cloud.Instance, error) {
-			return &cloud.Instance{
-				ProviderID:  instanceID,
-				Status:      "running",
-				SSHHost:     "192.168.1.100",
-				SSHPort:     10022,
-				CostPerHour: 0.50,
-			}, nil
+			// Simulate timeout so we don't reach the SSH phase (which would retry for minutes)
+			return nil, fmt.Errorf("instance %s not ready after %v", instanceID, timeout)
 		},
 		DestroyInstanceFunc: func(instanceID string) error {
 			return nil
@@ -126,22 +123,45 @@ func TestLaunchInstanceHappyPath(t *testing.T) {
 	}
 
 	createOpts := cloud.CreateOpts{
-		Image:      "nvidia/cuda:12.2-devel-ubuntu22.04",
+		Image:      "nvidia/cuda:12.4.1-runtime-ubuntu22.04",
 		DiskGB:     50,
 		SSHEnabled: true,
 	}
 
-	_, err := LaunchInstance(
+	instanceID, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		func(phase string) {},
 	)
 
+	// Should fail at WaitReady, not at SSH
 	if err == nil {
-		t.Error("expected error (mock SSH will fail), got nil")
+		t.Fatal("expected error from wait ready, got nil")
 	}
-	// We expect an error from SSH operations since they're not mocked
+	if !strings.Contains(err.Error(), "wait ready") {
+		t.Errorf("error should mention 'wait ready', got: %v", err)
+	}
+
+	// Verify pre-SSH phases completed: instance was created, offer ID was passed
+	if createdOfferID != "999" {
+		t.Errorf("expected offer ID 999, got %q", createdOfferID)
+	}
+
+	// Verify DB records were created
+	if instanceID == 0 {
+		t.Error("expected non-zero instance ID")
+	}
+	inst, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get cloud instance: %v", err)
+	}
+	if inst.Status != db.CloudInstanceStatusFailed {
+		t.Errorf("instance status = %q, want %q", inst.Status, db.CloudInstanceStatusFailed)
+	}
+	if inst.ProviderInstanceID != "12345" {
+		t.Errorf("provider_instance_id = %q, want %q", inst.ProviderInstanceID, "12345")
+	}
 }
 
 func TestLaunchInstanceCreateFails(t *testing.T) {
@@ -183,47 +203,5 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "create instance") {
 		t.Errorf("error message should mention 'create instance', got: %v", err)
-	}
-}
-
-func TestLaunchInstanceWaitTimeouts(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	mockClient := &cloud.MockClient{
-		ProviderVal: cloud.ProviderVastai,
-		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
-			return &cloud.Instance{ProviderID: "12345"}, nil
-		},
-		WaitReadyFunc: func(instanceID string, timeout time.Duration) (*cloud.Instance, error) {
-			return nil, fmt.Errorf("instance %s not ready after %v", instanceID, timeout)
-		},
-		DestroyInstanceFunc: func(instanceID string) error {
-			return nil
-		},
-	}
-
-	group := InstanceGroup{
-		GPUClass: "A100",
-		GPUMemGB: 40,
-		Jobs:     []*db.Job{{ID: 101}},
-	}
-
-	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
-	r2Cfg := cloud.R2Config{Bucket: "test"}
-	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
-
-	_, err := LaunchInstance(
-		mockClient, database, nil, group, offer,
-		LaunchOpts{},
-		r2Cfg, createOpts,
-		func(phase string) {},
-	)
-
-	if err == nil {
-		t.Fatal("expected error from wait timeout, got nil")
-	}
-	if !strings.Contains(err.Error(), "wait ready") {
-		t.Errorf("error should mention 'wait ready', got: %v", err)
 	}
 }
