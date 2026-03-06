@@ -39,7 +39,7 @@ type OfferConstraints struct {
 }
 
 // DefaultImage is the default Docker image for Vast.ai instances.
-const DefaultImage = "nvidia/cuda:12.2-devel-ubuntu22.04"
+const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {

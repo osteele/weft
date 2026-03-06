@@ -3,6 +3,7 @@ package vastai
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -141,12 +142,20 @@ func (c *Client) WaitReady(instanceID int, timeout time.Duration) (*Instance, er
 	deadline := time.Now().Add(timeout)
 	poll := 5 * time.Second
 
+	lastStatus := ""
 	for time.Now().Before(deadline) {
 		inst, err := c.ShowInstance(instanceID)
 		if err != nil {
 			// Instance might not be visible immediately after creation
+			if lastStatus == "" {
+				log.Printf("vastai: instance %d not visible yet, retrying...", instanceID)
+			}
 			time.Sleep(poll)
 			continue
+		}
+		if inst.Status != lastStatus {
+			log.Printf("vastai: instance %d status: %s", instanceID, inst.Status)
+			lastStatus = inst.Status
 		}
 		if inst.Status == "running" {
 			return inst, nil
@@ -190,7 +199,7 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	if c.GPUClass != "" {
 		vastaiNames, pf := resolveGPUFilter(c.GPUClass)
 		if len(vastaiNames) == 1 {
-			parts = append(parts, fmt.Sprintf("gpu_name=%s", vastaiNames[0]))
+			parts = append(parts, fmt.Sprintf("gpu_name=\"%s\"", vastaiNames[0]))
 		} else if len(vastaiNames) > 1 {
 			// Multiple exact names: use the first one in search, post-filter for all
 			// (Vast.ai doesn't support OR in gpu_name filter)
@@ -207,7 +216,7 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 		parts = append(parts, fmt.Sprintf("disk_space>=%d", c.MinDiskGB))
 	}
 	if c.MinReliability > 0 {
-		parts = append(parts, fmt.Sprintf("reliability2>=%g", c.MinReliability))
+		parts = append(parts, fmt.Sprintf("reliability>=%g", c.MinReliability))
 	}
 	numGPUs := c.NumGPUs
 	if numGPUs == 0 {

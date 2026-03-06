@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/osteele/weft/internal/cloud"
 	"gopkg.in/yaml.v3"
 )
 
@@ -120,6 +121,16 @@ type R2Config struct {
 	SecretAccessKey string `yaml:"secret_access_key"`
 	// Bucket is the R2 bucket name for storing results
 	Bucket string `yaml:"bucket"`
+}
+
+// ToCloudR2Config converts to the cloud package R2Config type.
+func (r R2Config) ToCloudR2Config() cloud.R2Config {
+	return cloud.R2Config{
+		AccountID:       r.AccountID,
+		AccessKeyID:     r.AccessKeyID,
+		SecretAccessKey: r.SecretAccessKey,
+		Bucket:          r.Bucket,
+	}
 }
 
 // RunpodConfig holds Runpod cloud GPU settings.

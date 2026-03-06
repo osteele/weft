@@ -233,24 +233,9 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			}
 		}
 
-		image := m.appConfig.Vastai.DefaultImage
-		if image == "" {
-			image = cloud.DefaultImage
-		}
+		createOpts := cloud.DefaultCreateOpts(m.appConfig.Vastai.DefaultImage)
 
-		createOpts := cloud.CreateOpts{
-			Image:      image,
-			DiskGB:     50,
-			SSHEnabled: true,
-			OnStartCmd: "curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash",
-		}
-
-		cloudR2 := cloud.R2Config{
-			AccountID:       r2Cfg.AccountID,
-			AccessKeyID:     r2Cfg.AccessKeyID,
-			SecretAccessKey: r2Cfg.SecretAccessKey,
-			Bucket:          r2Cfg.Bucket,
-		}
+		cloudR2 := r2Cfg.ToCloudR2Config()
 
 		// Create a single-job campaign group
 		gpuClass := job.GPUClass

@@ -69,7 +69,25 @@ type R2Config struct {
 type ProgressFunc func(phase string)
 
 // DefaultImage is the default Docker image for cloud instances.
-const DefaultImage = "nvidia/cuda:12.2-devel-ubuntu22.04"
+const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
+
+// DefaultOnStartCmd installs dependencies, uv, and rclone on fresh instances.
+// The runtime CUDA images lack unzip (needed by rclone installer) and build tools.
+const DefaultOnStartCmd = "apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev && curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash"
+
+// DefaultCreateOpts returns standard instance creation options.
+// If image is empty, DefaultImage is used.
+func DefaultCreateOpts(image string) CreateOpts {
+	if image == "" {
+		image = DefaultImage
+	}
+	return CreateOpts{
+		Image:      image,
+		DiskGB:     50,
+		SSHEnabled: true,
+		OnStartCmd: DefaultOnStartCmd,
+	}
+}
 
 // DefaultWaitReadyTimeout is the default timeout for waiting for an instance.
 const DefaultWaitReadyTimeout = 5 * time.Minute

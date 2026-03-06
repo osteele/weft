@@ -22,6 +22,9 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string) strin
 	b.WriteString("#!/bin/bash\n")
 	b.WriteString("set -o pipefail\n\n")
 
+	// Ensure uv and rclone are in PATH (installed by onstart to ~/.local/bin and /usr/bin)
+	b.WriteString("export PATH=\"$HOME/.local/bin:$PATH\"\n\n")
+
 	b.WriteString(fmt.Sprintf("R2_BUCKET=%q\n", r2Bucket))
 	b.WriteString("LOG_DIR=\"/tmp/weft-logs\"\n")
 	b.WriteString("mkdir -p \"$LOG_DIR\"\n\n")

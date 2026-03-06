@@ -213,21 +213,8 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		}
 	}
 
-	r2Cfg := cloud.R2Config{
-		AccountID:       cfg.Vastai.R2.AccountID,
-		AccessKeyID:     cfg.Vastai.R2.AccessKeyID,
-		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
-		Bucket:          cfg.Vastai.R2.Bucket,
-	}
-
-	createOpts := cloud.CreateOpts{
-		Image:      cfg.Vastai.DefaultImage,
-		DiskGB:     50,
-		SSHEnabled: true,
-	}
-	if createOpts.Image == "" {
-		createOpts.Image = cloud.DefaultImage
-	}
+	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+	createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 
 	// Create campaign batch
 	campaignRec := &db.Campaign{
