@@ -549,6 +549,22 @@ The combination of queue log/state files plus the runner loop means no long-live
 is required on the local machine once the job is queued—the remote host and its
 tmux sessions orchestrate everything.
 
+### Cloud Instances
+
+Ephemeral Vast.ai instances run the same Go agent (`weft-agent run-job`) as
+persistent hosts, providing identical telemetry and failure detection. The cloud
+launcher deploys the agent binary and rsyncs project sources via SSH, then starts
+a thin shell wrapper (~30 lines) that:
+
+1. Invokes `weft-agent run-job` for each assigned job (piping job JSON via stdin)
+2. Uploads per-job results (logs, completion record, timeseries, phases) to R2
+3. Writes a campaign completion marker to R2
+4. Self-destructs the instance
+
+This replaces the previous ~150-line bash wrapper that reimplemented telemetry
+collection. See `internal/cloud/wrapper.go` (`GenerateAgentWrapper`) and
+`internal/campaign/lifecycle.go` for the deployment flow.
+
 ## Shell Escaping and Quoting
 
 Data passes through multiple shell contexts between the Go CLI and job

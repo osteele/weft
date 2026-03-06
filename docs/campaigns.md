@@ -161,14 +161,15 @@ This creates a campaign with a single instance for that job.
 
 1. **Provisioning**: Weft creates a Vast.ai instance with the configured Docker
    image, disk, and SSH access.
-2. **Setup**: Once the instance is running, weft deploys rclone configuration
-   and a wrapper script via SSH.
-3. **Execution**: The wrapper script runs each assigned job sequentially,
-   capturing stdout/stderr, exit codes, phase timing, cache state, and GPU
-   utilization.
-4. **Result upload**: On completion, the wrapper uploads results (logs, exit
-   code, phase timings, GPU monitor data, debug artifacts) to R2 under
-   `jobs/<job-id>/`.
+2. **Setup**: Once the instance is running, weft deploys rclone configuration,
+   the Go agent binary (`weft-agent`), and rsyncs project sources via SSH.
+   Agent deployment and source sync run in parallel for faster setup.
+3. **Execution**: A thin shell wrapper invokes `weft-agent run-job` for each
+   assigned job. The agent runs the job with full telemetry: per-process CPU/RSS,
+   GPU memory, timeseries sampling, structured completion records, and failure
+   detection (OOM, segfault, signals).
+4. **Result upload**: After each job, the wrapper uploads results (logs,
+   completion record, timeseries, phases) to R2 under `jobs/<job-id>/`.
 5. **Sweep**: The coordinator's sweep loop polls R2 for completed markers,
    downloads results, extracts phase timings and GPU stats into the
    `job_phase_timings` table, updates job statuses, and cleans up R2.
@@ -206,6 +207,13 @@ vastai:
     secret_access_key: "..."
 ```
 
+### Source sync
+
+When launching with the agent (`--use-agent`), project sources are rsynced to
+the cloud instance. The same exclude patterns as persistent hosts apply
+(`.git`, `.venv`, `__pycache__`, etc.), plus any project-specific output dirs
+from `.weft.yaml`. See `internal/sync/sources.go` for the full exclude list.
+
 ## Cost estimation
 
 When launching a campaign, weft estimates the total cost per GPU group. If the
@@ -219,26 +227,35 @@ default of 1 hour per job is used. The cost table shows:
 
 ## Data collection
 
-The wrapper scripts collect data for duration prediction and cost analysis:
+Cloud jobs run the same Go agent as persistent-host jobs, producing identical
+telemetry. The agent collects data for duration prediction and cost analysis:
 
 ### Phase timing
 
-Each job records timestamps for wrapper start, setup start/end, run start/end,
-and upload start/end. These are stored in the `job_phase_timings` table, allowing
-the predictor to model setup, execution, and upload phases independently.
+Each job records structured phase timing as `{jobID}.phases.json`: wrapper start,
+setup start/end, run start/end, and cache probes. These are stored in the
+`job_phase_timings` table, allowing the predictor to model setup, execution,
+and upload phases independently.
 
-### Cache-state probes (campaign wrapper)
+### Cache-state probes
 
-Before each job in a campaign, the wrapper records the size of `~/.cache/huggingface`
-and `~/.cache/uv`. This lets the predictor distinguish cold-cache first jobs from
-warm-cache subsequent jobs.
+Before and after each job, the agent records the size of `~/.cache/huggingface`
+and `~/.cache/uv` in the phases file. This lets the predictor distinguish
+cold-cache first jobs from warm-cache subsequent jobs.
 
-### GPU monitoring
+### Telemetry (timeseries)
 
-During job execution, a background `nvidia-smi` sampling loop (5s interval)
-records GPU utilization and memory usage. The sweep loop extracts peak GPU memory,
-mean GPU utilization, and peak GPU utilization from the CSV and stores them in
-`job_phase_timings`.
+During job execution, the agent samples at 15-second intervals and writes
+`{jobID}.timeseries.jsonl`:
+- Per-process CPU usage, RSS, and peak RSS (VmHWM)
+- Per-process GPU memory (via nvidia-smi query-compute-apps)
+- Host memory and memory pressure (3 levels)
+- GPU utilization
+
+### Completion records
+
+On job completion, the agent writes `{jobID}.completion.json` with exit code,
+peak metrics, failure reason (OOM, segfault, signal), and discovered outputs.
 
 ### Upload sizes
 

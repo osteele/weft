@@ -50,7 +50,6 @@ instead of maintaining its own provisioning infrastructure.
 |-----|----------|-------------|---------------------|
 | Volume pooling | Low | Reuse existing Vast.ai volumes across campaigns. Try existing volumes before creating new ones. | Volume find/reuse in provisioning |
 | Multi-phase workflows | Low | Run multiple phases per instance (e.g., power calibration, then timing calibration). Currently: single wrapper script. | Two-phase calibration per GPU |
-| Project deployment | Low | rsync project source + deps to instance, run `uv sync`. Currently: wrapper script only. | rsync + uv sync setup phase |
 | vLLM-only mode | Low | Run subset of calibration (~20min vs 2+ hours). Would need weft to understand calibration phases. | `--only-vllm` flag |
 
 ## Integration Strategy

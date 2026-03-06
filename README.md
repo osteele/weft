@@ -1262,6 +1262,9 @@ vastai:
     secret_access_key: "..."
 ```
 
+Cloud instances automatically sync your project sources and collect detailed
+telemetry (CPU, memory, GPU usage, failure detection).
+
 Requires the `vastai` CLI: `pip install vastai && vastai set api-key YOUR_KEY`.
 
 ## Job Database

@@ -86,6 +86,7 @@ type JobPaths struct {
 	KillReason    string
 	Heartbeat     string
 	Completion    string
+	Phases        string
 }
 
 // TimeseriesSample holds a single time-series telemetry sample for a running job.
@@ -119,12 +120,13 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 		KillReason:    filepath.Join(logDir, fmt.Sprintf("%d.kill_reason", jobID)),
 		Heartbeat:     filepath.Join(logDir, fmt.Sprintf("%d.heartbeat", jobID)),
 		Completion:    filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID)),
+		Phases:        filepath.Join(logDir, fmt.Sprintf("%d.phases.json", jobID)),
 	}
 }
 
 // ArchiveExistingFiles renames existing job files with a timestamp suffix.
 func ArchiveExistingFiles(logDir string, jobID int64) {
-	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "kill_reason", "heartbeat", "completion.json"}
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json"}
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
 		info, err := os.Stat(path)
@@ -289,6 +291,28 @@ func ReadKillReasonFile(path string) string {
 // WriteHeartbeat writes the current epoch to the heartbeat file.
 func WriteHeartbeat(paths JobPaths, epoch int64) error {
 	return os.WriteFile(paths.Heartbeat, []byte(fmt.Sprintf("%d\n", epoch)), 0644)
+}
+
+// PhaseTiming records wall-clock timestamps for each execution phase.
+type PhaseTiming struct {
+	WrapperStart int64       `json:"wrapper_start"`
+	SetupStart   int64       `json:"setup_start"`
+	SetupEnd     int64       `json:"setup_end"`
+	RunStart     int64       `json:"run_start"`
+	RunEnd       int64       `json:"run_end"`
+	CachePre     *CacheProbe `json:"cache_pre,omitempty"`
+	CachePost    *CacheProbe `json:"cache_post,omitempty"`
+	SetupSeconds *int64      `json:"setup_seconds,omitempty"`
+}
+
+// WritePhasesFile writes a phases.json file alongside other job log files.
+func WritePhasesFile(paths JobPaths, phases PhaseTiming) error {
+	data, err := json.MarshalIndent(phases, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return os.WriteFile(paths.Phases, data, 0644)
 }
 
 // CompletionRecord is the structured post-mortem record written as .completion.json.

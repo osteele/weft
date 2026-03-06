@@ -2,6 +2,7 @@
 weft
 
 # Build output
+agent
 dist/
 
 # Go build artifacts

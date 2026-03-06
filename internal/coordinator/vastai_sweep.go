@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -84,26 +85,44 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		return
 	}
 
-	// Read exit code
-	exitCodeBytes, err := os.ReadFile(filepath.Join(tmpDir, "exit_code"))
-	if err != nil {
-		c.logger.Printf("vastai sweep: read exit_code for job %d: %v", jobID, err)
-		return
-	}
-	exitCode, _ := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
+	// Try agent format first: completion.json has structured exit info
+	var exitCode int
+	var endTimeUnix int64
+	var failureReason string
 
-	// Read end time
-	endTimeBytes, err := os.ReadFile(filepath.Join(tmpDir, "end_time"))
-	if err != nil {
-		c.logger.Printf("vastai sweep: read end_time for job %d: %v", jobID, err)
-		return
+	completionPath := filepath.Join(tmpDir, fmt.Sprintf("%d.completion.json", jobID))
+	if cData, err := os.ReadFile(completionPath); err == nil {
+		var completion struct {
+			ExitCode      int    `json:"exit_code"`
+			EndTime       int64  `json:"end_time"`
+			FailureReason string `json:"failure_reason"`
+		}
+		if json.Unmarshal(cData, &completion) == nil {
+			exitCode = completion.ExitCode
+			endTimeUnix = completion.EndTime
+			failureReason = completion.FailureReason
+		}
 	}
-	endTimeUnix, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
 
-	// Detect failure reason for non-zero exit codes (OOM, etc.)
-	failureReason := ""
-	if exitCode != 0 {
-		failureReason = detectFailureReason(tmpDir, exitCode)
+	// Fall back to legacy format: separate exit_code and end_time files
+	if endTimeUnix == 0 {
+		exitCodeBytes, err := os.ReadFile(filepath.Join(tmpDir, "exit_code"))
+		if err != nil {
+			c.logger.Printf("vastai sweep: read exit_code for job %d: %v", jobID, err)
+			return
+		}
+		exitCode, _ = strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
+
+		endTimeBytes, err := os.ReadFile(filepath.Join(tmpDir, "end_time"))
+		if err != nil {
+			c.logger.Printf("vastai sweep: read end_time for job %d: %v", jobID, err)
+			return
+		}
+		endTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
+
+		if exitCode != 0 && failureReason == "" {
+			failureReason = detectFailureReason(tmpDir, exitCode)
+		}
 	}
 
 	// Update job in DB — always StatusCompleted; exit code stored separately
@@ -167,9 +186,92 @@ func detectFailureReason(tmpDir string, exitCode int) string {
 	return fmt.Sprintf("exit_%d", exitCode)
 }
 
-// extractPhaseTimings reads phase_* files and GPU monitor CSV from the results dir.
+// extractPhaseTimings reads phase timing data from the results dir.
+// It first tries the structured phases.json format (agent-based wrapper),
+// then falls back to individual phase_* files (legacy bash wrapper).
 // Returns nil if no phase files are found (non-instrumented wrapper).
 func extractPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
+	// Try structured phases.json first (from agent-based wrapper)
+	if timings := extractStructuredPhaseTimings(jobID, tmpDir); timings != nil {
+		return timings
+	}
+	return extractLegacyPhaseTimings(jobID, tmpDir)
+}
+
+// extractStructuredPhaseTimings reads a phases.json file written by weft-agent run-job.
+func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
+	phasesPath := filepath.Join(tmpDir, fmt.Sprintf("%d.phases.json", jobID))
+	data, err := os.ReadFile(phasesPath)
+	if err != nil {
+		return nil
+	}
+
+	var phases struct {
+		WrapperStart int64 `json:"wrapper_start"`
+		SetupStart   int64 `json:"setup_start"`
+		SetupEnd     int64 `json:"setup_end"`
+		RunStart     int64 `json:"run_start"`
+		RunEnd       int64 `json:"run_end"`
+		CachePre     *struct {
+			HFBytes int64 `json:"hf_bytes"`
+			UVBytes int64 `json:"uv_bytes"`
+		} `json:"cache_pre"`
+		CachePost *struct {
+			HFBytes int64 `json:"hf_bytes"`
+			UVBytes int64 `json:"uv_bytes"`
+		} `json:"cache_post"`
+		SetupSeconds *int64 `json:"setup_seconds"`
+	}
+	if err := json.Unmarshal(data, &phases); err != nil {
+		return nil
+	}
+
+	t := &db.JobPhaseTimings{JobID: jobID}
+	if phases.WrapperStart > 0 {
+		t.WrapperStart = &phases.WrapperStart
+	}
+	if phases.SetupStart > 0 {
+		t.SetupStart = &phases.SetupStart
+	}
+	if phases.SetupEnd > 0 {
+		t.SetupEnd = &phases.SetupEnd
+	}
+	if phases.RunStart > 0 {
+		t.RunStart = &phases.RunStart
+	}
+	if phases.RunEnd > 0 {
+		t.RunEnd = &phases.RunEnd
+	}
+	if phases.CachePre != nil {
+		t.CacheHFBytes = &phases.CachePre.HFBytes
+		t.CacheUVBytes = &phases.CachePre.UVBytes
+	}
+	if phases.CachePost != nil {
+		t.CacheHFPostBytes = &phases.CachePost.HFBytes
+		t.CacheUVPostBytes = &phases.CachePost.UVBytes
+	}
+	t.UVSyncSeconds = phases.SetupSeconds
+
+	// Also try to read completion.json for peak metrics
+	completionPath := filepath.Join(tmpDir, fmt.Sprintf("%d.completion.json", jobID))
+	if cData, err := os.ReadFile(completionPath); err == nil {
+		var completion struct {
+			PeakRSSKB    int64 `json:"peak_rss_kb"`
+			MaxGPUMemMiB int   `json:"max_gpu_mem_mib"`
+		}
+		if json.Unmarshal(cData, &completion) == nil {
+			if completion.MaxGPUMemMiB > 0 {
+				t.PeakGPUMemMiB = &completion.MaxGPUMemMiB
+			}
+		}
+	}
+
+	return t
+}
+
+// extractLegacyPhaseTimings reads phase_* files and GPU monitor CSV from the results dir
+// (legacy bash wrapper format). Returns nil if no phase files are found.
+func extractLegacyPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
 	t := &db.JobPhaseTimings{JobID: jobID}
 	found := false
 
@@ -340,7 +442,16 @@ func readSummedInt64(path string) *int64 {
 }
 
 // writeVastaiLogsToCache writes stdout/stderr from R2 results into the local log cache.
+// Supports both agent format ({jobID}.log) and legacy format (stdout.log + stderr.log).
 func writeVastaiLogsToCache(jobID int64, tmpDir string) {
+	// Try agent format first: {jobID}.log
+	agentLogPath := filepath.Join(tmpDir, fmt.Sprintf("%d.log", jobID))
+	if agentLog, err := os.ReadFile(agentLogPath); err == nil && len(agentLog) > 0 {
+		_ = logcache.Write(jobID, string(agentLog))
+		return
+	}
+
+	// Fall back to legacy format: stdout.log + stderr.log
 	stdoutPath := filepath.Join(tmpDir, "stdout.log")
 	stderrPath := filepath.Join(tmpDir, "stderr.log")
 

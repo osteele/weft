@@ -40,6 +40,12 @@ func main() {
 		return
 	}
 
+	// Handle run-job subcommand
+	if len(os.Args) > 1 && os.Args[1] == "run-job" {
+		runJob(os.Args[2:])
+		return
+	}
+
 	// Handle batch-status subcommand
 	if len(os.Args) > 1 && os.Args[1] == "batch-status" {
 		queueName, jobIDs := parseBatchStatusArgs(os.Args[2:])

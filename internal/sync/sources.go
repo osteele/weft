@@ -162,3 +162,33 @@ func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error 
 // rsyncTimeout is the maximum time to wait for a single rsync operation.
 // This prevents indefinite hangs when the remote host is unresponsive.
 const rsyncTimeout = 30 * time.Second
+
+// SyncSourcesWithSSH rsyncs localDir to a remote host with a custom SSH command.
+// sshCmd is the full SSH command string (e.g., "ssh -p 12345 -o StrictHostKeyChecking=no").
+// target is "user@host". remoteDir is the destination directory.
+func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
+	excludes := DefaultExcludes()
+	for _, dir := range config.ProjectOutputDirs(localDir) {
+		dir = strings.TrimSuffix(dir, "/")
+		if !slices.Contains(excludes, dir) {
+			excludes = append(excludes, dir)
+		}
+	}
+
+	args := []string{"-az", "--delete", "-e", sshCmd}
+	for _, pattern := range excludes {
+		args = append(args, "--exclude", pattern)
+	}
+	src := strings.TrimRight(localDir, "/") + "/"
+	dst := target + ":" + strings.TrimRight(remoteDir, "/") + "/"
+	args = append(args, src, dst)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("rsync to %s:%s: %w\n%s", target, remoteDir, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
