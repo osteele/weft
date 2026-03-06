@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/oplog"
 )
 
 // SyncFunc is the function signature for syncing sources to a remote host.
@@ -82,18 +83,32 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 	return args
 }
 
-// SyncSources rsyncs localDir to host:remoteDir with standard excludes.
-// localDir is an absolute local path. remoteDir may contain ~ (rsync expands it).
-func SyncSources(host, localDir, remoteDir string) error {
+// sourceExcludes returns DefaultExcludes plus any project-specific output dirs.
+func sourceExcludes(localDir string) []string {
 	excludes := DefaultExcludes()
-	// Also exclude project-specific output dirs from .weft.yaml
 	for _, dir := range config.ProjectOutputDirs(localDir) {
 		dir = strings.TrimSuffix(dir, "/")
 		if !slices.Contains(excludes, dir) {
 			excludes = append(excludes, dir)
 		}
 	}
-	return syncFunc(host, localDir, remoteDir, excludes)
+	return excludes
+}
+
+// SyncSources rsyncs localDir to host:remoteDir with standard excludes.
+// localDir is an absolute local path. remoteDir may contain ~ (rsync expands it).
+func SyncSources(host, localDir, remoteDir string) error {
+	excludes := sourceExcludes(localDir)
+	start := time.Now()
+	err := syncFunc(host, localDir, remoteDir, excludes)
+	dur := time.Since(start)
+	oplog.Log("sync.sources",
+		oplog.WithHost(host),
+		oplog.WithDuration(dur),
+		oplog.WithDetailf("%s -> %s", localDir, remoteDir),
+		oplog.WithError(err),
+	)
+	return err
 }
 
 // BuildExtraPathRsyncArgs constructs rsync arguments for syncing an extra path
@@ -129,7 +144,15 @@ func SyncExtraPaths(host string, paths []string) error {
 			localPath = filepath.Join(home, localPath[2:])
 		}
 
-		if err := syncFunc(host, localPath, remotePath, nil); err != nil {
+		start := time.Now()
+		err := syncFunc(host, localPath, remotePath, nil)
+		oplog.Log("sync.extra_path",
+			oplog.WithHost(host),
+			oplog.WithDuration(time.Since(start)),
+			oplog.WithDetail(p),
+			oplog.WithError(err),
+		)
+		if err != nil {
 			return fmt.Errorf("rsync extra path %s to %s: %w", p, host, err)
 		}
 	}
@@ -167,13 +190,7 @@ const rsyncTimeout = 30 * time.Second
 // sshCmd is the full SSH command string (e.g., "ssh -p 12345 -o StrictHostKeyChecking=no").
 // target is "user@host". remoteDir is the destination directory.
 func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
-	excludes := DefaultExcludes()
-	for _, dir := range config.ProjectOutputDirs(localDir) {
-		dir = strings.TrimSuffix(dir, "/")
-		if !slices.Contains(excludes, dir) {
-			excludes = append(excludes, dir)
-		}
-	}
+	excludes := sourceExcludes(localDir)
 
 	args := []string{"-az", "--delete", "-e", sshCmd}
 	for _, pattern := range excludes {
@@ -187,7 +204,16 @@ func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "rsync", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	start := time.Now()
+	out, err := cmd.CombinedOutput()
+	dur := time.Since(start)
+	oplog.Log("sync.sources_ssh",
+		oplog.WithHost(target),
+		oplog.WithDuration(dur),
+		oplog.WithDetailf("%s -> %s", localDir, remoteDir),
+		oplog.WithError(err),
+	)
+	if err != nil {
 		return fmt.Errorf("rsync to %s:%s: %w\n%s", target, remoteDir, err, strings.TrimSpace(string(out)))
 	}
 	return nil
