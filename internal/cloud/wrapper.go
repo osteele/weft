@@ -5,6 +5,32 @@ import (
 	"strings"
 )
 
+// uvTimingShim is injected into wrapper scripts to intercept `uv sync` calls
+// and log their duration to /tmp/uv_sync_seconds (one line per invocation).
+const uvTimingShim = `# uv sync timing shim
+mkdir -p /tmp/bin
+cat > /tmp/bin/uv << 'SHIMEOF'
+#!/bin/bash
+UV_REAL=$(which -a uv | grep -v /tmp/bin | head -1)
+if [ -z "$UV_REAL" ]; then
+  echo "uv not found" >&2; exit 127
+fi
+if [ "$1" = "sync" ]; then
+  _start=$(date -u +%s)
+  "$UV_REAL" "$@"
+  _rc=$?
+  _end=$(date -u +%s)
+  echo "$((_end - _start))" >> /tmp/uv_sync_seconds
+  exit $_rc
+else
+  exec "$UV_REAL" "$@"
+fi
+SHIMEOF
+chmod +x /tmp/bin/uv
+export PATH="/tmp/bin:$PATH"
+
+`
+
 // GenerateWrapper produces a bash script that runs a job command, uploads
 // results to R2, and self-destructs the cloud instance.
 //
@@ -22,6 +48,9 @@ func GenerateWrapper(client Client, jobID int64, command string, r2Bucket string
 	// Phase timing: wrapper start
 	b.WriteString("# Phase timing\n")
 	b.WriteString("date -u +%s > /tmp/phase_start\n\n")
+
+	// uv sync timing shim
+	b.WriteString(uvTimingShim)
 
 	// Setup phase (pre-job)
 	b.WriteString("# --- Setup phase ---\n")
@@ -46,6 +75,11 @@ func GenerateWrapper(client Client, jobID int64, command string, r2Bucket string
 	b.WriteString("kill $GPU_MONITOR_PID 2>/dev/null; wait $GPU_MONITOR_PID 2>/dev/null\n")
 	b.WriteString("date -u +%s > /tmp/phase_run_end\n\n")
 
+	// Post-job cache sizes
+	b.WriteString("# Post-job cache sizes\n")
+	b.WriteString("du -sb ~/.cache/uv 2>/dev/null | cut -f1 > /tmp/cache_uv_post || echo 0 > /tmp/cache_uv_post\n")
+	b.WriteString("du -sb ~/.cache/huggingface 2>/dev/null | cut -f1 > /tmp/cache_hf_post || echo 0 > /tmp/cache_hf_post\n\n")
+
 	// Capture metadata
 	b.WriteString("# Capture metadata\n")
 	b.WriteString(`echo "$EXIT_CODE" > /tmp/exit_code`)
@@ -69,6 +103,7 @@ func GenerateWrapper(client Client, jobID int64, command string, r2Bucket string
 	b.WriteString("cp /tmp/stdout.log /tmp/stderr.log /tmp/exit_code /tmp/end_time /tmp/instance_id /tmp/results/\n")
 	b.WriteString("cp /tmp/phase_* /tmp/results/\n")
 	b.WriteString("cp /tmp/gpu_monitor.csv /tmp/results/ 2>/dev/null\n")
+	b.WriteString("cp /tmp/uv_sync_seconds /tmp/cache_uv_post /tmp/cache_hf_post /tmp/results/ 2>/dev/null\n")
 	b.WriteString("[ -d /tmp/debug ] && cp -r /tmp/debug /tmp/results/\n\n")
 
 	// Record upload sizes
@@ -119,6 +154,9 @@ func GenerateCampaignWrapper(client Client, campaignID int64, jobs []CampaignJob
 	b.WriteString(fmt.Sprintf("R2_BUCKET=%q\n", r2Bucket))
 	b.WriteString("CAMPAIGN_FAILED=0\n\n")
 
+	// uv sync timing shim
+	b.WriteString(uvTimingShim)
+
 	// Phase timing: campaign start
 	b.WriteString("# Phase timing\n")
 	b.WriteString("date -u +%s > /tmp/phase_start\n\n")
@@ -155,12 +193,19 @@ func GenerateCampaignWrapper(client Client, campaignID int64, jobs []CampaignJob
 		b.WriteString("echo $JOB_EXIT > /tmp/exit-$JOB_ID\n")
 		b.WriteString("date -u +%s > /tmp/end-$JOB_ID\n\n")
 
+		// Post-job cache sizes and uv sync timing
+		b.WriteString("du -sb ~/.cache/uv 2>/dev/null | cut -f1 > /tmp/cache_uv_post_$JOB_ID || echo 0 > /tmp/cache_uv_post_$JOB_ID\n")
+		b.WriteString("du -sb ~/.cache/huggingface 2>/dev/null | cut -f1 > /tmp/cache_hf_post_$JOB_ID || echo 0 > /tmp/cache_hf_post_$JOB_ID\n")
+		b.WriteString("cp /tmp/uv_sync_seconds /tmp/uv_sync_seconds_$JOB_ID 2>/dev/null\n")
+		b.WriteString("> /tmp/uv_sync_seconds 2>/dev/null\n\n")
+
 		// Upload per-job results
 		b.WriteString("# Upload job results\n")
 		b.WriteString("mkdir -p /tmp/results-$JOB_ID\n")
 		b.WriteString("cp /tmp/stdout-$JOB_ID.log /tmp/stderr-$JOB_ID.log /tmp/exit-$JOB_ID /tmp/end-$JOB_ID /tmp/results-$JOB_ID/\n")
 		b.WriteString("cp /tmp/phase_run_start_$JOB_ID /tmp/phase_run_end_$JOB_ID /tmp/results-$JOB_ID/ 2>/dev/null\n")
 		b.WriteString("cp /tmp/cache_hf_$JOB_ID /tmp/cache_uv_$JOB_ID /tmp/gpu_monitor_$JOB_ID.csv /tmp/results-$JOB_ID/ 2>/dev/null\n")
+		b.WriteString("cp /tmp/cache_uv_post_$JOB_ID /tmp/cache_hf_post_$JOB_ID /tmp/uv_sync_seconds_$JOB_ID /tmp/results-$JOB_ID/ 2>/dev/null\n")
 		b.WriteString("du -sb /tmp/results-$JOB_ID/ 2>/dev/null | cut -f1 > /tmp/results-$JOB_ID/upload_results_bytes\n")
 		b.WriteString(fmt.Sprintf("du -sb %s 2>/dev/null | cut -f1 > /tmp/results-$JOB_ID/upload_workspace_bytes\n", client.WorkspacePath()))
 		b.WriteString("if [ $JOB_EXIT -ne 0 ]; then\n")

@@ -83,6 +83,79 @@ func TestDetectFailureReason_OOM(t *testing.T) {
 	}
 }
 
+func TestReadSummedInt64(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    *int64
+	}{
+		{"single value", "42\n", int64Ptr(42)},
+		{"multiple values", "10\n20\n12\n", int64Ptr(42)},
+		{"trailing newline", "5\n", int64Ptr(5)},
+		{"no trailing newline", "7", int64Ptr(7)},
+		{"empty file", "", nil},
+		{"whitespace only", "  \n  \n", nil},
+		{"mixed valid and invalid", "10\nbad\n20\n", int64Ptr(30)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data")
+			os.WriteFile(path, []byte(tt.content), 0644)
+			got := readSummedInt64(path)
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("got %d, want nil", *got)
+				}
+			} else if got == nil {
+				t.Errorf("got nil, want %d", *tt.want)
+			} else if *got != *tt.want {
+				t.Errorf("got %d, want %d", *got, *tt.want)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		got := readSummedInt64(filepath.Join(t.TempDir(), "nonexistent"))
+		if got != nil {
+			t.Errorf("got %d, want nil", *got)
+		}
+	})
+}
+
+func int64Ptr(v int64) *int64 { return &v }
+
+func TestExtractPhaseTimings_NewFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	jobID := int64(42)
+
+	// Write phase files so extractPhaseTimings returns non-nil
+	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("phase_run_start_%d", jobID)), []byte("1000"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("phase_run_end_%d", jobID)), []byte("2000"), 0644)
+
+	// Write uv sync timing (multiple invocations)
+	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("uv_sync_seconds_%d", jobID)), []byte("15\n8\n"), 0644)
+
+	// Write post-job cache sizes
+	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("cache_uv_post_%d", jobID)), []byte("123456"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("cache_hf_post_%d", jobID)), []byte("789012"), 0644)
+
+	timings := extractPhaseTimings(jobID, tmpDir)
+	if timings == nil {
+		t.Fatal("expected non-nil timings")
+	}
+
+	if timings.UVSyncSeconds == nil || *timings.UVSyncSeconds != 23 {
+		t.Errorf("UVSyncSeconds = %v, want 23", timings.UVSyncSeconds)
+	}
+	if timings.CacheUVPostBytes == nil || *timings.CacheUVPostBytes != 123456 {
+		t.Errorf("CacheUVPostBytes = %v, want 123456", timings.CacheUVPostBytes)
+	}
+	if timings.CacheHFPostBytes == nil || *timings.CacheHFPostBytes != 789012 {
+		t.Errorf("CacheHFPostBytes = %v, want 789012", timings.CacheHFPostBytes)
+	}
+}
+
 func TestCheckCloudInstanceLimitsHandlesUnavailableClient(t *testing.T) {
 	database, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

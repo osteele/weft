@@ -218,6 +218,25 @@ func extractPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
 	t.CacheHFBytes = readInt64(fmt.Sprintf("cache_hf_%d", jobID))
 	t.CacheUVBytes = readInt64(fmt.Sprintf("cache_uv_%d", jobID))
 
+	// uv sync timing — sum all lines in the file (one per invocation)
+	readSummed := func(name string) *int64 {
+		return readSummedInt64(filepath.Join(tmpDir, name))
+	}
+	t.UVSyncSeconds = readSummed(fmt.Sprintf("uv_sync_seconds_%d", jobID))
+	if t.UVSyncSeconds == nil {
+		t.UVSyncSeconds = readSummed("uv_sync_seconds")
+	}
+
+	// Post-job cache sizes
+	t.CacheUVPostBytes = readInt64(fmt.Sprintf("cache_uv_post_%d", jobID))
+	if t.CacheUVPostBytes == nil {
+		t.CacheUVPostBytes = readInt64("cache_uv_post")
+	}
+	t.CacheHFPostBytes = readInt64(fmt.Sprintf("cache_hf_post_%d", jobID))
+	if t.CacheHFPostBytes == nil {
+		t.CacheHFPostBytes = readInt64("cache_hf_post")
+	}
+
 	// GPU monitor summary — single-job wrapper writes gpu_monitor.csv,
 	// campaign wrapper writes gpu_monitor_$JOB_ID.csv
 	gpuMonitorPath := filepath.Join(tmpDir, fmt.Sprintf("gpu_monitor_%d.csv", jobID))
@@ -290,6 +309,34 @@ func parseGPUMonitor(path string) (peakMemMiB, meanUtil, peakUtil float64) {
 		peakUtil = maxUtil
 	}
 	return
+}
+
+// readSummedInt64 reads a file containing one integer per line and returns their sum.
+// Returns nil if the file doesn't exist or contains no valid integers.
+func readSummedInt64(path string) *int64 {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var sum int64
+	found := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		v, err := strconv.ParseInt(line, 10, 64)
+		if err != nil {
+			continue
+		}
+		sum += v
+		found = true
+	}
+	if !found {
+		return nil
+	}
+	return &sum
 }
 
 // writeVastaiLogsToCache writes stdout/stderr from R2 results into the local log cache.

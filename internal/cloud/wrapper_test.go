@@ -43,6 +43,31 @@ func TestGenerateWrapper_VastaiDefaults(t *testing.T) {
 	}
 }
 
+func TestGenerateWrapper_ContainsUVShim(t *testing.T) {
+	client := &MockClient{
+		WorkspacePathVal:   "/workspace/",
+		SelfDestructCmdVal: "true",
+	}
+
+	wrapper := GenerateWrapper(client, 1, "echo hi", "bucket")
+
+	if !strings.Contains(wrapper, "uv sync timing shim") {
+		t.Error("wrapper should contain uv timing shim")
+	}
+	if !strings.Contains(wrapper, `/tmp/bin/uv`) {
+		t.Error("wrapper should create uv shim at /tmp/bin/uv")
+	}
+	if !strings.Contains(wrapper, `uv_sync_seconds`) {
+		t.Error("wrapper should reference uv_sync_seconds")
+	}
+	if !strings.Contains(wrapper, `cache_uv_post`) {
+		t.Error("wrapper should probe post-job uv cache size")
+	}
+	if !strings.Contains(wrapper, `cache_hf_post`) {
+		t.Error("wrapper should probe post-job hf cache size")
+	}
+}
+
 func TestGenerateCampaignWrapper_MultiJob(t *testing.T) {
 	client := &MockClient{
 		WorkspacePathVal:   "/workspace/",
@@ -67,5 +92,17 @@ func TestGenerateCampaignWrapper_MultiJob(t *testing.T) {
 	}
 	if !strings.Contains(wrapper, "CAMPAIGN_FAILED") {
 		t.Error("wrapper should track campaign failure state")
+	}
+	if !strings.Contains(wrapper, "uv sync timing shim") {
+		t.Error("campaign wrapper should contain uv timing shim")
+	}
+	if !strings.Contains(wrapper, "uv_sync_seconds_$JOB_ID") {
+		t.Error("campaign wrapper should copy per-job uv_sync_seconds")
+	}
+	if !strings.Contains(wrapper, "cache_uv_post_$JOB_ID") {
+		t.Error("campaign wrapper should probe post-job uv cache size")
+	}
+	if !strings.Contains(wrapper, "cache_hf_post_$JOB_ID") {
+		t.Error("campaign wrapper should probe post-job hf cache size")
 	}
 }
