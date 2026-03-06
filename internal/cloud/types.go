@@ -65,12 +65,6 @@ type R2Config struct {
 	Bucket          string
 }
 
-// CampaignJob describes a job to be included in a multi-job campaign wrapper.
-type CampaignJob struct {
-	ID      int64
-	Command string
-}
-
 // ProgressFunc is called at each lifecycle phase to report status.
 type ProgressFunc func(phase string)
 

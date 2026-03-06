@@ -17,7 +17,6 @@ type LaunchOpts struct {
 	MaxSpendCents  int
 	MaxTimeSeconds int
 	SourceDir      string // Local project directory to rsync to cloud instance
-	UseAgent       bool   // Deploy agent binary for job execution (vs bash wrapper)
 }
 
 // LaunchInstance creates a cloud instance record, provisions an instance via
@@ -78,28 +77,16 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 
-	// Build wrapper script (agent-based or legacy)
-	var wrapper string
-	if opts.UseAgent {
-		var agentJobs []cloud.AgentJob
-		for _, job := range group.Jobs {
-			agentJobs = append(agentJobs, cloud.AgentJob{
-				ID:      job.ID,
-				Command: job.EffectiveCommand(),
-				Dir:     job.EffectiveWorkingDir(),
-			})
-		}
-		wrapper = cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket)
-	} else {
-		var campaignJobs []cloud.CampaignJob
-		for _, job := range group.Jobs {
-			campaignJobs = append(campaignJobs, cloud.CampaignJob{
-				ID:      job.ID,
-				Command: job.EffectiveCommand(),
-			})
-		}
-		wrapper = cloud.GenerateCampaignWrapper(client, instanceID, campaignJobs, r2Cfg.Bucket, false)
+	// Build agent job list and wrapper script
+	var agentJobs []cloud.AgentJob
+	for _, job := range group.Jobs {
+		agentJobs = append(agentJobs, cloud.AgentJob{
+			ID:      job.ID,
+			Command: job.EffectiveCommand(),
+			Dir:     job.EffectiveWorkingDir(),
+		})
 	}
+	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket)
 
 	// Create cloud instance
 	progress("creating instance")
@@ -148,49 +135,45 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("write rclone config: %w", err)
 	}
 
-	// Deploy agent binary and sync sources (if using agent)
-	if opts.UseAgent {
-		progress("deploying agent + syncing sources")
+	// Build the agent binary (cached locally)
+	progress("deploying agent + syncing sources")
+	agentBinary, err := agentdeploy.EnsureBuilt("cloud", "linux", "amd64")
+	if err != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("build agent: %w", err)
+	}
 
-		// Build the agent binary (cached locally)
-		agentBinary, err := agentdeploy.EnsureBuilt("cloud", "linux", "amd64")
-		if err != nil {
-			_ = client.DestroyInstance(providerInstID)
-			_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-			return instanceID, fmt.Errorf("build agent: %w", err)
-		}
+	// Deploy agent and sync sources in parallel
+	var wg sync.WaitGroup
+	var deployErr, syncErr error
 
-		// Deploy agent and sync sources in parallel
-		var wg sync.WaitGroup
-		var deployErr, syncErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		deployErr = agentdeploy.DeployToSSH(agentBinary, sshTarget, sshOpts, "/usr/local/bin/weft-agent")
+	}()
 
+	if opts.SourceDir != "" {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			deployErr = agentdeploy.DeployToSSH(agentBinary, sshTarget, sshOpts, "/usr/local/bin/weft-agent")
+			sshCmd := fmt.Sprintf("ssh -p %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", sshPort)
+			syncErr = weftsync.SyncSourcesWithSSH(sshTarget, opts.SourceDir, client.WorkspacePath(), sshCmd)
 		}()
+	}
 
-		if opts.SourceDir != "" {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				sshCmd := fmt.Sprintf("ssh -p %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", sshPort)
-				syncErr = weftsync.SyncSourcesWithSSH(sshTarget, opts.SourceDir, client.WorkspacePath(), sshCmd)
-			}()
-		}
+	wg.Wait()
 
-		wg.Wait()
-
-		if deployErr != nil {
-			_ = client.DestroyInstance(providerInstID)
-			_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-			return instanceID, fmt.Errorf("deploy agent: %w", deployErr)
-		}
-		if syncErr != nil {
-			_ = client.DestroyInstance(providerInstID)
-			_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-			return instanceID, fmt.Errorf("sync sources: %w", syncErr)
-		}
+	if deployErr != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("deploy agent: %w", deployErr)
+	}
+	if syncErr != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("sync sources: %w", syncErr)
 	}
 
 	// Deploy wrapper script
