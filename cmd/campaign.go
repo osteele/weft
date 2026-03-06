@@ -91,6 +91,8 @@ func init() {
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all needs_rental jobs)")
 
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Use interactive TUI display")
+	campaignWatchCmd.Flags().Bool("plain", false, "Plain text output (default; accepted for clarity)")
+	_ = campaignWatchCmd.Flags().MarkHidden("plain")
 }
 
 func runCampaignLaunch(cmd *cobra.Command, args []string) error {

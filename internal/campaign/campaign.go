@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
@@ -67,6 +68,22 @@ func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 	})
 
 	return result
+}
+
+// SourceDirs returns the unique local absolute paths for all jobs in the group.
+// Each path is resolved from the job's working directory to a local absolute path.
+// Paths that cannot be resolved (relative, unrecognized prefix) are skipped.
+func (g InstanceGroup) SourceDirs() []string {
+	seen := make(map[string]bool)
+	var dirs []string
+	for _, job := range g.Jobs {
+		d := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if d != "" && !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
 }
 
 // GPUSpec returns a human-readable GPU spec string for the group.

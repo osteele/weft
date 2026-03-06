@@ -3,6 +3,8 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,13 +12,13 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	weftsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // LaunchOpts configures an instance launch.
 type LaunchOpts struct {
 	MaxSpendCents  int
 	MaxTimeSeconds int
-	SourceDir      string // Local project directory to rsync to cloud instance
 }
 
 // LaunchInstance creates a cloud instance record, provisions an instance via
@@ -77,13 +79,25 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 
-	// Build agent job list and wrapper script
+	// Build local-to-remote directory mapping and agent job list.
+	// Each unique local source dir maps to workspace/<basename> on the remote.
+	wsPath := client.WorkspacePath()
+	localToRemote := make(map[string]string)
+	for _, d := range group.SourceDirs() {
+		localToRemote[d] = path.Join(wsPath, path.Base(d))
+	}
+
 	var agentJobs []cloud.AgentJob
 	for _, job := range group.Jobs {
+		remoteDir := ""
+		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+		if mapped, ok := localToRemote[localDir]; ok {
+			remoteDir = mapped
+		}
 		agentJobs = append(agentJobs, cloud.AgentJob{
 			ID:      job.ID,
 			Command: job.EffectiveCommand(),
-			Dir:     job.EffectiveWorkingDir(),
+			Dir:     remoteDir,
 		})
 	}
 	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket)
@@ -111,7 +125,7 @@ func LaunchInstance(
 	// Wait for instance ready
 	progress("waiting for instance")
 	providerInstID := inst.ProviderID
-	inst, err = client.WaitReady(providerInstID, 5*time.Minute)
+	inst, err = client.WaitReady(providerInstID, 10*time.Minute)
 	if err != nil {
 		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
@@ -123,13 +137,13 @@ func LaunchInstance(
 
 	sshTarget := fmt.Sprintf("root@%s", inst.SSHHost)
 	sshPort := fmt.Sprintf("%d", inst.SSHPort)
-	sshOpts := []string{"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-p", sshPort}
+	sshOpts := []string{"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-p", sshPort}
 
-	// Deploy rclone config
+	// Deploy rclone config (retry SSH since sshd may not be ready immediately)
 	progress("configuring R2")
 	rcloneConf := cloud.GenerateRcloneConfig(r2Cfg)
 	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
-	if _, err := cloud.SSHRun(sshTarget, sshOpts, setupCmd); err != nil {
+	if _, err := cloud.SSHRunWithRetry(sshTarget, sshOpts, setupCmd, 5*time.Minute); err != nil {
 		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("write rclone config: %w", err)
@@ -154,12 +168,27 @@ func LaunchInstance(
 		deployErr = agentdeploy.DeployToSSH(agentBinary, sshTarget, sshOpts, "/usr/local/bin/weft-agent")
 	}()
 
-	if opts.SourceDir != "" {
+	if len(localToRemote) > 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Create remote directories, then sync sources
+			var mkdirs []string
+			for _, remoteDir := range localToRemote {
+				mkdirs = append(mkdirs, fmt.Sprintf("'%s'", remoteDir))
+			}
+			mkdirCmd := fmt.Sprintf("mkdir -p %s", strings.Join(mkdirs, " "))
+			if _, err := cloud.SSHRun(sshTarget, sshOpts, mkdirCmd); err != nil {
+				syncErr = fmt.Errorf("create remote dirs: %w", err)
+				return
+			}
 			sshCmd := fmt.Sprintf("ssh -p %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", sshPort)
-			syncErr = weftsync.SyncSourcesWithSSH(sshTarget, opts.SourceDir, client.WorkspacePath(), sshCmd)
+			for localDir, remoteDir := range localToRemote {
+				if err := weftsync.SyncSourcesWithSSH(sshTarget, localDir, remoteDir, sshCmd); err != nil {
+					syncErr = err
+					return
+				}
+			}
 		}()
 	}
 
@@ -178,7 +207,6 @@ func LaunchInstance(
 
 	// Deploy wrapper script
 	progress("deploying wrapper")
-	wsPath := client.WorkspacePath()
 	deployCmd := fmt.Sprintf("cat > %s.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x %s.weft-campaign.sh", wsPath, wrapper, wsPath)
 	if _, err := cloud.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
 		_ = client.DestroyInstance(providerInstID)

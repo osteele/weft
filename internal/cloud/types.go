@@ -7,6 +7,9 @@ import "time"
 type Provider string
 
 const (
+	// DefaultMinReliability is the minimum reliability score for cloud offers.
+	DefaultMinReliability = 0.98
+
 	ProviderVastai Provider = "vastai"
 	ProviderRunpod Provider = "runpod"
 )

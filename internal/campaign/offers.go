@@ -27,8 +27,9 @@ func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup) []GroupOff
 			defer wg.Done()
 
 			constraints := cloud.OfferConstraints{
-				GPUClass:    group.GPUClass,
-				MinGPUMemGB: group.GPUMemGB,
+				GPUClass:       group.GPUClass,
+				MinGPUMemGB:    group.GPUMemGB,
+				MinReliability: cloud.DefaultMinReliability,
 			}
 
 			offers, err := cloud.SearchAllProviders(clients, constraints)
