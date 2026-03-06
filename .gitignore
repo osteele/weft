@@ -54,3 +54,6 @@ docs/specs/*.cfg
 
 # Apalache output
 _apalache-out/
+
+# Test project virtual environments
+testdata/campaign/*/.venv/
