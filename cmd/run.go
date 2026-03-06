@@ -315,19 +315,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Parse "cd /path && command" pattern to extract working directory
 	// Only if -C/--directory wasn't explicitly provided
-	dirProvided := runDir != ""
+	dirExplicit := runDir != ""
 	parsedDir, parsedCmd := parseCdPrefix(command)
 	if parsedDir != "" && runDir == "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: \"cd %s && ...\" detected. Use -C %s instead.\n", parsedDir, shellQuote(parsedDir))
 		command = parsedCmd
 		runDir = parsedDir
-		dirProvided = true
+		dirExplicit = true
 	}
 
 	// Resolve working directory
 	workingDir, err := workdir.ResolveWorkingDir(runDir, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("get working dir: %w", err)
+	}
+
+	// Warn about literal local home paths (e.g. /Users/osteele/...) that won't exist on remote
+	if dirExplicit {
+		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
 	// Route through scheduler for non-draft, non-dependency submissions
@@ -435,10 +440,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		oplog.Log(oplog.OpPlacementDecided,
 			oplog.WithHost(host),
 			oplog.WithDetail(placement.FormatPlacementDetail(result)))
-	}
-
-	if dirProvided {
-		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
 	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=queue cmd=%s", command))

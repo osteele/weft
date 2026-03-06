@@ -959,20 +959,6 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// parseEffectiveCommand extracts the command from "cd dir && command" patterns.
-// Returns the command after "&&" if pattern matches, or the original command.
-func parseEffectiveCommand(command string) string {
-	cmd := strings.TrimSpace(command)
-	if !strings.HasPrefix(cmd, "cd ") {
-		return command
-	}
-	andIdx := strings.Index(cmd, " && ")
-	if andIdx == -1 {
-		return command
-	}
-	return strings.TrimSpace(cmd[andIdx+4:])
-}
-
 func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64, successVals, anyVals []string) ([]queueDependency, error) {
 	var deps []queueDependency
 	seen := map[int64]bool{}

@@ -19,7 +19,10 @@ func ResolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 		return dir, nil
 	}
 	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get current directory: %w", err)
+	}
 	if home != "" && cwd != "" {
 		for _, prefix := range config.AutomapDirs() {
 			expanded := expandTilde(prefix, home)
