@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -288,6 +287,16 @@ func (m launchModel) launchInstances() tea.Cmd {
 		}
 	}
 
+	// Build offers slice, filtering out groups without offers
+	var launchGroups []campaign.InstanceGroup
+	var offers []cloud.Offer
+	for i, fg := range filteredGroups {
+		if i < len(filteredOffers) && filteredOffers[i].Offer != nil {
+			launchGroups = append(launchGroups, fg)
+			offers = append(offers, *filteredOffers[i].Offer)
+		}
+	}
+
 	database := m.database
 	clients := m.clients
 	cfg := m.appConfig
@@ -297,71 +306,18 @@ func (m launchModel) launchInstances() tea.Cmd {
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 
-		// Create campaign batch record
-		campaignRec := &db.Campaign{
-			Status: db.CampaignStatusLaunching,
-		}
-		campaignID, err := db.CreateCampaign(database, campaignRec)
+		result, err := campaign.LaunchCampaign(
+			clients, database, launchGroups, offers, opts, r2Cfg, createOpts, nil,
+		)
 		if err != nil {
-			return instancesLaunchedMsg{err: fmt.Errorf("create campaign: %w", err)}
+			return instancesLaunchedMsg{err: err}
 		}
 
-		// Launch instances in parallel
-		var mu sync.Mutex
-		var instanceIDs []int64
-		var launchErrors []error
-		var wg sync.WaitGroup
-
-		for i, fg := range filteredGroups {
-			var offer cloud.Offer
-			if i < len(filteredOffers) && filteredOffers[i].Offer != nil {
-				offer = *filteredOffers[i].Offer
-			} else {
-				mu.Lock()
-				launchErrors = append(launchErrors, fmt.Errorf("no offer available for group %s", fg.GPUSpec()))
-				mu.Unlock()
-				continue
-			}
-
-			wg.Add(1)
-			go func(group campaign.InstanceGroup, ofr cloud.Offer) {
-				defer wg.Done()
-
-				client := cloudClientForProvider(clients, ofr.Provider)
-				if client == nil {
-					mu.Lock()
-					launchErrors = append(launchErrors, fmt.Errorf("no client for provider %s", ofr.Provider))
-					mu.Unlock()
-					return
-				}
-
-				cID, err := campaign.LaunchInstance(
-					client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-					func(phase string) {
-						// Progress callback — prefix with GPU spec
-					},
-				)
-
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					launchErrors = append(launchErrors, fmt.Errorf("launch instance for %s: %w", group.GPUSpec(), err))
-				} else {
-					instanceIDs = append(instanceIDs, cID)
-				}
-			}(fg, offer)
+		if len(result.InstanceIDs) == 0 && len(result.Errors) > 0 {
+			return instancesLaunchedMsg{err: result.Errors[0]}
 		}
 
-		wg.Wait()
-
-		// Update campaign status based on results
-		if len(instanceIDs) == 0 && len(launchErrors) > 0 {
-			_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-			return instancesLaunchedMsg{err: launchErrors[0]}
-		}
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
-
-		return instancesLaunchedMsg{instanceIDs: instanceIDs}
+		return instancesLaunchedMsg{instanceIDs: result.InstanceIDs}
 	}
 }
 

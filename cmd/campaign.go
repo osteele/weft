@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -206,6 +205,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Check all groups have offers
+	var offers []cloud.Offer
 	for _, go_ := range groupOffers {
 		if go_.Err != nil {
 			return fmt.Errorf("offer search failed for %s: %w", go_.Group.GPUSpec(), go_.Err)
@@ -213,91 +213,48 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		if go_.Offer == nil {
 			return fmt.Errorf("no offers found for %s", go_.Group.GPUSpec())
 		}
+		offers = append(offers, *go_.Offer)
 	}
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 	createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 
-	// Create campaign batch
-	campaignRec := &db.Campaign{
-		Status: db.CampaignStatusLaunching,
-	}
-	campaignID, err := db.CreateCampaign(database, campaignRec)
-	if err != nil {
-		return fmt.Errorf("create campaign: %w", err)
-	}
-
-	// Launch instances in parallel
 	fmt.Printf("Launching %d instance(s)...\n", len(groups))
-	var mu sync.Mutex
-	var instanceIDs []int64
-	var launchErrors []error
-	var wg sync.WaitGroup
 
-	for i, g := range groups {
-		offer := *groupOffers[i].Offer
-
-		wg.Add(1)
-		go func(group campaign.InstanceGroup, ofr cloud.Offer) {
-			defer wg.Done()
-
-			// Find the appropriate client for this offer's provider
-			client := cloudClientForProvider(clients, ofr.Provider)
-			if client == nil {
-				mu.Lock()
-				launchErrors = append(launchErrors, fmt.Errorf("%s: no client for provider %s", group.GPUSpec(), ofr.Provider))
-				mu.Unlock()
-				return
-			}
-
-			cID, err := campaign.LaunchInstance(
-				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-				func(phase string) {
-					mu.Lock()
-					fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
-					mu.Unlock()
-				},
-			)
-
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
-			} else {
-				instanceIDs = append(instanceIDs, cID)
-			}
-		}(g, offer)
+	result, err := campaign.LaunchCampaign(
+		clients, database, groups, offers, opts, r2Cfg, createOpts,
+		func(group campaign.InstanceGroup, phase string) {
+			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
+		},
+	)
+	if err != nil {
+		return err
 	}
 
-	wg.Wait()
-
-	// Update campaign status
-	if len(instanceIDs) == 0 && len(launchErrors) > 0 {
-		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
-		return launchErrors[0]
+	if len(result.InstanceIDs) == 0 && len(result.Errors) > 0 {
+		return result.Errors[0]
 	}
-	_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
 
 	// Print results
-	for _, e := range launchErrors {
+	for _, e := range result.Errors {
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", e)
 	}
-	fmt.Printf("Campaign %d: launched %d instance(s)\n", campaignID, len(instanceIDs))
-	for _, id := range instanceIDs {
+	fmt.Printf("Campaign %d: launched %d instance(s)\n", result.CampaignID, len(result.InstanceIDs))
+	for _, id := range result.InstanceIDs {
 		fmt.Printf("  instance %d\n", id)
 	}
 
 	// Print next steps
 	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("  weft campaign watch %d\n", campaignID)
-	for _, id := range instanceIDs {
+	fmt.Printf("  weft campaign watch %d\n", result.CampaignID)
+	for _, id := range result.InstanceIDs {
 		fmt.Printf("  weft instance ssh %d\n", id)
 	}
 
 	// Segue into watch mode
 	if !campaignLaunchNoWatch && term.IsTerminal(os.Stdout.Fd()) {
 		fmt.Println()
-		return watchInstances(database, instanceIDs)
+		return watchInstances(database, result.InstanceIDs)
 	}
 
 	return nil

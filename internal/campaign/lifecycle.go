@@ -21,6 +21,108 @@ type LaunchOpts struct {
 	MaxTimeSeconds int
 }
 
+// LaunchResult holds the outcome of a campaign launch.
+type LaunchResult struct {
+	CampaignID  int64
+	InstanceIDs []int64
+	Errors      []error
+}
+
+// LaunchCampaign creates a campaign record and launches instances for each group
+// in parallel. It collects results and updates the campaign status.
+// The onPhase callback, if non-nil, is called with progress updates per group.
+func LaunchCampaign(
+	clients []cloud.Client,
+	database *sql.DB,
+	groups []InstanceGroup,
+	offers []cloud.Offer, // parallel to groups
+	opts LaunchOpts,
+	r2Cfg cloud.R2Config,
+	createOpts cloud.CreateOpts,
+	onPhase func(group InstanceGroup, phase string),
+) (*LaunchResult, error) {
+	// Create campaign batch record
+	campaignRec := &db.Campaign{
+		Status: db.CampaignStatusLaunching,
+	}
+	campaignID, err := db.CreateCampaign(database, campaignRec)
+	if err != nil {
+		return nil, fmt.Errorf("create campaign: %w", err)
+	}
+
+	// Launch instances in parallel
+	var mu sync.Mutex
+	var instanceIDs []int64
+	var launchErrors []error
+	var wg sync.WaitGroup
+
+	for i, g := range groups {
+		offer := offers[i]
+
+		wg.Add(1)
+		go func(group InstanceGroup, ofr cloud.Offer) {
+			defer wg.Done()
+
+			client := clientForProvider(clients, ofr.Provider)
+			if client == nil {
+				mu.Lock()
+				launchErrors = append(launchErrors, fmt.Errorf("%s: no client for provider %s", group.GPUSpec(), ofr.Provider))
+				mu.Unlock()
+				return
+			}
+
+			var progress cloud.ProgressFunc
+			if onPhase != nil {
+				progress = func(phase string) {
+					mu.Lock()
+					onPhase(group, phase)
+					mu.Unlock()
+				}
+			}
+
+			cID, err := LaunchInstance(
+				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts, progress,
+			)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
+			} else {
+				instanceIDs = append(instanceIDs, cID)
+			}
+		}(g, offer)
+	}
+
+	wg.Wait()
+
+	// Update campaign status
+	if len(instanceIDs) == 0 && len(launchErrors) > 0 {
+		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusFailed)
+	} else {
+		_ = db.UpdateCampaignStatus(database, campaignID, db.CampaignStatusRunning)
+	}
+
+	return &LaunchResult{
+		CampaignID:  campaignID,
+		InstanceIDs: instanceIDs,
+		Errors:      launchErrors,
+	}, nil
+}
+
+// clientForProvider finds the client matching a provider from a list.
+func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Client {
+	for _, c := range clients {
+		if c.Provider() == provider {
+			return c
+		}
+	}
+	if len(clients) == 1 {
+		return clients[0]
+	}
+	return nil
+}
+
 // LaunchInstance creates a cloud instance record, provisions an instance via
 // the given cloud client, deploys the multi-job wrapper, and starts it.
 // Returns the cloud instance ID.
