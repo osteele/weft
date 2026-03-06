@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -22,7 +21,6 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/scheduler"
-	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -320,13 +318,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 	dirProvided := runDir != ""
 	parsedDir, parsedCmd := parseCdPrefix(command)
 	if parsedDir != "" && runDir == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: \"cd %s && ...\" detected. Use -C %s instead.\n", parsedDir, shellQuote(parsedDir))
 		command = parsedCmd
 		runDir = parsedDir
 		dirProvided = true
 	}
 
 	// Resolve working directory
-	workingDir, err := resolveWorkingDir(runDir, cmd.ErrOrStderr())
+	workingDir, err := workdir.ResolveWorkingDir(runDir, cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("get working dir: %w", err)
 	}
@@ -541,31 +540,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 // killJob kills a job by ID (used by --kill flag)
 
-// resolveWorkingDir resolves the effective working directory for a job submission.
-// If dir is non-empty it is returned as-is. Otherwise it tries automap from the
-// current working directory, then falls back to session.DefaultWorkingDir.
-// logDest receives an "Auto-detected" message when automap fires; nil suppresses it.
-func resolveWorkingDir(dir string, logDest io.Writer) (string, error) {
-	if dir != "" {
-		return dir, nil
-	}
-	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
-	if home != "" && cwd != "" {
-		for _, prefix := range config.AutomapDirs() {
-			expanded := strings.Replace(prefix, "~", home, 1)
-			if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
-				resolved := prefix + "/" + rel
-				if logDest != nil {
-					fmt.Fprintf(logDest, "Auto-detected working directory: %s\n", resolved)
-				}
-				return resolved, nil
-			}
-		}
-	}
-	return session.DefaultWorkingDir()
-}
-
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.
 func buildPlacementMeta(result *placement.PlacementResult, predict placement.JobPredictor) *db.PlacementMeta {
 	meta := &db.PlacementMeta{}
@@ -751,8 +725,9 @@ func maybeWarnHomePrefixedDir(host, dir string) {
 	if !pathHasHomePrefix(dir, home) {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "\nWarning: working directory %s will be used literally on %s.\n", dir, host)
-	fmt.Fprintf(os.Stderr, "If you intended the remote home directory, quote it instead, e.g. -C '~/path/to/dir'.\n")
+	rel, _ := filepath.Rel(home, dir)
+	fmt.Fprintf(os.Stderr, "\nWarning: local path %s may not exist on %s.\n", dir, host)
+	fmt.Fprintf(os.Stderr, "Use -C '~/%s' for the remote home-relative path.\n", rel)
 }
 
 func pathHasHomePrefix(dir, home string) bool {

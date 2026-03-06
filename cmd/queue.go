@@ -17,9 +17,9 @@ import (
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/queuerunner"
-	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -302,14 +302,14 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
 
-	// Set defaults
-	workingDir := queueDir_
-	if workingDir == "" {
-		var err error
-		workingDir, err = session.DefaultWorkingDir()
-		if err != nil {
-			return fmt.Errorf("get working dir: %w", err)
-		}
+	// Resolve working directory (automap from CWD if -C not specified)
+	workingDir, err := workdir.ResolveWorkingDir(queueDir_, cmd.ErrOrStderr())
+	if err != nil {
+		return fmt.Errorf("get working dir: %w", err)
+	}
+
+	if queueDir_ != "" {
+		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
 	database, err := db.Open()

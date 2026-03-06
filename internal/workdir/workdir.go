@@ -35,7 +35,7 @@ func ResolveLocal(workingDir string) string {
 		return ""
 	}
 	for _, prefix := range config.AutomapDirs() {
-		expanded := strings.Replace(prefix, "~", home, 1)
+		expanded := expandTilde(prefix, home)
 		if strings.HasPrefix(workingDir, prefix+"/") {
 			rel := workingDir[len(prefix)+1:]
 			return filepath.Join(expanded, rel)
@@ -48,4 +48,9 @@ func ResolveLocal(workingDir string) string {
 		return workingDir
 	}
 	return ""
+}
+
+// expandTilde replaces a leading "~" in prefix with the given home directory.
+func expandTilde(prefix, home string) string {
+	return strings.Replace(prefix, "~", home, 1)
 }
