@@ -131,7 +131,7 @@ func TestLaunchInstancePreSSHPhases(t *testing.T) {
 	instanceID, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
 		LaunchOpts{},
-		r2Cfg, createOpts,
+		r2Cfg, createOpts, "test-version",
 		func(phase string) {},
 	)
 
@@ -194,7 +194,7 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	_, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
 		LaunchOpts{},
-		r2Cfg, createOpts,
+		r2Cfg, createOpts, "test-version",
 		func(phase string) {},
 	)
 

@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -249,8 +250,12 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			Jobs:     []*db.Job{job},
 		}
 
+		agentVer, err := agentdeploy.LocalAgentVersion()
+		if err != nil {
+			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("local agent version: %w", err)}
+		}
 		campaignID, err := campaign.LaunchInstance(
-			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts,
+			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts, agentVer,
 			func(phase string) {
 				log.Printf("cloud: job %d instance: %s", job.ID, phase)
 			},

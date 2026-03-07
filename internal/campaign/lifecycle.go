@@ -16,6 +16,12 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
+// Cloud rental instances are currently always linux/amd64 (Vast.ai, RunPod).
+const (
+	cloudOS   = "linux"
+	cloudArch = "amd64"
+)
+
 // LaunchOpts configures an instance launch.
 type LaunchOpts struct {
 	MaxSpendCents  int
@@ -42,6 +48,12 @@ func LaunchCampaign(
 	createOpts cloud.CreateOpts,
 	onPhase func(group InstanceGroup, phase string),
 ) (*LaunchResult, error) {
+	// Resolve agent version once for all instances
+	agentVersion, err := agentdeploy.LocalAgentVersion()
+	if err != nil {
+		return nil, fmt.Errorf("local agent version: %w", err)
+	}
+
 	// Create campaign batch record
 	campaignRec := &db.Campaign{
 		Status: db.CampaignStatusLaunching,
@@ -82,7 +94,7 @@ func LaunchCampaign(
 			}
 
 			cID, err := LaunchInstance(
-				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts, progress,
+				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts, agentVersion, progress,
 			)
 
 			mu.Lock()
@@ -128,6 +140,7 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 // the given cloud client, deploys the multi-job wrapper, and starts it.
 // Returns the cloud instance ID.
 // If campaignID is non-nil, the cloud instance is associated with that campaign batch.
+// agentVersion is the pre-resolved local agent version (avoids repeated jj/git calls).
 func LaunchInstance(
 	client cloud.Client,
 	database *sql.DB,
@@ -137,6 +150,7 @@ func LaunchInstance(
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOpts cloud.CreateOpts,
+	agentVersion string,
 	progress cloud.ProgressFunc,
 ) (int64, error) {
 	if progress == nil {
@@ -213,7 +227,7 @@ func LaunchInstance(
 
 	// Record provider instance ID
 	if err := db.SetCloudInstanceProviderID(database, instanceID, inst.ProviderID); err != nil {
-		_ = client.DestroyInstance(inst.ProviderID)
+		_ = client.DestroyInstance(inst.ProviderID) // providerInstID not yet assigned
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
@@ -233,6 +247,13 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("wait ready: %w", err)
 	}
 
+	// From here on, failures destroy the provider instance and mark the DB record failed.
+	failAndDestroy := func(format string, args ...any) (int64, error) {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf(format, args...)
+	}
+
 	// Record when instance became ready (before SSH setup)
 	_ = db.SetCloudInstanceReadyAt(database, instanceID)
 
@@ -245,24 +266,14 @@ func LaunchInstance(
 	rcloneConf := cloud.GenerateRcloneConfig(r2Cfg)
 	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
 	if _, err := cloud.SSHRunWithRetry(sshTarget, sshOpts, setupCmd, 5*time.Minute); err != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("write rclone config: %w", err)
+		return failAndDestroy("write rclone config: %w", err)
 	}
 
 	// Extract the embedded agent binary (cached locally)
 	progress("deploying agent + syncing sources")
-	localVer, err := agentdeploy.LocalAgentVersion()
+	agentBinary, err := agentdeploy.EnsureBuilt(agentVersion, cloudOS, cloudArch)
 	if err != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("local agent version: %w", err)
-	}
-	agentBinary, err := agentdeploy.EnsureBuilt(localVer, "linux", "amd64")
-	if err != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("build agent: %w", err)
+		return failAndDestroy("build agent: %w", err)
 	}
 
 	// Deploy agent and sync sources in parallel
@@ -302,14 +313,10 @@ func LaunchInstance(
 	wg.Wait()
 
 	if deployErr != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("deploy agent: %w", deployErr)
+		return failAndDestroy("deploy agent: %w", deployErr)
 	}
 	if syncErr != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("sync sources: %w", syncErr)
+		return failAndDestroy("sync sources: %w", syncErr)
 	}
 
 	// Deploy wrapper script (generated after CreateInstance so providerInstID is available for self-destruct)
@@ -327,18 +334,14 @@ func LaunchInstance(
 	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket, providerInstID, wrapperOpts)
 	deployCmd := fmt.Sprintf("cat > %s.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x %s.weft-campaign.sh", wsPath, wrapper, wsPath)
 	if _, err := cloud.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("deploy wrapper: %w", err)
+		return failAndDestroy("deploy wrapper: %w", err)
 	}
 
 	// Start via nohup
 	progress("starting jobs")
 	startCmd := fmt.Sprintf("nohup bash %s.weft-campaign.sh </dev/null >/dev/null 2>&1 &", wsPath)
 	if _, err := cloud.SSHRun(sshTarget, sshOpts, startCmd); err != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("start wrapper: %w", err)
+		return failAndDestroy("start wrapper: %w", err)
 	}
 
 	// Update status to running
