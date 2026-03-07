@@ -30,5 +30,6 @@ type Client interface {
 	WorkspacePath() string
 
 	// SelfDestructCmd returns the shell command for an instance to destroy itself.
-	SelfDestructCmd() string
+	// providerInstanceID is the provider-specific instance ID (e.g., Vast.ai instance number).
+	SelfDestructCmd(providerInstanceID string) string
 }

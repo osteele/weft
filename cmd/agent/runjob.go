@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
@@ -17,6 +18,7 @@ func runJob(args []string) {
 	var jobID int64
 	var logDir string
 	var workingDir string
+	var maxTime time.Duration
 
 	for _, arg := range args {
 		switch {
@@ -32,9 +34,17 @@ func runJob(args []string) {
 			logDir = arg[len("--log-dir="):]
 		case hasPrefix(arg, "--working-dir="):
 			workingDir = arg[len("--working-dir="):]
+		case hasPrefix(arg, "--max-time="):
+			val := arg[len("--max-time="):]
+			var err error
+			maxTime, err = time.ParseDuration(val)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --max-time: %s\n", val)
+				os.Exit(1)
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
-			fmt.Fprintf(os.Stderr, "usage: weft-agent run-job --job-id=ID --log-dir=DIR [--working-dir=DIR]\n")
+			fmt.Fprintf(os.Stderr, "usage: weft-agent run-job --job-id=ID --log-dir=DIR [--working-dir=DIR] [--max-time=DURATION]\n")
 			os.Exit(1)
 		}
 	}
@@ -60,6 +70,7 @@ func runJob(args []string) {
 		Job:        job,
 		LogDir:     logDir,
 		WorkingDir: workingDir,
+		MaxTime:    maxTime,
 	}
 
 	ei, err := runner.RunSingleJob(cfg)

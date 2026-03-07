@@ -73,7 +73,7 @@ func (m *MockClient) WorkspacePath() string {
 	return "/workspace/"
 }
 
-func (m *MockClient) SelfDestructCmd() string {
+func (m *MockClient) SelfDestructCmd(providerInstanceID string) string {
 	if m.SelfDestructCmdVal != "" {
 		return m.SelfDestructCmdVal
 	}

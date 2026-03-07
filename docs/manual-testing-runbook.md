@@ -353,6 +353,82 @@ ssh studio 'tail -50 ~/.cache/weft/queue/oplog.jsonl'
 
 ---
 
+## Campaign Testing with Testdata Projects
+
+Test projects live in `testdata/campaign/` with pre-configured Python environments:
+
+| Project | Purpose | Duration | Exit |
+|---------|---------|----------|------|
+| `basic` | GPU detection, output files (torch, numpy) | ~5-10s | 0 |
+| `ml-tokenizer` | HuggingFace tokenizer download + inference | ~20-45s | 0 |
+| `ml-inference` | DistilBERT model GPU inference | ~30-60s | 0 |
+| `fail` | Deliberate `RuntimeError` after 2s sleep | ~2s | non-zero |
+
+Each has `pyproject.toml`, `run.py`, `.venv/`, and `uv.lock`.
+
+### Step 1: Queue testdata jobs
+
+Use a GPU class that no local host has (e.g., `rtx3060`) so jobs go to `needs_rental`:
+
+```bash
+weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/basic" 'uv run python run.py'
+weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/ml-tokenizer" 'uv run python run.py'
+weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/ml-inference" 'uv run python run.py'
+weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/fail" 'uv run python run.py'
+```
+
+### Step 2: Preview and launch
+
+```bash
+# Dry run to check grouping and cost estimate
+weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --dry-run
+
+# Launch (non-interactive, no watch — useful for CI/scripting)
+weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --yes --no-watch
+```
+
+### Step 3: Monitor
+
+```bash
+weft campaign watch <campaign-id> --plain
+# or check DB directly
+sqlite3 ~/.config/weft/jobs.db "SELECT id, status, gpu_class FROM jobs WHERE id IN (<ids>);"
+```
+
+### Step 4: Verify telemetry and phases
+
+After jobs complete, check the remote log directory for each job:
+
+```bash
+# SSH into the cloud instance (or use weft instance ssh <id>)
+# Check phases.json — setup should be separate from run
+cat ~/.cache/weft/logs/<job-id>.phases.json | python3 -m json.tool
+
+# Check timeseries — should have at least one sample even for short jobs
+cat ~/.cache/weft/logs/<job-id>.timeseries.jsonl
+
+# Check completion record
+cat ~/.cache/weft/logs/<job-id>.completion.json | python3 -m json.tool
+```
+
+**What to verify:**
+
+- **Phase timing**: `setup_start` < `setup_end` ≤ `run_start` (setup runs `uv sync` as a separate process)
+- **Setup seconds**: `setup_seconds` > 0 when `uv sync` actually ran (projects with `pyproject.toml` + `uv.lock` or `.venv/`)
+- **GPU metrics**: `timeseries.jsonl` has at least one sample (immediate sample before ticker)
+- **GPU fields**: `gpu_mem_used`, `gpu_util_pct` are non-null in timeseries samples
+- **Failure detection**: The `fail` project should have non-zero exit code and a failure reason
+
+### Re-running test jobs
+
+To reset completed test jobs for re-testing:
+
+```bash
+sqlite3 ~/.config/weft/jobs.db "UPDATE jobs SET status='needs_rental', host='' WHERE id IN (<ids>);"
+```
+
+---
+
 ## Cleanup
 
 After testing, clean up test jobs:

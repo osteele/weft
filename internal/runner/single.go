@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
@@ -18,6 +20,7 @@ type SingleJobConfig struct {
 	LogDir         string
 	WorkingDir     string        // Override job.Dir if non-empty
 	SampleInterval time.Duration // Default 15s
+	MaxTime        time.Duration // If >0, kill the job after this duration
 	SkipProbes     bool          // Skip cache size probes (useful in tests)
 }
 
@@ -132,6 +135,21 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	proc.WritePIDFiles(paths)
 
+	// Time budget enforcement: kill process group when deadline reached
+	var timedOut atomic.Bool
+	if cfg.MaxTime > 0 {
+		timer := time.AfterFunc(cfg.MaxTime, func() {
+			timedOut.Store(true)
+			log.Printf("Job %d: max-time %v reached, sending SIGTERM to process group %d", cfg.JobID, cfg.MaxTime, proc.PGID)
+			syscall.Kill(-proc.PGID, syscall.SIGTERM)
+			// Give the process a grace period to clean up, then SIGKILL
+			time.AfterFunc(10*time.Second, func() {
+				syscall.Kill(-proc.PGID, syscall.SIGKILL)
+			})
+		})
+		defer timer.Stop()
+	}
+
 	// Sampling loop in background
 	samplingDone := make(chan struct{})
 	var rs RunningJobState
@@ -168,6 +186,14 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	// Wait for process
 	waitErr := proc.Cmd.Wait()
 	ei := ExtractExitInfo(waitErr)
+
+	// Override exit info if we timed out (like GNU timeout exit code 124)
+	if timedOut.Load() {
+		ei.ExitCode = 124
+		ei.Signaled = true
+		ei.Signal = syscall.SIGTERM
+		log.Printf("Job %d: timed out after %v", cfg.JobID, cfg.MaxTime)
+	}
 
 	phases.RunEnd = time.Now().Unix()
 	endTime := time.Now().Unix()

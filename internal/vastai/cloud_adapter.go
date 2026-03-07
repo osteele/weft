@@ -2,7 +2,10 @@ package vastai
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -101,8 +104,35 @@ func (c *CloudClient) WorkspacePath() string {
 	return "/workspace/"
 }
 
-func (c *CloudClient) SelfDestructCmd() string {
-	return `vastai destroy instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY" 2>/dev/null || true`
+func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
+	apiKey := readVastaiAPIKey()
+	if apiKey == "" {
+		return fmt.Sprintf("echo 'warning: no vastai API key found, cannot self-destruct instance %s'", providerInstanceID)
+	}
+	// Use the REST API directly — the vastai CLI is not installed on instances.
+	return fmt.Sprintf(
+		`curl -s -X DELETE "https://console.vast.ai/api/v0/instances/%s/" -H "Authorization: Bearer %s" >/dev/null 2>&1 || true`,
+		providerInstanceID, apiKey,
+	)
+}
+
+// readVastaiAPIKey reads the API key from the vastai config file.
+// Checks ~/.config/vastai/vast_api_key first, then ~/.vast_api_key (legacy).
+func readVastaiAPIKey() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	for _, path := range []string{
+		filepath.Join(home, ".config", "vastai", "vast_api_key"),
+		filepath.Join(home, ".vast_api_key"),
+	} {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return ""
 }
 
 // Inner returns the underlying VastaiClient for Vast.ai-specific operations.

@@ -3,6 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -202,8 +203,6 @@ func LaunchInstance(
 			Dir:     remoteDir,
 		})
 	}
-	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket)
-
 	// Create cloud instance
 	progress("creating instance")
 	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
@@ -307,8 +306,19 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("sync sources: %w", syncErr)
 	}
 
-	// Deploy wrapper script
+	// Deploy wrapper script (generated after CreateInstance so providerInstID is available for self-destruct)
 	progress("deploying wrapper")
+	wrapperOpts := cloud.WrapperOpts{
+		MaxTimeSeconds: opts.MaxTimeSeconds,
+	}
+	// Forward HF token for gated model downloads
+	if token := os.Getenv("HF_TOKEN"); token != "" {
+		wrapperOpts.EnvVars = map[string]string{
+			"HF_TOKEN":               token,
+			"HUGGING_FACE_HUB_TOKEN": token,
+		}
+	}
+	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket, providerInstID, wrapperOpts)
 	deployCmd := fmt.Sprintf("cat > %s.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x %s.weft-campaign.sh", wsPath, wrapper, wsPath)
 	if _, err := cloud.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
 		_ = client.DestroyInstance(providerInstID)

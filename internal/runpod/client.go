@@ -136,7 +136,8 @@ func (c *CloudClient) WorkspacePath() string {
 	return "/workspace/"
 }
 
-func (c *CloudClient) SelfDestructCmd() string {
+func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
+	// RunPod sets $RUNPOD_POD_ID in the container, and runpodctl is pre-installed.
 	return `runpodctl remove pod "$RUNPOD_POD_ID" 2>/dev/null || true`
 }
 
