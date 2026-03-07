@@ -92,5 +92,10 @@ func DefaultCreateOpts(image string) CreateOpts {
 	}
 }
 
+// MbpsToBytesPerSec converts megabits per second to bytes per second.
+func MbpsToBytesPerSec(mbps float64) float64 {
+	return mbps * 1e6 / 8
+}
+
 // DefaultWaitReadyTimeout is the default timeout for waiting for an instance.
 const DefaultWaitReadyTimeout = 5 * time.Minute

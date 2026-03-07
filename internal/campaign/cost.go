@@ -1,8 +1,11 @@
 package campaign
 
 import (
+	"log"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/predictor"
 )
@@ -19,6 +22,8 @@ type CostEstimate struct {
 	Offer         GroupOffer
 	JobDurations  map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
 	SetupOverhead time.Duration
+	DownloadBytes int64         // total bytes of HF model inputs to download
+	DownloadTime  time.Duration // estimated download time from offer bandwidth
 	TotalTime     time.Duration
 	TotalCost     float64
 	HasPrediction bool // false = fell back to DefaultJobDuration
@@ -56,8 +61,19 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEs
 			}
 		}
 
+		// Estimate download time from HF model inputs
+		if totalBytes, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil); err != nil {
+			log.Printf("warning: could not resolve input sizes: %v", err)
+		} else if totalBytes > 0 {
+			est.DownloadBytes = totalBytes
+			if go_.Offer.DownloadBandwidth > 0 {
+				bytesPerSec := cloud.MbpsToBytesPerSec(go_.Offer.DownloadBandwidth)
+				est.DownloadTime = time.Duration(float64(totalBytes)/bytesPerSec) * time.Second
+			}
+		}
+
 		est.HasPrediction = hasPrediction
-		est.TotalTime = totalJobTime + est.SetupOverhead
+		est.TotalTime = totalJobTime + est.SetupOverhead + est.DownloadTime
 		est.TotalCost = est.TotalTime.Hours() * go_.Offer.CostPerHour
 
 		estimates[i] = est
