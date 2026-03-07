@@ -29,6 +29,7 @@ func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup) []GroupOff
 			constraints := cloud.OfferConstraints{
 				GPUClass:       group.GPUClass,
 				MinGPUMemGB:    group.GPUMemGB,
+				MinDiskGB:      group.DiskGB,
 				MinReliability: cloud.DefaultMinReliability,
 			}
 

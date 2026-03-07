@@ -15,6 +15,7 @@ import (
 type InstanceGroup struct {
 	GPUClass string // Normalized GPU class (uppercase), e.g. "H100"
 	GPUMemGB int    // Supremum of GPU memory across all jobs in the group
+	DiskGB   int    // Estimated disk space needed (0 = use default)
 	Jobs     []*db.Job
 }
 
@@ -84,6 +85,21 @@ func (g InstanceGroup) SourceDirs() []string {
 		}
 	}
 	return dirs
+}
+
+// AllInputs returns the deduplicated input refs from all jobs in the group.
+func (g InstanceGroup) AllInputs() []string {
+	seen := make(map[string]struct{})
+	var inputs []string
+	for _, job := range g.Jobs {
+		for _, input := range job.Inputs {
+			if _, ok := seen[input]; !ok {
+				seen[input] = struct{}{}
+				inputs = append(inputs, input)
+			}
+		}
+	}
+	return inputs
 }
 
 // GPUSpec returns a human-readable GPU spec string for the group.

@@ -159,6 +159,11 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Estimate disk needs from HF model inputs
+	for i := range groups {
+		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
+	}
+
 	// Parse budget limits
 	opts := parseLaunchOpts()
 
@@ -286,7 +291,7 @@ func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
 	estimates := campaign.EstimateCosts(groupOffers, &predCfg)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tCOST/HR\tEST TIME\tEST COST\n")
+	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")
 
 	for i, est := range estimates {
 		go_ := groupOffers[i]
@@ -294,6 +299,7 @@ func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
 
 		gpuStr := go_.Group.GPUSpec()
 		memStr := "—"
+		diskStr := fmt.Sprintf("%dGB", go_.Group.DiskGB)
 		costStr := "—"
 		durStr := "—"
 		estCostStr := "—"
@@ -309,8 +315,8 @@ func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
 			gpuStr = fmt.Sprintf("%s (no offers)", go_.Group.GPUSpec())
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
-			i+1, gpuStr, len(go_.Group.Jobs), jobIDs, memStr, costStr, durStr, estCostStr)
+		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			i+1, gpuStr, len(go_.Group.Jobs), jobIDs, memStr, diskStr, costStr, durStr, estCostStr)
 	}
 	w.Flush()
 

@@ -217,6 +217,11 @@ func LaunchInstance(
 			Dir:     remoteDir,
 		})
 	}
+	// Override disk size if the group has a computed estimate
+	if group.DiskGB > 0 && group.DiskGB > createOpts.DiskGB {
+		createOpts.DiskGB = group.DiskGB
+	}
+
 	// Create cloud instance
 	progress("creating instance")
 	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
