@@ -46,7 +46,10 @@ func EnsureRunnerStarted(host, runnerCmd string) (bool, error) {
 
 	tmuxCmd := fmt.Sprintf("tmux new-session -d -s '%s' bash -c '%s'", session, ssh.EscapeForSingleQuotes(runnerCmd))
 	if _, stderr, err := ssh.Run(host, tmuxCmd); err != nil {
-		return false, fmt.Errorf("start queue runner: %s", strings.TrimSpace(stderr))
+		if msg := strings.TrimSpace(stderr); msg != "" {
+			return false, fmt.Errorf("start queue runner: %s", msg)
+		}
+		return false, fmt.Errorf("start queue runner: %w", err)
 	}
 
 	// Health check: wait briefly and verify the session is still alive.

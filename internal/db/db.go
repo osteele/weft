@@ -2534,7 +2534,7 @@ func ListAllQueued(db *sql.DB) ([]*Job, error) {
 
 // ListUniqueHosts returns all unique hosts from all jobs
 func ListUniqueHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE tombstoned = 0 ORDER BY host`)
+	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE tombstoned = 0 AND host != '' ORDER BY host`)
 	if err != nil {
 		return nil, err
 	}
