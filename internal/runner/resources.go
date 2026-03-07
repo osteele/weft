@@ -223,27 +223,42 @@ func MemPressureSeverity(level MemPressureLevel) int {
 	}
 }
 
-// HostGPUUtilization returns system-wide GPU metrics by parsing nvidia-smi.
-// Returns (gpuUtilPct, gpuMemUsedMiB, gpuMemTotalMiB).
-// Returns (0, 0, 0) if nvidia-smi is not available.
-func HostGPUUtilization() (gpuUtilPct int, gpuMemUsedMiB int, gpuMemTotalMiB int) {
-	rows := queryNvidiaSmi("--query-gpu=utilization.gpu,memory.used,memory.total", 3)
+// HostGPUStats holds system-wide GPU metrics aggregated across all GPUs.
+type HostGPUStats struct {
+	UtilPct     int // max across GPUs
+	MemUsedMiB  int // summed across GPUs
+	MemTotalMiB int // summed across GPUs
+	TempC       int // max across GPUs
+	ClockMHz    int // max across GPUs (graphics clock)
+}
+
+// HostGPUMetrics returns system-wide GPU metrics by parsing nvidia-smi.
+// Returns a zero HostGPUStats if nvidia-smi is not available.
+func HostGPUMetrics() HostGPUStats {
+	rows := queryNvidiaSmi("--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,clocks.current.graphics", 5)
 	if rows == nil {
-		return 0, 0, 0
+		return HostGPUStats{}
 	}
-	// Sum across all GPUs (take max utilization, sum memory)
-	var maxUtil int
+	var stats HostGPUStats
 	for _, parts := range rows {
 		util, _ := strconv.Atoi(parts[0])
 		memUsed, _ := strconv.Atoi(parts[1])
 		memTotal, _ := strconv.Atoi(parts[2])
-		if util > maxUtil {
-			maxUtil = util
+		temp, _ := strconv.Atoi(parts[3])
+		clock, _ := strconv.Atoi(parts[4])
+		if util > stats.UtilPct {
+			stats.UtilPct = util
 		}
-		gpuMemUsedMiB += memUsed
-		gpuMemTotalMiB += memTotal
+		stats.MemUsedMiB += memUsed
+		stats.MemTotalMiB += memTotal
+		if temp > stats.TempC {
+			stats.TempC = temp
+		}
+		if clock > stats.ClockMHz {
+			stats.ClockMHz = clock
+		}
 	}
-	return maxUtil, gpuMemUsedMiB, gpuMemTotalMiB
+	return stats
 }
 
 // ProcGPUMemMiB returns the total GPU memory used by a process tree in MiB.

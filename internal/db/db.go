@@ -528,6 +528,14 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: add GPU temperature and clock frequency to timeseries
+	if err := addColumnIfMissing(db, `ALTER TABLE job_timeseries ADD COLUMN gpu_temp_c INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_timeseries ADD COLUMN gpu_clock_mhz INTEGER`); err != nil {
+		return err
+	}
+
 	// Migration: rename old campaigns table to cloud_instances
 	// The old campaigns table stored individual cloud instances (not batches).
 	// We drop it and recreate with the correct schema.

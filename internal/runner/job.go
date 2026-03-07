@@ -100,6 +100,8 @@ type TimeseriesSample struct {
 	GPUUtilPct   int    `json:"gpu_util_pct,omitempty"`
 	GPUMemUsed   int    `json:"gpu_mem_used_mib,omitempty"`
 	GPUMemTotal  int    `json:"gpu_mem_total_mib,omitempty"`
+	GPUTempC     int    `json:"gpu_temp_c,omitempty"`
+	GPUClockMHz  int    `json:"gpu_clock_mhz,omitempty"`
 	MemPressure  string `json:"mem_pressure,omitempty"`
 	Tenant       string `json:"tenant"`
 }
