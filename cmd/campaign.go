@@ -71,6 +71,7 @@ var (
 	campaignLaunchNoWatch  bool
 	campaignLaunchYes      bool
 	campaignLaunchJobs     string
+	campaignLaunchGPU      string
 	campaignWatchTUI       bool
 )
 
@@ -88,6 +89,7 @@ func init() {
 	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
 	campaignLaunchCmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all needs_rental jobs)")
+	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Use interactive TUI display")
 	campaignWatchCmd.Flags().Bool("plain", false, "Plain text output (default; accepted for clarity)")
@@ -136,8 +138,24 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	groups := campaign.GroupByGPUSupremum(jobs)
+
+	// Filter by --gpu if specified
+	if campaignLaunchGPU != "" {
+		var filtered []campaign.InstanceGroup
+		for _, g := range groups {
+			if strings.EqualFold(g.GPUClass, campaignLaunchGPU) {
+				filtered = append(filtered, g)
+			}
+		}
+		groups = filtered
+	}
+
 	if len(groups) == 0 {
-		fmt.Println("No jobs need rental GPUs.")
+		if campaignLaunchGPU != "" {
+			fmt.Printf("No needs_rental jobs match GPU class %q.\n", campaignLaunchGPU)
+		} else {
+			fmt.Println("No jobs need rental GPUs.")
+		}
 		return nil
 	}
 

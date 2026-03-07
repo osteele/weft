@@ -190,41 +190,27 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "up", "k":
-		m.cursor--
-		for m.cursor >= 0 && m.items[m.cursor].isHeader {
+		if m.cursor > 0 {
 			m.cursor--
-		}
-		if m.cursor < 0 {
-			// Find first non-header
-			for i, item := range m.items {
-				if !item.isHeader {
-					m.cursor = i
-					break
-				}
-			}
 		}
 		return m, nil
 
 	case "down", "j":
-		m.cursor++
-		for m.cursor < len(m.items) && m.items[m.cursor].isHeader {
+		if m.cursor < len(m.items)-1 {
 			m.cursor++
-		}
-		if m.cursor >= len(m.items) {
-			// Find last non-header
-			for i := len(m.items) - 1; i >= 0; i-- {
-				if !m.items[i].isHeader {
-					m.cursor = i
-					break
-				}
-			}
 		}
 		return m, nil
 
 	case " ":
-		if m.cursor >= 0 && m.cursor < len(m.items) && !m.items[m.cursor].isHeader {
-			id := m.items[m.cursor].jobID
-			m.selected[id] = !m.selected[id]
+		if m.cursor < len(m.items) {
+			item := m.items[m.cursor]
+			if item.isHeader {
+				// Toggle all jobs in this group
+				m.toggleGroup(item.groupIdx)
+			} else {
+				id := item.jobID
+				m.selected[id] = !m.selected[id]
+			}
 		}
 		return m, nil
 
@@ -259,6 +245,49 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// toggleGroup toggles all jobs in the given group. If any are unselected,
+// select all; otherwise deselect all.
+func (m launchModel) toggleGroup(groupIdx int) {
+	// Check if all jobs in this group are selected
+	allSelected := true
+	for _, item := range m.items {
+		if !item.isHeader && item.groupIdx == groupIdx {
+			if !m.selected[item.jobID] {
+				allSelected = false
+				break
+			}
+		}
+	}
+	// Toggle: if all selected, deselect all; otherwise select all
+	newState := !allSelected
+	for _, item := range m.items {
+		if !item.isHeader && item.groupIdx == groupIdx {
+			m.selected[item.jobID] = newState
+		}
+	}
+}
+
+// groupCheckState returns "[x]" if all jobs selected, "[-]" if some, "[ ]" if none.
+func (m launchModel) groupCheckState(groupIdx int) string {
+	total, selected := 0, 0
+	for _, item := range m.items {
+		if !item.isHeader && item.groupIdx == groupIdx {
+			total++
+			if m.selected[item.jobID] {
+				selected++
+			}
+		}
+	}
+	switch {
+	case selected == total:
+		return "[x]"
+	case selected > 0:
+		return "[-]"
+	default:
+		return "[ ]"
+	}
 }
 
 func (m launchModel) launchInstances() tea.Cmd {
@@ -368,14 +397,21 @@ func (m launchModel) View() string {
 	b.WriteString("\n\n")
 
 	// Job list with checkboxes
-	for _, item := range m.items {
+	for idx, item := range m.items {
+		isCursor := idx == m.cursor
+
 		if item.isHeader {
-			b.WriteString(launchHeaderStyle.Render(item.label))
+			checkbox := m.groupCheckState(item.groupIdx)
+			line := fmt.Sprintf("%s %s", checkbox, item.label)
+			if isCursor {
+				b.WriteString(launchCursorStyle.Render("> " + line))
+			} else {
+				b.WriteString(launchHeaderStyle.Render("  " + line))
+			}
 			b.WriteString("\n")
 			continue
 		}
 
-		isCursor := m.cursor >= 0 && m.cursor < len(m.items) && m.items[m.cursor].jobID == item.jobID
 		checked := m.selected[item.jobID]
 
 		var checkbox string
@@ -413,9 +449,9 @@ func (m launchModel) View() string {
 			selectedCount++
 		}
 	}
-	help := "↑/↓ navigate  space toggle  a all  n none  enter launch  q quit"
+	help := "↑/↓ navigate  space toggle job/group  a all  n none  enter launch  q quit"
 	if selectedCount == 0 {
-		help = "↑/↓ navigate  space toggle  a all  n none  enter quit  q quit"
+		help = "↑/↓ navigate  space toggle job/group  a all  n none  enter quit  q quit"
 	}
 	b.WriteString(launchDimStyle.Render(help))
 	b.WriteString("\n")
