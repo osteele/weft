@@ -45,6 +45,22 @@ If the model is on cool100 but not cool30, the coordinator places the job on
 cool100. If neither host has it, the coordinator downloads it before the job
 starts. You never need a separate prefetch job.
 
+**Declare all models your job downloads**, not just the primary one. If your
+script uses `AutoTokenizer.from_pretrained("bert-base-uncased")` in addition to
+the main model, declare both:
+
+```
+laptop$ weft run \
+  --input hf:meta-llama/Llama-3.1-8B \
+  --input hf:bert-base-uncased \
+  'uv run python scripts/collect_all.sh'
+```
+
+This matters because weft uses input declarations to:
+- **Estimate disk space** for cloud instances (undeclared models can cause disk-full failures)
+- **Score host placement** based on data locality
+- **Pre-stage data** to avoid download delays during job execution
+
 ### Declaring outputs
 
 Use `--output` to declare what a job produces. This lets downstream jobs find
