@@ -30,6 +30,10 @@ type JobPhaseTimings struct {
 	// uv sync timing
 	UVSyncSeconds *int64 // total uv sync time (seconds)
 
+	// Disk usage at job completion (bytes)
+	DiskUsedBytes  *int64 // root filesystem used bytes (post-job)
+	DiskTotalBytes *int64 // root filesystem total bytes
+
 	// GPU monitoring summary
 	PeakGPUMemMiB *int // peak GPU memory used (MiB)
 	MeanGPUUtil   *int // mean GPU utilization (%)
@@ -43,12 +47,14 @@ func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 		 (job_id, wrapper_start, setup_start, setup_end, run_start, run_end,
 		  upload_start, upload_end, upload_results_bytes, upload_workspace_bytes,
 		  cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
-		  uv_sync_seconds, peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  uv_sync_seconds, disk_used_bytes, disk_total_bytes,
+		  peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.JobID, t.WrapperStart, t.SetupStart, t.SetupEnd, t.RunStart, t.RunEnd,
 		t.UploadStart, t.UploadEnd, t.UploadResultsBytes, t.UploadWorkspaceBytes,
 		t.CacheHFBytes, t.CacheUVBytes, t.CacheUVPostBytes, t.CacheHFPostBytes,
-		t.UVSyncSeconds, t.PeakGPUMemMiB, t.MeanGPUUtil, t.PeakGPUUtil,
+		t.UVSyncSeconds, t.DiskUsedBytes, t.DiskTotalBytes,
+		t.PeakGPUMemMiB, t.MeanGPUUtil, t.PeakGPUUtil,
 	)
 	return err
 }
@@ -59,7 +65,8 @@ func GetJobPhaseTimings(db *sql.DB, jobID int64) (*JobPhaseTimings, error) {
 		`SELECT job_id, wrapper_start, setup_start, setup_end, run_start, run_end,
 		        upload_start, upload_end, upload_results_bytes, upload_workspace_bytes,
 		        cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
-		        uv_sync_seconds, peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util
+		        uv_sync_seconds, disk_used_bytes, disk_total_bytes,
+		        peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util
 		 FROM job_phase_timings WHERE job_id = ?`, jobID,
 	)
 
@@ -68,7 +75,8 @@ func GetJobPhaseTimings(db *sql.DB, jobID int64) (*JobPhaseTimings, error) {
 		&t.JobID, &t.WrapperStart, &t.SetupStart, &t.SetupEnd, &t.RunStart, &t.RunEnd,
 		&t.UploadStart, &t.UploadEnd, &t.UploadResultsBytes, &t.UploadWorkspaceBytes,
 		&t.CacheHFBytes, &t.CacheUVBytes, &t.CacheUVPostBytes, &t.CacheHFPostBytes,
-		&t.UVSyncSeconds, &t.PeakGPUMemMiB, &t.MeanGPUUtil, &t.PeakGPUUtil,
+		&t.UVSyncSeconds, &t.DiskUsedBytes, &t.DiskTotalBytes,
+		&t.PeakGPUMemMiB, &t.MeanGPUUtil, &t.PeakGPUUtil,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

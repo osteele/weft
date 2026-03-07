@@ -600,11 +600,13 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: add uv sync timing and post-job cache size columns
+	// Migration: add uv sync timing, post-job cache size, and disk usage columns
 	for _, stmt := range []string{
 		`ALTER TABLE job_phase_timings ADD COLUMN uv_sync_seconds INTEGER`,
 		`ALTER TABLE job_phase_timings ADD COLUMN cache_uv_post_bytes INTEGER`,
 		`ALTER TABLE job_phase_timings ADD COLUMN cache_hf_post_bytes INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN disk_used_bytes INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN disk_total_bytes INTEGER`,
 	} {
 		if err := addColumnIfMissing(db, stmt); err != nil {
 			return err

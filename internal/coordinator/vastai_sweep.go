@@ -217,8 +217,10 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 			UVBytes int64 `json:"uv_bytes"`
 		} `json:"cache_pre"`
 		CachePost *struct {
-			HFBytes int64 `json:"hf_bytes"`
-			UVBytes int64 `json:"uv_bytes"`
+			HFBytes        int64 `json:"hf_bytes"`
+			UVBytes        int64 `json:"uv_bytes"`
+			DiskUsedBytes  int64 `json:"disk_used_bytes"`
+			DiskTotalBytes int64 `json:"disk_total_bytes"`
 		} `json:"cache_post"`
 		SetupSeconds *int64 `json:"setup_seconds"`
 	}
@@ -249,6 +251,12 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 	if phases.CachePost != nil {
 		t.CacheHFPostBytes = &phases.CachePost.HFBytes
 		t.CacheUVPostBytes = &phases.CachePost.UVBytes
+		if phases.CachePost.DiskUsedBytes > 0 {
+			t.DiskUsedBytes = &phases.CachePost.DiskUsedBytes
+		}
+		if phases.CachePost.DiskTotalBytes > 0 {
+			t.DiskTotalBytes = &phases.CachePost.DiskTotalBytes
+		}
 	}
 	t.UVSyncSeconds = phases.SetupSeconds
 
