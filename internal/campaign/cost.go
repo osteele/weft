@@ -6,27 +6,22 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/dataloc"
-	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
 )
-
-// DefaultSetupOverhead is the flat time estimate for instance boot, env setup, and teardown.
-const DefaultSetupOverhead = 10 * time.Minute
-
-// DefaultJobDuration is the fallback duration when no prediction is available.
-const DefaultJobDuration = 1 * time.Hour
 
 // CostEstimate holds the cost projection for one instance group.
 type CostEstimate struct {
 	Group         InstanceGroup
 	Offer         GroupOffer
+	Breakdown     estimate.Breakdown
 	JobDurations  map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
 	SetupOverhead time.Duration
 	DownloadBytes int64         // total bytes of HF model inputs to download
 	DownloadTime  time.Duration // estimated download time from offer bandwidth
 	TotalTime     time.Duration
 	TotalCost     float64
-	HasPrediction bool // false = fell back to DefaultJobDuration
+	HasPrediction bool // false = fell back to default job duration
 }
 
 // EstimateCosts computes per-group cost estimates using the predictor for duration.
@@ -36,10 +31,9 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEs
 
 	for i, go_ := range groupOffers {
 		est := CostEstimate{
-			Group:         go_.Group,
-			Offer:         go_,
-			SetupOverhead: DefaultSetupOverhead,
-			JobDurations:  make(map[int64]time.Duration),
+			Group:        go_.Group,
+			Offer:        go_,
+			JobDurations: make(map[int64]time.Duration),
 		}
 
 		if go_.Offer == nil {
@@ -47,54 +41,57 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEs
 			continue
 		}
 
-		hasPrediction := false
-		var totalJobTime time.Duration
+		// Startup phase
+		startup := estimate.EstimateStartup(string(go_.Offer.Provider))
 
-		for _, job := range go_.Group.Jobs {
-			dur := predictJobDuration(predCfg, go_.Offer.GPUName, job)
-			if dur > 0 {
-				est.JobDurations[job.ID] = dur
-				totalJobTime += dur
-				hasPrediction = true
-			} else {
-				totalJobTime += DefaultJobDuration
-			}
-		}
-
-		// Estimate download time from HF model inputs
+		// Provision phase: workdir sync + model download
+		var downloadBytes int64
 		if totalBytes, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil); err != nil {
 			log.Printf("warning: could not resolve input sizes: %v", err)
-		} else if totalBytes > 0 {
-			est.DownloadBytes = totalBytes
-			if go_.Offer.DownloadBandwidth > 0 {
-				bytesPerSec := cloud.MbpsToBytesPerSec(go_.Offer.DownloadBandwidth)
-				est.DownloadTime = time.Duration(float64(totalBytes)/bytesPerSec) * time.Second
-			}
+		} else {
+			downloadBytes = totalBytes
 		}
 
+		bytesPerSec := cloud.MbpsToBytesPerSec(go_.Offer.DownloadBandwidth)
+		provision := estimate.EstimateProvision(estimate.ProvisionInput{
+			ModelDownloadBytes:   downloadBytes,
+			BandwidthBytesPerSec: bytesPerSec,
+		})
+
+		// Run phase: sum per-job estimates
+		hasPrediction := false
+		var runEst estimate.Estimate
+		for _, job := range go_.Group.Jobs {
+			jobEst, predicted := estimate.EstimateJobDuration(predCfg, go_.Offer.GPUName, job)
+			if predicted {
+				est.JobDurations[job.ID] = jobEst.Mean
+				hasPrediction = true
+			}
+			runEst = runEst.Add(jobEst)
+		}
+
+		// Build breakdown
+		total := startup.Add(provision).Add(runEst)
+		bd := estimate.Breakdown{
+			Startup:          startup,
+			Provision:        provision,
+			Run:              runEst,
+			Total:            total,
+			HasRunPrediction: hasPrediction,
+		}
+
+		est.Breakdown = bd
 		est.HasPrediction = hasPrediction
-		est.TotalTime = totalJobTime + est.SetupOverhead + est.DownloadTime
-		est.TotalCost = est.TotalTime.Hours() * go_.Offer.CostPerHour
+		est.SetupOverhead = startup.Mean + provision.Mean
+		est.DownloadBytes = downloadBytes
+		est.DownloadTime = estimate.TransferTime(downloadBytes, bytesPerSec).Mean
+		est.TotalTime = total.Mean
+		est.TotalCost = total.Mean.Hours() * go_.Offer.CostPerHour
 
 		estimates[i] = est
 	}
 
 	return estimates
-}
-
-// predictJobDuration calls the predictor for a single job.
-// Returns 0 if predictor is not configured or prediction fails.
-func predictJobDuration(predCfg *predictor.Config, gpuClass string, job *db.Job) time.Duration {
-	if predCfg == nil || !predCfg.Configured() {
-		return 0
-	}
-
-	result, err := predictor.Predict(*predCfg, "", job.Project, gpuClass, job.Command)
-	if err != nil || result == nil || result.DurationS == nil {
-		return 0
-	}
-
-	return time.Duration(result.DurationS.Mean) * time.Second
 }
 
 // BudgetMultiplier is the safety factor applied to estimates for budget limits.

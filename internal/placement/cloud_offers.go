@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/estimate"
 )
 
 // CloudOffering represents a compute option for running a job,
@@ -54,15 +55,19 @@ func BuildCloudOfferings(
 
 	// Cloud options
 	for i, offer := range cloudOffers {
-		estSetupMin := estimateSetupMinutes(offer)
-		estRunMin := estimateCloudRunMinutes(avgJobMinutes, localDLPerf, offer.DLPerf)
+		startup := estimate.EstimateStartup(string(offer.Provider))
+		bwBps := cloud.MbpsToBytesPerSec(offer.DownloadBandwidth)
+		provision := estimate.EstimateProvision(estimate.ProvisionInput{
+			BandwidthBytesPerSec: bwBps,
+		})
+		estSetupMin := (startup.Mean + provision.Mean).Minutes()
+
+		localEst := estimate.Constant(estimate.DurFromMinutes(avgJobMinutes))
+		cloudRunEst := estimate.EstimateCloudRuntime(localEst, localDLPerf, offer.DLPerf)
+		estRunMin := cloudRunEst.Mean.Minutes()
+
 		totalHours := (estSetupMin + estRunMin) / 60.0
 		estCost := totalHours * offer.CostPerHour
-
-		providerLabel := string(offer.Provider)
-		if providerLabel == "" {
-			providerLabel = "cloud"
-		}
 
 		off := CloudOffering{
 			Source:       string(offer.Provider),
@@ -75,6 +80,10 @@ func BuildCloudOfferings(
 			OfferID:      offer.ProviderID,
 			Offer:        &cloudOffers[i],
 		}
+		providerLabel := string(offer.Provider)
+		if providerLabel == "" {
+			providerLabel = "cloud"
+		}
 		off.DisplayName = fmt.Sprintf("%s %s %.0fGB: ~$%.2f (~%.0fm setup + ~%.0fm run)",
 			providerLabel, offer.GPUName, offer.GPUMemGB, estCost, estSetupMin, estRunMin)
 		offerings = append(offerings, off)
@@ -86,24 +95,4 @@ func BuildCloudOfferings(
 	})
 
 	return offerings
-}
-
-// estimateSetupMinutes estimates how long it takes to get a cloud instance ready.
-func estimateSetupMinutes(offer cloud.Offer) float64 {
-	spinUp := 0.75 // 45 seconds typical
-	workDirMB := 500.0
-	bwMBps := offer.DownloadBandwidth / 8.0
-	if bwMBps < 1 {
-		bwMBps = 1
-	}
-	syncMin := (workDirMB / bwMBps) / 60.0
-	return spinUp + syncMin
-}
-
-// estimateCloudRunMinutes scales local runtime by GPU performance ratio.
-func estimateCloudRunMinutes(localRunMin, localDLPerf, cloudDLPerf float64) float64 {
-	if localDLPerf <= 0 || cloudDLPerf <= 0 {
-		return localRunMin
-	}
-	return localRunMin * (localDLPerf / cloudDLPerf)
 }
