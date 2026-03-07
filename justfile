@@ -4,8 +4,8 @@
 default:
     @just --list
 
-# Build the binary
-build:
+# Build the binary (builds agent binaries for embedding first)
+build: build-agents
     go build -o weft .
 
 # Install to $GOPATH/bin
@@ -65,6 +65,18 @@ lint:
 # Check: format, lint, test
 check: format lint test
 
+# Build agent binaries for embedding into the weft CLI
+build-agents:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p internal/agentdeploy/binaries
+    VERSION=$(jj log --no-graph -r 'ancestors(@-, 200)' -T 'commit_id.short(12) ++ "\n"' --limit 1 cmd/agent/ internal/ 2>/dev/null || echo "dev")
+    LDFLAGS="-X main.version=${VERSION}"
+    GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-amd64 ./cmd/agent
+    GOOS=linux GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-arm64 ./cmd/agent
+    GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent
+    echo "Built agent binaries for embedding (version: ${VERSION})"
+
 # Build agent binary for a target (default: current platform)
 build-agent target="local":
     #!/usr/bin/env bash
@@ -100,4 +112,5 @@ build-agent target="local":
 clean:
     rm -f weft
     rm -rf dist
+    rm -f internal/agentdeploy/binaries/weft-agent-*
 

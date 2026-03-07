@@ -250,9 +250,15 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("write rclone config: %w", err)
 	}
 
-	// Build the agent binary (cached locally)
+	// Extract the embedded agent binary (cached locally)
 	progress("deploying agent + syncing sources")
-	agentBinary, err := agentdeploy.EnsureBuilt("cloud", "linux", "amd64")
+	localVer, err := agentdeploy.LocalAgentVersion()
+	if err != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("local agent version: %w", err)
+	}
+	agentBinary, err := agentdeploy.EnsureBuilt(localVer, "linux", "amd64")
 	if err != nil {
 		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)

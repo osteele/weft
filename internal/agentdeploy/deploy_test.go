@@ -108,23 +108,20 @@ func TestEnsureBuilt_CacheHit(t *testing.T) {
 	}
 }
 
-func TestEnsureBuilt_CacheMiss_InvokesBuild(t *testing.T) {
+func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 	var captured struct {
-		root, ldflags, outputPath, goos, goarch string
+		goos, goarch, outputPath string
 	}
 
-	cleanup := SetBuildFunc(func(root, ldflags, outputPath, goos, goarch string) error {
-		captured.root = root
-		captured.ldflags = ldflags
-		captured.outputPath = outputPath
+	cleanup := SetExtractFunc(func(goos, goarch, outputPath string) error {
 		captured.goos = goos
 		captured.goarch = goarch
-		// Write a fake binary so EnsureBuilt succeeds
+		captured.outputPath = outputPath
 		return os.WriteFile(outputPath, []byte("fake-agent"), 0o755)
 	})
 	defer cleanup()
 
-	version := "test-mock-build-" + t.Name()
+	version := "test-mock-extract-" + t.Name()
 	path := CachePath(version, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
@@ -136,27 +133,19 @@ func TestEnsureBuilt_CacheMiss_InvokesBuild(t *testing.T) {
 		t.Errorf("got %s, want %s", got, path)
 	}
 
-	// Verify build was called with correct arguments
 	if captured.goos != "linux" {
 		t.Errorf("GOOS = %q, want %q", captured.goos, "linux")
 	}
 	if captured.goarch != "amd64" {
 		t.Errorf("GOARCH = %q, want %q", captured.goarch, "amd64")
 	}
-	if !strings.Contains(captured.ldflags, version) {
-		t.Errorf("ldflags %q should contain version %q", captured.ldflags, version)
-	}
 	if captured.outputPath != path {
 		t.Errorf("output path = %q, want %q", captured.outputPath, path)
 	}
-	if captured.root == "" {
-		t.Error("root directory should not be empty")
-	}
 }
 
-func TestEnsureBuilt_CacheHit_SkipsBuild(t *testing.T) {
-	// Pre-populate cache with known content
-	version := "test-skip-build-" + t.Name()
+func TestEnsureBuilt_CacheHit_SkipsExtract(t *testing.T) {
+	version := "test-skip-extract-" + t.Name()
 	path := CachePath(version, "linux", "amd64")
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -173,104 +162,45 @@ func TestEnsureBuilt_CacheHit_SkipsBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Read the file back — it should still be our sentinel, not a real binary
 	data, err := os.ReadFile(got)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(data) != "sentinel-value" {
-		t.Error("cache hit should return existing file without rebuilding")
+		t.Error("cache hit should return existing file without extracting")
 	}
 }
 
-func TestEnsureBuilt_CrossCompile_CorrectArgs(t *testing.T) {
-	var captured struct {
-		goos, goarch string
-	}
-
-	cleanup := SetBuildFunc(func(root, ldflags, outputPath, goos, goarch string) error {
-		captured.goos = goos
-		captured.goarch = goarch
-		return os.WriteFile(outputPath, []byte("fake-agent"), 0o755)
-	})
-	defer cleanup()
-
-	version := "test-cross-" + t.Name()
-	path := CachePath(version, "linux", "amd64")
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
-
-	_, err := EnsureBuilt(version, "linux", "amd64")
-	if err != nil {
-		t.Fatalf("EnsureBuilt: %v", err)
-	}
-
-	if captured.goos != "linux" {
-		t.Errorf("GOOS = %q, want %q", captured.goos, "linux")
-	}
-	if captured.goarch != "amd64" {
-		t.Errorf("GOARCH = %q, want %q", captured.goarch, "amd64")
-	}
-}
-
-func TestEnsureBuilt_RealBuild_NativePlatform(t *testing.T) {
+func TestEnsureBuilt_ExtractFromEmbed(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping slow build test in short mode")
-	}
-	// Build for the native platform (should succeed without cross-compilation issues)
-	version := "test-native-build-" + t.Name()
-	path := CachePath(version, "darwin", "arm64")
-	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
-
-	got, err := EnsureBuilt(version, "darwin", "arm64")
-	if err != nil {
-		t.Fatalf("EnsureBuilt native: %v", err)
-	}
-	if got != path {
-		t.Errorf("got %s, want %s", got, path)
+		t.Skip("skipping embed extraction test in short mode")
 	}
 
-	// Verify the binary exists and is executable
-	info, err := os.Stat(got)
-	if err != nil {
-		t.Fatalf("stat built binary: %v", err)
-	}
-	if info.Size() == 0 {
-		t.Error("built binary is empty")
-	}
-	if info.Mode()&0o111 == 0 {
-		t.Error("built binary is not executable")
-	}
-}
-
-func TestEnsureBuilt_RealBuild_CrossCompile(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow cross-compile test in short mode")
-	}
-	version := "test-cross-linux-" + t.Name()
+	// This test only works if agent binaries have been built with "just build-agents"
+	version := "test-embed-extract-" + t.Name()
 	path := CachePath(version, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
 	got, err := EnsureBuilt(version, "linux", "amd64")
 	if err != nil {
-		t.Fatalf("EnsureBuilt linux/amd64: %v", err)
+		t.Skipf("embedded agent binary not available (run 'just build-agents' first): %v", err)
 	}
 
 	info, err := os.Stat(got)
 	if err != nil {
-		t.Fatalf("stat: %v", err)
+		t.Fatalf("stat extracted binary: %v", err)
 	}
 	if info.Size() == 0 {
-		t.Error("cross-compiled binary is empty")
+		t.Error("extracted binary is empty")
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Error("extracted binary is not executable")
 	}
 }
 
 // TestLocalAgentVersion_ExcludesWorkingCopy verifies that the local agent
 // version is based on committed revisions, not the jj working copy.
-// The working copy gets a new commit_id on every jj snapshot, so including
-// it causes perpetual version mismatches → agent redeploy → runner session
-// kill/restart on every TUI sync cycle.
 func TestLocalAgentVersion_ExcludesWorkingCopy(t *testing.T) {
-	// This test only works in a jj repo
 	if _, err := exec.LookPath("jj"); err != nil {
 		t.Skip("jj not installed")
 	}
@@ -287,7 +217,6 @@ func TestLocalAgentVersion_ExcludesWorkingCopy(t *testing.T) {
 		t.Fatal("LocalAgentVersion returned empty string")
 	}
 
-	// Get the working copy's commit_id
 	wcCmd := exec.Command("jj", "log", "--no-graph", "-r", "@", "-T", "commit_id.short(12)")
 	wcOut, err := wcCmd.Output()
 	if err != nil {
@@ -295,9 +224,6 @@ func TestLocalAgentVersion_ExcludesWorkingCopy(t *testing.T) {
 	}
 	wcCommit := strings.TrimSpace(string(wcOut))
 
-	// The agent version must NOT be the working copy's commit_id.
-	// If it is, every jj snapshot will change the version, causing
-	// perpetual agent redeploys.
 	if version == wcCommit {
 		t.Errorf("LocalAgentVersion() = %q matches working copy commit_id; "+
 			"should use a committed ancestor instead to avoid perpetual redeploys", version)

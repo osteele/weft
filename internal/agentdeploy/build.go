@@ -2,24 +2,23 @@ package agentdeploy
 
 import (
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 )
 
-// BuildFunc is the function signature for building the agent binary.
-// Tests can replace it with SetBuildFunc to avoid slow compilation.
-type BuildFunc func(root, ldflags, outputPath, goos, goarch string) error
+// ExtractFunc is the function signature for extracting an embedded agent binary.
+// Tests can replace it with SetExtractFunc to avoid requiring real embedded binaries.
+type ExtractFunc func(goos, goarch, outputPath string) error
 
-var buildFunc BuildFunc = defaultBuildFunc
+var extractFunc ExtractFunc = defaultExtractFunc
 
-// SetBuildFunc replaces the build execution function.
+// SetExtractFunc replaces the extract execution function.
 // Returns a cleanup function that restores the original.
-func SetBuildFunc(fn BuildFunc) func() {
-	original := buildFunc
-	buildFunc = fn
-	return func() { buildFunc = original }
+func SetExtractFunc(fn ExtractFunc) func() {
+	original := extractFunc
+	extractFunc = fn
+	return func() { extractFunc = original }
 }
 
 // CachePath returns the local cache path for a built agent binary.
@@ -32,22 +31,8 @@ func CachePath(version, goos, goarch string) string {
 	return filepath.Join(cacheDir, "weft", "builds", version, goos+"-"+goarch, "weft-agent")
 }
 
-// moduleRoot returns the root directory of the Go module by locating go.mod.
-func moduleRoot() (string, error) {
-	cmd := exec.Command("go", "env", "GOMOD")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("go env GOMOD: %w", err)
-	}
-	gomod := strings.TrimSpace(string(out))
-	if gomod == "" || gomod == os.DevNull {
-		return "", fmt.Errorf("not inside a Go module")
-	}
-	return filepath.Dir(gomod), nil
-}
-
-// EnsureBuilt checks the local build cache and cross-compiles the agent
-// if the cached binary is missing. Returns the path to the built binary.
+// EnsureBuilt checks the local build cache and extracts the embedded agent
+// binary if the cached binary is missing. Returns the path to the binary.
 func EnsureBuilt(version, goos, goarch string) (string, error) {
 	path := CachePath(version, goos, goarch)
 
@@ -59,25 +44,42 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 
-	root, err := moduleRoot()
-	if err != nil {
-		return "", fmt.Errorf("find module root: %w", err)
-	}
-
-	ldflags := fmt.Sprintf("-X main.version=%s", version)
-	if err := buildFunc(root, ldflags, path, goos, goarch); err != nil {
-		os.Remove(path) // clean up partial build
-		return "", fmt.Errorf("cross-compile agent for %s/%s: %w", goos, goarch, err)
+	if err := extractFunc(goos, goarch, path); err != nil {
+		return "", err
 	}
 
 	return path, nil
 }
 
-func defaultBuildFunc(root, ldflags, outputPath, goos, goarch string) error {
-	cmd := exec.Command("go", "build", "-ldflags", ldflags, "-o", outputPath, "./cmd/agent")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+goarch)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+func defaultExtractFunc(goos, goarch, outputPath string) error {
+	name := fmt.Sprintf("binaries/weft-agent-%s-%s", goos, goarch)
+	src, err := agentBinaries.Open(name)
+	if err != nil {
+		return fmt.Errorf("agent binary for %s/%s not embedded; run \"just build-agents\" then rebuild weft: %w", goos, goarch, err)
+	}
+	defer src.Close()
+
+	// Write to a temp file and rename atomically to avoid partial writes
+	// from concurrent extractions or interrupted processes.
+	tmpPath := outputPath + ".tmp"
+	dst, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create agent binary: %w", err)
+	}
+
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write agent binary: %w", err)
+	}
+	if err := dst.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close agent binary: %w", err)
+	}
+
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("install agent binary: %w", err)
+	}
+	return nil
 }
