@@ -106,14 +106,17 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		}
 	}
 
-	// Detect and prepend setup command
-	setupStart := time.Now()
+	// Run setup command as a separate phase
 	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
-		command = setupCmd + " && " + command
+		ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths)
+		if setupErr != nil {
+			phases.SetupEnd = time.Now().Unix()
+			return ei, setupErr
+		}
 	}
 
 	phases.SetupEnd = time.Now().Unix()
-	setupSecs := int64(time.Since(setupStart).Seconds())
+	setupSecs := phases.SetupEnd - phases.SetupStart
 	phases.SetupSeconds = &setupSecs
 
 	// Start the process
@@ -136,78 +139,29 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	rs.GPUDevices = gpuDevices
 	rs.GPUMemGB = GetJobGPUMem(job, DefaultGPUMemGB)
 
+	takeSample := func() bool {
+		if !CheckPIDAlive(proc.PID) {
+			return false
+		}
+		SampleJob(proc.PID, proc.PGID, cpuCount, paths, &rs, "single")
+		return true
+	}
+
 	go func() {
 		defer close(samplingDone)
+
+		// Immediate first sample so short jobs get at least one data point
+		if !takeSample() {
+			return
+		}
+
 		ticker := time.NewTicker(cfg.SampleInterval)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			now := time.Now()
-			pid := proc.PID
-			if !CheckPIDAlive(pid) {
+			if !takeSample() {
 				return
 			}
-
-			hostPct := ProcCPUHostPct(pid, cpuCount)
-			WriteSample(paths, now.Unix(), hostPct, nil)
-
-			// Resource usage from /proc
-			rusagePID := pid
-			if proc.PGID > 0 {
-				rusagePID = proc.PGID
-			}
-			if _, err := os.Stat("/proc"); err == nil {
-				userTicks, sysTicks, peakRSS := ProcResourceUsage(rusagePID)
-				rs.RusageUserCPU = TicksToSeconds(userTicks)
-				rs.RusageSysCPU = TicksToSeconds(sysTicks)
-				if peakRSS > rs.RusagePeakRSS {
-					rs.RusagePeakRSS = peakRSS
-				}
-			}
-
-			// GPU memory sampling
-			gpuMem := ProcGPUMemMiB(pid)
-			if gpuMem > rs.RusageMaxGPU {
-				rs.RusageMaxGPU = gpuMem
-			}
-
-			// Timeseries sample
-			currentRSS := ProcCurrentRSSKB(rusagePID)
-			hostTotal, hostUsed := HostMemoryKB()
-			gpuUtil, gpuMemUsed, gpuMemTotal := HostGPUUtilization()
-			pressure := MemoryPressureFromUsage(hostTotal, hostUsed)
-
-			sample := TimeseriesSample{
-				Ts:           now.Unix(),
-				CPUPct:       hostPct,
-				RSSKB:        currentRSS,
-				GPUMiB:       gpuMem,
-				HostRSSKB:    hostUsed,
-				HostMemTotal: hostTotal,
-				GPUUtilPct:   gpuUtil,
-				GPUMemUsed:   gpuMemUsed,
-				GPUMemTotal:  gpuMemTotal,
-				MemPressure:  string(pressure),
-				Tenant:       "single",
-			}
-			WriteTimeseriesSample(paths, sample)
-
-			if MemPressureSeverity(pressure) > MemPressureSeverity(rs.PeakMemPressure) {
-				rs.PeakMemPressure = pressure
-			}
-			if hostTotal > 0 {
-				ratio := float64(hostUsed) / float64(hostTotal)
-				if ratio > rs.PeakHostMemRatio {
-					rs.PeakHostMemRatio = ratio
-				}
-			}
-			if currentRSS > rs.PeakRSSFromTS {
-				rs.PeakRSSFromTS = currentRSS
-			}
-
-			rs.LastHeartbeat = now.Unix()
-			rs.LastSample = now.Unix()
-			WriteHeartbeat(paths, now.Unix())
 		}
 	}()
 

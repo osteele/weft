@@ -26,7 +26,15 @@ func TestDetectSetupCommand(t *testing.T) {
 			want: "uv sync",
 		},
 		{
-			name: "pyproject.toml without .venv is not detected",
+			name: "uv: pyproject.toml + uv.lock (no .venv)",
+			setup: func(dir string) {
+				os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\n"), 0644)
+				os.WriteFile(filepath.Join(dir, "uv.lock"), []byte(""), 0644)
+			},
+			want: "uv sync",
+		},
+		{
+			name: "pyproject.toml alone is not detected",
 			setup: func(dir string) {
 				os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte("[project]\n"), 0644)
 			},

@@ -428,9 +428,13 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 		envVars = append(envVars, cudaEnv)
 	}
 
-	// Prepend environment setup command if detected
+	// Run environment setup as a separate phase
 	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
-		command = setupCmd + " && " + command
+		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths)
+		if setupErr != nil {
+			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
+			return setupErr
+		}
 	}
 
 	// Start the process
@@ -683,84 +687,25 @@ func (r *Runner) sampleRunningJobs() {
 			continue
 		}
 
-		// CPU sample
-		hostPct := ProcCPUHostPct(pid, r.cpuCount)
-		WriteSample(paths, now.Unix(), hostPct, nil)
-
-		rs.Samples = appendBounded(rs.Samples, hostPct, r.cpuConfig.SampleCount())
-
-		// Resource usage from /proc
-		if _, err := os.Stat("/proc"); err == nil {
-			rusagePID := pid
-			if pgid, ok := ReadPIDFile(paths.PGID); ok {
-				rusagePID = pgid
-			}
-			userTicks, sysTicks, peakRSS := ProcResourceUsage(rusagePID)
-			rs.RusageUserCPU = TicksToSeconds(userTicks)
-			rs.RusageSysCPU = TicksToSeconds(sysTicks)
-
-			if peakRSS > rs.RusagePeakRSS {
-				rs.RusagePeakRSS = peakRSS
-			}
+		// Resolve PGID for resource usage
+		pgid := 0
+		if pg, ok := ReadPIDFile(paths.PGID); ok {
+			pgid = pg
 		}
 
-		// GPU memory sampling
-		gpuMem := ProcGPUMemMiB(pid)
-		if gpuMem > rs.RusageMaxGPU {
-			rs.RusageMaxGPU = gpuMem
-		}
+		// Collect telemetry sample
+		oldPressure := rs.PeakMemPressure
+		pressure, hostPct := SampleJob(pid, pgid, r.cpuCount, paths, &rs, "multi")
 
-		// Write timeseries sample (full telemetry for job-estimator)
-		sample := TimeseriesSample{
-			Ts:     now.Unix(),
-			CPUPct: hostPct,
-			GPUMiB: gpuMem,
-			Tenant: "multi",
-		}
-		// Current RSS (not peak)
-		rusagePIDForTS := pid
-		if pgid, ok := ReadPIDFile(paths.PGID); ok {
-			rusagePIDForTS = pgid
-		}
-		currentRSS := ProcCurrentRSSKB(rusagePIDForTS)
-		sample.RSSKB = currentRSS
-		// Host-wide memory
-		hostTotal, hostUsed := HostMemoryKB()
-		sample.HostMemTotal = hostTotal
-		sample.HostRSSKB = hostUsed
-		// Host-wide GPU utilization
-		gpuUtil, gpuMemUsed, gpuMemTotal := HostGPUUtilization()
-		sample.GPUUtilPct = gpuUtil
-		sample.GPUMemUsed = gpuMemUsed
-		sample.GPUMemTotal = gpuMemTotal
-
-		// Memory pressure (reuses already-fetched host memory values)
-		pressure := MemoryPressureFromUsage(hostTotal, hostUsed)
-		sample.MemPressure = string(pressure)
-		if MemPressureSeverity(pressure) > MemPressureSeverity(rs.PeakMemPressure) {
-			if rs.PeakMemPressure != "" && rs.PeakMemPressure != MemPressureNormal {
+		// Log pressure escalation
+		if MemPressureSeverity(pressure) > MemPressureSeverity(oldPressure) {
+			if oldPressure != "" && oldPressure != MemPressureNormal {
 				oplog.LogJob("job.mem_pressure", jobID, "", oplog.WithDetailf("level=%s", pressure))
 			}
-			rs.PeakMemPressure = pressure
 		}
 
-		WriteTimeseriesSample(paths, sample)
-
-		// Track high-water marks
-		if hostTotal > 0 {
-			ratio := float64(hostUsed) / float64(hostTotal)
-			if ratio > rs.PeakHostMemRatio {
-				rs.PeakHostMemRatio = ratio
-			}
-		}
-		if currentRSS > rs.PeakRSSFromTS {
-			rs.PeakRSSFromTS = currentRSS
-		}
-
-		// Write heartbeat
-		rs.LastHeartbeat = now.Unix()
-		rs.LastSample = now.Unix()
-		WriteHeartbeat(paths, now.Unix())
+		// CPU sample history for allotment hysteresis
+		rs.Samples = appendBounded(rs.Samples, hostPct, r.cpuConfig.SampleCount())
 
 		// CPU allotment hysteresis
 		newAllotment, newOverHist, newUnderHist := r.cpuConfig.AdjustAllotment(

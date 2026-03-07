@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -12,13 +14,14 @@ import (
 // The workingDir should already have ~ expanded.
 //
 // Detection order (first match wins):
-//  1. pyproject.toml + .venv/ → uv sync
+//  1. pyproject.toml + (uv.lock or .venv/) → uv sync
 //  2. pixi.toml or pixi.lock → pixi install
 //  3. environment.yml → conda env update
 //  4. .envrc → direnv allow && eval "$(direnv export bash)"
 func DetectSetupCommand(workingDir string) string {
-	// uv: pyproject.toml + .venv/
-	if fileExists(filepath.Join(workingDir, "pyproject.toml")) && dirExists(filepath.Join(workingDir, ".venv")) {
+	// uv: pyproject.toml + (uv.lock or .venv/)
+	if fileExists(filepath.Join(workingDir, "pyproject.toml")) &&
+		(fileExists(filepath.Join(workingDir, "uv.lock")) || dirExists(filepath.Join(workingDir, ".venv"))) {
 		return "uv sync"
 	}
 
@@ -38,6 +41,26 @@ func DetectSetupCommand(workingDir string) string {
 	}
 
 	return ""
+}
+
+// RunSetupCommand runs a detected environment setup command synchronously.
+// Returns ExitInfo and error. On success, ExitInfo.ExitCode is 0 and error is nil.
+func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []string, paths JobPaths) (ExitInfo, error) {
+	log.Printf("Job %d: running setup: %s", jobID, setupCmd)
+	proc, err := StartProcess(setupCmd, workingDir, envVars, paths.Log)
+	if err != nil {
+		log.Printf("Job %d: setup start failed: %v", jobID, err)
+		ei := ExitInfo{ExitCode: 1}
+		WriteStatusFile(paths, ei)
+		return ei, fmt.Errorf("setup command: %w", err)
+	}
+	if waitErr := proc.Cmd.Wait(); waitErr != nil {
+		ei := ExtractExitInfo(waitErr)
+		log.Printf("Job %d: setup failed (exit=%d): %s", jobID, ei.ExitCode, setupCmd)
+		WriteStatusFile(paths, ei)
+		return ei, fmt.Errorf("setup command failed: %w", waitErr)
+	}
+	return ExitInfo{}, nil
 }
 
 func fileExists(path string) bool {
