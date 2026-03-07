@@ -109,6 +109,8 @@ type VastaiConfig struct {
 	MaxRuntime string `yaml:"max_runtime"`
 	// R2 holds Cloudflare R2 result storage configuration
 	R2 R2Config `yaml:"r2"`
+	// SyncTimeout is the timeout in seconds for R2 sync checks (default: 5)
+	SyncTimeout int `yaml:"sync_timeout"`
 }
 
 // R2Config holds Cloudflare R2 credentials and bucket settings.

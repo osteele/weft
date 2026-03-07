@@ -139,7 +139,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	totalUpdated += placementUpdated
 
 	// Check Vast.ai instances for completed results (CLI fallback for coordinator)
-	vastaiUpdated := syncVastaiInstances(cfg, database, syncVerbose)
+	vastaiUpdated := syncVastaiInstances(database, syncVerbose)
 	totalUpdated += vastaiUpdated
 	if cfg.LogCacheMaxAge > 0 {
 		maxAge := time.Duration(cfg.LogCacheMaxAge) * 24 * time.Hour
@@ -380,8 +380,9 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 
 // syncVastaiInstances checks for completed Vast.ai job results in R2.
 // This is a CLI fallback for when the coordinator is not running.
-func syncVastaiInstances(cfg *config.Config, database *sql.DB, verbose bool) int {
-	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
+func syncVastaiInstances(database *sql.DB, verbose bool) int {
+	cfg, err := config.Load()
+	if err != nil || cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
 		return 0
 	}
 
@@ -403,7 +404,11 @@ func syncVastaiInstances(cfg *config.Config, database *sql.DB, verbose bool) int
 		return 0
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	syncTimeout := 5
+	if cfg.Vastai.SyncTimeout > 0 {
+		syncTimeout = cfg.Vastai.SyncTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(syncTimeout)*time.Second)
 	defer cancel()
 
 	updated := 0

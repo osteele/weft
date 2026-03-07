@@ -127,6 +127,9 @@ func runList(cmd *cobra.Command, args []string) error {
 			}
 		}
 
+		// Check cloud instance completion (R2 markers) — soft failure
+		syncVastaiInstances(database, false)
+
 		// Start queue runners on hosts with queued jobs
 		startQueueRunnersForQueuedHosts(database)
 	}

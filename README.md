@@ -1255,6 +1255,7 @@ Configure cloud GPU bursting with Vast.ai and optional R2 result upload:
 # ~/.config/weft/config.yaml
 vastai:
   default_image: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+  sync_timeout: 5  # Timeout in seconds for R2 result checks (default: 5)
   r2:
     bucket: "my-results-bucket"
     account_id: "..."
