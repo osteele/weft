@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -227,6 +228,11 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	estimates := campaign.EstimateCosts(groupOffers, &predCfg)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
+	// Auto-derive budget limits from estimates if not set by CLI
+	if opts.ApplyAutoBudget(estimates) {
+		printAutoBudget(opts)
+	}
+
 	// Check all groups have offers
 	var offers []cloud.Offer
 	for _, go_ := range groupOffers {
@@ -397,6 +403,8 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	reconcileBeforeDisplay(database)
+
 	campaigns, err := db.ListCampaigns(database)
 	if err != nil {
 		return fmt.Errorf("list campaigns: %w", err)
@@ -428,6 +436,8 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	reconcileBeforeDisplay(database)
 
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
@@ -491,4 +501,28 @@ func parseLaunchOpts() campaign.LaunchOpts {
 		}
 	}
 	return opts
+}
+
+// reconcileBeforeDisplay checks running cloud instances against the provider
+// and marks dead ones as failed. Called before displaying campaign data.
+func reconcileBeforeDisplay(database *sql.DB) {
+	cfg, _ := config.Load()
+	if clients := buildCloudClients(cfg); len(clients) > 0 {
+		if n, err := campaign.ReconcileCloudInstances(database, clients); err != nil {
+			log.Printf("reconcile: %v", err)
+		} else if n > 0 {
+			fmt.Printf("Reconciled %d dead instance(s)\n", n)
+		}
+	}
+}
+
+// printAutoBudget prints the auto-derived budget limits.
+func printAutoBudget(opts campaign.LaunchOpts) {
+	if opts.MaxSpendCents > 0 {
+		fmt.Printf("Auto budget: max spend $%.2f (10× estimate, min $20)\n", float64(opts.MaxSpendCents)/100)
+	}
+	if opts.MaxTimeSeconds > 0 {
+		d := time.Duration(opts.MaxTimeSeconds) * time.Second
+		fmt.Printf("Auto budget: max time %s (10× estimate, min 8h)\n", d.Round(time.Minute))
+	}
 }

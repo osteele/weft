@@ -517,6 +517,135 @@ func TestPromoteNeedsRentalToQueued(t *testing.T) {
 	}
 }
 
+func TestJobCloudAttempts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Create a job and a cloud instance
+	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	if err != nil {
+		t.Fatalf("record needs_rental: %v", err)
+	}
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+
+	// Associate job with instance (should create attempt)
+	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set job cloud instance: %v", err)
+	}
+
+	// Verify attempt was created
+	attempts, err := GetJobCloudAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("get attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(attempts))
+	}
+	if attempts[0].JobID != jobID {
+		t.Errorf("attempt JobID = %d, want %d", attempts[0].JobID, jobID)
+	}
+	if attempts[0].CloudInstanceID != instanceID {
+		t.Errorf("attempt CloudInstanceID = %d, want %d", attempts[0].CloudInstanceID, instanceID)
+	}
+	if attempts[0].EndedAt != nil {
+		t.Error("attempt should not have ended yet")
+	}
+
+	// Close the attempt
+	if err := CloseJobCloudAttempt(database, jobID, "failed"); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+
+	attempts, err = GetJobCloudAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("get attempts after close: %v", err)
+	}
+	if attempts[0].EndedAt == nil {
+		t.Error("attempt should have ended")
+	}
+	if attempts[0].Outcome != "failed" {
+		t.Errorf("attempt outcome = %q, want %q", attempts[0].Outcome, "failed")
+	}
+
+	// Create second instance and associate (simulates retry)
+	instanceID2, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create second instance: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, jobID, instanceID2); err != nil {
+		t.Fatalf("set job cloud instance 2: %v", err)
+	}
+
+	// Should now have 2 attempts
+	attempts, err = GetJobCloudAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("get attempts: %v", err)
+	}
+	if len(attempts) != 2 {
+		t.Fatalf("expected 2 attempts, got %d", len(attempts))
+	}
+}
+
+func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	if err != nil {
+		t.Fatalf("record needs_rental: %v", err)
+	}
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+
+	// Promote to queued then associate with instance
+	if _, err := PromoteNeedsRentalToQueued(database, jobID, "cloud"); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
+	}
+
+	// Reset should close attempts with "orphaned"
+	count, err := ResetCloudInstanceJobs(database, instanceID, "orphaned")
+	if err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("reset count = %d, want 1", count)
+	}
+
+	attempts, err := GetJobCloudAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("get attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("expected 1 attempt, got %d", len(attempts))
+	}
+	if attempts[0].Outcome != "orphaned" {
+		t.Errorf("attempt outcome = %q, want %q", attempts[0].Outcome, "orphaned")
+	}
+	if attempts[0].EndedAt == nil {
+		t.Error("attempt should have ended")
+	}
+}
+
 func TestSetJobEnvVars(t *testing.T) {
 	database := SetupTestDB(t)
 	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")

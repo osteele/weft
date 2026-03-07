@@ -26,7 +26,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 		gpu_mem_gb INTEGER,
 		command TEXT,
 		cloud_instance_id INTEGER,
-		campaign_job_index INTEGER
+		campaign_job_index INTEGER,
+		tombstoned INTEGER DEFAULT 0
 	);
 	CREATE TABLE cloud_instances (
 		id INTEGER PRIMARY KEY,
@@ -60,6 +61,14 @@ func setupTestDB(t *testing.T) *sql.DB {
 		status TEXT,
 		created_at INTEGER,
 		ended_at INTEGER
+	);
+	CREATE TABLE job_cloud_attempts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id INTEGER NOT NULL,
+		cloud_instance_id INTEGER NOT NULL,
+		started_at INTEGER NOT NULL,
+		ended_at INTEGER,
+		outcome TEXT
 	);
 	`
 	if _, err := database.Exec(schema); err != nil {

@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -163,10 +164,13 @@ func SetCloudInstanceActualSpend(db *sql.DB, id int64, cents int) error {
 	return err
 }
 
-// SetJobCloudInstanceID associates a job with a cloud instance.
+// SetJobCloudInstanceID associates a job with a cloud instance and records the attempt.
 func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 	_, err := db.Exec(`UPDATE jobs SET cloud_instance_id = ? WHERE id = ?`, instanceID, jobID)
-	return err
+	if err != nil {
+		return err
+	}
+	return InsertJobCloudAttempt(db, jobID, instanceID)
 }
 
 // SetJobCampaignIndex sets the 0-based position of a job within its campaign sequence.
@@ -206,9 +210,15 @@ func PromoteNeedsRentalToQueued(database *sql.DB, jobID int64, host string) (boo
 }
 
 // ResetCloudInstanceJobs resets non-terminal jobs in a cloud instance back to needs_rental
-// and clears their instance association. Returns the number of jobs reset.
-func ResetCloudInstanceJobs(db *sql.DB, instanceID int64) (int64, error) {
-	result, err := db.Exec(
+// and clears their instance association. Records the attempt outcome before resetting.
+// Returns the number of jobs reset.
+func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) (int64, error) {
+	// Close open attempts for all non-terminal jobs on this instance
+	if err := CloseJobCloudAttemptsByInstance(database, instanceID, outcome); err != nil {
+		return 0, fmt.Errorf("close attempts: %w", err)
+	}
+
+	result, err := database.Exec(
 		`UPDATE jobs SET status = ?, cloud_instance_id = NULL
 		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?) AND tombstoned = 0`,
 		StatusNeedsRental, instanceID, StatusCompleted, StatusFailed,
@@ -351,4 +361,106 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		c.DataCenter = dataCenter.String
 	}
 	return &c, nil
+}
+
+// Job cloud attempt outcome constants.
+const (
+	AttemptOutcomeCompleted = "completed"
+	AttemptOutcomeFailed    = "failed"
+	AttemptOutcomeCancelled = "cancelled"
+	AttemptOutcomeOrphaned  = "orphaned"
+)
+
+// JobCloudAttempt records a single association between a job and a cloud instance.
+type JobCloudAttempt struct {
+	ID              int64
+	JobID           int64
+	CloudInstanceID int64
+	StartedAt       int64
+	EndedAt         *int64
+	Outcome         string // "completed", "failed", "cancelled", "orphaned"
+}
+
+// InsertJobCloudAttempt records a new job ↔ cloud instance association.
+func InsertJobCloudAttempt(database *sql.DB, jobID, cloudInstanceID int64) error {
+	now := time.Now().Unix()
+	_, err := database.Exec(
+		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (?, ?, ?)`,
+		jobID, cloudInstanceID, now,
+	)
+	return err
+}
+
+// CloseJobCloudAttempt closes the open attempt for a specific job with the given outcome.
+func CloseJobCloudAttempt(database *sql.DB, jobID int64, outcome string) error {
+	now := time.Now().Unix()
+	_, err := database.Exec(
+		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
+		now, outcome, jobID,
+	)
+	return err
+}
+
+// CloseJobCloudAttemptsByInstance closes all open attempts for jobs on the given instance.
+func CloseJobCloudAttemptsByInstance(database *sql.DB, instanceID int64, outcome string) error {
+	now := time.Now().Unix()
+	_, err := database.Exec(
+		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ?
+		 WHERE cloud_instance_id = ? AND ended_at IS NULL`,
+		now, outcome, instanceID,
+	)
+	return err
+}
+
+// GetJobCloudAttempts returns the attempt history for a job, ordered by start time.
+func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, error) {
+	rows, err := database.Query(
+		`SELECT id, job_id, cloud_instance_id, started_at, ended_at, outcome
+		 FROM job_cloud_attempts WHERE job_id = ? ORDER BY started_at ASC`,
+		jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var attempts []JobCloudAttempt
+	for rows.Next() {
+		var a JobCloudAttempt
+		var endedAt sql.NullInt64
+		var outcome sql.NullString
+		if err := rows.Scan(&a.ID, &a.JobID, &a.CloudInstanceID, &a.StartedAt, &endedAt, &outcome); err != nil {
+			return nil, err
+		}
+		if endedAt.Valid {
+			a.EndedAt = &endedAt.Int64
+		}
+		if outcome.Valid {
+			a.Outcome = outcome.String
+		}
+		attempts = append(attempts, a)
+	}
+	return attempts, rows.Err()
+}
+
+// ListRunningCloudInstances returns all cloud instances with "running" or "launching" status.
+func ListRunningCloudInstances(database *sql.DB) ([]*CloudInstance, error) {
+	rows, err := database.Query(
+		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE status IN (?, ?) ORDER BY created_at DESC`,
+		CloudInstanceStatusRunning, CloudInstanceStatusLaunching,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var instances []*CloudInstance
+	for rows.Next() {
+		c, err := scanCloudInstanceFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, c)
+	}
+	return instances, rows.Err()
 }

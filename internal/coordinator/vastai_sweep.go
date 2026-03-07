@@ -135,6 +135,15 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		return
 	}
 
+	// Close the cloud attempt record
+	outcome := db.AttemptOutcomeCompleted
+	if exitCode != 0 {
+		outcome = db.AttemptOutcomeFailed
+	}
+	if err := db.CloseJobCloudAttempt(c.db, jobID, outcome); err != nil {
+		c.logger.Printf("vastai sweep: close attempt for job %d: %v", jobID, err)
+	}
+
 	// Extract and store phase timing data
 	if timings := extractPhaseTimings(jobID, tmpDir); timings != nil {
 		if err := db.UpsertJobPhaseTimings(c.db, timings); err != nil {

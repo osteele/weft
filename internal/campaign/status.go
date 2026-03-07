@@ -50,10 +50,18 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// Refresh cloud instance info periodically
 			providerInstID := ci.EffectiveProviderID()
 			if providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
-				if inst, err := client.ShowInstance(providerInstID); err == nil {
+				inst, showErr := client.ShowInstance(providerInstID)
+				if showErr == nil {
 					cachedInstance = inst
 				}
 				lastProviderPoll = time.Now()
+
+				// Detect dead instances: provider says dead but DB says running
+				if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) {
+					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed)
+					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
+					ci.Status = db.CloudInstanceStatusFailed
+				}
 			}
 
 			update := InstanceUpdate{

@@ -331,6 +331,13 @@ func (m launchModel) launchInstances() tea.Cmd {
 	cfg := m.appConfig
 	opts := m.launchOpts
 
+	// Auto-derive budget limits from estimates if not set by CLI
+	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(filteredOffers) > 0 {
+		predCfg := buildPredictorConfig(cfg)
+		estimates := campaign.EstimateCosts(filteredOffers, &predCfg)
+		opts.ApplyAutoBudget(estimates)
+	}
+
 	return func() tea.Msg {
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)

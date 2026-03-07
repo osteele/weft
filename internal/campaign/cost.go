@@ -97,6 +97,30 @@ func predictJobDuration(predCfg *predictor.Config, gpuClass string, job *db.Job)
 	return time.Duration(result.DurationS.Mean) * time.Second
 }
 
+// BudgetMultiplier is the safety factor applied to estimates for budget limits.
+const BudgetMultiplier = 10.0
+
+// MinBudgetTime is the minimum time budget to prevent premature kills.
+const MinBudgetTime = 8 * time.Hour
+
+// MinBudgetCents is the minimum spend budget ($20) to prevent premature kills.
+const MinBudgetCents = 2000
+
+// BudgetFromEstimate derives safety-net budget limits from a cost estimate.
+// Returns maxSpendCents and maxTimeSeconds with a generous multiplier,
+// floored at minimums to avoid killing jobs we can't estimate well.
+func BudgetFromEstimate(est CostEstimate) (maxSpendCents int, maxTimeSeconds int) {
+	maxTime := time.Duration(float64(est.TotalTime) * BudgetMultiplier)
+	if maxTime < MinBudgetTime {
+		maxTime = MinBudgetTime
+	}
+	maxSpendCents = int(est.TotalCost * BudgetMultiplier * 100)
+	if maxSpendCents < MinBudgetCents {
+		maxSpendCents = MinBudgetCents
+	}
+	return maxSpendCents, int(maxTime.Seconds())
+}
+
 // TotalEstimatedCostFromEstimates returns the total cost across all estimates.
 func TotalEstimatedCostFromEstimates(estimates []CostEstimate) float64 {
 	var total float64

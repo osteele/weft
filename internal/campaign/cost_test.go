@@ -67,6 +67,60 @@ func TestTotalEstimatedCostFromEstimates(t *testing.T) {
 	}
 }
 
+func TestBudgetFromEstimate(t *testing.T) {
+	tests := []struct {
+		name         string
+		est          CostEstimate
+		wantMinSpend int
+		wantMinTime  int
+		wantMaxSpend int
+		wantMaxTime  int
+	}{
+		{
+			name:         "normal estimate uses 10x multiplier",
+			est:          CostEstimate{TotalTime: 2 * time.Hour, TotalCost: 5.0},
+			wantMinSpend: 5000,  // $5 * 10 * 100 = 5000 cents
+			wantMinTime:  72000, // 2h * 10 = 20h = 72000s
+			wantMaxSpend: 5000,
+			wantMaxTime:  72000,
+		},
+		{
+			name:         "small estimate hits floor",
+			est:          CostEstimate{TotalTime: 10 * time.Minute, TotalCost: 0.10},
+			wantMinSpend: MinBudgetCents,               // $20 floor
+			wantMinTime:  int(MinBudgetTime.Seconds()), // 8h floor
+			wantMaxSpend: MinBudgetCents,
+			wantMaxTime:  int(MinBudgetTime.Seconds()),
+		},
+		{
+			name:         "zero estimate hits floor",
+			est:          CostEstimate{TotalTime: 0, TotalCost: 0},
+			wantMinSpend: MinBudgetCents,
+			wantMinTime:  int(MinBudgetTime.Seconds()),
+			wantMaxSpend: MinBudgetCents,
+			wantMaxTime:  int(MinBudgetTime.Seconds()),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spend, secs := BudgetFromEstimate(tt.est)
+			if spend < tt.wantMinSpend {
+				t.Errorf("MaxSpendCents = %d, want >= %d", spend, tt.wantMinSpend)
+			}
+			if spend > tt.wantMaxSpend {
+				t.Errorf("MaxSpendCents = %d, want <= %d", spend, tt.wantMaxSpend)
+			}
+			if secs < tt.wantMinTime {
+				t.Errorf("MaxTimeSeconds = %d, want >= %d", secs, tt.wantMinTime)
+			}
+			if secs > tt.wantMaxTime {
+				t.Errorf("MaxTimeSeconds = %d, want <= %d", secs, tt.wantMaxTime)
+			}
+		})
+	}
+}
+
 func TestFormatEstDuration(t *testing.T) {
 	tests := []struct {
 		dur           time.Duration

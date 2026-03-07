@@ -643,6 +643,21 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create job_cloud_attempts table (tracks each job ↔ cloud instance association)
+	jobCloudAttemptsSchema := `
+	CREATE TABLE IF NOT EXISTS job_cloud_attempts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id INTEGER NOT NULL REFERENCES jobs(id),
+		cloud_instance_id INTEGER NOT NULL REFERENCES cloud_instances(id),
+		started_at INTEGER NOT NULL,
+		ended_at INTEGER,
+		outcome TEXT
+	);
+	`
+	if _, err := db.Exec(jobCloudAttemptsSchema); err != nil {
+		return err
+	}
+
 	return nil
 }
 

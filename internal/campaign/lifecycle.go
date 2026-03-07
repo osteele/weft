@@ -28,6 +28,37 @@ type LaunchOpts struct {
 	MaxTimeSeconds int
 }
 
+// ApplyAutoBudget derives budget limits from estimates for any limits not already set.
+// Uses the maximum across all group estimates so no instance gets killed prematurely.
+// Returns true if any limits were set.
+func (opts *LaunchOpts) ApplyAutoBudget(estimates []CostEstimate) bool {
+	if opts.MaxSpendCents > 0 && opts.MaxTimeSeconds > 0 {
+		return false
+	}
+
+	var maxSpend, maxTime int
+	for _, est := range estimates {
+		spend, secs := BudgetFromEstimate(est)
+		if spend > maxSpend {
+			maxSpend = spend
+		}
+		if secs > maxTime {
+			maxTime = secs
+		}
+	}
+
+	changed := false
+	if opts.MaxSpendCents == 0 && maxSpend > 0 {
+		opts.MaxSpendCents = maxSpend
+		changed = true
+	}
+	if opts.MaxTimeSeconds == 0 && maxTime > 0 {
+		opts.MaxTimeSeconds = maxTime
+		changed = true
+	}
+	return changed
+}
+
 // LaunchResult holds the outcome of a campaign launch.
 type LaunchResult struct {
 	CampaignID  int64

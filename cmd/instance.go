@@ -291,7 +291,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 				return
 			}
 
-			resetCount, err := db.ResetCloudInstanceJobs(database, instanceID)
+			resetCount, err := db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeCancelled)
 			if err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("reset jobs for instance %d: %w", instanceID, err))
