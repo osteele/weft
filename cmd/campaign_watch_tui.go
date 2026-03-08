@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -26,6 +27,8 @@ type watchModel struct {
 	err         error
 	ctx         context.Context
 	cancel      context.CancelFunc
+	campaignID  int64     // campaign ID (0 if unknown)
+	launchedAt  time.Time // campaign launch time
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -43,6 +46,9 @@ type watchUpdateMsg struct {
 	closed     bool // true if channel was closed
 }
 
+// watchSyncTickMsg triggers periodic cloud job result syncing.
+type watchSyncTickMsg struct{}
+
 func newWatchModel(database *sql.DB, instanceIDs []int64) watchModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -54,6 +60,8 @@ func newWatchModel(database *sql.DB, instanceIDs []int64) watchModel {
 		clients[id] = clientForInstance(database, id)
 	}
 
+	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
+
 	return watchModel{
 		instanceIDs: instanceIDs,
 		updates:     make(map[int64]campaign.InstanceUpdate),
@@ -63,6 +71,8 @@ func newWatchModel(database *sql.DB, instanceIDs []int64) watchModel {
 		spinner:     s,
 		ctx:         ctx,
 		cancel:      cancel,
+		campaignID:  campaignID,
+		launchedAt:  launchedAt,
 	}
 }
 
@@ -76,6 +86,9 @@ func (m watchModel) Init() tea.Cmd {
 		m.channels[id] = ch
 		cmds = append(cmds, waitForUpdate(id, ch))
 	}
+
+	// Start periodic cloud job sync
+	cmds = append(cmds, scheduleSyncTick())
 
 	return tea.Batch(cmds...)
 }
@@ -106,6 +119,17 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue reading from the same channel
 		ch := m.channels[msg.instanceID]
 		return m, waitForUpdate(msg.instanceID, ch)
+
+	case watchSyncTickMsg:
+		// Sync cloud job results from R2 without blocking the UI
+		return m, tea.Batch(
+			func() tea.Msg {
+				cfg, _ := config.Load()
+				syncCloudJobResults(cfg, m.database, false)
+				return nil
+			},
+			scheduleSyncTick(),
+		)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -138,6 +162,18 @@ func (m watchModel) checkAllDone() tea.Cmd {
 
 func (m watchModel) View() string {
 	var b strings.Builder
+
+	// Campaign header
+	if m.campaignID > 0 {
+		header := fmt.Sprintf("Campaign %d", m.campaignID)
+		if !m.launchedAt.IsZero() {
+			header += fmt.Sprintf(" — launched %s (%s ago)",
+				m.launchedAt.Format("15:04"),
+				time.Since(m.launchedAt).Truncate(time.Minute))
+		}
+		b.WriteString(watchTitleStyle.Render(header))
+		b.WriteString("\n\n")
+	}
 
 	for _, id := range m.instanceIDs {
 		u, ok := m.updates[id]
@@ -176,6 +212,10 @@ func (m watchModel) View() string {
 
 		if u.Instance != nil && u.Instance.SSHHost != "" {
 			b.WriteString(fmt.Sprintf("  SSH: %s\n", campaign.FormatSSHCommand(u.Instance)))
+		}
+
+		if u.BootstrapStage != "" {
+			b.WriteString(fmt.Sprintf("  Bootstrap: %s\n", campaign.BootstrapStageLabel(u.BootstrapStage)))
 		}
 
 		if u.Instance != nil && ci.LaunchedAt != nil {
@@ -222,6 +262,13 @@ func (m watchModel) View() string {
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// scheduleSyncTick returns a command that fires a sync tick after 15 seconds.
+func scheduleSyncTick() tea.Cmd {
+	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
+		return watchSyncTickMsg{}
+	})
 }
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.

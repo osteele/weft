@@ -83,6 +83,51 @@ func TestLoadProjectConfig_EmptyDir(t *testing.T) {
 	}
 }
 
+func TestProjectInputs(t *testing.T) {
+	t.Run("no config file returns nil", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		inputs := ProjectInputs(tmpDir)
+		if inputs != nil {
+			t.Errorf("expected nil, got %v", inputs)
+		}
+	})
+
+	t.Run("empty dir returns nil", func(t *testing.T) {
+		inputs := ProjectInputs("")
+		if inputs != nil {
+			t.Errorf("expected nil, got %v", inputs)
+		}
+	})
+
+	t.Run("config with inputs", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := "inputs:\n  - hf:gpt2\n  - hf:meta-llama/Llama-3.1-8B\n"
+		os.WriteFile(filepath.Join(tmpDir, ".weft.yaml"), []byte(cfgContent), 0644)
+
+		inputs := ProjectInputs(tmpDir)
+		if len(inputs) != 2 {
+			t.Fatalf("expected 2 inputs, got %d", len(inputs))
+		}
+		if inputs[0] != "hf:gpt2" {
+			t.Errorf("inputs[0] = %q, want %q", inputs[0], "hf:gpt2")
+		}
+		if inputs[1] != "hf:meta-llama/Llama-3.1-8B" {
+			t.Errorf("inputs[1] = %q, want %q", inputs[1], "hf:meta-llama/Llama-3.1-8B")
+		}
+	})
+
+	t.Run("config without inputs returns nil", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgContent := "sync:\n  extra_paths:\n    - ~/data/\n"
+		os.WriteFile(filepath.Join(tmpDir, ".weft.yaml"), []byte(cfgContent), 0644)
+
+		inputs := ProjectInputs(tmpDir)
+		if inputs != nil {
+			t.Errorf("expected nil, got %v", inputs)
+		}
+	})
+}
+
 func TestProjectOutputsConfig_EffectiveDirs(t *testing.T) {
 	t.Run("empty config returns defaults", func(t *testing.T) {
 		cfg := ProjectOutputsConfig{}

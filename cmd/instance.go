@@ -601,7 +601,8 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("write release signal: %w", err)
 	}
 
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCompleted); err != nil {
+	// Grace period is entered because jobs failed, so releasing means giving up — mark as failed.
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed); err != nil {
 		return fmt.Errorf("update DB: %w", err)
 	}
 

@@ -79,6 +79,50 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 }
 
+func TestReconcileCloudInstances_GraceDetection(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a running instance with a provider ID
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	// Mock client that reports instance as still running
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: "running"}, nil
+		},
+	}
+
+	// With nil r2Client, grace detection is skipped — no reconciliation
+	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("reconciled = %d, want 0 (nil r2Client)", n)
+	}
+
+	// Instance should still be running
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusRunning {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusRunning)
+	}
+}
+
 func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

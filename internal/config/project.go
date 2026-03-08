@@ -15,6 +15,7 @@ const ProjectConfigFile = ".weft.yaml"
 type ProjectConfig struct {
 	Sync    ProjectSyncConfig    `yaml:"sync"`
 	Outputs ProjectOutputsConfig `yaml:"outputs"`
+	Inputs  []string             `yaml:"inputs"` // e.g. ["hf:gpt2", "hf:meta-llama/Llama-3.1-8B"]
 }
 
 // ProjectOutputsConfig holds output collection settings for convention-based output discovery.
@@ -117,6 +118,19 @@ func ProjectOutputDirs(localDir string) []string {
 // at localDir. Returns the default if no config is found.
 func ProjectMaxAutoSyncMB(localDir string) int {
 	return projectOutputsConfig(localDir).EffectiveMaxAutoSyncMB()
+}
+
+// ProjectInputs returns the input data assets from the project config at
+// localDir, or nil if no config is found. Errors are silently ignored.
+func ProjectInputs(localDir string) []string {
+	if localDir == "" {
+		return nil
+	}
+	projCfg, err := LoadProjectConfig(localDir)
+	if err != nil || projCfg == nil {
+		return nil
+	}
+	return projCfg.Inputs
 }
 
 // projectOutputsConfig loads the outputs section from the project config,

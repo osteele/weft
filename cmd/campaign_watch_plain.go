@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -20,6 +21,11 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Print campaign header if instances belong to a campaign
+	if campaignID, launchTime := campaignInfoFromInstances(database, instanceIDs); campaignID > 0 {
+		fmt.Printf("Campaign %d — launched %s\n\n", campaignID, launchTime.Format("2006-01-02 15:04"))
+	}
+
 	// Handle ctrl-c gracefully
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt)
@@ -27,6 +33,21 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	go func() {
 		<-sigCh
 		cancel()
+	}()
+
+	// Periodic cloud job result sync (every 15s)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cfg, _ := config.Load()
+				syncCloudJobResults(cfg, database, false)
+			}
+		}
 	}()
 
 	var wg sync.WaitGroup
@@ -61,4 +82,24 @@ func clientForInstance(database *sql.DB, instanceID int64) cloud.Client {
 		return cloudClientForDBInstance("vastai") // fallback
 	}
 	return cloudClientForDBInstance(ci.Provider)
+}
+
+// campaignInfoFromInstances looks up campaign ID and launch time from the first instance.
+func campaignInfoFromInstances(database *sql.DB, instanceIDs []int64) (campaignID int64, launchTime time.Time) {
+	if len(instanceIDs) == 0 {
+		return 0, time.Time{}
+	}
+	ci, err := db.GetCloudInstance(database, instanceIDs[0])
+	if err != nil || ci == nil {
+		return 0, time.Time{}
+	}
+	if ci.CampaignID != nil {
+		campaignID = *ci.CampaignID
+	}
+	if ci.LaunchedAt != nil {
+		launchTime = time.Unix(*ci.LaunchedAt, 0)
+	} else {
+		launchTime = time.Unix(ci.CreatedAt, 0)
+	}
+	return campaignID, launchTime
 }

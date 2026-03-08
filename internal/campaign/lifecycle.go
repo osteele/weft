@@ -226,6 +226,7 @@ func LaunchCampaign(
 					DonorMode:     true,
 					HFModels:      donorCfg.HFModels,
 					DonorID:       fmt.Sprintf("%d", donorInstanceID),
+					DBInstanceID:  donorInstanceID,
 				})
 
 				bootstrapKey := fmt.Sprintf("bootstrap/%d.sh", donorInstanceID)
@@ -598,6 +599,7 @@ func LaunchInstance(
 		Sources:       sources,
 		WrapperScript: wrapper,
 		WorkspacePath: wsPath,
+		DBInstanceID:  instanceID,
 	})
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {

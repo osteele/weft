@@ -638,10 +638,19 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		// Check if job is queued (not yet started)
+		// Check if job is cancellable (queued or needs_rental)
 		effectiveStatus := job.EffectiveStatus()
+		if effectiveStatus == db.StatusNeedsRental {
+			// needs_rental jobs have no remote queue entry — just update DB status
+			if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusCanceled); err != nil {
+				errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+				continue
+			}
+			fmt.Printf("Job %d cancelled (was awaiting cloud instance)\n", jobID)
+			continue
+		}
 		if effectiveStatus != db.StatusQueued {
-			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only remove queued jobs", jobID, effectiveStatus))
+			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only cancel queued or needs_rental jobs", jobID, effectiveStatus))
 			continue
 		}
 

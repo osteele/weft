@@ -214,7 +214,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	}
 
 	// Load output directories from .weft.yaml for convention-based output collection
-	outputDirs := config.ProjectOutputDirs(workdir.ResolveLocal(runDir))
+	localDir := workdir.ResolveLocal(runDir)
+	outputDirs := config.ProjectOutputDirs(localDir)
+
+	// Merge project-level inputs with CLI --input flags
+	projectInputs := config.ProjectInputs(localDir)
+	runInputs = mergeDedup(projectInputs, runInputs)
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
@@ -785,6 +790,32 @@ func printCommandRecommendations(command string) bool {
 		return true
 	}
 	return false
+}
+
+// mergeDedup merges two string slices, removing duplicates. Items from a appear
+// first, then unique items from b.
+func mergeDedup(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	var result []string
+	for _, s := range a {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // coordinatorReachable checks if the coordinator daemon is running.

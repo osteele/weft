@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -165,6 +166,11 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
+	// Cloud jobs: fetch log from R2 instead of SSH
+	if job.CloudInstanceID != nil && *job.CloudInstanceID > 0 && job.Host == "" {
+		return runLogForCloudJob(cmd, job)
+	}
+
 	follow := logFollow
 	if follow && isTerminalStatus(job.Status) {
 		fmt.Fprintf(os.Stderr, "Job %d already completed; showing log output without following.\n", jobID)
@@ -286,6 +292,51 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		tailHintPrinted = true
 	}
 	fmt.Print(processCarriageReturns(stdout))
+	return nil
+}
+
+// runLogForCloudJob fetches log output from R2 for a cloud-based job.
+func runLogForCloudJob(cmd *cobra.Command, job *db.Job) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		return fmt.Errorf("create R2 client: %w", err)
+	}
+	if r2Client == nil {
+		return fmt.Errorf("R2 not configured; cannot fetch cloud job logs")
+	}
+
+	if logFollow {
+		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud jobs; showing current log.\n")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	key := fmt.Sprintf("jobs/%d/results/%d.log", job.ID, job.ID)
+	data, err := r2Client.GetObject(ctx, key)
+	if err != nil {
+		return fmt.Errorf("fetch log from R2 (key %s): %w", key, err)
+	}
+
+	content := string(data)
+
+	// Cache for terminal jobs
+	if shouldPreferCachedLog(job.Status) {
+		_ = logcache.Write(job.ID, content)
+	}
+
+	defaultTailHint := shouldShowDefaultTailHint(cmd, false)
+	if defaultTailHint {
+		printDefaultTailHint(job.ID)
+	}
+
+	output := filterLogContent(content, logFrom, logTo, logLines, logGrep)
+	fmt.Print(processCarriageReturns(output))
 	return nil
 }
 
