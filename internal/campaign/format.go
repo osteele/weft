@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 )
 
 // FormatResolvedGPU formats the GPU constraint and resolved name.
@@ -39,39 +40,68 @@ func FormatJobLine(job *db.Job) string {
 	return fmt.Sprintf("%4d  %s", job.ID, desc)
 }
 
-// FormatCostTable returns a cost estimate table for the given group offers.
-// Only includes groups where an offer was found.
-func FormatCostTable(groupOffers []GroupOffer) string {
-	var b strings.Builder
+// FormatCostTable returns a rough cost estimate table (1hr/job) for the given
+// group offers, with selection awareness. Dimmed lines for groups with 0 selected.
+func FormatCostTable(groupOffers []GroupOffer, selectedPerGroup []int) CostTable {
+	type row struct {
+		gpu, jobs, mem, rate, cost string
+		dimmed                     bool
+	}
+	var rows []row
 	var totalCost float64
 	hasAny := false
 
-	for _, go_ := range groupOffers {
+	for i, go_ := range groupOffers {
 		if go_.Offer == nil {
 			continue
 		}
 		hasAny = true
-		jobs := len(go_.Group.Jobs)
-		// Rough estimate: 1 hour per job
-		estCost := float64(jobs) * go_.Offer.CostPerHour
+		totalJobs := len(go_.Group.Jobs)
+		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+
+		estCost := float64(totalJobs) * go_.Offer.CostPerHour * scale
 		totalCost += estCost
 
-		gpuLabel := FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName)
-		b.WriteString(fmt.Sprintf("%-18s %d jobs  %dGB   $%.2f/hr  ~$%.2f\n",
-			gpuLabel,
-			jobs,
-			int(go_.Offer.GPUMemGB),
-			go_.Offer.CostPerHour,
-			estCost,
-		))
+		rows = append(rows, row{
+			gpu:    FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName),
+			jobs:   fmt.Sprintf("%d jobs", selected),
+			mem:    fmt.Sprintf("%dGB", int(go_.Offer.GPUMemGB)),
+			rate:   fmt.Sprintf("$%.2f/hr", go_.Offer.CostPerHour),
+			cost:   fmt.Sprintf("~$%.2f", estCost),
+			dimmed: selected == 0,
+		})
 	}
 
 	if !hasAny {
-		return "  No offers found for any group.\n"
+		return CostTable{Lines: []CostLine{{Text: "  No offers found for any group."}}}
 	}
 
-	b.WriteString(fmt.Sprintf("%40s Total: ~$%.2f\n", "", totalCost))
-	return b.String()
+	var wGPU, wJobs, wMem, wRate int
+	for _, r := range rows {
+		if len(r.gpu) > wGPU {
+			wGPU = len(r.gpu)
+		}
+		if len(r.jobs) > wJobs {
+			wJobs = len(r.jobs)
+		}
+		if len(r.mem) > wMem {
+			wMem = len(r.mem)
+		}
+		if len(r.rate) > wRate {
+			wRate = len(r.rate)
+		}
+	}
+
+	var lines []CostLine
+	fmtStr := fmt.Sprintf("%%-%ds  %%%ds  %%%ds  %%%ds  %%s", wGPU, wJobs, wMem, wRate)
+	for _, r := range rows {
+		line := fmt.Sprintf(fmtStr, r.gpu, r.jobs, r.mem, r.rate, r.cost)
+		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
+	}
+
+	totalLine := fmt.Sprintf(fmtStr, "", "", "", "", fmt.Sprintf("Total: ~$%.2f", totalCost))
+	lines = append(lines, CostLine{Text: totalLine})
+	return CostTable{Lines: lines}
 }
 
 // FormatCostTableWithEstimates returns a cost table using predictor-based duration estimates.
@@ -116,7 +146,7 @@ func FormatEstDuration(d time.Duration, hasPrediction bool) string {
 	return "~" + s + " (est)"
 }
 
-// formatDurationShort formats a duration as a compact string like "2h 15m".
+// formatDurationShort formats a duration as a compact string like "2h15".
 func formatDurationShort(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
@@ -129,7 +159,7 @@ func formatDurationShort(d time.Duration) string {
 	if m == 0 {
 		return fmt.Sprintf("%dh", h)
 	}
-	return fmt.Sprintf("%dh %dm", h, m)
+	return fmt.Sprintf("%dh%02d", h, m)
 }
 
 // FormatSSHCommand returns the SSH command string for a cloud instance.
@@ -166,6 +196,191 @@ func TotalEstimatedCost(groupOffers []GroupOffer) float64 {
 		total += float64(len(go_.Group.Jobs)) * go_.Offer.CostPerHour
 	}
 	return total
+}
+
+// CostLine is a single line in the cost table with styling metadata.
+type CostLine struct {
+	Text   string
+	Dimmed bool
+}
+
+// CostTable is the result of FormatCostTableSelected.
+type CostTable struct {
+	Lines []CostLine
+}
+
+// selectionScale computes the fraction of selected jobs and the count for a group.
+func selectionScale(groupIdx int, totalJobs int, selectedPerGroup []int) (selected int, scale float64) {
+	if groupIdx < len(selectedPerGroup) {
+		selected = selectedPerGroup[groupIdx]
+	}
+	if totalJobs > 0 {
+		scale = float64(selected) / float64(totalJobs)
+	}
+	return selected, scale
+}
+
+// FormatCostTableSelected returns a selection-aware cost estimate table.
+// Each group line shows "selected/total jobs" and scales cost/time proportionally.
+// Lines for groups with 0 selected are marked as Dimmed.
+func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) CostTable {
+	type row struct {
+		gpu, jobs, rate, dur, cost string
+		dimmed                     bool
+	}
+	var rows []row
+	var totalCost, totalLower, totalUpper float64
+	hasAny := false
+
+	for i, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+		hasAny = true
+
+		totalJobs := len(est.Group.Jobs)
+		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+
+		scaledTime := est.Breakdown.Total.Scale(scale)
+		scaledCost := est.TotalCost * scale
+		totalCost += scaledCost
+		totalLower += scaledTime.Lower.Hours() * est.Offer.Offer.CostPerHour
+		totalUpper += scaledTime.Upper.Hours() * est.Offer.Offer.CostPerHour
+
+		rows = append(rows, row{
+			gpu:    FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName),
+			jobs:   fmt.Sprintf("%d jobs", selected),
+			rate:   fmt.Sprintf("$%.2f/hr", est.Offer.Offer.CostPerHour),
+			dur:    formatDurationWithBounds(scaledTime),
+			cost:   formatCostWithBounds(scaledCost, scaledTime, est.Offer.Offer.CostPerHour),
+			dimmed: scale == 0,
+		})
+	}
+
+	if !hasAny {
+		return CostTable{Lines: []CostLine{{Text: "  No offers found for any group."}}}
+	}
+
+	var wGPU, wJobs, wRate, wDur int
+	for _, r := range rows {
+		if len(r.gpu) > wGPU {
+			wGPU = len(r.gpu)
+		}
+		if len(r.jobs) > wJobs {
+			wJobs = len(r.jobs)
+		}
+		if len(r.rate) > wRate {
+			wRate = len(r.rate)
+		}
+		if len(r.dur) > wDur {
+			wDur = len(r.dur)
+		}
+	}
+
+	var lines []CostLine
+	fmtStr := fmt.Sprintf("%%-%ds  %%%ds  %%%ds  %%%ds  %%s", wGPU, wJobs, wRate, wDur)
+	for _, r := range rows {
+		line := fmt.Sprintf(fmtStr, r.gpu, r.jobs, r.rate, r.dur, r.cost)
+		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
+	}
+
+	var totalStr string
+	if totalUpper-totalLower < 0.01 {
+		totalStr = fmt.Sprintf("Total: ~$%.2f", totalCost)
+	} else {
+		totalStr = fmt.Sprintf("Total: ~$%.2f ($%.2f–$%.2f)", totalCost, totalLower, totalUpper)
+	}
+	totalLine := fmt.Sprintf(fmtStr, "", "", "", "", totalStr)
+	lines = append(lines, CostLine{Text: totalLine})
+	return CostTable{Lines: lines}
+}
+
+// FormatCostBreakdown returns a detailed cost breakdown per group, showing
+// startup, provisioning, and runtime phases with time/cost bounds.
+func FormatCostBreakdown(estimates []CostEstimate, selectedPerGroup []int) string {
+	var b strings.Builder
+	b.WriteString("  Cost Breakdown\n\n")
+
+	for i, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+
+		totalJobs := len(est.Group.Jobs)
+		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+
+		gpuLabel := FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName)
+		b.WriteString(fmt.Sprintf("  %s ($%.2f/hr, %d jobs selected)\n",
+			gpuLabel, est.Offer.Offer.CostPerHour, selected))
+
+		// Startup phase
+		b.WriteString(fmt.Sprintf("    Instance startup   %s\n",
+			formatDurationWithBounds(est.Breakdown.Startup)))
+
+		// Provision phase
+		provLine := fmt.Sprintf("    Provisioning       %s",
+			formatDurationWithBounds(est.Breakdown.Provision))
+		if est.DownloadBytes > 0 {
+			provLine += fmt.Sprintf("     %s model download", formatBytes(est.DownloadBytes))
+		}
+		b.WriteString(provLine + "\n")
+
+		// Run phase (scaled by selection)
+		scaledRun := est.Breakdown.Run.Scale(scale)
+		runLine := fmt.Sprintf("    Job runtime        %s",
+			formatDurationWithBounds(scaledRun))
+		runLine += fmt.Sprintf("     %d jobs, sequential", selected)
+		b.WriteString(runLine + "\n")
+
+		// Total
+		scaledTotal := est.Breakdown.Startup.Add(est.Breakdown.Provision).Add(scaledRun)
+		totalCost := scaledTotal.Mean.Hours() * est.Offer.Offer.CostPerHour
+		costStr := formatCostWithBounds(totalCost, scaledTotal, est.Offer.Offer.CostPerHour)
+		b.WriteString(fmt.Sprintf("    Total              %s          %s\n",
+			formatDurationWithBounds(scaledTotal), costStr))
+
+		b.WriteString("\n")
+	}
+
+	b.WriteString("  press d to return\n")
+	return b.String()
+}
+
+// formatDurationWithBounds formats a duration estimate as "~2h15 (1h–4h)".
+func formatDurationWithBounds(e estimate.Estimate) string {
+	if e.Mean == 0 {
+		return "—"
+	}
+	mean := formatDurationShort(e.Mean)
+	if e.Lower == e.Upper || e.Lower == e.Mean {
+		return "~" + mean
+	}
+	lower := formatDurationShort(e.Lower)
+	upper := formatDurationShort(e.Upper)
+	return fmt.Sprintf("~%s (%s–%s)", mean, lower, upper)
+}
+
+// formatCostWithBounds formats a cost as "~$3.38 ($1.00–$5.50)".
+func formatCostWithBounds(meanCost float64, timeEst estimate.Estimate, costPerHour float64) string {
+	if meanCost == 0 {
+		return "—"
+	}
+	lowerCost := timeEst.Lower.Hours() * costPerHour
+	upperCost := timeEst.Upper.Hours() * costPerHour
+	if upperCost-lowerCost < 0.01 || lowerCost == meanCost {
+		return fmt.Sprintf("~$%.2f", meanCost)
+	}
+	return fmt.Sprintf("~$%.2f ($%.2f–$%.2f)", meanCost, lowerCost, upperCost)
+}
+
+// formatBytes formats bytes as a human-readable string (e.g., "12 GB").
+func formatBytes(bytes int64) string {
+	const gb = 1024 * 1024 * 1024
+	const mb = 1024 * 1024
+	if bytes >= gb {
+		return fmt.Sprintf("%d GB", bytes/gb)
+	}
+	return fmt.Sprintf("%d MB", bytes/mb)
 }
 
 // TruncateCommand truncates a command string to max characters with ellipsis.

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 // Styles for the launch TUI (allocated once, not per-render).
@@ -33,18 +35,24 @@ type listItem struct {
 }
 
 type launchModel struct {
-	groups      []campaign.InstanceGroup
-	groupOffers []campaign.GroupOffer
+	groups        []campaign.InstanceGroup
+	groupOffers   []campaign.GroupOffer
+	costEstimates []campaign.CostEstimate
+	predConfig    *predictor.Config
 
 	items    []listItem
 	cursor   int
 	selected map[int64]bool // job ID -> checked
 
-	loading   bool
-	launching bool
-	done      bool
-	err       error
-	phase     string // launch progress phase
+	showCostDetail bool
+
+	loading          bool
+	launching        bool
+	done             bool
+	err              error
+	phase            string              // launch progress phase
+	estimateProgress estimateProgressMsg // latest estimation progress
+	progressCh       chan estimateProgressMsg
 
 	instanceIDs []int64
 	database    *sql.DB
@@ -63,6 +71,15 @@ type offersLoadedMsg struct {
 	err    error
 }
 
+type estimatesLoadedMsg struct {
+	estimates []campaign.CostEstimate
+}
+
+type estimateProgressMsg struct {
+	phase           string // e.g., "Resolving model sizes", "Estimating job durations"
+	resolved, total int
+}
+
 type instancesLaunchedMsg struct {
 	instanceIDs []int64
 	err         error
@@ -72,7 +89,7 @@ type launchPhaseMsg struct {
 	phase string
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config) launchModel {
 	// Build flat list of items
 	var items []listItem
 	selected := make(map[int64]bool)
@@ -115,6 +132,8 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		clients:    clients,
 		appConfig:  cfg,
 		launchOpts: opts,
+		predConfig: predCfg,
+		progressCh: make(chan estimateProgressMsg, 1),
 		spinner:    s,
 	}
 }
@@ -138,6 +157,34 @@ func (m launchModel) fetchOffers() tea.Cmd {
 	}
 }
 
+func (m launchModel) fetchEstimates() tea.Cmd {
+	groupOffers := m.groupOffers
+	predConfig := m.predConfig
+	ch := m.progressCh
+	return func() tea.Msg {
+		onProgress := func(phase string, resolved, total int) {
+			// Non-blocking send — if channel is full, skip this update
+			select {
+			case ch <- estimateProgressMsg{phase: phase, resolved: resolved, total: total}:
+			default:
+			}
+		}
+		estimates := campaign.EstimateCosts(groupOffers, predConfig, onProgress)
+		return estimatesLoadedMsg{estimates: estimates}
+	}
+}
+
+// waitForProgress returns a Cmd that reads one progress message from the channel.
+func waitForProgress(ch chan estimateProgressMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
 func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -155,6 +202,17 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.groupOffers = msg.offers
+		return m, tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh))
+
+	case estimateProgressMsg:
+		m.estimateProgress = msg
+		if m.costEstimates == nil {
+			return m, waitForProgress(m.progressCh)
+		}
+		return m, nil
+
+	case estimatesLoadedMsg:
+		m.costEstimates = msg.estimates
 		return m, nil
 
 	case launchPhaseMsg:
@@ -212,6 +270,10 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.selected[id] = !m.selected[id]
 			}
 		}
+		return m, nil
+
+	case "d":
+		m.showCostDetail = !m.showCostDetail
 		return m, nil
 
 	case "a":
@@ -290,6 +352,29 @@ func (m launchModel) groupCheckState(groupIdx int) string {
 	}
 }
 
+// selectedCountByGroup returns the number of selected jobs per group.
+// renderCostTable writes a CostTable to the builder, dimming lines as needed.
+func renderCostTable(b *strings.Builder, table campaign.CostTable) {
+	for _, cl := range table.Lines {
+		if cl.Dimmed {
+			b.WriteString(launchDimStyle.Render(cl.Text))
+		} else {
+			b.WriteString(cl.Text)
+		}
+		b.WriteString("\n")
+	}
+}
+
+func (m launchModel) selectedCountByGroup() []int {
+	counts := make([]int, len(m.groups))
+	for _, item := range m.items {
+		if !item.isHeader && m.selected[item.jobID] {
+			counts[item.groupIdx]++
+		}
+	}
+	return counts
+}
+
 func (m launchModel) launchInstances() tea.Cmd {
 	// Build filtered groups with only selected jobs
 	var filteredGroups []campaign.InstanceGroup
@@ -331,11 +416,24 @@ func (m launchModel) launchInstances() tea.Cmd {
 	cfg := m.appConfig
 	opts := m.launchOpts
 
-	// Auto-derive budget limits from estimates if not set by CLI
-	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(filteredOffers) > 0 {
-		predCfg := buildPredictorConfig(cfg)
-		estimates := campaign.EstimateCosts(filteredOffers, &predCfg)
-		opts.ApplyAutoBudget(estimates)
+	// Auto-derive budget limits from cached estimates if not set by CLI
+	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && m.costEstimates != nil {
+		// Filter cached estimates to selected groups
+		var selectedEstimates []campaign.CostEstimate
+		for i, est := range m.costEstimates {
+			for _, fg := range filteredGroups {
+				if i < len(m.groups) && m.groups[i].GPUClass == fg.GPUClass && m.groups[i].GPUMemGB == fg.GPUMemGB {
+					// Scale estimate proportionally to selected job count
+					scale := float64(len(fg.Jobs)) / float64(len(m.groups[i].Jobs))
+					scaled := est
+					scaled.TotalTime = time.Duration(float64(est.TotalTime) * scale)
+					scaled.TotalCost = est.TotalCost * scale
+					selectedEstimates = append(selectedEstimates, scaled)
+					break
+				}
+			}
+		}
+		opts.ApplyAutoBudget(selectedEstimates)
 	}
 
 	return func() tea.Msg {
@@ -400,52 +498,73 @@ func (m launchModel) View() string {
 		totalJobs += len(g.Jobs)
 	}
 
-	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("needs_rental jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
+	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Cloud GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
 	b.WriteString("\n\n")
 
-	// Job list with checkboxes
-	for idx, item := range m.items {
-		isCursor := idx == m.cursor
+	selected := m.selectedCountByGroup()
 
-		if item.isHeader {
-			checkbox := m.groupCheckState(item.groupIdx)
+	if m.showCostDetail && m.costEstimates != nil {
+		// Detail view replaces job list
+		b.WriteString(campaign.FormatCostBreakdown(m.costEstimates, selected))
+	} else {
+		// Job list with checkboxes
+		for idx, item := range m.items {
+			isCursor := idx == m.cursor
+
+			if item.isHeader {
+				checkbox := m.groupCheckState(item.groupIdx)
+				line := fmt.Sprintf("%s %s", checkbox, item.label)
+				if isCursor {
+					b.WriteString(launchCursorStyle.Render("> " + line))
+				} else {
+					b.WriteString(launchHeaderStyle.Render("  " + line))
+				}
+				b.WriteString("\n")
+				continue
+			}
+
+			checked := m.selected[item.jobID]
+
+			var checkbox string
+			if checked {
+				checkbox = "[x]"
+			} else {
+				checkbox = "[ ]"
+			}
+
 			line := fmt.Sprintf("%s %s", checkbox, item.label)
+
 			if isCursor {
 				b.WriteString(launchCursorStyle.Render("> " + line))
+			} else if checked {
+				b.WriteString(launchSelectedStyle.Render("  " + line))
 			} else {
-				b.WriteString(launchHeaderStyle.Render("  " + line))
+				b.WriteString(launchDimStyle.Render("  " + line))
 			}
 			b.WriteString("\n")
-			continue
 		}
 
-		checked := m.selected[item.jobID]
-
-		var checkbox string
-		if checked {
-			checkbox = "[x]"
-		} else {
-			checkbox = "[ ]"
+		// Cost estimate table
+		if m.costEstimates != nil {
+			b.WriteString("\n")
+			b.WriteString(launchDimStyle.Render("── Cost Estimate ─────────────────────────────────────"))
+			b.WriteString("\n")
+			costTable := campaign.FormatCostTableSelected(m.costEstimates, selected)
+			renderCostTable(&b, costTable)
+		} else if m.groupOffers != nil {
+			b.WriteString("\n")
+			b.WriteString(launchDimStyle.Render("── Cost Estimate (rough) ─────────────────────────────"))
+			b.WriteString("\n")
+			costTable := campaign.FormatCostTable(m.groupOffers, selected)
+			renderCostTable(&b, costTable)
+			b.WriteString(m.spinner.View())
+			if m.estimateProgress.phase != "" {
+				b.WriteString(launchDimStyle.Render(fmt.Sprintf(" %s (%d/%d)...", m.estimateProgress.phase, m.estimateProgress.resolved, m.estimateProgress.total)))
+			} else {
+				b.WriteString(launchDimStyle.Render(" Computing estimates..."))
+			}
+			b.WriteString("\n")
 		}
-
-		line := fmt.Sprintf("%s %s", checkbox, item.label)
-
-		if isCursor {
-			b.WriteString(launchCursorStyle.Render("> " + line))
-		} else if checked {
-			b.WriteString(launchSelectedStyle.Render("  " + line))
-		} else {
-			b.WriteString(launchDimStyle.Render("  " + line))
-		}
-		b.WriteString("\n")
-	}
-
-	// Cost estimate table
-	if m.groupOffers != nil {
-		b.WriteString("\n")
-		b.WriteString(launchDimStyle.Render("── Cost Estimate ─────────────────────────────────────"))
-		b.WriteString("\n")
-		b.WriteString(campaign.FormatCostTable(m.groupOffers))
 	}
 
 	// Help line
@@ -456,9 +575,13 @@ func (m launchModel) View() string {
 			selectedCount++
 		}
 	}
-	help := "↑/↓ navigate  space toggle job/group  a all  n none  enter launch  q quit"
-	if selectedCount == 0 {
-		help = "↑/↓ navigate  space toggle job/group  a all  n none  enter quit  q quit"
+	var help string
+	if m.showCostDetail {
+		help = "d back  q quit"
+	} else if selectedCount == 0 {
+		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter quit  q quit"
+	} else {
+		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit"
 	}
 	b.WriteString(launchDimStyle.Render(help))
 	b.WriteString("\n")

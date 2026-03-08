@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,9 +22,73 @@ var hfHTTPClient = &http.Client{Timeout: 15 * time.Second}
 // fetchHFModelSizeURL is the URL template for the HF API (overridable for testing).
 var fetchHFModelSizeURL = "https://huggingface.co/api/models/%s"
 
+// diskCachePath returns the path to the persistent model size cache.
+func diskCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cache", "weft", "hf-model-sizes.json")
+}
+
+// diskCacheLoaded tracks whether we've loaded from disk this process.
+var diskCacheLoaded bool
+
+// loadDiskCache loads the persistent cache into the in-memory sync.Map.
+func loadDiskCache() {
+	if diskCacheLoaded {
+		return
+	}
+	diskCacheLoaded = true
+
+	path := diskCachePath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var entries map[string]int64
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return
+	}
+	for k, v := range entries {
+		hfModelSizeCache.LoadOrStore(k, v)
+	}
+}
+
+// saveDiskCache writes the in-memory cache to disk.
+var diskCacheMu sync.Mutex
+
+func saveDiskCache() {
+	diskCacheMu.Lock()
+	defer diskCacheMu.Unlock()
+
+	path := diskCachePath()
+	if path == "" {
+		return
+	}
+	entries := make(map[string]int64)
+	hfModelSizeCache.Range(func(key, value any) bool {
+		entries[key.(string)] = value.(int64)
+		return true
+	})
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, 0o644)
+}
+
 // FetchHFModelSize queries the HuggingFace API for a model's total storage size.
 // Returns size in bytes from the usedStorage field.
 func FetchHFModelSize(modelID string) (int64, error) {
+	loadDiskCache()
+
 	if cached, ok := hfModelSizeCache.Load(modelID); ok {
 		return cached.(int64), nil
 	}
@@ -49,7 +116,56 @@ func FetchHFModelSize(modelID string) (int64, error) {
 	}
 
 	hfModelSizeCache.Store(modelID, result.UsedStorage)
+	saveDiskCache()
 	return result.UsedStorage, nil
+}
+
+// PrefetchInputSizes resolves model sizes for all inputs in parallel,
+// populating the cache so subsequent ResolveInputSizes calls are fast.
+// If onProgress is non-nil, it is called with (resolved, total) after each model.
+func PrefetchInputSizes(inputs []string, onProgress func(resolved, total int)) {
+	loadDiskCache()
+
+	seen := make(map[string]bool)
+	var assets []DataAsset
+	for _, input := range inputs {
+		asset, ok := ParseAssetRef(input)
+		if !ok || asset.Kind != AssetHFModel {
+			continue
+		}
+		if seen[asset.ID] {
+			continue
+		}
+		seen[asset.ID] = true
+		if _, ok := hfModelSizeCache.Load(asset.ID); ok {
+			continue
+		}
+		assets = append(assets, asset)
+	}
+	if len(assets) == 0 {
+		return
+	}
+
+	var resolved atomic.Int32
+	total := len(assets)
+	if onProgress != nil {
+		onProgress(0, total)
+	}
+
+	var wg sync.WaitGroup
+	for _, asset := range assets {
+		wg.Add(1)
+		go func(a DataAsset) {
+			defer wg.Done()
+			_, _ = FetchHFModelSize(a.ID)
+			cur := int(resolved.Add(1))
+			if onProgress != nil {
+				onProgress(cur, total)
+			}
+		}(asset)
+	}
+	wg.Wait()
+	saveDiskCache()
 }
 
 // ResolveInputSizes computes the total size in bytes of all hf:* model refs
@@ -99,4 +215,5 @@ func resolveModelSize(asset DataAsset, localDB *sql.DB) (int64, error) {
 // ClearHFModelSizeCache clears the in-process model size cache (for testing).
 func ClearHFModelSizeCache() {
 	hfModelSizeCache = sync.Map{}
+	diskCacheLoaded = false
 }

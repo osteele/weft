@@ -51,6 +51,28 @@ Remote Hosts (cool30, cool100)
 - **Cluster dashboard**: Web UI at `localhost:8127/cluster` shows host cards,
   live GPU utilization, coordinator status, and recent placement decisions
 
+#### Campaign Planner
+
+`weft campaign launch` opens an interactive planner:
+
+```
+Cloud GPU jobs (12 jobs, 3 GPU groups)
+
+  [x] A100 (3 jobs)
+  [x]   42  Llama-3 70B fine-tune on RedPajama (LoRA, 3 epochs)
+  [x]   43  Mixtral 8x7B inference benchmark (batch=64)
+> [ ]   44  GPT-NeoX 20B ablation: attention heads vs throughput
+  [-] RTX 4090 (5 jobs)
+  ...
+
+── Cost Estimate ──────────────────────────────────────────────────
+A100 → A100 PCIE    2/3 jobs  80GB  $0.52/hr  ~2h (1h–4h)   ~$1.04±0.52
+RTX 4090             5/5 jobs  24GB  $0.24/hr  ~5h (2h–10h)  ~$1.20±0.96
+                                                   Total: ~$2.24
+
+↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit
+```
+
 ### Designed for unreliable networks
 
 Laptops move between Wi-Fi networks, VPNs flap, and SSH servers occasionally

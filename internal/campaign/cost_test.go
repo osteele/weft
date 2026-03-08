@@ -18,7 +18,7 @@ func TestEstimateCosts_NoPredictions(t *testing.T) {
 		},
 	}
 
-	estimates := EstimateCosts(groupOffers, nil)
+	estimates := EstimateCosts(groupOffers, nil, nil)
 
 	if len(estimates) != 1 {
 		t.Fatalf("expected 1 estimate, got %d", len(estimates))
@@ -48,7 +48,7 @@ func TestEstimateCosts_NilOffer(t *testing.T) {
 		},
 	}
 
-	estimates := EstimateCosts(groupOffers, nil)
+	estimates := EstimateCosts(groupOffers, nil, nil)
 	if estimates[0].TotalCost != 0 {
 		t.Errorf("nil offer should have 0 cost, got %f", estimates[0].TotalCost)
 	}
@@ -128,7 +128,7 @@ func TestFormatEstDuration(t *testing.T) {
 		wantContains  string
 		wantExclude   string
 	}{
-		{90 * time.Minute, true, "~1h 30m", "est"},
+		{90 * time.Minute, true, "~1h30", "est"},
 		{2 * time.Hour, false, "(est)", ""},
 		{30 * time.Second, true, "~30s", ""},
 	}

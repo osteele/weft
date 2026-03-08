@@ -22,12 +22,36 @@ import (
 var campaignCmd = &cobra.Command{
 	Use:   "campaign",
 	Short: "Manage cloud GPU campaigns (batches of instances)",
+	RunE:  runCampaignAutoRoute,
+}
+
+// runCampaignAutoRoute routes bare `weft campaign` to list if there are
+// active campaigns, or to launch otherwise.
+func runCampaignAutoRoute(cmd *cobra.Command, args []string) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	campaigns, err := db.ListCampaigns(database)
+	if err != nil {
+		return fmt.Errorf("list campaigns: %w", err)
+	}
+
+	for _, c := range campaigns {
+		if c.Status == db.CampaignStatusRunning || c.Status == db.CampaignStatusLaunching {
+			return runCampaignList(cmd, args)
+		}
+	}
+
+	return runCampaignLaunch(cmd, args)
 }
 
 var campaignLaunchCmd = &cobra.Command{
 	Use:   "launch",
 	Short: "Interactively select and launch cloud instances for unplaceable jobs",
-	Long: `Shows all needs_rental jobs grouped by GPU class with checkboxes.
+	Long: `Shows jobs whose GPU constraints can't be satisfied by on-prem hosts, grouped by GPU class with checkboxes.
 Select/deselect jobs, view cost estimates, and launch instances.
 
 Use --dry-run to just print the plan without launching.`,
@@ -185,7 +209,8 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Interactive TUI
 	clients := buildCloudClients(cfg)
-	model := newLaunchModel(database, clients, cfg, groups, opts)
+	predCfg := buildPredictorConfig(cfg)
+	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {
@@ -225,7 +250,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groups))
 
 	predCfg := buildPredictorConfig(cfg)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg, nil)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Auto-derive budget limits from estimates if not set by CLI
@@ -294,7 +319,7 @@ func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
 	groupOffers := campaign.FetchGroupOffers(clients, groups)
 
 	predCfg := buildPredictorConfig(cfg)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg, nil)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")

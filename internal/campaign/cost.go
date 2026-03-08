@@ -24,10 +24,32 @@ type CostEstimate struct {
 	HasPrediction bool // false = fell back to default job duration
 }
 
+// EstimateProgressFunc reports progress during estimation.
+// phase describes what is happening, resolved/total track items.
+type EstimateProgressFunc func(phase string, resolved, total int)
+
 // EstimateCosts computes per-group cost estimates using the predictor for duration.
 // If predCfg is nil or not configured, falls back to 1hr/job estimates.
-func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEstimate {
+func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
+
+	// Prefetch all unique model sizes in parallel to avoid sequential HF API calls
+	var modelProgress func(resolved, total int)
+	if onProgress != nil {
+		modelProgress = func(resolved, total int) {
+			onProgress("Resolving model sizes", resolved, total)
+		}
+	}
+	dataloc.PrefetchInputSizes(collectAllInputs(groupOffers), modelProgress)
+
+	// Count total jobs for progress
+	totalJobs := 0
+	for _, go_ := range groupOffers {
+		if go_.Offer != nil {
+			totalJobs += len(go_.Group.Jobs)
+		}
+	}
+	jobsDone := 0
 
 	for i, go_ := range groupOffers {
 		est := CostEstimate{
@@ -68,6 +90,10 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEs
 				hasPrediction = true
 			}
 			runEst = runEst.Add(jobEst)
+			jobsDone++
+			if onProgress != nil {
+				onProgress("Estimating durations", jobsDone, totalJobs)
+			}
 		}
 
 		// Build breakdown
@@ -92,6 +118,24 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config) []CostEs
 	}
 
 	return estimates
+}
+
+// collectAllInputs gathers all unique inputs across all groups.
+func collectAllInputs(groupOffers []GroupOffer) []string {
+	seen := make(map[string]bool)
+	var inputs []string
+	for _, go_ := range groupOffers {
+		if go_.Offer == nil {
+			continue
+		}
+		for _, input := range go_.Group.AllInputs() {
+			if !seen[input] {
+				seen[input] = true
+				inputs = append(inputs, input)
+			}
+		}
+	}
+	return inputs
 }
 
 // BudgetMultiplier is the safety factor applied to estimates for budget limits.
