@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/r2"
@@ -56,14 +57,23 @@ func FetchUVManifests(r2Client *r2.Client, lockfileHashes map[string]string, pla
 	}
 
 	cacheBase := uvManifestCacheDir()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	result := make(map[string]*UVManifestRef)
 
 	for dir, hash := range lockfileHashes {
-		manifest := fetchOneManifest(r2Client, hash, platform, cacheBase)
-		if manifest != nil {
-			result[dir] = manifest
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			manifest := fetchOneManifest(r2Client, hash, platform, cacheBase)
+			if manifest != nil {
+				mu.Lock()
+				result[dir] = manifest
+				mu.Unlock()
+			}
+		}()
 	}
+	wg.Wait()
 	return result
 }
 

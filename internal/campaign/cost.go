@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"log"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -36,16 +37,9 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
-	// Prefetch all unique model sizes in parallel to avoid sequential HF API calls
-	var modelProgress func(resolved, total int)
-	if onProgress != nil {
-		modelProgress = func(resolved, total int) {
-			onProgress("Resolving model sizes", resolved, total)
-		}
-	}
-	dataloc.PrefetchInputSizes(collectAllInputs(groupOffers), modelProgress)
+	// Collect inputs for all three estimation steps (fast, in-memory)
+	allInputs := collectAllInputs(groupOffers)
 
-	// Collect unique source dirs across all groups, then hash lockfiles once
 	seenDirs := make(map[string]bool)
 	var uniqueDirs []string
 	for _, go_ := range groupOffers {
@@ -59,18 +53,12 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			}
 		}
 	}
-	allLockfileHashes := estimate.LockfileHash(uniqueDirs)
-	// Platform is always linux-amd64 for cloud instances
-	allManifests := estimate.FetchUVManifests(r2Client, allLockfileHashes, "linux-amd64")
 
-	// Batch-predict durations for all jobs across all groups in a single subprocess call
 	var allBatchJobs []predictor.BatchJob
-	totalJobs := 0
 	for _, go_ := range groupOffers {
 		if go_.Offer == nil {
 			continue
 		}
-		totalJobs += len(go_.Group.Jobs)
 		for _, job := range go_.Group.Jobs {
 			allBatchJobs = append(allBatchJobs, predictor.BatchJob{
 				ID:       job.ID,
@@ -80,7 +68,41 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			})
 		}
 	}
-	allPredictions := estimate.EstimateJobDurations(predCfg, allBatchJobs)
+
+	// Run three independent I/O-bound steps concurrently
+	var wg sync.WaitGroup
+	var allManifests map[string]*estimate.UVManifestRef
+	var allPredictions map[int64]estimate.Estimate
+
+	// Step 1: HF model sizes (network calls to HuggingFace API)
+	var modelProgress func(resolved, total int)
+	if onProgress != nil {
+		modelProgress = func(resolved, total int) {
+			onProgress("Resolving model sizes", resolved, total)
+		}
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		dataloc.PrefetchInputSizes(allInputs, modelProgress)
+	}()
+
+	// Step 2: UV manifests (lockfile hash + R2 fetch)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		allLockfileHashes := estimate.LockfileHash(uniqueDirs)
+		allManifests = estimate.FetchUVManifests(r2Client, allLockfileHashes, "linux-amd64")
+	}()
+
+	// Step 3: Job duration predictions (subprocess call to ML predictor)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		allPredictions = estimate.EstimateJobDurations(predCfg, allBatchJobs)
+	}()
+
+	wg.Wait()
 	jobsDone := 0
 
 	for i, go_ := range groupOffers {
@@ -145,7 +167,7 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			}
 			jobsDone++
 			if onProgress != nil {
-				onProgress("Estimating durations", jobsDone, totalJobs)
+				onProgress("Estimating durations", jobsDone, len(allBatchJobs))
 			}
 		}
 
