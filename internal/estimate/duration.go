@@ -30,6 +30,28 @@ func EstimateJobDuration(predCfg *predictor.Config, gpuClass string, job *db.Job
 	return FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper), true
 }
 
+// EstimateJobDurations predicts durations for multiple jobs in a single
+// subprocess call. Returns a map from job ID to Estimate, or nil if the
+// predictor is not configured or the batch call fails.
+func EstimateJobDurations(predCfg *predictor.Config, batchJobs []predictor.BatchJob) map[int64]Estimate {
+	if predCfg == nil || !predCfg.Configured() || len(batchJobs) == 0 {
+		return nil
+	}
+
+	results, err := predictor.PredictBatch(*predCfg, batchJobs)
+	if err != nil || results == nil {
+		return nil
+	}
+
+	estimates := make(map[int64]Estimate, len(results))
+	for id, r := range results {
+		if r != nil && r.DurationS != nil {
+			estimates[id] = FromSeconds(r.DurationS.Mean, r.DurationS.Lower, r.DurationS.Upper)
+		}
+	}
+	return estimates
+}
+
 // EstimateCloudRuntime scales a local duration estimate by the ratio of GPU
 // performance scores. localDLPerf and cloudDLPerf are deep-learning benchmark
 // scores; higher is faster.

@@ -3,6 +3,7 @@
 package predictor
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -171,6 +172,61 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 		return nil, fmt.Errorf("predictor: parse output: %w", err)
 	}
 	return &result, nil
+}
+
+// BatchJob describes a single job for batch prediction.
+type BatchJob struct {
+	ID       int64  `json:"id"`
+	Command  string `json:"command"`
+	Host     string `json:"host"`
+	Project  string `json:"project"`
+	GPUClass string `json:"gpu_class"`
+}
+
+// batchResultEntry is the JSON shape returned by predict-batch per job.
+type batchResultEntry struct {
+	ID int64 `json:"id"`
+	Result
+}
+
+// PredictBatch shells out to job-estimator predict-batch, sending all jobs
+// in a single subprocess invocation. Returns a map from job ID to Result.
+func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
+	if cfg.ProjectPath == "" {
+		return nil, fmt.Errorf("predictor: project_path not configured")
+	}
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+
+	input, err := json.Marshal(jobs)
+	if err != nil {
+		return nil, fmt.Errorf("predictor: marshal batch input: %w", err)
+	}
+
+	args := []string{
+		"run", "--project", cfg.ProjectPath, "job-estimator", "predict-batch",
+		"--model-dir", cfg.modelDir(),
+	}
+
+	cmd := exec.Command("uv", args...)
+	cmd.Stdin = bytes.NewReader(input)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("predictor predict-batch: %w", err)
+	}
+
+	var entries []batchResultEntry
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, fmt.Errorf("predictor: parse batch output: %w", err)
+	}
+
+	results := make(map[int64]*Result, len(entries))
+	for _, e := range entries {
+		r := e.Result
+		results[e.ID] = &r
+	}
+	return results, nil
 }
 
 // EnsureAndPredict retrains if stale, then predicts.

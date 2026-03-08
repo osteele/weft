@@ -42,13 +42,24 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgre
 	}
 	dataloc.PrefetchInputSizes(collectAllInputs(groupOffers), modelProgress)
 
-	// Count total jobs for progress
+	// Batch-predict durations for all jobs across all groups in a single subprocess call
+	var allBatchJobs []predictor.BatchJob
 	totalJobs := 0
 	for _, go_ := range groupOffers {
-		if go_.Offer != nil {
-			totalJobs += len(go_.Group.Jobs)
+		if go_.Offer == nil {
+			continue
+		}
+		totalJobs += len(go_.Group.Jobs)
+		for _, job := range go_.Group.Jobs {
+			allBatchJobs = append(allBatchJobs, predictor.BatchJob{
+				ID:       job.ID,
+				Command:  job.Command,
+				Project:  job.Project,
+				GPUClass: go_.Offer.GPUName,
+			})
 		}
 	}
+	allPredictions := estimate.EstimateJobDurations(predCfg, allBatchJobs)
 	jobsDone := 0
 
 	for i, go_ := range groupOffers {
@@ -80,16 +91,17 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgre
 			BandwidthBytesPerSec: bytesPerSec,
 		})
 
-		// Run phase: sum per-job estimates
+		// Run phase: look up batch predictions, then sum per-job estimates
 		hasPrediction := false
 		var runEst estimate.Estimate
 		for _, job := range go_.Group.Jobs {
-			jobEst, predicted := estimate.EstimateJobDuration(predCfg, go_.Offer.GPUName, job)
-			if predicted {
-				est.JobDurations[job.ID] = jobEst.Mean
+			if pred, ok := allPredictions[job.ID]; ok {
+				est.JobDurations[job.ID] = pred.Mean
 				hasPrediction = true
+				runEst = runEst.Add(pred)
+			} else {
+				runEst = runEst.Add(estimate.DefaultJobDuration)
 			}
-			runEst = runEst.Add(jobEst)
 			jobsDone++
 			if onProgress != nil {
 				onProgress("Estimating durations", jobsDone, totalJobs)
