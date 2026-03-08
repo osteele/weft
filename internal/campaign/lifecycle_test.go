@@ -52,7 +52,11 @@ func setupTestDB(t *testing.T) *sql.DB {
 		reliability REAL,
 		inet_down_mbps REAL,
 		inet_up_mbps REAL,
-		cuda_version REAL
+		cuda_version REAL,
+		instance_role TEXT DEFAULT 'worker',
+		donor_instance_id INTEGER,
+		seed_download_secs INTEGER,
+		seed_copy_secs INTEGER
 	);
 	CREATE TABLE campaigns (
 		id INTEGER PRIMARY KEY,

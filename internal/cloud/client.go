@@ -33,6 +33,10 @@ type Client interface {
 	// DestroyInstance tears down an instance.
 	DestroyInstance(instanceID string) error
 
+	// CopyBetweenInstances copies files from one instance to another.
+	// Uses provider-level copy (e.g., vastai copy) which is LAN-speed within a data center.
+	CopyBetweenInstances(srcInstanceID, srcPath, dstInstanceID, dstPath string) error
+
 	// WorkspacePath returns the default workspace path on instances (e.g., "/workspace/").
 	WorkspacePath() string
 

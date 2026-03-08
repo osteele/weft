@@ -6,12 +6,13 @@ import "time"
 // Each method delegates to its corresponding Func field; if the field is nil,
 // the method returns zero values.
 type MockClient struct {
-	AvailableFunc       func() error
-	SearchOffersFunc    func(OfferConstraints) ([]Offer, error)
-	CreateInstanceFunc  func(int, CreateOpts) (*Instance, error)
-	ShowInstanceFunc    func(int) (*Instance, error)
-	WaitReadyFunc       func(int, time.Duration) (*Instance, error)
-	DestroyInstanceFunc func(int) error
+	AvailableFunc            func() error
+	SearchOffersFunc         func(OfferConstraints) ([]Offer, error)
+	CreateInstanceFunc       func(int, CreateOpts) (*Instance, error)
+	ShowInstanceFunc         func(int) (*Instance, error)
+	WaitReadyFunc            func(int, time.Duration) (*Instance, error)
+	DestroyInstanceFunc      func(int) error
+	CopyBetweenInstancesFunc func(int, string, int, string) error
 }
 
 var _ VastaiClient = (*MockClient)(nil)
@@ -54,6 +55,13 @@ func (m *MockClient) WaitReady(instanceID int, timeout time.Duration) (*Instance
 func (m *MockClient) DestroyInstance(instanceID int) error {
 	if m.DestroyInstanceFunc != nil {
 		return m.DestroyInstanceFunc(instanceID)
+	}
+	return nil
+}
+
+func (m *MockClient) CopyBetweenInstances(srcID int, srcPath string, dstID int, dstPath string) error {
+	if m.CopyBetweenInstancesFunc != nil {
+		return m.CopyBetweenInstancesFunc(srcID, srcPath, dstID, dstPath)
 	}
 	return nil
 }

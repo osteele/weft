@@ -11,6 +11,9 @@ type BootstrapManifest struct {
 	Sources       []SourceMapping // source tarballs to extract
 	WrapperScript string          // pre-generated wrapper script content
 	WorkspacePath string          // e.g. "/workspace/"
+	DonorMode     bool            // download caches and write ready marker, no wrapper
+	HFModels      []string        // HF model IDs to pre-download (donor mode only)
+	DonorID       string          // provider instance ID (for R2 ready marker key)
 }
 
 // SourceMapping maps an R2 key to a target directory on the instance.
@@ -46,6 +49,50 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 		))
 	}
 
+	if manifest.DonorMode {
+		generateDonorBootstrapTail(&b, manifest)
+	} else {
+		generateWorkerBootstrapTail(&b, manifest)
+	}
+
+	return b.String()
+}
+
+// generateDonorBootstrapTail generates the donor-specific portion:
+// runs uv sync, downloads HF models, writes ready marker to R2.
+func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
+	// Run uv sync in each source directory
+	for _, src := range manifest.Sources {
+		b.WriteString(fmt.Sprintf("# Run uv sync in %s\n", src.RemoteDir))
+		b.WriteString(fmt.Sprintf("cd %q && uv sync 2>&1 || echo 'uv sync failed in %s'\n\n", src.RemoteDir, src.RemoteDir))
+	}
+
+	// Download each HF model
+	if len(manifest.HFModels) > 0 {
+		b.WriteString("# Download HF models\n")
+		for _, model := range manifest.HFModels {
+			b.WriteString(fmt.Sprintf("echo 'Downloading HF model: %s'\n", model))
+			b.WriteString(fmt.Sprintf("huggingface-cli download %q 2>&1 || echo 'Failed to download %s'\n", model, model))
+		}
+		b.WriteString("\n")
+
+		// Repair broken HF symlinks (known issue with huggingface_hub cache layout)
+		b.WriteString("# Repair broken HF symlinks\n")
+		b.WriteString(`find /root/.cache/huggingface -type l ! -exec test -e {} \; -delete 2>/dev/null || true` + "\n\n")
+	}
+
+	// Write ready marker to R2
+	b.WriteString("# Signal readiness to coordinator\n")
+	b.WriteString(fmt.Sprintf(
+		"echo 'ready' | rclone rcat \"r2:$R2_BUCKET/donor/%s/.ready\"\n",
+		manifest.DonorID,
+	))
+	b.WriteString("echo 'Donor ready'\n")
+}
+
+// generateWorkerBootstrapTail generates the worker-specific portion:
+// writes and starts the wrapper script.
+func generateWorkerBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
 	// Write wrapper script
 	wsPath := manifest.WorkspacePath
 	if wsPath == "" {
@@ -61,6 +108,4 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 	// Start wrapper via nohup
 	b.WriteString("# Start wrapper\n")
 	b.WriteString(fmt.Sprintf("nohup bash %s </dev/null >>/tmp/wrapper.log 2>&1 &\n", wrapperPath))
-
-	return b.String()
 }

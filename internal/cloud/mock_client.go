@@ -4,15 +4,16 @@ import "time"
 
 // MockClient is a test double for cloud.Client.
 type MockClient struct {
-	ProviderVal         Provider
-	AvailableFunc       func() error
-	SearchOffersFunc    func(OfferConstraints) ([]Offer, error)
-	CreateInstanceFunc  func(string, CreateOpts) (*Instance, error)
-	ShowInstanceFunc    func(string) (*Instance, error)
-	WaitReadyFunc       func(string, time.Duration) (*Instance, error)
-	DestroyInstanceFunc func(string) error
-	WorkspacePathVal    string
-	SelfDestructCmdVal  string
+	ProviderVal              Provider
+	AvailableFunc            func() error
+	SearchOffersFunc         func(OfferConstraints) ([]Offer, error)
+	CreateInstanceFunc       func(string, CreateOpts) (*Instance, error)
+	ShowInstanceFunc         func(string) (*Instance, error)
+	WaitReadyFunc            func(string, time.Duration) (*Instance, error)
+	DestroyInstanceFunc      func(string) error
+	CopyBetweenInstancesFunc func(string, string, string, string) error
+	WorkspacePathVal         string
+	SelfDestructCmdVal       string
 }
 
 var _ Client = (*MockClient)(nil)
@@ -71,6 +72,13 @@ func (m *MockClient) WorkspacePath() string {
 		return m.WorkspacePathVal
 	}
 	return "/workspace/"
+}
+
+func (m *MockClient) CopyBetweenInstances(srcID, srcPath, dstID, dstPath string) error {
+	if m.CopyBetweenInstancesFunc != nil {
+		return m.CopyBetweenInstancesFunc(srcID, srcPath, dstID, dstPath)
+	}
+	return nil
 }
 
 func (m *MockClient) SelfDestructCmd(providerInstanceID string) string {

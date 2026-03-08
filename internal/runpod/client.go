@@ -132,6 +132,10 @@ func (c *CloudClient) DestroyInstance(instanceID string) error {
 	return nil
 }
 
+func (c *CloudClient) CopyBetweenInstances(_, _ string, _, _ string) error {
+	return fmt.Errorf("RunPod does not support inter-instance copy")
+}
+
 func (c *CloudClient) WorkspacePath() string {
 	return "/workspace/"
 }

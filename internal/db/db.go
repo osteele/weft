@@ -632,6 +632,10 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE cloud_instances ADD COLUMN cuda_version REAL`,
 		`ALTER TABLE cloud_instances ADD COLUMN provider_instance_id TEXT`,
 		`ALTER TABLE cloud_instances ADD COLUMN data_center TEXT`,
+		`ALTER TABLE cloud_instances ADD COLUMN instance_role TEXT DEFAULT 'worker'`,
+		`ALTER TABLE cloud_instances ADD COLUMN donor_instance_id INTEGER`,
+		`ALTER TABLE cloud_instances ADD COLUMN seed_download_secs INTEGER`,
+		`ALTER TABLE cloud_instances ADD COLUMN seed_copy_secs INTEGER`,
 	}
 	for _, stmt := range cloudInstanceMigrations {
 		if err := addColumnIfMissing(db, stmt); err != nil {

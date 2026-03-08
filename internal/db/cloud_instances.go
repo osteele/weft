@@ -12,7 +12,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		created_at, ready_at, launched_at, ended_at,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		inet_down_mbps, inet_up_mbps, cuda_version,
-		provider_instance_id, data_center`
+		provider_instance_id, data_center,
+		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -43,6 +44,10 @@ type CloudInstance struct {
 	LaunchedAt         *int64
 	EndedAt            *int64
 	DataCenter         string // data center / geolocation of the instance
+	InstanceRole       string // "worker" or "donor"
+	DonorInstanceID    *int64 // DB ID of the donor instance that seeded this worker
+	SeedDownloadSecs   *int   // on donor: total download duration (HF + uv)
+	SeedCopySecs       *int   // on worker: copy-from-donor duration
 
 	// Offer metadata (captured at launch)
 	ResolvedGPUName  string
@@ -161,6 +166,30 @@ func SetCloudInstanceDataCenter(db *sql.DB, id int64, dc string) error {
 // SetCloudInstanceActualSpend updates the actual spend in cents.
 func SetCloudInstanceActualSpend(db *sql.DB, id int64, cents int) error {
 	_, err := db.Exec(`UPDATE cloud_instances SET actual_spend_cents = ? WHERE id = ?`, cents, id)
+	return err
+}
+
+// SetCloudInstanceRole sets the instance role ("worker" or "donor").
+func SetCloudInstanceRole(db *sql.DB, id int64, role string) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET instance_role = ? WHERE id = ?`, role, id)
+	return err
+}
+
+// SetCloudInstanceDonorID sets the DB ID of the donor instance that seeded this worker.
+func SetCloudInstanceDonorID(db *sql.DB, id int64, donorID int64) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET donor_instance_id = ? WHERE id = ?`, donorID, id)
+	return err
+}
+
+// SetCloudInstanceSeedDownloadSecs records the total download duration on a donor instance.
+func SetCloudInstanceSeedDownloadSecs(db *sql.DB, id int64, secs int) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET seed_download_secs = ? WHERE id = ?`, secs, id)
+	return err
+}
+
+// SetCloudInstanceSeedCopySecs records the copy-from-donor duration on a worker instance.
+func SetCloudInstanceSeedCopySecs(db *sql.DB, id int64, secs int) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET seed_copy_secs = ? WHERE id = ?`, secs, id)
 	return err
 }
 
@@ -284,6 +313,9 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var costPerHourCents, numGPUs sql.NullInt64
 	var dlPerf, reliability, inetDown, inetUp, cudaVersion sql.NullFloat64
 	var providerInstanceID, dataCenter sql.NullString
+	var instanceRole sql.NullString
+	var donorInstanceID sql.NullInt64
+	var seedDownloadSecs, seedCopySecs sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -292,6 +324,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
 		&inetDown, &inetUp, &cudaVersion,
 		&providerInstanceID, &dataCenter,
+		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs,
 	)
 	if err != nil {
 		return nil, err
@@ -359,6 +392,20 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	}
 	if dataCenter.Valid {
 		c.DataCenter = dataCenter.String
+	}
+	if instanceRole.Valid {
+		c.InstanceRole = instanceRole.String
+	}
+	if donorInstanceID.Valid {
+		c.DonorInstanceID = &donorInstanceID.Int64
+	}
+	if seedDownloadSecs.Valid {
+		v := int(seedDownloadSecs.Int64)
+		c.SeedDownloadSecs = &v
+	}
+	if seedCopySecs.Valid {
+		v := int(seedCopySecs.Int64)
+		c.SeedCopySecs = &v
 	}
 	return &c, nil
 }

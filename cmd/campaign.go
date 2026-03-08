@@ -95,6 +95,7 @@ var (
 	campaignLaunchMaxTime  string
 	campaignLaunchDryRun   bool
 	campaignLaunchNoWatch  bool
+	campaignLaunchNoDonor  bool
 	campaignLaunchYes      bool
 	campaignLaunchJobs     string
 	campaignLaunchGPU      string
@@ -113,6 +114,7 @@ func init() {
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchMaxTime, "max-time", "", "Maximum time per instance (e.g., '2h')")
 	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchDryRun, "dry-run", false, "Print plan table and exit without launching")
 	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
+	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoDonor, "no-donor", false, "Skip donor instance strategy (each instance downloads independently)")
 	campaignLaunchCmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all needs_rental jobs)")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
@@ -278,7 +280,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("Launching %d instance(s)...\n", len(groups))
 
 	result, err := campaign.LaunchCampaign(
-		clients, database, groups, offers, opts, r2Cfg, createOpts,
+		clients, database, groups, offers, estimates, opts, r2Cfg, createOpts,
 		func(group campaign.InstanceGroup, phase string) {
 			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
 		},
@@ -496,17 +498,27 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 	if len(instances) > 0 {
 		fmt.Printf("\n  Instances (%d):\n", len(instances))
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintf(w, "    ID\tSTATUS\tGPU SPEC\tVASTAI ID\n")
+		fmt.Fprintf(w, "    ID\tROLE\tSTATUS\tGPU SPEC\tPROVIDER ID\tTIMING\n")
 		for _, inst := range instances {
 			gpuSpec := inst.GPUSpec
 			if gpuSpec == "" {
 				gpuSpec = inst.GPUClass
 			}
-			vastaiID := inst.VastaiInstanceID
-			if vastaiID == "" {
-				vastaiID = "—"
+			providerID := inst.EffectiveProviderID()
+			if providerID == "" {
+				providerID = "—"
 			}
-			fmt.Fprintf(w, "    %d\t%s\t%s\t%s\n", inst.ID, inst.Status, gpuSpec, vastaiID)
+			role := inst.InstanceRole
+			if role == "" {
+				role = "worker"
+			}
+			timing := "—"
+			if inst.SeedDownloadSecs != nil {
+				timing = fmt.Sprintf("download: %ds", *inst.SeedDownloadSecs)
+			} else if inst.SeedCopySecs != nil {
+				timing = fmt.Sprintf("copy: %ds", *inst.SeedCopySecs)
+			}
+			fmt.Fprintf(w, "    %d\t%s\t%s\t%s\t%s\t%s\n", inst.ID, role, inst.Status, gpuSpec, providerID, timing)
 		}
 		w.Flush()
 	}
@@ -515,7 +527,9 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 }
 
 func parseLaunchOpts() campaign.LaunchOpts {
-	opts := campaign.LaunchOpts{}
+	opts := campaign.LaunchOpts{
+		NoDonor: campaignLaunchNoDonor,
+	}
 	if campaignLaunchMaxSpend != "" {
 		cleaned := strings.TrimPrefix(campaignLaunchMaxSpend, "$")
 		var dollars float64

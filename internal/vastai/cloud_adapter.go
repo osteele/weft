@@ -101,6 +101,18 @@ func (c *CloudClient) DestroyInstance(instanceID string) error {
 	return c.inner.DestroyInstance(id)
 }
 
+func (c *CloudClient) CopyBetweenInstances(srcInstanceID, srcPath, dstInstanceID, dstPath string) error {
+	srcID, err := strconv.Atoi(srcInstanceID)
+	if err != nil {
+		return fmt.Errorf("parse vastai src instance ID %q: %w", srcInstanceID, err)
+	}
+	dstID, err := strconv.Atoi(dstInstanceID)
+	if err != nil {
+		return fmt.Errorf("parse vastai dst instance ID %q: %w", dstInstanceID, err)
+	}
+	return c.inner.CopyBetweenInstances(srcID, srcPath, dstID, dstPath)
+}
+
 func (c *CloudClient) WorkspacePath() string {
 	return "/workspace/"
 }

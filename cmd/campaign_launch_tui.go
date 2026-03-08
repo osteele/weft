@@ -419,10 +419,9 @@ func (m launchModel) launchInstances() tea.Cmd {
 	cfg := m.appConfig
 	opts := m.launchOpts
 
-	// Auto-derive budget limits from cached estimates if not set by CLI
-	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && m.costEstimates != nil {
-		// Filter cached estimates to selected groups
-		var selectedEstimates []campaign.CostEstimate
+	// Filter cached estimates to selected groups
+	var selectedEstimates []campaign.CostEstimate
+	if m.costEstimates != nil {
 		for i, est := range m.costEstimates {
 			for _, fg := range filteredGroups {
 				if i < len(m.groups) && m.groups[i].GPUClass == fg.GPUClass && m.groups[i].GPUMemGB == fg.GPUMemGB {
@@ -436,6 +435,10 @@ func (m launchModel) launchInstances() tea.Cmd {
 				}
 			}
 		}
+	}
+
+	// Auto-derive budget limits from cached estimates if not set by CLI
+	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(selectedEstimates) > 0 {
 		opts.ApplyAutoBudget(selectedEstimates)
 	}
 
@@ -444,7 +447,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 
 		result, err := campaign.LaunchCampaign(
-			clients, database, launchGroups, offers, opts, r2Cfg, createOpts, nil,
+			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg, createOpts, nil,
 		)
 		if err != nil {
 			return instancesLaunchedMsg{err: err}

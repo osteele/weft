@@ -22,6 +22,7 @@ type VastaiClient interface {
 	ShowInstance(instanceID int) (*Instance, error)
 	WaitReady(instanceID int, timeout time.Duration) (*Instance, error)
 	DestroyInstance(instanceID int) error
+	CopyBetweenInstances(srcInstanceID int, srcPath string, dstInstanceID int, dstPath string) error
 }
 
 var _ VastaiClient = (*Client)(nil)
@@ -184,6 +185,18 @@ func (c *Client) DestroyInstance(instanceID int) error {
 	_, err := c.run("destroy", "instance", strconv.Itoa(instanceID), "--raw")
 	if err != nil {
 		return fmt.Errorf("destroy instance %d: %w", instanceID, err)
+	}
+	return nil
+}
+
+// CopyBetweenInstances copies files between two Vast.ai instances using `vastai copy`.
+// This uses rsync at LAN speed when instances are in the same data center.
+func (c *Client) CopyBetweenInstances(srcInstanceID int, srcPath string, dstInstanceID int, dstPath string) error {
+	src := fmt.Sprintf("%d:%s", srcInstanceID, srcPath)
+	dst := fmt.Sprintf("%d:%s", dstInstanceID, dstPath)
+	_, err := c.run("copy", src, dst)
+	if err != nil {
+		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
 	}
 	return nil
 }

@@ -1,0 +1,339 @@
+package campaign
+
+import (
+	"database/sql"
+	"fmt"
+	"log"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
+)
+
+// DonorConfig holds the selected donor offer and associated metadata.
+type DonorConfig struct {
+	Offer      cloud.Offer
+	DataCenter string
+	HFModels   []string // collected from jobs' --input hf:* declarations
+	SourceDirs []string // unique project dirs for uv sync
+}
+
+// dcWorker bundles a worker's offer and cost estimate for per-DC donor analysis.
+type dcWorker struct {
+	offerIdx int
+	offer    cloud.Offer
+	estimate CostEstimate
+}
+
+// estimatedLANCopyRate is the assumed LAN copy speed for vastai copy within
+// a data center. Based on observed rates from llm-performance-models seed pattern.
+const estimatedLANCopyRate = 500e6 // 500 MB/s
+
+// FindDonorOffer selects a cheap donor instance for the data center that has the
+// most workers, when the economics justify it. Only workers in the same data center
+// as the donor participate in the call tree — copies don't work across DCs.
+//
+// The cost comparison per DC is:
+//
+//	WITHOUT donor: workerRate × downloadTime  (per worker)
+//	WITH donor:    donorRate × (downloadTime + copyTime) + workerRate × copyTime  (per worker)
+//
+// The donor runs during both download and copy phases. Each worker pays GPU rates
+// only during copy (which replaces the download it would otherwise do).
+//
+// Returns nil if no suitable donor offer is found or if a donor would cost more.
+func FindDonorOffer(client cloud.Client, workerOffers []cloud.Offer, estimates []CostEstimate, groups []InstanceGroup) (*DonorConfig, error) {
+	if len(workerOffers) < 2 || len(estimates) == 0 {
+		return nil, nil
+	}
+
+	// Group workers by data center
+	dcWorkers := make(map[string][]dcWorker)
+	for i, o := range workerOffers {
+		if o.DataCenter == "" {
+			continue
+		}
+		var est CostEstimate
+		if i < len(estimates) {
+			est = estimates[i]
+		}
+		dcWorkers[o.DataCenter] = append(dcWorkers[o.DataCenter], dcWorker{
+			offerIdx: i,
+			offer:    o,
+			estimate: est,
+		})
+	}
+
+	// Search for cheap single-GPU donor offers (one search, filter per DC)
+	donorOffers, err := client.SearchOffers(cloud.OfferConstraints{
+		NumGPUs:        1,
+		MinReliability: cloud.DefaultMinReliability,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("search donor offers: %w", err)
+	}
+
+	// Index donor offers by data center, sorted by cost
+	dcDonorOffers := make(map[string][]cloud.Offer)
+	for _, o := range donorOffers {
+		if o.DataCenter != "" {
+			dcDonorOffers[o.DataCenter] = append(dcDonorOffers[o.DataCenter], o)
+		}
+	}
+	for dc := range dcDonorOffers {
+		sort.Slice(dcDonorOffers[dc], func(i, j int) bool {
+			return dcDonorOffers[dc][i].CostPerHour < dcDonorOffers[dc][j].CostPerHour
+		})
+	}
+
+	// Evaluate each DC: find the one where a donor saves the most
+	var bestDC string
+	var bestDonorOffer cloud.Offer
+	var bestSavings float64
+
+	for dc, workers := range dcWorkers {
+		if len(workers) < 2 {
+			continue // need 2+ workers in the same DC for a donor to help
+		}
+		collocated := dcDonorOffers[dc]
+		if len(collocated) == 0 {
+			log.Printf("donor: no collocated offers in data center %q", dc)
+			continue
+		}
+		cheapest := collocated[0]
+		savings := donorSavings(cheapest, workers)
+		log.Printf("donor: DC %q (%d workers): savings=$%.4f with donor at $%.2f/hr",
+			dc, len(workers), savings, cheapest.CostPerHour)
+		if savings > bestSavings {
+			bestSavings = savings
+			bestDC = dc
+			bestDonorOffer = cheapest
+		}
+	}
+
+	if bestDC == "" || bestSavings <= 0 {
+		log.Printf("donor: not cost-effective in any data center")
+		return nil, nil
+	}
+
+	hfModels := collectHFModels(groups)
+	var sourceDirs []string
+	seen := make(map[string]bool)
+	for _, g := range groups {
+		for _, d := range g.SourceDirs() {
+			if !seen[d] {
+				seen[d] = true
+				sourceDirs = append(sourceDirs, d)
+			}
+		}
+	}
+
+	return &DonorConfig{
+		Offer:      bestDonorOffer,
+		DataCenter: bestDC,
+		HFModels:   hfModels,
+		SourceDirs: sourceDirs,
+	}, nil
+}
+
+// donorSavings calculates how much money a donor saves vs. independent downloads
+// for workers in a single data center. Returns positive if donor is cheaper.
+//
+// WITHOUT donor (per worker): workerRate × downloadTime
+// WITH donor (total):         donorRate × (downloadTime + copyTime) + sum(workerRate_i × copyTime)
+//
+// downloadTime = max across workers (they all download the same models)
+// copyTime = estimated from cache bytes at LAN rate
+func donorSavings(donorOffer cloud.Offer, workers []dcWorker) float64 {
+	// Compute per-worker download time and total cost without donor
+	var costWithout float64
+	var maxDownloadTime time.Duration
+	var maxCacheBytes int64
+
+	for _, w := range workers {
+		downloadTime := workerDownloadTime(w.estimate)
+		costWithout += downloadTime.Hours() * w.offer.CostPerHour
+		if downloadTime > maxDownloadTime {
+			maxDownloadTime = downloadTime
+		}
+		cacheBytes := w.estimate.DownloadBytes + w.estimate.UVSyncBytes
+		if cacheBytes > maxCacheBytes {
+			maxCacheBytes = cacheBytes
+		}
+	}
+
+	if costWithout == 0 {
+		return 0
+	}
+
+	// Estimate LAN copy time from the largest cache
+	copyTime := time.Duration(float64(maxCacheBytes) / estimatedLANCopyRate * float64(time.Second))
+
+	// Donor cost: runs during download + copy phases
+	donorCost := (maxDownloadTime + copyTime).Hours() * donorOffer.CostPerHour
+
+	// Worker copy cost: each worker pays GPU rates during copy (instead of download)
+	var workerCopyCost float64
+	for _, w := range workers {
+		workerCopyCost += copyTime.Hours() * w.offer.CostPerHour
+	}
+
+	costWith := donorCost + workerCopyCost
+
+	log.Printf("donor: cost breakdown — without=$%.4f, with=$%.4f (donor=$%.4f + worker_copies=$%.4f), download=%s, copy=%s",
+		costWithout, costWith, donorCost, workerCopyCost,
+		maxDownloadTime.Round(time.Second), copyTime.Round(time.Second))
+
+	return costWithout - costWith
+}
+
+// workerDownloadTime estimates total download time for a worker from its cost estimate.
+func workerDownloadTime(est CostEstimate) time.Duration {
+	downloadTime := est.DownloadTime
+	if est.UVSyncBytes > 0 && est.Offer.Offer != nil {
+		bps := cloud.MbpsToBytesPerSec(est.Offer.Offer.DownloadBandwidth)
+		if bps > 0 {
+			downloadTime += time.Duration(float64(est.UVSyncBytes) / bps * float64(time.Second))
+		}
+	}
+	return downloadTime
+}
+
+// collectHFModels extracts HF model IDs from all jobs across all groups.
+func collectHFModels(groups []InstanceGroup) []string {
+	seen := make(map[string]bool)
+	var models []string
+	for _, g := range groups {
+		for _, input := range g.AllInputs() {
+			if strings.HasPrefix(input, "hf:") {
+				model := strings.TrimPrefix(input, "hf:")
+				if !seen[model] {
+					seen[model] = true
+					models = append(models, model)
+				}
+			}
+		}
+	}
+	return models
+}
+
+// workerInfo holds the provider and DB IDs of a worker instance.
+type workerInfo struct {
+	ProviderID string
+	DBID       int64
+}
+
+// SeedWorkers copies caches from the donor to workers using a phone-tree fan-out.
+// Each completed worker becomes a new donor, giving O(log N) total copy time.
+func SeedWorkers(
+	client cloud.Client,
+	database *sql.DB,
+	donorProviderID string,
+	workers []workerInfo,
+	cachePaths []string,
+	onProgress func(workerDBID int64, phase string),
+) error {
+	if len(workers) == 0 || len(cachePaths) == 0 {
+		return nil
+	}
+	if onProgress == nil {
+		onProgress = func(int64, string) {}
+	}
+
+	// Channel for available donors (initially just the original donor)
+	donors := make(chan string, len(workers)+1)
+	donors <- donorProviderID
+
+	var mu sync.Mutex
+	remaining := make([]workerInfo, len(workers))
+	copy(remaining, workers)
+
+	var wg sync.WaitGroup
+	var errs []error
+
+	for {
+		mu.Lock()
+		if len(remaining) == 0 {
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
+
+		// Wait for a donor to become available
+		var donorID string
+		select {
+		case donorID = <-donors:
+		default:
+			// All donors are busy; wait for one
+			donorID = <-donors
+		}
+
+		// Pop a worker
+		mu.Lock()
+		if len(remaining) == 0 {
+			donors <- donorID
+			mu.Unlock()
+			break
+		}
+		worker := remaining[0]
+		remaining = remaining[1:]
+		mu.Unlock()
+
+		wg.Add(1)
+		go func(donor string, w workerInfo) {
+			defer wg.Done()
+
+			onProgress(w.DBID, "copying caches")
+			start := time.Now()
+			var copyErr error
+
+			for _, cachePath := range cachePaths {
+				for attempt := 0; attempt < 3; attempt++ {
+					if err := client.CopyBetweenInstances(donor, cachePath, w.ProviderID, cachePath); err != nil {
+						copyErr = err
+						log.Printf("donor: copy %s to worker %s attempt %d failed: %v", cachePath, w.ProviderID, attempt+1, err)
+						continue
+					}
+					copyErr = nil
+					break
+				}
+				if copyErr != nil {
+					break
+				}
+			}
+
+			elapsed := int(time.Since(start).Seconds())
+			if copyErr != nil {
+				log.Printf("donor: copy to worker %s failed after retries: %v", w.ProviderID, copyErr)
+				mu.Lock()
+				errs = append(errs, fmt.Errorf("worker %d: %w", w.DBID, copyErr))
+				mu.Unlock()
+				onProgress(w.DBID, "copy failed, will download independently")
+			} else {
+				_ = db.SetCloudInstanceSeedCopySecs(database, w.DBID, elapsed)
+				onProgress(w.DBID, fmt.Sprintf("copy complete (%ds)", elapsed))
+				// This worker can now be a donor for others
+				donors <- w.ProviderID
+			}
+		}(donorID, worker)
+	}
+
+	wg.Wait()
+
+	if len(errs) > 0 {
+		return fmt.Errorf("some worker copies failed: %d/%d workers", len(errs), len(workers))
+	}
+	return nil
+}
+
+// DefaultDonorReadyTimeout is how long to wait for donor to finish downloads.
+const DefaultDonorReadyTimeout = 30 * time.Minute
+
+// DefaultDonorCachePaths are the cache directories copied from donor to workers.
+var DefaultDonorCachePaths = []string{
+	"/root/.cache/uv",
+	"/root/.cache/huggingface",
+}

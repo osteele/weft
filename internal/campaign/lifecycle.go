@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/cloud"
@@ -28,6 +30,7 @@ const (
 type LaunchOpts struct {
 	MaxSpendCents  int
 	MaxTimeSeconds int
+	NoDonor        bool // skip donor instance strategy
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -76,6 +79,7 @@ func LaunchCampaign(
 	database *sql.DB,
 	groups []InstanceGroup,
 	offers []cloud.Offer, // parallel to groups
+	estimates []CostEstimate, // parallel to groups; may be nil
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOpts cloud.CreateOpts,
@@ -154,9 +158,121 @@ func LaunchCampaign(
 		return nil, fmt.Errorf("create campaign: %w", err)
 	}
 
-	// Launch instances in parallel
+	// Donor strategy: find a cheap collocated instance for cache seeding
+	var donorCfg *DonorConfig
+	if !opts.NoDonor && len(groups) >= 2 {
+		client := clientForProvider(clients, offers[0].Provider)
+		if client != nil {
+			donorCfg, err = FindDonorOffer(client, offers, estimates, groups)
+			if err != nil {
+				log.Printf("donor: offer search failed, proceeding without donor: %v", err)
+			}
+		}
+	}
+
+	// Launch donor instance if strategy is available
+	var donorInstanceID int64
+	var donorProviderID string
+	var donorClient cloud.Client
+	if donorCfg != nil {
+		donorClient = clientForProvider(clients, donorCfg.Offer.Provider)
+		if donorClient != nil {
+			if onPhase != nil {
+				onPhase(InstanceGroup{GPUClass: "donor"}, "launching donor instance")
+			}
+
+			donorInst := &db.CloudInstance{
+				CampaignID:       &campaignID,
+				Status:           db.CloudInstanceStatusPlanned,
+				Provider:         string(donorClient.Provider()),
+				GPUSpec:          "donor",
+				GPUClass:         donorCfg.Offer.GPUName,
+				MaxSpendCents:    opts.MaxSpendCents,
+				MaxTimeSeconds:   opts.MaxTimeSeconds,
+				ResolvedGPUName:  donorCfg.Offer.GPUName,
+				CostPerHourCents: int(donorCfg.Offer.CostPerHour * 100),
+				NumGPUs:          donorCfg.Offer.NumGPUs,
+				Reliability:      donorCfg.Offer.Reliability,
+				InetDownMbps:     donorCfg.Offer.DownloadBandwidth,
+				InetUpMbps:       donorCfg.Offer.UploadBandwidth,
+				CUDAVersion:      donorCfg.Offer.CUDAVersion,
+				InstanceRole:     "donor",
+			}
+			var donorErr error
+			donorInstanceID, donorErr = db.CreateCloudInstance(database, donorInst)
+			if donorErr != nil {
+				log.Printf("donor: failed to create DB record: %v", donorErr)
+				donorCfg = nil
+			} else {
+				_ = db.SetCloudInstanceRole(database, donorInstanceID, "donor")
+
+				// Generate donor bootstrap script
+				var donorSources []SourceMapping
+				wsPath := donorClient.WorkspacePath()
+				for _, localDir := range donorCfg.SourceDirs {
+					if r2Key, ok := r2Assets.SourceR2Keys[localDir]; ok {
+						donorSources = append(donorSources, SourceMapping{
+							R2Key:     r2Key,
+							RemoteDir: path.Join(wsPath, path.Base(localDir)),
+						})
+					}
+				}
+
+				donorBootstrap := GenerateBootstrapScript(BootstrapManifest{
+					AgentR2Key:    r2Assets.AgentR2Key,
+					Sources:       donorSources,
+					WorkspacePath: wsPath,
+					DonorMode:     true,
+					HFModels:      donorCfg.HFModels,
+					DonorID:       fmt.Sprintf("%d", donorInstanceID),
+				})
+
+				bootstrapKey := fmt.Sprintf("bootstrap/%d.sh", donorInstanceID)
+				if uploadErr := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
+					log.Printf("donor: failed to upload bootstrap: %v", uploadErr)
+					donorCfg = nil
+				} else {
+					// Build env vars and create opts for donor
+					donorCreateOpts := createOpts
+					donorEnvVars := map[string]string{
+						"R2_ACCESS_KEY_ID":     r2Cfg.AccessKeyID,
+						"R2_SECRET_ACCESS_KEY": r2Cfg.SecretAccessKey,
+						"R2_ENDPOINT":          r2Assets.Client.Endpoint(),
+						"R2_BUCKET":            r2Cfg.Bucket,
+					}
+					if apiKey := vastai.ReadAPIKey(); apiKey != "" {
+						donorEnvVars["VASTAI_API_KEY"] = apiKey
+					}
+					if token := os.Getenv("HF_TOKEN"); token != "" {
+						donorEnvVars["HF_TOKEN"] = token
+						donorEnvVars["HUGGING_FACE_HUB_TOKEN"] = token
+					}
+					donorCreateOpts.EnvVars = donorEnvVars
+					donorCreateOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
+
+					inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
+					if createErr != nil {
+						log.Printf("donor: failed to create instance: %v", createErr)
+						_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusFailed)
+						donorCfg = nil
+					} else {
+						donorProviderID = inst.ProviderID
+						_ = db.SetCloudInstanceProviderID(database, donorInstanceID, donorProviderID)
+						_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusRunning)
+						if donorCfg.Offer.DataCenter != "" {
+							_ = db.SetCloudInstanceDataCenter(database, donorInstanceID, donorCfg.Offer.DataCenter)
+						}
+						log.Printf("donor: launched instance %s (DB ID %d) in %s", donorProviderID, donorInstanceID, donorCfg.DataCenter)
+					}
+				}
+			}
+		}
+	}
+
+	// Launch worker instances in parallel
 	var mu sync.Mutex
 	var instanceIDs []int64
+	var workerProviderIDs []workerInfo
 	var launchErrors []error
 	var wg sync.WaitGroup
 
@@ -195,11 +311,77 @@ func LaunchCampaign(
 				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
 			} else {
 				instanceIDs = append(instanceIDs, cID)
+				if donorCfg != nil {
+					_ = db.SetCloudInstanceDonorID(database, cID, donorInstanceID)
+					// Retrieve the provider ID for this instance
+					inst, getErr := db.GetCloudInstance(database, cID)
+					if getErr == nil && inst != nil {
+						workerProviderIDs = append(workerProviderIDs, workerInfo{
+							ProviderID: inst.EffectiveProviderID(),
+							DBID:       cID,
+						})
+					}
+				}
 			}
 		}(g, offer)
 	}
 
 	wg.Wait()
+
+	// Donor fan-out: wait for readiness, copy caches, then destroy donor
+	if donorCfg != nil && donorProviderID != "" && len(workerProviderIDs) > 0 {
+		if onPhase != nil {
+			onPhase(InstanceGroup{GPUClass: "donor"}, "waiting for donor downloads")
+		}
+
+		donorReady := false
+		readyKey := fmt.Sprintf("donor/%d/.ready", donorInstanceID)
+		downloadStart := time.Now()
+
+		// Poll R2 for donor readiness
+		for time.Since(downloadStart) < DefaultDonorReadyTimeout {
+			exists, checkErr := r2Assets.Client.ObjectExists(ctx, readyKey)
+			if checkErr != nil {
+				log.Printf("donor: R2 readiness check error: %v", checkErr)
+			} else if exists {
+				donorReady = true
+				break
+			}
+			time.Sleep(10 * time.Second)
+		}
+
+		if donorReady {
+			downloadSecs := int(time.Since(downloadStart).Seconds())
+			_ = db.SetCloudInstanceSeedDownloadSecs(database, donorInstanceID, downloadSecs)
+			log.Printf("donor: ready after %ds, starting fan-out to %d workers", downloadSecs, len(workerProviderIDs))
+
+			if onPhase != nil {
+				onPhase(InstanceGroup{GPUClass: "donor"}, "copying caches to workers")
+			}
+
+			var progressFunc func(int64, string)
+			if onPhase != nil {
+				progressFunc = func(dbID int64, phase string) {
+					onPhase(InstanceGroup{GPUClass: "donor"}, fmt.Sprintf("worker %d: %s", dbID, phase))
+				}
+			}
+
+			if seedErr := SeedWorkers(donorClient, database, donorProviderID, workerProviderIDs, DefaultDonorCachePaths, progressFunc); seedErr != nil {
+				log.Printf("donor: fan-out had errors: %v", seedErr)
+			}
+		} else {
+			log.Printf("donor: timed out waiting for readiness, workers will download independently")
+		}
+
+		// Destroy donor instance
+		if onPhase != nil {
+			onPhase(InstanceGroup{GPUClass: "donor"}, "destroying donor instance")
+		}
+		if destroyErr := donorClient.DestroyInstance(donorProviderID); destroyErr != nil {
+			log.Printf("donor: failed to destroy: %v", destroyErr)
+		}
+		_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusCompleted)
+	}
 
 	// Update campaign status
 	if len(instanceIDs) == 0 && len(launchErrors) > 0 {
