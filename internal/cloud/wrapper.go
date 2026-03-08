@@ -19,6 +19,7 @@ type AgentJob struct {
 type WrapperOpts struct {
 	EnvVars        map[string]string // Extra environment variables to export
 	MaxTimeSeconds int               // Instance time budget; remaining time is passed per-job as --max-time
+	DBInstanceID   int64             // DB instance ID for R2 completion marker (campaigns/<id>/.complete)
 }
 
 // GenerateAgentWrapper produces a thin bash script that delegates job execution
@@ -40,6 +41,9 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 	b.WriteString("\n")
 
 	b.WriteString(fmt.Sprintf("R2_BUCKET=%q\n", r2Bucket))
+	if opts.DBInstanceID > 0 {
+		b.WriteString(fmt.Sprintf("INSTANCE_ID=%d\n", opts.DBInstanceID))
+	}
 	b.WriteString("LOG_DIR=\"/tmp/weft-logs\"\n")
 	b.WriteString("mkdir -p \"$LOG_DIR\"\n")
 

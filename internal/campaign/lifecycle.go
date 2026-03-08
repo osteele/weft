@@ -1,18 +1,20 @@
 package campaign
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 	weftsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -85,6 +87,64 @@ func LaunchCampaign(
 		return nil, fmt.Errorf("local agent version: %w", err)
 	}
 
+	// Create R2 client for pre-staging
+	r2Client, err := r2.New(r2.Config{
+		AccountID:       r2Cfg.AccountID,
+		AccessKeyID:     r2Cfg.AccessKeyID,
+		SecretAccessKey: r2Cfg.SecretAccessKey,
+		Bucket:          r2Cfg.Bucket,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create R2 client: %w", err)
+	}
+
+	// Pre-stage agent binary to R2 (shared across all instances)
+	ctx := context.Background()
+	agentR2Key, err := agentdeploy.EnsureAgentInR2(ctx, r2Client, agentVersion, cloudOS, cloudArch)
+	if err != nil {
+		return nil, fmt.Errorf("upload agent to R2: %w", err)
+	}
+
+	r2Assets := R2Assets{
+		Client:       r2Client,
+		AgentR2Key:   agentR2Key,
+		SourceR2Keys: make(map[string]string),
+	}
+
+	// Pre-stage source tarballs to R2 (content-addressed, deduplicated)
+	// Collect all unique source dirs across groups and upload once.
+	var sourceMu sync.Mutex
+	var sourceWg sync.WaitGroup
+	var sourceErr error
+
+	allSourceDirs := make(map[string]bool)
+	for _, g := range groups {
+		for _, d := range g.SourceDirs() {
+			allSourceDirs[d] = true
+		}
+	}
+	for localDir := range allSourceDirs {
+		localDir := localDir
+		sourceWg.Add(1)
+		go func() {
+			defer sourceWg.Done()
+			key, err := weftsync.UploadSourceToR2(ctx, r2Client, localDir)
+			sourceMu.Lock()
+			defer sourceMu.Unlock()
+			if err != nil {
+				if sourceErr == nil {
+					sourceErr = fmt.Errorf("upload source %s: %w", localDir, err)
+				}
+				return
+			}
+			r2Assets.SourceR2Keys[localDir] = key
+		}()
+	}
+	sourceWg.Wait()
+	if sourceErr != nil {
+		return nil, sourceErr
+	}
+
 	// Create campaign batch record
 	campaignRec := &db.Campaign{
 		Status: db.CampaignStatusLaunching,
@@ -125,7 +185,8 @@ func LaunchCampaign(
 			}
 
 			cID, err := LaunchInstance(
-				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts, agentVersion, progress,
+				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
+				r2Assets, progress,
 			)
 
 			mu.Lock()
@@ -167,11 +228,17 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 	return nil
 }
 
-// LaunchInstance creates a cloud instance record, provisions an instance via
-// the given cloud client, deploys the multi-job wrapper, and starts it.
-// Returns the cloud instance ID.
-// If campaignID is non-nil, the cloud instance is associated with that campaign batch.
-// agentVersion is the pre-resolved local agent version (avoids repeated jj/git calls).
+// R2Assets holds pre-staged R2 resources shared across instances in a campaign.
+type R2Assets struct {
+	Client       *r2.Client
+	AgentR2Key   string            // R2 key for the agent binary
+	SourceR2Keys map[string]string // localDir -> R2 key for source tarballs
+}
+
+// LaunchInstance creates a cloud instance record, pre-stages assets to R2, and
+// creates a cloud instance that self-bootstraps from R2. No SSH is needed for
+// setup — the instance downloads its bootstrap script via the onstart command.
+// Returns the cloud instance DB ID.
 func LaunchInstance(
 	client cloud.Client,
 	database *sql.DB,
@@ -181,12 +248,17 @@ func LaunchInstance(
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOpts cloud.CreateOpts,
-	agentVersion string,
+	r2Assets R2Assets,
 	progress cloud.ProgressFunc,
 ) (int64, error) {
 	if progress == nil {
 		progress = func(string) {}
 	}
+	if r2Assets.Client == nil {
+		return 0, fmt.Errorf("R2Assets.Client is required for R2-based bootstrap")
+	}
+
+	ctx := context.Background()
 
 	// Create cloud instance record with offer metadata
 	instance := &db.CloudInstance{
@@ -228,7 +300,6 @@ func LaunchInstance(
 	}
 
 	// Build local-to-remote directory mapping and agent job list.
-	// Each unique local source dir maps to workspace/<basename> on the remote.
 	wsPath := client.WorkspacePath()
 	localToRemote := make(map[string]string)
 	for _, d := range group.SourceDirs() {
@@ -248,10 +319,43 @@ func LaunchInstance(
 			Dir:     remoteDir,
 		})
 	}
+
 	// Override disk size if the group has a computed estimate
 	if group.DiskGB > 0 && group.DiskGB > createOpts.DiskGB {
 		createOpts.DiskGB = group.DiskGB
 	}
+
+	// Build the bootstrap key using the DB instance ID (known before CreateInstance)
+	bootstrapKey := fmt.Sprintf("bootstrap/%d.sh", instanceID)
+
+	// Build R2 env vars for the instance
+	envVars := map[string]string{
+		"R2_ACCESS_KEY_ID":     r2Cfg.AccessKeyID,
+		"R2_SECRET_ACCESS_KEY": r2Cfg.SecretAccessKey,
+		"R2_ENDPOINT":          r2Assets.Client.Endpoint(),
+		"R2_BUCKET":            r2Cfg.Bucket,
+	}
+	// Pass Vast.ai API key for self-destruct (read from local config)
+	if apiKey := vastai.ReadAPIKey(); apiKey != "" {
+		envVars["VASTAI_API_KEY"] = apiKey
+	}
+	// Forward HF token for gated model downloads
+	if token := os.Getenv("HF_TOKEN"); token != "" {
+		envVars["HF_TOKEN"] = token
+		envVars["HUGGING_FACE_HUB_TOKEN"] = token
+	}
+
+	// Merge env vars into createOpts
+	if createOpts.EnvVars == nil {
+		createOpts.EnvVars = envVars
+	} else {
+		for k, v := range envVars {
+			createOpts.EnvVars[k] = v
+		}
+	}
+
+	// Set onstart command to bootstrap from R2
+	createOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
 
 	// Create cloud instance
 	progress("creating instance")
@@ -261,9 +365,11 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("create instance: %w", err)
 	}
 
+	providerInstID := inst.ProviderID
+
 	// Record provider instance ID
-	if err := db.SetCloudInstanceProviderID(database, instanceID, inst.ProviderID); err != nil {
-		_ = client.DestroyInstance(inst.ProviderID) // providerInstID not yet assigned
+	if err := db.SetCloudInstanceProviderID(database, instanceID, providerInstID); err != nil {
+		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
@@ -273,114 +379,45 @@ func LaunchInstance(
 		_ = db.SetCloudInstanceDataCenter(database, instanceID, offer.DataCenter)
 	}
 
-	// Wait for instance ready
-	progress("waiting for instance")
-	providerInstID := inst.ProviderID
-	inst, err = client.WaitReady(providerInstID, 10*time.Minute)
-	if err != nil {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf("wait ready: %w", err)
-	}
+	// Generate and upload bootstrap script (must happen after CreateInstance
+	// so we have providerInstID for self-destruct, but before instance finishes
+	// booting and runs onstart-cmd — boot typically takes several minutes).
+	progress("uploading bootstrap")
 
-	// From here on, failures destroy the provider instance and mark the DB record failed.
-	failAndDestroy := func(format string, args ...any) (int64, error) {
-		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
-		return instanceID, fmt.Errorf(format, args...)
-	}
-
-	// Record when instance became ready (before SSH setup)
-	_ = db.SetCloudInstanceReadyAt(database, instanceID)
-
-	sshTarget := fmt.Sprintf("root@%s", inst.SSHHost)
-	sshPort := fmt.Sprintf("%d", inst.SSHPort)
-	sshOpts := []string{"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10", "-p", sshPort}
-
-	// Deploy rclone config (retry SSH since sshd may not be ready immediately)
-	progress("configuring R2")
-	rcloneConf := cloud.GenerateRcloneConfig(r2Cfg)
-	setupCmd := fmt.Sprintf("mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << 'RCLONE_EOF'\n%sRCLONE_EOF", rcloneConf)
-	if _, err := cloud.SSHRunWithRetry(sshTarget, sshOpts, setupCmd, 5*time.Minute); err != nil {
-		return failAndDestroy("write rclone config: %w", err)
-	}
-
-	// Extract the embedded agent binary (cached locally)
-	progress("deploying agent + syncing sources")
-	agentBinary, err := agentdeploy.EnsureBuilt(agentVersion, cloudOS, cloudArch)
-	if err != nil {
-		return failAndDestroy("build agent: %w", err)
-	}
-
-	// Deploy agent and sync sources in parallel
-	var wg sync.WaitGroup
-	var deployErr, syncErr error
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		deployErr = agentdeploy.DeployToSSH(agentBinary, sshTarget, sshOpts, "/usr/local/bin/weft-agent")
-	}()
-
-	if len(localToRemote) > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// Create remote directories, then sync sources
-			var mkdirs []string
-			for _, remoteDir := range localToRemote {
-				mkdirs = append(mkdirs, fmt.Sprintf("'%s'", remoteDir))
-			}
-			mkdirCmd := fmt.Sprintf("mkdir -p %s", strings.Join(mkdirs, " "))
-			if _, err := cloud.SSHRun(sshTarget, sshOpts, mkdirCmd); err != nil {
-				syncErr = fmt.Errorf("create remote dirs: %w", err)
-				return
-			}
-			sshCmd := fmt.Sprintf("ssh -p %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", sshPort)
-			for localDir, remoteDir := range localToRemote {
-				if err := weftsync.SyncSourcesWithSSH(sshTarget, localDir, remoteDir, sshCmd); err != nil {
-					syncErr = err
-					return
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
-
-	if deployErr != nil {
-		return failAndDestroy("deploy agent: %w", deployErr)
-	}
-	if syncErr != nil {
-		return failAndDestroy("sync sources: %w", syncErr)
-	}
-
-	// Deploy wrapper script (generated after CreateInstance so providerInstID is available for self-destruct)
-	progress("deploying wrapper")
-	wrapperOpts := cloud.WrapperOpts{
-		MaxTimeSeconds: opts.MaxTimeSeconds,
-	}
-	// Forward HF token for gated model downloads
-	if token := os.Getenv("HF_TOKEN"); token != "" {
-		wrapperOpts.EnvVars = map[string]string{
-			"HF_TOKEN":               token,
-			"HUGGING_FACE_HUB_TOKEN": token,
+	// Build source mappings for the bootstrap script
+	var sources []SourceMapping
+	for localDir, remoteDir := range localToRemote {
+		if r2Key, ok := r2Assets.SourceR2Keys[localDir]; ok {
+			sources = append(sources, SourceMapping{
+				R2Key:     r2Key,
+				RemoteDir: remoteDir,
+			})
 		}
 	}
+
+	// Generate wrapper script (needs providerInstID for self-destruct)
+	wrapperOpts := cloud.WrapperOpts{
+		MaxTimeSeconds: opts.MaxTimeSeconds,
+		DBInstanceID:   instanceID,
+	}
+	// HF_TOKEN is already set via env vars on the instance, so the wrapper
+	// doesn't need to export it again — the env is inherited by all processes.
 	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket, providerInstID, wrapperOpts)
-	deployCmd := fmt.Sprintf("cat > %s.weft-campaign.sh << 'WRAPPER_EOF'\n%sWRAPPER_EOF\nchmod +x %s.weft-campaign.sh", wsPath, wrapper, wsPath)
-	if _, err := cloud.SSHRun(sshTarget, sshOpts, deployCmd); err != nil {
-		return failAndDestroy("deploy wrapper: %w", err)
+
+	bootstrapScript := GenerateBootstrapScript(BootstrapManifest{
+		AgentR2Key:    r2Assets.AgentR2Key,
+		Sources:       sources,
+		WrapperScript: wrapper,
+		WorkspacePath: wsPath,
+	})
+
+	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 
-	// Start via nohup
-	progress("starting jobs")
-	startCmd := fmt.Sprintf("nohup bash %s.weft-campaign.sh </dev/null >/dev/null 2>&1 &", wsPath)
-	if _, err := cloud.SSHRun(sshTarget, sshOpts, startCmd); err != nil {
-		return failAndDestroy("start wrapper: %w", err)
-	}
-
-	// Update status to running
+	// Update status to running — instance is now self-starting
 	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusRunning); err != nil {
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}

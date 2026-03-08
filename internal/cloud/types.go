@@ -1,7 +1,10 @@
 // Package cloud provides provider-neutral types and interfaces for cloud GPU providers.
 package cloud
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Provider identifies a cloud GPU provider.
 type Provider string
@@ -54,10 +57,11 @@ type OfferConstraints struct {
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {
-	Image      string // Docker image
-	DiskGB     int    // disk space to request
-	SSHEnabled bool   // enable SSH access
-	OnStartCmd string // command to run on instance start
+	Image      string            // Docker image
+	DiskGB     int               // disk space to request
+	SSHEnabled bool              // enable SSH access
+	OnStartCmd string            // command to run on instance start
+	EnvVars    map[string]string // environment variables passed via provider's env mechanism
 }
 
 // R2Config holds Cloudflare R2 credentials for instance-side uploads.
@@ -99,3 +103,22 @@ func MbpsToBytesPerSec(mbps float64) float64 {
 
 // DefaultWaitReadyTimeout is the default timeout for waiting for an instance.
 const DefaultWaitReadyTimeout = 5 * time.Minute
+
+// R2BootstrapOnStartCmd returns a shell command for --onstart-cmd that:
+// 1. Installs system deps, uv, and rclone (same as DefaultOnStartCmd)
+// 2. Writes rclone config from R2_* env vars
+// 3. Downloads and executes a bootstrap script from R2
+func R2BootstrapOnStartCmd(bootstrapKey string) string {
+	return fmt.Sprintf(
+		`%s && mkdir -p ~/.config/rclone && cat > ~/.config/rclone/rclone.conf << RCLONE_EOF
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = ${R2_ACCESS_KEY_ID}
+secret_access_key = ${R2_SECRET_ACCESS_KEY}
+endpoint = ${R2_ENDPOINT}
+RCLONE_EOF
+rclone cat "r2:${R2_BUCKET}/%s" > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`,
+		DefaultOnStartCmd, bootstrapKey,
+	)
+}

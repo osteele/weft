@@ -129,7 +129,7 @@ func TestExtractPhaseTimings_NewFields(t *testing.T) {
 	tmpDir := t.TempDir()
 	jobID := int64(42)
 
-	// Write phase files so extractPhaseTimings returns non-nil
+	// Write phase files so ExtractPhaseTimings returns non-nil
 	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("phase_run_start_%d", jobID)), []byte("1000"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("phase_run_end_%d", jobID)), []byte("2000"), 0644)
 
@@ -140,7 +140,7 @@ func TestExtractPhaseTimings_NewFields(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("cache_uv_post_%d", jobID)), []byte("123456"), 0644)
 	os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("cache_hf_post_%d", jobID)), []byte("789012"), 0644)
 
-	timings := extractPhaseTimings(jobID, tmpDir)
+	timings := ExtractPhaseTimings(jobID, tmpDir)
 	if timings == nil {
 		t.Fatal("expected non-nil timings")
 	}

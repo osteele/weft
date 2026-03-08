@@ -468,6 +468,13 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 		updated++
 
+		// Extract and store phase timing data
+		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
+			if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
+				log.Printf("sync: failed to store phase timings for job %d: %v", jobID, err)
+			}
+		}
+
 		if verbose {
 			fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, status, *exitCode)
 		}

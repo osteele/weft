@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +98,13 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 	}
 	if opts.OnStartCmd != "" {
 		args = append(args, "--onstart-cmd", opts.OnStartCmd)
+	}
+	if len(opts.EnvVars) > 0 {
+		var parts []string
+		for _, k := range slices.Sorted(maps.Keys(opts.EnvVars)) {
+			parts = append(parts, fmt.Sprintf("-e %s=%s", k, opts.EnvVars[k]))
+		}
+		args = append(args, "--env", strings.Join(parts, " "))
 	}
 	args = append(args, "--raw")
 

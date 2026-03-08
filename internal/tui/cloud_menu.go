@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/r2"
+	weftsync "github.com/osteele/weft/internal/sync"
 )
 
 // handleCloudMenuKeyPress handles key events when the cloud menu overlay is active.
@@ -254,8 +257,36 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		if err != nil {
 			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("local agent version: %w", err)}
 		}
+
+		// Create R2 client and pre-stage assets
+		r2Client, err := r2.New(r2.Config{
+			AccountID:       cloudR2.AccountID,
+			AccessKeyID:     cloudR2.AccessKeyID,
+			SecretAccessKey: cloudR2.SecretAccessKey,
+			Bucket:          cloudR2.Bucket,
+		})
+		if err != nil {
+			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("create R2 client: %w", err)}
+		}
+
+		ctx := context.Background()
+		agentR2Key, err := agentdeploy.EnsureAgentInR2(ctx, r2Client, agentVer, "linux", "amd64")
+		if err != nil {
+			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("upload agent: %w", err)}
+		}
+
+		sourceR2Keys := make(map[string]string)
+		for _, d := range group.SourceDirs() {
+			key, err := weftsync.UploadSourceToR2(ctx, r2Client, d)
+			if err != nil {
+				return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("upload source: %w", err)}
+			}
+			sourceR2Keys[d] = key
+		}
+
 		campaignID, err := campaign.LaunchInstance(
-			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts, agentVer,
+			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts,
+			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys},
 			func(phase string) {
 				log.Printf("cloud: job %d instance: %s", job.ID, phase)
 			},

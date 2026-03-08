@@ -43,8 +43,9 @@ const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 
 // CreateOpts configures instance creation.
 type CreateOpts struct {
-	Image      string // Docker image (e.g., "nvidia/cuda:12.2-devel-ubuntu22.04")
-	DiskGB     int    // disk space to request
-	SSHEnabled bool   // enable SSH access
-	OnStartCmd string // command to run on instance start
+	Image      string            // Docker image (e.g., "nvidia/cuda:12.2-devel-ubuntu22.04")
+	DiskGB     int               // disk space to request
+	SSHEnabled bool              // enable SSH access
+	OnStartCmd string            // command to run on instance start
+	EnvVars    map[string]string // environment variables passed via --env flag
 }

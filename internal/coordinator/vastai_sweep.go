@@ -145,7 +145,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	}
 
 	// Extract and store phase timing data
-	if timings := extractPhaseTimings(jobID, tmpDir); timings != nil {
+	if timings := ExtractPhaseTimings(jobID, tmpDir); timings != nil {
 		if err := db.UpsertJobPhaseTimings(c.db, timings); err != nil {
 			c.logger.Printf("vastai sweep: store phase timings for job %d: %v", jobID, err)
 		}
@@ -195,11 +195,11 @@ func detectFailureReason(tmpDir string, exitCode int) string {
 	return fmt.Sprintf("exit_%d", exitCode)
 }
 
-// extractPhaseTimings reads phase timing data from the results dir.
+// ExtractPhaseTimings reads phase timing data from the results dir.
 // It first tries the structured phases.json format (agent-based wrapper),
 // then falls back to individual phase_* files (legacy bash wrapper).
 // Returns nil if no phase files are found (non-instrumented wrapper).
-func extractPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
+func ExtractPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimings {
 	// Try structured phases.json first (from agent-based wrapper)
 	if timings := extractStructuredPhaseTimings(jobID, tmpDir); timings != nil {
 		return timings

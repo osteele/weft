@@ -4,6 +4,7 @@ package r2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,12 +15,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 // Client wraps an S3-compatible client configured for Cloudflare R2.
 type Client struct {
-	s3     *s3.Client
-	bucket string
+	s3       *s3.Client
+	bucket   string
+	endpoint string
 }
 
 // Config holds R2 connection settings.
@@ -48,7 +51,7 @@ func New(cfg Config) (*Client, error) {
 		o.BaseEndpoint = aws.String(endpoint)
 	})
 
-	return &Client{s3: s3Client, bucket: cfg.Bucket}, nil
+	return &Client{s3: s3Client, bucket: cfg.Bucket, endpoint: endpoint}, nil
 }
 
 // ListCompleted returns job IDs that have a .complete marker under the given prefix.
@@ -157,6 +160,50 @@ func (c *Client) DeletePrefix(ctx context.Context, prefix string) error {
 	return nil
 }
 
+// PutObject uploads data to R2 under the given key.
+func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, contentType string) error {
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+		Body:   body,
+	}
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	}
+	_, err := c.s3.PutObject(ctx, input)
+	if err != nil {
+		return fmt.Errorf("put object %s: %w", key, err)
+	}
+	return nil
+}
+
+// ObjectExists checks whether an object exists at the given key.
+func (c *Client) ObjectExists(ctx context.Context, key string) (bool, error) {
+	_, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		// HeadObject returns a NotFound-style error when the key doesn't exist.
+		// The S3 SDK wraps this as a smithy OperationError; check the HTTP status.
+		if isS3NotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("head object %s: %w", key, err)
+	}
+	return true, nil
+}
+
+// Bucket returns the bucket name this client is configured for.
+func (c *Client) Bucket() string {
+	return c.bucket
+}
+
+// Endpoint returns the R2 endpoint URL.
+func (c *Client) Endpoint() string {
+	return c.endpoint
+}
+
 // downloadObject downloads a single S3 object to a local file.
 func (c *Client) downloadObject(ctx context.Context, key string, localPath string) error {
 	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
@@ -180,4 +227,21 @@ func (c *Client) downloadObject(ctx context.Context, key string, localPath strin
 
 	_, err = io.Copy(f, resp.Body)
 	return err
+}
+
+// IsNotFound returns true if the error indicates the object was not found
+// (S3 NotFound or R2 NoSuchKey).
+func IsNotFound(err error) bool {
+	return isS3NotFound(err)
+}
+
+// isS3NotFound returns true if the error indicates the object was not found.
+func isS3NotFound(err error) bool {
+	var notFound *types.NotFound
+	if errors.As(err, &notFound) {
+		return true
+	}
+	// R2 may return NoSuchKey instead of NotFound
+	var noSuchKey *types.NoSuchKey
+	return errors.As(err, &noSuchKey)
 }

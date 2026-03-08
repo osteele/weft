@@ -60,6 +60,7 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		DiskGB:     opts.DiskGB,
 		SSHEnabled: opts.SSHEnabled,
 		OnStartCmd: opts.OnStartCmd,
+		EnvVars:    opts.EnvVars,
 	}
 	inst, err := c.inner.CreateInstance(id, vopts)
 	if err != nil {
@@ -105,7 +106,7 @@ func (c *CloudClient) WorkspacePath() string {
 }
 
 func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
-	apiKey := readVastaiAPIKey()
+	apiKey := ReadAPIKey()
 	if apiKey == "" {
 		return fmt.Sprintf("echo 'warning: no vastai API key found, cannot self-destruct instance %s'", providerInstanceID)
 	}
@@ -116,9 +117,9 @@ func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
 	)
 }
 
-// readVastaiAPIKey reads the API key from the vastai config file.
+// ReadAPIKey reads the API key from the vastai config file.
 // Checks ~/.config/vastai/vast_api_key first, then ~/.vast_api_key (legacy).
-func readVastaiAPIKey() string {
+func ReadAPIKey() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
