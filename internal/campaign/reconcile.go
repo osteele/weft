@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -8,11 +9,14 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // ReconcileCloudInstances checks all running/launching instances against the
-// cloud provider and marks dead ones as failed. Returns the number of instances reconciled.
-func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client) (int, error) {
+// cloud provider and marks dead ones as failed (or completed if R2 has
+// a completion marker). Returns the number of instances reconciled.
+// r2Client may be nil, in which case completion detection is skipped.
+func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (int, error) {
 	instances, err := db.ListRunningCloudInstances(database)
 	if err != nil {
 		return 0, err
@@ -42,6 +46,17 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client) (int, err
 			if inst != nil {
 				status = inst.Status
 			}
+
+			// Check R2 for completion marker before assuming failure.
+			if hasR2CompletionMarker(r2Client, ci.ID) {
+				log.Printf("reconcile: instance %d completed (R2 marker found), marking completed", ci.ID)
+				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted); err != nil {
+					log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
+				}
+				reconciled++
+				continue
+			}
+
 			log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed", ci.ID, providerID, status)
 
 			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed); err != nil {
@@ -109,6 +124,17 @@ func ReconcileCampaigns(database *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// hasR2CompletionMarker checks whether the wrapper wrote a completion marker
+// to R2 before the instance self-destructed. Returns false if r2Client is nil.
+func hasR2CompletionMarker(r2Client *r2.Client, instanceID int64) bool {
+	if r2Client == nil {
+		return false
+	}
+	key := fmt.Sprintf("campaigns/%d/.complete", instanceID)
+	exists, err := r2Client.ObjectExists(context.Background(), key)
+	return err == nil && exists
 }
 
 // isProviderTerminal returns true if the provider instance is in a terminal/dead state.

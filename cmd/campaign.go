@@ -60,12 +60,12 @@ Use --dry-run to just print the plan without launching.`,
 }
 
 var campaignWatchCmd = &cobra.Command{
-	Use:   "watch <instance-id> [instance-id...]",
-	Short: "Watch cloud instance progress",
-	Long: `Monitors one or more cloud instances, printing line-oriented status updates.
+	Use:   "watch <campaign-id>",
+	Short: "Watch campaign instance progress",
+	Long: `Monitors all instances in a campaign, printing line-oriented status updates.
 
 Use --tui for an interactive display.`,
-	Args: cobra.MinimumNArgs(1),
+	Args: cobra.ExactArgs(1),
 	RunE: runCampaignWatch,
 }
 
@@ -365,19 +365,28 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 }
 
 func runCampaignWatch(cmd *cobra.Command, args []string) error {
+	campaignID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid campaign ID %q: %w", args[0], err)
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
+	instances, err := db.GetCampaignInstances(database, campaignID)
+	if err != nil {
+		return fmt.Errorf("get campaign instances: %w", err)
+	}
+	if len(instances) == 0 {
+		return fmt.Errorf("campaign %d has no instances", campaignID)
+	}
+
 	var instanceIDs []int64
-	for _, arg := range args {
-		id, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
-			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
-		}
-		instanceIDs = append(instanceIDs, id)
+	for _, inst := range instances {
+		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
 	if campaignWatchTUI && term.IsTerminal(os.Stdout.Fd()) {
@@ -558,7 +567,9 @@ func parseLaunchOpts() campaign.LaunchOpts {
 func reconcileBeforeDisplay(database *sql.DB) {
 	cfg, _ := config.Load()
 	if clients := buildCloudClients(cfg); len(clients) > 0 {
-		if n, err := campaign.ReconcileCloudInstances(database, clients); err != nil {
+		// Build R2 client for completion detection (nil if unconfigured)
+		r2Client, _ := buildR2Client(cfg)
+		if n, err := campaign.ReconcileCloudInstances(database, clients, r2Client); err != nil {
 			log.Printf("reconcile: %v", err)
 		} else if n > 0 {
 			fmt.Printf("Reconciled %d dead instance(s)\n", n)

@@ -3,6 +3,7 @@ package cmd
 import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/vastai"
 )
@@ -50,6 +51,20 @@ func cloudClientForProvider(clients []cloud.Client, provider cloud.Provider) clo
 		return clients[0]
 	}
 	return nil
+}
+
+// buildR2Client creates an R2 client from config. Returns nil if R2 is not configured.
+func buildR2Client(cfg *config.Config) (*r2.Client, error) {
+	r2Cfg := cfg.Vastai.R2
+	if r2Cfg.Bucket == "" || r2Cfg.AccessKeyID == "" {
+		return nil, nil
+	}
+	return r2.New(r2.Config{
+		AccountID:       r2Cfg.AccountID,
+		AccessKeyID:     r2Cfg.AccessKeyID,
+		SecretAccessKey: r2Cfg.SecretAccessKey,
+		Bucket:          r2Cfg.Bucket,
+	})
 }
 
 // cloudClientForDBInstance creates a cloud.Client for the provider stored in a DB record.

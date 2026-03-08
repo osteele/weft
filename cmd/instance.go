@@ -103,23 +103,18 @@ func init() {
 }
 
 // newR2ClientFromConfig loads config and creates an R2 client.
+// Returns an error if R2 is not configured.
 func newR2ClientFromConfig() (*r2.Client, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	r2Cfg := cfg.Vastai.R2
-	if r2Cfg.Bucket == "" || r2Cfg.AccessKeyID == "" {
-		return nil, fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml")
-	}
-	client, err := r2.New(r2.Config{
-		AccountID:       r2Cfg.AccountID,
-		AccessKeyID:     r2Cfg.AccessKeyID,
-		SecretAccessKey: r2Cfg.SecretAccessKey,
-		Bucket:          r2Cfg.Bucket,
-	})
+	client, err := buildR2Client(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create R2 client: %w", err)
+		return nil, err
+	}
+	if client == nil {
+		return nil, fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml")
 	}
 	return client, nil
 }

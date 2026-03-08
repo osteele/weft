@@ -43,7 +43,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Reconcile
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient})
+	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 
 	// Reconcile — nothing should change
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient})
+	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
