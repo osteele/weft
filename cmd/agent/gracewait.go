@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -214,11 +215,14 @@ func writeGraceStatus(bucket, prefix string, status graceStatus) {
 
 func uploadJobResults(bucket string, jobID int64, logDir string) {
 	// Upload per-job results (same pattern as wrapper)
-	rcloneCmd := exec.Command("rclone", "copy", logDir+"/", fmt.Sprintf("r2:%s/jobs/%d/results/", bucket, jobID))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	rcloneCmd := exec.CommandContext(ctx, "rclone", "copy", logDir+"/", fmt.Sprintf("r2:%s/jobs/%d/results/", bucket, jobID))
 	rcloneCmd.Stderr = os.Stderr
 	_ = rcloneCmd.Run()
 
-	completeCmd := exec.Command("rclone", "rcat", fmt.Sprintf("r2:%s/jobs/%d/.complete", bucket, jobID))
+	completeCmd := exec.CommandContext(ctx, "rclone", "rcat", fmt.Sprintf("r2:%s/jobs/%d/.complete", bucket, jobID))
 	completeCmd.Stdin = strings.NewReader("done")
 	_ = completeCmd.Run()
 }
