@@ -116,6 +116,19 @@ func (c *Client) DownloadResults(ctx context.Context, prefix string, localDir st
 	return nil
 }
 
+// GetObject retrieves the contents of a single object by key.
+func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
+	resp, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get object %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
 // DeletePrefix deletes all objects under the given prefix.
 func (c *Client) DeletePrefix(ctx context.Context, prefix string) error {
 	input := &s3.ListObjectsV2Input{

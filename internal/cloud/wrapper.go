@@ -90,6 +90,16 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 		b.WriteString("# Upload per-job results\n")
 		b.WriteString("rclone copy $LOG_DIR/ \"r2:$R2_BUCKET/jobs/$JOB_ID/results/\" 2>/dev/null\n")
 		b.WriteString("echo \"done\" | rclone rcat \"r2:$R2_BUCKET/jobs/$JOB_ID/.complete\"\n")
+
+		// Promote uv manifest to content-addressable R2 key
+		b.WriteString("# Promote uv manifest to content-addressable key (idempotent)\n")
+		b.WriteString("if [ -f \"$LOG_DIR/uv-manifest.json\" ]; then\n")
+		b.WriteString("  UV_META=$(python3 -c \"import json,sys; m=json.load(sys.stdin); print(m['lockfile_hash'], m['platform'])\" < \"$LOG_DIR/uv-manifest.json\")\n")
+		b.WriteString("  LOCK_HASH=${UV_META%% *}\n")
+		b.WriteString("  PLATFORM=${UV_META##* }\n")
+		b.WriteString("  rclone copyto \"$LOG_DIR/uv-manifest.json\" \"r2:$R2_BUCKET/uv-manifests/$LOCK_HASH/$PLATFORM.json\" 2>/dev/null\n")
+		b.WriteString("fi\n")
+
 		b.WriteString("rm -f $LOG_DIR/*\n\n")
 	}
 

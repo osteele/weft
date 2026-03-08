@@ -5,6 +5,7 @@ package estimate
 type ProvisionInput struct {
 	ModelDownloadBytes   int64   // total HF model bytes to download
 	WorkdirSizeBytes     int64   // workdir sync size; 0 uses default (500 MB)
+	UVSyncBytes          int64   // estimated cold uv sync download bytes
 	BandwidthBytesPerSec float64 // instance download bandwidth in bytes/sec
 }
 
@@ -25,5 +26,6 @@ func EstimateProvision(input ProvisionInput) Estimate {
 
 	sync := TransferTime(workdir, bw)
 	download := TransferTime(input.ModelDownloadBytes, bw)
-	return sync.Add(download)
+	uvSync := TransferTime(input.UVSyncBytes, bw)
+	return sync.Add(download).Add(uvSync)
 }

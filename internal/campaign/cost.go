@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // CostEstimate holds the cost projection for one instance group.
@@ -19,6 +20,7 @@ type CostEstimate struct {
 	SetupOverhead time.Duration
 	DownloadBytes int64         // total bytes of HF model inputs to download
 	DownloadTime  time.Duration // estimated download time from offer bandwidth
+	UVSyncBytes   int64         // estimated cold uv sync download bytes
 	TotalTime     time.Duration
 	TotalCost     float64
 	HasPrediction bool // false = fell back to default job duration
@@ -30,7 +32,8 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 
 // EstimateCosts computes per-group cost estimates using the predictor for duration.
 // If predCfg is nil or not configured, falls back to 1hr/job estimates.
-func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, onProgress EstimateProgressFunc) []CostEstimate {
+// If r2Client is non-nil, UV manifests are fetched to estimate cold uv sync costs.
+func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Prefetch all unique model sizes in parallel to avoid sequential HF API calls
@@ -41,6 +44,24 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 		}
 	}
 	dataloc.PrefetchInputSizes(collectAllInputs(groupOffers), modelProgress)
+
+	// Collect unique source dirs across all groups, then hash lockfiles once
+	seenDirs := make(map[string]bool)
+	var uniqueDirs []string
+	for _, go_ := range groupOffers {
+		if go_.Offer == nil {
+			continue
+		}
+		for _, dir := range go_.Group.SourceDirs() {
+			if !seenDirs[dir] {
+				seenDirs[dir] = true
+				uniqueDirs = append(uniqueDirs, dir)
+			}
+		}
+	}
+	allLockfileHashes := estimate.LockfileHash(uniqueDirs)
+	// Platform is always linux-amd64 for cloud instances
+	allManifests := estimate.FetchUVManifests(r2Client, allLockfileHashes, "linux-amd64")
 
 	// Batch-predict durations for all jobs across all groups in a single subprocess call
 	var allBatchJobs []predictor.BatchJob
@@ -91,9 +112,22 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			downloadBytes = totalBytes
 		}
 
+		// Compute UV sync bytes for this group's source dirs
+		var uvSyncBytes int64
+		if allManifests != nil {
+			groupManifests := make(map[string]*estimate.UVManifestRef)
+			for _, dir := range go_.Group.SourceDirs() {
+				if m, ok := allManifests[dir]; ok {
+					groupManifests[dir] = m
+				}
+			}
+			uvSyncBytes = estimate.EstimateUVSyncBytes(groupManifests)
+		}
+
 		bytesPerSec := cloud.MbpsToBytesPerSec(go_.Offer.DownloadBandwidth)
 		provision := estimate.EstimateProvision(estimate.ProvisionInput{
 			ModelDownloadBytes:   downloadBytes,
+			UVSyncBytes:          uvSyncBytes,
 			BandwidthBytesPerSec: bytesPerSec,
 		})
 
@@ -134,6 +168,7 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 		est.HasPrediction = hasPrediction
 		est.SetupOverhead = startup.Mean + sshSetup.Mean + provision.Mean + jobSetup.Mean
 		est.DownloadBytes = downloadBytes
+		est.UVSyncBytes = uvSyncBytes
 		est.DownloadTime = estimate.TransferTime(downloadBytes, bytesPerSec).Mean
 		est.TotalTime = total.Mean
 		est.TotalCost = total.Mean.Hours() * go_.Offer.CostPerHour

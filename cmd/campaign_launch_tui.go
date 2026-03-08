@@ -172,7 +172,7 @@ func (m launchModel) fetchEstimates() tea.Cmd {
 			default:
 			}
 		}
-		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, onProgress)
+		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, nil, onProgress)
 		return estimatesLoadedMsg{estimates: estimates}
 	}
 }

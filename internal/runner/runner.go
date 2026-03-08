@@ -435,6 +435,9 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
 			return setupErr
 		}
+		if setupCmd == "uv sync" {
+			collectAndWriteUVManifest(jobID, expandedDir, filepath.Dir(paths.Log))
+		}
 	}
 
 	// Start the process

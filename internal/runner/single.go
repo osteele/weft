@@ -116,6 +116,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 			phases.SetupEnd = time.Now().Unix()
 			return ei, setupErr
 		}
+		if setupCmd == "uv sync" {
+			collectAndWriteUVManifest(cfg.JobID, expandedDir, cfg.LogDir)
+		}
 	}
 
 	phases.SetupEnd = time.Now().Unix()
