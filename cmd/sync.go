@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
@@ -138,9 +140,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 	placementUpdated := syncPlacementOutcomes(cfg, database, syncVerbose)
 	totalUpdated += placementUpdated
 
-	// Check Vast.ai instances for completed results (CLI fallback for coordinator)
-	vastaiUpdated := syncVastaiInstances(database, syncVerbose)
-	totalUpdated += vastaiUpdated
+	// Check cloud instances for completed results (CLI fallback for coordinator)
+	cloudUpdated := syncCloudJobResults(cfg, database, syncVerbose)
+	totalUpdated += cloudUpdated
+
+	// Auto-close campaigns where all instances are terminal
+	if err := campaign.ReconcileCampaigns(database); err != nil {
+		log.Printf("reconcile campaigns: %v", err)
+	}
+
 	if cfg.LogCacheMaxAge > 0 {
 		maxAge := time.Duration(cfg.LogCacheMaxAge) * 24 * time.Hour
 		if pruned, err := logcache.Prune(maxAge); err == nil && pruned > 0 && syncVerbose {
@@ -378,21 +386,20 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 	return summaries
 }
 
-// syncVastaiInstances checks for completed Vast.ai job results in R2.
-// This is a CLI fallback for when the coordinator is not running.
-func syncVastaiInstances(database *sql.DB, verbose bool) int {
-	cfg, err := config.Load()
-	if err != nil || cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
+// syncCloudJobResults checks for completed cloud job results in R2.
+// This covers both legacy Vast.ai-backend jobs and campaign-launched queue-runner jobs.
+func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int {
+	if cfg == nil || cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
 		return 0
 	}
 
-	jobs, err := db.ListActiveVastaiJobs(database)
+	jobs, err := db.ListActiveCloudJobs(database)
 	if err != nil || len(jobs) == 0 {
 		return 0
 	}
 
 	if verbose {
-		fmt.Printf("Checking %d active Vast.ai job(s)...\n", len(jobs))
+		fmt.Printf("Checking %d active cloud job(s)...\n", len(jobs))
 	}
 
 	r2Cfg := r2Config(cfg)
@@ -404,11 +411,7 @@ func syncVastaiInstances(database *sql.DB, verbose bool) int {
 		return 0
 	}
 
-	syncTimeout := 5
-	if cfg.Vastai.SyncTimeout > 0 {
-		syncTimeout = cfg.Vastai.SyncTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(syncTimeout)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	updated := 0
@@ -435,7 +438,7 @@ func syncVastaiInstances(database *sql.DB, verbose bool) int {
 		prefix := fmt.Sprintf("jobs/%d", jobID)
 
 		// Download results to temp dir
-		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-vastai-%d-*", jobID))
+		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
 		if err != nil {
 			continue
 		}
@@ -445,32 +448,31 @@ func syncVastaiInstances(database *sql.DB, verbose bool) int {
 			continue
 		}
 
-		// Read exit code
-		exitCodeBytes, err := os.ReadFile(filepath.Join(tmpDir, "exit_code"))
-		if err != nil {
+		exitCode, endTimeUnix := parseCloudJobResult(tmpDir, jobIDStr)
+		if exitCode == nil {
 			os.RemoveAll(tmpDir)
 			continue
 		}
-		exitCode, _ := strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
 
-		// Read end time
-		endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
-		endTimeUnix, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
+		status := db.StatusCompleted
+		if *exitCode != 0 {
+			status = db.StatusFailed
+		}
 
 		if _, err := database.Exec(
 			`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
-			db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, jobID,
+			status, *exitCode, endTimeUnix, status, jobID,
 		); err != nil {
-			log.Printf("sync: failed to update Vast.ai job %d status: %v", jobID, err)
+			log.Printf("sync: failed to update cloud job %d status: %v", jobID, err)
 			continue
 		}
 		updated++
 
 		if verbose {
-			fmt.Printf("  Vast.ai job %d: %s (exit %d)\n", jobID, db.StatusCompleted, exitCode)
+			fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, status, *exitCode)
 		}
 
-		// Cleanup
+		// Cleanup R2
 		_ = r2Client.DeletePrefix(ctx, prefix+"/")
 		os.RemoveAll(tmpDir)
 	}
@@ -485,6 +487,43 @@ func r2Config(cfg *config.Config) r2.Config {
 		SecretAccessKey: cfg.Vastai.R2.SecretAccessKey,
 		Bucket:          cfg.Vastai.R2.Bucket,
 	}
+}
+
+// parseCloudJobResult reads the exit code and end time from a downloaded R2 results directory.
+// Returns nil exitCode if no valid result was found.
+func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, endTimeUnix int64) {
+	// Try completion JSON (agent format: <jobID>.completion.json)
+	completionPath := filepath.Join(tmpDir, jobIDStr+".completion.json")
+	if data, err := os.ReadFile(completionPath); err == nil {
+		var rec struct {
+			ExitCode int   `json:"exit_code"`
+			EndTime  int64 `json:"end_time"`
+		}
+		if json.Unmarshal(data, &rec) == nil {
+			return &rec.ExitCode, rec.EndTime
+		}
+	}
+
+	// Fallback: <jobID>.status (exit code as text)
+	statusPath := filepath.Join(tmpDir, jobIDStr+".status")
+	if data, err := os.ReadFile(statusPath); err == nil {
+		var code int
+		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &code); err == nil {
+			return &code, 0
+		}
+	}
+
+	// Legacy fallback: standalone exit_code file
+	if data, err := os.ReadFile(filepath.Join(tmpDir, "exit_code")); err == nil {
+		code, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err == nil {
+			endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
+			et, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
+			return &code, et
+		}
+	}
+
+	return nil, 0
 }
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated

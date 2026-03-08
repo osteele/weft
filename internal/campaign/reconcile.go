@@ -2,6 +2,8 @@ package campaign
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -29,12 +31,12 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client) (int, err
 		}
 
 		inst, err := client.ShowInstance(providerID)
-		if err != nil {
+		if err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
 			log.Printf("reconcile: ShowInstance(%s) for instance %d: %v", providerID, ci.ID, err)
 			continue
 		}
 
-		// If provider reports terminal state but DB doesn't, reconcile
+		// If provider reports terminal state (or instance is gone) but DB doesn't, reconcile
 		if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) {
 			status := "not found"
 			if inst != nil {
@@ -56,6 +58,57 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client) (int, err
 	}
 
 	return reconciled, nil
+}
+
+// ReconcileCampaigns checks active campaigns and marks them as completed or failed
+// when all their instances have reached a terminal state.
+func ReconcileCampaigns(database *sql.DB) error {
+	campaigns, err := db.ListActiveCampaigns(database)
+	if err != nil {
+		return fmt.Errorf("list active campaigns: %w", err)
+	}
+
+	for _, c := range campaigns {
+		instances, err := db.GetCampaignInstances(database, c.ID)
+		if err != nil {
+			log.Printf("reconcile campaigns: get instances for campaign %d: %v", c.ID, err)
+			continue
+		}
+		if len(instances) == 0 {
+			continue
+		}
+
+		allTerminal := true
+		for _, inst := range instances {
+			if !IsInstanceTerminal(inst.Status) {
+				allTerminal = false
+				break
+			}
+		}
+		if !allTerminal {
+			continue
+		}
+
+		// All instances are terminal; check if all failed
+		allFailed := true
+		for _, inst := range instances {
+			if inst.Status != db.CloudInstanceStatusFailed {
+				allFailed = false
+				break
+			}
+		}
+
+		status := db.CampaignStatusCompleted
+		if allFailed {
+			status = db.CampaignStatusFailed
+		}
+		if err := db.UpdateCampaignStatus(database, c.ID, status); err != nil {
+			log.Printf("reconcile campaigns: update campaign %d to %s: %v", c.ID, status, err)
+		} else {
+			log.Printf("reconcile campaigns: campaign %d → %s", c.ID, status)
+		}
+	}
+	return nil
 }
 
 // isProviderTerminal returns true if the provider instance is in a terminal/dead state.

@@ -1,6 +1,13 @@
 package cloud
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrInstanceNotFound is returned by ShowInstance when the instance no longer
+// exists in the provider's inventory.
+var ErrInstanceNotFound = errors.New("instance not found")
 
 // Client is the provider-neutral interface for interacting with cloud GPU providers.
 type Client interface {

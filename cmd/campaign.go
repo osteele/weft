@@ -529,7 +529,8 @@ func parseLaunchOpts() campaign.LaunchOpts {
 }
 
 // reconcileBeforeDisplay checks running cloud instances against the provider
-// and marks dead ones as failed. Called before displaying campaign data.
+// and marks dead ones as failed, then auto-closes campaigns where all instances
+// are terminal. Called before displaying campaign data.
 func reconcileBeforeDisplay(database *sql.DB) {
 	cfg, _ := config.Load()
 	if clients := buildCloudClients(cfg); len(clients) > 0 {
@@ -538,6 +539,9 @@ func reconcileBeforeDisplay(database *sql.DB) {
 		} else if n > 0 {
 			fmt.Printf("Reconciled %d dead instance(s)\n", n)
 		}
+	}
+	if err := campaign.ReconcileCampaigns(database); err != nil {
+		log.Printf("reconcile campaigns: %v", err)
 	}
 }
 

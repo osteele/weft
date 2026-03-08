@@ -989,6 +989,18 @@ func ListActiveVastaiJobs(db *sql.DB) ([]*Job, error) {
 	return scanJobs(rows)
 }
 
+// ListActiveCloudJobs returns jobs associated with a cloud instance that are in a non-terminal status.
+// This covers both legacy vastai-backend jobs and campaign-launched queue-runner jobs.
+func ListActiveCloudJobs(db *sql.DB) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE cloud_instance_id IS NOT NULL AND status NOT IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY id`, jobSelectColumns)
+	rows, err := db.Query(query, StatusCompleted, StatusFailed, StatusKilled, StatusCanceled)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanJobs(rows)
+}
+
 // MarkJobDraftPending updates a job to draft status locally and records pending cleanup.
 func MarkJobDraftPending(db *sql.DB, id int64) error {
 	now := time.Now().Unix()

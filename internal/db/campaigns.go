@@ -65,7 +65,23 @@ func ListCampaigns(db *sql.DB) ([]*Campaign, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanCampaigns(rows)
+}
 
+// ListActiveCampaigns returns campaigns that are not in a terminal status.
+func ListActiveCampaigns(db *sql.DB) ([]*Campaign, error) {
+	rows, err := db.Query(
+		`SELECT id, status, created_at, ended_at FROM campaigns WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
+		CampaignStatusCompleted, CampaignStatusFailed, CampaignStatusCancelled,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCampaigns(rows)
+}
+
+func scanCampaigns(rows *sql.Rows) ([]*Campaign, error) {
 	var campaigns []*Campaign
 	for rows.Next() {
 		var c Campaign

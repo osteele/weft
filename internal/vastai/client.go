@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 // VastaiClient is the interface for interacting with the Vast.ai API.
@@ -134,7 +136,7 @@ func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
 			return &inst, nil
 		}
 	}
-	return nil, fmt.Errorf("instance %d not found", instanceID)
+	return nil, fmt.Errorf("instance %d: %w", instanceID, cloud.ErrInstanceNotFound)
 }
 
 // WaitReady polls until an instance reaches "running" status or the timeout expires.

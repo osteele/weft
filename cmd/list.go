@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
@@ -128,7 +129,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check cloud instance completion (R2 markers) — soft failure
-		syncVastaiInstances(database, false)
+		cfg, _ := config.Load()
+		syncCloudJobResults(cfg, database, false)
 
 		// Start queue runners on hosts with queued jobs
 		startQueueRunnersForQueuedHosts(database)
