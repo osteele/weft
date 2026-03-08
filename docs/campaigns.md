@@ -144,6 +144,62 @@ weft campaign cancel <id>
 Termination destroys the Vast.ai instance, resets associated jobs to
 `needs_rental`, and updates the instance status to `cancelled`.
 
+## Grace period
+
+Cloud instances have a default 15-minute grace period after job failures. Instead
+of self-destructing immediately, the instance waits for you to fix the issue and
+resubmit. This avoids repaying provisioning overhead (~100s startup + model
+downloads).
+
+### Launching with a grace period
+
+```bash
+# Default: 15-minute grace period
+weft campaign launch
+
+# Custom grace period
+weft campaign launch --grace-period 30m
+
+# No grace period (immediate self-destruct on failure)
+weft campaign launch --grace-period 0
+```
+
+### Responding to failures
+
+When a job fails on a grace-period instance, you can resubmit, extend, or
+release:
+
+```bash
+# Resubmit the job with updated sources (re-syncs project files)
+weft instance submit <instance-id> <job-id>
+
+# Resubmit with a modified command
+weft instance submit <instance-id> <job-id> --command 'python train.py --batch-size 16'
+
+# Extend the grace period (default: +15m)
+weft instance extend <instance-id> 15m
+
+# Clean shutdown (self-destruct immediately)
+weft instance release <instance-id>
+```
+
+### How it works
+
+1. The agent wrapper captures exit codes from each job.
+2. On failure, the wrapper invokes `weft-agent grace-wait` instead of
+   self-destructing.
+3. The agent polls R2 for control messages under `grace/<INSTANCE_ID>/`:
+   - `jobs.json` — new job submission
+   - `extend` — extend the deadline
+   - `release` — clean shutdown
+4. The CLI writes control messages to R2 when you run `instance submit`,
+   `instance extend`, or `instance release`.
+5. If the grace period expires with no action, the instance self-destructs.
+
+The grace period is tracked in the database (`grace_period_seconds`,
+`grace_started_at`, `grace_deadline`) and the instance status changes to
+`grace` during the wait.
+
 ## TUI cloud menu (single job)
 
 For launching a single job without the full campaign flow, use the TUI:

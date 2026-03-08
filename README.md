@@ -73,6 +73,30 @@ RTX 4090             5/5 jobs  24GB  $0.24/hr  ~5h (2h–10h)  ~$1.20±0.96
 ↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit
 ```
 
+#### Campaign Watch
+
+Monitor running instances with `weft campaign watch`:
+
+```
+Campaign 7 — 3 instances
+
+Instance 12  RTX 4090 24GB   running    ⏱ 42m   $0.18
+  Job 108  Fine-tune Llama-3 8B (LoRA)              ● running
+  Job 109  Eval on MMLU + HellaSwag                  ○ queued
+
+Instance 13  A100 80GB       running    ⏱ 38m   $0.33
+  Job 110  Mixtral 8x7B inference latency sweep      ● running
+
+Instance 14  RTX 3060 12GB   grace      ⏱ 51m   $0.10
+  Job 111  Phi-3 mini quantization benchmark         ✗ exit 1 (OOM)
+  Grace period: 12m remaining
+  → weft instance submit 14 111 --command '...'  # resubmit with fix
+  → weft instance release 14                     # clean shutdown
+```
+
+When an instance enters the grace period after a failure, the watch output
+shows remaining time and suggested commands for resubmission or release.
+
 ### Designed for unreliable networks
 
 Laptops move between Wi-Fi networks, VPNs flap, and SSH servers occasionally
@@ -220,9 +244,25 @@ weft run --after 42 deepthought 'python eval.py'
 # Run cleanup job after another completes (success or failure)
 weft run --after-any 42 deepthought 'python cleanup.py'
 
+# Artifact-based dependencies (file-path deps instead of job-ID deps)
+# Job 100: training — declares it will produce a checkpoint
+weft run --produces output/model.pt -m "Fine-tune Llama-3 8B" 'python train.py'
+
+# Job 101: eval — depends on job 100's checkpoint
+weft run --needs output/model.pt:100 -m "Eval on MMLU" 'python eval.py'
+
+# Job 100 fails. Retry as job 102, replacing version 100:
+weft run --produces output/model.pt:100 -m "Fine-tune (retry)" 'python train.py --resume'
+# Job 101 automatically picks up job 102's output — no re-editing needed
+
 # Kill a job
 weft run deepthought --kill 42
 ```
+
+The `--produces`/`--needs` flags let you build multi-step pipelines without
+hard-coding job IDs into downstream commands. When a producer fails and you
+retry it with a version suffix (`:100`), all consumers keyed to that version
+pick up the replacement automatically.
 
 ### weft artifact
 
@@ -272,6 +312,24 @@ weft artifact cat 2073 selectivity_results | jq '.metric'
 # Resolve latest job by tag
 weft artifact get --tag exp-012 --latest selectivity_results -o ./results.json
 ```
+
+#### Automatic output collection
+
+Jobs automatically track files written to `output/` or `outputs/` in the
+working directory. On successful completion, the runner records discovered files
+in the completion record and auto-syncs small outputs (< 100 MB) back to the
+coordinator.
+
+Customize output directories and the auto-sync threshold in `.weft.yaml`:
+
+```yaml
+outputs:
+  dirs: ["results/"]         # Default: ["output/", "outputs/"]
+  max_auto_sync_mb: 200      # Default: 100
+```
+
+Use `weft artifact list <job-id>` to see discovered outputs and
+`weft artifact sync <job-id>` to pull them from the remote host on demand.
 
 The command:
 - Creates a job ID and adds it to the remote queue (or starts immediately with `-i`)
@@ -1444,4 +1502,6 @@ Notifications include:
 - [Architecture](docs/architecture.md) - Detailed technical architecture and design
 - [Coordinator Architecture](docs/coordinator-architecture.md) - Coordinator daemon design, placement scoring, and migration phases
 - [Comparison to SLURM](docs/comparison-to-slurm.md) - How weft compares to HPC workload managers
+- [Debugging](docs/debugging.md) - Remote log locations, queue state files, and process inspection
+- [Agent Deployment](docs/agent-deployment.md) - Cross-compiling and deploying the Go agent to remote hosts
 - [Ideas](docs/IDEAS.md) - Future feature ideas and enhancements
