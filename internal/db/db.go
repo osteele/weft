@@ -536,13 +536,6 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: rename old campaigns table to cloud_instances
-	// The old campaigns table stored individual cloud instances (not batches).
-	// We drop it and recreate with the correct schema.
-	if _, err := db.Exec(`DROP TABLE IF EXISTS campaigns`); err != nil {
-		return err
-	}
-
 	// Create campaigns table (batch of cloud instances)
 	campaignsBatchSchema := `
 	CREATE TABLE IF NOT EXISTS campaigns (
