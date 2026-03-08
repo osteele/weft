@@ -415,7 +415,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	defer cancel()
 
 	updated := 0
-	completedJobIDs, err := r2Client.ListCompleted(ctx, "jobs/")
+	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
 		if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: R2 list: %v\n", err)
@@ -429,7 +429,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		activeJobIDs[fmt.Sprintf("%d", j.ID)] = true
 	}
 
-	for _, jobIDStr := range completedJobIDs {
+	for _, jobIDStr := range markers.Completed {
 		if !activeJobIDs[jobIDStr] {
 			continue
 		}
@@ -448,7 +448,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		exitCode, endTimeUnix := parseCloudJobResult(tmpDir, jobIDStr)
+		exitCode, startTimeUnix, endTimeUnix := parseCloudJobResult(tmpDir, jobIDStr)
 		if exitCode == nil {
 			os.RemoveAll(tmpDir)
 			continue
@@ -459,9 +459,16 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			status = db.StatusFailed
 		}
 
+		// If no start_time from completion record, try reading .started marker from R2
+		if startTimeUnix == 0 {
+			if data, err := r2Client.GetObject(ctx, fmt.Sprintf("jobs/%d/.started", jobID)); err == nil {
+				startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+			}
+		}
+
 		if _, err := database.Exec(
-			`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
-			status, *exitCode, endTimeUnix, status, jobID,
+			`UPDATE jobs SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
+			status, *exitCode, startTimeUnix, endTimeUnix, status, jobID,
 		); err != nil {
 			log.Printf("sync: failed to update cloud job %d status: %v", jobID, err)
 			continue
@@ -484,6 +491,40 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		os.RemoveAll(tmpDir)
 	}
 
+	// Check for .started markers to transition queued jobs to running
+	for _, jobIDStr := range markers.Started {
+		if !activeJobIDs[jobIDStr] {
+			continue
+		}
+		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
+
+		// Only update jobs still in queued status
+		var currentStatus string
+		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ?", jobID).Scan(&currentStatus); err != nil {
+			continue
+		}
+		if currentStatus != db.StatusQueued {
+			continue
+		}
+
+		var startTimeUnix int64
+		if data, err := r2Client.GetObject(ctx, fmt.Sprintf("jobs/%d/.started", jobID)); err == nil {
+			startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		}
+
+		if _, err := database.Exec(
+			`UPDATE jobs SET status = ?, start_time = ? WHERE id = ?`,
+			db.StatusRunning, startTimeUnix, jobID,
+		); err != nil {
+			log.Printf("sync: failed to update cloud job %d to running: %v", jobID, err)
+			continue
+		}
+		updated++
+		if verbose {
+			fmt.Printf("  cloud job %d: started\n", jobID)
+		}
+	}
+
 	return updated
 }
 
@@ -496,18 +537,19 @@ func r2Config(cfg *config.Config) r2.Config {
 	}
 }
 
-// parseCloudJobResult reads the exit code and end time from a downloaded R2 results directory.
+// parseCloudJobResult reads the exit code, start time, and end time from a downloaded R2 results directory.
 // Returns nil exitCode if no valid result was found.
-func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, endTimeUnix int64) {
+func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix, endTimeUnix int64) {
 	// Try completion JSON (agent format: <jobID>.completion.json)
 	completionPath := filepath.Join(tmpDir, jobIDStr+".completion.json")
 	if data, err := os.ReadFile(completionPath); err == nil {
 		var rec struct {
-			ExitCode int   `json:"exit_code"`
-			EndTime  int64 `json:"end_time"`
+			ExitCode  int   `json:"exit_code"`
+			StartTime int64 `json:"start_time"`
+			EndTime   int64 `json:"end_time"`
 		}
 		if json.Unmarshal(data, &rec) == nil {
-			return &rec.ExitCode, rec.EndTime
+			return &rec.ExitCode, rec.StartTime, rec.EndTime
 		}
 	}
 
@@ -516,7 +558,7 @@ func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, endTimeUnix in
 	if data, err := os.ReadFile(statusPath); err == nil {
 		var code int
 		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &code); err == nil {
-			return &code, 0
+			return &code, 0, 0
 		}
 	}
 
@@ -526,11 +568,11 @@ func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, endTimeUnix in
 		if err == nil {
 			endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
 			et, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
-			return &code, et
+			return &code, 0, et
 		}
 	}
 
-	return nil, 0
+	return nil, 0, 0
 }
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated

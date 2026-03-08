@@ -167,7 +167,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 
 	// Cloud jobs: fetch log from R2 instead of SSH
-	if job.CloudInstanceID != nil && *job.CloudInstanceID > 0 && job.Host == "" {
+	if job.CloudInstanceID != nil && *job.CloudInstanceID > 0 {
 		return runLogForCloudJob(cmd, job)
 	}
 
@@ -297,6 +297,22 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 
 // runLogForCloudJob fetches log output from R2 for a cloud-based job.
 func runLogForCloudJob(cmd *cobra.Command, job *db.Job) error {
+	// For terminal jobs, prefer local cache first.
+	if shouldPreferCachedLog(job.Status) {
+		if cached, err := logcache.Read(job.ID); err == nil {
+			isComplete := logcache.IsComplete(job.ID)
+			isDefaultTailView := !logFull && logFrom == 0 && logTo == 0 && !cmd.Flags().Changed("lines") && !cmd.Flags().Changed("tail")
+			if isComplete || isDefaultTailView {
+				if shouldShowDefaultTailHint(cmd, false) {
+					printDefaultTailHint(job.ID)
+				}
+				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
+				fmt.Print(processCarriageReturns(output))
+				return nil
+			}
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)

@@ -94,6 +94,9 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 			maxTimeFlag = " --max-time=${REMAINING}s"
 		}
 
+		// Write .started marker with timestamp to R2 (background, don't block job start)
+		b.WriteString("echo \"$(date +%s)\" | rclone rcat \"r2:$R2_BUCKET/jobs/$JOB_ID/.started\" &\n")
+
 		b.WriteString(fmt.Sprintf("echo '%s' | weft-agent run-job --job-id=$JOB_ID --log-dir=$LOG_DIR%s%s\n", jobJSON, workingDirFlag, maxTimeFlag))
 
 		// Capture exit code for grace period tracking

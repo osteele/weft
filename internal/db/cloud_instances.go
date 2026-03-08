@@ -200,9 +200,15 @@ func SetCloudInstanceSeedCopySecs(db *sql.DB, id int64, secs int) error {
 	return err
 }
 
+// CloudInstanceHost returns the synthetic host name for a cloud instance.
+func CloudInstanceHost(instanceID int64) string {
+	return fmt.Sprintf("vastai:%d", instanceID)
+}
+
 // SetJobCloudInstanceID associates a job with a cloud instance and records the attempt.
+// Also sets the job's host to "vastai:<instanceID>" so cloud jobs are visible in host-based views.
 func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
-	_, err := db.Exec(`UPDATE jobs SET cloud_instance_id = ? WHERE id = ?`, instanceID, jobID)
+	_, err := db.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ? WHERE id = ?`, instanceID, CloudInstanceHost(instanceID), jobID)
 	if err != nil {
 		return err
 	}
@@ -255,7 +261,7 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	}
 
 	result, err := database.Exec(
-		`UPDATE jobs SET status = ?, cloud_instance_id = NULL
+		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = ''
 		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?) AND tombstoned = 0`,
 		StatusNeedsRental, instanceID, StatusCompleted, StatusFailed,
 	)

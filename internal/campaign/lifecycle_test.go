@@ -19,6 +19,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 	schema := `
 	CREATE TABLE jobs (
 		id INTEGER PRIMARY KEY,
+		host TEXT NOT NULL DEFAULT '',
 		status TEXT,
 		gpu_class TEXT,
 		gpu_mem_gb INTEGER,

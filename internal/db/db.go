@@ -2094,7 +2094,7 @@ func FilterJobsByHosts(jobs []*Job, hosts []string) []*Job {
 	}
 	filtered := make([]*Job, 0, len(jobs))
 	for _, job := range jobs {
-		if _, ok := hostSet[job.Host]; ok {
+		if _, ok := hostSet[job.Host]; ok || job.CloudInstanceID != nil {
 			filtered = append(filtered, job)
 		}
 	}
@@ -2285,7 +2285,7 @@ func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, 
 	}
 	if maxAgeDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
-		query += ` AND start_time > ?`
+		query += ` AND (start_time > ? OR start_time IS NULL OR start_time = 0)`
 		args = append(args, cutoff)
 	}
 
@@ -2326,10 +2326,10 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 		placeholders = append(placeholders, "?")
 		args = append(args, host)
 	}
-	query += fmt.Sprintf(` AND host IN (%s)`, strings.Join(placeholders, ", "))
+	query += fmt.Sprintf(` AND (host IN (%s) OR cloud_instance_id IS NOT NULL)`, strings.Join(placeholders, ", "))
 	if maxAgeDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
-		query += ` AND start_time > ?`
+		query += ` AND (start_time > ? OR start_time IS NULL OR start_time = 0)`
 		args = append(args, cutoff)
 	}
 

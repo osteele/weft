@@ -158,6 +158,9 @@ func graceWait(args []string) {
 		for _, job := range payload.Jobs {
 			fmt.Printf("Running resubmitted job %d: %s\n", job.ID, job.Command)
 
+			// Write .started marker to R2
+			r2Put(r2Bucket, fmt.Sprintf("jobs/%d/.started", job.ID), fmt.Sprintf("%d", time.Now().Unix()))
+
 			workDir := job.Dir
 			if workDir == "" {
 				workDir = workspace

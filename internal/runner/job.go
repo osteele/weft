@@ -332,6 +332,7 @@ type CompletionRecord struct {
 	FailureReason    string           `json:"failure_reason,omitempty"`
 	LastHeartbeat    int64            `json:"last_heartbeat,omitempty"`
 	LastSample       int64            `json:"last_sample,omitempty"`
+	StartTime        int64            `json:"start_time,omitempty"`
 	EndTime          int64            `json:"end_time"`
 	OutputFiles      []OutputFile     `json:"output_files,omitempty"`
 }
@@ -354,6 +355,7 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 		FailureReason:    failureReason,
 		LastHeartbeat:    rs.LastHeartbeat,
 		LastSample:       rs.LastSample,
+		StartTime:        startTime,
 		EndTime:          endTime,
 		OutputFiles:      outputFiles,
 	}

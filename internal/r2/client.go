@@ -54,15 +54,20 @@ func New(cfg Config) (*Client, error) {
 	return &Client{s3: s3Client, bucket: cfg.Bucket, endpoint: endpoint}, nil
 }
 
-// ListCompleted returns job IDs that have a .complete marker under the given prefix.
-// It lists objects under prefix/jobs/ and looks for .complete files.
-func (c *Client) ListCompleted(ctx context.Context, prefix string) ([]string, error) {
+// JobMarkers holds the results of a single-pass scan for job marker files.
+type JobMarkers struct {
+	Completed []string // Job IDs with .complete markers
+	Started   []string // Job IDs with .started markers
+}
+
+// ListJobMarkers scans for both .complete and .started markers in a single pass.
+func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers, error) {
 	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(c.bucket),
 		Prefix: aws.String(prefix),
 	}
 
-	var jobIDs []string
+	result := &JobMarkers{}
 	paginator := s3.NewListObjectsV2Paginator(c.s3, input)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -71,20 +76,36 @@ func (c *Client) ListCompleted(ctx context.Context, prefix string) ([]string, er
 		}
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
-			if strings.HasSuffix(key, "/.complete") {
-				// Extract job ID: prefix/jobs/<job-id>/.complete
-				parts := strings.Split(key, "/")
-				for i, p := range parts {
-					if p == "jobs" && i+1 < len(parts) {
-						jobIDs = append(jobIDs, parts[i+1])
-						break
-					}
+			var target *[]string
+			switch {
+			case strings.HasSuffix(key, "/.complete"):
+				target = &result.Completed
+			case strings.HasSuffix(key, "/.started"):
+				target = &result.Started
+			default:
+				continue
+			}
+			// Extract job ID: prefix/jobs/<job-id>/<marker>
+			parts := strings.Split(key, "/")
+			for i, p := range parts {
+				if p == "jobs" && i+1 < len(parts) {
+					*target = append(*target, parts[i+1])
+					break
 				}
 			}
 		}
 	}
 
-	return jobIDs, nil
+	return result, nil
+}
+
+// ListCompleted returns job IDs that have a .complete marker under the given prefix.
+func (c *Client) ListCompleted(ctx context.Context, prefix string) ([]string, error) {
+	markers, err := c.ListJobMarkers(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	return markers.Completed, nil
 }
 
 // DownloadResults downloads all files under prefix to a local directory.
