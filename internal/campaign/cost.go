@@ -30,7 +30,7 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 
 // EstimateCosts computes per-group cost estimates using the predictor for duration.
 // If predCfg is nil or not configured, falls back to 1hr/job estimates.
-func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgress EstimateProgressFunc) []CostEstimate {
+func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Prefetch all unique model sizes in parallel to avoid sequential HF API calls
@@ -74,10 +74,16 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgre
 			continue
 		}
 
-		// Startup phase
-		startup := estimate.EstimateStartup(string(go_.Offer.Provider))
+		ctx := estimate.InstanceContext{
+			DataCenter:   go_.Offer.DataCenter,
+			DLPerf:       go_.Offer.DLPerf,
+			InetDownMbps: go_.Offer.DownloadBandwidth,
+			InetUpMbps:   go_.Offer.UploadBandwidth,
+		}
 
-		// Provision phase: workdir sync + model download
+		startup := estimate.EstimateStartupWithModel(string(go_.Offer.Provider), overheadModel, ctx)
+		sshSetup := estimate.EstimateSSHSetup(overheadModel, ctx)
+
 		var downloadBytes int64
 		if totalBytes, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil); err != nil {
 			log.Printf("warning: could not resolve input sizes: %v", err)
@@ -91,7 +97,8 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgre
 			BandwidthBytesPerSec: bytesPerSec,
 		})
 
-		// Run phase: look up batch predictions, then sum per-job estimates
+		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
+
 		hasPrediction := false
 		var runEst estimate.Estimate
 		for _, job := range go_.Group.Jobs {
@@ -108,19 +115,24 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, onProgre
 			}
 		}
 
-		// Build breakdown
-		total := startup.Add(provision).Add(runEst)
+		upload := estimate.EstimateUpload(overheadModel, ctx)
+
+		total := startup.Add(sshSetup).Add(provision).Add(jobSetup).Add(runEst).Add(upload)
 		bd := estimate.Breakdown{
-			Startup:          startup,
-			Provision:        provision,
-			Run:              runEst,
-			Total:            total,
-			HasRunPrediction: hasPrediction,
+			Startup:               startup,
+			SSHSetup:              sshSetup,
+			JobSetup:              jobSetup,
+			Provision:             provision,
+			Run:                   runEst,
+			Upload:                upload,
+			Total:                 total,
+			HasRunPrediction:      hasPrediction,
+			HasOverheadPrediction: overheadModel != nil,
 		}
 
 		est.Breakdown = bd
 		est.HasPrediction = hasPrediction
-		est.SetupOverhead = startup.Mean + provision.Mean
+		est.SetupOverhead = startup.Mean + sshSetup.Mean + provision.Mean + jobSetup.Mean
 		est.DownloadBytes = downloadBytes
 		est.DownloadTime = estimate.TransferTime(downloadBytes, bytesPerSec).Mean
 		est.TotalTime = total.Mean

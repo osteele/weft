@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/spf13/cobra"
 )
 
@@ -194,7 +195,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Dry run: print plan table
 	if campaignLaunchDryRun {
-		return runDryRunPlan(cfg, groups)
+		return runDryRunPlan(database, cfg, groups)
 	}
 
 	// Check R2 config before entering interactive mode
@@ -250,7 +251,8 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groups))
 
 	predCfg := buildPredictorConfig(cfg)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg, nil)
+	overheadModel := buildOverheadModel(database)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Auto-derive budget limits from estimates if not set by CLI
@@ -314,12 +316,13 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	return nil
 }
 
-func runDryRunPlan(cfg *config.Config, groups []campaign.InstanceGroup) error {
+func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup) error {
 	clients := buildCloudClients(cfg)
 	groupOffers := campaign.FetchGroupOffers(clients, groups)
 
 	predCfg := buildPredictorConfig(cfg)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg, nil)
+	overheadModel := buildOverheadModel(database)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")
@@ -543,6 +546,17 @@ func reconcileBeforeDisplay(database *sql.DB) {
 	if err := campaign.ReconcileCampaigns(database); err != nil {
 		log.Printf("reconcile campaigns: %v", err)
 	}
+}
+
+// buildOverheadModel queries historical cloud instance data and builds a
+// Bayesian overhead model. Returns nil if no data or on error.
+func buildOverheadModel(database *sql.DB) *estimate.OverheadModel {
+	obs, err := db.QueryOverheadObservations(database)
+	if err != nil {
+		log.Printf("warning: could not query overhead observations: %v", err)
+		return nil
+	}
+	return estimate.BuildOverheadModel(obs)
 }
 
 // printAutoBudget prints the auto-derived budget limits.

@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
 )
 
@@ -39,6 +40,7 @@ type launchModel struct {
 	groupOffers   []campaign.GroupOffer
 	costEstimates []campaign.CostEstimate
 	predConfig    *predictor.Config
+	overheadModel *estimate.OverheadModel
 
 	items    []listItem
 	cursor   int
@@ -123,18 +125,19 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 	s.Spinner = spinner.Dot
 
 	return launchModel{
-		groups:     groups,
-		items:      items,
-		cursor:     cursor,
-		selected:   selected,
-		loading:    true,
-		database:   database,
-		clients:    clients,
-		appConfig:  cfg,
-		launchOpts: opts,
-		predConfig: predCfg,
-		progressCh: make(chan estimateProgressMsg, 1),
-		spinner:    s,
+		groups:        groups,
+		items:         items,
+		cursor:        cursor,
+		selected:      selected,
+		loading:       true,
+		database:      database,
+		clients:       clients,
+		appConfig:     cfg,
+		launchOpts:    opts,
+		predConfig:    predCfg,
+		overheadModel: buildOverheadModel(database),
+		progressCh:    make(chan estimateProgressMsg, 1),
+		spinner:       s,
 	}
 }
 
@@ -169,7 +172,7 @@ func (m launchModel) fetchEstimates() tea.Cmd {
 			default:
 			}
 		}
-		estimates := campaign.EstimateCosts(groupOffers, predConfig, onProgress)
+		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, onProgress)
 		return estimatesLoadedMsg{estimates: estimates}
 	}
 }

@@ -15,11 +15,16 @@ type Estimate struct {
 // Breakdown holds estimates for each phase of a cloud job lifecycle.
 type Breakdown struct {
 	Startup   Estimate
+	SSHSetup  Estimate
+	JobSetup  Estimate
 	Provision Estimate
 	Run       Estimate
+	Upload    Estimate
 	Total     Estimate
 	// HasRunPrediction is true when Run came from the ML predictor rather than a fallback.
 	HasRunPrediction bool
+	// HasOverheadPrediction is true when overhead phases used historical data.
+	HasOverheadPrediction bool
 }
 
 // Constant returns an Estimate with no uncertainty.
