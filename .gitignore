@@ -2,7 +2,7 @@
 weft
 
 # Build output
-agent
+/agent
 dist/
 internal/agentdeploy/binaries/weft-agent-*
 

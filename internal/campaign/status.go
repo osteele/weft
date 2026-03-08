@@ -109,6 +109,30 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 			line += fmt.Sprintf(" ssh=\"%s\"", FormatSSHCommand(curr.Instance))
 		}
 		lines = append(lines, line)
+
+		// Show grace period help when entering grace status
+		if curr.CloudInstance.Status == db.CloudInstanceStatusGrace {
+			if curr.CloudInstance.GraceDeadline != nil {
+				deadline := time.Unix(*curr.CloudInstance.GraceDeadline, 0)
+				remaining := time.Until(deadline).Truncate(time.Second)
+				lines = append(lines, fmt.Sprintf("instance %d: grace period — %s remaining (until %s)",
+					id, remaining, deadline.Format("15:04")))
+			}
+			// Show actionable commands for failed jobs
+			for _, j := range curr.Jobs {
+				if j.Status == db.StatusFailed {
+					lines = append(lines, "")
+					lines = append(lines, fmt.Sprintf("  To resubmit job %d with updated sources:", j.ID))
+					lines = append(lines, fmt.Sprintf("    weft instance submit %d %d", id, j.ID))
+					lines = append(lines, "  To resubmit with a modified command:")
+					lines = append(lines, fmt.Sprintf("    weft instance submit %d %d --command '...'", id, j.ID))
+				}
+			}
+			lines = append(lines, "  To extend the grace period:")
+			lines = append(lines, fmt.Sprintf("    weft instance extend %d 15m", id))
+			lines = append(lines, "  To release the instance:")
+			lines = append(lines, fmt.Sprintf("    weft instance release %d", id))
+		}
 	}
 
 	// Report job status changes
@@ -130,6 +154,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 }
 
 // IsInstanceTerminal returns true if the instance status is a terminal state.
+// Note: "grace" is NOT terminal — the instance is still alive waiting for resubmission.
 func IsInstanceTerminal(status string) bool {
 	return status == db.CloudInstanceStatusCompleted ||
 		status == db.CloudInstanceStatusFailed ||

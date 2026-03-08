@@ -91,15 +91,16 @@ var campaignShowCmd = &cobra.Command{
 }
 
 var (
-	campaignLaunchMaxSpend string
-	campaignLaunchMaxTime  string
-	campaignLaunchDryRun   bool
-	campaignLaunchNoWatch  bool
-	campaignLaunchNoDonor  bool
-	campaignLaunchYes      bool
-	campaignLaunchJobs     string
-	campaignLaunchGPU      string
-	campaignWatchTUI       bool
+	campaignLaunchMaxSpend    string
+	campaignLaunchMaxTime     string
+	campaignLaunchGracePeriod string
+	campaignLaunchDryRun      bool
+	campaignLaunchNoWatch     bool
+	campaignLaunchNoDonor     bool
+	campaignLaunchYes         bool
+	campaignLaunchJobs        string
+	campaignLaunchGPU         string
+	campaignWatchTUI          bool
 )
 
 func init() {
@@ -118,6 +119,7 @@ func init() {
 	campaignLaunchCmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all needs_rental jobs)")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
+	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "15m", "Keep instance alive after job failure (e.g., '15m', '1h'; '0' to disable)")
 
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Use interactive TUI display")
 	campaignWatchCmd.Flags().Bool("plain", false, "Plain text output (default; accepted for clarity)")
@@ -540,6 +542,11 @@ func parseLaunchOpts() campaign.LaunchOpts {
 	if campaignLaunchMaxTime != "" {
 		if d, err := time.ParseDuration(campaignLaunchMaxTime); err == nil {
 			opts.MaxTimeSeconds = int(d.Seconds())
+		}
+	}
+	if campaignLaunchGracePeriod != "" && campaignLaunchGracePeriod != "0" {
+		if d, err := time.ParseDuration(campaignLaunchGracePeriod); err == nil {
+			opts.GracePeriodSeconds = int(d.Seconds())
 		}
 	}
 	return opts

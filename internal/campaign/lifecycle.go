@@ -28,9 +28,10 @@ const (
 
 // LaunchOpts configures an instance launch.
 type LaunchOpts struct {
-	MaxSpendCents  int
-	MaxTimeSeconds int
-	NoDonor        bool // skip donor instance strategy
+	MaxSpendCents      int
+	MaxTimeSeconds     int
+	NoDonor            bool // skip donor instance strategy
+	GracePeriodSeconds int  // grace period after job failure (0 = disabled)
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -577,10 +578,16 @@ func LaunchInstance(
 		}
 	}
 
+	// Store grace period in DB if configured
+	if opts.GracePeriodSeconds > 0 {
+		_ = db.SetCloudInstanceGracePeriod(database, instanceID, opts.GracePeriodSeconds)
+	}
+
 	// Generate wrapper script (needs providerInstID for self-destruct)
 	wrapperOpts := cloud.WrapperOpts{
-		MaxTimeSeconds: opts.MaxTimeSeconds,
-		DBInstanceID:   instanceID,
+		MaxTimeSeconds:     opts.MaxTimeSeconds,
+		DBInstanceID:       instanceID,
+		GracePeriodSeconds: opts.GracePeriodSeconds,
 	}
 	// HF_TOKEN is already set via env vars on the instance, so the wrapper
 	// doesn't need to export it again — the env is inherited by all processes.

@@ -110,6 +110,59 @@ func TestGenerateAgentWrapper_MaxTime(t *testing.T) {
 	}
 }
 
+func TestGenerateAgentWrapper_GracePeriod(t *testing.T) {
+	client := &MockClient{
+		WorkspacePathVal:   "/workspace/",
+		SelfDestructCmdVal: `vastai destroy instance "123"`,
+	}
+
+	jobs := []AgentJob{{ID: 42, Command: "python train.py"}}
+	wrapper := GenerateAgentWrapper(client, jobs, "bucket", "123", WrapperOpts{
+		GracePeriodSeconds: 900,
+		DBInstanceID:       7,
+	})
+
+	if !strings.Contains(wrapper, "GRACE_SECONDS=900") {
+		t.Error("wrapper should set GRACE_SECONDS")
+	}
+	if !strings.Contains(wrapper, "ANY_FAILED=0") {
+		t.Error("wrapper should initialize ANY_FAILED")
+	}
+	if !strings.Contains(wrapper, "JOB_EXIT=$?") {
+		t.Error("wrapper should capture job exit code")
+	}
+	if !strings.Contains(wrapper, "if [ $JOB_EXIT -ne 0 ]; then ANY_FAILED=1; fi") {
+		t.Error("wrapper should track failed jobs")
+	}
+	if !strings.Contains(wrapper, "weft-agent grace-wait") {
+		t.Error("wrapper should invoke grace-wait on failure")
+	}
+	if !strings.Contains(wrapper, "--timeout=${GRACE_SECONDS}s") {
+		t.Error("wrapper should pass grace timeout to agent")
+	}
+}
+
+func TestGenerateAgentWrapper_NoGracePeriod(t *testing.T) {
+	client := &MockClient{
+		WorkspacePathVal:   "/workspace/",
+		SelfDestructCmdVal: "true",
+	}
+
+	jobs := []AgentJob{{ID: 1, Command: "echo hi"}}
+	wrapper := GenerateAgentWrapper(client, jobs, "bucket", "123", WrapperOpts{})
+
+	if strings.Contains(wrapper, "GRACE_SECONDS") {
+		t.Error("wrapper should not set GRACE_SECONDS when grace period is 0")
+	}
+	if strings.Contains(wrapper, "grace-wait") {
+		t.Error("wrapper should not invoke grace-wait when grace period is 0")
+	}
+	// Should still track exit codes (always present)
+	if !strings.Contains(wrapper, "ANY_FAILED=0") {
+		t.Error("wrapper should always initialize ANY_FAILED")
+	}
+}
+
 func TestGenerateAgentWrapper_R2Upload(t *testing.T) {
 	client := &MockClient{
 		WorkspacePathVal:   "/workspace/",

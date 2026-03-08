@@ -46,6 +46,12 @@ func main() {
 		return
 	}
 
+	// Handle grace-wait subcommand
+	if len(os.Args) > 1 && os.Args[1] == "grace-wait" {
+		graceWait(os.Args[2:])
+		return
+	}
+
 	// Handle batch-status subcommand
 	if len(os.Args) > 1 && os.Args[1] == "batch-status" {
 		queueName, jobIDs := parseBatchStatusArgs(os.Args[2:])

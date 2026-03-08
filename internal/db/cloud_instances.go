@@ -13,13 +13,15 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		inet_down_mbps, inet_up_mbps, cuda_version,
 		provider_instance_id, data_center,
-		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs`
+		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs,
+		grace_period_seconds, grace_started_at, grace_deadline`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
 	CloudInstanceStatusPlanned   = "planned"
 	CloudInstanceStatusLaunching = "launching"
 	CloudInstanceStatusRunning   = "running"
+	CloudInstanceStatusGrace     = "grace"
 	CloudInstanceStatusCompleted = "completed"
 	CloudInstanceStatusFailed    = "failed"
 	CloudInstanceStatusCancelled = "cancelled"
@@ -48,6 +50,11 @@ type CloudInstance struct {
 	DonorInstanceID    *int64 // DB ID of the donor instance that seeded this worker
 	SeedDownloadSecs   *int   // on donor: total download duration (HF + uv)
 	SeedCopySecs       *int   // on worker: copy-from-donor duration
+
+	// Grace period (failure-tolerant rental sessions)
+	GracePeriodSeconds int    // configured grace period duration (0 = disabled)
+	GraceStartedAt     *int64 // when the grace period started
+	GraceDeadline      *int64 // when the grace period expires
 
 	// Offer metadata (captured at launch)
 	ResolvedGPUName  string
@@ -316,6 +323,8 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var instanceRole sql.NullString
 	var donorInstanceID sql.NullInt64
 	var seedDownloadSecs, seedCopySecs sql.NullInt64
+	var gracePeriodSeconds sql.NullInt64
+	var graceStartedAt, graceDeadline sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -325,6 +334,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&inetDown, &inetUp, &cudaVersion,
 		&providerInstanceID, &dataCenter,
 		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs,
+		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
 	)
 	if err != nil {
 		return nil, err
@@ -406,6 +416,15 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	if seedCopySecs.Valid {
 		v := int(seedCopySecs.Int64)
 		c.SeedCopySecs = &v
+	}
+	if gracePeriodSeconds.Valid {
+		c.GracePeriodSeconds = int(gracePeriodSeconds.Int64)
+	}
+	if graceStartedAt.Valid {
+		c.GraceStartedAt = &graceStartedAt.Int64
+	}
+	if graceDeadline.Valid {
+		c.GraceDeadline = &graceDeadline.Int64
 	}
 	return &c, nil
 }
@@ -490,11 +509,33 @@ func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, erro
 	return attempts, rows.Err()
 }
 
-// ListRunningCloudInstances returns all cloud instances with "running" or "launching" status.
+// SetCloudInstanceGracePeriod stores the configured grace period for a cloud instance.
+func SetCloudInstanceGracePeriod(db *sql.DB, id int64, seconds int) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET grace_period_seconds = ? WHERE id = ?`, seconds, id)
+	return err
+}
+
+// SetCloudInstanceGraceStarted transitions an instance to grace status with a deadline.
+func SetCloudInstanceGraceStarted(db *sql.DB, id int64, deadline int64) error {
+	now := time.Now().Unix()
+	_, err := db.Exec(
+		`UPDATE cloud_instances SET status = ?, grace_started_at = ?, grace_deadline = ? WHERE id = ?`,
+		CloudInstanceStatusGrace, now, deadline, id,
+	)
+	return err
+}
+
+// ExtendCloudInstanceGrace updates the grace deadline for an instance.
+func ExtendCloudInstanceGrace(db *sql.DB, id int64, newDeadline int64) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET grace_deadline = ? WHERE id = ?`, newDeadline, id)
+	return err
+}
+
+// ListRunningCloudInstances returns all cloud instances with "running", "launching", or "grace" status.
 func ListRunningCloudInstances(database *sql.DB) ([]*CloudInstance, error) {
 	rows, err := database.Query(
-		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE status IN (?, ?) ORDER BY created_at DESC`,
-		CloudInstanceStatusRunning, CloudInstanceStatusLaunching,
+		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE status IN (?, ?, ?) ORDER BY created_at DESC`,
+		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace,
 	)
 	if err != nil {
 		return nil, err

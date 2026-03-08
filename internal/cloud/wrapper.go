@@ -17,9 +17,10 @@ type AgentJob struct {
 
 // WrapperOpts configures optional aspects of the generated wrapper script.
 type WrapperOpts struct {
-	EnvVars        map[string]string // Extra environment variables to export
-	MaxTimeSeconds int               // Instance time budget; remaining time is passed per-job as --max-time
-	DBInstanceID   int64             // DB instance ID for R2 completion marker (campaigns/<id>/.complete)
+	EnvVars            map[string]string // Extra environment variables to export
+	MaxTimeSeconds     int               // Instance time budget; remaining time is passed per-job as --max-time
+	DBInstanceID       int64             // DB instance ID for R2 completion marker (campaigns/<id>/.complete)
+	GracePeriodSeconds int               // Grace period after job failure (0 = disabled, self-destruct immediately)
 }
 
 // GenerateAgentWrapper produces a thin bash script that delegates job execution
@@ -53,6 +54,12 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 		b.WriteString(fmt.Sprintf("MAX_SECONDS=%d\n", opts.MaxTimeSeconds))
 	}
 	b.WriteString("\n")
+
+	// Track failed jobs for grace period
+	if opts.GracePeriodSeconds > 0 {
+		b.WriteString(fmt.Sprintf("GRACE_SECONDS=%d\n", opts.GracePeriodSeconds))
+	}
+	b.WriteString("ANY_FAILED=0\n\n")
 
 	// Wrap jobs in a function so we can 'return' to skip remaining jobs on timeout
 	b.WriteString("run_jobs() {\n")
@@ -88,6 +95,10 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 		}
 
 		b.WriteString(fmt.Sprintf("echo '%s' | weft-agent run-job --job-id=$JOB_ID --log-dir=$LOG_DIR%s%s\n", jobJSON, workingDirFlag, maxTimeFlag))
+
+		// Capture exit code for grace period tracking
+		b.WriteString("JOB_EXIT=$?\n")
+		b.WriteString("if [ $JOB_EXIT -ne 0 ]; then ANY_FAILED=1; fi\n")
 		b.WriteString("\n")
 
 		// Upload per-job results
@@ -108,6 +119,18 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 	}
 
 	b.WriteString("}\nrun_jobs\n\n")
+
+	// Grace period: if any job failed and grace is configured, enter grace-wait
+	if opts.GracePeriodSeconds > 0 {
+		selfDestructCmd := client.SelfDestructCmd(providerInstanceID)
+		b.WriteString("# Grace period: keep instance alive after failure for fix-and-resubmit\n")
+		b.WriteString("if [ $ANY_FAILED -eq 1 ] && [ ${GRACE_SECONDS:-0} -gt 0 ]; then\n")
+		b.WriteString("  echo \"Jobs failed. Entering grace period (${GRACE_SECONDS}s).\"\n")
+		b.WriteString(fmt.Sprintf("  weft-agent grace-wait --instance-id=$INSTANCE_ID --r2-bucket=$R2_BUCKET --timeout=${GRACE_SECONDS}s --self-destruct-cmd=%q --log-dir=$LOG_DIR --workspace=%s\n",
+			selfDestructCmd, client.WorkspacePath()))
+		b.WriteString("  exit 0\n")
+		b.WriteString("fi\n\n")
+	}
 
 	// Instance completion marker + self-destruct (always runs, even after timeout)
 	b.WriteString("# Instance completion marker + self-destruct\n")

@@ -3,10 +3,12 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"text/tabwriter"
@@ -14,7 +16,11 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
+	weftsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -54,6 +60,33 @@ via SSH. Use --print to print the SSH command instead of connecting.`,
 }
 
 var instanceSSHPrint bool
+var instanceSubmitCommand string
+
+var instanceSubmitCmd = &cobra.Command{
+	Use:   "submit <instance-id> <job-id>",
+	Short: "Resubmit a job to a cloud instance in grace period",
+	Long: `Re-syncs sources and resubmits a job to a cloud instance that is in
+grace period (waiting after job failure). Use --command to override the job command.`,
+	Args: cobra.ExactArgs(2),
+	RunE: runInstanceSubmit,
+}
+
+var instanceExtendCmd = &cobra.Command{
+	Use:   "extend <instance-id> [duration]",
+	Short: "Extend the grace period of a cloud instance",
+	Long:  `Extends the grace period deadline. Default extension is 15m.`,
+	Args:  cobra.RangeArgs(1, 2),
+	RunE:  runInstanceExtend,
+}
+
+var instanceReleaseCmd = &cobra.Command{
+	Use:   "release <instance-id>",
+	Short: "Release a cloud instance from grace period (clean self-destruct)",
+	Long: `Signals the instance to write completion markers and self-destruct.
+Unlike terminate, this does a clean shutdown with proper completion markers.`,
+	Args: cobra.ExactArgs(1),
+	RunE: runInstanceRelease,
+}
 
 func init() {
 	rootCmd.AddCommand(instanceCmd)
@@ -61,8 +94,49 @@ func init() {
 	instanceCmd.AddCommand(instanceStatusCmd)
 	instanceCmd.AddCommand(instanceTerminateCmd)
 	instanceCmd.AddCommand(instanceSSHCmd)
+	instanceCmd.AddCommand(instanceSubmitCmd)
+	instanceCmd.AddCommand(instanceExtendCmd)
+	instanceCmd.AddCommand(instanceReleaseCmd)
 
 	instanceSSHCmd.Flags().BoolVar(&instanceSSHPrint, "print", false, "Print the SSH command instead of connecting")
+	instanceSubmitCmd.Flags().StringVar(&instanceSubmitCommand, "command", "", "Override the job command")
+}
+
+// newR2ClientFromConfig loads config and creates an R2 client.
+func newR2ClientFromConfig() (*r2.Client, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	r2Cfg := cfg.Vastai.R2
+	if r2Cfg.Bucket == "" || r2Cfg.AccessKeyID == "" {
+		return nil, fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml")
+	}
+	client, err := r2.New(r2.Config{
+		AccountID:       r2Cfg.AccountID,
+		AccessKeyID:     r2Cfg.AccessKeyID,
+		SecretAccessKey: r2Cfg.SecretAccessKey,
+		Bucket:          r2Cfg.Bucket,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create R2 client: %w", err)
+	}
+	return client, nil
+}
+
+// getGraceInstance fetches a cloud instance and verifies it is in grace period.
+func getGraceInstance(database *sql.DB, instanceID int64) (*db.CloudInstance, error) {
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("get instance: %w", err)
+	}
+	if ci == nil {
+		return nil, fmt.Errorf("instance %d not found", instanceID)
+	}
+	if ci.Status != db.CloudInstanceStatusGrace {
+		return nil, fmt.Errorf("instance %d is not in grace period (status: %s)", instanceID, ci.Status)
+	}
+	return ci, nil
 }
 
 func runInstanceList(cmd *cobra.Command, args []string) error {
@@ -374,6 +448,170 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	}
 
 	return execSSH(inst)
+}
+
+func runInstanceSubmit(cmd *cobra.Command, args []string) error {
+	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
+	}
+	jobID, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid job ID %q: %w", args[1], err)
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if _, err := getGraceInstance(database, instanceID); err != nil {
+		return err
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get job: %w", err)
+	}
+	if job == nil {
+		return fmt.Errorf("job %d not found", jobID)
+	}
+
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		return err
+	}
+
+	// Upload fresh sources
+	sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+	fmt.Printf("Re-syncing sources from %s...\n", sourceDir)
+	ctx := context.Background()
+	sourceR2Key, err := weftsync.UploadSourceToR2(ctx, r2Client, sourceDir)
+	if err != nil {
+		return fmt.Errorf("upload source: %w", err)
+	}
+
+	// Determine the command
+	jobCmd := job.EffectiveCommand()
+	if instanceSubmitCommand != "" {
+		jobCmd = instanceSubmitCommand
+	}
+
+	// Write jobs.json to R2
+	type graceJob struct {
+		ID      int64  `json:"id"`
+		Command string `json:"cmd"`
+		Dir     string `json:"dir,omitempty"`
+	}
+	type gracePayload struct {
+		Jobs    []graceJob        `json:"jobs"`
+		Sources map[string]string `json:"sources"`
+	}
+
+	payload := gracePayload{
+		Jobs: []graceJob{{
+			ID:      jobID,
+			Command: jobCmd,
+		}},
+		Sources: map[string]string{
+			sourceDir: sourceR2Key,
+		},
+	}
+	payloadJSON, _ := json.Marshal(payload)
+
+	graceKey := fmt.Sprintf("grace/%d/jobs.json", instanceID)
+	if err := r2Client.PutObject(ctx, graceKey, strings.NewReader(string(payloadJSON)), "application/json"); err != nil {
+		return fmt.Errorf("write jobs.json to R2: %w", err)
+	}
+
+	if err := db.UpdateJobRunning(database, jobID); err != nil {
+		return fmt.Errorf("update job status: %w", err)
+	}
+
+	fmt.Printf("Job %d resubmitted to instance %d.\n", jobID, instanceID)
+	fmt.Println("Use 'weft campaign watch' or 'weft instance status' to monitor progress.")
+	return nil
+}
+
+func runInstanceExtend(cmd *cobra.Command, args []string) error {
+	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
+	}
+
+	duration := 15 * time.Minute
+	if len(args) > 1 {
+		d, err := time.ParseDuration(args[1])
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", args[1], err)
+		}
+		duration = d
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if _, err := getGraceInstance(database, instanceID); err != nil {
+		return err
+	}
+
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	extendKey := fmt.Sprintf("grace/%d/extend", instanceID)
+	if err := r2Client.PutObject(ctx, extendKey, strings.NewReader(duration.String()), "text/plain"); err != nil {
+		return fmt.Errorf("write extend signal: %w", err)
+	}
+
+	newDeadline := time.Now().Add(duration).Unix()
+	if err := db.ExtendCloudInstanceGrace(database, instanceID, newDeadline); err != nil {
+		return fmt.Errorf("update DB: %w", err)
+	}
+
+	fmt.Printf("Grace period for instance %d extended by %s.\n", instanceID, duration)
+	return nil
+}
+
+func runInstanceRelease(cmd *cobra.Command, args []string) error {
+	instanceID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid instance ID %q: %w", args[0], err)
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if _, err := getGraceInstance(database, instanceID); err != nil {
+		return err
+	}
+
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	releaseKey := fmt.Sprintf("grace/%d/release", instanceID)
+	if err := r2Client.PutObject(ctx, releaseKey, strings.NewReader("release"), "text/plain"); err != nil {
+		return fmt.Errorf("write release signal: %w", err)
+	}
+
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCompleted); err != nil {
+		return fmt.Errorf("update DB: %w", err)
+	}
+
+	fmt.Printf("Instance %d released. It will self-destruct shortly.\n", instanceID)
+	return nil
 }
 
 func execSSH(inst *cloud.Instance) error {

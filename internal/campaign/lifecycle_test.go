@@ -56,7 +56,10 @@ func setupTestDB(t *testing.T) *sql.DB {
 		instance_role TEXT DEFAULT 'worker',
 		donor_instance_id INTEGER,
 		seed_download_secs INTEGER,
-		seed_copy_secs INTEGER
+		seed_copy_secs INTEGER,
+		grace_period_seconds INTEGER,
+		grace_started_at INTEGER,
+		grace_deadline INTEGER
 	);
 	CREATE TABLE campaigns (
 		id INTEGER PRIMARY KEY,
