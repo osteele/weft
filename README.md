@@ -44,12 +44,14 @@ Remote Hosts (titan, atlas)
   hosts are reachable — your laptop can sleep, travel, or disconnect
 - **Graceful degradation**: When the coordinator is unreachable, the CLI falls
   back to local placement scoring and direct SSH dispatch
-- **Cloud bursting**: Press `c` in the TUI on a queued job to compare local
-  wait time against Vast.ai cloud GPU cost/time estimates, or use
-  `weft campaign launch` to batch-launch jobs on cloud GPUs with parallel
-  instance provisioning
-- **Cluster dashboard**: Web UI at `localhost:8127/cluster` shows host cards,
-  live GPU utilization, coordinator status, and recent placement decisions
+- **Cloud GPU bursting**: When local GPUs are busy or no host matches,
+  `weft campaign launch` batch-provisions Vast.ai instances, runs jobs, and
+  tears down on completion. Failed jobs enter a grace period for resubmission
+- **Campaign management**: Launch, watch, and terminate batches of cloud
+  instances from the CLI or TUI. `weft campaign watch` streams live status,
+  cost, and per-job progress until all instances finish
+- **Web dashboard**: Browser UI at `localhost:8127/cluster` with host cards,
+  live GPU utilization bars, coordinator status, and recent placement decisions
 
 #### Campaign Planner
 
@@ -415,176 +417,6 @@ This command:
 - Updates the database if status has changed
 - Use `--wait` (with optional `--wait-timeout`) to block until jobs finish.
   The command exits with `0` only if every waited-on job succeeds.
-
-### weft tui
-
-Launch an interactive terminal UI for viewing and managing jobs.
-
-```bash
-weft tui
-weft tui --mouse   # enable mouse clicks (disables terminal selection)
-```
-
-The TUI has two views: **Jobs** and **Hosts**.
-Press `f` at any time to cycle the Jobs view between showing all jobs, only queued/running jobs, completed successes, or completed failures.
-
-#### Jobs View (default)
-
-Split-screen with:
-- **Top panel**: Job list with status indicators (colored by status)
-- **Bottom panel**: Job details or logs
-
-Jobs are sorted by the newest job IDs so your latest or actively queued entries stay near the top of the list.
-
-Press `d` on a highlighted job to flip it into draft mode. Drafting a queued job
-removes it from the remote queue (or defers the removal if the host is offline),
-while drafting a running job kills it and marks the record so future syncs don’t
-try to restart it.
-
-When editing a queued job (`e`), you can set a CPU allotment preset (20/40/60/80%).
-If unset, the runner treats it as the default (60%) and keeps total host
-utilization under its cap while adjusting local allotments based on observed
-usage.
-
-```
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
-│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
-│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
-│ 50   skynet       ✓ done       yesterday    make build                       │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ Details                                                                      │
-│ Job 52 on deepthought                                                        │
-│ Cmd:     python train.py --lr 0.001                                          │
-│ Dir:     ~/code/ml-project                                                   │
-│ Started: 2025-12-13 10:15:32 (2h ago)                                        │
-│ Elapsed: 2h 14m 23s (running)                                                │
-│                                                                              │
-│ Process Stats:                                                               │
-│   CPU:     45% (1h23m user, 5m sys)                                          │
-│   Memory:  2.1 GB (12%)                                                      │
-│   Threads: 24                                                                │
-│   GPU 0:   85% util, 12.5GiB                                                 │
-╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav l:logs s:sync n:new r:restart k:kill d:draft p:prune h:hosts q:quit
-```
-
-Press `l` to view logs:
-
-```
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
-│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
-│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
-│ 50   skynet       ✓ done       yesterday    make build                       │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ Logs: Job 52 on deepthought                                                  │
-│ Epoch 45/100: loss=0.0234, acc=0.9812                                        │
-│ Epoch 46/100: loss=0.0229, acc=0.9818                                        │
-│ Epoch 47/100: loss=0.0221, acc=0.9825                                        │
-│ Epoch 48/100: loss=0.0218, acc=0.9831                                        │
-│ ...                                                                          │
-╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
-```
-
-**Keyboard shortcuts:**
-- `↑/↓`: Navigate job list
-- `Space`/`b`/`t`: Page down / page up / jump to top
-- `l`: Toggle logs view (shows full logs, navigate between jobs while viewing)
-- `Tab`/`Shift+Tab`: Cycle detail tabs
-- `s`: Sync job statuses from remote hosts
-- `n`: Create new job (opens input form)
-- `e`: Edit queued job
-- `E`: Edit & restart (opens new job form pre-filled with job's parameters)
-- `r`: Restart highlighted job
-- `y`: Retry job (clone and re-queue)
-- `k`: Kill running / cancel queued or needs-rental job
-- `p`: Pause running job
-- `g`: Start queued job now / resume paused
-- `d`: Mark highlighted job as draft (removes remote queue entries or kills running jobs)
-- `c`: Cloud GPU options (queued or needs-rental jobs)
-- `F`: Move job to front of queue
-- `G`: Generate AI description
-- `P`: Prune completed/dead jobs from database
-- `S`: Start queue runner (for queued jobs)
-- `x`: Remove job from list
-- `h` or `←/→`: Switch between Jobs and Hosts views
-- `f`: Cycle job filter (All → Queued/Running → Success → Failure)
-- `H`: Cycle host filter
-- `o`: Cycle sort order
-- `Esc`: Clear selection / exit logs view
-- `q` or `Ctrl-C`: Quit
-- `Ctrl-Z`: Suspend (return to shell, resume with `fg`)
-
-Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/weft/config.yaml`) if you prefer clickable rows instead.
-
-**Log caching:** When a host goes offline, the TUI shows the last successfully fetched log content with a "(cached - host offline)" indicator.
-
-#### Hosts View
-
-Shows all hosts that have had jobs, with system info, queue status, and resource utilization.
-
-- **Top panel**: Host list with status, queue runner, architecture, CPU/RAM usage
-- **Bottom panel**: Detailed host info including per-GPU stats
-
-```
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ HOST         STATUS     QUEUE    ARCH             CPU     RAM                │
-│ deepthought  ● online   ▶ 3      Linux x86_64     45%     62%                │
-│ skynet       ● online   ○        Linux x86_64     12%     28%                │
-│ tardis       ○ offline  -        Linux x86_64     -       -                  │
-╰──────────────────────────────────────────────────────────────────────────────╯
-╭──────────────────────────────────────────────────────────────────────────────╮
-│ Host Details                                                                 │
-│ Host: deepthought                                                            │
-│ Status: online                                                               │
-│ ───────────────────────────────────────────────────────────────              │
-│ Architecture: Linux x86_64                                                   │
-│ OS Version:   5.15.0-generic                                                 │
-│ CPUs:         32                                                             │
-│ Memory:       45Gi used / 128Gi total                                        │
-│ Load:         2.31 (1m), 1.89 (5m), 1.45 (15m)  [7% utilized]                │
-│ GPUs:         6× NVIDIA GeForce RTX 3090                                     │
-│                                                                              │
-│ ID    TEMP    UTIL   MEM USED / TOTAL                                        │
-│  0    52°C      0%   456MiB / 24.0GiB (2%)                                   │
-│  1    48°C     95%   22.1GiB / 24.0GiB (92%)                                 │
-│  2    45°C      0%   456MiB / 24.0GiB (2%)                                   │
-│ ...                                                                          │
-│ Updated: 5s ago                                                              │
-╰──────────────────────────────────────────────────────────────────────────────╯
- ↑/↓:nav j:jobs tab:switch q:quit
-```
-
-**Keyboard shortcuts:**
-- `↑/↓`: Navigate host list
-- `i`: Info tab
-- `G`: GPU summary tab
-- `D`: Toggle AI host summaries
-- `S`: Start queue runner on selected host
-- `0`–`9`: Select GPU tab by hardware index
-- `j` or `←/→`: Switch to jobs view
-- `q`: Quit
-
-**Queue status icons:**
-- `▶ N`: Queue runner active with N jobs queued
-- `■ N`: Queue runner stopping, N jobs queued
-- `○`: No queue runner active
-- `-`: Status unknown (host offline or checking)
-
-**Host details include:**
-- Architecture and OS version
-- CPU count and memory usage
-- Load average with CPU utilization percentage
-- GPU table with temperature, utilization, and memory usage
-- Queue runner status and job count
-
-**Offline hosts:** Host details are cached and persist when a host goes offline. The "Updated" timestamp shows when the host was last successfully contacted (not the last failed attempt).
-
-The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 
 ### weft job list
 
@@ -1111,6 +943,140 @@ Both flags work entirely on the remote host (no laptop connection needed) and ca
 > **Note:** Dependencies must stay on the same host. If you try to start a job on
 > `titan` that waits on a job recorded on `studio`, the CLI errors immediately
 > instead of queuing work that can never start.
+
+## Terminal UI
+
+Launch the interactive terminal UI with `weft tui` (or `weft tui --mouse` for
+clickable rows).
+
+```bash
+weft tui
+weft tui --mouse   # enable mouse clicks (disables terminal selection)
+```
+
+The TUI has two views: **Jobs** and **Hosts**.
+Press `f` at any time to cycle the Jobs view between showing all jobs, only queued/running jobs, completed successes, or completed failures.
+
+### Jobs View (default)
+
+Split-screen with:
+- **Top panel**: Job list with status indicators (colored by status)
+- **Bottom panel**: Job details or logs
+
+Jobs are sorted by the newest job IDs so your latest or actively queued entries stay near the top of the list.
+
+Press `d` on a highlighted job to flip it into draft mode. Drafting a queued job
+removes it from the remote queue (or defers the removal if the host is offline),
+while drafting a running job kills it and marks the record so future syncs don't
+try to restart it.
+
+When editing a queued job (`e`), you can set a CPU allotment preset (20/40/60/80%).
+If unset, the runner treats it as the default (60%) and keeps total host
+utilization under its cap while adjusting local allotments based on observed
+usage.
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
+│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
+│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
+│ 50   skynet       ✓ done       yesterday    make build                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Details                                                                      │
+│ Job 52 on deepthought                                                        │
+│ Cmd:     python train.py --lr 0.001                                          │
+│ Dir:     ~/code/ml-project                                                   │
+│ Started: 2025-12-13 10:15:32 (2h ago)                                        │
+│ Elapsed: 2h 14m 23s (running)                                                │
+│                                                                              │
+│ Process Stats:                                                               │
+│   CPU:     45% (1h23m user, 5m sys)                                          │
+│   Memory:  2.1 GB (12%)                                                      │
+│   Threads: 24                                                                │
+│   GPU 0:   85% util, 12.5GiB                                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill d:draft p:prune h:hosts q:quit
+```
+
+Press `l` to view logs:
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ ID   HOST         STATUS       STARTED      COMMAND / DESCRIPTION            │
+│ 52   deepthought  ● running    2h ago       python train.py --lr 0.001       │
+│ 51   deepthought  ✗ exit 1     3h ago       python test.py                   │
+│ 50   skynet       ✓ done       yesterday    make build                       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Logs: Job 52 on deepthought                                                  │
+│ Epoch 45/100: loss=0.0234, acc=0.9812                                        │
+│ Epoch 46/100: loss=0.0229, acc=0.9818                                        │
+│ Epoch 47/100: loss=0.0221, acc=0.9825                                        │
+│ Epoch 48/100: loss=0.0218, acc=0.9831                                        │
+│ ...                                                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓:nav l:logs s:sync n:new r:restart k:kill p:prune h:hosts q:quit
+```
+
+Press `?` for the full keyboard shortcut help overlay.
+
+Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/weft/config.yaml`) if you prefer clickable rows instead.
+
+**Log caching:** When a host goes offline, the TUI shows the last successfully fetched log content with a "(cached - host offline)" indicator.
+
+### Hosts View
+
+Shows all hosts that have had jobs, with system info, queue status, and resource utilization.
+
+- **Top panel**: Host list with status, queue runner, architecture, CPU/RAM usage
+- **Bottom panel**: Detailed host info including per-GPU stats
+
+```
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ HOST         STATUS     QUEUE    ARCH             CPU     RAM                │
+│ deepthought  ● online   ▶ 3      Linux x86_64     45%     62%                │
+│ skynet       ● online   ○        Linux x86_64     12%     28%                │
+│ tardis       ○ offline  -        Linux x86_64     -       -                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│ Host Details                                                                 │
+│ Host: deepthought                                                            │
+│ Status: online                                                               │
+│ ───────────────────────────────────────────────────────────────              │
+│ Architecture: Linux x86_64                                                   │
+│ OS Version:   5.15.0-generic                                                 │
+│ CPUs:         32                                                             │
+│ Memory:       45Gi used / 128Gi total                                        │
+│ Load:         2.31 (1m), 1.89 (5m), 1.45 (15m)  [7% utilized]                │
+│ GPUs:         6× NVIDIA GeForce RTX 3090                                     │
+│                                                                              │
+│ ID    TEMP    UTIL   MEM USED / TOTAL                                        │
+│  0    52°C      0%   456MiB / 24.0GiB (2%)                                   │
+│  1    48°C     95%   22.1GiB / 24.0GiB (92%)                                 │
+│  2    45°C      0%   456MiB / 24.0GiB (2%)                                   │
+│ ...                                                                          │
+│ Updated: 5s ago                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ↑/↓:nav j:jobs tab:switch q:quit
+```
+
+**Queue status icons:**
+- `▶ N`: Queue runner active with N jobs queued
+- `■ N`: Queue runner stopping, N jobs queued
+- `○`: No queue runner active
+- `-`: Status unknown (host offline or checking)
+
+**Host details include:**
+- Architecture and OS version
+- CPU count and memory usage
+- Load average with CPU utilization percentage
+- GPU table with temperature, utilization, and memory usage
+- Queue runner status and job count
+
+**Offline hosts:** Host details are cached and persist when a host goes offline. The "Updated" timestamp shows when the host was last successfully contacted (not the last failed attempt).
+
+The TUI automatically syncs job statuses every 15 seconds, refreshes logs for running jobs every 3 seconds, and refreshes host info every 30 seconds (configurable).
 
 ## Coordinator
 
