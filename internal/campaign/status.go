@@ -18,6 +18,7 @@ type InstanceUpdate struct {
 	Jobs           []*db.Job
 	Instance       *cloud.Instance // nil if not yet provisioned
 	BootstrapStage string          // current bootstrap stage from R2 (e.g. "agent_installed")
+	InstancePhase  string          // current job execution phase from R2 (e.g. "running:123")
 }
 
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
@@ -73,9 +74,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
-			// Fetch bootstrap stage from R2 when instance is running with no started jobs
-			var bootstrapStage string
-			if r2c != nil && ci.Status == db.CloudInstanceStatusRunning {
+			// Fetch bootstrap stage or instance phase from R2
+			var bootstrapStage, instancePhase string
+			if r2c != nil && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
 				hasStartedJob := false
 				for _, j := range jobs {
 					if j.Status != db.StatusNeedsRental && j.Status != db.StatusQueued {
@@ -83,7 +84,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						break
 					}
 				}
-				if !hasStartedJob {
+				if hasStartedJob {
+					instancePhase = fetchInstancePhase(ctx, r2c, cloudInstanceID)
+				} else {
 					bootstrapStage = fetchBootstrapStage(ctx, r2c, cloudInstanceID)
 				}
 			}
@@ -93,6 +96,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				Jobs:           jobs,
 				Instance:       cachedInstance,
 				BootstrapStage: bootstrapStage,
+				InstancePhase:  instancePhase,
 			}
 
 			select {
@@ -117,9 +121,8 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 	return ch
 }
 
-// fetchBootstrapStage reads the bootstrap stage marker from R2 for an instance.
-func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	key := fmt.Sprintf("bootstrap/%d/stage", instanceID)
+// fetchR2Marker reads a string marker from R2 with a 3-second timeout.
+func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) string {
 	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	data, err := r2Client.GetObject(ctx2, key)
@@ -127,6 +130,36 @@ func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID in
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// fetchBootstrapStage reads the bootstrap stage marker from R2 for an instance.
+func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
+	return fetchR2Marker(ctx, r2Client, fmt.Sprintf("bootstrap/%d/stage", instanceID))
+}
+
+// fetchInstancePhase reads the instance phase marker from R2.
+func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
+	return fetchR2Marker(ctx, r2Client, fmt.Sprintf("instance/%d/phase", instanceID))
+}
+
+// InstancePhaseLabel returns a human-readable label for an instance phase string.
+func InstancePhaseLabel(phase string) string {
+	if phase == "grace" {
+		return "grace period"
+	}
+	if colon := strings.IndexByte(phase, ':'); colon >= 0 {
+		verb := phase[:colon]
+		jobID := phase[colon+1:]
+		switch verb {
+		case "setup":
+			return fmt.Sprintf("setup (job %s)", jobID)
+		case "running":
+			return fmt.Sprintf("running job %s", jobID)
+		case "uploading":
+			return fmt.Sprintf("uploading outputs (job %s)", jobID)
+		}
+	}
+	return phase
 }
 
 // BootstrapStageLabel returns a human-readable label for a bootstrap stage.
@@ -161,6 +194,12 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	if curr.BootstrapStage != "" && curr.BootstrapStage != prev.BootstrapStage {
 		label := BootstrapStageLabel(curr.BootstrapStage)
 		lines = append(lines, fmt.Sprintf("instance %d: bootstrap: %s", id, label))
+	}
+
+	// Report instance phase changes
+	if curr.InstancePhase != "" && curr.InstancePhase != prev.InstancePhase {
+		label := InstancePhaseLabel(curr.InstancePhase)
+		lines = append(lines, fmt.Sprintf("instance %d: phase: %s", id, label))
 	}
 
 	if prev.CloudInstance == nil || prev.CloudInstance.Status != curr.CloudInstance.Status {

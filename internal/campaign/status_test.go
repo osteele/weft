@@ -80,6 +80,35 @@ func TestFormatPlainUpdate_NoChange(t *testing.T) {
 	}
 }
 
+func TestInstancePhaseLabel(t *testing.T) {
+	tests := []struct {
+		phase string
+		want  string
+	}{
+		{"setup:42", "setup (job 42)"},
+		{"running:123", "running job 123"},
+		{"uploading:7", "uploading outputs (job 7)"},
+		{"grace", "grace period"},
+		{"unknown", "unknown"},
+	}
+	for _, tt := range tests {
+		if got := InstancePhaseLabel(tt.phase); got != tt.want {
+			t.Errorf("InstancePhaseLabel(%q) = %q, want %q", tt.phase, got, tt.want)
+		}
+	}
+}
+
+func TestFormatPlainUpdate_PhaseChange(t *testing.T) {
+	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
+	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "setup:42"}
+	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42"}
+
+	output := FormatPlainUpdate(prev, curr)
+	if !strings.Contains(output, "phase: running job 42") {
+		t.Errorf("should contain phase change, got %q", output)
+	}
+}
+
 func TestIsInstanceTerminal(t *testing.T) {
 	tests := []struct {
 		status string

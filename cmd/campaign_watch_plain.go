@@ -21,6 +21,9 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	cfg, _ := config.Load()
+	r2Client, _ := buildR2Client(cfg)
+
 	// Print campaign header if instances belong to a campaign
 	if campaignID, launchTime := campaignInfoFromInstances(database, instanceIDs); campaignID > 0 {
 		fmt.Printf("Campaign %d — launched %s\n\n", campaignID, launchTime.Format("2006-01-02 15:04"))
@@ -58,7 +61,7 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 
 			// Look up the provider from the DB to get the right client
 			client := clientForInstance(database, instanceID)
-			ch := campaign.WatchInstance(ctx, client, database, instanceID, 2*time.Second, 10*time.Second)
+			ch := campaign.WatchInstance(ctx, client, database, instanceID, 2*time.Second, 10*time.Second, r2Client)
 			var prev campaign.InstanceUpdate
 
 			for update := range ch {

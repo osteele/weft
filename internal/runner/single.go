@@ -18,10 +18,11 @@ type SingleJobConfig struct {
 	JobID          int64
 	Job            ops.CommandJob
 	LogDir         string
-	WorkingDir     string        // Override job.Dir if non-empty
-	SampleInterval time.Duration // Default 15s
-	MaxTime        time.Duration // If >0, kill the job after this duration
-	SkipProbes     bool          // Skip cache size probes (useful in tests)
+	WorkingDir     string             // Override job.Dir if non-empty
+	SampleInterval time.Duration      // Default 15s
+	MaxTime        time.Duration      // If >0, kill the job after this duration
+	SkipProbes     bool               // Skip cache size probes (useful in tests)
+	OnPhase        func(phase string) // Called at phase transitions: "setup", "running"
 }
 
 // RunSingleJob executes a single job synchronously with full telemetry.
@@ -59,6 +60,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	cpuCount := DetectCPUCount()
 
 	// Setup phase
+	if cfg.OnPhase != nil {
+		cfg.OnPhase("setup")
+	}
 	phases.SetupStart = time.Now().Unix()
 
 	os.MkdirAll(cfg.LogDir, 0755)
@@ -126,6 +130,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	phases.SetupSeconds = &setupSecs
 
 	// Start the process
+	if cfg.OnPhase != nil {
+		cfg.OnPhase("running")
+	}
 	phases.RunStart = time.Now().Unix()
 
 	log.Printf("Job %d: launching process", cfg.JobID)

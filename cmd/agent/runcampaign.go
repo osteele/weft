@@ -89,6 +89,9 @@ func runCampaign(args []string) {
 		os.Setenv(k, v)
 	}
 
+	// R2 key for instance phase tracking
+	phaseKey := fmt.Sprintf("instance/%s/phase", instanceID)
+
 	startTime := time.Now()
 	anyFailed := false
 
@@ -127,6 +130,7 @@ func runCampaign(args []string) {
 			LogDir:     logDir,
 			WorkingDir: workDir,
 			MaxTime:    jobMaxTime,
+			OnPhase:    phaseCallback(r2Bucket, phaseKey, job.ID),
 		}
 
 		ei, err := runner.RunSingleJob(cfg)
@@ -139,6 +143,8 @@ func runCampaign(args []string) {
 		} else {
 			fmt.Printf("Job %d completed successfully\n", job.ID)
 		}
+
+		writePhase(r2Bucket, phaseKey, fmt.Sprintf("uploading:%d", job.ID))
 
 		// Upload output directories
 		uploadOutputDirs(r2Bucket, job.ID, workDir)
@@ -166,6 +172,19 @@ func runCampaign(args []string) {
 		})
 	} else {
 		selfDestruct(r2Bucket, instanceID, manifest.SelfDestructCmd)
+	}
+}
+
+// writePhase writes a phase marker to R2 in a background goroutine.
+// Best-effort: errors are logged but do not block the caller.
+func writePhase(r2Bucket, phaseKey, phase string) {
+	go r2Put(r2Bucket, phaseKey, phase)
+}
+
+// phaseCallback returns an OnPhase callback that writes phase markers to R2.
+func phaseCallback(r2Bucket, phaseKey string, jobID int64) func(string) {
+	return func(phase string) {
+		writePhase(r2Bucket, phaseKey, fmt.Sprintf("%s:%d", phase, jobID))
 	}
 }
 

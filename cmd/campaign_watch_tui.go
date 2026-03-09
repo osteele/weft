@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 type watchModel struct {
@@ -22,6 +23,7 @@ type watchModel struct {
 	channels    map[int64]<-chan campaign.InstanceUpdate
 	database    *sql.DB
 	clients     map[int64]cloud.Client // per-instance client (looked up from DB provider)
+	r2Client    *r2.Client             // R2 client for phase/bootstrap fetching (may be nil)
 	spinner     spinner.Model
 	done        bool
 	err         error
@@ -49,7 +51,7 @@ type watchUpdateMsg struct {
 // watchSyncTickMsg triggers periodic cloud job result syncing.
 type watchSyncTickMsg struct{}
 
-func newWatchModel(database *sql.DB, instanceIDs []int64) watchModel {
+func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) watchModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,6 +70,7 @@ func newWatchModel(database *sql.DB, instanceIDs []int64) watchModel {
 		channels:    make(map[int64]<-chan campaign.InstanceUpdate),
 		database:    database,
 		clients:     clients,
+		r2Client:    r2Client,
 		spinner:     s,
 		ctx:         ctx,
 		cancel:      cancel,
@@ -82,7 +85,7 @@ func (m watchModel) Init() tea.Cmd {
 
 	for _, id := range m.instanceIDs {
 		client := m.clients[id]
-		ch := campaign.WatchInstance(m.ctx, client, m.database, id, 2*time.Second, 10*time.Second)
+		ch := campaign.WatchInstance(m.ctx, client, m.database, id, 2*time.Second, 10*time.Second, m.r2Client)
 		m.channels[id] = ch
 		cmds = append(cmds, waitForUpdate(id, ch))
 	}
@@ -216,6 +219,9 @@ func (m watchModel) View() string {
 		if u.BootstrapStage != "" {
 			b.WriteString(fmt.Sprintf("  Bootstrap: %s\n", campaign.BootstrapStageLabel(u.BootstrapStage)))
 		}
+		if u.InstancePhase != "" {
+			b.WriteString(fmt.Sprintf("  Phase: %s\n", campaign.InstancePhaseLabel(u.InstancePhase)))
+		}
 
 		if u.Instance != nil && ci.LaunchedAt != nil {
 			uptime := time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Minute)
@@ -272,7 +278,9 @@ func scheduleSyncTick() tea.Cmd {
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
 func watchInstances(database *sql.DB, instanceIDs []int64) error {
-	model := newWatchModel(database, instanceIDs)
+	cfg, _ := config.Load()
+	r2Client, _ := buildR2Client(cfg)
+	model := newWatchModel(database, instanceIDs, r2Client)
 	p := tea.NewProgram(model)
 	_, err := p.Run()
 	return err

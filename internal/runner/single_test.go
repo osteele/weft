@@ -123,6 +123,40 @@ func TestRunSingleJob_WorkingDir(t *testing.T) {
 	}
 }
 
+func TestRunSingleJob_OnPhase(t *testing.T) {
+	logDir := t.TempDir()
+
+	var phases []string
+	cfg := SingleJobConfig{
+		JobID:          50,
+		Job:            ops.CommandJob{Cmd: "echo phase-test"},
+		LogDir:         logDir,
+		SampleInterval: 100 * time.Millisecond,
+		SkipProbes:     true,
+		OnPhase: func(phase string) {
+			phases = append(phases, phase)
+		},
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Errorf("exit code = %d, want 0", ei.ExitCode)
+	}
+
+	if len(phases) < 2 {
+		t.Fatalf("expected at least 2 phase callbacks, got %d: %v", len(phases), phases)
+	}
+	if phases[0] != "setup" {
+		t.Errorf("first phase = %q, want %q", phases[0], "setup")
+	}
+	if phases[1] != "running" {
+		t.Errorf("second phase = %q, want %q", phases[1], "running")
+	}
+}
+
 func TestRunSingleJob_EmptyCommand(t *testing.T) {
 	logDir := t.TempDir()
 

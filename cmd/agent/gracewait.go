@@ -93,6 +93,9 @@ func graceWaitLoop(cfg graceWaitConfig) {
 
 	deadline := time.Now().Add(cfg.Timeout)
 	prefix := fmt.Sprintf("grace/%s", instanceID)
+	phaseKey := fmt.Sprintf("instance/%s/phase", instanceID)
+
+	writePhase(r2Bucket, phaseKey, "grace")
 
 	// Write initial status
 	writeGraceStatus(r2Bucket, prefix, graceStatus{
@@ -181,22 +184,24 @@ func graceWaitLoop(cfg graceWaitConfig) {
 				workDir = workspace
 			}
 
-			cfg := runner.SingleJobConfig{
+			resubCfg := runner.SingleJobConfig{
 				JobID: job.ID,
 				Job: ops.CommandJob{
 					Cmd: job.Command,
 				},
 				LogDir:     logDir,
 				WorkingDir: workDir,
+				OnPhase:    phaseCallback(r2Bucket, phaseKey, job.ID),
 			}
 
-			ei, err := runner.RunSingleJob(cfg)
+			ei, err := runner.RunSingleJob(resubCfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
 				failedJobs = append(failedJobs, job.ID)
 				continue
 			}
 
+			writePhase(r2Bucket, phaseKey, fmt.Sprintf("uploading:%d", job.ID))
 			uploadOutputDirs(r2Bucket, job.ID, workDir)
 			uploadJobResults(r2Bucket, job.ID, logDir)
 
@@ -216,6 +221,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		}
 
 		// Some jobs failed — resume waiting
+		writePhase(r2Bucket, phaseKey, "grace")
 		fmt.Printf("Some jobs failed. Resuming grace period until %s\n", deadline.Format(time.RFC3339))
 		writeGraceStatus(r2Bucket, prefix, graceStatus{
 			State:      "waiting",
