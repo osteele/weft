@@ -329,6 +329,27 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	return result.RowsAffected()
 }
 
+// ResetOrphanedCloudJobs resets queued jobs whose host references a cloud instance
+// (host LIKE 'vastai:%') that is either terminal or missing from the DB entirely.
+// This catches jobs stranded by stale host fields when cloud_instance_id was already cleared.
+func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
+	result, err := database.Exec(`
+		UPDATE jobs SET status = ?, host = '', cloud_instance_id = NULL
+		WHERE status = ? AND host LIKE 'vastai:%' AND tombstoned = 0
+		AND NOT EXISTS (
+			SELECT 1 FROM cloud_instances ci
+			WHERE ci.id = CAST(SUBSTR(jobs.host, 8) AS INTEGER)
+			AND ci.status IN (?, ?, ?)
+		)`,
+		StatusQueued, StatusQueued,
+		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // GetCloudInstanceJobCounts returns a map from cloud instance ID to job count.
 func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM jobs WHERE cloud_instance_id IS NOT NULL AND tombstoned = 0 GROUP BY cloud_instance_id`)

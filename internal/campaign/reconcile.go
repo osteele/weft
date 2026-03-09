@@ -109,6 +109,11 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
 					log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
 				}
+				if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+					log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+				} else if resetCount > 0 {
+					log.Printf("reconcile: reset %d jobs from completed instance %d to unplaced", resetCount, ci.ID)
+				}
 				reconciled++
 				continue
 			}
@@ -132,6 +137,14 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 			}
 			reconciled++
 		}
+	}
+
+	// Catch-all: reset jobs stranded on dead cloud instances (stale host field).
+	if orphaned, err := db.ResetOrphanedCloudJobs(database); err != nil {
+		log.Printf("reconcile: reset orphaned cloud jobs: %v", err)
+	} else if orphaned > 0 {
+		log.Printf("reconcile: reset %d orphaned jobs from dead cloud instances", orphaned)
+		reconciled += int(orphaned)
 	}
 
 	return reconciled, nil

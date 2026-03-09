@@ -116,6 +116,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Reconcile dead cloud instances so orphaned jobs become unplaced.
+	reconcileBeforeDisplay(database)
+
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
 		return fmt.Errorf("list unplaced jobs: %w", err)
