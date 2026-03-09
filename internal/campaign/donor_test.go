@@ -229,21 +229,29 @@ func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 
 func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 	manifest := BootstrapManifest{
-		AgentR2Key:    "agent/v1/linux-amd64",
-		Sources:       []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
-		WrapperScript: "#!/bin/bash\necho hello\n",
-		WorkspacePath: "/workspace/",
-		DonorMode:     false,
+		AgentR2Key:         "agent/v1/linux-amd64",
+		Sources:            []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
+		WorkspacePath:      "/workspace/",
+		DBInstanceID:       7,
+		MaxTimeSeconds:     3600,
+		GracePeriodSeconds: 900,
+		DonorMode:          false,
 	}
 
 	script := GenerateBootstrapScript(manifest)
 
-	// Should contain wrapper
-	if !strings.Contains(script, "WRAPPER_EOF") {
-		t.Error("worker script should write wrapper")
+	// Should launch weft-agent run-campaign via nohup
+	if !strings.Contains(script, "nohup weft-agent run-campaign") {
+		t.Error("worker script should launch weft-agent run-campaign")
 	}
-	if !strings.Contains(script, "nohup") {
-		t.Error("worker script should start wrapper")
+	if !strings.Contains(script, "--instance-id=7") {
+		t.Error("worker script should pass instance ID")
+	}
+	if !strings.Contains(script, "--max-time=3600s") {
+		t.Error("worker script should pass max-time")
+	}
+	if !strings.Contains(script, "--grace-period=900s") {
+		t.Error("worker script should pass grace-period")
 	}
 
 	// Should NOT contain donor-specific items

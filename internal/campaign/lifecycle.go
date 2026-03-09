@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -584,22 +585,29 @@ func LaunchInstance(
 		_ = db.SetCloudInstanceGracePeriod(database, instanceID, opts.GracePeriodSeconds)
 	}
 
-	// Generate wrapper script (needs providerInstID for self-destruct)
-	wrapperOpts := cloud.WrapperOpts{
-		MaxTimeSeconds:     opts.MaxTimeSeconds,
-		DBInstanceID:       instanceID,
-		GracePeriodSeconds: opts.GracePeriodSeconds,
+	// Generate and upload campaign manifest (needs providerInstID for self-destruct)
+	selfDestructCmd := client.SelfDestructCmd(providerInstID)
+	manifestJSON, err := cloud.GenerateCampaignManifest(agentJobs, selfDestructCmd, nil)
+	if err != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
-	// HF_TOKEN is already set via env vars on the instance, so the wrapper
-	// doesn't need to export it again — the env is inherited by all processes.
-	wrapper := cloud.GenerateAgentWrapper(client, agentJobs, r2Cfg.Bucket, providerInstID, wrapperOpts)
+
+	manifestKey := fmt.Sprintf("campaigns/%d/manifest.json", instanceID)
+	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
+		_ = client.DestroyInstance(providerInstID)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
+	}
 
 	bootstrapScript := GenerateBootstrapScript(BootstrapManifest{
-		AgentR2Key:    r2Assets.AgentR2Key,
-		Sources:       sources,
-		WrapperScript: wrapper,
-		WorkspacePath: wsPath,
-		DBInstanceID:  instanceID,
+		AgentR2Key:         r2Assets.AgentR2Key,
+		Sources:            sources,
+		WorkspacePath:      wsPath,
+		DBInstanceID:       instanceID,
+		MaxTimeSeconds:     opts.MaxTimeSeconds,
+		GracePeriodSeconds: opts.GracePeriodSeconds,
 	})
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {

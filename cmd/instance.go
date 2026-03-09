@@ -494,18 +494,13 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	// Write jobs.json to R2
-	type graceJob struct {
-		ID      int64  `json:"id"`
-		Command string `json:"cmd"`
-		Dir     string `json:"dir,omitempty"`
-	}
 	type gracePayload struct {
-		Jobs    []graceJob        `json:"jobs"`
+		Jobs    []cloud.AgentJob  `json:"jobs"`
 		Sources map[string]string `json:"sources"`
 	}
 
 	payload := gracePayload{
-		Jobs: []graceJob{{
+		Jobs: []cloud.AgentJob{{
 			ID:      jobID,
 			Command: jobCmd,
 		}},

@@ -7,14 +7,15 @@ import (
 
 // BootstrapManifest describes everything an instance needs to self-start.
 type BootstrapManifest struct {
-	AgentR2Key    string          // R2 key for the agent binary
-	Sources       []SourceMapping // source tarballs to extract
-	WrapperScript string          // pre-generated wrapper script content
-	WorkspacePath string          // e.g. "/workspace/"
-	DonorMode     bool            // download caches and write ready marker, no wrapper
-	HFModels      []string        // HF model IDs to pre-download (donor mode only)
-	DonorID       string          // provider instance ID (for R2 ready marker key)
-	DBInstanceID  int64           // DB cloud_instances.id for R2 stage markers
+	AgentR2Key         string          // R2 key for the agent binary
+	Sources            []SourceMapping // source tarballs to extract
+	WorkspacePath      string          // e.g. "/workspace/"
+	DonorMode          bool            // download caches and write ready marker, no wrapper
+	HFModels           []string        // HF model IDs to pre-download (donor mode only)
+	DonorID            string          // provider instance ID (for R2 ready marker key)
+	DBInstanceID       int64           // DB cloud_instances.id for R2 stage markers
+	MaxTimeSeconds     int             // instance time budget (0 = unlimited)
+	GracePeriodSeconds int             // grace period after job failure (0 = disabled)
 }
 
 // SourceMapping maps an R2 key to a target directory on the instance.
@@ -115,21 +116,26 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 }
 
 // generateWorkerBootstrapTail generates the worker-specific portion:
-// writes and starts the wrapper script.
+// launches weft-agent run-campaign via nohup.
 func generateWorkerBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
-	// Write wrapper script
 	wsPath := manifest.WorkspacePath
 	if wsPath == "" {
 		wsPath = "/workspace/"
 	}
-	wrapperPath := fmt.Sprintf("%s.weft-campaign.sh", strings.TrimRight(wsPath, "/"))
-	b.WriteString("# Write wrapper script\n")
-	b.WriteString(fmt.Sprintf("cat > %s << 'WRAPPER_EOF'\n", wrapperPath))
-	b.WriteString(manifest.WrapperScript)
-	b.WriteString("WRAPPER_EOF\n")
-	b.WriteString(fmt.Sprintf("chmod +x %s\n\n", wrapperPath))
 
-	// Start wrapper via nohup
-	b.WriteString("# Start wrapper\n")
-	b.WriteString(fmt.Sprintf("nohup bash %s </dev/null >>/tmp/wrapper.log 2>&1 &\n", wrapperPath))
+	b.WriteString("# Launch campaign agent\n")
+	b.WriteString(fmt.Sprintf("nohup weft-agent run-campaign"+
+		" --r2-bucket=$R2_BUCKET"+
+		" --instance-id=%d"+
+		" --workspace=%s",
+		manifest.DBInstanceID, wsPath))
+
+	if manifest.MaxTimeSeconds > 0 {
+		b.WriteString(fmt.Sprintf(" --max-time=%ds", manifest.MaxTimeSeconds))
+	}
+	if manifest.GracePeriodSeconds > 0 {
+		b.WriteString(fmt.Sprintf(" --grace-period=%ds", manifest.GracePeriodSeconds))
+	}
+
+	b.WriteString(" </dev/null >>/tmp/wrapper.log 2>&1 &\n")
 }

@@ -46,6 +46,12 @@ func main() {
 		return
 	}
 
+	// Handle run-campaign subcommand
+	if len(os.Args) > 1 && os.Args[1] == "run-campaign" {
+		runCampaign(os.Args[2:])
+		return
+	}
+
 	// Handle grace-wait subcommand
 	if len(os.Args) > 1 && os.Args[1] == "grace-wait" {
 		graceWait(os.Args[2:])

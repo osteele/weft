@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -22,61 +23,75 @@ type graceStatus struct {
 
 // graceJobsPayload is read from R2 as grace/<instanceID>/jobs.json.
 type graceJobsPayload struct {
-	Jobs []graceJob `json:"jobs"`
+	Jobs []cloud.AgentJob `json:"jobs"`
 }
 
-type graceJob struct {
-	ID      int64  `json:"id"`
-	Command string `json:"cmd"`
-	Dir     string `json:"dir,omitempty"`
+// graceWaitConfig holds parameters for the grace-wait loop.
+type graceWaitConfig struct {
+	InstanceID      string
+	R2Bucket        string
+	Timeout         time.Duration
+	SelfDestructCmd string
+	LogDir          string
+	Workspace       string
 }
 
-// graceWait implements the grace-wait subcommand.
-// It polls R2 for control messages and keeps the instance alive for resubmission.
-func graceWait(args []string) {
-	var instanceID string
-	var r2Bucket string
-	var timeout time.Duration
-	var selfDestructCmd string
-	var logDir string
-	var workspace string
+// parseGraceWaitArgs parses CLI args into a graceWaitConfig for the grace-wait subcommand.
+func parseGraceWaitArgs(args []string) graceWaitConfig {
+	var cfg graceWaitConfig
 
 	for _, arg := range args {
 		switch {
 		case hasPrefix(arg, "--instance-id="):
-			instanceID = arg[len("--instance-id="):]
+			cfg.InstanceID = arg[len("--instance-id="):]
 		case hasPrefix(arg, "--r2-bucket="):
-			r2Bucket = arg[len("--r2-bucket="):]
+			cfg.R2Bucket = arg[len("--r2-bucket="):]
 		case hasPrefix(arg, "--timeout="):
 			val := arg[len("--timeout="):]
 			var err error
-			timeout, err = time.ParseDuration(val)
+			cfg.Timeout, err = time.ParseDuration(val)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "invalid --timeout: %s\n", val)
 				os.Exit(1)
 			}
 		case hasPrefix(arg, "--self-destruct-cmd="):
-			selfDestructCmd = arg[len("--self-destruct-cmd="):]
+			cfg.SelfDestructCmd = arg[len("--self-destruct-cmd="):]
 		case hasPrefix(arg, "--log-dir="):
-			logDir = arg[len("--log-dir="):]
+			cfg.LogDir = arg[len("--log-dir="):]
 		case hasPrefix(arg, "--workspace="):
-			workspace = arg[len("--workspace="):]
+			cfg.Workspace = arg[len("--workspace="):]
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
 			os.Exit(1)
 		}
 	}
 
-	if instanceID == "" || r2Bucket == "" || timeout == 0 {
+	if cfg.InstanceID == "" || cfg.R2Bucket == "" || cfg.Timeout == 0 {
 		fmt.Fprintln(os.Stderr, "required: --instance-id, --r2-bucket, --timeout")
 		os.Exit(1)
 	}
-	if selfDestructCmd == "" {
+	if cfg.SelfDestructCmd == "" {
 		fmt.Fprintln(os.Stderr, "required: --self-destruct-cmd")
 		os.Exit(1)
 	}
 
-	deadline := time.Now().Add(timeout)
+	return cfg
+}
+
+// graceWait implements the grace-wait subcommand (CLI entry point).
+func graceWait(args []string) {
+	graceWaitLoop(parseGraceWaitArgs(args))
+}
+
+// graceWaitLoop polls R2 for control messages and keeps the instance alive for resubmission.
+func graceWaitLoop(cfg graceWaitConfig) {
+	instanceID := cfg.InstanceID
+	r2Bucket := cfg.R2Bucket
+	selfDestructCmd := cfg.SelfDestructCmd
+	logDir := cfg.LogDir
+	workspace := cfg.Workspace
+
+	deadline := time.Now().Add(cfg.Timeout)
 	prefix := fmt.Sprintf("grace/%s", instanceID)
 
 	// Write initial status
@@ -182,6 +197,7 @@ func graceWait(args []string) {
 				continue
 			}
 
+			uploadOutputDirs(r2Bucket, job.ID, workDir)
 			uploadJobResults(r2Bucket, job.ID, logDir)
 
 			if ei.ExitCode != 0 {
@@ -217,17 +233,19 @@ func writeGraceStatus(bucket, prefix string, status graceStatus) {
 }
 
 func uploadJobResults(bucket string, jobID int64, logDir string) {
-	// Upload per-job results (same pattern as wrapper)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	rcloneCmd := exec.CommandContext(ctx, "rclone", "copy", logDir+"/", fmt.Sprintf("r2:%s/jobs/%d/results/", bucket, jobID))
+	// Upload per-job results
+	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", fmt.Sprintf("r2:%s/jobs/%d/results/", bucket, jobID))
 	rcloneCmd.Stderr = os.Stderr
 	_ = rcloneCmd.Run()
+	copyCancel()
 
-	completeCmd := exec.CommandContext(ctx, "rclone", "rcat", fmt.Sprintf("r2:%s/jobs/%d/.complete", bucket, jobID))
+	// Write completion marker
+	completeCtx, completeCancel := context.WithTimeout(context.Background(), r2Timeout)
+	completeCmd := exec.CommandContext(completeCtx, "rclone", "rcat", fmt.Sprintf("r2:%s/jobs/%d/.complete", bucket, jobID))
 	completeCmd.Stdin = strings.NewReader("done")
 	_ = completeCmd.Run()
+	completeCancel()
 }
 
 func selfDestruct(bucket, instanceID, selfDestructCmd string) {
