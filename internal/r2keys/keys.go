@@ -88,6 +88,10 @@ func InstancePhase(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/phase", instanceID)
 }
 
+func InstanceHeartbeat(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/heartbeat", instanceID)
+}
+
 // Bootstrap keys
 
 func BootstrapScript(instanceID int64) string {

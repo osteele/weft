@@ -165,7 +165,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("job %d not found", runFrom)
 		}
 
-		// Copy settings from existing job
+		// Copy settings from existing job (explicit flags take priority)
 		if host == "" {
 			host = fromJob.Host
 		}
@@ -178,6 +178,27 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if len(runTags) == 0 {
 			runTags = append([]string(nil), fromJob.Tags...)
+		}
+		if runGPUClass == "" && runGPU == "" {
+			runGPUClass = fromJob.GPUClass
+		}
+		if runGPUMem == 0 && fromJob.GPUMemGB != nil {
+			runGPUMem = *fromJob.GPUMemGB
+		}
+		if len(runEnvVars) == 0 {
+			runEnvVars = append([]string(nil), fromJob.EnvVars...)
+		}
+		if len(runInputs) == 0 {
+			runInputs = append([]string(nil), fromJob.Inputs...)
+		}
+		if len(runOutputs) == 0 {
+			runOutputs = append([]string(nil), fromJob.Outputs...)
+		}
+		if len(runProduces) == 0 {
+			runProduces = append([]string(nil), fromJob.Produces...)
+		}
+		if len(runNeeds) == 0 {
+			runNeeds = append([]string(nil), fromJob.Needs...)
 		}
 
 		// Allow overriding command from positional arg

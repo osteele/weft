@@ -83,6 +83,9 @@ type Config struct {
 	// CoordinatorHost is the host where the coordinator daemon runs.
 	CoordinatorHost string `yaml:"coordinator_host"`
 
+	// Campaign holds cloud campaign defaults
+	Campaign CampaignConfig `yaml:"campaign"`
+
 	// Remediation holds auto-remediation configuration for failed jobs
 	Remediation RemediationConfig `yaml:"remediation"`
 }
@@ -94,6 +97,13 @@ type RemediationConfig struct {
 	CodingAgent string `yaml:"coding_agent"`
 	// CodingAgentDir is the working directory for the agent (defaults to job's working dir).
 	CodingAgentDir string `yaml:"coding_agent_dir"`
+}
+
+// CampaignConfig holds cloud campaign defaults.
+type CampaignConfig struct {
+	// GracePeriod is the default grace period after job failure (e.g., "5m", "15m").
+	// Default: "5m"
+	GracePeriod string `yaml:"grace_period"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
@@ -334,6 +344,14 @@ func AutomapDirs() []string {
 // Returns "" if not configured.
 func (c *Config) GetCoordinatorHost() string {
 	return c.CoordinatorHost
+}
+
+// DefaultGracePeriod returns the configured grace period string, or "5m" if not set.
+func (c *Config) DefaultGracePeriod() string {
+	if c.Campaign.GracePeriod != "" {
+		return c.Campaign.GracePeriod
+	}
+	return "5m"
 }
 
 // ValidateCommand checks if a command contains any blocked patterns.

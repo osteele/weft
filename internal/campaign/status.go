@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -21,16 +22,35 @@ const (
 	bootstrapStageReady       = "ready"          // R2 marker value when bootstrap is complete
 )
 
+// Heartbeat staleness threshold: warn if heartbeat is older than this.
+const heartbeatStaleThreshold = 3 * time.Minute
+
+// HeartbeatSample mirrors the agent's heartbeat JSON payload.
+type HeartbeatSample struct {
+	Ts             int64  `json:"ts"`
+	Phase          string `json:"phase"`
+	GPUUtilPct     int    `json:"gpu_util_pct"`
+	GPUMemUsedMiB  int    `json:"gpu_mem_used_mib"`
+	GPUMemTotalMiB int    `json:"gpu_mem_total_mib"`
+	GPUTempC       int    `json:"gpu_temp_c"`
+	HostRSSKB      int64  `json:"host_rss_kb"`
+	HostMemTotalKB int64  `json:"host_mem_total_kb"`
+	DiskFreeBytes  int64  `json:"disk_free_bytes"`
+	DiskTotalBytes int64  `json:"disk_total_bytes"`
+}
+
 // InstanceUpdate is a snapshot of cloud instance + job state.
 type InstanceUpdate struct {
 	CloudInstance  *db.CloudInstance
 	Jobs           []*db.Job
-	Instance       *cloud.Instance // nil if not yet provisioned
-	BootstrapStage string          // current bootstrap stage from R2 (e.g. "agent_installed")
-	InstancePhase  string          // current job execution phase from R2 (e.g. "running:123")
-	StallMessage   string          // non-empty if bootstrap appears stuck
-	JobProgress    int             // -1 = no progress, 0-100 = percent
-	JobProgressID  int64           // which job the progress is for
+	Instance       *cloud.Instance  // nil if not yet provisioned
+	BootstrapStage string           // current bootstrap stage from R2 (e.g. "agent_installed")
+	InstancePhase  string           // current job execution phase from R2 (e.g. "running:123")
+	StallMessage   string           // non-empty if bootstrap appears stuck
+	JobProgress    int              // -1 = no progress, 0-100 = percent
+	JobProgressID  int64            // which job the progress is for
+	HeartbeatAge   time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
+	Heartbeat      *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
 }
 
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
@@ -117,6 +137,13 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
+			// Fetch heartbeat from R2 (only when jobs have started)
+			var heartbeatAge time.Duration
+			var heartbeat *HeartbeatSample
+			if r2c != nil && hasStartedJob && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
+				heartbeat, heartbeatAge = fetchHeartbeat(ctx, r2c, cloudInstanceID)
+			}
+
 			// Detect bootstrap stall: instance running but no job progress
 			var stallMessage string
 			if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !hasStartedJob && bootstrapStage != bootstrapStageReady {
@@ -157,6 +184,11 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
+			// Detect stale heartbeat: agent may have crashed
+			if heartbeatAge > heartbeatStaleThreshold && stallMessage == "" {
+				stallMessage = fmt.Sprintf("heartbeat stale (%s since last update)", heartbeatAge.Truncate(time.Second))
+			}
+
 			// Detect failed self-destruct: all jobs finished but instance still running.
 			// Give 2 minutes after the last job for uploads + self-destruct attempts.
 			if ci.Status == db.CloudInstanceStatusRunning && hasStartedJob && len(jobs) > 0 {
@@ -191,6 +223,8 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				StallMessage:   stallMessage,
 				JobProgress:    jobProgress,
 				JobProgressID:  jobProgressID,
+				HeartbeatAge:   heartbeatAge,
+				Heartbeat:      heartbeat,
 			}
 
 			select {
@@ -246,6 +280,21 @@ func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) string 
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// fetchHeartbeat reads the heartbeat JSON from R2 and returns the parsed sample
+// and time since last heartbeat. Returns (nil, 0) if no heartbeat is available.
+func fetchHeartbeat(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
+	data := fetchR2Marker(ctx, r2Client, r2keys.InstanceHeartbeat(instanceID))
+	if data == "" {
+		return nil, 0
+	}
+	var sample HeartbeatSample
+	if err := json.Unmarshal([]byte(data), &sample); err != nil {
+		return nil, 0
+	}
+	age := time.Since(time.Unix(sample.Ts, 0))
+	return &sample, age
 }
 
 // fetchBootstrapStage reads the bootstrap stage marker from R2 for an instance.
@@ -323,7 +372,13 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	// Report instance phase changes
 	if curr.InstancePhase != "" && curr.InstancePhase != prev.InstancePhase {
 		label := InstancePhaseLabel(curr.InstancePhase)
-		lines = append(lines, fmt.Sprintf("instance %d: phase: %s", id, label))
+		line := fmt.Sprintf("instance %d: phase: %s", id, label)
+		if curr.Heartbeat != nil {
+			line += fmt.Sprintf("  (gpu %d°C %d%%, disk %s free)",
+				curr.Heartbeat.GPUTempC, curr.Heartbeat.GPUUtilPct,
+				formatBytes(curr.Heartbeat.DiskFreeBytes))
+		}
+		lines = append(lines, line)
 	}
 
 	// Report job progress changes

@@ -21,12 +21,12 @@ func ProbeCacheSizes() CacheProbe {
 		HFBytes: dirSizeBytes(filepath.Join(home, ".cache", "huggingface")),
 		UVBytes: dirSizeBytes(filepath.Join(home, ".cache", "uv")),
 	}
-	probe.DiskUsedBytes, probe.DiskTotalBytes = probeDiskUsage()
+	probe.DiskUsedBytes, probe.DiskTotalBytes = ProbeDiskUsage()
 	return probe
 }
 
-// probeDiskUsage returns (used, total) bytes for the root filesystem.
-func probeDiskUsage() (used, total int64) {
+// ProbeDiskUsage returns (used, total) bytes for the root filesystem.
+func ProbeDiskUsage() (used, total int64) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs("/", &stat); err != nil {
 		return 0, 0

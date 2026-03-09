@@ -103,8 +103,16 @@ func runCampaign(args []string) {
 	// R2 key for instance phase tracking
 	phaseKey := r2keys.InstancePhase(instanceIDInt)
 
+	// Track current phase for heartbeat reporting
+	var currentPhase syncString
+	currentPhase.Set("starting")
+
 	startTime := time.Now()
 	anyFailed := false
+
+	// Start heartbeat reporter (writes host metrics to R2 every 30s)
+	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, currentPhase.Get)
+	defer stopHeartbeat()
 
 	for _, job := range manifest.Jobs {
 		// Check time budget
@@ -141,7 +149,11 @@ func runCampaign(args []string) {
 			LogDir:     logDir,
 			WorkingDir: workDir,
 			MaxTime:    jobMaxTime,
-			OnPhase:    phaseCallback(r2Bucket, phaseKey, job.ID),
+			OnPhase: func(phase string) {
+				full := fmt.Sprintf("%s:%d", phase, job.ID)
+				currentPhase.Set(full)
+				writePhase(r2Bucket, phaseKey, full)
+			},
 		}
 
 		ei, err := runJobWithProgress(r2Bucket, job.ID, logDir, cfg)
@@ -155,7 +167,9 @@ func runCampaign(args []string) {
 			fmt.Printf("Job %d completed successfully\n", job.ID)
 		}
 
-		writePhase(r2Bucket, phaseKey, fmt.Sprintf("uploading:%d", job.ID))
+		uploadPhase := fmt.Sprintf("uploading:%d", job.ID)
+		currentPhase.Set(uploadPhase)
+		writePhase(r2Bucket, phaseKey, uploadPhase)
 
 		// Upload output directories
 		uploadOutputDirs(r2Bucket, job.ID, workDir)
@@ -291,6 +305,56 @@ func startProgressReporter(r2Bucket string, jobID int64, logPath string) func() 
 	}()
 
 	return stop
+}
+
+// startHeartbeatReporter starts a goroutine that writes host-level metrics
+// to R2 every 30 seconds. getPhase returns the current instance phase string.
+// Returns a stop function.
+func startHeartbeatReporter(r2Bucket string, instanceID int64, getPhase func() string) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	stop := func() { once.Do(func() { close(done) }) }
+
+	heartbeatKey := r2keys.InstanceHeartbeat(instanceID)
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				sample := collectHeartbeat(getPhase())
+				data, err := json.Marshal(sample)
+				if err != nil {
+					continue
+				}
+				r2Put(r2Bucket, heartbeatKey, string(data))
+			}
+		}
+	}()
+
+	return stop
+}
+
+// syncString is a mutex-protected string for sharing phase state between goroutines.
+type syncString struct {
+	mu  sync.Mutex
+	val string
+}
+
+func (s *syncString) Set(v string) {
+	s.mu.Lock()
+	s.val = v
+	s.mu.Unlock()
+}
+
+func (s *syncString) Get() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.val
 }
 
 // readLogTail reads the last maxBytes of a file. Returns empty string on error.

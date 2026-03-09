@@ -97,7 +97,7 @@ func init() {
 	campaignLaunchCmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "15m", "Keep instance alive after job failure (e.g., '15m', '1h'; '0' to disable)")
+	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
 
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Use interactive TUI display")
 	campaignWatchCmd.Flags().Bool("plain", false, "Plain text output (default; accepted for clarity)")
@@ -534,8 +534,16 @@ func parseLaunchOpts() campaign.LaunchOpts {
 			opts.MaxTimeSeconds = int(d.Seconds())
 		}
 	}
-	if campaignLaunchGracePeriod != "" && campaignLaunchGracePeriod != "0" {
-		if d, err := time.ParseDuration(campaignLaunchGracePeriod); err == nil {
+	gracePeriod := campaignLaunchGracePeriod
+	if gracePeriod == "" {
+		if cfg, err := config.Load(); err == nil {
+			gracePeriod = cfg.DefaultGracePeriod()
+		} else {
+			gracePeriod = "5m"
+		}
+	}
+	if gracePeriod != "0" {
+		if d, err := time.ParseDuration(gracePeriod); err == nil {
 			opts.GracePeriodSeconds = int(d.Seconds())
 		}
 	}
