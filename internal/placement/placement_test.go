@@ -10,6 +10,7 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/transferbw"
 	_ "modernc.org/sqlite"
 )
 
@@ -21,6 +22,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	if err := dataloc.InitSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := transferbw.InitSchema(db); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -1304,5 +1308,61 @@ func TestDescribeConstraints_IncludesBenchmark(t *testing.T) {
 	})
 	if !strings.Contains(desc, "benchmark") {
 		t.Errorf("DescribeConstraints should mention benchmark, got: %s", desc)
+	}
+}
+
+func TestTransferCostScoring_LearnedBandwidth(t *testing.T) {
+	db := setupTestDB(t)
+	now := time.Now()
+
+	// Place a 15GB model on host-beta only
+	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
+		Host:      "host-beta",
+		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "big-model/15gb"},
+		SizeBytes: 15_000_000_000,
+		LastSeen:  now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Record learned bandwidth observations: host-alpha receives at 500 MB/s
+	// (much faster than its static 10 Gbps ≈ 1.25 GB/s).
+	// This simulates learning that transfers to host-alpha are actually very fast.
+	src := transferbw.OnPremEndpoint("host-beta")
+	dstAlpha := transferbw.OnPremEndpoint("host-alpha")
+	for i := 0; i < 5; i++ {
+		if err := transferbw.RecordObservation(db, src, dstAlpha, 500e6, 1*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	scores := scoreTestHosts(db, Constraints{
+		Inputs: []string{"hf:big-model/15gb"},
+	})
+
+	// host-alpha should have a learned bandwidth reason
+	alphaScore := findScore(scores, "host-alpha")
+	hasLearned := false
+	for _, r := range alphaScore.Reasons {
+		if strings.Contains(r, "learned") {
+			hasLearned = true
+			break
+		}
+	}
+	if !hasLearned {
+		t.Errorf("host-alpha reasons should mention 'learned', got: %v", alphaScore.Reasons)
+	}
+
+	// host-gamma has no observations → should use static bandwidth
+	gammaScore := findScore(scores, "host-gamma")
+	hasStatic := false
+	for _, r := range gammaScore.Reasons {
+		if strings.Contains(r, "static") {
+			hasStatic = true
+			break
+		}
+	}
+	if !hasStatic {
+		t.Errorf("host-gamma reasons should mention 'static', got: %v", gammaScore.Reasons)
 	}
 }

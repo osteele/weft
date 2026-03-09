@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/transferbw"
 )
 
 // ErrNoReachableHost is returned when all eligible hosts are unreachable.
@@ -453,12 +454,18 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 
 		// Transfer cost penalty for non-local inputs
 		if missingCount > 0 && totalMissingBytes > 0 {
-			bw := host.NetworkBWBytesPerSec()
-			if bw > 0 {
-				transferTimeSec := float64(totalMissingBytes) / bw
+			staticBW := host.NetworkBWBytesPerSec()
+			destKey := transferbw.OnPremEndpoint(host.Name).Key()
+			effectiveBW, nObs := transferbw.EffectiveBandwidthToDest(db, destKey, staticBW)
+			if effectiveBW > 0 {
+				transferTimeSec := float64(totalMissingBytes) / effectiveBW
 				penalty := math.Min(transferTimeSec/60.0, 5.0)
 				s.Total -= penalty
-				s.Reasons = append(s.Reasons, fmt.Sprintf("~%.1fmin transfer for %d missing inputs", transferTimeSec/60.0, missingCount))
+				bwSource := "static"
+				if nObs >= transferbw.MinObservations {
+					bwSource = fmt.Sprintf("learned, n=%d", nObs)
+				}
+				s.Reasons = append(s.Reasons, fmt.Sprintf("~%.1fmin transfer for %d missing inputs (%s)", transferTimeSec/60.0, missingCount, bwSource))
 			}
 		}
 	}

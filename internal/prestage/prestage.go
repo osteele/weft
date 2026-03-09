@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/transferbw"
 )
 
 // OpPreStage is the oplog operation for pre-staging transfers.
@@ -103,9 +104,10 @@ func BuildPlan(db *sql.DB, targetHost string, inputs []string) (*Plan, error) {
 
 // Execute runs all transfers in the plan via rsync over SSH.
 // Each transfer rsyncs from sourceHost to targetHost.
+// If db is non-nil, successful transfers are recorded as bandwidth observations.
 // Returns nil if all transfers succeed; returns the first error encountered
 // but attempts all transfers (best-effort).
-func Execute(plan *Plan, timeout time.Duration) error {
+func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 	if len(plan.Transfers) == 0 {
 		return nil
 	}
@@ -137,6 +139,14 @@ func Execute(plan *Plan, timeout time.Duration) error {
 			oplog.WithDetailf("%s from %s (%d bytes)", t.Asset, t.SourceHost, t.SizeBytes),
 			oplog.WithDuration(elapsed),
 		)
+
+		if db != nil {
+			src := transferbw.OnPremEndpoint(t.SourceHost)
+			dst := transferbw.OnPremEndpoint(plan.Host)
+			if err := transferbw.RecordObservation(db, src, dst, t.SizeBytes, elapsed); err != nil {
+				log.Printf("transferbw: record observation: %v", err)
+			}
+		}
 	}
 
 	return firstErr

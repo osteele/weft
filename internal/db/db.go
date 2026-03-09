@@ -696,6 +696,24 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Transfer bandwidth observations (used by internal/transferbw package).
+	// Defined here to avoid import cycle: db → transferbw → estimate → db.
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS transfer_observations (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			source_key TEXT NOT NULL,
+			dest_key TEXT NOT NULL,
+			source_instance_id TEXT,
+			dest_instance_id TEXT,
+			bytes_transferred INTEGER NOT NULL,
+			duration_ms INTEGER NOT NULL,
+			observed_bw_bps REAL NOT NULL,
+			created_at INTEGER NOT NULL
+		)
+	`); err != nil {
+		return err
+	}
+
 	return nil
 }
 

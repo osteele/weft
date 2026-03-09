@@ -273,3 +273,14 @@ query for `status='queued' AND host=''` jobs and claim them.
 - Stream logs to external storage (S3, etc.)
 - Search across all job logs
 
+## Transfer Time Prediction Extensions
+
+The `internal/transferbw` package tracks per-(source, dest) bandwidth via EMA.
+Future extensions:
+
+- **Source-sync bandwidth**: Instrument `sync.sources` for source-sync observations
+- **Per-host-pair tracking**: When enough data accumulates, split aggregate dest estimates into per-pair
+- **`weft host bandwidth` CLI**: Inspect learned estimates and raw observations
+- **Time-based decay**: Down-weight observations older than N days
+- **Advertised-bandwidth sub-keys**: For cloud instances, bucket by provider-advertised Mbps to get finer-grained estimates (raw observations already store instance IDs for retroactive re-keying)
+

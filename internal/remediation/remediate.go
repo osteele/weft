@@ -89,7 +89,7 @@ func remediateData(ctx RemediationContext, diagnosis *ErrorDiagnosis, diagJSON s
 			return fmt.Sprintf("diagnosis only (prestage plan failed: %v)", err), false
 		}
 
-		if err := prestage.Execute(plan, 10*time.Minute); err != nil {
+		if err := prestage.Execute(ctx.DB, plan, 10*time.Minute); err != nil {
 			ctx.Logger.Printf("execute prestage for job %d: %v", ctx.Job.ID, err)
 			storeDiagnosis(ctx, diagJSON, ctx.Job.RetryCount)
 			return fmt.Sprintf("diagnosis only (prestage failed: %v)", err), false

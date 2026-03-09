@@ -36,7 +36,7 @@ func prestageInputs(database *sql.DB, i *intent.Intent, host string, logger *log
 	logger.Printf("pre-staging %d inputs (%d bytes) to %s for intent %s",
 		len(plan.Transfers), plan.TotalBytes(), host, i.IntentID)
 
-	if err := prestage.Execute(plan, 10*time.Minute); err != nil {
+	if err := prestage.Execute(database, plan, 10*time.Minute); err != nil {
 		logger.Printf("prestage failed for %s (continuing with dispatch): %v", i.IntentID, err)
 	}
 }
