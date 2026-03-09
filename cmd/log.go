@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
@@ -167,9 +168,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
-	// Cloud jobs: fetch log from R2 instead of SSH
+	// Cloud jobs: SSH for running, R2 for completed
 	if job.IsCloudJob() {
-		return runLogForCloudJob(cmd, job)
+		return runLogForCloudJob(cmd, database, job)
 	}
 
 	follow := logFollow
@@ -296,8 +297,10 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	return nil
 }
 
-// runLogForCloudJob fetches log output from R2 for a cloud-based job.
-func runLogForCloudJob(cmd *cobra.Command, job *db.Job) error {
+// runLogForCloudJob fetches log output for a cloud-based job.
+// For running jobs, it SSHes into the cloud instance (same as on-prem).
+// For terminal jobs, it fetches from R2.
+func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 	// For terminal jobs, prefer local cache first.
 	if shouldPreferCachedLog(job.Status) {
 		if cached, err := logcache.Read(job.ID); err == nil {
@@ -314,6 +317,88 @@ func runLogForCloudJob(cmd *cobra.Command, job *db.Job) error {
 		}
 	}
 
+	// For running jobs, SSH into the cloud instance to read the log directly
+	if !isTerminalStatus(job.Status) {
+		inst, err := resolveCloudInstanceSSH(database, job)
+		if err == nil {
+			return runLogViaCloudSSH(cmd, database, job, inst)
+		}
+		// Fall through to R2 if we can't resolve SSH details
+		fmt.Fprintf(os.Stderr, "Warning: could not resolve cloud instance SSH (%v); trying R2\n", err)
+	}
+
+	return runLogFromR2(cmd, job)
+}
+
+// resolveCloudInstanceSSH looks up the cloud instance for a job and returns its SSH details.
+func resolveCloudInstanceSSH(database *sql.DB, job *db.Job) (*cloud.Instance, error) {
+	if job.CloudInstanceID == nil {
+		return nil, fmt.Errorf("job has no cloud instance ID")
+	}
+
+	ci, err := db.GetCloudInstance(database, *job.CloudInstanceID)
+	if err != nil {
+		return nil, fmt.Errorf("get cloud instance: %w", err)
+	}
+	if ci == nil {
+		return nil, fmt.Errorf("cloud instance %d not found", *job.CloudInstanceID)
+	}
+
+	providerID := ci.EffectiveProviderID()
+	if providerID == "" {
+		return nil, fmt.Errorf("cloud instance has no provider ID")
+	}
+
+	client := cloudClientForDBInstance(ci.Provider)
+	inst, err := client.ShowInstance(providerID)
+	if err != nil {
+		return nil, fmt.Errorf("show instance: %w", err)
+	}
+	if inst.SSHHost == "" {
+		return nil, fmt.Errorf("instance has no SSH host")
+	}
+
+	return inst, nil
+}
+
+// cloudLogDir is the directory where the agent writes job logs on cloud instances.
+const cloudLogDir = "/tmp/weft-logs"
+
+// runLogViaCloudSSH reads a job's log by SSHing into the cloud instance.
+func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *cloud.Instance) error {
+	logFile := fmt.Sprintf("%s/%d.log", cloudLogDir, job.ID)
+	remoteCmd := buildLogCommand(logFile, logFollow)
+
+	target := cloud.InstanceSSHTarget(inst)
+	sshOpts := cloud.InstanceSSHArgs(inst)
+	sshArgs := append(sshOpts, target, remoteCmd)
+
+	defaultTailHint := shouldShowDefaultTailHint(cmd, logFollow)
+
+	if logFollow {
+		fmt.Printf("\nFollowing log output until job completes (Ctrl+C to stop)...\n\n")
+		sshCmd := exec.Command("ssh", sshArgs...)
+		sshCmd.Stdout = os.Stdout
+		sshCmd.Stderr = os.Stderr
+		return streamCommandUntilJobDone(database, job.ID, sshCmd)
+	}
+
+	out, err := cloud.RunOnInstance(inst, remoteCmd, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("ssh to cloud instance: %w", err)
+	}
+
+	if defaultTailHint {
+		printDefaultTailHint(job.ID)
+	}
+
+	output := filterLogContent(out, logFrom, logTo, logLines, logGrep)
+	fmt.Print(processCarriageReturns(output))
+	return nil
+}
+
+// runLogFromR2 fetches log output from R2 for a cloud-based job.
+func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -328,7 +413,7 @@ func runLogForCloudJob(cmd *cobra.Command, job *db.Job) error {
 	}
 
 	if logFollow {
-		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud jobs; showing current log.\n")
+		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud job logs from R2; showing current log.\n")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

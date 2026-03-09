@@ -17,20 +17,29 @@ func SSHRun(target string, sshOpts []string, command string) (string, error) {
 	return string(out), err
 }
 
+// InstanceSSHArgs returns the SSH arguments needed to connect to a cloud instance
+// (port, host key checks disabled, log level). Does not include the target or command.
+func InstanceSSHArgs(inst *Instance) []string {
+	return []string{
+		"-p", fmt.Sprintf("%d", inst.SSHPort),
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+	}
+}
+
+// InstanceSSHTarget returns the SSH target string (user@host) for a cloud instance.
+func InstanceSSHTarget(inst *Instance) string {
+	return fmt.Sprintf("root@%s", inst.SSHHost)
+}
+
 // RunOnInstance executes a command on a cloud instance via SSH using its
 // provider-supplied SSH details.
 func RunOnInstance(inst *Instance, command string, timeout time.Duration) (string, error) {
 	if inst.SSHHost == "" {
 		return "", fmt.Errorf("instance %s has no SSH host", inst.ProviderID)
 	}
-	target := fmt.Sprintf("root@%s", inst.SSHHost)
-	sshOpts := []string{
-		"-p", fmt.Sprintf("%d", inst.SSHPort),
-		"-o", "StrictHostKeyChecking=no",
-		"-o", "UserKnownHostsFile=/dev/null",
-		"-o", "LogLevel=ERROR",
-	}
-	return SSHRunWithRetry(target, sshOpts, command, timeout)
+	return SSHRunWithRetry(InstanceSSHTarget(inst), InstanceSSHArgs(inst), command, timeout)
 }
 
 // SSHRunWithRetry executes a command on a remote host via SSH, retrying on
