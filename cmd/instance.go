@@ -228,7 +228,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			if !campaign.IsInstanceTerminal(ci.Status) {
 				inst, _ = client.ShowInstance(providerInstID)
 			}
-			if inst != nil {
+			if inst != nil && inst.Status != "" {
 				fmt.Printf("  Instance: %s (%s)\n", providerInstID, inst.Status)
 			} else {
 				fmt.Printf("  Instance: %s\n", providerInstID)

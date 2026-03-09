@@ -37,7 +37,8 @@ type watchModel struct {
 var (
 	watchTitleStyle     = lipgloss.NewStyle().Bold(true)
 	watchStatusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-	watchCompletedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	watchRunningStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	watchCompletedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 	watchFailedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	watchDimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 )
@@ -246,6 +247,8 @@ func (m watchModel) View() string {
 				}
 				var jobStyle lipgloss.Style
 				switch j.Status {
+				case db.StatusRunning:
+					jobStyle = watchRunningStyle
 				case db.StatusCompleted:
 					jobStyle = watchCompletedStyle
 				case db.StatusFailed:
