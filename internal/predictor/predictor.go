@@ -30,10 +30,12 @@ type Config struct {
 
 // Prediction holds a point estimate with uncertainty bounds.
 type Prediction struct {
-	Mean  float64 `json:"mean"`
-	Std   float64 `json:"std"`
-	Lower float64 `json:"lower"`
-	Upper float64 `json:"upper"`
+	Mean            float64 `json:"mean"`
+	Std             float64 `json:"std"`
+	Lower           float64 `json:"lower"`
+	Upper           float64 `json:"upper"`
+	EpistemicFactor float64 `json:"epistemic_factor,omitempty"`
+	NCalibration    int     `json:"n_calibration,omitempty"`
 }
 
 // Result holds predictions for all targets.
@@ -260,14 +262,14 @@ func FormatMemory(p *Prediction, unit string) string {
 	if p == nil {
 		return "unknown"
 	}
-	divisor := 1.0
+	var divisor float64
 	switch unit {
 	case "GiB":
 		divisor = 1024
-	case "MiB":
-		divisor = 1
 	case "GB":
 		divisor = 1000
+	default:
+		divisor = 1
 	}
 	return fmt.Sprintf("~%.1f %s (95%% CI: %.1f – %.1f %s)",
 		p.Mean/divisor, unit, p.Lower/divisor, p.Upper/divisor, unit)

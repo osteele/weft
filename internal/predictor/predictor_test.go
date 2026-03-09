@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -17,13 +18,7 @@ func TestBuildConfig(t *testing.T) {
 
 	t.Run("auto appends weft DB", func(t *testing.T) {
 		cfg := BuildConfig("/path/to/project", "/models", 50, []string{"/other/db.sqlite"})
-		found := false
-		for _, p := range cfg.DBPaths {
-			if p == weftDB {
-				found = true
-			}
-		}
-		if !found {
+		if !slices.Contains(cfg.DBPaths, weftDB) {
 			t.Errorf("weft DB %q not found in DBPaths: %v", weftDB, cfg.DBPaths)
 		}
 	})
@@ -125,6 +120,72 @@ func TestFormatDur(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPredictionJSONParsing(t *testing.T) {
+	t.Run("with epistemic fields", func(t *testing.T) {
+		data := `{"mean":120.5,"std":30.2,"lower":60.1,"upper":180.9,"epistemic_factor":2.5,"n_calibration":45}`
+		var p Prediction
+		if err := json.Unmarshal([]byte(data), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Mean != 120.5 {
+			t.Errorf("Mean = %v, want 120.5", p.Mean)
+		}
+		if p.EpistemicFactor != 2.5 {
+			t.Errorf("EpistemicFactor = %v, want 2.5", p.EpistemicFactor)
+		}
+		if p.NCalibration != 45 {
+			t.Errorf("NCalibration = %v, want 45", p.NCalibration)
+		}
+	})
+
+	t.Run("backward compat without epistemic fields", func(t *testing.T) {
+		data := `{"mean":120.5,"std":30.2,"lower":60.1,"upper":180.9}`
+		var p Prediction
+		if err := json.Unmarshal([]byte(data), &p); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if p.Mean != 120.5 {
+			t.Errorf("Mean = %v, want 120.5", p.Mean)
+		}
+		if p.EpistemicFactor != 0 {
+			t.Errorf("EpistemicFactor = %v, want 0 (zero value)", p.EpistemicFactor)
+		}
+		if p.NCalibration != 0 {
+			t.Errorf("NCalibration = %v, want 0 (zero value)", p.NCalibration)
+		}
+	})
+
+	t.Run("full result with epistemic", func(t *testing.T) {
+		data := `{
+			"duration_s": {"mean":120.5,"std":30.2,"lower":60.1,"upper":180.9,"epistemic_factor":1.8,"n_calibration":50},
+			"peak_rss_kb": {"mean":1024.0,"std":100.0,"lower":824.0,"upper":1224.0},
+			"max_gpu_mem_mib": null
+		}`
+		var r Result
+		if err := json.Unmarshal([]byte(data), &r); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if r.DurationS == nil {
+			t.Fatal("DurationS is nil")
+		}
+		if r.DurationS.EpistemicFactor != 1.8 {
+			t.Errorf("DurationS.EpistemicFactor = %v, want 1.8", r.DurationS.EpistemicFactor)
+		}
+		if r.DurationS.NCalibration != 50 {
+			t.Errorf("DurationS.NCalibration = %v, want 50", r.DurationS.NCalibration)
+		}
+		if r.PeakRSSKB == nil {
+			t.Fatal("PeakRSSKB is nil")
+		}
+		if r.PeakRSSKB.EpistemicFactor != 0 {
+			t.Errorf("PeakRSSKB.EpistemicFactor = %v, want 0", r.PeakRSSKB.EpistemicFactor)
+		}
+		if r.MaxGPUMemMiB != nil {
+			t.Errorf("MaxGPUMemMiB = %v, want nil", r.MaxGPUMemMiB)
+		}
+	})
 }
 
 func TestNeedsRetrain(t *testing.T) {
