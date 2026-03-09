@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +14,13 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 )
 
+// Bootstrap timeout thresholds.
+const (
+	bootstrapWarnTimeout      = 15 * time.Minute // warn after this long with no progress
+	bootstrapTerminateTimeout = 20 * time.Minute // auto-terminate after this long
+	bootstrapStageReady       = "ready"          // R2 marker value when bootstrap is complete
+)
+
 // InstanceUpdate is a snapshot of cloud instance + job state.
 type InstanceUpdate struct {
 	CloudInstance  *db.CloudInstance
@@ -20,6 +28,9 @@ type InstanceUpdate struct {
 	Instance       *cloud.Instance // nil if not yet provisioned
 	BootstrapStage string          // current bootstrap stage from R2 (e.g. "agent_installed")
 	InstancePhase  string          // current job execution phase from R2 (e.g. "running:123")
+	StallMessage   string          // non-empty if bootstrap appears stuck
+	JobProgress    int             // -1 = no progress, 0-100 = percent
+	JobProgressID  int64           // which job the progress is for
 }
 
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
@@ -75,20 +86,45 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
+			// Check if any job has progressed beyond queued
+			hasStartedJob := false
+			for _, j := range jobs {
+				if j.Status != db.StatusQueued {
+					hasStartedJob = true
+					break
+				}
+			}
+
 			// Fetch bootstrap stage or instance phase from R2
 			var bootstrapStage, instancePhase string
+			jobProgress := -1
+			var jobProgressID int64
 			if r2c != nil && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
-				hasStartedJob := false
-				for _, j := range jobs {
-					if j.Status != db.StatusQueued {
-						hasStartedJob = true
-						break
-					}
-				}
 				if hasStartedJob {
 					instancePhase = fetchInstancePhase(ctx, r2c, cloudInstanceID)
+					jobProgressID, jobProgress = fetchJobProgress(ctx, r2c, instancePhase)
 				} else {
 					bootstrapStage = fetchBootstrapStage(ctx, r2c, cloudInstanceID)
+				}
+			}
+
+			// Detect bootstrap stall: instance running but no job progress
+			var stallMessage string
+			if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !hasStartedJob && bootstrapStage != bootstrapStageReady {
+				elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
+				if elapsed >= bootstrapTerminateTimeout {
+					// Auto-terminate: destroy provider instance, mark failed, reset jobs
+					if providerInstID != "" {
+						_ = client.DestroyInstance(providerInstID)
+					}
+					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed)
+					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
+					ci.Status = db.CloudInstanceStatusFailed
+					stallMessage = fmt.Sprintf("bootstrap timeout after %s — terminating instance, jobs reset to queued",
+						elapsed.Truncate(time.Minute))
+				} else if elapsed >= bootstrapWarnTimeout {
+					stallMessage = fmt.Sprintf("bootstrap stalled — no activity after %s",
+						elapsed.Truncate(time.Minute))
 				}
 			}
 
@@ -98,6 +134,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				Instance:       cachedInstance,
 				BootstrapStage: bootstrapStage,
 				InstancePhase:  instancePhase,
+				StallMessage:   stallMessage,
+				JobProgress:    jobProgress,
+				JobProgressID:  jobProgressID,
 			}
 
 			select {
@@ -120,6 +159,28 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 	}()
 
 	return ch
+}
+
+// fetchJobProgress extracts the running job ID from an instance phase string
+// and fetches its progress percentage from R2. Returns (0, -1) if not applicable.
+func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string) (jobID int64, percent int) {
+	verb, idStr, ok := strings.Cut(instancePhase, ":")
+	if !ok || verb != "running" {
+		return 0, -1
+	}
+	jid, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		return 0, -1
+	}
+	pctStr := fetchR2Marker(ctx, r2c, r2keys.JobProgress(jid))
+	if pctStr == "" {
+		return jid, -1
+	}
+	pct, err := strconv.Atoi(pctStr)
+	if err != nil {
+		return jid, -1
+	}
+	return jid, pct
 }
 
 // fetchR2Marker reads a string marker from R2 with a 3-second timeout.
@@ -175,7 +236,7 @@ func BootstrapStageLabel(stage string) string {
 		return "extracting sources"
 	case "deps_installed":
 		return "installing dependencies"
-	case "ready":
+	case bootstrapStageReady:
 		return "ready"
 	case "starting_jobs":
 		return "starting jobs"
@@ -191,6 +252,11 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	var lines []string
 	id := curr.CloudInstance.ID
 
+	// Report bootstrap stall warnings
+	if curr.StallMessage != "" && curr.StallMessage != prev.StallMessage {
+		lines = append(lines, fmt.Sprintf("instance %d: WARNING %s", id, curr.StallMessage))
+	}
+
 	// Report bootstrap stage changes
 	if curr.BootstrapStage != "" && curr.BootstrapStage != prev.BootstrapStage {
 		label := BootstrapStageLabel(curr.BootstrapStage)
@@ -201,6 +267,11 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	if curr.InstancePhase != "" && curr.InstancePhase != prev.InstancePhase {
 		label := InstancePhaseLabel(curr.InstancePhase)
 		lines = append(lines, fmt.Sprintf("instance %d: phase: %s", id, label))
+	}
+
+	// Report job progress changes
+	if curr.JobProgress >= 0 && (curr.JobProgress != prev.JobProgress || curr.JobProgressID != prev.JobProgressID) {
+		lines = append(lines, fmt.Sprintf("instance %d: job %d progress: %d%%", id, curr.JobProgressID, curr.JobProgress))
 	}
 
 	if prev.CloudInstance == nil || prev.CloudInstance.Status != curr.CloudInstance.Status {

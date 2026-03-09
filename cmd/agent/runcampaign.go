@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
@@ -141,7 +144,7 @@ func runCampaign(args []string) {
 			OnPhase:    phaseCallback(r2Bucket, phaseKey, job.ID),
 		}
 
-		ei, err := runner.RunSingleJob(cfg)
+		ei, err := runJobWithProgress(r2Bucket, job.ID, logDir, cfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
 			anyFailed = true
@@ -236,4 +239,90 @@ func promoteUVManifest(bucket, logDir string) {
 func cleanLogDir(logDir string) {
 	os.RemoveAll(logDir)
 	os.MkdirAll(logDir, 0o755)
+}
+
+// runJobWithProgress runs a single job with progress reporting to R2.
+// Starts a background goroutine that tails the log for progress lines,
+// cleans up the R2 progress key when done.
+func runJobWithProgress(r2Bucket string, jobID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
+	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
+	stopProgress := startProgressReporter(r2Bucket, jobID, logPath)
+	defer func() {
+		stopProgress()
+		r2Delete(r2Bucket, r2keys.JobProgress(jobID))
+	}()
+	return runner.RunSingleJob(cfg)
+}
+
+// startProgressReporter starts a goroutine that periodically reads the job log,
+// parses progress lines, and writes the percent to R2. Returns a stop function.
+func startProgressReporter(r2Bucket string, jobID int64, logPath string) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	stop := func() { once.Do(func() { close(done) }) }
+
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		lastPercent := -1
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				tail := readLogTail(logPath, 8192)
+				if tail == "" {
+					continue
+				}
+				prog := progress.FindLastProgress(tail)
+				if prog == nil {
+					continue
+				}
+				pct := prog.DisplayPercent()
+				if pct >= 0 && pct != lastPercent {
+					lastPercent = pct
+					r2Put(r2Bucket, r2keys.JobProgress(jobID), fmt.Sprintf("%d", pct))
+				}
+			}
+		}
+	}()
+
+	return stop
+}
+
+// readLogTail reads the last maxBytes of a file. Returns empty string on error.
+func readLogTail(path string, maxBytes int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+
+	size := info.Size()
+	if size == 0 {
+		return ""
+	}
+
+	readSize := maxBytes
+	offset := size - maxBytes
+	if offset < 0 {
+		offset = 0
+		readSize = size
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+
+	data := make([]byte, readSize)
+	n, err := f.Read(data)
+	if n == 0 || err != nil {
+		return ""
+	}
+	return string(data[:n])
 }

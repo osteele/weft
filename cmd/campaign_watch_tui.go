@@ -253,9 +253,13 @@ func (m watchModel) View() string {
 				default:
 					jobStyle = watchDimStyle
 				}
+				statusText := j.Status
+				if j.Status == db.StatusRunning && u.JobProgress >= 0 && u.JobProgressID == j.ID {
+					statusText = fmt.Sprintf("running %3d%%", u.JobProgress)
+				}
 				b.WriteString(fmt.Sprintf("    %4d  %s  %s\n",
 					j.ID,
-					jobStyle.Render(fmt.Sprintf("%-10s", j.Status)),
+					jobStyle.Render(fmt.Sprintf("%-12s", statusText)),
 					desc,
 				))
 			}

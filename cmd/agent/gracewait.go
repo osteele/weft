@@ -202,7 +202,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 				OnPhase:    phaseCallback(r2Bucket, phaseKey, job.ID),
 			}
 
-			ei, err := runner.RunSingleJob(resubCfg)
+			ei, err := runJobWithProgress(r2Bucket, job.ID, logDir, resubCfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
 				failedJobs = append(failedJobs, job.ID)

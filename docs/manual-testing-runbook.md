@@ -359,7 +359,7 @@ Test projects live in `testdata/campaign/` with pre-configured Python environmen
 
 | Project | Purpose | Duration | Exit |
 |---------|---------|----------|------|
-| `basic` | GPU detection, output files (torch, numpy) | ~5-10s | 0 |
+| `basic` | GPU detection, output files, progress reporting (torch, numpy) | ~20s | 0 |
 | `ml-tokenizer` | HuggingFace tokenizer download + inference | ~20-45s | 0 |
 | `ml-inference` | DistilBERT model GPU inference | ~30-60s | 0 |
 | `fail` | Deliberate `RuntimeError` after 2s sleep | ~2s | non-zero |
@@ -453,6 +453,26 @@ weft artifact sync <job-id>
 - `artifact list` shows output files for jobs that wrote to `output/` or `outputs/`
 - `artifact sync` downloads the files locally
 - The `basic` testdata project writes to `output/`, so it should have artifacts
+
+### Step 7: Verify progress reporting
+
+```bash
+# While the basic job is running, campaign watch should show progress:
+weft campaign watch <campaign-id> --plain
+# Expected output includes lines like:
+#   instance <id>: job <job-id> progress: 50%
+
+# TUI mode shows progress inline:
+weft campaign watch <campaign-id>
+# Running jobs should display "running  50%" instead of just "running"
+```
+
+**What to verify:**
+
+- The `basic` testdata job shows progress updates during `campaign watch --plain`
+- Progress percentage increases over the ~20s run
+- After the job completes, progress lines stop (the R2 key is cleaned up)
+- Jobs that don't emit progress lines (like `ml-tokenizer`) show plain "running" with no percentage
 
 ### Re-running test jobs
 

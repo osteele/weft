@@ -9,6 +9,12 @@ import numpy as np
 import torch
 
 os.makedirs("output", exist_ok=True)
+
+total_steps = 10
+for i in range(total_steps):
+    print(f"Progress: {i + 1}/{total_steps}")
+    time.sleep(2)  # ~20s total — enough for several progress updates at 15s interval
+
 json.dump(
     {
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none",

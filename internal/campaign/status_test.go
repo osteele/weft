@@ -1,8 +1,10 @@
 package campaign
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -106,6 +108,161 @@ func TestFormatPlainUpdate_PhaseChange(t *testing.T) {
 	output := FormatPlainUpdate(prev, curr)
 	if !strings.Contains(output, "phase: running job 42") {
 		t.Errorf("should contain phase change, got %q", output)
+	}
+}
+
+func TestFormatPlainUpdate_BootstrapStallWarning(t *testing.T) {
+	ci := &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusRunning}
+	prev := InstanceUpdate{CloudInstance: ci}
+	curr := InstanceUpdate{
+		CloudInstance: ci,
+		StallMessage:  "bootstrap stalled — no activity after 15m0s",
+	}
+
+	output := FormatPlainUpdate(prev, curr)
+	if !strings.Contains(output, "WARNING") {
+		t.Errorf("should contain WARNING, got %q", output)
+	}
+	if !strings.Contains(output, "bootstrap stalled") {
+		t.Errorf("should contain stall message, got %q", output)
+	}
+}
+
+func TestFormatPlainUpdate_BootstrapStallTerminate(t *testing.T) {
+	ci := &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusFailed}
+	prev := InstanceUpdate{CloudInstance: &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusRunning}}
+	curr := InstanceUpdate{
+		CloudInstance: ci,
+		StallMessage:  "bootstrap timeout after 20m0s — terminating instance, jobs reset to queued",
+	}
+
+	output := FormatPlainUpdate(prev, curr)
+	if !strings.Contains(output, "terminating instance") {
+		t.Errorf("should contain termination message, got %q", output)
+	}
+	if !strings.Contains(output, "status=failed") {
+		t.Errorf("should contain failed status, got %q", output)
+	}
+}
+
+func TestFormatPlainUpdate_BootstrapStallNoRepeat(t *testing.T) {
+	ci := &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusRunning}
+	msg := "bootstrap stalled — no activity after 15m0s"
+	prev := InstanceUpdate{CloudInstance: ci, StallMessage: msg}
+	curr := InstanceUpdate{CloudInstance: ci, StallMessage: msg}
+
+	output := FormatPlainUpdate(prev, curr)
+	if strings.Contains(output, "WARNING") {
+		t.Errorf("should not repeat same stall warning, got %q", output)
+	}
+}
+
+func TestWatchInstance_BootstrapTimeout(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Create a cloud instance, then set launched_at and provider_instance_id
+	// (CreateCloudInstance doesn't persist these fields)
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "mock",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	// Set launched_at to 25 minutes ago (beyond terminate threshold) and provider_instance_id
+	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
+	_, err = database.Exec(`UPDATE cloud_instances SET launched_at = ?, provider_instance_id = ? WHERE id = ?`,
+		launchedAt, "test-123", instanceID)
+	if err != nil {
+		t.Fatalf("update launched_at: %v", err)
+	}
+
+	// Create a queued job assigned to this instance
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
+	}
+
+	var destroyed bool
+	mockClient := &cloud.MockClient{
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyed = true
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ch := WatchInstance(ctx, mockClient, database, instanceID, 100*time.Millisecond, 100*time.Millisecond)
+
+	var gotStallMsg bool
+	var gotTerminateMsg bool
+	for update := range ch {
+		if update.StallMessage != "" {
+			gotStallMsg = true
+		}
+		if strings.Contains(update.StallMessage, "terminating instance") {
+			gotTerminateMsg = true
+		}
+	}
+
+	if !gotStallMsg {
+		t.Error("expected StallMessage to be set")
+	}
+	if !gotTerminateMsg {
+		t.Error("expected termination message")
+	}
+	if !destroyed {
+		t.Error("expected DestroyInstance to be called")
+	}
+
+	// Verify instance was marked as failed in DB
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+}
+
+func TestFormatPlainUpdate_ProgressChange(t *testing.T) {
+	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
+	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: -1}
+	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
+
+	output := FormatPlainUpdate(prev, curr)
+	if !strings.Contains(output, "job 42 progress: 50%") {
+		t.Errorf("should contain progress update, got %q", output)
+	}
+}
+
+func TestFormatPlainUpdate_ProgressNoChange(t *testing.T) {
+	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
+	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
+	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
+
+	output := FormatPlainUpdate(prev, curr)
+	if strings.Contains(output, "progress") {
+		t.Errorf("should not report unchanged progress, got %q", output)
+	}
+}
+
+func TestFormatPlainUpdate_ProgressNoReport(t *testing.T) {
+	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
+	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: -1}
+	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: -1}
+
+	output := FormatPlainUpdate(prev, curr)
+	if strings.Contains(output, "progress") {
+		t.Errorf("should not report when no progress, got %q", output)
 	}
 }
 

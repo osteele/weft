@@ -44,6 +44,10 @@ func JobOutputDir(jobID int64, dir string) string {
 	return fmt.Sprintf("jobs/%d/outputs/%s/", jobID, dir)
 }
 
+func JobProgress(jobID int64) string {
+	return fmt.Sprintf("jobs/%d/progress", jobID)
+}
+
 func JobPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d", jobID)
 }
