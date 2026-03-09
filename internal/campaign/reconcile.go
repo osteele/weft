@@ -35,6 +35,26 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 			}
 		}
 
+		// Clean up completed donor instances
+		if ci.InstanceRole == "donor" && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			exists, _ := r2Client.ObjectExists(ctx, r2keys.DonorReady(ci.ID))
+			cancel()
+			if exists {
+				providerID := ci.EffectiveProviderID()
+				if providerID != "" {
+					if client := clientForProvider(clients, cloud.Provider(ci.Provider)); client != nil {
+						if err := client.DestroyInstance(providerID); err != nil {
+							log.Printf("reconcile: failed to destroy completed donor %d: %v", ci.ID, err)
+						}
+					}
+				}
+				_ = db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
+				reconciled++
+				continue
+			}
+		}
+
 		providerID := ci.EffectiveProviderID()
 		if providerID == "" {
 			continue
@@ -75,8 +95,9 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 			}
 		}
 
-		// If provider reports terminal state (or instance is gone) but DB doesn't, reconcile
-		if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) {
+		// If provider reports terminal state (or instance is gone) but DB doesn't, reconcile.
+		// Skip grace-period instances — a transient API failure shouldn't kill the session.
+		if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
 			status := "not found"
 			if inst != nil {
 				status = inst.Status

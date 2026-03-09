@@ -78,8 +78,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 				lastProviderPoll = time.Now()
 
-				// Detect dead instances: provider says dead but DB says running
-				if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) {
+				// Detect dead instances: provider says dead but DB says running.
+				// Skip grace-period instances — they legitimately keep the provider
+				// alive, and a transient API failure shouldn't kill the grace session.
+				if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
 					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
 					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
 					ci.Status = db.CloudInstanceStatusFailed

@@ -11,7 +11,7 @@ type BootstrapManifest struct {
 	Sources            []SourceMapping // source tarballs to extract
 	WorkspacePath      string          // e.g. "/workspace/"
 	DonorMode          bool            // download caches and write ready marker, no wrapper
-	HFModels           []string        // HF model IDs to pre-download (donor mode only)
+	HFModels           []string        // HF model IDs to pre-download before jobs run
 	DonorID            string          // provider instance ID (for R2 ready marker key)
 	DBInstanceID       int64           // DB cloud_instances.id for R2 stage markers
 	MaxTimeSeconds     int             // instance time budget (0 = unlimited)
@@ -69,11 +69,33 @@ func GenerateBootstrapScript(manifest BootstrapManifest) string {
 	if manifest.DonorMode {
 		generateDonorBootstrapTail(&b, manifest)
 	} else {
+		writeHFDownloads(&b, manifest.HFModels, manifest.DBInstanceID)
 		writeStageMarker(&b, manifest.DBInstanceID, "starting_jobs")
 		generateWorkerBootstrapTail(&b, manifest)
 	}
 
 	return b.String()
+}
+
+// writeHFDownloads emits bash commands to pre-download HF models.
+func writeHFDownloads(b *strings.Builder, models []string, instanceID int64) {
+	if len(models) == 0 {
+		return
+	}
+	b.WriteString("# Download HF models\n")
+	b.WriteString("_hf_done=0\n")
+	b.WriteString(fmt.Sprintf("_hf_total=%d\n", len(models)))
+	for _, model := range models {
+		b.WriteString(fmt.Sprintf("echo 'Downloading HF model: %s'\n", model))
+		b.WriteString(fmt.Sprintf("huggingface-cli download %q 2>&1 || echo 'Failed to download %s'\n", model, model))
+		b.WriteString("_hf_done=$((_hf_done + 1))\n")
+		writeStageMarker(b, instanceID, "downloading_models:${_hf_done}/${_hf_total}")
+	}
+	b.WriteString("\n")
+
+	// Repair broken HF symlinks (known issue with huggingface_hub cache layout)
+	b.WriteString("# Repair broken HF symlinks\n")
+	b.WriteString(`find /root/.cache/huggingface -type l ! -exec test -e {} \; -delete 2>/dev/null || true` + "\n\n")
 }
 
 // generateDonorBootstrapTail generates the donor-specific portion:
@@ -86,23 +108,7 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 	}
 	writeStageMarker(b, manifest.DBInstanceID, "deps_installed")
 
-	// Download each HF model
-	if len(manifest.HFModels) > 0 {
-		b.WriteString("# Download HF models\n")
-		b.WriteString("_hf_done=0\n")
-		b.WriteString(fmt.Sprintf("_hf_total=%d\n", len(manifest.HFModels)))
-		for _, model := range manifest.HFModels {
-			b.WriteString(fmt.Sprintf("echo 'Downloading HF model: %s'\n", model))
-			b.WriteString(fmt.Sprintf("huggingface-cli download %q 2>&1 || echo 'Failed to download %s'\n", model, model))
-			b.WriteString("_hf_done=$((_hf_done + 1))\n")
-			writeStageMarker(b, manifest.DBInstanceID, "downloading_models:${_hf_done}/${_hf_total}")
-		}
-		b.WriteString("\n")
-
-		// Repair broken HF symlinks (known issue with huggingface_hub cache layout)
-		b.WriteString("# Repair broken HF symlinks\n")
-		b.WriteString(`find /root/.cache/huggingface -type l ! -exec test -e {} \; -delete 2>/dev/null || true` + "\n\n")
-	}
+	writeHFDownloads(b, manifest.HFModels, manifest.DBInstanceID)
 
 	writeStageMarker(b, manifest.DBInstanceID, "ready")
 

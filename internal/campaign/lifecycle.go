@@ -619,6 +619,7 @@ func LaunchInstance(
 		AgentR2Key:         r2Assets.AgentR2Key,
 		Sources:            sources,
 		WorkspacePath:      wsPath,
+		HFModels:           collectHFModels([]InstanceGroup{group}),
 		DBInstanceID:       instanceID,
 		MaxTimeSeconds:     opts.MaxTimeSeconds,
 		GracePeriodSeconds: opts.GracePeriodSeconds,

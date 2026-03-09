@@ -262,3 +262,34 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 		t.Error("worker script should not write donor ready marker")
 	}
 }
+
+func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
+	manifest := BootstrapManifest{
+		AgentR2Key:    "agent/v1/linux-amd64",
+		Sources:       []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
+		WorkspacePath: "/workspace/",
+		DBInstanceID:  9,
+		HFModels:      []string{"EleutherAI/pythia-1.4b", "gpt2-xl"},
+		DonorMode:     false,
+	}
+
+	script := GenerateBootstrapScript(manifest)
+
+	// Should download HF models before launching agent
+	if !strings.Contains(script, "huggingface-cli download") {
+		t.Error("worker script should download HF models")
+	}
+	if !strings.Contains(script, "EleutherAI/pythia-1.4b") {
+		t.Error("worker script should reference Pythia model")
+	}
+	if !strings.Contains(script, "gpt2-xl") {
+		t.Error("worker script should reference GPT-2 XL model")
+	}
+
+	// HF downloads should appear before the agent launch
+	dlIdx := strings.Index(script, "huggingface-cli download")
+	agentIdx := strings.Index(script, "nohup weft-agent run-campaign")
+	if dlIdx >= agentIdx {
+		t.Error("HF downloads should happen before agent launch")
+	}
+}
