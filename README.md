@@ -1190,6 +1190,44 @@ Models are stored at `~/.cache/weft/models/` and auto-retrain when 50+ new
 jobs complete. Configure the training data source via `predictor.project_path`
 in `~/.config/weft/config.yaml`.
 
+### Command-to-Resource Estimation
+
+The predictor estimates peak RSS and GPU memory from the command string and
+historical data. These estimates feed into placement as:
+
+- **Hard constraints**: Host is ineligible if predicted peak RSS (95th
+  percentile upper bound) exceeds host RAM, or predicted GPU memory exceeds the
+  largest GPU on the host.
+- **Soft constraints**: Penalty (up to -2.0) when predicted resource usage
+  exceeds 80% of currently free RAM or GPU memory.
+
+### Cost-Optimal Cloud Bidding
+
+The `weft campaign launch` command selects the cheapest cloud instance likely to
+survive the predicted job duration. A Beta-Binomial survival model learns
+price-reliability curves from campaign history — cheaper instances fail more
+often, so the bidding system balances cost against the probability of completion.
+
+```bash
+# Launch with automatic instance selection
+weft campaign launch
+
+# Dry-run to see the cost plan
+weft campaign launch --dry-run
+```
+
+### Transfer Bandwidth Learning
+
+Weft learns per-(source, destination) transfer bandwidth from observed file
+transfers using an exponential moving average. Learned bandwidth is used in:
+
+- **Placement scoring**: Estimating data transfer time to candidate hosts
+- **Campaign cost estimation**: Predicting total wall time including transfers
+
+Bandwidth estimates start from static inventory values and converge as transfers
+are observed. See `docs/IDEAS.md` § "Transfer Time Prediction Extensions" for
+planned improvements.
+
 ## Cluster Dashboard
 
 The web UI includes a `/cluster` page showing:

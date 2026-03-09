@@ -284,3 +284,52 @@ Future extensions:
 - **Time-based decay**: Down-weight observations older than N days
 - **Advertised-bandwidth sub-keys**: For cloud instances, bucket by provider-advertised Mbps to get finer-grained estimates (raw observations already store instance IDs for retroactive re-keying)
 
+## Anomaly Detection for Running Jobs
+
+Learn typical GPU utilization and memory curves per job type. Flag jobs that are
+likely stuck (GPU idle but process alive) or about to OOM (memory climbing
+linearly toward limit).
+
+### Approach
+
+- Collect per-job GPU util / memory time series from `internal/ssh.GetProcessStats`
+- Build lightweight baselines per cluster (from workload clustering, below, or
+  per-command rolling statistics)
+- At runtime, compare a job's trajectory against its baseline and fire alerts:
+  - **Stuck job**: GPU utilization drops to near-zero for N minutes while PID is
+    still alive
+  - **OOM trajectory**: GPU memory increasing linearly with projected
+    intersection of the device limit within the next M minutes
+- Surface alerts in the TUI job detail view and optionally via Slack notification
+
+### Relation to Idle Timeout
+
+The existing Idle Timeout idea (above) uses output-activity as a proxy.
+Anomaly detection uses learned GPU/memory baselines, which catches cases where
+the process still writes output but the GPU is idle (e.g., stuck in a data
+loading loop).
+
+## Workload Clustering
+
+Cluster historical jobs by resource profile (GPU utilization pattern, duration,
+peak memory) to automatically discover "job types" without manual labeling.
+
+### Use Cases
+
+- **Cold-start prediction**: New jobs that match a known cluster get reasonable
+  duration and resource estimates even without an exact command match in the
+  predictor
+- **Anomaly baselines**: Per-cluster GPU/memory curves feed the anomaly
+  detection system (above)
+- **Capacity planning**: Understand the mix of workload types to inform hardware
+  purchasing decisions
+
+### Implementation Sketch
+
+- Extract feature vectors from completed jobs: duration, peak RSS, peak GPU mem,
+  mean GPU util, GPU util variance, number of GPUs used
+- Run a simple clustering algorithm (k-means or HDBSCAN) periodically during
+  `weft retrain`
+- Store cluster assignments in the jobs database; expose via `weft jobs --cluster`
+- Use cluster centroids as priors in the predictor for unseen commands
+
