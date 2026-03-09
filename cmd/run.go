@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -365,20 +366,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if submitErr != nil {
 			return fmt.Errorf("submit job: %w", submitErr)
 		}
-		if submitResult.NeedsRental {
-			return recordNeedsRentalJob(cmd, database, needsRentalParams{
-				Constraints: placementConstraints,
-				WorkingDir:  workingDir,
-				Command:     command,
-				Description: runDescription,
-				EnvVars:     runEnvVars,
-				Tags:        runTags,
-				Outputs:     runOutputs,
-				Produces:    runProduces,
-				Needs:       runNeeds,
-			})
-		}
-
 		jobID := submitResult.JobID
 		host = submitResult.Host
 
@@ -390,18 +377,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		if host != "" {
-			fmt.Printf("Job #%d queued on %s\n\n", jobID, host)
-		} else {
-			fmt.Printf("Job #%d saved locally (pending placement)\n\n", jobID)
+		if host == "" {
+			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+			return nil
 		}
-		fmt.Printf("  Working dir: %s\n", workingDir)
-		fmt.Printf("  Command: %s\n", command)
+
+		w := cmd.OutOrStdout()
+		fmt.Fprintf(w, "Job #%d queued on %s\n\n", jobID, host)
+		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
+		fmt.Fprintf(w, "  Command: %s\n", command)
 		if runDescription != "" {
-			fmt.Printf("  Description: %s\n", runDescription)
+			fmt.Fprintf(w, "  Description: %s\n", runDescription)
 		}
 		if len(runEnvVars) > 0 {
-			fmt.Printf("  Env vars: %s\n", strings.Join(runEnvVars, ", "))
+			fmt.Fprintf(w, "  Env vars: %s\n", strings.Join(runEnvVars, ", "))
 		}
 
 		// Push the job to the remote host before waiting/following.
@@ -414,7 +403,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return followQueuedJob(database, jobID, host, deferred)
 		}
 		if deferred {
-			fmt.Printf("\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
+			fmt.Fprintf(w, "\nJob saved locally. %s is offline — it will be sent to the remote queue on the next sync.\n", host)
 		}
 		return nil
 	}
@@ -425,26 +414,39 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if host == "" {
 		result, err := placement.PlaceWithFallback(database, placementConstraints, predict)
 		if err != nil {
-			if errors.Is(err, placement.ErrNoEligibleHost) {
-				return recordNeedsRentalJob(cmd, database, needsRentalParams{
-					Constraints: placementConstraints,
-					WorkingDir:  workingDir,
-					Command:     command,
-					Description: runDescription,
-					EnvVars:     runEnvVars,
-					Tags:        runTags,
-					Outputs:     runOutputs,
-					Produces:    runProduces,
-					Needs:       runNeeds,
-				})
+			if !errors.Is(err, placement.ErrNoEligibleHost) {
+				return fmt.Errorf("auto-placement failed: %w", err)
 			}
-			return fmt.Errorf("auto-placement failed: %w", err)
-		}
-		host = result.Host
+			// No eligible host — will create unplaced job (host="")
+		} else {
+			host = result.Host
 
-		oplog.Log(oplog.OpPlacementDecided,
-			oplog.WithHost(host),
-			oplog.WithDetail(placement.FormatPlacementDetail(result)))
+			oplog.Log(oplog.OpPlacementDecided,
+				oplog.WithHost(host),
+				oplog.WithDetail(placement.FormatPlacementDetail(result)))
+		}
+	}
+
+	// For non-scheduler paths (--draft, --after), unplaced jobs use RecordQueuedJob with host=""
+	if host == "" && (runDraft || runAfter > 0 || runAfterAny > 0) {
+		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
+			WorkingDir:  workingDir,
+			Command:     command,
+			Description: runDescription,
+			EnvVars:     runEnvVars,
+			Tags:        runTags,
+			GPUClass:    runGPUClass,
+			Inputs:      runInputs,
+			Outputs:     runOutputs,
+			OutputDirs:  outputDirs,
+			Produces:    runProduces,
+			Needs:       runNeeds,
+		})
+		if err != nil {
+			return fmt.Errorf("record unplaced job: %w", err)
+		}
+		printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+		return nil
 	}
 
 	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=queue cmd=%s", command))
@@ -544,7 +546,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// killJob kills a job by ID (used by --kill flag)
+// printUnplacedJobMessage prints user-facing output when a job has no eligible local host.
+func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Constraints) {
+	constraintDesc := placement.DescribeConstraints(constraints)
+	fmt.Fprintf(w, "No local host matches constraints: %s\n", constraintDesc)
+	fmt.Fprintf(w, "Job #%d accepted (needs rental host)\n", jobID)
+	fmt.Fprintf(w, "Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.\n")
+}
 
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.
 func buildPlacementMeta(result *placement.PlacementResult, predict placement.JobPredictor) *db.PlacementMeta {
@@ -573,75 +581,6 @@ func buildPlacementMeta(result *placement.PlacementResult, predict placement.Job
 	}
 
 	return meta
-}
-
-// needsRentalParams bundles parameters for recording a needs-rental job.
-type needsRentalParams struct {
-	Constraints placement.Constraints
-	WorkingDir  string
-	Command     string
-	Description string
-	EnvVars     []string
-	Tags        []string
-	Outputs     []string
-	Produces    []string
-	Needs       []string
-}
-
-// recordNeedsRentalJob creates a needs_rental job when no local host matches constraints.
-func recordNeedsRentalJob(cmd *cobra.Command, database *sql.DB, p needsRentalParams) error {
-	jobID, err := db.RecordNeedsRentalJob(database, p.WorkingDir, p.Command, p.Description)
-	if err != nil {
-		return fmt.Errorf("record needs-rental job: %w", err)
-	}
-
-	// Set metadata on the job
-	if p.Constraints.GPUClass != "" {
-		if err := db.SetJobGPUClass(database, jobID, p.Constraints.GPUClass); err != nil {
-			return fmt.Errorf("set gpu class: %w", err)
-		}
-	}
-	if p.Constraints.GPUMemGB > 0 {
-		if err := db.SetJobGPUMemGB(database, jobID, &p.Constraints.GPUMemGB); err != nil {
-			return fmt.Errorf("set gpu mem: %w", err)
-		}
-	}
-	if len(p.Tags) > 0 {
-		if err := db.SetJobTags(database, jobID, p.Tags); err != nil {
-			return fmt.Errorf("set tags: %w", err)
-		}
-	}
-	if len(p.EnvVars) > 0 {
-		if err := db.SetJobEnvVars(database, jobID, p.EnvVars); err != nil {
-			return fmt.Errorf("set env vars: %w", err)
-		}
-	}
-	if len(p.Constraints.Inputs) > 0 {
-		if err := db.SetJobInputs(database, jobID, p.Constraints.Inputs); err != nil {
-			return fmt.Errorf("set inputs: %w", err)
-		}
-	}
-	if len(p.Outputs) > 0 {
-		if err := db.SetJobOutputs(database, jobID, p.Outputs); err != nil {
-			return fmt.Errorf("set outputs: %w", err)
-		}
-	}
-	if len(p.Produces) > 0 {
-		if err := db.SetJobProduces(database, jobID, p.Produces); err != nil {
-			return fmt.Errorf("set produces: %w", err)
-		}
-	}
-	if len(p.Needs) > 0 {
-		if err := db.SetJobNeeds(database, jobID, p.Needs); err != nil {
-			return fmt.Errorf("set needs: %w", err)
-		}
-	}
-
-	constraintDesc := placement.DescribeConstraints(p.Constraints)
-	fmt.Fprintf(cmd.OutOrStdout(), "No local host matches constraints: %s\n", constraintDesc)
-	fmt.Fprintf(cmd.OutOrStdout(), "Job #%d accepted (needs rental host)\n", jobID)
-	fmt.Fprintf(cmd.OutOrStdout(), "Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.\n")
-	return nil
 }
 
 // parseCdPrefix extracts "cd /path && " or "cd /path; " prefix from a command.

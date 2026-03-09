@@ -161,8 +161,8 @@ const StatusDraft = "draft"
 // StatusPendingPlacement indicates a job submitted to the coordinator but not yet placed on a host
 const StatusPendingPlacement = "pending_placement"
 
-// StatusNeedsRental indicates a job that cannot run on any local host and needs a rental GPU
-const StatusNeedsRental = "needs_rental"
+// statusNeedsRental is the legacy DB value for unplaced jobs. Migrated to StatusQueued with host="".
+const statusNeedsRental = "needs_rental"
 
 var dbPath string
 
@@ -677,6 +677,11 @@ func initSchema(db *sql.DB) error {
 	);
 	`
 	if _, err := db.Exec(jobCloudAttemptsSchema); err != nil {
+		return err
+	}
+
+	// Migration: convert legacy needs_rental status to queued (host is already empty)
+	if _, err := db.Exec(`UPDATE jobs SET status = ? WHERE status = ?`, StatusQueued, statusNeedsRental); err != nil {
 		return err
 	}
 
@@ -1292,21 +1297,6 @@ func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, dep
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, dep_spec, last_synced_status)
 		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
 		host, workingDir, command, description, createdAt, StatusDraft, queuefile.DefaultQueueName, gpu, depSpec, StatusDraft,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
-}
-
-// RecordNeedsRentalJob records a job that needs a rental GPU (no local host is eligible).
-// The job is created with an empty host and StatusNeedsRental.
-func RecordNeedsRentalJob(db *sql.DB, workingDir, command, description string) (int64, error) {
-	createdAt := time.Now().Unix()
-	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name)
-		 VALUES ('', NULL, ?, ?, ?, ?, NULL, ?, ?)`,
-		workingDir, command, description, createdAt, StatusNeedsRental, queuefile.DefaultQueueName,
 	)
 	if err != nil {
 		return 0, err

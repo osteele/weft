@@ -13,11 +13,15 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
+// PlaceFunc is the signature for host placement. See placement.PlaceWithFallback.
+type PlaceFunc func(db *sql.DB, constraints placement.Constraints, predict placement.JobPredictor) (*placement.PlacementResult, error)
+
 // LocalScheduler performs placement and dispatch in-process, without
 // requiring a remote coordinator daemon.
 type LocalScheduler struct {
 	db        *sql.DB
 	appConfig interface{ GetCoordinatorHost() string }
+	placeFn   PlaceFunc
 }
 
 // Submit places the job on the best available host and queues it directly.
@@ -41,19 +45,20 @@ func (s *LocalScheduler) Submit(_ context.Context, req *SubmitRequest) (*SubmitR
 	var placementResult *placement.PlacementResult
 
 	if host == "" {
-		result, err := placement.PlaceWithFallback(s.db, constraints, predict)
+		result, err := s.placeFn(s.db, constraints, predict)
 		if err != nil {
-			if errors.Is(err, placement.ErrNoEligibleHost) {
-				return &SubmitResult{NeedsRental: true}, nil
+			if !errors.Is(err, placement.ErrNoEligibleHost) {
+				return nil, err
 			}
-			return nil, err
-		}
-		placementResult = result
-		host = result.Host
+			// No eligible host — job will be created as unplaced (host="")
+		} else {
+			placementResult = result
+			host = result.Host
 
-		oplog.Log(oplog.OpPlacementDecided,
-			oplog.WithHost(host),
-			oplog.WithDetail(placement.FormatPlacementDetail(result)))
+			oplog.Log(oplog.OpPlacementDecided,
+				oplog.WithHost(host),
+				oplog.WithDetail(placement.FormatPlacementDetail(result)))
+		}
 	}
 
 	// Build queue params

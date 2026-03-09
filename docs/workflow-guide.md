@@ -330,7 +330,7 @@ Use 'weft campaign launch' or press 'c' in the TUI to launch on a cloud GPU.
 
 The job appears in the TUI with status `$ needs rental`. From there, press `c`
 to open the cloud menu for a single job, or use `weft campaign launch` to batch-
-launch all `needs_rental` jobs at once.
+launch all unplaced jobs at once.
 
 ### Prerequisites
 
@@ -341,7 +341,7 @@ vastai set api-key YOUR_API_KEY
 
 ### Using `weft campaign launch`
 
-The campaign launcher groups `needs_rental` jobs by GPU requirements, searches
+The campaign launcher groups unplaced jobs by GPU requirements, searches
 for Vast.ai offers in parallel, and launches instances concurrently:
 
 ```

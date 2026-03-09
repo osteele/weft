@@ -76,21 +76,21 @@ set of states. The CLI records each transition so commands such as `status`,
 | `pending`   | Local intent recorded (kill/start/change) awaiting reconciliation.          |
 | `draft`     | Job saved locally but not yet submitted to a remote host.                   |
 | `pending_placement` | Job submitted to the coordinator but not yet placed on a host.     |
-| `needs_rental` | No local host matches constraints; awaiting cloud GPU launch via TUI.   |
 
 ```mermaid
 stateDiagram-v2
     [*] --> queued : run (queued by default) / plan series
     [*] --> starting : run
-    [*] --> needs_rental : run (no eligible local host)
     queued --> starting : queue runner / job start
-    needs_rental --> queued : cloud menu launch
-    needs_rental --> canceled : user cancel
+    queued --> canceled : user cancel
     starting --> running : tmux session ready
     starting --> dead : setup error
     running --> completed : status file written
     running --> failed : tmux gone, no status file
 ```
+
+Note: Jobs that need cloud GPUs are `queued` with no host assigned (unplaced).
+The TUI displays these as `$ needs rental`.
 
 ## Directory Structure
 

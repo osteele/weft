@@ -158,22 +158,22 @@ func (w *SyncWorker) run() {
 			w.processQueue()
 
 		case <-benchTicker.C:
-			w.checkBenchmarkReplacement()
+			w.checkUnplacedJobs()
 		}
 	}
 }
 
-// checkBenchmarkReplacement looks for needs_rental benchmark jobs and tries to
-// place them on hosts that have become idle since the original placement failed.
-func (w *SyncWorker) checkBenchmarkReplacement() {
-	jobs, err := db.ListNeedsRentalJobs(w.database)
+// checkUnplacedJobs looks for unplaced queued jobs and tries to place them on
+// hosts that have become available since the original placement failed.
+func (w *SyncWorker) checkUnplacedJobs() {
+	jobs, err := db.ListUnplacedJobs(w.database)
 	if err != nil {
-		log.Printf("benchmark re-placement: list needs_rental: %v", err)
+		log.Printf("unplaced re-placement: list unplaced: %v", err)
 		return
 	}
 
 	for _, j := range jobs {
-		if !j.HasTag("benchmark") || (j.CloudInstanceID != nil && *j.CloudInstanceID != 0) {
+		if j.CloudInstanceID != nil && *j.CloudInstanceID != 0 {
 			continue
 		}
 
@@ -191,13 +191,13 @@ func (w *SyncWorker) checkBenchmarkReplacement() {
 			continue
 		}
 
-		promoted, err := db.PromoteNeedsRentalToQueued(w.database, j.ID, result.Host)
+		assigned, err := db.AssignJobHost(w.database, j.ID, result.Host)
 		if err != nil {
-			log.Printf("benchmark re-placement: promote job %d: %v", j.ID, err)
+			log.Printf("unplaced re-placement: assign job %d: %v", j.ID, err)
 			continue
 		}
-		if promoted {
-			log.Printf("benchmark re-placement: promoted job %d to %s", j.ID, result.Host)
+		if assigned {
+			log.Printf("unplaced re-placement: assigned job %d to %s", j.ID, result.Host)
 			// Trigger a sync for the target host
 			select {
 			case w.results <- SyncResult{Host: result.Host, Updated: 1}:

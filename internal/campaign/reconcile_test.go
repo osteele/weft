@@ -60,13 +60,13 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
 	}
 
-	// Verify job was reset to needs_rental
+	// Verify job was reset to queued (unplaced)
 	var jobStatus string
 	if err := database.QueryRow(`SELECT status FROM jobs WHERE id = 1`).Scan(&jobStatus); err != nil {
 		t.Fatalf("get job status: %v", err)
 	}
-	if jobStatus != db.StatusNeedsRental {
-		t.Errorf("job status = %q, want %q", jobStatus, db.StatusNeedsRental)
+	if jobStatus != db.StatusQueued {
+		t.Errorf("job status = %q, want %q", jobStatus, db.StatusQueued)
 	}
 
 	// Verify attempt was closed

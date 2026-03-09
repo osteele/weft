@@ -19,7 +19,7 @@ type InstanceGroup struct {
 	Jobs     []*db.Job
 }
 
-// GroupByGPUSupremum groups needs_rental jobs by GPU class, using the maximum
+// GroupByGPUSupremum groups unplaced jobs by GPU class, using the maximum
 // memory requirement across the group as the supremum. Jobs with the same
 // GPUClass (case-insensitive) are placed in the same group. Jobs with no class
 // are grouped by memory tier alone.
@@ -34,7 +34,7 @@ func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 	groups := make(map[groupKey]*InstanceGroup)
 
 	for _, job := range jobs {
-		if job.Status != db.StatusNeedsRental {
+		if job.Status != db.StatusQueued || job.Host != "" {
 			continue
 		}
 

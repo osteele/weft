@@ -107,7 +107,7 @@ func TestLaunchInstanceNilR2Client(t *testing.T) {
 
 	job := &db.Job{
 		ID:      101,
-		Status:  db.StatusNeedsRental,
+		Status:  db.StatusQueued,
 		Command: "python train.py",
 	}
 
@@ -172,7 +172,7 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 
 	job := &db.Job{
 		ID:      101,
-		Status:  db.StatusNeedsRental,
+		Status:  db.StatusQueued,
 		Command: "python train.py",
 	}
 

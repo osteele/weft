@@ -10,10 +10,10 @@ func intPtr(n int) *int { return &n }
 
 func TestGroupByGPUSupremum(t *testing.T) {
 	jobs := []*db.Job{
-		{ID: 1, Status: db.StatusNeedsRental, GPUClass: "H100", GPUMemGB: intPtr(80)},
-		{ID: 2, Status: db.StatusNeedsRental, GPUClass: "h100", GPUMemGB: intPtr(40)},
-		{ID: 3, Status: db.StatusNeedsRental, GPUClass: "A100", GPUMemGB: intPtr(40)},
-		{ID: 4, Status: db.StatusNeedsRental, GPUClass: "", GPUMemGB: intPtr(24)},
+		{ID: 1, Status: db.StatusQueued, GPUClass: "H100", GPUMemGB: intPtr(80)},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "h100", GPUMemGB: intPtr(40)},
+		{ID: 3, Status: db.StatusQueued, GPUClass: "A100", GPUMemGB: intPtr(40)},
+		{ID: 4, Status: db.StatusQueued, GPUClass: "", GPUMemGB: intPtr(24)},
 		{ID: 5, Status: db.StatusRunning, GPUClass: "H100", GPUMemGB: intPtr(80)}, // should be excluded
 	}
 

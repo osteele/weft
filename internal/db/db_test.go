@@ -439,12 +439,13 @@ func TestRecordQueuedExplicitGPUNotOverridden(t *testing.T) {
 	}
 }
 
-func TestRecordNeedsRentalJob(t *testing.T) {
+func TestRecordUnplacedJob(t *testing.T) {
 	database := SetupTestDB(t)
 
-	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	// An unplaced job is a queued job with host=""
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
 	if err != nil {
-		t.Fatalf("record needs rental: %v", err)
+		t.Fatalf("record unplaced: %v", err)
 	}
 
 	job, err := GetJobByID(database, jobID)
@@ -452,8 +453,8 @@ func TestRecordNeedsRentalJob(t *testing.T) {
 		t.Fatalf("get job: %v", err)
 	}
 
-	if job.Status != StatusNeedsRental {
-		t.Errorf("Status = %q, want %q", job.Status, StatusNeedsRental)
+	if job.Status != StatusQueued {
+		t.Errorf("Status = %q, want %q", job.Status, StatusQueued)
 	}
 	if job.Host != "" {
 		t.Errorf("Host = %q, want empty", job.Host)
@@ -469,24 +470,25 @@ func TestRecordNeedsRentalJob(t *testing.T) {
 	}
 }
 
-func TestPromoteNeedsRentalToQueued(t *testing.T) {
+func TestAssignJobHost(t *testing.T) {
 	database := SetupTestDB(t)
 
-	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	// Create an unplaced job (queued with host="")
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
 	if err != nil {
-		t.Fatalf("record needs rental: %v", err)
+		t.Fatalf("record unplaced: %v", err)
 	}
 
-	// Promote to queued
-	promoted, err := PromoteNeedsRentalToQueued(database, jobID, "cool30")
+	// Assign a host
+	assigned, err := AssignJobHost(database, jobID, "cool30")
 	if err != nil {
-		t.Fatalf("promote: %v", err)
+		t.Fatalf("assign: %v", err)
 	}
-	if !promoted {
-		t.Error("expected promotion to succeed")
+	if !assigned {
+		t.Error("expected assignment to succeed")
 	}
 
-	// Verify job is now queued with host
+	// Verify job now has host
 	job, err := GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("get job: %v", err)
@@ -498,32 +500,63 @@ func TestPromoteNeedsRentalToQueued(t *testing.T) {
 		t.Errorf("Host = %q, want %q", job.Host, "cool30")
 	}
 
-	// Second promotion should be a no-op (already queued)
-	promoted, err = PromoteNeedsRentalToQueued(database, jobID, "cool100")
+	// Second assignment should be a no-op (host already set)
+	assigned, err = AssignJobHost(database, jobID, "cool100")
 	if err != nil {
-		t.Fatalf("second promote: %v", err)
+		t.Fatalf("second assign: %v", err)
 	}
-	if promoted {
-		t.Error("second promotion should fail (job already queued)")
+	if assigned {
+		t.Error("second assignment should fail (host already set)")
 	}
 
 	// Host should remain cool30
 	job, err = GetJobByID(database, jobID)
 	if err != nil {
-		t.Fatalf("get job after second promote: %v", err)
+		t.Fatalf("get job after second assign: %v", err)
 	}
 	if job.Host != "cool30" {
 		t.Errorf("Host = %q, want %q (should not change)", job.Host, "cool30")
 	}
 }
 
+func TestListUnplacedJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Create an unplaced job (queued, host="")
+	unplacedID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "unplaced", "")
+	if err != nil {
+		t.Fatalf("record unplaced: %v", err)
+	}
+
+	// Create a placed job (queued, host="cool30")
+	_, err = RecordQueuedWithGPU(database, "cool30", "/tmp/project", "echo hello", "placed", "")
+	if err != nil {
+		t.Fatalf("record placed: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("list unplaced: %v", err)
+	}
+
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 unplaced job, got %d", len(jobs))
+	}
+	if jobs[0].ID != unplacedID {
+		t.Errorf("expected job ID %d, got %d", unplacedID, jobs[0].ID)
+	}
+	if jobs[0].Host != "" {
+		t.Errorf("expected empty host, got %q", jobs[0].Host)
+	}
+}
+
 func TestJobCloudAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 
-	// Create a job and a cloud instance
-	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	// Create an unplaced job and a cloud instance
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
 	if err != nil {
-		t.Fatalf("record needs_rental: %v", err)
+		t.Fatalf("record unplaced: %v", err)
 	}
 
 	instanceID, err := CreateCloudInstance(database, &CloudInstance{
@@ -600,9 +633,9 @@ func TestJobCloudAttempts(t *testing.T) {
 func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 
-	jobID, err := RecordNeedsRentalJob(database, "/tmp/project", "python train.py", "GPU training")
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
 	if err != nil {
-		t.Fatalf("record needs_rental: %v", err)
+		t.Fatalf("record unplaced: %v", err)
 	}
 
 	instanceID, err := CreateCloudInstance(database, &CloudInstance{
@@ -614,9 +647,9 @@ func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
 		t.Fatalf("create cloud instance: %v", err)
 	}
 
-	// Promote to queued then associate with instance
-	if _, err := PromoteNeedsRentalToQueued(database, jobID, "cloud"); err != nil {
-		t.Fatalf("promote: %v", err)
+	// Assign host then associate with instance
+	if _, err := AssignJobHost(database, jobID, "cloud"); err != nil {
+		t.Fatalf("assign host: %v", err)
 	}
 	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)

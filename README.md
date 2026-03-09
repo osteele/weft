@@ -1332,7 +1332,7 @@ Log files are stored on remote hosts at `~/.cache/weft/logs/{id}-{timestamp}.log
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
 - `queued`: Job waiting in a remote queue for scheduling
-- `needs_rental`: No local host matches constraints; awaiting cloud GPU launch via TUI
+- `queued` (unplaced): No local host matches constraints; awaiting cloud GPU launch via TUI
 - `failed`: Job failed to start (e.g., connection error)
 
 The database is automatically created on first use and updated when checking job status.

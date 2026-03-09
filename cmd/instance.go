@@ -375,7 +375,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 			if providerInstID != "" {
 				instanceInfo = fmt.Sprintf(", destroyed %s %s", ci.Provider, providerInstID)
 			}
-			fmt.Printf("Cancelled instance %d%s, %d jobs reset to needs_rental\n", instanceID, instanceInfo, resetCount)
+			fmt.Printf("Cancelled instance %d%s, %d jobs reset to unplaced\n", instanceID, instanceInfo, resetCount)
 			mu.Unlock()
 		}(id)
 	}

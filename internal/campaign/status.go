@@ -80,7 +80,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			if r2c != nil && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
 				hasStartedJob := false
 				for _, j := range jobs {
-					if j.Status != db.StatusNeedsRental && j.Status != db.StatusQueued {
+					if j.Status != db.StatusQueued {
 						hasStartedJob = true
 						break
 					}

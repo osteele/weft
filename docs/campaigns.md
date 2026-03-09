@@ -9,7 +9,7 @@ hosts can't satisfy GPU requirements.
 |------|---------|
 | **Campaign** | A batch of cloud instances launched together |
 | **Instance** | A single Vast.ai deployment running one or more jobs |
-| **`needs_rental`** | Job status indicating no local host matches constraints |
+| **Unplaced job** | A queued job with no host assigned (needs cloud GPU) |
 
 ## Quick start
 
@@ -28,7 +28,7 @@ vastai set api-key YOUR_API_KEY
 
 # 3. Queue jobs that need cloud GPUs
 weft run --gpu hopper+ -m "Train on H100" 'python train.py'
-# Job accepted with needs_rental status
+# Job accepted (unplaced — needs cloud GPU)
 
 # 4. Launch a campaign
 weft campaign launch
@@ -42,7 +42,7 @@ weft campaign launch
 weft campaign launch
 ```
 
-The TUI groups `needs_rental` jobs by GPU class, searches for Vast.ai offers in
+The TUI groups unplaced jobs by GPU class, searches for Vast.ai offers in
 parallel, and presents an interactive selector:
 
 1. **Job selection**: All eligible jobs are pre-selected. Use `Space` to
@@ -59,7 +59,7 @@ parallel, and presents an interactive selector:
 For scripted or agent-driven workflows, use `--yes` to skip the TUI:
 
 ```bash
-weft campaign launch --yes              # Launch all needs_rental jobs
+weft campaign launch --yes              # Launch all unplaced jobs
 weft campaign launch --yes --jobs 42,43 # Launch specific jobs only
 weft campaign launch --yes --no-watch   # Launch and exit (print IDs)
 ```
@@ -142,7 +142,7 @@ weft campaign cancel <id>
 ```
 
 Termination destroys the Vast.ai instance, resets associated jobs to
-`needs_rental`, and updates the instance status to `cancelled`.
+unplaced (queued with no host), and updates the instance status to `cancelled`.
 
 ## Grace period
 
@@ -205,7 +205,7 @@ The grace period is tracked in the database (`grace_period_seconds`,
 For launching a single job without the full campaign flow, use the TUI:
 
 1. Open `weft tui`
-2. Navigate to a **queued** or **needs_rental** job
+2. Navigate to an unplaced job (queued with no host)
 3. Press `c` to open the cloud GPU menu
 4. Select a Vast.ai offer and confirm the cost
 
@@ -243,7 +243,7 @@ This creates a campaign with a single instance for that job.
 ### Failure handling
 
 - If an instance fails to provision, other instances in the campaign continue.
-- Jobs on failed instances remain in `needs_rental` status for re-launch.
+- Jobs on failed instances are reset to unplaced (queued with no host) for re-launch.
 - The sweep loop detects orphaned instances (exceeded time limits, exited
   unexpectedly) and marks associated jobs as failed.
 - Exit code 137 and dmesg/nvidia-smi analysis detect OOM failures.

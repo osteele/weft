@@ -368,7 +368,7 @@ Each has `pyproject.toml`, `run.py`, `.venv/`, and `uv.lock`.
 
 ### Step 1: Queue testdata jobs
 
-Use a GPU class that no local host has (e.g., `rtx3060`) so jobs go to `needs_rental`:
+Use a GPU class that no local host has (e.g., `rtx3060`) so jobs are queued without a host (unplaced):
 
 ```bash
 weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/basic" 'uv run python run.py'
@@ -459,7 +459,7 @@ weft artifact sync <job-id>
 To reset completed test jobs for re-testing:
 
 ```bash
-sqlite3 ~/.config/weft/jobs.db "UPDATE jobs SET status='needs_rental', host='' WHERE id IN (<ids>);"
+sqlite3 ~/.config/weft/jobs.db "UPDATE jobs SET status='queued', host='' WHERE id IN (<ids>);"
 ```
 
 ---

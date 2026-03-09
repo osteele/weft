@@ -45,6 +45,9 @@ func (m Model) formatStatus(job *db.Job) string {
 		}
 		return fmt.Sprintf("✖ failed (%d)", *job.ExitCode)
 	case db.StatusQueued:
+		if job.Host == "" {
+			return "$ needs rental"
+		}
 		return "… queued"
 	case db.StatusDead:
 		return "✖ start failed"
@@ -58,8 +61,6 @@ func (m Model) formatStatus(job *db.Job) string {
 		return "  Draft"
 	case db.StatusPendingPlacement:
 		return "⧗ placing"
-	case db.StatusNeedsRental:
-		return "$ needs rental"
 	default:
 		return job.Status
 	}
@@ -131,8 +132,6 @@ func (m Model) styleForStatus(status string) lipgloss.Style {
 	case db.StatusStarting:
 		return pendingStyle
 	case db.StatusPendingPlacement:
-		return pendingStyle
-	case db.StatusNeedsRental:
 		return pendingStyle
 	default:
 		return lipgloss.NewStyle()

@@ -52,9 +52,9 @@ func intPtr(n int) *int { return &n }
 
 func TestFilterJobsByIDs(t *testing.T) {
 	jobs := []*db.Job{
-		{ID: 10, Status: db.StatusNeedsRental},
-		{ID: 20, Status: db.StatusNeedsRental},
-		{ID: 30, Status: db.StatusNeedsRental},
+		{ID: 10, Status: db.StatusQueued},
+		{ID: 20, Status: db.StatusQueued},
+		{ID: 30, Status: db.StatusQueued},
 	}
 
 	// Filter to jobs 10 and 30
@@ -77,9 +77,9 @@ func TestFilterJobsByIDs(t *testing.T) {
 func TestNonInteractiveLaunchGrouping(t *testing.T) {
 	// Verify that jobs are grouped correctly for non-interactive launch
 	jobs := []*db.Job{
-		{ID: 1, Status: db.StatusNeedsRental, GPUClass: "H100", GPUMemGB: intPtr(80)},
-		{ID: 2, Status: db.StatusNeedsRental, GPUClass: "H100", GPUMemGB: intPtr(80)},
-		{ID: 3, Status: db.StatusNeedsRental, GPUClass: "A100", GPUMemGB: intPtr(40)},
+		{ID: 1, Status: db.StatusQueued, GPUClass: "H100", GPUMemGB: intPtr(80)},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "H100", GPUMemGB: intPtr(80)},
+		{ID: 3, Status: db.StatusQueued, GPUClass: "A100", GPUMemGB: intPtr(40)},
 	}
 
 	groups := campaign.GroupByGPUSupremum(jobs)

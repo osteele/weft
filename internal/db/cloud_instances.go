@@ -256,19 +256,18 @@ func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
 	return queryJobs(db, query, instanceID)
 }
 
-// ListNeedsRentalJobs returns all jobs with needs_rental status.
-func ListNeedsRentalJobs(db *sql.DB) ([]*Job, error) {
-	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY id ASC"
-	return queryJobs(db, query, StatusNeedsRental)
+// ListUnplacedJobs returns all queued jobs with no host assignment (needing placement or rental).
+func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
+	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE status = ? AND host = '' AND tombstoned = 0 ORDER BY id ASC"
+	return queryJobs(db, query, StatusQueued)
 }
 
-// PromoteNeedsRentalToQueued atomically promotes a needs_rental job to queued
-// with a host assignment. Returns true if the job was updated (false if it was
-// already claimed or changed status).
-func PromoteNeedsRentalToQueued(database *sql.DB, jobID int64, host string) (bool, error) {
+// AssignJobHost atomically assigns a host to an unplaced queued job.
+// Returns true if the job was updated (false if it was already claimed or changed status).
+func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	result, err := database.Exec(
-		`UPDATE jobs SET status = ?, host = ? WHERE id = ? AND status = ? AND tombstoned = 0`,
-		StatusQueued, host, jobID, StatusNeedsRental,
+		`UPDATE jobs SET host = ? WHERE id = ? AND status = ? AND host = '' AND tombstoned = 0`,
+		host, jobID, StatusQueued,
 	)
 	if err != nil {
 		return false, err
@@ -280,9 +279,9 @@ func PromoteNeedsRentalToQueued(database *sql.DB, jobID int64, host string) (boo
 	return n > 0, nil
 }
 
-// ResetCloudInstanceJobs resets non-terminal jobs in a cloud instance back to needs_rental
-// and clears their instance association. Records the attempt outcome before resetting.
-// Returns the number of jobs reset.
+// ResetCloudInstanceJobs resets non-terminal jobs in a cloud instance back to
+// unplaced (queued with empty host) and clears their instance association.
+// Records the attempt outcome before resetting. Returns the number of jobs reset.
 func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) (int64, error) {
 	// Close open attempts for all non-terminal jobs on this instance
 	if err := CloseJobCloudAttemptsByInstance(database, instanceID, outcome); err != nil {
@@ -292,7 +291,7 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	result, err := database.Exec(
 		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = ''
 		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?) AND tombstoned = 0`,
-		StatusNeedsRental, instanceID, StatusCompleted, StatusFailed,
+		StatusQueued, instanceID, StatusCompleted, StatusFailed,
 	)
 	if err != nil {
 		return 0, err

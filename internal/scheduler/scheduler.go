@@ -31,11 +31,9 @@ type SubmitRequest struct {
 
 // SubmitResult reports the outcome of a submission.
 type SubmitResult struct {
-	JobID            int64
-	Host             string   // Host the job was placed on
-	PlacementReasons []string // Why this host was chosen
-	NeedsRental      bool     // True if no eligible host found
-	PlacementResult  *placement.PlacementResult
+	JobID           int64
+	Host            string // Host the job was placed on (empty = unplaced, needs rental)
+	PlacementResult *placement.PlacementResult
 }
 
 // Scheduler submits jobs for placement and dispatch.
@@ -59,6 +57,7 @@ func SelectScheduler(db *sql.DB, coordinatorReachable bool, opts ...Option) Sche
 	return &LocalScheduler{
 		db:        db,
 		appConfig: o.appConfig,
+		placeFn:   placement.PlaceWithFallback,
 	}
 }
 

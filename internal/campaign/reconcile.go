@@ -68,7 +68,7 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 				if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
 					log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
 				} else if resetCount > 0 {
-					log.Printf("reconcile: reset %d jobs from wedged instance %d to needs_rental", resetCount, ci.ID)
+					log.Printf("reconcile: reset %d jobs from wedged instance %d to unplaced", resetCount, ci.ID)
 				}
 				reconciled++
 				continue
@@ -101,7 +101,7 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
 				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
 			} else if resetCount > 0 {
-				log.Printf("reconcile: reset %d jobs from instance %d to needs_rental", resetCount, ci.ID)
+				log.Printf("reconcile: reset %d jobs from instance %d to unplaced", resetCount, ci.ID)
 			}
 			reconciled++
 		}

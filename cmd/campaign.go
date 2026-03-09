@@ -117,7 +117,7 @@ func init() {
 	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
 	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoDonor, "no-donor", false, "Skip donor instance strategy (each instance downloads independently)")
 	campaignLaunchCmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all needs_rental jobs)")
+	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "15m", "Keep instance alive after job failure (e.g., '15m', '1h'; '0' to disable)")
 
@@ -138,9 +138,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	jobs, err := db.ListNeedsRentalJobs(database)
+	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
-		return fmt.Errorf("list needs_rental jobs: %w", err)
+		return fmt.Errorf("list unplaced jobs: %w", err)
 	}
 
 	// Filter by --jobs if specified
@@ -182,7 +182,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	if len(groups) == 0 {
 		if campaignLaunchGPU != "" {
-			fmt.Printf("No needs_rental jobs match GPU class %q.\n", campaignLaunchGPU)
+			fmt.Printf("No unplaced jobs match GPU class %q.\n", campaignLaunchGPU)
 		} else {
 			fmt.Println("No jobs need rental GPUs.")
 		}
