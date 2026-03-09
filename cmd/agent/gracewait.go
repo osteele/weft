@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -251,31 +252,47 @@ func uploadJobResults(bucket string, jobID int64, logDir string) {
 	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobResultsPrefix(jobID))
 	rcloneCmd.Stderr = os.Stderr
-	_ = rcloneCmd.Run()
+	if err := rcloneCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "upload results for job %d: %v\n", jobID, err)
+	}
 	copyCancel()
 
 	// Write completion marker
 	completeCtx, completeCancel := context.WithTimeout(context.Background(), r2Timeout)
 	completeCmd := exec.CommandContext(completeCtx, "rclone", "rcat", "r2:"+bucket+"/"+r2keys.JobComplete(jobID))
 	completeCmd.Stdin = strings.NewReader("done")
-	_ = completeCmd.Run()
+	if err := completeCmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "write completion marker for job %d: %v\n", jobID, err)
+	}
 	completeCancel()
 }
 
 func selfDestruct(bucket, instanceID, selfDestructCmd string) {
 	instanceIDInt, _ := strconv.ParseInt(instanceID, 10, 64)
+	phaseKey := r2keys.InstancePhase(instanceIDInt)
 
-	// Write completion marker
+	// Write completion marker and phase
 	r2Put(bucket, r2keys.CampaignComplete(instanceIDInt), "0")
+	writePhase(bucket, phaseKey, "destroying")
 
 	// Clean up grace keys
 	prefix := r2keys.GracePrefix(instanceIDInt)
 	r2Delete(bucket, prefix+"/status")
 
-	// Execute self-destruct
+	// Execute self-destruct with retries
 	fmt.Printf("Executing self-destruct: %s\n", selfDestructCmd)
-	cmd := exec.Command("bash", "-c", selfDestructCmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	_ = cmd.Run()
+	for attempt := 1; attempt <= 3; attempt++ {
+		cmd := exec.Command("bash", "-c", selfDestructCmd)
+		var stderr bytes.Buffer
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "self-destruct attempt %d failed: %v (stderr: %s)\n", attempt, err, stderr.String())
+		} else {
+			fmt.Printf("Self-destruct succeeded on attempt %d\n", attempt)
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+	fmt.Fprintf(os.Stderr, "WARNING: self-destruct failed after 3 attempts, instance may still be running\n")
 }

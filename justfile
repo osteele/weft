@@ -6,6 +6,7 @@ default:
 
 # Build the binary (builds agent binaries for embedding first)
 build: build-agents
+    @echo "Building weft binary..."
     go build -o weft .
 
 # Install to $GOPATH/bin
@@ -72,11 +73,13 @@ build-agents:
     mkdir -p internal/agentdeploy/binaries
     VERSION=$(jj log --no-graph -r 'ancestors(@-, 200)' -T 'commit_id.short(12)' --limit 1 cmd/agent/ internal/ 2>/dev/null || echo "dev")
     LDFLAGS="-X main.version=${VERSION}"
-    GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-amd64 ./cmd/agent
-    GOOS=linux GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-arm64 ./cmd/agent
-    GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent
+    echo "Building agent binaries in parallel (version: ${VERSION})..."
+    pids=()
+    GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-amd64 ./cmd/agent & pids+=($!)
+    GOOS=linux GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-arm64 ./cmd/agent & pids+=($!)
+    GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent & pids+=($!)
+    for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
     echo "${VERSION}" > internal/agentdeploy/binaries/VERSION
-    echo "Built agent binaries for embedding (version: ${VERSION})"
 
 # Build agent binary for a target (default: current platform)
 build-agent target="local":

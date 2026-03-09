@@ -206,8 +206,11 @@ func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int
 
 // InstancePhaseLabel returns a human-readable label for an instance phase string.
 func InstancePhaseLabel(phase string) string {
-	if phase == "grace" {
+	switch phase {
+	case "grace":
 		return "grace period"
+	case "destroying":
+		return "self-destructing"
 	}
 	if colon := strings.IndexByte(phase, ':'); colon >= 0 {
 		verb := phase[:colon]

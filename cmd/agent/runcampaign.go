@@ -214,7 +214,9 @@ func uploadOutputDirs(bucket string, jobID int64, workDir string) {
 			"r2:"+bucket+"/"+r2keys.JobOutputDir(jobID, dir),
 		)
 		cmd.Stderr = os.Stderr
-		_ = cmd.Run()
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d: %v\n", dir, jobID, err)
+		}
 		cancel()
 	}
 }

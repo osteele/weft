@@ -80,6 +80,10 @@ func GraceAck(instanceID int64) string {
 
 // Instance keys
 
+func InstanceAgentVersion(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/agent-version", instanceID)
+}
+
 func InstancePhase(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/phase", instanceID)
 }

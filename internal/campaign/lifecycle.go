@@ -114,6 +114,7 @@ func LaunchCampaign(
 
 	r2Assets := R2Assets{
 		Client:       r2Client,
+		AgentVersion: agentVersion,
 		AgentR2Key:   agentR2Key,
 		SourceR2Keys: make(map[string]string),
 	}
@@ -417,6 +418,7 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 // R2Assets holds pre-staged R2 resources shared across instances in a campaign.
 type R2Assets struct {
 	Client       *r2.Client
+	AgentVersion string            // agent version string (jj commit hash)
 	AgentR2Key   string            // R2 key for the agent binary
 	SourceR2Keys map[string]string // localDir -> R2 key for source tarballs
 }
@@ -600,6 +602,12 @@ func LaunchInstance(
 		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
+	}
+
+	// Store agent version for diagnostics
+	if r2Assets.AgentVersion != "" {
+		versionKey := r2keys.InstanceAgentVersion(instanceID)
+		_ = r2Assets.Client.PutObject(ctx, versionKey, strings.NewReader(r2Assets.AgentVersion), "text/plain")
 	}
 
 	bootstrapScript := GenerateBootstrapScript(BootstrapManifest{

@@ -241,6 +241,16 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Location: %s\n", ci.DataCenter)
 		}
 
+		// Agent version from R2
+		if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			versionKey := r2keys.InstanceAgentVersion(ci.ID)
+			if data, err := r2c.GetObject(ctx, versionKey); err == nil && len(data) > 0 {
+				fmt.Printf("  Agent:    %s\n", strings.TrimSpace(string(data)))
+			}
+			cancel()
+		}
+
 		// Uptime and cost
 		if ci.LaunchedAt != nil {
 			var uptime time.Duration

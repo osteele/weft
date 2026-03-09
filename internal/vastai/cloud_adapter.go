@@ -124,8 +124,9 @@ func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
 		return fmt.Sprintf("echo 'warning: no vastai API key found, cannot self-destruct instance %s'", providerInstanceID)
 	}
 	// Use the REST API directly — the vastai CLI is not installed on instances.
+	// -f (--fail) makes curl return non-zero on HTTP errors so retries work.
 	return fmt.Sprintf(
-		`curl -s -X DELETE "https://console.vast.ai/api/v0/instances/%s/" -H "Authorization: Bearer %s" >/dev/null 2>&1 || true`,
+		`curl -sf -X DELETE "https://console.vast.ai/api/v0/instances/%s/" -H "Authorization: Bearer %s"`,
 		providerInstanceID, apiKey,
 	)
 }
