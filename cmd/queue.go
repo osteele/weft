@@ -229,14 +229,20 @@ func addQueueHostFlag(cmd *cobra.Command) {
 
 // resolveQueueHost resolves host from --host flag or positional argument.
 // For commands that take host as first positional arg.
+// Returns an error if the resolved host is a cloud instance.
 func resolveQueueHost(args []string) (string, error) {
+	var host string
 	if queueHost != "" {
-		return queueHost, nil
+		host = queueHost
+	} else if len(args) > 0 {
+		host = args[0]
+	} else {
+		return "", fmt.Errorf("host is required (provide as argument or use --host)")
 	}
-	if len(args) > 0 {
-		return args[0], nil
+	if strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:") {
+		return "", fmt.Errorf("queue commands are not supported for cloud instances; use 'weft campaign' commands instead")
 	}
-	return "", fmt.Errorf("host is required (provide as argument or use --host)")
+	return host, nil
 }
 
 func init() {

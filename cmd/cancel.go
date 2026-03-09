@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/weft/internal/core"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
@@ -46,6 +47,15 @@ func runCancel(cmd *cobra.Command, args []string) error {
 
 	for _, jobID := range jobIDs {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("cancel"), oplog.WithJobID(jobID))
+
+		if msg, err := killOrCancelCloudJob(service.Database(), jobID, db.StatusCanceled); err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		} else if msg != "" {
+			fmt.Println(msg)
+			cancelled++
+			continue
+		}
 
 		result, err := service.KillJob(jobID, ops.TimeoutNormal)
 		if err != nil {

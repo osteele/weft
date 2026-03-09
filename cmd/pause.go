@@ -42,6 +42,14 @@ func runPause(cmd *cobra.Command, args []string) error {
 	for _, jobID := range jobIDs {
 		oplog.Log(oplog.OpCLICommand, oplog.WithDetail("pause"), oplog.WithJobID(jobID))
 
+		if isCloud, err := isCloudJob(service.Database(), jobID); err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		} else if isCloud {
+			errors = append(errors, fmt.Sprintf("job %d: pause is not supported for cloud jobs", jobID))
+			continue
+		}
+
 		result, err := service.PauseJob(jobID, ops.TimeoutNormal)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))

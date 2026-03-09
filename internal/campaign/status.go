@@ -327,6 +327,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 
 // IsInstanceTerminal returns true if the instance status is a terminal state.
 // Note: "grace" is NOT terminal — the instance is still alive waiting for resubmission.
+// When you have a CloudInstance struct, prefer inst.IsTerminal() instead.
 func IsInstanceTerminal(status string) bool {
 	return status == db.CloudInstanceStatusCompleted ||
 		status == db.CloudInstanceStatusFailed ||

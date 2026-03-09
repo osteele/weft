@@ -48,6 +48,11 @@ func (s *Service) Close() error {
 	return err
 }
 
+// Database returns the underlying database handle.
+func (s *Service) Database() *sql.DB {
+	return s.database
+}
+
 // Job loads a job by ID.
 func (s *Service) Job(jobID int64) (*db.Job, error) {
 	return s.loadJob(jobID)

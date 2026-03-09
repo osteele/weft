@@ -75,11 +75,22 @@ func restartJob(database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job is currently %s; kill it first if you want to retry", effectiveStatus)
 	}
 
-	if job.Host == "" {
-		return fmt.Errorf("job missing host")
-	}
 	if job.Command == "" {
 		return fmt.Errorf("job missing command")
+	}
+
+	// Cloud jobs: reset to unplaced (the original instance is gone)
+	if job.IsCloudJob() {
+		if err := db.ResetJobToUnplaced(database, jobID); err != nil {
+			return err
+		}
+		fmt.Printf("Reset job %d to queued (cloud instance no longer available)\n", jobID)
+		fmt.Printf("  Use 'weft campaign launch' to run on a new instance\n")
+		return nil
+	}
+
+	if job.Host == "" {
+		return fmt.Errorf("job missing host")
 	}
 
 	// Completed jobs: create a new job with the same metadata

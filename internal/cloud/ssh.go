@@ -2,6 +2,7 @@ package cloud
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"os/exec"
 	"time"
@@ -14,6 +15,22 @@ func SSHRun(target string, sshOpts []string, command string) (string, error) {
 	cmd := exec.Command("ssh", args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// RunOnInstance executes a command on a cloud instance via SSH using its
+// provider-supplied SSH details.
+func RunOnInstance(inst *Instance, command string, timeout time.Duration) (string, error) {
+	if inst.SSHHost == "" {
+		return "", fmt.Errorf("instance %s has no SSH host", inst.ProviderID)
+	}
+	target := fmt.Sprintf("root@%s", inst.SSHHost)
+	sshOpts := []string{
+		"-p", fmt.Sprintf("%d", inst.SSHPort),
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+	}
+	return SSHRunWithRetry(target, sshOpts, command, timeout)
 }
 
 // SSHRunWithRetry executes a command on a remote host via SSH, retrying on

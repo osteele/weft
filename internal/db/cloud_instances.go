@@ -96,6 +96,13 @@ func (c *CloudInstance) GraceStatusLabel() string {
 	return "grace period"
 }
 
+// IsTerminal reports whether the instance is in a terminal status.
+func (c *CloudInstance) IsTerminal() bool {
+	return c.Status == CloudInstanceStatusCompleted ||
+		c.Status == CloudInstanceStatusFailed ||
+		c.Status == CloudInstanceStatusCancelled
+}
+
 // EffectiveProviderID returns ProviderInstanceID, falling back to VastaiInstanceID for legacy records.
 func (c *CloudInstance) EffectiveProviderID() string {
 	if c.ProviderInstanceID != "" {

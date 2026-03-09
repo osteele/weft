@@ -1189,8 +1189,22 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 // append fails.
 func RequeueByID(db *sql.DB, id int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, pending_status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+		`UPDATE jobs SET status = ?, pending_status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL, cloud_instance_id = NULL WHERE id = ?`,
 		StatusQueued, StatusQueued, id,
+	)
+	return err
+}
+
+// ResetJobToUnplaced resets a single job to unplaced state (queued with empty host),
+// clearing cloud instance association and run metadata. Used when restarting cloud
+// jobs whose original instance is no longer available.
+func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET status = ?, pending_status = ?, host = '', cloud_instance_id = NULL,
+		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
+		 session_name = NULL, last_synced_status = NULL
+		 WHERE id = ?`,
+		StatusQueued, StatusQueued, jobID,
 	)
 	return err
 }
