@@ -47,7 +47,7 @@ type apiCoordinatorState struct {
 }
 
 func (s *Server) handleAPIHosts(w http.ResponseWriter, _ *http.Request) {
-	specs, err := inventory.LoadEmbeddedHosts()
+	specs, err := inventory.LoadHosts()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -127,7 +127,7 @@ func mergeLiveGPUs(apiGPUs []apiGPU, liveGPUs []hostinfo.GPUInfo) {
 	// For each API GPU group, aggregate live metrics from matching indices.
 	// The static GPU list uses Count to represent a group (e.g., 2x A100).
 	// We map to live GPUs using the inventory's index ranges.
-	specs, _ := inventory.LoadEmbeddedHosts()
+	specs, _ := inventory.LoadHosts()
 	specIndices := make(map[string]map[string][]int) // host->class->indices (not available here)
 	_ = specIndices
 	_ = specs

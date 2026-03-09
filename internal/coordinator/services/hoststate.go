@@ -123,9 +123,9 @@ func (m *HostStateManager) Snapshot() map[string]HostState {
 	return result
 }
 
-// SeedFromInventory populates the host state map from the embedded inventory.
+// SeedFromInventory populates the host state map from the host inventory.
 func (m *HostStateManager) SeedFromInventory() {
-	hosts, err := inventory.LoadEmbeddedHosts()
+	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		m.logger.Printf("load inventory: %v", err)
 		return

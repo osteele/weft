@@ -178,7 +178,7 @@ func TestIntegrationCatchupOnStartup(t *testing.T) {
 				Cmd: "echo " + id,
 				Dir: "/tmp",
 				Constraints: intent.IntentConstraints{
-					Host: "cool30", // use known inventory host
+					Host: "host-beta", // use known inventory host
 				},
 			},
 		}

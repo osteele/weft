@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/hostinfo"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
 )
@@ -18,6 +19,7 @@ import (
 // newTestServer creates a Server with no monitor for testing API endpoints.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	inventory.UseTestHosts(t)
 	return &Server{
 		hostSyncTimes: make(map[string]time.Time),
 		jobProgress:   make(map[int64]*progress.Progress),
@@ -79,7 +81,7 @@ func TestHandleAPIHosts_GPUFields(t *testing.T) {
 
 	// Find cool100 — should have 2 GPU groups
 	for _, h := range hosts {
-		if h.Name == "cool100" {
+		if h.Name == "host-alpha" {
 			if len(h.GPUs) != 2 {
 				t.Fatalf("cool100: got %d GPU groups, want 2", len(h.GPUs))
 			}
@@ -194,8 +196,8 @@ func TestHandleCluster_ReturnsHTML(t *testing.T) {
 func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 	now := time.Now()
 	hosts := []*hostinfo.Host{
-		{Name: "cool30", Status: hostinfo.HostStatusOnline},
-		{Name: "cool100", Status: hostinfo.HostStatusOnline},
+		{Name: "host-beta", Status: hostinfo.HostStatusOnline},
+		{Name: "host-alpha", Status: hostinfo.HostStatusOnline},
 		{Name: "lm2", Status: hostinfo.HostStatusOffline},
 	}
 
@@ -207,19 +209,19 @@ func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 		{
 			name: "only recently synced hosts shown",
 			syncTimes: map[string]time.Time{
-				"cool30":  now.Add(-1 * time.Hour),
-				"cool100": now.Add(-24 * time.Hour),
-				"lm2":     now.Add(-30 * 24 * time.Hour), // 30 days ago
+				"host-beta":  now.Add(-1 * time.Hour),
+				"host-alpha": now.Add(-24 * time.Hour),
+				"lm2":        now.Add(-30 * 24 * time.Hour), // 30 days ago
 			},
-			wantHostNames: []string{"cool100", "cool30"},
+			wantHostNames: []string{"host-alpha", "host-beta"},
 		},
 		{
 			name: "host with no sync time excluded",
 			syncTimes: map[string]time.Time{
-				"cool30":  now.Add(-1 * time.Hour),
-				"cool100": now.Add(-1 * time.Hour),
+				"host-beta":  now.Add(-1 * time.Hour),
+				"host-alpha": now.Add(-1 * time.Hour),
 			},
-			wantHostNames: []string{"cool100", "cool30"},
+			wantHostNames: []string{"host-alpha", "host-beta"},
 		},
 		{
 			name:          "empty sync times shows no hosts",
@@ -229,11 +231,11 @@ func TestBuildHostSummaries_FiltersStaleHosts(t *testing.T) {
 		{
 			name: "all hosts recently synced",
 			syncTimes: map[string]time.Time{
-				"cool30":  now.Add(-1 * time.Hour),
-				"cool100": now.Add(-1 * time.Hour),
-				"lm2":     now.Add(-1 * time.Hour),
+				"host-beta":  now.Add(-1 * time.Hour),
+				"host-alpha": now.Add(-1 * time.Hour),
+				"lm2":        now.Add(-1 * time.Hour),
 			},
-			wantHostNames: []string{"cool100", "cool30", "lm2"},
+			wantHostNames: []string{"host-alpha", "host-beta", "lm2"},
 		},
 	}
 
@@ -307,8 +309,8 @@ func TestMergeLiveGPUs_NoLiveData(t *testing.T) {
 
 func TestBuildHostFilters_IncludesAllHosts(t *testing.T) {
 	hosts := []*hostinfo.Host{
-		{Name: "cool30"},
-		{Name: "cool100"},
+		{Name: "host-beta"},
+		{Name: "host-alpha"},
 		{Name: "lm2"},
 	}
 

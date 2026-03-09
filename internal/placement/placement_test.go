@@ -26,12 +26,25 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func testHosts() []inventory.HostSpec {
+	return inventory.TestHosts()
+}
+
+func scoreTestHosts(db *sql.DB, constraints Constraints) []Score {
+	return ScoreHostListWithMetrics(db, testHosts(), constraints, nil)
+}
+
+func scoreTestHostsWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) []Score {
+	return ScoreHostListWithMetrics(db, testHosts(), constraints, metrics)
+}
+
+func scoreTestHostsWithPredictor(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) []Score {
+	return ScoreHostListWithPredictor(db, testHosts(), constraints, metrics, predict)
+}
+
 func TestScoreHosts_NoConstraints(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{})
 	if len(scores) < 3 {
 		t.Fatalf("expected at least 3 hosts, got %d", len(scores))
 	}
@@ -44,23 +57,20 @@ func TestScoreHosts_NoConstraints(t *testing.T) {
 
 func TestScoreHosts_GPUClass_A100(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "a100"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "a100"})
 
 	// cool100 should be eligible (has A100s), others should not
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			if !s.Eligible {
 				t.Errorf("cool100 should be eligible for A100")
 			}
-		case "cool30":
+		case "host-beta":
 			if s.Eligible {
 				t.Errorf("cool30 should not be eligible for A100")
 			}
-		case "studio":
+		case "host-gamma":
 			if s.Eligible {
 				t.Errorf("studio should not be eligible for A100")
 			}
@@ -70,16 +80,13 @@ func TestScoreHosts_GPUClass_A100(t *testing.T) {
 
 func TestScoreHosts_GPUClass_RTX3090(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "rtx3090"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "rtx3090"})
 
 	for _, s := range scores {
-		if s.Host == "cool30" && !s.Eligible {
+		if s.Host == "host-beta" && !s.Eligible {
 			t.Error("cool30 should be eligible for rtx3090")
 		}
-		if s.Host == "cool100" && s.Eligible {
+		if s.Host == "host-alpha" && s.Eligible {
 			t.Error("cool100 should not be eligible for rtx3090")
 		}
 	}
@@ -87,22 +94,19 @@ func TestScoreHosts_GPUClass_RTX3090(t *testing.T) {
 
 func TestScoreHosts_GPUMemory(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUMemGB: 48})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUMemGB: 48})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			if !s.Eligible {
 				t.Error("cool100 should be eligible (A100 has 80GB)")
 			}
-		case "cool30":
+		case "host-beta":
 			if s.Eligible {
 				t.Error("cool30 should not be eligible (RTX 3090 has 24GB)")
 			}
-		case "studio":
+		case "host-gamma":
 			if !s.Eligible {
 				t.Error("studio should be eligible (M2 Max has 96GB)")
 			}
@@ -115,21 +119,18 @@ func TestScoreHosts_GPUMemOnly_UsesGPUScoring(t *testing.T) {
 	// When only GPUMemGB is set (no GPUClass), scoring should use GPU performance
 	// factors, not CPU factors. This ensures cool30 (gpu_factor=0.6) is scored
 	// as a GPU host rather than being penalized by its low cpu_factor=0.5.
-	scores, err := ScoreHosts(db, Constraints{GPUMemGB: 24})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUMemGB: 24})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool30":
+		case "host-beta":
 			if !s.Eligible {
 				t.Error("cool30 should be eligible (RTX 3090 has 24GB)")
 			}
 			if !strings.Contains(s.staticPerfReason, "GPU") {
 				t.Errorf("cool30 should use GPU perf scoring, got %q", s.staticPerfReason)
 			}
-		case "cool100":
+		case "host-alpha":
 			if !s.Eligible {
 				t.Error("cool100 should be eligible (A100 has 80GB)")
 			}
@@ -143,22 +144,19 @@ func TestScoreHosts_DataLocality(t *testing.T) {
 
 	// Place a model on cool30
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:     "cool30",
+		Host:     "host-beta",
 		Asset:    dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "meta-llama/Llama-3-8B"},
 		LastSeen: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	scores, err := ScoreHosts(db, Constraints{
+	scores := scoreTestHosts(db, Constraints{
 		Inputs: []string{"hf:meta-llama/Llama-3-8B"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// cool30 should rank first due to data locality
-	if scores[0].Host != "cool30" {
+	if scores[0].Host != "host-beta" {
 		t.Errorf("expected cool30 first (has local data), got %s", scores[0].Host)
 	}
 }
@@ -174,28 +172,25 @@ func TestScoreHosts_DataLocality_MultipleInputs(t *testing.T) {
 			kind = dataloc.AssetHFDataset
 		}
 		if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-			Host: "cool100", Asset: dataloc.DataAsset{Kind: kind, ID: id}, LastSeen: now,
+			Host: "host-alpha", Asset: dataloc.DataAsset{Kind: kind, ID: id}, LastSeen: now,
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// cool30 has only one
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host: "cool30", Asset: dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now,
+		Host: "host-beta", Asset: dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	scores, err := ScoreHosts(db, Constraints{
+	scores := scoreTestHosts(db, Constraints{
 		Inputs: []string{"hf:meta-llama/Llama-3-8B", "hf-dataset:wikitext"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// cool100 should rank higher (2/2 local vs 1/2)
-	cool100Score := findScore(scores, "cool100")
-	cool30Score := findScore(scores, "cool30")
+	cool100Score := findScore(scores, "host-alpha")
+	cool30Score := findScore(scores, "host-beta")
 	if cool100Score.Total <= cool30Score.Total {
 		t.Errorf("cool100 (%.1f) should score higher than cool30 (%.1f)", cool100Score.Total, cool30Score.Total)
 	}
@@ -207,32 +202,30 @@ func TestScoreHosts_CombinedConstraints(t *testing.T) {
 
 	// Place data on cool30
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host: "cool30", Asset: dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model"}, LastSeen: now,
+		Host: "host-beta", Asset: dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model"}, LastSeen: now,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Require A100 (cool100 only) + data locality (cool30 only)
-	scores, err := ScoreHosts(db, Constraints{
+	scores := scoreTestHosts(db, Constraints{
 		GPUClass: "a100",
 		Inputs:   []string{"hf:model"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// cool100 should be only eligible host (has A100), even though data is on cool30
 	for _, s := range scores {
-		if s.Host == "cool100" && !s.Eligible {
+		if s.Host == "host-alpha" && !s.Eligible {
 			t.Error("cool100 should be eligible (has A100)")
 		}
-		if s.Host == "cool30" && s.Eligible {
+		if s.Host == "host-beta" && s.Eligible {
 			t.Error("cool30 should be ineligible (no A100)")
 		}
 	}
 }
 
 func TestBestHost_NoConstraints(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 	result, err := BestHost(db, Constraints{})
 	if err != nil {
@@ -247,6 +240,7 @@ func TestBestHost_NoConstraints(t *testing.T) {
 }
 
 func TestBestHost_Impossible(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 	_, err := BestHost(db, Constraints{GPUClass: "nonexistent"})
 	if err == nil {
@@ -255,6 +249,7 @@ func TestBestHost_Impossible(t *testing.T) {
 }
 
 func TestBestHost_NoEligibleHostError(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 	_, err := BestHost(db, Constraints{GPUClass: "nonexistent"})
 	if !errors.Is(err, ErrNoEligibleHost) {
@@ -318,7 +313,7 @@ func TestTransferCostScoring(t *testing.T) {
 
 	// Place a large model (15GB) on cool30 only
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool30",
+		Host:      "host-beta",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "big-model/15gb"},
 		SizeBytes: 15_000_000_000, // 15GB
 		LastSeen:  now,
@@ -326,17 +321,14 @@ func TestTransferCostScoring(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scores, err := ScoreHosts(db, Constraints{
+	scores := scoreTestHosts(db, Constraints{
 		Inputs: []string{"hf:big-model/15gb"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// cool30 has the data locally — should score highest
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
-	studio := findScore(scores, "studio")
+	cool30 := findScore(scores, "host-beta")
+	cool100 := findScore(scores, "host-alpha")
+	studio := findScore(scores, "host-gamma")
 
 	if !cool30.Eligible || !cool100.Eligible || !studio.Eligible {
 		t.Error("all hosts should be eligible with no hard constraints")
@@ -374,7 +366,7 @@ func TestTransferCostScoring_AllLocal(t *testing.T) {
 
 	// Place data on cool100
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool100",
+		Host:      "host-alpha",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model-a"},
 		SizeBytes: 5_000_000_000,
 		LastSeen:  now,
@@ -382,15 +374,12 @@ func TestTransferCostScoring_AllLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	scores, err := ScoreHosts(db, Constraints{
+	scores := scoreTestHosts(db, Constraints{
 		Inputs: []string{"hf:model-a"},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	// cool100 should have no transfer penalty
-	cool100 := findScore(scores, "cool100")
+	cool100 := findScore(scores, "host-alpha")
 	for _, r := range cool100.Reasons {
 		if strings.Contains(r, "transfer") {
 			t.Errorf("cool100 should not have transfer reason when data is local, got: %v", cool100.Reasons)
@@ -402,18 +391,15 @@ func TestUtilizationScoring_PrefersIdleHost(t *testing.T) {
 	db := setupTestDB(t)
 
 	metrics := map[string]*HostMetrics{
-		"cool30":  {GPUPercent: 90, CPUPercent: 80},
-		"cool100": {GPUPercent: 10, CPUPercent: 5},
-		"studio":  {GPUPercent: 50, CPUPercent: 40},
+		"host-beta":  {GPUPercent: 90, CPUPercent: 80},
+		"host-alpha": {GPUPercent: 10, CPUPercent: 5},
+		"host-gamma": {GPUPercent: 50, CPUPercent: 40},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, Constraints{}, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, Constraints{}, metrics)
 
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
+	cool30 := findScore(scores, "host-beta")
+	cool100 := findScore(scores, "host-alpha")
 
 	if cool100.Total <= cool30.Total {
 		t.Errorf("cool100 (%.2f, 10%% GPU) should score higher than cool30 (%.2f, 90%% GPU)", cool100.Total, cool30.Total)
@@ -424,18 +410,15 @@ func TestUtilizationScoring_QueueDepth(t *testing.T) {
 	db := setupTestDB(t)
 
 	metrics := map[string]*HostMetrics{
-		"cool30":  {QueueDepth: 0},
-		"cool100": {QueueDepth: 5},
-		"studio":  {QueueDepth: 2},
+		"host-beta":  {QueueDepth: 0},
+		"host-alpha": {QueueDepth: 5},
+		"host-gamma": {QueueDepth: 2},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, Constraints{}, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, Constraints{}, metrics)
 
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
+	cool30 := findScore(scores, "host-beta")
+	cool100 := findScore(scores, "host-alpha")
 
 	// cool30 with 0 queued should beat cool100 with 5 queued
 	if cool30.Total <= cool100.Total {
@@ -459,14 +442,8 @@ func TestUtilizationScoring_NilMetrics(t *testing.T) {
 	db := setupTestDB(t)
 
 	// Nil metrics should work the same as ScoreHosts
-	scoresWithNil, err := ScoreHostsWithMetrics(db, Constraints{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoresWithout, err := ScoreHosts(db, Constraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresWithNil := scoreTestHostsWithMetrics(db, Constraints{}, nil)
+	scoresWithout := scoreTestHosts(db, Constraints{})
 
 	for i := range scoresWithNil {
 		if scoresWithNil[i].Total != scoresWithout[i].Total {
@@ -481,16 +458,13 @@ func TestUtilizationScoring_CombinedWithConstraints(t *testing.T) {
 
 	// cool100 is the only host with A100, but it's heavily loaded
 	metrics := map[string]*HostMetrics{
-		"cool100": {GPUPercent: 95, CPUPercent: 90, QueueDepth: 3},
+		"host-alpha": {GPUPercent: 95, CPUPercent: 90, QueueDepth: 3},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metrics)
 
 	// cool100 should still be the only eligible host despite load
-	cool100 := findScore(scores, "cool100")
+	cool100 := findScore(scores, "host-alpha")
 	if !cool100.Eligible {
 		t.Error("cool100 should be eligible (only host with A100)")
 	}
@@ -513,12 +487,9 @@ func TestPerformanceFactor_GPUJob(t *testing.T) {
 	// Use RTX 3090 class — cool30 is the only eligible host, but
 	// we test the performance penalty is applied by checking reasons.
 	// For a broader GPU test, use GPUMemGB to keep multiple hosts eligible.
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "rtx3090"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "rtx3090"})
 
-	cool30 := findScore(scores, "cool30")
+	cool30 := findScore(scores, "host-beta")
 	if !cool30.Eligible {
 		t.Fatal("cool30 should be eligible for rtx3090")
 	}
@@ -538,14 +509,11 @@ func TestPerformanceFactor_GPUJob(t *testing.T) {
 func TestPerformanceFactor_CPUOnlyJob(t *testing.T) {
 	db := setupTestDB(t)
 
-	scores, err := ScoreHosts(db, Constraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{})
 
-	cool100 := findScore(scores, "cool100")
-	cool30 := findScore(scores, "cool30")
-	studio := findScore(scores, "studio")
+	cool100 := findScore(scores, "host-alpha")
+	cool30 := findScore(scores, "host-beta")
+	studio := findScore(scores, "host-gamma")
 
 	if studio.Total <= cool100.Total {
 		t.Errorf("studio (%.2f) should score higher than cool100 (%.2f) for CPU job", studio.Total, cool100.Total)
@@ -560,19 +528,16 @@ func TestPerformanceFactor_StudioWinsWithBacklog(t *testing.T) {
 
 	// Give cool30 and cool100 heavy queue depth so studio can overcome perf penalty
 	metrics := map[string]*HostMetrics{
-		"cool30":  {QueueDepth: 6, GPUPercent: 80},
-		"cool100": {QueueDepth: 6, GPUPercent: 90},
-		"studio":  {QueueDepth: 0, GPUPercent: 0},
+		"host-beta":  {QueueDepth: 6, GPUPercent: 80},
+		"host-alpha": {QueueDepth: 6, GPUPercent: 90},
+		"host-gamma": {QueueDepth: 0, GPUPercent: 0},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, Constraints{}, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, Constraints{}, metrics)
 
-	studio := findScore(scores, "studio")
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
+	studio := findScore(scores, "host-gamma")
+	cool30 := findScore(scores, "host-beta")
+	cool100 := findScore(scores, "host-alpha")
 
 	if studio.Total <= cool30.Total {
 		t.Errorf("studio (%.2f) should beat cool30 (%.2f) when cool30 is heavily loaded", studio.Total, cool30.Total)
@@ -583,10 +548,7 @@ func TestPerformanceFactor_StudioWinsWithBacklog(t *testing.T) {
 }
 
 func TestAllHostsHavePerformanceFactors(t *testing.T) {
-	hosts, err := inventory.LoadEmbeddedHosts()
-	if err != nil {
-		t.Fatal(err)
-	}
+	hosts := inventory.TestHosts()
 
 	for _, h := range hosts {
 		if h.CPUFactor == 0 {
@@ -604,27 +566,24 @@ func TestPredictorDurationScoring(t *testing.T) {
 	// studio is faster (730s) than cool30 (1137s)
 	predict := func(host string) *JobPrediction {
 		switch host {
-		case "studio":
+		case "host-gamma":
 			d := 730.0
 			return &JobPrediction{DurationS: &d}
-		case "cool30":
+		case "host-beta":
 			d := 1137.0
 			return &JobPrediction{DurationS: &d}
-		case "cool100":
+		case "host-alpha":
 			d := 600.0
 			return &JobPrediction{DurationS: &d}
 		}
 		return nil
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test cmd"}, nil, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test cmd"}, nil, predict)
 
-	studio := findScore(scores, "studio")
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
+	studio := findScore(scores, "host-gamma")
+	cool30 := findScore(scores, "host-beta")
+	cool100 := findScore(scores, "host-alpha")
 
 	// cool100 (600s) should be fastest, studio (730s) second, cool30 (1137s) slowest
 	if cool100.Total <= studio.Total {
@@ -652,25 +611,19 @@ func TestPredictorDurationScoring_SingleHostSkipped(t *testing.T) {
 
 	// Only one host has prediction — should not apply duration scoring
 	predict := func(host string) *JobPrediction {
-		if host == "cool30" {
+		if host == "host-beta" {
 			d := 1000.0
 			return &JobPrediction{DurationS: &d}
 		}
 		return nil
 	}
 
-	scoresWithPredictor, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoresWithout, err := ScoreHosts(db, Constraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresWithPredictor := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
+	scoresWithout := scoreTestHosts(db, Constraints{})
 
 	// With only 1 prediction, scores should be the same as without predictor
-	cool30With := findScore(scoresWithPredictor, "cool30")
-	cool30Without := findScore(scoresWithout, "cool30")
+	cool30With := findScore(scoresWithPredictor, "host-beta")
+	cool30Without := findScore(scoresWithout, "host-beta")
 	if cool30With.Total != cool30Without.Total {
 		t.Errorf("single prediction should not change scores: got %.2f vs %.2f", cool30With.Total, cool30Without.Total)
 	}
@@ -683,7 +636,7 @@ func TestPredictorResourceHardConstraint_RSS(t *testing.T) {
 	predict := func(host string) *JobPrediction {
 		rss := 50.0 * 1024 * 1024   // 50 GiB in KB — mean
 		upper := 70.0 * 1024 * 1024 // 70 GiB in KB — upper bound
-		if host == "cool30" {
+		if host == "host-beta" {
 			return &JobPrediction{
 				PeakRSSKB:      &rss,
 				PeakRSSKBUpper: &upper,
@@ -692,12 +645,9 @@ func TestPredictorResourceHardConstraint_RSS(t *testing.T) {
 		return nil
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
 
-	cool30 := findScore(scores, "cool30")
+	cool30 := findScore(scores, "host-beta")
 	if cool30.Eligible {
 		t.Error("cool30 should be ineligible when predicted RSS exceeds 64GB RAM")
 	}
@@ -719,22 +669,19 @@ func TestPredictorResourceSoftConstraint_TightRAM(t *testing.T) {
 	// Predict 50 GiB RSS on cool100 which has 256GB total but only 60 GiB free
 	rss := 50.0 * 1024 * 1024 // 50 GiB in KB
 	predict := func(host string) *JobPrediction {
-		if host == "cool100" {
+		if host == "host-alpha" {
 			return &JobPrediction{PeakRSSKB: &rss}
 		}
 		return nil
 	}
 
 	metrics := map[string]*HostMetrics{
-		"cool100": {FreeRAMKB: 60 * 1024 * 1024}, // 60 GiB free
+		"host-alpha": {FreeRAMKB: 60 * 1024 * 1024}, // 60 GiB free
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
 
-	cool100 := findScore(scores, "cool100")
+	cool100 := findScore(scores, "host-alpha")
 	// 50/60 = 83% > 80% threshold, should get penalty
 	hasTightRAM := false
 	for _, r := range cool100.Reasons {
@@ -751,14 +698,8 @@ func TestPredictorNilPredictor(t *testing.T) {
 	db := setupTestDB(t)
 
 	// Nil predictor should behave identically to ScoreHostsWithMetrics
-	scoresWithPredictor, err := ScoreHostsWithPredictor(db, Constraints{}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoresWithout, err := ScoreHostsWithMetrics(db, Constraints{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresWithPredictor := scoreTestHostsWithPredictor(db, Constraints{}, nil, nil)
+	scoresWithout := scoreTestHostsWithMetrics(db, Constraints{}, nil)
 
 	for i := range scoresWithPredictor {
 		if scoresWithPredictor[i].Total != scoresWithout[i].Total {
@@ -774,23 +715,20 @@ func TestPredictorRemovesStaticPerfPenalty(t *testing.T) {
 	// With predictor, static CPU perf penalties should be removed for hosts with predictions
 	predict := func(host string) *JobPrediction {
 		switch host {
-		case "cool100":
+		case "host-alpha":
 			d := 500.0
 			return &JobPrediction{DurationS: &d}
-		case "cool30":
+		case "host-beta":
 			d := 800.0
 			return &JobPrediction{DurationS: &d}
-		case "studio":
+		case "host-gamma":
 			d := 600.0
 			return &JobPrediction{DurationS: &d}
 		}
 		return nil
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
 
 	// Hosts with predictions should not have CPU perf reasons
 	for _, s := range scores {
@@ -808,7 +746,7 @@ func TestGPUMemoryPressure_PenalizesLoadedHost(t *testing.T) {
 	// cool100 has A100s at indices 0 and 1
 	// Simulate: device 0 mostly full, device 1 has space
 	metricsLoaded := map[string]*HostMetrics{
-		"cool100": {
+		"host-alpha": {
 			GPUDeviceFreeMemMiB: map[string]int64{
 				"0": 5 * 1024,  // 5GB free
 				"1": 70 * 1024, // 70GB free
@@ -816,14 +754,11 @@ func TestGPUMemoryPressure_PenalizesLoadedHost(t *testing.T) {
 		},
 	}
 
-	scoresLoaded, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metricsLoaded)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresLoaded := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metricsLoaded)
 
 	// Same host but with both devices having plenty of free VRAM
 	metricsFree := map[string]*HostMetrics{
-		"cool100": {
+		"host-alpha": {
 			GPUDeviceFreeMemMiB: map[string]int64{
 				"0": 75 * 1024,
 				"1": 75 * 1024,
@@ -831,13 +766,10 @@ func TestGPUMemoryPressure_PenalizesLoadedHost(t *testing.T) {
 		},
 	}
 
-	scoresFree, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metricsFree)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresFree := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metricsFree)
 
-	cool100Loaded := findScore(scoresLoaded, "cool100")
-	cool100Free := findScore(scoresFree, "cool100")
+	cool100Loaded := findScore(scoresLoaded, "host-alpha")
+	cool100Free := findScore(scoresFree, "host-alpha")
 
 	if cool100Loaded.Total >= cool100Free.Total {
 		t.Errorf("loaded cool100 (%.2f) should score lower than free cool100 (%.2f)",
@@ -850,7 +782,7 @@ func TestGPUMemoryPressure_NoDeviceHasEnough(t *testing.T) {
 
 	// Both A100s on cool100 are nearly full
 	metrics := map[string]*HostMetrics{
-		"cool100": {
+		"host-alpha": {
 			GPUDeviceFreeMemMiB: map[string]int64{
 				"0": 5 * 1024,  // 5GB free
 				"1": 10 * 1024, // 10GB free
@@ -858,12 +790,9 @@ func TestGPUMemoryPressure_NoDeviceHasEnough(t *testing.T) {
 		},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metrics)
 
-	cool100 := findScore(scores, "cool100")
+	cool100 := findScore(scores, "host-alpha")
 	// Should still be eligible (defeasible) but with a strong penalty
 	if !cool100.Eligible {
 		t.Error("cool100 should still be eligible (memory pressure is defeasible)")
@@ -885,17 +814,11 @@ func TestGPUMemoryPressure_NilMetrics(t *testing.T) {
 	db := setupTestDB(t)
 
 	// No metrics at all — should not add any GPU memory penalty
-	scoresWithNil, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoresWithout, err := ScoreHosts(db, Constraints{GPUClass: "a100"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresWithNil := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100"}, nil)
+	scoresWithout := scoreTestHosts(db, Constraints{GPUClass: "a100"})
 
-	cool100Nil := findScore(scoresWithNil, "cool100")
-	cool100Without := findScore(scoresWithout, "cool100")
+	cool100Nil := findScore(scoresWithNil, "host-alpha")
+	cool100Without := findScore(scoresWithout, "host-alpha")
 
 	if cool100Nil.Total != cool100Without.Total {
 		t.Errorf("nil metrics should not change score: %.2f vs %.2f",
@@ -907,23 +830,17 @@ func TestGPUJobsQueued_Penalty(t *testing.T) {
 	db := setupTestDB(t)
 
 	metricsQueued := map[string]*HostMetrics{
-		"cool100": {GPUJobsQueued: 3},
+		"host-alpha": {GPUJobsQueued: 3},
 	}
 	metricsEmpty := map[string]*HostMetrics{
-		"cool100": {GPUJobsQueued: 0},
+		"host-alpha": {GPUJobsQueued: 0},
 	}
 
-	scoresQueued, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metricsQueued)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoresEmpty, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metricsEmpty)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scoresQueued := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metricsQueued)
+	scoresEmpty := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100"}, metricsEmpty)
 
-	cool100Queued := findScore(scoresQueued, "cool100")
-	cool100Empty := findScore(scoresEmpty, "cool100")
+	cool100Queued := findScore(scoresQueued, "host-alpha")
+	cool100Empty := findScore(scoresEmpty, "host-alpha")
 
 	if cool100Queued.Total >= cool100Empty.Total {
 		t.Errorf("cool100 with GPU jobs queued (%.2f) should score lower than without (%.2f)",
@@ -943,24 +860,21 @@ func TestGPUJobsQueued_Penalty(t *testing.T) {
 
 func TestScoreHosts_GPUGeneration_Ampere(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "ampere"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "ampere"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			// Has A100 (Ampere) and RTX 2080 Ti (Turing) — should match on A100
 			if !s.Eligible {
 				t.Error("cool100 should be eligible for ampere (has A100)")
 			}
-		case "cool30":
+		case "host-beta":
 			// Has RTX 3090 (Ampere)
 			if !s.Eligible {
 				t.Error("cool30 should be eligible for ampere (has RTX 3090)")
 			}
-		case "studio":
+		case "host-gamma":
 			// M2 Max — Apple, not Ampere
 			if s.Eligible {
 				t.Error("studio should not be eligible for ampere (has M2 Max)")
@@ -971,24 +885,21 @@ func TestScoreHosts_GPUGeneration_Ampere(t *testing.T) {
 
 func TestScoreHosts_GPUGeneration_AmpereMin(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "ampere+"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "ampere+"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			// Has A100 (Ampere) — matches ampere+
 			if !s.Eligible {
 				t.Error("cool100 should be eligible for ampere+ (has A100)")
 			}
-		case "cool30":
+		case "host-beta":
 			// Has RTX 3090 (Ampere) — matches ampere+
 			if !s.Eligible {
 				t.Error("cool30 should be eligible for ampere+ (has RTX 3090)")
 			}
-		case "studio":
+		case "host-gamma":
 			// M2 Max — cross-family, should not match
 			if s.Eligible {
 				t.Error("studio should not be eligible for ampere+ (cross-family)")
@@ -999,24 +910,21 @@ func TestScoreHosts_GPUGeneration_AmpereMin(t *testing.T) {
 
 func TestScoreHosts_GPUGeneration_Turing(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "turing"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "turing"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			// Has RTX 2080 Ti (Turing) — should match
 			if !s.Eligible {
 				t.Error("cool100 should be eligible for turing (has RTX 2080 Ti)")
 			}
-		case "cool30":
+		case "host-beta":
 			// RTX 3090 is Ampere, not Turing
 			if s.Eligible {
 				t.Error("cool30 should not be eligible for turing (RTX 3090 is Ampere)")
 			}
-		case "studio":
+		case "host-gamma":
 			if s.Eligible {
 				t.Error("studio should not be eligible for turing")
 			}
@@ -1028,23 +936,20 @@ func TestScoreHosts_GPUGeneration_ModelPromotedToGen(t *testing.T) {
 	db := setupTestDB(t)
 
 	// "a100+" should promote A100 to Ampere generation, matching Ampere and newer
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "a100+"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "a100+"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			if !s.Eligible {
 				t.Error("cool100 should be eligible for a100+ (A100 is Ampere)")
 			}
-		case "cool30":
+		case "host-beta":
 			// RTX 3090 is also Ampere — should match a100+ (= ampere+)
 			if !s.Eligible {
 				t.Error("cool30 should be eligible for a100+ (RTX 3090 is Ampere)")
 			}
-		case "studio":
+		case "host-gamma":
 			if s.Eligible {
 				t.Error("studio should not be eligible for a100+ (cross-family)")
 			}
@@ -1054,22 +959,19 @@ func TestScoreHosts_GPUGeneration_ModelPromotedToGen(t *testing.T) {
 
 func TestScoreHosts_GPUFamily_Nvidia(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "nvidia"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "nvidia"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			if !s.Eligible {
 				t.Error("cool100 should be eligible for nvidia (has A100 and RTX 2080 Ti)")
 			}
-		case "cool30":
+		case "host-beta":
 			if !s.Eligible {
 				t.Error("cool30 should be eligible for nvidia (has RTX 3090)")
 			}
-		case "studio":
+		case "host-gamma":
 			if s.Eligible {
 				t.Error("studio should not be eligible for nvidia (has Apple M2 Max)")
 			}
@@ -1079,22 +981,19 @@ func TestScoreHosts_GPUFamily_Nvidia(t *testing.T) {
 
 func TestScoreHosts_GPUFamily_Apple(t *testing.T) {
 	db := setupTestDB(t)
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "apple"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "apple"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "studio":
+		case "host-gamma":
 			if !s.Eligible {
 				t.Error("studio should be eligible for apple (has M2 Max)")
 			}
-		case "cool100":
+		case "host-alpha":
 			if s.Eligible {
 				t.Error("cool100 should not be eligible for apple (has NVIDIA GPUs)")
 			}
-		case "cool30":
+		case "host-beta":
 			if s.Eligible {
 				t.Error("cool30 should not be eligible for apple (has NVIDIA GPU)")
 			}
@@ -1106,18 +1005,15 @@ func TestScoreHosts_GPUClass_BackwardCompat(t *testing.T) {
 	db := setupTestDB(t)
 
 	// Plain "a100" (no +) should still exact-match only A100
-	scores, err := ScoreHosts(db, Constraints{GPUClass: "a100"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{GPUClass: "a100"})
 
 	for _, s := range scores {
 		switch s.Host {
-		case "cool100":
+		case "host-alpha":
 			if !s.Eligible {
 				t.Error("cool100 should be eligible for exact a100")
 			}
-		case "cool30":
+		case "host-beta":
 			if s.Eligible {
 				t.Error("cool30 should NOT be eligible for exact a100 (has RTX 3090)")
 			}
@@ -1132,7 +1028,7 @@ func TestScoreHosts_GPUClass_A100_MixedHost_OnlyCountsMatchingGPUs(t *testing.T)
 	// Simulate: A100s are full (0 MiB free) but 2080 Tis have plenty free.
 	// With GPUClass "a100", scoring should only consider A100 devices.
 	metrics := map[string]*HostMetrics{
-		"cool100": {
+		"host-alpha": {
 			GPUDeviceFreeMemMiB: map[string]int64{
 				"0": 0,         // A100 #0: full
 				"1": 0,         // A100 #1: full
@@ -1148,12 +1044,9 @@ func TestScoreHosts_GPUClass_A100_MixedHost_OnlyCountsMatchingGPUs(t *testing.T)
 		},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "a100", GPUMemGB: 40}, metrics)
 
-	cool100 := findScore(scores, "cool100")
+	cool100 := findScore(scores, "host-alpha")
 	if !cool100.Eligible {
 		t.Fatal("cool100 should be eligible (has A100s)")
 	}
@@ -1178,7 +1071,7 @@ func TestNewJobPredictor_PropagatesDurationBounds(t *testing.T) {
 			DurationS: &RawPredictionField{Mean: 600, Lower: 500, Upper: 700},
 		}
 	})
-	jp := predict("cool100")
+	jp := predict("host-alpha")
 	if jp == nil {
 		t.Fatal("expected non-nil prediction")
 	}
@@ -1200,23 +1093,20 @@ func TestPredictorDurationScoring_UncertaintyAffectsScoring(t *testing.T) {
 	// cool100: fast and certain. cool30: same mean but very uncertain. studio: slow.
 	predict := func(host string) *JobPrediction {
 		switch host {
-		case "cool100":
+		case "host-alpha":
 			d, lo, hi := 600.0, 580.0, 620.0 // narrow CI
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
-		case "cool30":
+		case "host-beta":
 			d, lo, hi := 600.0, 100.0, 3600.0 // very wide CI — median of log-normal shifts right
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
-		case "studio":
+		case "host-gamma":
 			d, lo, hi := 1200.0, 1000.0, 1400.0
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
 		}
 		return nil
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, nil, predict)
 
 	// Verify MC is active on all hosts
 	for _, s := range scores {
@@ -1235,8 +1125,8 @@ func TestPredictorDurationScoring_UncertaintyAffectsScoring(t *testing.T) {
 	}
 
 	// cool100 (narrow CI, 600s mean) should beat studio (1200s mean)
-	cool100 := findScore(scores, "cool100")
-	studio := findScore(scores, "studio")
+	cool100 := findScore(scores, "host-alpha")
+	studio := findScore(scores, "host-gamma")
 	if cool100.Total <= studio.Total {
 		t.Errorf("cool100 (%.2f) should beat studio (%.2f) — faster prediction", cool100.Total, studio.Total)
 	}
@@ -1251,22 +1141,19 @@ func TestPredictorResourceSoftConstraint_UpperBound(t *testing.T) {
 	meanKB := 40.0 * 1024 * 1024
 	upperKB := 55.0 * 1024 * 1024
 	predict := func(host string) *JobPrediction {
-		if host == "cool100" {
+		if host == "host-alpha" {
 			return &JobPrediction{PeakRSSKB: &meanKB, PeakRSSKBUpper: &upperKB}
 		}
 		return nil
 	}
 
 	metrics := map[string]*HostMetrics{
-		"cool100": {FreeRAMKB: 60 * 1024 * 1024}, // 60 GiB free
+		"host-alpha": {FreeRAMKB: 60 * 1024 * 1024}, // 60 GiB free
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
 
-	cool100 := findScore(scores, "cool100")
+	cool100 := findScore(scores, "host-alpha")
 	hasTightRAM := false
 	for _, r := range cool100.Reasons {
 		if strings.Contains(r, "tight RAM") {
@@ -1303,10 +1190,7 @@ func TestBenchmarkTag_NoMetrics_Ineligible(t *testing.T) {
 	constraints := Constraints{Tags: []string{"benchmark"}}
 
 	// Without metrics, benchmark jobs should be ineligible (can't verify idle)
-	scores, err := ScoreHosts(db, constraints)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, constraints)
 
 	for _, s := range scores {
 		if s.Eligible {
@@ -1329,15 +1213,12 @@ func TestBenchmarkTag_IdleHost_Eligible(t *testing.T) {
 	constraints := Constraints{Tags: []string{"benchmark"}}
 
 	metrics := map[string]*HostMetrics{
-		"cool30":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
-		"cool100": {CPUPercent: 2, GPUPercent: 1, RAMPercent: 10},
-		"studio":  {CPUPercent: 3, GPUPercent: 0, RAMPercent: 15},
+		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+		"host-alpha": {CPUPercent: 2, GPUPercent: 1, RAMPercent: 10},
+		"host-gamma": {CPUPercent: 3, GPUPercent: 0, RAMPercent: 15},
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, constraints, metrics)
 
 	for _, s := range scores {
 		if !s.Eligible {
@@ -1351,15 +1232,12 @@ func TestBenchmarkTag_BusyHost_Ineligible(t *testing.T) {
 	constraints := Constraints{Tags: []string{"benchmark"}}
 
 	metrics := map[string]*HostMetrics{
-		"cool30":  {CPUPercent: 50, GPUPercent: 0, RAMPercent: 5},  // CPU too high
-		"cool100": {CPUPercent: 1, GPUPercent: 30, RAMPercent: 10}, // GPU too high
-		"studio":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 50},  // RAM too high
+		"host-beta":  {CPUPercent: 50, GPUPercent: 0, RAMPercent: 5},  // CPU too high
+		"host-alpha": {CPUPercent: 1, GPUPercent: 30, RAMPercent: 10}, // GPU too high
+		"host-gamma": {CPUPercent: 1, GPUPercent: 0, RAMPercent: 50},  // RAM too high
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, constraints, metrics)
 
 	for _, s := range scores {
 		if s.Eligible {
@@ -1373,19 +1251,16 @@ func TestBenchmarkTag_MixedHosts_OnlyIdleEligible(t *testing.T) {
 	constraints := Constraints{Tags: []string{"benchmark"}}
 
 	metrics := map[string]*HostMetrics{
-		"cool30":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},    // idle
-		"cool100": {CPUPercent: 50, GPUPercent: 80, RAMPercent: 60}, // busy
-		"studio":  {CPUPercent: 2, GPUPercent: 0, RAMPercent: 10},   // idle
+		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},    // idle
+		"host-alpha": {CPUPercent: 50, GPUPercent: 80, RAMPercent: 60}, // busy
+		"host-gamma": {CPUPercent: 2, GPUPercent: 0, RAMPercent: 10},   // idle
 	}
 
-	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithMetrics(db, constraints, metrics)
 
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
-	studio := findScore(scores, "studio")
+	cool30 := findScore(scores, "host-beta")
+	cool100 := findScore(scores, "host-alpha")
+	studio := findScore(scores, "host-gamma")
 
 	if !cool30.Eligible {
 		t.Error("cool30 should be eligible (idle)")
@@ -1403,10 +1278,7 @@ func TestNonBenchmarkTag_IgnoresIdleCheck(t *testing.T) {
 	constraints := Constraints{Tags: []string{"exclusive"}}
 
 	// Even without metrics, non-benchmark tagged jobs should be eligible
-	scores, err := ScoreHosts(db, constraints)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, constraints)
 
 	for _, s := range scores {
 		if !s.Eligible {

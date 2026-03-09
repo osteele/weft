@@ -1,8 +1,9 @@
 package inventory
 
 import (
-	"embed"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -10,8 +11,67 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-//go:embed hosts/*.yaml
-var hostsFS embed.FS
+var hostsDirOverride string
+
+// HostsDir returns the directory for host YAML files.
+// Defaults to ~/.config/weft/hosts/.
+func HostsDir() string {
+	if hostsDirOverride != "" {
+		return hostsDirOverride
+	}
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		configDir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	return filepath.Join(configDir, "weft", "hosts")
+}
+
+// SetHostsDir overrides the hosts directory. Returns a cleanup function
+// that restores the original value. Intended for testing.
+func SetHostsDir(dir string) func() {
+	old := hostsDirOverride
+	hostsDirOverride = dir
+	return func() { hostsDirOverride = old }
+}
+
+// LoadHostsFromDir reads all YAML host specs from a filesystem directory.
+func LoadHostsFromDir(dir string) ([]HostSpec, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read hosts dir %s: %w", dir, err)
+	}
+
+	var hosts []HostSpec
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", entry.Name(), err)
+		}
+		var spec HostSpec
+		if err := yaml.Unmarshal(data, &spec); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", entry.Name(), err)
+		}
+		hosts = append(hosts, spec)
+	}
+	return hosts, nil
+}
+
+// LoadHosts loads host specs from ~/.config/weft/hosts/.
+// Returns an empty slice (no error) if the directory does not exist.
+func LoadHosts() ([]HostSpec, error) {
+	dir := HostsDir()
+	hosts, err := LoadHostsFromDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return hosts, nil
+}
 
 // GPUSpec describes a group of identical GPUs on a host.
 type GPUSpec struct {
@@ -110,35 +170,10 @@ func NormalizeGPUClass(s string) string {
 	return b.String()
 }
 
-// LoadEmbeddedHosts parses all embedded host YAML files and returns the specs.
-func LoadEmbeddedHosts() ([]HostSpec, error) {
-	entries, err := hostsFS.ReadDir("hosts")
-	if err != nil {
-		return nil, fmt.Errorf("read embedded hosts dir: %w", err)
-	}
-
-	var hosts []HostSpec
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
-			continue
-		}
-		data, err := hostsFS.ReadFile("hosts/" + entry.Name())
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", entry.Name(), err)
-		}
-		var spec HostSpec
-		if err := yaml.Unmarshal(data, &spec); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", entry.Name(), err)
-		}
-		hosts = append(hosts, spec)
-	}
-	return hosts, nil
-}
-
-// FindHost looks up a host by name from the embedded inventory.
+// FindHost looks up a host by name from the runtime inventory.
 // Returns nil if not found.
 func FindHost(name string) *HostSpec {
-	hosts, err := LoadEmbeddedHosts()
+	hosts, err := LoadHosts()
 	if err != nil {
 		return nil
 	}

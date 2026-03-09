@@ -85,7 +85,7 @@ func TestParseMetadata(t *testing.T) {
 working_dir=/mnt/code/LM2
 command=python train.py
 start_time=1234567890
-host=cool30
+host=host-beta
 description=Training run`
 
 	result := ParseMetadata(content)
@@ -99,8 +99,8 @@ description=Training run`
 	if result["command"] != "python train.py" {
 		t.Errorf("command = %q, want %q", result["command"], "python train.py")
 	}
-	if result["host"] != "cool30" {
-		t.Errorf("host = %q, want %q", result["host"], "cool30")
+	if result["host"] != "host-beta" {
+		t.Errorf("host = %q, want %q", result["host"], "host-beta")
 	}
 	if result["description"] != "Training run" {
 		t.Errorf("description = %q, want %q", result["description"], "Training run")
@@ -123,13 +123,13 @@ end_time=1700000300`
 }
 
 func TestFormatMetadata(t *testing.T) {
-	content := FormatMetadata(42, "/mnt/code", "python train.py", "cool30", "Test job", 1234567890)
+	content := FormatMetadata(42, "/mnt/code", "python train.py", "host-beta", "Test job", 1234567890)
 
 	expected := map[string]string{
 		"job_id":      "42",
 		"working_dir": "/mnt/code",
 		"command":     "python train.py",
-		"host":        "cool30",
+		"host":        "host-beta",
 		"description": "Test job",
 		"start_time":  "1234567890",
 		"display_dir": "/mnt/code",       // No cd prefix, so same as working_dir
@@ -146,13 +146,13 @@ func TestFormatMetadata(t *testing.T) {
 
 func TestFormatMetadataWithCdPrefix(t *testing.T) {
 	// Command with "cd <dir> && <cmd>" pattern
-	content := FormatMetadata(42, "~", "cd ~/code/project && python train.py", "cool30", "", 1234567890)
+	content := FormatMetadata(42, "~", "cd ~/code/project && python train.py", "host-beta", "", 1234567890)
 
 	expected := map[string]string{
 		"job_id":      "42",
 		"working_dir": "~",
 		"command":     "cd ~/code/project && python train.py",
-		"host":        "cool30",
+		"host":        "host-beta",
 		"start_time":  "1234567890",
 		"display_dir": "~/code/project",  // Extracted from cd prefix
 		"display_cmd": "python train.py", // Command after &&
@@ -316,13 +316,13 @@ func TestBuildWrapperCommand_NotifyCmd(t *testing.T) {
 		LogFile:    "~/.cache/weft/logs/42.log",
 		StatusFile: "~/.cache/weft/logs/42.status",
 		PidFile:    "~/.cache/weft/logs/42.pid",
-		NotifyCmd:  "; notify-slack.sh rj-42 $EXIT_CODE cool30",
+		NotifyCmd:  "; notify-slack.sh rj-42 $EXIT_CODE host-beta",
 	}
 
 	cmd := BuildWrapperCommand(params)
 
 	// Notify command should be appended at the end
-	if !strings.HasSuffix(cmd, "; notify-slack.sh rj-42 $EXIT_CODE cool30") {
+	if !strings.HasSuffix(cmd, "; notify-slack.sh rj-42 $EXIT_CODE host-beta") {
 		t.Errorf("BuildWrapperCommand: notify command not properly appended\nCommand: %s", cmd)
 	}
 

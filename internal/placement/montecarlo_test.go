@@ -179,15 +179,9 @@ func TestApplyMonteCarloScoring_QueueOverridesDuration(t *testing.T) {
 func TestMonteCarlo_FallbackWhenNoPredictions(t *testing.T) {
 	db := setupTestDB(t)
 
-	// No predictor — should use deterministic scoring, same as ScoreHosts
-	scoresWithPredictor, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoresWithout, err := ScoreHosts(db, Constraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// No predictor — should use deterministic scoring, same as scoreTestHosts
+	scoresWithPredictor := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, nil, nil)
+	scoresWithout := scoreTestHosts(db, Constraints{})
 
 	for i := range scoresWithPredictor {
 		if scoresWithPredictor[i].Total != scoresWithout[i].Total {
@@ -203,13 +197,13 @@ func TestMonteCarlo_IntegrationThroughScoreHostsWithPredictor(t *testing.T) {
 	// Set up predictions with bounds so MC will activate
 	predict := func(host string) *JobPrediction {
 		switch host {
-		case "cool100":
+		case "host-alpha":
 			d, lo, hi := 600.0, 400.0, 900.0
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
-		case "cool30":
+		case "host-beta":
 			d, lo, hi := 1200.0, 800.0, 1800.0
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
-		case "studio":
+		case "host-gamma":
 			d, lo, hi := 800.0, 600.0, 1100.0
 			return &JobPrediction{DurationS: &d, DurationSLower: &lo, DurationSUpper: &hi}
 		}
@@ -217,33 +211,30 @@ func TestMonteCarlo_IntegrationThroughScoreHostsWithPredictor(t *testing.T) {
 	}
 
 	metrics := map[string]*HostMetrics{
-		"cool100": {QueueDepth: 0},
-		"cool30":  {QueueDepth: 3},
-		"studio":  {QueueDepth: 0},
+		"host-alpha": {QueueDepth: 0},
+		"host-beta":  {QueueDepth: 3},
+		"host-gamma": {QueueDepth: 0},
 	}
 
-	scores, err := ScoreHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHostsWithPredictor(db, Constraints{Command: "test"}, metrics, predict)
 
-	// cool100 (600s, no queue) should beat cool30 (1200s, 3 queued)
-	cool100 := findScore(scores, "cool100")
-	cool30 := findScore(scores, "cool30")
-	if cool100.Total <= cool30.Total {
-		t.Errorf("cool100 (%.2f) should beat cool30 (%.2f) — faster + no queue",
-			cool100.Total, cool30.Total)
+	// host-alpha (600s, no queue) should beat host-beta (1200s, 3 queued)
+	hostAlpha := findScore(scores, "host-alpha")
+	hostBeta := findScore(scores, "host-beta")
+	if hostAlpha.Total <= hostBeta.Total {
+		t.Errorf("host-alpha (%.2f) should beat host-beta (%.2f) — faster + no queue",
+			hostAlpha.Total, hostBeta.Total)
 	}
 
 	// Verify MC reasons are present (not deterministic "predicted" reasons)
 	hasMC := false
-	for _, r := range cool100.Reasons {
+	for _, r := range hostAlpha.Reasons {
 		if strings.HasPrefix(r, "MC:") {
 			hasMC = true
 		}
 	}
 	if !hasMC {
-		t.Errorf("expected MC reason on cool100, got: %v", cool100.Reasons)
+		t.Errorf("expected MC reason on host-alpha, got: %v", hostAlpha.Reasons)
 	}
 }
 

@@ -24,7 +24,7 @@ func TestRecordJobOutputs_Success(t *testing.T) {
 	exitCode := 0
 	job := &db.Job{
 		ID:       42,
-		Host:     "cool30",
+		Host:     "host-beta",
 		Status:   db.StatusCompleted,
 		ExitCode: &exitCode,
 		Outputs:  []string{"checkpoint:llama-ft-v1", "hf:my-org/fine-tuned-model"},
@@ -33,7 +33,7 @@ func TestRecordJobOutputs_Success(t *testing.T) {
 	RecordJobOutputs(database, job)
 
 	// Verify assets were recorded
-	entries, err := dataloc.ListHostAssets(database, "cool30")
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestRecordJobOutputs_FailedJob(t *testing.T) {
 	exitCode := 1
 	job := &db.Job{
 		ID:       43,
-		Host:     "cool30",
+		Host:     "host-beta",
 		Status:   db.StatusCompleted,
 		ExitCode: &exitCode,
 		Outputs:  []string{"checkpoint:should-not-record"},
@@ -67,7 +67,7 @@ func TestRecordJobOutputs_FailedJob(t *testing.T) {
 
 	RecordJobOutputs(database, job)
 
-	entries, err := dataloc.ListHostAssets(database, "cool30")
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestRecordJobOutputs_NoOutputs(t *testing.T) {
 	exitCode := 0
 	job := &db.Job{
 		ID:       44,
-		Host:     "cool30",
+		Host:     "host-beta",
 		Status:   db.StatusCompleted,
 		ExitCode: &exitCode,
 	}
@@ -90,7 +90,7 @@ func TestRecordJobOutputs_NoOutputs(t *testing.T) {
 	// Should not panic or error
 	RecordJobOutputs(database, job)
 
-	entries, err := dataloc.ListHostAssets(database, "cool30")
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,14 +118,14 @@ func TestRecordJobOutputs_KilledJob(t *testing.T) {
 
 	job := &db.Job{
 		ID:      45,
-		Host:    "cool30",
+		Host:    "host-beta",
 		Status:  db.StatusKilled,
 		Outputs: []string{"checkpoint:should-not-record"},
 	}
 
 	RecordJobOutputs(database, job)
 
-	entries, err := dataloc.ListHostAssets(database, "cool30")
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
 	if err != nil {
 		t.Fatal(err)
 	}

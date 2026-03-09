@@ -76,7 +76,7 @@ func TestRunOnJobComplete_FiresWithEnvVars(t *testing.T) {
 
 	job := &db.Job{
 		ID:          42,
-		Host:        "cool30",
+		Host:        "host-beta",
 		Status:      db.StatusCompleted,
 		Description: "test job",
 		WorkingDir:  "/home/user/project",
@@ -94,7 +94,7 @@ func TestRunOnJobComplete_FiresWithEnvVars(t *testing.T) {
 	output := string(content)
 	expected := map[string]string{
 		"JOB_ID":          "42",
-		"JOB_HOST":        "cool30",
+		"JOB_HOST":        "host-beta",
 		"JOB_STATUS":      "completed",
 		"JOB_DESCRIPTION": "test job",
 		"JOB_DIR":         "/home/user/project",

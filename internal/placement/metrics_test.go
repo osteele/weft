@@ -78,7 +78,7 @@ func TestHostMetricsFromHostInfo_NilQueue(t *testing.T) {
 
 func TestHostMetricsFromHostInfo_MultiGPU(t *testing.T) {
 	host := &hostinfo.Host{
-		Name:     "cool100",
+		Name:     "host-alpha",
 		CPUs:     64,
 		LoadAvg:  "16.0",
 		MemTotal: "256G",
@@ -107,12 +107,12 @@ func TestHostMetricsFromHostInfo_MultiGPU(t *testing.T) {
 	}
 }
 
-func TestCool30WinsWhenCool100Loaded(t *testing.T) {
+func TestHostBetaWinsWhenHostAlphaLoaded(t *testing.T) {
 	db := setupTestDB(t)
 
-	// cool100 is heavily loaded; cool30 is idle
+	// host-alpha is heavily loaded; host-beta is idle
 	metrics := map[string]*HostMetrics{
-		"cool100": {
+		"host-alpha": {
 			GPUPercent: 95,
 			CPUPercent: 80,
 			QueueDepth: 4,
@@ -121,7 +121,7 @@ func TestCool30WinsWhenCool100Loaded(t *testing.T) {
 				"1": 10 * 1024, // 10 GB free
 			},
 		},
-		"cool30": {
+		"host-beta": {
 			GPUPercent: 0,
 			CPUPercent: 5,
 			QueueDepth: 0,
@@ -132,21 +132,18 @@ func TestCool30WinsWhenCool100Loaded(t *testing.T) {
 	}
 
 	// Use nvidia family constraint (both hosts eligible)
-	scores, err := ScoreHostsWithMetrics(db, Constraints{GPUClass: "nvidia"}, metrics)
-	if err != nil {
-		t.Fatal(err)
+	scores := scoreTestHostsWithMetrics(db, Constraints{GPUClass: "nvidia"}, metrics)
+
+	hostBeta := findScore(scores, "host-beta")
+	hostAlpha := findScore(scores, "host-alpha")
+
+	if !hostBeta.Eligible || !hostAlpha.Eligible {
+		t.Fatalf("both should be eligible: host-beta=%v host-alpha=%v", hostBeta.Eligible, hostAlpha.Eligible)
 	}
 
-	cool30 := findScore(scores, "cool30")
-	cool100 := findScore(scores, "cool100")
-
-	if !cool30.Eligible || !cool100.Eligible {
-		t.Fatalf("both should be eligible: cool30=%v cool100=%v", cool30.Eligible, cool100.Eligible)
-	}
-
-	if cool30.Total <= cool100.Total {
-		t.Errorf("cool30 (%.2f) should beat loaded cool100 (%.2f)\n  cool30 reasons: %v\n  cool100 reasons: %v",
-			cool30.Total, cool100.Total, cool30.Reasons, cool100.Reasons)
+	if hostBeta.Total <= hostAlpha.Total {
+		t.Errorf("host-beta (%.2f) should beat loaded host-alpha (%.2f)\n  host-beta reasons: %v\n  host-alpha reasons: %v",
+			hostBeta.Total, hostAlpha.Total, hostBeta.Reasons, hostAlpha.Reasons)
 	}
 }
 

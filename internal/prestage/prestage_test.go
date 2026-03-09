@@ -28,7 +28,7 @@ func TestBuildPlan_MissingData(t *testing.T) {
 
 	// Place model on cool30 with a known path
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool30",
+		Host:      "host-beta",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "meta-llama/Llama-3-8B"},
 		Path:      "/data/models/meta-llama/Llama-3-8B",
 		SizeBytes: 16_000_000_000,
@@ -38,7 +38,7 @@ func TestBuildPlan_MissingData(t *testing.T) {
 	}
 
 	// Build plan targeting cool100 (doesn't have the model)
-	plan, err := BuildPlan(db, "cool100", []string{"hf:meta-llama/Llama-3-8B"})
+	plan, err := BuildPlan(db, "host-alpha", []string{"hf:meta-llama/Llama-3-8B"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestBuildPlan_MissingData(t *testing.T) {
 	}
 
 	tr := plan.Transfers[0]
-	if tr.SourceHost != "cool30" {
+	if tr.SourceHost != "host-beta" {
 		t.Errorf("source host: got %s, want cool30", tr.SourceHost)
 	}
 	if tr.SizeBytes != 16_000_000_000 {
@@ -68,7 +68,7 @@ func TestBuildPlan_AllLocal(t *testing.T) {
 
 	// Place model on cool100 (the target)
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool100",
+		Host:      "host-alpha",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model-a"},
 		Path:      "/data/models/model-a",
 		SizeBytes: 5_000_000_000,
@@ -77,7 +77,7 @@ func TestBuildPlan_AllLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan(db, "cool100", []string{"hf:model-a"})
+	plan, err := BuildPlan(db, "host-alpha", []string{"hf:model-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestBuildPlan_MultipleInputs(t *testing.T) {
 
 	// model-a on cool30
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool30",
+		Host:      "host-beta",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model-a"},
 		Path:      "/data/models/model-a",
 		SizeBytes: 10_000_000_000,
@@ -104,7 +104,7 @@ func TestBuildPlan_MultipleInputs(t *testing.T) {
 
 	// dataset-b on cool100 (the target) — should not need transfer
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool100",
+		Host:      "host-alpha",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFDataset, ID: "wikitext"},
 		Path:      "/data/datasets/wikitext",
 		SizeBytes: 1_000_000_000,
@@ -113,7 +113,7 @@ func TestBuildPlan_MultipleInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan(db, "cool100", []string{"hf:model-a", "hf-dataset:wikitext"})
+	plan, err := BuildPlan(db, "host-alpha", []string{"hf:model-a", "hf-dataset:wikitext"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestBuildPlan_NoSourceWithPath(t *testing.T) {
 
 	// Asset exists on cool30 but without a path — can't rsync
 	if err := dataloc.RecordAsset(db, dataloc.HostDataEntry{
-		Host:      "cool30",
+		Host:      "host-beta",
 		Asset:     dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "model-x"},
 		Path:      "",
 		SizeBytes: 5_000_000_000,
@@ -142,7 +142,7 @@ func TestBuildPlan_NoSourceWithPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan(db, "cool100", []string{"hf:model-x"})
+	plan, err := BuildPlan(db, "host-alpha", []string{"hf:model-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestBuildPlan_UnknownAsset(t *testing.T) {
 	db := setupTestDB(t)
 
 	// No assets recorded at all
-	plan, err := BuildPlan(db, "cool100", []string{"hf:unknown-model"})
+	plan, err := BuildPlan(db, "host-alpha", []string{"hf:unknown-model"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestBuildPlan_UnknownAsset(t *testing.T) {
 
 func TestPlan_TotalBytes(t *testing.T) {
 	plan := &Plan{
-		Host: "cool100",
+		Host: "host-alpha",
 		Transfers: []Transfer{
 			{SizeBytes: 10_000_000_000},
 			{SizeBytes: 5_000_000_000},
@@ -181,7 +181,7 @@ func TestPlan_TotalBytes(t *testing.T) {
 }
 
 func TestPlan_TotalBytes_Empty(t *testing.T) {
-	plan := &Plan{Host: "cool100"}
+	plan := &Plan{Host: "host-alpha"}
 	if got := plan.TotalBytes(); got != 0 {
 		t.Errorf("TotalBytes: got %d, want 0", got)
 	}

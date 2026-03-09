@@ -2,7 +2,8 @@ package vastai
 
 import (
 	"strings"
-	"unicode"
+
+	"github.com/osteele/weft/internal/inventory"
 )
 
 // gpuClassToVastaiNames maps normalized weft GPU class names to Vast.ai gpu_name values.
@@ -92,17 +93,6 @@ var gpuClassToGen = map[string]gpuGeneration{
 	"b100": genBlackwell, "b200": genBlackwell, "gb200": genBlackwell,
 }
 
-// normalizeGPU strips non-alphanumeric chars and lowercases (same logic as inventory.NormalizeGPUClass).
-func normalizeGPU(s string) string {
-	var b strings.Builder
-	for _, r := range strings.ToLower(s) {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
 // resolveGPUFilter determines whether the GPU class constraint can be sent
 // directly to Vast.ai as a gpu_name filter, or whether results need post-filtering.
 // Returns:
@@ -115,7 +105,7 @@ func resolveGPUFilter(gpuClass string) (vastaiNames []string, postFilter func([]
 
 	minMode := strings.HasSuffix(gpuClass, "+")
 	base := strings.TrimSuffix(gpuClass, "+")
-	norm := normalizeGPU(base)
+	norm := inventory.NormalizeGPUClass(base)
 
 	// Family constraint (e.g., "nvidia") — no gpu_name filter, accept all NVIDIA
 	if norm == "nvidia" {

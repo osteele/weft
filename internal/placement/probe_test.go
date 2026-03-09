@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ssh"
 	_ "modernc.org/sqlite"
 )
@@ -13,7 +14,7 @@ import (
 func TestProbeHosts(t *testing.T) {
 	cleanup := ssh.SetRunner(func(host, command string) (string, string, error) {
 		switch host {
-		case "cool30", "cool100":
+		case "host-beta", "host-alpha":
 			return "", "", nil
 		default:
 			return "", "", fmt.Errorf("connection refused")
@@ -21,16 +22,16 @@ func TestProbeHosts(t *testing.T) {
 	})
 	defer cleanup()
 
-	result := ProbeHosts([]string{"cool30", "cool100", "studio"}, 5*time.Second)
+	result := ProbeHosts([]string{"host-beta", "host-alpha", "host-gamma"}, 5*time.Second)
 
-	if !result["cool30"] {
-		t.Error("cool30 should be reachable")
+	if !result["host-beta"] {
+		t.Error("host-beta should be reachable")
 	}
-	if !result["cool100"] {
-		t.Error("cool100 should be reachable")
+	if !result["host-alpha"] {
+		t.Error("host-alpha should be reachable")
 	}
-	if result["studio"] {
-		t.Error("studio should be unreachable")
+	if result["host-gamma"] {
+		t.Error("host-gamma should be unreachable")
 	}
 }
 
@@ -48,12 +49,13 @@ func TestProbeHosts_Empty(t *testing.T) {
 }
 
 func TestBestReachableHost(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 
-	// cool30 and cool100 are online; studio is offline
+	// host-beta and host-alpha are online; host-gamma is offline
 	cleanup := ssh.SetRunner(func(host, command string) (string, string, error) {
 		switch host {
-		case "cool30", "cool100":
+		case "host-beta", "host-alpha":
 			return "", "", nil
 		default:
 			return "", "", fmt.Errorf("connection refused")
@@ -65,9 +67,8 @@ func TestBestReachableHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Should pick one of the online hosts (cool30 or cool100)
-	if result.Host != "cool30" && result.Host != "cool100" {
-		t.Errorf("expected cool30 or cool100, got %s", result.Host)
+	if result.Host != "host-beta" && result.Host != "host-alpha" {
+		t.Errorf("expected host-beta or host-alpha, got %s", result.Host)
 	}
 	if len(result.Scores) == 0 {
 		t.Error("expected scores in PlacementResult")
@@ -75,13 +76,10 @@ func TestBestReachableHost(t *testing.T) {
 }
 
 func TestBestReachableHost_SkipsOfflineBest(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 
-	// Get scores to find the best-scored host, then make it offline
-	scores, err := ScoreHosts(db, Constraints{})
-	if err != nil {
-		t.Fatal(err)
-	}
+	scores := scoreTestHosts(db, Constraints{})
 
 	// The best-scored host
 	bestHost := scores[0].Host
@@ -119,6 +117,7 @@ func TestBestReachableHost_SkipsOfflineBest(t *testing.T) {
 }
 
 func TestBestReachableHost_AllOffline(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 
 	cleanup := ssh.SetRunner(func(host, command string) (string, string, error) {
@@ -133,9 +132,10 @@ func TestBestReachableHost_AllOffline(t *testing.T) {
 }
 
 func TestBestReachableHost_GPUConstraint(t *testing.T) {
+	inventory.UseTestHosts(t)
 	db := setupTestDB(t)
 
-	// Require A100 — only cool100 is eligible. Make cool100 offline.
+	// Require A100 — only host-alpha is eligible. Make it offline.
 	cleanup := ssh.SetRunner(func(host, command string) (string, string, error) {
 		return "", "", fmt.Errorf("connection refused")
 	})

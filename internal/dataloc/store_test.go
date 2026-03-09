@@ -35,7 +35,7 @@ func TestRecordAsset_Insert(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 
 	entry := HostDataEntry{
-		Host:      "cool100",
+		Host:      "host-alpha",
 		Asset:     DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"},
 		Path:      "~/.cache/huggingface/hub/models--meta-llama--Llama-3-8B",
 		SizeBytes: 16_000_000_000,
@@ -45,7 +45,7 @@ func TestRecordAsset_Insert(t *testing.T) {
 		t.Fatalf("RecordAsset: %v", err)
 	}
 
-	entries, err := ListHostAssets(db, "cool100")
+	entries, err := ListHostAssets(db, "host-alpha")
 	if err != nil {
 		t.Fatalf("ListHostAssets: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRecordAsset_Upsert(t *testing.T) {
 	t2 := time.Now().Truncate(time.Second)
 
 	entry := HostDataEntry{
-		Host:      "cool100",
+		Host:      "host-alpha",
 		Asset:     DataAsset{Kind: AssetHFModel, ID: "bert-base"},
 		SizeBytes: 1000,
 		LastSeen:  t1,
@@ -86,7 +86,7 @@ func TestRecordAsset_Upsert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries, err := ListHostAssets(db, "cool100")
+	entries, err := ListHostAssets(db, "host-alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,9 +117,9 @@ func TestListHostAssets_MultipleHosts(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 
 	assets := []HostDataEntry{
-		{Host: "cool100", Asset: DataAsset{AssetHFModel, "llama"}, LastSeen: now},
-		{Host: "cool100", Asset: DataAsset{AssetHFDataset, "wikitext"}, LastSeen: now},
-		{Host: "cool30", Asset: DataAsset{AssetHFModel, "llama"}, LastSeen: now},
+		{Host: "host-alpha", Asset: DataAsset{AssetHFModel, "llama"}, LastSeen: now},
+		{Host: "host-alpha", Asset: DataAsset{AssetHFDataset, "wikitext"}, LastSeen: now},
+		{Host: "host-beta", Asset: DataAsset{AssetHFModel, "llama"}, LastSeen: now},
 	}
 	for _, a := range assets {
 		if err := RecordAsset(db, a); err != nil {
@@ -127,20 +127,20 @@ func TestListHostAssets_MultipleHosts(t *testing.T) {
 		}
 	}
 
-	cool100, err := ListHostAssets(db, "cool100")
+	hostAlpha, err := ListHostAssets(db, "host-alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cool100) != 2 {
-		t.Errorf("cool100: got %d assets, want 2", len(cool100))
+	if len(hostAlpha) != 2 {
+		t.Errorf("hostAlpha: got %d assets, want 2", len(hostAlpha))
 	}
 
-	cool30, err := ListHostAssets(db, "cool30")
+	hostBeta, err := ListHostAssets(db, "host-beta")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cool30) != 1 {
-		t.Errorf("cool30: got %d assets, want 1", len(cool30))
+	if len(hostBeta) != 1 {
+		t.Errorf("hostBeta: got %d assets, want 1", len(hostBeta))
 	}
 }
 
@@ -151,7 +151,7 @@ func TestFindAssetHosts(t *testing.T) {
 	llama := DataAsset{AssetHFModel, "meta-llama/Llama-3-8B"}
 
 	// Record on two hosts
-	for _, host := range []string{"cool100", "cool30"} {
+	for _, host := range []string{"host-alpha", "host-beta"} {
 		if err := RecordAsset(db, HostDataEntry{
 			Host: host, Asset: llama, LastSeen: now,
 		}); err != nil {
@@ -183,18 +183,18 @@ func TestRemoveStaleEntries(t *testing.T) {
 	recent := time.Now().Truncate(time.Second)
 
 	if err := RecordAsset(db, HostDataEntry{
-		Host: "cool100", Asset: DataAsset{AssetHFModel, "old-model"}, LastSeen: old,
+		Host: "host-alpha", Asset: DataAsset{AssetHFModel, "old-model"}, LastSeen: old,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := RecordAsset(db, HostDataEntry{
-		Host: "cool100", Asset: DataAsset{AssetHFModel, "new-model"}, LastSeen: recent,
+		Host: "host-alpha", Asset: DataAsset{AssetHFModel, "new-model"}, LastSeen: recent,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	cutoff := time.Now().Add(-24 * time.Hour)
-	removed, err := RemoveStaleEntries(db, "cool100", cutoff)
+	removed, err := RemoveStaleEntries(db, "host-alpha", cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestRemoveStaleEntries(t *testing.T) {
 		t.Errorf("removed %d, want 1", removed)
 	}
 
-	entries, err := ListHostAssets(db, "cool100")
+	entries, err := ListHostAssets(db, "host-alpha")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,18 +219,18 @@ func TestRemoveStaleEntries_OnlyAffectsSpecifiedHost(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
 
 	if err := RecordAsset(db, HostDataEntry{
-		Host: "cool100", Asset: DataAsset{AssetHFModel, "model"}, LastSeen: old,
+		Host: "host-alpha", Asset: DataAsset{AssetHFModel, "model"}, LastSeen: old,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := RecordAsset(db, HostDataEntry{
-		Host: "cool30", Asset: DataAsset{AssetHFModel, "model"}, LastSeen: old,
+		Host: "host-beta", Asset: DataAsset{AssetHFModel, "model"}, LastSeen: old,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	cutoff := time.Now()
-	removed, err := RemoveStaleEntries(db, "cool100", cutoff)
+	removed, err := RemoveStaleEntries(db, "host-alpha", cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,13 +238,13 @@ func TestRemoveStaleEntries_OnlyAffectsSpecifiedHost(t *testing.T) {
 		t.Errorf("removed %d, want 1", removed)
 	}
 
-	// cool30's entry should still exist
-	entries, err := ListHostAssets(db, "cool30")
+	// hostBeta's entry should still exist
+	entries, err := ListHostAssets(db, "host-beta")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(entries) != 1 {
-		t.Errorf("cool30 entry should survive, got %d", len(entries))
+		t.Errorf("hostBeta entry should survive, got %d", len(entries))
 	}
 }
 
@@ -254,9 +254,9 @@ func TestListAllAssets(t *testing.T) {
 
 	// Record assets on multiple hosts
 	assets := []HostDataEntry{
-		{Host: "cool30", Asset: DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now},
-		{Host: "cool100", Asset: DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now},
-		{Host: "cool100", Asset: DataAsset{Kind: AssetHFDataset, ID: "allenai/dolma"}, LastSeen: now},
+		{Host: "host-beta", Asset: DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now},
+		{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFModel, ID: "meta-llama/Llama-3-8B"}, LastSeen: now},
+		{Host: "host-alpha", Asset: DataAsset{Kind: AssetHFDataset, ID: "allenai/dolma"}, LastSeen: now},
 	}
 	for _, a := range assets {
 		if err := RecordAsset(db, a); err != nil {

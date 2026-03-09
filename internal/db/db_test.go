@@ -480,7 +480,7 @@ func TestAssignJobHost(t *testing.T) {
 	}
 
 	// Assign a host
-	assigned, err := AssignJobHost(database, jobID, "cool30")
+	assigned, err := AssignJobHost(database, jobID, "host-beta")
 	if err != nil {
 		t.Fatalf("assign: %v", err)
 	}
@@ -496,12 +496,12 @@ func TestAssignJobHost(t *testing.T) {
 	if job.Status != StatusQueued {
 		t.Errorf("Status = %q, want %q", job.Status, StatusQueued)
 	}
-	if job.Host != "cool30" {
-		t.Errorf("Host = %q, want %q", job.Host, "cool30")
+	if job.Host != "host-beta" {
+		t.Errorf("Host = %q, want %q", job.Host, "host-beta")
 	}
 
 	// Second assignment should be a no-op (host already set)
-	assigned, err = AssignJobHost(database, jobID, "cool100")
+	assigned, err = AssignJobHost(database, jobID, "host-alpha")
 	if err != nil {
 		t.Fatalf("second assign: %v", err)
 	}
@@ -509,13 +509,13 @@ func TestAssignJobHost(t *testing.T) {
 		t.Error("second assignment should fail (host already set)")
 	}
 
-	// Host should remain cool30
+	// Host should remain host-beta
 	job, err = GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("get job after second assign: %v", err)
 	}
-	if job.Host != "cool30" {
-		t.Errorf("Host = %q, want %q (should not change)", job.Host, "cool30")
+	if job.Host != "host-beta" {
+		t.Errorf("Host = %q, want %q (should not change)", job.Host, "host-beta")
 	}
 }
 
@@ -528,8 +528,8 @@ func TestListUnplacedJobs(t *testing.T) {
 		t.Fatalf("record unplaced: %v", err)
 	}
 
-	// Create a placed job (queued, host="cool30")
-	_, err = RecordQueuedWithGPU(database, "cool30", "/tmp/project", "echo hello", "placed", "")
+	// Create a placed job (queued, host="host-beta")
+	_, err = RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "echo hello", "placed", "")
 	if err != nil {
 		t.Fatalf("record placed: %v", err)
 	}
@@ -841,11 +841,11 @@ func TestHostSyncTracking(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	old := now.Add(-72 * time.Hour)
 
-	if err := RecordHostSync(database, "cool30", now); err != nil {
-		t.Fatalf("RecordHostSync cool30: %v", err)
+	if err := RecordHostSync(database, "host-beta", now); err != nil {
+		t.Fatalf("RecordHostSync host-beta: %v", err)
 	}
-	if err := RecordHostSync(database, "cool100", old); err != nil {
-		t.Fatalf("RecordHostSync cool100: %v", err)
+	if err := RecordHostSync(database, "host-alpha", old); err != nil {
+		t.Fatalf("RecordHostSync host-alpha: %v", err)
 	}
 
 	times, err := LoadHostSyncTimes(database)
@@ -855,19 +855,19 @@ func TestHostSyncTracking(t *testing.T) {
 	if len(times) != 2 {
 		t.Fatalf("expected 2 host sync entries, got %d", len(times))
 	}
-	if got := times["cool30"]; !got.Equal(now) {
-		t.Fatalf("cool30 last sync = %v, want %v", got, now)
+	if got := times["host-beta"]; !got.Equal(now) {
+		t.Fatalf("host-beta last sync = %v, want %v", got, now)
 	}
-	if got := times["cool100"]; !got.Equal(old) {
-		t.Fatalf("cool100 last sync = %v, want %v", got, old)
+	if got := times["host-alpha"]; !got.Equal(old) {
+		t.Fatalf("host-alpha last sync = %v, want %v", got, old)
 	}
 
 	recentHosts, err := ListHostsSyncedSince(database, now.Add(-48*time.Hour))
 	if err != nil {
 		t.Fatalf("ListHostsSyncedSince: %v", err)
 	}
-	if len(recentHosts) != 1 || recentHosts[0] != "cool30" {
-		t.Fatalf("expected [cool30], got %v", recentHosts)
+	if len(recentHosts) != 1 || recentHosts[0] != "host-beta" {
+		t.Fatalf("expected [host-beta], got %v", recentHosts)
 	}
 }
 

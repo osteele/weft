@@ -81,7 +81,6 @@ type Config struct {
 	Runpod RunpodConfig `yaml:"runpod"`
 
 	// CoordinatorHost is the host where the coordinator daemon runs.
-	// Default: "studio"
 	CoordinatorHost string `yaml:"coordinator_host"`
 
 	// Remediation holds auto-remediation configuration for failed jobs
@@ -331,12 +330,10 @@ func AutomapDirs() []string {
 	return dirs
 }
 
-// GetCoordinatorHost returns the configured coordinator host, defaulting to "studio".
+// GetCoordinatorHost returns the configured coordinator host.
+// Returns "" if not configured.
 func (c *Config) GetCoordinatorHost() string {
-	if c.CoordinatorHost != "" {
-		return c.CoordinatorHost
-	}
-	return "studio"
+	return c.CoordinatorHost
 }
 
 // ValidateCommand checks if a command contains any blocked patterns.

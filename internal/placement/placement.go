@@ -155,26 +155,38 @@ func ScoreHosts(db *sql.DB, constraints Constraints) ([]Score, error) {
 // ScoreHostsWithMetrics evaluates hosts with optional live utilization data.
 // The metrics map is keyed by host name. Nil or missing entries are skipped.
 func ScoreHostsWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) ([]Score, error) {
-	hosts, err := inventory.LoadEmbeddedHosts()
+	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
 	}
+	scores := ScoreHostListWithMetrics(db, hosts, constraints, metrics)
+	return scores, nil
+}
+
+// ScoreHostListWithMetrics evaluates the given hosts with optional live utilization data.
+func ScoreHostListWithMetrics(db *sql.DB, hosts []inventory.HostSpec, constraints Constraints, metrics map[string]*HostMetrics) []Score {
 	scores := scoreAll(db, hosts, constraints, metrics)
 	sortScores(scores)
-	return scores, nil
+	return scores
 }
 
 // ScoreHostsWithPredictor evaluates hosts with optional predictor and metrics.
 func ScoreHostsWithPredictor(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) ([]Score, error) {
-	hosts, err := inventory.LoadEmbeddedHosts()
+	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
 	}
+	scores := ScoreHostListWithPredictor(db, hosts, constraints, metrics, predict)
+	return scores, nil
+}
+
+// ScoreHostListWithPredictor evaluates the given hosts with optional predictor and metrics.
+func ScoreHostListWithPredictor(db *sql.DB, hosts []inventory.HostSpec, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) []Score {
 	scores := scoreAll(db, hosts, constraints, metrics)
 
 	if predict == nil {
 		sortScores(scores)
-		return scores, nil
+		return scores
 	}
 
 	hostSpecs := make(map[string]inventory.HostSpec, len(hosts))
@@ -215,7 +227,7 @@ func ScoreHostsWithPredictor(db *sql.DB, constraints Constraints, metrics map[st
 	}
 
 	sortScores(scores)
-	return scores, nil
+	return scores
 }
 
 // scoreAll runs scoreHost for each host. Does not sort.
@@ -274,7 +286,7 @@ func bestFromScores(scores []Score, constraints Constraints, metrics map[string]
 // Returns ErrNoReachableHost if no eligible host responds.
 func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Duration) (*PlacementResult, error) {
 	// First pass: static scoring to determine eligible hosts
-	hosts, err := inventory.LoadEmbeddedHosts()
+	hosts, err := inventory.LoadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
 	}

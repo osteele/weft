@@ -18,9 +18,9 @@ func TestIsLocalHost(t *testing.T) {
 		{"127.0.0.1", true},
 		{"::1", true},
 		{hostname, true},
-		{"cool30", false},
-		{"cool100", false},
-		{"studio", false},
+		{"host-beta", false},
+		{"host-alpha", false},
+		{"host-gamma", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.host, func(t *testing.T) {
@@ -50,7 +50,7 @@ func TestSyncSourcesToHostSkipsLocalHost(t *testing.T) {
 	}
 
 	// Should sync when host is remote
-	if err := SyncSourcesToHost("cool30", "/tmp/test", "~/test", nil); err != nil {
+	if err := SyncSourcesToHost("host-beta", "/tmp/test", "~/test", nil); err != nil {
 		t.Errorf("SyncSourcesToHost for remote host returned unexpected error: %v", err)
 	}
 	if !synced {
@@ -64,14 +64,14 @@ func TestSyncSourcesToHostReturnsError(t *testing.T) {
 	})
 	defer cleanup()
 
-	err := SyncSourcesToHost("cool30", "/tmp/test", "~/test", nil)
+	err := SyncSourcesToHost("host-beta", "/tmp/test", "~/test", nil)
 	if err == nil {
 		t.Error("SyncSourcesToHost should return error when sync fails")
 	}
 }
 
 func TestSyncSourcesToHostEmptyLocalDir(t *testing.T) {
-	err := SyncSourcesToHost("cool30", "", "~/test", nil)
+	err := SyncSourcesToHost("host-beta", "", "~/test", nil)
 	if err != nil {
 		t.Errorf("SyncSourcesToHost with empty localDir should return nil, got: %v", err)
 	}

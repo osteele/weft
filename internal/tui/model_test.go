@@ -76,13 +76,13 @@ func TestDisconnectedHostFromFreshCacheShowsGray(t *testing.T) {
 	// Create a host as it would be created from fresh cache (no fetch triggered)
 	// This simulates what happens when cacheAge < hostCacheDuration
 	host := &Host{
-		Name:      "cool100",
+		Name:      "host-alpha",
 		Status:    HostStatusUnknown, // From hostFromCachedInfo
 		LastCheck: lastSeenTime,      // From cached.LastUpdated
 	}
 
 	m := Model{hosts: []*Host{host}}
-	job := &db.Job{Host: "cool100"}
+	job := &db.Job{Host: "host-alpha"}
 
 	// This should return true - host hasn't been seen in > 30 minutes
 	if !m.isHostDisconnectedLong(job) {
@@ -95,7 +95,7 @@ func TestDisconnectedHostFromFreshCacheShowsGray(t *testing.T) {
 func TestJobsOnMissingHostsNotDimmed(t *testing.T) {
 	// Empty hosts list
 	m := Model{hosts: []*Host{}}
-	job := &db.Job{Host: "studio"}
+	job := &db.Job{Host: "host-gamma"}
 
 	// Should return false when host isn't in the list
 	if m.isHostDisconnectedLong(job) {
@@ -110,27 +110,27 @@ func TestMultipleHostsWithMixedStatus(t *testing.T) {
 	oldTime := now.Add(-2 * time.Hour)
 
 	hosts := []*Host{
-		{Name: "cool30", Status: HostStatusOnline, LastCheck: now},
-		{Name: "cool100", Status: HostStatusUnknown, LastCheck: oldTime},
-		{Name: "studio", Status: HostStatusOffline, LastCheck: oldTime},
+		{Name: "host-beta", Status: HostStatusOnline, LastCheck: now},
+		{Name: "host-alpha", Status: HostStatusUnknown, LastCheck: oldTime},
+		{Name: "host-gamma", Status: HostStatusOffline, LastCheck: oldTime},
 	}
 
 	m := Model{hosts: hosts}
 
 	// Job on online host - NOT dimmed
-	jobCool30 := &db.Job{Host: "cool30"}
+	jobCool30 := &db.Job{Host: "host-beta"}
 	if m.isHostDisconnectedLong(jobCool30) {
 		t.Error("Job on cool30 (online) should NOT be dimmed")
 	}
 
 	// Job on unknown host with old LastCheck - dimmed
-	jobCool100 := &db.Job{Host: "cool100"}
+	jobCool100 := &db.Job{Host: "host-alpha"}
 	if !m.isHostDisconnectedLong(jobCool100) {
 		t.Error("Job on cool100 (unknown, old LastCheck) SHOULD be dimmed")
 	}
 
 	// Job on offline host with old LastCheck - dimmed
-	jobStudio := &db.Job{Host: "studio"}
+	jobStudio := &db.Job{Host: "host-gamma"}
 	if !m.isHostDisconnectedLong(jobStudio) {
 		t.Error("Job on studio (offline, old LastCheck) SHOULD be dimmed")
 	}
@@ -146,7 +146,7 @@ func TestHostFromCachedInfoIntegration(t *testing.T) {
 	oldTimestamp := time.Now().Add(-21 * time.Hour).Unix()
 
 	cached := &db.CachedHostInfo{
-		Name:        "cool100",
+		Name:        "host-alpha",
 		LastUpdated: oldTimestamp,
 		Arch:        "Linux x86_64",
 	}
@@ -171,7 +171,7 @@ func TestHostFromCachedInfoIntegration(t *testing.T) {
 	m := Model{hosts: []*Host{host}}
 
 	// Step 3: Check if job on this host is detected as disconnected
-	job := &db.Job{Host: "cool100"}
+	job := &db.Job{Host: "host-alpha"}
 	disconnected := m.isHostDisconnectedLong(job)
 
 	t.Logf("isHostDisconnectedLong returned: %v", disconnected)
@@ -192,7 +192,7 @@ func TestRealDatabaseHostCaching(t *testing.T) {
 	defer database.Close()
 
 	// Load cached info for cool100
-	cachedInfo, err := db.LoadCachedHostInfo(database, "cool100")
+	cachedInfo, err := db.LoadCachedHostInfo(database, "host-alpha")
 	if err != nil {
 		t.Fatalf("LoadCachedHostInfo error: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestRealDatabaseHostCaching(t *testing.T) {
 		hosts:             []*Host{host},
 		hostCacheDuration: 24 * time.Hour,
 	}
-	job := &db.Job{Host: "cool100"}
+	job := &db.Job{Host: "host-alpha"}
 
 	disconnected := m.isHostDisconnectedLong(job)
 	t.Logf("isHostDisconnectedLong for cool100: %v", disconnected)
@@ -244,47 +244,47 @@ func TestIsHostDisconnectedLong(t *testing.T) {
 		{
 			name: "host online - not disconnected",
 			hosts: []*Host{
-				{Name: "cool30", Status: HostStatusOnline, LastCheck: oldTime},
+				{Name: "host-beta", Status: HostStatusOnline, LastCheck: oldTime},
 			},
-			job:      &db.Job{Host: "cool30"},
+			job:      &db.Job{Host: "host-beta"},
 			expected: false,
 		},
 		{
 			name: "host offline with old LastCheck - disconnected",
 			hosts: []*Host{
-				{Name: "cool100", Status: HostStatusOffline, LastCheck: oldTime},
+				{Name: "host-alpha", Status: HostStatusOffline, LastCheck: oldTime},
 			},
-			job:      &db.Job{Host: "cool100"},
+			job:      &db.Job{Host: "host-alpha"},
 			expected: true,
 		},
 		{
 			name: "host offline with recent LastCheck - not disconnected",
 			hosts: []*Host{
-				{Name: "cool100", Status: HostStatusOffline, LastCheck: recentTime},
+				{Name: "host-alpha", Status: HostStatusOffline, LastCheck: recentTime},
 			},
-			job:      &db.Job{Host: "cool100"},
+			job:      &db.Job{Host: "host-alpha"},
 			expected: false,
 		},
 		{
 			name: "host unknown with old LastCheck - disconnected",
 			hosts: []*Host{
-				{Name: "studio", Status: HostStatusUnknown, LastCheck: oldTime},
+				{Name: "host-gamma", Status: HostStatusUnknown, LastCheck: oldTime},
 			},
-			job:      &db.Job{Host: "studio"},
+			job:      &db.Job{Host: "host-gamma"},
 			expected: true,
 		},
 		{
 			name: "host checking with old LastCheck - disconnected",
 			hosts: []*Host{
-				{Name: "studio", Status: HostStatusChecking, LastCheck: oldTime},
+				{Name: "host-gamma", Status: HostStatusChecking, LastCheck: oldTime},
 			},
-			job:      &db.Job{Host: "studio"},
+			job:      &db.Job{Host: "host-gamma"},
 			expected: true,
 		},
 		{
 			name: "host not in list - not disconnected",
 			hosts: []*Host{
-				{Name: "cool30", Status: HostStatusOnline, LastCheck: now},
+				{Name: "host-beta", Status: HostStatusOnline, LastCheck: now},
 			},
 			job:      &db.Job{Host: "unknown-host"},
 			expected: false,
@@ -292,9 +292,9 @@ func TestIsHostDisconnectedLong(t *testing.T) {
 		{
 			name: "host offline with zero LastCheck - not disconnected",
 			hosts: []*Host{
-				{Name: "cool100", Status: HostStatusOffline, LastCheck: time.Time{}},
+				{Name: "host-alpha", Status: HostStatusOffline, LastCheck: time.Time{}},
 			},
-			job:      &db.Job{Host: "cool100"},
+			job:      &db.Job{Host: "host-alpha"},
 			expected: false,
 		},
 	}
@@ -318,13 +318,13 @@ func TestNaturalSortStrings(t *testing.T) {
 	}{
 		{
 			name:     "numeric suffixes",
-			input:    []string{"cool100", "cool30", "cool10", "cool2"},
-			expected: []string{"cool2", "cool10", "cool30", "cool100"},
+			input:    []string{"host-alpha", "host-beta", "cool10", "cool2"},
+			expected: []string{"cool2", "cool10", "host-alpha", "host-beta"},
 		},
 		{
 			name:     "mixed hosts",
-			input:    []string{"studio", "cool100", "cool30", "alpha"},
-			expected: []string{"alpha", "cool30", "cool100", "studio"},
+			input:    []string{"host-gamma", "host-alpha", "host-beta", "alpha"},
+			expected: []string{"alpha", "host-alpha", "host-beta", "host-gamma"},
 		},
 		{
 			name:     "pure alphabetic",

@@ -59,31 +59,31 @@ func TestBuildRsyncArgs(t *testing.T) {
 	}{
 		{
 			name:      "basic",
-			host:      "cool30",
+			host:      "host-beta",
 			localDir:  "/Users/osteele/code/research/compression-lab",
 			remoteDir: "~/code/research/compression-lab",
 			excludes:  []string{".git", "__pycache__"},
 			wantFlags: []string{"-az", "--delete", "--exclude", ".git", "--exclude", "__pycache__"},
 			wantSrc:   "/Users/osteele/code/research/compression-lab/",
-			wantDst:   "cool30:~/code/research/compression-lab/",
+			wantDst:   "host-beta:~/code/research/compression-lab/",
 		},
 		{
 			name:      "trailing slash stripped",
-			host:      "studio",
+			host:      "host-gamma",
 			localDir:  "/home/user/project/",
 			remoteDir: "~/project/",
 			excludes:  nil,
 			wantSrc:   "/home/user/project/",
-			wantDst:   "studio:~/project/",
+			wantDst:   "host-gamma:~/project/",
 		},
 		{
 			name:      "no excludes",
-			host:      "cool100",
+			host:      "host-alpha",
 			localDir:  "/tmp/src",
 			remoteDir: "~/src",
 			excludes:  nil,
 			wantSrc:   "/tmp/src/",
-			wantDst:   "cool100:~/src/",
+			wantDst:   "host-alpha:~/src/",
 		},
 	}
 
@@ -128,19 +128,19 @@ func TestBuildExtraPathRsyncArgs(t *testing.T) {
 	}{
 		{
 			name:      "tilde path",
-			host:      "cool30",
+			host:      "host-beta",
 			localDir:  "/Users/osteele/sources/vidur/data",
 			remoteDir: "~/sources/vidur/data",
 			wantSrc:   "/Users/osteele/sources/vidur/data/",
-			wantDst:   "cool30:~/sources/vidur/data/",
+			wantDst:   "host-beta:~/sources/vidur/data/",
 		},
 		{
 			name:      "absolute path",
-			host:      "cool100",
+			host:      "host-alpha",
 			localDir:  "/data/profiling",
 			remoteDir: "/data/profiling",
 			wantSrc:   "/data/profiling/",
-			wantDst:   "cool100:/data/profiling/",
+			wantDst:   "host-alpha:/data/profiling/",
 		},
 	}
 

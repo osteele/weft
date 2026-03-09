@@ -408,7 +408,7 @@ func equalEnvVars(a, b []string) bool {
 }
 
 // naturalSortStrings sorts strings using macOS Finder-style natural ordering
-// where numeric segments are compared as numbers (e.g., "cool30" < "cool100")
+// where numeric segments are compared as numbers (e.g., "host30" < "host100")
 func naturalSortStrings(s []string) {
 	sort.Slice(s, func(i, j int) bool {
 		return naturalLess(s[i], s[j])

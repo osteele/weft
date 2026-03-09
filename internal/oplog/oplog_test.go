@@ -21,16 +21,16 @@ func TestFileLogger(t *testing.T) {
 	defer logger.Close()
 
 	// Log a simple operation
-	logger.Log(OpCLICommand, WithDetail("run --host cool30"))
+	logger.Log(OpCLICommand, WithDetail("run --host host-beta"))
 
 	// Log a job operation
-	logger.LogJob(OpJobStart, 1234, "cool30", WithDetail("starting via TUI"))
+	logger.LogJob(OpJobStart, 1234, "host-beta", WithDetail("starting via TUI"))
 
 	// Log with error
-	logger.LogJob(OpJobStartFailed, 1234, "cool30", WithError(errors.New("connection timeout")))
+	logger.LogJob(OpJobStartFailed, 1234, "host-beta", WithError(errors.New("connection timeout")))
 
 	// Log with duration
-	logger.LogJob(OpJobCompleted, 1234, "cool30", WithDuration(5*time.Second))
+	logger.LogJob(OpJobCompleted, 1234, "host-beta", WithDuration(5*time.Second))
 
 	logger.Close()
 
@@ -48,16 +48,16 @@ func TestFileLogger(t *testing.T) {
 	if entries[0].Operation != OpCLICommand {
 		t.Errorf("entry[0].Operation = %q, want %q", entries[0].Operation, OpCLICommand)
 	}
-	if entries[0].Detail != "run --host cool30" {
-		t.Errorf("entry[0].Detail = %q, want %q", entries[0].Detail, "run --host cool30")
+	if entries[0].Detail != "run --host host-beta" {
+		t.Errorf("entry[0].Detail = %q, want %q", entries[0].Detail, "run --host host-beta")
 	}
 
 	// Verify job entry
 	if entries[1].JobID != 1234 {
 		t.Errorf("entry[1].JobID = %d, want 1234", entries[1].JobID)
 	}
-	if entries[1].Host != "cool30" {
-		t.Errorf("entry[1].Host = %q, want cool30", entries[1].Host)
+	if entries[1].Host != "host-beta" {
+		t.Errorf("entry[1].Host = %q, want host-beta", entries[1].Host)
 	}
 
 	// Verify error entry
@@ -143,7 +143,7 @@ func TestEntryJSONFormat(t *testing.T) {
 		Time:      time.Date(2025, 12, 31, 15, 36, 12, 0, time.UTC),
 		Operation: OpJobStart,
 		JobID:     1384,
-		Host:      "cool30",
+		Host:      "host-beta",
 		Detail:    "starting queued job",
 	}
 

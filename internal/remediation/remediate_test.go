@@ -11,7 +11,7 @@ import (
 
 func TestAttemptRemediation_NoMatch(t *testing.T) {
 	ctx := RemediationContext{
-		Job:        &db.Job{ID: 1, Host: "cool30"},
+		Job:        &db.Job{ID: 1, Host: "host-beta"},
 		LogContent: "Training complete! Loss: 0.01",
 		Logger:     log.New(os.Stderr, "", 0),
 	}
@@ -25,7 +25,7 @@ func TestAttemptRemediation_RetryLimitReached(t *testing.T) {
 	ctx := RemediationContext{
 		Job: &db.Job{
 			ID:         1,
-			Host:       "cool30",
+			Host:       "host-beta",
 			RetryCount: 1, // already retried once
 		},
 		LogContent: "ModuleNotFoundError: No module named 'transformers'",
@@ -50,7 +50,7 @@ func TestAttemptRemediation_CodingAgentNotConfigured(t *testing.T) {
 	ctx := RemediationContext{
 		Job: &db.Job{
 			ID:   1,
-			Host: "cool30",
+			Host: "host-beta",
 		},
 		LogContent: "ModuleNotFoundError: No module named 'transformers'",
 		Logger:     log.New(os.Stderr, "", 0),
@@ -73,7 +73,7 @@ func TestAttemptRemediation_EnvironmentNotRemediable(t *testing.T) {
 	ctx := RemediationContext{
 		Job: &db.Job{
 			ID:   1,
-			Host: "cool30",
+			Host: "host-beta",
 		},
 		LogContent: "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
 		Logger:     log.New(os.Stderr, "", 0),
