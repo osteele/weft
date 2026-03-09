@@ -150,6 +150,11 @@ func runLog(cmd *cobra.Command, args []string) error {
 		}
 		if err := runLogForJob(cmd, database, jobID); err != nil {
 			errorsList = append(errorsList, err.Error())
+		} else {
+			job, _ := db.GetJobByID(database, jobID)
+			if job != nil {
+				printPostLogDiagnostics(job)
+			}
 		}
 	}
 
@@ -692,6 +697,19 @@ func processCarriageReturns(content string) string {
 	}
 
 	return strings.Join(result, "\n")
+}
+
+// printPostLogDiagnostics shows diagnosis info after log output for failed jobs.
+func printPostLogDiagnostics(job *db.Job) {
+	if job.ErrorDiagnosis == "" {
+		return
+	}
+	if job.Status != db.StatusFailed && job.Status != db.StatusDead {
+		return
+	}
+	fmt.Println()
+	fmt.Println("--- diagnosis ---")
+	printDiagnosisSummary(job)
 }
 
 // runOpsLog displays the operations log with optional filtering

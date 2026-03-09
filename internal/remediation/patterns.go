@@ -128,4 +128,10 @@ var envPatterns = []*pattern{
 		category:  "environment",
 		message:   "CUDA runtime error",
 	},
+	{
+		re:        regexp.MustCompile(`(?:ENOSPC|No space left on device)`),
+		patternID: "disk_full",
+		category:  "environment",
+		message:   "Disk full — if HF models were downloaded at runtime, declare them with --input hf:<model-id> so the disk estimator accounts for their size",
+	},
 }
