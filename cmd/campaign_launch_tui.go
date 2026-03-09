@@ -50,6 +50,7 @@ type launchModel struct {
 
 	showCostDetail bool
 
+	campaignID       int64
 	loading          bool
 	launching        bool
 	done             bool
@@ -57,6 +58,7 @@ type launchModel struct {
 	phase            string              // launch progress phase
 	estimateProgress estimateProgressMsg // latest estimation progress
 	progressCh       chan estimateProgressMsg
+	campaignCh       chan int64
 
 	instanceIDs []int64
 	database    *sql.DB
@@ -87,6 +89,10 @@ type estimateProgressMsg struct {
 type instancesLaunchedMsg struct {
 	instanceIDs []int64
 	err         error
+}
+
+type campaignCreatedMsg struct {
+	campaignID int64
 }
 
 type launchPhaseMsg struct {
@@ -140,6 +146,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		overheadModel: buildOverheadModel(database),
 		survivalModel: buildSurvivalModel(database),
 		progressCh:    make(chan estimateProgressMsg, 1),
+		campaignCh:    make(chan int64, 1),
 		spinner:       s,
 	}
 }
@@ -177,6 +184,18 @@ func (m launchModel) fetchEstimates() tea.Cmd {
 		}
 		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, nil, m.survivalModel, onProgress)
 		return estimatesLoadedMsg{estimates: estimates}
+	}
+}
+
+// waitForCampaignCreated returns a Cmd that reads the campaign ID from the channel.
+func (m launchModel) waitForCampaignCreated() tea.Cmd {
+	ch := m.campaignCh
+	return func() tea.Msg {
+		id, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return campaignCreatedMsg{campaignID: id}
 	}
 }
 
@@ -219,6 +238,10 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case estimatesLoadedMsg:
 		m.costEstimates = msg.estimates
+		return m, nil
+
+	case campaignCreatedMsg:
+		m.campaignID = msg.campaignID
 		return m, nil
 
 	case launchPhaseMsg:
@@ -309,7 +332,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.launching = true
-		return m, tea.Batch(m.spinner.Tick, m.launchInstances())
+		return m, tea.Batch(m.spinner.Tick, m.launchInstances(), m.waitForCampaignCreated())
 	}
 
 	return m, nil
@@ -421,6 +444,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 	clients := m.clients
 	cfg := m.appConfig
 	opts := m.launchOpts
+	campaignCh := m.campaignCh
 
 	// Filter cached estimates to selected groups
 	var selectedEstimates []campaign.CostEstimate
@@ -446,11 +470,14 @@ func (m launchModel) launchInstances() tea.Cmd {
 	}
 
 	return func() tea.Msg {
+		defer close(campaignCh)
+
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 
 		result, err := campaign.LaunchCampaign(
 			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg, createOpts, nil,
+			func(id int64) { campaignCh <- id },
 		)
 		if err != nil {
 			return instancesLaunchedMsg{err: err}
@@ -474,7 +501,11 @@ func (m launchModel) View() string {
 	}
 
 	if m.done {
-		b.WriteString("Launched instances: ")
+		if m.campaignID != 0 {
+			b.WriteString(fmt.Sprintf("Campaign %d: launched instances: ", m.campaignID))
+		} else {
+			b.WriteString("Launched instances: ")
+		}
 		for i, id := range m.instanceIDs {
 			if i > 0 {
 				b.WriteString(", ")
@@ -487,7 +518,11 @@ func (m launchModel) View() string {
 
 	if m.launching {
 		b.WriteString(m.spinner.View())
-		b.WriteString(" Launching instances...")
+		if m.campaignID != 0 {
+			b.WriteString(fmt.Sprintf(" Launching instances... (campaign %d)", m.campaignID))
+		} else {
+			b.WriteString(" Launching instances...")
+		}
 		if m.phase != "" {
 			b.WriteString(fmt.Sprintf(" (%s)", m.phase))
 		}

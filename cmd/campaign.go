@@ -24,35 +24,12 @@ import (
 var campaignCmd = &cobra.Command{
 	Use:   "campaign",
 	Short: "Manage cloud GPU campaigns (batches of instances)",
-	RunE:  runCampaignAutoRoute,
-}
-
-// runCampaignAutoRoute routes bare `weft campaign` to list if there are
-// active campaigns, or to launch otherwise.
-func runCampaignAutoRoute(cmd *cobra.Command, args []string) error {
-	database, err := db.Open()
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer database.Close()
-
-	campaigns, err := db.ListCampaigns(database)
-	if err != nil {
-		return fmt.Errorf("list campaigns: %w", err)
-	}
-
-	for _, c := range campaigns {
-		if c.Status == db.CampaignStatusRunning || c.Status == db.CampaignStatusLaunching {
-			return runCampaignList(cmd, args)
-		}
-	}
-
-	return runCampaignLaunch(cmd, args)
 }
 
 var campaignLaunchCmd = &cobra.Command{
-	Use:   "launch",
-	Short: "Interactively select and launch cloud instances for unplaceable jobs",
+	Use:     "launch",
+	Aliases: []string{"run", "start"},
+	Short:   "Interactively select and launch cloud instances for unplaceable jobs",
 	Long: `Shows jobs whose GPU constraints can't be satisfied by on-prem hosts, grouped by GPU class with checkboxes.
 Select/deselect jobs, view cost estimates, and launch instances.
 
@@ -281,12 +258,13 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 	createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 
-	fmt.Printf("Launching %d instance(s)...\n", len(groups))
-
 	result, err := campaign.LaunchCampaign(
 		clients, database, groups, offers, estimates, opts, r2Cfg, createOpts,
 		func(group campaign.InstanceGroup, phase string) {
 			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
+		},
+		func(id int64) {
+			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(groups))
 		},
 	)
 	if err != nil {

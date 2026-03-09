@@ -87,6 +87,7 @@ func LaunchCampaign(
 	r2Cfg cloud.R2Config,
 	createOpts cloud.CreateOpts,
 	onPhase func(group InstanceGroup, phase string),
+	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
 ) (*LaunchResult, error) {
 	// Resolve agent version once for all instances
 	agentVersion, err := agentdeploy.LocalAgentVersion()
@@ -160,6 +161,10 @@ func LaunchCampaign(
 	campaignID, err := db.CreateCampaign(database, campaignRec)
 	if err != nil {
 		return nil, fmt.Errorf("create campaign: %w", err)
+	}
+
+	if onCampaignCreated != nil {
+		onCampaignCreated(campaignID)
 	}
 
 	// Donor strategy: find a cheap collocated instance for cache seeding
