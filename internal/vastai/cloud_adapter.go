@@ -38,6 +38,7 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 		MinDiskGB:      constraints.MinDiskGB,
 		MinReliability: constraints.MinReliability,
 		NumGPUs:        constraints.NumGPUs,
+		ExcludeGeos:    constraints.ExcludeGeos,
 	}
 	offers, err := c.inner.SearchOffers(vc)
 	if err != nil {

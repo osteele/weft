@@ -248,6 +248,19 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	}
 	parts = append(parts, fmt.Sprintf("num_gpus=%d", numGPUs))
 
+	// Exclude geolocations (e.g., countries with unreliable R2 connectivity)
+	excludeGeos := c.ExcludeGeos
+	if len(excludeGeos) == 0 {
+		excludeGeos = cloud.DefaultExcludeGeos
+	}
+	if len(excludeGeos) > 0 {
+		quoted := make([]string, len(excludeGeos))
+		for i, g := range excludeGeos {
+			quoted[i] = fmt.Sprintf("'%s'", g)
+		}
+		parts = append(parts, fmt.Sprintf("geolocation notin [%s]", strings.Join(quoted, ",")))
+	}
+
 	// Always require SSH and verified machines
 	parts = append(parts, "direct_port_count>=1")
 	parts = append(parts, "verified=true")

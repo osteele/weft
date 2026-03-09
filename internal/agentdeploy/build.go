@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // ExtractFunc is the function signature for extracting an embedded agent binary.
@@ -51,7 +52,38 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 	return path, nil
 }
 
+// checkEmbeddedVersion verifies the embedded agent binary version matches the
+// requested version. Returns nil if no VERSION file exists (backwards compat).
+func checkEmbeddedVersion(requestedVer string) error {
+	embeddedVerBytes, err := agentBinaries.ReadFile("binaries/VERSION")
+	if err != nil {
+		return nil
+	}
+	embeddedVer := strings.TrimSpace(string(embeddedVerBytes))
+	if embeddedVer == "" || embeddedVer == "dev" {
+		return nil
+	}
+	if requestedVer == "" || requestedVer == "dev" {
+		return nil
+	}
+
+	if embeddedVer != requestedVer {
+		return fmt.Errorf(
+			"embedded agent binary is stale (embedded: %s, need: %s); run \"just build-agents\" then rebuild weft",
+			embeddedVer, requestedVer,
+		)
+	}
+	return nil
+}
+
 func defaultExtractFunc(goos, goarch, outputPath string) error {
+	// Extract requested version from cache path: .../builds/<version>/<goos>-<goarch>/weft-agent
+	dir := filepath.Dir(outputPath)
+	requestedVer := filepath.Base(filepath.Dir(dir))
+	if err := checkEmbeddedVersion(requestedVer); err != nil {
+		return err
+	}
+
 	name := fmt.Sprintf("binaries/weft-agent-%s-%s", goos, goarch)
 	src, err := agentBinaries.Open(name)
 	if err != nil {

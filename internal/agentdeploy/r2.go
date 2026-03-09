@@ -9,18 +9,12 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 )
 
-// EnsureAgentInR2 uploads the agent binary for the given version to R2 if it
-// doesn't already exist. Returns the R2 key.
+// EnsureAgentInR2 uploads the agent binary for the given version to R2.
+// Always re-uploads to ensure the R2 copy matches the locally embedded binary,
+// since the version hash is based on commit history and may not change when
+// the binary is rebuilt (e.g., after `just build-agents` without a new commit).
 func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string) (string, error) {
 	key := r2keys.AgentBinary(version, goos, goarch)
-
-	exists, err := r2Client.ObjectExists(ctx, key)
-	if err != nil {
-		return "", fmt.Errorf("check agent exists: %w", err)
-	}
-	if exists {
-		return key, nil
-	}
 
 	localPath, err := EnsureBuilt(version, goos, goarch)
 	if err != nil {
