@@ -354,7 +354,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 				_ = client.DestroyInstance(providerInstID) // best-effort
 			}
 
-			if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCancelled); err != nil {
+			if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCancelled, db.TerminationReasonCancelled); err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("update instance %d status: %w", instanceID, err))
 				mu.Unlock()
@@ -598,7 +598,7 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	// Grace period is entered because jobs failed, so releasing means giving up — mark as failed.
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed); err != nil {
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
 		return fmt.Errorf("update DB: %w", err)
 	}
 

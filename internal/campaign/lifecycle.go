@@ -257,7 +257,7 @@ func LaunchCampaign(
 					inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 					if createErr != nil {
 						log.Printf("donor: failed to create instance: %v", createErr)
-						_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusFailed)
+						_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 						donorCfg = nil
 					} else {
 						donorProviderID = inst.ProviderID
@@ -384,7 +384,7 @@ func LaunchCampaign(
 		if destroyErr := donorClient.DestroyInstance(donorProviderID); destroyErr != nil {
 			log.Printf("donor: failed to destroy: %v", destroyErr)
 		}
-		_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusCompleted)
+		_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
 	}
 
 	// Update campaign status
@@ -547,7 +547,7 @@ func LaunchInstance(
 	progress("creating instance")
 	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
 	if err != nil {
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("create instance: %w", err)
 	}
 
@@ -556,7 +556,7 @@ func LaunchInstance(
 	// Record provider instance ID
 	if err := db.SetCloudInstanceProviderID(database, instanceID, providerInstID); err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
 
@@ -591,14 +591,14 @@ func LaunchInstance(
 	manifestJSON, err := cloud.GenerateCampaignManifest(agentJobs, selfDestructCmd, nil)
 	if err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
 	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
 	}
 
@@ -613,7 +613,7 @@ func LaunchInstance(
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 

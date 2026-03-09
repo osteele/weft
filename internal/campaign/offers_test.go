@@ -3,6 +3,7 @@ package campaign
 import (
 	"testing"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 )
 
@@ -12,12 +13,13 @@ func TestCheapestOffer(t *testing.T) {
 		{ProviderID: "2", CostPerHour: 0.45, GPUName: "RTX_A6000"},
 		{ProviderID: "3", CostPerHour: 1.20, GPUName: "RTX_4090"},
 	}
-	best := cheapestOffer(offers)
+	// nil model falls back to cheapest
+	_, best := bidding.BestOffer(nil, offers, 1.0, 0.5)
 	if best.ProviderID != "2" {
-		t.Errorf("cheapestOffer returned id=%s, want 2", best.ProviderID)
+		t.Errorf("BestOffer(nil) returned id=%s, want 2", best.ProviderID)
 	}
 	if best.CostPerHour != 0.45 {
-		t.Errorf("cheapestOffer cost=%f, want 0.45", best.CostPerHour)
+		t.Errorf("BestOffer(nil) cost=%f, want 0.45", best.CostPerHour)
 	}
 }
 
@@ -57,7 +59,7 @@ func TestFetchGroupOffersMock(t *testing.T) {
 		{GPUClass: "H100", GPUMemGB: 80},
 	}
 
-	results := FetchGroupOffers([]cloud.Client{mockClient}, groups)
+	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, 0.5)
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))

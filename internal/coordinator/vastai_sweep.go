@@ -552,7 +552,11 @@ func (c *Coordinator) sweepCampaignResults() {
 		if !allSucceeded {
 			status = db.CloudInstanceStatusFailed
 		}
-		if err := db.UpdateCloudInstanceStatus(c.db, instanceID, status); err != nil {
+		terminationReason := db.TerminationReasonCompleted
+		if !allSucceeded {
+			terminationReason = db.TerminationReasonJobFailure
+		}
+		if err := db.UpdateCloudInstanceStatus(c.db, instanceID, status, terminationReason); err != nil {
 			c.logger.Printf("instance sweep: update instance %d status: %v", instanceID, err)
 		}
 
@@ -597,7 +601,7 @@ func (c *Coordinator) checkCloudInstanceLimits(cfg *config.Config) {
 						_ = cl.DestroyInstance(providerInstID)
 					}
 				}
-				_ = db.UpdateCloudInstanceStatus(c.db, ci.ID, db.CloudInstanceStatusFailed)
+				_ = db.UpdateCloudInstanceStatus(c.db, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 			}
 		}
 	}

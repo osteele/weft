@@ -12,6 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -243,9 +244,10 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		return fmt.Errorf("no cloud providers available (check vastai/runpod CLI)")
 	}
 
-	// Fetch offers in parallel
+	// Fetch offers in parallel (with survival model for cost-optimal bidding)
 	fmt.Println("Searching for GPU offers...")
-	groupOffers := campaign.FetchGroupOffers(clients, groups)
+	survivalModel := buildSurvivalModel(database)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5)
 
 	// Print plan summary with cost estimates
 	totalJobs := 0
@@ -256,7 +258,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil, nil)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil, survivalModel, nil)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Auto-derive budget limits from estimates if not set by CLI
@@ -319,11 +321,12 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 
 func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup) error {
 	clients := buildCloudClients(cfg)
-	groupOffers := campaign.FetchGroupOffers(clients, groups)
+	survivalModel := buildSurvivalModel(database)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5)
 
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil, nil)
+	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil, survivalModel, nil)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")
@@ -589,6 +592,17 @@ func buildOverheadModel(database *sql.DB) *estimate.OverheadModel {
 		return nil
 	}
 	return estimate.BuildOverheadModel(obs)
+}
+
+// buildSurvivalModel queries historical cloud instance data and builds a
+// Beta-Binomial survival model for cost-optimal bidding. Returns nil if no data or on error.
+func buildSurvivalModel(database *sql.DB) *bidding.SurvivalModel {
+	outcomes, err := bidding.LoadInstanceOutcomes(database)
+	if err != nil {
+		log.Printf("warning: could not query instance outcomes: %v", err)
+		return nil
+	}
+	return bidding.BuildSurvivalModel(outcomes)
 }
 
 // printAutoBudget prints the auto-derived budget limits.

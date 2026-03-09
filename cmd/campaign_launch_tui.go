@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -41,6 +42,7 @@ type launchModel struct {
 	costEstimates []campaign.CostEstimate
 	predConfig    *predictor.Config
 	overheadModel *estimate.OverheadModel
+	survivalModel *bidding.SurvivalModel
 
 	items    []listItem
 	cursor   int
@@ -136,6 +138,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		launchOpts:    opts,
 		predConfig:    predCfg,
 		overheadModel: buildOverheadModel(database),
+		survivalModel: buildSurvivalModel(database),
 		progressCh:    make(chan estimateProgressMsg, 1),
 		spinner:       s,
 	}
@@ -155,7 +158,7 @@ func (m launchModel) fetchOffers() tea.Cmd {
 		if len(clients) == 0 {
 			return offersLoadedMsg{err: fmt.Errorf("no cloud providers available")}
 		}
-		offers := campaign.FetchGroupOffers(clients, groups)
+		offers := campaign.FetchGroupOffers(clients, groups, m.survivalModel, 1.0, 0.5)
 		return offersLoadedMsg{offers: offers}
 	}
 }
@@ -172,7 +175,7 @@ func (m launchModel) fetchEstimates() tea.Cmd {
 			default:
 			}
 		}
-		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, nil, onProgress)
+		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, nil, m.survivalModel, onProgress)
 		return estimatesLoadedMsg{estimates: estimates}
 	}
 }

@@ -61,7 +61,7 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 				if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
 					log.Printf("reconcile: failed to destroy wedged instance %d: %v", ci.ID, destroyErr)
 				}
-				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed); err != nil {
+				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
 					log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
 					continue
 				}
@@ -85,16 +85,22 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 			// Check R2 for completion marker before assuming failure.
 			if hasR2CompletionMarker(r2Client, ci.ID) {
 				log.Printf("reconcile: instance %d completed (R2 marker found), marking completed", ci.ID)
-				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted); err != nil {
+				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
 					log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
 				}
 				reconciled++
 				continue
 			}
 
-			log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed", ci.ID, providerID, status)
+			// Provider dead + had been launched (running) → preempted
+			reason := db.TerminationReasonPreempted
+			if ci.LaunchedAt == nil {
+				reason = db.TerminationReasonInfraFailure
+			}
 
-			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed); err != nil {
+			log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed (%s)", ci.ID, providerID, status, reason)
+
+			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, reason); err != nil {
 				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
 				continue
 			}

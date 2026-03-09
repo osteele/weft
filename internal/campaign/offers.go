@@ -3,20 +3,23 @@ package campaign
 import (
 	"sync"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 )
 
 // GroupOffer pairs an instance group with its best cloud offer.
 type GroupOffer struct {
-	Group InstanceGroup
-	Offer *cloud.Offer // nil if no offers found
-	Err   error
+	Group        InstanceGroup
+	Offer        *cloud.Offer // nil if no offers found
+	SurvivalProb float64      // 0 if no survival model available
+	Err          error
 }
 
-// FetchGroupOffers searches cloud providers for the best (cheapest) offer per group, in parallel.
-// Accepts multiple cloud clients and merges offers across all providers.
-// Returns results in the same order as the input groups.
-func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup) []GroupOffer {
+// FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
+// When survivalModel is non-nil, selects the offer with lowest expected cost (including
+// retry risk from preemption). Otherwise falls back to cheapest offer.
+// jobDurationHrs and setupOverheadHrs are used for expected cost computation.
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64) []GroupOffer {
 	results := make([]GroupOffer, len(groups))
 	var wg sync.WaitGroup
 
@@ -41,22 +44,16 @@ func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup) []GroupOff
 			if len(offers) == 0 {
 				return
 			}
-			best := cheapestOffer(offers)
+
+			_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs)
 			results[idx].Offer = &best
+
+			if survivalModel != nil {
+				results[idx].SurvivalProb = survivalModel.OfferSurvival(best)
+			}
 		}(i, g)
 	}
 
 	wg.Wait()
 	return results
-}
-
-// cheapestOffer returns the offer with the lowest cost per hour.
-func cheapestOffer(offers []cloud.Offer) cloud.Offer {
-	best := offers[0]
-	for _, o := range offers[1:] {
-		if o.CostPerHour < best.CostPerHour {
-			best = o
-		}
-	}
-	return best
 }

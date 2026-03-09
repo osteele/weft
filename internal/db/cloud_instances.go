@@ -14,7 +14,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		inet_down_mbps, inet_up_mbps, cuda_version,
 		provider_instance_id, data_center,
 		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs,
-		grace_period_seconds, grace_started_at, grace_deadline`
+		grace_period_seconds, grace_started_at, grace_deadline,
+		termination_reason`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -25,6 +26,15 @@ const (
 	CloudInstanceStatusCompleted = "completed"
 	CloudInstanceStatusFailed    = "failed"
 	CloudInstanceStatusCancelled = "cancelled"
+)
+
+// Termination reason constants for CloudInstance.TerminationReason.
+const (
+	TerminationReasonCompleted    = "completed"
+	TerminationReasonPreempted    = "preempted"
+	TerminationReasonJobFailure   = "job_failure"
+	TerminationReasonInfraFailure = "infra_failure"
+	TerminationReasonCancelled    = "cancelled"
 )
 
 // CloudInstance represents a single cloud GPU deployment (e.g. one Vast.ai instance).
@@ -55,6 +65,9 @@ type CloudInstance struct {
 	GracePeriodSeconds int    // configured grace period duration (0 = disabled)
 	GraceStartedAt     *int64 // when the grace period started
 	GraceDeadline      *int64 // when the grace period expires
+
+	// Termination classification
+	TerminationReason string // "completed", "preempted", "job_failure", "infra_failure", "cancelled"
 
 	// Offer metadata (captured at launch)
 	ResolvedGPUName  string
@@ -165,13 +178,23 @@ func ListCloudInstances(db *sql.DB) ([]*CloudInstance, error) {
 }
 
 // UpdateCloudInstanceStatus updates a cloud instance's status and optionally sets timestamps.
-func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string) error {
+// For terminal statuses (completed, failed, cancelled), an optional terminationReason
+// classifies why the instance ended (e.g. "preempted", "infra_failure").
+func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string, terminationReason ...string) error {
 	now := time.Now().Unix()
+	reason := ""
+	if len(terminationReason) > 0 {
+		reason = terminationReason[0]
+	}
 	switch status {
 	case CloudInstanceStatusRunning:
 		_, err := db.Exec(`UPDATE cloud_instances SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
 		return err
 	case CloudInstanceStatusCompleted, CloudInstanceStatusFailed, CloudInstanceStatusCancelled:
+		if reason != "" {
+			_, err := db.Exec(`UPDATE cloud_instances SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
+			return err
+		}
 		_, err := db.Exec(`UPDATE cloud_instances SET status = ?, ended_at = ? WHERE id = ?`, status, now, id)
 		return err
 	default:
@@ -366,6 +389,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var seedDownloadSecs, seedCopySecs sql.NullInt64
 	var gracePeriodSeconds sql.NullInt64
 	var graceStartedAt, graceDeadline sql.NullInt64
+	var terminationReason sql.NullString
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -376,6 +400,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&providerInstanceID, &dataCenter,
 		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs,
 		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
+		&terminationReason,
 	)
 	if err != nil {
 		return nil, err
@@ -466,6 +491,9 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	}
 	if graceDeadline.Valid {
 		c.GraceDeadline = &graceDeadline.Int64
+	}
+	if terminationReason.Valid {
+		c.TerminationReason = terminationReason.String
 	}
 	return &c, nil
 }

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/estimate"
@@ -25,6 +26,10 @@ type CostEstimate struct {
 	TotalTime     time.Duration
 	TotalCost     float64
 	HasPrediction bool // false = fell back to default job duration
+
+	// Survival model fields (zero values if no model available)
+	SurvivalProb     float64 // 0-1, probability of completing without preemption
+	RiskAdjustedCost float64 // expected cost including retry overhead
 }
 
 // EstimateProgressFunc reports progress during estimation.
@@ -34,7 +39,8 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 // EstimateCosts computes per-group cost estimates using the predictor for duration.
 // If predCfg is nil or not configured, falls back to 1hr/job estimates.
 // If r2Client is non-nil, UV manifests are fetched to estimate cold uv sync costs.
-func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, onProgress EstimateProgressFunc) []CostEstimate {
+// If survivalModel is non-nil, computes survival probability and risk-adjusted cost.
+func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Collect inputs for all three estimation steps (fast, in-memory)
@@ -194,6 +200,19 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 		est.DownloadTime = estimate.TransferTime(downloadBytes, bytesPerSec).Mean
 		est.TotalTime = total.Mean
 		est.TotalCost = total.Mean.Hours() * go_.Offer.CostPerHour
+
+		// Compute survival and risk-adjusted cost when model is available
+		if go_.SurvivalProb > 0 {
+			est.SurvivalProb = go_.SurvivalProb
+			setupHrs := est.SetupOverhead.Hours()
+			jobHrs := runEst.Mean.Hours()
+			est.RiskAdjustedCost = bidding.ExpectedCost(go_.Offer.CostPerHour, jobHrs, setupHrs, go_.SurvivalProb)
+		} else if survivalModel != nil && go_.Offer != nil {
+			est.SurvivalProb = survivalModel.OfferSurvival(*go_.Offer)
+			setupHrs := est.SetupOverhead.Hours()
+			jobHrs := runEst.Mean.Hours()
+			est.RiskAdjustedCost = bidding.ExpectedCost(go_.Offer.CostPerHour, jobHrs, setupHrs, est.SurvivalProb)
+		}
 
 		estimates[i] = est
 	}

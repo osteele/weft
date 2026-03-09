@@ -80,7 +80,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 				// Detect dead instances: provider says dead but DB says running
 				if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) {
-					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed)
+					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
 					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
 					ci.Status = db.CloudInstanceStatusFailed
 				}
@@ -117,7 +117,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					if providerInstID != "" {
 						_ = client.DestroyInstance(providerInstID)
 					}
-					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed)
+					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
 					ci.Status = db.CloudInstanceStatusFailed
 					stallMessage = fmt.Sprintf("bootstrap timeout after %s — terminating instance, jobs reset to queued",

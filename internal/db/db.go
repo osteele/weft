@@ -666,6 +666,11 @@ func initSchema(db *sql.DB) error {
 		}
 	}
 
+	// Migration: add termination_reason column to cloud_instances
+	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN termination_reason TEXT`); err != nil {
+		return err
+	}
+
 	// Backfill provider_instance_id from vastai_instance_id
 	if _, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`); err != nil {
 		return err
