@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -695,7 +696,7 @@ func syncCloudJobOutputs(job *db.Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	prefix := fmt.Sprintf("jobs/%d/outputs/", job.ID)
+	prefix := r2keys.JobOutputsPrefix(job.ID)
 	return r2Client.DownloadResults(ctx, prefix, localDir)
 }
 
@@ -704,7 +705,7 @@ func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFi
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	prefix := fmt.Sprintf("jobs/%d/outputs/", job.ID)
+	prefix := r2keys.JobOutputsPrefix(job.ID)
 	files, err := r2Client.ListObjects(ctx, prefix)
 	if err != nil {
 		return nil

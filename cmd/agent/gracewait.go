@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -91,9 +93,15 @@ func graceWaitLoop(cfg graceWaitConfig) {
 	logDir := cfg.LogDir
 	workspace := cfg.Workspace
 
+	instanceIDInt, err := strconv.ParseInt(instanceID, 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid instance ID %q: %v\n", instanceID, err)
+		os.Exit(1)
+	}
+
 	deadline := time.Now().Add(cfg.Timeout)
-	prefix := fmt.Sprintf("grace/%s", instanceID)
-	phaseKey := fmt.Sprintf("instance/%s/phase", instanceID)
+	prefix := r2keys.GracePrefix(instanceIDInt)
+	phaseKey := r2keys.InstancePhase(instanceIDInt)
 
 	writePhase(r2Bucket, phaseKey, "grace")
 
@@ -177,7 +185,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			fmt.Printf("Running resubmitted job %d: %s\n", job.ID, job.Command)
 
 			// Write .started marker to R2
-			r2Put(r2Bucket, fmt.Sprintf("jobs/%d/.started", job.ID), fmt.Sprintf("%d", time.Now().Unix()))
+			r2Put(r2Bucket, r2keys.JobStarted(job.ID), fmt.Sprintf("%d", time.Now().Unix()))
 
 			workDir := job.Dir
 			if workDir == "" {
@@ -241,25 +249,27 @@ func writeGraceStatus(bucket, prefix string, status graceStatus) {
 func uploadJobResults(bucket string, jobID int64, logDir string) {
 	// Upload per-job results
 	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", fmt.Sprintf("r2:%s/jobs/%d/results/", bucket, jobID))
+	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobResultsPrefix(jobID))
 	rcloneCmd.Stderr = os.Stderr
 	_ = rcloneCmd.Run()
 	copyCancel()
 
 	// Write completion marker
 	completeCtx, completeCancel := context.WithTimeout(context.Background(), r2Timeout)
-	completeCmd := exec.CommandContext(completeCtx, "rclone", "rcat", fmt.Sprintf("r2:%s/jobs/%d/.complete", bucket, jobID))
+	completeCmd := exec.CommandContext(completeCtx, "rclone", "rcat", "r2:"+bucket+"/"+r2keys.JobComplete(jobID))
 	completeCmd.Stdin = strings.NewReader("done")
 	_ = completeCmd.Run()
 	completeCancel()
 }
 
 func selfDestruct(bucket, instanceID, selfDestructCmd string) {
+	instanceIDInt, _ := strconv.ParseInt(instanceID, 10, 64)
+
 	// Write completion marker
-	r2Put(bucket, fmt.Sprintf("campaigns/%s/.complete", instanceID), "0")
+	r2Put(bucket, r2keys.CampaignComplete(instanceIDInt), "0")
 
 	// Clean up grace keys
-	prefix := fmt.Sprintf("grace/%s", instanceID)
+	prefix := r2keys.GracePrefix(instanceIDInt)
 	r2Delete(bucket, prefix+"/status")
 
 	// Execute self-destruct

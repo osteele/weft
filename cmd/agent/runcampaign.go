@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -70,8 +72,14 @@ func runCampaign(args []string) {
 	}
 	_ = os.MkdirAll(logDir, 0o755)
 
+	instanceIDInt, err := strconv.ParseInt(instanceID, 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid instance ID %q: %v\n", instanceID, err)
+		os.Exit(1)
+	}
+
 	// Fetch manifest from R2
-	manifestKey := fmt.Sprintf("campaigns/%s/manifest.json", instanceID)
+	manifestKey := r2keys.CampaignManifest(instanceIDInt)
 	manifestJSON, err := r2Get(r2Bucket, manifestKey)
 	if err != nil || manifestJSON == "" {
 		fmt.Fprintf(os.Stderr, "failed to fetch manifest from R2 key %s: %v\n", manifestKey, err)
@@ -90,7 +98,7 @@ func runCampaign(args []string) {
 	}
 
 	// R2 key for instance phase tracking
-	phaseKey := fmt.Sprintf("instance/%s/phase", instanceID)
+	phaseKey := r2keys.InstancePhase(instanceIDInt)
 
 	startTime := time.Now()
 	anyFailed := false
@@ -109,7 +117,7 @@ func runCampaign(args []string) {
 		fmt.Printf("--- Job %d ---\n", job.ID)
 
 		// Write .started marker to R2
-		r2Put(r2Bucket, fmt.Sprintf("jobs/%d/.started", job.ID), fmt.Sprintf("%d", time.Now().Unix()))
+		r2Put(r2Bucket, r2keys.JobStarted(job.ID), fmt.Sprintf("%d", time.Now().Unix()))
 
 		workDir := job.Dir
 		if workDir == "" {
@@ -200,7 +208,7 @@ func uploadOutputDirs(bucket string, jobID int64, workDir string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		cmd := exec.CommandContext(ctx, "rclone", "copy",
 			dirPath+"/",
-			fmt.Sprintf("r2:%s/jobs/%d/outputs/%s/", bucket, jobID, dir),
+			"r2:"+bucket+"/"+r2keys.JobOutputDir(jobID, dir),
 		)
 		cmd.Stderr = os.Stderr
 		_ = cmd.Run()
@@ -220,7 +228,7 @@ func promoteUVManifest(bucket, logDir string) {
 	if json.Unmarshal(data, &m) != nil || m.LockfileHash == "" || m.Platform == "" {
 		return
 	}
-	key := fmt.Sprintf("uv-manifests/%s/%s.json", m.LockfileHash, m.Platform)
+	key := r2keys.UVManifest(m.LockfileHash, m.Platform)
 	r2Put(bucket, key, string(data))
 }
 

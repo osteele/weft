@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
@@ -510,7 +511,7 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 	}
 	payloadJSON, _ := json.Marshal(payload)
 
-	graceKey := fmt.Sprintf("grace/%d/jobs.json", instanceID)
+	graceKey := r2keys.GraceJobs(instanceID)
 	if err := r2Client.PutObject(ctx, graceKey, strings.NewReader(string(payloadJSON)), "application/json"); err != nil {
 		return fmt.Errorf("write jobs.json to R2: %w", err)
 	}
@@ -555,7 +556,7 @@ func runInstanceExtend(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	extendKey := fmt.Sprintf("grace/%d/extend", instanceID)
+	extendKey := r2keys.GraceExtend(instanceID)
 	if err := r2Client.PutObject(ctx, extendKey, strings.NewReader(duration.String()), "text/plain"); err != nil {
 		return fmt.Errorf("write extend signal: %w", err)
 	}
@@ -591,7 +592,7 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	releaseKey := fmt.Sprintf("grace/%d/release", instanceID)
+	releaseKey := r2keys.GraceRelease(instanceID)
 	if err := r2Client.PutObject(ctx, releaseKey, strings.NewReader("release"), "text/plain"); err != nil {
 		return fmt.Errorf("write release signal: %w", err)
 	}

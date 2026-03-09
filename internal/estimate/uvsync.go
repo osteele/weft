@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // UVManifestRef is a minimal copy of runner.UVManifest for deserialization.
@@ -91,7 +91,7 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 	}
 
 	// Fetch from R2
-	r2Key := fmt.Sprintf("uv-manifests/%s/%s.json", lockHash, platform)
+	r2Key := r2keys.UVManifest(lockHash, platform)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // ReconcileCloudInstances checks all running/launching instances against the
@@ -173,7 +174,7 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.CloudInstance, database *sql
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	key := fmt.Sprintf("grace/%d/status", ci.ID)
+	key := r2keys.GraceStatus(ci.ID)
 	data, err := r2Client.GetObject(ctx, key)
 	if err != nil {
 		return false
@@ -203,7 +204,7 @@ func hasR2CompletionMarker(r2Client *r2.Client, instanceID int64) bool {
 	if r2Client == nil {
 		return false
 	}
-	key := fmt.Sprintf("campaigns/%d/.complete", instanceID)
+	key := r2keys.CampaignComplete(instanceID)
 	exists, err := r2Client.ObjectExists(context.Background(), key)
 	return err == nil && exists
 }

@@ -6,12 +6,13 @@ import (
 	"os"
 
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // EnsureAgentInR2 uploads the agent binary for the given version to R2 if it
 // doesn't already exist. Returns the R2 key.
 func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string) (string, error) {
-	key := fmt.Sprintf("agents/%s/%s-%s", version, goos, goarch)
+	key := r2keys.AgentBinary(version, goos, goarch)
 
 	exists, err := r2Client.ObjectExists(ctx, key)
 	if err != nil {

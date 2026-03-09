@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -333,7 +334,7 @@ func runLogForCloudJob(cmd *cobra.Command, job *db.Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	key := fmt.Sprintf("jobs/%d/results/%d.log", job.ID, job.ID)
+	key := r2keys.JobResultLog(job.ID)
 	data, err := r2Client.GetObject(ctx, key)
 	if err != nil {
 		return fmt.Errorf("fetch log from R2 (key %s): %w", key, err)

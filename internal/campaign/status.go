@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // InstanceUpdate is a snapshot of cloud instance + job state.
@@ -134,12 +135,12 @@ func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) string 
 
 // fetchBootstrapStage reads the bootstrap stage marker from R2 for an instance.
 func fetchBootstrapStage(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	return fetchR2Marker(ctx, r2Client, fmt.Sprintf("bootstrap/%d/stage", instanceID))
+	return fetchR2Marker(ctx, r2Client, r2keys.BootstrapStage(instanceID))
 }
 
 // fetchInstancePhase reads the instance phase marker from R2.
 func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int64) string {
-	return fetchR2Marker(ctx, r2Client, fmt.Sprintf("instance/%d/phase", instanceID))
+	return fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
 }
 
 // InstancePhaseLabel returns a human-readable label for an instance phase string.

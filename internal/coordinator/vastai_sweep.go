@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // loadR2Client creates an R2 client from the app config.
@@ -70,7 +71,7 @@ func (c *Coordinator) sweepVastaiResults() {
 // processCompletedVastaiJob downloads results from R2, updates the job in the DB,
 // writes logs to the log cache, and cleans up the R2 prefix.
 func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r2.Client, jobID int64) {
-	prefix := fmt.Sprintf("jobs/%d", jobID)
+	prefix := r2keys.JobPrefix(jobID)
 
 	// Download results to temp dir
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-vastai-%d-*", jobID))
@@ -556,7 +557,7 @@ func (c *Coordinator) sweepCampaignResults() {
 		}
 
 		// Clean up R2 marker
-		prefix := fmt.Sprintf("campaigns/%d/", instanceID)
+		prefix := r2keys.CampaignPrefix(instanceID)
 		if err := r2Client.DeletePrefix(ctx, prefix); err != nil {
 			c.logger.Printf("instance sweep: cleanup R2 for instance %d: %v", instanceID, err)
 		}

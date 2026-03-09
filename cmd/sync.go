@@ -23,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
 )
@@ -435,7 +436,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
-		prefix := fmt.Sprintf("jobs/%d", jobID)
+		prefix := r2keys.JobPrefix(jobID)
 
 		// Download results to temp dir
 		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
@@ -461,7 +462,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		// If no start_time from completion record, try reading .started marker from R2
 		if startTimeUnix == 0 {
-			if data, err := r2Client.GetObject(ctx, fmt.Sprintf("jobs/%d/.started", jobID)); err == nil {
+			if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
 				startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 			}
 		}
@@ -511,7 +512,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		var startTimeUnix int64
-		if data, err := r2Client.GetObject(ctx, fmt.Sprintf("jobs/%d/.started", jobID)); err == nil {
+		if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
 			startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
 		}
 

@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
 	"github.com/osteele/weft/internal/workdir"
@@ -230,7 +231,7 @@ func LaunchCampaign(
 					DBInstanceID:  donorInstanceID,
 				})
 
-				bootstrapKey := fmt.Sprintf("bootstrap/%d.sh", donorInstanceID)
+				bootstrapKey := r2keys.BootstrapScript(donorInstanceID)
 				if uploadErr := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
 					log.Printf("donor: failed to upload bootstrap: %v", uploadErr)
 					donorCfg = nil
@@ -338,7 +339,7 @@ func LaunchCampaign(
 		}
 
 		donorReady := false
-		readyKey := fmt.Sprintf("donor/%d/.ready", donorInstanceID)
+		readyKey := r2keys.DonorReady(donorInstanceID)
 		downloadStart := time.Now()
 
 		// Poll R2 for donor readiness
@@ -511,7 +512,7 @@ func LaunchInstance(
 	}
 
 	// Build the bootstrap key using the DB instance ID (known before CreateInstance)
-	bootstrapKey := fmt.Sprintf("bootstrap/%d.sh", instanceID)
+	bootstrapKey := r2keys.BootstrapScript(instanceID)
 
 	// Build R2 env vars for the instance
 	envVars := map[string]string{
@@ -594,7 +595,7 @@ func LaunchInstance(
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
-	manifestKey := fmt.Sprintf("campaigns/%d/manifest.json", instanceID)
+	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
 		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed)
