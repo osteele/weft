@@ -9,8 +9,8 @@ Weft manages jobs on remote GPU hosts. You submit from your laptop, and the
 remote queue runner handles execution even while your laptop sleeps.
 
 ```
-laptop$ weft run cool30 'uv run python train.py'
-# Job 100 queued on cool30
+laptop$ weft run titan 'uv run python train.py'
+# Job 100 queued on titan
 # Next: weft tui (or weft log 100)
 ```
 
@@ -19,7 +19,7 @@ data locality, and current load:
 
 ```
 laptop$ weft run --gpu-class a100 'uv run python train.py'
-# Auto-placed on cool100 (gpu_class match, 2 queued jobs)
+# Auto-placed on atlas (gpu_class match, 2 queued jobs)
 ```
 
 ## Declaring data dependencies
@@ -38,11 +38,11 @@ laptop$ weft run \
   -m "EXP-010: Developmental dynamics (Pythia-160M)" \
   'uv run python scripts/developmental_dynamics.py \
     --checkpoints 64,512,4000,32000,143000 --device cuda'
-# Auto-placed on cool100 (pythia-160m cached there)
+# Auto-placed on atlas (pythia-160m cached there)
 ```
 
-If the model is on cool100 but not cool30, the coordinator places the job on
-cool100. If neither host has it, the coordinator downloads it before the job
+If the model is on atlas but not titan, the coordinator places the job on
+atlas. If neither host has it, the coordinator downloads it before the job
 starts. You never need a separate prefetch job.
 
 **Declare all models your job downloads**, not just the primary one. If your
@@ -67,19 +67,19 @@ Use `--output` to declare what a job produces. This lets downstream jobs find
 the data and lets the coordinator pre-stage it to the right host:
 
 ```
-laptop$ weft run cool30 \
+laptop$ weft run titan \
   --output file:~/outputs/traces/entropy-sweep/ \
   -m "Generate entropy traces" \
   'uv run python scripts/generate_traces.py --output ~/outputs/traces/entropy-sweep/'
 # Job 4674 queued
 
-laptop$ weft run cool100 \
+laptop$ weft run atlas \
   --after 4674 \
   --input file:~/outputs/traces/entropy-sweep/ \
   -m "Analyze traces on A100" \
   'uv run python scripts/analyze_traces.py --input ~/outputs/traces/entropy-sweep/'
 # Job 4675 queued (depends on 4674)
-# Coordinator rsyncs traces from cool30 → cool100 before starting
+# Coordinator rsyncs traces from titan → atlas before starting
 ```
 
 The coordinator handles the cross-host rsync automatically. You declare what the
@@ -92,10 +92,10 @@ See what's cached where:
 ```
 laptop$ weft host data
 HOST     ASSET                           SIZE
-cool30   hf:meta-llama/Llama-3-8B        15.2 GB
-cool100  hf:meta-llama/Llama-3-8B        15.2 GB
-cool100  hf:EleutherAI/pythia-160m       312 MB
-cool100  hf-dataset:wikitext             512 MB
+titan   hf:meta-llama/Llama-3-8B        15.2 GB
+atlas  hf:meta-llama/Llama-3-8B        15.2 GB
+atlas  hf:EleutherAI/pythia-160m       312 MB
+atlas  hf-dataset:wikitext             512 MB
 ```
 
 ## Ablation sweep with a fan-out dependency chain
@@ -108,7 +108,7 @@ access).
 ### Baseline first
 
 ```
-laptop$ weft run cool100 --gpu 1 \
+laptop$ weft run atlas --gpu 1 \
   --tag markov-attention --tag EXP-112 \
   -m "EXP-112: Unpruned + LoRA control (GPU 1)" \
   'uv run python -u scripts/exp112_pruning_lora_recovery.py \
@@ -119,21 +119,21 @@ laptop$ weft run cool100 --gpu 1 \
 ### Fan out ablations with `--after`
 
 ```
-laptop$ weft run cool100 --gpu 1 --after 4823 \
+laptop$ weft run atlas --gpu 1 --after 4823 \
   --tag markov-attention --tag EXP-112 \
   -m "EXP-112: Reverse L1 (GPU 1)" \
   'uv run python -u scripts/exp112_pruning_lora_recovery.py \
     --device cuda --criterion reverse_l1'
 # Job 4828 queued (depends on 4823)
 
-laptop$ weft run cool100 --gpu 1 --after 4828 \
+laptop$ weft run atlas --gpu 1 --after 4828 \
   --tag markov-attention --tag EXP-112 \
   -m "EXP-112: Gamma + Alpaca (GPU 1)" \
   'uv run python -u scripts/exp112_pruning_lora_recovery.py \
     --device cuda --criterion gamma'
 # Job 4829 queued (depends on 4828)
 
-laptop$ weft run cool100 --gpu 1 --after 4829 \
+laptop$ weft run atlas --gpu 1 --after 4829 \
   --tag markov-attention --tag EXP-112 \
   -m "EXP-112: L1-norm + Alpaca (GPU 1)" \
   'uv run python -u scripts/exp112_pruning_lora_recovery.py \
@@ -148,7 +148,7 @@ don't start, so you can fix the issue and retry from that point.
 
 ```
 for seed in 0 1; do
-  weft run cool100 --gpu 1 --after 4830 \
+  weft run atlas --gpu 1 --after 4830 \
     --tag markov-attention --tag EXP-112 \
     -m "EXP-112: Random seed=$seed + Alpaca (GPU 1)" \
     "uv run python -u scripts/exp112_pruning_lora_recovery.py \
@@ -163,28 +163,28 @@ done
 If you want a cleanup or summary job to run even if a step fails:
 
 ```
-laptop$ weft run cool100 --after-any 4830 \
+laptop$ weft run atlas --after-any 4830 \
   -m "Summarize EXP-112 results" \
   'uv run python scripts/summarize_exp112.py'
 ```
 
 ## Running parallel experiments across GPUs
 
-On a multi-GPU host like cool100 (2x A100 + 8x RTX 2080 Ti), you can run
+On a multi-GPU host like atlas (2x A100 + 8x RTX 2080 Ti), you can run
 independent experiments in parallel by pinning them to different GPUs.
 
 ### Two independent signal sweeps, one per A100
 
 ```
 # GPU 0: entropy-based signals
-laptop$ weft run cool100 --gpu 0 \
+laptop$ weft run atlas --gpu 0 \
   --tag adaptive-escalation --tag EXP-005 \
   -m "EXP-005: entropy signal (A100 GPU 0)" \
   'uv run python scripts/run_backtracking_search.py \
     --signal entropy --dtype bfloat16 --resume'
 # Job 4822 queued
 
-laptop$ weft run cool100 --gpu 0 --after 4822 \
+laptop$ weft run atlas --gpu 0 --after 4822 \
   --tag adaptive-escalation --tag EXP-005 \
   -m "EXP-005: entropy_delta signal (A100 GPU 0)" \
   'uv run python scripts/run_backtracking_search.py \
@@ -192,14 +192,14 @@ laptop$ weft run cool100 --gpu 0 --after 4822 \
 # Job 4825 queued (depends on 4822)
 
 # GPU 1: different signals in parallel
-laptop$ weft run cool100 --gpu 1 \
+laptop$ weft run atlas --gpu 1 \
   --tag adaptive-escalation --tag EXP-005 \
   -m "EXP-005: random signal baseline (A100 GPU 1)" \
   'uv run python scripts/run_backtracking_search.py \
     --signal random --dtype bfloat16 --resume'
 # Job 4834 queued (runs simultaneously with 4822)
 
-laptop$ weft run cool100 --gpu 1 --after 4834 \
+laptop$ weft run atlas --gpu 1 --after 4834 \
   --tag adaptive-escalation --tag EXP-005 \
   -m "EXP-005: varentropy signal (A100 GPU 1)" \
   'uv run python scripts/run_backtracking_search.py \
@@ -219,7 +219,7 @@ settings — e.g., measuring compression across datasets, data types, and codecs
 for dataset in gpt2-baseline gpt2-gct gpt2-backslash gpt2-gct-backslash; do
   for dtype in gradients weights; do
     for granularity in whole-file per-layer; do
-      weft run cool30 \
+      weft run titan \
         --tag compression-lab --tag reg-matrix-ans \
         -m "sparse-ans $dataset $dtype $granularity" \
         "uv run compression-lab measure \
@@ -244,7 +244,7 @@ Run a second codec variant by changing the tag and codec:
 for dataset in gpt2-baseline gpt2-gct gpt2-backslash gpt2-gct-backslash; do
   for dtype in gradients weights; do
     for granularity in whole-file per-layer; do
-      weft run cool30 \
+      weft run titan \
         --tag compression-lab --tag reg-matrix-bitcast \
         -m "sparse-ans $dataset $dtype $granularity bitcast16" \
         "uv run compression-lab measure \
@@ -260,24 +260,24 @@ done
 When developing a new experiment script, iterate on a cheap/fast host first,
 then move to the big GPU for the full run.
 
-### Iterate on cool30 (RTX 3090)
+### Iterate on titan (RTX 3090)
 
 ```
-laptop$ weft run cool30 \
+laptop$ weft run titan \
   --tag head-type-ontology --tag EXP-013 \
   -m "EXP-013 validation: single config (12h, 100 GFLOPs) to test pipeline" \
   'uv run python scripts/head_count_sweep.py --design A --n-heads 12 \
     --target-gflops 100 --device cuda'
 # Job 4768 completed (exit 1 — found a bug)
 
-laptop$ weft run cool30 --after 4768 \
+laptop$ weft run titan --after 4768 \
   --tag head-type-ontology --tag EXP-013 \
   -m "EXP-013 validation v2: 12h, 500 GFLOPs, attentions fix" \
   'uv run python scripts/head_count_sweep.py --design A --n-heads 12 \
     --target-gflops 500 --device cuda'
 # Job 4773 completed (exit 1 — another issue)
 
-laptop$ weft run cool30 --after 4773 \
+laptop$ weft run titan --after 4773 \
   --tag head-type-ontology --tag EXP-013 \
   -m "EXP-013 validation v3: fingerprint fix" \
   'uv run python scripts/head_count_sweep.py --design A --n-heads 12 \
@@ -285,23 +285,23 @@ laptop$ weft run cool30 --after 4773 \
 # Job 4777 completed (exit 1 — still not right)
 ```
 
-### Once the pipeline works, move to cool100 for the full sweep
+### Once the pipeline works, move to atlas for the full sweep
 
 ```
-laptop$ weft run cool100 --gpu 1 \
+laptop$ weft run atlas --gpu 1 \
   --tag head-type-ontology --tag EXP-013 \
-  -m "EXP-013 validation v4: head_count_sweep (cool100 GPU 1)" \
+  -m "EXP-013 validation v4: head_count_sweep (atlas GPU 1)" \
   'uv run python scripts/head_count_sweep.py --design A --n-heads 12 \
     --target-gflops 500 --device cuda'
 # Job 4784 completed (exit 0 — success!)
 
-laptop$ weft run cool100 \
+laptop$ weft run atlas \
   --tag head-type-ontology --tag EXP-013 \
   -m "EXP-013 full sweep Design A: 4,8,12,24,48 heads" \
   'uv run python scripts/head_count_sweep.py --design A --device cuda'
 # Job 4798 queued
 
-laptop$ weft run cool100 \
+laptop$ weft run atlas \
   --tag head-type-ontology --tag EXP-013 \
   -m "EXP-013 full sweep Design B: 4,8,12,24 heads (fixed d_head=64)" \
   'uv run python scripts/head_count_sweep.py --design B --device cuda'
@@ -404,7 +404,7 @@ Some jobs need exclusive access to all GPU memory. Tag them `exclusive` so the
 queue runner runs them alone:
 
 ```
-laptop$ weft run cool100 \
+laptop$ weft run atlas \
   --tag exclusive \
   -m "CUDA multistream ANS (actual size)" \
   'uv run compression-lab gpu-bench --codec ans --multistream'
@@ -417,7 +417,7 @@ For reproducible benchmarking, the `benchmark` tag goes further — it waits for
 the whole system (CPU, RAM, GPU, VRAM) to be idle before starting:
 
 ```
-laptop$ weft run cool100 \
+laptop$ weft run atlas \
   --tag benchmark \
   -m "Measure throughput at batch_size=64" \
   'uv run python benchmark.py --batch 64'
@@ -440,7 +440,7 @@ laptop$ weft run \
   --input hf:meta-llama/Llama-3-8B \
   -m "Llama inference on A100" \
   'uv run python inference.py'
-# Auto-placed on cool100 (gpu_class: a100, data: local, queue: 2 jobs)
+# Auto-placed on atlas (gpu_class: a100, data: local, queue: 2 jobs)
 ```
 
 See what weft knows about your hosts:
@@ -455,7 +455,7 @@ laptop$ weft host data
 When iterating on a command and not ready to submit:
 
 ```
-laptop$ weft run --draft cool30 \
+laptop$ weft run --draft titan \
   -m "WIP: trying new loss function" \
   'uv run python train.py --loss focal'
 # Job 500 created as draft (not synced to host)
@@ -476,7 +476,7 @@ Or from the TUI: navigate to the draft job, press `g` to run it.
 weft is designed for laptops that come and go. If the remote host is unreachable:
 
 ```
-laptop$ weft run cool30 'uv run python train.py'
+laptop$ weft run titan 'uv run python train.py'
 # Job 600 created (host offline — will sync when reachable)
 ```
 

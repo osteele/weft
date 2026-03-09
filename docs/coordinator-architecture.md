@@ -32,7 +32,7 @@ resolves both problems.
 The sister project
 [llm-performance-models](../../research/llm-performance-models/) already has:
 
-- Hardware YAML configs for cool30 and cool100 (GPU specs, storage tiers,
+- Hardware YAML configs for titan and atlas (GPU specs, storage tiers,
   transfer bandwidth)
 - Roofline performance models for predicting runtime from model architecture
 - Power coefficients per GPU type, calibrated from measurements
@@ -71,7 +71,7 @@ heterogeneous GPUs, and modeling data transfer costs — all with real workloads
           │                             │
           ▼                             ▼
 ┌───────────────────────┐  ┌───────────────────────┐
-│      cool30           │  │      cool100          │
+│      titan           │  │      atlas          │
 │  ┌────────────────┐   │  │  ┌────────────────┐   │
 │  │  Edge Agent    │   │  │  │  Edge Agent    │   │
 │  │  (local sched, │   │  │  │  (local sched, │   │
@@ -106,7 +106,7 @@ locality:
   cluster queue state, and host capabilities. Does not need moment-to-moment GPU
   utilization.
 
-- **Edge agents** (cool30, cool100, studio queue runners): Host-local authority.
+- **Edge agents** (titan, atlas, studio queue runners): Host-local authority.
   Own **execution timing** (when to start a placed job), exclusive/benchmark
   coordination on local GPUs, resource enforcement, and measurement collection.
   Can autonomously defer jobs (e.g., system is hot, benchmark running) without
@@ -118,7 +118,7 @@ The contract between coordinator and edge agent:
 - Edge agent has full autonomy over *when* and *how* within its host
 
 This separation means each agent decides based on what it can best observe.
-The coordinator might place a job on cool100 for data locality, but the edge
+The coordinator might place a job on atlas for data locality, but the edge
 agent defers it because a benchmark is running. Neither needs the other's full
 context to make a good decision.
 
@@ -170,7 +170,7 @@ compute hosts beyond the existing queue runners.
 
 Studio runs the coordinator daemon in a tmux session. When the coordinator
 places a job on studio itself, it dispatches to studio's local queue runner the
-same way it dispatches to cool30/cool100. The `remote.Host` interface already
+same way it dispatches to titan/atlas. The `remote.Host` interface already
 supports local execution.
 
 ### Graceful degradation
@@ -227,8 +227,8 @@ YAML files describe what each host has. Format inspired by
 llm-performance-models but simplified for scheduling needs:
 
 ```yaml
-# config/hosts/cool100.yaml
-name: cool100
+# config/hosts/atlas.yaml
+name: atlas
 compute_backend: cuda
 gpus:
   - name: A100 80GB PCIe
@@ -312,14 +312,14 @@ When a downstream job depends on an upstream job's output, the coordinator:
 ### Transfer cost estimation
 
 The coordinator estimates transfer time using host-to-host bandwidth
-(conservative estimates given the bursty network between cool30/cool100):
+(conservative estimates given the bursty network between titan/atlas):
 
 ```go
 func EstimateTransferTime(asset DataAsset, from, to string) time.Duration
 ```
 
-This factors into placement scoring: a 10GB model already cached on cool30
-avoids a multi-minute transfer that would be needed to run on cool100.
+This factors into placement scoring: a 10GB model already cached on titan
+avoids a multi-minute transfer that would be needed to run on atlas.
 
 ## Placement Scoring
 
@@ -423,7 +423,7 @@ to job execution.
 
 - Rename module, binary, CLI references from weft to weft
 - Create `internal/inventory/` package (HostSpec, GPUSpec types)
-- Create host YAML files for cool30, cool100, studio
+- Create host YAML files for titan, atlas, studio
 - Extend `internal/config/` to load inventory
 - Add `weft host list` showing GPU specs, VRAM, storage
 - Wire inventory into `internal/hostinfo/`

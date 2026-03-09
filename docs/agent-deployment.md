@@ -1,6 +1,6 @@
 # Agent Deployment
 
-The `weft-agent` binary runs on remote hosts (cool30, cool100) and is auto-deployed
+The `weft-agent` binary runs on remote hosts (titan, atlas) and is auto-deployed
 by `EnsureAgentUpToDate()` during TUI sync. To manually re-deploy, follow the
 steps below.
 
@@ -17,11 +17,11 @@ ssh studio 'cd ~/code/utils/weft && GOOS=linux GOARCH=amd64 go build -o dist/wef
 
 # 3. Copy back locally (for EnsureBuilt cache) and/or deploy to target host
 scp studio:~/code/utils/weft/dist/weft-agent-linux-amd64 dist/weft-agent-linux-amd64
-scp dist/weft-agent-linux-amd64 cool30:~/.cache/weft/bin/weft-agent
-ssh cool30 'chmod +x ~/.cache/weft/bin/weft-agent'
+scp dist/weft-agent-linux-amd64 titan:~/.cache/weft/bin/weft-agent
+ssh titan 'chmod +x ~/.cache/weft/bin/weft-agent'
 
 # 4. Kill the runner session so it restarts with the new binary
-ssh cool30 'tmux kill-session -t weft-runner 2>/dev/null; true'
+ssh titan 'tmux kill-session -t weft-runner 2>/dev/null; true'
 ```
 
 ## Key files

@@ -26,7 +26,7 @@ Laptop (CLI / TUI)
    └──fallback──> Direct SSH (when coordinator unreachable)
                     └── Local placement scoring, queue directly
 
-Remote Hosts (cool30, cool100)
+Remote Hosts (titan, atlas)
    └── Go agent (autonomous)
         ├── Discovers and executes queued jobs
         ├── Manages GPU allocation and exclusive jobs
@@ -765,7 +765,7 @@ This command updates the host for a job that hasn't started yet (status=queued).
 
 **Examples:**
 ```bash
-weft job move 42 cool100   # Move job 42 to cool100
+weft job move 42 atlas   # Move job 42 to atlas
 weft job move 43 studio    # Move job 43 to studio
 ```
 
@@ -804,9 +804,9 @@ Copies command, working directory, and description from an existing job. You can
 
 ```bash
 weft run --from 42                    # Rerun job 42 with same settings
-weft run --from 42 cool100            # Rerun on different host
+weft run --from 42 atlas            # Rerun on different host
 weft run --from 42 --timeout 4h       # Rerun with longer timeout
-weft run --from 42 cool100 "python train.py --epochs 200"  # Override everything
+weft run --from 42 atlas "python train.py --epochs 200"  # Override everything
 ```
 
 **Timeout (`--timeout`)**:
@@ -817,7 +817,7 @@ weft run --timeout <duration> <host> <command>
 Automatically kills the job after the specified duration (e.g., "2h", "30m", "1h30m"):
 
 ```bash
-weft run --timeout 2h cool30 "python train.py"
+weft run --timeout 2h titan "python train.py"
 weft run --timeout 30m --from 42      # Retry with timeout
 ```
 
@@ -829,9 +829,9 @@ weft run -e VAR=value <host> <command>
 Set environment variables for the job. Can be repeated for multiple variables:
 
 ```bash
-weft run -e CUDA_VISIBLE_DEVICES=0 cool30 "python train.py"
-weft run -e BATCH_SIZE=32 -e LR=0.001 cool30 "python train.py"
-weft queue add -e TMPDIR=/mnt/data/tmp cool30 "python train.py"
+weft run -e CUDA_VISIBLE_DEVICES=0 titan "python train.py"
+weft run -e BATCH_SIZE=32 -e LR=0.001 titan "python train.py"
+weft queue add -e TMPDIR=/mnt/data/tmp titan "python train.py"
 ```
 
 **Automatic environment file loading**:
@@ -952,11 +952,11 @@ the `d` key in the TUI) once you decide they should be eligible to run.
 
 **Examples:**
 ```bash
-weft queue add cool30 'python train.py --epochs 100'
-weft queue add -d "Training run 1" cool30 'python train.py'
-weft queue add -e CUDA_VISIBLE_DEVICES=0 cool30 'python train.py'
-weft queue add --after 42 cool30 'python eval.py'       # Run after job 42 succeeds
-weft queue add --after-any 42 cool30 'python cleanup.py' # Run after job 42 completes (success or failure)
+weft queue add titan 'python train.py --epochs 100'
+weft queue add -d "Training run 1" titan 'python train.py'
+weft queue add -e CUDA_VISIBLE_DEVICES=0 titan 'python train.py'
+weft queue add --after 42 titan 'python eval.py'       # Run after job 42 succeeds
+weft queue add --after-any 42 titan 'python cleanup.py' # Run after job 42 completes (success or failure)
 ```
 
 #### weft edit
@@ -1006,7 +1006,7 @@ The queue runner:
 
 **Examples:**
 ```bash
-weft queue start cool30
+weft queue start titan
 ```
 
 #### weft queue stop
@@ -1019,7 +1019,7 @@ weft queue stop [flags] <host>
 
 **Examples:**
 ```bash
-weft queue stop cool30
+weft queue stop titan
 ```
 
 #### weft queue list
@@ -1032,7 +1032,7 @@ weft queue list [flags] <host>
 
 **Examples:**
 ```bash
-weft queue list cool30
+weft queue list titan
 ```
 
 #### weft queue status
@@ -1045,7 +1045,7 @@ weft queue status [flags] <host>
 
 **Examples:**
 ```bash
-weft queue status cool30
+weft queue status titan
 ```
 
 #### weft queue upgrade
@@ -1055,28 +1055,28 @@ CLI records a build number on the first line of the embedded script, compares
 it with the version on the host, and restarts the runner only when needed.
 
 ```bash
-weft queue upgrade cool30
+weft queue upgrade titan
 ```
 
 #### Queue Workflow Example
 
 ```bash
 # Start the queue runner (does nothing if already running)
-weft queue start cool30
+weft queue start titan
 
 # Add jobs to the queue - laptop can disconnect after these commands
-weft queue add cool30 "python train.py --epochs 100"
-weft queue add cool30 "python train.py --epochs 200"
-weft queue add cool30 "python evaluate.py"
+weft queue add titan "python train.py --epochs 100"
+weft queue add titan "python train.py --epochs 200"
+weft queue add titan "python evaluate.py"
 
 # Check queue status (when back online)
-weft queue status cool30
+weft queue status titan
 
 # View what's in the queue
-weft queue list cool30
+weft queue list titan
 
 # Stop the queue after current job
-weft queue stop cool30
+weft queue stop titan
 ```
 
 #### Job Dependencies
@@ -1085,19 +1085,19 @@ You can create job chains where one job runs after another completes:
 
 ```bash
 # Start the queue runner
-weft queue start cool30
+weft queue start titan
 
 # Job 42: Training
-weft queue add -d "Training" cool30 "python train.py"
+weft queue add -d "Training" titan "python train.py"
 
 # Job 43: Evaluate after training succeeds (waits for job 42)
-weft queue add --after 42 -d "Evaluation" cool30 "python eval.py"
+weft queue add --after 42 -d "Evaluation" titan "python eval.py"
 
 # Job 44: Generate report after evaluation (waits for job 43)
-weft queue add --after 43 -d "Report" cool30 "python report.py"
+weft queue add --after 43 -d "Report" titan "python report.py"
 
 # Job 45: Cleanup runs regardless of whether job 42 succeeded or failed
-weft queue add --after-any 42 -d "Cleanup" cool30 "python cleanup.py"
+weft queue add --after-any 42 -d "Cleanup" titan "python cleanup.py"
 
 # Disconnect laptop - jobs run in sequence on the remote host
 ```
@@ -1109,7 +1109,7 @@ weft queue add --after-any 42 -d "Cleanup" cool30 "python cleanup.py"
 Both flags work entirely on the remote host (no laptop connection needed) and can be used with both `queue add` and `run` commands.
 
 > **Note:** Dependencies must stay on the same host. If you try to start a job on
-> `cool30` that waits on a job recorded on `studio`, the CLI errors immediately
+> `titan` that waits on a job recorded on `studio`, the CLI errors immediately
 > instead of queuing work that can never start.
 
 ## Coordinator
@@ -1151,8 +1151,8 @@ When a job has no explicit host, the coordinator scores all eligible hosts:
 ### Pre-staging
 
 Before dispatching a job, the coordinator pre-stages missing input data via
-rsync. If a job needs `hf:meta-llama/Llama-3-8B` and it exists on cool30 but
-not cool100, the coordinator transfers it before dispatch. Pre-staging is
+rsync. If a job needs `hf:meta-llama/Llama-3-8B` and it exists on titan but
+not atlas, the coordinator transfers it before dispatch. Pre-staging is
 best-effort — dispatch proceeds even if transfers fail.
 
 ### Data Locality
@@ -1167,10 +1167,10 @@ The system tracks what data exists on which hosts:
 
 ```bash
 # Scan a host's HF cache
-weft host data --scan cool30
+weft host data --scan titan
 
 # List data assets on a host
-weft host data cool30
+weft host data titan
 ```
 
 ### Auto-Remediation
@@ -1211,7 +1211,7 @@ Weft can predict job duration and resource usage based on historical data.
 
 ```bash
 # Predict duration/resources for a command on a specific host
-weft predict --host cool100 'python train.py'
+weft predict --host atlas 'python train.py'
 
 # Force retrain models from all configured job databases
 weft retrain

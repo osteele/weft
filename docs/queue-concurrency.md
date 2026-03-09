@@ -220,7 +220,7 @@ concurrently. The allotment system (above) manages this.
 
 ### Multi-tenancy and memory checks
 
-On shared machines (e.g. cool100), other users may have jobs running on GPUs
+On shared machines (e.g. atlas), other users may have jobs running on GPUs
 outside our control. The one-job-per-device rule applies only to *our own* jobs
 — we don't wait for a device to be completely vacant before starting, because:
 

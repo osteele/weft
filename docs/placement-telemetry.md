@@ -14,7 +14,7 @@ Logged whenever auto-placement selects a host (in `cmd/run.go` and
 `internal/coordinator/dispatch.go`).
 
 ```jsonl
-{"t":"2026-03-04T10:00:00Z","op":"placement.decided","host":"cool30","detail":"selected=cool30 scores=cool30:8.2,cool100:5.1 metrics=cool30:{cpu:5,gpu:0,q:0},cool100:{cpu:80,gpu:95,q:4}"}
+{"t":"2026-03-04T10:00:00Z","op":"placement.decided","host":"titan","detail":"selected=titan scores=titan:8.2,atlas:5.1 metrics=titan:{cpu:5,gpu:0,q:0},atlas:{cpu:80,gpu:95,q:4}"}
 ```
 
 Fields in `detail`:
@@ -28,7 +28,7 @@ Logged after `CollectMetrics` probes hosts (in `internal/placement/metrics.go`).
 One entry per host that responded.
 
 ```jsonl
-{"t":"2026-03-04T10:00:00Z","op":"host.metrics","host":"cool100","detail":"cpu=80 gpu=95 ram=39 q=4 gpu_free=0:11920,1:76920"}
+{"t":"2026-03-04T10:00:00Z","op":"host.metrics","host":"atlas","detail":"cpu=80 gpu=95 ram=39 q=4 gpu_free=0:11920,1:76920"}
 ```
 
 Fields in `detail`:
@@ -65,8 +65,8 @@ Schema (`PlacementMeta`):
 # Recent placement decisions
 tail -100 ~/.cache/weft/operations.log | jq 'select(.op == "placement.decided")'
 
-# Host metrics time series for cool100
-cat ~/.cache/weft/operations.log | jq 'select(.op == "host.metrics" and .host == "cool100")'
+# Host metrics time series for atlas
+cat ~/.cache/weft/operations.log | jq 'select(.op == "host.metrics" and .host == "atlas")'
 
 # Placement decisions where runner-up scored close to winner
 cat ~/.cache/weft/operations.log | jq 'select(.op == "placement.decided") | .detail'

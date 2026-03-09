@@ -7,7 +7,7 @@ This document compares `weft` to SLURM (Simple Linux Utility for Resource Manage
 **weft** is designed for individual researchers managing jobs on a few personal machines from a laptop. **SLURM** is designed for shared HPC clusters with multiple users, centralized resource management, and complex job dependencies.
 
 Use **weft** when:
-- You have a few personal machines (like cool30, cool100, studio)
+- You have a few personal machines (like titan, atlas, studio)
 - You SSH from a laptop that sleeps/travels
 - You want simple job tracking without cluster infrastructure
 - You need jobs to keep running when your laptop is off
@@ -130,10 +130,10 @@ sbatch --nodes=4 --ntasks-per-node=8 mpi_job.sh
 **weft:**
 ```bash
 # Run after job 42 completes successfully
-weft run --after 42 cool30 'python analyze.py'
+weft run --after 42 titan 'python analyze.py'
 
 # Run regardless of job 42's exit code
-weft run --after-any 42 cool30 'python cleanup.py'
+weft run --after-any 42 titan 'python cleanup.py'
 
 # YAML plans for multi-job workflows
 weft plan run workflow.yaml
@@ -281,7 +281,7 @@ This means weft is not strictly an alternative to SLURM — it can also be a mor
 **weft:**
 ```bash
 # Host is unreachable right now — no problem
-weft run cool30 'python train.py'
+weft run titan 'python train.py'
 # Job recorded locally, synced when host comes back
 ```
 - All operations (run, kill, queue edits) work offline
@@ -328,7 +328,7 @@ Features that could further bridge the gap without sacrificing weft' design phil
 ### 1. Resource-Aware Scheduling
 
 ```bash
-# Automatically picks cool30 or cool100 based on available GPUs
+# Automatically picks titan or atlas based on available GPUs
 weft run --require gpu:2,mem:32G 'python train.py'
 ```
 
@@ -336,13 +336,13 @@ weft run --require gpu:2,mem:32G 'python train.py'
 
 ```bash
 # Submit 100 jobs for hyperparameter sweep
-weft run --array 1-100 cool30 'python sweep.py --param $TASK_ID'
+weft run --array 1-100 titan 'python sweep.py --param $TASK_ID'
 ```
 
 ### 3. Multi-Host Queue
 
 ```bash
-# Pool = [cool30, cool100, studio], schedules to first available
+# Pool = [titan, atlas, studio], schedules to first available
 weft queue add --pool ml-cluster 'python train.py'
 ```
 

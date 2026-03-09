@@ -66,7 +66,7 @@ done
 Specify CPU, memory, or GPU requirements.
 
 ```bash
-weft run --cpus 4 --mem 16G --gpu 1 cool30 "train.py"
+weft run --cpus 4 --mem 16G --gpu 1 titan "train.py"
 ```
 
 ### Implementation
@@ -95,7 +95,7 @@ Add per-job CPU/memory/thread stats for macOS hosts in the TUI.
 Tag jobs for organization and bulk operations.
 
 ```bash
-weft run --tag experiment-v2 --tag ablation cool30 "run.py"
+weft run --tag experiment-v2 --tag ablation titan "run.py"
 weft job list --tag experiment-v2
 weft job kill --tag experiment-v2  # Kill all matching
 ```
@@ -105,7 +105,7 @@ weft job kill --tag experiment-v2  # Kill all matching
 Beyond Slack, support other notification methods.
 
 ```bash
-weft run --notify discord --notify email cool30 "long-job.sh"
+weft run --notify discord --notify email titan "long-job.sh"
 ```
 
 - Email notifications
@@ -196,8 +196,8 @@ Add a dedicated `job move` CLI that relocates queued jobs to a different host,
 including when the original host is offline.
 
 ```bash
-# Move queued job 42 from cool30 to cool100
-weft job move 42 cool100
+# Move queued job 42 from titan to atlas
+weft job move 42 atlas
 ```
 
 ### Requirements
@@ -223,7 +223,7 @@ Save common job configurations as templates.
 weft job save-template 42 "gpu-training"
 
 # Use template
-weft run --template gpu-training cool30 "train.py --epochs 100"
+weft run --template gpu-training titan "train.py --epochs 100"
 ```
 
 ### Storage
@@ -237,7 +237,7 @@ Automatically select best host based on load, availability, resources.
 
 ```bash
 # Run on any host from a group
-weft run --hosts cool30,cool100,studio "benchmark.py"
+weft run --hosts titan,atlas,studio "benchmark.py"
 ```
 
 ### Implementation
@@ -252,7 +252,7 @@ Run the same command with different parameters (like SLURM job arrays).
 
 ```bash
 # Run with different parameters
-weft run --array 1-10 cool30 "process.py --task \$TASK_ID"
+weft run --array 1-10 titan "process.py --task \$TASK_ID"
 
 # Creates 10 jobs with TASK_ID=1..10
 ```

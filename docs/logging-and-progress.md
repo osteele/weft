@@ -23,7 +23,7 @@ tails the log file the wrapper script already writes.
 ### CLI Experience
 
 ```
-weft run --allow cool30 "python train.py --lr 1e-4"
+weft run --allow titan "python train.py --lr 1e-4"
 ```
 
 1. The command prints the usual metadata (job ID, host, working dir).
