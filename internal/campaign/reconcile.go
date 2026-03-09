@@ -35,6 +35,22 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 			}
 		}
 
+		// Expire grace-period instances whose deadline has passed
+		if ci.Status == db.CloudInstanceStatusGrace && ci.GraceDeadline != nil && time.Now().Unix() > *ci.GraceDeadline {
+			log.Printf("reconcile: instance %d grace period expired, marking failed", ci.ID)
+			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
+				continue
+			}
+			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+			} else if resetCount > 0 {
+				log.Printf("reconcile: reset %d jobs from expired grace instance %d to unplaced", resetCount, ci.ID)
+			}
+			reconciled++
+			continue
+		}
+
 		// Clean up completed donor instances
 		if ci.InstanceRole == "donor" && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
