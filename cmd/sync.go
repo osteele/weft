@@ -412,7 +412,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		return 0
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Use a generous overall timeout — each completed job may need to download
+	// result files, and a tight timeout causes later jobs to be skipped.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	updated := 0

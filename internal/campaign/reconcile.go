@@ -169,9 +169,34 @@ func ReconcileCampaigns(database *sql.DB) error {
 
 // graceStatusPayload is the JSON structure written by the agent's grace-wait to R2.
 type graceStatusPayload struct {
-	State      string `json:"state"`
-	Deadline   int64  `json:"deadline"`
-	FailedJobs []int  `json:"failed_jobs"`
+	State      string        `json:"state"`
+	Deadline   deadlineValue `json:"deadline"`
+	FailedJobs []int         `json:"failed_jobs"`
+}
+
+// deadlineValue handles both RFC3339 string and unix epoch int64 formats for the deadline field.
+type deadlineValue struct {
+	Unix int64
+}
+
+func (d *deadlineValue) UnmarshalJSON(data []byte) error {
+	// Try int64 first
+	var n int64
+	if err := json.Unmarshal(data, &n); err == nil {
+		d.Unix = n
+		return nil
+	}
+	// Try RFC3339 string
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("deadline must be int64 or RFC3339 string, got %s", string(data))
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return fmt.Errorf("invalid deadline string %q: %w", s, err)
+	}
+	d.Unix = t.Unix()
+	return nil
 }
 
 // checkR2GraceStatus checks R2 for a grace status marker for a running instance.
@@ -192,12 +217,12 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.CloudInstance, database *sql
 		return false
 	}
 
-	if payload.Deadline == 0 {
+	if payload.Deadline.Unix == 0 {
 		return false
 	}
 
-	log.Printf("reconcile: instance %d entered grace-wait (deadline %d)", ci.ID, payload.Deadline)
-	if err := db.SetCloudInstanceGraceStarted(database, ci.ID, payload.Deadline); err != nil {
+	log.Printf("reconcile: instance %d entered grace-wait (deadline %d)", ci.ID, payload.Deadline.Unix)
+	if err := db.SetCloudInstanceGraceStarted(database, ci.ID, payload.Deadline.Unix); err != nil {
 		log.Printf("reconcile: set grace for instance %d: %v", ci.ID, err)
 		return false
 	}

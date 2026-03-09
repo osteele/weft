@@ -119,15 +119,14 @@ func (c *CloudClient) WorkspacePath() string {
 }
 
 func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
-	apiKey := ReadAPIKey()
-	if apiKey == "" {
-		return fmt.Sprintf("echo 'warning: no vastai API key found, cannot self-destruct instance %s'", providerInstanceID)
-	}
-	// Use the REST API directly — the vastai CLI is not installed on instances.
+	// Prefer Vast.ai's per-instance credentials (CONTAINER_ID + CONTAINER_API_KEY),
+	// which are set in PID 1's environment and inherited by the onstart script.
+	// Fall back to the user's API key if the env vars aren't available.
 	// -f (--fail) makes curl return non-zero on HTTP errors so retries work.
 	return fmt.Sprintf(
-		`curl -sf -X DELETE "https://console.vast.ai/api/v0/instances/%s/" -H "Authorization: Bearer %s"`,
-		providerInstanceID, apiKey,
+		`curl -sf -X DELETE "https://console.vast.ai/api/v0/instances/${CONTAINER_ID:-%s}/" `+
+			`-H "Authorization: Bearer ${CONTAINER_API_KEY:-%s}"`,
+		providerInstanceID, ReadAPIKey(),
 	)
 }
 

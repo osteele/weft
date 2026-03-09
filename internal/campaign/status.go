@@ -103,6 +103,13 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				if hasStartedJob {
 					instancePhase = fetchInstancePhase(ctx, r2c, cloudInstanceID)
 					jobProgressID, jobProgress = fetchJobProgress(ctx, r2c, instancePhase)
+
+					// Detect grace transition: R2 phase says "grace" but DB still says "running"
+					if instancePhase == "grace" && ci.Status == db.CloudInstanceStatusRunning {
+						if checkR2GraceStatus(r2c, ci, database) {
+							ci.Status = db.CloudInstanceStatusGrace
+						}
+					}
 				} else {
 					bootstrapStage = fetchBootstrapStage(ctx, r2c, cloudInstanceID)
 				}
@@ -111,8 +118,28 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// Detect bootstrap stall: instance running but no job progress
 			var stallMessage string
 			if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !hasStartedJob && bootstrapStage != bootstrapStageReady {
+				// Check R2 for completion marker before declaring a stall — the agent
+				// may have completed all jobs but failed to self-destruct, so the local
+				// DB still shows jobs as queued while the instance is actually done.
+				instanceComplete := false
+				if r2c != nil {
+					completeKey := r2keys.CampaignComplete(cloudInstanceID)
+					if data, err := r2c.GetObject(ctx, completeKey); err == nil && len(data) > 0 {
+						instanceComplete = true
+					}
+				}
+
 				elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
-				if elapsed >= bootstrapTerminateTimeout {
+				if instanceComplete {
+					// Instance completed its work but self-destruct failed.
+					// Clean up the provider instance and mark as completed, not failed.
+					if providerInstID != "" {
+						_ = client.DestroyInstance(providerInstID)
+					}
+					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted)
+					ci.Status = db.CloudInstanceStatusCompleted
+					stallMessage = "instance completed but self-destruct failed — cleaning up"
+				} else if elapsed >= bootstrapTerminateTimeout {
 					// Auto-terminate: destroy provider instance, mark failed, reset jobs
 					if providerInstID != "" {
 						_ = client.DestroyInstance(providerInstID)
@@ -125,6 +152,31 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				} else if elapsed >= bootstrapWarnTimeout {
 					stallMessage = fmt.Sprintf("bootstrap stalled — no activity after %s",
 						elapsed.Truncate(time.Minute))
+				}
+			}
+
+			// Detect failed self-destruct: all jobs finished but instance still running.
+			// Give 2 minutes after the last job for uploads + self-destruct attempts.
+			if ci.Status == db.CloudInstanceStatusRunning && hasStartedJob && len(jobs) > 0 {
+				allJobsTerminal := true
+				var latestEnd int64
+				for _, j := range jobs {
+					if j.Status != db.StatusCompleted && j.Status != db.StatusFailed {
+						allJobsTerminal = false
+						break
+					}
+					if j.EndTime != nil && *j.EndTime > latestEnd {
+						latestEnd = *j.EndTime
+					}
+				}
+				if allJobsTerminal && latestEnd > 0 && time.Since(time.Unix(latestEnd, 0)) > 2*time.Minute {
+					// Self-destruct failed — clean up
+					if providerInstID != "" {
+						_ = client.DestroyInstance(providerInstID)
+					}
+					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted)
+					ci.Status = db.CloudInstanceStatusCompleted
+					stallMessage = "all jobs finished but self-destruct failed — cleaning up"
 				}
 			}
 
