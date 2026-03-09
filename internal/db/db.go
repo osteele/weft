@@ -105,6 +105,11 @@ func (j *Job) UsesSlurm() bool {
 	return j.Backend == BackendSlurm
 }
 
+// IsCloudJob reports whether this job is associated with a cloud instance.
+func (j *Job) IsCloudJob() bool {
+	return j != nil && j.CloudInstanceID != nil && *j.CloudInstanceID > 0
+}
+
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
 type PlacementMeta struct {
 	PredictedDurationS *float64 `json:"pred_dur_s,omitempty"`

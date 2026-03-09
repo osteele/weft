@@ -152,7 +152,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	}
 
 	// Write logs to log cache
-	writeVastaiLogsToCache(jobID, tmpDir)
+	WriteVastaiLogsToCache(jobID, tmpDir)
 
 	// Clean up R2 prefix
 	if err := r2Client.DeletePrefix(ctx, prefix+"/"); err != nil {
@@ -458,9 +458,9 @@ func readSummedInt64(path string) *int64 {
 	return &sum
 }
 
-// writeVastaiLogsToCache writes stdout/stderr from R2 results into the local log cache.
+// WriteVastaiLogsToCache writes stdout/stderr from R2 results into the local log cache.
 // Supports both agent format ({jobID}.log) and legacy format (stdout.log + stderr.log).
-func writeVastaiLogsToCache(jobID int64, tmpDir string) {
+func WriteVastaiLogsToCache(jobID int64, tmpDir string) {
 	// Try agent format first: {jobID}.log
 	agentLogPath := filepath.Join(tmpDir, fmt.Sprintf("%d.log", jobID))
 	if agentLog, err := os.ReadFile(agentLogPath); err == nil && len(agentLog) > 0 {

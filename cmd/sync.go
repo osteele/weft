@@ -482,6 +482,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			}
 		}
 
+		// Cache logs locally before cleaning up
+		coordinator.WriteVastaiLogsToCache(jobID, tmpDir)
+
 		if verbose {
 			fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, status, *exitCode)
 		}

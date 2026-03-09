@@ -5,11 +5,68 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/vastai"
 	_ "modernc.org/sqlite"
 )
+
+func TestWriteVastaiLogsToCache_AgentFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	// Redirect HOME so logcache writes to a temp location
+	t.Setenv("HOME", tmpDir)
+
+	jobID := int64(999)
+	logContent := "epoch 1/10 loss=0.5\nepoch 2/10 loss=0.3\n"
+
+	// Create agent-format log file: {jobID}.log
+	resultsDir := t.TempDir()
+	logPath := filepath.Join(resultsDir, fmt.Sprintf("%d.log", jobID))
+	if err := os.WriteFile(logPath, []byte(logContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	WriteVastaiLogsToCache(jobID, resultsDir)
+
+	// Verify the log was cached
+	cached, err := logcache.Read(jobID)
+	if err != nil {
+		t.Fatalf("logcache.Read() error: %v", err)
+	}
+	if cached != logContent {
+		t.Errorf("cached content = %q, want %q", cached, logContent)
+	}
+	if !logcache.IsComplete(jobID) {
+		t.Error("expected log to be marked as complete")
+	}
+}
+
+func TestWriteVastaiLogsToCache_LegacyFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+
+	jobID := int64(1000)
+	resultsDir := t.TempDir()
+
+	// Create legacy format files
+	os.WriteFile(filepath.Join(resultsDir, "stdout.log"), []byte("stdout output\n"), 0644)
+	os.WriteFile(filepath.Join(resultsDir, "stderr.log"), []byte("stderr output\n"), 0644)
+
+	WriteVastaiLogsToCache(jobID, resultsDir)
+
+	cached, err := logcache.Read(jobID)
+	if err != nil {
+		t.Fatalf("logcache.Read() error: %v", err)
+	}
+	if !strings.Contains(cached, "stdout output") {
+		t.Error("cached log should contain stdout")
+	}
+	if !strings.Contains(cached, "stderr output") {
+		t.Error("cached log should contain stderr")
+	}
+}
 
 func TestDetectFailureReason_OOM(t *testing.T) {
 	tests := []struct {

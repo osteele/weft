@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// defaultOutputDirs mirrors config.DefaultOutputDirs for use in the wrapper script.
+// Cannot import config directly due to import cycle (config -> cloud).
+var defaultOutputDirs = []string{"output", "outputs"}
+
 // AgentJob describes a job for the agent-based wrapper, serialized as JSON for stdin.
 type AgentJob struct {
 	ID      int64  `json:"id"`
@@ -72,12 +76,11 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 		jobData, _ := json.Marshal(job)
 		jobJSON := string(jobData)
 
-		workingDirFlag := ""
+		jobWorkDir := client.WorkspacePath()
 		if job.Dir != "" {
-			workingDirFlag = fmt.Sprintf(" --working-dir=%s", job.Dir)
-		} else {
-			workingDirFlag = fmt.Sprintf(" --working-dir=%s", client.WorkspacePath())
+			jobWorkDir = job.Dir
 		}
+		workingDirFlag := fmt.Sprintf(" --working-dir=%s", jobWorkDir)
 
 		// Compute remaining time budget for this job
 		if opts.MaxTimeSeconds > 0 {
@@ -103,6 +106,14 @@ func GenerateAgentWrapper(client Client, jobs []AgentJob, r2Bucket string, provi
 		b.WriteString("JOB_EXIT=$?\n")
 		b.WriteString("if [ $JOB_EXIT -ne 0 ]; then ANY_FAILED=1; fi\n")
 		b.WriteString("\n")
+
+		// Upload job output files (convention-based output directories)
+		b.WriteString(fmt.Sprintf("JOB_WORKDIR=%q\n", jobWorkDir))
+		for _, outDir := range defaultOutputDirs {
+			b.WriteString(fmt.Sprintf("if [ -d \"$JOB_WORKDIR/%s\" ]; then\n", outDir))
+			b.WriteString(fmt.Sprintf("  rclone copy \"$JOB_WORKDIR/%s/\" \"r2:$R2_BUCKET/jobs/$JOB_ID/outputs/%s/\" 2>/dev/null\n", outDir, outDir))
+			b.WriteString("fi\n")
+		}
 
 		// Upload per-job results
 		b.WriteString("# Upload per-job results\n")

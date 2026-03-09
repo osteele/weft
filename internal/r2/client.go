@@ -181,6 +181,40 @@ func (c *Client) DeletePrefix(ctx context.Context, prefix string) error {
 	return nil
 }
 
+// ObjectInfo holds basic metadata about an R2 object.
+type ObjectInfo struct {
+	Key       string
+	SizeBytes int64
+}
+
+// ListObjects returns all objects under a prefix.
+func (c *Client) ListObjects(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(prefix),
+	}
+
+	var result []ObjectInfo
+	paginator := s3.NewListObjectsV2Paginator(c.s3, input)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list objects: %w", err)
+		}
+		for _, obj := range page.Contents {
+			var size int64
+			if obj.Size != nil {
+				size = *obj.Size
+			}
+			result = append(result, ObjectInfo{
+				Key:       aws.ToString(obj.Key),
+				SizeBytes: size,
+			})
+		}
+	}
+	return result, nil
+}
+
 // PutObject uploads data to R2 under the given key.
 func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, contentType string) error {
 	input := &s3.PutObjectInput{

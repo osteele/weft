@@ -419,6 +419,41 @@ cat ~/.cache/weft/logs/<job-id>.completion.json | python3 -m json.tool
 - **GPU fields**: `gpu_mem_used`, `gpu_util_pct` are non-null in timeseries samples
 - **Failure detection**: The `fail` project should have non-zero exit code and a failure reason
 
+### Step 5: Verify log retrieval
+
+After instances terminate, logs should still be accessible from the local cache or R2:
+
+```bash
+# Logs should be accessible even after instance termination
+weft log <job-id>
+# Should show full job output, not SSH errors
+
+# Force sync to ensure logs are cached
+weft sync
+weft log <job-id>
+```
+
+**What to verify:**
+- No SSH errors for cloud jobs
+- Log content matches what the job actually printed
+
+### Step 6: Verify artifact retrieval
+
+```bash
+# List discovered output files (reads from R2)
+weft artifact list <job-id>
+# Should show output files if the job wrote to output/ or outputs/
+
+# Sync outputs to local working directory (downloads from R2)
+weft artifact sync <job-id>
+# Should download output files from R2 to the local project directory
+```
+
+**What to verify:**
+- `artifact list` shows output files for jobs that wrote to `output/` or `outputs/`
+- `artifact sync` downloads the files locally
+- The `basic` testdata project writes to `output/`, so it should have artifacts
+
 ### Re-running test jobs
 
 To reset completed test jobs for re-testing:

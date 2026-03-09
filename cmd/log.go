@@ -167,7 +167,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 
 	// Cloud jobs: fetch log from R2 instead of SSH
-	if job.CloudInstanceID != nil && *job.CloudInstanceID > 0 {
+	if job.IsCloudJob() {
 		return runLogForCloudJob(cmd, job)
 	}
 

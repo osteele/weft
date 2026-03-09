@@ -163,6 +163,43 @@ func TestGenerateAgentWrapper_NoGracePeriod(t *testing.T) {
 	}
 }
 
+func TestGenerateAgentWrapper_OutputUpload(t *testing.T) {
+	client := &MockClient{
+		WorkspacePathVal:   "/workspace/",
+		SelfDestructCmdVal: "true",
+	}
+
+	jobs := []AgentJob{{ID: 42, Command: "python train.py"}}
+	wrapper := GenerateAgentWrapper(client, jobs, "test-bucket", "123", WrapperOpts{})
+
+	if !strings.Contains(wrapper, `JOB_WORKDIR="/workspace/"`) {
+		t.Error("wrapper should set JOB_WORKDIR to workspace path")
+	}
+	if !strings.Contains(wrapper, `rclone copy "$JOB_WORKDIR/output/"`) {
+		t.Error("wrapper should upload output/ dir to R2")
+	}
+	if !strings.Contains(wrapper, `rclone copy "$JOB_WORKDIR/outputs/"`) {
+		t.Error("wrapper should upload outputs/ dir to R2")
+	}
+	if !strings.Contains(wrapper, `r2:$R2_BUCKET/jobs/$JOB_ID/outputs/output/`) {
+		t.Error("wrapper should upload to correct R2 prefix for output/")
+	}
+}
+
+func TestGenerateAgentWrapper_OutputUpload_CustomDir(t *testing.T) {
+	client := &MockClient{
+		WorkspacePathVal:   "/workspace/",
+		SelfDestructCmdVal: "true",
+	}
+
+	jobs := []AgentJob{{ID: 42, Command: "python train.py", Dir: "/custom/project"}}
+	wrapper := GenerateAgentWrapper(client, jobs, "test-bucket", "123", WrapperOpts{})
+
+	if !strings.Contains(wrapper, `JOB_WORKDIR="/custom/project"`) {
+		t.Error("wrapper should use job-specific Dir for JOB_WORKDIR when set")
+	}
+}
+
 func TestGenerateAgentWrapper_R2Upload(t *testing.T) {
 	client := &MockClient{
 		WorkspacePathVal:   "/workspace/",

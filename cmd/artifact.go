@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/artifacts"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -228,6 +231,12 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
+	// Build R2 client once for cloud job listing (best-effort, nil if unconfigured)
+	var r2Client *r2.Client
+	if cfg, err := config.Load(); err == nil {
+		r2Client, _ = buildR2Client(cfg)
+	}
+
 	var errorsList []string
 	for i, jobID := range jobIDs {
 		if len(jobIDs) > 1 {
@@ -263,7 +272,13 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 		// Also show job-output assets from host_data
 		outputAssets, _ := listJobOutputAssets(database, jobID)
 
-		if len(entries) == 0 && len(outputAssets) == 0 {
+		// For cloud jobs, also list output files from the completion record in the log cache
+		var cloudOutputFiles []runner.OutputFile
+		if job.IsCloudJob() && r2Client != nil {
+			cloudOutputFiles = listCloudJobOutputFiles(r2Client, job)
+		}
+
+		if len(entries) == 0 && len(outputAssets) == 0 && len(cloudOutputFiles) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "No cached artifacts.")
 			continue
 		}
@@ -276,6 +291,9 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 		}
 		for _, a := range outputAssets {
 			fmt.Fprintf(cmd.OutOrStdout(), "output\t%s\t%d\t%s\n", a.Path, a.SizeBytes, a.Host)
+		}
+		for _, f := range cloudOutputFiles {
+			fmt.Fprintf(cmd.OutOrStdout(), "output\t%s\t%d\tcloud\n", f.RelPath, f.SizeBytes)
 		}
 	}
 
@@ -609,7 +627,12 @@ func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry
 }
 
 // syncJobOutputs rsyncs convention-based output directories from a remote host to the local working dir.
+// For cloud jobs, it downloads outputs from R2 instead.
 func syncJobOutputs(job *db.Job) error {
+	if job.IsCloudJob() {
+		return syncCloudJobOutputs(job)
+	}
+
 	if job.Host == "" || job.WorkingDir == "" {
 		return nil
 	}
@@ -648,6 +671,57 @@ func syncJobOutputs(job *db.Job) error {
 
 	totalMB := runner.TotalSizeMB(rec.OutputFiles)
 	return srcsync.SyncOutputsBack(job.Host, job.WorkingDir, localDir, dirs, totalMB, 0)
+}
+
+// syncCloudJobOutputs downloads convention-based outputs from R2 for cloud jobs.
+func syncCloudJobOutputs(job *db.Job) error {
+	localDir := workdir.ResolveLocal(job.WorkingDir)
+	if localDir == "" {
+		return fmt.Errorf("cannot resolve local working directory for job %d", job.ID)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		return fmt.Errorf("create R2 client: %w", err)
+	}
+	if r2Client == nil {
+		return fmt.Errorf("R2 not configured; cannot fetch cloud job outputs")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	prefix := fmt.Sprintf("jobs/%d/outputs/", job.ID)
+	return r2Client.DownloadResults(ctx, prefix, localDir)
+}
+
+// listCloudJobOutputFiles lists output files for a cloud job by checking R2 for the outputs prefix.
+func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFile {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	prefix := fmt.Sprintf("jobs/%d/outputs/", job.ID)
+	files, err := r2Client.ListObjects(ctx, prefix)
+	if err != nil {
+		return nil
+	}
+
+	var result []runner.OutputFile
+	for _, f := range files {
+		relPath := strings.TrimPrefix(f.Key, prefix)
+		if relPath == "" {
+			continue
+		}
+		result = append(result, runner.OutputFile{
+			RelPath:   relPath,
+			SizeBytes: f.SizeBytes,
+		})
+	}
+	return result
 }
 
 // recordJobOutputAssets records discovered output files as job-output assets in the host_data table.
