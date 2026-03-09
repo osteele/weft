@@ -328,6 +328,11 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 // and returns ErrNoEligibleHost if no host matches at all.
 // This encapsulates the common BestReachableHost → BestHostWithPredictor fallback chain.
 func PlaceWithFallback(db *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
+	// Jobs tagged "cloud" skip local placement entirely.
+	if slices.Contains(constraints.Tags, "cloud") {
+		return nil, ErrNoEligibleHost
+	}
+
 	result, err := BestReachableHost(db, constraints, 5*time.Second)
 	if err == nil {
 		return result, nil

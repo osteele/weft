@@ -1415,6 +1415,16 @@ func TestNonBenchmarkTag_IgnoresIdleCheck(t *testing.T) {
 	}
 }
 
+func TestCloudTag_SkipsLocalPlacement(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{"cloud"}}
+
+	_, err := PlaceWithFallback(db, constraints, nil)
+	if !errors.Is(err, ErrNoEligibleHost) {
+		t.Errorf("cloud tag should skip local placement, got err=%v", err)
+	}
+}
+
 func TestDescribeConstraints_IncludesBenchmark(t *testing.T) {
 	desc := DescribeConstraints(Constraints{
 		GPUClass: "a100",

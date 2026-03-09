@@ -368,13 +368,14 @@ Each has `pyproject.toml`, `run.py`, `.venv/`, and `uv.lock`.
 
 ### Step 1: Queue testdata jobs
 
-Use a GPU class that no local host has (e.g., `rtx3060`) so jobs are queued without a host (unplaced):
+Use `--tag cloud` to skip local placement and force jobs to be unplaced (requiring cloud GPU).
+Also specify `--gpu turing+` to require at least a Turing-generation GPU:
 
 ```bash
-weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/basic" 'uv run python run.py'
-weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/ml-tokenizer" 'uv run python run.py'
-weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/ml-inference" 'uv run python run.py'
-weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/fail" 'uv run python run.py'
+weft run --gpu turing+ --tag cloud --tag test-campaign -C "$(pwd)/testdata/campaign/basic" 'uv run python run.py'
+weft run --gpu turing+ --tag cloud --tag test-campaign -C "$(pwd)/testdata/campaign/ml-tokenizer" 'uv run python run.py'
+weft run --gpu turing+ --tag cloud --tag test-campaign -C "$(pwd)/testdata/campaign/ml-inference" 'uv run python run.py'
+weft run --gpu turing+ --tag cloud --tag test-campaign -C "$(pwd)/testdata/campaign/fail" 'uv run python run.py'
 ```
 
 ### Step 2: Preview and launch
