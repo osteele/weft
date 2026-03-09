@@ -785,6 +785,9 @@ func DescribeConstraints(c Constraints) string {
 	if hasBenchmarkTag(c.Tags) {
 		parts = append(parts, "benchmark")
 	}
+	if slices.Contains(c.Tags, db.TagCloud) {
+		parts = append(parts, "cloud")
+	}
 	if c.Command != "" {
 		cmd := c.Command
 		if len(cmd) > 40 {
@@ -882,9 +885,9 @@ func intFromEnvOrDefault(key string, defaultVal int) int {
 	return defaultVal
 }
 
-// hasBenchmarkTag returns true if tags contain "benchmark".
+// hasBenchmarkTag returns true if tags contain the benchmark tag.
 func hasBenchmarkTag(tags []string) bool {
-	return slices.Contains(tags, "benchmark")
+	return slices.Contains(tags, db.TagBenchmark)
 }
 
 // benchmarkIdleCheck returns a non-empty reason string if the host is not idle

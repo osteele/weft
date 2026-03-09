@@ -122,7 +122,13 @@ type PlacementMeta struct {
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, cloud_instance_id`
 
-const ProcessedTag = "processed"
+// Special job tags that affect scheduling and execution behavior.
+const (
+	ProcessedTag = "processed"
+	TagExclusive = "exclusive"
+	TagBenchmark = "benchmark"
+	TagCloud     = "cloud"
+)
 
 const BackendQueueRunner = "queue-runner"
 const BackendSlurm = "slurm"

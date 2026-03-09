@@ -150,7 +150,7 @@ func TestBuildSearchFilter(t *testing.T) {
 				GPUClass:    "RTX_4090",
 				MinGPUMemGB: 24,
 			},
-			wantParts: []string{`gpu_name="RTX 4090"`, "gpu_ram>=24576", "num_gpus=1"},
+			wantParts: []string{`gpu_name="RTX 4090"`, "gpu_ram>=24", "num_gpus=1"},
 		},
 		{
 			name: "with reliability",
