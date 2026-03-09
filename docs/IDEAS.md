@@ -2,12 +2,6 @@
 
 Ideas for future enhancements that are not currently prioritized.
 
-**Already implemented** (kept here for historical reference):
-- Job Tags — `--tag` flag, `weft tag add/rm`, TUI filtering
-- Multi-Host Scheduling — coordinator placement scoring with GPU, data locality, utilization
-- Web UI — cluster dashboard at `/cluster` with host cards, GPU bars, coordinator status
-- Resource-Aware Scheduling — placement engine scores GPU class, memory, utilization
-
 ## Disk Full Recovery
 
 When the disk fills up during job execution, the queue runner can get into an inconsistent state because it can't write state files.
@@ -61,19 +55,20 @@ done
 - What about jobs that only update other files (not stdout/stderr)?
 - Should this be opt-in per job or configurable per host?
 
-## Resource Limits
+## Resource Enforcement via cgroups
 
-Specify CPU, memory, or GPU requirements.
+GPU constraints (`--gpu`, `--gpu-class`, `--gpu-mem`) and CPU allotments are
+already implemented at the scheduling level. This idea is about kernel-level
+enforcement using cgroups to hard-limit CPU, memory, and GPU access per job.
 
 ```bash
-weft run --cpus 4 --mem 16G --gpu 1 titan "train.py"
+weft run --cpus 4 --mem 16G titan "train.py"
 ```
 
 ### Implementation
-- Check available resources before scheduling
-- Use cgroups or similar for enforcement
-- Queue jobs waiting for resources
-- May require host-level resource tracking
+- Use cgroups (v2) to enforce CPU and memory limits per job
+- Integrate with existing CPU allotment system for consistency
+- Prevent runaway jobs from starving other jobs on shared hosts
 
 ## macOS Per-Job Stats
 
@@ -89,16 +84,6 @@ Add per-job CPU/memory/thread stats for macOS hosts in the TUI.
   equivalents to estimate CPU time and thread count.
 - Mirror the Linux fields we already show (CPU%, RSS, threads).
 - Keep the Linux path unchanged; add a macOS branch in `internal/ssh.GetProcessStats`.
-
-## Job Tags
-
-Tag jobs for organization and bulk operations.
-
-```bash
-weft run --tag experiment-v2 --tag ablation titan "run.py"
-weft job list --tag experiment-v2
-weft job kill --tag experiment-v2  # Kill all matching
-```
 
 ## Notification Channels
 
@@ -190,30 +175,6 @@ job:
 - Allow per-job and per-block defaults (e.g., series block waits for available
   GPU before queueing the next job).
 
-## Job Move Command
-
-Add a dedicated `job move` CLI that relocates queued jobs to a different host,
-including when the original host is offline.
-
-```bash
-# Move queued job 42 from titan to atlas
-weft job move 42 atlas
-```
-
-### Requirements
-- Update the job's host in the database immediately.
-- Remove the job from the original host queue (or queue the removal for the
-  next `weft sync` if the host is unreachable).
-- Append the job to the target host's queue with the same metadata/env vars.
-- Validate that the job is still queued and hasn't started.
-- Provide clear user feedback when operations are deferred due to network
-  issues.
-
-### Benefits
-- Lets users rebalance or evacuate queues without logging into the remote host.
-- Keeps queue state consistent even when moving across unstable connections.
-- Builds on the deferred operation model introduced for other host actions.
-
 ## Job Templates
 
 Save common job configurations as templates.
@@ -231,21 +192,6 @@ weft run --template gpu-training titan "train.py --epochs 100"
 - Template includes: working directory, env vars, timeouts, notification settings
 - Allow overriding specific fields
 
-## Multi-Host Scheduling
-
-Automatically select best host based on load, availability, resources.
-
-```bash
-# Run on any host from a group
-weft run --hosts titan,atlas,studio "benchmark.py"
-```
-
-### Implementation
-- Check load average, available resources on each host
-- Score and rank hosts
-- Fall back to next host if first fails
-- May need host groups/pools configuration
-
 ## Job Arrays
 
 Run the same command with different parameters (like SLURM job arrays).
@@ -262,6 +208,64 @@ weft run --array 1-10 titan "process.py --task \$TASK_ID"
 - Processing multiple input files
 - Monte Carlo simulations
 
+## On-Prem Agent (Pull Model)
+
+Deploy `weft-agent` to on-prem hosts as a persistent service, making them
+behave like cloud instances: autonomous, pull-based, and capable of operating
+without the laptop or coordinator online.
+
+### Motivation
+
+The cloud agent already demonstrates a pull model: it polls for work, runs
+jobs, reports status via R2, and handles data fetching autonomously. On-prem
+hosts currently use a push model (laptop SSHes in, appends to queue file, polls
+for status). This asymmetry means several coordinator features exist only
+because the laptop can't be assumed online.
+
+### What This Enables Without a Coordinator
+
+| Capability | Current state | With on-prem agent |
+|---|---|---|
+| **Data pre-staging** | Needs coordinator to transfer data before dispatch | Agent pulls declared `--input` deps itself |
+| **Async submission** | Needs coordinator or laptop online | Write job to shared queue (R2); agent polls and claims work |
+| **Retry on failure** | Coordinator retry drainer, or 60s TUI poll for benchmarks | Job returns to shared queue; any agent can pick it up |
+| **Status without laptop** | Laptop must SSH-poll | Agent reports to R2/shared DB; laptop reads on reconnect |
+| **Offline placement** | Coordinator resolves intent files later | Agents self-select from unplaced jobs matching their capabilities |
+
+### What Still Benefits from a Coordinator
+
+- **Optimal cross-host scheduling** — When multiple jobs compete for
+  heterogeneous hosts with different data already cached, a central authority
+  makes better global placement decisions than agents independently claiming
+  work.
+- **Transfer cost arbitrage** — "Run on atlas because the model is already
+  there" requires knowing state across all hosts simultaneously.
+
+Both are soft optimizations. An agent pull model where agents filter by
+hardware capabilities and prefer jobs whose `--input` data they already have
+gets ~80% of the benefit.
+
+### Implementation Sketch
+
+1. Deploy `weft-agent` as a systemd service on on-prem hosts
+2. Agent periodically queries `ListUnplacedJobs()` (or R2 equivalent),
+   filtered by its own GPU/memory/disk capabilities
+3. Agent claims a job via `AssignJobHost()` (atomic, race-safe)
+4. Agent runs the job, reports status to R2 or shared DB
+5. On failure, agent releases the job back to unplaced
+
+The `needs_rental` → derived unplaced refactor provides the foundation: agents
+query for `status='queued' AND host=''` jobs and claim them.
+
+### Questions
+
+- Should agents use R2 as the job queue (like cloud grace period) or query the
+  SQLite DB directly (requires shared DB access or an API)?
+- How to handle agent upgrades on on-prem hosts? (Cloud instances are
+  ephemeral; on-prem hosts persist.)
+- Should the coordinator become optional, or remain as an optimization layer
+  that agents consult for placement hints?
+
 ## Better Log Management
 
 - Automatic log rotation for long-running jobs
@@ -269,16 +273,3 @@ weft run --array 1-10 titan "process.py --task \$TASK_ID"
 - Stream logs to external storage (S3, etc.)
 - Search across all job logs
 
-## Web UI
-
-Browser-based interface as alternative to TUI.
-
-- View all jobs, hosts, queues
-- Real-time log streaming
-- Start/stop/kill operations
-- Historical charts and analytics
-
-### Technology
-- Go backend with WebSocket for real-time updates
-- Minimal frontend (htmx or similar)
-- Optional feature, not required for core functionality
