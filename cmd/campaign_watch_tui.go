@@ -184,9 +184,9 @@ func (m watchModel) View() string {
 		}
 
 		ci := u.CloudInstance
-		status := ci.Status
+		statusLabel := ci.Status
 		var stStyle lipgloss.Style
-		switch status {
+		switch ci.Status {
 		case db.CloudInstanceStatusCompleted:
 			stStyle = watchCompletedStyle
 		case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
@@ -194,8 +194,11 @@ func (m watchModel) View() string {
 		default:
 			stStyle = watchStatusStyle
 		}
+		if label := ci.GraceStatusLabel(); label != "" {
+			statusLabel = label
+		}
 
-		header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.GPUSpec, stStyle.Render(status))
+		header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), stStyle.Render(statusLabel))
 		b.WriteString(watchTitleStyle.Render(header))
 		b.WriteString("\n")
 
@@ -208,10 +211,6 @@ func (m watchModel) View() string {
 			b.WriteString(instLine + "\n")
 		} else {
 			b.WriteString(fmt.Sprintf("  %s: (provisioning...)\n", ci.Provider))
-		}
-
-		if u.Instance != nil && u.Instance.SSHHost != "" {
-			b.WriteString(fmt.Sprintf("  SSH: %s\n", campaign.FormatSSHCommand(u.Instance)))
 		}
 
 		if u.BootstrapStage != "" {

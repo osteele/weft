@@ -67,6 +67,35 @@ type CloudInstance struct {
 	CUDAVersion      float64
 }
 
+// DisplayGPUSpec returns a human-readable GPU spec string, falling back to
+// GPUClass if GPUSpec is empty, and appending the resolved GPU name if known.
+func (c *CloudInstance) DisplayGPUSpec() string {
+	spec := c.GPUSpec
+	if spec == "" {
+		spec = c.GPUClass
+	}
+	if c.ResolvedGPUName != "" {
+		spec += fmt.Sprintf(" (%s)", c.ResolvedGPUName)
+	}
+	return spec
+}
+
+// GraceStatusLabel returns a human-readable label for the grace period status.
+// Returns empty string if the instance is not in grace status.
+func (c *CloudInstance) GraceStatusLabel() string {
+	if c.Status != CloudInstanceStatusGrace {
+		return ""
+	}
+	if c.GraceDeadline != nil {
+		remaining := time.Until(time.Unix(*c.GraceDeadline, 0)).Truncate(time.Second)
+		if remaining < 0 {
+			return "grace period — expired"
+		}
+		return fmt.Sprintf("grace period — %s remaining", remaining)
+	}
+	return "grace period"
+}
+
 // EffectiveProviderID returns ProviderInstanceID, falling back to VastaiInstanceID for legacy records.
 func (c *CloudInstance) EffectiveProviderID() string {
 	if c.ProviderInstanceID != "" {

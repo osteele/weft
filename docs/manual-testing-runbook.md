@@ -383,8 +383,8 @@ weft run --gpu rtx3060 --tag test-campaign -C "$(pwd)/testdata/campaign/fail" 'u
 # Dry run to check grouping and cost estimate
 weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --dry-run
 
-# Launch (non-interactive, no watch — useful for CI/scripting)
-weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --yes --no-watch
+# Launch with short grace period for faster testing
+weft campaign launch --jobs <ids> --max-spend '$1.00' --max-time 30m --grace-period 2m --yes --no-watch
 ```
 
 ### Step 3: Monitor

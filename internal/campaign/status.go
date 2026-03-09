@@ -176,11 +176,8 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 
 		// Show grace period help when entering grace status
 		if curr.CloudInstance.Status == db.CloudInstanceStatusGrace {
-			if curr.CloudInstance.GraceDeadline != nil {
-				deadline := time.Unix(*curr.CloudInstance.GraceDeadline, 0)
-				remaining := time.Until(deadline).Truncate(time.Second)
-				lines = append(lines, fmt.Sprintf("instance %d: grace period — %s remaining (until %s)",
-					id, remaining, deadline.Format("15:04")))
+			if label := curr.CloudInstance.GraceStatusLabel(); label != "" {
+				lines = append(lines, fmt.Sprintf("instance %d: %s", id, label))
 			}
 			// Show actionable commands for failed jobs
 			for _, j := range curr.Jobs {

@@ -307,9 +307,6 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Print next steps
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  weft campaign watch %d\n", result.CampaignID)
-	for _, id := range result.InstanceIDs {
-		fmt.Printf("  weft instance ssh %d\n", id)
-	}
 
 	// Segue into watch mode
 	if !campaignLaunchNoWatch && term.IsTerminal(os.Stdout.Fd()) {

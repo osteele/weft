@@ -212,11 +212,11 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		gpuSpec := ci.GPUSpec
-		if gpuSpec == "" {
-			gpuSpec = ci.GPUClass
+		statusLabel := ci.Status
+		if label := ci.GraceStatusLabel(); label != "" {
+			statusLabel = label
 		}
-		fmt.Printf("Instance %d — %s — %s\n", ci.ID, gpuSpec, ci.Status)
+		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUSpec(), statusLabel)
 		fmt.Printf("  Provider: %s\n", ci.Provider)
 
 		// Cloud instance info
