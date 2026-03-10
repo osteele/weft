@@ -175,7 +175,8 @@ var editCmd = &cobra.Command{
 Examples:
   weft edit 1595 --depends-on 1599
   weft edit 1595 --command "python eval.py"
-  weft edit 1595 --env FOO=bar --env BAZ=qux`,
+  weft edit 1595 --env FOO=bar --env BAZ=qux
+  weft edit 1595 --input hf:meta-llama/Llama-3-8B`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runEdit,
 }
@@ -210,6 +211,8 @@ var (
 	editStatus          string
 	editRetry           bool
 	editGPUClass        string
+	editInputs          []string
+	editClearInputs     bool
 	queueHost           string // Shared --host flag for queue subcommands
 )
 
@@ -732,10 +735,14 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
+	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
 	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("command") ||
-		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged
+		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || inputsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--command/--directory/--env/--status/--retry/--gpu-class or dependency flags")
+		return usageErrorf("no changes specified; use --message/--command/--directory/--env/--status/--retry/--gpu-class/--input or dependency flags")
+	}
+	if editClearInputs && cmd.Flags().Changed("input") {
+		return fmt.Errorf("cannot combine --input and --clear-inputs")
 	}
 	if queueEditClearDeps && dependsChanged {
 		return fmt.Errorf("cannot combine --clear-depends with --depends-on flags")
@@ -878,6 +885,22 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "GPU class cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("GPU class: %s", editGPUClass))
+		}
+	}
+
+	if inputsChanged {
+		var newInputs []string
+		if !editClearInputs {
+			newInputs = editInputs
+		}
+		if err := db.SetJobInputs(database, jobID, newInputs); err != nil {
+			return fmt.Errorf("update inputs: %w", err)
+		}
+		job.Inputs = newInputs
+		if len(newInputs) == 0 {
+			updates = append(updates, "inputs cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("inputs: %s", strings.Join(newInputs, ", ")))
 		}
 	}
 
@@ -1100,4 +1123,6 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editStatus, "status", "", "Change job status (only 'queued' is allowed, from killed/dead/failed/canceled)")
 	cmd.Flags().BoolVar(&editRetry, "retry", false, "Requeue the job (shorthand for --status=queued)")
 	cmd.Flags().StringVar(&editGPUClass, "gpu-class", "", "GPU class or generation (e.g., a100, ampere, ampere+); '+' means that generation or newer")
+	cmd.Flags().StringSliceVar(&editInputs, "input", nil, "Input data asset (e.g., hf:meta-llama/Llama-3-8B), can be repeated")
+	cmd.Flags().BoolVar(&editClearInputs, "clear-inputs", false, "Remove all input declarations")
 }
