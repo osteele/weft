@@ -362,10 +362,10 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 		AND NOT EXISTS (
 			SELECT 1 FROM cloud_instances ci
 			WHERE ci.id = CAST(SUBSTR(jobs.host, 8) AS INTEGER)
-			AND ci.status IN (?, ?, ?)
+			AND ci.status IN (?, ?, ?, ?)
 		)`,
 		StatusQueued, StatusQueued, StatusRunning,
-		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace,
+		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace, CloudInstanceStatusCompleted,
 	)
 	if err != nil {
 		return 0, err

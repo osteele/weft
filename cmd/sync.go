@@ -389,18 +389,11 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 
 // syncCloudJobResults checks for completed cloud job results in R2.
 // This covers both legacy Vast.ai-backend jobs and campaign-launched queue-runner jobs.
+// Uses per-job DB lookups rather than pre-filtering by cloud_instance_id, so results
+// are synced even if the instance association was cleared by a concurrent reset.
 func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int {
 	if cfg == nil || cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
 		return 0
-	}
-
-	jobs, err := db.ListActiveCloudJobs(database)
-	if err != nil || len(jobs) == 0 {
-		return 0
-	}
-
-	if verbose {
-		fmt.Printf("Checking %d active cloud job(s)...\n", len(jobs))
 	}
 
 	r2Cfg := r2Config(cfg)
@@ -426,18 +419,28 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		return 0
 	}
 
-	// Build lookup of active job IDs
-	activeJobIDs := make(map[string]bool)
-	for _, j := range jobs {
-		activeJobIDs[fmt.Sprintf("%d", j.ID)] = true
+	if verbose && (len(markers.Completed) > 0 || len(markers.Started) > 0) {
+		fmt.Printf("Checking %d completed + %d started cloud job marker(s)...\n",
+			len(markers.Completed), len(markers.Started))
 	}
 
+	// Track jobs processed as completed so the started-markers loop skips them.
+	completedJobIDs := make(map[int64]bool, len(markers.Completed))
+
 	for _, jobIDStr := range markers.Completed {
-		if !activeJobIDs[jobIDStr] {
+		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
+		if jobID == 0 {
 			continue
 		}
 
-		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
+		// Check current job status directly — skip if already terminal
+		var currentStatus string
+		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus); err != nil || db.IsTerminalStatus(currentStatus) {
+			// Job not found or already terminal — clean up stale R2 markers
+			_ = r2Client.DeletePrefix(ctx, r2keys.JobPrefix(jobID)+"/")
+			continue
+		}
+
 		prefix := r2keys.JobPrefix(jobID)
 
 		// Download results to temp dir
@@ -477,6 +480,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 		updated++
+		completedJobIDs[jobID] = true
 
 		// Extract and store phase timing data
 		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
@@ -499,14 +503,14 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 	// Check for .started markers to transition queued jobs to running
 	for _, jobIDStr := range markers.Started {
-		if !activeJobIDs[jobIDStr] {
+		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
+		if jobID == 0 || completedJobIDs[jobID] {
 			continue
 		}
-		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
 
 		// Only update jobs still in queued status
 		var currentStatus string
-		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ?", jobID).Scan(&currentStatus); err != nil {
+		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus); err != nil {
 			continue
 		}
 		if currentStatus != db.StatusQueued {

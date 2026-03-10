@@ -211,10 +211,10 @@ func reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2
 			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
 				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
 			}
-			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-			} else if resetCount > 0 {
-				log.Printf("reconcile: reset %d jobs from completed instance %d to unplaced", resetCount, ci.ID)
+			// Don't reset jobs — leave them for syncCloudJobResults to update from R2.
+			// Just close the attempt records.
+			if err := db.CloseJobCloudAttemptsByInstance(database, ci.ID, db.AttemptOutcomeCompleted); err != nil {
+				log.Printf("reconcile: close attempts for instance %d: %v", ci.ID, err)
 			}
 			return true
 		}

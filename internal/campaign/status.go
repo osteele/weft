@@ -102,9 +102,15 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				// Skip grace-period instances — they legitimately keep the provider
 				// alive, and a transient API failure shouldn't kill the grace session.
 				if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
-					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
-					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
-					ci.Status = db.CloudInstanceStatusFailed
+					if r2c != nil && hasR2CompletionMarker(r2c, cloudInstanceID) {
+						_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
+						_ = db.CloseJobCloudAttemptsByInstance(database, cloudInstanceID, db.AttemptOutcomeCompleted)
+						ci.Status = db.CloudInstanceStatusCompleted
+					} else {
+						_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
+						_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
+						ci.Status = db.CloudInstanceStatusFailed
+					}
 				}
 			}
 

@@ -62,6 +62,15 @@ type watchUpdateMsg struct {
 // watchSyncTickMsg triggers periodic cloud job result syncing.
 type watchSyncTickMsg struct{}
 
+// watchSyncDoneMsg is sent after syncCloudJobResults completes,
+// triggering a background re-read of jobs from DB for terminated instances.
+type watchSyncDoneMsg struct{}
+
+// watchJobsRefreshedMsg carries refreshed job lists from a background DB query.
+type watchJobsRefreshedMsg struct {
+	jobs map[int64][]*db.Job
+}
+
 // watchCheckDoneMsg triggers a periodic DB-based check for all-terminal state.
 type watchCheckDoneMsg struct{}
 
@@ -161,10 +170,42 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					campaign.ReconcileCloudInstances(m.database, clients, r2Client)
 				}
 				syncCloudJobResults(cfg, m.database, false)
-				return nil
+				return watchSyncDoneMsg{}
 			},
 			scheduleSyncTick(),
 		)
+
+	case watchSyncDoneMsg:
+		// Re-read jobs from DB for terminated instances in a background goroutine
+		// to avoid blocking the UI thread with DB queries.
+		terminalIDs := make([]int64, 0)
+		for _, id := range m.instanceIDs {
+			u, ok := m.updates[id]
+			if ok && u.CloudInstance != nil && campaign.IsInstanceTerminal(u.CloudInstance.Status) {
+				terminalIDs = append(terminalIDs, id)
+			}
+		}
+		if len(terminalIDs) == 0 {
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			result := make(map[int64][]*db.Job, len(terminalIDs))
+			for _, id := range terminalIDs {
+				if jobs, err := db.GetCloudInstanceJobsIncludingAttempts(m.database, id); err == nil && jobs != nil {
+					result[id] = jobs
+				}
+			}
+			return watchJobsRefreshedMsg{jobs: result}
+		}
+
+	case watchJobsRefreshedMsg:
+		for id, jobs := range msg.jobs {
+			if u, ok := m.updates[id]; ok {
+				u.Jobs = jobs
+				m.updates[id] = u
+			}
+		}
+		return m, nil
 
 	case watchCheckDoneMsg:
 		if m.done {
@@ -379,12 +420,10 @@ func (m watchModel) View() string {
 		}
 	}
 
-	if m.done {
-		b.WriteString(watchDimStyle.Render("All instances finished. Exiting..."))
-	} else {
-		b.WriteString(watchDimStyle.Render("ctrl-c to exit (instances continue in background)"))
+	if !m.done {
+		b.WriteString(watchDimStyle.Render("q to quit (instances continue in background)"))
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
 
 	return b.String()
 }
