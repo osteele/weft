@@ -1,6 +1,7 @@
 package vastai
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +14,9 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 )
+
+// cliTimeout is the maximum time to wait for a vastai CLI command to complete.
+const cliTimeout = 30 * time.Second
 
 // VastaiClient is the interface for interacting with the Vast.ai API.
 type VastaiClient interface {
@@ -46,7 +50,9 @@ func (c *Client) Available() error {
 		return fmt.Errorf("vastai CLI not found in PATH (install: pip install vastai)")
 	}
 	// Quick auth check: "vastai show user" fails if not authenticated
-	cmd := exec.Command(path, "show", "user", "--raw")
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "show", "user", "--raw")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("vastai CLI not authenticated: %s", strings.TrimSpace(string(out)))
@@ -221,7 +227,9 @@ func (c *Client) CopyBetweenInstances(srcInstanceID int, srcPath string, dstInst
 
 // run executes a vastai CLI command and returns stdout.
 func (c *Client) run(args ...string) ([]byte, error) {
-	cmd := exec.Command(c.CLIPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.CLIPath, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {

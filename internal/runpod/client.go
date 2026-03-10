@@ -1,6 +1,7 @@
 package runpod
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -9,6 +10,9 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 )
+
+// cliTimeout is the maximum time to wait for a runpodctl CLI command to complete.
+const cliTimeout = 30 * time.Second
 
 // CloudClient implements cloud.Client via the runpodctl CLI.
 type CloudClient struct {
@@ -32,7 +36,9 @@ func (c *CloudClient) Available() error {
 		return fmt.Errorf("runpodctl not found in PATH (install: https://docs.runpod.io/cli/install)")
 	}
 	// Quick check: runpodctl version
-	cmd := exec.Command(path, "version")
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "version")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("runpodctl check failed: %s", strings.TrimSpace(string(out)))
 	}
@@ -175,7 +181,9 @@ func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
 }
 
 func (c *CloudClient) run(args ...string) ([]byte, error) {
-	cmd := exec.Command(c.cliPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, c.cliPath, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
