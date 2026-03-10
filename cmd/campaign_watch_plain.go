@@ -38,7 +38,7 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 		cancel()
 	}()
 
-	// Periodic cloud job result sync (every 15s)
+	// Periodic cloud instance reconciliation and job result sync (every 15s)
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
@@ -48,6 +48,11 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 				return
 			case <-ticker.C:
 				cfg, _ := config.Load()
+				clients := buildCloudClients(cfg)
+				r2Client, _ := buildR2Client(cfg)
+				if len(clients) > 0 {
+					campaign.ReconcileCloudInstances(database, clients, r2Client)
+				}
 				syncCloudJobResults(cfg, database, false)
 			}
 		}

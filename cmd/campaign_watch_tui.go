@@ -62,6 +62,12 @@ type watchUpdateMsg struct {
 // watchSyncTickMsg triggers periodic cloud job result syncing.
 type watchSyncTickMsg struct{}
 
+// watchCheckDoneMsg triggers a periodic DB-based check for all-terminal state.
+type watchCheckDoneMsg struct{}
+
+// watchCheckDoneResultMsg carries the result of a background DB terminal check.
+type watchCheckDoneResultMsg struct{ allTerminal bool }
+
 func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) watchModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -110,8 +116,9 @@ func (m watchModel) Init() tea.Cmd {
 		cmds = append(cmds, waitForUpdate(id, ch))
 	}
 
-	// Start periodic cloud job sync
+	// Start periodic cloud job sync and DB-based done check
 	cmds = append(cmds, scheduleSyncTick())
+	cmds = append(cmds, scheduleCheckDone())
 
 	return tea.Batch(cmds...)
 }
@@ -144,15 +151,45 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForUpdate(msg.instanceID, ch)
 
 	case watchSyncTickMsg:
-		// Sync cloud job results from R2 without blocking the UI
+		// Reconcile cloud instances and sync job results without blocking the UI
 		return m, tea.Batch(
 			func() tea.Msg {
 				cfg, _ := config.Load()
+				clients := buildCloudClients(cfg)
+				r2Client, _ := buildR2Client(cfg)
+				if len(clients) > 0 {
+					campaign.ReconcileCloudInstances(m.database, clients, r2Client)
+				}
 				syncCloudJobResults(cfg, m.database, false)
 				return nil
 			},
 			scheduleSyncTick(),
 		)
+
+	case watchCheckDoneMsg:
+		if m.done {
+			return m, nil
+		}
+		// Run DB queries in background to avoid blocking the UI
+		return m, func() tea.Msg {
+			for _, id := range m.instanceIDs {
+				ci, err := db.GetCloudInstance(m.database, id)
+				if err != nil || ci == nil || !campaign.IsInstanceTerminal(ci.Status) {
+					return watchCheckDoneResultMsg{allTerminal: false}
+				}
+			}
+			return watchCheckDoneResultMsg{allTerminal: true}
+		}
+
+	case watchCheckDoneResultMsg:
+		if msg.allTerminal {
+			m.done = true
+			m.cancel()
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+				return tea.QuitMsg{}
+			})
+		}
+		return m, scheduleCheckDone()
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -342,7 +379,11 @@ func (m watchModel) View() string {
 		}
 	}
 
-	b.WriteString(watchDimStyle.Render("ctrl-c to exit (instances continue in background)"))
+	if m.done {
+		b.WriteString(watchDimStyle.Render("All instances finished. Exiting..."))
+	} else {
+		b.WriteString(watchDimStyle.Render("ctrl-c to exit (instances continue in background)"))
+	}
 	b.WriteString("\n")
 
 	return b.String()
@@ -352,6 +393,13 @@ func (m watchModel) View() string {
 func scheduleSyncTick() tea.Cmd {
 	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
 		return watchSyncTickMsg{}
+	})
+}
+
+// scheduleCheckDone returns a command that fires a done-check after 5 seconds.
+func scheduleCheckDone() tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+		return watchCheckDoneMsg{}
 	})
 }
 
