@@ -65,6 +65,9 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 	if opts.DiskGB > 0 {
 		args = append(args, "--volumeSize", fmt.Sprintf("%d", opts.DiskGB))
 	}
+	if opts.Label != "" {
+		args = append(args, "--name", opts.Label)
+	}
 
 	out, err := c.run(args...)
 	if err != nil {
@@ -78,6 +81,32 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		Provider:   cloud.ProviderRunpod,
 		Status:     "creating",
 	}, nil
+}
+
+func (c *CloudClient) ListAllInstances() ([]cloud.Instance, error) {
+	out, err := c.run("get", "pod")
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	var pods []Pod
+	if err := json.Unmarshal(out, &pods); err != nil {
+		return nil, fmt.Errorf("parse pods: %w", err)
+	}
+
+	result := make([]cloud.Instance, len(pods))
+	for i, pod := range pods {
+		result[i] = cloud.Instance{
+			ProviderID:  pod.ID,
+			Provider:    cloud.ProviderRunpod,
+			Status:      strings.ToLower(pod.Status),
+			SSHHost:     pod.SSHHost,
+			SSHPort:     pod.SSHPort,
+			CostPerHour: pod.CostPerHour,
+			Label:       pod.Name,
+		}
+	}
+	return result, nil
 }
 
 func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {

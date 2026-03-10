@@ -9,6 +9,7 @@ type MockClient struct {
 	SearchOffersFunc         func(OfferConstraints) ([]Offer, error)
 	CreateInstanceFunc       func(string, CreateOpts) (*Instance, error)
 	ShowInstanceFunc         func(string) (*Instance, error)
+	ListAllInstancesFunc     func() ([]Instance, error)
 	WaitReadyFunc            func(string, time.Duration) (*Instance, error)
 	DestroyInstanceFunc      func(string) error
 	CopyBetweenInstancesFunc func(string, string, string, string) error
@@ -49,6 +50,13 @@ func (m *MockClient) CreateInstance(offerID string, opts CreateOpts) (*Instance,
 func (m *MockClient) ShowInstance(instanceID string) (*Instance, error) {
 	if m.ShowInstanceFunc != nil {
 		return m.ShowInstanceFunc(instanceID)
+	}
+	return nil, nil
+}
+
+func (m *MockClient) ListAllInstances() ([]Instance, error) {
+	if m.ListAllInstancesFunc != nil {
+		return m.ListAllInstancesFunc()
 	}
 	return nil, nil
 }

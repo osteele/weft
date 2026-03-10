@@ -27,6 +27,7 @@ type Instance struct {
 	SSHHost     string  `json:"ssh_host"`
 	SSHPort     int     `json:"ssh_port"`
 	CostPerHour float64 `json:"dph_total"`
+	Label       string  `json:"label"`
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.
@@ -49,4 +50,5 @@ type CreateOpts struct {
 	SSHEnabled bool              // enable SSH access
 	OnStartCmd string            // command to run on instance start
 	EnvVars    map[string]string // environment variables passed via --env flag
+	Label      string            // instance label visible in Vast.ai dashboard
 }

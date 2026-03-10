@@ -44,6 +44,7 @@ type Instance struct {
 	SSHPort     int
 	CostPerHour float64
 	DataCenter  string
+	Label       string // provider-assigned label/name (e.g., "weft/c42")
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.
@@ -67,6 +68,7 @@ type CreateOpts struct {
 	SSHEnabled bool              // enable SSH access
 	OnStartCmd string            // command to run on instance start
 	EnvVars    map[string]string // environment variables passed via provider's env mechanism
+	Label      string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
 }
 
 // R2Config holds Cloudflare R2 credentials for instance-side uploads.

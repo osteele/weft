@@ -20,6 +20,7 @@ type VastaiClient interface {
 	SearchOffers(constraints OfferConstraints) ([]Offer, error)
 	CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 	ShowInstance(instanceID int) (*Instance, error)
+	ListAllInstances() ([]Instance, error)
 	WaitReady(instanceID int, timeout time.Duration) (*Instance, error)
 	DestroyInstance(instanceID int) error
 	CopyBetweenInstances(srcInstanceID int, srcPath string, dstInstanceID int, dstPath string) error
@@ -100,6 +101,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 	if opts.OnStartCmd != "" {
 		args = append(args, "--onstart-cmd", opts.OnStartCmd)
 	}
+	if opts.Label != "" {
+		args = append(args, "--label", opts.Label)
+	}
 	if len(opts.EnvVars) > 0 {
 		var parts []string
 		for _, k := range slices.Sorted(maps.Keys(opts.EnvVars)) {
@@ -147,6 +151,20 @@ func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
 		}
 	}
 	return nil, fmt.Errorf("instance %d: %w", instanceID, cloud.ErrInstanceNotFound)
+}
+
+// ListAllInstances returns all instances from the user's Vast.ai account.
+func (c *Client) ListAllInstances() ([]Instance, error) {
+	out, err := c.run("show", "instances", "--raw")
+	if err != nil {
+		return nil, fmt.Errorf("show instances: %w", err)
+	}
+
+	var instances []Instance
+	if err := json.Unmarshal(out, &instances); err != nil {
+		return nil, fmt.Errorf("parse instances: %w", err)
+	}
+	return instances, nil
 }
 
 // WaitReady polls until an instance reaches "running" status or the timeout expires.

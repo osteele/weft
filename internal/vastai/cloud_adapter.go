@@ -62,12 +62,25 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		SSHEnabled: opts.SSHEnabled,
 		OnStartCmd: opts.OnStartCmd,
 		EnvVars:    opts.EnvVars,
+		Label:      opts.Label,
 	}
 	inst, err := c.inner.CreateInstance(id, vopts)
 	if err != nil {
 		return nil, err
 	}
 	return instanceToCloud(inst), nil
+}
+
+func (c *CloudClient) ListAllInstances() ([]cloud.Instance, error) {
+	instances, err := c.inner.ListAllInstances()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]cloud.Instance, len(instances))
+	for i, inst := range instances {
+		result[i] = *instanceToCloud(&inst)
+	}
+	return result, nil
 }
 
 func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {
@@ -184,5 +197,6 @@ func instanceToCloud(inst *Instance) *cloud.Instance {
 		SSHHost:     inst.SSHHost,
 		SSHPort:     inst.SSHPort,
 		CostPerHour: inst.CostPerHour,
+		Label:       inst.Label,
 	}
 }

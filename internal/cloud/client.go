@@ -30,6 +30,9 @@ type Client interface {
 	// WaitReady polls until an instance reaches "running" status or the timeout expires.
 	WaitReady(instanceID string, timeout time.Duration) (*Instance, error)
 
+	// ListAllInstances returns all instances from the provider (for orphan detection).
+	ListAllInstances() ([]Instance, error)
+
 	// DestroyInstance tears down an instance.
 	DestroyInstance(instanceID string) error
 
