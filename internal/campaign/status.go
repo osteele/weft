@@ -87,7 +87,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
-			jobs, _ := db.GetCloudInstanceJobs(database, cloudInstanceID)
+			jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 
 			// Refresh cloud instance info periodically
 			providerInstID := ci.EffectiveProviderID()
@@ -388,6 +388,9 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 
 	if prev.CloudInstance == nil || prev.CloudInstance.Status != curr.CloudInstance.Status {
 		line := fmt.Sprintf("instance %d: status=%s", id, curr.CloudInstance.Status)
+		if reason := curr.CloudInstance.TerminationReason; reason != "" && reason != db.TerminationReasonCompleted {
+			line += fmt.Sprintf(" (%s)", reason)
+		}
 		providerInstID := curr.CloudInstance.EffectiveProviderID()
 		if providerInstID != "" {
 			line += fmt.Sprintf(" provider_id=%s", providerInstID)

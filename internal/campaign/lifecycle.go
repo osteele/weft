@@ -154,9 +154,17 @@ func LaunchCampaign(
 		return nil, sourceErr
 	}
 
+	// Compute total estimated cost from estimates
+	var estimatedCostCents int
+	if estimates != nil {
+		totalCost := TotalEstimatedCostFromEstimates(estimates)
+		estimatedCostCents = int(totalCost * 100)
+	}
+
 	// Create campaign batch record
 	campaignRec := &db.Campaign{
-		Status: db.CampaignStatusLaunching,
+		Status:             db.CampaignStatusLaunching,
+		EstimatedCostCents: estimatedCostCents,
 	}
 	campaignID, err := db.CreateCampaign(database, campaignRec)
 	if err != nil {
@@ -259,6 +267,7 @@ func LaunchCampaign(
 					}
 					donorCreateOpts.EnvVars = donorEnvVars
 					donorCreateOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
+					donorCreateOpts.Label = fmt.Sprintf("weft/c%d", campaignID)
 
 					inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 					if createErr != nil {
@@ -549,6 +558,11 @@ func LaunchInstance(
 
 	// Set onstart command to bootstrap from R2
 	createOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
+
+	// Set instance label for provider dashboard visibility
+	if campaignID != nil {
+		createOpts.Label = fmt.Sprintf("weft/c%d", *campaignID)
+	}
 
 	// Create cloud instance
 	progress("creating instance")

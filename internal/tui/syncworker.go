@@ -146,6 +146,9 @@ func (w *SyncWorker) run() {
 	benchTicker := time.NewTicker(60 * time.Second)
 	defer benchTicker.Stop()
 
+	cloudReconcileTicker := time.NewTicker(10 * time.Second)
+	defer cloudReconcileTicker.Stop()
+
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -159,6 +162,9 @@ func (w *SyncWorker) run() {
 
 		case <-benchTicker.C:
 			w.checkUnplacedJobs()
+
+		case <-cloudReconcileTicker.C:
+			w.reconcileCloudJobs()
 		}
 	}
 }
@@ -203,6 +209,22 @@ func (w *SyncWorker) checkUnplacedJobs() {
 			case w.results <- SyncResult{Host: result.Host, Updated: 1}:
 			default:
 			}
+		}
+	}
+}
+
+// reconcileCloudJobs resets jobs stranded on terminal cloud instances.
+func (w *SyncWorker) reconcileCloudJobs() {
+	n, err := db.ResetJobsOnTerminalCloudInstances(w.database)
+	if err != nil {
+		log.Printf("cloud reconcile: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("cloud reconcile: reset %d job(s) on terminal instances", n)
+		select {
+		case w.results <- SyncResult{Updated: int(n)}:
+		default:
 		}
 	}
 }
