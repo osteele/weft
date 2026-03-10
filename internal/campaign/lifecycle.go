@@ -74,28 +74,15 @@ type LaunchResult struct {
 	Errors      []error
 }
 
-// LaunchCampaign creates a campaign record and launches instances for each group
-// in parallel. It collects results and updates the campaign status.
-// The onPhase callback, if non-nil, is called with progress updates per group.
-func LaunchCampaign(
-	clients []cloud.Client,
-	database *sql.DB,
-	groups []InstanceGroup,
-	offers []cloud.Offer, // parallel to groups
-	estimates []CostEstimate, // parallel to groups; may be nil
-	opts LaunchOpts,
-	r2Cfg cloud.R2Config,
-	createOpts cloud.CreateOpts,
-	onPhase func(group InstanceGroup, phase string),
-	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
-) (*LaunchResult, error) {
-	// Resolve agent version once for all instances
+// PrepareR2Assets uploads the agent binary and source tarballs to R2,
+// returning the pre-staged assets for use by LaunchInstance. This is
+// extracted from LaunchCampaign so that RelaunchOrphanedJobs can reuse it.
+func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, error) {
 	agentVersion, err := agentdeploy.LocalAgentVersion()
 	if err != nil {
 		return nil, fmt.Errorf("local agent version: %w", err)
 	}
 
-	// Create R2 client for pre-staging
 	r2Client, err := r2.New(r2.Config{
 		AccountID:       r2Cfg.AccountID,
 		AccessKeyID:     r2Cfg.AccessKeyID,
@@ -106,9 +93,6 @@ func LaunchCampaign(
 		return nil, fmt.Errorf("create R2 client: %w", err)
 	}
 
-	// Pre-stage agent binary to R2 (shared across all instances).
-	// Use a generous timeout (10 min) since the agent binary is ~50-100MB
-	// and uploads may be slow on constrained networks.
 	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer uploadCancel()
 
@@ -134,7 +118,7 @@ func LaunchCampaign(
 		return nil, fmt.Errorf("upload agent to R2: %w", err)
 	}
 
-	r2Assets := R2Assets{
+	assets := &R2Assets{
 		Client:       r2Client,
 		AgentVersion: agentVersion,
 		AgentR2Key:   agentR2Key,
@@ -142,7 +126,6 @@ func LaunchCampaign(
 	}
 
 	// Pre-stage source tarballs to R2 (content-addressed, deduplicated)
-	// Collect all unique source dirs across groups and upload once.
 	var sourceMu sync.Mutex
 	var sourceWg sync.WaitGroup
 	var sourceErr error
@@ -167,12 +150,35 @@ func LaunchCampaign(
 				}
 				return
 			}
-			r2Assets.SourceR2Keys[localDir] = key
+			assets.SourceR2Keys[localDir] = key
 		}()
 	}
 	sourceWg.Wait()
 	if sourceErr != nil {
 		return nil, sourceErr
+	}
+
+	return assets, nil
+}
+
+// LaunchCampaign creates a campaign record and launches instances for each group
+// in parallel. It collects results and updates the campaign status.
+// The onPhase callback, if non-nil, is called with progress updates per group.
+func LaunchCampaign(
+	clients []cloud.Client,
+	database *sql.DB,
+	groups []InstanceGroup,
+	offers []cloud.Offer, // parallel to groups
+	estimates []CostEstimate, // parallel to groups; may be nil
+	opts LaunchOpts,
+	r2Cfg cloud.R2Config,
+	createOpts cloud.CreateOpts,
+	onPhase func(group InstanceGroup, phase string),
+	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
+) (*LaunchResult, error) {
+	r2Assets, err := PrepareR2Assets(r2Cfg, groups)
+	if err != nil {
+		return nil, err
 	}
 
 	// Compute total estimated cost from estimates
@@ -344,7 +350,7 @@ func LaunchCampaign(
 
 			cID, err := LaunchInstance(
 				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-				r2Assets, progress,
+				*r2Assets, progress,
 			)
 
 			mu.Lock()

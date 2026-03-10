@@ -240,15 +240,15 @@ func (w *SyncWorker) reconcileCloudJobs() {
 		return
 	}
 
-	n, err := campaign.ReconcileCloudInstances(w.database, w.cloudClients, w.r2Client)
+	result, err := campaign.ReconcileCloudInstances(w.database, w.cloudClients, w.r2Client)
 	if err != nil {
 		log.Printf("cloud reconcile: %v", err)
 		return
 	}
-	if n > 0 {
-		log.Printf("cloud reconcile: reconciled %d dead instance(s)", n)
+	if result.Reconciled > 0 {
+		log.Printf("cloud reconcile: reconciled %d dead instance(s)", result.Reconciled)
 		select {
-		case w.results <- SyncResult{Updated: int(n)}:
+		case w.results <- SyncResult{Updated: result.Reconciled}:
 		default:
 		}
 	}

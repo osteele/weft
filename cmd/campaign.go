@@ -689,10 +689,10 @@ func reconcileBeforeDisplay(database *sql.DB) {
 	if clients := buildCloudClients(cfg); len(clients) > 0 {
 		// Build R2 client for completion detection (nil if unconfigured)
 		r2Client, _ := buildR2Client(cfg)
-		if n, err := campaign.ReconcileCloudInstances(database, clients, r2Client); err != nil {
+		if result, err := campaign.ReconcileCloudInstances(database, clients, r2Client); err != nil {
 			log.Printf("reconcile: %v", err)
-		} else if n > 0 {
-			fmt.Printf("Reconciled %d dead instance(s)\n", n)
+		} else if result.Reconciled > 0 {
+			fmt.Printf("Reconciled %d dead instance(s)\n", result.Reconciled)
 		}
 	}
 	// Sync cloud job results from R2 (completed/failed markers)

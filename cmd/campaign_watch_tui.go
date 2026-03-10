@@ -183,7 +183,24 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				clients := buildCloudClients(cfg)
 				r2Client, _ := buildR2Client(cfg)
 				if len(clients) > 0 {
-					campaign.ReconcileCloudInstances(m.database, clients, r2Client)
+					result, _ := campaign.ReconcileCloudInstances(m.database, clients, r2Client)
+					if result != nil && len(result.TerminatedInstances) > 0 {
+						// Trigger relaunch in background
+						go func() {
+							relaunchCfg := campaign.RelaunchConfig{
+								Clients:    clients,
+								R2Cfg:      cfg.Vastai.R2.ToCloudR2Config(),
+								CreateOpts: cloud.CreateOpts{},
+								LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
+								Database:   m.database,
+							}
+							if rr, err := campaign.RelaunchOrphanedJobs(relaunchCfg); err != nil {
+								log.Printf("relaunch: %v", err)
+							} else if rr != nil && len(rr.InstanceIDs) > 0 {
+								log.Printf("relaunch: launched %d new instances", len(rr.InstanceIDs))
+							}
+						}()
+					}
 				}
 				syncCloudJobResults(cfg, m.database, false)
 				return watchSyncDoneMsg{}

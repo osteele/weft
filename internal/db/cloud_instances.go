@@ -616,6 +616,13 @@ func CloseJobCloudAttemptsByInstance(database *sql.DB, instanceID int64, outcome
 	return err
 }
 
+// CountJobCloudAttempts returns the number of cloud attempts for a job.
+func CountJobCloudAttempts(database *sql.DB, jobID int64) (int, error) {
+	var count int
+	err := database.QueryRow(`SELECT COUNT(*) FROM job_cloud_attempts WHERE job_id = ?`, jobID).Scan(&count)
+	return count, err
+}
+
 // GetJobCloudAttempts returns the attempt history for a job, ordered by start time.
 func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, error) {
 	rows, err := database.Query(

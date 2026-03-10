@@ -44,12 +44,12 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Reconcile
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("reconciled = %d, want 1", n)
+	if result.Reconciled != 1 {
+		t.Errorf("reconciled = %d, want 1", result.Reconciled)
 	}
 
 	// Verify instance is now failed
@@ -106,12 +106,12 @@ func TestReconcileCloudInstances_GraceDetection(t *testing.T) {
 	}
 
 	// With nil r2Client, grace detection is skipped — no reconciliation
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("reconciled = %d, want 0 (nil r2Client)", n)
+	if result.Reconciled != 0 {
+		t.Errorf("reconciled = %d, want 0 (nil r2Client)", result.Reconciled)
 	}
 
 	// Instance should still be running
@@ -150,12 +150,12 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 
 	// Reconcile — nothing should change
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("reconciled = %d, want 0", n)
+	if result.Reconciled != 0 {
+		t.Errorf("reconciled = %d, want 0", result.Reconciled)
 	}
 }
 
@@ -191,12 +191,12 @@ func TestReconcileCloudInstances_GraceExpiry_DestroysProvider(t *testing.T) {
 		},
 	}
 
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("reconciled = %d, want 1", n)
+	if result.Reconciled != 1 {
+		t.Errorf("reconciled = %d, want 1", result.Reconciled)
 	}
 
 	// Verify DestroyInstance was called with the correct provider ID
@@ -250,12 +250,12 @@ func TestReconcileCloudInstances_SafetyNet_DestroysLeakedInstance(t *testing.T) 
 
 	// Reconcile — the main loop won't see this instance (it's already failed),
 	// but the safety-net pass should catch and destroy it.
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("reconciled = %d, want 1 (safety-net destroy)", n)
+	if result.Reconciled != 1 {
+		t.Errorf("reconciled = %d, want 1 (safety-net destroy)", result.Reconciled)
 	}
 	if destroyedID != "leaked-123" {
 		t.Errorf("DestroyInstance called with %q, want %q", destroyedID, "leaked-123")
@@ -295,12 +295,12 @@ func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 		},
 	}
 
-	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("reconciled = %d, want 0 (already destroyed)", n)
+	if result.Reconciled != 0 {
+		t.Errorf("reconciled = %d, want 0 (already destroyed)", result.Reconciled)
 	}
 	if destroyCalled {
 		t.Error("DestroyInstance should not be called for already-destroyed instances")
