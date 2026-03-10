@@ -16,7 +16,6 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
@@ -122,85 +121,17 @@ func runCampaign(args []string) {
 	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, currentPhase.Get)
 	defer stopHeartbeat()
 
-	for i, job := range manifest.Jobs {
-		// Check time budget
-		if maxTime > 0 {
-			elapsed := time.Since(startTime)
-			remaining := maxTime - elapsed
-			if remaining <= 0 {
-				fmt.Println("Instance time budget exhausted, skipping remaining jobs")
-				break
-			}
-		}
-
-		fmt.Printf("--- Job %d ---\n", job.ID)
-
-		// Write .started marker to R2
-		r2Put(r2Bucket, r2keys.JobStarted(job.ID), fmt.Sprintf("%d", time.Now().Unix()))
-
-		workDir := job.Dir
-		if workDir == "" {
-			workDir = workspace
-		}
-
-		// Compute per-job max time from remaining budget
-		var jobMaxTime time.Duration
-		if maxTime > 0 {
-			jobMaxTime = maxTime - time.Since(startTime)
-		}
-
-		cfg := runner.SingleJobConfig{
-			JobID: job.ID,
-			Job: ops.CommandJob{
-				Cmd: job.Command,
-			},
-			LogDir:     logDir,
-			WorkingDir: workDir,
-			MaxTime:    jobMaxTime,
-			OnPhase: func(phase string) {
-				full := fmt.Sprintf("%s:%d", phase, job.ID)
-				currentPhase.Set(full)
-				writePhase(r2Bucket, phaseKey, full)
-			},
-		}
-
-		ei, err := runJobWithProgress(r2Bucket, job.ID, logDir, cfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
-			anyFailed = true
-		} else if ei.ExitCode != 0 {
-			fmt.Printf("Job %d failed (exit %d)\n", job.ID, ei.ExitCode)
-			anyFailed = true
-		} else {
-			fmt.Printf("Job %d completed successfully\n", job.ID)
-		}
-
-		uploadPhase := fmt.Sprintf("uploading:%d", job.ID)
-		currentPhase.Set(uploadPhase)
-		writePhase(r2Bucket, phaseKey, uploadPhase)
-
-		// Upload output directories
-		uploadOutputDirs(r2Bucket, job.ID, workDir)
-
-		// Upload per-job results
-		uploadJobResults(r2Bucket, job.ID, logDir)
-
-		// Promote uv manifest
-		promoteUVManifest(r2Bucket, logDir)
-
-		// Upload opslog checkpoint and clean log dir for next job
-		uploadOpslog(r2Bucket, instanceIDInt, logDir)
-		if i < len(manifest.Jobs)-1 {
-			cleanLogDir(logDir)
-			oplog.Init(filepath.Join(logDir, agentOpslogFile), 0)
-		}
-
-		// Check for newly submitted jobs via R2 (between-job reuse)
-		if newJobs := checkForNewJobs(r2Bucket, instanceIDInt); len(newJobs) > 0 {
-			fmt.Printf("Picked up %d new job(s) from R2\n", len(newJobs))
-			manifest.Jobs = append(manifest.Jobs, newJobs...)
-		}
-	}
+	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
+		R2Bucket:   r2Bucket,
+		InstanceID: instanceIDInt,
+		PhaseKey:   phaseKey,
+		LogDir:     logDir,
+		Workspace:  workspace,
+		MaxTime:    maxTime,
+		StartTime:  startTime,
+		OnPhase:    currentPhase.Set,
+	})
+	anyFailed = seqResult.AnyFailed
 
 	// Grace period or self-destruct
 	if anyFailed && gracePeriod > 0 {

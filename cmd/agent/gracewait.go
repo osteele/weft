@@ -13,9 +13,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2keys"
-	"github.com/osteele/weft/internal/runner"
 )
 
 // graceStatus is written to R2 as grace/<instanceID>/status.
@@ -190,47 +188,16 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			Deadline: deadline.Format(time.RFC3339),
 		})
 
-		// Run resubmitted jobs
-		var failedJobs []int64
-		for _, job := range payload.Jobs {
-			fmt.Printf("Running resubmitted job %d: %s\n", job.ID, job.Command)
-
-			// Write .started marker to R2
-			r2Put(r2Bucket, r2keys.JobStarted(job.ID), fmt.Sprintf("%d", time.Now().Unix()))
-
-			workDir := job.Dir
-			if workDir == "" {
-				workDir = workspace
-			}
-
-			resubCfg := runner.SingleJobConfig{
-				JobID: job.ID,
-				Job: ops.CommandJob{
-					Cmd: job.Command,
-				},
-				LogDir:     logDir,
-				WorkingDir: workDir,
-				OnPhase:    phaseCallback(r2Bucket, phaseKey, job.ID),
-			}
-
-			ei, err := runJobWithProgress(r2Bucket, job.ID, logDir, resubCfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
-				failedJobs = append(failedJobs, job.ID)
-				continue
-			}
-
-			writePhase(r2Bucket, phaseKey, fmt.Sprintf("uploading:%d", job.ID))
-			uploadOutputDirs(r2Bucket, job.ID, workDir)
-			uploadJobResults(r2Bucket, job.ID, logDir)
-
-			if ei.ExitCode != 0 {
-				fmt.Printf("Job %d failed (exit %d)\n", job.ID, ei.ExitCode)
-				failedJobs = append(failedJobs, job.ID)
-			} else {
-				fmt.Printf("Job %d completed successfully\n", job.ID)
-			}
-		}
+		// Run resubmitted jobs using the shared job loop
+		seqResult := runJobSequence(payload.Jobs, jobSequenceConfig{
+			R2Bucket:   r2Bucket,
+			InstanceID: instanceIDInt,
+			PhaseKey:   phaseKey,
+			LogDir:     logDir,
+			Workspace:  workspace,
+			StartTime:  time.Now(),
+		})
+		failedJobs := seqResult.FailedJobs
 
 		if len(failedJobs) == 0 {
 			// All jobs succeeded — self-destruct

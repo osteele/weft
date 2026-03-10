@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -314,9 +315,14 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 			return fmt.Errorf("upload source for job %d: %w", job.ID, err)
 		}
 
+		// Compute remote working directory: /workspace/<project-name>
+		// This mirrors lifecycle.go which uses path.Join(wsPath, path.Base(localDir))
+		remoteDir := path.Join("/workspace", path.Base(sourceDir))
+
 		payload.Jobs = append(payload.Jobs, cloud.AgentJob{
 			ID:      job.ID,
 			Command: job.EffectiveCommand(),
+			Dir:     remoteDir,
 		})
 		payload.Sources[sourceDir] = sourceR2Key
 	}
@@ -332,8 +338,11 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("write jobs.json to R2: %w", err)
 	}
 
-	// Associate jobs with the cloud instance
+	// Reset jobs to queued and associate with the cloud instance
 	for _, job := range jobs {
+		if err := db.MarkQueuedByID(database, job.ID); err != nil {
+			return fmt.Errorf("reset job %d to queued: %w", job.ID, err)
+		}
 		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
 			return fmt.Errorf("associate job %d with instance %d: %w", job.ID, instanceID, err)
 		}

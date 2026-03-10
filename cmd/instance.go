@@ -501,6 +501,13 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Persist command override to DB (SubmitJobsToInstance resets status to queued first)
+	if instanceSubmitCommand != "" {
+		if err := db.UpdateJobCommand(database, jobID, instanceSubmitCommand); err != nil {
+			return fmt.Errorf("persist command override: %w", err)
+		}
+	}
+
 	fmt.Printf("Job %d resubmitted to instance %d.\n", jobID, instanceID)
 	fmt.Println("Use 'weft campaign watch' or 'weft instance status' to monitor progress.")
 	return nil
