@@ -26,6 +26,10 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 		return 0, err
 	}
 
+	if len(instances) > 0 {
+		log.Printf("reconcile: checking %d running instances...", len(instances))
+	}
+
 	var mu sync.Mutex
 	reconciled := 0
 	var wg sync.WaitGroup

@@ -9,10 +9,13 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queuerunner"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // SyncRate represents the desired sync frequency for a host
@@ -79,9 +82,11 @@ type hostSyncState struct {
 
 // SyncWorker manages background sync operations
 type SyncWorker struct {
-	database *sql.DB
-	requests chan SyncRequest
-	results  chan SyncResult
+	database     *sql.DB
+	cloudClients []cloud.Client
+	r2Client     *r2.Client
+	requests     chan SyncRequest
+	results      chan SyncResult
 
 	mu        sync.Mutex
 	hostState map[string]*hostSyncState
@@ -97,16 +102,18 @@ type SyncWorker struct {
 }
 
 // NewSyncWorker creates a new sync worker
-func NewSyncWorker(database *sql.DB) *SyncWorker {
+func NewSyncWorker(database *sql.DB, cloudClients []cloud.Client, r2Client *r2.Client) *SyncWorker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &SyncWorker{
-		database:    database,
-		requests:    make(chan SyncRequest, 100),
-		results:     make(chan SyncResult, 100),
-		hostState:   make(map[string]*hostSyncState),
-		maxParallel: 3,
-		ctx:         ctx,
-		cancel:      cancel,
+		database:     database,
+		cloudClients: cloudClients,
+		r2Client:     r2Client,
+		requests:     make(chan SyncRequest, 100),
+		results:      make(chan SyncResult, 100),
+		hostState:    make(map[string]*hostSyncState),
+		maxParallel:  3,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -213,19 +220,41 @@ func (w *SyncWorker) checkUnplacedJobs() {
 	}
 }
 
-// reconcileCloudJobs resets jobs stranded on terminal cloud instances.
+// reconcileCloudJobs runs full cloud reconciliation: queries provider APIs,
+// discovers dead instances, resets orphaned jobs, and auto-closes campaigns.
 func (w *SyncWorker) reconcileCloudJobs() {
-	n, err := db.ResetJobsOnTerminalCloudInstances(w.database)
+	if len(w.cloudClients) == 0 {
+		// No cloud clients — fall back to DB-only reconciliation
+		n, err := db.ResetJobsOnTerminalCloudInstances(w.database)
+		if err != nil {
+			log.Printf("cloud reconcile: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("cloud reconcile: reset %d job(s) on terminal instances", n)
+			select {
+			case w.results <- SyncResult{Updated: int(n)}:
+			default:
+			}
+		}
+		return
+	}
+
+	n, err := campaign.ReconcileCloudInstances(w.database, w.cloudClients, w.r2Client)
 	if err != nil {
 		log.Printf("cloud reconcile: %v", err)
 		return
 	}
 	if n > 0 {
-		log.Printf("cloud reconcile: reset %d job(s) on terminal instances", n)
+		log.Printf("cloud reconcile: reconciled %d dead instance(s)", n)
 		select {
 		case w.results <- SyncResult{Updated: int(n)}:
 		default:
 		}
+	}
+
+	if err := campaign.ReconcileCampaigns(w.database); err != nil {
+		log.Printf("cloud reconcile campaigns: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -22,6 +23,7 @@ import (
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/progress"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runpod"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/vastai"
@@ -398,8 +400,24 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		}
 	}
 
-	// Create and start sync worker
-	model.syncWorker = NewSyncWorker(database)
+	// Create and start sync worker (with cloud clients for full reconciliation)
+	var r2Client *r2.Client
+	if appCfg != nil {
+		r2Cfg := appCfg.Vastai.R2
+		if r2Cfg.Bucket != "" && r2Cfg.AccessKeyID != "" {
+			var err error
+			r2Client, err = r2.New(r2.Config{
+				AccountID:       r2Cfg.AccountID,
+				AccessKeyID:     r2Cfg.AccessKeyID,
+				SecretAccessKey: r2Cfg.SecretAccessKey,
+				Bucket:          r2Cfg.Bucket,
+			})
+			if err != nil {
+				log.Printf("r2 client init: %v", err)
+			}
+		}
+	}
+	model.syncWorker = NewSyncWorker(database, model.cloudClients, r2Client)
 	model.syncWorker.Start()
 
 	return model
