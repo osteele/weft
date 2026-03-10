@@ -253,7 +253,7 @@ func (w *SyncWorker) reconcileCloudJobs() {
 		}
 	}
 
-	if err := campaign.ReconcileCampaigns(w.database); err != nil {
+	if _, err := campaign.ReconcileCampaigns(w.database); err != nil {
 		log.Printf("cloud reconcile campaigns: %v", err)
 	}
 }

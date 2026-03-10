@@ -187,6 +187,32 @@ deploy-agent host="":
 
     echo "==> Done. Agent ${VERSION} deployed to ${HOST}."
 
+# Deploy coordinator to studio: sync sources, rebuild, restart the launchd service
+deploy-coordinator host="studio":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOST="{{ host }}"
+    REMOTE_DIR="~/code/utils/weft"
+
+    echo "==> Syncing sources to ${HOST}..."
+    rsync -az --delete \
+        --exclude='.jj/' --exclude='.git/' --exclude='.claude/' \
+        --exclude='weft' --exclude='dist/' \
+        --exclude='internal/agentdeploy/binaries/weft-agent-*' \
+        --exclude='internal/agentdeploy/binaries/VERSION' \
+        ./ "${HOST}:${REMOTE_DIR}/"
+
+    echo "==> Building on ${HOST}..."
+    ssh "${HOST}" "cd ${REMOTE_DIR} && go build -o ~/.cache/weft/bin/weft ."
+
+    echo "==> Restarting coordinator on ${HOST}..."
+    # KeepAlive=true in launchd plist means it auto-restarts after stop
+    ssh "${HOST}" "~/.cache/weft/bin/weft coordinator stop 2>/dev/null || true"
+    sleep 2
+    ssh "${HOST}" "~/.cache/weft/bin/weft coordinator status"
+
+    echo "==> Done. Coordinator deployed and restarted on ${HOST}."
+
 # Clean build artifacts
 clean:
     rm -f weft

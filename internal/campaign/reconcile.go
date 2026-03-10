@@ -244,12 +244,14 @@ func reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2
 
 // ReconcileCampaigns checks active campaigns and marks them as completed or failed
 // when all their instances have reached a terminal state.
-func ReconcileCampaigns(database *sql.DB) error {
+// Returns the list of campaigns that were transitioned to a terminal state.
+func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 	campaigns, err := db.ListActiveCampaigns(database)
 	if err != nil {
-		return fmt.Errorf("list active campaigns: %w", err)
+		return nil, fmt.Errorf("list active campaigns: %w", err)
 	}
 
+	var completed []*db.Campaign
 	for _, c := range campaigns {
 		instances, err := db.GetCampaignInstances(database, c.ID)
 		if err != nil {
@@ -288,9 +290,11 @@ func ReconcileCampaigns(database *sql.DB) error {
 			log.Printf("reconcile campaigns: update campaign %d to %s: %v", c.ID, status, err)
 		} else {
 			log.Printf("reconcile campaigns: campaign %d → %s", c.ID, status)
+			c.Status = status
+			completed = append(completed, c)
 		}
 	}
-	return nil
+	return completed, nil
 }
 
 // graceStatusPayload is the JSON structure written by the agent's grace-wait to R2.

@@ -141,7 +141,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	totalUpdated += cloudUpdated
 
 	// Auto-close campaigns where all instances are terminal
-	if err := campaign.ReconcileCampaigns(database); err != nil {
+	if _, err := campaign.ReconcileCampaigns(database); err != nil {
 		log.Printf("reconcile campaigns: %v", err)
 	}
 

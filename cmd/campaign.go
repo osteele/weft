@@ -588,7 +588,7 @@ func reconcileBeforeDisplay(database *sql.DB) {
 	// Sync cloud job results from R2 (completed/failed markers)
 	syncCloudJobResults(cfg, database, false)
 
-	if err := campaign.ReconcileCampaigns(database); err != nil {
+	if _, err := campaign.ReconcileCampaigns(database); err != nil {
 		log.Printf("reconcile campaigns: %v", err)
 	}
 }

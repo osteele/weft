@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/vastai"
 )
 
@@ -146,7 +148,20 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 		case <-vastaiSweepTicker.C:
 			c.sweepVastaiResults()
+			c.reconcileAndNotifyCampaigns()
 		}
+	}
+}
+
+// reconcileAndNotifyCampaigns checks for newly-completed campaigns and sends Slack notifications.
+func (c *Coordinator) reconcileAndNotifyCampaigns() {
+	completed, err := campaign.ReconcileCampaigns(c.db)
+	if err != nil {
+		c.logger.Printf("reconcile campaigns: %v", err)
+		return
+	}
+	for _, camp := range completed {
+		slack.SendCampaignNotification(c.db, *camp)
 	}
 }
 

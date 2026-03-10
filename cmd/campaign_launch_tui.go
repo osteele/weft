@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -206,7 +207,9 @@ func (m launchModel) runReconciliation() tea.Cmd {
 			campaign.ReconcileCloudInstances(database, clients, r2Client)
 		}
 		syncCloudJobResults(cfg, database, false)
-		campaign.ReconcileCampaigns(database)
+		if _, err := campaign.ReconcileCampaigns(database); err != nil {
+			log.Printf("reconcile campaigns: %v", err)
+		}
 
 		// Re-query unplaced jobs since reconciliation may have freed some
 		jobs, err := db.ListUnplacedJobs(database)

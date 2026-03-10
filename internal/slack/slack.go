@@ -17,26 +17,30 @@ const NotifyScriptPath = "/tmp/weft-notify-slack.sh"
 
 // GetWebhook returns the Slack webhook URL from environment or config file.
 func GetWebhook() string {
-	// Check environment variable first
-	if webhook := os.Getenv("WEFT_SLACK_WEBHOOK"); webhook != "" {
-		return webhook
+	return getConfigValue("WEFT_SLACK_WEBHOOK", "SLACK_WEBHOOK")
+}
+
+// getConfigValue reads a value from an environment variable first, then from
+// the weft config file (~/.config/weft/config) using the fileKey.
+func getConfigValue(envVar, fileKey string) string {
+	if v := os.Getenv(envVar); v != "" {
+		return v
 	}
 
-	// Check config file
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 
-	configFile := filepath.Join(home, ".config", "weft", "config")
-	content, err := os.ReadFile(configFile)
+	content, err := os.ReadFile(filepath.Join(home, ".config", "weft", "config"))
 	if err != nil {
 		return ""
 	}
 
+	prefix := fileKey + "="
 	for _, line := range strings.Split(string(content), "\n") {
-		if strings.HasPrefix(line, "SLACK_WEBHOOK=") {
-			return strings.TrimPrefix(line, "SLACK_WEBHOOK=")
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
 		}
 	}
 
