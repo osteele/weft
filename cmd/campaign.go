@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -747,6 +748,10 @@ func campaignActualCost(instances []*db.CloudInstance) string {
 // ensureAgentFresh checks if the embedded agent binary matches the current
 // source version. If stale and `just` is available, it rebuilds and re-execs.
 func ensureAgentFresh() error {
+	if os.Getenv("WEFT_AGENT_REBUILT") == "1" {
+		return fmt.Errorf("agent binary still stale after rebuild; run \"just build\" manually")
+	}
+
 	version, err := agentdeploy.LocalAgentVersion()
 	if err != nil {
 		return nil // can't determine version; let downstream handle it
@@ -765,7 +770,7 @@ func ensureAgentFresh() error {
 
 	justPath, lookErr := exec.LookPath("just")
 	if lookErr != nil {
-		return fmt.Errorf("agent binary is stale and `just` is not available; run \"just build\" manually")
+		return fmt.Errorf("agent binary is stale and `just` is not installed; install it or run \"go build .\" in %s", sourceDir)
 	}
 
 	fmt.Println("Agent binary is stale, rebuilding...")
@@ -777,13 +782,16 @@ func ensureAgentFresh() error {
 		return fmt.Errorf("auto-rebuild failed: %w; run \"just build\" manually", err)
 	}
 
-	// Re-exec with the freshly built binary
-	self, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("cannot find own executable for re-exec: %w", err)
+	// Re-exec with the freshly built binary from the source directory.
+	// We must use the newly built binary, not os.Executable(), because the
+	// running binary (e.g., in $GOPATH/bin) still has stale embedded agents.
+	freshBinary := filepath.Join(sourceDir, "weft")
+	if _, err := os.Stat(freshBinary); err != nil {
+		return fmt.Errorf("rebuilt binary not found at %s: %w", freshBinary, err)
 	}
 	fmt.Println("Re-executing with fresh binary...")
-	return syscall.Exec(self, os.Args, os.Environ())
+	env := append(os.Environ(), "WEFT_AGENT_REBUILT=1")
+	return syscall.Exec(freshBinary, os.Args, env)
 }
 
 // printAutoBudget prints the auto-derived budget limits.
