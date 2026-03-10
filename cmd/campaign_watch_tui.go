@@ -28,20 +28,21 @@ type initialInstanceInfo struct {
 }
 
 type watchModel struct {
-	instanceIDs []int64
-	updates     map[int64]campaign.InstanceUpdate // latest update per instance
-	channels    map[int64]<-chan campaign.InstanceUpdate
-	initInfo    map[int64]initialInstanceInfo // pre-fetched data for pre-update display
-	database    *sql.DB
-	clients     map[int64]cloud.Client // per-instance client (looked up from DB provider)
-	r2Client    *r2.Client             // R2 client for phase/bootstrap fetching (may be nil)
-	spinner     spinner.Model
-	done        bool
-	err         error
-	ctx         context.Context
-	cancel      context.CancelFunc
-	campaignID  int64     // campaign ID (0 if unknown)
-	launchedAt  time.Time // campaign launch time
+	instanceIDs    []int64
+	updates        map[int64]campaign.InstanceUpdate // latest update per instance
+	channels       map[int64]<-chan campaign.InstanceUpdate
+	initInfo       map[int64]initialInstanceInfo // pre-fetched data for pre-update display
+	database       *sql.DB
+	clients        map[int64]cloud.Client // per-instance client (looked up from DB provider)
+	r2Client       *r2.Client             // R2 client for phase/bootstrap fetching (may be nil)
+	spinner        spinner.Model
+	done           bool
+	err            error
+	ctx            context.Context
+	cancel         context.CancelFunc
+	campaignID     int64         // campaign ID (0 if unknown)
+	launchedAt     time.Time     // campaign launch time
+	jobProgressHWM map[int64]int // high-water mark per job ID (prevents progress regression)
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -102,18 +103,19 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) w
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
 
 	return watchModel{
-		instanceIDs: instanceIDs,
-		updates:     make(map[int64]campaign.InstanceUpdate),
-		channels:    make(map[int64]<-chan campaign.InstanceUpdate),
-		initInfo:    initInfo,
-		database:    database,
-		clients:     clients,
-		r2Client:    r2Client,
-		spinner:     s,
-		ctx:         ctx,
-		cancel:      cancel,
-		campaignID:  campaignID,
-		launchedAt:  launchedAt,
+		instanceIDs:    instanceIDs,
+		updates:        make(map[int64]campaign.InstanceUpdate),
+		channels:       make(map[int64]<-chan campaign.InstanceUpdate),
+		initInfo:       initInfo,
+		database:       database,
+		clients:        clients,
+		r2Client:       r2Client,
+		spinner:        s,
+		ctx:            ctx,
+		cancel:         cancel,
+		campaignID:     campaignID,
+		launchedAt:     launchedAt,
+		jobProgressHWM: make(map[int64]int),
 	}
 }
 
@@ -158,6 +160,17 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.checkAllDone()
 		}
 		m.updates[msg.instanceID] = msg.update
+		// Update progress high-water mark; prune entries for non-running jobs
+		if msg.update.JobProgress >= 0 && msg.update.JobProgressID > 0 {
+			if msg.update.JobProgress > m.jobProgressHWM[msg.update.JobProgressID] {
+				m.jobProgressHWM[msg.update.JobProgressID] = msg.update.JobProgress
+			}
+		}
+		for _, j := range msg.update.Jobs {
+			if j.Status != db.StatusRunning {
+				delete(m.jobProgressHWM, j.ID)
+			}
+		}
 		// Continue reading from the same channel
 		ch := m.channels[msg.instanceID]
 		return m, waitForUpdate(msg.instanceID, ch)
@@ -280,7 +293,7 @@ func (m watchModel) View() string {
 		if !m.launchedAt.IsZero() {
 			header += fmt.Sprintf(" — launched %s (%s ago)",
 				m.launchedAt.Format("15:04"),
-				time.Since(m.launchedAt).Truncate(time.Minute))
+				time.Since(m.launchedAt).Truncate(time.Second))
 		}
 		b.WriteString(watchTitleStyle.Render(header))
 		b.WriteString("\n\n")
@@ -304,7 +317,7 @@ func (m watchModel) View() string {
 					b.WriteString(fmt.Sprintf("  %s: (provisioning...)\n", ci.Provider))
 				}
 				if len(jobs) > 0 {
-					b.WriteString(fmt.Sprintf("  Jobs: 0/%d completed\n", len(jobs)))
+					b.WriteString(fmt.Sprintf("  Jobs: 0/%d resolved\n", len(jobs)))
 					for _, j := range jobs {
 						desc := j.Description
 						if desc == "" {
@@ -350,7 +363,7 @@ func (m watchModel) View() string {
 		providerInstID := ci.EffectiveProviderID()
 		if providerInstID != "" {
 			instLine := fmt.Sprintf("  %s: %s", ci.Provider, providerInstID)
-			if u.Instance != nil && !campaign.IsInstanceTerminal(ci.Status) {
+			if u.Instance != nil && !campaign.IsInstanceTerminal(ci.Status) && u.Instance.Status != "" {
 				instLine += fmt.Sprintf(" (%s)", u.Instance.Status)
 			}
 			b.WriteString(instLine + "\n")
@@ -366,7 +379,7 @@ func (m watchModel) View() string {
 		}
 
 		if u.Instance != nil && ci.LaunchedAt != nil {
-			uptime := time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Minute)
+			uptime := time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second)
 			cost := uptime.Hours() * u.Instance.CostPerHour
 			b.WriteString(fmt.Sprintf("  Cost: $%.2f (uptime: %s)\n", cost, uptime))
 		}
@@ -382,7 +395,7 @@ func (m watchModel) View() string {
 					completed++
 				}
 			}
-			b.WriteString(fmt.Sprintf("  Jobs: %d/%d completed\n", completed, len(u.Jobs)))
+			b.WriteString(fmt.Sprintf("  Jobs: %d/%d resolved\n", completed, len(u.Jobs)))
 
 			for i, j := range u.Jobs {
 				desc := j.Description
@@ -402,8 +415,8 @@ func (m watchModel) View() string {
 					jobStyle = watchDimStyle
 				}
 				statusText := displayStatus
-				if j.Status == db.StatusRunning && u.JobProgress >= 0 && u.JobProgressID == j.ID {
-					statusText = fmt.Sprintf("running %3d%%", u.JobProgress)
+				if hwm := m.jobProgressHWM[j.ID]; j.Status == db.StatusRunning && hwm > 0 {
+					statusText = fmt.Sprintf("running %3d%%", hwm)
 				}
 				b.WriteString(fmt.Sprintf("    %4d  %s  %s\n",
 					j.ID,
@@ -424,7 +437,7 @@ func (m watchModel) View() string {
 			if !ok || u.CloudInstance == nil || u.Instance == nil || u.CloudInstance.LaunchedAt == nil {
 				continue
 			}
-			uptime := time.Since(time.Unix(*u.CloudInstance.LaunchedAt, 0)).Truncate(time.Minute)
+			uptime := time.Since(time.Unix(*u.CloudInstance.LaunchedAt, 0)).Truncate(time.Second)
 			totalCost += uptime.Hours() * u.Instance.CostPerHour
 			hasCost = true
 		}

@@ -304,17 +304,28 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		printAutoBudget(opts)
 	}
 
-	// Check all groups have offers
+	// Filter groups to those with valid offers, warning about failures
+	var filteredGroups []campaign.InstanceGroup
 	var offers []cloud.Offer
-	for _, go_ := range groupOffers {
+	var filteredEstimates []campaign.CostEstimate
+	for i, go_ := range groupOffers {
 		if go_.Err != nil {
-			return fmt.Errorf("offer search failed for %s: %w", go_.Group.GPUSpec(), go_.Err)
+			fmt.Fprintf(os.Stderr, "Warning: offer search failed for %s: %v\n", go_.Group.GPUSpec(), go_.Err)
+			continue
 		}
 		if go_.Offer == nil {
-			return fmt.Errorf("no offers found for %s", go_.Group.GPUSpec())
+			fmt.Fprintf(os.Stderr, "Warning: no offers found for %s — skipping %d job(s)\n", go_.Group.GPUSpec(), len(go_.Group.Jobs))
+			continue
 		}
+		filteredGroups = append(filteredGroups, go_.Group)
 		offers = append(offers, *go_.Offer)
+		filteredEstimates = append(filteredEstimates, estimates[i])
 	}
+	if len(filteredGroups) == 0 {
+		return fmt.Errorf("no offers found for any GPU group")
+	}
+	groups = filteredGroups
+	estimates = filteredEstimates
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 	createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)

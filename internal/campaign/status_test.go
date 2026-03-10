@@ -333,6 +333,25 @@ func TestFormatPlainUpdate_JobDisplayStatusUsed(t *testing.T) {
 	}
 }
 
+func TestIsJobTerminal(t *testing.T) {
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{db.StatusCompleted, true},
+		{db.StatusFailed, true},
+		{db.AttemptOutcomeOrphaned, true},
+		{db.AttemptOutcomeCancelled, true},
+		{db.StatusQueued, false},
+		{db.StatusRunning, false},
+	}
+	for _, tt := range tests {
+		if got := IsJobTerminal(tt.status); got != tt.want {
+			t.Errorf("IsJobTerminal(%q) = %v, want %v", tt.status, got, tt.want)
+		}
+	}
+}
+
 func TestIsInstanceTerminal(t *testing.T) {
 	tests := []struct {
 		status string

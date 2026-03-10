@@ -117,10 +117,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
 						_ = db.CloseJobCloudAttemptsByInstance(database, cloudInstanceID, db.AttemptOutcomeCompleted)
 						ci.Status = db.CloudInstanceStatusCompleted
+						jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 					} else {
 						_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
 						_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
 						ci.Status = db.CloudInstanceStatusFailed
+						jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 					}
 				}
 			}
@@ -184,6 +186,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					}
 					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted)
 					ci.Status = db.CloudInstanceStatusCompleted
+					jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 					stallMessage = "instance completed but self-destruct failed — cleaning up"
 				} else if elapsed >= bootstrapTerminateTimeout {
 					// Auto-terminate: destroy provider instance, mark failed, reset jobs
@@ -193,6 +196,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
 					ci.Status = db.CloudInstanceStatusFailed
+					jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 					stallMessage = fmt.Sprintf("bootstrap timeout after %s — terminating instance, jobs reset to queued",
 						elapsed.Truncate(time.Minute))
 				} else if elapsed >= bootstrapWarnTimeout {
@@ -212,7 +216,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				allJobsTerminal := true
 				var latestEnd int64
 				for _, j := range jobs {
-					if j.Status != db.StatusCompleted && j.Status != db.StatusFailed {
+					if !IsJobTerminal(j.Status) {
 						allJobsTerminal = false
 						break
 					}

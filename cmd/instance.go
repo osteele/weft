@@ -259,7 +259,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			} else {
 				uptime = time.Since(time.Unix(*ci.LaunchedAt, 0))
 			}
-			uptime = uptime.Truncate(time.Minute)
+			uptime = uptime.Truncate(time.Second)
 			fmt.Printf("  Uptime:   %s\n", uptime)
 
 			if inst != nil && inst.CostPerHour > 0 {
