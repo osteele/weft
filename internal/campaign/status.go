@@ -41,16 +41,27 @@ type HeartbeatSample struct {
 
 // InstanceUpdate is a snapshot of cloud instance + job state.
 type InstanceUpdate struct {
-	CloudInstance  *db.CloudInstance
-	Jobs           []*db.Job
-	Instance       *cloud.Instance  // nil if not yet provisioned
-	BootstrapStage string           // current bootstrap stage from R2 (e.g. "agent_installed")
-	InstancePhase  string           // current job execution phase from R2 (e.g. "running:123")
-	StallMessage   string           // non-empty if bootstrap appears stuck
-	JobProgress    int              // -1 = no progress, 0-100 = percent
-	JobProgressID  int64            // which job the progress is for
-	HeartbeatAge   time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
-	Heartbeat      *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
+	CloudInstance      *db.CloudInstance
+	Jobs               []*db.Job
+	JobAttemptOutcomes map[int64]string // job_id → attempt outcome for this instance
+	Instance           *cloud.Instance  // nil if not yet provisioned
+	BootstrapStage     string           // current bootstrap stage from R2 (e.g. "agent_installed")
+	InstancePhase      string           // current job execution phase from R2 (e.g. "running:123")
+	StallMessage       string           // non-empty if bootstrap appears stuck
+	JobProgress        int              // -1 = no progress, 0-100 = percent
+	JobProgressID      int64            // which job the progress is for
+	HeartbeatAge       time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
+	Heartbeat          *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
+}
+
+// JobDisplayStatus returns the status to display for a job in the context of a
+// specific instance. When a job has been reset to "queued" after an instance
+// failure, this returns the attempt outcome (e.g. "failed") instead.
+func JobDisplayStatus(j *db.Job, outcomes map[int64]string) string {
+	if outcome, ok := outcomes[j.ID]; ok && j.Status == db.StatusQueued {
+		return outcome
+	}
+	return j.Status
 }
 
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
@@ -220,17 +231,24 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
+			// Fetch attempt outcomes only for terminal instances (outcomes are immutable)
+			var attemptOutcomes map[int64]string
+			if IsInstanceTerminal(ci.Status) {
+				attemptOutcomes, _ = db.GetAttemptOutcomesByInstance(database, cloudInstanceID)
+			}
+
 			update := InstanceUpdate{
-				CloudInstance:  ci,
-				Jobs:           jobs,
-				Instance:       cachedInstance,
-				BootstrapStage: bootstrapStage,
-				InstancePhase:  instancePhase,
-				StallMessage:   stallMessage,
-				JobProgress:    jobProgress,
-				JobProgressID:  jobProgressID,
-				HeartbeatAge:   heartbeatAge,
-				Heartbeat:      heartbeat,
+				CloudInstance:      ci,
+				Jobs:               jobs,
+				JobAttemptOutcomes: attemptOutcomes,
+				Instance:           cachedInstance,
+				BootstrapStage:     bootstrapStage,
+				InstancePhase:      instancePhase,
+				StallMessage:       stallMessage,
+				JobProgress:        jobProgress,
+				JobProgressID:      jobProgressID,
+				HeartbeatAge:       heartbeatAge,
+				Heartbeat:          heartbeat,
 			}
 
 			select {
@@ -431,11 +449,12 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	// Report job status changes
 	prevJobStatus := make(map[int64]string)
 	for _, j := range prev.Jobs {
-		prevJobStatus[j.ID] = j.Status
+		prevJobStatus[j.ID] = JobDisplayStatus(j, prev.JobAttemptOutcomes)
 	}
 	for _, j := range curr.Jobs {
-		if prevJobStatus[j.ID] != j.Status {
-			line := fmt.Sprintf("instance %d: job %d status=%s", id, j.ID, j.Status)
+		displayStatus := JobDisplayStatus(j, curr.JobAttemptOutcomes)
+		if prevJobStatus[j.ID] != displayStatus {
+			line := fmt.Sprintf("instance %d: job %d status=%s", id, j.ID, displayStatus)
 			if j.ExitCode != nil {
 				line += fmt.Sprintf(" exit=%d", *j.ExitCode)
 			}
@@ -444,6 +463,17 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// IsJobTerminal returns true if a display status represents a terminal job state.
+// This covers both job statuses (completed, failed) and attempt outcomes (orphaned, cancelled).
+func IsJobTerminal(displayStatus string) bool {
+	switch displayStatus {
+	case db.StatusCompleted, db.StatusFailed,
+		db.AttemptOutcomeOrphaned, db.AttemptOutcomeCancelled:
+		return true
+	}
+	return false
 }
 
 // IsInstanceTerminal returns true if the instance status is a terminal state.

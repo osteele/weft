@@ -22,8 +22,9 @@ import (
 // initialInstanceInfo holds pre-fetched DB data for instances that haven't
 // received a channel update yet, avoiding repeated queries in View().
 type initialInstanceInfo struct {
-	ci   *db.CloudInstance
-	jobs []*db.Job
+	ci       *db.CloudInstance
+	jobs     []*db.Job
+	outcomes map[int64]string
 }
 
 type watchModel struct {
@@ -68,7 +69,8 @@ type watchSyncDoneMsg struct{}
 
 // watchJobsRefreshedMsg carries refreshed job lists from a background DB query.
 type watchJobsRefreshedMsg struct {
-	jobs map[int64][]*db.Job
+	jobs     map[int64][]*db.Job
+	outcomes map[int64]map[int64]string // instanceID → (jobID → outcome)
 }
 
 // watchCheckDoneMsg triggers a periodic DB-based check for all-terminal state.
@@ -93,7 +95,8 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) w
 	for _, id := range instanceIDs {
 		ci, _ := db.GetCloudInstance(database, id)
 		jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, id)
-		initInfo[id] = initialInstanceInfo{ci: ci, jobs: jobs}
+		outcomes, _ := db.GetAttemptOutcomesByInstance(database, id)
+		initInfo[id] = initialInstanceInfo{ci: ci, jobs: jobs, outcomes: outcomes}
 	}
 
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
@@ -190,18 +193,25 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, func() tea.Msg {
 			result := make(map[int64][]*db.Job, len(terminalIDs))
+			outcomesResult := make(map[int64]map[int64]string, len(terminalIDs))
 			for _, id := range terminalIDs {
 				if jobs, err := db.GetCloudInstanceJobsIncludingAttempts(m.database, id); err == nil && jobs != nil {
 					result[id] = jobs
 				}
+				if outcomes, err := db.GetAttemptOutcomesByInstance(m.database, id); err == nil {
+					outcomesResult[id] = outcomes
+				}
 			}
-			return watchJobsRefreshedMsg{jobs: result}
+			return watchJobsRefreshedMsg{jobs: result, outcomes: outcomesResult}
 		}
 
 	case watchJobsRefreshedMsg:
 		for id, jobs := range msg.jobs {
 			if u, ok := m.updates[id]; ok {
 				u.Jobs = jobs
+				if outcomes, ok := msg.outcomes[id]; ok {
+					u.JobAttemptOutcomes = outcomes
+				}
 				m.updates[id] = u
 			}
 		}
@@ -302,7 +312,7 @@ func (m watchModel) View() string {
 						}
 						b.WriteString(fmt.Sprintf("    %4d  %s  %s\n",
 							j.ID,
-							watchDimStyle.Render(fmt.Sprintf("%-12s", j.Status)),
+							watchDimStyle.Render(fmt.Sprintf("%-12s", campaign.JobDisplayStatus(j, info.outcomes))),
 							desc,
 						))
 					}
@@ -363,31 +373,35 @@ func (m watchModel) View() string {
 
 		// Jobs
 		if len(u.Jobs) > 0 {
+			// Compute display statuses once for both counting and rendering
+			displayStatuses := make([]string, len(u.Jobs))
 			completed := 0
-			for _, j := range u.Jobs {
-				if j.Status == db.StatusCompleted || j.Status == db.StatusFailed {
+			for i, j := range u.Jobs {
+				displayStatuses[i] = campaign.JobDisplayStatus(j, u.JobAttemptOutcomes)
+				if campaign.IsJobTerminal(displayStatuses[i]) {
 					completed++
 				}
 			}
 			b.WriteString(fmt.Sprintf("  Jobs: %d/%d completed\n", completed, len(u.Jobs)))
 
-			for _, j := range u.Jobs {
+			for i, j := range u.Jobs {
 				desc := j.Description
 				if desc == "" {
 					desc = campaign.TruncateCommand(j.Command, 50)
 				}
+				displayStatus := displayStatuses[i]
 				var jobStyle lipgloss.Style
-				switch j.Status {
+				switch displayStatus {
 				case db.StatusRunning:
 					jobStyle = watchRunningStyle
 				case db.StatusCompleted:
 					jobStyle = watchCompletedStyle
-				case db.StatusFailed:
+				case db.StatusFailed, db.AttemptOutcomeOrphaned, db.AttemptOutcomeCancelled:
 					jobStyle = watchFailedStyle
 				default:
 					jobStyle = watchDimStyle
 				}
-				statusText := j.Status
+				statusText := displayStatus
 				if j.Status == db.StatusRunning && u.JobProgress >= 0 && u.JobProgressID == j.ID {
 					statusText = fmt.Sprintf("running %3d%%", u.JobProgress)
 				}

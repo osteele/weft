@@ -81,3 +81,53 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: got job ID %d, want 1", jobsIncl[0].ID)
 	}
 }
+
+func TestGetAttemptOutcomesByInstance(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Create a cloud instance and a job
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES (1, ?, ?, 0, 'queued', 'echo hello', '/tmp')`,
+		instanceID, CloudInstanceHost(instanceID),
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	// Before closing the attempt, outcomes should be empty
+	outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByInstance: %v", err)
+	}
+	if len(outcomes) != 0 {
+		t.Fatalf("expected 0 outcomes before closing, got %d", len(outcomes))
+	}
+
+	// Close the attempt as orphaned (simulates instance failure + reset)
+	if err := CloseJobCloudAttemptsByInstance(database, instanceID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("CloseJobCloudAttemptsByInstance: %v", err)
+	}
+
+	outcomes, err = GetAttemptOutcomesByInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByInstance after close: %v", err)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("expected 1 outcome, got %d", len(outcomes))
+	}
+	if outcomes[1] != AttemptOutcomeOrphaned {
+		t.Fatalf("expected outcome %q, got %q", AttemptOutcomeOrphaned, outcomes[1])
+	}
+}

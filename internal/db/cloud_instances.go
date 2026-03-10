@@ -647,6 +647,32 @@ func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, erro
 	return attempts, rows.Err()
 }
 
+// GetAttemptOutcomesByInstance returns the latest closed attempt outcome for each job
+// that ran on the given cloud instance. Returns map[jobID]outcome.
+func GetAttemptOutcomesByInstance(database *sql.DB, cloudInstanceID int64) (map[int64]string, error) {
+	rows, err := database.Query(
+		`SELECT job_id, outcome FROM job_cloud_attempts
+		 WHERE cloud_instance_id = ? AND ended_at IS NOT NULL AND outcome IS NOT NULL
+		 ORDER BY started_at ASC`,
+		cloudInstanceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	outcomes := make(map[int64]string)
+	for rows.Next() {
+		var jobID int64
+		var outcome string
+		if err := rows.Scan(&jobID, &outcome); err != nil {
+			return nil, err
+		}
+		outcomes[jobID] = outcome // later rows overwrite earlier, giving us the latest
+	}
+	return outcomes, rows.Err()
+}
+
 // SetCloudInstanceGracePeriod stores the configured grace period for a cloud instance.
 func SetCloudInstanceGracePeriod(db *sql.DB, id int64, seconds int) error {
 	_, err := db.Exec(`UPDATE cloud_instances SET grace_period_seconds = ? WHERE id = ?`, seconds, id)

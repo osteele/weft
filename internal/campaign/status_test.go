@@ -266,6 +266,73 @@ func TestFormatPlainUpdate_ProgressNoReport(t *testing.T) {
 	}
 }
 
+func TestJobDisplayStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		outcomes map[int64]string
+		want     string
+	}{
+		{
+			name:     "no outcomes, returns job status",
+			status:   db.StatusRunning,
+			outcomes: nil,
+			want:     db.StatusRunning,
+		},
+		{
+			name:     "queued with orphaned outcome shows outcome",
+			status:   db.StatusQueued,
+			outcomes: map[int64]string{1: db.AttemptOutcomeOrphaned},
+			want:     db.AttemptOutcomeOrphaned,
+		},
+		{
+			name:     "queued with failed outcome shows outcome",
+			status:   db.StatusQueued,
+			outcomes: map[int64]string{1: db.AttemptOutcomeFailed},
+			want:     db.AttemptOutcomeFailed,
+		},
+		{
+			name:     "running with outcome still shows running",
+			status:   db.StatusRunning,
+			outcomes: map[int64]string{1: db.AttemptOutcomeFailed},
+			want:     db.StatusRunning,
+		},
+		{
+			name:     "queued with no matching outcome shows queued",
+			status:   db.StatusQueued,
+			outcomes: map[int64]string{99: db.AttemptOutcomeFailed},
+			want:     db.StatusQueued,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &db.Job{ID: 1, Status: tt.status}
+			got := JobDisplayStatus(j, tt.outcomes)
+			if got != tt.want {
+				t.Errorf("JobDisplayStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatPlainUpdate_JobDisplayStatusUsed(t *testing.T) {
+	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusFailed}
+	prev := InstanceUpdate{
+		CloudInstance: &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning},
+		Jobs:          []*db.Job{{ID: 88, Status: db.StatusRunning}},
+	}
+	curr := InstanceUpdate{
+		CloudInstance:      ci,
+		Jobs:               []*db.Job{{ID: 88, Status: db.StatusQueued}},
+		JobAttemptOutcomes: map[int64]string{88: db.AttemptOutcomeOrphaned},
+	}
+
+	output := FormatPlainUpdate(prev, curr)
+	if !strings.Contains(output, "job 88 status=orphaned") {
+		t.Errorf("should show attempt outcome instead of queued, got %q", output)
+	}
+}
+
 func TestIsInstanceTerminal(t *testing.T) {
 	tests := []struct {
 		status string

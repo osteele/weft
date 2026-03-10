@@ -275,10 +275,11 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("get instance %d jobs: %w", ci.ID, err)
 		}
+		outcomes, _ := db.GetAttemptOutcomesByInstance(database, ci.ID)
 		if len(jobs) > 0 {
 			completed := 0
 			for _, j := range jobs {
-				if j.Status == db.StatusCompleted || j.Status == db.StatusFailed {
+				if campaign.IsJobTerminal(campaign.JobDisplayStatus(j, outcomes)) {
 					completed++
 				}
 			}
@@ -288,7 +289,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				if desc == "" {
 					desc = campaign.TruncateCommand(j.EffectiveCommand(), 50)
 				}
-				fmt.Printf("    %-6d %-12s %s\n", j.ID, j.Status, desc)
+				fmt.Printf("    %-6d %-12s %s\n", j.ID, campaign.JobDisplayStatus(j, outcomes), desc)
 			}
 		}
 	}
