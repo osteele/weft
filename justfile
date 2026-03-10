@@ -112,6 +112,38 @@ build-agent target="local":
             ;;
     esac
 
+# Build on a remote host and sync artifacts back — faster than local cross-compile
+# Set WEFT_BUILD_HOST in .env or environment (e.g., WEFT_BUILD_HOST=studio)
+remote-build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -f .env ]; then
+        export $(grep -v '^#' .env | xargs)
+    fi
+    HOST="${WEFT_BUILD_HOST:-}"
+    if [ -z "$HOST" ]; then
+        echo "WEFT_BUILD_HOST not set. Add WEFT_BUILD_HOST=<host> to .env or environment."
+        exit 1
+    fi
+    REMOTE_DIR="~/code/utils/weft"
+
+    echo "==> Syncing sources to ${HOST}..."
+    rsync -az --delete \
+        --exclude='.jj/' --exclude='.git/' --exclude='.claude/' \
+        --exclude='weft' --exclude='dist/' \
+        --exclude='internal/agentdeploy/binaries/weft-agent-*' \
+        --exclude='internal/agentdeploy/binaries/VERSION' \
+        ./ "${HOST}:${REMOTE_DIR}/"
+
+    echo "==> Building on ${HOST}..."
+    ssh "${HOST}" "cd ${REMOTE_DIR} && just build"
+
+    echo "==> Syncing build artifacts back..."
+    rsync -az "${HOST}:${REMOTE_DIR}/weft" ./weft
+    rsync -az "${HOST}:${REMOTE_DIR}/internal/agentdeploy/binaries/" ./internal/agentdeploy/binaries/
+
+    echo "==> Done. Local binary and agent binaries updated."
+
 # Clean build artifacts
 clean:
     rm -f weft

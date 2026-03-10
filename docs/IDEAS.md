@@ -266,6 +266,23 @@ query for `status='queued' AND host=''` jobs and claim them.
 - Should the coordinator become optional, or remain as an optimization layer
   that agents consult for placement hints?
 
+## Interruptible (Bid) Instance Support
+
+Allow campaigns to opt into interruptible (bid-priced) instances via
+`--rental-type bid --bid-price <$/hr>`. Currently all instances are on-demand
+(direct) since `CreateInstance` never passes `--bid_price` to the Vast.ai CLI.
+
+Evaluate when interruptible instances are cost-effective — e.g., for short jobs
+where retry overhead is low, or when the bid price discount is large enough to
+offset expected preemption costs. The existing survival model in
+`internal/bidding/` could be extended to compare expected cost across rental
+types.
+
+Vast.ai CLI reference:
+- `vastai search offers --type bid` returns bid pricing in `dph_total`
+- `vastai create instance <id> --bid_price <$/hr>` creates an interruptible instance
+- `min_bid` field in search results shows minimum bid price per offer
+
 ## Better Log Management
 
 - Automatic log rotation for long-running jobs

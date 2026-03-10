@@ -30,7 +30,7 @@ func writeStageMarker(b *strings.Builder, instanceID int64, stage string) {
 		return
 	}
 	b.WriteString(fmt.Sprintf(
-		"echo '%s' | rclone rcat \"r2:$R2_BUCKET/bootstrap/%d/stage\"\n",
+		"echo \"%s\" | rclone rcat \"r2:$R2_BUCKET/bootstrap/%d/stage\"\n",
 		stage, instanceID,
 	))
 }

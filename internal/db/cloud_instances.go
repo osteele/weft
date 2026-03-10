@@ -88,7 +88,7 @@ func (c *CloudInstance) DisplayGPUSpec() string {
 		spec = c.GPUClass
 	}
 	if c.ResolvedGPUName != "" {
-		spec += fmt.Sprintf(" (%s)", c.ResolvedGPUName)
+		return fmt.Sprintf("%s (%s)", c.ResolvedGPUName, spec)
 	}
 	return spec
 }
