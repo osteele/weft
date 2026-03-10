@@ -2,39 +2,88 @@ package agentdeploy
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/osteele/weft/internal/ssh"
 )
 
+// RepoRoot returns the root directory of the weft source tree.
+// First tries the CWD-based VCS root, validating it contains the weft go.mod.
+// Falls back to the compile-time source directory if CWD is in a different repo.
+func RepoRoot() (string, error) {
+	// Try CWD-based VCS root first
+	if root, err := jjWorkspaceRoot(); err == nil {
+		if isWeftRoot(root) {
+			return root, nil
+		}
+	}
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		root := strings.TrimSpace(string(out))
+		if isWeftRoot(root) {
+			return root, nil
+		}
+	}
+
+	// Fall back to compile-time source directory
+	if root := compileTimeRoot(); root != "" && isWeftRoot(root) {
+		return root, nil
+	}
+
+	return "", fmt.Errorf("weft source tree not found (CWD is in a different repo)")
+}
+
+// isWeftRoot checks if a directory is the weft source tree root
+// by looking for a go.mod with the weft module path.
+func isWeftRoot(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "module github.com/osteele/weft")
+}
+
+// compileTimeRoot returns the source tree root based on the file path
+// of this source file at compile time (via runtime.Caller).
+func compileTimeRoot() string {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		return ""
+	}
+	// thisFile is .../internal/agentdeploy/version.go — go up 3 levels
+	root := filepath.Dir(filepath.Dir(filepath.Dir(thisFile)))
+	return root
+}
+
 // LocalAgentVersion returns a stable version string for the agent binary.
 // Uses the most recent commit that touched agent source files (cmd/agent/ or
 // internal/), so unrelated file changes don't trigger a cross-compile.
-// Prefers jj, falls back to git HEAD if jj is unavailable.
+// Uses RepoRoot() to find the weft source tree, so this works even when
+// CWD is in a different repository.
 func LocalAgentVersion() (string, error) {
-	if version, err := jjVersion(); err == nil {
+	repoRoot, err := RepoRoot()
+	if err != nil {
+		return "", err
+	}
+
+	if version, err := jjVersion(repoRoot); err == nil {
 		return version, nil
 	}
 
-	if version, err := gitVersion(); err == nil {
+	if version, err := gitVersion(repoRoot); err == nil {
 		return version, nil
 	}
 
-	return "", fmt.Errorf("neither jj nor git repository found")
+	return "", fmt.Errorf("no VCS found in weft source tree %s", repoRoot)
 }
 
 // agentSourcePaths are the directories whose changes affect the agent binary.
 var agentSourcePaths = []string{"cmd/agent/", "internal/"}
 
-func jjVersion() (string, error) {
-	rootCmd := exec.Command("jj", "workspace", "root")
-	rootOut, err := rootCmd.Output()
-	if err != nil {
-		return "", err
-	}
-	repoRoot := strings.TrimSpace(string(rootOut))
-
+func jjVersion(repoRoot string) (string, error) {
 	// Find the most recent committed ancestor that touched agent source files.
 	// Use @- (parent of working copy) to exclude the working copy itself,
 	// because the working copy gets a new commit_id on every jj snapshot,
@@ -54,6 +103,14 @@ func jjVersion() (string, error) {
 	return jjLog(repoRoot, "log", "--no-graph", "-r", "@-", "-T", `commit_id.short(12)`)
 }
 
+func jjWorkspaceRoot() (string, error) {
+	out, err := exec.Command("jj", "workspace", "root").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // jjLog runs a jj command in repoRoot and returns the trimmed output.
 func jjLog(repoRoot string, args ...string) (string, error) {
 	cmd := exec.Command("jj", args...)
@@ -69,8 +126,9 @@ func jjLog(repoRoot string, args ...string) (string, error) {
 	return version, nil
 }
 
-func gitVersion() (string, error) {
+func gitVersion(repoRoot string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--short=12", "HEAD")
+	cmd.Dir = repoRoot
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err

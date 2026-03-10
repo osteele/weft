@@ -745,14 +745,21 @@ func ensureAgentFresh() error {
 		return nil // agent is fresh
 	}
 
-	// Agent is stale — try to rebuild
+	// Find the source directory via VCS workspace root so `just build` finds
+	// the correct justfile even when weft is invoked from another directory.
+	sourceDir, err := agentdeploy.RepoRoot()
+	if err != nil {
+		return fmt.Errorf("agent binary is stale but not in the weft source tree; run \"just build\" manually")
+	}
+
 	justPath, lookErr := exec.LookPath("just")
 	if lookErr != nil {
-		return fmt.Errorf("embedded agent binary is stale and `just` is not available; run \"just build\" manually")
+		return fmt.Errorf("agent binary is stale and `just` is not available; run \"just build\" manually")
 	}
 
 	fmt.Println("Agent binary is stale, rebuilding...")
 	buildCmd := exec.Command(justPath, "build")
+	buildCmd.Dir = sourceDir
 	buildCmd.Stdout = os.Stdout
 	buildCmd.Stderr = os.Stderr
 	if err := buildCmd.Run(); err != nil {
