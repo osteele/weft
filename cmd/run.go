@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -406,6 +408,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		if host == "" {
+			// Try cloud instance reuse before declaring unplaced
+			if submitted := tryCloudReuse(database, jobID); submitted {
+				return nil
+			}
 			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
 			return nil
 		}
@@ -803,6 +809,41 @@ func syncHostQuietly(database *sql.DB, host string, noSync bool) bool {
 		return ensureQueueRunnerStarted(h, defaultQueueName)
 	})
 	return syncResult.HostContacted
+}
+
+// tryCloudReuse attempts to submit an unplaced job to a compatible cloud
+// instance (grace or running). Returns true if the job was submitted.
+// Silently returns false on any error (falls through to normal unplaced flow).
+func tryCloudReuse(database *sql.DB, jobID int64) bool {
+	instances, err := campaign.FindReusableInstances(database)
+	if err != nil || len(instances) == 0 {
+		return false
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil || job == nil {
+		return false
+	}
+
+	ranked := campaign.RankForJob(job, instances)
+	if len(ranked) == 0 {
+		return false
+	}
+
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		return false
+	}
+
+	best := ranked[0]
+	ctx := context.Background()
+	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, best.Instance.ID, []*db.Job{job}); err != nil {
+		return false
+	}
+
+	fmt.Printf("Job #%d submitted to cloud instance #%d (%s, %s)\n",
+		jobID, best.Instance.ID, best.Instance.DisplayGPUSpec(), best.Instance.Status)
+	return true
 }
 
 // syncAndReportOffline syncs a host and prints an offline message if unreachable.

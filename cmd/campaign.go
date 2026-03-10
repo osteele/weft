@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -22,6 +23,8 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 	"github.com/spf13/cobra"
 )
 
@@ -178,6 +181,25 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Check for reusable cloud instances (grace or running)
+	reusable, _ := campaign.FindReusableInstances(database)
+	var reuseAssignments []campaign.ReuseAssignment
+	if len(reusable) > 0 {
+		// Flatten all jobs for reuse matching
+		var allJobs []*db.Job
+		for _, g := range groups {
+			allJobs = append(allJobs, g.Jobs...)
+		}
+		var remainingJobs []*db.Job
+		reuseAssignments, remainingJobs = campaign.PlanReuse(allJobs, reusable)
+
+		if len(reuseAssignments) > 0 {
+			// Re-group remaining jobs for provisioning
+			groups = campaign.GroupByGPUSupremum(remainingJobs)
+			groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
+		}
+	}
+
 	// Estimate disk needs from HF model inputs
 	for i := range groups {
 		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
@@ -188,7 +210,12 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Dry run: print plan table
 	if campaignLaunchDryRun {
-		return runDryRunPlan(database, cfg, groups)
+		return runDryRunPlanWithReuse(database, cfg, groups, reuseAssignments)
+	}
+
+	if len(groups) == 0 && len(reuseAssignments) == 0 {
+		fmt.Println("No jobs need rental GPUs.")
+		return nil
 	}
 
 	// Check R2 config before entering interactive mode
@@ -198,7 +225,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Non-interactive mode
 	if campaignLaunchYes {
-		return runNonInteractiveLaunch(database, cfg, groups, opts)
+		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments)
 	}
 
 	// Interactive TUI
@@ -232,7 +259,24 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
-func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts) error {
+func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, reuseAssignments []campaign.ReuseAssignment) error {
+	// Submit reuse assignments first
+	if len(reuseAssignments) > 0 {
+		fmt.Print(campaign.FormatReuseAssignments(reuseAssignments))
+		r2Client, err := newR2ClientFromConfig()
+		if err != nil {
+			return fmt.Errorf("R2 client for reuse: %w", err)
+		}
+		if err := executeReuseAssignments(database, r2Client, reuseAssignments); err != nil {
+			return err
+		}
+	}
+
+	if len(groups) == 0 {
+		fmt.Println("All jobs assigned to existing instances.")
+		return nil
+	}
+
 	clients := buildCloudClients(cfg)
 	if len(clients) == 0 {
 		return fmt.Errorf("no cloud providers available (check vastai/runpod CLI)")
@@ -312,6 +356,20 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	}
 
 	return nil
+}
+
+func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, reuseAssignments []campaign.ReuseAssignment) error {
+	if len(reuseAssignments) > 0 {
+		fmt.Print(campaign.FormatReuseAssignments(reuseAssignments))
+		fmt.Println()
+	}
+
+	if len(groups) == 0 {
+		fmt.Println("All jobs can be assigned to existing instances. No new instances needed.")
+		return nil
+	}
+
+	return runDryRunPlan(database, cfg, groups)
 }
 
 func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup) error {
@@ -569,6 +627,46 @@ func parseLaunchOpts() campaign.LaunchOpts {
 		}
 	}
 	return opts
+}
+
+// executeReuseAssignments submits jobs to their assigned instances via R2.
+// Groups assignments by instance to batch submissions.
+func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments []campaign.ReuseAssignment) error {
+	// Group by instance ID
+	byInstance := make(map[int64][]*db.Job)
+	for _, a := range assignments {
+		byInstance[a.Instance.Instance.ID] = append(byInstance[a.Instance.Instance.ID], a.Job)
+	}
+
+	ctx := context.Background()
+	for instanceID, jobs := range byInstance {
+		jobIDs := make([]string, len(jobs))
+		for i, j := range jobs {
+			jobIDs[i] = fmt.Sprintf("#%d", j.ID)
+		}
+		fmt.Printf("Submitting %s to instance %d...\n", strings.Join(jobIDs, ", "), instanceID)
+
+		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, jobs); err != nil {
+			return fmt.Errorf("submit to instance %d: %w", instanceID, err)
+		}
+
+		// Auto-extend grace if deadline is close
+		inst, _ := db.GetCloudInstance(database, instanceID)
+		if inst != nil && inst.Status == db.CloudInstanceStatusGrace && inst.GraceDeadline != nil {
+			remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
+			if remaining < campaign.MinGraceRemaining {
+				extendDur := 15 * time.Minute
+				extendKey := r2keys.GraceExtend(instanceID)
+				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
+				newDeadline := time.Now().Add(extendDur).Unix()
+				_ = db.ExtendCloudInstanceGrace(database, instanceID, newDeadline)
+				fmt.Printf("  Auto-extended grace period by %s\n", extendDur)
+			}
+		}
+
+		fmt.Printf("  Submitted %d job(s) to instance %d\n", len(jobs), instanceID)
+	}
+	return nil
 }
 
 // reconcileBeforeDisplay checks running cloud instances against the provider

@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,8 +19,6 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
-	weftsync "github.com/osteele/weft/internal/sync"
-	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -487,50 +484,21 @@ func runInstanceSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d not found", jobID)
 	}
 
+	// Override command if specified via CLI flag
+	if instanceSubmitCommand != "" {
+		job.Command = instanceSubmitCommand
+	}
+
 	r2Client, err := newR2ClientFromConfig()
 	if err != nil {
 		return err
 	}
 
-	// Upload fresh sources
-	sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-	fmt.Printf("Re-syncing sources from %s...\n", sourceDir)
 	ctx := context.Background()
-	sourceR2Key, err := weftsync.UploadSourceToR2(ctx, r2Client, sourceDir)
-	if err != nil {
-		return fmt.Errorf("upload source: %w", err)
-	}
+	fmt.Printf("Re-syncing sources and submitting job %d to instance %d...\n", jobID, instanceID)
 
-	// Determine the command
-	jobCmd := job.EffectiveCommand()
-	if instanceSubmitCommand != "" {
-		jobCmd = instanceSubmitCommand
-	}
-
-	// Write jobs.json to R2
-	type gracePayload struct {
-		Jobs    []cloud.AgentJob  `json:"jobs"`
-		Sources map[string]string `json:"sources"`
-	}
-
-	payload := gracePayload{
-		Jobs: []cloud.AgentJob{{
-			ID:      jobID,
-			Command: jobCmd,
-		}},
-		Sources: map[string]string{
-			sourceDir: sourceR2Key,
-		},
-	}
-	payloadJSON, _ := json.Marshal(payload)
-
-	graceKey := r2keys.GraceJobs(instanceID)
-	if err := r2Client.PutObject(ctx, graceKey, strings.NewReader(string(payloadJSON)), "application/json"); err != nil {
-		return fmt.Errorf("write jobs.json to R2: %w", err)
-	}
-
-	if err := db.UpdateJobRunning(database, jobID); err != nil {
-		return fmt.Errorf("update job status: %w", err)
+	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
+		return err
 	}
 
 	fmt.Printf("Job %d resubmitted to instance %d.\n", jobID, instanceID)

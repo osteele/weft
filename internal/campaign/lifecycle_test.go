@@ -61,7 +61,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 		grace_period_seconds INTEGER,
 		grace_started_at INTEGER,
 		grace_deadline INTEGER,
-		termination_reason TEXT
+		termination_reason TEXT,
+		disk_gb INTEGER,
+		provisioned_inputs TEXT
 	);
 	CREATE TABLE campaigns (
 		id INTEGER PRIMARY KEY,

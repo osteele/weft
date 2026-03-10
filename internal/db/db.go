@@ -686,6 +686,14 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: add disk_gb and provisioned_inputs to cloud_instances for instance reuse
+	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN disk_gb INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN provisioned_inputs TEXT`); err != nil {
+		return err
+	}
+
 	// Backfill provider_instance_id from vastai_instance_id
 	if _, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`); err != nil {
 		return err

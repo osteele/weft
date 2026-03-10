@@ -194,6 +194,12 @@ func runCampaign(args []string) {
 			cleanLogDir(logDir)
 			oplog.Init(filepath.Join(logDir, agentOpslogFile), 0)
 		}
+
+		// Check for newly submitted jobs via R2 (between-job reuse)
+		if newJobs := checkForNewJobs(r2Bucket, instanceIDInt); len(newJobs) > 0 {
+			fmt.Printf("Picked up %d new job(s) from R2\n", len(newJobs))
+			manifest.Jobs = append(manifest.Jobs, newJobs...)
+		}
 	}
 
 	// Grace period or self-destruct
@@ -210,6 +216,29 @@ func runCampaign(args []string) {
 	} else {
 		selfDestruct(r2Bucket, instanceID, manifest.SelfDestructCmd)
 	}
+}
+
+// checkForNewJobs reads the grace/jobs.json R2 key and returns any newly
+// submitted jobs. Deletes the key after reading (acknowledge receipt).
+// This enables running instances to pick up jobs submitted via campaign reuse.
+func checkForNewJobs(r2Bucket string, instanceID int64) []cloud.AgentJob {
+	jobsJSON, _ := r2Get(r2Bucket, r2keys.GraceJobs(instanceID))
+	if jobsJSON == "" {
+		return nil
+	}
+
+	var payload graceJobsPayload
+	if err := json.Unmarshal([]byte(jobsJSON), &payload); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to parse between-job jobs.json: %v\n", err)
+		r2Delete(r2Bucket, r2keys.GraceJobs(instanceID))
+		return nil
+	}
+
+	// Acknowledge and delete
+	r2Delete(r2Bucket, r2keys.GraceJobs(instanceID))
+	r2Put(r2Bucket, r2keys.GraceAck(instanceID), fmt.Sprintf("%d", time.Now().Unix()))
+
+	return payload.Jobs
 }
 
 // writePhase writes a phase marker to R2 in a background goroutine.

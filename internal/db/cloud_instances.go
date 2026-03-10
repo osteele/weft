@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -16,7 +17,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		provider_instance_id, data_center,
 		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs,
 		grace_period_seconds, grace_started_at, grace_deadline,
-		termination_reason`
+		termination_reason,
+		disk_gb, provisioned_inputs`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -69,6 +71,10 @@ type CloudInstance struct {
 
 	// Termination classification
 	TerminationReason string // "completed", "preempted", "job_failure", "infra_failure", "cancelled"
+
+	// Instance capacity (for reuse matching)
+	DiskGB            int      // Actual disk space from offer (may exceed requested)
+	ProvisionedInputs []string // Input refs provisioned at launch (e.g., "hf:meta-llama/Llama-3-8B")
 
 	// Offer metadata (captured at launch)
 	ResolvedGPUName  string
@@ -128,16 +134,26 @@ func (c *CloudInstance) EffectiveProviderID() string {
 // CreateCloudInstance inserts a new cloud instance record and returns its ID.
 func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 	now := time.Now().Unix()
+
+	var provisionedInputsJSON *string
+	if len(c.ProvisionedInputs) > 0 {
+		data, _ := json.Marshal(c.ProvisionedInputs)
+		s := string(data)
+		provisionedInputsJSON = &s
+	}
+
 	result, err := db.Exec(
 		`INSERT INTO cloud_instances (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 		 max_spend_cents, max_time_seconds, created_at,
 		 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
-		 inet_down_mbps, inet_up_mbps, cuda_version)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 inet_down_mbps, inet_up_mbps, cuda_version,
+		 disk_gb, provisioned_inputs)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 		c.MaxSpendCents, c.MaxTimeSeconds, now,
 		c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
 		c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
+		c.DiskGB, provisionedInputsJSON,
 	)
 	if err != nil {
 		return 0, err
@@ -434,6 +450,8 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var gracePeriodSeconds sql.NullInt64
 	var graceStartedAt, graceDeadline sql.NullInt64
 	var terminationReason sql.NullString
+	var diskGB sql.NullInt64
+	var provisionedInputsJSON sql.NullString
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -445,6 +463,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs,
 		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
 		&terminationReason,
+		&diskGB, &provisionedInputsJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -538,6 +557,12 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	}
 	if terminationReason.Valid {
 		c.TerminationReason = terminationReason.String
+	}
+	if diskGB.Valid {
+		c.DiskGB = int(diskGB.Int64)
+	}
+	if provisionedInputsJSON.Valid && provisionedInputsJSON.String != "" {
+		_ = json.Unmarshal([]byte(provisionedInputsJSON.String), &c.ProvisionedInputs)
 	}
 	return &c, nil
 }
