@@ -51,6 +51,7 @@ type launchModel struct {
 	showCostDetail bool
 
 	campaignID       int64
+	reconciling      bool // true while background reconciliation is in progress
 	loading          bool
 	launching        bool
 	done             bool
@@ -65,6 +66,7 @@ type launchModel struct {
 	clients     []cloud.Client
 	appConfig   *config.Config
 	launchOpts  campaign.LaunchOpts
+	gpuFilter   string // --gpu filter to reapply after reconciliation
 
 	spinner spinner.Model
 	width   int
@@ -72,6 +74,12 @@ type launchModel struct {
 }
 
 // Messages
+type reconcileDoneMsg struct {
+	reconciled int
+	jobs       []*db.Job
+	groups     []campaign.InstanceGroup
+}
+
 type offersLoadedMsg struct {
 	offers []campaign.GroupOffer
 	err    error
@@ -99,8 +107,9 @@ type launchPhaseMsg struct {
 	phase string
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config) launchModel {
-	// Build flat list of items
+// buildItemsFromGroups creates the flat item list, selection map, and initial
+// cursor position from instance groups.
+func buildItemsFromGroups(groups []campaign.InstanceGroup) ([]listItem, map[int64]bool, int) {
 	var items []listItem
 	selected := make(map[int64]bool)
 
@@ -120,7 +129,6 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		}
 	}
 
-	// Position cursor on first non-header item
 	cursor := 0
 	for i, item := range items {
 		if !item.isHeader {
@@ -128,6 +136,11 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 			break
 		}
 	}
+	return items, selected, cursor
+}
+
+func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool) launchModel {
+	items, selected, cursor := buildItemsFromGroups(groups)
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
@@ -137,6 +150,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		items:         items,
 		cursor:        cursor,
 		selected:      selected,
+		reconciling:   reconciling,
 		loading:       true,
 		database:      database,
 		clients:       clients,
@@ -147,15 +161,56 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		survivalModel: buildSurvivalModel(database),
 		progressCh:    make(chan estimateProgressMsg, 1),
 		campaignCh:    make(chan int64, 1),
+		gpuFilter:     gpuFilter,
 		spinner:       s,
 	}
 }
 
 func (m launchModel) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		m.spinner.Tick,
 		m.fetchOffers(),
-	)
+	}
+	if m.reconciling {
+		cmds = append(cmds, m.runReconciliation())
+	}
+	return tea.Batch(cmds...)
+}
+
+// runReconciliation runs cloud instance reconciliation in the background and
+// returns a refreshed job/group list.
+func (m launchModel) runReconciliation() tea.Cmd {
+	database := m.database
+	gpuFilter := m.gpuFilter
+	return func() tea.Msg {
+		reconcileBeforeDisplay(database)
+
+		// Re-query unplaced jobs since reconciliation may have freed some
+		jobs, err := db.ListUnplacedJobs(database)
+		if err != nil {
+			return reconcileDoneMsg{}
+		}
+
+		groups := campaign.GroupByGPUSupremum(jobs)
+
+		// Reapply --gpu filter
+		if gpuFilter != "" {
+			var filtered []campaign.InstanceGroup
+			for _, g := range groups {
+				if strings.EqualFold(g.GPUClass, gpuFilter) {
+					filtered = append(filtered, g)
+				}
+			}
+			groups = filtered
+		}
+
+		// Re-estimate disk needs
+		for i := range groups {
+			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
+		}
+
+		return reconcileDoneMsg{jobs: jobs, groups: groups}
+	}
 }
 
 func (m launchModel) fetchOffers() tea.Cmd {
@@ -218,6 +273,19 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		return m, nil
+
+	case reconcileDoneMsg:
+		m.reconciling = false
+		if msg.groups != nil && len(msg.groups) > 0 {
+			m.groups = msg.groups
+			m.items, m.selected, m.cursor = buildItemsFromGroups(m.groups)
+			// Re-fetch offers for new groups
+			m.loading = true
+			m.groupOffers = nil
+			m.costEstimates = nil
+			return m, m.fetchOffers()
+		}
 		return m, nil
 
 	case offersLoadedMsg:
@@ -531,7 +599,13 @@ func (m launchModel) View() string {
 	}
 
 	// Loading state
-	if m.loading {
+	if m.reconciling && m.loading {
+		b.WriteString(m.spinner.View())
+		b.WriteString(" Reconciling instances & searching for GPU offers...\n\n")
+	} else if m.reconciling {
+		b.WriteString(m.spinner.View())
+		b.WriteString(" Reconciling cloud instances...\n\n")
+	} else if m.loading {
 		b.WriteString(m.spinner.View())
 		b.WriteString(" Searching for GPU offers...\n\n")
 	}

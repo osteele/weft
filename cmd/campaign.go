@@ -128,8 +128,12 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// Reconcile dead cloud instances so orphaned jobs become unplaced.
-	reconcileBeforeDisplay(database)
+	// For non-interactive and dry-run modes, reconcile synchronously.
+	// For TUI mode, reconciliation runs in the background (see below).
+	needsSyncReconcile := campaignLaunchYes || campaignLaunchDryRun
+	if needsSyncReconcile {
+		reconcileBeforeDisplay(database)
+	}
 
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
@@ -208,7 +212,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Interactive TUI
 	clients := buildCloudClients(cfg)
 	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg)
+	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg, campaignLaunchGPU, !needsSyncReconcile)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {

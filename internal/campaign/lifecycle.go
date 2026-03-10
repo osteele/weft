@@ -106,9 +106,30 @@ func LaunchCampaign(
 		return nil, fmt.Errorf("create R2 client: %w", err)
 	}
 
-	// Pre-stage agent binary to R2 (shared across all instances)
-	ctx := context.Background()
-	agentR2Key, err := agentdeploy.EnsureAgentInR2(ctx, r2Client, agentVersion, cloudOS, cloudArch)
+	// Pre-stage agent binary to R2 (shared across all instances).
+	// Use a generous timeout (10 min) since the agent binary is ~50-100MB
+	// and uploads may be slow on constrained networks.
+	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer uploadCancel()
+
+	// Log periodic warnings so the user knows the upload is still in progress.
+	uploadDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		elapsed := 15 * time.Second
+		for {
+			select {
+			case <-uploadDone:
+				return
+			case <-ticker.C:
+				log.Printf("agent upload still in progress (%s elapsed)...", elapsed.Truncate(time.Second))
+				elapsed += 15 * time.Second
+			}
+		}
+	}()
+	agentR2Key, err := agentdeploy.EnsureAgentInR2(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch)
+	close(uploadDone)
 	if err != nil {
 		return nil, fmt.Errorf("upload agent to R2: %w", err)
 	}
@@ -137,7 +158,7 @@ func LaunchCampaign(
 		sourceWg.Add(1)
 		go func() {
 			defer sourceWg.Done()
-			key, err := weftsync.UploadSourceToR2(ctx, r2Client, localDir)
+			key, err := weftsync.UploadSourceToR2(uploadCtx, r2Client, localDir)
 			sourceMu.Lock()
 			defer sourceMu.Unlock()
 			if err != nil {
@@ -246,7 +267,9 @@ func LaunchCampaign(
 				})
 
 				bootstrapKey := r2keys.BootstrapScript(donorInstanceID)
-				if uploadErr := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
+				donorUploadCtx, donorUploadCancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer donorUploadCancel()
+				if uploadErr := r2Assets.Client.PutObject(donorUploadCtx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
 					log.Printf("donor: failed to upload bootstrap: %v", uploadErr)
 					donorCfg = nil
 				} else {
@@ -359,7 +382,7 @@ func LaunchCampaign(
 
 		// Poll R2 for donor readiness
 		for time.Since(downloadStart) < DefaultDonorReadyTimeout {
-			exists, checkErr := r2Assets.Client.ObjectExists(ctx, readyKey)
+			exists, checkErr := r2Assets.Client.ObjectExists(context.Background(), readyKey)
 			if checkErr != nil {
 				log.Printf("donor: R2 readiness check error: %v", checkErr)
 			} else if exists {
