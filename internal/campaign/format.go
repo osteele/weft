@@ -64,7 +64,7 @@ func FormatCostTable(groupOffers []GroupOffer, selectedPerGroup []int) CostTable
 
 		rows = append(rows, row{
 			gpu:    FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName),
-			jobs:   fmt.Sprintf("%d jobs", selected),
+			jobs:   PluralJobs(selected),
 			mem:    fmt.Sprintf("%dGB", int(go_.Offer.GPUMemGB)),
 			rate:   fmt.Sprintf("$%.2f/hr", go_.Offer.CostPerHour),
 			cost:   fmt.Sprintf("~$%.2f", estCost),
@@ -127,9 +127,9 @@ func FormatCostTableWithEstimates(estimates []CostEstimate) string {
 		if est.SurvivalProb > 0 {
 			survStr = fmt.Sprintf("  %.0f%% surv", est.SurvivalProb*100)
 		}
-		b.WriteString(fmt.Sprintf("%-18s %d jobs  %dGB   $%.2f/hr  %s  %s%s\n",
+		b.WriteString(fmt.Sprintf("%-18s %-7s  %dGB   $%.2f/hr  %s  %s%s\n",
 			gpuLabel,
-			len(est.Group.Jobs),
+			PluralJobs(len(est.Group.Jobs)),
 			int(est.Offer.Offer.GPUMemGB),
 			est.Offer.Offer.CostPerHour,
 			durStr,
@@ -258,7 +258,7 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 
 		rows = append(rows, row{
 			gpu:    FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName),
-			jobs:   fmt.Sprintf("%d jobs", selected),
+			jobs:   PluralJobs(selected),
 			rate:   fmt.Sprintf("$%.2f/hr", est.Offer.Offer.CostPerHour),
 			dur:    formatDurationWithBounds(scaledTime),
 			cost:   formatCostWithBounds(scaledCost, scaledTime, est.Offer.Offer.CostPerHour),
@@ -319,8 +319,8 @@ func FormatCostBreakdown(estimates []CostEstimate, selectedPerGroup []int) strin
 		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
 
 		gpuLabel := FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName)
-		b.WriteString(fmt.Sprintf("  %s ($%.2f/hr, %d jobs selected)\n",
-			gpuLabel, est.Offer.Offer.CostPerHour, selected))
+		b.WriteString(fmt.Sprintf("  %s ($%.2f/hr, %s selected)\n",
+			gpuLabel, est.Offer.Offer.CostPerHour, PluralJobs(selected)))
 
 		// Startup phase
 		b.WriteString(fmt.Sprintf("    Instance startup   %s\n",
@@ -338,7 +338,7 @@ func FormatCostBreakdown(estimates []CostEstimate, selectedPerGroup []int) strin
 		scaledRun := est.Breakdown.Run.Scale(scale)
 		runLine := fmt.Sprintf("    Job runtime        %s",
 			formatDurationWithBounds(scaledRun))
-		runLine += fmt.Sprintf("     %d jobs, sequential", selected)
+		runLine += fmt.Sprintf("     %s, sequential", PluralJobs(selected))
 		b.WriteString(runLine + "\n")
 
 		// Total
@@ -390,6 +390,30 @@ func formatBytes(bytes int64) string {
 		return fmt.Sprintf("%d GB", bytes/gb)
 	}
 	return fmt.Sprintf("%d MB", bytes/mb)
+}
+
+// PluralJobs returns "1 job" or "N jobs".
+func PluralJobs(n int) string {
+	if n == 1 {
+		return "1 job"
+	}
+	return fmt.Sprintf("%d jobs", n)
+}
+
+// FormatCostCents formats a cost in cents as "$X.XX", or returns "—" if zero.
+func FormatCostCents(cents float64) string {
+	if cents == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("$%.2f", cents/100)
+}
+
+// FormatEstimatedCostCents formats an estimated cost stored as integer cents.
+func FormatEstimatedCostCents(cents int) string {
+	if cents <= 0 {
+		return "—"
+	}
+	return fmt.Sprintf("$%.2f", float64(cents)/100)
 }
 
 // TruncateCommand truncates a command string to max characters with ellipsis.

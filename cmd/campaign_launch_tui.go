@@ -108,7 +108,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		items = append(items, listItem{
 			isHeader: true,
 			groupIdx: i,
-			label:    fmt.Sprintf("%s (%d jobs)", g.GPUSpec(), len(g.Jobs)),
+			label:    fmt.Sprintf("%s (%s)", g.GPUSpec(), campaign.PluralJobs(len(g.Jobs))),
 		})
 		for _, job := range g.Jobs {
 			items = append(items, listItem{
