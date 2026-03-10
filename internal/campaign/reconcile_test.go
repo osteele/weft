@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -155,5 +156,153 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("reconciled = %d, want 0", n)
+	}
+}
+
+func TestReconcileCloudInstances_GraceExpiry_DestroysProvider(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a grace-period instance with an expired deadline
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusGrace,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "99999"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	// Set grace deadline in the past
+	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
+	if err := db.SetCloudInstanceGraceStarted(database, instanceID, pastDeadline); err != nil {
+		t.Fatalf("set grace started: %v", err)
+	}
+
+	// Track whether DestroyInstance was called
+	var destroyedID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			return nil
+		},
+	}
+
+	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("reconciled = %d, want 1", n)
+	}
+
+	// Verify DestroyInstance was called with the correct provider ID
+	if destroyedID != "99999" {
+		t.Errorf("DestroyInstance called with %q, want %q", destroyedID, "99999")
+	}
+
+	// Verify instance is now failed
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+}
+
+func TestReconcileCloudInstances_SafetyNet_DestroysLeakedInstance(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create an instance already marked as failed (recently)
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "leaked-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	// Mark it as failed (this sets ended_at to now)
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	// Mock client: ShowInstance reports it's still alive, DestroyInstance tracks the call
+	var destroyedID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: "running"}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			return nil
+		},
+	}
+
+	// Reconcile — the main loop won't see this instance (it's already failed),
+	// but the safety-net pass should catch and destroy it.
+	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("reconciled = %d, want 1 (safety-net destroy)", n)
+	}
+	if destroyedID != "leaked-123" {
+		t.Errorf("DestroyInstance called with %q, want %q", destroyedID, "leaked-123")
+	}
+}
+
+func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create an instance already marked as failed (recently)
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "dead-456"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	// Mock client: ShowInstance reports it's already destroyed
+	destroyCalled := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: "destroyed"}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyCalled = true
+			return nil
+		},
+	}
+
+	n, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("reconciled = %d, want 0 (already destroyed)", n)
+	}
+	if destroyCalled {
+		t.Error("DestroyInstance should not be called for already-destroyed instances")
 	}
 }

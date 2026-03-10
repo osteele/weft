@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -25,145 +26,216 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 		return 0, err
 	}
 
+	var mu sync.Mutex
 	reconciled := 0
+	var wg sync.WaitGroup
+
 	for _, ci := range instances {
-		// Check for grace-wait state for running instances via R2
-		if ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
-			if graceDetected := checkR2GraceStatus(r2Client, ci, database); graceDetected {
+		wg.Add(1)
+		go func(ci *db.CloudInstance) {
+			defer wg.Done()
+			if reconcileOneInstance(database, clients, r2Client, ci) {
+				mu.Lock()
 				reconciled++
-				continue
+				mu.Unlock()
 			}
-		}
-
-		// Expire grace-period instances whose deadline has passed
-		if ci.Status == db.CloudInstanceStatusGrace && ci.GraceDeadline != nil && time.Now().Unix() > *ci.GraceDeadline {
-			log.Printf("reconcile: instance %d grace period expired, marking failed", ci.ID)
-			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
-				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-				continue
-			}
-			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-			} else if resetCount > 0 {
-				log.Printf("reconcile: reset %d jobs from expired grace instance %d to unplaced", resetCount, ci.ID)
-			}
-			reconciled++
-			continue
-		}
-
-		// Clean up completed donor instances
-		if ci.InstanceRole == "donor" && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			exists, _ := r2Client.ObjectExists(ctx, r2keys.DonorReady(ci.ID))
-			cancel()
-			if exists {
-				providerID := ci.EffectiveProviderID()
-				if providerID != "" {
-					if client := clientForProvider(clients, cloud.Provider(ci.Provider)); client != nil {
-						if err := client.DestroyInstance(providerID); err != nil {
-							log.Printf("reconcile: failed to destroy completed donor %d: %v", ci.ID, err)
-						}
-					}
-				}
-				_ = db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
-				reconciled++
-				continue
-			}
-		}
-
-		providerID := ci.EffectiveProviderID()
-		if providerID == "" {
-			continue
-		}
-
-		client := clientForProvider(clients, cloud.Provider(ci.Provider))
-		if client == nil {
-			continue
-		}
-
-		inst, err := client.ShowInstance(providerID)
-		if err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
-			log.Printf("reconcile: ShowInstance(%s) for instance %d: %v", providerID, ci.ID, err)
-			continue
-		}
-
-		// Detect wedged instances: provider says "running" but no bootstrap progress
-		if !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
-			if isBootstrapStalled(r2Client, ci) {
-				log.Printf("reconcile: instance %d is wedged (no bootstrap progress after %s), terminating",
-					ci.ID, time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second))
-
-				// Try to terminate the provider instance
-				if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-					log.Printf("reconcile: failed to destroy wedged instance %d: %v", ci.ID, destroyErr)
-				}
-				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
-					log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-					continue
-				}
-				if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-					log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-				} else if resetCount > 0 {
-					log.Printf("reconcile: reset %d jobs from wedged instance %d to unplaced", resetCount, ci.ID)
-				}
-				reconciled++
-				continue
-			}
-		}
-
-		// If provider reports terminal state (or instance is gone) but DB doesn't, reconcile.
-		// Skip grace-period instances — a transient API failure shouldn't kill the session.
-		if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
-			status := "not found"
-			if inst != nil {
-				status = inst.Status
-			}
-
-			// Check R2 for completion marker before assuming failure.
-			if hasR2CompletionMarker(r2Client, ci.ID) {
-				log.Printf("reconcile: instance %d completed (R2 marker found), marking completed", ci.ID)
-				if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
-					log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-				}
-				if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-					log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-				} else if resetCount > 0 {
-					log.Printf("reconcile: reset %d jobs from completed instance %d to unplaced", resetCount, ci.ID)
-				}
-				reconciled++
-				continue
-			}
-
-			// Provider dead + had been launched (running) → preempted
-			reason := db.TerminationReasonPreempted
-			if ci.LaunchedAt == nil {
-				reason = db.TerminationReasonInfraFailure
-			}
-
-			log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed (%s)", ci.ID, providerID, status, reason)
-
-			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, reason); err != nil {
-				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-				continue
-			}
-			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-			} else if resetCount > 0 {
-				log.Printf("reconcile: reset %d jobs from instance %d to unplaced", resetCount, ci.ID)
-			}
-			reconciled++
-		}
+		}(ci)
 	}
+	wg.Wait()
 
 	// Catch-all: reset jobs stranded on dead cloud instances (stale host field).
 	if orphaned, err := db.ResetOrphanedCloudJobs(database); err != nil {
 		log.Printf("reconcile: reset orphaned cloud jobs: %v", err)
 	} else if orphaned > 0 {
 		log.Printf("reconcile: reset %d orphaned jobs from dead cloud instances", orphaned)
+		mu.Lock()
 		reconciled += int(orphaned)
+		mu.Unlock()
+	}
+
+	// Safety net: check recently-terminal instances to ensure provider instances are destroyed.
+	// Catches cases where self-destruct failed or a code path marked an instance terminal
+	// without calling DestroyInstance.
+	recentlyTerminal, err := db.ListRecentlyTerminalCloudInstances(database, 30*time.Minute)
+	if err != nil {
+		log.Printf("reconcile: list recently terminal instances: %v", err)
+	}
+	var wg2 sync.WaitGroup
+	for _, ci := range recentlyTerminal {
+		providerID := ci.EffectiveProviderID()
+		client := clientForProvider(clients, cloud.Provider(ci.Provider))
+		if client == nil {
+			continue
+		}
+
+		wg2.Add(1)
+		go func(ci *db.CloudInstance, providerID string, client cloud.Client) {
+			defer wg2.Done()
+			inst, err := client.ShowInstance(providerID)
+			if err != nil {
+				return // can't check — skip
+			}
+			if !isProviderTerminal(inst) {
+				log.Printf("reconcile: safety-net destroying leaked provider instance %s (db instance %d, status %s)",
+					providerID, ci.ID, ci.Status)
+				if err := client.DestroyInstance(providerID); err != nil {
+					log.Printf("reconcile: safety-net destroy %s failed: %v", providerID, err)
+				}
+				mu.Lock()
+				reconciled++
+				mu.Unlock()
+			}
+		}(ci, providerID, client)
+	}
+	wg2.Wait()
+
+	// Orphan sweep: destroy weft-labeled instances that belong to non-active campaigns.
+	// Rate-limited to avoid excessive provider API calls.
+	if swept, sweepErr := MaybeSweepOrphanedInstances(database, clients); sweepErr != nil {
+		log.Printf("reconcile: orphan sweep error: %v", sweepErr)
+	} else if swept > 0 {
+		log.Printf("reconcile: orphan sweep destroyed %d instances", swept)
+		reconciled += swept
 	}
 
 	return reconciled, nil
+}
+
+// reconcileOneInstance processes a single cloud instance for reconciliation.
+// Returns true if the instance was reconciled (state changed).
+func reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance) bool {
+	// Check for grace-wait state for running instances via R2
+	if ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+		if graceDetected := checkR2GraceStatus(r2Client, ci, database); graceDetected {
+			return true
+		}
+	}
+
+	// Expire grace-period instances whose deadline has passed
+	if ci.Status == db.CloudInstanceStatusGrace && ci.GraceDeadline != nil && time.Now().Unix() > *ci.GraceDeadline {
+		log.Printf("reconcile: instance %d grace period expired, destroying and marking failed", ci.ID)
+
+		providerID := ci.EffectiveProviderID()
+		if providerID != "" {
+			if client := clientForProvider(clients, cloud.Provider(ci.Provider)); client != nil {
+				if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
+					log.Printf("reconcile: failed to destroy expired grace instance %d: %v", ci.ID, destroyErr)
+				}
+			}
+		}
+
+		if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+			log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
+			return false
+		}
+		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+			log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+		} else if resetCount > 0 {
+			log.Printf("reconcile: reset %d jobs from expired grace instance %d to unplaced", resetCount, ci.ID)
+		}
+		return true
+	}
+
+	// Clean up completed donor instances
+	if ci.InstanceRole == "donor" && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		exists, _ := r2Client.ObjectExists(ctx, r2keys.DonorReady(ci.ID))
+		cancel()
+		if exists {
+			providerID := ci.EffectiveProviderID()
+			if providerID != "" {
+				if client := clientForProvider(clients, cloud.Provider(ci.Provider)); client != nil {
+					if err := client.DestroyInstance(providerID); err != nil {
+						log.Printf("reconcile: failed to destroy completed donor %d: %v", ci.ID, err)
+					}
+				}
+			}
+			_ = db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
+			return true
+		}
+	}
+
+	providerID := ci.EffectiveProviderID()
+	if providerID == "" {
+		return false
+	}
+
+	client := clientForProvider(clients, cloud.Provider(ci.Provider))
+	if client == nil {
+		return false
+	}
+
+	inst, err := client.ShowInstance(providerID)
+	if err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
+		log.Printf("reconcile: ShowInstance(%s) for instance %d: %v", providerID, ci.ID, err)
+		return false
+	}
+
+	// Detect wedged instances: provider says "running" but no bootstrap progress
+	if !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+		if isBootstrapStalled(r2Client, ci) {
+			log.Printf("reconcile: instance %d is wedged (no bootstrap progress after %s), terminating",
+				ci.ID, time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second))
+
+			if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
+				log.Printf("reconcile: failed to destroy wedged instance %d: %v", ci.ID, destroyErr)
+			}
+			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
+				return false
+			}
+			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+			} else if resetCount > 0 {
+				log.Printf("reconcile: reset %d jobs from wedged instance %d to unplaced", resetCount, ci.ID)
+			}
+			return true
+		}
+	}
+
+	// If provider reports terminal state (or instance is gone) but DB doesn't, reconcile.
+	// Skip grace-period instances — a transient API failure shouldn't kill the session.
+	if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
+		status := "not found"
+		if inst != nil {
+			status = inst.Status
+		}
+
+		// Check R2 for completion marker before assuming failure.
+		if hasR2CompletionMarker(r2Client, ci.ID) {
+			log.Printf("reconcile: instance %d completed (R2 marker found), marking completed", ci.ID)
+			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
+				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
+			}
+			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+			} else if resetCount > 0 {
+				log.Printf("reconcile: reset %d jobs from completed instance %d to unplaced", resetCount, ci.ID)
+			}
+			return true
+		}
+
+		// Provider dead + had been launched (running) → preempted
+		reason := db.TerminationReasonPreempted
+		if ci.LaunchedAt == nil {
+			reason = db.TerminationReasonInfraFailure
+		}
+
+		log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed (%s)", ci.ID, providerID, status, reason)
+
+		if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, reason); err != nil {
+			log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
+			return false
+		}
+		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+			log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+		} else if resetCount > 0 {
+			log.Printf("reconcile: reset %d jobs from instance %d to unplaced", resetCount, ci.ID)
+		}
+		return true
+	}
+
+	return false
 }
 
 // ReconcileCampaigns checks active campaigns and marks them as completed or failed
