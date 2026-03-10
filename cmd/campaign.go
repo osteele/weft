@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -204,8 +205,14 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	clients := buildCloudClients(cfg)
 	predCfg := buildPredictorConfig(cfg)
 	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg, campaignLaunchGPU, !needsSyncReconcile)
+
+	// Suppress log output while the TUI is running to prevent log messages
+	// from corrupting the terminal display.
+	origLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
+	log.SetOutput(origLogOutput)
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
