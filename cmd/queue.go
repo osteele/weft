@@ -239,7 +239,7 @@ func resolveQueueHost(args []string) (string, error) {
 	} else {
 		return "", fmt.Errorf("host is required (provide as argument or use --host)")
 	}
-	if strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:") {
+	if db.IsCloudHost(host) {
 		return "", fmt.Errorf("queue commands are not supported for cloud instances; use 'weft campaign' commands instead")
 	}
 	return host, nil

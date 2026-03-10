@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -262,6 +263,12 @@ func SetCloudInstanceSeedCopySecs(db *sql.DB, id int64, secs int) error {
 // CloudInstanceHost returns the synthetic host name for a cloud instance.
 func CloudInstanceHost(instanceID int64) string {
 	return fmt.Sprintf("vastai:%d", instanceID)
+}
+
+// IsCloudHost reports whether a host string refers to a cloud instance
+// (e.g. "vastai:123" or "runpod:456").
+func IsCloudHost(host string) bool {
+	return strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:")
 }
 
 // SetJobCloudInstanceID associates a job with a cloud instance and records the attempt.

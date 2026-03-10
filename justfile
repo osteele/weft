@@ -10,7 +10,7 @@ build: build-agents
     go build -o weft .
 
 # Install to $GOPATH/bin
-install:
+install: build-agents
     go install .
 
 # Run tests (skips slow build tests; use test-all for full suite)
