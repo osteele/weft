@@ -52,9 +52,9 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 	return path, nil
 }
 
-// checkEmbeddedVersion verifies the embedded agent binary version matches the
+// CheckEmbeddedVersion verifies the embedded agent binary version matches the
 // requested version. Returns nil if no VERSION file exists (backwards compat).
-func checkEmbeddedVersion(requestedVer string) error {
+func CheckEmbeddedVersion(requestedVer string) error {
 	embeddedVerBytes, err := agentBinaries.ReadFile("binaries/VERSION")
 	if err != nil {
 		return nil
@@ -80,7 +80,7 @@ func defaultExtractFunc(goos, goarch, outputPath string) error {
 	// Extract requested version from cache path: .../builds/<version>/<goos>-<goarch>/weft-agent
 	dir := filepath.Dir(outputPath)
 	requestedVer := filepath.Base(filepath.Dir(dir))
-	if err := checkEmbeddedVersion(requestedVer); err != nil {
+	if err := CheckEmbeddedVersion(requestedVer); err != nil {
 		return err
 	}
 

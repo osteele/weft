@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/term"
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
@@ -79,6 +82,7 @@ var (
 	campaignLaunchJobs        string
 	campaignLaunchGPU         string
 	campaignWatchTUI          bool
+	campaignListTUI           bool
 )
 
 func init() {
@@ -88,6 +92,7 @@ func init() {
 	campaignCmd.AddCommand(campaignTerminateCmd)
 	campaignCmd.AddCommand(campaignListCmd)
 	campaignCmd.AddCommand(campaignShowCmd)
+	campaignCmd.AddCommand(campaignStatsCmd)
 
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchMaxSpend, "max-spend", "", "Maximum spend per instance (e.g., '$5.00')")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchMaxTime, "max-time", "", "Maximum time per instance (e.g., '2h')")
@@ -102,9 +107,16 @@ func init() {
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Use interactive TUI display")
 	campaignWatchCmd.Flags().Bool("plain", false, "Plain text output (default; accepted for clarity)")
 	_ = campaignWatchCmd.Flags().MarkHidden("plain")
+
+	campaignListCmd.Flags().BoolVar(&campaignListTUI, "tui", false, "Interactive list with drill-down to watch")
 }
 
 func runCampaignLaunch(cmd *cobra.Command, args []string) error {
+	// Pre-flight: check if embedded agent binary is stale and auto-rebuild
+	if err := ensureAgentFresh(); err != nil {
+		return err
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -437,16 +449,23 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if campaignListTUI && term.IsTerminal(os.Stdout.Fd()) {
+		return runCampaignListTUI(database, campaigns)
+	}
+
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "ID\tSTATUS\tINSTANCES\tCREATED\n")
+	fmt.Fprintf(w, "ID\tSTATUS\tINSTANCES\tEST. COST\tACTUAL COST\tCREATED\n")
 
 	for _, c := range campaigns {
 		created := time.Unix(c.CreatedAt, 0).Format("01/02 15:04")
 
 		instances, _ := db.GetCampaignInstances(database, c.ID)
 
-		fmt.Fprintf(w, "%d\t%s\t%d\t%s\n",
-			c.ID, c.Status, len(instances), created)
+		estCost := campaign.FormatEstimatedCostCents(c.EstimatedCostCents)
+		actualCost := campaignActualCost(instances)
+
+		fmt.Fprintf(w, "%d\t%s\t%d\t%s\t%s\t%s\n",
+			c.ID, c.Status, len(instances), estCost, actualCost, created)
 	}
 	w.Flush()
 	return nil
@@ -592,6 +611,61 @@ func buildSurvivalModel(database *sql.DB) *bidding.SurvivalModel {
 		return nil
 	}
 	return bidding.BuildSurvivalModel(outcomes)
+}
+
+// campaignActualCost computes the total actual cost for a set of cloud instances
+// based on uptime and cost_per_hour_cents. Returns a formatted string.
+func campaignActualCost(instances []*db.CloudInstance) string {
+	var totalCents float64
+	for _, inst := range instances {
+		if inst.CostPerHourCents == 0 || inst.LaunchedAt == nil {
+			continue
+		}
+		var end time.Time
+		if inst.EndedAt != nil {
+			end = time.Unix(*inst.EndedAt, 0)
+		} else {
+			end = time.Now()
+		}
+		uptime := end.Sub(time.Unix(*inst.LaunchedAt, 0))
+		totalCents += uptime.Hours() * float64(inst.CostPerHourCents)
+	}
+	return campaign.FormatCostCents(totalCents)
+}
+
+// ensureAgentFresh checks if the embedded agent binary matches the current
+// source version. If stale and `just` is available, it rebuilds and re-execs.
+func ensureAgentFresh() error {
+	version, err := agentdeploy.LocalAgentVersion()
+	if err != nil {
+		return nil // can't determine version; let downstream handle it
+	}
+
+	if err := agentdeploy.CheckEmbeddedVersion(version); err == nil {
+		return nil // agent is fresh
+	}
+
+	// Agent is stale — try to rebuild
+	justPath, lookErr := exec.LookPath("just")
+	if lookErr != nil {
+		return fmt.Errorf("embedded agent binary is stale and `just` is not available; run \"just build\" manually")
+	}
+
+	fmt.Println("Agent binary is stale, rebuilding...")
+	buildCmd := exec.Command(justPath, "build")
+	buildCmd.Stdout = os.Stdout
+	buildCmd.Stderr = os.Stderr
+	if err := buildCmd.Run(); err != nil {
+		return fmt.Errorf("auto-rebuild failed: %w; run \"just build\" manually", err)
+	}
+
+	// Re-exec with the freshly built binary
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot find own executable for re-exec: %w", err)
+	}
+	fmt.Println("Re-executing with fresh binary...")
+	return syscall.Exec(self, os.Args, os.Environ())
 }
 
 // printAutoBudget prints the auto-derived budget limits.

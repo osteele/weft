@@ -218,6 +218,9 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			statusLabel = label
 		}
 		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUSpec(), statusLabel)
+		if ci.TerminationReason != "" {
+			fmt.Printf("  Terminated: %s\n", ci.TerminationReason)
+		}
 		fmt.Printf("  Provider: %s\n", ci.Provider)
 
 		// Cloud instance info
@@ -271,7 +274,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		// Jobs
-		jobs, err := db.GetCloudInstanceJobs(database, ci.ID)
+		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
 		if err != nil {
 			return fmt.Errorf("get instance %d jobs: %w", ci.ID, err)
 		}

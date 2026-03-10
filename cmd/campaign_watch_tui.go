@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -201,6 +203,9 @@ func (m watchModel) View() string {
 		if label := ci.GraceStatusLabel(); label != "" {
 			statusLabel = label
 		}
+		if ci.TerminationReason != "" && ci.TerminationReason != db.TerminationReasonCompleted {
+			statusLabel += " (" + ci.TerminationReason + ")"
+		}
 
 		header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), stStyle.Render(statusLabel))
 		b.WriteString(watchTitleStyle.Render(header))
@@ -270,6 +275,25 @@ func (m watchModel) View() string {
 		b.WriteString("\n")
 	}
 
+	// Campaign cost total
+	if len(m.instanceIDs) > 1 {
+		var totalCost float64
+		hasCost := false
+		for _, id := range m.instanceIDs {
+			u, ok := m.updates[id]
+			if !ok || u.CloudInstance == nil || u.Instance == nil || u.CloudInstance.LaunchedAt == nil {
+				continue
+			}
+			uptime := time.Since(time.Unix(*u.CloudInstance.LaunchedAt, 0)).Truncate(time.Minute)
+			totalCost += uptime.Hours() * u.Instance.CostPerHour
+			hasCost = true
+		}
+		if hasCost {
+			b.WriteString(watchTitleStyle.Render(fmt.Sprintf("Total: $%.2f (%d instances)", totalCost, len(m.instanceIDs))))
+			b.WriteString("\n\n")
+		}
+	}
+
 	b.WriteString(watchDimStyle.Render("ctrl-c to exit (instances continue in background)"))
 	b.WriteString("\n")
 
@@ -288,6 +312,11 @@ func watchInstances(database *sql.DB, instanceIDs []int64) error {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
 	model := newWatchModel(database, instanceIDs, r2Client)
+
+	origLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(origLogOutput)
+
 	p := tea.NewProgram(model)
 	_, err := p.Run()
 	return err
