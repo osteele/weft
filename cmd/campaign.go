@@ -166,16 +166,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	groups := campaign.GroupByGPUSupremum(jobs)
 
-	// Filter by --gpu if specified
-	if campaignLaunchGPU != "" {
-		var filtered []campaign.InstanceGroup
-		for _, g := range groups {
-			if strings.EqualFold(g.GPUClass, campaignLaunchGPU) {
-				filtered = append(filtered, g)
-			}
-		}
-		groups = filtered
-	}
+	groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
 
 	if len(groups) == 0 {
 		if campaignLaunchGPU != "" {

@@ -75,9 +75,7 @@ type launchModel struct {
 
 // Messages
 type reconcileDoneMsg struct {
-	reconciled int
-	jobs       []*db.Job
-	groups     []campaign.InstanceGroup
+	groups []campaign.InstanceGroup
 }
 
 type offersLoadedMsg struct {
@@ -105,6 +103,24 @@ type campaignCreatedMsg struct {
 
 type launchPhaseMsg struct {
 	phase string
+}
+
+// groupsChanged returns true if the groups differ in count or job composition.
+func groupsChanged(old, new []campaign.InstanceGroup) bool {
+	if len(old) != len(new) {
+		return true
+	}
+	for i := range old {
+		if old[i].GPUClass != new[i].GPUClass || len(old[i].Jobs) != len(new[i].Jobs) {
+			return true
+		}
+		for j := range old[i].Jobs {
+			if old[i].Jobs[j].ID != new[i].Jobs[j].ID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // buildItemsFromGroups creates the flat item list, selection map, and initial
@@ -181,9 +197,16 @@ func (m launchModel) Init() tea.Cmd {
 // returns a refreshed job/group list.
 func (m launchModel) runReconciliation() tea.Cmd {
 	database := m.database
+	clients := m.clients
+	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
 	return func() tea.Msg {
-		reconcileBeforeDisplay(database)
+		r2Client, _ := buildR2Client(cfg)
+		if len(clients) > 0 {
+			campaign.ReconcileCloudInstances(database, clients, r2Client)
+		}
+		syncCloudJobResults(cfg, database, false)
+		campaign.ReconcileCampaigns(database)
 
 		// Re-query unplaced jobs since reconciliation may have freed some
 		jobs, err := db.ListUnplacedJobs(database)
@@ -193,23 +216,14 @@ func (m launchModel) runReconciliation() tea.Cmd {
 
 		groups := campaign.GroupByGPUSupremum(jobs)
 
-		// Reapply --gpu filter
-		if gpuFilter != "" {
-			var filtered []campaign.InstanceGroup
-			for _, g := range groups {
-				if strings.EqualFold(g.GPUClass, gpuFilter) {
-					filtered = append(filtered, g)
-				}
-			}
-			groups = filtered
-		}
+		groups = campaign.FilterByGPUClass(groups, gpuFilter)
 
 		// Re-estimate disk needs
 		for i := range groups {
 			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
 		}
 
-		return reconcileDoneMsg{jobs: jobs, groups: groups}
+		return reconcileDoneMsg{groups: groups}
 	}
 }
 
@@ -277,10 +291,18 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case reconcileDoneMsg:
 		m.reconciling = false
-		if msg.groups != nil && len(msg.groups) > 0 {
+		if msg.groups == nil {
+			return m, nil // reconciliation failed, keep current state
+		}
+		if len(msg.groups) == 0 {
+			// All jobs got placed during reconciliation
+			m.err = fmt.Errorf("no jobs need rental GPUs (all placed during reconciliation)")
+			return m, nil
+		}
+		// Only re-fetch offers if groups actually changed
+		if groupsChanged(m.groups, msg.groups) {
 			m.groups = msg.groups
 			m.items, m.selected, m.cursor = buildItemsFromGroups(m.groups)
-			// Re-fetch offers for new groups
 			m.loading = true
 			m.groupOffers = nil
 			m.costEstimates = nil
@@ -598,18 +620,6 @@ func (m launchModel) View() string {
 		return b.String()
 	}
 
-	// Loading state
-	if m.reconciling && m.loading {
-		b.WriteString(m.spinner.View())
-		b.WriteString(" Reconciling instances & searching for GPU offers...\n\n")
-	} else if m.reconciling {
-		b.WriteString(m.spinner.View())
-		b.WriteString(" Reconciling cloud instances...\n\n")
-	} else if m.loading {
-		b.WriteString(m.spinner.View())
-		b.WriteString(" Searching for GPU offers...\n\n")
-	}
-
 	// Count totals
 	totalJobs := 0
 	for _, g := range m.groups {
@@ -617,6 +627,19 @@ func (m launchModel) View() string {
 	}
 
 	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Cloud GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
+	// Show loading/reconciling status inline after the title
+	if m.reconciling || m.loading {
+		var status []string
+		if m.reconciling {
+			status = append(status, "reconciling")
+		}
+		if m.loading {
+			status = append(status, "fetching offers")
+		}
+		b.WriteString("  ")
+		b.WriteString(m.spinner.View())
+		b.WriteString(launchDimStyle.Render(strings.Join(status, ", ") + "..."))
+	}
 	b.WriteString("\n\n")
 
 	selected := m.selectedCountByGroup()

@@ -71,6 +71,21 @@ func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 	return result
 }
 
+// FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).
+// Returns all groups if filter is empty.
+func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
+	if filter == "" {
+		return groups
+	}
+	var filtered []InstanceGroup
+	for _, g := range groups {
+		if strings.EqualFold(g.GPUClass, filter) {
+			filtered = append(filtered, g)
+		}
+	}
+	return filtered
+}
+
 // SourceDirs returns the unique local absolute paths for all jobs in the group.
 // Each path is resolved from the job's working directory to a local absolute path.
 // Paths that cannot be resolved (relative, unrecognized prefix) are skipped.
