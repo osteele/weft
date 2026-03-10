@@ -25,9 +25,8 @@ var coordinatorStartCmd = &cobra.Command{
 	Short: "Start the coordinator daemon",
 	Long: `Start the coordinator daemon in the foreground.
 
-The coordinator watches for intent files, scores hosts, and dispatches
-jobs to remote queue runners. It handles host connectivity changes by
-queuing intents for offline hosts and retrying when they come back online.
+The coordinator manages cloud instance sweeps (Vast.ai), host state
+monitoring, and job remediation.
 
 Use Ctrl+C to stop.`,
 	RunE: runCoordinatorStart,
@@ -144,7 +143,6 @@ func runCoordinatorStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Status: running (PID %d)\n", pid)
-	fmt.Printf("Intent dir: %s\n", config.IntentDir)
 	fmt.Printf("Log: %s\n", config.LogPath)
 	if coordinator.IsInstalled() {
 		fmt.Printf("Launchd: installed (%s)\n", coordinator.PlistPath())

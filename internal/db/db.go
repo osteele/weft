@@ -980,25 +980,6 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 	return err
 }
 
-// MarkPendingPlacement sets a job's status to pending_placement.
-// Used when submitting a job to the coordinator for host assignment.
-func MarkPendingPlacement(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ? WHERE id = ?`,
-		StatusPendingPlacement, id,
-	)
-	return err
-}
-
-// SetJobPlacement records the coordinator's placement decision.
-func SetJobPlacement(db *sql.DB, jobID int64, host string, reasons string) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET placement_host = ?, placement_reasons = ? WHERE id = ?`,
-		host, reasons, jobID,
-	)
-	return err
-}
-
 // SetJobVastaiInstance stores the Vast.ai instance ID and backend on a job record.
 // This should be called immediately after creating the instance, before any other work.
 func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {

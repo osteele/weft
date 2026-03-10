@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,15 +13,12 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/runner"
-	"github.com/osteele/weft/internal/scheduler"
-	"github.com/osteele/weft/internal/ssh"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -34,10 +30,6 @@ var runCmd = &cobra.Command{
 
 If --host is omitted, automatic placement selects the best host based on
 GPU constraints (--gpu, --gpu-class, --gpu-mem) and data locality (--input).
-
-Jobs are routed through a scheduler that handles placement and dispatch.
-If a coordinator daemon is running, jobs are submitted as intents; otherwise
-placement and dispatch happen in-process.
 
 Examples:
   weft run 'python train.py'                           # Auto-place on best host
@@ -362,37 +354,52 @@ func runRun(cmd *cobra.Command, args []string) error {
 		maybeWarnHomePrefixedDir(host, workingDir)
 	}
 
-	// Route through scheduler for non-draft, non-dependency submissions
+	// Route through local placement for non-draft, non-dependency submissions
 	if !runDraft && runAfter == 0 && runAfterAny == 0 {
-		sched := scheduler.SelectScheduler(database, coordinatorReachable(cfg),
-			scheduler.WithConfig(cfg))
+		var placementResult *placement.PlacementResult
 
-		submitResult, submitErr := sched.Submit(context.Background(), &scheduler.SubmitRequest{
+		if host == "" {
+			result, err := placement.PlaceWithFallback(database, placementConstraints, predict)
+			if err != nil {
+				if !errors.Is(err, placement.ErrNoEligibleHost) {
+					return err
+				}
+				// No eligible host — job will be created as unplaced (host="")
+			} else {
+				placementResult = result
+				host = result.Host
+
+				oplog.Log(oplog.OpPlacementDecided,
+					oplog.WithHost(host),
+					oplog.WithDetail(placement.FormatPlacementDetail(result)))
+			}
+		}
+
+		// Build queue params
+		params := ops.QueueJobParams{
 			Host:        host,
-			Command:     command,
 			WorkingDir:  workingDir,
+			Command:     command,
 			Description: runDescription,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
+			GPUClass:    runGPUClass,
+			GPUMemGB:    intPtrOrNil(runGPUMem),
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
-			GPUClass:    runGPUClass,
-			GPUMemGB:    runGPUMem,
-			DepAfter:    runAfter,
+			OutputDirs:  outputDirs,
 			Produces:    runProduces,
 			Needs:       runNeeds,
-			OutputDirs:  outputDirs,
-			NoSync:      runNoSync,
-		})
-		if submitErr != nil {
-			return fmt.Errorf("submit job: %w", submitErr)
 		}
-		jobID := submitResult.JobID
-		host = submitResult.Host
+
+		jobID, err := ops.RecordQueuedJob(database, params)
+		if err != nil {
+			return fmt.Errorf("submit job: %w", err)
+		}
 
 		// Store placement telemetry if auto-placement was used
-		if submitResult.PlacementResult != nil {
-			meta := buildPlacementMeta(submitResult.PlacementResult, predict)
+		if placementResult != nil {
+			meta := buildPlacementMeta(placementResult, predict)
 			if err := db.SetJobPlacementMeta(database, jobID, meta); err != nil {
 				log.Printf("warning: failed to save placement meta: %v", err)
 			}
@@ -448,8 +455,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// For non-scheduler paths (--draft, --after), unplaced jobs use RecordQueuedJob with host=""
-	if host == "" && (runDraft || runAfter > 0 || runAfterAny > 0) {
+	// Unplaced jobs: record locally and prompt for cloud launch
+	if host == "" {
 		jobID, err := ops.RecordQueuedJob(database, ops.QueueJobParams{
 			WorkingDir:  workingDir,
 			Command:     command,
@@ -562,8 +569,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// This path is unreachable — all branches above return early.
-	// --draft and --after paths are handled above; default queue path uses scheduler.
 	return nil
 }
 
@@ -778,18 +783,12 @@ func mergeDedup(a, b []string) []string {
 	return result
 }
 
-// coordinatorReachable checks if the coordinator daemon is running.
-// It checks for the PID file via SSH with a short timeout for fast fail.
-func coordinatorReachable(cfg *config.Config) bool {
-	host := cfg.GetCoordinatorHost()
-	coordConfig := coordinator.DefaultConfig()
-	cmd := fmt.Sprintf("test -f %s && kill -0 $(cat %s) 2>/dev/null && echo YES || echo NO",
-		coordConfig.PIDFile, coordConfig.PIDFile)
-	stdout, _, err := ssh.RunWithTimeout(host, cmd, 3*time.Second)
-	if err != nil {
-		return false
+// intPtrOrNil returns a pointer to v if v > 0, or nil otherwise.
+func intPtrOrNil(v int) *int {
+	if v > 0 {
+		return &v
 	}
-	return strings.TrimSpace(stdout) == "YES"
+	return nil
 }
 
 // syncHostQuietly syncs a host to push queued jobs to the remote.
