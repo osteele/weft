@@ -19,10 +19,18 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
+// initialInstanceInfo holds pre-fetched DB data for instances that haven't
+// received a channel update yet, avoiding repeated queries in View().
+type initialInstanceInfo struct {
+	ci   *db.CloudInstance
+	jobs []*db.Job
+}
+
 type watchModel struct {
 	instanceIDs []int64
 	updates     map[int64]campaign.InstanceUpdate // latest update per instance
 	channels    map[int64]<-chan campaign.InstanceUpdate
+	initInfo    map[int64]initialInstanceInfo // pre-fetched data for pre-update display
 	database    *sql.DB
 	clients     map[int64]cloud.Client // per-instance client (looked up from DB provider)
 	r2Client    *r2.Client             // R2 client for phase/bootstrap fetching (may be nil)
@@ -65,12 +73,21 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) w
 		clients[id] = clientForInstance(database, id)
 	}
 
+	// Pre-fetch DB data for initial display (avoids queries in View)
+	initInfo := make(map[int64]initialInstanceInfo)
+	for _, id := range instanceIDs {
+		ci, _ := db.GetCloudInstance(database, id)
+		jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, id)
+		initInfo[id] = initialInstanceInfo{ci: ci, jobs: jobs}
+	}
+
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
 
 	return watchModel{
 		instanceIDs: instanceIDs,
 		updates:     make(map[int64]campaign.InstanceUpdate),
 		channels:    make(map[int64]<-chan campaign.InstanceUpdate),
+		initInfo:    initInfo,
 		database:    database,
 		clients:     clients,
 		r2Client:    r2Client,
@@ -184,8 +201,39 @@ func (m watchModel) View() string {
 	for _, id := range m.instanceIDs {
 		u, ok := m.updates[id]
 		if !ok {
-			b.WriteString(m.spinner.View())
-			b.WriteString(fmt.Sprintf(" Instance %d — waiting for data...\n\n", id))
+			// No channel update yet — show pre-fetched DB data
+			info := m.initInfo[id]
+			ci := info.ci
+			jobs := info.jobs
+			if ci != nil {
+				header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), watchStatusStyle.Render("launching"))
+				b.WriteString(watchTitleStyle.Render(header))
+				b.WriteString(" " + m.spinner.View() + "\n")
+				providerInstID := ci.EffectiveProviderID()
+				if providerInstID != "" {
+					b.WriteString(fmt.Sprintf("  %s: %s\n", ci.Provider, providerInstID))
+				} else {
+					b.WriteString(fmt.Sprintf("  %s: (provisioning...)\n", ci.Provider))
+				}
+				if len(jobs) > 0 {
+					b.WriteString(fmt.Sprintf("  Jobs: 0/%d completed\n", len(jobs)))
+					for _, j := range jobs {
+						desc := j.Description
+						if desc == "" {
+							desc = campaign.TruncateCommand(j.Command, 50)
+						}
+						b.WriteString(fmt.Sprintf("    %4d  %s  %s\n",
+							j.ID,
+							watchDimStyle.Render(fmt.Sprintf("%-12s", j.Status)),
+							desc,
+						))
+					}
+				}
+				b.WriteString("\n")
+			} else {
+				b.WriteString(m.spinner.View())
+				b.WriteString(fmt.Sprintf(" Instance %d — waiting for data...\n\n", id))
+			}
 			continue
 		}
 
@@ -214,7 +262,7 @@ func (m watchModel) View() string {
 		providerInstID := ci.EffectiveProviderID()
 		if providerInstID != "" {
 			instLine := fmt.Sprintf("  %s: %s", ci.Provider, providerInstID)
-			if u.Instance != nil {
+			if u.Instance != nil && !campaign.IsInstanceTerminal(ci.Status) {
 				instLine += fmt.Sprintf(" (%s)", u.Instance.Status)
 			}
 			b.WriteString(instLine + "\n")
