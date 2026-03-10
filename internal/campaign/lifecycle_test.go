@@ -67,7 +67,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 		id INTEGER PRIMARY KEY,
 		status TEXT,
 		created_at INTEGER,
-		ended_at INTEGER
+		ended_at INTEGER,
+		estimated_cost_cents INTEGER
 	);
 	CREATE TABLE job_cloud_attempts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -17,18 +17,19 @@ const (
 
 // Campaign represents a batch of cloud instances launched together.
 type Campaign struct {
-	ID        int64
-	Status    string
-	CreatedAt int64
-	EndedAt   *int64
+	ID                 int64
+	Status             string
+	CreatedAt          int64
+	EndedAt            *int64
+	EstimatedCostCents int // sum of per-instance cost estimates at launch time
 }
 
 // CreateCampaign inserts a new campaign batch record and returns its ID.
 func CreateCampaign(db *sql.DB, c *Campaign) (int64, error) {
 	now := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO campaigns (status, created_at) VALUES (?, ?)`,
-		c.Status, now,
+		`INSERT INTO campaigns (status, created_at, estimated_cost_cents) VALUES (?, ?, ?)`,
+		c.Status, now, c.EstimatedCostCents,
 	)
 	if err != nil {
 		return 0, err
@@ -39,11 +40,11 @@ func CreateCampaign(db *sql.DB, c *Campaign) (int64, error) {
 // GetCampaign retrieves a campaign by ID.
 func GetCampaign(db *sql.DB, id int64) (*Campaign, error) {
 	row := db.QueryRow(
-		`SELECT id, status, created_at, ended_at FROM campaigns WHERE id = ?`, id,
+		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0) FROM campaigns WHERE id = ?`, id,
 	)
 	var c Campaign
 	var endedAt sql.NullInt64
-	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt)
+	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -59,7 +60,7 @@ func GetCampaign(db *sql.DB, id int64) (*Campaign, error) {
 // ListCampaigns returns all campaigns ordered by creation time descending.
 func ListCampaigns(db *sql.DB) ([]*Campaign, error) {
 	rows, err := db.Query(
-		`SELECT id, status, created_at, ended_at FROM campaigns ORDER BY created_at DESC`,
+		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0) FROM campaigns ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, err
@@ -71,7 +72,7 @@ func ListCampaigns(db *sql.DB) ([]*Campaign, error) {
 // ListActiveCampaigns returns campaigns that are not in a terminal status.
 func ListActiveCampaigns(db *sql.DB) ([]*Campaign, error) {
 	rows, err := db.Query(
-		`SELECT id, status, created_at, ended_at FROM campaigns WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
+		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0) FROM campaigns WHERE status NOT IN (?, ?, ?) ORDER BY created_at DESC`,
 		CampaignStatusCompleted, CampaignStatusFailed, CampaignStatusCancelled,
 	)
 	if err != nil {
@@ -86,7 +87,7 @@ func scanCampaigns(rows *sql.Rows) ([]*Campaign, error) {
 	for rows.Next() {
 		var c Campaign
 		var endedAt sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents); err != nil {
 			return nil, err
 		}
 		if endedAt.Valid {

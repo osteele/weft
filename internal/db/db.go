@@ -122,6 +122,16 @@ type PlacementMeta struct {
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, cloud_instance_id`
 
+// qualifiedJobSelectColumns returns jobSelectColumns with each column prefixed
+// by the given table alias (e.g. "jobs" → "jobs.id, jobs.host, ...").
+func qualifiedJobSelectColumns(table string) string {
+	cols := strings.Split(jobSelectColumns, ",")
+	for i, col := range cols {
+		cols[i] = table + "." + strings.TrimSpace(col)
+	}
+	return strings.Join(cols, ", ")
+}
+
 // Special job tags that affect scheduling and execution behavior.
 const (
 	ProcessedTag = "processed"
@@ -668,6 +678,11 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: add termination_reason column to cloud_instances
 	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN termination_reason TEXT`); err != nil {
+		return err
+	}
+
+	// Migration: add estimated_cost_cents to campaigns
+	if err := addColumnIfMissing(db, `ALTER TABLE campaigns ADD COLUMN estimated_cost_cents INTEGER`); err != nil {
 		return err
 	}
 

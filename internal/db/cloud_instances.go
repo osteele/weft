@@ -286,6 +286,20 @@ func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
 	return queryJobs(db, query, instanceID)
 }
 
+// GetCloudInstanceJobsIncludingAttempts returns jobs currently associated with a
+// cloud instance OR that have a historical cloud attempt record for it. This is
+// useful for display purposes: after ResetCloudInstanceJobs clears
+// cloud_instance_id on re-queued jobs, those jobs are still visible via the
+// job_cloud_attempts table.
+func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT DISTINCT %s FROM jobs
+		LEFT JOIN job_cloud_attempts ON jobs.id = job_cloud_attempts.job_id
+		WHERE (jobs.cloud_instance_id = ? OR job_cloud_attempts.cloud_instance_id = ?)
+		AND jobs.tombstoned = 0
+		ORDER BY jobs.id ASC`, qualifiedJobSelectColumns("jobs"))
+	return queryJobs(database, query, instanceID, instanceID)
+}
+
 // ListUnplacedJobs returns all queued jobs with no host assignment (needing placement or rental).
 func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
 	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE status = ? AND host = '' AND tombstoned = 0 ORDER BY id ASC"
@@ -329,19 +343,21 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	return result.RowsAffected()
 }
 
-// ResetOrphanedCloudJobs resets queued jobs whose host references a cloud instance
-// (host LIKE 'vastai:%') that is either terminal or missing from the DB entirely.
-// This catches jobs stranded by stale host fields when cloud_instance_id was already cleared.
+// ResetOrphanedCloudJobs resets non-terminal jobs whose host references a cloud
+// instance (host LIKE 'vastai:%') that is either terminal or missing from the DB
+// entirely. This catches jobs stranded by stale host fields when cloud_instance_id
+// was already cleared — including "running" jobs whose instance died after the
+// agent started execution but before the reset could clear them.
 func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 	result, err := database.Exec(`
 		UPDATE jobs SET status = ?, host = '', cloud_instance_id = NULL
-		WHERE status = ? AND host LIKE 'vastai:%' AND tombstoned = 0
+		WHERE status IN (?, ?) AND host LIKE 'vastai:%' AND tombstoned = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM cloud_instances ci
 			WHERE ci.id = CAST(SUBSTR(jobs.host, 8) AS INTEGER)
 			AND ci.status IN (?, ?, ?)
 		)`,
-		StatusQueued, StatusQueued,
+		StatusQueued, StatusQueued, StatusRunning,
 		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace,
 	)
 	if err != nil {
@@ -619,6 +635,79 @@ func SetCloudInstanceGraceStarted(db *sql.DB, id int64, deadline int64) error {
 func ExtendCloudInstanceGrace(db *sql.DB, id int64, newDeadline int64) error {
 	_, err := db.Exec(`UPDATE cloud_instances SET grace_deadline = ? WHERE id = ?`, newDeadline, id)
 	return err
+}
+
+// ListRecentlyTerminalCloudInstances returns cloud instances that reached a terminal status
+// (failed, completed, cancelled) within the last `since` duration and have a provider ID.
+// Used as a safety net to destroy leaked provider instances.
+func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) ([]*CloudInstance, error) {
+	cutoff := time.Now().Add(-since).Unix()
+	rows, err := database.Query(
+		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances
+		 WHERE status IN (?, ?, ?)
+		 AND ended_at >= ?
+		 AND (provider_instance_id != '' OR vastai_instance_id != '')
+		 ORDER BY ended_at DESC`,
+		CloudInstanceStatusFailed, CloudInstanceStatusCompleted, CloudInstanceStatusCancelled,
+		cutoff,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var instances []*CloudInstance
+	for rows.Next() {
+		c, err := scanCloudInstanceFrom(rows)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, c)
+	}
+	return instances, rows.Err()
+}
+
+// ResetJobsOnTerminalCloudInstances finds non-terminal jobs associated with
+// terminal cloud instances and resets them to queued/unplaced. This is a DB-only
+// operation that doesn't require cloud provider clients. Returns total jobs reset.
+func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
+	// Find terminal instances that still have non-terminal jobs
+	rows, err := database.Query(`
+		SELECT DISTINCT ci.id
+		FROM cloud_instances ci
+		JOIN jobs j ON j.cloud_instance_id = ci.id
+		WHERE ci.status IN (?, ?, ?)
+		AND j.status NOT IN (?, ?)
+		AND j.tombstoned = 0`,
+		CloudInstanceStatusCompleted, CloudInstanceStatusFailed, CloudInstanceStatusCancelled,
+		StatusCompleted, StatusFailed,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var instanceIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		instanceIDs = append(instanceIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	var total int64
+	for _, id := range instanceIDs {
+		n, err := ResetCloudInstanceJobs(database, id, AttemptOutcomeOrphaned)
+		if err != nil {
+			return total, fmt.Errorf("reset jobs on instance %d: %w", id, err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // ListRunningCloudInstances returns all cloud instances with "running", "launching", or "grace" status.
