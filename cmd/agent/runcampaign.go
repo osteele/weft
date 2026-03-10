@@ -15,6 +15,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
@@ -75,11 +76,18 @@ func runCampaign(args []string) {
 	}
 	_ = os.MkdirAll(logDir, 0o755)
 
+	oplogPath := filepath.Join(logDir, agentOpslogFile)
+	if err := oplog.Init(oplogPath, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: init opslog: %v\n", err)
+	}
+	defer oplog.Close()
+
 	instanceIDInt, err := strconv.ParseInt(instanceID, 10, 64)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid instance ID %q: %v\n", instanceID, err)
 		os.Exit(1)
 	}
+	oplog.Log(oplog.OpAgentStart, oplog.WithDetailf("run-campaign instance=%s", instanceID))
 
 	// Fetch manifest from R2
 	manifestKey := r2keys.CampaignManifest(instanceIDInt)
@@ -114,7 +122,7 @@ func runCampaign(args []string) {
 	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, currentPhase.Get)
 	defer stopHeartbeat()
 
-	for _, job := range manifest.Jobs {
+	for i, job := range manifest.Jobs {
 		// Check time budget
 		if maxTime > 0 {
 			elapsed := time.Since(startTime)
@@ -180,8 +188,12 @@ func runCampaign(args []string) {
 		// Promote uv manifest
 		promoteUVManifest(r2Bucket, logDir)
 
-		// Clean log dir for next job
-		cleanLogDir(logDir)
+		// Upload opslog checkpoint and clean log dir for next job
+		uploadOpslog(r2Bucket, instanceIDInt, logDir)
+		if i < len(manifest.Jobs)-1 {
+			cleanLogDir(logDir)
+			oplog.Init(filepath.Join(logDir, agentOpslogFile), 0)
+		}
 	}
 
 	// Grace period or self-destruct
@@ -228,8 +240,12 @@ func uploadOutputDirs(bucket string, jobID int64, workDir string) {
 			"r2:"+bucket+"/"+r2keys.JobOutputDir(jobID, dir),
 		)
 		cmd.Stderr = os.Stderr
+		start := time.Now()
 		if err := cmd.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d: %v\n", dir, jobID, err)
+			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+				oplog.WithDetailf("output dir=%s", dir), oplog.WithError(err),
+				oplog.WithDuration(time.Since(start)))
 		}
 		cancel()
 	}

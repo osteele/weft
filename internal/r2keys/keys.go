@@ -92,6 +92,10 @@ func InstanceHeartbeat(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/heartbeat", instanceID)
 }
 
+func InstanceOpslog(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/opslog.jsonl", instanceID)
+}
+
 // Bootstrap keys
 
 func BootstrapScript(instanceID int64) string {

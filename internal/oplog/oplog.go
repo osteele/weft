@@ -55,6 +55,12 @@ const (
 	OpCoordinatorDiagnosis   = "coordinator.diagnosis"
 	OpCoordinatorRemediation = "coordinator.remediation"
 	OpCoordinatorAgentInvoke = "coordinator.agent.invoke"
+
+	// Agent R2/cloud operations
+	OpR2Get    = "r2.get"
+	OpR2Put    = "r2.put"
+	OpR2Delete = "r2.delete"
+	OpR2Copy   = "r2.copy" // rclone copy (bulk upload)
 )
 
 // Entry represents a single log entry in JSONL format.

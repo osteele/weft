@@ -7,11 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/runner"
@@ -100,6 +101,13 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		os.Exit(1)
 	}
 
+	oplogPath := filepath.Join(logDir, agentOpslogFile)
+	if err := oplog.Init(oplogPath, 0); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: init opslog: %v\n", err)
+	}
+	defer oplog.Close()
+	oplog.Log(oplog.OpAgentStart, oplog.WithDetailf("grace-wait instance=%s", instanceID))
+
 	deadline := time.Now().Add(cfg.Timeout)
 	prefix := r2keys.GracePrefix(instanceIDInt)
 	phaseKey := r2keys.InstancePhase(instanceIDInt)
@@ -125,6 +133,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		// Check deadline
 		if time.Now().After(deadline) {
 			fmt.Println("Grace period expired. Self-destructing.")
+			uploadOpslog(r2Bucket, instanceIDInt, logDir)
 			selfDestruct(r2Bucket, instanceID, selfDestructCmd)
 			return
 		}
@@ -133,6 +142,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		if releaseVal, _ := r2Get(r2Bucket, prefix+"/release"); releaseVal != "" {
 			fmt.Println("Release signal received. Self-destructing.")
 			r2Delete(r2Bucket, prefix+"/release")
+			uploadOpslog(r2Bucket, instanceIDInt, logDir)
 			selfDestruct(r2Bucket, instanceID, selfDestructCmd)
 			return
 		}
@@ -225,6 +235,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		if len(failedJobs) == 0 {
 			// All jobs succeeded — self-destruct
 			fmt.Println("All resubmitted jobs succeeded. Self-destructing.")
+			uploadOpslog(r2Bucket, instanceIDInt, logDir)
 			selfDestruct(r2Bucket, instanceID, selfDestructCmd)
 			return
 		}
@@ -252,19 +263,19 @@ func uploadJobResults(bucket string, jobID int64, logDir string) {
 	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobResultsPrefix(jobID))
 	rcloneCmd.Stderr = os.Stderr
+	start := time.Now()
 	if err := rcloneCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "upload results for job %d: %v\n", jobID, err)
+		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+			oplog.WithDetailf("results dir=%s", logDir), oplog.WithError(err),
+			oplog.WithDuration(time.Since(start)))
 	}
 	copyCancel()
 
 	// Write completion marker
-	completeCtx, completeCancel := context.WithTimeout(context.Background(), r2Timeout)
-	completeCmd := exec.CommandContext(completeCtx, "rclone", "rcat", "r2:"+bucket+"/"+r2keys.JobComplete(jobID))
-	completeCmd.Stdin = strings.NewReader("done")
-	if err := completeCmd.Run(); err != nil {
+	if err := r2Put(bucket, r2keys.JobComplete(jobID), "done"); err != nil {
 		fmt.Fprintf(os.Stderr, "write completion marker for job %d: %v\n", jobID, err)
 	}
-	completeCancel()
 }
 
 func selfDestruct(bucket, instanceID, selfDestructCmd string) {
