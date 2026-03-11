@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -80,6 +81,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		defer close(ch)
 		var lastProviderPoll time.Time
 		var cachedInstance *cloud.Instance
+		var firstDeadAt time.Time
 
 		for {
 			select {
@@ -112,18 +114,32 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				// Detect dead instances: provider says dead but DB says running.
 				// Skip grace-period instances — they legitimately keep the provider
 				// alive, and a transient API failure shouldn't kill the grace session.
-				if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
-					if r2c != nil && hasR2CompletionMarker(r2c, cloudInstanceID) {
-						_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
-						_ = db.CloseJobCloudAttemptsByInstance(database, cloudInstanceID, db.AttemptOutcomeCompleted)
-						ci.Status = db.CloudInstanceStatusCompleted
-						jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
-					} else {
-						_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
-						_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
-						ci.Status = db.CloudInstanceStatusFailed
-						jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+				if showErr == nil && isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
+					if firstDeadAt.IsZero() {
+						firstDeadAt = time.Now()
+						status := "not found"
+						if inst != nil {
+							status = inst.Status
+						}
+						log.Printf("watch: cloud instance %d appears dead (status: %s), waiting %s to confirm",
+							cloudInstanceID, status, minDeadConfirmTime)
 					}
+					if time.Since(firstDeadAt) >= minDeadConfirmTime {
+						if r2c != nil && hasR2CompletionMarker(r2c, cloudInstanceID) {
+							_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
+							_ = db.CloseJobCloudAttemptsByInstance(database, cloudInstanceID, db.AttemptOutcomeCompleted)
+							ci.Status = db.CloudInstanceStatusCompleted
+							jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+						} else {
+							_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
+							_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
+							ci.Status = db.CloudInstanceStatusFailed
+							jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+						}
+						firstDeadAt = time.Time{}
+					}
+				} else if showErr == nil && !isProviderTerminal(inst) {
+					firstDeadAt = time.Time{}
 				}
 			}
 

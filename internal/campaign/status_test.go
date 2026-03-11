@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -230,6 +231,50 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	}
 	if ci.Status != db.CloudInstanceStatusFailed {
 		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+}
+
+func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "mock",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	_, err = database.Exec(`UPDATE cloud_instances SET provider_instance_id = ? WHERE id = ?`,
+		"test-err", instanceID)
+	if err != nil {
+		t.Fatalf("update provider_instance_id: %v", err)
+	}
+
+	var showCalls int
+	mockClient := &cloud.MockClient{
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			showCalls++
+			return nil, errors.New("transient API failure")
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	ch := WatchInstance(ctx, mockClient, database, instanceID, 20*time.Millisecond, 20*time.Millisecond)
+	for range ch {
+	}
+
+	if showCalls == 0 {
+		t.Fatal("expected ShowInstance to be called at least once")
+	}
+
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusRunning {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusRunning)
 	}
 }
 
