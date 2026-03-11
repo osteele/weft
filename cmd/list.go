@@ -179,6 +179,9 @@ func runList(cmd *cobra.Command, args []string) error {
 	hostFilterHosts := []string{}
 	if listHost != "" {
 		hostFilterHosts = []string{listHost}
+	} else if listQueued {
+		// --queued is an explicit request for all pending jobs; unplaced jobs have no
+		// host, so filtering by recently-synced hosts would silently hide them.
 	} else if !listAllHosts {
 		recentHosts, err := db.ListHostsSyncedSince(database, time.Now().Add(-defaultHostSyncWindow))
 		if err != nil {

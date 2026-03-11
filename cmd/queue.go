@@ -271,12 +271,12 @@ func init() {
 	addQueueHostFlag(queueStatusCmd)
 	addQueueHostFlag(queueUpdateCmd)
 
-	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path)")
+	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path; alias: --dir)")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "message", "m", "", "Description of the job")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
-	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Special: 'exclusive' makes job run alone; 'benchmark' waits for system-wide idle")
+	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated; alias: --project). Special: 'exclusive' makes job run alone; 'benchmark' waits for system-wide idle")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
@@ -284,6 +284,7 @@ func init() {
 	queueAddCmd.Flags().BoolVar(&queueDraft, "draft", false, "Create the job in draft status without syncing to the remote queue")
 	queueAddCmd.Flags().BoolVar(&queueWait, "wait", false, "Wait for job to complete before returning")
 	queueAddCmd.Flags().BoolVar(&queueNoWait, "no-wait", false, "Don't wait for job (default behavior, for explicit acknowledgment)")
+	addJobAddFlagAliases(queueAddCmd)
 
 }
 

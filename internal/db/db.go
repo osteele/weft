@@ -2368,7 +2368,7 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 		placeholders = append(placeholders, "?")
 		args = append(args, host)
 	}
-	query += fmt.Sprintf(` AND (host IN (%s) OR cloud_instance_id IS NOT NULL)`, strings.Join(placeholders, ", "))
+	query += fmt.Sprintf(` AND (host IN (%s) OR host = '' OR cloud_instance_id IS NOT NULL)`, strings.Join(placeholders, ", "))
 	if maxAgeDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
 		query += ` AND (start_time > ? OR start_time IS NULL OR start_time = 0)`
