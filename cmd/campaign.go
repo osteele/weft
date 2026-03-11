@@ -45,13 +45,14 @@ Use --dry-run to just print the plan without launching.`,
 }
 
 var campaignWatchCmd = &cobra.Command{
-	Use:   "watch <campaign-id>",
+	Use:   "watch [campaign-id]",
 	Short: "Watch campaign instance progress",
 	Long: `Monitors all instances in a campaign.
 
 Defaults to TUI in an interactive terminal, otherwise plain text.
+If no campaign ID is provided, watches the most recent campaign.
 Use --tui or --plain to override.`,
-	Args: cobra.ExactArgs(1),
+	Args: usageArgs(cobra.MaximumNArgs(1)),
 	RunE: runCampaignWatch,
 }
 
@@ -98,6 +99,7 @@ func init() {
 	rootCmd.AddCommand(campaignCmd)
 	campaignCmd.AddCommand(campaignLaunchCmd)
 	campaignCmd.AddCommand(campaignWatchCmd)
+	campaignCmd.AddCommand(campaignDiagnoseCmd)
 	campaignCmd.AddCommand(campaignTerminateCmd)
 	campaignCmd.AddCommand(campaignListCmd)
 	campaignCmd.AddCommand(campaignShowCmd)
@@ -455,15 +457,25 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 	return nil
 }
 
+func resolveCampaignWatchID(database *sql.DB, args []string) (int64, error) {
+	if len(args) > 0 {
+		return parseCampaignID(args[0])
+	}
+
+	c, err := db.GetMostRecentCampaign(database)
+	if err != nil {
+		return 0, fmt.Errorf("get most recent campaign: %w", err)
+	}
+	if c == nil {
+		return 0, fmt.Errorf("no campaigns found")
+	}
+	return c.ID, nil
+}
+
 func runCampaignWatch(cmd *cobra.Command, args []string) error {
 	useTUI, err := resolveCampaignTUI(campaignWatchTUI, campaignWatchPlain)
 	if err != nil {
 		return err
-	}
-
-	campaignID, err := strconv.ParseInt(args[0], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid campaign ID %q: %w", args[0], err)
 	}
 
 	database, err := db.Open()
@@ -471,6 +483,11 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	campaignID, err := resolveCampaignWatchID(database, args)
+	if err != nil {
+		return err
+	}
 
 	instances, err := db.GetCampaignInstances(database, campaignID)
 	if err != nil {

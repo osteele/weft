@@ -69,6 +69,31 @@ func ListCampaigns(db *sql.DB) ([]*Campaign, error) {
 	return scanCampaigns(rows)
 }
 
+// GetMostRecentCampaign returns the newest campaign, or nil if none exist.
+func GetMostRecentCampaign(db *sql.DB) (*Campaign, error) {
+	return getMostRecentCampaignByQuery(
+		db,
+		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0)
+		 FROM campaigns
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+	)
+}
+
+// GetMostRecentCampaignByStatus returns the newest campaign with the given status,
+// or nil if none exist.
+func GetMostRecentCampaignByStatus(db *sql.DB, status string) (*Campaign, error) {
+	return getMostRecentCampaignByQuery(
+		db,
+		`SELECT id, status, created_at, ended_at, COALESCE(estimated_cost_cents, 0)
+		 FROM campaigns
+		 WHERE status = ?
+		 ORDER BY created_at DESC, id DESC
+		 LIMIT 1`,
+		status,
+	)
+}
+
 // ListActiveCampaigns returns campaigns that are not in a terminal status.
 func ListActiveCampaigns(db *sql.DB) ([]*Campaign, error) {
 	rows, err := db.Query(
@@ -96,6 +121,23 @@ func scanCampaigns(rows *sql.Rows) ([]*Campaign, error) {
 		campaigns = append(campaigns, &c)
 	}
 	return campaigns, rows.Err()
+}
+
+func getMostRecentCampaignByQuery(db *sql.DB, query string, args ...any) (*Campaign, error) {
+	row := db.QueryRow(query, args...)
+	var c Campaign
+	var endedAt sql.NullInt64
+	err := row.Scan(&c.ID, &c.Status, &c.CreatedAt, &endedAt, &c.EstimatedCostCents)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if endedAt.Valid {
+		c.EndedAt = &endedAt.Int64
+	}
+	return &c, nil
 }
 
 // UpdateCampaignStatus updates a campaign's status and optionally sets timestamps.

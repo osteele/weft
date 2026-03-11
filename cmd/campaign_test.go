@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/remediation"
 )
 
 func TestParseLaunchOpts(t *testing.T) {
@@ -116,5 +118,135 @@ func TestParseLaunchOptsTimeDuration(t *testing.T) {
 	expected := int((1*time.Hour + 30*time.Minute).Seconds())
 	if opts.MaxTimeSeconds != expected {
 		t.Errorf("MaxTimeSeconds = %d, want %d", opts.MaxTimeSeconds, expected)
+	}
+}
+
+func TestResolveCampaignWatchIDDefaultsToMostRecent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	if _, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusCompleted}); err != nil {
+		t.Fatalf("CreateCampaign(first): %v", err)
+	}
+	secondID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("CreateCampaign(second): %v", err)
+	}
+
+	got, err := resolveCampaignWatchID(database, nil)
+	if err != nil {
+		t.Fatalf("resolveCampaignWatchID: %v", err)
+	}
+	if got != secondID {
+		t.Fatalf("resolveCampaignWatchID = %d, want %d", got, secondID)
+	}
+}
+
+func TestResolveCampaignDiagnoseIDDefaultsToMostRecentFailed(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	if _, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusCompleted}); err != nil {
+		t.Fatalf("CreateCampaign(completed): %v", err)
+	}
+	if _, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusFailed}); err != nil {
+		t.Fatalf("CreateCampaign(failed-1): %v", err)
+	}
+	if _, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning}); err != nil {
+		t.Fatalf("CreateCampaign(running): %v", err)
+	}
+	secondFailedID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusFailed})
+	if err != nil {
+		t.Fatalf("CreateCampaign(failed-2): %v", err)
+	}
+
+	got, err := resolveCampaignDiagnoseID(database, nil)
+	if err != nil {
+		t.Fatalf("resolveCampaignDiagnoseID: %v", err)
+	}
+	if got != secondFailedID {
+		t.Fatalf("resolveCampaignDiagnoseID = %d, want %d", got, secondFailedID)
+	}
+}
+
+func TestBuildCampaignDiagnosisReport(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusFailed})
+	if err != nil {
+		t.Fatalf("CreateCampaign: %v", err)
+	}
+
+	preemptedID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		CampaignID: &campaignID,
+		Status:     db.CloudInstanceStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(preempted): %v", err)
+	}
+	if err := db.UpdateCloudInstanceStatus(database, preemptedID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus(preempted): %v", err)
+	}
+
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES (1, ?, ?, 0, ?, 'python train.py', '/tmp')`,
+		preemptedID, db.CloudInstanceHost(preemptedID), db.StatusQueued,
+	)
+	if err != nil {
+		t.Fatalf("insert orphaned job: %v", err)
+	}
+	if err := db.InsertJobCloudAttempt(database, 1, preemptedID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(orphaned): %v", err)
+	}
+	if err := db.CloseJobCloudAttemptsByInstance(database, preemptedID, db.AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("CloseJobCloudAttemptsByInstance(orphaned): %v", err)
+	}
+
+	jobFailureID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		CampaignID: &campaignID,
+		Status:     db.CloudInstanceStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(job failure): %v", err)
+	}
+	if err := db.UpdateCloudInstanceStatus(database, jobFailureID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus(job failure): %v", err)
+	}
+
+	diagJSON, err := remediation.MarshalDiagnosis(&remediation.ErrorDiagnosis{
+		Pattern:  "gpu_oom",
+		Category: "environment",
+		Message:  "GPU out of memory",
+	})
+	if err != nil {
+		t.Fatalf("MarshalDiagnosis: %v", err)
+	}
+
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason, error_diagnosis)
+		 VALUES (2, ?, ?, 0, ?, 'python train.py', '/tmp', ?, ?)`,
+		jobFailureID, db.CloudInstanceHost(jobFailureID), db.StatusFailed, "gpu_oom", diagJSON,
+	)
+	if err != nil {
+		t.Fatalf("insert failed job: %v", err)
+	}
+
+	report, err := buildCampaignDiagnosisReport(database, campaignID)
+	if err != nil {
+		t.Fatalf("buildCampaignDiagnosisReport: %v", err)
+	}
+
+	out := formatCampaignDiagnosisReport(report)
+	if !strings.Contains(out, "provider terminated/preempted the instance") {
+		t.Fatalf("diagnosis output missing preemption summary:\n%s", out)
+	}
+	if !strings.Contains(out, "Job #1: orphaned after the instance terminated") {
+		t.Fatalf("diagnosis output missing orphaned job detail:\n%s", out)
+	}
+	if !strings.Contains(out, "GPU out of memory") {
+		t.Fatalf("diagnosis output missing GPU OOM detail:\n%s", out)
 	}
 }
