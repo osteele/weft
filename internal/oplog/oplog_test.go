@@ -30,7 +30,7 @@ func TestFileLogger(t *testing.T) {
 	logger.LogJob(OpJobStartFailed, 1234, "host-beta", WithError(errors.New("connection timeout")))
 
 	// Log with duration
-	logger.LogJob(OpJobCompleted, 1234, "host-beta", WithDuration(5*time.Second))
+	logger.LogJob(OpJobComplete, 1234, "host-beta", WithDuration(5*time.Second))
 
 	logger.Close()
 
@@ -109,9 +109,9 @@ func TestFilterEntries(t *testing.T) {
 	now := time.Now()
 	entries := []Entry{
 		{Time: now.Add(-2 * time.Hour), Operation: OpJobStart, JobID: 100, Host: "host1"},
-		{Time: now.Add(-1 * time.Hour), Operation: OpJobCompleted, JobID: 100, Host: "host1"},
+		{Time: now.Add(-1 * time.Hour), Operation: OpJobComplete, JobID: 100, Host: "host1"},
 		{Time: now.Add(-30 * time.Minute), Operation: OpJobStart, JobID: 200, Host: "host2"},
-		{Time: now.Add(-10 * time.Minute), Operation: OpJobFailed, JobID: 200, Host: "host2", Error: "timeout"},
+		{Time: now.Add(-10 * time.Minute), Operation: OpJobFail, JobID: 200, Host: "host2", Error: "timeout"},
 	}
 
 	tests := []struct {

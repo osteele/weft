@@ -48,6 +48,10 @@ func JobProgress(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/progress", jobID)
 }
 
+func JobLiveTimeseries(jobID int64) string {
+	return fmt.Sprintf("jobs/%d/timeseries.jsonl", jobID)
+}
+
 func JobPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d", jobID)
 }

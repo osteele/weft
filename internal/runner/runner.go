@@ -432,7 +432,7 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
 		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths)
 		if setupErr != nil {
-			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
+			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
 			return setupErr
 		}
 		if setupCmd == "uv sync" {
@@ -529,7 +529,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 			oplog.LogJob("job.outputs_discovered", jobID, "", oplog.WithDetailf("files=%d total_mb=%d", len(discovered), TotalSizeMB(discovered)))
 			fmt.Printf("Job %d: discovered %d output files\n", jobID, len(discovered))
 		}
-		oplog.LogJob(oplog.OpJobCompleted, jobID, "", oplog.WithDetailf("exit=0 duration=%ds", duration))
+		oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("exit=0 duration=%ds", duration))
 		fmt.Printf("Job %d completed successfully\n", jobID)
 	} else {
 		reason := ReadFailureReasonFile(paths.FailureReason)
@@ -537,7 +537,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 		if ei.Signaled {
 			detail += fmt.Sprintf(" signal=%s", ei.SignalName())
 		}
-		oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail(detail))
+		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail(detail))
 		fmt.Printf("Job %d failed with exit code %d (%s)\n", jobID, ei.ExitCode, reason)
 	}
 
@@ -620,7 +620,7 @@ func (r *Runner) refreshRunningJobs() {
 
 			stoppedEI := ExitInfo{ExitCode: 1}
 			WriteStatusFile(paths, stoppedEI)
-			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail("exit=1 reason=stopped"))
+			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 reason=stopped"))
 			rs := r.state.Running[jobIDStr]
 			WriteRusageFile(paths, rs)
 			endTime := time.Now().Unix()
@@ -649,7 +649,7 @@ func (r *Runner) refreshRunningJobs() {
 		if _, err := os.Stat(paths.Status); err != nil {
 			orphanEI := ExitInfo{ExitCode: 1}
 			WriteStatusFile(paths, orphanEI)
-			oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetail("exit=1 duration=0"))
+			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
 			endTime := time.Now().Unix()
 			rs := r.state.Running[jobIDStr]
 			WriteCompletionRecord(paths, orphanEI, rs, "orphan", "orphan", rs.StartedAt, endTime, nil)

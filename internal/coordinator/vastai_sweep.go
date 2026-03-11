@@ -167,9 +167,9 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 
 	c.logger.Printf("vastai sweep: processed job %d (exit=%d, status=%s)", jobID, exitCode, db.StatusCompleted)
 	if exitCode == 0 {
-		oplog.LogJob(oplog.OpJobCompleted, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
+		oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
 	} else {
-		oplog.LogJob(oplog.OpJobFailed, jobID, "", oplog.WithDetailf("vastai exit=%d reason=%s", exitCode, failureReason))
+		oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("vastai exit=%d reason=%s", exitCode, failureReason))
 	}
 }
 

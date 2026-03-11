@@ -97,19 +97,21 @@ type JobPaths struct {
 
 // TimeseriesSample holds a single time-series telemetry sample for a running job.
 type TimeseriesSample struct {
-	Ts           int64  `json:"ts"`
-	CPUPct       int    `json:"cpu_pct"`
-	RSSKB        int64  `json:"rss_kb"`
-	GPUMiB       int    `json:"gpu_mib,omitempty"`
-	HostRSSKB    int64  `json:"host_rss_kb,omitempty"`
-	HostMemTotal int64  `json:"host_mem_total_kb,omitempty"`
-	GPUUtilPct   int    `json:"gpu_util_pct,omitempty"`
-	GPUMemUsed   int    `json:"gpu_mem_used_mib,omitempty"`
-	GPUMemTotal  int    `json:"gpu_mem_total_mib,omitempty"`
-	GPUTempC     int    `json:"gpu_temp_c,omitempty"`
-	GPUClockMHz  int    `json:"gpu_clock_mhz,omitempty"`
-	MemPressure  string `json:"mem_pressure,omitempty"`
-	Tenant       string `json:"tenant"`
+	Ts             int64  `json:"ts"`
+	CPUPct         int    `json:"cpu_pct"`
+	RSSKB          int64  `json:"rss_kb"`
+	GPUMiB         int    `json:"gpu_mib,omitempty"`
+	DiskFreeBytes  int64  `json:"disk_free_bytes,omitempty"`
+	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
+	HostRSSKB      int64  `json:"host_rss_kb,omitempty"`
+	HostMemTotal   int64  `json:"host_mem_total_kb,omitempty"`
+	GPUUtilPct     int    `json:"gpu_util_pct,omitempty"`
+	GPUMemUsed     int    `json:"gpu_mem_used_mib,omitempty"`
+	GPUMemTotal    int    `json:"gpu_mem_total_mib,omitempty"`
+	GPUTempC       int    `json:"gpu_temp_c,omitempty"`
+	GPUClockMHz    int    `json:"gpu_clock_mhz,omitempty"`
+	MemPressure    string `json:"mem_pressure,omitempty"`
+	Tenant         string `json:"tenant"`
 }
 
 // NewJobPaths returns file paths for all job-related files.

@@ -12,6 +12,8 @@ type TimeseriesSample struct {
 	CPUPct         int    `json:"cpu_pct"`
 	RSSKB          int64  `json:"rss_kb"`
 	GPUMiB         int    `json:"gpu_mib,omitempty"`
+	DiskFreeBytes  int64  `json:"disk_free_bytes,omitempty"`
+	DiskTotalBytes int64  `json:"disk_total_bytes,omitempty"`
 	HostRSSKB      int64  `json:"host_rss_kb,omitempty"`
 	HostMemTotalKB int64  `json:"host_mem_total_kb,omitempty"`
 	GPUUtilPct     int    `json:"gpu_util_pct,omitempty"`
@@ -47,14 +49,14 @@ func InsertTimeseries(database *sql.DB, jobID int64, samples []TimeseriesSample)
 		var placeholders []string
 		var args []any
 		for _, s := range batch {
-			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args, jobID, s.Ts, s.CPUPct, s.RSSKB, s.GPUMiB,
-				s.HostRSSKB, s.HostMemTotalKB, s.GPUUtilPct, s.GPUMemUsedMiB, s.GPUMemTotalMiB,
-				s.GPUTempC, s.GPUClockMHz, s.Tenant)
+				s.DiskFreeBytes, s.DiskTotalBytes, s.HostRSSKB, s.HostMemTotalKB,
+				s.GPUUtilPct, s.GPUMemUsedMiB, s.GPUMemTotalMiB, s.GPUTempC, s.GPUClockMHz, s.Tenant)
 		}
 
 		query := `INSERT OR IGNORE INTO job_timeseries
-			(job_id, ts, cpu_pct, rss_kb, gpu_mib, host_rss_kb, host_mem_total_kb, gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib, gpu_temp_c, gpu_clock_mhz, tenant)
+			(job_id, ts, cpu_pct, rss_kb, gpu_mib, disk_free_bytes, disk_total_bytes, host_rss_kb, host_mem_total_kb, gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib, gpu_temp_c, gpu_clock_mhz, tenant)
 			VALUES ` + strings.Join(placeholders, ", ")
 
 		if _, err := tx.Exec(query, args...); err != nil {
@@ -68,7 +70,7 @@ func InsertTimeseries(database *sql.DB, jobID int64, samples []TimeseriesSample)
 // GetTimeseries reads all time series samples for a job, ordered by timestamp.
 func GetTimeseries(database *sql.DB, jobID int64) ([]TimeseriesSample, error) {
 	rows, err := database.Query(`
-		SELECT ts, cpu_pct, rss_kb, gpu_mib, host_rss_kb, host_mem_total_kb,
+		SELECT ts, cpu_pct, rss_kb, gpu_mib, COALESCE(disk_free_bytes, 0), COALESCE(disk_total_bytes, 0), host_rss_kb, host_mem_total_kb,
 		       gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib,
 		       COALESCE(gpu_temp_c, 0), COALESCE(gpu_clock_mhz, 0), tenant
 		FROM job_timeseries
@@ -84,7 +86,7 @@ func GetTimeseries(database *sql.DB, jobID int64) ([]TimeseriesSample, error) {
 		var s TimeseriesSample
 		var tenant sql.NullString
 		if err := rows.Scan(&s.Ts, &s.CPUPct, &s.RSSKB, &s.GPUMiB,
-			&s.HostRSSKB, &s.HostMemTotalKB, &s.GPUUtilPct, &s.GPUMemUsedMiB, &s.GPUMemTotalMiB,
+			&s.DiskFreeBytes, &s.DiskTotalBytes, &s.HostRSSKB, &s.HostMemTotalKB, &s.GPUUtilPct, &s.GPUMemUsedMiB, &s.GPUMemTotalMiB,
 			&s.GPUTempC, &s.GPUClockMHz, &tenant); err != nil {
 			return nil, fmt.Errorf("scan timeseries row: %w", err)
 		}

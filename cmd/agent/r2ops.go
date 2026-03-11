@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/oplog"
@@ -20,6 +21,8 @@ const (
 	// agentOpslogFile is the filename for the agent operations log.
 	agentOpslogFile = "agent-ops.jsonl"
 )
+
+var uploadOpslogMu sync.Mutex
 
 // r2Get reads the content of an R2 key via rclone. Returns ("", nil) if the key doesn't exist.
 func r2Get(bucket, key string) (string, error) {
@@ -71,6 +74,9 @@ func r2Delete(bucket, key string) error {
 
 // uploadOpslog flushes the oplog and uploads it to R2, then re-initializes for continued use.
 func uploadOpslog(bucket string, instanceID int64, logDir string) {
+	uploadOpslogMu.Lock()
+	defer uploadOpslogMu.Unlock()
+
 	oplogPath := filepath.Join(logDir, agentOpslogFile)
 	oplog.Close() // flush
 

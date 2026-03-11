@@ -535,6 +535,8 @@ func initSchema(db *sql.DB) error {
 		cpu_pct INTEGER,
 		rss_kb INTEGER,
 		gpu_mib INTEGER,
+		disk_free_bytes INTEGER,
+		disk_total_bytes INTEGER,
 		host_rss_kb INTEGER,
 		host_mem_total_kb INTEGER,
 		gpu_util_pct INTEGER,
@@ -554,6 +556,12 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE job_timeseries ADD COLUMN gpu_clock_mhz INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_timeseries ADD COLUMN disk_free_bytes INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_timeseries ADD COLUMN disk_total_bytes INTEGER`); err != nil {
 		return err
 	}
 

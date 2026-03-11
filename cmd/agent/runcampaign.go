@@ -120,6 +120,8 @@ func runCampaign(args []string) {
 	// Start heartbeat reporter (writes host metrics to R2 every 30s)
 	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, currentPhase.Get)
 	defer stopHeartbeat()
+	stopOpslogReporter := startOpslogReporter(r2Bucket, instanceIDInt, logDir)
+	defer stopOpslogReporter()
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
 		R2Bucket:   r2Bucket,
@@ -179,9 +181,14 @@ func writePhase(r2Bucket, phaseKey, phase string) {
 }
 
 // phaseCallback returns an OnPhase callback that writes phase markers to R2.
-func phaseCallback(r2Bucket, phaseKey string, jobID int64) func(string) {
+func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)) func(string) {
 	return func(phase string) {
-		writePhase(r2Bucket, phaseKey, fmt.Sprintf("%s:%d", phase, jobID))
+		full := fmt.Sprintf("%s:%d", phase, jobID)
+		if setPhase != nil {
+			setPhase(full)
+		}
+		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(jobID), oplog.WithDetail(full))
+		writePhase(r2Bucket, phaseKey, full)
 	}
 }
 
@@ -361,6 +368,88 @@ func startHeartbeatReporter(r2Bucket string, instanceID int64, getPhase func() s
 					continue
 				}
 				r2Put(r2Bucket, heartbeatKey, string(data))
+			}
+		}
+	}()
+
+	return stop
+}
+
+// startOpslogReporter starts a goroutine that periodically uploads the agent
+// opslog to R2 while jobs are still running.
+func startOpslogReporter(bucket string, instanceID int64, logDir string) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	stop := func() {
+		once.Do(func() { close(done) })
+		<-stopped
+	}
+
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				uploadOpslog(bucket, instanceID, logDir)
+				return
+			case <-ticker.C:
+				uploadOpslog(bucket, instanceID, logDir)
+			}
+		}
+	}()
+
+	return stop
+}
+
+// startTimeseriesUploader starts a goroutine that periodically uploads the
+// local timeseries JSONL file to a live R2 checkpoint key.
+func startTimeseriesUploader(bucket string, jobID int64, timeseriesPath string) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	stop := func() {
+		once.Do(func() { close(done) })
+		<-stopped
+	}
+
+	upload := func() {
+		info, err := os.Stat(timeseriesPath)
+		if err != nil || info.Size() == 0 {
+			return
+		}
+
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, "rclone", "copyto",
+			timeseriesPath, fmt.Sprintf("r2:%s/%s", bucket, r2keys.JobLiveTimeseries(jobID)))
+		cmd.Stderr = os.Stderr
+		err = cmd.Run()
+		cancel()
+		if err != nil {
+			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+				oplog.WithDetail("live timeseries"), oplog.WithError(err),
+				oplog.WithDuration(time.Since(start)))
+			return
+		}
+		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+			oplog.WithDetail("live timeseries"), oplog.WithDuration(time.Since(start)))
+	}
+
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				upload()
+				return
+			case <-ticker.C:
+				upload()
 			}
 		}
 	}()

@@ -11,7 +11,17 @@ func TestInsertAndGetTimeseries(t *testing.T) {
 	samples := []TimeseriesSample{
 		{Ts: 1000, CPUPct: 25, RSSKB: 400000, GPUMiB: 6000, Tenant: "multi"},
 		{Ts: 1015, CPUPct: 28, RSSKB: 500000, GPUMiB: 8000, Tenant: "multi"},
-		{Ts: 1030, CPUPct: 30, RSSKB: 520000, GPUMiB: 8100, HostRSSKB: 1000000, HostMemTotalKB: 16000000, Tenant: "single"},
+		{
+			Ts:             1030,
+			CPUPct:         30,
+			RSSKB:          520000,
+			GPUMiB:         8100,
+			DiskFreeBytes:  1_500_000_000,
+			DiskTotalBytes: 3_000_000_000,
+			HostRSSKB:      1000000,
+			HostMemTotalKB: 16000000,
+			Tenant:         "single",
+		},
 	}
 
 	if err := InsertTimeseries(database, 42, samples); err != nil {
@@ -38,6 +48,9 @@ func TestInsertAndGetTimeseries(t *testing.T) {
 	// Verify third sample with host metrics
 	if got[2].HostRSSKB != 1000000 || got[2].HostMemTotalKB != 16000000 {
 		t.Errorf("sample 2 host metrics mismatch: %+v", got[2])
+	}
+	if got[2].DiskFreeBytes != 1_500_000_000 || got[2].DiskTotalBytes != 3_000_000_000 {
+		t.Errorf("sample 2 disk metrics mismatch: %+v", got[2])
 	}
 	if got[2].Tenant != "single" {
 		t.Errorf("expected tenant=single, got %q", got[2].Tenant)

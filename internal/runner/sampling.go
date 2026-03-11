@@ -40,23 +40,26 @@ func SampleJob(pid, pgid int, cpuCount int, paths JobPaths, rs *RunningJobState,
 	// Timeseries sample
 	currentRSS := ProcCurrentRSSKB(rusagePID)
 	hostTotal, hostUsed := HostMemoryKB()
+	diskUsed, diskTotal := ProbeDiskUsage()
 	gpuStats := HostGPUMetrics()
 	pressure := MemoryPressureFromUsage(hostTotal, hostUsed)
 
 	sample := TimeseriesSample{
-		Ts:           now.Unix(),
-		CPUPct:       hostPct,
-		RSSKB:        currentRSS,
-		GPUMiB:       gpuMem,
-		HostRSSKB:    hostUsed,
-		HostMemTotal: hostTotal,
-		GPUUtilPct:   gpuStats.UtilPct,
-		GPUMemUsed:   gpuStats.MemUsedMiB,
-		GPUMemTotal:  gpuStats.MemTotalMiB,
-		GPUTempC:     gpuStats.TempC,
-		GPUClockMHz:  gpuStats.ClockMHz,
-		MemPressure:  string(pressure),
-		Tenant:       tenant,
+		Ts:             now.Unix(),
+		CPUPct:         hostPct,
+		RSSKB:          currentRSS,
+		GPUMiB:         gpuMem,
+		DiskFreeBytes:  diskTotal - diskUsed,
+		DiskTotalBytes: diskTotal,
+		HostRSSKB:      hostUsed,
+		HostMemTotal:   hostTotal,
+		GPUUtilPct:     gpuStats.UtilPct,
+		GPUMemUsed:     gpuStats.MemUsedMiB,
+		GPUMemTotal:    gpuStats.MemTotalMiB,
+		GPUTempC:       gpuStats.TempC,
+		GPUClockMHz:    gpuStats.ClockMHz,
+		MemPressure:    string(pressure),
+		Tenant:         tenant,
 	}
 	WriteTimeseriesSample(paths, sample)
 

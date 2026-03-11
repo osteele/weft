@@ -20,16 +20,18 @@ func TestWriteTimeseriesSample(t *testing.T) {
 		Tenant: "multi",
 	}
 	sample2 := TimeseriesSample{
-		Ts:           1704067215,
-		CPUPct:       28,
-		RSSKB:        500000,
-		GPUMiB:       8000,
-		HostRSSKB:    1000000,
-		HostMemTotal: 16000000,
-		GPUUtilPct:   85,
-		GPUMemUsed:   12000,
-		GPUMemTotal:  24000,
-		Tenant:       "single",
+		Ts:             1704067215,
+		CPUPct:         28,
+		RSSKB:          500000,
+		GPUMiB:         8000,
+		DiskFreeBytes:  2_000_000_000,
+		DiskTotalBytes: 4_000_000_000,
+		HostRSSKB:      1000000,
+		HostMemTotal:   16000000,
+		GPUUtilPct:     85,
+		GPUMemUsed:     12000,
+		GPUMemTotal:    24000,
+		Tenant:         "single",
 	}
 
 	if err := WriteTimeseriesSample(paths, sample1); err != nil {
@@ -71,6 +73,9 @@ func TestWriteTimeseriesSample(t *testing.T) {
 	}
 	if parsed2.GPUUtilPct != 85 || parsed2.GPUMemUsed != 12000 {
 		t.Errorf("sample 2 GPU metrics mismatch: %+v", parsed2)
+	}
+	if parsed2.DiskFreeBytes != 2_000_000_000 || parsed2.DiskTotalBytes != 4_000_000_000 {
+		t.Errorf("sample 2 disk metrics mismatch: %+v", parsed2)
 	}
 	if parsed2.Tenant != "single" {
 		t.Errorf("expected tenant=single, got %q", parsed2.Tenant)

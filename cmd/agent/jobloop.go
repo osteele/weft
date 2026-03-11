@@ -49,9 +49,12 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		fmt.Printf("--- Job %d ---\n", job.ID)
+		oplog.LogJob(oplog.OpJobStart, job.ID, "", oplog.WithDetailf("cmd=%s", job.Command))
 
 		// Write .started marker to R2
 		r2Put(cfg.R2Bucket, r2keys.JobStarted(job.ID), fmt.Sprintf("%d", time.Now().Unix()))
+		timeseriesPath := runner.NewJobPaths(cfg.LogDir, job.ID).Timeseries
+		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, timeseriesPath)
 
 		workDir := job.Dir
 		if workDir == "" {
@@ -72,32 +75,30 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			LogDir:     cfg.LogDir,
 			WorkingDir: workDir,
 			MaxTime:    jobMaxTime,
-			OnPhase: func(phase string) {
-				full := fmt.Sprintf("%s:%d", phase, job.ID)
-				if cfg.OnPhase != nil {
-					cfg.OnPhase(full)
-				}
-				writePhase(cfg.R2Bucket, cfg.PhaseKey, full)
-			},
+			OnPhase:    phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
 		}
 
 		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, cfg.LogDir, jobCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
 		} else if ei.ExitCode != 0 {
 			fmt.Printf("Job %d failed (exit %d)\n", job.ID, ei.ExitCode)
+			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithDetailf("exit=%d", ei.ExitCode))
 			result.AnyFailed = true
 			result.FailedJobs = append(result.FailedJobs, job.ID)
 		} else {
 			fmt.Printf("Job %d completed successfully\n", job.ID)
+			oplog.LogJob(oplog.OpJobComplete, job.ID, "", oplog.WithDetail("exit=0"))
 		}
 
 		uploadPhase := fmt.Sprintf("uploading:%d", job.ID)
 		if cfg.OnPhase != nil {
 			cfg.OnPhase(uploadPhase)
 		}
+		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(uploadPhase))
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadPhase)
 
 		// Upload output directories
@@ -107,12 +108,15 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			if cfg.OnPhase != nil {
 				cfg.OnPhase(failPhase)
 			}
+			oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(failPhase))
 			writePhase(cfg.R2Bucket, cfg.PhaseKey, failPhase)
 		}
 		patchCompletionUpload(cfg.LogDir, job.ID, &uploadResult)
 
 		// Upload per-job results
 		uploadJobResults(cfg.R2Bucket, job.ID, cfg.LogDir)
+		stopTimeseriesUploader()
+		r2Delete(cfg.R2Bucket, r2keys.JobLiveTimeseries(job.ID))
 
 		// Promote uv manifest
 		promoteUVManifest(cfg.R2Bucket, cfg.LogDir)

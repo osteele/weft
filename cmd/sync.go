@@ -486,6 +486,17 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 	}
 
+	// Import live timeseries checkpoints for started jobs that are not complete.
+	for _, jobIDStr := range markers.Started {
+		jobID, _ := strconv.ParseInt(jobIDStr, 10, 64)
+		if jobID == 0 || completedJobIDs[jobID] {
+			continue
+		}
+		if err := syncCloudLiveTimeseries(ctx, r2Client, database, jobID); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: cloud job %d live timeseries sync failed: %v\n", jobID, err)
+		}
+	}
+
 	for instanceID := range updatedInstanceIDs {
 		updateInstanceTerminationReason(database, instanceID)
 	}
@@ -546,6 +557,59 @@ func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix,
 	}
 
 	return nil, 0, 0, ""
+}
+
+// syncCloudLiveTimeseries imports live JSONL telemetry from R2 for running or
+// unresolved cloud jobs that have .started markers but no .complete marker.
+func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID int64) error {
+	var status string
+	var backend sql.NullString
+	if err := database.QueryRow("SELECT status, backend FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend); err != nil {
+		return nil
+	}
+	if db.IsTerminalStatus(status) {
+		return nil
+	}
+
+	data, err := r2Client.GetObject(ctx, r2keys.JobLiveTimeseries(jobID))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	lastTS, err := db.GetTimeseriesLastTS(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get last ts: %w", err)
+	}
+
+	tenant := "multi"
+	if backend.Valid && backend.String == db.BackendVastai {
+		tenant = "single"
+	}
+
+	var samples []db.TimeseriesSample
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var s db.TimeseriesSample
+		if err := json.Unmarshal([]byte(line), &s); err != nil {
+			continue
+		}
+		if s.Ts <= lastTS {
+			continue
+		}
+		s.Tenant = tenant
+		samples = append(samples, s)
+	}
+	if len(samples) == 0 {
+		return nil
+	}
+
+	if err := db.InsertTimeseries(database, jobID, samples); err != nil {
+		return fmt.Errorf("insert timeseries: %w", err)
+	}
+	return nil
 }
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated
