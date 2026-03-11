@@ -186,7 +186,11 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64) func(string) {
 }
 
 // uploadOutputDirs uploads convention-based output directories to R2.
-func uploadOutputDirs(bucket string, jobID int64, workDir string) {
+func uploadOutputDirs(bucket string, jobID int64, workDir string) runner.OutputUploadResult {
+	var result runner.OutputUploadResult
+	var attempted int
+	var failed int
+
 	for _, dir := range config.DefaultOutputDirs {
 		dir = strings.TrimRight(dir, "/")
 		dirPath := filepath.Join(workDir, dir)
@@ -194,21 +198,70 @@ func uploadOutputDirs(bucket string, jobID int64, workDir string) {
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		cmd := exec.CommandContext(ctx, "rclone", "copy",
-			dirPath+"/",
-			"r2:"+bucket+"/"+r2keys.JobOutputDir(jobID, dir),
-		)
-		cmd.Stderr = os.Stderr
+		attempted++
 		start := time.Now()
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d: %v\n", dir, jobID, err)
-			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-				oplog.WithDetailf("output dir=%s", dir), oplog.WithError(err),
-				oplog.WithDuration(time.Since(start)))
+		var lastErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			cmd := exec.CommandContext(ctx, "rclone", "copy",
+				dirPath+"/",
+				"r2:"+bucket+"/"+r2keys.JobOutputDir(jobID, dir),
+			)
+			cmd.Stderr = os.Stderr
+			err := cmd.Run()
+			cancel()
+			if err == nil {
+				duration := time.Since(start)
+				oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+					oplog.WithDetailf("output dir=%s", dir),
+					oplog.WithDuration(duration))
+				result.Dirs = append(result.Dirs, runner.OutputDirUpload{
+					Dir:        dir,
+					Status:     "ok",
+					DurationMS: duration.Milliseconds(),
+				})
+				lastErr = nil
+				break
+			}
+			lastErr = err
+			if attempt < 3 {
+				backoff := 5 * time.Second
+				if attempt == 2 {
+					backoff = 10 * time.Second
+				}
+				fmt.Fprintf(os.Stderr, "upload outputs %s for job %d (attempt %d/3): %v; retrying in %s\n",
+					dir, jobID, attempt, err, backoff)
+				time.Sleep(backoff)
+			}
 		}
-		cancel()
+		if lastErr != nil {
+			duration := time.Since(start)
+			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d failed: %v\n", dir, jobID, lastErr)
+			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+				oplog.WithDetailf("output dir=%s", dir), oplog.WithError(lastErr),
+				oplog.WithDuration(duration))
+			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
+				Dir:        dir,
+				Status:     "failed",
+				Error:      lastErr.Error(),
+				DurationMS: duration.Milliseconds(),
+			})
+			failed++
+		}
 	}
+
+	switch {
+	case attempted == 0:
+		result.Status = "ok"
+	case failed == 0:
+		result.Status = "ok"
+	case failed == attempted:
+		result.Status = "failed"
+	default:
+		result.Status = "partial"
+	}
+
+	return result
 }
 
 // promoteUVManifest reads uv-manifest.json from logDir and copies it to

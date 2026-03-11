@@ -317,24 +317,45 @@ func WritePhasesFile(paths JobPaths, phases PhaseTiming) error {
 	return os.WriteFile(paths.Phases, data, 0644)
 }
 
+// OutputFile describes a single discovered output file.
+type OutputFile struct {
+	RelPath   string `json:"rel_path"` // relative to workDir (e.g., "output/results.json")
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+// OutputDirUpload describes the upload outcome for a single output directory.
+type OutputDirUpload struct {
+	Dir        string `json:"dir"`
+	Status     string `json:"status"` // "ok" or "failed"
+	Error      string `json:"error,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// OutputUploadResult summarizes output directory uploads for a job.
+type OutputUploadResult struct {
+	Status string            `json:"status"` // "ok", "partial", "failed"
+	Dirs   []OutputDirUpload `json:"dirs,omitempty"`
+}
+
 // CompletionRecord is the structured post-mortem record written as .completion.json.
 type CompletionRecord struct {
-	ExitCode         int              `json:"exit_code"`
-	Signal           string           `json:"signal,omitempty"`
-	SignalName       string           `json:"signal_name,omitempty"`
-	CoreDump         bool             `json:"core_dump,omitempty"`
-	WallTimeSecs     int64            `json:"wall_time_secs"`
-	PeakRSSKB        int64            `json:"peak_rss_kb,omitempty"`
-	MaxGPUMemMiB     int              `json:"max_gpu_mem_mib,omitempty"`
-	PeakHostMemRatio float64          `json:"peak_host_mem_ratio,omitempty"`
-	PeakMemPressure  MemPressureLevel `json:"peak_mem_pressure,omitempty"`
-	KillReason       string           `json:"kill_reason,omitempty"`
-	FailureReason    string           `json:"failure_reason,omitempty"`
-	LastHeartbeat    int64            `json:"last_heartbeat,omitempty"`
-	LastSample       int64            `json:"last_sample,omitempty"`
-	StartTime        int64            `json:"start_time,omitempty"`
-	EndTime          int64            `json:"end_time"`
-	OutputFiles      []OutputFile     `json:"output_files,omitempty"`
+	ExitCode         int                 `json:"exit_code"`
+	Signal           string              `json:"signal,omitempty"`
+	SignalName       string              `json:"signal_name,omitempty"`
+	CoreDump         bool                `json:"core_dump,omitempty"`
+	WallTimeSecs     int64               `json:"wall_time_secs"`
+	PeakRSSKB        int64               `json:"peak_rss_kb,omitempty"`
+	MaxGPUMemMiB     int                 `json:"max_gpu_mem_mib,omitempty"`
+	PeakHostMemRatio float64             `json:"peak_host_mem_ratio,omitempty"`
+	PeakMemPressure  MemPressureLevel    `json:"peak_mem_pressure,omitempty"`
+	KillReason       string              `json:"kill_reason,omitempty"`
+	FailureReason    string              `json:"failure_reason,omitempty"`
+	LastHeartbeat    int64               `json:"last_heartbeat,omitempty"`
+	LastSample       int64               `json:"last_sample,omitempty"`
+	StartTime        int64               `json:"start_time,omitempty"`
+	EndTime          int64               `json:"end_time"`
+	OutputFiles      []OutputFile        `json:"output_files,omitempty"`
+	OutputUpload     *OutputUploadResult `json:"output_upload,omitempty"`
 }
 
 // WriteCompletionRecord writes a structured completion.json for post-mortem analysis.

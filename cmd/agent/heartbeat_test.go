@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -30,9 +33,13 @@ func TestCollectHeartbeat(t *testing.T) {
 		t.Errorf("DiskFreeBytes = %d, should be >= 0", sample.DiskFreeBytes)
 	}
 
-	// HostMemTotalKB should be populated on Linux and macOS
-	if sample.HostMemTotalKB == 0 {
-		t.Error("HostMemTotalKB should be non-zero")
+	// HostMemTotalKB should be populated when host memory probes are permitted.
+	if canProbeHostMemory() {
+		if sample.HostMemTotalKB == 0 {
+			t.Error("HostMemTotalKB should be non-zero")
+		}
+	} else {
+		t.Skip("Host memory probe unavailable in test environment")
 	}
 }
 
@@ -71,5 +78,21 @@ func TestHeartbeatSampleJSON(t *testing.T) {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("JSON missing expected key %q", key)
 		}
+	}
+}
+
+func canProbeHostMemory() bool {
+	switch runtime.GOOS {
+	case "linux":
+		_, err := os.ReadFile("/proc/meminfo")
+		return err == nil
+	case "darwin":
+		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		if err != nil {
+			return false
+		}
+		return len(out) > 0
+	default:
+		return false
 	}
 }

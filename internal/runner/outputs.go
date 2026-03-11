@@ -9,12 +9,6 @@ import (
 	"github.com/osteele/weft/internal/config"
 )
 
-// OutputFile describes a single discovered output file.
-type OutputFile struct {
-	RelPath   string `json:"rel_path"` // relative to workDir (e.g., "output/results.json")
-	SizeBytes int64  `json:"size_bytes"`
-}
-
 // DiscoverOutputs walks the configured output directories under workDir
 // and returns a list of files with their sizes. Only regular files are included.
 func DiscoverOutputs(workDir string, dirs []string) ([]OutputFile, error) {

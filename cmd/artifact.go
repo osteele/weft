@@ -273,10 +273,13 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 		// Also show job-output assets from host_data
 		outputAssets, _ := listJobOutputAssets(database, jobID)
 
-		// For cloud jobs, also list output files from the completion record in the log cache
+		// For cloud jobs, also list output files from R2 and warn on upload failures.
 		var cloudOutputFiles []runner.OutputFile
 		if job.IsCloudJob() && r2Client != nil {
 			cloudOutputFiles = listCloudJobOutputFiles(r2Client, job)
+		}
+		if job.IsCloudJob() {
+			warnOnFailedCloudOutputUpload(cmd, job.ID)
 		}
 
 		if len(entries) == 0 && len(outputAssets) == 0 && len(cloudOutputFiles) == 0 {
@@ -302,6 +305,28 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
 	}
 	return nil
+}
+
+func warnOnFailedCloudOutputUpload(cmd *cobra.Command, jobID int64) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	completionPath := filepath.Join(home, ".cache", "weft", "logs", fmt.Sprintf("%d.completion.json", jobID))
+	data, err := os.ReadFile(completionPath)
+	if err != nil {
+		return
+	}
+	var rec runner.CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return
+	}
+	if rec.OutputUpload == nil {
+		return
+	}
+	if rec.OutputUpload.Status == "failed" || rec.OutputUpload.Status == "partial" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: Output upload failed — outputs were not uploaded to R2 (disk may have been full)")
+	}
 }
 
 func runArtifactGet(cmd *cobra.Command, args []string) error {

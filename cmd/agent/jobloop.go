@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,7 +101,15 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadPhase)
 
 		// Upload output directories
-		uploadOutputDirs(cfg.R2Bucket, job.ID, workDir)
+		uploadResult := uploadOutputDirs(cfg.R2Bucket, job.ID, workDir)
+		if uploadResult.Status != "ok" {
+			failPhase := fmt.Sprintf("upload-failed:%d", job.ID)
+			if cfg.OnPhase != nil {
+				cfg.OnPhase(failPhase)
+			}
+			writePhase(cfg.R2Bucket, cfg.PhaseKey, failPhase)
+		}
+		patchCompletionUpload(cfg.LogDir, job.ID, &uploadResult)
 
 		// Upload per-job results
 		uploadJobResults(cfg.R2Bucket, job.ID, cfg.LogDir)
@@ -123,4 +132,33 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	}
 
 	return result
+}
+
+func patchCompletionUpload(logDir string, jobID int64, upload *runner.OutputUploadResult) {
+	if upload == nil {
+		return
+	}
+	paths := runner.NewJobPaths(logDir, jobID)
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "patch completion record for job %d: read: %v\n", jobID, err)
+		return
+	}
+
+	var rec runner.CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		fmt.Fprintf(os.Stderr, "patch completion record for job %d: parse: %v\n", jobID, err)
+		return
+	}
+
+	rec.OutputUpload = upload
+	out, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "patch completion record for job %d: encode: %v\n", jobID, err)
+		return
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(paths.Completion, out, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "patch completion record for job %d: write: %v\n", jobID, err)
+	}
 }
