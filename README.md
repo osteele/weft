@@ -409,6 +409,8 @@ Duplicate IDs are automatically removed with a warning.
 weft job status 42           # Check status of job #42
 weft job status 42 43 44     # Check multiple jobs
 weft job status 100:105      # Check jobs 100 through 105
+weft job status 100...105    # Alternative range syntax
+weft job status 42,43,44     # Comma-separated IDs
 ```
 
 This command:
@@ -449,6 +451,9 @@ weft job list --host deepthought       # Jobs on deepthought
 weft job list --tag exp-012            # Jobs with a tag
 weft job list --status unprocessed     # Jobs missing the processed tag
 weft job list --search training        # Search jobs
+weft job list 12::14                   # List jobs 12 through 14
+weft job list 12...13                  # Alternative range syntax
+weft job list 12,13,14                 # Comma-separated IDs
 weft job list --show 42                # Job details
 weft job list --cleanup 30             # Remove old jobs
 ```

@@ -9,13 +9,15 @@ import (
 )
 
 // ParseJobIDs parses command-line arguments into a deduplicated, sorted list of job IDs.
-// Supports individual IDs (123) and ranges (123:127 or 123::127 expands to 123,124,125,126,127).
+// Supports individual IDs (123), ranges (123:127 / 123::127 / 123...127),
+// and comma-separated lists (123,124,125).
 // Prints a warning to stderr if duplicates are found.
 //
 // Syntax:
 //   - Single ID: 123
-//   - Range: 123:127 or 123::127 (inclusive, expands to 123, 124, 125, 126, 127)
-//   - Mixed: 123 125:127 130 (expands to 123, 125, 126, 127, 130)
+//   - Range: 123:127, 123::127, or 123...127 (inclusive)
+//   - List: 123,124,125
+//   - Mixed: 123 125:127 130,131 (expands to 123, 125, 126, 127, 130, 131)
 func ParseJobIDs(args []string) ([]int64, error) {
 	seen := make(map[int64]bool)
 	var ids []int64
@@ -56,6 +58,37 @@ func ParseJobIDs(args []string) ([]int64, error) {
 
 // parseJobIDArg parses a single argument which may be an ID or a range.
 func parseJobIDArg(arg string) ([]int64, error) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return nil, fmt.Errorf("invalid empty job ID")
+	}
+
+	// Support comma-separated IDs/ranges within a single arg (e.g. 12,13,14 or 12:14,20).
+	if strings.Contains(arg, ",") {
+		parts := strings.Split(arg, ",")
+		ids := make([]int64, 0, len(parts))
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				return nil, fmt.Errorf("invalid empty job ID in %q", arg)
+			}
+			partIDs, err := parseJobIDArg(part)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, partIDs...)
+		}
+		return ids, nil
+	}
+
+	// Normalize ellipsis range syntax (12...14) to colon syntax (12:14).
+	if strings.Contains(arg, "...") {
+		if strings.Count(arg, "...") != 1 || strings.Contains(arg, ":") {
+			return nil, fmt.Errorf("invalid job ID range %q", arg)
+		}
+		arg = strings.Replace(arg, "...", ":", 1)
+	}
+
 	if strings.Count(arg, ":") > 1 {
 		if strings.Contains(arg, "::") && strings.Count(arg, ":") == 2 {
 			arg = strings.Replace(arg, "::", ":", 1)

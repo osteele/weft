@@ -16,7 +16,7 @@ import (
 )
 
 var listCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [job-id]...",
 	Short: "List and search job history",
 	Long: `Query and search job history from the local database.
 
@@ -38,6 +38,9 @@ Examples:
   weft list --exclude-tag exp-012  # Jobs without tag exp-012
   weft list --status unprocessed --tag exp-012
   weft list --search training  # Search jobs
+  weft list 12::14             # List jobs 12 through 14
+  weft list 12...13            # List jobs 12 and 13
+  weft list 12,13,14           # List jobs 12, 13, and 14
   weft list --show 42          # Job details`,
 	RunE: runList,
 }
@@ -151,9 +154,26 @@ func runList(cmd *cobra.Command, args []string) error {
 		return showJob(database, listShow)
 	}
 
-	processedFilter := ""
-	if listStatus == "processed" || listStatus == "unprocessed" {
-		processedFilter = listStatus
+	statusFilter, processedFilter := listStatusFilters()
+
+	// Handle explicit job IDs: weft list 12::14, weft list 12...13, weft list 12,13,14
+	if len(args) > 0 {
+		jobIDs, err := ParseJobIDs(args)
+		if err != nil {
+			return err
+		}
+		jobs, missingIDs, err := listJobsByID(database, jobIDs)
+		if err != nil {
+			return err
+		}
+		if len(missingIDs) > 0 {
+			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", formatJobIDList(missingIDs))
+		}
+		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter)
+		if listLimit > 0 && len(jobs) > listLimit {
+			jobs = jobs[:listLimit]
+		}
+		return printJobs(jobs)
 	}
 
 	hostFilterHosts := []string{}
@@ -189,22 +209,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return printJobs(jobs)
 	}
 
-	// Determine status filter
-	var status string
-	if listStatus != "" {
-		if processedFilter == "" {
-			status = listStatus
-		}
-	} else if listRunning {
-		status = db.StatusRunning
-	} else if listCompleted {
-		status = db.StatusCompleted
-	} else if listQueued {
-		status = db.StatusQueued
-	} else if listDead {
-		status = db.StatusDead
-	}
-
 	// Default to 7 days unless --all is specified
 	maxAgeDays := 7
 	if listAll {
@@ -215,7 +219,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || listProject != "" {
 		queryLimit = 0
 	}
-	jobs, err := db.ListJobsWithMaxAgeForHosts(database, status, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
+	jobs, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}
@@ -226,6 +230,78 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	return printJobs(jobs)
+}
+
+func listStatusFilters() (statusFilter, processedFilter string) {
+	if listStatus == "processed" || listStatus == "unprocessed" {
+		processedFilter = listStatus
+	}
+
+	if listStatus != "" {
+		if processedFilter == "" {
+			statusFilter = listStatus
+		}
+		return statusFilter, processedFilter
+	}
+	if listRunning {
+		statusFilter = db.StatusRunning
+	} else if listCompleted {
+		statusFilter = db.StatusCompleted
+	} else if listQueued {
+		statusFilter = db.StatusQueued
+	} else if listDead {
+		statusFilter = db.StatusDead
+	}
+	return statusFilter, processedFilter
+}
+
+func listJobsByID(database *sql.DB, ids []int64) ([]*db.Job, []int64, error) {
+	jobs := make([]*db.Job, 0, len(ids))
+	missing := make([]int64, 0)
+	for _, id := range ids {
+		job, err := db.GetJobByID(database, id)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get job %d: %w", id, err)
+		}
+		if job == nil || job.Tombstoned {
+			missing = append(missing, id)
+			continue
+		}
+		jobs = append(jobs, job)
+	}
+	return jobs, missing, nil
+}
+
+func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string) []*db.Job {
+	if statusFilter != "" {
+		filtered := make([]*db.Job, 0, len(jobs))
+		for _, job := range jobs {
+			if job.Status == statusFilter {
+				filtered = append(filtered, job)
+			}
+		}
+		jobs = filtered
+	}
+
+	if listSearch != "" {
+		filter := strings.ToLower(listSearch)
+		filtered := make([]*db.Job, 0, len(jobs))
+		for _, job := range jobs {
+			if strings.Contains(strings.ToLower(job.EffectiveDescription()), filter) ||
+				strings.Contains(strings.ToLower(job.EffectiveCommand()), filter) {
+				filtered = append(filtered, job)
+			}
+		}
+		jobs = filtered
+	}
+
+	jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
+	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
+	jobs = db.FilterJobsByProject(jobs, listProject)
+	if listHost != "" {
+		jobs = db.FilterJobsByHosts(jobs, []string{listHost})
+	}
+	return jobs
 }
 
 func showJob(database *sql.DB, id int64) error {

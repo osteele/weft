@@ -69,7 +69,9 @@ Supports checking multiple jobs at once.
 
 Examples:
   weft job status 42          # Single job
-  weft job status 42 43 44    # Multiple jobs`,
+  weft job status 42 43 44    # Multiple jobs
+  weft job status 42...44     # Range syntax
+  weft job status 42,43,44    # Comma-separated IDs`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runStatus,
 }
@@ -94,7 +96,7 @@ var jobRestartCmd = &cobra.Command{
 
 // Job list subcommand
 var jobListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [job-id]...",
 	Short: "List and search job history",
 	Long:  listCmd.Long,
 	RunE:  runList,
@@ -212,10 +214,11 @@ func init() {
 	jobRunCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Job description")
 	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Job description")
 	jobRunCmd.Flags().MarkHidden("description")
-	jobRunCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory on remote host")
+	jobRunCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory on remote host (alias: --dir)")
 	jobRunCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
-	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
+	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated; alias: --project)")
+	addJobAddFlagAliases(jobRunCmd)
 
 	// Copy flags from log command to job log
 	jobLogCmd.Flags().BoolVarP(&logFollow, "follow", "f", false, "Follow log in real-time")

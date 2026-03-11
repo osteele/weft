@@ -44,8 +44,9 @@ and recent failures from the last 24 hours.
 
 Job IDs can be specified individually or as ranges:
   - Single ID: 42
-  - Range: 42:47 or 42::47 (expands to 42, 43, 44, 45, 46, 47)
-  - Mixed: 42 50:52 60 (expands to 42, 50, 51, 52, 60)
+  - Range: 42:47, 42::47, or 42...47 (expands to 42, 43, 44, 45, 46, 47)
+  - List: 42,43,44
+  - Mixed: 42 50:52 60,61 (expands to 42, 50, 51, 52, 60, 61)
 
 Duplicate IDs are automatically removed with a warning.
 
@@ -59,6 +60,8 @@ Examples:
   weft status              # Show all active jobs
   weft status 42
   weft status 42:47        # Check jobs 42 through 47
+  weft status 42...47      # Check jobs 42 through 47
+  weft status 42,43,44     # Check multiple jobs in one argument
   weft status 42 --fast    # Quick check with 2s timeout
   weft status 42 -t 2m     # Use 2 minute SSH timeout (slow connections)
   weft status 42:47 --wait  # Wait for jobs 42-47 to complete`,
@@ -89,7 +92,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return showActiveJobs(database)
 	}
 
-	// Parse job IDs (supports ranges like 123:127, deduplicates with warning)
+	// Parse job IDs (supports ranges, ellipsis, and comma-separated lists).
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
 		return err

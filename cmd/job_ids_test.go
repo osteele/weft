@@ -58,6 +58,21 @@ func TestParseJobIDs(t *testing.T) {
 			want: []int64{2371, 2373, 2374, 2375},
 		},
 		{
+			name: "comma separated IDs",
+			args: []string{"12,13,14"},
+			want: []int64{12, 13, 14},
+		},
+		{
+			name: "ellipsis range",
+			args: []string{"12...13"},
+			want: []int64{12, 13},
+		},
+		{
+			name: "mixed comma and range syntaxes",
+			args: []string{"10,11:12", "13...14", "15::16"},
+			want: []int64{10, 11, 12, 13, 14, 15, 16},
+		},
+		{
 			name:    "invalid ID",
 			args:    []string{"abc"},
 			wantErr: true,
@@ -116,6 +131,21 @@ func TestParseJobIDArg(t *testing.T) {
 			want: []int64{10, 11, 12},
 		},
 		{
+			name: "ellipsis range",
+			arg:  "10...12",
+			want: []int64{10, 11, 12},
+		},
+		{
+			name: "comma-separated list",
+			arg:  "10,12,14",
+			want: []int64{10, 12, 14},
+		},
+		{
+			name: "comma-separated mixed",
+			arg:  "10,11:12,14...15",
+			want: []int64{10, 11, 12, 14, 15},
+		},
+		{
 			name:    "invalid triple colon",
 			arg:     "10:::12",
 			wantErr: true,
@@ -128,6 +158,16 @@ func TestParseJobIDArg(t *testing.T) {
 		{
 			name:    "range too large",
 			arg:     "1:2000",
+			wantErr: true,
+		},
+		{
+			name:    "invalid empty comma segment",
+			arg:     "10,,12",
+			wantErr: true,
+		},
+		{
+			name:    "invalid multiple ellipsis",
+			arg:     "10...12...14",
 			wantErr: true,
 		},
 	}
