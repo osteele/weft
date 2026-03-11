@@ -68,6 +68,7 @@ type launchModel struct {
 	appConfig   *config.Config
 	launchOpts  campaign.LaunchOpts
 	gpuFilter   string // --gpu filter to reapply after reconciliation
+	reconciler  *campaign.Reconciler
 
 	spinner spinner.Model
 	width   int
@@ -179,6 +180,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		progressCh:    make(chan estimateProgressMsg, 1),
 		campaignCh:    make(chan int64, 1),
 		gpuFilter:     gpuFilter,
+		reconciler:    campaign.NewReconciler(),
 		spinner:       s,
 	}
 }
@@ -201,10 +203,11 @@ func (m launchModel) runReconciliation() tea.Cmd {
 	clients := m.clients
 	cfg := m.appConfig
 	gpuFilter := m.gpuFilter
+	reconciler := m.reconciler
 	return func() tea.Msg {
 		r2Client, _ := buildR2Client(cfg)
 		if len(clients) > 0 {
-			campaign.ReconcileCloudInstances(database, clients, r2Client)
+			reconciler.ReconcileCloudInstances(database, clients, r2Client)
 		}
 		syncCloudJobResults(cfg, database, false)
 		if _, err := campaign.ReconcileCampaigns(database); err != nil {

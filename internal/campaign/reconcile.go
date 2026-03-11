@@ -22,10 +22,34 @@ type ReconcileResult struct {
 	TerminatedInstances []int64 // DB IDs of instances that were moved to a terminal state
 }
 
+// minDeadConfirmTime is how long an instance must continuously appear dead
+// before we declare it terminal. Guards against transient API blips.
+const minDeadConfirmTime = 2 * time.Minute
+
+// Reconciler runs reconciliation passes and remembers when each instance was
+// first seen dead, so we can require a sustained dead period before terminating.
+type Reconciler struct {
+	mu              sync.Mutex
+	firstDeadAt     map[int64]time.Time // keyed by CloudInstance.ID
+	deadConfirmTime time.Duration       // 0 uses minDeadConfirmTime
+}
+
+// NewReconciler creates a Reconciler ready for use.
+func NewReconciler() *Reconciler {
+	return &Reconciler{firstDeadAt: make(map[int64]time.Time)}
+}
+
+func (r *Reconciler) confirmTime() time.Duration {
+	if r.deadConfirmTime == 0 {
+		return minDeadConfirmTime
+	}
+	return r.deadConfirmTime
+}
+
 // ReconcileCloudInstances checks all running/launching instances against the
 // cloud provider and marks dead ones as failed (or completed if R2 has
 // a completion marker). r2Client may be nil, in which case completion detection is skipped.
-func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (*ReconcileResult, error) {
+func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (*ReconcileResult, error) {
 	instances, err := db.ListRunningCloudInstances(database)
 	if err != nil {
 		return nil, err
@@ -35,6 +59,19 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 		log.Printf("reconcile: checking %d running instances...", len(instances))
 	}
 
+	// Collect IDs of instances still running, to prune stale firstDeadAt entries.
+	activeIDs := make(map[int64]bool, len(instances))
+	for _, ci := range instances {
+		activeIDs[ci.ID] = true
+	}
+	r.mu.Lock()
+	for id := range r.firstDeadAt {
+		if !activeIDs[id] {
+			delete(r.firstDeadAt, id)
+		}
+	}
+	r.mu.Unlock()
+
 	result := &ReconcileResult{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -43,7 +80,7 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 		wg.Add(1)
 		go func(ci *db.CloudInstance) {
 			defer wg.Done()
-			reconciled, terminated := reconcileOneInstance(database, clients, r2Client, ci)
+			reconciled, terminated := r.reconcileOneInstance(database, clients, r2Client, ci)
 			if reconciled {
 				mu.Lock()
 				result.Reconciled++
@@ -117,7 +154,7 @@ func ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client 
 // reconcileOneInstance processes a single cloud instance for reconciliation.
 // Returns (reconciled, terminated) where reconciled means state changed and
 // terminated means the instance was moved to a terminal state (failed/completed).
-func reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance) (bool, bool) {
+func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance) (bool, bool) {
 	// Check for grace-wait state for running instances via R2
 	if ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
 		if graceDetected := checkR2GraceStatus(r2Client, ci, database); graceDetected {
@@ -251,8 +288,37 @@ func reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2
 			if err := db.CloseJobCloudAttemptsByInstance(database, ci.ID, db.AttemptOutcomeCompleted); err != nil {
 				log.Printf("reconcile: close attempts for instance %d: %v", ci.ID, err)
 			}
+			r.mu.Lock()
+			delete(r.firstDeadAt, ci.ID)
+			r.mu.Unlock()
 			return true, true
 		}
+
+		// Require the instance to appear dead for minDeadConfirmTime before
+		// declaring it terminal. Transient API blips (false "exited" status,
+		// ErrInstanceNotFound) can otherwise kill a healthy running instance.
+		confirmTime := r.confirmTime()
+		r.mu.Lock()
+		first, seen := r.firstDeadAt[ci.ID]
+		if !seen {
+			r.firstDeadAt[ci.ID] = time.Now()
+			r.mu.Unlock()
+			if confirmTime > 0 {
+				log.Printf("reconcile: instance %d (provider %s) appears dead (status: %s); waiting %s to confirm",
+					ci.ID, providerID, status, confirmTime)
+				return false, false
+			}
+		} else {
+			r.mu.Unlock()
+		}
+		if confirmTime > 0 && time.Since(first) < confirmTime {
+			log.Printf("reconcile: instance %d still appears dead (status: %s); confirming for %s more",
+				ci.ID, status, (confirmTime - time.Since(first)).Truncate(time.Second))
+			return false, false
+		}
+		r.mu.Lock()
+		delete(r.firstDeadAt, ci.ID)
+		r.mu.Unlock()
 
 		// Provider dead + had been launched (running) → preempted
 		reason := db.TerminationReasonPreempted

@@ -43,8 +43,9 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 		},
 	}
 
-	// Reconcile
-	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	// Use zero deadConfirmTime so the instance is terminated immediately (no hysteresis wait).
+	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), deadConfirmTime: -1}
+	result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestReconcileCloudInstances_GraceDetection(t *testing.T) {
 	}
 
 	// With nil r2Client, grace detection is skipped — no reconciliation
-	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 
 	// Reconcile — nothing should change
-	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestReconcileCloudInstances_GraceExpiry_DestroysProvider(t *testing.T) {
 		},
 	}
 
-	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestReconcileCloudInstances_SafetyNet_DestroysLeakedInstance(t *testing.T) 
 
 	// Reconcile — the main loop won't see this instance (it's already failed),
 	// but the safety-net pass should catch and destroy it.
-	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -295,7 +296,7 @@ func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 		},
 	}
 
-	result, err := ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -304,5 +305,61 @@ func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 	}
 	if destroyCalled {
 		t.Error("DestroyInstance should not be called for already-destroyed instances")
+	}
+}
+
+func TestReconcileCloudInstances_DeadInstanceHysteresis(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: "exited"}, nil
+		},
+	}
+
+	// Use a short confirm time so the test doesn't need real wall-clock time.
+	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), deadConfirmTime: 10 * time.Millisecond}
+
+	// First call: instance appears dead but hasn't been confirmed yet.
+	result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile (first): %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Errorf("first pass: reconciled = %d, want 0 (hysteresis pending)", result.Reconciled)
+	}
+	ci, _ := db.GetCloudInstance(database, instanceID)
+	if ci.Status != db.CloudInstanceStatusRunning {
+		t.Errorf("first pass: instance status = %q, want running", ci.Status)
+	}
+
+	// Wait for confirm period to elapse.
+	time.Sleep(20 * time.Millisecond)
+
+	// Second call: now confirmed dead, should terminate.
+	result, err = r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile (second): %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Errorf("second pass: reconciled = %d, want 1", result.Reconciled)
+	}
+	ci, _ = db.GetCloudInstance(database, instanceID)
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Errorf("second pass: instance status = %q, want failed", ci.Status)
 	}
 }

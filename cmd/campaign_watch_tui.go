@@ -43,6 +43,7 @@ type watchModel struct {
 	campaignID     int64         // campaign ID (0 if unknown)
 	launchedAt     time.Time     // campaign launch time
 	jobProgressHWM map[int64]int // high-water mark per job ID (prevents progress regression)
+	reconciler     *campaign.Reconciler
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -116,6 +117,7 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) w
 		campaignID:     campaignID,
 		launchedAt:     launchedAt,
 		jobProgressHWM: make(map[int64]int),
+		reconciler:     campaign.NewReconciler(),
 	}
 }
 
@@ -183,7 +185,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				clients := buildCloudClients(cfg)
 				r2Client, _ := buildR2Client(cfg)
 				if len(clients) > 0 {
-					result, _ := campaign.ReconcileCloudInstances(m.database, clients, r2Client)
+					result, _ := m.reconciler.ReconcileCloudInstances(m.database, clients, r2Client)
 					if result != nil && len(result.TerminatedInstances) > 0 {
 						// Trigger relaunch in background
 						go func() {

@@ -88,8 +88,9 @@ type SyncWorker struct {
 	requests     chan SyncRequest
 	results      chan SyncResult
 
-	mu        sync.Mutex
-	hostState map[string]*hostSyncState
+	mu         sync.Mutex
+	hostState  map[string]*hostSyncState
+	reconciler *campaign.Reconciler
 
 	// Configuration
 	maxParallel int
@@ -111,6 +112,7 @@ func NewSyncWorker(database *sql.DB, cloudClients []cloud.Client, r2Client *r2.C
 		requests:     make(chan SyncRequest, 100),
 		results:      make(chan SyncResult, 100),
 		hostState:    make(map[string]*hostSyncState),
+		reconciler:   campaign.NewReconciler(),
 		maxParallel:  3,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -240,7 +242,7 @@ func (w *SyncWorker) reconcileCloudJobs() {
 		return
 	}
 
-	result, err := campaign.ReconcileCloudInstances(w.database, w.cloudClients, w.r2Client)
+	result, err := w.reconciler.ReconcileCloudInstances(w.database, w.cloudClients, w.r2Client)
 	if err != nil {
 		log.Printf("cloud reconcile: %v", err)
 		return
