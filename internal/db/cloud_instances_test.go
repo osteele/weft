@@ -131,3 +131,117 @@ func TestGetAttemptOutcomesByInstance(t *testing.T) {
 		t.Fatalf("expected outcome %q, got %q", AttemptOutcomeOrphaned, outcomes[1])
 	}
 }
+
+func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := UpdateCloudInstanceStatus(database, instanceID, CloudInstanceStatusFailed, TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
+	}
+
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason)
+		 VALUES (1, ?, ?, 0, 'failed', 'python train.py', '/tmp', ?)`,
+		instanceID, CloudInstanceHost(instanceID), TerminationReasonDiskFull,
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {
+		t.Fatalf("RefineInstanceTerminationReason: %v", err)
+	}
+
+	ci, err := GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstance: %v", err)
+	}
+	if ci.TerminationReason != TerminationReasonDiskFull {
+		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, TerminationReasonDiskFull)
+	}
+}
+
+func TestRefineInstanceTerminationReason_OnlyRefinesJobFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := UpdateCloudInstanceStatus(database, instanceID, CloudInstanceStatusFailed, TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
+	}
+
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason)
+		 VALUES (1, ?, ?, 0, 'failed', 'python train.py', '/tmp', ?)`,
+		instanceID, CloudInstanceHost(instanceID), TerminationReasonDiskFull,
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {
+		t.Fatalf("RefineInstanceTerminationReason: %v", err)
+	}
+
+	ci, err := GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstance: %v", err)
+	}
+	if ci.TerminationReason != TerminationReasonInfraFailure {
+		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, TerminationReasonInfraFailure)
+	}
+}
+
+func TestRefineInstanceTerminationReason_UsesHistoricalAttempts(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := UpdateCloudInstanceStatus(database, instanceID, CloudInstanceStatusFailed, TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
+	}
+
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason)
+		 VALUES (1, NULL, '', 0, 'failed', 'python train.py', '/tmp', ?)`,
+		TerminationReasonDiskFull,
+	)
+	if err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {
+		t.Fatalf("RefineInstanceTerminationReason: %v", err)
+	}
+
+	ci, err := GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstance: %v", err)
+	}
+	if ci.TerminationReason != TerminationReasonDiskFull {
+		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, TerminationReasonDiskFull)
+	}
+}

@@ -36,6 +36,7 @@ const (
 	TerminationReasonCompleted    = "completed"
 	TerminationReasonPreempted    = "preempted"
 	TerminationReasonJobFailure   = "job_failure"
+	TerminationReasonDiskFull     = "disk_full"
 	TerminationReasonInfraFailure = "infra_failure"
 	TerminationReasonCancelled    = "cancelled"
 )
@@ -70,7 +71,7 @@ type CloudInstance struct {
 	GraceDeadline      *int64 // when the grace period expires
 
 	// Termination classification
-	TerminationReason string // "completed", "preempted", "job_failure", "infra_failure", "cancelled"
+	TerminationReason string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "cancelled"
 
 	// Instance capacity (for reuse matching)
 	DiskGB            int      // Actual disk space from offer (may exceed requested)
@@ -249,6 +250,54 @@ func SetCloudInstanceDataCenter(db *sql.DB, id int64, dc string) error {
 // SetCloudInstanceActualSpend updates the actual spend in cents.
 func SetCloudInstanceActualSpend(db *sql.DB, id int64, cents int) error {
 	_, err := db.Exec(`UPDATE cloud_instances SET actual_spend_cents = ? WHERE id = ?`, cents, id)
+	return err
+}
+
+// RefineInstanceTerminationReason upgrades a generic "job_failure" termination
+// reason to a more specific reason inferred from associated job failure reasons.
+// Currently upgrades to "disk_full" when any associated job reports it.
+func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
+	if instanceID <= 0 {
+		return nil
+	}
+
+	var current sql.NullString
+	err := database.QueryRow(`SELECT termination_reason FROM cloud_instances WHERE id = ?`, instanceID).Scan(&current)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !current.Valid || current.String != TerminationReasonJobFailure {
+		return nil
+	}
+
+	var hasDiskFull int
+	err = database.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1
+			FROM jobs
+			LEFT JOIN job_cloud_attempts ON jobs.id = job_cloud_attempts.job_id
+			WHERE jobs.tombstoned = 0
+			  AND jobs.failure_reason = ?
+			  AND (jobs.cloud_instance_id = ? OR job_cloud_attempts.cloud_instance_id = ?)
+		)`,
+		TerminationReasonDiskFull, instanceID, instanceID,
+	).Scan(&hasDiskFull)
+	if err != nil {
+		return err
+	}
+	if hasDiskFull == 0 {
+		return nil
+	}
+
+	_, err = database.Exec(
+		`UPDATE cloud_instances
+		 SET termination_reason = ?
+		 WHERE id = ? AND termination_reason = ?`,
+		TerminationReasonDiskFull, instanceID, TerminationReasonJobFailure,
+	)
 	return err
 }
 

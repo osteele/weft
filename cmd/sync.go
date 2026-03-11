@@ -354,6 +354,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	defer cancel()
 
 	updated := 0
+	updatedInstanceIDs := make(map[int64]struct{})
 	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
 		if verbose {
@@ -378,7 +379,8 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		// Check current job status directly — skip if already terminal
 		var currentStatus string
-		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus); err != nil || db.IsTerminalStatus(currentStatus) {
+		var cloudInstanceID sql.NullInt64
+		if err := database.QueryRow("SELECT status, cloud_instance_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &cloudInstanceID); err != nil || db.IsTerminalStatus(currentStatus) {
 			// Job not found or already terminal — clean up stale R2 markers
 			_ = r2Client.DeletePrefix(ctx, r2keys.JobPrefix(jobID)+"/")
 			continue
@@ -397,7 +399,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		exitCode, startTimeUnix, endTimeUnix := parseCloudJobResult(tmpDir, jobIDStr)
+		exitCode, startTimeUnix, endTimeUnix, failureReason := parseCloudJobResult(tmpDir, jobIDStr)
 		if exitCode == nil {
 			os.RemoveAll(tmpDir)
 			continue
@@ -416,11 +418,17 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		if _, err := database.Exec(
-			`UPDATE jobs SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ? WHERE id = ?`,
-			status, *exitCode, startTimeUnix, endTimeUnix, status, jobID,
+			`UPDATE jobs
+			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
+			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason)
+			 WHERE id = ?`,
+			status, *exitCode, startTimeUnix, endTimeUnix, status, failureReason, jobID,
 		); err != nil {
 			log.Printf("sync: failed to update cloud job %d status: %v", jobID, err)
 			continue
+		}
+		if cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
+			updatedInstanceIDs[cloudInstanceID.Int64] = struct{}{}
 		}
 		updated++
 		completedJobIDs[jobID] = true
@@ -478,7 +486,17 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 	}
 
+	for instanceID := range updatedInstanceIDs {
+		updateInstanceTerminationReason(database, instanceID)
+	}
+
 	return updated
+}
+
+func updateInstanceTerminationReason(database *sql.DB, instanceID int64) {
+	if err := db.RefineInstanceTerminationReason(database, instanceID); err != nil {
+		log.Printf("sync: refine termination reason for instance %d: %v", instanceID, err)
+	}
 }
 
 func r2Config(cfg *config.Config) r2.Config {
@@ -490,19 +508,21 @@ func r2Config(cfg *config.Config) r2.Config {
 	}
 }
 
-// parseCloudJobResult reads the exit code, start time, and end time from a downloaded R2 results directory.
+// parseCloudJobResult reads the exit code, start time, end time, and failure
+// reason from a downloaded R2 results directory.
 // Returns nil exitCode if no valid result was found.
-func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix, endTimeUnix int64) {
+func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix, endTimeUnix int64, failureReason string) {
 	// Try completion JSON (agent format: <jobID>.completion.json)
 	completionPath := filepath.Join(tmpDir, jobIDStr+".completion.json")
 	if data, err := os.ReadFile(completionPath); err == nil {
 		var rec struct {
-			ExitCode  int   `json:"exit_code"`
-			StartTime int64 `json:"start_time"`
-			EndTime   int64 `json:"end_time"`
+			ExitCode      int    `json:"exit_code"`
+			StartTime     int64  `json:"start_time"`
+			EndTime       int64  `json:"end_time"`
+			FailureReason string `json:"failure_reason"`
 		}
 		if json.Unmarshal(data, &rec) == nil {
-			return &rec.ExitCode, rec.StartTime, rec.EndTime
+			return &rec.ExitCode, rec.StartTime, rec.EndTime, rec.FailureReason
 		}
 	}
 
@@ -511,7 +531,7 @@ func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix,
 	if data, err := os.ReadFile(statusPath); err == nil {
 		var code int
 		if _, err := fmt.Sscanf(strings.TrimSpace(string(data)), "%d", &code); err == nil {
-			return &code, 0, 0
+			return &code, 0, 0, ""
 		}
 	}
 
@@ -521,11 +541,11 @@ func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix,
 		if err == nil {
 			endTimeBytes, _ := os.ReadFile(filepath.Join(tmpDir, "end_time"))
 			et, _ := strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
-			return &code, 0, et
+			return &code, 0, et, ""
 		}
 	}
 
-	return nil, 0, 0
+	return nil, 0, 0, ""
 }
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated

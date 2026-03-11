@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,6 +43,8 @@ func ExtractExitInfo(err error) ExitInfo {
 }
 
 // SignalName returns the signal name (e.g. "SIGKILL") or empty string if not signaled.
+// Failure reasons are reported separately by DetectFailureReasonFromExitInfo
+// (e.g. "disk_full", "oom", "gpu_oom").
 func (ei ExitInfo) SignalName() string {
 	if !ei.Signaled {
 		return ""
@@ -52,6 +55,9 @@ func (ei ExitInfo) SignalName() string {
 // DetectFailureReasonFromExitInfo examines exit info and system state to determine why a job failed.
 func DetectFailureReasonFromExitInfo(ei ExitInfo) string {
 	if ei.Signaled {
+		if checkDiskFull() {
+			return "disk_full"
+		}
 		switch ei.Signal {
 		case syscall.SIGKILL:
 			if checkDmesgOOM() {
@@ -393,8 +399,13 @@ func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, kill
 }
 
 // DetectFailureReason examines the system state to determine why a job failed.
-// It checks the exit code, dmesg for OOM kills, and nvidia-smi for GPU OOM.
+// It checks for disk exhaustion, then evaluates exit code, OOM, and GPU OOM signals.
 func DetectFailureReason(exitCode int) string {
+	// Disk exhaustion can surface through many exit codes/signals.
+	if checkDiskFull() {
+		return "disk_full"
+	}
+
 	// Exit code 137 = SIGKILL (classic OOM killer)
 	if exitCode == 137 {
 		if checkDmesgOOM() {
@@ -442,6 +453,63 @@ func checkDmesgOOM() bool {
 		strings.Contains(output, "oom-kill") ||
 		strings.Contains(output, "Killed process") ||
 		strings.Contains(output, "invoked oom-killer")
+}
+
+// checkDiskFull checks recent system signals for ENOSPC/disk exhaustion.
+// It looks at dmesg and falls back to df usage on "/" for containerized setups.
+func checkDiskFull() bool {
+	if checkDmesgDiskFull() {
+		return true
+	}
+	return checkRootDiskUsage()
+}
+
+func checkDmesgDiskFull() bool {
+	cmd := exec.Command("dmesg", "--time-format=reltime", "--level=err,crit,alert,emerg")
+	out, err := cmd.Output()
+	if err != nil {
+		// Fallback: try without flags (older kernels, macOS won't have dmesg)
+		cmd = exec.Command("dmesg")
+		out, err = cmd.Output()
+		if err != nil {
+			return false
+		}
+	}
+	output := strings.ToLower(string(out))
+	return strings.Contains(output, "no space left on device") ||
+		strings.Contains(output, "enospc")
+}
+
+func checkRootDiskUsage() bool {
+	cmd := exec.Command("df", "-P", "/")
+	out, err := cmd.Output()
+	if err != nil {
+		// Fallback for environments that do not support -P.
+		cmd = exec.Command("df", "/")
+		out, err = cmd.Output()
+		if err != nil {
+			return false
+		}
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for i := 1; i < len(lines); i++ {
+		fields := strings.Fields(lines[i])
+		for _, field := range fields {
+			if !strings.HasSuffix(field, "%") {
+				continue
+			}
+			pct, err := strconv.Atoi(strings.TrimSuffix(field, "%"))
+			if err != nil {
+				continue
+			}
+			if pct >= 99 {
+				return true
+			}
+			break
+		}
+	}
+	return false
 }
 
 // checkGPUOOM checks nvidia-smi for GPU memory errors.

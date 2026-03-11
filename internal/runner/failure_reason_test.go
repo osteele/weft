@@ -2,6 +2,8 @@ package runner
 
 import (
 	"os"
+	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -65,5 +67,42 @@ func TestWriteFailureReasonFile_Empty(t *testing.T) {
 
 	if _, err := os.Stat(paths.FailureReason); !os.IsNotExist(err) {
 		t.Error("empty failure reason should not create file")
+	}
+}
+
+func TestDetectFailureReason_DiskFullFromDmesg(t *testing.T) {
+	binDir := t.TempDir()
+	writeFakeCommand(t, binDir, "dmesg", "#!/bin/sh\necho '[123] writeback: No space left on device'\n")
+	writeFakeCommand(t, binDir, "df", "#!/bin/sh\necho 'Filesystem 1K-blocks Used Available Use% Mounted on'\necho '/dev/root 1000 100 900 10% /'\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	got := DetectFailureReason(1)
+	if got != "disk_full" {
+		t.Fatalf("DetectFailureReason(1) = %q, want disk_full", got)
+	}
+}
+
+func TestDetectFailureReasonFromExitInfo_DiskFullOverridesSignal(t *testing.T) {
+	binDir := t.TempDir()
+	writeFakeCommand(t, binDir, "dmesg", "#!/bin/sh\necho 'ENOSPC: write failed'\n")
+	writeFakeCommand(t, binDir, "df", "#!/bin/sh\necho 'Filesystem 1K-blocks Used Available Use% Mounted on'\necho '/dev/root 1000 100 900 10% /'\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ei := ExitInfo{
+		ExitCode: 137,
+		Signaled: true,
+		Signal:   syscall.SIGKILL,
+	}
+	got := DetectFailureReasonFromExitInfo(ei)
+	if got != "disk_full" {
+		t.Fatalf("DetectFailureReasonFromExitInfo() = %q, want disk_full", got)
+	}
+}
+
+func writeFakeCommand(t *testing.T, dir, name, script string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake command %s: %v", name, err)
 	}
 }

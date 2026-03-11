@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -132,6 +133,12 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	if err != nil {
 		c.logger.Printf("vastai sweep: update job %d: %v", jobID, err)
 		return
+	}
+	var cloudInstanceID sql.NullInt64
+	if err := c.db.QueryRow(`SELECT cloud_instance_id FROM jobs WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
+		if err := db.RefineInstanceTerminationReason(c.db, cloudInstanceID.Int64); err != nil {
+			c.logger.Printf("vastai sweep: refine termination reason for instance %d: %v", cloudInstanceID.Int64, err)
+		}
 	}
 
 	// Close the cloud attempt record
