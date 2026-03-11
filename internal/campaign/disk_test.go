@@ -57,6 +57,11 @@ func Test_hasCUDAPackages(t *testing.T) {
 			content: "[project]\ndependencies = [\n  \"jax[cuda12]\",\n]\n",
 			want:    true,
 		},
+		{
+			name:    "vllm dependency",
+			content: "[project]\ndependencies = [\n  \"vllm>=0.6\",\n]\n",
+			want:    true,
+		},
 	}
 
 	for _, tt := range tests {

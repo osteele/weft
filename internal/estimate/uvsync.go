@@ -27,9 +27,10 @@ type UVManifestRef struct {
 
 // UVPackageRef mirrors runner.UVPackage.
 type UVPackageRef struct {
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	SizeBytes int64  `json:"size_bytes"`
+	Name           string `json:"name"`
+	Version        string `json:"version"`
+	SizeBytes      int64  `json:"size_bytes"`
+	InstalledBytes int64  `json:"installed_bytes,omitempty"`
 }
 
 // LockfileHash computes SHA256 hashes for uv.lock files found in the given
@@ -116,9 +117,10 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 	return &m
 }
 
-// EstimateUVSyncBytes computes the total bytes that would need to be downloaded
-// for a cold uv sync across all manifests. Packages are deduplicated by
-// (name, version) so shared dependencies are only counted once.
+// EstimateUVSyncBytes computes the total bytes needed for a cold uv sync disk
+// footprint across all manifests. When installed_bytes is available, it is used
+// instead of wheel size. Packages are deduplicated by (name, version), so
+// shared dependencies are only counted once.
 func EstimateUVSyncBytes(manifests map[string]*UVManifestRef) int64 {
 	type pkgKey struct{ name, version string }
 	seen := make(map[pkgKey]int64)
@@ -129,8 +131,12 @@ func EstimateUVSyncBytes(manifests map[string]*UVManifestRef) int64 {
 		}
 		for _, pkg := range m.Packages {
 			k := pkgKey{pkg.Name, pkg.Version}
-			if pkg.SizeBytes > seen[k] {
-				seen[k] = pkg.SizeBytes
+			sz := pkg.SizeBytes
+			if pkg.InstalledBytes > 0 {
+				sz = pkg.InstalledBytes
+			}
+			if sz > seen[k] {
+				seen[k] = sz
 			}
 		}
 	}

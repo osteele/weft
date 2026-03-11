@@ -37,6 +37,20 @@ func TestCollectUVManifest_WithLockfile(t *testing.T) {
 	// Point UV_CACHE_DIR to our mock cache
 	t.Setenv("UV_CACHE_DIR", cacheDir)
 
+	// Create a mock virtualenv site-packages with installed files.
+	sitePackages := filepath.Join(dir, ".venv", "lib", "python3.12", "site-packages")
+	torchDistInfo := filepath.Join(sitePackages, "torch-2.2.1.dist-info")
+	torchPkg := filepath.Join(sitePackages, "torch")
+	os.MkdirAll(torchDistInfo, 0755)
+	os.MkdirAll(torchPkg, 0755)
+	os.WriteFile(filepath.Join(torchPkg, "__init__.py"), make([]byte, 3000), 0644)
+	os.WriteFile(filepath.Join(torchPkg, "libtorch_cuda.so"), make([]byte, 7000), 0644)
+	os.WriteFile(
+		filepath.Join(torchDistInfo, "RECORD"),
+		[]byte("torch/__init__.py,,\ntorch/libtorch_cuda.so,,\ntorch-2.2.1.dist-info/RECORD,,\n"),
+		0644,
+	)
+
 	m, err := CollectUVManifest(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -84,6 +98,9 @@ func TestCollectUVManifest_WithLockfile(t *testing.T) {
 	}
 	if torch.SizeBytes != 5000 {
 		t.Errorf("torch size = %d, want 5000", torch.SizeBytes)
+	}
+	if torch.InstalledBytes <= torch.SizeBytes {
+		t.Errorf("torch installed_bytes = %d, want > wheel size %d", torch.InstalledBytes, torch.SizeBytes)
 	}
 }
 

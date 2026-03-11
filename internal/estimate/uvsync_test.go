@@ -105,6 +105,26 @@ func TestEstimateUVSyncBytes_NilManifests(t *testing.T) {
 	}
 }
 
+func TestEstimateUVSyncBytes_PrefersInstalledBytes(t *testing.T) {
+	manifests := map[string]*UVManifestRef{
+		"/proj/a": {
+			Packages: []UVPackageRef{
+				{Name: "vllm", Version: "0.6.0", SizeBytes: 700, InstalledBytes: 3200},
+			},
+		},
+		"/proj/b": {
+			Packages: []UVPackageRef{
+				{Name: "vllm", Version: "0.6.0", SizeBytes: 800, InstalledBytes: 3000},
+			},
+		},
+	}
+
+	total := EstimateUVSyncBytes(manifests)
+	if total != 3200 {
+		t.Errorf("total = %d, want 3200", total)
+	}
+}
+
 func TestEstimateUVSyncBytes_EmptyManifests(t *testing.T) {
 	manifests := map[string]*UVManifestRef{
 		"/proj/a": nil,

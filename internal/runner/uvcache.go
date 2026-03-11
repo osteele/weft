@@ -2,6 +2,7 @@ package runner
 
 import (
 	"crypto/sha256"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,15 +12,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
 
 // UVPackage describes a single cached Python package.
 type UVPackage struct {
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	SizeBytes int64  `json:"size_bytes"`
+	Name           string `json:"name"`
+	Version        string `json:"version"`
+	SizeBytes      int64  `json:"size_bytes"`
+	InstalledBytes int64  `json:"installed_bytes,omitempty"`
 }
 
 // UVManifest is a per-lockfile, per-platform snapshot of cached package sizes.
@@ -33,10 +36,12 @@ type UVManifest struct {
 // wheelNameRe matches wheel filenames: name-version-*.whl
 // PEP 427: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
 var wheelNameRe = regexp.MustCompile(`^([A-Za-z0-9](?:[A-Za-z0-9._]*[A-Za-z0-9])?)-([^-]+)-`)
+var distInfoDirRe = regexp.MustCompile(`^(.+)-([^-]+)\.dist-info$`)
 
 // CollectUVManifest reads uv.lock from workingDir, hashes it, walks the uv
-// wheel cache to enumerate cached packages with sizes, and returns a manifest.
-// Returns nil, nil if uv.lock does not exist.
+// wheel cache to enumerate cached packages, and augments entries with installed
+// sizes from .venv site-packages when available. Returns nil, nil if uv.lock
+// does not exist.
 func CollectUVManifest(workingDir string) (*UVManifest, error) {
 	lockPath := filepath.Join(workingDir, "uv.lock")
 	lockData, err := os.ReadFile(lockPath)
@@ -52,6 +57,13 @@ func CollectUVManifest(workingDir string) (*UVManifest, error) {
 
 	cacheDir := uvCacheDir()
 	packages := scanUVCache(cacheDir)
+	installedSizes := scanInstalledSitePackages(workingDir)
+	for i := range packages {
+		key := uvPkgKey{name: packages[i].Name, version: packages[i].Version}
+		if installed := installedSizes[key]; installed > 0 {
+			packages[i].InstalledBytes = installed
+		}
+	}
 
 	return &UVManifest{
 		LockfileHash: lockHash,
@@ -82,8 +94,7 @@ func uvCacheDir() string {
 // scanUVCache walks the uv cache's wheels-v* subdirectories looking for
 // wheel files and aggregates sizes by (name, version).
 func scanUVCache(cacheDir string) []UVPackage {
-	type pkgKey struct{ name, version string }
-	sizes := make(map[pkgKey]int64)
+	sizes := make(map[uvPkgKey]int64)
 
 	// Only walk wheels-v* subdirs to avoid traversing unrelated cache data
 	wheelsDirs, _ := filepath.Glob(filepath.Join(cacheDir, "wheels-v*"))
@@ -106,7 +117,7 @@ func scanUVCache(cacheDir string) []UVPackage {
 			if err != nil {
 				return nil
 			}
-			sizes[pkgKey{name, version}] += info.Size()
+			sizes[uvPkgKey{name, version}] += info.Size()
 			return nil
 		})
 	}
@@ -120,6 +131,108 @@ func scanUVCache(cacheDir string) []UVPackage {
 		})
 	}
 	return packages
+}
+
+type uvPkgKey struct {
+	name    string
+	version string
+}
+
+// scanInstalledSitePackages collects installed package sizes from
+// .venv/lib/python*/site-packages by reading each dist-info RECORD.
+func scanInstalledSitePackages(workingDir string) map[uvPkgKey]int64 {
+	pattern := filepath.Join(workingDir, ".venv", "lib", "python*", "site-packages")
+	sitePackageDirs, _ := filepath.Glob(pattern)
+	if len(sitePackageDirs) == 0 {
+		return nil
+	}
+	sort.Strings(sitePackageDirs)
+
+	sizes := make(map[uvPkgKey]int64)
+	for _, sitePackages := range sitePackageDirs {
+		entries, err := os.ReadDir(sitePackages)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			m := distInfoDirRe.FindStringSubmatch(entry.Name())
+			if m == nil {
+				continue
+			}
+			key := uvPkgKey{
+				name:    normalizePackageName(m[1]),
+				version: m[2],
+			}
+			distInfoDir := filepath.Join(sitePackages, entry.Name())
+			size, ok := sizeFromDistInfoRecord(sitePackages, distInfoDir)
+			if !ok {
+				size = dirSizeBytes(distInfoDir)
+			}
+			if size > sizes[key] {
+				sizes[key] = size
+			}
+		}
+	}
+	return sizes
+}
+
+func sizeFromDistInfoRecord(sitePackages, distInfoDir string) (int64, bool) {
+	recordPath := filepath.Join(distInfoDir, "RECORD")
+	f, err := os.Open(recordPath)
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+
+	reader := csv.NewReader(f)
+	reader.FieldsPerRecord = -1
+
+	var total int64
+	seen := make(map[string]struct{})
+	for {
+		row, err := reader.Read()
+		if err != nil {
+			break
+		}
+		if len(row) == 0 {
+			continue
+		}
+		relPath := strings.TrimSpace(row[0])
+		if relPath == "" {
+			continue
+		}
+		absPath := filepath.Clean(filepath.Join(sitePackages, filepath.FromSlash(relPath)))
+		if !isWithinDir(absPath, sitePackages) {
+			continue
+		}
+		if _, ok := seen[absPath]; ok {
+			continue
+		}
+		seen[absPath] = struct{}{}
+		info, err := os.Stat(absPath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		total += info.Size()
+	}
+	if total == 0 {
+		return 0, false
+	}
+	return total, true
+}
+
+func isWithinDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 // normalizePackageName converts a wheel distribution name to a normalized form
