@@ -16,7 +16,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
@@ -48,9 +47,10 @@ Use --dry-run to just print the plan without launching.`,
 var campaignWatchCmd = &cobra.Command{
 	Use:   "watch <campaign-id>",
 	Short: "Watch campaign instance progress",
-	Long: `Monitors all instances in a campaign, printing line-oriented status updates.
+	Long: `Monitors all instances in a campaign.
 
-Use --tui for an interactive display.`,
+Defaults to TUI in an interactive terminal, otherwise plain text.
+Use --tui or --plain to override.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runCampaignWatch,
 }
@@ -86,8 +86,12 @@ var (
 	campaignLaunchYes         bool
 	campaignLaunchJobs        string
 	campaignLaunchGPU         string
+	campaignLaunchTUI         bool
+	campaignLaunchPlain       bool
 	campaignWatchTUI          bool
+	campaignWatchPlain        bool
 	campaignListTUI           bool
+	campaignListPlain         bool
 )
 
 func init() {
@@ -108,15 +112,27 @@ func init() {
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
+	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
+	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
+	campaignLaunchCmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	campaignLaunchCmd.MarkFlagsMutuallyExclusive("tui", "yes")
 
-	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Use interactive TUI display")
-	campaignWatchCmd.Flags().Bool("plain", false, "Plain text output (default; accepted for clarity)")
-	_ = campaignWatchCmd.Flags().MarkHidden("plain")
+	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Force interactive TUI display")
+	campaignWatchCmd.Flags().BoolVar(&campaignWatchPlain, "plain", false, "Force plain text output")
+	campaignWatchCmd.MarkFlagsMutuallyExclusive("tui", "plain")
 
-	campaignListCmd.Flags().BoolVar(&campaignListTUI, "tui", false, "Interactive list with drill-down to watch")
+	campaignListCmd.Flags().BoolVar(&campaignListTUI, "tui", false, "Force interactive list with drill-down to watch")
+	campaignListCmd.Flags().BoolVar(&campaignListPlain, "plain", false, "Force plain table output")
+	campaignListCmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
 func runCampaignLaunch(cmd *cobra.Command, args []string) error {
+	useTUI, err := resolveCampaignTUI(campaignLaunchTUI, campaignLaunchPlain)
+	if err != nil {
+		return err
+	}
+	launchInteractive := useTUI && !campaignLaunchYes
+
 	// Pre-flight: check if embedded agent binary is stale and auto-rebuild
 	if err := ensureAgentFresh(); err != nil {
 		return err
@@ -135,7 +151,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// For non-interactive and dry-run modes, reconcile synchronously.
 	// For TUI mode, reconciliation runs in the background (see below).
-	needsSyncReconcile := campaignLaunchYes || campaignLaunchDryRun
+	needsSyncReconcile := !launchInteractive || campaignLaunchDryRun
 	if needsSyncReconcile {
 		reconcileBeforeDisplay(database)
 	}
@@ -224,9 +240,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml (vastai.r2)")
 	}
 
-	// Non-interactive mode
-	if campaignLaunchYes {
-		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments)
+	// Non-interactive mode (explicit via --yes/--plain or automatic).
+	if !launchInteractive {
+		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments, useTUI)
 	}
 
 	// Interactive TUI
@@ -253,14 +269,17 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Segue into watch mode if instances were launched
 	if len(m.instanceIDs) > 0 && !campaignLaunchNoWatch {
 		fmt.Println()
-		return watchInstances(database, m.instanceIDs)
+		if useTUI {
+			return watchInstances(database, m.instanceIDs)
+		}
+		return watchInstancesPlain(database, m.instanceIDs)
 	}
 
 	return nil
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
-func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, reuseAssignments []campaign.ReuseAssignment) error {
+func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, reuseAssignments []campaign.ReuseAssignment, watchTUI bool) error {
 	// Submit reuse assignments first
 	if len(reuseAssignments) > 0 {
 		fmt.Print(campaign.FormatReuseAssignments(reuseAssignments))
@@ -334,6 +353,10 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	result, err := campaign.LaunchCampaign(
 		clients, database, groups, offers, estimates, opts, r2Cfg, createOpts,
 		func(group campaign.InstanceGroup, phase string) {
+			if strings.EqualFold(group.GPUClass, "campaign") {
+				fmt.Printf("  %s\n", phase)
+				return
+			}
 			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
 		},
 		func(id int64) {
@@ -361,10 +384,13 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  weft campaign watch %d\n", result.CampaignID)
 
-	// Segue into watch mode
-	if !campaignLaunchNoWatch && term.IsTerminal(os.Stdout.Fd()) {
+	// Segue into watch mode.
+	if !campaignLaunchNoWatch {
 		fmt.Println()
-		return watchInstances(database, result.InstanceIDs)
+		if watchTUI {
+			return watchInstances(database, result.InstanceIDs)
+		}
+		return watchInstancesPlain(database, result.InstanceIDs)
 	}
 
 	return nil
@@ -430,6 +456,11 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 }
 
 func runCampaignWatch(cmd *cobra.Command, args []string) error {
+	useTUI, err := resolveCampaignTUI(campaignWatchTUI, campaignWatchPlain)
+	if err != nil {
+		return err
+	}
+
 	campaignID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid campaign ID %q: %w", args[0], err)
@@ -454,7 +485,7 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	if campaignWatchTUI && term.IsTerminal(os.Stdout.Fd()) {
+	if useTUI {
 		return watchInstances(database, instanceIDs)
 	}
 
@@ -503,6 +534,11 @@ func runCampaignTerminate(cmd *cobra.Command, args []string) error {
 }
 
 func runCampaignList(cmd *cobra.Command, args []string) error {
+	useTUI, err := resolveCampaignTUI(campaignListTUI, campaignListPlain)
+	if err != nil {
+		return err
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -521,7 +557,7 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if campaignListTUI && term.IsTerminal(os.Stdout.Fd()) {
+	if useTUI {
 		return runCampaignListTUI(database, campaigns)
 	}
 

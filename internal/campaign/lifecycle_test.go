@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // setupTestDB creates an in-memory SQLite database for testing.
@@ -189,30 +190,63 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
 	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
 	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, host, status, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '', ?, ?, ?, ?, 0)`,
+		job.ID, db.StatusQueued, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
 
-	// For CreateFails test, we need a non-nil r2Client but CreateInstance fails first.
-	// Since we can't easily create a real R2 client without valid credentials,
-	// and the nil check now happens before CreateInstance, this test needs
-	// a different approach — skip it by testing that nil r2Client fails.
-	// The CreateInstance failure path is still covered because the nil check
-	// returns error code 0 (before DB record creation), not after.
-
-	// Actually, nil r2Client fails before CreateInstance, so we can't test
-	// CreateInstance failure with nil r2Client. The CreateFails test is less
-	// meaningful now — the important test is that r2Client is validated.
-	_, err := LaunchInstance(
+	instanceID, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
 		LaunchOpts{},
 		r2Cfg, createOpts,
-		R2Assets{Client: nil},
+		R2Assets{Client: &r2.Client{}},
 		func(phase string) {},
 	)
-
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "R2Assets.Client is required") {
-		t.Errorf("error message should mention R2Assets.Client requirement, got: %v", err)
+	if !strings.Contains(err.Error(), "create instance: API error: insufficient balance") {
+		t.Errorf("error should include create-instance failure, got: %v", err)
+	}
+
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get cloud instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+	if ci.TerminationReason != db.TerminationReasonInfraFailure {
+		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, db.TerminationReasonInfraFailure)
+	}
+
+	var host string
+	var cloudInstanceID sql.NullInt64
+	if err := database.QueryRow(`SELECT host, cloud_instance_id FROM jobs WHERE id = ?`, job.ID).Scan(&host, &cloudInstanceID); err != nil {
+		t.Fatalf("select job: %v", err)
+	}
+	if cloudInstanceID.Valid {
+		t.Fatalf("job cloud_instance_id = %v, want NULL", cloudInstanceID.Int64)
+	}
+	if host != "" {
+		t.Fatalf("job host = %q, want empty", host)
+	}
+
+	attempts, err := db.GetJobCloudAttempts(database, job.ID)
+	if err != nil {
+		t.Fatalf("get job attempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	if attempts[0].Outcome != db.AttemptOutcomeOrphaned {
+		t.Fatalf("attempt outcome = %q, want %q", attempts[0].Outcome, db.AttemptOutcomeOrphaned)
+	}
+	if attempts[0].EndedAt == nil {
+		t.Fatal("attempt ended_at = nil, want non-nil")
 	}
 }
 

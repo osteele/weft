@@ -163,7 +163,8 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 
 // LaunchCampaign creates a campaign record and launches instances for each group
 // in parallel. It collects results and updates the campaign status.
-// The onPhase callback, if non-nil, is called with progress updates per group.
+// The onPhase callback, if non-nil, is called with progress updates for campaign
+// lifecycle steps and per-group launch activity.
 func LaunchCampaign(
 	clients []cloud.Client,
 	database *sql.DB,
@@ -183,6 +184,9 @@ func LaunchCampaign(
 		return nil, fmt.Errorf("offers/groups mismatch: %d offers for %d groups", len(offers), len(groups))
 	}
 
+	if onPhase != nil {
+		onPhase(InstanceGroup{GPUClass: "campaign"}, "preparing R2 assets")
+	}
 	r2Assets, err := PrepareR2Assets(r2Cfg, groups)
 	if err != nil {
 		return nil, err
@@ -196,6 +200,9 @@ func LaunchCampaign(
 	}
 
 	// Create campaign batch record
+	if onPhase != nil {
+		onPhase(InstanceGroup{GPUClass: "campaign"}, "creating campaign record")
+	}
 	campaignRec := &db.Campaign{
 		Status:             db.CampaignStatusLaunching,
 		EstimatedCostCents: estimatedCostCents,
@@ -325,6 +332,9 @@ func LaunchCampaign(
 	}
 
 	// Launch worker instances in parallel
+	if onPhase != nil {
+		onPhase(InstanceGroup{GPUClass: "campaign"}, "launching worker instances")
+	}
 	var mu sync.Mutex
 	var instanceIDs []int64
 	var workerProviderIDs []workerInfo
@@ -607,6 +617,7 @@ func LaunchInstance(
 	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
 	if err != nil {
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+		_, _ = db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		return instanceID, fmt.Errorf("create instance: %w", err)
 	}
 

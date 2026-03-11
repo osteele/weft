@@ -132,6 +132,70 @@ func TestGetAttemptOutcomesByInstance(t *testing.T) {
 	}
 }
 
+func TestResetCloudInstanceJobs_PreservesCanceledJobs(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES (1, ?, ?, 0, ?, 'echo canceled', '/tmp')`,
+		instanceID, CloudInstanceHost(instanceID), StatusCanceled,
+	); err != nil {
+		t.Fatalf("insert canceled job: %v", err)
+	}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES (2, ?, ?, 0, ?, 'echo running', '/tmp')`,
+		instanceID, CloudInstanceHost(instanceID), StatusRunning,
+	); err != nil {
+		t.Fatalf("insert running job: %v", err)
+	}
+
+	n, err := ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("ResetCloudInstanceJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+
+	canceledJob, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID(canceled): %v", err)
+	}
+	if canceledJob.Status != StatusCanceled {
+		t.Fatalf("canceled job status = %q, want %q", canceledJob.Status, StatusCanceled)
+	}
+	if canceledJob.CloudInstanceID == nil || *canceledJob.CloudInstanceID != instanceID {
+		t.Fatalf("canceled job cloud_instance_id = %v, want %d", canceledJob.CloudInstanceID, instanceID)
+	}
+	if canceledJob.Host != CloudInstanceHost(instanceID) {
+		t.Fatalf("canceled job host = %q, want %q", canceledJob.Host, CloudInstanceHost(instanceID))
+	}
+
+	resetJob, err := GetJobByID(database, 2)
+	if err != nil {
+		t.Fatalf("GetJobByID(reset): %v", err)
+	}
+	if resetJob.Status != StatusQueued {
+		t.Fatalf("reset job status = %q, want %q", resetJob.Status, StatusQueued)
+	}
+	if resetJob.CloudInstanceID != nil {
+		t.Fatalf("reset job cloud_instance_id = %v, want nil", resetJob.CloudInstanceID)
+	}
+	if resetJob.Host != "" {
+		t.Fatalf("reset job host = %q, want empty", resetJob.Host)
+	}
+}
+
 func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
 	database := setupTestDB(t)
 

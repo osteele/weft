@@ -1,0 +1,78 @@
+package cmd
+
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/osteele/weft/internal/db"
+)
+
+func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	failedID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusLaunching,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("create failed instance: %v", err)
+	}
+	if err := db.UpdateCloudInstanceStatus(database, failedID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+		t.Fatalf("set failed status: %v", err)
+	}
+
+	launchingID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusLaunching,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("create launching instance: %v", err)
+	}
+
+	m := newWatchModel(database, []int64{failedID, launchingID}, nil)
+	m.spinner.Spinner = spinner.Spinner{Frames: []string{"SPIN"}, FPS: time.Second}
+	spinnerMarker := m.spinner.View()
+	if spinnerMarker == "" {
+		t.Fatal("spinner marker unexpectedly empty")
+	}
+
+	out := m.View()
+	cleanOut := stripANSI(out)
+	cleanSpinner := stripANSI(spinnerMarker)
+
+	if !strings.Contains(cleanOut, "failed (infra_failure)") {
+		t.Fatalf("output missing failed status label, got:\n%s", out)
+	}
+	if !strings.Contains(cleanOut, fmt.Sprintf("Instance %d — A100 — launching", launchingID)) {
+		t.Fatalf("output missing launching status label, got:\n%s", out)
+	}
+
+	parts := strings.Split(cleanOut, fmt.Sprintf("Instance %d —", failedID))
+	if len(parts) < 2 {
+		t.Fatalf("could not isolate failed instance section, got:\n%s", out)
+	}
+	failedSection := strings.Split(parts[1], "\n\n")[0]
+	if strings.Contains(failedSection, cleanSpinner) {
+		t.Fatalf("failed instance section should not include spinner %q, section:\n%s", cleanSpinner, failedSection)
+	}
+
+	launchParts := strings.Split(cleanOut, fmt.Sprintf("Instance %d —", launchingID))
+	if len(launchParts) < 2 {
+		t.Fatalf("could not isolate launching instance section, got:\n%s", out)
+	}
+	launchingSection := strings.Split(launchParts[1], "\n\n")[0]
+	if !strings.Contains(launchingSection, cleanSpinner) {
+		t.Fatalf("launching instance section should include spinner %q, section:\n%s", cleanSpinner, launchingSection)
+	}
+}
+
+func stripANSI(s string) string {
+	re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return re.ReplaceAllString(s, "")
+}

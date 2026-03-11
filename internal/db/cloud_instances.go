@@ -406,8 +406,8 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 
 	result, err := database.Exec(
 		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = ''
-		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?) AND tombstoned = 0`,
-		StatusQueued, instanceID, StatusCompleted, StatusFailed,
+		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?) AND tombstoned = 0`,
+		StatusQueued, instanceID, StatusCompleted, StatusFailed, StatusCanceled,
 	)
 	if err != nil {
 		return 0, err

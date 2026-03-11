@@ -20,7 +20,7 @@ var hfModelSizeCache sync.Map // map[string]int64
 var hfHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 // fetchHFModelSizeURL is the URL template for the HF API (overridable for testing).
-var fetchHFModelSizeURL = "https://huggingface.co/api/models/%s"
+var fetchHFModelSizeURL = "https://huggingface.co/api/models/%s/tree/main"
 
 // diskCachePath returns the path to the persistent model size cache.
 func diskCachePath() string {
@@ -84,8 +84,8 @@ func saveDiskCache() {
 	_ = os.WriteFile(path, data, 0o644)
 }
 
-// FetchHFModelSize queries the HuggingFace API for a model's total storage size.
-// Returns size in bytes from the usedStorage field.
+// FetchHFModelSize queries the HuggingFace tree API and sums file sizes.
+// Returns total size in bytes for the model's main branch.
 func FetchHFModelSize(modelID string) (int64, error) {
 	loadDiskCache()
 
@@ -94,30 +94,60 @@ func FetchHFModelSize(modelID string) (int64, error) {
 	}
 
 	url := fmt.Sprintf(fetchHFModelSizeURL, modelID)
-	resp, err := hfHTTPClient.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build HF API request for %s: %w", modelID, err)
+	}
+	if token := os.Getenv("HF_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := hfHTTPClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("fetch HF model info for %s: %w", modelID, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return 0, fmt.Errorf("HF API auth required for %s; set HF_TOKEN", modelID)
+	default:
 		return 0, fmt.Errorf("HF API returned %d for model %s", resp.StatusCode, modelID)
 	}
 
-	var result struct {
-		UsedStorage int64 `json:"usedStorage"`
+	var files []struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+		LFS  *struct {
+			Size int64 `json:"size"`
+		} `json:"lfs"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
 		return 0, fmt.Errorf("decode HF API response for %s: %w", modelID, err)
 	}
 
-	if result.UsedStorage <= 0 {
-		return 0, fmt.Errorf("HF API returned no usedStorage for model %s", modelID)
+	if len(files) == 0 {
+		return 0, fmt.Errorf("HF API returned no files for model %s", modelID)
 	}
 
-	hfModelSizeCache.Store(modelID, result.UsedStorage)
+	var totalSize int64
+	for _, f := range files {
+		fileSize := f.Size
+		if f.LFS != nil && f.LFS.Size > 0 {
+			fileSize = f.LFS.Size
+		}
+		if fileSize > 0 {
+			totalSize += fileSize
+		}
+	}
+	if totalSize <= 0 {
+		return 0, fmt.Errorf("HF API returned zero total size for model %s", modelID)
+	}
+
+	hfModelSizeCache.Store(modelID, totalSize)
 	saveDiskCache()
-	return result.UsedStorage, nil
+	return totalSize, nil
 }
 
 // PrefetchInputSizes resolves model sizes for all inputs in parallel,

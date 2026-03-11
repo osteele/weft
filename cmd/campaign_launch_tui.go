@@ -61,6 +61,7 @@ type launchModel struct {
 	estimateProgress estimateProgressMsg // latest estimation progress
 	progressCh       chan estimateProgressMsg
 	campaignCh       chan int64
+	phaseCh          chan launchPhaseMsg
 
 	instanceIDs []int64
 	database    *sql.DB
@@ -179,6 +180,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		survivalModel: buildSurvivalModel(database),
 		progressCh:    make(chan estimateProgressMsg, 1),
 		campaignCh:    make(chan int64, 1),
+		phaseCh:       make(chan launchPhaseMsg, 16),
 		gpuFilter:     gpuFilter,
 		reconciler:    campaign.NewReconciler(),
 		spinner:       s,
@@ -285,6 +287,17 @@ func waitForProgress(ch chan estimateProgressMsg) tea.Cmd {
 	}
 }
 
+// waitForLaunchPhase returns a Cmd that reads one launch phase update.
+func waitForLaunchPhase(ch chan launchPhaseMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
 func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -342,6 +355,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchPhaseMsg:
 		m.phase = msg.phase
+		if m.launching {
+			return m, waitForLaunchPhase(m.phaseCh)
+		}
 		return m, nil
 
 	case instancesLaunchedMsg:
@@ -428,7 +444,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.launching = true
-		return m, tea.Batch(m.spinner.Tick, m.launchInstances(), m.waitForCampaignCreated())
+		return m, tea.Batch(m.spinner.Tick, m.launchInstances(), m.waitForCampaignCreated(), waitForLaunchPhase(m.phaseCh))
 	}
 
 	return m, nil
@@ -548,6 +564,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 	cfg := m.appConfig
 	opts := m.launchOpts
 	campaignCh := m.campaignCh
+	phaseCh := m.phaseCh
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
@@ -577,6 +594,13 @@ func (m launchModel) launchInstances() tea.Cmd {
 
 	return func() tea.Msg {
 		defer close(campaignCh)
+		defer close(phaseCh)
+		sendPhase := func(phase string) {
+			select {
+			case phaseCh <- launchPhaseMsg{phase: phase}:
+			default:
+			}
+		}
 		if len(launchGroups) == 0 {
 			return instancesLaunchedMsg{err: fmt.Errorf("no selected groups have available offers")}
 		}
@@ -589,9 +613,17 @@ func (m launchModel) launchInstances() tea.Cmd {
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
+		sendPhase("preparing campaign launch")
 
 		result, err := campaign.LaunchCampaign(
-			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg, createOpts, nil,
+			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg, createOpts,
+			func(group campaign.InstanceGroup, phase string) {
+				if strings.EqualFold(group.GPUClass, "campaign") {
+					sendPhase(phase)
+					return
+				}
+				sendPhase(fmt.Sprintf("%s: %s", group.GPUSpec(), phase))
+			},
 			func(id int64) { campaignCh <- id },
 		)
 		if err != nil {

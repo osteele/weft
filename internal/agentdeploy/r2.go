@@ -10,11 +10,17 @@ import (
 )
 
 // EnsureAgentInR2 uploads the agent binary for the given version to R2.
-// Always re-uploads to ensure the R2 copy matches the locally embedded binary,
-// since the version hash is based on commit history and may not change when
-// the binary is rebuilt (e.g., after `just build-agents` without a new commit).
+// If the object is already present, it skips build and upload.
 func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string) (string, error) {
 	key := r2keys.AgentBinary(version, goos, goarch)
+
+	exists, err := r2Client.ObjectExists(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("check agent binary exists: %w", err)
+	}
+	if exists {
+		return key, nil
+	}
 
 	localPath, err := EnsureBuilt(version, goos, goarch)
 	if err != nil {

@@ -326,9 +326,26 @@ func (m watchModel) View() string {
 			ci := info.ci
 			jobs := info.jobs
 			if ci != nil {
-				header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), watchStatusStyle.Render("launching"))
+				statusLabel := ci.Status
+				var stStyle lipgloss.Style
+				switch ci.Status {
+				case db.CloudInstanceStatusCompleted:
+					stStyle = watchCompletedStyle
+				case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
+					stStyle = watchFailedStyle
+				default:
+					stStyle = watchStatusStyle
+				}
+				if ci.TerminationReason != "" && ci.TerminationReason != db.TerminationReasonCompleted {
+					statusLabel += " (" + ci.TerminationReason + ")"
+				}
+
+				header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), stStyle.Render(statusLabel))
 				b.WriteString(watchTitleStyle.Render(header))
-				b.WriteString(" " + m.spinner.View() + "\n")
+				if !campaign.IsInstanceTerminal(ci.Status) {
+					b.WriteString(" " + m.spinner.View())
+				}
+				b.WriteString("\n")
 				providerInstID := ci.EffectiveProviderID()
 				if providerInstID != "" {
 					b.WriteString(fmt.Sprintf("  %s: %s\n", ci.Provider, providerInstID))
