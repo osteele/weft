@@ -215,3 +215,30 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 		t.Errorf("error message should mention R2Assets.Client requirement, got: %v", err)
 	}
 }
+
+func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	result, err := LaunchCampaign(
+		nil, database, nil, nil, nil, LaunchOpts{}, cloud.R2Config{}, cloud.CreateOpts{},
+		nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error for empty groups, got nil")
+	}
+	if result != nil {
+		t.Fatalf("expected nil result on error, got %#v", result)
+	}
+	if !strings.Contains(err.Error(), "no instance groups to launch") {
+		t.Fatalf("error = %v, want message about empty launch groups", err)
+	}
+
+	var campaigns int
+	if scanErr := database.QueryRow(`SELECT COUNT(*) FROM campaigns`).Scan(&campaigns); scanErr != nil {
+		t.Fatalf("count campaigns: %v", scanErr)
+	}
+	if campaigns != 0 {
+		t.Fatalf("campaign count = %d, want 0", campaigns)
+	}
+}

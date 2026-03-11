@@ -363,3 +363,41 @@ func TestReconcileCloudInstances_DeadInstanceHysteresis(t *testing.T) {
 		t.Errorf("second pass: instance status = %q, want failed", ci.Status)
 	}
 }
+
+func TestReconcileCampaigns_RunningCampaignWithNoInstancesBecomesFailed(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+
+	completed, err := ReconcileCampaigns(database)
+	if err != nil {
+		t.Fatalf("ReconcileCampaigns: %v", err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed campaigns = %d, want 1", len(completed))
+	}
+	if completed[0].ID != campaignID {
+		t.Fatalf("completed campaign ID = %d, want %d", completed[0].ID, campaignID)
+	}
+	if completed[0].Status != db.CampaignStatusFailed {
+		t.Fatalf("completed campaign status = %q, want %q", completed[0].Status, db.CampaignStatusFailed)
+	}
+
+	got, err := db.GetCampaign(database, campaignID)
+	if err != nil {
+		t.Fatalf("get campaign: %v", err)
+	}
+	if got == nil {
+		t.Fatalf("campaign %d not found", campaignID)
+	}
+	if got.Status != db.CampaignStatusFailed {
+		t.Fatalf("campaign status = %q, want %q", got.Status, db.CampaignStatusFailed)
+	}
+	if got.EndedAt == nil {
+		t.Fatal("ended_at was not set for failed campaign")
+	}
+}

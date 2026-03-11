@@ -15,6 +15,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
@@ -234,8 +235,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 	outputDirs := config.ProjectOutputDirs(localDir)
 
 	// Merge project-level inputs with CLI --input flags
+	originalRunInputs := append([]string(nil), runInputs...)
 	projectInputs := config.ProjectInputs(localDir)
 	runInputs = mergeDedup(projectInputs, runInputs)
+	inputsBeforeAutoDetect := mergeDedup(projectInputs, originalRunInputs)
+
+	// Auto-detect HF inputs from Python source and command string.
+	if detected := dataloc.ScanPythonHFRefs(localDir); len(detected) > 0 {
+		runInputs = mergeDedup(runInputs, detected)
+	}
+	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
+		runInputs = mergeDedup(runInputs, detected)
+	}
+	if newInputs := filterNew(runInputs, inputsBeforeAutoDetect); len(newInputs) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
+	}
 
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
@@ -787,6 +801,27 @@ func mergeDedup(a, b []string) []string {
 		}
 	}
 	return result
+}
+
+// filterNew returns items that exist in items but not in baseline.
+func filterNew(items, baseline []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	if len(baseline) == 0 {
+		return append([]string(nil), items...)
+	}
+	seen := make(map[string]bool, len(baseline))
+	for _, s := range baseline {
+		seen[s] = true
+	}
+	var out []string
+	for _, s := range items {
+		if !seen[s] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // intPtrOrNil returns a pointer to v if v > 0, or nil otherwise.

@@ -360,6 +360,15 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 			continue
 		}
 		if len(instances) == 0 {
+			if c.Status == db.CampaignStatusRunning {
+				if err := db.UpdateCampaignStatus(database, c.ID, db.CampaignStatusFailed); err != nil {
+					log.Printf("reconcile campaigns: update campaign %d to %s: %v", c.ID, db.CampaignStatusFailed, err)
+				} else {
+					log.Printf("reconcile campaigns: campaign %d had no instances, marking %s", c.ID, db.CampaignStatusFailed)
+					c.Status = db.CampaignStatusFailed
+					completed = append(completed, c)
+				}
+			}
 			continue
 		}
 

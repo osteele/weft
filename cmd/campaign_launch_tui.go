@@ -529,10 +529,17 @@ func (m launchModel) launchInstances() tea.Cmd {
 	// Build offers slice, filtering out groups without offers
 	var launchGroups []campaign.InstanceGroup
 	var offers []cloud.Offer
+	var launchGroupOffers []campaign.GroupOffer
 	for i, fg := range filteredGroups {
 		if i < len(filteredOffers) && filteredOffers[i].Offer != nil {
+			offerCopy := *filteredOffers[i].Offer
 			launchGroups = append(launchGroups, fg)
-			offers = append(offers, *filteredOffers[i].Offer)
+			offers = append(offers, offerCopy)
+			launchGroupOffers = append(launchGroupOffers, campaign.GroupOffer{
+				Group:        fg,
+				Offer:        &offerCopy,
+				SurvivalProb: filteredOffers[i].SurvivalProb,
+			})
 		}
 	}
 
@@ -541,6 +548,9 @@ func (m launchModel) launchInstances() tea.Cmd {
 	cfg := m.appConfig
 	opts := m.launchOpts
 	campaignCh := m.campaignCh
+	predCfg := m.predConfig
+	overheadModel := m.overheadModel
+	survivalModel := m.survivalModel
 
 	// Filter cached estimates to selected groups
 	var selectedEstimates []campaign.CostEstimate
@@ -567,6 +577,15 @@ func (m launchModel) launchInstances() tea.Cmd {
 
 	return func() tea.Msg {
 		defer close(campaignCh)
+		if len(launchGroups) == 0 {
+			return instancesLaunchedMsg{err: fmt.Errorf("no selected groups have available offers")}
+		}
+
+		// If async estimation has not finished yet, compute estimates now so
+		// launched campaigns still persist estimated_cost_cents.
+		if len(selectedEstimates) == 0 {
+			selectedEstimates = campaign.EstimateCosts(launchGroupOffers, predCfg, overheadModel, nil, survivalModel, nil)
+		}
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)

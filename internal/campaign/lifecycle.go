@@ -176,6 +176,13 @@ func LaunchCampaign(
 	onPhase func(group InstanceGroup, phase string),
 	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
 ) (*LaunchResult, error) {
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("no instance groups to launch")
+	}
+	if len(offers) != len(groups) {
+		return nil, fmt.Errorf("offers/groups mismatch: %d offers for %d groups", len(offers), len(groups))
+	}
+
 	r2Assets, err := PrepareR2Assets(r2Cfg, groups)
 	if err != nil {
 		return nil, err
