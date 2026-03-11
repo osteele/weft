@@ -376,7 +376,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		statusStr := job.Status
 		fmt.Printf("Status:      %s\n", statusStr)
 		fmt.Printf("Description: %s\n", job.Description)
-		fmt.Printf("Directory:   %s\n", job.WorkingDir)
+		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
 		fmt.Printf("Command:     %s\n", job.Command)
 		if len(job.Tags) > 0 {
 			fmt.Printf("Tags:        %s\n", strings.Join(job.Tags, ", "))

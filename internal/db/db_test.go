@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -467,6 +468,28 @@ func TestRecordUnplacedJob(t *testing.T) {
 	}
 	if job.WorkingDir != "/tmp/project" {
 		t.Errorf("WorkingDir = %q, want %q", job.WorkingDir, "/tmp/project")
+	}
+}
+
+func TestRecordQueuedNormalizesRelativeWorkingDir(t *testing.T) {
+	database := SetupTestDB(t)
+
+	root := t.TempDir()
+	subdir := filepath.Join(root, "project")
+	t.Chdir(root)
+
+	jobID, err := RecordQueuedWithGPU(database, "hostA", "./project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	if job.WorkingDir != subdir {
+		t.Fatalf("WorkingDir = %q, want %q", job.WorkingDir, subdir)
 	}
 }
 

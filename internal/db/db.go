@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/queuefile"
+	"github.com/osteele/weft/internal/workdir"
 	_ "modernc.org/sqlite"
 )
 
@@ -944,7 +945,12 @@ func GetJobsNeedingDescriptions(db *sql.DB, limit int) ([]*Job, error) {
 
 // UpdateJobWorkingDir updates the working directory for a queued job
 func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
-	_, err := db.Exec(
+	var err error
+	workingDir, err = workdir.Normalize(workingDir)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(
 		`UPDATE jobs SET working_dir = ? WHERE id = ? AND status = ?`,
 		workingDir, id, StatusQueued,
 	)
@@ -1325,6 +1331,11 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
 	}
+	var err error
+	workingDir, err = workdir.Normalize(workingDir)
+	if err != nil {
+		return 0, err
+	}
 	now := time.Now().Unix()
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
@@ -1346,6 +1357,11 @@ func RecordDraftJobWithGPU(db *sql.DB, host, workingDir, command, description, g
 func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, depSpec string) (int64, error) {
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
+	}
+	var err error
+	workingDir, err = workdir.Normalize(workingDir)
+	if err != nil {
+		return 0, err
 	}
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(

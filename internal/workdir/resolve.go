@@ -16,7 +16,7 @@ import (
 // logDest receives an "Auto-detected" message when automap fires; nil suppresses it.
 func ResolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 	if dir != "" {
-		return dir, nil
+		return Normalize(dir)
 	}
 	home, _ := os.UserHomeDir()
 	cwd, err := os.Getwd()
@@ -36,4 +36,22 @@ func ResolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// Normalize converts a submission directory into the canonical stored form.
+// Relative local paths are resolved against the current working directory.
+// Tilde-prefixed and absolute paths are preserved.
+func Normalize(dir string) (string, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(dir, "~") || filepath.IsAbs(dir) {
+		return filepath.Clean(dir), nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve absolute path for %q: %w", dir, err)
+	}
+	return abs, nil
 }

@@ -18,6 +18,23 @@ func TestResolveWorkingDir_ExplicitDir(t *testing.T) {
 	}
 }
 
+func TestResolveWorkingDir_ExplicitRelativeDirBecomesAbsolute(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "project")
+	if err := os.Mkdir(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+	t.Chdir(root)
+
+	dir, err := ResolveWorkingDir("./project", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != child {
+		t.Errorf("got %q, want %q", dir, child)
+	}
+}
+
 func TestResolveWorkingDir_ExplicitDirNoLog(t *testing.T) {
 	var buf bytes.Buffer
 	dir, err := ResolveWorkingDir("~/code/myproject", &buf)
