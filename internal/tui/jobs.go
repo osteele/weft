@@ -407,6 +407,11 @@ func (m Model) jobMatchesHostFilter(job *db.Job) bool {
 		}
 		return job.Host == m.jobHostFilterHost
 	case hostFilterRecent:
+		// Cloud-managed and unplaced jobs do not produce normal host sync timestamps,
+		// but they should remain visible in the default Jobs view.
+		if job.Host == "" || job.IsCloudJob() || db.IsCloudHost(job.Host) {
+			return true
+		}
 		return m.isHostRecentlySynced(job.Host)
 	default:
 		return true

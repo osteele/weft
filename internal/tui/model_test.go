@@ -36,6 +36,57 @@ func TestGetTargetJobPrefersHighlightedInDetailsTab(t *testing.T) {
 	}
 }
 
+func TestJobMatchesHostFilterRecentIncludesCloudAndUnplacedJobs(t *testing.T) {
+	m := Model{
+		jobHostFilterMode: hostFilterRecent,
+		hostSyncTimes: map[string]time.Time{
+			"host-a": time.Now(),
+		},
+	}
+
+	cloudInstanceID := int64(32708838)
+
+	tests := []struct {
+		name string
+		job  *db.Job
+		want bool
+	}{
+		{
+			name: "recently synced host remains visible",
+			job:  &db.Job{Host: "host-a"},
+			want: true,
+		},
+		{
+			name: "stale normal host remains hidden",
+			job:  &db.Job{Host: "host-b"},
+			want: false,
+		},
+		{
+			name: "cloud instance job is visible",
+			job:  &db.Job{Host: "vastai:32708838", CloudInstanceID: &cloudInstanceID},
+			want: true,
+		},
+		{
+			name: "cloud host string is visible even without instance id",
+			job:  &db.Job{Host: "runpod:456"},
+			want: true,
+		},
+		{
+			name: "unplaced job is visible",
+			job:  &db.Job{Host: ""},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := m.jobMatchesHostFilter(tt.job); got != tt.want {
+				t.Fatalf("jobMatchesHostFilter(%+v) = %v, want %v", tt.job, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHostFromCachedInfoSetsLastCheck(t *testing.T) {
 	// Simulate cached host info with a timestamp from 2 hours ago
 	oldTimestamp := time.Now().Add(-2 * time.Hour).Unix()
