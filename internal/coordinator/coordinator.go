@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator/services"
 	"github.com/osteele/weft/internal/oplog"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/vastai"
 )
@@ -54,6 +55,7 @@ type Coordinator struct {
 	prober     *services.HostProber
 	syncer     *services.HostSyncer
 	remediator *services.Remediator
+	reconciler *campaign.Reconciler
 
 	// CloudClients holds the cloud provider clients. If nil, defaults are created.
 	CloudClients []cloud.Client
@@ -95,11 +97,12 @@ func New(database *sql.DB, cfg Config) *Coordinator {
 	hostState := services.NewHostStateManager(logger)
 
 	c := &Coordinator{
-		db:        database,
-		config:    cfg,
-		appConfig: appCfg,
-		hostState: hostState,
-		logger:    logger,
+		db:         database,
+		config:     cfg,
+		appConfig:  appCfg,
+		hostState:  hostState,
+		logger:     logger,
+		reconciler: campaign.NewReconciler(),
 	}
 
 	c.prober = services.NewHostProber(hostState, cfg.PollInterval)
@@ -147,14 +150,21 @@ func (c *Coordinator) Run(ctx context.Context) error {
 			return nil
 
 		case <-vastaiSweepTicker.C:
-			c.sweepVastaiResults()
-			c.reconcileAndNotifyCampaigns()
+			r2Client := c.sweepVastaiResults()
+			c.reconcileAndNotifyCampaigns(r2Client)
 		}
 	}
 }
 
 // reconcileAndNotifyCampaigns checks for newly-completed campaigns and sends Slack notifications.
-func (c *Coordinator) reconcileAndNotifyCampaigns() {
+func (c *Coordinator) reconcileAndNotifyCampaigns(r2Client *r2.Client) {
+	if c.reconciler == nil {
+		c.reconciler = campaign.NewReconciler()
+	}
+	if _, err := c.reconciler.ReconcileCloudInstances(c.db, c.CloudClients, r2Client); err != nil {
+		c.logger.Printf("reconcile cloud instances: %v", err)
+	}
+
 	completed, err := campaign.ReconcileCampaigns(c.db)
 	if err != nil {
 		c.logger.Printf("reconcile campaigns: %v", err)
