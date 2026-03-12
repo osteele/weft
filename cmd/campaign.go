@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -15,7 +14,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
@@ -247,34 +245,22 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments, useTUI)
 	}
 
-	// Interactive TUI
-	clients := buildCloudClients(cfg)
-	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg, campaignLaunchGPU, !needsSyncReconcile)
-
-	// Suppress log output while the TUI is running to prevent log messages
-	// from corrupting the terminal display.
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
-	p := tea.NewProgram(model, tea.WithAltScreen())
-	finalModel, err := p.Run()
-	log.SetOutput(origLogOutput)
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile)
 	if err != nil {
-		return fmt.Errorf("TUI error: %w", err)
+		return err
 	}
 
-	m := finalModel.(launchModel)
-	if m.err != nil {
-		return m.err
+	if finalModel.err != nil {
+		return finalModel.err
 	}
 
 	// Segue into watch mode if instances were launched
-	if len(m.instanceIDs) > 0 && !campaignLaunchNoWatch {
+	if len(finalModel.instanceIDs) > 0 && !campaignLaunchNoWatch {
 		fmt.Println()
 		if useTUI {
-			return watchInstances(database, m.instanceIDs)
+			return watchInstances(database, finalModel.instanceIDs)
 		}
-		return watchInstancesPlain(database, m.instanceIDs)
+		return watchInstancesPlain(database, finalModel.instanceIDs)
 	}
 
 	return nil

@@ -3163,6 +3163,17 @@ func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
+// ListActiveOnPremJobs returns all non-cloud active jobs with host assignments.
+func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE host != '' AND cloud_instance_id IS NULL
+		AND status IN (?, ?, ?, ?) AND tombstoned = 0
+		ORDER BY host ASC,
+			CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END,
+			id ASC`, jobSelectColumns)
+	return queryJobs(db, query, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
+}
+
 // ListUnsyncedQueuedJobs returns queued jobs on a host that haven't been pushed
 // to the remote queue yet (last_synced_status is not 'queued' and no pending operation).
 func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {

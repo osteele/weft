@@ -85,7 +85,7 @@ weft campaign launch --jobs 42,43       # Filter to specific job IDs
 ```bash
 weft campaign watch <campaign-id>       # Line-oriented (good for agents/pipes)
 weft campaign watch --tui <campaign-id> # Interactive TUI
-weft campaign watch <id1> <id2>         # Watch multiple campaigns
+weft campaign watch                     # Watch the most recent campaign
 ```
 
 Watch mode shows per-instance details:

@@ -573,6 +573,63 @@ func TestListUnplacedJobs(t *testing.T) {
 	}
 }
 
+func TestListActiveOnPremJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	onPremRunningID, err := RecordJobStarting(database, "cool30", "/tmp/project-alpha", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("record running on-prem job: %v", err)
+	}
+
+	onPremQueuedID, err := RecordQueuedWithGPU(database, "cool30", "/tmp/project-beta", "python eval.py", "eval", "")
+	if err != nil {
+		t.Fatalf("record queued on-prem job: %v", err)
+	}
+
+	cloudJobID, err := RecordQueuedWithGPU(database, "vastai:17", "/tmp/project-cloud", "python cloud.py", "cloud", "")
+	if err != nil {
+		t.Fatalf("record cloud job: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, cloudJobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance on job: %v", err)
+	}
+
+	if _, err := RecordQueuedWithGPU(database, "", "/tmp/project-unplaced", "python wait.py", "unplaced", ""); err != nil {
+		t.Fatalf("record unplaced job: %v", err)
+	}
+
+	jobs, err := ListActiveOnPremJobs(database)
+	if err != nil {
+		t.Fatalf("ListActiveOnPremJobs: %v", err)
+	}
+
+	if len(jobs) != 2 {
+		t.Fatalf("expected 2 on-prem jobs, got %d", len(jobs))
+	}
+	if jobs[0].ID != onPremRunningID {
+		t.Fatalf("first job ID = %d, want %d", jobs[0].ID, onPremRunningID)
+	}
+	if jobs[1].ID != onPremQueuedID {
+		t.Fatalf("second job ID = %d, want %d", jobs[1].ID, onPremQueuedID)
+	}
+	for _, job := range jobs {
+		if job.CloudInstanceID != nil {
+			t.Fatalf("unexpected cloud job in on-prem list: %+v", job)
+		}
+		if job.Host == "" {
+			t.Fatalf("unexpected unplaced job in on-prem list: %+v", job)
+		}
+	}
+}
+
 func TestJobCloudAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 

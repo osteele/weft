@@ -13,7 +13,7 @@ import (
 // Config holds application configuration
 type Config struct {
 	// DefaultCommand is the command to run when no arguments are provided
-	// Valid values: "help", "list", "tui", "web"
+	// Valid values: "help", "watch", "list", "tui", "web"
 	DefaultCommand string `yaml:"default_command"`
 
 	// TUI polling intervals (in seconds)

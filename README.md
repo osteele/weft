@@ -50,6 +50,8 @@ Remote Hosts (titan, atlas)
 - **Campaign management**: Launch, watch, and terminate batches of cloud
   instances from the CLI or TUI. `weft campaign watch` streams live status,
   cost, and per-job progress until all instances finish
+- **System watch**: `weft watch` shows all active cloud instances, on-prem jobs,
+  and unplaced jobs in a simplified TUI or periodic plain-text summary
 - **Web dashboard**: Browser UI at `localhost:8127/cluster` with host cards,
   live GPU utilization bars, coordinator status, and recent placement decisions
 
@@ -98,6 +100,42 @@ Instance 14  RTX 3060 12GB   grace      ⏱ 51m   $0.10
 
 When an instance enters the grace period after a failure, the watch output
 shows remaining time and suggested commands for resubmission or release.
+
+`weft campaign watch` watches a single campaign. If you omit the campaign ID, it
+watches the most recent campaign. Use `--tui` or `--plain` to override the
+default terminal-based mode selection.
+
+#### System Watch
+
+Monitor the full active system with `weft watch`:
+
+```bash
+weft watch           # Interactive TUI in a terminal
+weft watch --plain   # Periodic plain-text summary
+weft watch --follow  # Keep printing summaries even when idle
+```
+
+The system watch shows:
+
+- Active cloud instances across all campaigns
+- On-prem running and queued jobs grouped by host
+- Unplaced jobs that are waiting for placement or cloud launch
+- Directory tails in job listings, consistent with `weft job list`
+
+Press `l` in the watch TUI to jump into the cloud launch planner, then return
+to the watch view when the planner exits.
+
+#### Campaign Commands
+
+Current campaign subcommands are:
+
+```bash
+weft campaign launch [--dry-run|--yes|--plain|--tui]
+weft campaign watch [campaign-id] [--plain|--tui]
+weft campaign list [--plain|--tui]
+weft campaign show <campaign-id>
+weft campaign terminate <campaign-id>
+```
 
 ### Designed for unreliable networks
 
@@ -1271,6 +1309,7 @@ default_command: tui
 
 Valid values for `default_command`:
 - `help` (default): Show help message
+- `watch`: Launch the system watch TUI or plain watch, depending on terminal mode
 - `tui`: Launch interactive terminal UI
 - `list`: Show job list
 - `web`: Launch the read-only web UI

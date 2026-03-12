@@ -294,7 +294,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 YAML configuration at `~/.config/weft/config.yaml`:
 
 ```yaml
-default_command: tui    # "help", "list", "tui", or "web"
+default_command: tui    # "help", "watch", "list", "tui", or "web"
 sync_interval: 15       # Seconds between status syncs
 log_refresh_interval: 3 # Seconds between log refreshes
 host_refresh_interval: 30
