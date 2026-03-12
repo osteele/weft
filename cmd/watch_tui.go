@@ -46,6 +46,7 @@ type watchAllModel struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	exitAction      watchExitAction
+	jobProgressHWM  map[int64]int
 }
 
 type watchAllTickMsg struct{}
@@ -86,6 +87,7 @@ func newWatchAllModel(database *sql.DB, cfg *config.Config, flashMessage string)
 		flashMessage:    flashMessage,
 		ctx:             ctx,
 		cancel:          cancel,
+		jobProgressHWM:  map[int64]int{},
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
@@ -161,6 +163,19 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.instanceUpdates[msg.instanceID] = msg.update
+		if m.jobProgressHWM == nil {
+			m.jobProgressHWM = map[int64]int{}
+		}
+		if msg.update.JobProgress >= 0 && msg.update.JobProgressID > 0 {
+			if msg.update.JobProgress > m.jobProgressHWM[msg.update.JobProgressID] {
+				m.jobProgressHWM[msg.update.JobProgressID] = msg.update.JobProgress
+			}
+		}
+		for _, j := range msg.update.Jobs {
+			if j.Status != db.StatusRunning {
+				delete(m.jobProgressHWM, j.ID)
+			}
+		}
 		return m, waitForUpdate(msg.instanceID, m.watchChannels[msg.instanceID])
 
 	case watchAllTickMsg:
@@ -414,11 +429,21 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 	if len(m.cloudInstances) == 0 {
 		addPlain(watchDimStyle.Render("  no active cloud instances"))
 	} else {
-		for _, ci := range m.cloudInstances {
+		for i, ci := range m.cloudInstances {
+			if i > 0 {
+				addPlain("")
+			}
 			update := m.instanceUpdates[ci.ID]
-			addSelectable("  " + truncate(formatCloudSummaryLine(ci, update), width-2))
-			for _, line := range formatCloudAssignedJobLines(update) {
-				addPlain("    " + truncate(line, width-4))
+			if update.CloudInstance == nil {
+				update.CloudInstance = ci
+			}
+			lines := formatWatchInstanceBlockLines(update, m.jobProgressHWM, watchInstanceBlockOptions{})
+			if len(lines) == 0 {
+				continue
+			}
+			addSelectable(truncate(lines[0], width))
+			for _, line := range lines[1:] {
+				addPlain(truncate(line, width))
 			}
 		}
 	}

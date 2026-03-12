@@ -50,6 +50,9 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		"On-Prem Hosts (1 active)",
 		"Unplaced Jobs (1)",
 		"[u] unplace queued job",
+		"Instance 5 — A100 — running",
+		"  vastai:",
+		"  Jobs: 0/2 resolved",
 		"project-alpha",
 		"project-delta",
 		"project-beta",
@@ -60,25 +63,41 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 			t.Fatalf("output missing %q, got:\n%s", expected, out)
 		}
 	}
+	if strings.Contains(out, "ID 5") {
+		t.Fatalf("output should omit redundant provider line ID, got:\n%s", out)
+	}
 }
 
-func TestFormatCloudAssignedJobLinesShowsAllAssignedJobs(t *testing.T) {
+func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
+	ci := &db.CloudInstance{
+		ID:                 5,
+		Status:             db.CloudInstanceStatusRunning,
+		Provider:           "vastai",
+		ProviderInstanceID: "32734388",
+		GPUSpec:            "A100",
+	}
 	update := campaign.InstanceUpdate{
+		CloudInstance: ci,
 		Jobs: []*db.Job{
 			{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
 			{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Description: "eval model"},
 		},
 	}
 
-	lines := formatCloudAssignedJobLines(update)
-	if len(lines) != 2 {
-		t.Fatalf("line count = %d, want 2", len(lines))
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
+	for _, expected := range []string{
+		"Instance 5 — A100 — running",
+		"  vastai: 32734388",
+		"  Jobs: 0/2 resolved",
+		"project-alpha",
+		"project-delta",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("output missing %q, got:\n%s", expected, out)
+		}
 	}
-	if !strings.Contains(lines[0], "project-alpha") {
-		t.Fatalf("first line missing project-alpha: %q", lines[0])
-	}
-	if !strings.Contains(lines[1], "project-delta") {
-		t.Fatalf("second line missing project-delta: %q", lines[1])
+	if strings.Contains(out, "ID 5") {
+		t.Fatalf("output should omit redundant provider line ID, got:\n%s", out)
 	}
 }
 

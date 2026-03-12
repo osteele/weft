@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
-	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
@@ -154,16 +153,19 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 	if len(snapshot.CloudInstances) == 0 {
 		b.WriteString("  none\n")
 	} else {
-		for _, ci := range snapshot.CloudInstances {
-			update := snapshot.InstanceUpdates[ci.ID]
-			b.WriteString("  ")
-			b.WriteString(formatCloudSummaryLine(ci, update))
-			b.WriteString("\n")
-			for _, line := range formatCloudAssignedJobLines(update) {
-				b.WriteString("    ")
-				b.WriteString(line)
+		for i, ci := range snapshot.CloudInstances {
+			if i > 0 {
 				b.WriteString("\n")
 			}
+			update := snapshot.InstanceUpdates[ci.ID]
+			if update.CloudInstance == nil {
+				update.CloudInstance = ci
+			}
+			b.WriteString(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
+				plain: true,
+				now:   now,
+			}))
+			b.WriteString("\n")
 		}
 	}
 
@@ -211,107 +213,6 @@ func countHostJobStates(jobs []*db.Job) (running, queued int) {
 		}
 	}
 	return running, queued
-}
-
-func formatCloudSummaryLine(ci *db.CloudInstance, update campaign.InstanceUpdate) string {
-	job := currentCloudJob(update)
-	jobText := "no jobs"
-	progressText := ""
-	if job != nil {
-		jobText = fmt.Sprintf("job#%d %s %s", job.ID, job.DirectoryTailDisplay(), truncate(job.EffectiveDescription(), 28))
-		if update.JobProgressID == job.ID && update.JobProgress >= 0 {
-			progressText = fmt.Sprintf("  %d%%", update.JobProgress)
-		}
-	}
-
-	return fmt.Sprintf("%s  %-18s  %-9s  %s%s  %s",
-		watchCloudInstanceLabel(ci),
-		truncate(ci.DisplayGPUSpec(), 18),
-		watchCloudStatus(ci),
-		jobText,
-		progressText,
-		formatWatchCost(ci, update.Instance),
-	)
-}
-
-func currentCloudJob(update campaign.InstanceUpdate) *db.Job {
-	if len(update.Jobs) == 0 {
-		return nil
-	}
-
-	var queued *db.Job
-	for _, job := range update.Jobs {
-		displayStatus := campaign.JobDisplayStatus(job, update.JobAttemptOutcomes)
-		switch displayStatus {
-		case db.StatusRunning:
-			return job
-		case db.StatusStarting, db.StatusPaused:
-			if queued == nil {
-				queued = job
-			}
-		case db.StatusQueued:
-			if queued == nil {
-				queued = job
-			}
-		}
-	}
-	if queued != nil {
-		return queued
-	}
-	return update.Jobs[0]
-}
-
-func formatCloudAssignedJobLines(update campaign.InstanceUpdate) []string {
-	if len(update.Jobs) == 0 {
-		return nil
-	}
-	lines := make([]string, 0, len(update.Jobs))
-	for _, job := range update.Jobs {
-		status := campaign.JobDisplayStatus(job, update.JobAttemptOutcomes)
-		line := fmt.Sprintf("#%-4d %-16s %-9s %s",
-			job.ID,
-			truncate(job.DirectoryTailDisplay(), 16),
-			status,
-			truncate(job.EffectiveDescription(), 36),
-		)
-		if update.JobProgressID == job.ID && update.JobProgress >= 0 {
-			line += fmt.Sprintf("  %d%%", update.JobProgress)
-		}
-		lines = append(lines, line)
-	}
-	return lines
-}
-
-func watchCloudInstanceLabel(ci *db.CloudInstance) string {
-	if providerID := strings.TrimSpace(ci.EffectiveProviderID()); providerID != "" {
-		return fmt.Sprintf("#%d %s", ci.ID, providerID)
-	}
-	return fmt.Sprintf("#%d", ci.ID)
-}
-
-func watchCloudStatus(ci *db.CloudInstance) string {
-	if ci.TerminationIntent != nil && !ci.IsTerminal() {
-		return "terminating"
-	}
-	if ci.Status == db.CloudInstanceStatusGrace {
-		return "grace"
-	}
-	return ci.Status
-}
-
-func formatWatchCost(ci *db.CloudInstance, inst *cloud.Instance) string {
-	if ci.ActualSpendCents > 0 {
-		return fmt.Sprintf("$%.2f", float64(ci.ActualSpendCents)/100.0)
-	}
-	if ci.LaunchedAt != nil && inst != nil && inst.CostPerHour > 0 {
-		uptime := time.Since(time.Unix(*ci.LaunchedAt, 0))
-		return fmt.Sprintf("$%.2f", uptime.Hours()*inst.CostPerHour)
-	}
-	if ci.CostPerHourCents > 0 && ci.LaunchedAt != nil {
-		uptime := time.Since(time.Unix(*ci.LaunchedAt, 0))
-		return fmt.Sprintf("$%.2f", uptime.Hours()*float64(ci.CostPerHourCents)/100.0)
-	}
-	return "--"
 }
 
 func formatWatchGPUConstraint(job *db.Job) string {

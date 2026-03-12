@@ -53,11 +53,14 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	if !strings.Contains(cleanOut, fmt.Sprintf("Instance %d — A100 — launching", launchingID)) {
 		t.Fatalf("output missing launching status label, got:\n%s", out)
 	}
-	if !strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", failedID)) {
+	if !strings.Contains(cleanOut, "  vastai:") {
 		t.Fatalf("output missing failed instance identity line, got:\n%s", out)
 	}
-	if !strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", launchingID)) {
+	if !strings.Contains(cleanOut, "  vastai:") {
 		t.Fatalf("output missing launching instance identity line, got:\n%s", out)
+	}
+	if strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", failedID)) || strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", launchingID)) {
+		t.Fatalf("output should omit redundant provider line IDs, got:\n%s", out)
 	}
 
 	parts := strings.Split(cleanOut, fmt.Sprintf("Instance %d —", failedID))
@@ -88,7 +91,7 @@ func TestFormatWatchProviderLine(t *testing.T) {
 	}
 
 	line := formatWatchProviderLine(ci, nil)
-	if line != "  ID 106  vastai: 32712486" {
+	if line != "  vastai: 32712486" {
 		t.Fatalf("provider line = %q", line)
 	}
 }

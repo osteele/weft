@@ -41,12 +41,17 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 		"CLOUD INSTANCES (1)",
 		"ON-PREM HOSTS (1 active)",
 		"UNPLACED JOBS (1)",
-		"#5 32734388",
+		"Instance 5 — A100 — running",
+		"  vastai: 32734388",
+		"  Jobs: 0/1 resolved",
 		"project-alpha",
 		"project-gamma",
 	} {
 		if !strings.Contains(out, expected) {
 			t.Fatalf("output missing %q, got:\n%s", expected, out)
 		}
+	}
+	if strings.Contains(out, "ID 5") {
+		t.Fatalf("output should omit redundant provider line ID, got:\n%s", out)
 	}
 }

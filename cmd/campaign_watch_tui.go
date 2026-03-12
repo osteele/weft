@@ -323,45 +323,19 @@ func (m watchModel) View() string {
 			ci := info.ci
 			jobs := info.jobs
 			if ci != nil {
-				statusLabel := ci.Status
-				var stStyle lipgloss.Style
-				switch ci.Status {
-				case db.CloudInstanceStatusCompleted:
-					stStyle = watchCompletedStyle
-				case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
-					stStyle = watchFailedStyle
-				default:
-					stStyle = watchStatusStyle
+				update := campaign.InstanceUpdate{
+					CloudInstance:      ci,
+					Jobs:               jobs,
+					JobAttemptOutcomes: info.outcomes,
 				}
-				if ci.TerminationReason != "" && ci.TerminationReason != db.TerminationReasonCompleted {
-					statusLabel += " (" + ci.TerminationReason + ")"
-				}
-
-				header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), stStyle.Render(statusLabel))
-				b.WriteString(watchTitleStyle.Render(header))
-				if !campaign.IsInstanceTerminal(ci.Status) {
-					b.WriteString(" " + m.spinner.View())
-				}
-				b.WriteString("\n")
-				b.WriteString(formatWatchProviderLine(ci, nil))
-				b.WriteString("\n")
-				if len(jobs) > 0 {
-					b.WriteString(fmt.Sprintf("  Jobs: 0/%d resolved\n", len(jobs)))
-					for _, j := range jobs {
-						desc := j.Description
-						if desc == "" {
-							desc = campaign.TruncateCommand(j.Command, 50)
-						}
-						statusText := fmt.Sprintf("%-12s", campaign.JobDisplayStatus(j, info.outcomes))
-						b.WriteString(fmt.Sprintf("    %4d  %s  %-12s  %s\n",
-							j.ID,
-							watchDimStyle.Render(statusText),
-							j.DirectoryTailDisplay(),
-							desc,
-						))
-					}
-				}
-				b.WriteString("\n")
+				resolved := 0
+				b.WriteString(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
+					spinner:                  m.spinner.View(),
+					showSpinnerIfNonTerminal: true,
+					resolvedJobsOverride:     &resolved,
+					dimJobStatuses:           true,
+				}))
+				b.WriteString("\n\n")
 			} else {
 				b.WriteString(m.spinner.View())
 				b.WriteString(fmt.Sprintf(" Instance %d — waiting for data...\n\n", id))
@@ -369,90 +343,8 @@ func (m watchModel) View() string {
 			continue
 		}
 
-		ci := u.CloudInstance
-		statusLabel := ci.Status
-		var stStyle lipgloss.Style
-		switch ci.Status {
-		case db.CloudInstanceStatusCompleted:
-			stStyle = watchCompletedStyle
-		case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
-			stStyle = watchFailedStyle
-		default:
-			stStyle = watchStatusStyle
-		}
-		if label := ci.GraceStatusLabel(); label != "" {
-			statusLabel = label
-		}
-		if ci.TerminationReason != "" && ci.TerminationReason != db.TerminationReasonCompleted {
-			statusLabel += " (" + ci.TerminationReason + ")"
-		}
-
-		header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), stStyle.Render(statusLabel))
-		b.WriteString(watchTitleStyle.Render(header))
-		b.WriteString("\n")
-
-		b.WriteString(formatWatchProviderLine(ci, u.Instance))
-		b.WriteString("\n")
-
-		if u.BootstrapStage != "" {
-			b.WriteString(fmt.Sprintf("  Bootstrap: %s\n", campaign.BootstrapStageLabel(u.BootstrapStage)))
-		}
-		if u.InstancePhase != "" {
-			b.WriteString(fmt.Sprintf("  Phase: %s\n", campaign.InstancePhaseLabel(u.InstancePhase)))
-		}
-		if label := campaign.TerminationIntentLabel(u.TerminationIntent); label != "" {
-			b.WriteString(fmt.Sprintf("  Termination: %s\n", label))
-		}
-
-		if u.Instance != nil && ci.LaunchedAt != nil {
-			uptime := time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second)
-			cost := uptime.Hours() * u.Instance.CostPerHour
-			b.WriteString(fmt.Sprintf("  Cost: $%.2f (uptime: %s)\n", cost, uptime))
-		}
-
-		// Jobs
-		if len(u.Jobs) > 0 {
-			// Compute display statuses once for both counting and rendering
-			displayStatuses := make([]string, len(u.Jobs))
-			completed := 0
-			for i, j := range u.Jobs {
-				displayStatuses[i] = campaign.JobDisplayStatus(j, u.JobAttemptOutcomes)
-				if campaign.IsJobTerminal(displayStatuses[i]) {
-					completed++
-				}
-			}
-			b.WriteString(fmt.Sprintf("  Jobs: %d/%d resolved\n", completed, len(u.Jobs)))
-
-			for i, j := range u.Jobs {
-				desc := j.Description
-				if desc == "" {
-					desc = campaign.TruncateCommand(j.Command, 50)
-				}
-				displayStatus := displayStatuses[i]
-				var jobStyle lipgloss.Style
-				switch displayStatus {
-				case db.StatusRunning:
-					jobStyle = watchRunningStyle
-				case db.StatusCompleted:
-					jobStyle = watchCompletedStyle
-				case db.StatusFailed, db.AttemptOutcomeOrphaned, db.AttemptOutcomeCancelled:
-					jobStyle = watchFailedStyle
-				default:
-					jobStyle = watchDimStyle
-				}
-				statusText := displayStatus
-				if hwm := m.jobProgressHWM[j.ID]; j.Status == db.StatusRunning && hwm > 0 {
-					statusText = fmt.Sprintf("running %3d%%", hwm)
-				}
-				b.WriteString(fmt.Sprintf("    %4d  %s  %-12s  %s\n",
-					j.ID,
-					jobStyle.Render(fmt.Sprintf("%-12s", statusText)),
-					j.DirectoryTailDisplay(),
-					desc,
-				))
-			}
-		}
-		b.WriteString("\n")
+		b.WriteString(formatWatchInstanceBlock(u, m.jobProgressHWM, watchInstanceBlockOptions{}))
+		b.WriteString("\n\n")
 	}
 
 	// Campaign cost total
@@ -516,23 +408,6 @@ func watchInstances(database *sql.DB, instanceIDs []int64) error {
 		fmt.Print(finalView)
 	}
 	return nil
-}
-
-func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string {
-	if ci == nil {
-		return ""
-	}
-
-	line := fmt.Sprintf("  ID %d  %s:", ci.ID, ci.Provider)
-	if providerInstID := ci.EffectiveProviderID(); providerInstID != "" {
-		line += " " + providerInstID
-		if inst != nil && !campaign.IsInstanceTerminal(ci.Status) && inst.Status != "" {
-			line += fmt.Sprintf(" (%s)", inst.Status)
-		}
-		return line
-	}
-
-	return line + " (provisioning...)"
 }
 
 func renderWatchExitSnapshot(model tea.Model) string {
