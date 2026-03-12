@@ -68,6 +68,7 @@ type CreateOpts struct {
 	SSHEnabled bool              // enable SSH access
 	OnStartCmd string            // command to run on instance start
 	EnvVars    map[string]string // environment variables passed via provider's env mechanism
+	TemplateID string            // provider template ID for startup-managed images
 	Label      string            // instance label/name visible in provider dashboard (e.g., "weft/c42")
 }
 
@@ -88,6 +89,10 @@ const DefaultImage = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
 // DefaultOnStartCmd installs dependencies, uv, and rclone on fresh instances.
 // The runtime CUDA images lack unzip (needed by rclone installer) and build tools.
 const DefaultOnStartCmd = "apt-get update -qq && apt-get install -y -qq unzip gcc g++ python3-dev && curl -LsSf https://astral.sh/uv/install.sh | sh && curl https://rclone.org/install.sh | bash"
+
+// R2BootstrapKeyEnvVar is the env var a template-managed startup command reads
+// to locate the instance-specific bootstrap script in R2.
+const R2BootstrapKeyEnvVar = "WEFT_BOOTSTRAP_KEY"
 
 // DefaultCreateOpts returns standard instance creation options.
 // If image is empty, DefaultImage is used.
@@ -128,4 +133,10 @@ RCLONE_EOF
 rclone cat "r2:${R2_BUCKET}/%s" > /tmp/bootstrap.sh && bash /tmp/bootstrap.sh`,
 		DefaultOnStartCmd, bootstrapKey,
 	)
+}
+
+// R2BootstrapTemplateStartCmd returns a startup command suitable for a
+// provider template. It expects the bootstrap key in $WEFT_BOOTSTRAP_KEY.
+func R2BootstrapTemplateStartCmd() string {
+	return R2BootstrapOnStartCmd("${" + R2BootstrapKeyEnvVar + "}")
 }

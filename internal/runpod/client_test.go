@@ -1,10 +1,68 @@
 package runpod
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
 )
+
+func TestBuildCreatePodArgs_WithTemplateAndEnv(t *testing.T) {
+	args, err := buildCreatePodArgs("NVIDIA A100 80GB PCIe", cloud.CreateOpts{
+		TemplateID: "tpl-bootstrap",
+		DiskGB:     120,
+		Label:      "weft/c42",
+		EnvVars: map[string]string{
+			"R2_BUCKET":                "bucket",
+			cloud.R2BootstrapKeyEnvVar: "bootstrap/42.sh",
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildCreatePodArgs: %v", err)
+	}
+
+	got := strings.Join(args, " ")
+	for _, want := range []string{
+		"pod create",
+		"--gpu-id NVIDIA A100 80GB PCIe",
+		"--template-id tpl-bootstrap",
+		"--volume-in-gb 120",
+		"--name weft/c42",
+		"--env",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args %q missing %q", got, want)
+		}
+	}
+}
+
+func TestBuildCreatePodArgs_RejectsOnStartWithoutTemplate(t *testing.T) {
+	_, err := buildCreatePodArgs("RTX 4090", cloud.CreateOpts{
+		Image:      "ubuntu:22.04",
+		OnStartCmd: "echo hello",
+	})
+	if err == nil {
+		t.Fatal("expected error for per-pod startup command")
+	}
+	if !strings.Contains(err.Error(), "do not support per-pod startup commands") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseCreatedPodID_JSON(t *testing.T) {
+	data, err := json.Marshal(Pod{ID: "pod-123"})
+	if err != nil {
+		t.Fatalf("marshal pod: %v", err)
+	}
+	id, err := parseCreatedPodID(data)
+	if err != nil {
+		t.Fatalf("parseCreatedPodID: %v", err)
+	}
+	if id != "pod-123" {
+		t.Fatalf("id = %q, want %q", id, "pod-123")
+	}
+}
 
 func TestParseGPUTypeOutput(t *testing.T) {
 	input := `[

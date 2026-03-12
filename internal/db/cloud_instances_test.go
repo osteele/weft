@@ -196,6 +196,95 @@ func TestResetCloudInstanceJobs_PreservesCanceledJobs(t *testing.T) {
 	}
 }
 
+func TestResetCloudInstanceJobs_DoesNotRewriteCompletedAttempts(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	for _, stmt := range []struct {
+		id     int64
+		status string
+	}{
+		{id: 1, status: StatusCompleted},
+		{id: 2, status: StatusRunning},
+	} {
+		if _, err := database.Exec(
+			`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+			 VALUES (?, ?, ?, 0, ?, 'echo test', '/tmp')`,
+			stmt.id, instanceID, CloudInstanceHost(instanceID), stmt.status,
+		); err != nil {
+			t.Fatalf("insert job %d: %v", stmt.id, err)
+		}
+		if err := InsertJobCloudAttempt(database, stmt.id, instanceID); err != nil {
+			t.Fatalf("InsertJobCloudAttempt(%d): %v", stmt.id, err)
+		}
+	}
+	if err := CloseJobCloudAttempt(database, 1, AttemptOutcomeCompleted); err != nil {
+		t.Fatalf("CloseJobCloudAttempt(completed): %v", err)
+	}
+
+	if _, err := ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetCloudInstanceJobs: %v", err)
+	}
+
+	outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByInstance: %v", err)
+	}
+	if outcomes[1] != AttemptOutcomeCompleted {
+		t.Fatalf("completed job outcome = %q, want %q", outcomes[1], AttemptOutcomeCompleted)
+	}
+	if outcomes[2] != AttemptOutcomeOrphaned {
+		t.Fatalf("reset job outcome = %q, want %q", outcomes[2], AttemptOutcomeOrphaned)
+	}
+}
+
+func TestGetActiveCloudInstanceJobCounts_OnlyCountsNonTerminalJobs(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	for _, stmt := range []struct {
+		id     int64
+		status string
+	}{
+		{id: 1, status: StatusQueued},
+		{id: 2, status: StatusRunning},
+		{id: 3, status: StatusCompleted},
+		{id: 4, status: StatusFailed},
+	} {
+		if _, err := database.Exec(
+			`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+			 VALUES (?, ?, ?, 0, ?, 'echo test', '/tmp')`,
+			stmt.id, instanceID, CloudInstanceHost(instanceID), stmt.status,
+		); err != nil {
+			t.Fatalf("insert job %d: %v", stmt.id, err)
+		}
+	}
+
+	counts, err := GetActiveCloudInstanceJobCounts(database)
+	if err != nil {
+		t.Fatalf("GetActiveCloudInstanceJobCounts: %v", err)
+	}
+	if counts[instanceID] != 2 {
+		t.Fatalf("active count = %d, want 2", counts[instanceID])
+	}
+}
+
 func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
 	database := setupTestDB(t)
 

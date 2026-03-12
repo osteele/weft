@@ -612,11 +612,13 @@ func (m launchModel) launchInstances() tea.Cmd {
 		}
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-		createOpts := cloud.DefaultCreateOpts(cfg.Vastai.DefaultImage)
 		sendPhase("preparing campaign launch")
 
 		result, err := campaign.LaunchCampaign(
-			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg, createOpts,
+			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg,
+			func(provider cloud.Provider) (cloud.CreateOpts, error) {
+				return createOptsForProvider(cfg, provider)
+			},
 			func(group campaign.InstanceGroup, phase string) {
 				if strings.EqualFold(group.GPUClass, "campaign") {
 					sendPhase(phase)

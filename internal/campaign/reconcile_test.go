@@ -401,3 +401,35 @@ func TestReconcileCampaigns_RunningCampaignWithNoInstancesBecomesFailed(t *testi
 		t.Fatal("ended_at was not set for failed campaign")
 	}
 }
+
+func TestReconcileCampaigns_MixedTerminalInstancesBecomeFailed(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+
+	for _, status := range []string{db.CloudInstanceStatusCompleted, db.CloudInstanceStatusFailed} {
+		if _, err := db.CreateCloudInstance(database, &db.CloudInstance{
+			CampaignID: &campaignID,
+			Status:     status,
+			Provider:   "vastai",
+			GPUSpec:    "RTX_4090",
+		}); err != nil {
+			t.Fatalf("create cloud instance(%s): %v", status, err)
+		}
+	}
+
+	completed, err := ReconcileCampaigns(database)
+	if err != nil {
+		t.Fatalf("ReconcileCampaigns: %v", err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("completed campaigns = %d, want 1", len(completed))
+	}
+	if completed[0].Status != db.CampaignStatusFailed {
+		t.Fatalf("campaign status = %q, want %q", completed[0].Status, db.CampaignStatusFailed)
+	}
+}

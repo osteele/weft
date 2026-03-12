@@ -237,18 +237,19 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			}
 		}
 
-		createOpts := cloud.DefaultCreateOpts(m.appConfig.Vastai.DefaultImage)
+		createOpts, err := m.appConfig.CloudCreateOpts(offer.Provider)
+		if err != nil {
+			return cloudJobLaunchedMsg{jobID: job.ID, err: err}
+		}
 
 		cloudR2 := r2Cfg.ToCloudR2Config()
 
-		// Create a single-job campaign group
-		gpuClass := job.GPUClass
 		gpuMemGB := 0
 		if job.GPUMemGB != nil {
 			gpuMemGB = *job.GPUMemGB
 		}
 		group := campaign.InstanceGroup{
-			GPUClass: gpuClass,
+			GPUClass: job.GPUClass,
 			GPUMemGB: gpuMemGB,
 			Jobs:     []*db.Job{job},
 		}

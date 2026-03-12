@@ -61,18 +61,9 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 }
 
 func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
-	args := []string{"create", "pod",
-		"--gpuType", offerID,
-		"--gpuCount", "1",
-	}
-	if opts.Image != "" {
-		args = append(args, "--imageName", opts.Image)
-	}
-	if opts.DiskGB > 0 {
-		args = append(args, "--volumeSize", fmt.Sprintf("%d", opts.DiskGB))
-	}
-	if opts.Label != "" {
-		args = append(args, "--name", opts.Label)
+	args, err := buildCreatePodArgs(offerID, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	out, err := c.run(args...)
@@ -80,8 +71,10 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		return nil, fmt.Errorf("create pod: %w", err)
 	}
 
-	// Parse pod ID from output
-	podID := strings.TrimSpace(string(out))
+	podID, err := parseCreatedPodID(out)
+	if err != nil {
+		return nil, err
+	}
 	return &cloud.Instance{
 		ProviderID: podID,
 		Provider:   cloud.ProviderRunpod,
@@ -192,6 +185,66 @@ func (c *CloudClient) run(args ...string) ([]byte, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error) {
+	args := []string{"pod", "create",
+		"--gpu-id", offerID,
+		"--gpu-count", "1",
+	}
+	switch {
+	case opts.TemplateID != "":
+		args = append(args, "--template-id", opts.TemplateID)
+		if opts.OnStartCmd != "" {
+			return nil, fmt.Errorf("runpod templates manage startup commands; remove OnStartCmd when using template %q", opts.TemplateID)
+		}
+	case opts.OnStartCmd != "":
+		return nil, fmt.Errorf("runpod pods do not support per-pod startup commands; configure runpod.bootstrap_template_id and bake startup into the template")
+	case opts.Image != "":
+		args = append(args, "--image", opts.Image)
+	default:
+		return nil, fmt.Errorf("runpod create requires either TemplateID or Image")
+	}
+	if opts.DiskGB > 0 {
+		args = append(args, "--volume-in-gb", fmt.Sprintf("%d", opts.DiskGB))
+	}
+	if opts.Label != "" {
+		args = append(args, "--name", opts.Label)
+	}
+	if len(opts.EnvVars) > 0 {
+		data, err := json.Marshal(opts.EnvVars)
+		if err != nil {
+			return nil, fmt.Errorf("encode runpod env vars: %w", err)
+		}
+		args = append(args, "--env", string(data))
+	}
+	return args, nil
+}
+
+func parseCreatedPodID(out []byte) (string, error) {
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return "", fmt.Errorf("create pod returned empty output")
+	}
+
+	var pod Pod
+	if err := json.Unmarshal(out, &pod); err == nil && pod.ID != "" {
+		return pod.ID, nil
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err == nil {
+		if id, ok := payload["id"].(string); ok && id != "" {
+			return id, nil
+		}
+	}
+
+	trimmed = strings.Trim(trimmed, "\"")
+	if trimmed != "" && !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
+		return trimmed, nil
+	}
+
+	return "", fmt.Errorf("could not parse runpod pod ID from output: %s", strings.TrimSpace(string(out)))
 }
 
 // parseGPUTypeOutput parses runpodctl get gpu output and filters by constraints.

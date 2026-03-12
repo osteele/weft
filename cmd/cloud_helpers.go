@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/r2"
@@ -78,4 +80,11 @@ func cloudClientForDBInstance(provider string) cloud.Client {
 		// Default to vastai for legacy records
 		return vastai.NewCloudClient(vastai.NewClient())
 	}
+}
+
+func createOptsForProvider(cfg *config.Config, provider cloud.Provider) (cloud.CreateOpts, error) {
+	if cfg == nil {
+		return cloud.CreateOpts{}, fmt.Errorf("cloud config is required")
+	}
+	return cfg.CloudCreateOpts(provider)
 }

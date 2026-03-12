@@ -383,18 +383,19 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 			continue
 		}
 
-		// All instances are terminal; check if all failed
-		allFailed := true
+		// All instances are terminal; only an all-completed campaign counts as
+		// successful. Any failed/cancelled/mixed terminal outcome is a failure.
+		allCompleted := true
 		for _, inst := range instances {
-			if inst.Status != db.CloudInstanceStatusFailed {
-				allFailed = false
+			if inst.Status != db.CloudInstanceStatusCompleted {
+				allCompleted = false
 				break
 			}
 		}
 
-		status := db.CampaignStatusCompleted
-		if allFailed {
-			status = db.CampaignStatusFailed
+		status := db.CampaignStatusFailed
+		if allCompleted {
+			status = db.CampaignStatusCompleted
 		}
 		if err := db.UpdateCampaignStatus(database, c.ID, status); err != nil {
 			log.Printf("reconcile campaigns: update campaign %d to %s: %v", c.ID, status, err)

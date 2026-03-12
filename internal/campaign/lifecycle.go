@@ -173,7 +173,7 @@ func LaunchCampaign(
 	estimates []CostEstimate, // parallel to groups; may be nil
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
-	createOpts cloud.CreateOpts,
+	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
 	onPhase func(group InstanceGroup, phase string),
 	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
 ) (*LaunchResult, error) {
@@ -220,7 +220,7 @@ func LaunchCampaign(
 	var donorCfg *DonorConfig
 	if !opts.NoDonor && len(groups) >= 2 {
 		client := clientForProvider(clients, offers[0].Provider)
-		if client != nil {
+		if supportsDonorStrategy(client) {
 			donorCfg, err = FindDonorOffer(client, offers, estimates, groups)
 			if err != nil {
 				log.Printf("donor: offer search failed, proceeding without donor: %v", err)
@@ -294,37 +294,51 @@ func LaunchCampaign(
 					donorCfg = nil
 				} else {
 					// Build env vars and create opts for donor
-					donorCreateOpts := createOpts
-					donorEnvVars := map[string]string{
-						"R2_ACCESS_KEY_ID":     r2Cfg.AccessKeyID,
-						"R2_SECRET_ACCESS_KEY": r2Cfg.SecretAccessKey,
-						"R2_ENDPOINT":          r2Assets.Client.Endpoint(),
-						"R2_BUCKET":            r2Cfg.Bucket,
-					}
-					if apiKey := vastai.ReadAPIKey(); apiKey != "" {
-						donorEnvVars["VASTAI_API_KEY"] = apiKey
-					}
-					if token := os.Getenv("HF_TOKEN"); token != "" {
-						donorEnvVars["HF_TOKEN"] = token
-						donorEnvVars["HUGGING_FACE_HUB_TOKEN"] = token
-					}
-					donorCreateOpts.EnvVars = donorEnvVars
-					donorCreateOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
-					donorCreateOpts.Label = fmt.Sprintf("weft/c%d", campaignID)
-
-					inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
-					if createErr != nil {
-						log.Printf("donor: failed to create instance: %v", createErr)
-						_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
-						donorCfg = nil
-					} else {
-						donorProviderID = inst.ProviderID
-						_ = db.SetCloudInstanceProviderID(database, donorInstanceID, donorProviderID)
-						_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusRunning)
-						if donorCfg.Offer.DataCenter != "" {
-							_ = db.SetCloudInstanceDataCenter(database, donorInstanceID, donorCfg.Offer.DataCenter)
+					donorCreateOpts := cloud.CreateOpts{}
+					if createOptsForProvider != nil {
+						donorCreateOpts, donorErr = createOptsForProvider(donorCfg.Offer.Provider)
+						if donorErr != nil {
+							log.Printf("donor: unsupported provider config: %v", donorErr)
+							donorCfg = nil
 						}
-						log.Printf("donor: launched instance %s (DB ID %d) in %s", donorProviderID, donorInstanceID, donorCfg.DataCenter)
+					}
+					if donorCfg != nil {
+						donorEnvVars := map[string]string{
+							"R2_ACCESS_KEY_ID":     r2Cfg.AccessKeyID,
+							"R2_SECRET_ACCESS_KEY": r2Cfg.SecretAccessKey,
+							"R2_ENDPOINT":          r2Assets.Client.Endpoint(),
+							"R2_BUCKET":            r2Cfg.Bucket,
+						}
+						if apiKey := vastai.ReadAPIKey(); apiKey != "" {
+							donorEnvVars["VASTAI_API_KEY"] = apiKey
+						}
+						if token := os.Getenv("HF_TOKEN"); token != "" {
+							donorEnvVars["HF_TOKEN"] = token
+							donorEnvVars["HUGGING_FACE_HUB_TOKEN"] = token
+						}
+						donorCreateOpts.EnvVars = donorEnvVars
+						if err := configureBootstrapCreateOpts(donorClient, &donorCreateOpts, bootstrapKey); err != nil {
+							log.Printf("donor: bootstrap config failed: %v", err)
+							donorCfg = nil
+						}
+					}
+					if donorCfg != nil {
+						donorCreateOpts.Label = fmt.Sprintf("weft/c%d", campaignID)
+
+						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
+						if createErr != nil {
+							log.Printf("donor: failed to create instance: %v", createErr)
+							_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+							donorCfg = nil
+						} else {
+							donorProviderID = inst.ProviderID
+							_ = db.SetCloudInstanceProviderID(database, donorInstanceID, donorProviderID)
+							_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusRunning)
+							if donorCfg.Offer.DataCenter != "" {
+								_ = db.SetCloudInstanceDataCenter(database, donorInstanceID, donorCfg.Offer.DataCenter)
+							}
+							log.Printf("donor: launched instance %s (DB ID %d) in %s", donorProviderID, donorInstanceID, donorCfg.DataCenter)
+						}
 					}
 				}
 			}
@@ -362,6 +376,18 @@ func LaunchCampaign(
 					mu.Lock()
 					onPhase(group, phase)
 					mu.Unlock()
+				}
+			}
+
+			createOpts := cloud.CreateOpts{}
+			if createOptsForProvider != nil {
+				var err error
+				createOpts, err = createOptsForProvider(ofr.Provider)
+				if err != nil {
+					mu.Lock()
+					launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
+					mu.Unlock()
+					return
 				}
 			}
 
@@ -471,6 +497,27 @@ func clientForProvider(clients []cloud.Client, provider cloud.Provider) cloud.Cl
 	}
 	if len(clients) == 1 {
 		return clients[0]
+	}
+	return nil
+}
+
+func supportsDonorStrategy(client cloud.Client) bool {
+	return client != nil && client.Provider() == cloud.ProviderVastai
+}
+
+func configureBootstrapCreateOpts(client cloud.Client, createOpts *cloud.CreateOpts, bootstrapKey string) error {
+	switch client.Provider() {
+	case cloud.ProviderRunpod:
+		if createOpts.TemplateID == "" {
+			return fmt.Errorf("runpod bootstrap requires a template with startup command %q", cloud.R2BootstrapTemplateStartCmd())
+		}
+		if createOpts.EnvVars == nil {
+			createOpts.EnvVars = make(map[string]string)
+		}
+		createOpts.EnvVars[cloud.R2BootstrapKeyEnvVar] = bootstrapKey
+		createOpts.OnStartCmd = ""
+	default:
+		createOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
 	}
 	return nil
 }
@@ -604,8 +651,12 @@ func LaunchInstance(
 		}
 	}
 
-	// Set onstart command to bootstrap from R2
-	createOpts.OnStartCmd = cloud.R2BootstrapOnStartCmd(bootstrapKey)
+	// Configure provider-specific bootstrap wiring.
+	if err := configureBootstrapCreateOpts(client, &createOpts, bootstrapKey); err != nil {
+		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+		_, _ = db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		return instanceID, fmt.Errorf("configure bootstrap: %w", err)
+	}
 
 	// Set instance label for provider dashboard visibility
 	if campaignID != nil {

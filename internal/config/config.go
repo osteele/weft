@@ -152,6 +152,9 @@ type RunpodConfig struct {
 	SpendingLimit float64 `yaml:"spending_limit"`
 	// DefaultImage is the Docker image for cloud instances
 	DefaultImage string `yaml:"default_image"`
+	// BootstrapTemplateID is the RunPod template ID whose startup command
+	// installs deps and executes cloud.R2BootstrapTemplateStartCmd().
+	BootstrapTemplateID string `yaml:"bootstrap_template_id"`
 	// MaxRuntime is the auto-kill threshold (e.g., "4h")
 	MaxRuntime string `yaml:"max_runtime"`
 }
@@ -222,6 +225,28 @@ func DefaultConfig() *Config {
 			Enabled: nil, // nil means "auto" - enabled if ollama is available
 			Model:   "",  // empty means use default model
 		},
+	}
+}
+
+// CloudCreateOpts returns provider-appropriate instance creation defaults.
+func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, error) {
+	switch provider {
+	case cloud.ProviderRunpod:
+		if c == nil || c.Runpod.BootstrapTemplateID == "" {
+			return cloud.CreateOpts{}, fmt.Errorf("runpod campaigns require runpod.bootstrap_template_id because runpod pods do not accept per-pod startup commands")
+		}
+		return cloud.CreateOpts{
+			DiskGB:     50,
+			SSHEnabled: true,
+			TemplateID: c.Runpod.BootstrapTemplateID,
+		}, nil
+	case cloud.ProviderVastai:
+		if c == nil {
+			return cloud.DefaultCreateOpts(""), nil
+		}
+		return cloud.DefaultCreateOpts(c.Vastai.DefaultImage), nil
+	default:
+		return cloud.DefaultCreateOpts(""), nil
 	}
 }
 

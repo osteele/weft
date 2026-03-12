@@ -48,7 +48,7 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 		return nil, err
 	}
 
-	jobCounts, _ := db.GetCloudInstanceJobCounts(database)
+	jobCounts, _ := db.GetActiveCloudInstanceJobCounts(database)
 
 	var result []InstanceCapacity
 	for _, inst := range instances {

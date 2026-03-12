@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestBase64EncodingPreservesSpecialCharacters(t *testing.T) {
@@ -62,5 +64,55 @@ func TestBase64EncodingPreservesSpecialCharacters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+
+	updatedInstanceID, err := recordCloudJobCompletion(database, jobID, 0, 10, 20, "")
+	if err != nil {
+		t.Fatalf("recordCloudJobCompletion: %v", err)
+	}
+	if updatedInstanceID != instanceID {
+		t.Fatalf("updatedInstanceID = %d, want %d", updatedInstanceID, instanceID)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusCompleted)
+	}
+
+	attempts, err := db.GetJobCloudAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobCloudAttempts: %v", err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempt count = %d, want 1", len(attempts))
+	}
+	if attempts[0].Outcome != db.AttemptOutcomeCompleted {
+		t.Fatalf("attempt outcome = %q, want %q", attempts[0].Outcome, db.AttemptOutcomeCompleted)
+	}
+	if attempts[0].EndedAt == nil {
+		t.Fatal("attempt ended_at = nil, want non-nil")
 	}
 }

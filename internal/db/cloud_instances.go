@@ -399,8 +399,19 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 // unplaced (queued with empty host) and clears their instance association.
 // Records the attempt outcome before resetting. Returns the number of jobs reset.
 func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) (int64, error) {
-	// Close open attempts for all non-terminal jobs on this instance
-	if err := CloseJobCloudAttemptsByInstance(database, instanceID, outcome); err != nil {
+	// Close open attempts only for jobs that are about to be reset. Completed or
+	// otherwise terminal jobs keep their recorded attempt outcomes.
+	if _, err := database.Exec(
+		`UPDATE job_cloud_attempts
+		 SET ended_at = ?, outcome = ?
+		 WHERE cloud_instance_id = ? AND ended_at IS NULL
+		 AND job_id IN (
+		 	SELECT id FROM jobs
+		 	WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?) AND tombstoned = 0
+		 )`,
+		time.Now().Unix(), outcome, instanceID, instanceID,
+		StatusCompleted, StatusFailed, StatusCanceled,
+	); err != nil {
 		return 0, fmt.Errorf("close attempts: %w", err)
 	}
 
@@ -441,6 +452,32 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 // GetCloudInstanceJobCounts returns a map from cloud instance ID to job count.
 func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM jobs WHERE cloud_instance_id IS NOT NULL AND tombstoned = 0 GROUP BY cloud_instance_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[int64]int)
+	for rows.Next() {
+		var id int64
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, err
+		}
+		counts[id] = count
+	}
+	return counts, rows.Err()
+}
+
+// GetActiveCloudInstanceJobCounts returns a map from cloud instance ID to the
+// number of non-terminal jobs still assigned to that instance.
+func GetActiveCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
+	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM jobs
+		WHERE cloud_instance_id IS NOT NULL
+		AND tombstoned = 0
+		AND status NOT IN (?, ?, ?, ?, ?, ?)
+		GROUP BY cloud_instance_id`,
+		StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, StatusDraft,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -255,7 +255,7 @@ func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	defer database.Close()
 
 	result, err := LaunchCampaign(
-		nil, database, nil, nil, nil, LaunchOpts{}, cloud.R2Config{}, cloud.CreateOpts{},
+		nil, database, nil, nil, nil, LaunchOpts{}, cloud.R2Config{}, nil,
 		nil, nil,
 	)
 	if err == nil {

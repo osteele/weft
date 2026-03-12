@@ -379,8 +379,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		// Check current job status directly — skip if already terminal
 		var currentStatus string
-		var cloudInstanceID sql.NullInt64
-		if err := database.QueryRow("SELECT status, cloud_instance_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &cloudInstanceID); err != nil || db.IsTerminalStatus(currentStatus) {
+		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus); err != nil || db.IsTerminalStatus(currentStatus) {
 			// Job not found or already terminal — clean up stale R2 markers
 			_ = r2Client.DeletePrefix(ctx, r2keys.JobPrefix(jobID)+"/")
 			continue
@@ -405,11 +404,6 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		status := db.StatusCompleted
-		if *exitCode != 0 {
-			status = db.StatusFailed
-		}
-
 		// If no start_time from completion record, try reading .started marker from R2
 		if startTimeUnix == 0 {
 			if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
@@ -417,18 +411,13 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			}
 		}
 
-		if _, err := database.Exec(
-			`UPDATE jobs
-			 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
-			     failure_reason = COALESCE(NULLIF(?, ''), failure_reason)
-			 WHERE id = ?`,
-			status, *exitCode, startTimeUnix, endTimeUnix, status, failureReason, jobID,
-		); err != nil {
+		updatedInstanceID, err := recordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason)
+		if err != nil {
 			log.Printf("sync: failed to update cloud job %d status: %v", jobID, err)
 			continue
 		}
-		if cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
-			updatedInstanceIDs[cloudInstanceID.Int64] = struct{}{}
+		if updatedInstanceID > 0 {
+			updatedInstanceIDs[updatedInstanceID] = struct{}{}
 		}
 		updated++
 		completedJobIDs[jobID] = true
@@ -444,7 +433,11 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		coordinator.WriteVastaiLogsToCache(jobID, tmpDir)
 
 		if verbose {
-			fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, status, *exitCode)
+			statusLabel := db.StatusCompleted
+			if *exitCode != 0 {
+				statusLabel = db.StatusFailed
+			}
+			fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, statusLabel, *exitCode)
 		}
 
 		// Cleanup R2
@@ -508,6 +501,37 @@ func updateInstanceTerminationReason(database *sql.DB, instanceID int64) {
 	if err := db.RefineInstanceTerminationReason(database, instanceID); err != nil {
 		log.Printf("sync: refine termination reason for instance %d: %v", instanceID, err)
 	}
+}
+
+func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string) (int64, error) {
+	status := db.StatusCompleted
+	outcome := db.AttemptOutcomeCompleted
+	if exitCode != 0 {
+		status = db.StatusFailed
+		outcome = db.AttemptOutcomeFailed
+	}
+
+	var cloudInstanceID sql.NullInt64
+	if err := database.QueryRow(`SELECT cloud_instance_id FROM jobs WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
+		return 0, err
+	}
+
+	if _, err := database.Exec(
+		`UPDATE jobs
+		 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
+		     failure_reason = COALESCE(NULLIF(?, ''), failure_reason)
+		 WHERE id = ?`,
+		status, exitCode, startTimeUnix, endTimeUnix, status, failureReason, jobID,
+	); err != nil {
+		return 0, err
+	}
+	if err := db.CloseJobCloudAttempt(database, jobID, outcome); err != nil {
+		return 0, err
+	}
+	if cloudInstanceID.Valid {
+		return cloudInstanceID.Int64, nil
+	}
+	return 0, nil
 }
 
 func r2Config(cfg *config.Config) r2.Config {
