@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/spf13/cobra"
 )
 
@@ -46,17 +50,32 @@ type trainingDataRecord struct {
 	RunID      int64                 `json:"run_id"`
 	JobID      int64                 `json:"job_id"`
 	Host       string                `json:"host"`
+	WorkingDir string                `json:"working_dir,omitempty"`
 	Command    string                `json:"command"`
 	Project    string                `json:"project,omitempty"`
 	GPUClass   string                `json:"gpu_class,omitempty"`
 	Backend    string                `json:"backend"`
 	Tenant     string                `json:"tenant"`
+	StartTime  int64                 `json:"start_time"`
+	EndTime    int64                 `json:"end_time"`
 	DurationS  int64                 `json:"duration_s"`
 	ExitCode   int                   `json:"exit_code"`
 	PeakRSSKB  int64                 `json:"peak_rss_kb,omitempty"`
 	MaxGPUMiB  int64                 `json:"max_gpu_mem_mib,omitempty"`
 	CPUMean    float64               `json:"cpu_mean,omitempty"`
+	HostSpecs  *trainingHostSpecs    `json:"host_specs,omitempty"`
 	Timeseries []db.TimeseriesSample `json:"timeseries,omitempty"`
+}
+
+type trainingHostSpecs struct {
+	CPUCount            int      `json:"cpu_count,omitempty"`
+	CPUModel            string   `json:"cpu_model,omitempty"`
+	CPUFreq             string   `json:"cpu_freq,omitempty"`
+	MemTotal            string   `json:"mem_total,omitempty"`
+	GPUNames            []string `json:"gpu_names,omitempty"`
+	GPUCount            int      `json:"gpu_count,omitempty"`
+	GPUVRAMPerDeviceMiB int      `json:"gpu_vram_per_device_mib,omitempty"`
+	GPUVRAMTotalMiB     int      `json:"gpu_vram_total_mib,omitempty"`
 }
 
 func runExportTrainingData(cmd *cobra.Command, args []string) error {
@@ -65,6 +84,11 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	hostSpecs, err := loadTrainingHostSpecs(database)
+	if err != nil {
+		return fmt.Errorf("load host specs: %w", err)
+	}
 
 	// Parse since filter
 	var sinceTime time.Time
@@ -100,16 +124,20 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 
 	for _, run := range runs {
 		rec := trainingDataRecord{
-			RunID:     run.RunID,
-			JobID:     run.JobID,
-			Host:      run.Host,
-			Command:   run.Command,
-			Project:   run.Project,
-			GPUClass:  run.GPUClass,
-			Backend:   run.Backend,
-			Tenant:    run.Tenant,
-			DurationS: run.DurationS,
-			ExitCode:  run.ExitCode,
+			RunID:      run.RunID,
+			JobID:      run.JobID,
+			Host:       run.Host,
+			WorkingDir: run.WorkingDir,
+			Command:    run.Command,
+			Project:    run.Project,
+			GPUClass:   run.GPUClass,
+			Backend:    run.Backend,
+			Tenant:     run.Tenant,
+			StartTime:  run.StartTime,
+			EndTime:    run.EndTime,
+			DurationS:  run.DurationS,
+			ExitCode:   run.ExitCode,
+			HostSpecs:  hostSpecs[run.Host],
 		}
 
 		// Extract resource usage from metadata
@@ -142,4 +170,64 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "Exported %d jobs to %s\n", count, exportOutput)
 	}
 	return nil
+}
+
+func loadTrainingHostSpecs(database *sql.DB) (map[string]*trainingHostSpecs, error) {
+	cachedHosts, err := db.LoadAllCachedHosts(database)
+	if err != nil {
+		return nil, err
+	}
+
+	specs := make(map[string]*trainingHostSpecs, len(cachedHosts))
+	for _, cached := range cachedHosts {
+		specs[cached.Name] = cachedHostToTrainingSpecs(cached)
+	}
+	return specs, nil
+}
+
+func cachedHostToTrainingSpecs(cached *db.CachedHostInfo) *trainingHostSpecs {
+	if cached == nil {
+		return nil
+	}
+
+	result := &trainingHostSpecs{
+		CPUCount: cached.CPUCount,
+		CPUModel: cached.CPUModel,
+		CPUFreq:  cached.CPUFreq,
+		MemTotal: cached.MemTotal,
+	}
+
+	var gpus []hostinfo.GPUInfo
+	if err := json.Unmarshal([]byte(cached.GPUsJSON), &gpus); err != nil {
+		return result
+	}
+
+	result.GPUCount = len(gpus)
+	result.GPUNames = make([]string, 0, len(gpus))
+	for _, gpu := range gpus {
+		if gpu.Name != "" {
+			result.GPUNames = append(result.GPUNames, gpu.Name)
+		}
+		vram := parseMiB(gpu.MemTotal)
+		if vram > 0 {
+			result.GPUVRAMTotalMiB += vram
+			if result.GPUVRAMPerDeviceMiB == 0 {
+				result.GPUVRAMPerDeviceMiB = vram
+			}
+		}
+	}
+
+	return result
+}
+
+func parseMiB(value string) int {
+	cleaned := strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(value, "MiB"), "MB"))
+	if cleaned == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(cleaned)
+	if err != nil {
+		return 0
+	}
+	return n
 }
