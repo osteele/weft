@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/runner"
 )
 
 // graceStatus is written to R2 as grace/<instanceID>/status.
@@ -228,7 +229,12 @@ func writeGraceStatus(bucket, prefix string, status graceStatus) {
 	}
 }
 
-func uploadJobResults(bucket string, jobID, runID int64, logDir string) {
+func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.UploadSummary {
+	summary := runner.UploadSummary{
+		Status:        "ok",
+		StartedAtUnix: time.Now().Unix(),
+	}
+	summary.FileCount, summary.Bytes = measureUploadTree(logDir)
 	// Upload per-job results
 	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobAttemptResultsPrefix(jobID, runID))
@@ -236,6 +242,8 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) {
 	start := time.Now()
 	copyOK := false
 	if err := rcloneCmd.Run(); err != nil {
+		summary.Status = "failed"
+		summary.Error = err.Error()
 		fmt.Fprintf(os.Stderr, "upload results for job %d: %v\n", jobID, err)
 		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
 			oplog.WithDetailf("results dir=%s", logDir), oplog.WithError(err),
@@ -243,6 +251,8 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) {
 	} else {
 		copyOK = true
 	}
+	summary.DurationMS = time.Since(start).Milliseconds()
+	summary.CompletedAtUnix = time.Now().Unix()
 	copyCancel()
 
 	if copyOK {
@@ -253,6 +263,7 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) {
 	if err := r2Put(bucket, r2keys.JobAttemptComplete(jobID, runID), "done"); err != nil {
 		fmt.Fprintf(os.Stderr, "write completion marker for job %d: %v\n", jobID, err)
 	}
+	return summary
 }
 
 func selfDestruct(bucket, instanceID, selfDestructCmd, terminalStatus, terminationReason, phase string, jobID int64) {

@@ -16,8 +16,14 @@ type JobPhaseTimings struct {
 	UploadEnd    *int64 // upload phase end
 
 	// Transfer sizes (bytes)
-	UploadResultsBytes   *int64 // size of results dir
-	UploadWorkspaceBytes *int64 // size of workspace dir
+	UploadResultsBytes    *int64 // size of results dir
+	UploadWorkspaceBytes  *int64 // size of workspace dir
+	OutputUploadFiles     *int   // files uploaded from convention-based output dirs
+	OutputUploadRetries   *int   // total retries for output dir upload
+	OutputUploadDuration  *int64 // total output dir upload time (ms)
+	ResultsUploadFiles    *int   // files uploaded from the per-job results dir
+	ResultsUploadRetries  *int   // retries for per-job results upload
+	ResultsUploadDuration *int64 // per-job results upload time (ms)
 
 	// Cache state before job (bytes, for campaign jobs)
 	CacheHFBytes *int64 // ~/.cache/huggingface size before job
@@ -46,12 +52,16 @@ func UpsertJobPhaseTimings(db *sql.DB, t *JobPhaseTimings) error {
 		`INSERT OR REPLACE INTO job_phase_timings
 		 (job_id, wrapper_start, setup_start, setup_end, run_start, run_end,
 		  upload_start, upload_end, upload_results_bytes, upload_workspace_bytes,
+		  output_upload_files, output_upload_retries, output_upload_duration_ms,
+		  results_upload_files, results_upload_retries, results_upload_duration_ms,
 		  cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
 		  uv_sync_seconds, disk_used_bytes, disk_total_bytes,
 		  peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.JobID, t.WrapperStart, t.SetupStart, t.SetupEnd, t.RunStart, t.RunEnd,
 		t.UploadStart, t.UploadEnd, t.UploadResultsBytes, t.UploadWorkspaceBytes,
+		t.OutputUploadFiles, t.OutputUploadRetries, t.OutputUploadDuration,
+		t.ResultsUploadFiles, t.ResultsUploadRetries, t.ResultsUploadDuration,
 		t.CacheHFBytes, t.CacheUVBytes, t.CacheUVPostBytes, t.CacheHFPostBytes,
 		t.UVSyncSeconds, t.DiskUsedBytes, t.DiskTotalBytes,
 		t.PeakGPUMemMiB, t.MeanGPUUtil, t.PeakGPUUtil,
@@ -64,6 +74,8 @@ func GetJobPhaseTimings(db *sql.DB, jobID int64) (*JobPhaseTimings, error) {
 	row := db.QueryRow(
 		`SELECT job_id, wrapper_start, setup_start, setup_end, run_start, run_end,
 		        upload_start, upload_end, upload_results_bytes, upload_workspace_bytes,
+		        output_upload_files, output_upload_retries, output_upload_duration_ms,
+		        results_upload_files, results_upload_retries, results_upload_duration_ms,
 		        cache_hf_bytes, cache_uv_bytes, cache_uv_post_bytes, cache_hf_post_bytes,
 		        uv_sync_seconds, disk_used_bytes, disk_total_bytes,
 		        peak_gpu_mem_mib, mean_gpu_util, peak_gpu_util
@@ -74,6 +86,8 @@ func GetJobPhaseTimings(db *sql.DB, jobID int64) (*JobPhaseTimings, error) {
 	err := row.Scan(
 		&t.JobID, &t.WrapperStart, &t.SetupStart, &t.SetupEnd, &t.RunStart, &t.RunEnd,
 		&t.UploadStart, &t.UploadEnd, &t.UploadResultsBytes, &t.UploadWorkspaceBytes,
+		&t.OutputUploadFiles, &t.OutputUploadRetries, &t.OutputUploadDuration,
+		&t.ResultsUploadFiles, &t.ResultsUploadRetries, &t.ResultsUploadDuration,
 		&t.CacheHFBytes, &t.CacheUVBytes, &t.CacheUVPostBytes, &t.CacheHFPostBytes,
 		&t.UVSyncSeconds, &t.DiskUsedBytes, &t.DiskTotalBytes,
 		&t.PeakGPUMemMiB, &t.MeanGPUUtil, &t.PeakGPUUtil,

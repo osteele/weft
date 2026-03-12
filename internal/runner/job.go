@@ -310,6 +310,8 @@ type PhaseTiming struct {
 	SetupEnd     int64       `json:"setup_end"`
 	RunStart     int64       `json:"run_start"`
 	RunEnd       int64       `json:"run_end"`
+	UploadStart  int64       `json:"upload_start,omitempty"`
+	UploadEnd    int64       `json:"upload_end,omitempty"`
 	CachePre     *CacheProbe `json:"cache_pre,omitempty"`
 	CachePost    *CacheProbe `json:"cache_post,omitempty"`
 	SetupSeconds *int64      `json:"setup_seconds,omitempty"`
@@ -336,13 +338,34 @@ type OutputDirUpload struct {
 	Dir        string `json:"dir"`
 	Status     string `json:"status"` // "ok" or "failed"
 	Error      string `json:"error,omitempty"`
+	FileCount  int    `json:"file_count,omitempty"`
+	Bytes      int64  `json:"bytes,omitempty"`
+	RetryCount int    `json:"retry_count,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
 }
 
 // OutputUploadResult summarizes output directory uploads for a job.
 type OutputUploadResult struct {
-	Status string            `json:"status"` // "ok", "partial", "failed"
-	Dirs   []OutputDirUpload `json:"dirs,omitempty"`
+	Status          string            `json:"status"` // "ok", "partial", "failed"
+	FileCount       int               `json:"file_count,omitempty"`
+	Bytes           int64             `json:"bytes,omitempty"`
+	RetryCount      int               `json:"retry_count,omitempty"`
+	DurationMS      int64             `json:"duration_ms,omitempty"`
+	StartedAtUnix   int64             `json:"started_at_unix,omitempty"`
+	CompletedAtUnix int64             `json:"completed_at_unix,omitempty"`
+	Dirs            []OutputDirUpload `json:"dirs,omitempty"`
+}
+
+// UploadSummary describes a bulk upload such as the per-job results directory.
+type UploadSummary struct {
+	Status          string `json:"status"` // "ok" or "failed"
+	FileCount       int    `json:"file_count,omitempty"`
+	Bytes           int64  `json:"bytes,omitempty"`
+	RetryCount      int    `json:"retry_count,omitempty"`
+	DurationMS      int64  `json:"duration_ms,omitempty"`
+	StartedAtUnix   int64  `json:"started_at_unix,omitempty"`
+	CompletedAtUnix int64  `json:"completed_at_unix,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // CompletionRecord is the structured post-mortem record written as .completion.json.
@@ -364,6 +387,7 @@ type CompletionRecord struct {
 	EndTime          int64               `json:"end_time"`
 	OutputFiles      []OutputFile        `json:"output_files,omitempty"`
 	OutputUpload     *OutputUploadResult `json:"output_upload,omitempty"`
+	ResultsUpload    *UploadSummary      `json:"results_upload,omitempty"`
 }
 
 // WriteCompletionRecord writes a structured completion.json for post-mortem analysis.

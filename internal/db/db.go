@@ -694,6 +694,12 @@ func initSchema(db *sql.DB) error {
 		upload_end INTEGER,
 		upload_results_bytes INTEGER,
 		upload_workspace_bytes INTEGER,
+		output_upload_files INTEGER,
+		output_upload_retries INTEGER,
+		output_upload_duration_ms INTEGER,
+		results_upload_files INTEGER,
+		results_upload_retries INTEGER,
+		results_upload_duration_ms INTEGER,
 		cache_hf_bytes INTEGER,
 		cache_uv_bytes INTEGER,
 		peak_gpu_mem_mib INTEGER,
@@ -712,6 +718,12 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE job_phase_timings ADD COLUMN cache_hf_post_bytes INTEGER`,
 		`ALTER TABLE job_phase_timings ADD COLUMN disk_used_bytes INTEGER`,
 		`ALTER TABLE job_phase_timings ADD COLUMN disk_total_bytes INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN output_upload_files INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN output_upload_retries INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN output_upload_duration_ms INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN results_upload_files INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN results_upload_retries INTEGER`,
+		`ALTER TABLE job_phase_timings ADD COLUMN results_upload_duration_ms INTEGER`,
 	} {
 		if err := addColumnIfMissing(db, stmt); err != nil {
 			return err

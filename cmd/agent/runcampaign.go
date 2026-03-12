@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -204,9 +205,11 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)
 
 // uploadOutputDirs uploads convention-based output directories to R2.
 func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.OutputUploadResult {
+	startedAt := time.Now()
 	var result runner.OutputUploadResult
 	var attempted int
 	var failed int
+	var totalDuration time.Duration
 
 	for _, dir := range config.DefaultOutputDirs {
 		dir = strings.TrimRight(dir, "/")
@@ -216,8 +219,10 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 			continue
 		}
 		attempted++
+		fileCount, bytes := measureUploadTree(dirPath)
 		start := time.Now()
 		var lastErr error
+		retryCount := 0
 		for attempt := 1; attempt <= 3; attempt++ {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			cmd := exec.CommandContext(ctx, "rclone", "copy",
@@ -232,15 +237,11 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 				oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
 					oplog.WithDetailf("output dir=%s", dir),
 					oplog.WithDuration(duration))
-				result.Dirs = append(result.Dirs, runner.OutputDirUpload{
-					Dir:        dir,
-					Status:     "ok",
-					DurationMS: duration.Milliseconds(),
-				})
 				lastErr = nil
 				break
 			}
 			lastErr = err
+			retryCount++
 			if attempt < 3 {
 				backoff := 5 * time.Second
 				if attempt == 2 {
@@ -253,6 +254,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		}
 		if lastErr != nil {
 			duration := time.Since(start)
+			totalDuration += duration
 			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d failed: %v\n", dir, jobID, lastErr)
 			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
 				oplog.WithDetailf("output dir=%s", dir), oplog.WithError(lastErr),
@@ -261,10 +263,30 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 				Dir:        dir,
 				Status:     "failed",
 				Error:      lastErr.Error(),
+				FileCount:  fileCount,
+				Bytes:      bytes,
+				RetryCount: retryCount,
 				DurationMS: duration.Milliseconds(),
 			})
+			result.FileCount += fileCount
+			result.Bytes += bytes
+			result.RetryCount += retryCount
 			failed++
+			continue
 		}
+		duration := time.Since(start)
+		totalDuration += duration
+		result.FileCount += fileCount
+		result.Bytes += bytes
+		result.RetryCount += retryCount
+		result.Dirs = append(result.Dirs, runner.OutputDirUpload{
+			Dir:        dir,
+			Status:     "ok",
+			FileCount:  fileCount,
+			Bytes:      bytes,
+			RetryCount: retryCount,
+			DurationMS: duration.Milliseconds(),
+		})
 	}
 
 	switch {
@@ -277,8 +299,29 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 	default:
 		result.Status = "partial"
 	}
+	result.DurationMS = totalDuration.Milliseconds()
+	if attempted > 0 {
+		result.StartedAtUnix = startedAt.Unix()
+		result.CompletedAtUnix = time.Now().Unix()
+	}
 
 	return result
+}
+
+func measureUploadTree(root string) (files int, bytes int64) {
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return nil
+		}
+		files++
+		bytes += info.Size()
+		return nil
+	})
+	return files, bytes
 }
 
 // promoteUVManifest reads uv-manifest.json from logDir and copies it to

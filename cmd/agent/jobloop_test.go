@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -53,4 +54,22 @@ func TestPatchCompletionUpload(t *testing.T) {
 	if !reflect.DeepEqual(decoded.OutputUpload, &upload) {
 		t.Fatalf("output upload mismatch: %#v != %#v", decoded.OutputUpload, upload)
 	}
+}
+
+func TestHasOutputDirs(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		if hasOutputDirs(t.TempDir()) {
+			t.Fatal("hasOutputDirs() = true, want false")
+		}
+	})
+
+	t.Run("present", func(t *testing.T) {
+		workDir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(workDir, "output"), 0o755); err != nil {
+			t.Fatalf("mkdir output: %v", err)
+		}
+		if !hasOutputDirs(workDir) {
+			t.Fatal("hasOutputDirs() = false, want true")
+		}
+	})
 }

@@ -3,10 +3,12 @@ package cmd
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 )
 
 func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
@@ -118,6 +120,53 @@ func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
 	if !strings.Contains(out, "Instance 111 — A100 — loading") {
 		t.Fatalf("expected provider loading status in header, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockShowsObservabilityDetails(t *testing.T) {
+	changedAt := time.Now().Add(-4 * time.Second)
+	ci := &db.CloudInstance{
+		ID:                 106,
+		Status:             db.CloudInstanceStatusRunning,
+		Provider:           "vastai",
+		ProviderInstanceID: "32712486",
+		GPUSpec:            "A100",
+	}
+	update := campaign.InstanceUpdate{
+		CloudInstance:  ci,
+		InstancePhase:  "uploading-results:88",
+		PhaseChangedAt: &changedAt,
+		TerminationIntent: &instanceintent.Marker{
+			TerminalStatus:  db.CloudInstanceStatusFailed,
+			RequestedAtUnix: time.Now().Add(-2 * time.Second).Unix(),
+			DestroyAttempts: 2,
+			LastError:       "exit status 22",
+		},
+		Jobs: []*db.Job{
+			{ID: 88, Status: db.StatusFailed, WorkingDir: "/workspace/project-alpha", Description: "train model"},
+		},
+		JobPhaseTimings: map[int64]*db.JobPhaseTimings{
+			88: {
+				UploadWorkspaceBytes:  watchTestInt64Ptr(4096),
+				OutputUploadFiles:     watchTestIntPtr(2),
+				OutputUploadDuration:  watchTestInt64Ptr(250),
+				UploadResultsBytes:    watchTestInt64Ptr(8192),
+				ResultsUploadFiles:    watchTestIntPtr(4),
+				ResultsUploadDuration: watchTestInt64Ptr(600),
+			},
+		},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: time.Now()}))
+	for _, want := range []string{
+		"Phase: uploading logs/results (job 88) (for",
+		"Termination:",
+		"Detail: requested",
+		"uploads: outputs 2 files, 4.0 KiB, 250ms | logs 4 files, 8.0 KiB, 600ms",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
 	}
 }
 
@@ -240,3 +289,7 @@ func TestWatchAllModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.T) 
 		t.Fatalf("footer should omit overflowing detail, got:\n%s", out)
 	}
 }
+
+func watchTestInt64Ptr(v int64) *int64 { return &v }
+
+func watchTestIntPtr(v int) *int { return &v }

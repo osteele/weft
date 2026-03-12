@@ -37,10 +37,13 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 		lines = append(lines, fmt.Sprintf("  Bootstrap: %s", campaign.BootstrapStageLabel(update.BootstrapStage)))
 	}
 	if update.InstancePhase != "" {
-		lines = append(lines, fmt.Sprintf("  Phase: %s", campaign.InstancePhaseLabel(update.InstancePhase)))
+		lines = append(lines, fmt.Sprintf("  Phase: %s", formatObservedPhase(update, opts.now)))
 	}
 	if label := campaign.TerminationIntentLabel(update.TerminationIntent); label != "" {
 		lines = append(lines, fmt.Sprintf("  Termination: %s", label))
+		if detail := campaign.TerminationIntentDetail(update.TerminationIntent); detail != "" {
+			lines = append(lines, fmt.Sprintf("  Detail: %s", detail))
+		}
 	}
 	if costLine := formatWatchInstanceCostLine(ci, update.Instance, opts.now); costLine != "" {
 		lines = append(lines, costLine)
@@ -80,6 +83,11 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 			job.DirectoryTailDisplay(),
 			desc,
 		))
+		if campaign.IsJobTerminal(displayStatuses[i]) {
+			if summary := formatUploadSummary(update.JobPhaseTimings[job.ID]); summary != "" {
+				lines = append(lines, fmt.Sprintf("          uploads: %s", summary))
+			}
+		}
 	}
 
 	return lines

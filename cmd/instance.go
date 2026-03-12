@@ -223,8 +223,8 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		// Cloud instance info
 		providerInstID := ci.EffectiveProviderID()
 		var inst *cloud.Instance
+		client := cloudClientForDBInstance(ci.Provider)
 		if providerInstID != "" {
-			client := cloudClientForDBInstance(ci.Provider)
 			if !campaign.IsInstanceTerminal(ci.Status) {
 				inst, _ = client.ShowInstance(providerInstID)
 			}
@@ -242,6 +242,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		// Agent version from R2
+		var liveUpdate *campaign.InstanceUpdate
 		if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			versionKey := r2keys.InstanceAgentVersion(ci.ID)
@@ -249,6 +250,13 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Agent:    %s\n", strings.TrimSpace(string(data)))
 			}
 			cancel()
+
+			watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
+			if update, ok := <-ch; ok {
+				liveUpdate = &update
+			}
+			watchCancel()
 		}
 
 		// Uptime and cost
@@ -269,6 +277,15 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Cost:     $%.2f\n", float64(ci.ActualSpendCents)/100)
 			}
 		}
+		if liveUpdate != nil && liveUpdate.InstancePhase != "" {
+			fmt.Printf("  Phase:    %s\n", formatObservedPhase(*liveUpdate, time.Now()))
+		}
+		if liveUpdate != nil && liveUpdate.HeartbeatAge > 0 {
+			fmt.Printf("  Heartbeat: %s ago\n", liveUpdate.HeartbeatAge.Truncate(time.Second))
+		}
+		if detail := campaign.TerminationIntentDetail(ci.TerminationIntent); detail != "" {
+			fmt.Printf("  Termination detail: %s\n", detail)
+		}
 
 		// Jobs
 		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
@@ -285,11 +302,28 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 			fmt.Printf("  Jobs:     %d/%d completed\n", completed, len(jobs))
 			for _, j := range jobs {
+				displayStatus := campaign.JobDisplayStatus(j, outcomes)
 				desc := j.Description
 				if desc == "" {
 					desc = campaign.TruncateCommand(j.EffectiveCommand(), 50)
 				}
-				fmt.Printf("    %-6d %-12s %s\n", j.ID, campaign.JobDisplayStatus(j, outcomes), desc)
+				fmt.Printf("    %-6d %-12s %s\n", j.ID, displayStatus, desc)
+				if campaign.IsJobTerminal(displayStatus) {
+					if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil {
+						if summary := formatUploadSummary(timings); summary != "" {
+							fmt.Printf("             uploads: %s\n", summary)
+						}
+					}
+				}
+				if displayStatus == db.StatusFailed || displayStatus == db.AttemptOutcomeFailed || displayStatus == db.AttemptOutcomeOrphaned {
+					excerpt := readCachedJobFailureExcerpt(j.ID)
+					if excerpt == "" {
+						excerpt = truncate(strings.TrimSpace(strings.Join([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | ")), 180)
+					}
+					if excerpt != "" {
+						fmt.Printf("             failure: %s\n", excerpt)
+					}
+				}
 			}
 		}
 	}

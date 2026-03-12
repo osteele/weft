@@ -45,10 +45,12 @@ type HeartbeatSample struct {
 type InstanceUpdate struct {
 	CloudInstance      *db.CloudInstance
 	Jobs               []*db.Job
+	JobPhaseTimings    map[int64]*db.JobPhaseTimings
 	JobAttemptOutcomes map[int64]string // job_id → attempt outcome for this instance
 	Instance           *cloud.Instance  // nil if not yet provisioned
 	BootstrapStage     string           // current bootstrap stage from R2 (e.g. "agent_installed")
 	InstancePhase      string           // current job execution phase from R2 (e.g. "running:123")
+	PhaseChangedAt     *time.Time       // first observed time of the current phase within this watcher
 	StallMessage       string           // non-empty if bootstrap appears stuck
 	JobProgress        int              // -1 = no progress, 0-100 = percent
 	JobProgressID      int64            // which job the progress is for
@@ -65,6 +67,62 @@ func JobDisplayStatus(j *db.Job, outcomes map[int64]string) string {
 		return outcome
 	}
 	return j.Status
+}
+
+func inferInitialPhaseChangedAt(phase string, jobs []*db.Job, timings map[int64]*db.JobPhaseTimings) *time.Time {
+	verb, jobID, ok := parsePhaseJobID(phase)
+	if !ok {
+		return nil
+	}
+
+	var job *db.Job
+	for _, candidate := range jobs {
+		if candidate != nil && candidate.ID == jobID {
+			job = candidate
+			break
+		}
+	}
+	jobTimings := timings[jobID]
+
+	switch verb {
+	case "setup":
+		if jobTimings != nil && jobTimings.SetupStart != nil && *jobTimings.SetupStart > 0 {
+			ts := time.Unix(*jobTimings.SetupStart, 0)
+			return &ts
+		}
+	case "running":
+		if job != nil && job.StartTime > 0 {
+			ts := time.Unix(job.StartTime, 0)
+			return &ts
+		}
+		if jobTimings != nil && jobTimings.RunStart != nil && *jobTimings.RunStart > 0 {
+			ts := time.Unix(*jobTimings.RunStart, 0)
+			return &ts
+		}
+	case "finalizing":
+		if jobTimings != nil && jobTimings.RunEnd != nil && *jobTimings.RunEnd > 0 {
+			ts := time.Unix(*jobTimings.RunEnd, 0)
+			return &ts
+		}
+	case "uploading":
+		if jobTimings != nil && jobTimings.UploadStart != nil && *jobTimings.UploadStart > 0 {
+			ts := time.Unix(*jobTimings.UploadStart, 0)
+			return &ts
+		}
+	}
+	return nil
+}
+
+func parsePhaseJobID(phase string) (string, int64, bool) {
+	verb, jobIDText, ok := strings.Cut(phase, ":")
+	if !ok || jobIDText == "" {
+		return "", 0, false
+	}
+	jobID, err := strconv.ParseInt(jobIDText, 10, 64)
+	if err != nil {
+		return "", 0, false
+	}
+	return verb, jobID, true
 }
 
 // WatchInstance polls DB and cloud provider, sends updates on the returned channel.
@@ -84,6 +142,8 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		var lastProviderPoll time.Time
 		var cachedInstance *cloud.Instance
 		var firstDeadAt time.Time
+		var currentPhase string
+		var phaseChangedAt *time.Time
 
 		for {
 			select {
@@ -103,6 +163,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			}
 
 			jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+			jobPhaseTimings := make(map[int64]*db.JobPhaseTimings, len(jobs))
+			for _, j := range jobs {
+				if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil && timings != nil {
+					jobPhaseTimings[j.ID] = timings
+				}
+			}
 
 			// Refresh cloud instance info periodically
 			providerInstID := ci.EffectiveProviderID()
@@ -230,6 +296,20 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				stallMessage = fmt.Sprintf("heartbeat stale (%s since last update)", heartbeatAge.Truncate(time.Second))
 			}
 
+			if instancePhase == "" {
+				currentPhase = ""
+				phaseChangedAt = nil
+			} else if instancePhase != currentPhase {
+				prevPhase := currentPhase
+				currentPhase = instancePhase
+				if prevPhase == "" {
+					phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, jobs, jobPhaseTimings)
+				} else {
+					now := time.Now()
+					phaseChangedAt = &now
+				}
+			}
+
 			// Detect failed self-destruct: all jobs finished but instance still running.
 			// Give 2 minutes after the last job for uploads + self-destruct attempts.
 			if ci.Status == db.CloudInstanceStatusRunning && hasStartedJob && len(jobs) > 0 {
@@ -264,10 +344,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			update := InstanceUpdate{
 				CloudInstance:      ci,
 				Jobs:               jobs,
+				JobPhaseTimings:    jobPhaseTimings,
 				JobAttemptOutcomes: attemptOutcomes,
 				Instance:           cachedInstance,
 				BootstrapStage:     bootstrapStage,
 				InstancePhase:      instancePhase,
+				PhaseChangedAt:     phaseChangedAt,
 				StallMessage:       stallMessage,
 				JobProgress:        jobProgress,
 				JobProgressID:      jobProgressID,
@@ -406,8 +488,12 @@ func InstancePhaseLabel(phase string) string {
 			return fmt.Sprintf("setup (job %s)", jobID)
 		case "running":
 			return fmt.Sprintf("running job %s", jobID)
+		case "finalizing":
+			return fmt.Sprintf("finalizing job %s", jobID)
 		case "uploading":
 			return fmt.Sprintf("uploading outputs (job %s)", jobID)
+		case "uploading-results":
+			return fmt.Sprintf("uploading logs/results (job %s)", jobID)
 		case "disk-full":
 			return fmt.Sprintf("disk full (job %s)", jobID)
 		}
@@ -436,6 +522,33 @@ func TerminationIntentLabel(marker *instanceintent.Marker) string {
 	default:
 		return fmt.Sprintf("termination requested (%s)", reason)
 	}
+}
+
+func TerminationIntentDetail(marker *instanceintent.Marker) string {
+	if marker == nil {
+		return ""
+	}
+	parts := make([]string, 0, 3)
+	if marker.RequestedAtUnix > 0 {
+		parts = append(parts, fmt.Sprintf("requested %s ago", time.Since(time.Unix(marker.RequestedAtUnix, 0)).Truncate(time.Second)))
+	}
+	if marker.DestroyAttempts > 0 {
+		parts = append(parts, fmt.Sprintf("attempts=%d", marker.DestroyAttempts))
+	}
+	if marker.LastError != "" {
+		parts = append(parts, truncateText(marker.LastError, 160))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func truncateText(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // BootstrapStageLabel returns a human-readable label for a bootstrap stage.
@@ -481,6 +594,9 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	if curr.InstancePhase != "" && curr.InstancePhase != prev.InstancePhase {
 		label := InstancePhaseLabel(curr.InstancePhase)
 		line := fmt.Sprintf("instance %d: phase: %s", id, label)
+		if curr.PhaseChangedAt != nil {
+			line += fmt.Sprintf(" (for %s)", time.Since(*curr.PhaseChangedAt).Truncate(time.Second))
+		}
 		if curr.Heartbeat != nil {
 			line += fmt.Sprintf("  (gpu %d°C %d%%, disk %s free)",
 				curr.Heartbeat.GPUTempC, curr.Heartbeat.GPUUtilPct,
@@ -494,6 +610,9 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 		currLabel := TerminationIntentLabel(curr.TerminationIntent)
 		if currLabel != "" && currLabel != prevLabel {
 			lines = append(lines, fmt.Sprintf("instance %d: %s", id, currLabel))
+			if detail := TerminationIntentDetail(curr.TerminationIntent); detail != "" {
+				lines = append(lines, fmt.Sprintf("instance %d: termination detail: %s", id, detail))
+			}
 		}
 	}
 

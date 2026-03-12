@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -210,6 +211,76 @@ func TestExtractPhaseTimings_NewFields(t *testing.T) {
 	}
 	if timings.CacheHFPostBytes == nil || *timings.CacheHFPostBytes != 789012 {
 		t.Errorf("CacheHFPostBytes = %v, want 789012", timings.CacheHFPostBytes)
+	}
+}
+
+func TestExtractPhaseTimings_StructuredUploadMetrics(t *testing.T) {
+	tmpDir := t.TempDir()
+	jobID := int64(42)
+
+	phases := map[string]any{
+		"wrapper_start": 1000,
+		"setup_start":   1005,
+		"setup_end":     1010,
+		"run_start":     1010,
+		"run_end":       1020,
+		"upload_start":  1021,
+		"upload_end":    1024,
+	}
+	phaseData, err := json.Marshal(phases)
+	if err != nil {
+		t.Fatalf("marshal phases: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("%d.phases.json", jobID)), phaseData, 0644); err != nil {
+		t.Fatalf("write phases: %v", err)
+	}
+
+	completion := map[string]any{
+		"max_gpu_mem_mib": 2048,
+		"output_upload": map[string]any{
+			"bytes":       4096,
+			"file_count":  3,
+			"retry_count": 1,
+			"duration_ms": 250,
+		},
+		"results_upload": map[string]any{
+			"bytes":       8192,
+			"file_count":  4,
+			"duration_ms": 600,
+		},
+	}
+	completionData, err := json.Marshal(completion)
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, fmt.Sprintf("%d.completion.json", jobID)), completionData, 0644); err != nil {
+		t.Fatalf("write completion: %v", err)
+	}
+
+	timings := ExtractPhaseTimings(jobID, tmpDir)
+	if timings == nil {
+		t.Fatal("expected non-nil timings")
+	}
+	if timings.UploadStart == nil || *timings.UploadStart != 1021 {
+		t.Fatalf("UploadStart = %v, want 1021", timings.UploadStart)
+	}
+	if timings.UploadEnd == nil || *timings.UploadEnd != 1024 {
+		t.Fatalf("UploadEnd = %v, want 1024", timings.UploadEnd)
+	}
+	if timings.UploadWorkspaceBytes == nil || *timings.UploadWorkspaceBytes != 4096 {
+		t.Fatalf("UploadWorkspaceBytes = %v, want 4096", timings.UploadWorkspaceBytes)
+	}
+	if timings.OutputUploadFiles == nil || *timings.OutputUploadFiles != 3 {
+		t.Fatalf("OutputUploadFiles = %v, want 3", timings.OutputUploadFiles)
+	}
+	if timings.OutputUploadRetries == nil || *timings.OutputUploadRetries != 1 {
+		t.Fatalf("OutputUploadRetries = %v, want 1", timings.OutputUploadRetries)
+	}
+	if timings.ResultsUploadFiles == nil || *timings.ResultsUploadFiles != 4 {
+		t.Fatalf("ResultsUploadFiles = %v, want 4", timings.ResultsUploadFiles)
+	}
+	if timings.UploadResultsBytes == nil || *timings.UploadResultsBytes != 8192 {
+		t.Fatalf("UploadResultsBytes = %v, want 8192", timings.UploadResultsBytes)
 	}
 }
 

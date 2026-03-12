@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 )
 
 func TestFormatPlainUpdate_Initial(t *testing.T) {
@@ -93,7 +94,9 @@ func TestInstancePhaseLabel(t *testing.T) {
 	}{
 		{"setup:42", "setup (job 42)"},
 		{"running:123", "running job 123"},
+		{"finalizing:7", "finalizing job 7"},
 		{"uploading:7", "uploading outputs (job 7)"},
+		{"uploading-results:7", "uploading logs/results (job 7)"},
 		{"disk-full:7", "disk full (job 7)"},
 		{"grace", "grace period"},
 		{"unknown", "unknown"},
@@ -102,6 +105,32 @@ func TestInstancePhaseLabel(t *testing.T) {
 		if got := InstancePhaseLabel(tt.phase); got != tt.want {
 			t.Errorf("InstancePhaseLabel(%q) = %q, want %q", tt.phase, got, tt.want)
 		}
+	}
+}
+
+func TestInferInitialPhaseChangedAt_RunningUsesJobStartTime(t *testing.T) {
+	startTime := time.Now().Add(-45 * time.Second).Unix()
+	got := inferInitialPhaseChangedAt(
+		"running:42",
+		[]*db.Job{{ID: 42, StartTime: startTime}},
+		nil,
+	)
+	if got == nil {
+		t.Fatal("expected non-nil phase start")
+	}
+	if got.Unix() != startTime {
+		t.Fatalf("phase start = %d, want %d", got.Unix(), startTime)
+	}
+}
+
+func TestInferInitialPhaseChangedAt_UnknownUploadPhaseReturnsNil(t *testing.T) {
+	got := inferInitialPhaseChangedAt(
+		"uploading-results:42",
+		[]*db.Job{{ID: 42, StartTime: time.Now().Unix()}},
+		nil,
+	)
+	if got != nil {
+		t.Fatalf("phase start = %v, want nil", got)
 	}
 }
 
@@ -117,11 +146,34 @@ func TestFailureTerminationReasonFromPhase(t *testing.T) {
 func TestFormatPlainUpdate_PhaseChange(t *testing.T) {
 	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
 	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "setup:42"}
-	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42"}
+	changedAt := time.Now().Add(-5 * time.Second)
+	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", PhaseChangedAt: &changedAt}
 
 	output := FormatPlainUpdate(prev, curr)
-	if !strings.Contains(output, "phase: running job 42") {
+	if !strings.Contains(output, "phase: running job 42 (for") {
 		t.Errorf("should contain phase change, got %q", output)
+	}
+}
+
+func TestFormatPlainUpdate_TerminationDetail(t *testing.T) {
+	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusFailed}
+	prev := InstanceUpdate{CloudInstance: ci}
+	curr := InstanceUpdate{
+		CloudInstance: ci,
+		TerminationIntent: &instanceintent.Marker{
+			TerminalStatus:  db.CloudInstanceStatusFailed,
+			RequestedAtUnix: time.Now().Add(-3 * time.Second).Unix(),
+			DestroyAttempts: 2,
+			LastError:       "exit status 22",
+		},
+	}
+
+	output := FormatPlainUpdate(prev, curr)
+	if !strings.Contains(output, "termination detail:") {
+		t.Fatalf("expected termination detail, got %q", output)
+	}
+	if !strings.Contains(output, "attempts=2") {
+		t.Fatalf("expected attempt count, got %q", output)
 	}
 }
 

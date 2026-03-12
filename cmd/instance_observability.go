@@ -1,0 +1,130 @@
+package cmd
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logcache"
+)
+
+func formatObservedPhase(update campaign.InstanceUpdate, now time.Time) string {
+	label := campaign.InstancePhaseLabel(update.InstancePhase)
+	if update.PhaseChangedAt == nil {
+		return label
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return fmt.Sprintf("%s (for %s)", label, now.Sub(*update.PhaseChangedAt).Truncate(time.Second))
+}
+
+func formatUploadSummary(timings *db.JobPhaseTimings) string {
+	if timings == nil {
+		return ""
+	}
+	var parts []string
+	if hasStructuredOutputUploadSummary(timings) {
+		parts = append(parts, "outputs "+formatUploadStats(
+			valueInt64(timings.UploadWorkspaceBytes),
+			valueInt(timings.OutputUploadFiles),
+			valueInt64(timings.OutputUploadDuration),
+			valueInt(timings.OutputUploadRetries),
+		))
+	}
+	if timings.UploadResultsBytes != nil || timings.ResultsUploadFiles != nil || timings.ResultsUploadDuration != nil {
+		parts = append(parts, "logs "+formatUploadStats(
+			valueInt64(timings.UploadResultsBytes),
+			valueInt(timings.ResultsUploadFiles),
+			valueInt64(timings.ResultsUploadDuration),
+			valueInt(timings.ResultsUploadRetries),
+		))
+	}
+	return strings.Join(parts, " | ")
+}
+
+func hasStructuredOutputUploadSummary(timings *db.JobPhaseTimings) bool {
+	if timings == nil {
+		return false
+	}
+	return timings.OutputUploadFiles != nil ||
+		timings.OutputUploadRetries != nil ||
+		timings.OutputUploadDuration != nil
+}
+
+func formatUploadStats(bytes int64, files int, durationMS int64, retries int) string {
+	var parts []string
+	if files > 0 {
+		parts = append(parts, fmt.Sprintf("%d files", files))
+	}
+	if bytes > 0 {
+		parts = append(parts, formatBytesIEC(bytes))
+	}
+	if durationMS > 0 {
+		parts = append(parts, (time.Duration(durationMS) * time.Millisecond).String())
+	}
+	if retries > 0 {
+		parts = append(parts, fmt.Sprintf("retries=%d", retries))
+	}
+	if len(parts) == 0 {
+		return "no data"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func readCachedJobFailureExcerpt(jobID int64) string {
+	content, err := logcache.Read(jobID)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	candidates := make([]string, 0, 4)
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "===") {
+			continue
+		}
+		if strings.HasPrefix(line, "Downloaded ") || strings.HasPrefix(line, "Preparing ") {
+			continue
+		}
+		candidates = append([]string{line}, candidates...)
+		if len(candidates) == 3 {
+			break
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return truncate(strings.Join(candidates, " | "), 180)
+}
+
+func formatBytesIEC(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	value := float64(n)
+	for _, unit := range units {
+		value /= 1024
+		if value < 1024 {
+			return fmt.Sprintf("%.1f %s", value, unit)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value/1024)
+}
+
+func valueInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func valueInt(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
+}

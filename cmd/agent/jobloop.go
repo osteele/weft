@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2keys"
@@ -94,14 +95,29 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			oplog.LogJob(oplog.OpJobComplete, job.ID, "", oplog.WithDetail("exit=0"))
 		}
 
-		uploadPhase := fmt.Sprintf("uploading:%d", job.ID)
+		finalizePhase := fmt.Sprintf("finalizing:%d", job.ID)
 		if cfg.OnPhase != nil {
-			cfg.OnPhase(uploadPhase)
+			cfg.OnPhase(finalizePhase)
 		}
-		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(uploadPhase))
-		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadPhase)
+		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(finalizePhase))
+		writePhase(cfg.R2Bucket, cfg.PhaseKey, finalizePhase)
 
-		// Upload output directories
+		uploadStartedAt := time.Now()
+		uploadStartedUnix := uploadStartedAt.Unix()
+		if err := patchPhaseUploadWindow(cfg.LogDir, job.ID, uploadStartedUnix, 0); err != nil {
+			fmt.Fprintf(os.Stderr, "patch phase timing for job %d: upload start: %v\n", job.ID, err)
+		}
+
+		// Upload output directories when the job produced convention-based outputs.
+		if hasOutputDirs(workDir) {
+			uploadPhase := fmt.Sprintf("uploading:%d", job.ID)
+			if cfg.OnPhase != nil {
+				cfg.OnPhase(uploadPhase)
+			}
+			oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(uploadPhase))
+			writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadPhase)
+		}
+
 		uploadResult := uploadOutputDirs(cfg.R2Bucket, job.ID, job.RunID, workDir)
 		if uploadResult.Status != "ok" {
 			failPhase := fmt.Sprintf("upload-failed:%d", job.ID)
@@ -114,7 +130,18 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		patchCompletionUpload(cfg.LogDir, job.ID, &uploadResult)
 
 		// Upload per-job results
-		uploadJobResults(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir)
+		resultsPhase := fmt.Sprintf("uploading-results:%d", job.ID)
+		if cfg.OnPhase != nil {
+			cfg.OnPhase(resultsPhase)
+		}
+		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(resultsPhase))
+		writePhase(cfg.R2Bucket, cfg.PhaseKey, resultsPhase)
+		resultsUpload := uploadJobResults(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir)
+		patchCompletionResultsUpload(cfg.LogDir, job.ID, &resultsUpload)
+		uploadEndedUnix := time.Now().Unix()
+		if err := patchPhaseUploadWindow(cfg.LogDir, job.ID, uploadStartedUnix, uploadEndedUnix); err != nil {
+			fmt.Fprintf(os.Stderr, "patch phase timing for job %d: upload end: %v\n", job.ID, err)
+		}
 		stopTimeseriesUploader()
 		r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
 
@@ -139,7 +166,19 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 }
 
 func patchCompletionUpload(logDir string, jobID int64, upload *runner.OutputUploadResult) {
-	if upload == nil {
+	patchCompletionRecord(logDir, jobID, func(rec *runner.CompletionRecord) {
+		rec.OutputUpload = upload
+	})
+}
+
+func patchCompletionResultsUpload(logDir string, jobID int64, upload *runner.UploadSummary) {
+	patchCompletionRecord(logDir, jobID, func(rec *runner.CompletionRecord) {
+		rec.ResultsUpload = upload
+	})
+}
+
+func patchCompletionRecord(logDir string, jobID int64, mutate func(*runner.CompletionRecord)) {
+	if mutate == nil {
 		return
 	}
 	paths := runner.NewJobPaths(logDir, jobID)
@@ -155,7 +194,7 @@ func patchCompletionUpload(logDir string, jobID int64, upload *runner.OutputUplo
 		return
 	}
 
-	rec.OutputUpload = upload
+	mutate(&rec)
 	out, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "patch completion record for job %d: encode: %v\n", jobID, err)
@@ -165,4 +204,41 @@ func patchCompletionUpload(logDir string, jobID int64, upload *runner.OutputUplo
 	if err := os.WriteFile(paths.Completion, out, 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "patch completion record for job %d: write: %v\n", jobID, err)
 	}
+}
+
+func patchPhaseUploadWindow(logDir string, jobID, uploadStart, uploadEnd int64) error {
+	paths := runner.NewJobPaths(logDir, jobID)
+	data, err := os.ReadFile(paths.Phases)
+	if err != nil {
+		return err
+	}
+
+	var phases runner.PhaseTiming
+	if err := json.Unmarshal(data, &phases); err != nil {
+		return err
+	}
+	if uploadStart > 0 {
+		phases.UploadStart = uploadStart
+	}
+	if uploadEnd > 0 {
+		phases.UploadEnd = uploadEnd
+	}
+
+	out, err := json.MarshalIndent(phases, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	return os.WriteFile(paths.Phases, out, 0o644)
+}
+
+func hasOutputDirs(workDir string) bool {
+	for _, dir := range config.DefaultOutputDirs {
+		dir = filepath.Clean(dir)
+		info, err := os.Stat(filepath.Join(workDir, dir))
+		if err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
 }

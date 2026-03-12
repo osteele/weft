@@ -12,6 +12,7 @@ func TestCurrentJobIDFromPhase(t *testing.T) {
 		want  int64
 	}{
 		{"running:123", 123},
+		{"finalizing:66", 66},
 		{"uploading:77", 77},
 		{"disk-full:88", 88},
 		{"grace", 0},

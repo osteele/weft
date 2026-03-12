@@ -248,6 +248,8 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 		SetupEnd     int64 `json:"setup_end"`
 		RunStart     int64 `json:"run_start"`
 		RunEnd       int64 `json:"run_end"`
+		UploadStart  int64 `json:"upload_start"`
+		UploadEnd    int64 `json:"upload_end"`
 		CachePre     *struct {
 			HFBytes int64 `json:"hf_bytes"`
 			UVBytes int64 `json:"uv_bytes"`
@@ -280,6 +282,12 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 	if phases.RunEnd > 0 {
 		t.RunEnd = &phases.RunEnd
 	}
+	if phases.UploadStart > 0 {
+		t.UploadStart = &phases.UploadStart
+	}
+	if phases.UploadEnd > 0 {
+		t.UploadEnd = &phases.UploadEnd
+	}
 	if phases.CachePre != nil {
 		t.CacheHFBytes = &phases.CachePre.HFBytes
 		t.CacheUVBytes = &phases.CachePre.UVBytes
@@ -302,10 +310,60 @@ func extractStructuredPhaseTimings(jobID int64, tmpDir string) *db.JobPhaseTimin
 		var completion struct {
 			PeakRSSKB    int64 `json:"peak_rss_kb"`
 			MaxGPUMemMiB int   `json:"max_gpu_mem_mib"`
+			OutputUpload *struct {
+				FileCount       int   `json:"file_count"`
+				Bytes           int64 `json:"bytes"`
+				RetryCount      int   `json:"retry_count"`
+				DurationMS      int64 `json:"duration_ms"`
+				StartedAtUnix   int64 `json:"started_at_unix"`
+				CompletedAtUnix int64 `json:"completed_at_unix"`
+			} `json:"output_upload"`
+			ResultsUpload *struct {
+				FileCount       int   `json:"file_count"`
+				Bytes           int64 `json:"bytes"`
+				RetryCount      int   `json:"retry_count"`
+				DurationMS      int64 `json:"duration_ms"`
+				StartedAtUnix   int64 `json:"started_at_unix"`
+				CompletedAtUnix int64 `json:"completed_at_unix"`
+			} `json:"results_upload"`
 		}
 		if json.Unmarshal(cData, &completion) == nil {
 			if completion.MaxGPUMemMiB > 0 {
 				t.PeakGPUMemMiB = &completion.MaxGPUMemMiB
+			}
+			if completion.OutputUpload != nil {
+				if completion.OutputUpload.Bytes > 0 {
+					t.UploadWorkspaceBytes = &completion.OutputUpload.Bytes
+				}
+				if completion.OutputUpload.FileCount > 0 {
+					t.OutputUploadFiles = &completion.OutputUpload.FileCount
+				}
+				if completion.OutputUpload.RetryCount > 0 {
+					t.OutputUploadRetries = &completion.OutputUpload.RetryCount
+				}
+				if completion.OutputUpload.DurationMS > 0 {
+					t.OutputUploadDuration = &completion.OutputUpload.DurationMS
+				}
+				if t.UploadStart == nil && completion.OutputUpload.StartedAtUnix > 0 {
+					t.UploadStart = &completion.OutputUpload.StartedAtUnix
+				}
+			}
+			if completion.ResultsUpload != nil {
+				if completion.ResultsUpload.Bytes > 0 {
+					t.UploadResultsBytes = &completion.ResultsUpload.Bytes
+				}
+				if completion.ResultsUpload.FileCount > 0 {
+					t.ResultsUploadFiles = &completion.ResultsUpload.FileCount
+				}
+				if completion.ResultsUpload.RetryCount > 0 {
+					t.ResultsUploadRetries = &completion.ResultsUpload.RetryCount
+				}
+				if completion.ResultsUpload.DurationMS > 0 {
+					t.ResultsUploadDuration = &completion.ResultsUpload.DurationMS
+				}
+				if t.UploadEnd == nil && completion.ResultsUpload.CompletedAtUnix > 0 {
+					t.UploadEnd = &completion.ResultsUpload.CompletedAtUnix
+				}
 			}
 		}
 	}
