@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -73,6 +75,76 @@ func TestFilterJobsByIDs(t *testing.T) {
 	}
 	if filtered[0].ID != 10 || filtered[1].ID != 30 {
 		t.Errorf("expected jobs [10, 30], got [%d, %d]", filtered[0].ID, filtered[1].ID)
+	}
+}
+
+func TestFindFreshRepoBinary_UsesMatchingRepoBinary(t *testing.T) {
+	sourceDir := t.TempDir()
+	repoBinary := filepath.Join(sourceDir, "weft")
+	writeTestWeftBinary(t, repoBinary, "abc123def456")
+
+	oldExecutable := osExecutable
+	t.Cleanup(func() {
+		osExecutable = oldExecutable
+	})
+	osExecutable = func() (string, error) {
+		return filepath.Join(sourceDir, "installed-weft"), nil
+	}
+
+	got := findFreshRepoBinary(sourceDir, "abc123def456")
+	if got != repoBinary {
+		t.Fatalf("findFreshRepoBinary() = %q, want %q", got, repoBinary)
+	}
+}
+
+func TestFindFreshRepoBinary_SkipsCurrentExecutable(t *testing.T) {
+	sourceDir := t.TempDir()
+	repoBinary := filepath.Join(sourceDir, "weft")
+	writeTestWeftBinary(t, repoBinary, "abc123def456")
+
+	oldExecutable := osExecutable
+	t.Cleanup(func() {
+		osExecutable = oldExecutable
+	})
+	osExecutable = func() (string, error) {
+		return repoBinary, nil
+	}
+
+	if got := findFreshRepoBinary(sourceDir, "abc123def456"); got != "" {
+		t.Fatalf("findFreshRepoBinary() = %q, want empty string", got)
+	}
+}
+
+func TestFindFreshRepoBinary_IgnoresVersionMismatch(t *testing.T) {
+	sourceDir := t.TempDir()
+	repoBinary := filepath.Join(sourceDir, "weft")
+	writeTestWeftBinary(t, repoBinary, "old-version")
+
+	oldExecutable := osExecutable
+	t.Cleanup(func() {
+		osExecutable = oldExecutable
+	})
+	osExecutable = func() (string, error) {
+		return filepath.Join(sourceDir, "installed-weft"), nil
+	}
+
+	if got := findFreshRepoBinary(sourceDir, "new-version"); got != "" {
+		t.Fatalf("findFreshRepoBinary() = %q, want empty string", got)
+	}
+}
+
+func writeTestWeftBinary(t *testing.T, path, embeddedVersion string) {
+	t.Helper()
+
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"internal-agent-version\" ]; then\n" +
+		"  printf '%s\\n' \"" + embeddedVersion + "\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write test binary: %v", err)
 	}
 }
 

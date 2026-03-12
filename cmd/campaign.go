@@ -26,6 +26,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	osExecutable = os.Executable
+	execCommand  = exec.Command
+	syscallExec  = syscall.Exec
+)
+
 var campaignCmd = &cobra.Command{
 	Use:   "campaign",
 	Short: "Manage cloud GPU campaigns (batches of instances)",
@@ -809,6 +815,11 @@ func ensureAgentFresh() error {
 		return fmt.Errorf("agent binary is stale but not in the weft source tree; run \"just build\" manually")
 	}
 
+	if freshBinary := findFreshRepoBinary(sourceDir, version); freshBinary != "" {
+		fmt.Println("Re-executing with fresh binary...")
+		return syscallExec(freshBinary, os.Args, os.Environ())
+	}
+
 	justPath, lookErr := exec.LookPath("just")
 	if lookErr != nil {
 		return fmt.Errorf("agent binary is stale and `just` is not installed; install it or run \"go build .\" in %s", sourceDir)
@@ -832,7 +843,49 @@ func ensureAgentFresh() error {
 	}
 	fmt.Println("Re-executing with fresh binary...")
 	env := append(os.Environ(), "WEFT_AGENT_REBUILT=1")
-	return syscall.Exec(freshBinary, os.Args, env)
+	return syscallExec(freshBinary, os.Args, env)
+}
+
+func findFreshRepoBinary(sourceDir, version string) string {
+	freshBinary := filepath.Join(sourceDir, "weft")
+	if sameExecutable(freshBinary) {
+		return ""
+	}
+
+	embeddedVersion, err := embeddedAgentVersionFromBinary(freshBinary)
+	if err != nil || embeddedVersion != version {
+		return ""
+	}
+
+	return freshBinary
+}
+
+func sameExecutable(path string) bool {
+	current, err := osExecutable()
+	if err != nil {
+		return false
+	}
+
+	currentEval, err := filepath.EvalSymlinks(current)
+	if err == nil {
+		current = currentEval
+	}
+
+	targetEval, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		path = targetEval
+	}
+
+	return current == path
+}
+
+func embeddedAgentVersionFromBinary(path string) (string, error) {
+	cmd := execCommand(path, "internal-agent-version")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // printAutoBudget prints the auto-derived budget limits.

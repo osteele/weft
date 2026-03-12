@@ -52,14 +52,23 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 	return path, nil
 }
 
+// EmbeddedVersion returns the version recorded for the embedded agent binaries.
+// Returns os.ErrNotExist if no VERSION file was embedded.
+func EmbeddedVersion() (string, error) {
+	embeddedVerBytes, err := agentBinaries.ReadFile("binaries/VERSION")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(embeddedVerBytes)), nil
+}
+
 // CheckEmbeddedVersion verifies the embedded agent binary version matches the
 // requested version. Returns nil if no VERSION file exists (backwards compat).
 func CheckEmbeddedVersion(requestedVer string) error {
-	embeddedVerBytes, err := agentBinaries.ReadFile("binaries/VERSION")
+	embeddedVer, err := EmbeddedVersion()
 	if err != nil {
 		return nil
 	}
-	embeddedVer := strings.TrimSpace(string(embeddedVerBytes))
 	if embeddedVer == "" || embeddedVer == "dev" {
 		return nil
 	}

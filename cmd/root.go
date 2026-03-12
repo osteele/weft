@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/spf13/cobra"
@@ -81,8 +82,22 @@ var versionCmd = &cobra.Command{
 	},
 }
 
+var embeddedAgentVersionCmd = &cobra.Command{
+	Use:    "internal-agent-version",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		version, err := agentdeploy.EmbeddedVersion()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), version)
+		return nil
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(embeddedAgentVersionCmd)
 }
 
 func printCommandError(cmd *cobra.Command, err error) {
