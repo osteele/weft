@@ -225,10 +225,10 @@ func writeGraceStatus(bucket, prefix string, status graceStatus) {
 	}
 }
 
-func uploadJobResults(bucket string, jobID int64, logDir string) {
+func uploadJobResults(bucket string, jobID, runID int64, logDir string) {
 	// Upload per-job results
 	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobResultsPrefix(jobID))
+	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobAttemptResultsPrefix(jobID, runID))
 	rcloneCmd.Stderr = os.Stderr
 	start := time.Now()
 	copyOK := false
@@ -243,11 +243,11 @@ func uploadJobResults(bucket string, jobID int64, logDir string) {
 	copyCancel()
 
 	if copyOK {
-		cleanupLiveLogUpload(bucket, jobID)
+		cleanupLiveLogUpload(bucket, jobID, runID)
 	}
 
 	// Write completion marker
-	if err := r2Put(bucket, r2keys.JobComplete(jobID), "done"); err != nil {
+	if err := r2Put(bucket, r2keys.JobAttemptComplete(jobID, runID), "done"); err != nil {
 		fmt.Fprintf(os.Stderr, "write completion marker for job %d: %v\n", jobID, err)
 	}
 }

@@ -5,6 +5,7 @@ import "encoding/json"
 // AgentJob describes a job for the campaign manifest, used by weft-agent run-campaign.
 type AgentJob struct {
 	ID      int64  `json:"id"`
+	RunID   int64  `json:"run_id,omitempty"`
 	Command string `json:"cmd"`
 	Dir     string `json:"dir,omitempty"`
 }

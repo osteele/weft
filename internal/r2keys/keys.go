@@ -68,6 +68,83 @@ func JobPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d", jobID)
 }
 
+func JobRunPrefix(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobPrefix(jobID)
+	}
+	return fmt.Sprintf("jobs/%d/runs/%d", jobID, runID)
+}
+
+func JobAttemptStarted(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobStarted(jobID)
+	}
+	return fmt.Sprintf("%s/.started", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptComplete(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobComplete(jobID)
+	}
+	return fmt.Sprintf("%s/.complete", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptResultsPrefix(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobResultsPrefix(jobID)
+	}
+	return fmt.Sprintf("%s/results/", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptResultLog(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobResultLog(jobID)
+	}
+	return fmt.Sprintf("%s/results/%d.log", JobRunPrefix(jobID, runID), jobID)
+}
+
+func JobAttemptLiveLogsPrefix(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobLiveLogsPrefix(jobID)
+	}
+	return fmt.Sprintf("%s/live-log/", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptLiveLogManifest(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobLiveLogManifest(jobID)
+	}
+	return fmt.Sprintf("%s/live-log/manifest.json", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptLiveLogPart(jobID, runID int64, part int) string {
+	if runID <= 0 {
+		return JobLiveLogPart(jobID, part)
+	}
+	return fmt.Sprintf("%s/live-log/part-%06d.log", JobRunPrefix(jobID, runID), part)
+}
+
+func JobAttemptOutputsPrefix(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobOutputsPrefix(jobID)
+	}
+	return fmt.Sprintf("%s/outputs/", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptOutputDir(jobID, runID int64, dir string) string {
+	if runID <= 0 {
+		return JobOutputDir(jobID, dir)
+	}
+	return fmt.Sprintf("%s/outputs/%s/", JobRunPrefix(jobID, runID), dir)
+}
+
+func JobAttemptLiveTimeseries(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobLiveTimeseries(jobID)
+	}
+	return fmt.Sprintf("%s/timeseries.jsonl", JobRunPrefix(jobID, runID))
+}
+
 // Grace period keys
 
 func GracePrefix(instanceID int64) string {

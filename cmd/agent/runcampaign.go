@@ -196,7 +196,7 @@ func phaseCallback(r2Bucket, phaseKey string, jobID int64, setPhase func(string)
 }
 
 // uploadOutputDirs uploads convention-based output directories to R2.
-func uploadOutputDirs(bucket string, jobID int64, workDir string) runner.OutputUploadResult {
+func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.OutputUploadResult {
 	var result runner.OutputUploadResult
 	var attempted int
 	var failed int
@@ -215,7 +215,7 @@ func uploadOutputDirs(bucket string, jobID int64, workDir string) runner.OutputU
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			cmd := exec.CommandContext(ctx, "rclone", "copy",
 				dirPath+"/",
-				"r2:"+bucket+"/"+r2keys.JobOutputDir(jobID, dir),
+				"r2:"+bucket+"/"+r2keys.JobAttemptOutputDir(jobID, runID, dir),
 			)
 			cmd.Stderr = os.Stderr
 			err := cmd.Run()
@@ -299,10 +299,10 @@ func cleanLogDir(logDir string) {
 // runJobWithProgress runs a single job with progress reporting to R2.
 // Starts a background goroutine that tails the log for progress lines,
 // cleans up the R2 progress key when done.
-func runJobWithProgress(r2Bucket string, jobID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
+func runJobWithProgress(r2Bucket string, jobID, runID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
 	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
 	stopProgress := startProgressReporter(r2Bucket, jobID, logPath)
-	stopLogs := startLogUploader(r2Bucket, jobID, logPath)
+	stopLogs := startLogUploader(r2Bucket, jobID, runID, logPath)
 	defer func() {
 		stopProgress()
 		stopLogs()
@@ -411,7 +411,7 @@ func startOpslogReporter(bucket string, instanceID int64, logDir string) func() 
 
 // startTimeseriesUploader starts a goroutine that periodically uploads the
 // local timeseries JSONL file to a live R2 checkpoint key.
-func startTimeseriesUploader(bucket string, jobID int64, timeseriesPath string) func() {
+func startTimeseriesUploader(bucket string, jobID, runID int64, timeseriesPath string) func() {
 	var once sync.Once
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -429,7 +429,7 @@ func startTimeseriesUploader(bucket string, jobID int64, timeseriesPath string) 
 		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, "rclone", "copyto",
-			timeseriesPath, fmt.Sprintf("r2:%s/%s", bucket, r2keys.JobLiveTimeseries(jobID)))
+			timeseriesPath, fmt.Sprintf("r2:%s/%s", bucket, r2keys.JobAttemptLiveTimeseries(jobID, runID)))
 		cmd.Stderr = os.Stderr
 		err = cmd.Run()
 		cancel()
@@ -516,11 +516,11 @@ func readLogTail(path string, maxBytes int64) string {
 	return string(data[:n])
 }
 
-func cleanupLiveLogUpload(bucket string, jobID int64) {
-	if err := r2Delete(bucket, cloudlog.ManifestKey(jobID)); err != nil {
+func cleanupLiveLogUpload(bucket string, jobID, runID int64) {
+	if err := r2Delete(bucket, cloudlog.ManifestKeyForRun(jobID, runID)); err != nil {
 		fmt.Fprintf(os.Stderr, "delete live log manifest for job %d: %v\n", jobID, err)
 	}
-	if err := r2Delete(bucket, cloudlog.Prefix(jobID)); err != nil {
+	if err := r2Delete(bucket, cloudlog.PrefixForRun(jobID, runID)); err != nil {
 		fmt.Fprintf(os.Stderr, "delete live log parts for job %d: %v\n", jobID, err)
 	}
 }

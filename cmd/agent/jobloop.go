@@ -52,9 +52,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		oplog.LogJob(oplog.OpJobStart, job.ID, "", oplog.WithDetailf("cmd=%s", job.Command))
 
 		// Write .started marker to R2
-		r2Put(cfg.R2Bucket, r2keys.JobStarted(job.ID), fmt.Sprintf("%d", time.Now().Unix()))
+		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", time.Now().Unix()))
 		timeseriesPath := runner.NewJobPaths(cfg.LogDir, job.ID).Timeseries
-		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, timeseriesPath)
+		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, timeseriesPath)
 
 		workDir := job.Dir
 		if workDir == "" {
@@ -78,7 +78,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			OnPhase:    phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
 		}
 
-		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, cfg.LogDir, jobCfg)
+		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir, jobCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
@@ -102,7 +102,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadPhase)
 
 		// Upload output directories
-		uploadResult := uploadOutputDirs(cfg.R2Bucket, job.ID, workDir)
+		uploadResult := uploadOutputDirs(cfg.R2Bucket, job.ID, job.RunID, workDir)
 		if uploadResult.Status != "ok" {
 			failPhase := fmt.Sprintf("upload-failed:%d", job.ID)
 			if cfg.OnPhase != nil {
@@ -114,9 +114,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		patchCompletionUpload(cfg.LogDir, job.ID, &uploadResult)
 
 		// Upload per-job results
-		uploadJobResults(cfg.R2Bucket, job.ID, cfg.LogDir)
+		uploadJobResults(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir)
 		stopTimeseriesUploader()
-		r2Delete(cfg.R2Bucket, r2keys.JobLiveTimeseries(job.ID))
+		r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
 
 		// Promote uv manifest
 		promoteUVManifest(cfg.R2Bucket, cfg.LogDir)

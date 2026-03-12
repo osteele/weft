@@ -147,7 +147,7 @@ func handleDiskFull(r2Bucket string, instanceID int64, ballastDir, ballastPath, 
 
 	if jobID > 0 {
 		logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
-		uploadLiveLog(r2Bucket, jobID, logPath, &liveLogUploadState{partHashes: make(map[int]uint64)})
+		uploadLiveLog(r2Bucket, jobID, 0, logPath, &liveLogUploadState{partHashes: make(map[int]uint64)})
 	}
 	uploadOpslog(r2Bucket, instanceID, logDir)
 

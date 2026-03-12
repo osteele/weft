@@ -70,7 +70,16 @@ func (c *Coordinator) sweepVastaiResults() *r2.Client {
 // processCompletedVastaiJob downloads results from R2, updates the job in the DB,
 // writes logs to the log cache, and cleans up the R2 prefix.
 func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r2.Client, jobID int64) {
-	prefix := r2keys.JobPrefix(jobID)
+	var latestRunID sql.NullInt64
+	if err := c.db.QueryRow(`SELECT latest_run_id FROM jobs WHERE id = ?`, jobID).Scan(&latestRunID); err != nil && err != sql.ErrNoRows {
+		c.logger.Printf("vastai sweep: latest_run_id for job %d: %v", jobID, err)
+	}
+	runID := int64(0)
+	if latestRunID.Valid {
+		runID = latestRunID.Int64
+	}
+	resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
+	cleanupPrefix := r2keys.JobRunPrefix(jobID, runID)
 
 	// Download results to temp dir
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-vastai-%d-*", jobID))
@@ -80,9 +89,18 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	}
 	defer os.RemoveAll(tmpDir)
 
-	if err := r2Client.DownloadResults(ctx, prefix+"/results/", tmpDir); err != nil {
-		c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
-		return
+	if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
+		if runID > 0 {
+			resultPrefix = r2keys.JobResultsPrefix(jobID)
+			cleanupPrefix = r2keys.JobPrefix(jobID)
+			if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
+				c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
+				return
+			}
+		} else {
+			c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
+			return
+		}
 	}
 
 	// Try agent format first: completion.json has structured exit info
@@ -134,6 +152,9 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		c.logger.Printf("vastai sweep: update job %d: %v", jobID, err)
 		return
 	}
+	if err := db.PersistLatestRunSnapshot(c.db, jobID, ""); err != nil {
+		c.logger.Printf("vastai sweep: persist run snapshot for job %d: %v", jobID, err)
+	}
 	var cloudInstanceID sql.NullInt64
 	if err := c.db.QueryRow(`SELECT cloud_instance_id FROM jobs WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
 		if err := db.RefineInstanceTerminationReason(c.db, cloudInstanceID.Int64); err != nil {
@@ -161,7 +182,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	WriteVastaiLogsToCache(jobID, tmpDir)
 
 	// Clean up R2 prefix
-	if err := r2Client.DeletePrefix(ctx, prefix+"/"); err != nil {
+	if err := r2Client.DeletePrefix(ctx, cleanupPrefix+"/"); err != nil {
 		c.logger.Printf("vastai sweep: cleanup R2 for job %d: %v", jobID, err)
 	}
 

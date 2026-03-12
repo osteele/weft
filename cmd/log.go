@@ -427,7 +427,11 @@ func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	fetched, err := fetchCloudLogFromR2(ctx, r2Client, job.ID, logFrom, logTo, logLines)
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+	fetched, err := fetchCloudLogFromR2(ctx, r2Client, job.ID, runID, logFrom, logTo, logLines)
 	if err != nil {
 		return err
 	}
@@ -455,57 +459,73 @@ type fetchedCloudLog struct {
 	Lines   int
 }
 
-func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID int64, from, to, lines int) (*fetchedCloudLog, error) {
-	finalKey := r2keys.JobResultLog(jobID)
-	exists, err := r2Client.ObjectExists(ctx, finalKey)
-	if err != nil {
-		return nil, fmt.Errorf("check log in R2 (key %s): %w", finalKey, err)
+func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID int64, from, to, lines int) (*fetchedCloudLog, error) {
+	keys := []struct {
+		finalKey    string
+		manifestKey string
+	}{
+		{finalKey: r2keys.JobAttemptResultLog(jobID, runID), manifestKey: cloudlog.ManifestKeyForRun(jobID, runID)},
 	}
-	if exists {
-		data, err := r2Client.GetObject(ctx, finalKey)
+	if runID > 0 {
+		keys = append(keys, struct {
+			finalKey    string
+			manifestKey string
+		}{finalKey: r2keys.JobResultLog(jobID), manifestKey: cloudlog.ManifestKey(jobID)})
+	}
+
+	for _, keys := range keys {
+		exists, err := r2Client.ObjectExists(ctx, keys.finalKey)
 		if err != nil {
-			return nil, fmt.Errorf("fetch log from R2 (key %s): %w", finalKey, err)
+			return nil, fmt.Errorf("check log in R2 (key %s): %w", keys.finalKey, err)
 		}
+		if exists {
+			data, err := r2Client.GetObject(ctx, keys.finalKey)
+			if err != nil {
+				return nil, fmt.Errorf("fetch log from R2 (key %s): %w", keys.finalKey, err)
+			}
+			return &fetchedCloudLog{
+				Content: string(data),
+				Final:   true,
+				From:    from,
+				To:      to,
+				Lines:   lines,
+			}, nil
+		}
+
+		manifestData, err := r2Client.GetObject(ctx, keys.manifestKey)
+		if err != nil {
+			continue
+		}
+
+		var manifest cloudlog.Manifest
+		if err := json.Unmarshal(manifestData, &manifest); err != nil {
+			return nil, fmt.Errorf("parse live log manifest for job %d: %w", jobID, err)
+		}
+		parts := cloudlog.SelectParts(manifest, from, to, lines)
+		if len(parts) == 0 {
+			return &fetchedCloudLog{Content: "", Final: false, From: from, To: to, Lines: lines}, nil
+		}
+
+		var b strings.Builder
+		for _, part := range parts {
+			data, err := r2Client.GetObject(ctx, part.Key)
+			if err != nil {
+				return nil, fmt.Errorf("fetch live log chunk from R2 (key %s): %w", part.Key, err)
+			}
+			b.Write(data)
+		}
+
+		localFrom, localTo, localLines := cloudlog.AdjustQueryForParts(parts, from, to, lines)
 		return &fetchedCloudLog{
-			Content: string(data),
-			Final:   true,
-			From:    from,
-			To:      to,
-			Lines:   lines,
+			Content: b.String(),
+			Final:   false,
+			From:    localFrom,
+			To:      localTo,
+			Lines:   localLines,
 		}, nil
 	}
 
-	manifestData, err := r2Client.GetObject(ctx, cloudlog.ManifestKey(jobID))
-	if err != nil {
-		return nil, fmt.Errorf("fetch live log manifest from R2 (key %s): %w", cloudlog.ManifestKey(jobID), err)
-	}
-
-	var manifest cloudlog.Manifest
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return nil, fmt.Errorf("parse live log manifest for job %d: %w", jobID, err)
-	}
-	parts := cloudlog.SelectParts(manifest, from, to, lines)
-	if len(parts) == 0 {
-		return &fetchedCloudLog{Content: "", Final: false, From: from, To: to, Lines: lines}, nil
-	}
-
-	var b strings.Builder
-	for _, part := range parts {
-		data, err := r2Client.GetObject(ctx, part.Key)
-		if err != nil {
-			return nil, fmt.Errorf("fetch live log chunk from R2 (key %s): %w", part.Key, err)
-		}
-		b.Write(data)
-	}
-
-	localFrom, localTo, localLines := cloudlog.AdjustQueryForParts(parts, from, to, lines)
-	return &fetchedCloudLog{
-		Content: b.String(),
-		Final:   false,
-		From:    localFrom,
-		To:      localTo,
-		Lines:   localLines,
-	}, nil
+	return nil, fmt.Errorf("fetch live log manifest from R2 for job %d: not found", jobID)
 }
 
 func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {

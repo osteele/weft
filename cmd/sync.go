@@ -390,13 +390,19 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		// Check current job status directly — skip if already terminal
 		var currentStatus string
-		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus); err != nil || db.IsTerminalStatus(currentStatus) {
+		var latestRunID sql.NullInt64
+		if err := database.QueryRow("SELECT status, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil || db.IsTerminalStatus(currentStatus) {
 			// Job not found or already terminal — clean up stale R2 markers
 			_ = r2Client.DeletePrefix(ctx, r2keys.JobPrefix(jobID)+"/")
 			continue
 		}
 
-		prefix := r2keys.JobPrefix(jobID)
+		runID := int64(0)
+		if latestRunID.Valid {
+			runID = latestRunID.Int64
+		}
+		resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
+		cleanupPrefix := r2keys.JobRunPrefix(jobID, runID)
 
 		// Download results to temp dir
 		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
@@ -404,9 +410,18 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		if err := r2Client.DownloadResults(ctx, prefix+"/results/", tmpDir); err != nil {
-			os.RemoveAll(tmpDir)
-			continue
+		if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
+			if runID > 0 {
+				resultPrefix = r2keys.JobResultsPrefix(jobID)
+				cleanupPrefix = r2keys.JobPrefix(jobID)
+				if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
+					os.RemoveAll(tmpDir)
+					continue
+				}
+			} else {
+				os.RemoveAll(tmpDir)
+				continue
+			}
 		}
 
 		exitCode, startTimeUnix, endTimeUnix, failureReason := parseCloudJobResult(tmpDir, jobIDStr)
@@ -417,8 +432,12 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		// If no start_time from completion record, try reading .started marker from R2
 		if startTimeUnix == 0 {
-			if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
+			if data, err := r2Client.GetObject(ctx, r2keys.JobAttemptStarted(jobID, runID)); err == nil {
 				startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+			} else if runID > 0 {
+				if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
+					startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+				}
 			}
 		}
 
@@ -452,7 +471,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		// Cleanup R2
-		_ = r2Client.DeletePrefix(ctx, prefix+"/")
+		_ = r2Client.DeletePrefix(ctx, cleanupPrefix+"/")
 		os.RemoveAll(tmpDir)
 	}
 
@@ -465,16 +484,25 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		// Only update jobs still in queued status
 		var currentStatus string
-		if err := database.QueryRow("SELECT status FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus); err != nil {
+		var latestRunID sql.NullInt64
+		if err := database.QueryRow("SELECT status, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil {
 			continue
 		}
 		if currentStatus != db.StatusQueued {
 			continue
 		}
 
+		runID := int64(0)
+		if latestRunID.Valid {
+			runID = latestRunID.Int64
+		}
 		var startTimeUnix int64
-		if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
+		if data, err := r2Client.GetObject(ctx, r2keys.JobAttemptStarted(jobID, runID)); err == nil {
 			startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+		} else if runID > 0 {
+			if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
+				startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+			}
 		}
 
 		if _, err := database.Exec(
@@ -483,6 +511,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		); err != nil {
 			log.Printf("sync: failed to update cloud job %d to running: %v", jobID, err)
 			continue
+		}
+		if err := db.PersistLatestRunSnapshot(database, jobID, ""); err != nil {
+			log.Printf("sync: failed to persist cloud job %d running snapshot: %v", jobID, err)
 		}
 		updated++
 		if verbose {
@@ -534,6 +565,9 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		 WHERE id = ?`,
 		status, exitCode, startTimeUnix, endTimeUnix, status, failureReason, jobID,
 	); err != nil {
+		return 0, err
+	}
+	if err := db.PersistLatestRunSnapshot(database, jobID, ""); err != nil {
 		return 0, err
 	}
 	if err := db.CloseJobCloudAttempt(database, jobID, outcome); err != nil {
@@ -599,14 +633,22 @@ func parseCloudJobResult(tmpDir, jobIDStr string) (exitCode *int, startTimeUnix,
 func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID int64) error {
 	var status string
 	var backend sql.NullString
-	if err := database.QueryRow("SELECT status, backend FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend); err != nil {
+	var latestRunID sql.NullInt64
+	if err := database.QueryRow("SELECT status, backend, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend, &latestRunID); err != nil {
 		return nil
 	}
 	if db.IsTerminalStatus(status) {
 		return nil
 	}
 
-	data, err := r2Client.GetObject(ctx, r2keys.JobLiveTimeseries(jobID))
+	runID := int64(0)
+	if latestRunID.Valid {
+		runID = latestRunID.Int64
+	}
+	data, err := r2Client.GetObject(ctx, r2keys.JobAttemptLiveTimeseries(jobID, runID))
+	if (err != nil || len(data) == 0) && runID > 0 {
+		data, err = r2Client.GetObject(ctx, r2keys.JobLiveTimeseries(jobID))
+	}
 	if err != nil || len(data) == 0 {
 		return nil
 	}

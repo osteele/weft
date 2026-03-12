@@ -19,7 +19,7 @@ type liveLogUploadState struct {
 	manifestJSON string
 }
 
-func startLogUploader(bucket string, jobID int64, logPath string) func() {
+func startLogUploader(bucket string, jobID, runID int64, logPath string) func() {
 	var once sync.Once
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -37,10 +37,10 @@ func startLogUploader(bucket string, jobID int64, logPath string) func() {
 		for {
 			select {
 			case <-done:
-				uploadLiveLog(bucket, jobID, logPath, state)
+				uploadLiveLog(bucket, jobID, runID, logPath, state)
 				return
 			case <-ticker.C:
-				uploadLiveLog(bucket, jobID, logPath, state)
+				uploadLiveLog(bucket, jobID, runID, logPath, state)
 			}
 		}
 	}()
@@ -48,13 +48,13 @@ func startLogUploader(bucket string, jobID int64, logPath string) func() {
 	return stop
 }
 
-func uploadLiveLog(bucket string, jobID int64, logPath string, state *liveLogUploadState) {
+func uploadLiveLog(bucket string, jobID, runID int64, logPath string, state *liveLogUploadState) {
 	data, err := os.ReadFile(logPath)
 	if err != nil || len(data) == 0 {
 		return
 	}
 
-	manifest, chunks := cloudlog.BuildChunks(jobID, data, cloudlog.DefaultChunkTargetBytes)
+	manifest, chunks := cloudlog.BuildRunChunks(jobID, runID, data, cloudlog.DefaultChunkTargetBytes)
 	if len(chunks) == 0 {
 		return
 	}
@@ -87,7 +87,7 @@ func uploadLiveLog(bucket string, jobID int64, logPath string, state *liveLogUpl
 	}
 
 	start := time.Now()
-	if err := r2Put(bucket, cloudlog.ManifestKey(jobID), string(manifestJSON)); err != nil {
+	if err := r2Put(bucket, cloudlog.ManifestKeyForRun(jobID, runID), string(manifestJSON)); err != nil {
 		oplog.Log(oplog.OpR2Put, oplog.WithJobID(jobID),
 			oplog.WithDetail("live log manifest"),
 			oplog.WithError(err), oplog.WithDuration(time.Since(start)))

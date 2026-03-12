@@ -3238,6 +3238,29 @@ func setJobLatestRunIDTx(tx *sql.Tx, jobID, runID int64) error {
 	return err
 }
 
+// PersistLatestRunSnapshot updates the current run row for a job from the live
+// jobs table. If the job has no run yet, this creates one and points
+// jobs.latest_run_id at it.
+func PersistLatestRunSnapshot(db *sql.DB, jobID int64, reason string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := persistLatestRunSnapshotTx(tx, job, reason); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 func persistLatestRunSnapshotTx(tx *sql.Tx, job *Job, reason string) error {
 	if job == nil {
 		return nil

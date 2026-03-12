@@ -37,6 +37,10 @@ type Chunk struct {
 }
 
 func BuildChunks(jobID int64, content []byte, targetBytes int) (Manifest, []Chunk) {
+	return BuildRunChunks(jobID, 0, content, targetBytes)
+}
+
+func BuildRunChunks(jobID, runID int64, content []byte, targetBytes int) (Manifest, []Chunk) {
 	if targetBytes <= 0 {
 		targetBytes = DefaultChunkTargetBytes
 	}
@@ -68,7 +72,7 @@ func BuildChunks(jobID int64, content []byte, targetBytes int) (Manifest, []Chun
 		lineCount := CountLines(partContent)
 		part := Part{
 			Part:      partNum,
-			Key:       r2keys.JobLiveLogPart(jobID, partNum),
+			Key:       r2keys.JobAttemptLiveLogPart(jobID, runID, partNum),
 			SizeBytes: len(partContent),
 			LineCount: lineCount,
 			StartLine: nextLine,
@@ -204,11 +208,19 @@ func splitIndex(content []byte, targetBytes int) int {
 }
 
 func ManifestKey(jobID int64) string {
-	return r2keys.JobLiveLogManifest(jobID)
+	return ManifestKeyForRun(jobID, 0)
+}
+
+func ManifestKeyForRun(jobID, runID int64) string {
+	return r2keys.JobAttemptLiveLogManifest(jobID, runID)
 }
 
 func Prefix(jobID int64) string {
-	return r2keys.JobLiveLogsPrefix(jobID)
+	return PrefixForRun(jobID, 0)
+}
+
+func PrefixForRun(jobID, runID int64) string {
+	return r2keys.JobAttemptLiveLogsPrefix(jobID, runID)
 }
 
 func Summary(m Manifest) string {

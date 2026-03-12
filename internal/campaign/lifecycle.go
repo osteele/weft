@@ -586,6 +586,13 @@ func LaunchInstance(
 		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
 			return instanceID, fmt.Errorf("set cloud_instance_id for job %d: %w", job.ID, err)
 		}
+		updatedJob, err := db.GetJobByID(database, job.ID)
+		if err != nil {
+			return instanceID, fmt.Errorf("refresh job %d after cloud assignment: %w", job.ID, err)
+		}
+		if updatedJob != nil {
+			group.Jobs[i] = updatedJob
+		}
 		if err := db.SetJobCampaignIndex(database, job.ID, i); err != nil {
 			return instanceID, fmt.Errorf("set campaign_job_index for job %d: %w", job.ID, err)
 		}
@@ -610,8 +617,13 @@ func LaunchInstance(
 		if mapped, ok := localToRemote[localDir]; ok {
 			remoteDir = mapped
 		}
+		runID := int64(0)
+		if job.LatestRunID != nil {
+			runID = *job.LatestRunID
+		}
 		agentJobs = append(agentJobs, cloud.AgentJob{
 			ID:      job.ID,
+			RunID:   runID,
 			Command: job.EffectiveCommand(),
 			Dir:     remoteDir,
 		})

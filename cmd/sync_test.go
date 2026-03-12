@@ -102,6 +102,23 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 	if job.Status != db.StatusCompleted {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusCompleted)
 	}
+	if job.LatestRunID == nil {
+		t.Fatal("job latest_run_id = nil, want non-nil")
+	}
+
+	run, err := db.GetJobRunByID(database, *job.LatestRunID)
+	if err != nil {
+		t.Fatalf("GetJobRunByID: %v", err)
+	}
+	if run.Status != db.StatusCompleted {
+		t.Fatalf("run status = %q, want %q", run.Status, db.StatusCompleted)
+	}
+	if run.StartTime != 10 {
+		t.Fatalf("run start_time = %d, want 10", run.StartTime)
+	}
+	if run.EndTime == nil || *run.EndTime != 20 {
+		t.Fatalf("run end_time = %v, want 20", run.EndTime)
+	}
 
 	attempts, err := db.GetJobCloudAttempts(database, jobID)
 	if err != nil {

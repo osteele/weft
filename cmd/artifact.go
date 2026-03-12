@@ -721,7 +721,11 @@ func syncCloudJobOutputs(job *db.Job) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	prefix := r2keys.JobOutputsPrefix(job.ID)
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+	prefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
 	return r2Client.DownloadResults(ctx, prefix, localDir)
 }
 
@@ -730,8 +734,16 @@ func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFi
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	prefix := r2keys.JobOutputsPrefix(job.ID)
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+	prefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
 	files, err := r2Client.ListObjects(ctx, prefix)
+	if err != nil && runID > 0 {
+		prefix = r2keys.JobOutputsPrefix(job.ID)
+		files, err = r2Client.ListObjects(ctx, prefix)
+	}
 	if err != nil {
 		return nil
 	}

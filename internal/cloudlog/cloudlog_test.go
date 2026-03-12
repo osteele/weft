@@ -57,3 +57,18 @@ func TestAdjustQueryForParts(t *testing.T) {
 		t.Fatalf("adjusted query = (%d,%d,%d), want (5,12,50)", from, to, lines)
 	}
 }
+
+func TestBuildRunChunks_UsesRunScopedKeys(t *testing.T) {
+	manifest, chunks := BuildRunChunks(42, 7, []byte("aaa\nbbb\n"), 4)
+
+	if len(chunks) != 1 {
+		t.Fatalf("chunk count = %d, want 1", len(chunks))
+	}
+	wantKey := "jobs/42/runs/7/live-log/part-000001.log"
+	if chunks[0].Part.Key != wantKey {
+		t.Fatalf("chunk key = %q, want %q", chunks[0].Part.Key, wantKey)
+	}
+	if manifest.Parts[0].Key != wantKey {
+		t.Fatalf("manifest part key = %q, want %q", manifest.Parts[0].Key, wantKey)
+	}
+}

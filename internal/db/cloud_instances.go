@@ -352,10 +352,17 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 		tx.Rollback()
 		return err
 	}
-	if job != nil && job.LatestRunID != nil {
-		if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-			tx.Rollback()
-			return err
+	if job != nil {
+		if job.LatestRunID == nil {
+			if err := startNewLatestRunTx(tx, job, "cloud_run_prepare"); err != nil {
+				tx.Rollback()
+				return err
+			}
+		} else {
+			if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
+				tx.Rollback()
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(
