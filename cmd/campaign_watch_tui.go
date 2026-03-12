@@ -158,21 +158,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchUpdateMsg:
 		if msg.closed {
+			clearWatchJobProgressHWM(m.jobProgressHWM, m.updates[msg.instanceID])
 			// Channel closed — instance reached terminal state
 			return m, m.checkAllDone()
 		}
+		prev := m.updates[msg.instanceID]
+		updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
 		m.updates[msg.instanceID] = msg.update
-		// Update progress high-water mark; prune entries for non-running jobs
-		if msg.update.JobProgress >= 0 && msg.update.JobProgressID > 0 {
-			if msg.update.JobProgress > m.jobProgressHWM[msg.update.JobProgressID] {
-				m.jobProgressHWM[msg.update.JobProgressID] = msg.update.JobProgress
-			}
-		}
-		for _, j := range msg.update.Jobs {
-			if j.Status != db.StatusRunning {
-				delete(m.jobProgressHWM, j.ID)
-			}
-		}
 		// Continue reading from the same channel
 		ch := m.channels[msg.instanceID]
 		return m, waitForUpdate(msg.instanceID, ch)

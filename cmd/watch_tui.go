@@ -158,24 +158,17 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchUpdateMsg:
 		if msg.closed {
+			clearWatchJobProgressHWM(m.jobProgressHWM, m.instanceUpdates[msg.instanceID])
 			delete(m.watchChannels, msg.instanceID)
 			delete(m.clients, msg.instanceID)
 			return m, nil
 		}
-		m.instanceUpdates[msg.instanceID] = msg.update
 		if m.jobProgressHWM == nil {
 			m.jobProgressHWM = map[int64]int{}
 		}
-		if msg.update.JobProgress >= 0 && msg.update.JobProgressID > 0 {
-			if msg.update.JobProgress > m.jobProgressHWM[msg.update.JobProgressID] {
-				m.jobProgressHWM[msg.update.JobProgressID] = msg.update.JobProgress
-			}
-		}
-		for _, j := range msg.update.Jobs {
-			if j.Status != db.StatusRunning {
-				delete(m.jobProgressHWM, j.ID)
-			}
-		}
+		prev := m.instanceUpdates[msg.instanceID]
+		updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
+		m.instanceUpdates[msg.instanceID] = msg.update
 		return m, waitForUpdate(msg.instanceID, m.watchChannels[msg.instanceID])
 
 	case watchAllTickMsg:
@@ -461,10 +454,7 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 			if i > 0 {
 				addPlain("")
 			}
-			update := m.instanceUpdates[ci.ID]
-			if update.CloudInstance == nil {
-				update.CloudInstance = ci
-			}
+			update := normalizeWatchInstanceUpdate(m.instanceUpdates[ci.ID], ci)
 			lines := formatWatchInstanceBlockLines(update, m.jobProgressHWM, watchInstanceBlockOptions{})
 			if len(lines) == 0 {
 				continue

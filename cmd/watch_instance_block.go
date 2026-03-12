@@ -20,6 +20,13 @@ type watchInstanceBlockOptions struct {
 	now                      time.Time
 }
 
+func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.CloudInstance) campaign.InstanceUpdate {
+	if update.CloudInstance == nil {
+		update.CloudInstance = ci
+	}
+	return update
+}
+
 func formatWatchInstanceBlock(update campaign.InstanceUpdate, jobProgressHWM map[int64]int, opts watchInstanceBlockOptions) string {
 	return strings.Join(formatWatchInstanceBlockLines(update, jobProgressHWM, opts), "\n")
 }
@@ -205,13 +212,59 @@ func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string 
 }
 
 func formatWatchInstanceCostLine(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) string {
-	if ci == nil || inst == nil || ci.LaunchedAt == nil {
+	if ci == nil {
 		return ""
+	}
+	if ci.ActualSpendCents > 0 {
+		return fmt.Sprintf("  Cost: $%.2f", float64(ci.ActualSpendCents)/100.0)
 	}
 	if now.IsZero() {
 		now = time.Now()
 	}
+	if ci.LaunchedAt == nil {
+		return ""
+	}
+
 	uptime := now.Sub(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second)
-	cost := uptime.Hours() * inst.CostPerHour
-	return fmt.Sprintf("  Cost: $%.2f (uptime: %s)", cost, uptime)
+	if inst != nil && inst.CostPerHour > 0 {
+		cost := uptime.Hours() * inst.CostPerHour
+		return fmt.Sprintf("  Cost: $%.2f (uptime: %s)", cost, uptime)
+	}
+	if ci.CostPerHourCents > 0 {
+		cost := uptime.Hours() * float64(ci.CostPerHourCents) / 100.0
+		return fmt.Sprintf("  Cost: $%.2f (uptime: %s)", cost, uptime)
+	}
+	return ""
+}
+
+func updateWatchJobProgressHWM(hwm map[int64]int, prev, curr campaign.InstanceUpdate) {
+	if hwm == nil {
+		return
+	}
+	if curr.JobProgress >= 0 && curr.JobProgressID > 0 && curr.JobProgress > hwm[curr.JobProgressID] {
+		hwm[curr.JobProgressID] = curr.JobProgress
+	}
+
+	runningJobs := make(map[int64]struct{}, len(curr.Jobs))
+	for _, j := range curr.Jobs {
+		if j.Status == db.StatusRunning {
+			runningJobs[j.ID] = struct{}{}
+			continue
+		}
+		delete(hwm, j.ID)
+	}
+	for _, j := range prev.Jobs {
+		if _, ok := runningJobs[j.ID]; !ok {
+			delete(hwm, j.ID)
+		}
+	}
+}
+
+func clearWatchJobProgressHWM(hwm map[int64]int, update campaign.InstanceUpdate) {
+	if hwm == nil {
+		return
+	}
+	for _, j := range update.Jobs {
+		delete(hwm, j.ID)
+	}
 }

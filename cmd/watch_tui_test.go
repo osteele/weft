@@ -170,6 +170,70 @@ func TestFormatWatchInstanceBlockShowsObservabilityDetails(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlockShowsActualSpendWithoutProviderInstance(t *testing.T) {
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:               106,
+			Status:           db.CloudInstanceStatusRunning,
+			Provider:         "vastai",
+			ActualSpendCents: 1234,
+			GPUSpec:          "A100",
+		},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: time.Now()}))
+	if !strings.Contains(out, "Cost: $12.34") {
+		t.Fatalf("expected actual spend fallback in output, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockShowsDBHourlyCostFallback(t *testing.T) {
+	now := time.Unix(7200, 0)
+	launchedAt := int64(0)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:               107,
+			Status:           db.CloudInstanceStatusRunning,
+			Provider:         "vastai",
+			CostPerHourCents: 150,
+			LaunchedAt:       &launchedAt,
+			GPUSpec:          "A100",
+		},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: now}))
+	if !strings.Contains(out, "Cost: $3.00 (uptime: 2h0m0s)") {
+		t.Fatalf("expected DB hourly cost fallback in output, got:\n%s", out)
+	}
+}
+
+func TestUpdateWatchJobProgressHWMPrunesDisappearedJobs(t *testing.T) {
+	hwm := map[int64]int{
+		88: 40,
+		89: 20,
+	}
+	prev := campaign.InstanceUpdate{
+		Jobs: []*db.Job{
+			{ID: 88, Status: db.StatusRunning},
+			{ID: 89, Status: db.StatusRunning},
+		},
+	}
+	curr := campaign.InstanceUpdate{
+		Jobs: []*db.Job{
+			{ID: 89, Status: db.StatusRunning},
+		},
+	}
+
+	updateWatchJobProgressHWM(hwm, prev, curr)
+
+	if _, ok := hwm[88]; ok {
+		t.Fatalf("expected disappeared job progress entry to be pruned, got %+v", hwm)
+	}
+	if got := hwm[89]; got != 20 {
+		t.Fatalf("job 89 progress = %d, want 20", got)
+	}
+}
+
 func TestFormatOnPremJobRowQueuedUsesDashDuration(t *testing.T) {
 	m := watchAllModel{}
 	row := m.formatOnPremJobRow(&db.Job{

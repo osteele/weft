@@ -157,10 +157,7 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 			if i > 0 {
 				b.WriteString("\n")
 			}
-			update := snapshot.InstanceUpdates[ci.ID]
-			if update.CloudInstance == nil {
-				update.CloudInstance = ci
-			}
+			update := normalizeWatchInstanceUpdate(snapshot.InstanceUpdates[ci.ID], ci)
 			b.WriteString(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
 				plain: true,
 				now:   now,
