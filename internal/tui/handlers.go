@@ -24,7 +24,7 @@ func (m Model) handleJobsRefreshed(msg jobsRefreshedMsg) (Model, tea.Cmd) {
 
 	runningJobIDs := make(map[int64]bool)
 	for _, job := range msg.jobs {
-		if job.Status == db.StatusRunning {
+		if job.EffectiveStatus() == db.StatusRunning {
 			runningJobIDs[job.ID] = true
 		}
 	}
@@ -291,7 +291,7 @@ func (m Model) handleMonitorJobLog(result *monitor.JobLogResult) (Model, tea.Cmd
 			combined := result.Content + result.Stderr
 			if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
 				msg := "No log file yet"
-				if m.selectedJob.Status == db.StatusCompleted || m.selectedJob.Status == db.StatusFailed || m.selectedJob.Status == db.StatusDead || m.selectedJob.Status == db.StatusKilled || m.selectedJob.Status == db.StatusCanceled {
+				if db.IsTerminalStatus(m.selectedJob.EffectiveStatus()) {
 					msg = "Log file not found (may have been cleaned up)"
 				}
 				m.logContent = msg
@@ -304,7 +304,7 @@ func (m Model) handleMonitorJobLog(result *monitor.JobLogResult) (Model, tea.Cmd
 		combined := result.Content
 		if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
 			msg := "No log file yet"
-			if m.selectedJob.Status == db.StatusCompleted || m.selectedJob.Status == db.StatusFailed || m.selectedJob.Status == db.StatusDead || m.selectedJob.Status == db.StatusKilled || m.selectedJob.Status == db.StatusCanceled {
+			if db.IsTerminalStatus(m.selectedJob.EffectiveStatus()) {
 				msg = "Log file not found (may have been cleaned up)"
 			}
 			m.logContent = msg
@@ -384,7 +384,7 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 		}
 		if m.monitor != nil {
 			m.monitor.WatchJobLog(job)
-			if job.Status == db.StatusRunning {
+			if job.EffectiveStatus() == db.StatusRunning {
 				m.monitor.WatchJobStats(job)
 			}
 		} else {
@@ -405,7 +405,7 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 
 	// Pre-fetch log for non-Logs tab (background cache warming)
 	if m.monitor == nil {
-		if _, ok := m.logCache[job.ID]; !ok || job.Status == db.StatusRunning {
+		if _, ok := m.logCache[job.ID]; !ok || job.EffectiveStatus() == db.StatusRunning {
 			if cmd := m.fetchJobLog(job); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
@@ -414,7 +414,7 @@ func (m *Model) handleSelectionChanged() tea.Cmd {
 
 	// Update watched stats job for running jobs
 	if m.monitor != nil {
-		if job.Status == db.StatusRunning {
+		if job.EffectiveStatus() == db.StatusRunning {
 			m.monitor.WatchJobStats(job)
 		} else {
 			m.monitor.WatchJobStats(nil)

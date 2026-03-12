@@ -574,6 +574,33 @@ func TestListUnplacedJobs(t *testing.T) {
 	}
 }
 
+func TestListUnplacedJobsIncludesHostlessRunning(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "hostless running", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, jobID); err != nil {
+		t.Fatalf("mark queued job running: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("list unplaced: %v", err)
+	}
+
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 unplaced job, got %d", len(jobs))
+	}
+	if jobs[0].ID != jobID {
+		t.Fatalf("expected job ID %d, got %d", jobID, jobs[0].ID)
+	}
+	if jobs[0].EffectiveStatus() != StatusQueued {
+		t.Fatalf("effective status = %q, want %q", jobs[0].EffectiveStatus(), StatusQueued)
+	}
+}
+
 func TestSetJobPlacementReasonsRoundTrip(t *testing.T) {
 	database := SetupTestDB(t)
 

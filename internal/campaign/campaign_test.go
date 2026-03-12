@@ -14,7 +14,8 @@ func TestGroupByGPUSupremum(t *testing.T) {
 		{ID: 2, Status: db.StatusQueued, GPUClass: "h100", GPUMemGB: intPtr(40)},
 		{ID: 3, Status: db.StatusQueued, GPUClass: "A100", GPUMemGB: intPtr(40)},
 		{ID: 4, Status: db.StatusQueued, GPUClass: "", GPUMemGB: intPtr(24)},
-		{ID: 5, Status: db.StatusRunning, GPUClass: "H100", GPUMemGB: intPtr(80)}, // should be excluded
+		{ID: 5, Status: db.StatusRunning, Host: "", GPUClass: "H100", GPUMemGB: intPtr(80)},       // effectively queued
+		{ID: 6, Status: db.StatusRunning, Host: "host-a", GPUClass: "H100", GPUMemGB: intPtr(80)}, // should be excluded
 	}
 
 	groups := GroupByGPUSupremum(jobs)
@@ -30,8 +31,8 @@ func TestGroupByGPUSupremum(t *testing.T) {
 	if groups[0].GPUClass != "H100" {
 		t.Errorf("first group should be H100, got %s", groups[0].GPUClass)
 	}
-	if len(groups[0].Jobs) != 2 {
-		t.Errorf("H100 group should have 2 jobs, got %d", len(groups[0].Jobs))
+	if len(groups[0].Jobs) != 3 {
+		t.Errorf("H100 group should have 3 jobs, got %d", len(groups[0].Jobs))
 	}
 
 	// A100 group

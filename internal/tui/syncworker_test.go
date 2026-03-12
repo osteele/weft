@@ -100,3 +100,14 @@ func TestSyncWorkerNoJobsNoSyncTime(t *testing.T) {
 		t.Errorf("Sync time should NOT be recorded when there are no jobs to sync")
 	}
 }
+
+func TestGetHostSyncRateUsesEffectiveStatus(t *testing.T) {
+	queuedRunning := db.StatusRunning
+	jobs := []*db.Job{
+		{Status: db.StatusQueued, PendingStatus: &queuedRunning, Host: "test-host"},
+	}
+
+	if got := GetHostSyncRate(jobs); got != RateRunning {
+		t.Fatalf("GetHostSyncRate() = %v, want %v", got, RateRunning)
+	}
+}

@@ -144,7 +144,7 @@ func (m Model) startQueuedJobNow(job *db.Job) tea.Cmd {
 
 // moveJobToFront moves a queued job to the front of its queue
 func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
-	if job == nil || job.Status != db.StatusQueued {
+	if job == nil || job.EffectiveStatus() != db.StatusQueued {
 		return nil
 	}
 	database := m.database
@@ -492,7 +492,7 @@ func (m Model) killJob(job *db.Job) tea.Cmd {
 	}
 
 	jobID := job.ID
-	cancelled := job.Status == db.StatusQueued
+	cancelled := job.EffectiveStatus() == db.StatusQueued
 	return func() tea.Msg {
 		result, err := m.coreService.KillJob(jobID, ops.TimeoutFast)
 		if err != nil {

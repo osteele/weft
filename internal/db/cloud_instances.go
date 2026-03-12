@@ -427,8 +427,18 @@ func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) (
 
 // ListUnplacedJobs returns all queued jobs with no host assignment (needing placement or rental).
 func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
-	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE status = ? AND host = '' AND tombstoned = 0 ORDER BY id ASC"
-	return queryJobs(db, query, StatusQueued)
+	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE host = '' AND tombstoned = 0 ORDER BY id ASC"
+	jobs, err := queryJobs(db, query)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == StatusQueued {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered, nil
 }
 
 // AssignJobHost atomically assigns a host to an unplaced queued job.

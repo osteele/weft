@@ -265,9 +265,10 @@ func (m Model) deleteHost(hostName string) tea.Cmd {
 		var activeJobs []int64
 		var jobsToTombstone []int64
 		for _, job := range jobs {
-			if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
+			switch job.EffectiveStatus() {
+			case db.StatusRunning, db.StatusQueued, db.StatusStarting, db.StatusPaused:
 				activeJobs = append(activeJobs, job.ID)
-			} else {
+			default:
 				// Completed, failed, dead jobs can be tombstoned
 				jobsToTombstone = append(jobsToTombstone, job.ID)
 			}
@@ -301,7 +302,7 @@ func (m Model) jobCountsForHost(host string) (running, queued int) {
 		if job.Host != host || job.Tombstoned {
 			continue
 		}
-		switch job.Status {
+		switch job.EffectiveStatus() {
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			running++
 		case db.StatusQueued:
@@ -367,7 +368,7 @@ func (m Model) computeHostJobsHash(host string) string {
 			if job.ExitCode != nil {
 				exitCode = fmt.Sprintf(":%d", *job.ExitCode)
 			}
-			parts = append(parts, fmt.Sprintf("%d:%s%s", job.ID, job.Status, exitCode))
+			parts = append(parts, fmt.Sprintf("%d:%s%s", job.ID, job.EffectiveStatus(), exitCode))
 		}
 	}
 	// Simple hash: join and take first 16 chars of sha256
@@ -389,7 +390,7 @@ func (m Model) generateHostSummary(host, hash string) tea.Cmd {
 			if len(desc) > 40 {
 				desc = desc[:40] + "..."
 			}
-			switch job.Status {
+			switch job.EffectiveStatus() {
 			case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 				running = append(running, desc)
 			case db.StatusQueued:

@@ -543,7 +543,7 @@ func GetHostSyncRate(jobs []*db.Job) SyncRate {
 		if job == nil {
 			continue
 		}
-		switch job.Status {
+		switch job.EffectiveStatus() {
 		case db.StatusRunning, db.StatusStarting:
 			hasRunning = true
 			if job.StartTime > 0 {

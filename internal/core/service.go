@@ -68,13 +68,14 @@ func (s *Service) KillJob(jobID int64, mode ops.TimeoutMode) (OperationResult, e
 
 	opts := ops.OptionsForMode(resolveMode(mode))
 	var outcome ops.Result
-	switch job.Status {
+	effectiveStatus := job.EffectiveStatus()
+	switch effectiveStatus {
 	case db.StatusQueued:
 		outcome, err = ops.CancelQueuedJob(s.database, job, opts)
 	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		outcome, err = ops.KillJob(s.database, job, opts)
 	default:
-		return OperationResult{}, fmt.Errorf("job %d is %s; nothing to kill", job.ID, job.Status)
+		return OperationResult{}, fmt.Errorf("job %d is %s; nothing to kill", job.ID, effectiveStatus)
 	}
 	if err != nil {
 		return OperationResult{}, err

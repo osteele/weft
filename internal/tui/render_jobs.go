@@ -247,7 +247,7 @@ func (m Model) formatCPUUsageDisplay(job *db.Job) string {
 	}
 	stats := job.Metadata.CPU
 	parts := []string{}
-	if job.Status == db.StatusRunning && stats.Latest != nil {
+	if job.EffectiveStatus() == db.StatusRunning && stats.Latest != nil {
 		parts = append(parts, fmt.Sprintf("latest %s", formatCPUPercent(*stats.Latest)))
 	}
 	if stats.Max != nil {
@@ -891,7 +891,8 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString("\n")
 	}
 
-	if job.Status == db.StatusQueued || job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
+	status := job.EffectiveStatus()
+	if status == db.StatusQueued || status == db.StatusRunning || status == db.StatusStarting || status == db.StatusPaused {
 		b.WriteString(labelStyle.Render("CPU"))
 		b.WriteString(valueStyle.Render(m.formatCPUAllotmentDisplay(job)))
 		b.WriteString("\n")
@@ -905,7 +906,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	_ = m.writeJobTimingSection(&b, job, labelStyle, valueStyle)
 
 	// Exit status
-	if job.Status == db.StatusCompleted && job.ExitCode != nil {
+	if status == db.StatusCompleted && job.ExitCode != nil {
 		b.WriteString(labelStyle.Render("Exit"))
 		if *job.ExitCode == 0 {
 			b.WriteString(completedStyle.Render("0 (success)"))
@@ -913,15 +914,15 @@ func (m Model) jobDetailContent(job *db.Job) string {
 			b.WriteString(failedStyle.Render(fmt.Sprintf("%d (failed)", *job.ExitCode)))
 		}
 		b.WriteString("\n")
-	} else if job.Status == db.StatusKilled {
+	} else if status == db.StatusKilled {
 		b.WriteString(labelStyle.Render("Exit"))
 		b.WriteString(deadStyle.Render("killed"))
 		b.WriteString("\n")
-	} else if job.Status == db.StatusCanceled {
+	} else if status == db.StatusCanceled {
 		b.WriteString(labelStyle.Render("Exit"))
 		b.WriteString(deadStyle.Render("canceled"))
 		b.WriteString("\n")
-	} else if job.Status == db.StatusDead {
+	} else if status == db.StatusDead {
 		b.WriteString(labelStyle.Render("Exit"))
 		b.WriteString(failedStyle.Render("failed to start"))
 		b.WriteString("\n")
@@ -930,7 +931,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 			b.WriteString(errorStyle.Render(job.ErrorMessage))
 			b.WriteString("\n")
 		}
-	} else if job.Status == db.StatusFailed {
+	} else if status == db.StatusFailed {
 		b.WriteString(labelStyle.Render("Exit"))
 		b.WriteString(failedStyle.Render("crashed"))
 		b.WriteString("\n")
@@ -972,7 +973,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 
 	// Process stats and progress section for running jobs
 	// Reserve a fixed number of lines to prevent log preview from jumping
-	if job.Status == db.StatusRunning {
+	if job.EffectiveStatus() == db.StatusRunning {
 		const statsReservedLines = 7 // header + CPU + Memory + Threads + 2 GPUs + Progress
 		linesWritten := 0
 
@@ -1110,11 +1111,12 @@ func (m Model) jobDetailContent(job *db.Job) string {
 
 func (m Model) writeJobTimingSection(b *strings.Builder, job *db.Job, labelStyle, valueStyle lipgloss.Style) bool {
 	wrote := false
+	status := job.EffectiveStatus()
 	if job.CreatedAt > 0 || job.StartTime > 0 || job.EndTime != nil {
 		if job.CreatedAt > 0 && (job.StartTime == 0 || job.StartTime-job.CreatedAt > 60) {
 			createdTime := time.Unix(job.CreatedAt, 0)
 			label := "Created"
-			if job.Status == db.StatusQueued {
+			if status == db.StatusQueued {
 				label = "Queued"
 			}
 			b.WriteString(labelStyle.Render(label))
@@ -1124,7 +1126,7 @@ func (m Model) writeJobTimingSection(b *strings.Builder, job *db.Job, labelStyle
 		}
 
 		startTimestamp := job.StartTime
-		if startTimestamp == 0 && job.CreatedAt > 0 && db.IsTerminalStatus(job.Status) {
+		if startTimestamp == 0 && job.CreatedAt > 0 && db.IsTerminalStatus(status) {
 			startTimestamp = job.CreatedAt
 		}
 
@@ -1158,7 +1160,7 @@ func (m Model) writeJobTimingSection(b *strings.Builder, job *db.Job, labelStyle
 			}
 			wrote = true
 
-			if job.Status == db.StatusRunning {
+			if status == db.StatusRunning {
 				elapsed := time.Since(startTime)
 				b.WriteString(labelStyle.Render("Elapsed"))
 				b.WriteString(valueStyle.Render(formatDuration(elapsed)))

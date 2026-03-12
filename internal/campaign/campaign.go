@@ -34,7 +34,7 @@ func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 	groups := make(map[groupKey]*InstanceGroup)
 
 	for _, job := range jobs {
-		if job.Status != db.StatusQueued || job.Host != "" {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasAssignedHost() {
 			continue
 		}
 

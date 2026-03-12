@@ -394,7 +394,8 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, nil
 		}
-		switch job.Status {
+		status := job.EffectiveStatus()
+		switch status {
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=k action=kill"))
 			return m, tea.Batch(m.setFlash("Killing job...", false), m.killJob(job))
@@ -412,7 +413,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case db.StatusCanceled:
 			return m, m.setFlash(fmt.Sprintf("Job %d already canceled", job.ID), true)
 		default:
-			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, job.Status), true)
+			return m, m.setFlash(fmt.Sprintf("Can't kill job %d (status: %s)", job.ID, status), true)
 		}
 
 	case key.Matches(msg, keys.Pause):
@@ -423,14 +424,15 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, nil
 		}
-		switch job.Status {
+		status := job.EffectiveStatus()
+		switch status {
 		case db.StatusRunning, db.StatusStarting:
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=p action=pause"))
 			return m, tea.Batch(m.setFlash("Pausing job...", false), m.pauseJob(job))
 		case db.StatusPaused:
 			return m, m.setFlash(fmt.Sprintf("Job %d already paused (press g to resume)", job.ID), false)
 		default:
-			return m, m.setFlash(fmt.Sprintf("Can't pause job %d (status: %s)", job.ID, job.Status), true)
+			return m, m.setFlash(fmt.Sprintf("Can't pause job %d (status: %s)", job.ID, status), true)
 		}
 
 	case key.Matches(msg, keys.Draft):
@@ -491,8 +493,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		// Refuse to remove active jobs - suggest killing first
-		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
-			return m, m.setFlash(fmt.Sprintf("Job %d is %s. Kill it first (k)", job.ID, job.Status), true)
+		status := job.EffectiveStatus()
+		if status == db.StatusRunning || status == db.StatusQueued || status == db.StatusStarting || status == db.StatusPaused {
+			return m, m.setFlash(fmt.Sprintf("Job %d is %s. Kill it first (k)", job.ID, status), true)
 		}
 		return m, tea.Batch(m.setFlash("Removing job...", false), m.removeJob(job))
 
@@ -592,7 +595,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		job := m.getTargetJob()
-		if job != nil && job.Status == db.StatusQueued {
+		if job != nil && job.EffectiveStatus() == db.StatusQueued {
 			oplog.LogJob(oplog.OpTUIAction, job.ID, job.Host, oplog.WithDetail("key=G action=move_to_front"))
 			return m, tea.Batch(m.setFlash(fmt.Sprintf("Moving job %d to front...", job.ID), false), m.moveJobToFront(job))
 		}
@@ -630,7 +633,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
-		if job.Status != db.StatusQueued {
+		if job.EffectiveStatus() != db.StatusQueued {
 			return m, m.setFlash("Can only edit queued jobs", true)
 		}
 		// Enter edit mode with form pre-populated
@@ -667,7 +670,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil {
 			return m, m.setFlash("No job selected", true)
 		}
-		if job.Status != db.StatusQueued {
+		if job.EffectiveStatus() != db.StatusQueued {
 			return m, m.setFlash("Cloud GPU only available for queued jobs", true)
 		}
 		return m, m.openCloudMenu(job)

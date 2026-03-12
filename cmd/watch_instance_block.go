@@ -182,7 +182,7 @@ func renderWatchJobStatusText(statusText, displayStatus string, opts watchInstan
 }
 
 func watchJobProgressPercent(update campaign.InstanceUpdate, job *db.Job, jobProgressHWM map[int64]int) int {
-	if job == nil || job.Status != db.StatusRunning {
+	if job == nil || job.EffectiveStatus() != db.StatusRunning {
 		return -1
 	}
 	if jobProgressHWM != nil && jobProgressHWM[job.ID] > 0 {

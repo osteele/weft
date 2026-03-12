@@ -871,13 +871,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update the monitor's watched jobs based on current UI state.
 		// The monitor handles the actual SSH polling and emits events.
 		if m.monitor != nil {
-			if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.Status == db.StatusRunning {
+			if m.detailTab == DetailTabLogs && m.selectedJob != nil && m.selectedJob.EffectiveStatus() == db.StatusRunning {
 				m.monitor.WatchJobLog(m.selectedJob)
 			} else {
 				m.monitor.WatchJobLog(nil)
 			}
 			targetJob := m.getTargetJob()
-			if targetJob != nil && targetJob.Status == db.StatusRunning {
+			if targetJob != nil && targetJob.EffectiveStatus() == db.StatusRunning {
 				m.monitor.WatchJobStats(targetJob)
 			} else {
 				m.monitor.WatchJobStats(nil)
@@ -940,7 +940,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Build set of hosts with running jobs
 		hostsWithRunningJobs := make(map[string]bool)
 		for _, job := range m.jobs {
-			if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused {
+			switch job.EffectiveStatus() {
+			case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 				hostsWithRunningJobs[job.Host] = true
 			}
 		}

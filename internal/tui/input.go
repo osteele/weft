@@ -239,7 +239,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 	return func() tea.Msg {
 		job := jobCopy
 		// For terminal jobs, try local cache first
-		if job.Status == db.StatusCompleted || job.Status == db.StatusDead || job.Status == db.StatusFailed || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
+		if db.IsTerminalStatus(job.EffectiveStatus()) {
 			if cached, err := logcache.Read(job.ID); err == nil {
 				// Apply tail -500 equivalent
 				lines := strings.Split(cached, "\n")
@@ -288,7 +288,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 			// Check if log file doesn't exist
 			if strings.Contains(combined, "No such file") || strings.Contains(combined, "cannot open") {
 				msg := "No log file yet"
-				if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
+				if db.IsTerminalStatus(job.EffectiveStatus()) {
 					msg = "Log file not found (may have been cleaned up)"
 				}
 				return logFetchedMsg{
@@ -305,7 +305,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 		// Check if output indicates file not found (for cases where tail doesn't error)
 		if strings.Contains(stdout, "No such file") || strings.Contains(stdout, "cannot open") {
 			msg := "No log file yet"
-			if job.Status == db.StatusCompleted || job.Status == db.StatusFailed || job.Status == db.StatusDead || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
+			if db.IsTerminalStatus(job.EffectiveStatus()) {
 				msg = "Log file not found (may have been cleaned up)"
 			}
 			return logFetchedMsg{
@@ -335,7 +335,7 @@ func (m Model) fetchSelectedJobLog() tea.Cmd {
 // fetchQuickProgress quickly greps the log file for the last progress line
 // This is faster than fetching the full log and is used for periodic refresh
 func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
-	if job == nil || job.Status != db.StatusRunning {
+	if job == nil || job.EffectiveStatus() != db.StatusRunning {
 		return nil
 	}
 
@@ -360,7 +360,7 @@ func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 func (m Model) fetchAllRunningJobsProgress() tea.Cmd {
 	var cmds []tea.Cmd
 	for _, job := range m.allJobs {
-		if job.Status == db.StatusRunning && !job.Tombstoned {
+		if job.EffectiveStatus() == db.StatusRunning && !job.Tombstoned {
 			if cmd := m.fetchQuickProgress(job); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
