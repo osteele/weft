@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -240,6 +241,175 @@ func TestSetJobPlacementMetaDoesNotCreateRunBeforeStart(t *testing.T) {
 	}
 	if job.LatestRunID != nil {
 		t.Fatalf("latest_run_id = %v, want nil before execution starts", job.LatestRunID)
+	}
+}
+
+func TestOpenBackfillsLegacyTerminalJobsIntoRuns(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "weft-legacy-db-*.db")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	tmpFile.Close()
+
+	cleanup := SetDBPath(tmpFile.Name())
+	t.Cleanup(func() {
+		cleanup()
+		os.Remove(tmpFile.Name())
+	})
+
+	legacyDB, err := sql.Open("sqlite", tmpFile.Name())
+	if err != nil {
+		t.Fatalf("sql.Open legacy db: %v", err)
+	}
+
+	legacySchema := `
+	CREATE TABLE jobs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		host TEXT NOT NULL,
+		session_name TEXT,
+		working_dir TEXT NOT NULL,
+		command TEXT NOT NULL,
+		description TEXT,
+		job_metadata TEXT,
+		tags TEXT,
+		start_time INTEGER,
+		end_time INTEGER,
+		exit_code INTEGER,
+		status TEXT NOT NULL DEFAULT 'running',
+		tombstoned INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE TABLE job_timeseries (
+		job_id INTEGER NOT NULL,
+		ts INTEGER NOT NULL,
+		cpu_pct INTEGER,
+		rss_kb INTEGER,
+		gpu_mib INTEGER,
+		disk_free_bytes INTEGER,
+		disk_total_bytes INTEGER,
+		host_rss_kb INTEGER,
+		host_mem_total_kb INTEGER,
+		gpu_util_pct INTEGER,
+		gpu_mem_used_mib INTEGER,
+		gpu_mem_total_mib INTEGER,
+		tenant TEXT,
+		PRIMARY KEY (job_id, ts)
+	);
+	CREATE TABLE artifacts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id INTEGER NOT NULL,
+		name TEXT,
+		path TEXT NOT NULL,
+		stored_path TEXT NOT NULL,
+		size_bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT,
+		created_at INTEGER NOT NULL
+	);
+	`
+	if _, err := legacyDB.Exec(legacySchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+
+	metadataJSON := `{"resource":{"peak_rss_kb":4096,"max_gpu_mem_mib":8192},"cpu":{"mean":42.5}}`
+	jobResult, err := legacyDB.Exec(
+		`INSERT INTO jobs (host, session_name, working_dir, command, description, job_metadata, tags, start_time, end_time, exit_code, status, tombstoned)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		"host1", "", "/tmp/project", "python train.py", "legacy train", metadataJSON, `["train"]`, 100, 130, 0, StatusCompleted,
+	)
+	if err != nil {
+		t.Fatalf("insert legacy job: %v", err)
+	}
+	jobID, err := jobResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId: %v", err)
+	}
+
+	if _, err := legacyDB.Exec(
+		`INSERT INTO job_timeseries (
+			job_id, ts, cpu_pct, rss_kb, gpu_mib, disk_free_bytes, disk_total_bytes,
+			host_rss_kb, host_mem_total_kb, gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib, tenant
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		jobID, 105, 55, 2048, 4096, 0, 0, 8192, 16384, 77, 4096, 8192, "multi",
+	); err != nil {
+		t.Fatalf("insert legacy timeseries: %v", err)
+	}
+	if _, err := legacyDB.Exec(
+		`INSERT INTO artifacts (job_id, name, path, stored_path, size_bytes, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		jobID, "model", "output/model.bin", "/tmp/store/model.bin", 1234, "abc", 131,
+	); err != nil {
+		t.Fatalf("insert legacy artifact: %v", err)
+	}
+	if err := legacyDB.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("Open migrated db: %v", err)
+	}
+	defer database.Close()
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job == nil || job.LatestRunID == nil {
+		t.Fatalf("latest_run_id not backfilled: %+v", job)
+	}
+
+	run, err := GetJobRunByID(database, *job.LatestRunID)
+	if err != nil {
+		t.Fatalf("GetJobRunByID: %v", err)
+	}
+	if run.JobID != jobID || run.Status != StatusCompleted || run.Command != "python train.py" || run.Description != "legacy train" {
+		t.Fatalf("backfilled run = %+v", run)
+	}
+	if run.StartTime != 100 || run.EndTime == nil || *run.EndTime != 130 || run.ExitCode == nil || *run.ExitCode != 0 {
+		t.Fatalf("backfilled run timing/exit = %+v", run)
+	}
+	if run.Metadata == nil || run.Metadata.Resource == nil || run.Metadata.Resource.PeakRSSKB == nil || *run.Metadata.Resource.PeakRSSKB != 4096 {
+		t.Fatalf("backfilled run metadata = %+v", run.Metadata)
+	}
+
+	ts, err := GetTimeseriesByRun(database, *job.LatestRunID)
+	if err != nil {
+		t.Fatalf("GetTimeseriesByRun: %v", err)
+	}
+	if len(ts) != 1 || ts[0].JobRunID == nil || *ts[0].JobRunID != *job.LatestRunID {
+		t.Fatalf("backfilled timeseries = %+v", ts)
+	}
+
+	arts, err := ListArtifactsByRun(database, *job.LatestRunID)
+	if err != nil {
+		t.Fatalf("ListArtifactsByRun: %v", err)
+	}
+	if len(arts) != 1 || arts[0].JobRunID == nil || *arts[0].JobRunID != *job.LatestRunID {
+		t.Fatalf("backfilled artifacts = %+v", arts)
+	}
+
+	runs, err := ListTrainingJobRuns(database, 0)
+	if err != nil {
+		t.Fatalf("ListTrainingJobRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].RunID != *job.LatestRunID || runs[0].JobID != jobID {
+		t.Fatalf("training export rows = %+v", runs)
+	}
+
+	if err := database.Close(); err != nil {
+		t.Fatalf("close migrated db: %v", err)
+	}
+
+	database, err = Open()
+	if err != nil {
+		t.Fatalf("reopen migrated db: %v", err)
+	}
+	defer database.Close()
+
+	var runCount int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM job_runs WHERE job_id = ?`, jobID).Scan(&runCount); err != nil {
+		t.Fatalf("count job_runs: %v", err)
+	}
+	if runCount != 1 {
+		t.Fatalf("job_runs count after reopen = %d, want 1", runCount)
 	}
 }
 

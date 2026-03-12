@@ -923,6 +923,9 @@ func initSchema(db *sql.DB) error {
 	`); err != nil {
 		return err
 	}
+	if err := backfillLegacyJobRuns(db); err != nil {
+		return err
+	}
 
 	// Migration: convert legacy needs_rental status to queued (host is already empty)
 	if _, err := db.Exec(`UPDATE jobs SET status = ? WHERE status = ?`, StatusQueued, statusNeedsRental); err != nil {
@@ -3352,8 +3355,87 @@ func shouldArchiveJobRun(job *Job) bool {
 		job.ErrorMessage != "" || job.FailureReason != "" || job.SessionName != ""
 }
 
+func backfillLegacyJobRuns(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	jobs, err := queryJobsTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE COALESCE(latest_run_id, 0) = 0 ORDER BY id ASC`, jobSelectColumns))
+	if err != nil {
+		return err
+	}
+
+	for _, job := range jobs {
+		if !shouldArchiveJobRun(job) {
+			continue
+		}
+
+		runID, err := latestArchivedRunIDTx(tx, job.ID)
+		if err != nil {
+			return err
+		}
+		if runID == nil {
+			backfilledRunID, err := insertJobRunSnapshotAtTx(tx, job, "legacy_migration", legacyJobArchivedAt(job))
+			if err != nil {
+				return err
+			}
+			runID = &backfilledRunID
+		}
+
+		if err := setJobLatestRunIDTx(tx, job.ID, *runID); err != nil {
+			return err
+		}
+		if err := attachLegacyTimeseriesToRunTx(tx, job.ID, *runID); err != nil {
+			return err
+		}
+		if err := attachLegacyArtifactsToRunTx(tx, job.ID, *runID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func latestArchivedRunIDTx(tx *sql.Tx, jobID int64) (*int64, error) {
+	var runID sql.NullInt64
+	if err := tx.QueryRow(`SELECT id FROM job_runs WHERE job_id = ? ORDER BY archived_at DESC, id DESC LIMIT 1`, jobID).Scan(&runID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !runID.Valid {
+		return nil, nil
+	}
+	return &runID.Int64, nil
+}
+
+func legacyJobArchivedAt(job *Job) int64 {
+	if job == nil {
+		return time.Now().Unix()
+	}
+	if job.EndTime != nil && *job.EndTime > 0 {
+		return *job.EndTime
+	}
+	if job.StartTime > 0 {
+		return job.StartTime
+	}
+	if job.QueuedAt > 0 {
+		return job.QueuedAt
+	}
+	if job.CreatedAt > 0 {
+		return job.CreatedAt
+	}
+	return time.Now().Unix()
+}
+
 func insertJobRunSnapshotTx(tx *sql.Tx, job *Job, reason string) (int64, error) {
-	now := time.Now().Unix()
+	return insertJobRunSnapshotAtTx(tx, job, reason, time.Now().Unix())
+}
+
+func insertJobRunSnapshotAtTx(tx *sql.Tx, job *Job, reason string, archivedAt int64) (int64, error) {
 	jobMetadata, err := encodeJobMetadata(job.Metadata)
 	if err != nil {
 		return 0, err
@@ -3371,7 +3453,7 @@ func insertJobRunSnapshotTx(tx *sql.Tx, job *Job, reason string) (int64, error) 
 			start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis,
 			job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, now, reason, job.Status, job.Host, job.WorkingDir, job.Command, nullIfEmpty(job.Description),
+		job.ID, archivedAt, reason, job.Status, job.Host, job.WorkingDir, job.Command, nullIfEmpty(job.Description),
 		nullIfEmpty(job.SessionName), nullIfEmpty(job.QueueName), nullIfEmpty(job.Backend),
 		nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
 		nullIfEmpty(job.GPU), nullIfEmpty(job.GPUClass), job.CPUAllotment, job.GPUMemGB,
@@ -3386,6 +3468,64 @@ func insertJobRunSnapshotTx(tx *sql.Tx, job *Job, reason string) (int64, error) 
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func attachLegacyTimeseriesToRunTx(tx *sql.Tx, jobID, runID int64) error {
+	_, err := tx.Exec(`UPDATE job_timeseries SET job_run_id = ? WHERE job_id = ? AND job_run_id IS NULL`, runID, jobID)
+	return err
+}
+
+func attachLegacyArtifactsToRunTx(tx *sql.Tx, jobID, runID int64) error {
+	rows, err := tx.Query(`SELECT id, name, path FROM artifacts WHERE job_id = ? AND job_run_id IS NULL ORDER BY id ASC`, jobID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type legacyArtifactRow struct {
+		id   int64
+		name sql.NullString
+		path string
+	}
+
+	var legacyRows []legacyArtifactRow
+	for rows.Next() {
+		var row legacyArtifactRow
+		if err := rows.Scan(&row.id, &row.name, &row.path); err != nil {
+			return err
+		}
+		legacyRows = append(legacyRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, row := range legacyRows {
+		var existingID int64
+		var err error
+		if row.name.Valid {
+			err = tx.QueryRow(
+				`SELECT id FROM artifacts WHERE job_run_id = ? AND path = ? AND name = ? LIMIT 1`,
+				runID, row.path, row.name.String,
+			).Scan(&existingID)
+		} else {
+			err = tx.QueryRow(
+				`SELECT id FROM artifacts WHERE job_run_id = ? AND path = ? AND name IS NULL LIMIT 1`,
+				runID, row.path,
+			).Scan(&existingID)
+		}
+		if err == nil {
+			continue
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE artifacts SET job_run_id = ? WHERE id = ?`, runID, row.id); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func setJobLatestRunIDTx(tx *sql.Tx, jobID, runID int64) error {
