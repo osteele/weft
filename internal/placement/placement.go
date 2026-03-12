@@ -825,6 +825,67 @@ func DescribeConstraints(c Constraints) string {
 	return strings.Join(parts, ", ")
 }
 
+// ExplainUnplaced returns compact user-facing reasons for why local placement
+// left a job unplaced.
+func ExplainUnplaced(database *sql.DB, constraints Constraints) ([]string, error) {
+	if slices.Contains(constraints.Tags, db.TagCloud) {
+		return []string{"cloud-tagged job skips local placement"}, nil
+	}
+
+	scores, err := ScoreHostsWithMetrics(database, constraints, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	type reasonGroup struct {
+		reason string
+		hosts  []string
+	}
+	reasonHosts := make(map[string][]string)
+	for _, score := range scores {
+		if score.Eligible {
+			continue
+		}
+		reason := "host did not match constraints"
+		if len(score.Reasons) > 0 && score.Reasons[0] != "" {
+			reason = score.Reasons[0]
+		}
+		reasonHosts[reason] = append(reasonHosts[reason], score.Host)
+	}
+
+	if len(reasonHosts) == 0 {
+		return []string{fmt.Sprintf("no local host matched %s", DescribeConstraints(constraints))}, nil
+	}
+
+	groups := make([]reasonGroup, 0, len(reasonHosts))
+	for reason, hosts := range reasonHosts {
+		slices.Sort(hosts)
+		groups = append(groups, reasonGroup{reason: reason, hosts: hosts})
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if len(groups[i].hosts) != len(groups[j].hosts) {
+			return len(groups[i].hosts) > len(groups[j].hosts)
+		}
+		return groups[i].reason < groups[j].reason
+	})
+
+	reasons := []string{fmt.Sprintf("no local host matched %s", DescribeConstraints(constraints))}
+	for i, group := range groups {
+		if i >= 2 {
+			break
+		}
+		reasons = append(reasons, fmt.Sprintf("%d host%s: %s", len(group.hosts), pluralSuffix(len(group.hosts)), group.reason))
+	}
+	return reasons, nil
+}
+
+func pluralSuffix(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // FormatPlacementDetail builds a compact detail string for oplog entries.
 func FormatPlacementDetail(result *PlacementResult) string {
 	if result == nil {

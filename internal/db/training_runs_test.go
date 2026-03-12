@@ -244,6 +244,26 @@ func TestSetJobPlacementMetaDoesNotCreateRunBeforeStart(t *testing.T) {
 	}
 }
 
+func TestSetJobPlacementReasonsDoesNotCreateRunBeforeStart(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "train")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := SetJobPlacementReasons(database, jobID, []string{"manually moved to unplaced queue"}); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID != nil {
+		t.Fatalf("latest_run_id = %v, want nil before execution starts", job.LatestRunID)
+	}
+}
+
 func TestOpenBackfillsLegacyTerminalJobsIntoRuns(t *testing.T) {
 	tmpFile, err := os.CreateTemp("", "weft-legacy-db-*.db")
 	if err != nil {

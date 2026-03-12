@@ -79,6 +79,7 @@ type Job struct {
 	ErrorDiagnosis       string         // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
 	RetryCount           int            // Number of auto-remediation retries attempted
 	PlacementMeta        *PlacementMeta // Placement telemetry (predictions, scores)
+	PlacementReasons     []string       // Why the job is currently unplaced
 	CloudInstanceID      *int64         // Cloud instance ID if this job is part of a cloud instance
 	LatestRunID          *int64         // Latest execution attempt row for this logical job
 
@@ -166,7 +167,7 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, cloud_instance_id, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, latest_run_id`
 
 const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
@@ -1387,6 +1388,13 @@ func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
 	return PersistLatestRunSnapshotIfExists(db, jobID, "")
 }
 
+// SetJobPlacementReasons stores why a job is currently unplaced.
+func SetJobPlacementReasons(db *sql.DB, jobID int64, reasons []string) error {
+	encoded := encodeStringSlice(reasons)
+	_, err := db.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`, encoded, jobID)
+	return err
+}
+
 func encodePlacementMeta(meta *PlacementMeta) (any, error) {
 	if meta == nil {
 		return nil, nil
@@ -1749,9 +1757,10 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 		     pending_at = NULL,
 		     last_synced_status = NULL,
 		     cloud_instance_id = NULL,
-		     tags = ?
+		     tags = ?,
+		     placement_reasons = ?
 		 WHERE id = ? AND status = ?`,
-		tagValue, id, StatusQueued,
+		tagValue, encodeStringSlice([]string{"manually moved to unplaced queue"}), id, StatusQueued,
 	)
 	return err
 }
@@ -1780,14 +1789,24 @@ func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
 		`UPDATE jobs SET status = ?, pending_status = ?, host = '', cloud_instance_id = NULL,
 		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
 		 session_name = NULL, last_synced_status = NULL, failure_reason = NULL,
-		 error_diagnosis = NULL, remote_state = NULL, remote_id = NULL
+		 error_diagnosis = NULL, remote_state = NULL, remote_id = NULL, placement_reasons = ?
 		 WHERE id = ?`,
-		StatusQueued, StatusQueued, jobID,
+		StatusQueued, StatusQueued, encodeStringSlice(resetJobPlacementReasons(job)), jobID,
 	); err != nil {
 		tx.Rollback()
 		return err
 	}
 	return tx.Commit()
+}
+
+func resetJobPlacementReasons(job *Job) []string {
+	if job == nil {
+		return []string{"job reset to unplaced queue"}
+	}
+	if job.CloudInstanceID != nil && *job.CloudInstanceID > 0 {
+		return []string{fmt.Sprintf("cloud instance %d unavailable; job reset to unplaced queue", *job.CloudInstanceID)}
+	}
+	return []string{"job reset to unplaced queue"}
 }
 
 // SetQueuedAtNow sets queued_at to the current time if it's not already set.
@@ -2480,10 +2499,11 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var errorDiagnosis sql.NullString
 	var retryCount sql.NullInt64
 	var placementMeta sql.NullString
+	var placementReasons sql.NullString
 	var cloudInstanceID sql.NullInt64
 	var latestRunID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &cloudInstanceID, &latestRunID)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &latestRunID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -2591,6 +2611,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.RetryCount = int(retryCount.Int64)
 	}
 	j.PlacementMeta = decodePlacementMeta(placementMeta)
+	j.PlacementReasons = decodeStringSlice(placementReasons)
 	if cloudInstanceID.Valid {
 		j.CloudInstanceID = &cloudInstanceID.Int64
 	}
@@ -2830,10 +2851,11 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var errorDiagnosis sql.NullString
 		var retryCount sql.NullInt64
 		var placementMeta sql.NullString
+		var placementReasons sql.NullString
 		var cloudInstanceID sql.NullInt64
 		var latestRunID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &cloudInstanceID, &latestRunID)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &latestRunID)
 		if err != nil {
 			return nil, err
 		}
@@ -2938,6 +2960,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.RetryCount = int(retryCount.Int64)
 		}
 		j.PlacementMeta = decodePlacementMeta(placementMeta)
+		j.PlacementReasons = decodeStringSlice(placementReasons)
 		if cloudInstanceID.Valid {
 			j.CloudInstanceID = &cloudInstanceID.Int64
 		}

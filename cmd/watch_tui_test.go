@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -101,6 +102,25 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
+	ci := &db.CloudInstance{
+		ID:                 111,
+		Status:             db.CloudInstanceStatusRunning,
+		Provider:           "vastai",
+		ProviderInstanceID: "32740493",
+		GPUSpec:            "A100",
+	}
+	update := campaign.InstanceUpdate{
+		CloudInstance: ci,
+		Instance:      &cloud.Instance{Status: "loading"},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
+	if !strings.Contains(out, "Instance 111 — A100 — loading") {
+		t.Fatalf("expected provider loading status in header, got:\n%s", out)
+	}
+}
+
 func TestFormatOnPremJobRowQueuedUsesDashDuration(t *testing.T) {
 	m := watchAllModel{}
 	row := m.formatOnPremJobRow(&db.Job{
@@ -161,5 +181,62 @@ func TestWatchAllModelUnplaceDoneMovesJobImmediately(t *testing.T) {
 	}
 	if got.unplacedJobs[0].Host != "" {
 		t.Fatalf("unplaced job host = %q, want empty", got.unplacedJobs[0].Host)
+	}
+}
+
+func TestWatchAllModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
+	m := watchAllModel{
+		width:  180,
+		height: 12,
+		cursor: 0,
+		unplacedJobs: []*db.Job{
+			{
+				ID:               189,
+				Status:           db.StatusQueued,
+				WorkingDir:       "/tmp/project-gamma",
+				Description:      "benchmark",
+				GPUClass:         "L40s",
+				PlacementReasons: []string{"no local host matched gpu-class=L40s, gpu-mem>=20GB", "2 hosts: no L40s GPU"},
+			},
+		},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"#189 unplaced: no local host matched gpu-class=L40s, gpu-mem>=20GB | 2 hosts: no L40s GPU",
+		"[u] unplace queued job",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestWatchAllModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.T) {
+	m := watchAllModel{
+		width:  90,
+		height: 12,
+		cursor: 0,
+		unplacedJobs: []*db.Job{
+			{
+				ID:               189,
+				Status:           db.StatusQueued,
+				WorkingDir:       "/tmp/project-gamma",
+				Description:      "benchmark",
+				GPUClass:         "L40s",
+				PlacementReasons: []string{"no local host matched gpu-class=L40s, gpu-mem>=20GB", "2 hosts: no L40s GPU", "another long reason"},
+			},
+		},
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "#189 unplaced:") {
+		t.Fatalf("footer missing unplaced prefix, got:\n%s", out)
+	}
+	if !strings.Contains(out, "...") {
+		t.Fatalf("footer should truncate detail, got:\n%s", out)
+	}
+	if strings.Contains(out, "another long reason") {
+		t.Fatalf("footer should omit overflowing detail, got:\n%s", out)
 	}
 }

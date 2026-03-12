@@ -3,6 +3,7 @@ package db
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -573,6 +574,30 @@ func TestListUnplacedJobs(t *testing.T) {
 	}
 }
 
+func TestSetJobPlacementReasonsRoundTrip(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "unplaced", "")
+	if err != nil {
+		t.Fatalf("record unplaced: %v", err)
+	}
+	reasons := []string{"no local host matched gpu-class=L40s, gpu-mem>=20GB", "2 hosts: no L40s GPU"}
+	if err := SetJobPlacementReasons(database, jobID, reasons); err != nil {
+		t.Fatalf("SetJobPlacementReasons: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 unplaced job, got %d", len(jobs))
+	}
+	if got := jobs[0].PlacementReasons; strings.Join(got, "\n") != strings.Join(reasons, "\n") {
+		t.Fatalf("placement reasons = %v, want %v", got, reasons)
+	}
+}
+
 func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	database := SetupTestDB(t)
 
@@ -612,6 +637,33 @@ func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	}
 	if !job.HasTag(TagCloud) {
 		t.Errorf("expected cloud tag after move to unplaced, got %v", job.Tags)
+	}
+	if got := strings.Join(job.PlacementReasons, "\n"); got != "manually moved to unplaced queue" {
+		t.Errorf("PlacementReasons = %v, want manual unplaced reason", job.PlacementReasons)
+	}
+}
+
+func TestResetJobToUnplacedSetsReason(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, CloudInstanceHost(42), "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET cloud_instance_id = ?, status = ?, start_time = ? WHERE id = ?`, 42, StatusRunning, time.Now().Unix(), jobID); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+
+	if err := ResetJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("ResetJobToUnplaced: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if got := strings.Join(job.PlacementReasons, "\n"); got != "cloud instance 42 unavailable; job reset to unplaced queue" {
+		t.Fatalf("PlacementReasons = %v", job.PlacementReasons)
 	}
 }
 

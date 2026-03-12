@@ -427,6 +427,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 			if submitted := tryCloudReuse(database, jobID); submitted {
 				return nil
 			}
+			if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
+				log.Printf("warning: failed to explain unplaced job %d: %v", jobID, reasonErr)
+			} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
+				log.Printf("warning: failed to save unplaced reasons for job %d: %v", jobID, err)
+			}
 			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
 			return nil
 		}
@@ -493,6 +498,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		})
 		if err != nil {
 			return fmt.Errorf("record unplaced job: %w", err)
+		}
+		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
+			log.Printf("warning: failed to explain unplaced job %d: %v", jobID, reasonErr)
+		} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
+			log.Printf("warning: failed to save unplaced reasons for job %d: %v", jobID, err)
 		}
 		printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
 		return nil

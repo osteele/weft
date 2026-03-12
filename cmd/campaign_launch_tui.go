@@ -780,6 +780,13 @@ func (m launchModel) View() string {
 			b.WriteString("\n")
 			costTable := campaign.FormatCostTableSelected(m.costEstimates, selected)
 			renderCostTable(&b, costTable)
+		} else if m.loading && m.groupOffers == nil {
+			b.WriteString("\n")
+			b.WriteString(launchDimStyle.Render("── Cost Estimate ─────────────────────────────────────"))
+			b.WriteString("\n")
+			b.WriteString(m.spinner.View())
+			b.WriteString(launchDimStyle.Render(" Awaiting offers..."))
+			b.WriteString("\n")
 		} else if m.groupOffers != nil {
 			b.WriteString("\n")
 			b.WriteString(launchDimStyle.Render("── Cost Estimate (rough) ─────────────────────────────"))

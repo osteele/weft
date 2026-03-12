@@ -367,7 +367,7 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ? WHERE id = ?`, instanceID, CloudInstanceHost(instanceID), jobID); err != nil {
+	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ?, placement_reasons = NULL WHERE id = ?`, instanceID, CloudInstanceHost(instanceID), jobID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -435,7 +435,7 @@ func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
 // Returns true if the job was updated (false if it was already claimed or changed status).
 func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	result, err := database.Exec(
-		`UPDATE jobs SET host = ? WHERE id = ? AND status = ? AND host = '' AND tombstoned = 0`,
+		`UPDATE jobs SET host = ?, placement_reasons = NULL WHERE id = ? AND status = ? AND host = '' AND tombstoned = 0`,
 		host, jobID, StatusQueued,
 	)
 	if err != nil {
@@ -456,6 +456,12 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	if err != nil {
 		return 0, err
 	}
+	ci, err := scanCloudInstanceFrom(tx.QueryRow(`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE id = ?`, instanceID))
+	if err != nil && err != sql.ErrNoRows {
+		tx.Rollback()
+		return 0, err
+	}
+	placementReasons := encodeStringSlice(cloudResetPlacementReasons(ci, outcome))
 
 	jobs, err := queryJobsTx(tx,
 		fmt.Sprintf(`SELECT %s FROM jobs WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
@@ -494,9 +500,9 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = '',
 		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
 		 session_name = NULL, failure_reason = NULL, error_diagnosis = NULL,
-		 remote_state = NULL, remote_id = NULL
+		 remote_state = NULL, remote_id = NULL, placement_reasons = ?
 		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0`,
-		StatusQueued, instanceID,
+		StatusQueued, placementReasons, instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {
@@ -514,27 +520,93 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	return n, nil
 }
 
+func cloudResetPlacementReasons(ci *CloudInstance, outcome string) []string {
+	if ci == nil {
+		return []string{"returned from cloud instance to unplaced queue"}
+	}
+
+	switch ci.Status {
+	case CloudInstanceStatusFailed:
+		if ci.TerminationReason != "" {
+			return []string{fmt.Sprintf("cloud instance %d failed (%s)", ci.ID, ci.TerminationReason)}
+		}
+		return []string{fmt.Sprintf("cloud instance %d failed", ci.ID)}
+	case CloudInstanceStatusCancelled:
+		return []string{fmt.Sprintf("cloud instance %d was cancelled", ci.ID)}
+	default:
+		if outcome != "" {
+			return []string{fmt.Sprintf("cloud instance %d returned job to queue (%s)", ci.ID, outcome)}
+		}
+		return []string{fmt.Sprintf("cloud instance %d returned job to queue", ci.ID)}
+	}
+}
+
 // ResetOrphanedCloudJobs resets non-terminal jobs whose host references a cloud
 // instance (host LIKE 'vastai:%') that is either terminal or missing from the DB
 // entirely. This catches jobs stranded by stale host fields when cloud_instance_id
 // was already cleared — including "running" jobs whose instance died after the
 // agent started execution but before the reset could clear them.
 func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
-	result, err := database.Exec(`
-		UPDATE jobs SET status = ?, host = '', cloud_instance_id = NULL
+	tx, err := database.Begin()
+	if err != nil {
+		return 0, err
+	}
+	rows, err := tx.Query(`
+		SELECT id, host FROM jobs
 		WHERE status IN (?, ?) AND host LIKE 'vastai:%' AND tombstoned = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM cloud_instances ci
 			WHERE ci.id = CAST(SUBSTR(jobs.host, 8) AS INTEGER)
 			AND ci.status IN (?, ?, ?, ?)
 		)`,
-		StatusQueued, StatusQueued, StatusRunning,
+		StatusQueued, StatusRunning,
 		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace, CloudInstanceStatusCompleted,
 	)
 	if err != nil {
+		tx.Rollback()
 		return 0, err
 	}
-	return result.RowsAffected()
+	defer rows.Close()
+
+	type staleCloudJob struct {
+		id   int64
+		host string
+	}
+	var jobs []staleCloudJob
+	for rows.Next() {
+		var job staleCloudJob
+		if err := rows.Scan(&job.id, &job.host); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	for _, job := range jobs {
+		if _, err := tx.Exec(
+			`UPDATE jobs SET status = ?, host = '', cloud_instance_id = NULL, placement_reasons = ?
+			 WHERE id = ?`,
+			StatusQueued, encodeStringSlice(orphanedCloudPlacementReasons(job.host)), job.id,
+		); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int64(len(jobs)), nil
+}
+
+func orphanedCloudPlacementReasons(host string) []string {
+	if instanceID := strings.TrimPrefix(host, "vastai:"); instanceID != "" && instanceID != host {
+		return []string{fmt.Sprintf("cloud instance %s no longer active; job returned to unplaced queue", instanceID)}
+	}
+	return []string{"cloud instance no longer active; job returned to unplaced queue"}
 }
 
 // GetCloudInstanceJobCounts returns a map from cloud instance ID to job count.

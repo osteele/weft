@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,36 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 	}
 	if jobsIncl[0].ID != 1 {
 		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: got job ID %d, want 1", jobsIncl[0].ID)
+	}
+}
+
+func TestResetOrphanedCloudJobsSetsPlacementReasons(t *testing.T) {
+	database := setupTestDB(t)
+
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, host, tombstoned, status, command, working_dir)
+		 VALUES (1, 'vastai:77', 0, 'running', 'echo hello', '/tmp')`,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	n, err := ResetOrphanedCloudJobs(database)
+	if err != nil {
+		t.Fatalf("ResetOrphanedCloudJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ResetOrphanedCloudJobs reset %d jobs, want 1", n)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Host != "" || job.Status != StatusQueued {
+		t.Fatalf("job = %+v, want queued unplaced", job)
+	}
+	if got := strings.Join(job.PlacementReasons, "\n"); got != "cloud instance 77 no longer active; job returned to unplaced queue" {
+		t.Fatalf("PlacementReasons = %v", job.PlacementReasons)
 	}
 }
 

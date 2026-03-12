@@ -305,6 +305,23 @@ func (m watchAllModel) selectedOnPremJob() *db.Job {
 	return nil
 }
 
+func (m watchAllModel) selectedUnplacedJob() *db.Job {
+	index := m.cursor - len(m.cloudInstances)
+	if index < 0 {
+		return nil
+	}
+	for _, host := range m.onPremHosts {
+		if index < len(host.Jobs) {
+			return nil
+		}
+		index -= len(host.Jobs)
+	}
+	if index < 0 || index >= len(m.unplacedJobs) {
+		return nil
+	}
+	return m.unplacedJobs[index]
+}
+
 func (m *watchAllModel) removeOnPremJob(jobID int64) {
 	filteredHosts := m.onPremHosts[:0]
 	for _, host := range m.onPremHosts {
@@ -354,13 +371,24 @@ func (m watchAllModel) View() string {
 		return ""
 	}
 
-	footer := watchDimStyle.Render("[u] unplace queued job  [l] launch  [r] refresh  [q] quit")
-	if m.flashMessage != "" {
-		footer = m.flashMessage + "  " + footer
-	}
+	footerParts := make([]string, 0, 3)
+	footerPrefixWidth := 0
 	if m.err != nil {
-		footer = watchFailedStyle.Render(fmt.Sprintf("Error: %v", m.err)) + "  " + footer
+		errText := fmt.Sprintf("Error: %v", m.err)
+		footerParts = append(footerParts, watchFailedStyle.Render(errText))
+		footerPrefixWidth = lipgloss.Width(errText)
+	} else if m.flashMessage != "" {
+		footerParts = append(footerParts, m.flashMessage)
+		footerPrefixWidth = lipgloss.Width(m.flashMessage)
 	}
+	if detail := m.selectedStatusDetail(); detail != "" {
+		detail = m.truncateFooterDetail(detail, footerPrefixWidth)
+		if detail != "" {
+			footerParts = append(footerParts, watchDimStyle.Render(detail))
+		}
+	}
+	footerParts = append(footerParts, watchDimStyle.Render("[u] unplace queued job  [l] launch  [r] refresh  [q] quit"))
+	footer := strings.Join(footerParts, "  ")
 
 	contentHeight := m.height - 1
 	if contentHeight < 1 {
@@ -501,6 +529,33 @@ func (m watchAllModel) formatUnplacedJobRow(job *db.Job) string {
 		truncate(job.EffectiveDescription(), 28),
 		formatWatchGPUConstraint(job),
 	)
+}
+
+func (m watchAllModel) selectedStatusDetail() string {
+	job := m.selectedUnplacedJob()
+	if job == nil || len(job.PlacementReasons) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("#%d unplaced: %s", job.ID, strings.Join(job.PlacementReasons, " | "))
+}
+
+func (m watchAllModel) truncateFooterDetail(detail string, prefixWidth int) string {
+	if m.width <= 0 {
+		return detail
+	}
+	controlsWidth := lipgloss.Width("[u] unplace queued job  [l] launch  [r] refresh  [q] quit")
+	available := m.width - controlsWidth
+	if prefixWidth > 0 {
+		available -= prefixWidth + lipgloss.Width("  ")
+	}
+	available -= lipgloss.Width("  ")
+	if available <= 0 {
+		return ""
+	}
+	if available < 16 {
+		return truncate(detail, max(available, 3))
+	}
+	return truncate(detail, available)
 }
 
 func refreshWatchSystem(database *sql.DB, cfg *config.Config) tea.Cmd {

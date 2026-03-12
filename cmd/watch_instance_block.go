@@ -30,7 +30,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 		return nil
 	}
 
-	lines := []string{formatWatchInstanceHeaderLine(ci, opts)}
+	lines := []string{formatWatchInstanceHeaderLine(ci, update.Instance, opts)}
 	lines = append(lines, formatWatchProviderLine(ci, update.Instance))
 
 	if update.BootstrapStage != "" {
@@ -85,8 +85,8 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	return lines
 }
 
-func formatWatchInstanceHeaderLine(ci *db.CloudInstance, opts watchInstanceBlockOptions) string {
-	statusLabel := ci.Status
+func formatWatchInstanceHeaderLine(ci *db.CloudInstance, inst *cloud.Instance, opts watchInstanceBlockOptions) string {
+	statusLabel := watchInstanceStatusLabel(ci, inst)
 	if label := ci.GraceStatusLabel(); label != "" {
 		statusLabel = label
 	}
@@ -96,7 +96,7 @@ func formatWatchInstanceHeaderLine(ci *db.CloudInstance, opts watchInstanceBlock
 
 	statusText := statusLabel
 	if !opts.plain {
-		statusText = watchStatusBlockStyle(ci.Status).Render(statusLabel)
+		statusText = watchStatusBlockStyle(statusLabel, ci.Status).Render(statusLabel)
 	}
 
 	header := fmt.Sprintf("Instance %d — %s — %s", ci.ID, ci.DisplayGPUSpec(), statusText)
@@ -109,8 +109,33 @@ func formatWatchInstanceHeaderLine(ci *db.CloudInstance, opts watchInstanceBlock
 	return header
 }
 
-func watchStatusBlockStyle(status string) lipgloss.Style {
-	switch status {
+func watchInstanceStatusLabel(ci *db.CloudInstance, inst *cloud.Instance) string {
+	if ci == nil {
+		return ""
+	}
+	statusLabel := ci.Status
+	if inst == nil || inst.Status == "" || campaign.IsInstanceTerminal(ci.Status) {
+		return statusLabel
+	}
+	if ci.Status == db.CloudInstanceStatusRunning && inst.Status != "running" {
+		return inst.Status
+	}
+	if ci.Status == db.CloudInstanceStatusLaunching {
+		return inst.Status
+	}
+	return statusLabel
+}
+
+func watchStatusBlockStyle(displayStatus, dbStatus string) lipgloss.Style {
+	switch displayStatus {
+	case "loading", "launching", "provisioning":
+		return watchDimStyle
+	case db.CloudInstanceStatusCompleted:
+		return watchCompletedStyle
+	case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
+		return watchFailedStyle
+	}
+	switch dbStatus {
 	case db.CloudInstanceStatusCompleted:
 		return watchCompletedStyle
 	case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
