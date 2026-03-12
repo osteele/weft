@@ -36,6 +36,18 @@ func JobResultLog(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/results/%d.log", jobID, jobID)
 }
 
+func JobLiveLogsPrefix(jobID int64) string {
+	return fmt.Sprintf("jobs/%d/live-log/", jobID)
+}
+
+func JobLiveLogManifest(jobID int64) string {
+	return fmt.Sprintf("jobs/%d/live-log/manifest.json", jobID)
+}
+
+func JobLiveLogPart(jobID int64, part int) string {
+	return fmt.Sprintf("jobs/%d/live-log/part-%06d.log", jobID, part)
+}
+
 func JobOutputsPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/outputs/", jobID)
 }

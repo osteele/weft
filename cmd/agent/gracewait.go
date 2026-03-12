@@ -231,13 +231,20 @@ func uploadJobResults(bucket string, jobID int64, logDir string) {
 	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobResultsPrefix(jobID))
 	rcloneCmd.Stderr = os.Stderr
 	start := time.Now()
+	copyOK := false
 	if err := rcloneCmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "upload results for job %d: %v\n", jobID, err)
 		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
 			oplog.WithDetailf("results dir=%s", logDir), oplog.WithError(err),
 			oplog.WithDuration(time.Since(start)))
+	} else {
+		copyOK = true
 	}
 	copyCancel()
+
+	if copyOK {
+		cleanupLiveLogUpload(bucket, jobID)
+	}
 
 	// Write completion marker
 	if err := r2Put(bucket, r2keys.JobComplete(jobID), "done"); err != nil {

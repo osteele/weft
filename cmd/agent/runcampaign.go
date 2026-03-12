@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudlog"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
@@ -299,8 +300,10 @@ func cleanLogDir(logDir string) {
 func runJobWithProgress(r2Bucket string, jobID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
 	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
 	stopProgress := startProgressReporter(r2Bucket, jobID, logPath)
+	stopLogs := startLogUploader(r2Bucket, jobID, logPath)
 	defer func() {
 		stopProgress()
+		stopLogs()
 		r2Delete(r2Bucket, r2keys.JobProgress(jobID))
 	}()
 	return runner.RunSingleJob(cfg)
@@ -509,4 +512,13 @@ func readLogTail(path string, maxBytes int64) string {
 		return ""
 	}
 	return string(data[:n])
+}
+
+func cleanupLiveLogUpload(bucket string, jobID int64) {
+	if err := r2Delete(bucket, cloudlog.ManifestKey(jobID)); err != nil {
+		fmt.Fprintf(os.Stderr, "delete live log manifest for job %d: %v\n", jobID, err)
+	}
+	if err := r2Delete(bucket, cloudlog.Prefix(jobID)); err != nil {
+		fmt.Fprintf(os.Stderr, "delete live log parts for job %d: %v\n", jobID, err)
+	}
 }
