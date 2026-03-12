@@ -339,11 +339,33 @@ func IsCloudHost(host string) bool {
 // SetJobCloudInstanceID associates a job with a cloud instance and records the attempt.
 // Also sets the job's host to "vastai:<instanceID>" so cloud jobs are visible in host-based views.
 func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
-	_, err := db.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ? WHERE id = ?`, instanceID, CloudInstanceHost(instanceID), jobID)
+	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	return InsertJobCloudAttempt(db, jobID, instanceID)
+	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ? WHERE id = ?`, instanceID, CloudInstanceHost(instanceID), jobID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job != nil && job.LatestRunID != nil {
+		if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (?, ?, ?)`,
+		jobID, instanceID, time.Now().Unix(),
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetJobCampaignIndex sets the 0-based position of a job within its campaign sequence.

@@ -26,7 +26,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Create a job associated with this instance
-	_, err = database.Exec(`INSERT INTO jobs (id, status, command, cloud_instance_id) VALUES (1, 'queued', 'python train.py', ?)`, instanceID)
+	_, err = database.Exec(`INSERT INTO jobs (id, host, working_dir, status, command, cloud_instance_id) VALUES (1, '', '/tmp', 'queued', 'python train.py', ?)`, instanceID)
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}

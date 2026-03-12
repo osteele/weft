@@ -127,3 +127,37 @@ func TestInsertTimeseries_Empty(t *testing.T) {
 		t.Fatalf("InsertTimeseries(empty): %v", err)
 	}
 }
+
+func TestGetTimeseriesLastTS_UsesLatestRun(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	if err := InsertTimeseries(database, jobID, []TimeseriesSample{{Ts: 5000, CPUPct: 10}}); err != nil {
+		t.Fatalf("InsertTimeseries first run: %v", err)
+	}
+
+	if err := RequeueByID(database, jobID); err != nil {
+		t.Fatalf("RequeueByID: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning second run: %v", err)
+	}
+	if err := InsertTimeseries(database, jobID, []TimeseriesSample{{Ts: 1000, CPUPct: 20}}); err != nil {
+		t.Fatalf("InsertTimeseries second run: %v", err)
+	}
+
+	ts, err := GetTimeseriesLastTS(database, jobID)
+	if err != nil {
+		t.Fatalf("GetTimeseriesLastTS: %v", err)
+	}
+	if ts != 1000 {
+		t.Fatalf("latest-run ts = %d, want %d", ts, 1000)
+	}
+}

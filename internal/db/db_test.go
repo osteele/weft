@@ -1007,15 +1007,21 @@ func TestMarkRunningFromTerminalArchivesPreviousRun(t *testing.T) {
 	endTime := time.Now().Add(-1 * time.Minute).Unix()
 	exitCode := 17
 	errorDiagnosis := `{"kind":"transient_infra"}`
+	if err := UpdateQueuedToRunningWithSession(database, jobID, "rj-42"); err != nil {
+		t.Fatalf("UpdateQueuedToRunningWithSession: %v", err)
+	}
 	if _, err := database.Exec(
 		`UPDATE jobs
-		 SET status = ?, last_synced_status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?,
+		 SET start_time = ?, end_time = ?, exit_code = ?,
 		     error_message = ?, failure_reason = ?, error_diagnosis = ?, remote_state = ?
 		 WHERE id = ?`,
-		StatusFailed, StatusFailed, "rj-42", startTime, endTime, exitCode,
+		startTime, endTime, exitCode,
 		"lost worker", "infra_failure", errorDiagnosis, "missing", jobID,
 	); err != nil {
-		t.Fatalf("seed failed job: %v", err)
+		t.Fatalf("seed running fields: %v", err)
+	}
+	if err := MarkDeadByID(database, jobID); err != nil {
+		t.Fatalf("MarkDeadByID: %v", err)
 	}
 
 	if err := MarkRunningFromTerminal(database, jobID); err != nil {
@@ -1044,33 +1050,36 @@ func TestMarkRunningFromTerminalArchivesPreviousRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListJobRuns: %v", err)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("expected 1 archived run, got %d", len(runs))
+	if len(runs) != 2 {
+		t.Fatalf("expected 2 run rows, got %d", len(runs))
 	}
-	run := runs[0]
-	if run.ArchiveReason != "mark_running_from_terminal" {
-		t.Fatalf("archive_reason = %q, want %q", run.ArchiveReason, "mark_running_from_terminal")
+	oldRun := runs[0]
+	if oldRun.Status != StatusFailed {
+		t.Fatalf("old run status = %q, want %q", oldRun.Status, StatusFailed)
 	}
-	if run.Status != StatusFailed {
-		t.Fatalf("archived status = %q, want %q", run.Status, StatusFailed)
+	if oldRun.StartTime != startTime {
+		t.Fatalf("old run start_time = %d, want %d", oldRun.StartTime, startTime)
 	}
-	if run.StartTime != startTime {
-		t.Fatalf("archived start_time = %d, want %d", run.StartTime, startTime)
+	if oldRun.EndTime == nil {
+		t.Fatal("expected old run end_time to be set")
 	}
-	if run.EndTime == nil || *run.EndTime != endTime {
-		t.Fatalf("archived end_time = %v, want %d", run.EndTime, endTime)
+	if oldRun.ExitCode == nil || *oldRun.ExitCode != exitCode {
+		t.Fatalf("old run exit_code = %v, want %d", oldRun.ExitCode, exitCode)
 	}
-	if run.ExitCode == nil || *run.ExitCode != exitCode {
-		t.Fatalf("archived exit_code = %v, want %d", run.ExitCode, exitCode)
-	}
-	if run.ErrorMessage != "lost worker" || run.FailureReason != "infra_failure" || run.ErrorDiagnosis != errorDiagnosis {
-		t.Fatalf("archived failure fields = (%q, %q, %q), want (%q, %q, %q)",
-			run.ErrorMessage, run.FailureReason, run.ErrorDiagnosis,
+	if oldRun.ErrorMessage != "lost worker" || oldRun.FailureReason != "infra_failure" || oldRun.ErrorDiagnosis != errorDiagnosis {
+		t.Fatalf("old run failure fields = (%q, %q, %q), want (%q, %q, %q)",
+			oldRun.ErrorMessage, oldRun.FailureReason, oldRun.ErrorDiagnosis,
 			"lost worker", "infra_failure", errorDiagnosis)
 	}
-	if run.RemoteState != "missing" || run.SessionName != "rj-42" {
-		t.Fatalf("archived remote/session = (%q, %q), want (%q, %q)",
-			run.RemoteState, run.SessionName, "missing", "rj-42")
+	if oldRun.RemoteState != "missing" {
+		t.Fatalf("old run remote_state = %q, want %q", oldRun.RemoteState, "missing")
+	}
+	newRun := runs[1]
+	if newRun.Status != StatusRunning {
+		t.Fatalf("new run status = %q, want %q", newRun.Status, StatusRunning)
+	}
+	if newRun.StartTime != 0 || newRun.EndTime != nil || newRun.ExitCode != nil {
+		t.Fatalf("new run timestamps = start=%d end=%v exit=%v, want zero/nil", newRun.StartTime, newRun.EndTime, newRun.ExitCode)
 	}
 }
 
@@ -1141,6 +1150,37 @@ func TestRequeueByIDArchivesPreviousRun(t *testing.T) {
 		t.Fatalf("archived failure fields = (%q, %q, %q), want (%q, %q, %q)",
 			run.ErrorMessage, run.FailureReason, run.ErrorDiagnosis,
 			"segfault", "crash", errorDiagnosis)
+	}
+}
+
+func TestUpdateQueuedToRunningCreatesLatestRun(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LatestRunID == nil {
+		t.Fatal("expected latest_run_id to be set")
+	}
+
+	run, err := GetJobRunByID(database, *job.LatestRunID)
+	if err != nil {
+		t.Fatalf("GetJobRunByID: %v", err)
+	}
+	if run.JobID != jobID || run.Status != StatusRunning {
+		t.Fatalf("run = %+v, want job_id=%d status=%q", run, jobID, StatusRunning)
+	}
+	if run.StartTime == 0 {
+		t.Fatal("expected run start_time to be populated")
 	}
 }
 

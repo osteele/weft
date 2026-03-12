@@ -13,79 +13,7 @@ import (
 
 // setupTestDB creates an in-memory SQLite database for testing.
 func setupTestDB(t *testing.T) *sql.DB {
-	database, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open in-memory db: %v", err)
-	}
-	schema := `
-	CREATE TABLE jobs (
-		id INTEGER PRIMARY KEY,
-		host TEXT NOT NULL DEFAULT '',
-		status TEXT,
-		gpu_class TEXT,
-		gpu_mem_gb INTEGER,
-		command TEXT,
-		cloud_instance_id INTEGER,
-		campaign_job_index INTEGER,
-		tombstoned INTEGER DEFAULT 0
-	);
-	CREATE TABLE cloud_instances (
-		id INTEGER PRIMARY KEY,
-		campaign_id INTEGER,
-		status TEXT,
-		provider TEXT,
-		gpu_spec TEXT,
-		gpu_class TEXT,
-		gpu_mem_gb INTEGER,
-		max_spend_cents INTEGER,
-		max_time_seconds INTEGER,
-		actual_spend_cents INTEGER,
-		vastai_instance_id TEXT,
-		provider_instance_id TEXT,
-		data_center TEXT,
-		created_at INTEGER,
-		ready_at INTEGER,
-		launched_at INTEGER,
-		ended_at INTEGER,
-		resolved_gpu_name TEXT,
-		cost_per_hour_cents INTEGER,
-		num_gpus INTEGER,
-		dl_perf REAL,
-		reliability REAL,
-		inet_down_mbps REAL,
-		inet_up_mbps REAL,
-		cuda_version REAL,
-		instance_role TEXT DEFAULT 'worker',
-		donor_instance_id INTEGER,
-		seed_download_secs INTEGER,
-		seed_copy_secs INTEGER,
-		grace_period_seconds INTEGER,
-		grace_started_at INTEGER,
-		grace_deadline INTEGER,
-		termination_reason TEXT,
-		disk_gb INTEGER,
-		provisioned_inputs TEXT
-	);
-	CREATE TABLE campaigns (
-		id INTEGER PRIMARY KEY,
-		status TEXT,
-		created_at INTEGER,
-		ended_at INTEGER,
-		estimated_cost_cents INTEGER
-	);
-	CREATE TABLE job_cloud_attempts (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		job_id INTEGER NOT NULL,
-		cloud_instance_id INTEGER NOT NULL,
-		started_at INTEGER NOT NULL,
-		ended_at INTEGER,
-		outcome TEXT
-	);
-	`
-	if _, err := database.Exec(schema); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	return database
+	return db.SetupTestDB(t)
 }
 
 func TestLaunchInstanceNilR2Client(t *testing.T) {
@@ -191,8 +119,8 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
 	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
 	if _, err := database.Exec(
-		`INSERT INTO jobs (id, host, status, gpu_class, gpu_mem_gb, command, tombstoned)
-		 VALUES (?, '', ?, ?, ?, ?, 0)`,
+		`INSERT INTO jobs (id, host, working_dir, status, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '', '/tmp', ?, ?, ?, ?, 0)`,
 		job.ID, db.StatusQueued, group.GPUClass, group.GPUMemGB, job.Command,
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
