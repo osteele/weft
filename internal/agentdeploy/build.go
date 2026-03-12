@@ -62,37 +62,7 @@ func EmbeddedVersion() (string, error) {
 	return strings.TrimSpace(string(embeddedVerBytes)), nil
 }
 
-// CheckEmbeddedVersion verifies the embedded agent binary version matches the
-// requested version. Returns nil if no VERSION file exists (backwards compat).
-func CheckEmbeddedVersion(requestedVer string) error {
-	embeddedVer, err := EmbeddedVersion()
-	if err != nil {
-		return nil
-	}
-	if embeddedVer == "" || embeddedVer == "dev" {
-		return nil
-	}
-	if requestedVer == "" || requestedVer == "dev" {
-		return nil
-	}
-
-	if embeddedVer != requestedVer {
-		return fmt.Errorf(
-			"embedded agent binary is stale (embedded: %s, need: %s); run \"just build-agents\" then rebuild weft",
-			embeddedVer, requestedVer,
-		)
-	}
-	return nil
-}
-
 func defaultExtractFunc(goos, goarch, outputPath string) error {
-	// Extract requested version from cache path: .../builds/<version>/<goos>-<goarch>/weft-agent
-	dir := filepath.Dir(outputPath)
-	requestedVer := filepath.Base(filepath.Dir(dir))
-	if err := CheckEmbeddedVersion(requestedVer); err != nil {
-		return err
-	}
-
 	name := fmt.Sprintf("binaries/weft-agent-%s-%s", goos, goarch)
 	src, err := agentBinaries.Open(name)
 	if err != nil {

@@ -101,10 +101,6 @@ func runWatchLoop(database *sql.DB, cfg *config.Config) error {
 }
 
 func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, string, error) {
-	if err := ensureAgentFresh(); err != nil {
-		return nil, "", err
-	}
-
 	jobs, err := db.ListUnplacedJobs(database)
 	if err != nil {
 		return nil, "", fmt.Errorf("list unplaced jobs: %w", err)

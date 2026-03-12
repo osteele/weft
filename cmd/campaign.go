@@ -6,15 +6,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
-	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
@@ -24,12 +20,6 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/spf13/cobra"
-)
-
-var (
-	osExecutable = os.Executable
-	execCommand  = exec.Command
-	syscallExec  = syscall.Exec
 )
 
 var campaignCmd = &cobra.Command{
@@ -138,11 +128,6 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	launchInteractive := useTUI && !campaignLaunchYes
-
-	// Pre-flight: check if embedded agent binary is stale and auto-rebuild
-	if err := ensureAgentFresh(); err != nil {
-		return err
-	}
 
 	database, err := db.Open()
 	if err != nil {
@@ -782,102 +767,6 @@ func campaignActualCost(instances []*db.CloudInstance) string {
 		totalCents += uptime.Hours() * float64(inst.CostPerHourCents)
 	}
 	return campaign.FormatCostCents(totalCents)
-}
-
-// ensureAgentFresh checks if the embedded agent binary matches the current
-// source version. If stale and `just` is available, it rebuilds and re-execs.
-func ensureAgentFresh() error {
-	if os.Getenv("WEFT_AGENT_REBUILT") == "1" {
-		return fmt.Errorf("agent binary still stale after rebuild; run \"just build\" manually")
-	}
-
-	version, err := agentdeploy.LocalAgentVersion()
-	if err != nil {
-		return nil // can't determine version; let downstream handle it
-	}
-
-	if err := agentdeploy.CheckEmbeddedVersion(version); err == nil {
-		return nil // agent is fresh
-	}
-
-	// Find the source directory via VCS workspace root so `just build` finds
-	// the correct justfile even when weft is invoked from another directory.
-	sourceDir, err := agentdeploy.RepoRoot()
-	if err != nil {
-		return fmt.Errorf("agent binary is stale but not in the weft source tree; run \"just build\" manually")
-	}
-
-	if freshBinary := findFreshRepoBinary(sourceDir, version); freshBinary != "" {
-		fmt.Println("Re-executing with fresh binary...")
-		return syscallExec(freshBinary, os.Args, os.Environ())
-	}
-
-	justPath, lookErr := exec.LookPath("just")
-	if lookErr != nil {
-		return fmt.Errorf("agent binary is stale and `just` is not installed; install it or run \"go build .\" in %s", sourceDir)
-	}
-
-	fmt.Println("Agent binary is stale, rebuilding...")
-	buildCmd := exec.Command(justPath, "build")
-	buildCmd.Dir = sourceDir
-	buildCmd.Stdout = os.Stdout
-	buildCmd.Stderr = os.Stderr
-	if err := buildCmd.Run(); err != nil {
-		return fmt.Errorf("auto-rebuild failed: %w; run \"just build\" manually", err)
-	}
-
-	// Re-exec with the freshly built binary from the source directory.
-	// We must use the newly built binary, not os.Executable(), because the
-	// running binary (e.g., in $GOPATH/bin) still has stale embedded agents.
-	freshBinary := filepath.Join(sourceDir, "weft")
-	if _, err := os.Stat(freshBinary); err != nil {
-		return fmt.Errorf("rebuilt binary not found at %s: %w", freshBinary, err)
-	}
-	fmt.Println("Re-executing with fresh binary...")
-	env := append(os.Environ(), "WEFT_AGENT_REBUILT=1")
-	return syscallExec(freshBinary, os.Args, env)
-}
-
-func findFreshRepoBinary(sourceDir, version string) string {
-	freshBinary := filepath.Join(sourceDir, "weft")
-	if sameExecutable(freshBinary) {
-		return ""
-	}
-
-	embeddedVersion, err := embeddedAgentVersionFromBinary(freshBinary)
-	if err != nil || embeddedVersion != version {
-		return ""
-	}
-
-	return freshBinary
-}
-
-func sameExecutable(path string) bool {
-	current, err := osExecutable()
-	if err != nil {
-		return false
-	}
-
-	currentEval, err := filepath.EvalSymlinks(current)
-	if err == nil {
-		current = currentEval
-	}
-
-	targetEval, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		path = targetEval
-	}
-
-	return current == path
-}
-
-func embeddedAgentVersionFromBinary(path string) (string, error) {
-	cmd := execCommand(path, "internal-agent-version")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 // printAutoBudget prints the auto-derived budget limits.
