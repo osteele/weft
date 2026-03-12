@@ -88,6 +88,10 @@ type Config struct {
 
 	// Remediation holds auto-remediation configuration for failed jobs
 	Remediation RemediationConfig `yaml:"remediation"`
+
+	// AutomapDirs lists local prefixes that should reuse the same relative path
+	// on remote hosts; defaults to ["~"].
+	AutomapDirs []string `yaml:"automap_dirs"`
 }
 
 // RemediationConfig holds configuration for automatic job failure remediation.
@@ -225,7 +229,12 @@ func DefaultConfig() *Config {
 			Enabled: nil, // nil means "auto" - enabled if ollama is available
 			Model:   "",  // empty means use default model
 		},
+		AutomapDirs: defaultAutomapDirs(),
 	}
+}
+
+func defaultAutomapDirs() []string {
+	return []string{"~"}
 }
 
 // CloudCreateOpts returns provider-appropriate instance creation defaults.
@@ -338,31 +347,17 @@ func Load() (*Config, error) {
 // AutomapDirs returns the list of local directory prefixes that should be
 // auto-mapped to the same path on remote hosts. When -C is not specified and
 // CWD is under one of these prefixes, the working directory is automatically
-// set to the corresponding remote path. Reads from ~/.config/weft/automap.txt
-// (one prefix per line), falling back to ["~/code", "~/src"].
+// set to the corresponding remote path. The list is read from
+// ~/.config/weft/config.yaml via the automap_dirs key, defaulting to ["~"].
 func AutomapDirs() []string {
-	home, err := os.UserHomeDir()
+	cfg, err := Load()
 	if err != nil {
-		return []string{"~/code", "~/src"}
+		return defaultAutomapDirs()
 	}
-
-	automapPath := filepath.Join(home, ".config", "weft", "automap.txt")
-	data, err := os.ReadFile(automapPath)
-	if err != nil {
-		return []string{"~/code", "~/src"}
+	if len(cfg.AutomapDirs) == 0 {
+		return defaultAutomapDirs()
 	}
-
-	var dirs []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			dirs = append(dirs, line)
-		}
-	}
-	if len(dirs) == 0 {
-		return []string{"~/code", "~/src"}
-	}
-	return dirs
+	return append([]string(nil), cfg.AutomapDirs...)
 }
 
 // GetCoordinatorHost returns the configured coordinator host.

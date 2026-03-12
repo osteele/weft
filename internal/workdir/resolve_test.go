@@ -50,26 +50,24 @@ func TestResolveWorkingDir_ExplicitDirNoLog(t *testing.T) {
 }
 
 func TestResolveWorkingDir_Automap(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot get home dir")
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	autoDir := filepath.Join(tmpHome, "structural-probes")
+	if err := os.MkdirAll(autoDir, 0o755); err != nil {
+		t.Fatalf("mkdir autoDir: %v", err)
 	}
 
-	// If ~/code doesn't exist, skip.
-	codeDir := filepath.Join(home, "code")
-	if _, err := os.Stat(codeDir); os.IsNotExist(err) {
-		t.Skip("~/code does not exist")
-	}
-
-	t.Chdir(codeDir)
+	t.Chdir(autoDir)
 
 	var buf bytes.Buffer
 	dir, err := ResolveWorkingDir("", &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(dir, "~/code") {
-		t.Errorf("expected automap result starting with ~/code, got %q", dir)
+	expected := "~/structural-probes"
+	if dir != expected {
+		t.Errorf("expected automap result %q, got %q", expected, dir)
 	}
 	if !strings.Contains(buf.String(), "Auto-detected") {
 		t.Errorf("expected 'Auto-detected' in log output, got %q", buf.String())

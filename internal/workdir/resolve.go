@@ -12,8 +12,9 @@ import (
 
 // ResolveWorkingDir resolves the effective working directory for a job submission.
 // If dir is non-empty it is returned as-is. Otherwise it tries automap from the
-// current working directory, then falls back to empty string (remote home).
-// logDest receives an "Auto-detected" message when automap fires; nil suppresses it.
+// current working directory (based on the automap_dirs config setting), then
+// falls back to empty string (remote home). logDest receives an "Auto-detected"
+// message when automap fires; nil suppresses it.
 func ResolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 	if dir != "" {
 		return Normalize(dir)
@@ -27,7 +28,10 @@ func ResolveWorkingDir(dir string, logDest io.Writer) (string, error) {
 		for _, prefix := range config.AutomapDirs() {
 			expanded := expandTilde(prefix, home)
 			if rel, err := filepath.Rel(expanded, cwd); err == nil && !strings.HasPrefix(rel, "..") {
-				resolved := prefix + "/" + rel
+				resolved := prefix
+				if rel != "." {
+					resolved = prefix + "/" + rel
+				}
 				if logDest != nil {
 					fmt.Fprintf(logDest, "Auto-detected working directory: %s\n", resolved)
 				}
