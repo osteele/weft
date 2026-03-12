@@ -59,3 +59,25 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatOnPremJobRowQueuedUsesDashDuration(t *testing.T) {
+	m := watchAllModel{}
+	row := m.formatOnPremJobRow(&db.Job{
+		ID:          41,
+		Status:      db.StatusQueued,
+		Host:        "cool30",
+		WorkingDir:  "/tmp/project-beta",
+		Description: "eval",
+	})
+
+	fields := strings.Fields(row)
+	if len(fields) < 5 {
+		t.Fatalf("row %q has too few fields", row)
+	}
+	if got := fields[len(fields)-2]; got != db.StatusQueued {
+		t.Fatalf("status field = %q, want %q in row %q", got, db.StatusQueued, row)
+	}
+	if got := fields[len(fields)-1]; got != "—" {
+		t.Fatalf("duration field = %q, want %q in row %q", got, "—", row)
+	}
+}

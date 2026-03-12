@@ -406,7 +406,7 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 
 func (m watchAllModel) formatOnPremJobRow(job *db.Job) string {
 	status := job.EffectiveStatus()
-	duration := "queued"
+	duration := "—"
 	if job.StartTime > 0 {
 		duration = db.FormatDuration(time.Now().Unix() - job.StartTime)
 	}
