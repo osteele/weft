@@ -246,6 +246,89 @@ func TestResetCloudInstanceJobs_DoesNotRewriteCompletedAttempts(t *testing.T) {
 	}
 }
 
+func TestResetCloudInstanceJobs_ArchivesPreviousRun(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	jobID, err := RecordQueued(database, CloudInstanceHost(instanceID), "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+
+	startTime := int64(1_700_000_100)
+	endTime := int64(1_700_000_120)
+	exitCode := 137
+	errorDiagnosis := `{"kind":"instance_lost"}`
+	if _, err := database.Exec(
+		`UPDATE jobs
+		 SET status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?,
+		     error_message = ?, failure_reason = ?, error_diagnosis = ?, remote_state = ?, remote_id = ?
+		 WHERE id = ?`,
+		StatusRunning, "rj-88", startTime, endTime, exitCode,
+		"worker disappeared", "infra_failure", errorDiagnosis, "running", "inst-remote-1", jobID,
+	); err != nil {
+		t.Fatalf("seed cloud job: %v", err)
+	}
+
+	n, err := ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("ResetCloudInstanceJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued || job.Host != "" || job.CloudInstanceID != nil {
+		t.Fatalf("reset job = status %q host %q cloud_instance %v, want queued empty nil", job.Status, job.Host, job.CloudInstanceID)
+	}
+	if job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil {
+		t.Fatalf("expected runtime timestamps cleared, got start=%d end=%v exit=%v", job.StartTime, job.EndTime, job.ExitCode)
+	}
+	if job.ErrorMessage != "" || job.FailureReason != "" || job.ErrorDiagnosis != "" || job.RemoteState != "" || job.RemoteID != "" || job.SessionName != "" {
+		t.Fatalf("expected runtime fields cleared, got err=%q reason=%q diagnosis=%q remote_state=%q remote_id=%q session=%q",
+			job.ErrorMessage, job.FailureReason, job.ErrorDiagnosis, job.RemoteState, job.RemoteID, job.SessionName)
+	}
+
+	runs, err := ListJobRuns(database, jobID)
+	if err != nil {
+		t.Fatalf("ListJobRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 archived run, got %d", len(runs))
+	}
+	run := runs[0]
+	if run.ArchiveReason != "cloud_reset:"+AttemptOutcomeOrphaned {
+		t.Fatalf("archive_reason = %q, want %q", run.ArchiveReason, "cloud_reset:"+AttemptOutcomeOrphaned)
+	}
+	if run.Status != StatusRunning || run.CloudInstanceID == nil || *run.CloudInstanceID != instanceID {
+		t.Fatalf("archived run = status %q cloud_instance %v, want %q %d", run.Status, run.CloudInstanceID, StatusRunning, instanceID)
+	}
+	if run.ErrorMessage != "worker disappeared" || run.FailureReason != "infra_failure" || run.ErrorDiagnosis != errorDiagnosis {
+		t.Fatalf("archived failure fields = (%q, %q, %q), want (%q, %q, %q)",
+			run.ErrorMessage, run.FailureReason, run.ErrorDiagnosis,
+			"worker disappeared", "infra_failure", errorDiagnosis)
+	}
+	if run.RemoteID != "inst-remote-1" || run.SessionName != "rj-88" {
+		t.Fatalf("archived remote/session = (%q, %q), want (%q, %q)",
+			run.RemoteID, run.SessionName, "inst-remote-1", "rj-88")
+	}
+}
+
 func TestGetActiveCloudInstanceJobCounts_OnlyCountsNonTerminalJobs(t *testing.T) {
 	database := setupTestDB(t)
 

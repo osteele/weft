@@ -399,9 +399,30 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 // unplaced (queued with empty host) and clears their instance association.
 // Records the attempt outcome before resetting. Returns the number of jobs reset.
 func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) (int64, error) {
+	tx, err := database.Begin()
+	if err != nil {
+		return 0, err
+	}
+
+	jobs, err := queryJobsTx(tx,
+		fmt.Sprintf(`SELECT %s FROM jobs WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
+		instanceID,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+	)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	for _, job := range jobs {
+		if err := archiveJobRunTx(tx, job, "cloud_reset:"+outcome); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
+
 	// Close open attempts only for jobs that are about to be reset. Completed or
 	// otherwise terminal jobs keep their recorded attempt outcomes.
-	if _, err := database.Exec(
+	if _, err := tx.Exec(
 		`UPDATE job_cloud_attempts
 		 SET ended_at = ?, outcome = ?
 		 WHERE cloud_instance_id = ? AND ended_at IS NULL
@@ -412,19 +433,32 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		time.Now().Unix(), outcome, instanceID, instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	); err != nil {
+		tx.Rollback()
 		return 0, fmt.Errorf("close attempts: %w", err)
 	}
 
-	result, err := database.Exec(
-		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = ''
+	result, err := tx.Exec(
+		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = '',
+		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
+		 session_name = NULL, failure_reason = NULL, error_diagnosis = NULL,
+		 remote_state = NULL, remote_id = NULL
 		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0`,
 		StatusQueued, instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {
+		tx.Rollback()
 		return 0, err
 	}
-	return result.RowsAffected()
+	n, err := result.RowsAffected()
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ResetOrphanedCloudJobs resets non-terminal jobs whose host references a cloud

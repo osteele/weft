@@ -87,6 +87,31 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
+// JobRun stores an archived execution snapshot for a logical job whose mutable
+// jobs row has been reused for another run.
+type JobRun struct {
+	ID              int64
+	JobID           int64
+	ArchivedAt      int64
+	ArchiveReason   string
+	Status          string
+	Host            string
+	WorkingDir      string
+	Command         string
+	SessionName     string
+	QueueName       string
+	Backend         string
+	RemoteID        string
+	RemoteState     string
+	StartTime       int64
+	EndTime         *int64
+	ExitCode        *int
+	ErrorMessage    string
+	FailureReason   string
+	ErrorDiagnosis  string
+	CloudInstanceID *int64
+}
+
 // UsesQueueRunner reports whether this job should be managed by the queue runner backend.
 func (j *Job) UsesQueueRunner() bool {
 	if j == nil {
@@ -122,6 +147,8 @@ type PlacementMeta struct {
 }
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, cloud_instance_id`
+
+const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, session_name, queue_name, backend, remote_id, remote_state, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, cloud_instance_id`
 
 // qualifiedJobSelectColumns returns jobSelectColumns with each column prefixed
 // by the given table alias (e.g. "jobs" → "jobs.id, jobs.host, ...").
@@ -723,6 +750,40 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create job_runs table (archives overwritten execution state when a logical
+	// job row is reused for another attempt).
+	jobRunsSchema := `
+	CREATE TABLE IF NOT EXISTS job_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id INTEGER NOT NULL REFERENCES jobs(id),
+		archived_at INTEGER NOT NULL,
+		archive_reason TEXT NOT NULL,
+		status TEXT NOT NULL,
+		host TEXT NOT NULL,
+		working_dir TEXT NOT NULL,
+		command TEXT NOT NULL,
+		session_name TEXT,
+		queue_name TEXT,
+		backend TEXT,
+		remote_id TEXT,
+		remote_state TEXT,
+		start_time INTEGER,
+		end_time INTEGER,
+		exit_code INTEGER,
+		error_message TEXT,
+		failure_reason TEXT,
+		error_diagnosis TEXT,
+		cloud_instance_id INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id, archived_at, id);
+	`
+	if _, err := db.Exec(jobRunsSchema); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE job_runs ADD COLUMN error_diagnosis TEXT`); err != nil {
+		return err
+	}
+
 	// Migration: convert legacy needs_rental status to queued (host is already empty)
 	if _, err := db.Exec(`UPDATE jobs SET status = ? WHERE status = ?`, StatusQueued, statusNeedsRental); err != nil {
 		return err
@@ -899,20 +960,62 @@ func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 
 // UpdateJobStartingToQueued transitions a starting job to queued state and assigns a queue name.
 func UpdateJobStartingToQueued(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusStarting)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := archiveJobRunTx(tx, job, "starting_to_queued"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
+		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
+		 WHERE id = ? AND status = ?`,
 		StatusQueued, queuefile.DefaultQueueName, id, StatusStarting,
-	)
-	return err
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateJobRunningToQueued transitions a running job back to queued state.
 func UpdateJobRunningToQueued(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ? AND status = ?`,
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := archiveJobRunTx(tx, job, "running_to_queued"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
+		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
+		 WHERE id = ? AND status = ?`,
 		StatusQueued, queuefile.DefaultQueueName, id, StatusRunning,
-	)
-	return err
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateJobDescription updates the description for a job
@@ -1123,11 +1226,32 @@ func MarkRunningFromPaused(db *sql.DB, id int64) error {
 // MarkRunningFromTerminal transitions a job from a terminal status (failed, dead, etc.) back to running.
 // This handles jobs that were restarted by the queue runner after previously failing.
 func MarkRunningFromTerminal(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		StatusRunning, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
-	)
-	return err
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status IN (?, ?, ?, ?)`, jobSelectColumns), id, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := archiveJobRunTx(tx, job, "mark_running_from_terminal"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE jobs SET status = ?, last_synced_status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
+		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL, session_name = NULL
+		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
+		StatusRunning, StatusRunning, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // MarkQueuedJobRunning transitions a queued job to running without touching start_time.
@@ -1144,11 +1268,32 @@ func MarkQueuedJobRunning(db *sql.DB, id int64) error {
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
 // Updates last_synced_status since this is a sync operation.
 func MarkQueuedByID(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := archiveJobRunTx(tx, job, "mark_queued"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE jobs SET status = ?, last_synced_status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
+		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
+		 WHERE id = ?`,
 		StatusQueued, StatusQueued, id,
-	)
-	return err
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // ClearQueueAssignment removes the queue association from a job so its queue
@@ -1205,12 +1350,38 @@ func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
 // Clears session_name for non-running states per spec: SessionImpliesRunning.
 func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 	if status == StatusQueued || status == StatusDraft {
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if job == nil {
+			return tx.Commit()
+		}
+		reason := "clear_pending_to_queued"
+		if status == StatusDraft {
+			reason = "clear_pending_to_draft"
+		}
+		if err := archiveJobRunTx(tx, job, reason); err != nil {
+			tx.Rollback()
+			return err
+		}
 		// Reset all execution-related fields when going back to queued/draft
-		_, err := db.Exec(
-			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL WHERE id = ?`,
+		_, err = tx.Exec(
+			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
+			 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
+			 WHERE id = ?`,
 			status, status, jobID,
 		)
-		return err
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		return tx.Commit()
 	}
 	if IsTerminalStatus(status) {
 		// Clear session_name for terminal states per spec: SessionImpliesRunning
@@ -1235,25 +1406,66 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 // so the sync path will re-append the job to the remote queue if the immediate
 // append fails.
 func RequeueByID(db *sql.DB, id int64) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, pending_status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL, cloud_instance_id = NULL WHERE id = ?`,
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := archiveJobRunTx(tx, job, "requeue"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE jobs SET status = ?, pending_status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
+		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL, remote_id = NULL, cloud_instance_id = NULL
+		 WHERE id = ?`,
 		StatusQueued, StatusQueued, id,
-	)
-	return err
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // ResetJobToUnplaced resets a single job to unplaced state (queued with empty host),
 // clearing cloud instance association and run metadata. Used when restarting cloud
 // jobs whose original instance is no longer available.
 func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
-	_, err := db.Exec(
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if job == nil {
+		return tx.Commit()
+	}
+	if err := archiveJobRunTx(tx, job, "reset_to_unplaced"); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
 		`UPDATE jobs SET status = ?, pending_status = ?, host = '', cloud_instance_id = NULL,
 		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
-		 session_name = NULL, last_synced_status = NULL
+		 session_name = NULL, last_synced_status = NULL, failure_reason = NULL,
+		 error_diagnosis = NULL, remote_state = NULL, remote_id = NULL
 		 WHERE id = ?`,
 		StatusQueued, StatusQueued, jobID,
-	)
-	return err
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetQueuedAtNow sets queued_at to the current time if it's not already set.
@@ -2718,6 +2930,158 @@ func queryJobs(db *sql.DB, query string, args ...interface{}) ([]*Job, error) {
 	defer rows.Close()
 
 	return scanJobs(rows)
+}
+
+func queryJobsTx(tx *sql.Tx, query string, args ...interface{}) ([]*Job, error) {
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobs(rows)
+}
+
+func queryJobTx(tx *sql.Tx, query string, args ...interface{}) (*Job, error) {
+	jobs, err := queryJobsTx(tx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if len(jobs) == 0 {
+		return nil, nil
+	}
+	return jobs[0], nil
+}
+
+func shouldArchiveJobRun(job *Job) bool {
+	if job == nil {
+		return false
+	}
+	if job.CloudInstanceID != nil {
+		return true
+	}
+	if IsTerminalStatus(job.Status) {
+		return true
+	}
+	switch job.Status {
+	case StatusRunning, StatusStarting, StatusPaused:
+		return true
+	case StatusQueued:
+		return job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil ||
+			job.ErrorMessage != "" || job.FailureReason != "" || job.SessionName != ""
+	}
+	return job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil ||
+		job.ErrorMessage != "" || job.FailureReason != "" || job.SessionName != ""
+}
+
+func archiveJobRunTx(tx *sql.Tx, job *Job, reason string) error {
+	if !shouldArchiveJobRun(job) {
+		return nil
+	}
+
+	now := time.Now().Unix()
+	_, err := tx.Exec(
+		`INSERT INTO job_runs (
+			job_id, archived_at, archive_reason, status, host, working_dir, command,
+			session_name, queue_name, backend, remote_id, remote_state,
+			start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, cloud_instance_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, now, reason, job.Status, job.Host, job.WorkingDir, job.Command,
+		nullIfEmpty(job.SessionName), nullIfEmpty(job.QueueName), nullIfEmpty(job.Backend),
+		nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
+		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
+		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), job.CloudInstanceID,
+	)
+	return err
+}
+
+func nullIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func nullableUnix(ts int64) *int64 {
+	if ts == 0 {
+		return nil
+	}
+	return &ts
+}
+
+func scanJobRuns(rows *sql.Rows) ([]JobRun, error) {
+	var runs []JobRun
+	for rows.Next() {
+		var run JobRun
+		var sessionName, queueName, backend, remoteID, remoteState, errorMessage, failureReason, errorDiagnosis sql.NullString
+		var startTime, endTime sql.NullInt64
+		var exitCode sql.NullInt64
+		var cloudInstanceID sql.NullInt64
+
+		if err := rows.Scan(
+			&run.ID, &run.JobID, &run.ArchivedAt, &run.ArchiveReason, &run.Status, &run.Host,
+			&run.WorkingDir, &run.Command, &sessionName, &queueName, &backend, &remoteID,
+			&remoteState, &startTime, &endTime, &exitCode, &errorMessage, &failureReason,
+			&errorDiagnosis,
+			&cloudInstanceID,
+		); err != nil {
+			return nil, err
+		}
+		if sessionName.Valid {
+			run.SessionName = sessionName.String
+		}
+		if queueName.Valid {
+			run.QueueName = queueName.String
+		}
+		if backend.Valid {
+			run.Backend = backend.String
+		}
+		if remoteID.Valid {
+			run.RemoteID = remoteID.String
+		}
+		if remoteState.Valid {
+			run.RemoteState = remoteState.String
+		}
+		if startTime.Valid {
+			run.StartTime = startTime.Int64
+		}
+		if endTime.Valid {
+			run.EndTime = &endTime.Int64
+		}
+		if exitCode.Valid {
+			v := int(exitCode.Int64)
+			run.ExitCode = &v
+		}
+		if errorMessage.Valid {
+			run.ErrorMessage = errorMessage.String
+		}
+		if failureReason.Valid {
+			run.FailureReason = failureReason.String
+		}
+		if errorDiagnosis.Valid {
+			run.ErrorDiagnosis = errorDiagnosis.String
+		}
+		if cloudInstanceID.Valid {
+			run.CloudInstanceID = &cloudInstanceID.Int64
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// ListJobRuns returns archived execution snapshots for a logical job, ordered
+// from oldest to newest archive.
+func ListJobRuns(db *sql.DB, jobID int64) ([]JobRun, error) {
+	rows, err := db.Query(
+		`SELECT `+jobRunSelectColumns+` FROM job_runs WHERE job_id = ? ORDER BY archived_at ASC, id ASC`,
+		jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanJobRuns(rows)
 }
 
 // EffectiveWorkingDir returns the actual working directory for display.

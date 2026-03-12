@@ -995,6 +995,155 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 	}
 }
 
+func TestMarkRunningFromTerminalArchivesPreviousRun(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	startTime := time.Now().Add(-2 * time.Minute).Unix()
+	endTime := time.Now().Add(-1 * time.Minute).Unix()
+	exitCode := 17
+	errorDiagnosis := `{"kind":"transient_infra"}`
+	if _, err := database.Exec(
+		`UPDATE jobs
+		 SET status = ?, last_synced_status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?,
+		     error_message = ?, failure_reason = ?, error_diagnosis = ?, remote_state = ?
+		 WHERE id = ?`,
+		StatusFailed, StatusFailed, "rj-42", startTime, endTime, exitCode,
+		"lost worker", "infra_failure", errorDiagnosis, "missing", jobID,
+	); err != nil {
+		t.Fatalf("seed failed job: %v", err)
+	}
+
+	if err := MarkRunningFromTerminal(database, jobID); err != nil {
+		t.Fatalf("MarkRunningFromTerminal: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusRunning {
+		t.Fatalf("status = %q, want %q", job.Status, StatusRunning)
+	}
+	if job.LastSyncedStatus != StatusRunning {
+		t.Fatalf("last_synced_status = %q, want %q", job.LastSyncedStatus, StatusRunning)
+	}
+	if job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil {
+		t.Fatalf("expected runtime timestamps cleared, got start=%d end=%v exit=%v", job.StartTime, job.EndTime, job.ExitCode)
+	}
+	if job.ErrorMessage != "" || job.FailureReason != "" || job.ErrorDiagnosis != "" || job.RemoteState != "" || job.SessionName != "" {
+		t.Fatalf("expected runtime failure fields cleared, got err=%q reason=%q diagnosis=%q remote_state=%q session=%q",
+			job.ErrorMessage, job.FailureReason, job.ErrorDiagnosis, job.RemoteState, job.SessionName)
+	}
+
+	runs, err := ListJobRuns(database, jobID)
+	if err != nil {
+		t.Fatalf("ListJobRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 archived run, got %d", len(runs))
+	}
+	run := runs[0]
+	if run.ArchiveReason != "mark_running_from_terminal" {
+		t.Fatalf("archive_reason = %q, want %q", run.ArchiveReason, "mark_running_from_terminal")
+	}
+	if run.Status != StatusFailed {
+		t.Fatalf("archived status = %q, want %q", run.Status, StatusFailed)
+	}
+	if run.StartTime != startTime {
+		t.Fatalf("archived start_time = %d, want %d", run.StartTime, startTime)
+	}
+	if run.EndTime == nil || *run.EndTime != endTime {
+		t.Fatalf("archived end_time = %v, want %d", run.EndTime, endTime)
+	}
+	if run.ExitCode == nil || *run.ExitCode != exitCode {
+		t.Fatalf("archived exit_code = %v, want %d", run.ExitCode, exitCode)
+	}
+	if run.ErrorMessage != "lost worker" || run.FailureReason != "infra_failure" || run.ErrorDiagnosis != errorDiagnosis {
+		t.Fatalf("archived failure fields = (%q, %q, %q), want (%q, %q, %q)",
+			run.ErrorMessage, run.FailureReason, run.ErrorDiagnosis,
+			"lost worker", "infra_failure", errorDiagnosis)
+	}
+	if run.RemoteState != "missing" || run.SessionName != "rj-42" {
+		t.Fatalf("archived remote/session = (%q, %q), want (%q, %q)",
+			run.RemoteState, run.SessionName, "missing", "rj-42")
+	}
+}
+
+func TestRequeueByIDArchivesPreviousRun(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+
+	startTime := time.Now().Add(-90 * time.Second).Unix()
+	endTime := time.Now().Add(-30 * time.Second).Unix()
+	exitCode := 9
+	errorDiagnosis := `{"kind":"retryable"}`
+	if _, err := database.Exec(
+		`UPDATE jobs
+		 SET status = ?, last_synced_status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?,
+		     error_message = ?, failure_reason = ?, error_diagnosis = ?, remote_state = ?, remote_id = ?
+		 WHERE id = ?`,
+		StatusFailed, StatusFailed, "rj-77", startTime, endTime, exitCode,
+		"segfault", "crash", errorDiagnosis, "FAILED", "12345", jobID,
+	); err != nil {
+		t.Fatalf("seed failed job: %v", err)
+	}
+
+	if err := RequeueByID(database, jobID); err != nil {
+		t.Fatalf("RequeueByID: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.PendingStatus == nil || *job.PendingStatus != StatusQueued {
+		t.Fatalf("pending_status = %v, want %q", job.PendingStatus, StatusQueued)
+	}
+	if job.LastSyncedStatus != "" {
+		t.Fatalf("last_synced_status = %q, want empty", job.LastSyncedStatus)
+	}
+	if job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil {
+		t.Fatalf("expected runtime timestamps cleared, got start=%d end=%v exit=%v", job.StartTime, job.EndTime, job.ExitCode)
+	}
+	if job.ErrorMessage != "" || job.FailureReason != "" || job.ErrorDiagnosis != "" || job.RemoteState != "" || job.RemoteID != "" || job.SessionName != "" {
+		t.Fatalf("expected runtime fields cleared, got err=%q reason=%q diagnosis=%q remote_state=%q remote_id=%q session=%q",
+			job.ErrorMessage, job.FailureReason, job.ErrorDiagnosis, job.RemoteState, job.RemoteID, job.SessionName)
+	}
+
+	runs, err := ListJobRuns(database, jobID)
+	if err != nil {
+		t.Fatalf("ListJobRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("expected 1 archived run, got %d", len(runs))
+	}
+	run := runs[0]
+	if run.ArchiveReason != "requeue" {
+		t.Fatalf("archive_reason = %q, want %q", run.ArchiveReason, "requeue")
+	}
+	if run.Status != StatusFailed || run.RemoteID != "12345" || run.RemoteState != "FAILED" {
+		t.Fatalf("archived run = status %q remote_id %q remote_state %q, want %q %q %q",
+			run.Status, run.RemoteID, run.RemoteState, StatusFailed, "12345", "FAILED")
+	}
+	if run.ErrorMessage != "segfault" || run.FailureReason != "crash" || run.ErrorDiagnosis != errorDiagnosis {
+		t.Fatalf("archived failure fields = (%q, %q, %q), want (%q, %q, %q)",
+			run.ErrorMessage, run.FailureReason, run.ErrorDiagnosis,
+			"segfault", "crash", errorDiagnosis)
+	}
+}
+
 func TestGetGPU_DatabaseFieldTakesPrecedence(t *testing.T) {
 	tests := []struct {
 		name    string
