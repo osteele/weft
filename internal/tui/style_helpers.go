@@ -11,10 +11,17 @@ import (
 func (m Model) formatStatus(job *db.Job) string {
 	// Check if job has a pending (target) status from three-way merge model
 	if job.PendingStatus != nil {
+		if job.EffectiveStatus() != *job.PendingStatus {
+			return m.formatStatusValue(job, job.EffectiveStatus())
+		}
 		return m.formatPendingStatusDisplay(*job.PendingStatus, job.Status)
 	}
 
-	switch job.Status {
+	return m.formatStatusValue(job, job.EffectiveStatus())
+}
+
+func (m Model) formatStatusValue(job *db.Job, status string) string {
+	switch status {
 	case db.StatusRunning:
 		stale := m.isJobStatusStale(job)
 		// Show progress percentage if available
@@ -62,7 +69,7 @@ func (m Model) formatStatus(job *db.Job) string {
 	case db.StatusPendingPlacement:
 		return "⧗ placing"
 	default:
-		return job.Status
+		return status
 	}
 }
 
@@ -97,10 +104,12 @@ func (m Model) formatPendingStatusDisplay(pendingStatus, currentStatus string) s
 }
 
 func (m Model) styleForJob(job *db.Job) lipgloss.Style {
-	if job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode != 0 {
+	effectiveStatus := job.EffectiveStatus()
+
+	if effectiveStatus == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode != 0 {
 		return failedStyle
 	}
-	if job.Status == db.StatusRunning || job.Status == db.StatusPaused {
+	if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusPaused {
 		host := m.findHostByName(job.Host)
 		if host != nil {
 			if cpuPct, ok := hostCPULoadPercent(host); ok && cpuPct > 100 {
@@ -108,7 +117,7 @@ func (m Model) styleForJob(job *db.Job) lipgloss.Style {
 			}
 		}
 	}
-	return m.styleForStatus(job.Status)
+	return m.styleForStatus(effectiveStatus)
 }
 
 func (m Model) styleForStatus(status string) lipgloss.Style {

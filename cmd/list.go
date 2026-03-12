@@ -202,6 +202,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
+		jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
 		jobs = db.FilterJobsByHosts(jobs, hostFilterHosts)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
@@ -226,6 +227,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}
+	jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 	jobs = db.FilterJobsByProject(jobs, listProject)
 	if listLimit > 0 && len(jobs) > listLimit {
@@ -276,15 +278,7 @@ func listJobsByID(database *sql.DB, ids []int64) ([]*db.Job, []int64, error) {
 }
 
 func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string) []*db.Job {
-	if statusFilter != "" {
-		filtered := make([]*db.Job, 0, len(jobs))
-		for _, job := range jobs {
-			if job.Status == statusFilter {
-				filtered = append(filtered, job)
-			}
-		}
-		jobs = filtered
-	}
+	jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
 
 	if listSearch != "" {
 		filter := strings.ToLower(listSearch)
@@ -305,6 +299,19 @@ func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string)
 		jobs = db.FilterJobsByHosts(jobs, []string{listHost})
 	}
 	return jobs
+}
+
+func filterJobsByEffectiveStatus(jobs []*db.Job, status string) []*db.Job {
+	if status == "" {
+		return jobs
+	}
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == status {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
 }
 
 func showJob(database *sql.DB, id int64) error {
@@ -328,7 +335,7 @@ func showJob(database *sql.DB, id int64) error {
 	if len(job.Tags) > 0 {
 		fmt.Printf("Tags:         %s\n", strings.Join(job.Tags, ", "))
 	}
-	fmt.Printf("Status:       %s\n", job.Status)
+	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
 	fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
 	if job.EndTime != nil {
 		fmt.Printf("End Time:     %s\n", time.Unix(*job.EndTime, 0).Format("2006-01-02 15:04:05"))
@@ -366,8 +373,8 @@ func printJobs(jobs []*db.Job) error {
 			started = time.Unix(job.StartTime, 0).Format("01/02 15:04")
 		}
 
-		status := job.Status
-		if job.Status == db.StatusCompleted && job.ExitCode != nil {
+		status := job.EffectiveStatus()
+		if status == db.StatusCompleted && job.ExitCode != nil {
 			if *job.ExitCode == 0 {
 				status = "completed ✓"
 			} else {

@@ -245,7 +245,7 @@ func sortRecentJobs(jobs []*db.Job, mode jobSortMode) {
 		}
 
 		// Within same status group, apply appropriate ordering
-		switch ji.Status {
+		switch ji.EffectiveStatus() {
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 			// Running: most recently started first (for Newest), oldest first (for Oldest)
 			if mode == jobSortOldest {
@@ -287,7 +287,7 @@ func sortRecentJobs(jobs []*db.Job, mode jobSortMode) {
 }
 
 func recentStatusPriority(job *db.Job) int {
-	switch job.Status {
+	switch job.EffectiveStatus() {
 	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
 		return 0
 	case db.StatusQueued, db.StatusPendingPlacement:
@@ -333,7 +333,7 @@ func getJobSortTime(job *db.Job) int64 {
 func jobQueueOrderLess(i, j *db.Job) bool {
 	// Status priority: queued/draft first, then running/starting, then completed/dead/failed
 	statusPriority := func(job *db.Job) int {
-		switch job.Status {
+		switch job.EffectiveStatus() {
 		case db.StatusQueued, db.StatusDraft:
 			return 0
 		case db.StatusRunning, db.StatusStarting, db.StatusPaused:
@@ -352,14 +352,15 @@ func jobQueueOrderLess(i, j *db.Job) bool {
 	// - Queued/Draft: by queued_at (earlier = runs first), falling back to ID for legacy jobs
 	// - Running: by start time (oldest first = running longest)
 	// - Completed: by end time (most recent first)
-	if i.Status == db.StatusQueued || i.Status == db.StatusDraft {
+	iStatus := i.EffectiveStatus()
+	if iStatus == db.StatusQueued || iStatus == db.StatusDraft {
 		// For queued/draft jobs, use queued_at for proper queue order
 		if i.QueuedAt > 0 && j.QueuedAt > 0 {
 			return i.QueuedAt < j.QueuedAt
 		}
 		// Fallback to ID for legacy jobs without queued_at
 		return i.ID < j.ID
-	} else if i.Status == db.StatusRunning || i.Status == db.StatusStarting {
+	} else if iStatus == db.StatusRunning || iStatus == db.StatusStarting {
 		// Running jobs: show oldest (running longest) first
 		return i.StartTime < j.StartTime
 	} else {
@@ -376,22 +377,24 @@ func jobQueueOrderLess(i, j *db.Job) bool {
 }
 
 func jobMatchesFilter(job *db.Job, mode jobFilterMode) bool {
+	status := job.EffectiveStatus()
+
 	switch mode {
 	case jobFilterRecent:
 		// Active jobs (running, starting, queued, draft, pending_placement)
-		if job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusQueued || job.Status == db.StatusDraft || job.Status == db.StatusPendingPlacement {
+		if status == db.StatusRunning || status == db.StatusStarting || status == db.StatusPaused || status == db.StatusQueued || status == db.StatusDraft || status == db.StatusPendingPlacement {
 			return true
 		}
 		return isRecentHistory(job)
 	case jobFilterActive:
-		return job.Status == db.StatusRunning || job.Status == db.StatusStarting || job.Status == db.StatusPaused || job.Status == db.StatusQueued || job.Status == db.StatusDraft || job.Status == db.StatusPendingPlacement
+		return status == db.StatusRunning || status == db.StatusStarting || status == db.StatusPaused || status == db.StatusQueued || status == db.StatusDraft || status == db.StatusPendingPlacement
 	case jobFilterSucceeded:
-		return job.Status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
+		return status == db.StatusCompleted && job.ExitCode != nil && *job.ExitCode == 0
 	case jobFilterFailed:
-		if job.Status == db.StatusFailed || job.Status == db.StatusDead || job.Status == db.StatusKilled || job.Status == db.StatusCanceled {
+		if status == db.StatusFailed || status == db.StatusDead || status == db.StatusKilled || status == db.StatusCanceled {
 			return true
 		}
-		return job.Status == db.StatusCompleted && (job.ExitCode == nil || *job.ExitCode != 0)
+		return status == db.StatusCompleted && (job.ExitCode == nil || *job.ExitCode != 0)
 	default:
 		return true
 	}

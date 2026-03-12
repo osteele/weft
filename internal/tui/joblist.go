@@ -130,7 +130,7 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 	// Apply status-based coloring (for the whole line when not selected)
 	if !isSelected {
-		switch job.Status {
+		switch job.EffectiveStatus() {
 		case db.StatusRunning, db.StatusStarting:
 			style = d.styles.running
 		case db.StatusPaused:
@@ -160,6 +160,9 @@ func (d JobDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 func formatJobStatus(job *db.Job) string {
 	// If there's a pending status, show it with an indicator
 	if job.PendingStatus != nil {
+		if job.EffectiveStatus() != *job.PendingStatus {
+			return formatActualStatus(job)
+		}
 		return formatPendingStatus(*job.PendingStatus)
 	}
 
@@ -168,7 +171,7 @@ func formatJobStatus(job *db.Job) string {
 
 // formatActualStatus returns display string for the verified status
 func formatActualStatus(job *db.Job) string {
-	switch job.Status {
+	switch job.EffectiveStatus() {
 	case db.StatusCompleted:
 		if job.ExitCode != nil {
 			if *job.ExitCode == 0 {
@@ -196,7 +199,7 @@ func formatActualStatus(job *db.Job) string {
 	case db.StatusDraft:
 		return "✎ draft"
 	default:
-		return job.Status
+		return job.EffectiveStatus()
 	}
 }
 

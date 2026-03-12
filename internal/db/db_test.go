@@ -1212,37 +1212,64 @@ func TestEffectiveStatus(t *testing.T) {
 		name          string
 		status        string
 		pendingStatus *string
+		host          string
 		want          string
 	}{
 		{
 			name:          "no pending status returns actual status",
 			status:        StatusRunning,
 			pendingStatus: nil,
+			host:          "host-a",
 			want:          StatusRunning,
 		},
 		{
 			name:          "pending status overrides actual status",
 			status:        StatusRunning,
 			pendingStatus: ptr(StatusKilled),
+			host:          "host-a",
 			want:          StatusKilled,
 		},
 		{
 			name:          "queued with pending canceled",
 			status:        StatusQueued,
 			pendingStatus: ptr(StatusCanceled),
+			host:          "host-a",
 			want:          StatusCanceled,
 		},
 		{
 			name:          "running with pending paused",
 			status:        StatusRunning,
 			pendingStatus: ptr(StatusPaused),
+			host:          "host-a",
 			want:          StatusPaused,
 		},
 		{
 			name:          "paused with pending running (resume)",
 			status:        StatusPaused,
 			pendingStatus: ptr(StatusRunning),
+			host:          "host-a",
 			want:          StatusRunning,
+		},
+		{
+			name:          "hostless running is treated as queued",
+			status:        StatusRunning,
+			pendingStatus: nil,
+			host:          "",
+			want:          StatusQueued,
+		},
+		{
+			name:          "hostless starting is treated as queued",
+			status:        StatusStarting,
+			pendingStatus: nil,
+			host:          "",
+			want:          StatusQueued,
+		},
+		{
+			name:          "hostless paused is treated as queued",
+			status:        StatusPaused,
+			pendingStatus: nil,
+			host:          "",
+			want:          StatusQueued,
 		},
 	}
 
@@ -1251,6 +1278,7 @@ func TestEffectiveStatus(t *testing.T) {
 			job := &Job{
 				Status:        tt.status,
 				PendingStatus: tt.pendingStatus,
+				Host:          tt.host,
 			}
 			got := job.EffectiveStatus()
 			if got != tt.want {

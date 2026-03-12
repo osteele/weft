@@ -2740,13 +2740,28 @@ func (j *Job) DisplayWorkingDir() string {
 	return dir
 }
 
+// HasAssignedHost reports whether the job currently has a concrete host target.
+func (j *Job) HasAssignedHost() bool {
+	return strings.TrimSpace(j.Host) != ""
+}
+
 // EffectiveStatus returns the status to use for UI decisions.
 // Returns PendingStatus if set (the desired/target state), otherwise Status.
+// A job without a host cannot actually be running, starting, or paused; treat
+// those impossible states as queued so the UI does not report them as active on
+// a nonexistent host.
 func (j *Job) EffectiveStatus() string {
+	status := j.Status
 	if j.PendingStatus != nil {
-		return *j.PendingStatus
+		status = *j.PendingStatus
 	}
-	return j.Status
+	if !j.HasAssignedHost() {
+		switch status {
+		case StatusRunning, StatusStarting, StatusPaused:
+			return StatusQueued
+		}
+	}
+	return status
 }
 
 // HasTag returns true if the job has the given tag.

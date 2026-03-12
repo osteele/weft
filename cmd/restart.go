@@ -11,8 +11,9 @@ import (
 )
 
 var restartCmd = &cobra.Command{
-	Use:   "restart <job-id>...",
-	Short: "Restart a killed, dead, failed, canceled, or completed job",
+	Use:     "restart <job-id>...",
+	Aliases: []string{"retry"},
+	Short:   "Restart a killed, dead, failed, canceled, or completed job",
 	Long: `Restart a job by re-running it.
 
 For killed/dead/failed/canceled jobs, the job is requeued with its original ID.
@@ -20,6 +21,7 @@ For completed jobs, a new job is created with the same command and metadata.
 
 Examples:
   weft restart 42
+  weft retry 42
   weft restart 42 43 44`,
 	Args: usageArgs(cobra.MinimumNArgs(1)),
 	RunE: runRestart,

@@ -225,22 +225,24 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
-	// If job is already marked as terminal, use cached result
-	if isWaitTerminalStatus(job.Status) {
+	// If the effective state is already terminal, use cached result.
+	if isWaitTerminalStatus(job.EffectiveStatus()) {
 		printJobStatus(job, exitOnComplete)
 		return
 	}
 
-	// Sync host to update job status from remote
-	syncTimeout := 15 * time.Second
-	if statusSSHTimeout > syncTimeout {
-		syncTimeout = statusSSHTimeout
-	}
-	_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
-		Timeout: syncTimeout,
-	}, nil)
-	if syncErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
+	// Sync host to update job status from remote when a host exists.
+	if job.HasAssignedHost() {
+		syncTimeout := 15 * time.Second
+		if statusSSHTimeout > syncTimeout {
+			syncTimeout = statusSSHTimeout
+		}
+		_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
+			Timeout: syncTimeout,
+		}, nil)
+		if syncErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
+		}
 	}
 
 	// Re-read job from DB after sync
@@ -494,7 +496,7 @@ func printJobStatusLine(job *db.Job) {
 	if job == nil {
 		return
 	}
-	line := fmt.Sprintf("Job %d (%s): %s", job.ID, job.Host, job.Status)
+	line := fmt.Sprintf("Job %d (%s): %s", job.ID, job.Host, job.EffectiveStatus())
 	if job.ExitCode != nil {
 		line = fmt.Sprintf("%s (exit %d)", line, *job.ExitCode)
 	}
@@ -502,12 +504,14 @@ func printJobStatusLine(job *db.Job) {
 }
 
 func printJobStatus(job *db.Job, exitOnComplete bool) {
+	effectiveStatus := job.EffectiveStatus()
+
 	fmt.Printf("Job ID:   %d\n", job.ID)
 	fmt.Printf("Host:     %s\n", job.Host)
 	if gpuDev := job.GPUDevice(); gpuDev != "" {
 		fmt.Printf("GPU:      %s\n", gpuDev)
 	}
-	fmt.Printf("Status:   %s\n", job.Status)
+	fmt.Printf("Status:   %s\n", effectiveStatus)
 
 	if job.Description != "" {
 		fmt.Printf("Desc:     %s\n", job.Description)
@@ -525,15 +529,15 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 			duration := *job.EndTime - job.StartTime
 			fmt.Printf("Duration: %s\n", db.FormatDuration(duration))
 		}
-	} else if job.Status == db.StatusRunning && job.StartTime > 0 {
+	} else if effectiveStatus == db.StatusRunning && job.StartTime > 0 {
 		duration := time.Now().Unix() - job.StartTime
 		fmt.Printf("Running:  %s\n", db.FormatDuration(duration))
 	}
 
-	if job.Status == db.StatusKilled {
+	if effectiveStatus == db.StatusKilled {
 		fmt.Printf("Exit:     killed\n")
 	}
-	if job.Status == db.StatusCanceled {
+	if effectiveStatus == db.StatusCanceled {
 		fmt.Printf("Exit:     canceled\n")
 	}
 
@@ -552,14 +556,14 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	if exitOnComplete && usageHintsEnabled() {
 		fmt.Println()
 		fmt.Printf("Hints:    weft log %d        # View job output\n", job.ID)
-		if job.Status == db.StatusRunning || job.Status == db.StatusQueued || job.Status == db.StatusStarting {
+		if effectiveStatus == db.StatusRunning || effectiveStatus == db.StatusQueued || effectiveStatus == db.StatusStarting {
 			fmt.Printf("          weft status %d --wait   # Don't exit until the job completes\n", job.ID)
 		}
 	}
 
 	// Set exit code based on status (only for single job)
 	if exitOnComplete {
-		switch job.Status {
+		switch effectiveStatus {
 		case db.StatusCompleted:
 			if job.ExitCode != nil && *job.ExitCode == 0 {
 				os.Exit(ExitSuccess)
@@ -623,6 +627,10 @@ func showActiveJobs(database *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("list queued jobs: %w", err)
 	}
+	queued = append(queued, jobsWithEffectiveStatus(running, db.StatusQueued)...)
+	queued = append(queued, jobsWithEffectiveStatus(starting, db.StatusQueued)...)
+	running = jobsWithEffectiveStatus(running, db.StatusRunning)
+	starting = jobsWithEffectiveStatus(starting, db.StatusStarting)
 
 	// Get recent failed jobs
 	failed, err := db.ListRecentFailed(database, 10)
@@ -693,6 +701,16 @@ func printJobSummary(job *db.Job) {
 		desc = desc[:57] + "..."
 	}
 	fmt.Printf("  %4d  %-14s  %s\n", job.ID, job.HostWithGPU(), desc)
+}
+
+func jobsWithEffectiveStatus(jobs []*db.Job, status string) []*db.Job {
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && job.EffectiveStatus() == status {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
 }
 
 func printFailedJobSummary(job *db.Job) {
