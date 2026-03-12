@@ -75,15 +75,14 @@ uv run --project <predictor.project_path> job-estimator predict-batch ...
 uv run --project <predictor.project_path> job-estimator train ...
 ```
 
-The predictor is configured in `~/.config/weft/config.yaml`:
+The predictor is configured in `~/.config/weft/config.toml`:
 
-```yaml
-predictor:
-  project_path: /path/to/job-estimator
-  model_dir: ~/.cache/weft/models
-  retrain_interval: 50
-  db_paths:
-    - /path/to/extra/jobs.db
+```toml
+[predictor]
+project_path = "/path/to/job-estimator"
+model_dir = "~/.cache/weft/models"
+retrain_interval = 50
+db_paths = ["/path/to/extra/jobs.db"]
 ```
 
 ### Inputs

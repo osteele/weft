@@ -119,7 +119,7 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 	}
 
 	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
-		return nil, "", fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml (vastai.r2)")
+		return nil, "", fmt.Errorf("R2 not configured in ~/.config/weft/config.toml (vastai.r2)")
 	}
 
 	opts := campaign.LaunchOpts{}
@@ -129,7 +129,7 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 		}
 	}
 
-	finalModel, err := runLaunchProgram(database, cfg, groups, opts, "", true)
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, "", true, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -144,13 +144,17 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 	for _, id := range finalModel.instanceIDs {
 		instanceText = append(instanceText, fmt.Sprintf("%d", id))
 	}
-	return finalModel.instanceIDs, "Launched instances: " + strings.Join(instanceText, ", "), nil
+	message := "Launched instances: " + strings.Join(instanceText, ", ")
+	if len(finalModel.partialErrors) > 0 {
+		message = fmt.Sprintf("%s (%d failed)", message, len(finalModel.partialErrors))
+	}
+	return finalModel.instanceIDs, message, nil
 }
 
-func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool) (launchModel, error) {
+func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool) (launchModel, error) {
 	clients := buildCloudClients(cfg)
 	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg, gpuFilter, reconciling)
+	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)

@@ -16,7 +16,7 @@ var retrainCmd = &cobra.Command{
 Models are stored in ~/.cache/weft/models/ and are used by placement scoring
 to predict job duration and resource usage per host.
 
-The predictor must be configured in ~/.config/weft/config.yaml:
+The predictor must be configured in ~/.config/weft/config.toml:
   predictor:
     project_path: /path/to/job-estimator`,
 	RunE: runRetrain,

@@ -306,7 +306,7 @@ Press `l` to view logs:
 
 Press `?` for the full keyboard shortcut help overlay.
 
-Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse: true` in `~/.config/weft/config.yaml`) if you prefer clickable rows instead.
+Mouse support is off by default so you can select/copy text with your terminal. Pass `--mouse` (or set `enable_mouse = true` in `~/.config/weft/config.toml`) if you prefer clickable rows instead.
 
 **Log caching:** When a host goes offline, the TUI shows the last successfully fetched log content with a "(cached - host offline)" indicator.
 
@@ -443,7 +443,7 @@ known error patterns and, when possible, fixes the issue and retries.
 Jobs are retried at most once to prevent loops. Diagnoses are stored in the
 database (`error_diagnosis` column) for inspection.
 
-To enable the coding agent for code fixes, add to `~/.config/weft/config.yaml`:
+To enable the coding agent for code fixes, add to `~/.config/weft/config.toml`:
 
 ```yaml
 remediation:
@@ -473,7 +473,7 @@ weft export training-data
 
 Models are stored at `~/.cache/weft/models/` and auto-retrain when 50+ new
 jobs complete. Configure the training data source via `predictor.project_path`
-in `~/.config/weft/config.yaml`. See
+in `~/.config/weft/config.toml`. See
 [Estimation and Modeling](docs/reference/estimation.md) for the full pipeline.
 
 ### Command-to-Resource Estimation
@@ -539,15 +539,15 @@ The web UI exposes JSON API endpoints:
 
 ## Configuration
 
-Configuration is stored in `~/.config/weft/config.yaml`.
+Configuration is stored in `~/.config/weft/config.toml`.
 
 ### Default Command
 
 By default, running `weft` with no arguments shows the help message. You can change this to run a different command:
 
-```yaml
-# ~/.config/weft/config.yaml
-default_command: tui
+```toml
+# ~/.config/weft/config.toml
+default_command = "tui"
 ```
 
 Valid values for `default_command`:
@@ -561,21 +561,21 @@ Valid values for `default_command`:
 
 Customize how often the TUI refreshes data:
 
-```yaml
-# ~/.config/weft/config.yaml
-sync_interval: 15          # Seconds between job status syncs (default: 15)
-log_refresh_interval: 3    # Seconds between log refreshes for running jobs (default: 3)
-host_refresh_interval: 30  # Seconds between host info refreshes in hosts view (default: 30)
+```toml
+# ~/.config/weft/config.toml
+sync_interval = 15          # Seconds between job status syncs (default: 15)
+log_refresh_interval = 3    # Seconds between log refreshes for running jobs (default: 3)
+host_refresh_interval = 30  # Seconds between host info refreshes in hosts view (default: 30)
 ```
 
 ### Web UI
 
 The TUI automatically starts a local web UI (localhost only) unless disabled:
 
-```yaml
-# ~/.config/weft/config.yaml
-web_enabled: true
-web_port: 8127
+```toml
+# ~/.config/weft/config.toml
+web_enabled = true
+web_port = 8127
 ```
 
 You can also run it directly:
@@ -588,10 +588,10 @@ weft web --open
 
 Completed job logs under 50KB are cached locally for faster access without SSH:
 
-```yaml
-# ~/.config/weft/config.yaml
-log_cache_max_size: 51200  # Maximum log size to cache in bytes (default: 50KB)
-log_cache_max_age: 7       # Days to keep cached logs (default: 7, 0 to disable)
+```toml
+# ~/.config/weft/config.toml
+log_cache_max_size = 51200  # Maximum log size to cache in bytes (default: 50KB)
+log_cache_max_age = 7       # Days to keep cached logs (default: 7, 0 to disable)
 ```
 
 Cached logs are stored in `~/.cache/weft/logs/` and automatically pruned during sync.
@@ -600,12 +600,12 @@ Cached logs are stored in `~/.cache/weft/logs/` and automatically pruned during 
 
 Tune SSH connection pool behavior for slow or unreliable networks:
 
-```yaml
-# ~/.config/weft/config.yaml
-ssh:
-  pool_size: 4        # Persistent sessions per host (default: 4)
-  max_parallel: 8     # Max concurrent SSH operations across all hosts (default: 8)
-  connect_timeout: 30 # SSH connect timeout in seconds (default: 10)
+```toml
+# ~/.config/weft/config.toml
+[ssh]
+pool_size = 4
+max_parallel = 8
+connect_timeout = 30
 ```
 
 Environment variables override the config file:
@@ -622,17 +622,47 @@ Increasing `connect_timeout` also extends the session ready timeout (connect tim
 
 Configure cloud GPU bursting with Vast.ai and optional R2 result upload:
 
-```yaml
-# ~/.config/weft/config.yaml
-vastai:
-  default_image: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
-  sync_timeout: 5  # Timeout in seconds for R2 result checks (default: 5)
-  r2:
-    bucket: "my-results-bucket"
-    account_id: "..."
-    access_key_id: "..."
-    secret_access_key: "..."
+```toml
+# ~/.config/weft/config.toml
+[vastai]
+default_image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+sync_timeout = 5
+
+[vastai.r2]
+bucket = "my-results-bucket"
+account_id = "..."
+access_key_id = "..."
+secret_access_key = "..."
 ```
+
+### Source Excludes
+
+Campaign source tarballs and `weft sync` share the same exclude rules.
+
+Global defaults:
+- Built-in excludes still cover VCS metadata, virtualenvs, caches, `output/`, and `outputs/`.
+- App-level defaults now also exclude `runs`, `wand`, and `wandb`.
+
+App-level overrides live in `~/.config/weft/config.toml`:
+
+```toml
+[sync]
+exclude_dirs = ["lab-notebook"]
+```
+
+Per-project overrides live in `$PROJECT/.weft.toml`:
+
+```toml
+[sync]
+exclude_dirs = ["data"]
+
+[outputs]
+dirs = ["results/"]
+max_auto_sync_mb = 200
+```
+
+Project excludes are added on top of the global defaults. This is useful for
+research repos that keep large datasets or experiment artifacts alongside code.
 
 Cloud instances automatically sync your project sources and collect detailed
 telemetry (CPU, memory, GPU usage, failure detection).

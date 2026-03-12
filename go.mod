@@ -16,6 +16,7 @@ require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-runewidth v0.0.16
+	github.com/pelletier/go-toml v1.9.5
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 	gopkg.in/yaml.v3 v3.0.1

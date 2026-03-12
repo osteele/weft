@@ -74,10 +74,52 @@ type LaunchResult struct {
 	Errors      []error
 }
 
-// PrepareR2Assets uploads the agent binary and source tarballs to R2,
-// returning the pre-staged assets for use by LaunchInstance. This is
-// extracted from LaunchCampaign so that RelaunchOrphanedJobs can reuse it.
-func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, error) {
+type stringPromise struct {
+	done chan struct{}
+	mu   sync.Mutex
+	val  string
+	err  error
+}
+
+func newStringPromise() *stringPromise {
+	return &stringPromise{done: make(chan struct{})}
+}
+
+func (p *stringPromise) resolve(val string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	select {
+	case <-p.done:
+		return
+	default:
+		p.val = val
+		p.err = err
+		close(p.done)
+	}
+}
+
+func (p *stringPromise) await() (string, error) {
+	<-p.done
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.val, p.err
+}
+
+// R2AssetStager uploads shared campaign assets in the background so group
+// launches can start as soon as their own dependencies are ready.
+type R2AssetStager struct {
+	Client       *r2.Client
+	AgentVersion string
+
+	cancel         context.CancelFunc
+	agentKey       *stringPromise
+	sourcePromises map[string]*stringPromise
+}
+
+// StartR2AssetStaging starts uploading the agent binary and source tarballs to
+// R2 in the background. Group launches can wait only on the directories they
+// need instead of blocking on all assets globally.
+func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2AssetStager, error) {
 	agentVersion, err := agentdeploy.LocalAgentVersion()
 	if err != nil {
 		return nil, fmt.Errorf("local agent version: %w", err)
@@ -94,7 +136,24 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 	}
 
 	uploadCtx, uploadCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer uploadCancel()
+
+	stager := &R2AssetStager{
+		Client:         r2Client,
+		AgentVersion:   agentVersion,
+		cancel:         uploadCancel,
+		agentKey:       newStringPromise(),
+		sourcePromises: make(map[string]*stringPromise),
+	}
+
+	allSourceDirs := make(map[string]bool)
+	for _, g := range groups {
+		for _, d := range g.SourceDirs() {
+			allSourceDirs[d] = true
+		}
+	}
+	for localDir := range allSourceDirs {
+		stager.sourcePromises[localDir] = newStringPromise()
+	}
 
 	// Log periodic warnings so the user knows the upload is still in progress.
 	uploadDone := make(chan struct{})
@@ -107,58 +166,100 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 			case <-uploadDone:
 				return
 			case <-ticker.C:
-				log.Printf("agent upload still in progress (%s elapsed)...", elapsed.Truncate(time.Second))
+				log.Printf("R2 asset upload still in progress (%s elapsed)...", elapsed.Truncate(time.Second))
 				elapsed += 15 * time.Second
 			}
 		}
 	}()
-	agentR2Key, err := agentdeploy.EnsureAgentInR2(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch)
-	close(uploadDone)
-	if err != nil {
-		return nil, fmt.Errorf("upload agent to R2: %w", err)
+	go func() {
+		agentR2Key, err := agentdeploy.EnsureAgentInR2(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch)
+		stager.agentKey.resolve(agentR2Key, err)
+	}()
+
+	var uploadWg sync.WaitGroup
+	for localDir, promise := range stager.sourcePromises {
+		localDir := localDir
+		promise := promise
+		uploadWg.Add(1)
+		go func() {
+			defer uploadWg.Done()
+			key, err := weftsync.UploadSourceToR2(uploadCtx, r2Client, localDir)
+			if err != nil {
+				promise.resolve("", fmt.Errorf("upload source %s: %w", localDir, err))
+				return
+			}
+			promise.resolve(key, nil)
+		}()
 	}
 
-	assets := &R2Assets{
-		Client:       r2Client,
-		AgentVersion: agentVersion,
+	go func() {
+		_, _ = stager.agentKey.await()
+		uploadWg.Wait()
+		close(uploadDone)
+	}()
+
+	return stager, nil
+}
+
+func (s *R2AssetStager) Close() {
+	if s != nil && s.cancel != nil {
+		s.cancel()
+	}
+}
+
+func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string) (R2Assets, error) {
+	if s == nil || s.Client == nil {
+		return R2Assets{}, fmt.Errorf("R2 asset stager is not initialized")
+	}
+	agentR2Key, err := s.agentKey.await()
+	if err != nil {
+		return R2Assets{}, fmt.Errorf("upload agent to R2: %w", err)
+	}
+	assets := R2Assets{
+		Client:       s.Client,
+		AgentVersion: s.AgentVersion,
 		AgentR2Key:   agentR2Key,
 		SourceR2Keys: make(map[string]string),
 	}
-
-	// Pre-stage source tarballs to R2 (content-addressed, deduplicated)
-	var sourceMu sync.Mutex
-	var sourceWg sync.WaitGroup
-	var sourceErr error
-
-	allSourceDirs := make(map[string]bool)
-	for _, g := range groups {
-		for _, d := range g.SourceDirs() {
-			allSourceDirs[d] = true
+	for _, localDir := range dirs {
+		promise, ok := s.sourcePromises[localDir]
+		if !ok {
+			continue
 		}
+		key, err := promise.await()
+		if err != nil {
+			return R2Assets{}, err
+		}
+		assets.SourceR2Keys[localDir] = key
 	}
-	for localDir := range allSourceDirs {
-		localDir := localDir
-		sourceWg.Add(1)
-		go func() {
-			defer sourceWg.Done()
-			key, err := weftsync.UploadSourceToR2(uploadCtx, r2Client, localDir)
-			sourceMu.Lock()
-			defer sourceMu.Unlock()
-			if err != nil {
-				if sourceErr == nil {
-					sourceErr = fmt.Errorf("upload source %s: %w", localDir, err)
-				}
-				return
-			}
-			assets.SourceR2Keys[localDir] = key
-		}()
-	}
-	sourceWg.Wait()
-	if sourceErr != nil {
-		return nil, sourceErr
-	}
-
 	return assets, nil
+}
+
+func (s *R2AssetStager) AwaitAll() (*R2Assets, error) {
+	if s == nil {
+		return nil, fmt.Errorf("R2 asset stager is not initialized")
+	}
+	dirs := make([]string, 0, len(s.sourcePromises))
+	for localDir := range s.sourcePromises {
+		dirs = append(dirs, localDir)
+	}
+	assets, err := s.AwaitAssetsForDirs(dirs)
+	if err != nil {
+		return nil, err
+	}
+	return &assets, nil
+}
+
+// PrepareR2Assets uploads the agent binary and source tarballs to R2,
+// returning the pre-staged assets for use by LaunchInstance. This is
+// extracted from LaunchCampaign so that RelaunchOrphanedJobs can reuse it.
+func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, error) {
+	stager, err := StartR2AssetStaging(r2Cfg, groups)
+	if err != nil {
+		return nil, err
+	}
+	defer stager.Close()
+	return stager.AwaitAll()
 }
 
 // LaunchCampaign creates a campaign record and launches instances for each group
@@ -187,10 +288,11 @@ func LaunchCampaign(
 	if onPhase != nil {
 		onPhase(InstanceGroup{GPUClass: "campaign"}, "preparing R2 assets")
 	}
-	r2Assets, err := PrepareR2Assets(r2Cfg, groups)
+	stager, err := StartR2AssetStaging(r2Cfg, groups)
 	if err != nil {
 		return nil, err
 	}
+	defer stager.Close()
 
 	// Compute total estimated cost from estimates
 	var estimatedCostCents int
@@ -265,10 +367,19 @@ func LaunchCampaign(
 				_ = db.SetCloudInstanceRole(database, donorInstanceID, "donor")
 
 				// Generate donor bootstrap script
+				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs)
+				if donorAssetErr != nil {
+					log.Printf("donor: staging assets failed: %v", donorAssetErr)
+					donorCfg = nil
+				}
+				if donorCfg == nil {
+					goto donorDisabled
+				}
+
 				var donorSources []SourceMapping
 				wsPath := donorClient.WorkspacePath()
 				for _, localDir := range donorCfg.SourceDirs {
-					if r2Key, ok := r2Assets.SourceR2Keys[localDir]; ok {
+					if r2Key, ok := donorAssets.SourceR2Keys[localDir]; ok {
 						donorSources = append(donorSources, SourceMapping{
 							R2Key:     r2Key,
 							RemoteDir: path.Join(wsPath, path.Base(localDir)),
@@ -277,7 +388,7 @@ func LaunchCampaign(
 				}
 
 				donorBootstrap := GenerateBootstrapScript(BootstrapManifest{
-					AgentR2Key:    r2Assets.AgentR2Key,
+					AgentR2Key:    donorAssets.AgentR2Key,
 					Sources:       donorSources,
 					WorkspacePath: wsPath,
 					DonorMode:     true,
@@ -289,7 +400,7 @@ func LaunchCampaign(
 				bootstrapKey := r2keys.BootstrapScript(donorInstanceID)
 				donorUploadCtx, donorUploadCancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer donorUploadCancel()
-				if uploadErr := r2Assets.Client.PutObject(donorUploadCtx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
+				if uploadErr := donorAssets.Client.PutObject(donorUploadCtx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
 					log.Printf("donor: failed to upload bootstrap: %v", uploadErr)
 					donorCfg = nil
 				} else {
@@ -306,7 +417,7 @@ func LaunchCampaign(
 						donorEnvVars := map[string]string{
 							"R2_ACCESS_KEY_ID":     r2Cfg.AccessKeyID,
 							"R2_SECRET_ACCESS_KEY": r2Cfg.SecretAccessKey,
-							"R2_ENDPOINT":          r2Assets.Client.Endpoint(),
+							"R2_ENDPOINT":          donorAssets.Client.Endpoint(),
 							"R2_BUCKET":            r2Cfg.Bucket,
 						}
 						if apiKey := vastai.ReadAPIKey(); apiKey != "" {
@@ -343,6 +454,7 @@ func LaunchCampaign(
 				}
 			}
 		}
+	donorDisabled:
 	}
 
 	// Launch worker instances in parallel
@@ -391,9 +503,17 @@ func LaunchCampaign(
 				}
 			}
 
+			groupAssets, assetErr := stager.AwaitAssetsForDirs(group.SourceDirs())
+			if assetErr != nil {
+				mu.Lock()
+				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), assetErr))
+				mu.Unlock()
+				return
+			}
+
 			cID, err := LaunchInstance(
 				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-				*r2Assets, progress,
+				groupAssets, progress,
 			)
 
 			mu.Lock()
@@ -431,7 +551,7 @@ func LaunchCampaign(
 
 		// Poll R2 for donor readiness
 		for time.Since(downloadStart) < DefaultDonorReadyTimeout {
-			exists, checkErr := r2Assets.Client.ObjectExists(context.Background(), readyKey)
+			exists, checkErr := stager.Client.ObjectExists(context.Background(), readyKey)
 			if checkErr != nil {
 				log.Printf("donor: R2 readiness check error: %v", checkErr)
 			} else if exists {

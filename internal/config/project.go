@@ -5,28 +5,33 @@ import (
 	"os"
 	"path/filepath"
 
+	toml "github.com/pelletier/go-toml"
 	"gopkg.in/yaml.v3"
 )
 
-// ProjectConfigFile is the filename for per-project weft configuration.
-const ProjectConfigFile = ".weft.yaml"
+const (
+	// ProjectConfigFile is the preferred filename for per-project weft configuration.
+	ProjectConfigFile = ".weft.toml"
+	// LegacyProjectConfigFile remains supported for backward compatibility.
+	LegacyProjectConfigFile = ".weft.yaml"
+)
 
-// ProjectConfig holds per-project configuration loaded from .weft.yaml.
+// ProjectConfig holds per-project configuration loaded from .weft.toml.
 type ProjectConfig struct {
-	Sync    ProjectSyncConfig    `yaml:"sync"`
-	Outputs ProjectOutputsConfig `yaml:"outputs"`
-	Inputs  []string             `yaml:"inputs"` // e.g. ["hf:gpt2", "hf:meta-llama/Llama-3.1-8B"]
+	Sync    ProjectSyncConfig    `yaml:"sync" toml:"sync"`
+	Outputs ProjectOutputsConfig `yaml:"outputs" toml:"outputs"`
+	Inputs  []string             `yaml:"inputs" toml:"inputs"` // e.g. ["hf:gpt2", "hf:meta-llama/Llama-3.1-8B"]
 }
 
 // ProjectOutputsConfig holds output collection settings for convention-based output discovery.
 type ProjectOutputsConfig struct {
 	// Dirs lists relative directory patterns to collect as outputs.
 	// Default: ["output/", "outputs/"]
-	Dirs []string `yaml:"dirs"`
+	Dirs []string `yaml:"dirs" toml:"dirs"`
 	// MaxAutoSyncMB is the max total size (MB) to auto-sync back on completion.
 	// Outputs larger than this are tracked but only synced on demand.
 	// Default: 100
-	MaxAutoSyncMB int `yaml:"max_auto_sync_mb"`
+	MaxAutoSyncMB int `yaml:"max_auto_sync_mb" toml:"max_auto_sync_mb"`
 }
 
 // DefaultOutputDirs is the default list of output directories to scan.
@@ -55,11 +60,15 @@ func (c *ProjectOutputsConfig) EffectiveMaxAutoSyncMB() int {
 type ProjectSyncConfig struct {
 	// ExtraPaths lists additional local paths to sync to remote hosts before
 	// job execution. These are typically out-of-tree data directories.
-	ExtraPaths []string `yaml:"extra_paths"`
+	ExtraPaths []string `yaml:"extra_paths" toml:"extra_paths"`
+	// ExcludeDirs lists additional path-component patterns excluded from source
+	// sync and campaign tarballs for this project only.
+	ExcludeDirs []string `yaml:"exclude_dirs" toml:"exclude_dirs"`
 }
 
-// LoadProjectConfig searches for .weft.yaml starting from dir and walking up
-// to the filesystem root. Returns nil (no error) if no config file is found.
+// LoadProjectConfig searches for .weft.toml (falling back to .weft.yaml)
+// starting from dir and walking up to the filesystem root. Returns nil (no
+// error) if no config file is found.
 func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 	if dir == "" {
 		return nil, nil
@@ -71,17 +80,26 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 	}
 
 	for {
-		path := filepath.Join(dir, ProjectConfigFile)
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var cfg ProjectConfig
-			if err := yaml.Unmarshal(data, &cfg); err != nil {
+		for _, name := range []string{ProjectConfigFile, LegacyProjectConfigFile} {
+			path := filepath.Join(dir, name)
+			data, err := os.ReadFile(path)
+			if err == nil {
+				var cfg ProjectConfig
+				switch filepath.Ext(path) {
+				case ".toml":
+					if err := toml.Unmarshal(data, &cfg); err != nil {
+						return nil, err
+					}
+				default:
+					if err := yaml.Unmarshal(data, &cfg); err != nil {
+						return nil, err
+					}
+				}
+				return &cfg, nil
+			}
+			if !os.IsNotExist(err) {
 				return nil, err
 			}
-			return &cfg, nil
-		}
-		if !os.IsNotExist(err) {
-			return nil, err
 		}
 
 		parent := filepath.Dir(dir)
@@ -106,6 +124,19 @@ func ProjectExtraPaths(localDir string) []string {
 		return nil
 	}
 	return projCfg.Sync.ExtraPaths
+}
+
+// ProjectExcludeDirs returns additional source exclude patterns from the
+// project config at localDir, or nil if no config is found.
+func ProjectExcludeDirs(localDir string) []string {
+	if localDir == "" {
+		return nil
+	}
+	projCfg, err := LoadProjectConfig(localDir)
+	if err != nil || projCfg == nil {
+		return nil
+	}
+	return projCfg.Sync.ExcludeDirs
 }
 
 // ProjectOutputDirs returns the effective output directories from the project

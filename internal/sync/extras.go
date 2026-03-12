@@ -5,7 +5,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 )
 
-// CollectExtraPaths gathers file paths to sync from input flags and .weft.yaml.
+// CollectExtraPaths gathers file paths to sync from input flags and .weft.toml.
 // It classifies inputs into asset refs (ignored here) and file paths,
 // then merges with extra_paths from the project config if found.
 func CollectExtraPaths(inputs []string, localDir string) []string {

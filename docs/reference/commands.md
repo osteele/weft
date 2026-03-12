@@ -172,12 +172,16 @@ working directory. On successful completion, the runner records discovered files
 in the completion record and auto-syncs small outputs (< 100 MB) back to the
 coordinator.
 
-Customize output directories and the auto-sync threshold in `.weft.yaml`:
+Customize output directories, auto-sync behavior, and project-specific source
+excludes in `.weft.toml`:
 
-```yaml
-outputs:
-  dirs: ["results/"]         # Default: ["output/", "outputs/"]
-  max_auto_sync_mb: 200      # Default: 100
+```toml
+[outputs]
+dirs = ["results/"]          # Default: ["output/", "outputs/"]
+max_auto_sync_mb = 200       # Default: 100
+
+[sync]
+exclude_dirs = ["data"]      # Additional project-specific source excludes
 ```
 
 Use `weft artifact list <job-id>` to see discovered outputs and
@@ -799,4 +803,3 @@ Both flags work entirely on the remote host (no laptop connection needed) and ca
 > **Note:** Dependencies must stay on the same host. If you try to start a job on
 > `titan` that waits on a job recorded on `studio`, the CLI errors immediately
 > instead of queuing work that can never start.
-

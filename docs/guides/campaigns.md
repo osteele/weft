@@ -18,13 +18,12 @@ hosts can't satisfy GPU requirements.
 pip install vastai
 vastai set api-key YOUR_API_KEY
 
-# 2. Configure R2 for result upload (in ~/.config/weft/config.yaml)
-# vastai:
-#   r2:
-#     bucket: "my-results-bucket"
-#     account_id: "..."
-#     access_key_id: "..."
-#     secret_access_key: "..."
+# 2. Configure R2 for result upload (in ~/.config/weft/config.toml)
+# [vastai.r2]
+# bucket = "my-results-bucket"
+# account_id = "..."
+# access_key_id = "..."
+# secret_access_key = "..."
 
 # 3. Queue jobs that need cloud GPUs
 weft run --gpu hopper+ -m "Train on H100" 'python train.py'
@@ -250,25 +249,43 @@ This creates a campaign with a single instance for that job.
 
 ## Configuration
 
-In `~/.config/weft/config.yaml`:
+In `~/.config/weft/config.toml`:
 
-```yaml
-vastai:
-  default_image: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
-  max_runtime: "4h"    # Max runtime before orphan cleanup
-  r2:
-    bucket: "my-results-bucket"
-    account_id: "..."
-    access_key_id: "..."
-    secret_access_key: "..."
+```toml
+[vastai]
+default_image = "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+max_runtime = "4h"
+
+[vastai.r2]
+bucket = "my-results-bucket"
+account_id = "..."
+access_key_id = "..."
+secret_access_key = "..."
 ```
 
 ### Source sync
 
 When launching with the agent (`--use-agent`), project sources are rsynced to
 the cloud instance. The same exclude patterns as persistent hosts apply
-(`.git`, `.venv`, `__pycache__`, etc.), plus any project-specific output dirs
-from `.weft.yaml`. See `internal/sync/sources.go` for the full exclude list.
+(`.git`, `.venv`, `__pycache__`, etc.), plus app-level excludes from
+`~/.config/weft/config.toml` and project-specific excludes and output dirs from
+`.weft.toml`.
+
+Current app-level defaults also exclude `runs`, `wand`, and `wandb`.
+
+Example app config:
+
+```toml
+[sync]
+exclude_dirs = ["lab-notebook"]
+```
+
+Example project config:
+
+```toml
+[sync]
+exclude_dirs = ["data"]
+```
 
 ## Cost estimation
 

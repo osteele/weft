@@ -213,7 +213,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		if r2Cfg.Bucket == "" || r2Cfg.AccessKeyID == "" {
 			return cloudJobLaunchedMsg{
 				jobID: job.ID,
-				err:   fmt.Errorf("R2 not configured (set vastai.r2 in config.yaml)"),
+				err:   fmt.Errorf("R2 not configured (set vastai.r2 in config.toml)"),
 			}
 		}
 

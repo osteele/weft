@@ -112,7 +112,7 @@ func newR2ClientFromConfig() (*r2.Client, error) {
 		return nil, err
 	}
 	if client == nil {
-		return nil, fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml")
+		return nil, fmt.Errorf("R2 not configured in ~/.config/weft/config.toml")
 	}
 	return client, nil
 }

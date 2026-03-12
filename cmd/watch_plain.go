@@ -164,6 +164,11 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 			b.WriteString("  ")
 			b.WriteString(formatCloudSummaryLine(ci, update))
 			b.WriteString("\n")
+			for _, line := range formatCloudAssignedJobLines(update) {
+				b.WriteString("    ")
+				b.WriteString(line)
+				b.WriteString("\n")
+			}
 		}
 	}
 
@@ -259,6 +264,27 @@ func currentCloudJob(update campaign.InstanceUpdate) *db.Job {
 		return queued
 	}
 	return update.Jobs[0]
+}
+
+func formatCloudAssignedJobLines(update campaign.InstanceUpdate) []string {
+	if len(update.Jobs) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(update.Jobs))
+	for _, job := range update.Jobs {
+		status := campaign.JobDisplayStatus(job, update.JobAttemptOutcomes)
+		line := fmt.Sprintf("#%-4d %-16s %-9s %s",
+			job.ID,
+			truncate(job.DirectoryTailDisplay(), 16),
+			status,
+			truncate(job.EffectiveDescription(), 36),
+		)
+		if update.JobProgressID == job.ID && update.JobProgress >= 0 {
+			line += fmt.Sprintf("  %d%%", update.JobProgress)
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 func watchCloudInstanceLabel(ci *db.CloudInstance) string {

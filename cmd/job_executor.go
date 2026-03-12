@@ -106,7 +106,7 @@ type queueJobOptions struct {
 	AutoStart    bool
 	Inputs       []string // Data asset refs (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs      []string // Data asset refs (e.g., "checkpoint:llama-ft-v1")
-	OutputDirs   []string // Convention-based output directories from .weft.yaml
+	OutputDirs   []string // Convention-based output directories from .weft.toml
 	Produces     []string // Artifact specs this job produces
 	Needs        []string // Artifact specs this job needs
 }

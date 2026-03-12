@@ -34,7 +34,7 @@ type CommandJob struct {
 	GPUClass   string   `json:"gpu_class,omitempty"` // GPU class name (e.g. "A100") — resolved to device at runtime
 	GPUMem     *int     `json:"gpu_mem,omitempty"`   // GPU memory reservation in GB per device
 	Tags       []string `json:"tags,omitempty"`
-	OutputDirs []string `json:"output_dirs,omitempty"` // convention-based output directories from .weft.yaml
+	OutputDirs []string `json:"output_dirs,omitempty"` // convention-based output directories from .weft.toml
 	Produces   []string `json:"produces,omitempty"`    // artifact specs this job produces
 	Needs      []string `json:"needs,omitempty"`       // artifact specs this job needs
 }

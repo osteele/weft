@@ -417,6 +417,9 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 		for _, ci := range m.cloudInstances {
 			update := m.instanceUpdates[ci.ID]
 			addSelectable("  " + truncate(formatCloudSummaryLine(ci, update), width-2))
+			for _, line := range formatCloudAssignedJobLines(update) {
+				addPlain("    " + truncate(line, width-4))
+			}
 		}
 	}
 	addPlain("")

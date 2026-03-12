@@ -231,7 +231,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Load output directories from .weft.yaml for convention-based output collection
+	// Load output directories from .weft.toml for convention-based output collection
 	localDir := workdir.ResolveLocal(runDir)
 	outputDirs := config.ProjectOutputDirs(localDir)
 

@@ -292,7 +292,7 @@ Built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) (Elm archite
 
 ### 7. Configuration (`internal/config/`)
 
-YAML configuration at `~/.config/weft/config.yaml`:
+Configuration at `~/.config/weft/config.toml`:
 
 ```yaml
 default_command: tui    # "help", "watch", "list", "tui", or "web"
@@ -382,7 +382,7 @@ See `cmd/sync.go` and `internal/ops/` for the reconciliation logic.
 | Path | Purpose |
 |------|---------|
 | `~/.config/weft/jobs.db` | SQLite database |
-| `~/.config/weft/config.yaml` | Configuration |
+| `~/.config/weft/config.toml` | Configuration |
 | `~/.config/weft/config` | Legacy config (Slack webhook) |
 
 ### Remote (Server)

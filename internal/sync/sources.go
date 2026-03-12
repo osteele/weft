@@ -58,7 +58,7 @@ func DefaultExcludes() []string {
 		// AI/dev guidance files
 		"CLAUDE.md", "AGENTS.md", "WARP.md",
 		// Weft project config
-		".weft.yaml",
+		".weft.toml", ".weft.yaml",
 	}
 }
 
@@ -86,6 +86,19 @@ func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []strin
 // sourceExcludes returns DefaultExcludes plus any project-specific output dirs.
 func sourceExcludes(localDir string) []string {
 	excludes := DefaultExcludes()
+	if cfg, err := config.Load(); err == nil {
+		for _, pattern := range cfg.SourceExcludeDirs() {
+			if !slices.Contains(excludes, pattern) {
+				excludes = append(excludes, pattern)
+			}
+		}
+	}
+	for _, dir := range config.ProjectExcludeDirs(localDir) {
+		dir = strings.TrimSuffix(dir, "/")
+		if dir != "" && !slices.Contains(excludes, dir) {
+			excludes = append(excludes, dir)
+		}
+	}
 	for _, dir := range config.ProjectOutputDirs(localDir) {
 		dir = strings.TrimSuffix(dir, "/")
 		if !slices.Contains(excludes, dir) {

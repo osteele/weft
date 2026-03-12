@@ -10,7 +10,7 @@ import (
 
 func TestDefaultExcludes(t *testing.T) {
 	excludes := DefaultExcludes()
-	required := []string{".git", ".jj", ".venv", "__pycache__", "node_modules", ".DS_Store", "build", "dist", ".weft.yaml", "output", "outputs"}
+	required := []string{".git", ".jj", ".venv", "__pycache__", "node_modules", ".DS_Store", "build", "dist", ".weft.toml", ".weft.yaml", "output", "outputs"}
 	for _, pattern := range required {
 		if !slices.Contains(excludes, pattern) {
 			t.Errorf("DefaultExcludes() missing expected pattern %q", pattern)
@@ -19,12 +19,12 @@ func TestDefaultExcludes(t *testing.T) {
 }
 
 func TestSyncSourcesExcludesCustomOutputDirs(t *testing.T) {
-	// Create a temp dir with a .weft.yaml that configures custom output dirs
+	// Create a temp dir with a .weft.toml that configures custom output dirs.
 	tmpDir := t.TempDir()
-	weftYaml := filepath.Join(tmpDir, ".weft.yaml")
-	err := os.WriteFile(weftYaml, []byte("outputs:\n  dirs:\n    - results/\n    - data/processed/\n"), 0644)
+	weftToml := filepath.Join(tmpDir, ".weft.toml")
+	err := os.WriteFile(weftToml, []byte("[outputs]\ndirs = [\"results/\", \"data/processed/\"]\n[sync]\nexclude_dirs = [\"data/raw\", \"runs\"]\n"), 0644)
 	if err != nil {
-		t.Fatalf("write .weft.yaml: %v", err)
+		t.Fatalf("write .weft.toml: %v", err)
 	}
 
 	// Capture the excludes passed to rsync
@@ -39,7 +39,7 @@ func TestSyncSourcesExcludesCustomOutputDirs(t *testing.T) {
 		t.Fatalf("SyncSources: %v", err)
 	}
 
-	for _, want := range []string{"results", "data/processed", "output", "outputs"} {
+	for _, want := range []string{"results", "data/processed", "data/raw", "runs", "output", "outputs"} {
 		if !slices.Contains(capturedExcludes, want) {
 			t.Errorf("excludes missing %q", want)
 		}

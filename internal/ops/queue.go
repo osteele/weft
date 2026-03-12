@@ -207,7 +207,7 @@ type QueueJobParams struct {
 	GPUMemGB     *int   // GPU memory reservation in GB per device
 	DepSpec      string
 	CPUAllotment *int
-	OutputDirs   []string // convention-based output directories from .weft.yaml
+	OutputDirs   []string // convention-based output directories from .weft.toml
 	Inputs       []string // Data asset refs the job reads (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs      []string // Data asset refs the job produces (e.g., "checkpoint:llama-ft-v1")
 	Produces     []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")

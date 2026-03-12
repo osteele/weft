@@ -243,7 +243,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Check R2 config before entering interactive mode
 	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
-		return fmt.Errorf("R2 not configured in ~/.config/weft/config.yaml (vastai.r2)")
+		return fmt.Errorf("R2 not configured in ~/.config/weft/config.toml (vastai.r2)")
 	}
 
 	// Non-interactive mode (explicit via --yes/--plain or automatic).
@@ -251,7 +251,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments, useTUI)
 	}
 
-	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile)
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false)
 	if err != nil {
 		return err
 	}

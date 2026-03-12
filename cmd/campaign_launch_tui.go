@@ -57,6 +57,8 @@ type launchModel struct {
 	launching        bool
 	done             bool
 	err              error
+	partialErrors    []string
+	fromWatch        bool
 	phase            string              // launch progress phase
 	estimateProgress estimateProgressMsg // latest estimation progress
 	progressCh       chan estimateProgressMsg
@@ -97,6 +99,7 @@ type estimateProgressMsg struct {
 
 type instancesLaunchedMsg struct {
 	instanceIDs []int64
+	errors      []error
 	err         error
 }
 
@@ -158,7 +161,7 @@ func buildItemsFromGroups(groups []campaign.InstanceGroup) ([]listItem, map[int6
 	return items, selected, cursor
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool) launchModel {
 	items, selected, cursor := buildItemsFromGroups(groups)
 
 	s := spinner.New()
@@ -184,6 +187,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		gpuFilter:     gpuFilter,
 		reconciler:    campaign.NewReconciler(),
 		spinner:       s,
+		fromWatch:     fromWatch,
 	}
 }
 
@@ -368,7 +372,16 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.done = true
 		m.instanceIDs = msg.instanceIDs
-		return m, tea.Quit
+		m.partialErrors = make([]string, 0, len(msg.errors))
+		for _, err := range msg.errors {
+			if err != nil {
+				m.partialErrors = append(m.partialErrors, err.Error())
+			}
+		}
+		if len(m.partialErrors) == 0 {
+			return m, tea.Quit
+		}
+		return m, nil
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -385,6 +398,26 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "enter":
+		if m.done {
+			return m, tea.Quit
+		}
+		if m.loading {
+			return m, nil
+		}
+		// Count selected
+		count := 0
+		for _, v := range m.selected {
+			if v {
+				count++
+			}
+		}
+		if count == 0 {
+			return m, tea.Quit
+		}
+		m.launching = true
+		return m, tea.Batch(m.spinner.Tick, m.launchInstances(), m.waitForCampaignCreated(), waitForLaunchPhase(m.phaseCh))
+
 	case "q", "esc", "ctrl+c":
 		return m, tea.Quit
 
@@ -429,22 +462,6 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "enter":
-		if m.loading {
-			return m, nil
-		}
-		// Count selected
-		count := 0
-		for _, v := range m.selected {
-			if v {
-				count++
-			}
-		}
-		if count == 0 {
-			return m, tea.Quit
-		}
-		m.launching = true
-		return m, tea.Batch(m.spinner.Tick, m.launchInstances(), m.waitForCampaignCreated(), waitForLaunchPhase(m.phaseCh))
 	}
 
 	return m, nil
@@ -633,10 +650,10 @@ func (m launchModel) launchInstances() tea.Cmd {
 		}
 
 		if len(result.InstanceIDs) == 0 && len(result.Errors) > 0 {
-			return instancesLaunchedMsg{err: result.Errors[0]}
+			return instancesLaunchedMsg{err: result.Errors[0], errors: result.Errors}
 		}
 
-		return instancesLaunchedMsg{instanceIDs: result.InstanceIDs}
+		return instancesLaunchedMsg{instanceIDs: result.InstanceIDs, errors: result.Errors}
 	}
 }
 
@@ -646,6 +663,9 @@ func (m launchModel) View() string {
 	if m.err != nil {
 		b.WriteString(launchErrStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n")
+		if m.fromWatch {
+			b.WriteString("\nPress Enter, Esc, or q to return to watch.\n")
+		}
 		return b.String()
 	}
 
@@ -662,6 +682,17 @@ func (m launchModel) View() string {
 			b.WriteString(fmt.Sprintf("%d", id))
 		}
 		b.WriteString("\n")
+		if len(m.partialErrors) > 0 {
+			b.WriteString("\n")
+			b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(m.partialErrors))))
+			b.WriteString("\n")
+			for _, err := range m.partialErrors {
+				b.WriteString("  - ")
+				b.WriteString(err)
+				b.WriteString("\n")
+			}
+			b.WriteString("\nPress Enter, Esc, or q to continue.\n")
+		}
 		return b.String()
 	}
 

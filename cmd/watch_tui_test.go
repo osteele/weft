@@ -27,6 +27,7 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 				CloudInstance: cloudInstance,
 				Jobs: []*db.Job{
 					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
+					{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Description: "eval model"},
 				},
 			},
 		},
@@ -50,6 +51,7 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		"Unplaced Jobs (1)",
 		"[u] unplace queued job",
 		"project-alpha",
+		"project-delta",
 		"project-beta",
 		"project-gamma",
 		"cool30",
@@ -57,6 +59,26 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		if !strings.Contains(out, expected) {
 			t.Fatalf("output missing %q, got:\n%s", expected, out)
 		}
+	}
+}
+
+func TestFormatCloudAssignedJobLinesShowsAllAssignedJobs(t *testing.T) {
+	update := campaign.InstanceUpdate{
+		Jobs: []*db.Job{
+			{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
+			{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Description: "eval model"},
+		},
+	}
+
+	lines := formatCloudAssignedJobLines(update)
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2", len(lines))
+	}
+	if !strings.Contains(lines[0], "project-alpha") {
+		t.Fatalf("first line missing project-alpha: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "project-delta") {
+		t.Fatalf("second line missing project-delta: %q", lines[1])
 	}
 }
 

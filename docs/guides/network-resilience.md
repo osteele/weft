@@ -66,7 +66,7 @@ possible.
 
 Completed logs are mirrored into `~/.cache/weft/logs/` so `weft log`
 and the TUI can show output even while offline. Entries honor the max-age and
-size limits from `config.yaml`. `weft sync` keeps the cache fresh and
+size limits from `config.toml`. `weft sync` keeps the cache fresh and
 prunes expired files, and cache hits are served instantly without touching SSH.
 
 ## Recovering job status

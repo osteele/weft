@@ -63,7 +63,7 @@ type Job struct {
 	DepSpec              string   // Dependency specification (e.g., "42" or "42+" for after-any)
 	Inputs               []string // Data asset refs consumed by this job (e.g., "hf:meta-llama/Llama-3-8B")
 	Outputs              []string // Data asset refs produced by this job
-	OutputDirs           []string // Convention-based output directories from .weft.yaml
+	OutputDirs           []string // Convention-based output directories from .weft.toml
 	Produces             []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
 	Needs                []string // Artifact specs this job needs (e.g., "output/model.pt:100")
 	Project              string   // Basename of working directory (stored at creation time)
