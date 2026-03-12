@@ -297,7 +297,7 @@ func (r *Runner) tryStartNextJob() {
 
 	// Check GPU capacity and resolve devices
 	var resolvedGPUDevices []string
-	if runningCount > 0 {
+	if jobHasGPU {
 		var canStart bool
 		canStart, resolvedGPUDevices = r.gpuInv.CanStartGPUJob(r.state, rj)
 		if !canStart {
@@ -355,10 +355,25 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 		return nil
 	}
 
+	// Resolve GPU devices (use pre-resolved if available, otherwise resolve now)
+	rj := &RunnerJob{Data: job, ID: jobID}
+	var gpuDevices []string
+	jobHasGPU := job.GPUClass != "" || len(GetJobGPUDevices(job)) > 0
+
+	if len(preResolvedGPUDevices) > 0 {
+		gpuDevices = preResolvedGPUDevices
+	} else if jobHasGPU {
+		canStart, resolvedGPUDevices := r.gpuInv.CanStartGPUJob(r.state, rj)
+		if !canStart {
+			return errRequeue
+		}
+		gpuDevices = resolvedGPUDevices
+	}
+
 	startTime := time.Now().Unix()
 	paths := NewJobPaths(r.logDir, jobID)
 
-	// Archive existing files
+	// Archive existing files only when the job is definitely launching.
 	ArchiveExistingFiles(r.logDir, jobID)
 
 	oplog.LogJob(oplog.OpJobStart, jobID, "", oplog.WithDetailf("cmd=%s", command))
@@ -377,23 +392,6 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command)
-
-	// Resolve GPU devices (use pre-resolved if available, otherwise resolve now)
-	rj := &RunnerJob{Data: job, ID: jobID}
-	var gpuDevices []string
-
-	if len(preResolvedGPUDevices) > 0 {
-		gpuDevices = preResolvedGPUDevices
-	} else if job.GPUClass != "" {
-		memPerDevice := GetJobGPUMem(job, DefaultGPUMemGB)
-		device, ok := r.gpuInv.PickBestGPUForClass(r.state, job.GPUClass, memPerDevice)
-		if !ok {
-			return errRequeue
-		}
-		gpuDevices = []string{device}
-	} else {
-		gpuDevices = GetJobGPUDevices(job)
-	}
 
 	// Write gpu_devices to meta file so the coordinator can discover them
 	if len(gpuDevices) > 0 {
