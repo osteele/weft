@@ -88,29 +88,48 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-// JobRun stores an archived execution snapshot for a logical job whose mutable
-// jobs row has been reused for another run.
+// JobRun stores the immutable spec snapshot plus mutable execution state for a
+// single execution attempt of a logical job.
 type JobRun struct {
-	ID              int64
-	JobID           int64
-	ArchivedAt      int64
-	ArchiveReason   string
-	Status          string
-	Host            string
-	WorkingDir      string
-	Command         string
-	SessionName     string
-	QueueName       string
-	Backend         string
-	RemoteID        string
-	RemoteState     string
-	StartTime       int64
-	EndTime         *int64
-	ExitCode        *int
-	ErrorMessage    string
-	FailureReason   string
-	ErrorDiagnosis  string
-	CloudInstanceID *int64
+	ID               int64
+	JobID            int64
+	ArchivedAt       int64
+	ArchiveReason    string
+	Status           string
+	Host             string
+	WorkingDir       string
+	Command          string
+	Description      string
+	SessionName      string
+	QueueName        string
+	Backend          string
+	RemoteID         string
+	RemoteState      string
+	GPU              string
+	GPUClass         string
+	CPUAllotment     *int
+	GPUMemGB         *int
+	EnvVars          []string
+	Tags             []string
+	DepSpec          string
+	Inputs           []string
+	Outputs          []string
+	OutputDirs       []string
+	Produces         []string
+	Needs            []string
+	Project          string
+	StartTime        int64
+	EndTime          *int64
+	ExitCode         *int
+	ErrorMessage     string
+	FailureReason    string
+	ErrorDiagnosis   string
+	Metadata         *JobMetadata
+	PlacementMeta    *PlacementMeta
+	Cost             *float64
+	VastaiInstanceID *int
+	RetryCount       int
+	CloudInstanceID  *int64
 }
 
 // UsesQueueRunner reports whether this job should be managed by the queue runner backend.
@@ -149,7 +168,7 @@ type PlacementMeta struct {
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, cloud_instance_id, latest_run_id`
 
-const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, session_name, queue_name, backend, remote_id, remote_state, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, cloud_instance_id`
+const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
 // qualifiedJobSelectColumns returns jobSelectColumns with each column prefixed
 // by the given table alias (e.g. "jobs" → "jobs.id, jobs.host, ...").
@@ -789,17 +808,36 @@ func initSchema(db *sql.DB) error {
 		host TEXT NOT NULL,
 		working_dir TEXT NOT NULL,
 		command TEXT NOT NULL,
+		description TEXT,
 		session_name TEXT,
 		queue_name TEXT,
 		backend TEXT,
 		remote_id TEXT,
 		remote_state TEXT,
+		gpu TEXT,
+		gpu_class TEXT,
+		cpu_allotment INTEGER,
+		gpu_mem_gb INTEGER,
+		env_vars TEXT,
+		tags TEXT,
+		dep_spec TEXT,
+		inputs TEXT,
+		outputs TEXT,
+		output_dirs TEXT,
+		produces TEXT,
+		needs TEXT,
+		project TEXT,
 		start_time INTEGER,
 		end_time INTEGER,
 		exit_code INTEGER,
 		error_message TEXT,
 		failure_reason TEXT,
 		error_diagnosis TEXT,
+		job_metadata TEXT,
+		placement_meta TEXT,
+		cost REAL,
+		vastai_instance_id INTEGER,
+		retry_count INTEGER DEFAULT 0,
 		cloud_instance_id INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_job_runs_job ON job_runs(job_id, archived_at, id);
@@ -807,7 +845,82 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(jobRunsSchema); err != nil {
 		return err
 	}
-	if err := addColumnIfMissing(db, `ALTER TABLE job_runs ADD COLUMN error_diagnosis TEXT`); err != nil {
+	for _, stmt := range []string{
+		`ALTER TABLE job_runs ADD COLUMN description TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN gpu TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN gpu_class TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN cpu_allotment INTEGER`,
+		`ALTER TABLE job_runs ADD COLUMN gpu_mem_gb INTEGER`,
+		`ALTER TABLE job_runs ADD COLUMN env_vars TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN tags TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN dep_spec TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN inputs TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN outputs TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN output_dirs TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN produces TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN needs TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN project TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN error_diagnosis TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN job_metadata TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN placement_meta TEXT`,
+		`ALTER TABLE job_runs ADD COLUMN cost REAL`,
+		`ALTER TABLE job_runs ADD COLUMN vastai_instance_id INTEGER`,
+		`ALTER TABLE job_runs ADD COLUMN retry_count INTEGER DEFAULT 0`,
+	} {
+		if err := addColumnIfMissing(db, stmt); err != nil {
+			return err
+		}
+	}
+
+	if _, err := db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE VIEW job_run_training_examples AS
+		SELECT
+			id AS run_id,
+			job_id,
+			archived_at,
+			archive_reason,
+			status,
+			host,
+			working_dir,
+			command,
+			description,
+			gpu,
+			gpu_class,
+			cpu_allotment,
+			gpu_mem_gb,
+			env_vars,
+			tags,
+			dep_spec,
+			inputs,
+			outputs,
+			output_dirs,
+			produces,
+			needs,
+			project,
+			COALESCE(backend, 'queue-runner') AS backend,
+			CASE WHEN COALESCE(backend, 'queue-runner') = 'vastai' THEN 'single' ELSE 'multi' END AS tenant,
+			start_time,
+			end_time,
+			CASE
+				WHEN start_time IS NOT NULL AND end_time IS NOT NULL THEN end_time - start_time
+				ELSE NULL
+			END AS duration_s,
+			exit_code,
+			job_metadata,
+			placement_meta,
+			cost,
+			vastai_instance_id,
+			retry_count,
+			cloud_instance_id,
+			error_message,
+			failure_reason,
+			error_diagnosis
+		FROM job_runs
+		WHERE start_time IS NOT NULL AND end_time IS NOT NULL
+	`); err != nil {
 		return err
 	}
 
@@ -1237,13 +1350,19 @@ func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
 		`UPDATE jobs SET vastai_instance_id = ?, backend = ? WHERE id = ?`,
 		instanceID, BackendVastai, jobID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return PersistLatestRunSnapshotIfExists(db, jobID, "")
 }
 
 // SetJobCost updates the actual cost for a cloud-run job.
 func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
 	_, err := db.Exec(`UPDATE jobs SET cost = ? WHERE id = ?`, cost, jobID)
-	return err
+	if err != nil {
+		return err
+	}
+	return PersistLatestRunSnapshotIfExists(db, jobID, "")
 }
 
 // SetJobPlacementMeta stores placement telemetry on a job record.
@@ -1253,7 +1372,10 @@ func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
 		return err
 	}
 	_, err = db.Exec(`UPDATE jobs SET placement_meta = ? WHERE id = ?`, encoded, jobID)
-	return err
+	if err != nil {
+		return err
+	}
+	return PersistLatestRunSnapshotIfExists(db, jobID, "")
 }
 
 func encodePlacementMeta(meta *PlacementMeta) (any, error) {
@@ -1828,7 +1950,10 @@ func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
 		return err
 	}
 	_, err = db.Exec(`UPDATE jobs SET job_metadata = ? WHERE id = ?`, value, jobID)
-	return err
+	if err != nil {
+		return err
+	}
+	return PersistLatestRunSnapshotIfExists(db, jobID, "")
 }
 
 // AddJobTag adds a tag to a job if it doesn't already exist.
@@ -2195,7 +2320,10 @@ func UpdateStartTime(db *sql.DB, id int64, startTime int64) error {
 		`UPDATE jobs SET start_time = ? WHERE id = ? AND (start_time IS NULL OR start_time = 0)`,
 		startTime, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return PersistLatestRunSnapshotIfExists(db, id, "")
 }
 
 // DeleteJob removes a job from the database without touching remote files
@@ -3215,17 +3343,33 @@ func shouldArchiveJobRun(job *Job) bool {
 
 func insertJobRunSnapshotTx(tx *sql.Tx, job *Job, reason string) (int64, error) {
 	now := time.Now().Unix()
+	jobMetadata, err := encodeJobMetadata(job.Metadata)
+	if err != nil {
+		return 0, err
+	}
+	placementMeta, err := encodePlacementMeta(job.PlacementMeta)
+	if err != nil {
+		return 0, err
+	}
 	result, err := tx.Exec(
 		`INSERT INTO job_runs (
-			job_id, archived_at, archive_reason, status, host, working_dir, command,
+			job_id, archived_at, archive_reason, status, host, working_dir, command, description,
 			session_name, queue_name, backend, remote_id, remote_state,
-			start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, cloud_instance_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, now, reason, job.Status, job.Host, job.WorkingDir, job.Command,
+			gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec,
+			inputs, outputs, output_dirs, produces, needs, project,
+			start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis,
+			job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, now, reason, job.Status, job.Host, job.WorkingDir, job.Command, nullIfEmpty(job.Description),
 		nullIfEmpty(job.SessionName), nullIfEmpty(job.QueueName), nullIfEmpty(job.Backend),
 		nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
+		nullIfEmpty(job.GPU), nullIfEmpty(job.GPUClass), job.CPUAllotment, job.GPUMemGB,
+		encodeStringSlice(job.EnvVars), encodeTagsForRun(job.Tags), nullIfEmpty(job.DepSpec),
+		encodeStringSlice(job.Inputs), encodeStringSlice(job.Outputs), encodeStringSlice(job.OutputDirs),
+		encodeStringSlice(job.Produces), encodeStringSlice(job.Needs), nullIfEmpty(job.Project),
 		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
-		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), job.CloudInstanceID,
+		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), jobMetadata, placementMeta,
+		job.Cost, nullableInt(job.VastaiInstanceID), job.RetryCount, job.CloudInstanceID,
 	)
 	if err != nil {
 		return 0, err
@@ -3261,6 +3405,23 @@ func PersistLatestRunSnapshot(db *sql.DB, jobID int64, reason string) error {
 	return tx.Commit()
 }
 
+// PersistLatestRunSnapshotIfExists updates the current run row only when the job
+// already has a tracked run. This avoids creating placeholder runs for queued
+// jobs whose mutable job row is being edited before execution starts.
+func PersistLatestRunSnapshotIfExists(db *sql.DB, jobID int64, reason string) error {
+	var latestRunID sql.NullInt64
+	if err := db.QueryRow(`SELECT latest_run_id FROM jobs WHERE id = ?`, jobID).Scan(&latestRunID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if !latestRunID.Valid || latestRunID.Int64 == 0 {
+		return nil
+	}
+	return PersistLatestRunSnapshot(db, jobID, reason)
+}
+
 func persistLatestRunSnapshotTx(tx *sql.Tx, job *Job, reason string) error {
 	if job == nil {
 		return nil
@@ -3275,20 +3436,29 @@ func persistLatestRunSnapshotTx(tx *sql.Tx, job *Job, reason string) error {
 	}
 
 	now := time.Now().Unix()
-	_, err := tx.Exec(
+	jobMetadata, err := encodeJobMetadata(job.Metadata)
+	if err != nil {
+		return err
+	}
+	placementMeta, err := encodePlacementMeta(job.PlacementMeta)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(
 		`UPDATE job_runs SET
 			archived_at = ?,
 			archive_reason = CASE WHEN ? <> '' THEN ? ELSE archive_reason END,
-			status = ?, host = ?, working_dir = ?, command = ?,
-			session_name = ?, queue_name = ?, backend = ?, remote_id = ?, remote_state = ?,
+			status = ?,
+			session_name = ?, remote_id = ?, remote_state = ?,
 			start_time = ?, end_time = ?, exit_code = ?, error_message = ?, failure_reason = ?,
-			error_diagnosis = ?, cloud_instance_id = ?
+			error_diagnosis = ?, job_metadata = ?, placement_meta = ?, cost = ?,
+			vastai_instance_id = ?, retry_count = ?, cloud_instance_id = ?
 		 WHERE id = ?`,
-		now, reason, reason, job.Status, job.Host, job.WorkingDir, job.Command,
-		nullIfEmpty(job.SessionName), nullIfEmpty(job.QueueName), nullIfEmpty(job.Backend),
-		nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
+		now, reason, reason, job.Status,
+		nullIfEmpty(job.SessionName), nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
 		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
-		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), job.CloudInstanceID,
+		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), jobMetadata, placementMeta, job.Cost,
+		nullableInt(job.VastaiInstanceID), job.RetryCount, job.CloudInstanceID,
 		*job.LatestRunID,
 	)
 	return err
@@ -3320,6 +3490,10 @@ func nullIfEmpty(s string) *string {
 	return &s
 }
 
+func nullableInt(v *int) *int {
+	return v
+}
+
 func nullableUnix(ts int64) *int64 {
 	if ts == 0 {
 		return nil
@@ -3327,23 +3501,50 @@ func nullableUnix(ts int64) *int64 {
 	return &ts
 }
 
+func encodeStringSlice(values []string) any {
+	if len(values) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil
+	}
+	return string(data)
+}
+
+func encodeTagsForRun(tags []string) any {
+	value, err := encodeTags(tags)
+	if err != nil {
+		return nil
+	}
+	return value
+}
+
 func scanJobRuns(rows *sql.Rows) ([]JobRun, error) {
 	var runs []JobRun
 	for rows.Next() {
 		var run JobRun
-		var sessionName, queueName, backend, remoteID, remoteState, errorMessage, failureReason, errorDiagnosis sql.NullString
+		var description, sessionName, queueName, backend, remoteID, remoteState sql.NullString
+		var gpu, gpuClass, envVars, tags, depSpec, inputs, outputs, outputDirs, produces, needs, project sql.NullString
+		var errorMessage, failureReason, errorDiagnosis, jobMetadata, placementMeta sql.NullString
 		var startTime, endTime sql.NullInt64
-		var exitCode sql.NullInt64
+		var exitCode, cpuAllotment, gpuMemGB, vastaiInstanceID, retryCount sql.NullInt64
+		var cost sql.NullFloat64
 		var cloudInstanceID sql.NullInt64
 
 		if err := rows.Scan(
 			&run.ID, &run.JobID, &run.ArchivedAt, &run.ArchiveReason, &run.Status, &run.Host,
-			&run.WorkingDir, &run.Command, &sessionName, &queueName, &backend, &remoteID,
-			&remoteState, &startTime, &endTime, &exitCode, &errorMessage, &failureReason,
-			&errorDiagnosis,
+			&run.WorkingDir, &run.Command, &description, &sessionName, &queueName, &backend, &remoteID,
+			&remoteState, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec,
+			&inputs, &outputs, &outputDirs, &produces, &needs, &project,
+			&startTime, &endTime, &exitCode, &errorMessage, &failureReason, &errorDiagnosis,
+			&jobMetadata, &placementMeta, &cost, &vastaiInstanceID, &retryCount,
 			&cloudInstanceID,
 		); err != nil {
 			return nil, err
+		}
+		if description.Valid {
+			run.Description = description.String
 		}
 		if sessionName.Valid {
 			run.SessionName = sessionName.String
@@ -3359,6 +3560,33 @@ func scanJobRuns(rows *sql.Rows) ([]JobRun, error) {
 		}
 		if remoteState.Valid {
 			run.RemoteState = remoteState.String
+		}
+		if gpu.Valid {
+			run.GPU = gpu.String
+		}
+		if gpuClass.Valid {
+			run.GPUClass = gpuClass.String
+		}
+		if cpuAllotment.Valid {
+			v := int(cpuAllotment.Int64)
+			run.CPUAllotment = &v
+		}
+		if gpuMemGB.Valid {
+			v := int(gpuMemGB.Int64)
+			run.GPUMemGB = &v
+		}
+		run.EnvVars = decodeEnvVars(envVars)
+		run.Tags = decodeTags(tags)
+		if depSpec.Valid {
+			run.DepSpec = depSpec.String
+		}
+		run.Inputs = decodeStringSlice(inputs)
+		run.Outputs = decodeStringSlice(outputs)
+		run.OutputDirs = decodeStringSlice(outputDirs)
+		run.Produces = decodeStringSlice(produces)
+		run.Needs = decodeStringSlice(needs)
+		if project.Valid {
+			run.Project = project.String
 		}
 		if startTime.Valid {
 			run.StartTime = startTime.Int64
@@ -3379,8 +3607,23 @@ func scanJobRuns(rows *sql.Rows) ([]JobRun, error) {
 		if errorDiagnosis.Valid {
 			run.ErrorDiagnosis = errorDiagnosis.String
 		}
+		run.Metadata = decodeJobMetadata(jobMetadata)
+		run.PlacementMeta = decodePlacementMeta(placementMeta)
+		if cost.Valid {
+			run.Cost = &cost.Float64
+		}
+		if vastaiInstanceID.Valid {
+			v := int(vastaiInstanceID.Int64)
+			run.VastaiInstanceID = &v
+		}
+		if retryCount.Valid {
+			run.RetryCount = int(retryCount.Int64)
+		}
 		if cloudInstanceID.Valid {
 			run.CloudInstanceID = &cloudInstanceID.Int64
+		}
+		if run.Backend == "" {
+			run.Backend = BackendQueueRunner
 		}
 		runs = append(runs, run)
 	}

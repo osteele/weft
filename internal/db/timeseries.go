@@ -75,13 +75,22 @@ func InsertTimeseries(database *sql.DB, jobID int64, samples []TimeseriesSample)
 
 // GetTimeseries reads all time series samples for a job, ordered by timestamp.
 func GetTimeseries(database *sql.DB, jobID int64) ([]TimeseriesSample, error) {
+	return getTimeseriesWhere(database, `WHERE job_id = ? ORDER BY ts`, jobID)
+}
+
+// GetTimeseriesByRun reads all time series samples for a specific execution
+// attempt, ordered by timestamp.
+func GetTimeseriesByRun(database *sql.DB, runID int64) ([]TimeseriesSample, error) {
+	return getTimeseriesWhere(database, `WHERE job_run_id = ? ORDER BY ts`, runID)
+}
+
+func getTimeseriesWhere(database *sql.DB, where string, args ...any) ([]TimeseriesSample, error) {
 	rows, err := database.Query(`
 		SELECT job_run_id, ts, cpu_pct, rss_kb, gpu_mib, COALESCE(disk_free_bytes, 0), COALESCE(disk_total_bytes, 0), host_rss_kb, host_mem_total_kb,
 		       gpu_util_pct, gpu_mem_used_mib, gpu_mem_total_mib,
 		       COALESCE(gpu_temp_c, 0), COALESCE(gpu_clock_mhz, 0), tenant
 		FROM job_timeseries
-		WHERE job_id = ?
-		ORDER BY ts`, jobID)
+		`+where, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query timeseries: %w", err)
 	}

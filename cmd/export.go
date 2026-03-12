@@ -22,10 +22,10 @@ var exportCmd = &cobra.Command{
 
 var exportTrainingDataCmd = &cobra.Command{
 	Use:   "training-data",
-	Short: "Export job data with time series for ML training",
-	Long: `Export completed job data as JSONL, including time series telemetry.
+	Short: "Export per-run data with time series for ML training",
+	Long: `Export terminal job runs as JSONL, including time series telemetry.
 
-Each line is a JSON object with job metadata and an embedded timeseries array.
+Each line is a JSON object with run metadata and an embedded timeseries array.
 This format is designed for consumption by job-estimator and similar ML tools.
 
 Examples:
@@ -43,6 +43,7 @@ func init() {
 
 // trainingDataRecord is the JSONL output format for job-estimator.
 type trainingDataRecord struct {
+	RunID      int64                 `json:"run_id"`
 	JobID      int64                 `json:"job_id"`
 	Host       string                `json:"host"`
 	Command    string                `json:"command"`
@@ -65,12 +66,6 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// Query completed jobs
-	jobs, err := db.ListJobs(database, db.StatusCompleted, "", 0, nil, "")
-	if err != nil {
-		return fmt.Errorf("list jobs: %w", err)
-	}
-
 	// Parse since filter
 	var sinceTime time.Time
 	if exportSince != "" {
@@ -91,49 +86,35 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 		out = f
 	}
 
+	var sinceUnix int64
+	if !sinceTime.IsZero() {
+		sinceUnix = sinceTime.Unix()
+	}
+	runs, err := db.ListTrainingJobRuns(database, sinceUnix)
+	if err != nil {
+		return fmt.Errorf("list training job runs: %w", err)
+	}
+
 	encoder := json.NewEncoder(out)
 	var count int
 
-	for _, job := range jobs {
-		if job.StartTime == 0 {
-			continue
-		}
-		if !sinceTime.IsZero() && job.StartTime < sinceTime.Unix() {
-			continue
-		}
-
-		// Compute duration
-		var durationS int64
-		if job.EndTime != nil {
-			durationS = *job.EndTime - job.StartTime
-		}
-
-		exitCode := 0
-		if job.ExitCode != nil {
-			exitCode = *job.ExitCode
-		}
-
-		// Determine tenant from backend
-		tenant := "multi"
-		if job.Backend == db.BackendVastai {
-			tenant = "single"
-		}
-
+	for _, run := range runs {
 		rec := trainingDataRecord{
-			JobID:     job.ID,
-			Host:      job.Host,
-			Command:   job.Command,
-			Project:   job.Project,
-			GPUClass:  job.GPUClass,
-			Backend:   job.Backend,
-			Tenant:    tenant,
-			DurationS: durationS,
-			ExitCode:  exitCode,
+			RunID:     run.RunID,
+			JobID:     run.JobID,
+			Host:      run.Host,
+			Command:   run.Command,
+			Project:   run.Project,
+			GPUClass:  run.GPUClass,
+			Backend:   run.Backend,
+			Tenant:    run.Tenant,
+			DurationS: run.DurationS,
+			ExitCode:  run.ExitCode,
 		}
 
 		// Extract resource usage from metadata
-		if job.Metadata != nil && job.Metadata.Resource != nil {
-			ru := job.Metadata.Resource
+		if run.Metadata != nil && run.Metadata.Resource != nil {
+			ru := run.Metadata.Resource
 			if ru.PeakRSSKB != nil {
 				rec.PeakRSSKB = *ru.PeakRSSKB
 			}
@@ -141,18 +122,18 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 				rec.MaxGPUMiB = *ru.MaxGPUMemMiB
 			}
 		}
-		if job.Metadata != nil && job.Metadata.CPU != nil && job.Metadata.CPU.Mean != nil {
-			rec.CPUMean = *job.Metadata.CPU.Mean
+		if run.Metadata != nil && run.Metadata.CPU != nil && run.Metadata.CPU.Mean != nil {
+			rec.CPUMean = *run.Metadata.CPU.Mean
 		}
 
 		// Fetch timeseries
-		ts, err := db.GetTimeseries(database, job.ID)
+		ts, err := db.GetTimeseriesByRun(database, run.RunID)
 		if err == nil && len(ts) > 0 {
 			rec.Timeseries = ts
 		}
 
 		if err := encoder.Encode(rec); err != nil {
-			return fmt.Errorf("encode job %d: %w", job.ID, err)
+			return fmt.Errorf("encode run %d: %w", run.RunID, err)
 		}
 		count++
 	}
