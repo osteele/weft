@@ -573,6 +573,48 @@ func TestListUnplacedJobs(t *testing.T) {
 	}
 }
 
+func TestMoveQueuedJobToUnplaced(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := UpdateLastSyncedStatus(database, jobID, StatusQueued); err != nil {
+		t.Fatalf("set last synced status: %v", err)
+	}
+	if err := SetQueuedAtNow(database, jobID); err != nil {
+		t.Fatalf("set queued_at: %v", err)
+	}
+
+	if err := MoveQueuedJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplaced: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Host != "" {
+		t.Errorf("Host = %q, want empty", job.Host)
+	}
+	if job.Status != StatusQueued {
+		t.Errorf("Status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.LastSyncedStatus != "" {
+		t.Errorf("LastSyncedStatus = %q, want empty", job.LastSyncedStatus)
+	}
+	if job.QueueName != "" {
+		t.Errorf("QueueName = %q, want empty", job.QueueName)
+	}
+	if job.QueuedAt != 0 {
+		t.Errorf("QueuedAt = %d, want 0", job.QueuedAt)
+	}
+	if !job.HasTag(TagCloud) {
+		t.Errorf("expected cloud tag after move to unplaced, got %v", job.Tags)
+	}
+}
+
 func TestListActiveOnPremJobs(t *testing.T) {
 	database := SetupTestDB(t)
 
@@ -627,6 +669,26 @@ func TestListActiveOnPremJobs(t *testing.T) {
 		if job.Host == "" {
 			t.Fatalf("unexpected unplaced job in on-prem list: %+v", job)
 		}
+	}
+}
+
+func TestListUniqueActiveHostsIncludesDeferredOpHosts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "unplaced", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := AddDeferredOperation(database, "cool30", OpRemoveQueued, jobID, "", ""); err != nil {
+		t.Fatalf("add deferred op: %v", err)
+	}
+
+	hosts, err := ListUniqueActiveHosts(database)
+	if err != nil {
+		t.Fatalf("ListUniqueActiveHosts: %v", err)
+	}
+	if len(hosts) != 1 || hosts[0] != "cool30" {
+		t.Fatalf("hosts = %v, want [cool30]", hosts)
 	}
 }
 

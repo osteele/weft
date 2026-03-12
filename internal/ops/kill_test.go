@@ -182,6 +182,87 @@ func TestCancelQueuedJob_QuickTimeout(t *testing.T) {
 	}
 }
 
+func TestUnplaceQueuedJob_Success(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
+	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+		t.Fatalf("UpdateLastSyncedStatus: %v", err)
+	}
+	job, _ := db.GetJobByID(database, jobID)
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		return "", "", 0
+	})
+
+	result, err := UnplaceQueuedJob(database, job, DefaultOptions())
+	if err != nil {
+		t.Fatalf("UnplaceQueuedJob failed: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected Success to be true")
+	}
+	if result.Deferred {
+		t.Error("expected Deferred to be false")
+	}
+
+	updatedJob, _ := db.GetJobByID(database, jobID)
+	if updatedJob.Host != "" {
+		t.Errorf("expected job host to be empty, got %q", updatedJob.Host)
+	}
+	if updatedJob.Status != db.StatusQueued {
+		t.Errorf("expected job status queued, got %s", updatedJob.Status)
+	}
+	if updatedJob.LastSyncedStatus != "" {
+		t.Errorf("expected last synced status to be empty, got %q", updatedJob.LastSyncedStatus)
+	}
+	if !updatedJob.HasTag(db.TagCloud) {
+		t.Errorf("expected job to gain cloud tag, got %v", updatedJob.Tags)
+	}
+	pending, err := db.HasPendingOperation(database, jobID, db.OpRemoveQueued)
+	if err != nil {
+		t.Fatalf("HasPendingOperation: %v", err)
+	}
+	if pending {
+		t.Error("expected remove_queued deferred op to be cleared")
+	}
+}
+
+func TestUnplaceQueuedJob_DeferredWhenHostOffline(t *testing.T) {
+	database := db.SetupTestDB(t)
+	jobID, _ := db.RecordQueued(database, "test-host", "/tmp", "sleep 100", "test")
+	job, _ := db.GetJobByID(database, jobID)
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		return "", "ssh: connect to host test-host port 22: Connection refused", 255
+	})
+
+	result, err := UnplaceQueuedJob(database, job, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("UnplaceQueuedJob returned an unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected Success to be true")
+	}
+	if !result.Deferred {
+		t.Error("expected Deferred to be true")
+	}
+
+	updatedJob, _ := db.GetJobByID(database, jobID)
+	if updatedJob.Host != "" {
+		t.Errorf("expected job host to be empty, got %q", updatedJob.Host)
+	}
+	if !updatedJob.HasTag(db.TagCloud) {
+		t.Errorf("expected job to gain cloud tag, got %v", updatedJob.Tags)
+	}
+	pending, err := db.HasPendingOperation(database, jobID, db.OpRemoveQueued)
+	if err != nil {
+		t.Fatalf("HasPendingOperation: %v", err)
+	}
+	if !pending {
+		t.Error("expected remove_queued deferred op to remain pending")
+	}
+}
+
 // Note: CancelQueuedJob only makes a single SSH call (removeFromQueueFile),
 // so there's no separate "SyncError" case distinct from QuickTimeout.
 // The connection error case is already covered by TestCancelQueuedJob_QuickTimeout.

@@ -14,6 +14,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
 )
 
@@ -51,6 +52,11 @@ type watchAllTickMsg struct{}
 type watchAllRefreshedMsg struct {
 	snapshot watchSystemSnapshot
 	err      error
+}
+
+type watchUnplaceDoneMsg struct {
+	message string
+	err     error
 }
 
 type watchRenderRow struct {
@@ -125,6 +131,13 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.refreshing = true
 			return m, refreshWatchSystem(m.database, m.config)
+		case "u":
+			job := m.selectedOnPremJob()
+			if job == nil || job.EffectiveStatus() != db.StatusQueued || job.Host == "" {
+				m.flashMessage = watchFailedStyle.Render("Select a queued on-prem job to unplace")
+				return m, nil
+			}
+			return m, requestWatchJobUnplace(m.database, job.ID)
 		case "up", "k":
 			m.moveCursor(-1)
 		case "down", "j":
@@ -171,6 +184,15 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := m.mergeSnapshot(msg.snapshot)
 		m.clampCursor()
 		return m, tea.Batch(cmds...)
+
+	case watchUnplaceDoneMsg:
+		if msg.err != nil {
+			m.flashMessage = watchFailedStyle.Render(msg.err.Error())
+			return m, nil
+		}
+		m.flashMessage = msg.message
+		m.refreshing = true
+		return m, refreshWatchSystem(m.database, m.config)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -247,6 +269,20 @@ func (m *watchAllModel) clampCursor() {
 	}
 }
 
+func (m watchAllModel) selectedOnPremJob() *db.Job {
+	index := m.cursor - len(m.cloudInstances)
+	if index < 0 {
+		return nil
+	}
+	for _, host := range m.onPremHosts {
+		if index < len(host.Jobs) {
+			return host.Jobs[index]
+		}
+		index -= len(host.Jobs)
+	}
+	return nil
+}
+
 func (m watchAllModel) selectableRowCount() int {
 	count := len(m.cloudInstances) + len(m.unplacedJobs)
 	for _, host := range m.onPremHosts {
@@ -261,7 +297,7 @@ func (m watchAllModel) View() string {
 		return ""
 	}
 
-	footer := watchDimStyle.Render("[l] launch  [r] refresh  [q] quit")
+	footer := watchDimStyle.Render("[u] unplace queued job  [l] launch  [r] refresh  [q] quit")
 	if m.flashMessage != "" {
 		footer = m.flashMessage + "  " + footer
 	}
@@ -401,6 +437,23 @@ func refreshWatchSystem(database *sql.DB, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
 		snapshot, err := loadWatchSystemSnapshot(database, cfg, true)
 		return watchAllRefreshedMsg{snapshot: snapshot, err: err}
+	}
+}
+
+func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
+	return func() tea.Msg {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return watchUnplaceDoneMsg{err: fmt.Errorf("get job %d: %w", jobID, err)}
+		}
+		if job == nil {
+			return watchUnplaceDoneMsg{err: fmt.Errorf("job %d not found", jobID)}
+		}
+		result, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
+		if err != nil {
+			return watchUnplaceDoneMsg{err: err}
+		}
+		return watchUnplaceDoneMsg{message: result.Message}
 	}
 }
 

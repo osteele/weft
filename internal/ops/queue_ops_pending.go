@@ -274,6 +274,32 @@ func ProcessDeferredQueueOps(database *sql.DB, host string, timeout time.Duratio
 	var result SyncResult
 	for _, op := range ops {
 		switch op.Operation {
+		case db.OpRemoveQueued:
+			job, err := db.GetJobByID(database, op.JobID)
+			if err != nil {
+				return result, err
+			}
+			if job == nil {
+				_ = db.DeleteDeferredOperation(database, op.ID)
+				continue
+			}
+			// If the job has been assigned back to this host, the cleanup request is stale.
+			if job.Host == host {
+				_ = db.DeleteDeferredOperation(database, op.ID)
+				continue
+			}
+			cleanupJob := *job
+			cleanupJob.Host = host
+			if err := applyCancelToRemote(&cleanupJob, timeout); err != nil {
+				if isQueueConnectionError(err) {
+					return result, nil
+				}
+				return result, err
+			}
+			if err := db.DeleteDeferredOperation(database, op.ID); err != nil {
+				log.Printf("sync: failed to delete deferred op %d: %v", op.ID, err)
+			}
+			result.HostContacted = true
 		case db.OpUpdateQueuedJob:
 			job, err := db.GetJobByID(database, op.JobID)
 			if err != nil {

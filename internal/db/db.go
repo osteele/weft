@@ -1714,6 +1714,42 @@ func RequeueByID(db *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
+// MoveQueuedJobToUnplaced clears a queued job's host assignment and adds the
+// cloud tag so future placement skips local hosts. Unlike ResetJobToUnplaced,
+// this does not archive a run because the job has not started; it only clears
+// queue placement metadata.
+func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
+	job, err := GetJobByID(db, id)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return nil
+	}
+	tags := append([]string(nil), job.Tags...)
+	if !job.HasTag(TagCloud) {
+		tags = append(tags, TagCloud)
+	}
+	tagValue, err := encodeTags(tags)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(
+		`UPDATE jobs
+		 SET host = '',
+		     queue_name = NULL,
+		     queued_at = NULL,
+		     pending_status = NULL,
+		     pending_at = NULL,
+		     last_synced_status = NULL,
+		     cloud_instance_id = NULL,
+		     tags = ?
+		 WHERE id = ? AND status = ?`,
+		tagValue, id, StatusQueued,
+	)
+	return err
+}
+
 // ResetJobToUnplaced resets a single job to unplaced state (queued with empty host),
 // clearing cloud instance association and run metadata. Used when restarting cloud
 // jobs whose original instance is no longer available.
@@ -3075,12 +3111,18 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 
 // ListUniqueActiveHosts returns unique hosts with running, queued, or pending draft jobs
 func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
-		WHERE tombstoned = 0
-		AND (
-			status IN (?, ?, ?, ?)
-			OR (status = ? AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?))
-		)`,
+	rows, err := db.Query(`
+		SELECT DISTINCT host FROM (
+			SELECT host FROM jobs
+			WHERE tombstoned = 0
+			AND (
+				status IN (?, ?, ?, ?)
+				OR (status = ? AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?))
+			)
+			UNION
+			SELECT host FROM deferred_operations WHERE host != ''
+		)
+		WHERE host != ''`,
 		StatusRunning, StatusStarting, StatusPaused, StatusQueued, StatusDraft, StatusDraft, StatusDraft)
 	if err != nil {
 		return nil, err

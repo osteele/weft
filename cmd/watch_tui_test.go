@@ -48,6 +48,7 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		"Cloud Instances (1)",
 		"On-Prem Hosts (1 active)",
 		"Unplaced Jobs (1)",
+		"[u] unplace queued job",
 		"project-alpha",
 		"project-beta",
 		"project-gamma",

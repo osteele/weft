@@ -128,3 +128,42 @@ func TestEnsureQueuedJobsOnRemote_SkipsPendingStatus(t *testing.T) {
 		t.Error("expected contacted=false for pending status")
 	}
 }
+
+func TestProcessDeferredQueueOps_RemoveQueued(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "queued job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.AddDeferredOperation(database, "test-host", db.OpRemoveQueued, jobID, "", ""); err != nil {
+		t.Fatalf("add deferred op: %v", err)
+	}
+	if err := db.MoveQueuedJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplaced: %v", err)
+	}
+
+	callCount := 0
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		callCount++
+		return "", "", 0
+	})
+
+	result, err := ProcessDeferredQueueOps(database, "test-host", 5*time.Second)
+	if err != nil {
+		t.Fatalf("ProcessDeferredQueueOps: %v", err)
+	}
+	if !result.HostContacted {
+		t.Error("expected HostContacted to be true")
+	}
+	if callCount == 0 {
+		t.Error("expected remote cleanup SSH command")
+	}
+	pending, err := db.HasPendingOperation(database, jobID, db.OpRemoveQueued)
+	if err != nil {
+		t.Fatalf("HasPendingOperation: %v", err)
+	}
+	if pending {
+		t.Error("expected remove_queued deferred op to be cleared")
+	}
+}
