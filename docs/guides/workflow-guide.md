@@ -368,7 +368,7 @@ laptop$ weft campaign terminate <id>      # Destroy all instances
 laptop$ weft instance ssh <id>            # SSH into an instance
 ```
 
-See [docs/campaigns.md](campaigns.md) for the full campaign guide.
+See [Campaigns](campaigns.md) for the full campaign guide.
 
 ### Using the TUI cloud menu (single job)
 

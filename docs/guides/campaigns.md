@@ -273,13 +273,17 @@ from `.weft.yaml`. See `internal/sync/sources.go` for the full exclude list.
 ## Cost estimation
 
 When launching a campaign, weft estimates the total cost per GPU group. If the
-job-duration predictor is configured (`predictor.project_path` in config), each
-job's predicted duration is summed with a 10-minute setup overhead. Otherwise a
-default of 1 hour per job is used. The cost table shows:
+job-duration predictor is configured (`predictor.project_path` in config), the
+estimate combines startup, SSH setup, provisioning, job setup, predicted run
+time, and upload time. Otherwise the runtime falls back to a default of 1 hour
+per job and the other phases use static defaults. The cost table shows:
 
 - Resolved GPU name (e.g., "HOPPER+ → H200 NVL")
 - Number of jobs, GPU memory, hourly rate
 - Estimated duration and total cost
+
+See [Estimation and Modeling](../reference/estimation.md) for the full
+estimation pipeline, including the statistical models and telemetry sources.
 
 ## Data collection
 

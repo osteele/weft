@@ -29,8 +29,7 @@ resolves both problems.
 
 ### Research Synergy
 
-The sister project
-[llm-performance-models](../../research/llm-performance-models/) already has:
+The sibling project `llm-performance-models` already has:
 
 - Hardware YAML configs for titan and atlas (GPU specs, storage tiers,
   transfer bandwidth)

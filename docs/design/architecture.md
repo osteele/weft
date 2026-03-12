@@ -2,7 +2,7 @@
 
 This document describes the architecture and design of weft. For the
 coordinator-specific design (placement scoring, data locality, pre-staging),
-see [coordinator-architecture.md](coordinator-architecture.md).
+see [Coordinator Architecture](coordinator-architecture.md).
 
 ## Overview
 
@@ -54,8 +54,9 @@ validation, database mutations, and reconciliation with remote hosts. This
 guarantees that every operation—whether triggered by a key binding or a Cobra
 command—runs through the same code path. The facades handle only input parsing,
 presentation, and read-heavy listing queries. The core service records intent,
-kicks off sync, and returns structured results. See `docs/facade-core.md` for
-details on the responsibilities split.
+kicks off sync, and returns structured results. See
+[CLI, TUI, and Core Responsibilities](facade-core.md) for details on the
+responsibilities split.
 
 ## Job States
 
@@ -337,7 +338,7 @@ update the append-only command log in `~/.cache/weft/queue/*.commands`,
 rehydrate metadata, and start a job immediately even if it never reached the
 remote queue (pending deferred op). `internal/plan` parses YAML plans, expands
 IDs/aliases, validates per-host dependency DAGs, and emits queue operations that
-match the semantics documented in [docs/job-plans.md](job-plans.md). Together
+match the semantics documented in [Job Plans](../reference/job-plans.md). Together
 they let both humans and agents orchestrate large job graphs while keeping
 local/remote state consistent even when connections flap.
 
