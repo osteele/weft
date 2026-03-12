@@ -365,7 +365,7 @@ func printJobs(jobs []*db.Job) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tDESCRIPTION")
+	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tDIR\tDESCRIPTION")
 
 	for _, job := range jobs {
 		started := "—"
@@ -393,8 +393,8 @@ func printJobs(jobs []*db.Job) error {
 			display = display[:49] + "…"
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n",
-			job.ID, job.Host, status, started, display)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
+			job.ID, job.Host, status, started, job.DirectoryTailDisplay(), display)
 	}
 
 	return w.Flush()

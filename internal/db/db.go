@@ -3683,6 +3683,20 @@ func (j *Job) DisplayWorkingDir() string {
 	return dir
 }
 
+// DirectoryTailDisplay returns the trailing path component of the effective
+// working directory for compact job-list displays.
+func (j *Job) DirectoryTailDisplay() string {
+	dir := strings.TrimSpace(j.EffectiveWorkingDir())
+	if dir == "" {
+		return "—"
+	}
+	tail := filepath.Base(dir)
+	if tail == "" || tail == "." {
+		return "—"
+	}
+	return tail
+}
+
 // HasAssignedHost reports whether the job currently has a concrete host target.
 func (j *Job) HasAssignedHost() bool {
 	return strings.TrimSpace(j.Host) != ""

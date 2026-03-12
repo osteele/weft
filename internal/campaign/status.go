@@ -501,7 +501,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	for _, j := range curr.Jobs {
 		displayStatus := JobDisplayStatus(j, curr.JobAttemptOutcomes)
 		if prevJobStatus[j.ID] != displayStatus {
-			line := fmt.Sprintf("instance %d: job %d status=%s", id, j.ID, displayStatus)
+			line := fmt.Sprintf("instance %d: job %d status=%s dir=%s", id, j.ID, displayStatus, j.DirectoryTailDisplay())
 			if j.ExitCode != nil {
 				line += fmt.Sprintf(" exit=%d", *j.ExitCode)
 			}

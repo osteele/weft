@@ -355,9 +355,11 @@ func (m watchModel) View() string {
 						if desc == "" {
 							desc = campaign.TruncateCommand(j.Command, 50)
 						}
-						b.WriteString(fmt.Sprintf("    %4d  %s  %s\n",
+						statusText := fmt.Sprintf("%-12s", campaign.JobDisplayStatus(j, info.outcomes))
+						b.WriteString(fmt.Sprintf("    %4d  %s  %-12s  %s\n",
 							j.ID,
-							watchDimStyle.Render(fmt.Sprintf("%-12s", campaign.JobDisplayStatus(j, info.outcomes))),
+							watchDimStyle.Render(statusText),
+							j.DirectoryTailDisplay(),
 							desc,
 						))
 					}
@@ -442,9 +444,10 @@ func (m watchModel) View() string {
 				if hwm := m.jobProgressHWM[j.ID]; j.Status == db.StatusRunning && hwm > 0 {
 					statusText = fmt.Sprintf("running %3d%%", hwm)
 				}
-				b.WriteString(fmt.Sprintf("    %4d  %s  %s\n",
+				b.WriteString(fmt.Sprintf("    %4d  %s  %-12s  %s\n",
 					j.ID,
 					jobStyle.Render(fmt.Sprintf("%-12s", statusText)),
+					j.DirectoryTailDisplay(),
 					desc,
 				))
 			}

@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"math"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -382,13 +381,8 @@ func (m Model) renderJobList(height int) string {
 		statusCol := status + strings.Repeat(" ", max(0, 12-lipgloss.Width(status)))
 		timeColFormatted := fmt.Sprintf("%-12s", timeCol)
 
-		project := job.Project
-		if project == "" {
-			project = filepath.Base(job.EffectiveWorkingDir())
-		}
-		if project == "" || project == "." {
-			project = "—"
-		} else {
+		project := job.DirectoryTailDisplay()
+		if project != "—" {
 			project = abbreviateProject(project, projectWidth)
 		}
 		projectCol := fmt.Sprintf("%-*s", projectWidth, truncate(project, projectWidth))

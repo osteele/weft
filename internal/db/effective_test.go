@@ -159,3 +159,35 @@ func TestEffectiveDescriptionFromDB(t *testing.T) {
 		t.Fatalf("EffectiveDescription() = %q, want %q", got, expectedCmd)
 	}
 }
+
+func TestDirectoryTailDisplay(t *testing.T) {
+	tests := []struct {
+		name string
+		job  Job
+		want string
+	}{
+		{
+			name: "uses effective working dir",
+			job:  Job{WorkingDir: "~/code/alpha"},
+			want: "alpha",
+		},
+		{
+			name: "uses cd override from command",
+			job:  Job{WorkingDir: "~/code/alpha", Command: "cd /tmp/beta && python train.py"},
+			want: "beta",
+		},
+		{
+			name: "falls back when unset",
+			job:  Job{},
+			want: "—",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.job.DirectoryTailDisplay(); got != tt.want {
+				t.Fatalf("DirectoryTailDisplay() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

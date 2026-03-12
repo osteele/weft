@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -105,6 +106,31 @@ func TestRenderWatchExitSnapshot(t *testing.T) {
 	runningModel := watchModel{}
 	if snapshot := renderWatchExitSnapshot(runningModel); snapshot != "" {
 		t.Fatalf("unexpected snapshot for incomplete watch: %q", snapshot)
+	}
+}
+
+func TestWatchModelView_ShowsJobDirectoryTail(t *testing.T) {
+	m := watchModel{
+		instanceIDs: []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
+			5: {
+				CloudInstance: &db.CloudInstance{
+					ID:       5,
+					Status:   db.CloudInstanceStatusRunning,
+					Provider: "vastai",
+					GPUSpec:  "A100",
+				},
+				Jobs: []*db.Job{
+					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
+				},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "project-alpha") {
+		t.Fatalf("output missing job directory tail, got:\n%s", out)
 	}
 }
 

@@ -61,12 +61,15 @@ func TestFormatPlainUpdate_JobStatusChange(t *testing.T) {
 	}
 	curr := InstanceUpdate{
 		CloudInstance: &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning},
-		Jobs:          []*db.Job{{ID: 88, Status: db.StatusRunning}},
+		Jobs:          []*db.Job{{ID: 88, Status: db.StatusRunning, WorkingDir: "/work/alpha"}},
 	}
 
 	output := FormatPlainUpdate(prev, curr)
 	if !strings.Contains(output, "job 88 status=running") {
 		t.Errorf("should contain job status change, got %q", output)
+	}
+	if !strings.Contains(output, "dir=alpha") {
+		t.Errorf("should contain job directory tail, got %q", output)
 	}
 }
 
