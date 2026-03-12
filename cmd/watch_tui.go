@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,6 +56,7 @@ type watchAllRefreshedMsg struct {
 }
 
 type watchUnplaceDoneMsg struct {
+	job     *db.Job
 	message string
 	err     error
 }
@@ -190,6 +192,11 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.flashMessage = watchFailedStyle.Render(msg.err.Error())
 			return m, nil
 		}
+		if msg.job != nil {
+			m.removeOnPremJob(msg.job.ID)
+			m.upsertUnplacedJob(msg.job)
+			m.clampCursor()
+		}
 		m.flashMessage = msg.message
 		m.refreshing = true
 		return m, refreshWatchSystem(m.database, m.config)
@@ -281,6 +288,41 @@ func (m watchAllModel) selectedOnPremJob() *db.Job {
 		index -= len(host.Jobs)
 	}
 	return nil
+}
+
+func (m *watchAllModel) removeOnPremJob(jobID int64) {
+	filteredHosts := m.onPremHosts[:0]
+	for _, host := range m.onPremHosts {
+		jobs := host.Jobs[:0]
+		for _, job := range host.Jobs {
+			if job != nil && job.ID == jobID {
+				continue
+			}
+			jobs = append(jobs, job)
+		}
+		if len(jobs) == 0 {
+			continue
+		}
+		host.Jobs = jobs
+		filteredHosts = append(filteredHosts, host)
+	}
+	m.onPremHosts = filteredHosts
+}
+
+func (m *watchAllModel) upsertUnplacedJob(job *db.Job) {
+	if job == nil {
+		return
+	}
+	for i, existing := range m.unplacedJobs {
+		if existing != nil && existing.ID == job.ID {
+			m.unplacedJobs[i] = job
+			return
+		}
+	}
+	m.unplacedJobs = append(m.unplacedJobs, job)
+	sort.SliceStable(m.unplacedJobs, func(i, j int) bool {
+		return m.unplacedJobs[i].ID < m.unplacedJobs[j].ID
+	})
 }
 
 func (m watchAllModel) selectableRowCount() int {
@@ -453,7 +495,11 @@ func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
 		if err != nil {
 			return watchUnplaceDoneMsg{err: err}
 		}
-		return watchUnplaceDoneMsg{message: result.Message}
+		updatedJob, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return watchUnplaceDoneMsg{err: fmt.Errorf("reload job %d: %w", jobID, err)}
+		}
+		return watchUnplaceDoneMsg{job: updatedJob, message: result.Message}
 	}
 }
 

@@ -81,3 +81,44 @@ func TestFormatOnPremJobRowQueuedUsesDashDuration(t *testing.T) {
 		t.Fatalf("duration field = %q, want %q in row %q", got, "—", row)
 	}
 }
+
+func TestWatchAllModelUnplaceDoneMovesJobImmediately(t *testing.T) {
+	m := watchAllModel{
+		onPremHosts: []onPremHostSummary{
+			{
+				Name: "cool30",
+				Jobs: []*db.Job{
+					{ID: 41, Status: db.StatusQueued, Host: "cool30", WorkingDir: "/tmp/project-beta", Description: "eval model"},
+				},
+			},
+		},
+	}
+
+	msg := watchUnplaceDoneMsg{
+		job: &db.Job{
+			ID:          41,
+			Status:      db.StatusQueued,
+			Host:        "",
+			WorkingDir:  "/tmp/project-beta",
+			Description: "eval model",
+			Tags:        []string{db.TagCloud},
+		},
+		message: "moved",
+	}
+
+	updatedModel, _ := m.Update(msg)
+	got := updatedModel.(watchAllModel)
+
+	if len(got.onPremHosts) != 0 {
+		t.Fatalf("expected on-prem host list to be empty, got %+v", got.onPremHosts)
+	}
+	if len(got.unplacedJobs) != 1 {
+		t.Fatalf("expected one unplaced job, got %+v", got.unplacedJobs)
+	}
+	if got.unplacedJobs[0].ID != 41 {
+		t.Fatalf("unplaced job ID = %d, want 41", got.unplacedJobs[0].ID)
+	}
+	if got.unplacedJobs[0].Host != "" {
+		t.Fatalf("unplaced job host = %q, want empty", got.unplacedJobs[0].Host)
+	}
+}
