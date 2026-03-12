@@ -256,7 +256,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// from corrupting the terminal display.
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
-	p := tea.NewProgram(model)
+	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	log.SetOutput(origLogOutput)
 	if err != nil {

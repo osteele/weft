@@ -346,12 +346,8 @@ func (m watchModel) View() string {
 					b.WriteString(" " + m.spinner.View())
 				}
 				b.WriteString("\n")
-				providerInstID := ci.EffectiveProviderID()
-				if providerInstID != "" {
-					b.WriteString(fmt.Sprintf("  %s: %s\n", ci.Provider, providerInstID))
-				} else {
-					b.WriteString(fmt.Sprintf("  %s: (provisioning...)\n", ci.Provider))
-				}
+				b.WriteString(formatWatchProviderLine(ci, nil))
+				b.WriteString("\n")
 				if len(jobs) > 0 {
 					b.WriteString(fmt.Sprintf("  Jobs: 0/%d resolved\n", len(jobs)))
 					for _, j := range jobs {
@@ -396,16 +392,8 @@ func (m watchModel) View() string {
 		b.WriteString(watchTitleStyle.Render(header))
 		b.WriteString("\n")
 
-		providerInstID := ci.EffectiveProviderID()
-		if providerInstID != "" {
-			instLine := fmt.Sprintf("  %s: %s", ci.Provider, providerInstID)
-			if u.Instance != nil && !campaign.IsInstanceTerminal(ci.Status) && u.Instance.Status != "" {
-				instLine += fmt.Sprintf(" (%s)", u.Instance.Status)
-			}
-			b.WriteString(instLine + "\n")
-		} else {
-			b.WriteString(fmt.Sprintf("  %s: (provisioning...)\n", ci.Provider))
-		}
+		b.WriteString(formatWatchProviderLine(ci, u.Instance))
+		b.WriteString("\n")
 
 		if u.BootstrapStage != "" {
 			b.WriteString(fmt.Sprintf("  Bootstrap: %s\n", campaign.BootstrapStageLabel(u.BootstrapStage)))
@@ -515,7 +503,39 @@ func watchInstances(database *sql.DB, instanceIDs []int64) error {
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(origLogOutput)
 
-	p := tea.NewProgram(model)
-	_, err := p.Run()
-	return err
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	finalModel, err := p.Run()
+	if err != nil {
+		return err
+	}
+
+	if finalView := renderWatchExitSnapshot(finalModel); finalView != "" {
+		fmt.Print(finalView)
+	}
+	return nil
+}
+
+func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string {
+	if ci == nil {
+		return ""
+	}
+
+	line := fmt.Sprintf("  ID %d  %s:", ci.ID, ci.Provider)
+	if providerInstID := ci.EffectiveProviderID(); providerInstID != "" {
+		line += " " + providerInstID
+		if inst != nil && !campaign.IsInstanceTerminal(ci.Status) && inst.Status != "" {
+			line += fmt.Sprintf(" (%s)", inst.Status)
+		}
+		return line
+	}
+
+	return line + " (provisioning...)"
+}
+
+func renderWatchExitSnapshot(model tea.Model) string {
+	m, ok := model.(watchModel)
+	if !ok || !m.done {
+		return ""
+	}
+	return m.View()
 }

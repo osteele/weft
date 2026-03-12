@@ -52,6 +52,12 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	if !strings.Contains(cleanOut, fmt.Sprintf("Instance %d — A100 — launching", launchingID)) {
 		t.Fatalf("output missing launching status label, got:\n%s", out)
 	}
+	if !strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", failedID)) {
+		t.Fatalf("output missing failed instance identity line, got:\n%s", out)
+	}
+	if !strings.Contains(cleanOut, fmt.Sprintf("ID %d  vastai:", launchingID)) {
+		t.Fatalf("output missing launching instance identity line, got:\n%s", out)
+	}
 
 	parts := strings.Split(cleanOut, fmt.Sprintf("Instance %d —", failedID))
 	if len(parts) < 2 {
@@ -69,6 +75,36 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	launchingSection := strings.Split(launchParts[1], "\n\n")[0]
 	if !strings.Contains(launchingSection, cleanSpinner) {
 		t.Fatalf("launching instance section should include spinner %q, section:\n%s", cleanSpinner, launchingSection)
+	}
+}
+
+func TestFormatWatchProviderLine(t *testing.T) {
+	ci := &db.CloudInstance{
+		ID:                 106,
+		Status:             db.CloudInstanceStatusRunning,
+		Provider:           "vastai",
+		ProviderInstanceID: "32712486",
+	}
+
+	line := formatWatchProviderLine(ci, nil)
+	if line != "  ID 106  vastai: 32712486" {
+		t.Fatalf("provider line = %q", line)
+	}
+}
+
+func TestRenderWatchExitSnapshot(t *testing.T) {
+	doneModel := watchModel{
+		done:       true,
+		campaignID: 48,
+		launchedAt: time.Unix(1, 0),
+	}
+	if snapshot := renderWatchExitSnapshot(doneModel); snapshot == "" {
+		t.Fatal("expected final snapshot for completed watch")
+	}
+
+	runningModel := watchModel{}
+	if snapshot := renderWatchExitSnapshot(runningModel); snapshot != "" {
+		t.Fatalf("unexpected snapshot for incomplete watch: %q", snapshot)
 	}
 }
 
