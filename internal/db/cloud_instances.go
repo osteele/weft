@@ -407,18 +407,19 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		 WHERE cloud_instance_id = ? AND ended_at IS NULL
 		 AND job_id IN (
 		 	SELECT id FROM jobs
-		 	WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?) AND tombstoned = 0
+		 	WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0
 		 )`,
 		time.Now().Unix(), outcome, instanceID, instanceID,
-		StatusCompleted, StatusFailed, StatusCanceled,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	); err != nil {
 		return 0, fmt.Errorf("close attempts: %w", err)
 	}
 
 	result, err := database.Exec(
 		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = ''
-		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?) AND tombstoned = 0`,
-		StatusQueued, instanceID, StatusCompleted, StatusFailed, StatusCanceled,
+		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0`,
+		StatusQueued, instanceID,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {
 		return 0, err
@@ -818,20 +819,43 @@ func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) (
 	return instances, rows.Err()
 }
 
+// NormalizeTerminalCloudInstanceJobs repairs unresolved jobs on a terminal cloud
+// instance. Failed instances orphan active jobs; cancelled instances cancel them.
+// Completed instances are left unchanged so result sync can still finalize them.
+func NormalizeTerminalCloudInstanceJobs(database *sql.DB, instanceID int64) (int64, error) {
+	ci, err := GetCloudInstance(database, instanceID)
+	if err != nil {
+		return 0, err
+	}
+	if ci == nil {
+		return 0, nil
+	}
+
+	switch ci.Status {
+	case CloudInstanceStatusFailed:
+		return ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned)
+	case CloudInstanceStatusCancelled:
+		return ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeCancelled)
+	default:
+		return 0, nil
+	}
+}
+
 // ResetJobsOnTerminalCloudInstances finds non-terminal jobs associated with
-// terminal cloud instances and resets them to queued/unplaced. This is a DB-only
-// operation that doesn't require cloud provider clients. Returns total jobs reset.
+// failed or cancelled cloud instances and resets them to queued/unplaced.
+// Completed instances are intentionally skipped until result sync finalizes them.
+// This is a DB-only repair pass that doesn't require cloud provider clients.
 func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
-	// Find terminal instances that still have non-terminal jobs
+	// Find non-success terminal instances that still have non-terminal jobs.
 	rows, err := database.Query(`
 		SELECT DISTINCT ci.id
 		FROM cloud_instances ci
 		JOIN jobs j ON j.cloud_instance_id = ci.id
-		WHERE ci.status IN (?, ?, ?)
-		AND j.status NOT IN (?, ?)
+		WHERE ci.status IN (?, ?)
+		AND j.status NOT IN (?, ?, ?, ?, ?, ?)
 		AND j.tombstoned = 0`,
-		CloudInstanceStatusCompleted, CloudInstanceStatusFailed, CloudInstanceStatusCancelled,
-		StatusCompleted, StatusFailed,
+		CloudInstanceStatusFailed, CloudInstanceStatusCancelled,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {
 		return 0, err
@@ -852,9 +876,9 @@ func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
 
 	var total int64
 	for _, id := range instanceIDs {
-		n, err := ResetCloudInstanceJobs(database, id, AttemptOutcomeOrphaned)
+		n, err := NormalizeTerminalCloudInstanceJobs(database, id)
 		if err != nil {
-			return total, fmt.Errorf("reset jobs on instance %d: %w", id, err)
+			return total, fmt.Errorf("normalize jobs on instance %d: %w", id, err)
 		}
 		total += n
 	}

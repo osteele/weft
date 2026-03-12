@@ -285,6 +285,123 @@ func TestGetActiveCloudInstanceJobCounts_OnlyCountsNonTerminalJobs(t *testing.T)
 	}
 }
 
+func TestNormalizeTerminalCloudInstanceJobs_FailedInstanceOrphansRunningJobs(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	_, err = database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES (1, ?, ?, 0, ?, 'echo running', '/tmp')`,
+		instanceID, CloudInstanceHost(instanceID), StatusRunning,
+	)
+	if err != nil {
+		t.Fatalf("insert running job: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	n, err := NormalizeTerminalCloudInstanceJobs(database, instanceID)
+	if err != nil {
+		t.Fatalf("NormalizeTerminalCloudInstanceJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("NormalizeTerminalCloudInstanceJobs reset %d jobs, want 1", n)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
+	}
+	if job.CloudInstanceID != nil {
+		t.Fatalf("job cloud_instance_id = %v, want nil", job.CloudInstanceID)
+	}
+
+	outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByInstance: %v", err)
+	}
+	if outcomes[1] != AttemptOutcomeOrphaned {
+		t.Fatalf("attempt outcome = %q, want %q", outcomes[1], AttemptOutcomeOrphaned)
+	}
+}
+
+func TestResetJobsOnTerminalCloudInstances_SkipsCompletedInstances(t *testing.T) {
+	database := setupTestDB(t)
+
+	completedID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(completed): %v", err)
+	}
+	failedID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(failed): %v", err)
+	}
+
+	for _, tc := range []struct {
+		jobID      int64
+		instanceID int64
+	}{
+		{jobID: 1, instanceID: completedID},
+		{jobID: 2, instanceID: failedID},
+	} {
+		_, err = database.Exec(
+			`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+			 VALUES (?, ?, ?, 0, ?, 'echo test', '/tmp')`,
+			tc.jobID, tc.instanceID, CloudInstanceHost(tc.instanceID), StatusRunning,
+		)
+		if err != nil {
+			t.Fatalf("insert job %d: %v", tc.jobID, err)
+		}
+		if err := InsertJobCloudAttempt(database, tc.jobID, tc.instanceID); err != nil {
+			t.Fatalf("InsertJobCloudAttempt(%d): %v", tc.jobID, err)
+		}
+	}
+
+	n, err := ResetJobsOnTerminalCloudInstances(database)
+	if err != nil {
+		t.Fatalf("ResetJobsOnTerminalCloudInstances: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ResetJobsOnTerminalCloudInstances reset %d jobs, want 1", n)
+	}
+
+	completedJob, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID(completed): %v", err)
+	}
+	if completedJob.Status != StatusRunning {
+		t.Fatalf("completed-instance job status = %q, want %q", completedJob.Status, StatusRunning)
+	}
+
+	failedJob, err := GetJobByID(database, 2)
+	if err != nil {
+		t.Fatalf("GetJobByID(failed): %v", err)
+	}
+	if failedJob.Status != StatusQueued {
+		t.Fatalf("failed-instance job status = %q, want %q", failedJob.Status, StatusQueued)
+	}
+}
+
 func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
 	database := setupTestDB(t)
 

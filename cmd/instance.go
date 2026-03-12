@@ -586,12 +586,21 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("write release signal: %w", err)
 	}
 
-	// Grace period is entered because jobs failed, so releasing means giving up — mark as failed.
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
-		return fmt.Errorf("update DB: %w", err)
+	if err := markReleasedInstanceFailed(database, instanceID); err != nil {
+		return err
 	}
 
 	fmt.Printf("Instance %d released. It will self-destruct shortly.\n", instanceID)
+	return nil
+}
+
+func markReleasedInstanceFailed(database *sql.DB, instanceID int64) error {
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+		return fmt.Errorf("update DB: %w", err)
+	}
+	if _, err := db.NormalizeTerminalCloudInstanceJobs(database, instanceID); err != nil {
+		return fmt.Errorf("normalize jobs: %w", err)
+	}
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -114,5 +115,52 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 	}
 	if attempts[0].EndedAt == nil {
 		t.Fatal("attempt ended_at = nil, want non-nil")
+	}
+}
+
+func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, db.StatusRunning, jobID); err != nil {
+		t.Fatalf("set job running: %v", err)
+	}
+
+	updated := syncCloudJobResults(&config.Config{}, database, false)
+	if updated != 1 {
+		t.Fatalf("syncCloudJobResults updated %d rows, want 1", updated)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
+	}
+	if job.CloudInstanceID != nil {
+		t.Fatalf("job cloud_instance_id = %v, want nil", job.CloudInstanceID)
+	}
+
+	outcomes, err := db.GetAttemptOutcomesByInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetAttemptOutcomesByInstance: %v", err)
+	}
+	if outcomes[jobID] != db.AttemptOutcomeOrphaned {
+		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeOrphaned)
 	}
 }

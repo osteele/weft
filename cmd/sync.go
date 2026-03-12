@@ -335,8 +335,20 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 // Uses per-job DB lookups rather than pre-filtering by cloud_instance_id, so results
 // are synced even if the instance association was cleared by a concurrent reset.
 func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int {
+	updated := 0
+	if repaired, err := db.ResetJobsOnTerminalCloudInstances(database); err != nil {
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Warning: terminal cloud job repair: %v\n", err)
+		}
+	} else if repaired > 0 {
+		updated += int(repaired)
+		if verbose {
+			fmt.Printf("Repaired %d stale cloud job assignment(s) on terminal instances\n", repaired)
+		}
+	}
+
 	if cfg == nil || cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
-		return 0
+		return updated
 	}
 
 	r2Cfg := r2Config(cfg)
@@ -353,7 +365,6 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	updated := 0
 	updatedInstanceIDs := make(map[int64]struct{})
 	markers, err := r2Client.ListJobMarkers(ctx, "jobs/")
 	if err != nil {
