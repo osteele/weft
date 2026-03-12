@@ -11,10 +11,11 @@ import (
 
 func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 	cloudInstance := &db.CloudInstance{
-		ID:       5,
-		Status:   db.CloudInstanceStatusRunning,
-		Provider: "vastai",
-		GPUSpec:  "A100",
+		ID:                 5,
+		Status:             db.CloudInstanceStatusRunning,
+		Provider:           "vastai",
+		ProviderInstanceID: "32734388",
+		GPUSpec:            "A100",
 	}
 
 	snapshot := watchSystemSnapshot{
@@ -40,6 +41,7 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 		"CLOUD INSTANCES (1)",
 		"ON-PREM HOSTS (1 active)",
 		"UNPLACED JOBS (1)",
+		"#5 32734388",
 		"project-alpha",
 		"project-gamma",
 	} {

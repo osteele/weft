@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/dataloc"
+	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // BaseOverheadGB covers Docker image (~15GB) and working space (~2GB).
@@ -43,16 +45,15 @@ var cudaPackages = []string{
 }
 
 // EstimateGroupDisk computes the required disk space in GB for an instance group
-// based on the total size of HF model inputs across all jobs, plus overhead.
-// Returns at least DefaultMinDiskGB.
-func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB) int {
+// based on the deduplicated HF input footprint, deduplicated uv sync footprint,
+// and fixed workspace/runtime overhead. Returns at least DefaultMinDiskGB.
+func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client) int {
+	var hfBytes int64
 	totalBytes, err := dataloc.ResolveInputSizes(group.AllInputs(), localDB)
 	if err != nil {
-		log.Printf("warning: resolving input sizes: %v; using default disk size", err)
-		return DefaultMinDiskGB
-	}
-	if totalBytes == 0 {
-		return DefaultMinDiskGB
+		log.Printf("warning: resolving input sizes: %v; continuing without HF input sizes", err)
+	} else {
+		hfBytes = totalBytes
 	}
 
 	overhead := BaseOverheadGB
@@ -62,11 +63,27 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB) int {
 		overhead += NonCUDAOverheadGB
 	}
 
-	diskGB := int(math.Ceil(float64(totalBytes)/1e9*HFCacheMultiplier)) + overhead
+	uvBytes := estimateGroupUVBytes(group.SourceDirs(), r2Client)
+
+	diskGB := int(math.Ceil(float64(hfBytes) / 1e9 * HFCacheMultiplier))
+	diskGB += int(math.Ceil(float64(uvBytes) / 1e9))
+	diskGB += overhead
 	if diskGB < DefaultMinDiskGB {
 		return DefaultMinDiskGB
 	}
 	return diskGB
+}
+
+func estimateGroupUVBytes(sourceDirs []string, r2Client *r2.Client) int64 {
+	lockfileHashes := estimate.LockfileHash(sourceDirs)
+	if len(lockfileHashes) == 0 {
+		return 0
+	}
+	manifests := estimate.FetchUVManifests(r2Client, lockfileHashes, "linux-amd64")
+	if len(manifests) == 0 {
+		return 0
+	}
+	return estimate.EstimateUVSyncBytes(manifests)
 }
 
 // hasCUDAPackages checks whether any pyproject.toml in the given directories

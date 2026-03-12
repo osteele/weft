@@ -9,9 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -132,7 +135,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		if time.Now().After(deadline) {
 			fmt.Println("Grace period expired. Self-destructing.")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			selfDestruct(r2Bucket, instanceID, selfDestructCmd)
+			selfDestruct(r2Bucket, instanceID, selfDestructCmd, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure, "destroying", 0)
 			return
 		}
 
@@ -141,7 +144,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			fmt.Println("Release signal received. Self-destructing.")
 			r2Delete(r2Bucket, prefix+"/release")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			selfDestruct(r2Bucket, instanceID, selfDestructCmd)
+			selfDestruct(r2Bucket, instanceID, selfDestructCmd, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure, "destroying", 0)
 			return
 		}
 
@@ -203,7 +206,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			// All jobs succeeded — self-destruct
 			fmt.Println("All resubmitted jobs succeeded. Self-destructing.")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			selfDestruct(r2Bucket, instanceID, selfDestructCmd)
+			selfDestruct(r2Bucket, instanceID, selfDestructCmd, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted, "destroying", 0)
 			return
 		}
 
@@ -252,32 +255,73 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) {
 	}
 }
 
-func selfDestruct(bucket, instanceID, selfDestructCmd string) {
+func selfDestruct(bucket, instanceID, selfDestructCmd, terminalStatus, terminationReason, phase string, jobID int64) {
 	instanceIDInt, _ := strconv.ParseInt(instanceID, 10, 64)
 	phaseKey := r2keys.InstancePhase(instanceIDInt)
+	marker := &instanceintent.Marker{
+		TerminalStatus:    terminalStatus,
+		TerminationReason: terminationReason,
+		Phase:             phase,
+		JobID:             jobID,
+		RequestedAtUnix:   time.Now().Unix(),
+	}
 
 	// Write completion marker and phase
 	r2Put(bucket, r2keys.CampaignComplete(instanceIDInt), "0")
 	writePhase(bucket, phaseKey, "destroying")
+	writeTerminationIntent(bucket, instanceIDInt, *marker)
 
 	// Clean up grace keys
 	prefix := r2keys.GracePrefix(instanceIDInt)
 	r2Delete(bucket, prefix+"/status")
 
-	executeSelfDestruct(selfDestructCmd)
+	executeSelfDestruct(bucket, instanceIDInt, selfDestructCmd, marker)
 }
 
-func executeSelfDestruct(selfDestructCmd string) {
+func writeTerminationIntent(bucket string, instanceID int64, marker instanceintent.Marker) {
+	data, err := json.Marshal(marker)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "marshal termination intent: %v\n", err)
+		return
+	}
+	if err := r2Put(bucket, r2keys.InstanceTerminationIntent(instanceID), string(data)); err != nil {
+		fmt.Fprintf(os.Stderr, "write termination intent: %v\n", err)
+	}
+}
+
+func executeSelfDestruct(bucket string, instanceID int64, selfDestructCmd string, marker *instanceintent.Marker) {
 	// Execute self-destruct with retries
 	fmt.Printf("Executing self-destruct: %s\n", selfDestructCmd)
+	if marker != nil && marker.DestroyStartedAtUnix == 0 {
+		marker.DestroyStartedAtUnix = time.Now().Unix()
+		writeTerminationIntent(bucket, instanceID, *marker)
+	}
 	for attempt := 1; attempt <= 3; attempt++ {
+		if marker != nil {
+			marker.DestroyAttempts = attempt
+			marker.LastAttemptAtUnix = time.Now().Unix()
+			marker.LastError = ""
+			writeTerminationIntent(bucket, instanceID, *marker)
+		}
 		cmd := exec.Command("bash", "-c", selfDestructCmd)
 		var stderr bytes.Buffer
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
+			if marker != nil {
+				marker.LastError = err.Error()
+				if s := strings.TrimSpace(stderr.String()); s != "" {
+					marker.LastError = marker.LastError + ": " + s
+				}
+				writeTerminationIntent(bucket, instanceID, *marker)
+			}
 			fmt.Fprintf(os.Stderr, "self-destruct attempt %d failed: %v (stderr: %s)\n", attempt, err, stderr.String())
 		} else {
+			if marker != nil {
+				marker.DestroySucceededAtUnix = time.Now().Unix()
+				marker.LastError = ""
+				writeTerminationIntent(bucket, instanceID, *marker)
+			}
 			fmt.Printf("Self-destruct succeeded on attempt %d\n", attempt)
 			return
 		}

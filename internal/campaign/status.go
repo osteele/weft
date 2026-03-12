@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -53,6 +54,7 @@ type InstanceUpdate struct {
 	JobProgressID      int64            // which job the progress is for
 	HeartbeatAge       time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
 	Heartbeat          *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
+	TerminationIntent  *instanceintent.Marker
 }
 
 // JobDisplayStatus returns the status to display for a job in the context of a
@@ -156,9 +158,15 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			// Fetch bootstrap stage or instance phase from R2
 			var bootstrapStage, instancePhase string
+			terminationIntent := ci.TerminationIntent
 			jobProgress := -1
 			var jobProgressID int64
 			if r2c != nil && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
+				if fetchedIntent, err := fetchReconcileTerminationIntent(ctx, r2c, cloudInstanceID); err == nil && fetchedIntent != nil {
+					terminationIntent = fetchedIntent
+					_ = db.UpdateCloudInstanceTerminationIntent(database, cloudInstanceID, fetchedIntent)
+					ci.TerminationIntent = fetchedIntent
+				}
 				if hasStartedJob {
 					instancePhase = fetchInstancePhase(ctx, r2c, cloudInstanceID)
 					jobProgressID, jobProgress = fetchJobProgress(ctx, r2c, instancePhase)
@@ -187,13 +195,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				// Check R2 for completion marker before declaring a stall — the agent
 				// may have completed all jobs but failed to self-destruct, so the local
 				// DB still shows jobs as queued while the instance is actually done.
-				instanceComplete := false
-				if r2c != nil {
-					completeKey := r2keys.CampaignComplete(cloudInstanceID)
-					if data, err := r2c.GetObject(ctx, completeKey); err == nil && len(data) > 0 {
-						instanceComplete = true
-					}
-				}
+				instanceComplete := hasR2CompletionMarker(r2c, cloudInstanceID)
 
 				elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
 				if instanceComplete {
@@ -271,6 +273,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				JobProgressID:      jobProgressID,
 				HeartbeatAge:       heartbeatAge,
 				Heartbeat:          heartbeat,
+				TerminationIntent:  terminationIntent,
 			}
 
 			select {
@@ -318,7 +321,15 @@ func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string)
 }
 
 // fetchR2Marker reads a string marker from R2 with a 3-second timeout.
-func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) string {
+func fetchR2Marker(ctx context.Context, r2Client *r2.Client, key string) (value string) {
+	if r2Client == nil {
+		return ""
+	}
+	defer func() {
+		if recover() != nil {
+			value = ""
+		}
+	}()
 	ctx2, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	data, err := r2Client.GetObject(ctx2, key)
@@ -364,6 +375,9 @@ func failureTerminationReasonFromR2(ctx context.Context, r2Client *r2.Client, in
 	if r2Client == nil {
 		return fallback
 	}
+	if intent, err := fetchReconcileTerminationIntent(ctx, r2Client, instanceID); err == nil && intent != nil && intent.TerminationReason != "" {
+		return intent.TerminationReason
+	}
 	phase := fetchInstancePhase(ctx, r2Client, instanceID)
 	if reason := failureTerminationReasonFromPhase(phase, fallback); reason != fallback {
 		return reason
@@ -399,6 +413,29 @@ func InstancePhaseLabel(phase string) string {
 		}
 	}
 	return phase
+}
+
+func TerminationIntentLabel(marker *instanceintent.Marker) string {
+	if marker == nil {
+		return ""
+	}
+	reason := marker.TerminationReason
+	if reason == "" {
+		reason = marker.TerminalStatus
+	}
+	switch {
+	case marker.DestroySucceededAtUnix > 0:
+		return fmt.Sprintf("self-destruct succeeded (%s)", reason)
+	case marker.LastError != "" && marker.DestroyAttempts > 0:
+		return fmt.Sprintf("self-destruct retry %d failed (%s)", marker.DestroyAttempts, reason)
+	case marker.DestroyStartedAtUnix > 0:
+		if marker.DestroyAttempts > 0 {
+			return fmt.Sprintf("self-destructing (%s, attempt %d)", reason, marker.DestroyAttempts)
+		}
+		return fmt.Sprintf("self-destructing (%s)", reason)
+	default:
+		return fmt.Sprintf("termination requested (%s)", reason)
+	}
 }
 
 // BootstrapStageLabel returns a human-readable label for a bootstrap stage.
@@ -450,6 +487,14 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 				formatBytes(curr.Heartbeat.DiskFreeBytes))
 		}
 		lines = append(lines, line)
+	}
+
+	if curr.TerminationIntent != nil {
+		prevLabel := TerminationIntentLabel(prev.TerminationIntent)
+		currLabel := TerminationIntentLabel(curr.TerminationIntent)
+		if currLabel != "" && currLabel != prevLabel {
+			lines = append(lines, fmt.Sprintf("instance %d: %s", id, currLabel))
+		}
 	}
 
 	// Report job progress changes

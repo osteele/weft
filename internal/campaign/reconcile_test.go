@@ -1,11 +1,14 @@
 package campaign
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
+	"github.com/osteele/weft/internal/r2"
 )
 
 func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
@@ -157,6 +160,284 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 	if result.Reconciled != 0 {
 		t.Errorf("reconciled = %d, want 0", result.Reconciled)
+	}
+}
+
+func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "stale-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	for _, jobID := range []int64{1, 2} {
+		if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, status, command, cloud_instance_id) VALUES (?, '', '/tmp', 'queued', 'python train.py', ?)`, jobID, instanceID); err != nil {
+			t.Fatalf("create job %d: %v", jobID, err)
+		}
+		if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+			t.Fatalf("insert attempt for job %d: %v", jobID, err)
+		}
+	}
+
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+
+	fetchReconcileHeartbeat = func(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	probeCampaignAgent = func(inst *cloud.Instance, timeout time.Duration) (bool, error) {
+		return false, nil
+	}
+
+	var destroyedID string
+	destroyed := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			status := "running"
+			if destroyed {
+				status = "destroyed"
+			}
+			return &cloud.Instance{
+				ProviderID: id,
+				Status:     status,
+				SSHHost:    "ssh6.vast.ai",
+				SSHPort:    22,
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			destroyed = true
+			return nil
+		},
+	}
+
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1", result.Reconciled)
+	}
+	if destroyedID != "stale-123" {
+		t.Fatalf("DestroyInstance called with %q, want %q", destroyedID, "stale-123")
+	}
+
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+
+	for _, jobID := range []int64{1, 2} {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			t.Fatalf("get job %d: %v", jobID, err)
+		}
+		if job.Status != db.StatusQueued {
+			t.Fatalf("job %d status = %q, want %q", jobID, job.Status, db.StatusQueued)
+		}
+		if job.CloudInstanceID != nil {
+			t.Fatalf("job %d cloud_instance_id = %v, want nil", jobID, job.CloudInstanceID)
+		}
+	}
+}
+
+func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "intent-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("assign job: %v", err)
+	}
+	if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("insert attempt: %v", err)
+	}
+
+	origFetchIntent := fetchReconcileTerminationIntent
+	t.Cleanup(func() {
+		fetchReconcileTerminationIntent = origFetchIntent
+	})
+	fetchReconcileTerminationIntent = func(_ context.Context, _ *r2.Client, id int64) (*instanceintent.Marker, error) {
+		if id != instanceID {
+			return nil, nil
+		}
+		return &instanceintent.Marker{
+			TerminalStatus:    db.CloudInstanceStatusFailed,
+			TerminationReason: db.TerminationReasonDiskFull,
+			Phase:             "disk-full:246",
+			JobID:             246,
+			RequestedAtUnix:   time.Now().Unix(),
+		}, nil
+	}
+
+	var destroyedID string
+	destroyed := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			if destroyed {
+				return &cloud.Instance{ProviderID: id, Status: "destroyed"}, nil
+			}
+			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			destroyed = true
+			return nil
+		},
+	}
+
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1", result.Reconciled)
+	}
+	if destroyedID != "intent-123" {
+		t.Fatalf("DestroyInstance called with %q, want %q", destroyedID, "intent-123")
+	}
+
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+	if ci.TerminationReason != db.TerminationReasonDiskFull {
+		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, db.TerminationReasonDiskFull)
+	}
+	if ci.TerminationRequestedAt == nil || *ci.TerminationRequestedAt == 0 {
+		t.Fatalf("termination requested at = %v, want non-nil", ci.TerminationRequestedAt)
+	}
+	if ci.TerminationIntent == nil || ci.TerminationIntent.TerminationReason != db.TerminationReasonDiskFull {
+		t.Fatalf("termination intent = %+v, want disk_full marker", ci.TerminationIntent)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
+	}
+	if job.CloudInstanceID != nil {
+		t.Fatalf("job cloud_instance_id = %v, want nil", job.CloudInstanceID)
+	}
+}
+
+func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedFailures(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "probe-err-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("queue job: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("assign job: %v", err)
+	}
+	if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("insert attempt: %v", err)
+	}
+
+	origFetchHeartbeat := fetchReconcileHeartbeat
+	origProbeCampaignAgent := probeCampaignAgent
+	t.Cleanup(func() {
+		fetchReconcileHeartbeat = origFetchHeartbeat
+		probeCampaignAgent = origProbeCampaignAgent
+	})
+
+	fetchReconcileHeartbeat = func(ctx context.Context, r2Client *r2.Client, instanceID int64) (*HeartbeatSample, time.Duration) {
+		return &HeartbeatSample{Ts: time.Now().Add(-10 * time.Minute).Unix()}, 10 * time.Minute
+	}
+	probeCampaignAgent = func(inst *cloud.Instance, timeout time.Duration) (bool, error) {
+		return false, context.DeadlineExceeded
+	}
+
+	var destroyCalls int
+	destroyed := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			status := "running"
+			if destroyed {
+				status = "destroyed"
+			}
+			return &cloud.Instance{ProviderID: id, Status: status}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyCalls++
+			destroyed = true
+			return nil
+		},
+	}
+
+	reconciler := NewReconciler()
+	for i := 0; i < minProbeFailureAttempts-1; i++ {
+		result, err := reconciler.ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+		if err != nil {
+			t.Fatalf("reconcile attempt %d: %v", i+1, err)
+		}
+		if result.Reconciled != 0 {
+			t.Fatalf("reconcile attempt %d = %d, want 0 before threshold", i+1, result.Reconciled)
+		}
+	}
+
+	result, err := reconciler.ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile final attempt: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconcile final attempt = %d, want 1", result.Reconciled)
+	}
+	if destroyCalls != 1 {
+		t.Fatalf("destroy calls = %d, want 1", destroyCalls)
 	}
 }
 

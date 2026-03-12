@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -31,13 +33,34 @@ const minDeadConfirmTime = 2 * time.Minute
 type Reconciler struct {
 	mu              sync.Mutex
 	firstDeadAt     map[int64]time.Time // keyed by CloudInstance.ID
-	deadConfirmTime time.Duration       // 0 uses minDeadConfirmTime
+	probeFailures   map[int64]probeFailureState
+	deadConfirmTime time.Duration // 0 uses minDeadConfirmTime
+}
+
+type probeFailureState struct {
+	FirstAt time.Time
+	Count   int
 }
 
 // NewReconciler creates a Reconciler ready for use.
 func NewReconciler() *Reconciler {
-	return &Reconciler{firstDeadAt: make(map[int64]time.Time)}
+	return &Reconciler{
+		firstDeadAt:   make(map[int64]time.Time),
+		probeFailures: make(map[int64]probeFailureState),
+	}
 }
+
+var (
+	fetchReconcileHeartbeat = fetchHeartbeat
+	probeCampaignAgent      = func(inst *cloud.Instance, timeout time.Duration) (bool, error) {
+		out, err := cloud.RunOnInstance(inst, "pgrep -af 'weft-agent .*run-campaign'", timeout)
+		if err != nil {
+			return false, err
+		}
+		return strings.TrimSpace(out) != "", nil
+	}
+	fetchReconcileTerminationIntent = fetchTerminationIntentFromR2
+)
 
 func (r *Reconciler) confirmTime() time.Duration {
 	if r.deadConfirmTime == 0 {
@@ -68,6 +91,11 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 	for id := range r.firstDeadAt {
 		if !activeIDs[id] {
 			delete(r.firstDeadAt, id)
+		}
+	}
+	for id := range r.probeFailures {
+		if !activeIDs[id] {
+			delete(r.probeFailures, id)
 		}
 	}
 	r.mu.Unlock()
@@ -222,6 +250,23 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		return false, false
 	}
 
+	intent, intentErr := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID)
+	if intentErr != nil {
+		log.Printf("reconcile: fetch termination intent for instance %d: %v", ci.ID, intentErr)
+	}
+	if intent != nil {
+		if err := db.UpdateCloudInstanceTerminationIntent(database, ci.ID, intent); err != nil {
+			log.Printf("reconcile: persist termination intent for instance %d: %v", ci.ID, err)
+		}
+	} else if ci.TerminationIntent != nil {
+		intent = ci.TerminationIntent
+	}
+	if intent != nil {
+		if reconciled, terminated := r.reconcileTerminationIntent(database, client, ci, inst, intent); reconciled {
+			return true, terminated
+		}
+	}
+
 	// Detect instances stuck with empty provider status (never started).
 	// Do NOT add "" to isProviderTerminal — that's used in the safety-net loop
 	// where treating empty as terminal would destroy provisioning instances.
@@ -266,6 +311,12 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				log.Printf("reconcile: reset %d jobs from wedged instance %d to unplaced", resetCount, ci.ID)
 			}
 			return true, true
+		}
+	}
+
+	if !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+		if reconciled, terminated := r.reconcileStaleHeartbeat(database, client, r2Client, ci, inst); reconciled {
+			return true, terminated
 		}
 	}
 
@@ -342,6 +393,145 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	return false, false
+}
+
+func (r *Reconciler) reconcileTerminationIntent(database *sql.DB, client cloud.Client, ci *db.CloudInstance, inst *cloud.Instance, intent *instanceintent.Marker) (bool, bool) {
+	if intent == nil {
+		return false, false
+	}
+
+	reason := intent.TerminationReason
+	switch intent.TerminalStatus {
+	case db.CloudInstanceStatusCompleted:
+		if reason == "" {
+			reason = db.TerminationReasonCompleted
+		}
+	case db.CloudInstanceStatusFailed:
+		if reason == "" {
+			reason = db.TerminationReasonJobFailure
+		}
+	default:
+		return false, false
+	}
+
+	providerID := ci.EffectiveProviderID()
+	requestedAt := intent.RequestedAtUnix
+	if requestedAt == 0 && ci.TerminationRequestedAt != nil {
+		requestedAt = *ci.TerminationRequestedAt
+	}
+	age := time.Duration(0)
+	if requestedAt > 0 {
+		age = time.Since(time.Unix(requestedAt, 0)).Truncate(time.Second)
+	}
+	if !isProviderTerminal(inst) && providerID != "" {
+		log.Printf("reconcile: instance %d registered termination intent (%s, age=%s), destroying provider instance %s", ci.ID, reason, age, providerID)
+		if err := client.DestroyInstance(providerID); err != nil {
+			log.Printf("reconcile: destroy intent-marked instance %d: %v", ci.ID, err)
+			return false, false
+		}
+	}
+
+	log.Printf("reconcile: instance %d registered termination intent, marking %s (%s)", ci.ID, intent.TerminalStatus, reason)
+	if err := db.UpdateCloudInstanceStatus(database, ci.ID, intent.TerminalStatus, reason); err != nil {
+		log.Printf("reconcile: update instance %d status from termination intent: %v", ci.ID, err)
+		return false, false
+	}
+
+	switch intent.TerminalStatus {
+	case db.CloudInstanceStatusCompleted:
+		if err := db.CloseJobCloudAttemptsByInstance(database, ci.ID, db.AttemptOutcomeCompleted); err != nil {
+			log.Printf("reconcile: close attempts for completion intent instance %d: %v", ci.ID, err)
+		}
+	case db.CloudInstanceStatusFailed:
+		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+			log.Printf("reconcile: reset jobs for intent-marked instance %d: %v", ci.ID, err)
+		} else if resetCount > 0 {
+			log.Printf("reconcile: reset %d jobs from intent-marked instance %d to unplaced", resetCount, ci.ID)
+		}
+	}
+
+	r.mu.Lock()
+	delete(r.firstDeadAt, ci.ID)
+	r.mu.Unlock()
+	return true, true
+}
+
+const (
+	minProbeFailureAttempts = 3
+	minProbeFailureWindow   = 2 * time.Minute
+)
+
+func (r *Reconciler) clearProbeFailure(id int64) {
+	r.mu.Lock()
+	delete(r.probeFailures, id)
+	r.mu.Unlock()
+}
+
+func (r *Reconciler) noteProbeFailure(id int64) probeFailureState {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.probeFailures == nil {
+		r.probeFailures = make(map[int64]probeFailureState)
+	}
+	state := r.probeFailures[id]
+	if state.Count == 0 {
+		state.FirstAt = time.Now()
+	}
+	state.Count++
+	r.probeFailures[id] = state
+	return state
+}
+
+func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Client, r2Client *r2.Client, ci *db.CloudInstance, inst *cloud.Instance) (bool, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, heartbeatAge := fetchReconcileHeartbeat(ctx, r2Client, ci.ID)
+	if heartbeatAge == 0 || heartbeatAge <= heartbeatStaleThreshold {
+		r.clearProbeFailure(ci.ID)
+		return false, false
+	}
+
+	agentAlive, err := probeCampaignAgent(inst, 15*time.Second)
+	if err == nil && agentAlive {
+		r.clearProbeFailure(ci.ID)
+		return false, false
+	}
+
+	if err != nil {
+		state := r.noteProbeFailure(ci.ID)
+		elapsed := time.Since(state.FirstAt)
+		if state.Count < minProbeFailureAttempts && elapsed < minProbeFailureWindow {
+			log.Printf("reconcile: instance %d heartbeat stale (%s) and agent probe is unreachable (attempt %d/%d over %s); waiting before termination",
+				ci.ID, heartbeatAge.Truncate(time.Second), state.Count, minProbeFailureAttempts, elapsed.Truncate(time.Second))
+			return false, false
+		}
+	} else {
+		r.clearProbeFailure(ci.ID)
+	}
+
+	reason := failureTerminationReasonFromR2(ctx, r2Client, ci.ID, db.TerminationReasonInfraFailure)
+	log.Printf("reconcile: instance %d heartbeat stale (%s) and agent probe failed/alive=%t err=%v, marking failed (%s)",
+		ci.ID, heartbeatAge.Truncate(time.Second), agentAlive, err, reason)
+
+	providerID := ci.EffectiveProviderID()
+	if providerID != "" {
+		if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
+			log.Printf("reconcile: destroy stale-heartbeat instance %d: %v", ci.ID, destroyErr)
+		}
+	}
+
+	if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, reason); err != nil {
+		log.Printf("reconcile: update stale-heartbeat instance %d status: %v", ci.ID, err)
+		return false, false
+	}
+	if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+		log.Printf("reconcile: reset jobs for stale-heartbeat instance %d: %v", ci.ID, err)
+	} else if resetCount > 0 {
+		log.Printf("reconcile: reset %d jobs from stale-heartbeat instance %d to unplaced", resetCount, ci.ID)
+	}
+	r.clearProbeFailure(ci.ID)
+	return true, true
 }
 
 // ReconcileCampaigns checks active campaigns and marks them as completed or failed
@@ -448,13 +638,13 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.CloudInstance, database *sql
 	defer cancel()
 
 	key := r2keys.GraceStatus(ci.ID)
-	data, err := r2Client.GetObject(ctx, key)
-	if err != nil {
+	data := fetchR2Marker(ctx, r2Client, key)
+	if data == "" {
 		return false
 	}
 
 	var payload graceStatusPayload
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
 		log.Printf("reconcile: parse grace status for instance %d: %v", ci.ID, err)
 		return false
 	}
@@ -473,13 +663,43 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.CloudInstance, database *sql
 
 // hasR2CompletionMarker checks whether the wrapper wrote a completion marker
 // to R2 before the instance self-destructed. Returns false if r2Client is nil.
-func hasR2CompletionMarker(r2Client *r2.Client, instanceID int64) bool {
+func hasR2CompletionMarker(r2Client *r2.Client, instanceID int64) (exists bool) {
 	if r2Client == nil {
 		return false
 	}
+	defer func() {
+		if recover() != nil {
+			exists = false
+		}
+	}()
 	key := r2keys.CampaignComplete(instanceID)
 	exists, err := r2Client.ObjectExists(context.Background(), key)
 	return err == nil && exists
+}
+
+func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, instanceID int64) (_ *instanceintent.Marker, err error) {
+	if r2Client == nil {
+		return nil, nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = nil
+		}
+	}()
+
+	data := fetchR2Marker(ctx, r2Client, r2keys.InstanceTerminationIntent(instanceID))
+	if data == "" {
+		return nil, nil
+	}
+
+	var marker instanceintent.Marker
+	if err := json.Unmarshal([]byte(data), &marker); err != nil {
+		return nil, err
+	}
+	if marker.TerminalStatus == "" {
+		return nil, nil
+	}
+	return &marker, nil
 }
 
 // maxEmptyStatusTime is the maximum time to wait for a provider instance to

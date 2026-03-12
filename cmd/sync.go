@@ -136,14 +136,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// Prune old cached log files
 	cfg, _ := config.Load()
 
-	// Check cloud instances for completed results (CLI fallback for coordinator)
-	cloudUpdated := syncCloudJobResults(cfg, database, syncVerbose)
-	totalUpdated += cloudUpdated
-
-	// Auto-close campaigns where all instances are terminal
-	if _, err := campaign.ReconcileCampaigns(database); err != nil {
-		log.Printf("reconcile campaigns: %v", err)
-	}
+	totalUpdated += syncCloudState(cfg, database, campaign.NewReconciler(), syncVerbose).Updated
 
 	if cfg.LogCacheMaxAge > 0 {
 		maxAge := time.Duration(cfg.LogCacheMaxAge) * 24 * time.Hour

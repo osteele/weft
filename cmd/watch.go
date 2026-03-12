@@ -114,8 +114,12 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 	}
 
 	groups := campaign.GroupByGPUSupremum(jobs)
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		log.Printf("warning: build R2 client for disk estimation: %v", err)
+	}
 	for i := range groups {
-		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
+		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
 	}
 
 	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {

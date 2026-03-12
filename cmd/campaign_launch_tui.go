@@ -212,13 +212,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 	reconciler := m.reconciler
 	return func() tea.Msg {
 		r2Client, _ := buildR2Client(cfg)
-		if len(clients) > 0 {
-			reconciler.ReconcileCloudInstances(database, clients, r2Client)
-		}
-		syncCloudJobResults(cfg, database, false)
-		if _, err := campaign.ReconcileCampaigns(database); err != nil {
-			log.Printf("reconcile campaigns: %v", err)
-		}
+		syncCloudStateWithClients(cfg, database, reconciler, clients, r2Client, false)
 
 		// Re-query unplaced jobs since reconciliation may have freed some
 		jobs, err := db.ListUnplacedJobs(database)
@@ -231,8 +225,12 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		groups = campaign.FilterByGPUClass(groups, gpuFilter)
 
 		// Re-estimate disk needs
+		r2Client, err = buildR2Client(cfg)
+		if err != nil {
+			log.Printf("warning: build R2 client for disk estimation: %v", err)
+		}
 		for i := range groups {
-			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
+			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
 		}
 
 		return reconcileDoneMsg{groups: groups}

@@ -8,6 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remediation"
@@ -131,9 +132,9 @@ func runList(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Check cloud instance completion (R2 markers) — soft failure
+		// Reconcile cloud instances and sync cloud job results — soft failure
 		cfg, _ := config.Load()
-		syncCloudJobResults(cfg, database, false)
+		syncCloudState(cfg, database, campaign.NewReconciler(), false)
 
 		// Start queue runners on hosts with queued jobs
 		startQueueRunnersForQueuedHosts(database)

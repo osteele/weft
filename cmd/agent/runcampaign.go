@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudlog"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
@@ -150,7 +151,13 @@ func runCampaign(args []string) {
 			Workspace:       workspace,
 		})
 	} else {
-		selfDestruct(r2Bucket, instanceID, manifest.SelfDestructCmd)
+		terminalStatus := db.CloudInstanceStatusCompleted
+		terminationReason := db.TerminationReasonCompleted
+		if anyFailed {
+			terminalStatus = db.CloudInstanceStatusFailed
+			terminationReason = db.TerminationReasonJobFailure
+		}
+		selfDestruct(r2Bucket, instanceID, manifest.SelfDestructCmd, terminalStatus, terminationReason, currentPhase.Get(), 0)
 	}
 }
 

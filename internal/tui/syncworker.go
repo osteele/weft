@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
@@ -242,21 +243,13 @@ func (w *SyncWorker) reconcileCloudJobs() {
 		return
 	}
 
-	result, err := w.reconciler.ReconcileCloudInstances(w.database, w.cloudClients, w.r2Client)
-	if err != nil {
-		log.Printf("cloud reconcile: %v", err)
-		return
-	}
-	if result.Reconciled > 0 {
-		log.Printf("cloud reconcile: reconciled %d dead instance(s)", result.Reconciled)
+	result := cloudsync.SyncState(w.database, w.reconciler, w.cloudClients, w.r2Client, nil)
+	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
+		log.Printf("cloud reconcile: reconciled %d dead instance(s)", result.ReconcileResult.Reconciled)
 		select {
-		case w.results <- SyncResult{Updated: result.Reconciled}:
+		case w.results <- SyncResult{Updated: result.ReconcileResult.Reconciled}:
 		default:
 		}
-	}
-
-	if _, err := campaign.ReconcileCampaigns(w.database); err != nil {
-		log.Printf("cloud reconcile campaigns: %v", err)
 	}
 }
 

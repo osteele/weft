@@ -88,7 +88,7 @@ func newWatchAllModel(database *sql.DB, cfg *config.Config, flashMessage string)
 		cancel:          cancel,
 	}
 
-	snapshot, err := loadWatchSystemSnapshot(database, cfg, false)
+	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
 	if err != nil {
 		model.err = err
 		return model
@@ -480,7 +480,7 @@ func (m watchAllModel) formatUnplacedJobRow(job *db.Job) string {
 
 func refreshWatchSystem(database *sql.DB, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, true)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, true)
 		return watchAllRefreshedMsg{snapshot: snapshot, err: err}
 	}
 }

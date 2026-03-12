@@ -49,12 +49,7 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 				return
 			case <-ticker.C:
 				cfg, _ := config.Load()
-				clients := buildCloudClients(cfg)
-				r2Client, _ := buildR2Client(cfg)
-				if len(clients) > 0 {
-					reconciler.ReconcileCloudInstances(database, clients, r2Client)
-				}
-				syncCloudJobResults(cfg, database, false)
+				syncCloudState(cfg, database, reconciler, false)
 			}
 		}
 	}()

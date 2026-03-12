@@ -49,11 +49,12 @@ func LockfileHash(sourceDirs []string) map[string]string {
 	return result
 }
 
-// FetchUVManifests retrieves UV manifests from R2, using a local cache at
-// ~/.cache/weft/uv-manifests/. Returns dir → manifest for each dir that
-// has a lockfile hash with a matching manifest in R2.
+// FetchUVManifests retrieves UV manifests, using a local cache at
+// ~/.cache/weft/uv-manifests/ and falling back to R2 when a client is provided.
+// Returns dir → manifest for each dir that has a matching cached or remote
+// manifest for the requested platform.
 func FetchUVManifests(r2Client *r2.Client, lockfileHashes map[string]string, platform string) map[string]*UVManifestRef {
-	if r2Client == nil || len(lockfileHashes) == 0 {
+	if len(lockfileHashes) == 0 {
 		return nil
 	}
 
@@ -89,6 +90,10 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 		if json.Unmarshal(data, &m) == nil {
 			return &m
 		}
+	}
+
+	if r2Client == nil {
+		return nil
 	}
 
 	// Fetch from R2

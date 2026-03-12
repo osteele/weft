@@ -193,6 +193,10 @@ func InstanceDiskFailure(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/disk-failure.json", instanceID)
 }
 
+func InstanceTerminationIntent(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/termination-intent.json", instanceID)
+}
+
 // Bootstrap keys
 
 func BootstrapScript(instanceID int64) string {

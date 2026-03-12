@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/osteele/weft/internal/instanceintent"
 )
 
 // cloudInstanceSelectColumns is the column list for SELECT queries on cloud_instances.
@@ -18,7 +20,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs,
 		grace_period_seconds, grace_started_at, grace_deadline,
 		termination_reason,
-		disk_gb, provisioned_inputs`
+		disk_gb, provisioned_inputs,
+		termination_requested_at, termination_intent_json`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -71,7 +74,9 @@ type CloudInstance struct {
 	GraceDeadline      *int64 // when the grace period expires
 
 	// Termination classification
-	TerminationReason string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "cancelled"
+	TerminationReason      string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "cancelled"
+	TerminationRequestedAt *int64
+	TerminationIntent      *instanceintent.Marker
 
 	// Instance capacity (for reuse matching)
 	DiskGB            int      // Actual disk space from offer (may exceed requested)
@@ -219,6 +224,25 @@ func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string, terminationR
 		_, err := db.Exec(`UPDATE cloud_instances SET status = ? WHERE id = ?`, status, id)
 		return err
 	}
+}
+
+func UpdateCloudInstanceTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
+	if marker == nil {
+		_, err := db.Exec(`UPDATE cloud_instances SET termination_requested_at = NULL, termination_intent_json = NULL WHERE id = ?`, id)
+		return err
+	}
+
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	requestedAt := marker.RequestedAtUnix
+	if requestedAt == 0 {
+		requestedAt = time.Now().Unix()
+	}
+	_, err = db.Exec(`UPDATE cloud_instances SET termination_requested_at = ?, termination_intent_json = ? WHERE id = ?`,
+		requestedAt, string(data), id)
+	return err
 }
 
 // SetCloudInstanceReadyAt records when the Vast.ai instance became ready.
@@ -602,6 +626,8 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var terminationReason sql.NullString
 	var diskGB sql.NullInt64
 	var provisionedInputsJSON sql.NullString
+	var terminationRequestedAt sql.NullInt64
+	var terminationIntentJSON sql.NullString
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -614,6 +640,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
 		&terminationReason,
 		&diskGB, &provisionedInputsJSON,
+		&terminationRequestedAt, &terminationIntentJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -708,11 +735,20 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	if terminationReason.Valid {
 		c.TerminationReason = terminationReason.String
 	}
+	if terminationRequestedAt.Valid {
+		c.TerminationRequestedAt = &terminationRequestedAt.Int64
+	}
 	if diskGB.Valid {
 		c.DiskGB = int(diskGB.Int64)
 	}
 	if provisionedInputsJSON.Valid && provisionedInputsJSON.String != "" {
 		_ = json.Unmarshal([]byte(provisionedInputsJSON.String), &c.ProvisionedInputs)
+	}
+	if terminationIntentJSON.Valid && terminationIntentJSON.String != "" {
+		var marker instanceintent.Marker
+		if json.Unmarshal([]byte(terminationIntentJSON.String), &marker) == nil {
+			c.TerminationIntent = &marker
+		}
 	}
 	return &c, nil
 }

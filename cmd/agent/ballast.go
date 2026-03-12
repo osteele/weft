@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -158,7 +160,7 @@ func handleDiskFull(r2Bucket string, instanceID int64, ballastDir, ballastPath, 
 
 	oplog.Log(oplog.OpPhaseTransition, oplog.WithDetail(failurePhase))
 	fmt.Fprintf(os.Stderr, "disk monitor: free space dropped below threshold (%s free); terminating instance\n", formatBytes(freeBytesBefore))
-	terminateInstanceForFailure(r2Bucket, instanceID, selfDestructCmd)
+	terminateInstanceForFailure(r2Bucket, instanceID, selfDestructCmd, failurePhase, jobID)
 }
 
 func currentJobIDFromPhase(phase string) int64 {
@@ -191,6 +193,7 @@ func collectDiskFailureReport(ballastDir, ballastPath, phase string, jobID int64
 	home, _ := os.UserHomeDir()
 	for label, path := range map[string]string{
 		"workspace":   ballastDir,
+		"uv_cache":    filepath.Join(home, ".cache", "uv"),
 		"huggingface": filepath.Join(home, ".cache", "huggingface"),
 		"weft_cache":  filepath.Join(home, ".cache", "weft"),
 	} {
@@ -211,10 +214,16 @@ func commandOutput(timeout time.Duration, name string, args ...string) (string, 
 	return strings.TrimSpace(string(out)), nil
 }
 
-func terminateInstanceForFailure(bucket string, instanceID int64, selfDestructCmd string) {
-	_ = bucket
-	_ = instanceID
-	executeSelfDestruct(selfDestructCmd)
+func terminateInstanceForFailure(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64) {
+	marker := &instanceintent.Marker{
+		TerminalStatus:    db.CloudInstanceStatusFailed,
+		TerminationReason: db.TerminationReasonDiskFull,
+		Phase:             phase,
+		JobID:             jobID,
+		RequestedAtUnix:   time.Now().Unix(),
+	}
+	writeTerminationIntent(bucket, instanceID, *marker)
+	executeSelfDestruct(bucket, instanceID, selfDestructCmd, marker)
 }
 
 func formatBytes(n int64) string {

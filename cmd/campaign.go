@@ -224,8 +224,12 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Estimate disk needs from HF model inputs
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		log.Printf("warning: build R2 client for disk estimation: %v", err)
+	}
 	for i := range groups {
-		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database)
+		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
 	}
 
 	// Parse budget limits
@@ -733,20 +737,8 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 // are terminal. Called before displaying campaign data.
 func reconcileBeforeDisplay(database *sql.DB) {
 	cfg, _ := config.Load()
-	if clients := buildCloudClients(cfg); len(clients) > 0 {
-		// Build R2 client for completion detection (nil if unconfigured)
-		r2Client, _ := buildR2Client(cfg)
-		if result, err := campaign.NewReconciler().ReconcileCloudInstances(database, clients, r2Client); err != nil {
-			log.Printf("reconcile: %v", err)
-		} else if result.Reconciled > 0 {
-			fmt.Printf("Reconciled %d dead instance(s)\n", result.Reconciled)
-		}
-	}
-	// Sync cloud job results from R2 (completed/failed markers)
-	syncCloudJobResults(cfg, database, false)
-
-	if _, err := campaign.ReconcileCampaigns(database); err != nil {
-		log.Printf("reconcile campaigns: %v", err)
+	if result := syncCloudState(cfg, database, campaign.NewReconciler(), false); result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
+		fmt.Printf("Reconciled %d dead instance(s)\n", result.ReconcileResult.Reconciled)
 	}
 }
 

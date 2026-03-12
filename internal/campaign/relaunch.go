@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // DefaultMaxCloudAttempts is the default maximum number of cloud launch
@@ -72,8 +73,21 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 
 	// Group by GPU requirements and estimate disk
 	groups := GroupByGPUSupremum(eligible)
+	var r2Client *r2.Client
+	if cfg.R2Cfg.Bucket != "" && cfg.R2Cfg.AccessKeyID != "" {
+		var err error
+		r2Client, err = r2.New(r2.Config{
+			AccountID:       cfg.R2Cfg.AccountID,
+			AccessKeyID:     cfg.R2Cfg.AccessKeyID,
+			SecretAccessKey: cfg.R2Cfg.SecretAccessKey,
+			Bucket:          cfg.R2Cfg.Bucket,
+		})
+		if err != nil {
+			log.Printf("relaunch: build R2 client for disk estimation: %v", err)
+		}
+	}
 	for i := range groups {
-		groups[i].DiskGB = EstimateGroupDisk(groups[i], cfg.Database)
+		groups[i].DiskGB = EstimateGroupDisk(groups[i], cfg.Database, r2Client)
 	}
 
 	// Fetch offers

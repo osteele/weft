@@ -184,27 +184,24 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cfg, _ := config.Load()
 				clients := buildCloudClients(cfg)
 				r2Client, _ := buildR2Client(cfg)
-				if len(clients) > 0 {
-					result, _ := m.reconciler.ReconcileCloudInstances(m.database, clients, r2Client)
-					if result != nil && len(result.TerminatedInstances) > 0 {
-						// Trigger relaunch in background
-						go func() {
-							relaunchCfg := campaign.RelaunchConfig{
-								Clients:    clients,
-								R2Cfg:      cfg.Vastai.R2.ToCloudR2Config(),
-								CreateOpts: cloud.CreateOpts{},
-								LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
-								Database:   m.database,
-							}
-							if rr, err := campaign.RelaunchOrphanedJobs(relaunchCfg); err != nil {
-								log.Printf("relaunch: %v", err)
-							} else if rr != nil && len(rr.InstanceIDs) > 0 {
-								log.Printf("relaunch: launched %d new instances", len(rr.InstanceIDs))
-							}
-						}()
-					}
+				result := syncCloudStateWithClients(cfg, m.database, m.reconciler, clients, r2Client, false)
+				if result.ReconcileResult != nil && len(result.ReconcileResult.TerminatedInstances) > 0 {
+					// Trigger relaunch in background
+					go func() {
+						relaunchCfg := campaign.RelaunchConfig{
+							Clients:    clients,
+							R2Cfg:      cfg.Vastai.R2.ToCloudR2Config(),
+							CreateOpts: cloud.CreateOpts{},
+							LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
+							Database:   m.database,
+						}
+						if rr, err := campaign.RelaunchOrphanedJobs(relaunchCfg); err != nil {
+							log.Printf("relaunch: %v", err)
+						} else if rr != nil && len(rr.InstanceIDs) > 0 {
+							log.Printf("relaunch: launched %d new instances", len(rr.InstanceIDs))
+						}
+					}()
 				}
-				syncCloudJobResults(cfg, m.database, false)
 				return watchSyncDoneMsg{}
 			},
 			scheduleSyncTick(),
@@ -402,6 +399,9 @@ func (m watchModel) View() string {
 		}
 		if u.InstancePhase != "" {
 			b.WriteString(fmt.Sprintf("  Phase: %s\n", campaign.InstancePhaseLabel(u.InstancePhase)))
+		}
+		if label := campaign.TerminationIntentLabel(u.TerminationIntent); label != "" {
+			b.WriteString(fmt.Sprintf("  Termination: %s\n", label))
 		}
 
 		if u.Instance != nil && ci.LaunchedAt != nil {

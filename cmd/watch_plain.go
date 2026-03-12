@@ -31,9 +31,10 @@ type watchSystemSnapshot struct {
 func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	reconciler := campaign.NewReconciler()
 
 	for {
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, true)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true)
 		if err != nil {
 			return err
 		}
@@ -52,16 +53,10 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 	}
 }
 
-func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, refresh bool) (watchSystemSnapshot, error) {
+func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool) (watchSystemSnapshot, error) {
 	if refresh {
 		performFastSync(database, false)
-		clients := buildCloudClients(cfg)
-		r2Client, _ := buildR2Client(cfg)
-		if len(clients) > 0 {
-			_, _ = campaign.NewReconciler().ReconcileCloudInstances(database, clients, r2Client)
-		}
-		syncCloudJobResults(cfg, database, false)
-		_, _ = campaign.ReconcileCampaigns(database)
+		syncCloudState(cfg, database, reconciler, false)
 	}
 
 	cloudInstances, err := db.ListRunningCloudInstances(database)
@@ -289,12 +284,15 @@ func formatCloudAssignedJobLines(update campaign.InstanceUpdate) []string {
 
 func watchCloudInstanceLabel(ci *db.CloudInstance) string {
 	if providerID := strings.TrimSpace(ci.EffectiveProviderID()); providerID != "" {
-		return providerID
+		return fmt.Sprintf("#%d %s", ci.ID, providerID)
 	}
 	return fmt.Sprintf("#%d", ci.ID)
 }
 
 func watchCloudStatus(ci *db.CloudInstance) string {
+	if ci.TerminationIntent != nil && !ci.IsTerminal() {
+		return "terminating"
+	}
 	if ci.Status == db.CloudInstanceStatusGrace {
 		return "grace"
 	}
