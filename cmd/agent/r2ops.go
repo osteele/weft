@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -43,11 +44,15 @@ func r2Get(bucket, key string) (string, error) {
 
 // r2Put writes content to an R2 key via rclone rcat.
 func r2Put(bucket, key, content string) error {
+	return r2PutReader(bucket, key, strings.NewReader(content))
+}
+
+func r2PutReader(bucket, key string, body io.Reader) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r2Timeout)
 	defer cancel()
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, "rclone", "rcat", fmt.Sprintf("r2:%s/%s", bucket, key))
-	cmd.Stdin = strings.NewReader(content)
+	cmd.Stdin = body
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		oplog.Log(oplog.OpR2Put, oplog.WithDetail(key),
@@ -81,13 +86,11 @@ func uploadOpslog(bucket string, instanceID int64, logDir string) {
 	oplog.Close() // flush
 
 	key := r2keys.InstanceOpslog(instanceID)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "rclone", "copyto",
-		oplogPath, fmt.Sprintf("r2:%s/%s", bucket, key))
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "upload opslog: %v\n", err)
+	data, err := os.ReadFile(oplogPath)
+	if err == nil && len(data) > 0 {
+		if err := r2PutReader(bucket, key, strings.NewReader(string(data))); err != nil {
+			fmt.Fprintf(os.Stderr, "upload opslog: %v\n", err)
+		}
 	}
 
 	// Re-open for continued logging

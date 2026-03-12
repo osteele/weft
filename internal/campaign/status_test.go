@@ -91,6 +91,7 @@ func TestInstancePhaseLabel(t *testing.T) {
 		{"setup:42", "setup (job 42)"},
 		{"running:123", "running job 123"},
 		{"uploading:7", "uploading outputs (job 7)"},
+		{"disk-full:7", "disk full (job 7)"},
 		{"grace", "grace period"},
 		{"unknown", "unknown"},
 	}
@@ -98,6 +99,15 @@ func TestInstancePhaseLabel(t *testing.T) {
 		if got := InstancePhaseLabel(tt.phase); got != tt.want {
 			t.Errorf("InstancePhaseLabel(%q) = %q, want %q", tt.phase, got, tt.want)
 		}
+	}
+}
+
+func TestFailureTerminationReasonFromPhase(t *testing.T) {
+	if got := failureTerminationReasonFromPhase("disk-full:42", db.TerminationReasonPreempted); got != db.TerminationReasonDiskFull {
+		t.Fatalf("failureTerminationReasonFromPhase(disk-full:42) = %q, want %q", got, db.TerminationReasonDiskFull)
+	}
+	if got := failureTerminationReasonFromPhase("running:42", db.TerminationReasonPreempted); got != db.TerminationReasonPreempted {
+		t.Fatalf("failureTerminationReasonFromPhase(running:42) = %q, want %q", got, db.TerminationReasonPreempted)
 	}
 }
 

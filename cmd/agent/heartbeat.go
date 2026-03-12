@@ -1,6 +1,7 @@
 package main
 
 import (
+	"syscall"
 	"time"
 
 	"github.com/osteele/weft/internal/runner"
@@ -21,10 +22,10 @@ type HeartbeatSample struct {
 }
 
 // collectHeartbeat gathers host-level metrics and returns a HeartbeatSample.
-func collectHeartbeat(phase string) HeartbeatSample {
+func collectHeartbeat(phase, diskPath string) HeartbeatSample {
 	gpu := runner.HostGPUMetrics()
 	memTotal, memUsed := runner.HostMemoryKB()
-	diskUsed, diskTotal := runner.ProbeDiskUsage()
+	diskUsed, diskTotal := probeDiskUsageAtPath(diskPath)
 
 	return HeartbeatSample{
 		Ts:             time.Now().Unix(),
@@ -38,4 +39,18 @@ func collectHeartbeat(phase string) HeartbeatSample {
 		DiskFreeBytes:  diskTotal - diskUsed,
 		DiskTotalBytes: diskTotal,
 	}
+}
+
+func probeDiskUsageAtPath(path string) (used, total int64) {
+	if path == "" {
+		path = "/"
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return runner.ProbeDiskUsage()
+	}
+	bsize := int64(stat.Bsize)
+	total = int64(stat.Blocks) * bsize
+	free := int64(stat.Bavail) * bsize
+	return total - free, total
 }

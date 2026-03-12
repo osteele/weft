@@ -264,6 +264,10 @@ func selfDestruct(bucket, instanceID, selfDestructCmd string) {
 	prefix := r2keys.GracePrefix(instanceIDInt)
 	r2Delete(bucket, prefix+"/status")
 
+	executeSelfDestruct(selfDestructCmd)
+}
+
+func executeSelfDestruct(selfDestructCmd string) {
 	// Execute self-destruct with retries
 	fmt.Printf("Executing self-destruct: %s\n", selfDestructCmd)
 	for attempt := 1; attempt <= 3; attempt++ {

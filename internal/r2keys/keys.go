@@ -112,6 +112,10 @@ func InstanceOpslog(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/opslog.jsonl", instanceID)
 }
 
+func InstanceDiskFailure(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/disk-failure.json", instanceID)
+}
+
 // Bootstrap keys
 
 func BootstrapScript(instanceID int64) string {

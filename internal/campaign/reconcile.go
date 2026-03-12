@@ -325,6 +325,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		if ci.LaunchedAt == nil {
 			reason = db.TerminationReasonInfraFailure
 		}
+		reason = failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
 
 		log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed (%s)", ci.ID, providerID, status, reason)
 

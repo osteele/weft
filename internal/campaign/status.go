@@ -131,9 +131,11 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 							ci.Status = db.CloudInstanceStatusCompleted
 							jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 						} else {
-							_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted)
+							reason := failureTerminationReasonFromR2(ctx, r2c, cloudInstanceID, db.TerminationReasonPreempted)
+							_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, reason)
 							_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
 							ci.Status = db.CloudInstanceStatusFailed
+							ci.TerminationReason = reason
 							jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
 						}
 						firstDeadAt = time.Time{}
@@ -351,6 +353,27 @@ func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int
 	return fetchR2Marker(ctx, r2Client, r2keys.InstancePhase(instanceID))
 }
 
+func failureTerminationReasonFromPhase(phase, fallback string) string {
+	if strings.HasPrefix(phase, "disk-full:") || phase == "disk-full" {
+		return db.TerminationReasonDiskFull
+	}
+	return fallback
+}
+
+func failureTerminationReasonFromR2(ctx context.Context, r2Client *r2.Client, instanceID int64, fallback string) string {
+	if r2Client == nil {
+		return fallback
+	}
+	phase := fetchInstancePhase(ctx, r2Client, instanceID)
+	if reason := failureTerminationReasonFromPhase(phase, fallback); reason != fallback {
+		return reason
+	}
+	if data := fetchR2Marker(ctx, r2Client, r2keys.InstanceDiskFailure(instanceID)); data != "" {
+		return db.TerminationReasonDiskFull
+	}
+	return fallback
+}
+
 // InstancePhaseLabel returns a human-readable label for an instance phase string.
 func InstancePhaseLabel(phase string) string {
 	switch phase {
@@ -358,6 +381,8 @@ func InstancePhaseLabel(phase string) string {
 		return "grace period"
 	case "destroying":
 		return "self-destructing"
+	case "disk-full":
+		return "disk full"
 	}
 	if colon := strings.IndexByte(phase, ':'); colon >= 0 {
 		verb := phase[:colon]
@@ -369,6 +394,8 @@ func InstancePhaseLabel(phase string) string {
 			return fmt.Sprintf("running job %s", jobID)
 		case "uploading":
 			return fmt.Sprintf("uploading outputs (job %s)", jobID)
+		case "disk-full":
+			return fmt.Sprintf("disk full (job %s)", jobID)
 		}
 	}
 	return phase

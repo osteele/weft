@@ -10,7 +10,7 @@ import (
 )
 
 func TestCollectHeartbeat(t *testing.T) {
-	sample := collectHeartbeat("running:42")
+	sample := collectHeartbeat("running:42", "/")
 
 	if sample.Phase != "running:42" {
 		t.Errorf("Phase = %q, want %q", sample.Phase, "running:42")

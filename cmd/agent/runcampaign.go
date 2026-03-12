@@ -119,10 +119,12 @@ func runCampaign(args []string) {
 	anyFailed := false
 
 	// Start heartbeat reporter (writes host metrics to R2 every 30s)
-	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, currentPhase.Get)
+	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, workspace, currentPhase.Get)
 	defer stopHeartbeat()
 	stopOpslogReporter := startOpslogReporter(r2Bucket, instanceIDInt, logDir)
 	defer stopOpslogReporter()
+	stopDiskMonitor := startDiskMonitor(r2Bucket, instanceIDInt, workspace, logDir, phaseKey, manifest.SelfDestructCmd, currentPhase.Get, currentPhase.Set)
+	defer stopDiskMonitor()
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
 		R2Bucket:   r2Bucket,
@@ -349,7 +351,7 @@ func startProgressReporter(r2Bucket string, jobID int64, logPath string) func() 
 // startHeartbeatReporter starts a goroutine that writes host-level metrics
 // to R2 every 30 seconds. getPhase returns the current instance phase string.
 // Returns a stop function.
-func startHeartbeatReporter(r2Bucket string, instanceID int64, getPhase func() string) func() {
+func startHeartbeatReporter(r2Bucket string, instanceID int64, diskPath string, getPhase func() string) func() {
 	var once sync.Once
 	done := make(chan struct{})
 	stop := func() { once.Do(func() { close(done) }) }
@@ -365,7 +367,7 @@ func startHeartbeatReporter(r2Bucket string, instanceID int64, getPhase func() s
 			case <-done:
 				return
 			case <-ticker.C:
-				sample := collectHeartbeat(getPhase())
+				sample := collectHeartbeat(getPhase(), diskPath)
 				data, err := json.Marshal(sample)
 				if err != nil {
 					continue
