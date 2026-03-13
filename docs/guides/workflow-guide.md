@@ -42,8 +42,9 @@ laptop$ weft run \
 ```
 
 If the model is on atlas but not titan, the coordinator places the job on
-atlas. If neither host has it, the coordinator downloads it before the job
-starts. You never need a separate prefetch job.
+atlas. If neither host has it, the coordinator can download it before the job
+starts. When you want to warm a cache ahead of time or ensure a specific host
+has the asset, use `weft data fetch`; you do not need a separate prefetch job.
 
 **Declare all models your job downloads**, not just the primary one. If your
 script uses `AutoTokenizer.from_pretrained("bert-base-uncased")` in addition to
@@ -90,12 +91,27 @@ job needs and what it produces; the coordinator figures out the rest.
 See what's cached where:
 
 ```
-laptop$ weft host data
-HOST     ASSET                           SIZE
-titan   hf:meta-llama/Llama-3-8B        15.2 GB
-atlas  hf:meta-llama/Llama-3-8B        15.2 GB
-atlas  hf:EleutherAI/pythia-160m       312 MB
-atlas  hf-dataset:wikitext             512 MB
+laptop$ weft data where hf:meta-llama/Llama-3-8B
+HOST     SIZE     LAST SEEN   PATH
+titan    15.2GB   3m ago      /home/oliver/.cache/huggingface/hub/models--meta-llama--Llama-3-8B
+atlas    15.2GB   8m ago      /home/oliver/.cache/huggingface/hub/models--meta-llama--Llama-3-8B
+```
+
+To refresh inventory from an existing cache:
+
+```
+laptop$ weft host data atlas --scan
+```
+
+To request that a host download a model or dataset now:
+
+```
+laptop$ weft data fetch hf:meta-llama/Llama-3-8B --host atlas
+# Request 17 completed
+
+laptop$ weft data requests --host atlas
+ID  HOST   ASSET                           REVISION  STATUS     REQUESTED  SIZE
+17  atlas  hf:meta-llama/Llama-3-8B       main      completed  0s ago     15.2GB
 ```
 
 ## Ablation sweep with a fan-out dependency chain

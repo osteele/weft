@@ -176,6 +176,14 @@ func RunWithContext(ctx context.Context, host string, command string) (string, s
 		}
 	}
 
+	if runnerWithTimeout != nil {
+		stdout, stderr, err := runnerWithTimeout(host, command, timeout)
+		if ctx.Err() != nil {
+			return stdout, stderr, ctx.Err()
+		}
+		return stdout, stderr, err
+	}
+
 	type result struct {
 		stdout, stderr string
 		err            error
@@ -215,6 +223,14 @@ func TryRunWithContext(ctx context.Context, host string, command string) (string
 		if timeout <= 0 {
 			return "", "", context.DeadlineExceeded
 		}
+	}
+
+	if runnerWithTimeout != nil {
+		stdout, stderr, err := runnerWithTimeout(host, command, timeout)
+		if ctx.Err() != nil {
+			return stdout, stderr, ctx.Err()
+		}
+		return stdout, stderr, err
 	}
 
 	type result struct {

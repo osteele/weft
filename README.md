@@ -222,6 +222,8 @@ Most workflows start with:
 
 ```bash
 weft run --gpu-class a100 -m "Train" 'uv run python train.py'
+weft data where hf:meta-llama/Llama-3-8B
+weft data fetch hf:meta-llama/Llama-3-8B --host cool100
 weft log 42 -f
 weft job list --running
 weft plan submit plan.yaml
@@ -414,14 +416,22 @@ The system tracks what data exists on which hosts:
   host sync (`weft sync`)
 - **Job outputs**: Declared via `--output` flags, recorded automatically when
   jobs complete successfully
-- **Manual assets**: Registered via `weft host data`
+- **Manual scans**: `weft host data <host> --scan` updates the local inventory
+- **Explicit fetch requests**: `weft data fetch ... --host ...` downloads a HF
+  model or dataset onto a specific host and records the request lifecycle
 
 ```bash
 # Scan a host's HF cache
-weft host data --scan titan
+weft host data titan --scan
 
-# List data assets on a host
-weft host data titan
+# Ask which hosts have a model cached
+weft data where hf:meta-llama/Llama-3-8B
+
+# Download a model to a specific host
+weft data fetch hf:meta-llama/Llama-3-8B --host cool100
+
+# Review past and current download requests
+weft data requests --host cool100
 ```
 
 ### Auto-Remediation

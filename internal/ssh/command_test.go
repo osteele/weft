@@ -1,8 +1,10 @@
 package ssh
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestTildeExpansion verifies that paths with ~ are not quoted
@@ -231,5 +233,32 @@ func TestIsConnectionError(t *testing.T) {
 				t.Errorf("IsConnectionError(%q) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestRunWithContextUsesMockRunner(t *testing.T) {
+	cleanup := SetRunner(func(host, command string) (string, string, error) {
+		if host != "testhost" {
+			t.Fatalf("host = %q, want testhost", host)
+		}
+		if command != "echo hello" {
+			t.Fatalf("command = %q, want echo hello", command)
+		}
+		return "hello\n", "", nil
+	})
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	stdout, stderr, err := RunWithContext(ctx, "testhost", "echo hello")
+	if err != nil {
+		t.Fatalf("RunWithContext: %v", err)
+	}
+	if stdout != "hello\n" {
+		t.Fatalf("stdout = %q, want %q", stdout, "hello\n")
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want empty", stderr)
 	}
 }

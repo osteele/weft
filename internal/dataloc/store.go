@@ -20,6 +20,23 @@ func InitSchema(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_host_data_host ON host_data(host);
 	CREATE INDEX IF NOT EXISTS idx_host_data_asset ON host_data(asset_kind, asset_id);
+	CREATE TABLE IF NOT EXISTS data_requests (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		host TEXT NOT NULL,
+		asset_kind TEXT NOT NULL,
+		asset_id TEXT NOT NULL,
+		revision TEXT NOT NULL DEFAULT 'main',
+		status TEXT NOT NULL,
+		error_message TEXT DEFAULT '',
+		remote_path TEXT DEFAULT '',
+		size_bytes INTEGER DEFAULT 0,
+		requested_at INTEGER NOT NULL,
+		started_at INTEGER,
+		completed_at INTEGER
+	);
+	CREATE INDEX IF NOT EXISTS idx_data_requests_host ON data_requests(host);
+	CREATE INDEX IF NOT EXISTS idx_data_requests_status ON data_requests(status);
+	CREATE INDEX IF NOT EXISTS idx_data_requests_asset ON data_requests(asset_kind, asset_id);
 	`
 	_, err := db.Exec(schema)
 	return err

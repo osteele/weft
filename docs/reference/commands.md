@@ -116,6 +116,54 @@ hard-coding job IDs into downstream commands. When a producer fails and you
 retry it with a version suffix (`:100`), all consumers keyed to that version
 pick up the replacement automatically.
 
+### weft data
+
+Query data locality and request HF asset downloads onto specific hosts.
+
+```bash
+weft data where <asset-ref>
+weft data fetch <asset-ref> --host <host> [--revision <rev>]
+weft data requests [--host <host>]
+```
+
+Supported asset refs for `weft data` are:
+- `hf:<repo-id>` for Hugging Face models
+- `hf-dataset:<repo-id>` for Hugging Face datasets
+
+`where` looks up the local inventory database and shows which hosts are known
+to have the asset, including the last seen time and discovered cache path.
+
+`fetch` creates a persistent download request record, runs the remote download
+on the target host, rescans the HF cache, and updates the local inventory on
+success. It uses the `hf` CLI when present on the remote host, or falls back to
+`python3` with the `huggingface_hub` package installed.
+
+`requests` shows past and current download requests recorded by the CLI. Use it
+to audit which host was asked to download what, and whether the request
+completed or failed.
+
+**Flags:**
+- `--json`: Emit JSON instead of a table
+- `weft data fetch --host HOST`: Host that should cache the asset
+- `weft data fetch --revision REV`: HF revision to download (default: `main`)
+- `weft data requests --host HOST`: Filter recorded requests by host
+
+**Examples:**
+```bash
+# Find where a model is currently cached
+weft data where hf:meta-llama/Llama-3-8B
+
+# Download a model to a specific host
+weft data fetch hf:meta-llama/Llama-3-8B --host cool100
+
+# Download a dataset revision to a host
+weft data fetch hf-dataset:HuggingFaceFW/fineweb --host cool30 --revision main
+
+# Show request history
+weft data requests
+weft data requests --host cool100
+```
+
 ### weft artifact
 
 Track and retrieve job outputs through a durable local artifact store.

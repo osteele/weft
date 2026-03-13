@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/workdir"
 	_ "modernc.org/sqlite"
@@ -593,6 +594,10 @@ func initSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_host_data_asset ON host_data(asset_kind, asset_id);
 	`
 	if _, err := db.Exec(hostDataSchema); err != nil {
+		return err
+	}
+
+	if err := dataloc.InitSchema(db); err != nil {
 		return err
 	}
 
