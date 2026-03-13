@@ -15,7 +15,7 @@ var (
 	sentenceTransformerPattern = regexp.MustCompile(`SentenceTransformer\(\s*["']([^"']+)["']`)
 	loadDatasetPattern         = regexp.MustCompile(`load_dataset\(\s*["']([^"']+)["']`)
 	argparseDefaultPattern     = regexp.MustCompile(`default\s*=\s*["']([^"']+)["']`)
-	modelFlagPattern           = regexp.MustCompile(`--(?:model|model-name|base-model)\b`)
+	modelFlagPattern           = regexp.MustCompile(`["']--(?:model|model-name|base-model)["']`)
 )
 
 var pyScanSkipDirs = map[string]struct{}{
@@ -85,30 +85,14 @@ func scanPythonContent(content string, refs *[]string, seen map[string]struct{})
 	addModelMatches(content, sentenceTransformerPattern, refs, seen)
 	addDatasetMatches(content, loadDatasetPattern, refs, seen)
 
-	for i, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+	for _, block := range findArgparseBlocks(lines) {
+		if !looksLikeModelFlagLine(block) {
 			continue
 		}
-		if !looksLikeModelFlagLine(line) {
-			continue
-		}
-		start := i - 3
-		if start < 0 {
-			start = 0
-		}
-		end := i + 3
-		if end >= len(lines) {
-			end = len(lines) - 1
-		}
-		for _, candidate := range lines[start : end+1] {
-			if strings.HasPrefix(strings.TrimSpace(candidate), "#") {
-				continue
-			}
-			for _, m := range argparseDefaultPattern.FindAllStringSubmatch(candidate, -1) {
-				id := strings.TrimSpace(m[1])
-				if isHFModelID(id) {
-					addRef(newAssetRef(AssetHFModel, id), refs, seen)
-				}
+		for _, m := range argparseDefaultPattern.FindAllStringSubmatch(block, -1) {
+			id := strings.TrimSpace(m[1])
+			if isLikelyHFModelArgDefault(id) {
+				addRef(newAssetRef(AssetHFModel, id), refs, seen)
 			}
 		}
 	}
@@ -136,6 +120,43 @@ func looksLikeModelFlagLine(line string) bool {
 	return modelFlagPattern.MatchString(line)
 }
 
+func findArgparseBlocks(lines []string) []string {
+	var blocks []string
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		if strings.HasPrefix(strings.TrimSpace(line), "#") || !strings.Contains(line, "add_argument(") {
+			continue
+		}
+
+		var blockLines []string
+		depth := 0
+		seenOpen := false
+
+		for ; i < len(lines); i++ {
+			current := lines[i]
+			if strings.HasPrefix(strings.TrimSpace(current), "#") {
+				continue
+			}
+			blockLines = append(blockLines, current)
+			depth += strings.Count(current, "(")
+			depth -= strings.Count(current, ")")
+			if strings.Contains(current, "add_argument(") {
+				seenOpen = true
+			}
+			if seenOpen && depth <= 0 {
+				break
+			}
+		}
+
+		if len(blockLines) > 0 {
+			blocks = append(blocks, strings.Join(blockLines, "\n"))
+		}
+	}
+
+	return blocks
+}
+
 func newAssetRef(kind AssetKind, id string) string {
 	return DataAsset{Kind: kind, ID: id}.String()
 }
@@ -146,6 +167,25 @@ func addRef(ref string, refs *[]string, seen map[string]struct{}) {
 	}
 	seen[ref] = struct{}{}
 	*refs = append(*refs, ref)
+}
+
+func isLikelyHFModelArgDefault(s string) bool {
+	if !isHFModelID(s) {
+		return false
+	}
+	if strings.Contains(s, "/") {
+		return true
+	}
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			return true
+		}
+		switch r {
+		case '-', '_', '.':
+			return true
+		}
+	}
+	return false
 }
 
 // ScanCommandHFRefs extracts HF model IDs from a command string.

@@ -48,6 +48,40 @@ parser.add_argument("--base-model", default="google/gemma-2b")
 	})
 }
 
+func TestPyScanPythonHFRefs_IgnoresNearbyNonModelDefaults(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "a.py", `
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", default="gpt2")
+parser.add_argument("--device", default="cuda", choices=["cuda", "mps", "cpu"])
+parser.add_argument("--mode", default="both")
+parser.add_argument("--output-dir", default="outputs")
+`)
+
+	refs := ScanPythonHFRefs(dir)
+	assertSetEqual(t, refs, []string{"hf:gpt2"})
+}
+
+func TestPyScanPythonHFRefs_ModelArgBlockWithSlashDefault(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "a.py", `
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--base-model",
+    type=str,
+    default="meta-llama/Llama-3-8B",
+    help="Base model",
+)
+`)
+
+	refs := ScanPythonHFRefs(dir)
+	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
+}
+
 func TestPyScanPythonHFRefs_DedupAcrossFiles(t *testing.T) {
 	dir := t.TempDir()
 	writePyFile(t, dir, "a.py", `model = AutoModel.from_pretrained("meta-llama/Llama-3-8B")`)
