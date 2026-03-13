@@ -394,6 +394,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		if latestRunID.Valid {
 			runID = latestRunID.Int64
 		}
+		if !markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, runID)) {
+			continue
+		}
 		resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
 		cleanupPrefix := r2keys.JobRunPrefix(jobID, runID)
 
@@ -404,17 +407,8 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-			if runID > 0 {
-				resultPrefix = r2keys.JobResultsPrefix(jobID)
-				cleanupPrefix = r2keys.JobPrefix(jobID)
-				if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-					os.RemoveAll(tmpDir)
-					continue
-				}
-			} else {
-				os.RemoveAll(tmpDir)
-				continue
-			}
+			os.RemoveAll(tmpDir)
+			continue
 		}
 
 		exitCode, startTimeUnix, endTimeUnix, failureReason := parseCloudJobResult(tmpDir, jobIDStr)
@@ -427,10 +421,6 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		if startTimeUnix == 0 {
 			if data, err := r2Client.GetObject(ctx, r2keys.JobAttemptStarted(jobID, runID)); err == nil {
 				startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-			} else if runID > 0 {
-				if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
-					startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-				}
 			}
 		}
 
@@ -475,27 +465,20 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
-		// Only update jobs still in queued status
-		var currentStatus string
-		var latestRunID sql.NullInt64
-		if err := database.QueryRow("SELECT status, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil {
+		runID, ok, err := jobEligibleForStartedMarker(database, jobID)
+		if err != nil {
+			log.Printf("sync: failed to check started-marker eligibility for job %d: %v", jobID, err)
 			continue
 		}
-		if currentStatus != db.StatusQueued {
+		if !ok {
 			continue
 		}
-
-		runID := int64(0)
-		if latestRunID.Valid {
-			runID = latestRunID.Int64
+		if !markers.HasStartedMarker(jobID, r2keys.JobAttemptStarted(jobID, runID)) {
+			continue
 		}
 		var startTimeUnix int64
 		if data, err := r2Client.GetObject(ctx, r2keys.JobAttemptStarted(jobID, runID)); err == nil {
 			startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-		} else if runID > 0 {
-			if data, err := r2Client.GetObject(ctx, r2keys.JobStarted(jobID)); err == nil {
-				startTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-			}
 		}
 
 		if _, err := database.Exec(
@@ -530,6 +513,50 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	}
 
 	return updated
+}
+
+// jobEligibleForStartedMarker returns the current run ID for a queued job that
+// is still attached to a live cloud instance. This prevents stale R2 .started
+// markers from resurrecting jobs that were already reset from failed instances.
+func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, error) {
+	var (
+		currentStatus   string
+		latestRunID     sql.NullInt64
+		cloudInstanceID sql.NullInt64
+		cloudInstStatus sql.NullString
+	)
+	if err := database.QueryRow(
+		`SELECT status, latest_run_id, cloud_instance_id
+		 FROM jobs
+		 WHERE id = ? AND tombstoned = 0`,
+		jobID,
+	).Scan(&currentStatus, &latestRunID, &cloudInstanceID); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if currentStatus != db.StatusQueued || !cloudInstanceID.Valid {
+		return 0, false, nil
+	}
+	if err := database.QueryRow(
+		`SELECT status FROM cloud_instances WHERE id = ?`,
+		cloudInstanceID.Int64,
+	).Scan(&cloudInstStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if campaign.IsInstanceTerminal(cloudInstStatus.String) {
+		return 0, false, nil
+	}
+
+	runID := int64(0)
+	if latestRunID.Valid {
+		runID = latestRunID.Int64
+	}
+	return runID, true, nil
 }
 
 func updateInstanceTerminationReason(database *sql.DB, instanceID int64) {
@@ -639,9 +666,6 @@ func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database 
 		runID = latestRunID.Int64
 	}
 	data, err := r2Client.GetObject(ctx, r2keys.JobAttemptLiveTimeseries(jobID, runID))
-	if (err != nil || len(data) == 0) && runID > 0 {
-		data, err = r2Client.GetObject(ctx, r2keys.JobLiveTimeseries(jobID))
-	}
 	if err != nil || len(data) == 0 {
 		return nil
 	}

@@ -90,17 +90,8 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	defer os.RemoveAll(tmpDir)
 
 	if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-		if runID > 0 {
-			resultPrefix = r2keys.JobResultsPrefix(jobID)
-			cleanupPrefix = r2keys.JobPrefix(jobID)
-			if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-				c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
-				return
-			}
-		} else {
-			c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
-			return
-		}
+		c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
+		return
 	}
 
 	// Try agent format first: completion.json has structured exit info

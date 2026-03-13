@@ -181,3 +181,87 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeOrphaned)
 	}
 }
+
+func TestJobEligibleForStartedMarker_SkipsQueuedJobWithoutCloudInstance(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if _, err := database.Exec(
+		`UPDATE jobs
+		 SET status = ?, start_time = ?, cloud_instance_id = NULL, host = ''
+		 WHERE id = ?`,
+		db.StatusQueued, 123, jobID,
+	); err != nil {
+		t.Fatalf("seed job state: %v", err)
+	}
+
+	runID, ok, err := jobEligibleForStartedMarker(database, jobID)
+	if err != nil {
+		t.Fatalf("jobEligibleForStartedMarker: %v", err)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false (runID=%d)", runID)
+	}
+}
+
+func TestJobEligibleForStartedMarker_SkipsQueuedJobOnFailedInstance(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+
+	runID, ok, err := jobEligibleForStartedMarker(database, jobID)
+	if err != nil {
+		t.Fatalf("jobEligibleForStartedMarker: %v", err)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false (runID=%d)", runID)
+	}
+}
+
+func TestJobEligibleForStartedMarker_AllowsQueuedJobOnRunningInstance(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+
+	runID, ok, err := jobEligibleForStartedMarker(database, jobID)
+	if err != nil {
+		t.Fatalf("jobEligibleForStartedMarker: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if runID == 0 {
+		t.Fatal("runID = 0, want non-zero latest run ID")
+	}
+}

@@ -740,10 +740,6 @@ func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFi
 	}
 	prefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
 	files, err := r2Client.ListObjects(ctx, prefix)
-	if err != nil && runID > 0 {
-		prefix = r2keys.JobOutputsPrefix(job.ID)
-		files, err = r2Client.ListObjects(ctx, prefix)
-	}
 	if err != nil {
 		return nil
 	}

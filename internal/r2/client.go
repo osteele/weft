@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -56,8 +57,10 @@ func New(cfg Config) (*Client, error) {
 
 // JobMarkers holds the results of a single-pass scan for job marker files.
 type JobMarkers struct {
-	Completed []string // Job IDs with .complete markers
-	Started   []string // Job IDs with .started markers
+	Completed     []string
+	Started       []string
+	completedKeys map[int64]map[string]struct{}
+	startedKeys   map[int64]map[string]struct{}
 }
 
 // ListJobMarkers scans for both .complete and .started markers in a single pass.
@@ -67,7 +70,10 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 		Prefix: aws.String(prefix),
 	}
 
-	result := &JobMarkers{}
+	result := &JobMarkers{
+		completedKeys: make(map[int64]map[string]struct{}),
+		startedKeys:   make(map[int64]map[string]struct{}),
+	}
 	paginator := s3.NewListObjectsV2Paginator(c.s3, input)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -76,12 +82,17 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 		}
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
-			var target *[]string
+			var (
+				target     *[]string
+				targetKeys map[int64]map[string]struct{}
+			)
 			switch {
 			case strings.HasSuffix(key, "/.complete"):
 				target = &result.Completed
+				targetKeys = result.completedKeys
 			case strings.HasSuffix(key, "/.started"):
 				target = &result.Started
+				targetKeys = result.startedKeys
 			default:
 				continue
 			}
@@ -89,7 +100,15 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 			parts := strings.Split(key, "/")
 			for i, p := range parts {
 				if p == "jobs" && i+1 < len(parts) {
-					*target = append(*target, parts[i+1])
+					jobID, convErr := strconv.ParseInt(parts[i+1], 10, 64)
+					if convErr != nil {
+						break
+					}
+					if _, ok := targetKeys[jobID]; !ok {
+						targetKeys[jobID] = make(map[string]struct{})
+						*target = append(*target, parts[i+1])
+					}
+					targetKeys[jobID][key] = struct{}{}
 					break
 				}
 			}
@@ -97,6 +116,26 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 	}
 
 	return result, nil
+}
+
+func (m *JobMarkers) HasCompletedMarker(jobID int64, key string) bool {
+	return m.hasMarker(m.completedKeys, jobID, key)
+}
+
+func (m *JobMarkers) HasStartedMarker(jobID int64, key string) bool {
+	return m.hasMarker(m.startedKeys, jobID, key)
+}
+
+func (m *JobMarkers) hasMarker(markers map[int64]map[string]struct{}, jobID int64, key string) bool {
+	if m == nil || key == "" {
+		return false
+	}
+	keys, ok := markers[jobID]
+	if !ok {
+		return false
+	}
+	_, ok = keys[key]
+	return ok
 }
 
 // ListCompleted returns job IDs that have a .complete marker under the given prefix.

@@ -108,6 +108,27 @@ func TestInstancePhaseLabel(t *testing.T) {
 	}
 }
 
+func TestJobAttemptProgressKey_UsesLatestRunID(t *testing.T) {
+	runID := int64(77)
+	jobs := []*db.Job{
+		{ID: 42, LatestRunID: &runID},
+	}
+
+	got := jobAttemptProgressKey(42, jobs)
+	want := "jobs/42/runs/77/progress"
+	if got != want {
+		t.Fatalf("jobAttemptProgressKey() = %q, want %q", got, want)
+	}
+}
+
+func TestJobAttemptProgressKey_FallsBackToJobScopedOnlyWithoutRun(t *testing.T) {
+	got := jobAttemptProgressKey(42, []*db.Job{{ID: 42}})
+	want := "jobs/42/progress"
+	if got != want {
+		t.Fatalf("jobAttemptProgressKey() = %q, want %q", got, want)
+	}
+}
+
 func TestInferInitialPhaseChangedAt_RunningUsesJobStartTime(t *testing.T) {
 	startTime := time.Now().Add(-45 * time.Second).Unix()
 	got := inferInitialPhaseChangedAt(

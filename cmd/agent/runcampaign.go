@@ -351,19 +351,19 @@ func cleanLogDir(logDir string) {
 // cleans up the R2 progress key when done.
 func runJobWithProgress(r2Bucket string, jobID, runID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
 	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
-	stopProgress := startProgressReporter(r2Bucket, jobID, logPath)
+	stopProgress := startProgressReporter(r2Bucket, jobID, runID, logPath)
 	stopLogs := startLogUploader(r2Bucket, jobID, runID, logPath)
 	defer func() {
 		stopProgress()
 		stopLogs()
-		r2Delete(r2Bucket, r2keys.JobProgress(jobID))
+		r2Delete(r2Bucket, r2keys.JobAttemptProgress(jobID, runID))
 	}()
 	return runner.RunSingleJob(cfg)
 }
 
 // startProgressReporter starts a goroutine that periodically reads the job log,
 // parses progress lines, and writes the percent to R2. Returns a stop function.
-func startProgressReporter(r2Bucket string, jobID int64, logPath string) func() {
+func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) func() {
 	var once sync.Once
 	done := make(chan struct{})
 	stop := func() { once.Do(func() { close(done) }) }
@@ -389,7 +389,7 @@ func startProgressReporter(r2Bucket string, jobID int64, logPath string) func() 
 				pct := prog.DisplayPercent()
 				if pct >= 0 && pct != lastPercent {
 					lastPercent = pct
-					r2Put(r2Bucket, r2keys.JobProgress(jobID), fmt.Sprintf("%d", pct))
+					r2Put(r2Bucket, r2keys.JobAttemptProgress(jobID, runID), fmt.Sprintf("%d", pct))
 				}
 			}
 		}

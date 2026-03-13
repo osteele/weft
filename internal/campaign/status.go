@@ -235,7 +235,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 				if hasStartedJob {
 					instancePhase = fetchInstancePhase(ctx, r2c, cloudInstanceID)
-					jobProgressID, jobProgress = fetchJobProgress(ctx, r2c, instancePhase)
+					jobProgressID, jobProgress = fetchJobProgress(ctx, r2c, instancePhase, jobs)
 
 					// Detect grace transition: R2 phase says "grace" but DB still says "running"
 					if instancePhase == "grace" && ci.Status == db.CloudInstanceStatusRunning {
@@ -382,7 +382,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 // fetchJobProgress extracts the running job ID from an instance phase string
 // and fetches its progress percentage from R2. Returns (0, -1) if not applicable.
-func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string) (jobID int64, percent int) {
+func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string, jobs []*db.Job) (jobID int64, percent int) {
 	verb, idStr, ok := strings.Cut(instancePhase, ":")
 	if !ok || verb != "running" {
 		return 0, -1
@@ -391,7 +391,7 @@ func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string)
 	if err != nil {
 		return 0, -1
 	}
-	pctStr := fetchR2Marker(ctx, r2c, r2keys.JobProgress(jid))
+	pctStr := fetchR2Marker(ctx, r2c, jobAttemptProgressKey(jid, jobs))
 	if pctStr == "" {
 		return jid, -1
 	}
@@ -400,6 +400,19 @@ func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string)
 		return jid, -1
 	}
 	return jid, pct
+}
+
+func jobAttemptProgressKey(jobID int64, jobs []*db.Job) string {
+	for _, job := range jobs {
+		if job != nil && job.ID == jobID {
+			runID := int64(0)
+			if job.LatestRunID != nil {
+				runID = *job.LatestRunID
+			}
+			return r2keys.JobAttemptProgress(jobID, runID)
+		}
+	}
+	return r2keys.JobAttemptProgress(jobID, 0)
 }
 
 // fetchR2Marker reads a string marker from R2 with a 3-second timeout.

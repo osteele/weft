@@ -466,12 +466,6 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 	}{
 		{finalKey: r2keys.JobAttemptResultLog(jobID, runID), manifestKey: cloudlog.ManifestKeyForRun(jobID, runID)},
 	}
-	if runID > 0 {
-		keys = append(keys, struct {
-			finalKey    string
-			manifestKey string
-		}{finalKey: r2keys.JobResultLog(jobID), manifestKey: cloudlog.ManifestKey(jobID)})
-	}
 
 	for _, keys := range keys {
 		exists, err := r2Client.ObjectExists(ctx, keys.finalKey)

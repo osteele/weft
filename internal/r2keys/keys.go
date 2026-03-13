@@ -60,6 +60,13 @@ func JobProgress(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/progress", jobID)
 }
 
+func JobAttemptProgress(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobProgress(jobID)
+	}
+	return fmt.Sprintf("%s/progress", JobRunPrefix(jobID, runID))
+}
+
 func JobLiveTimeseries(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/timeseries.jsonl", jobID)
 }
