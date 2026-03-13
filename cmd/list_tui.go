@@ -3,6 +3,8 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -70,6 +72,11 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		syncEnabled:    syncEnabled,
 		syncInProgress: syncEnabled,
 	}
+
+	origLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(origLogOutput)
+
 	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
 	if err != nil {
 		return fmt.Errorf("run list TUI: %w", err)

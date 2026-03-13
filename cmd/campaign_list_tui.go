@@ -3,6 +3,8 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -170,6 +172,11 @@ func (m campaignListModel) View() string {
 // Returns the selected campaign for watching, or nil if the user quit.
 func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 	model := newCampaignListModel(database, campaigns)
+
+	origLogOutput := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(origLogOutput)
+
 	p := tea.NewProgram(model)
 	finalModel, err := p.Run()
 	if err != nil {
