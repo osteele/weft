@@ -16,7 +16,7 @@ func DiscoverOutputs(workDir string, dirs []string) ([]OutputFile, error) {
 		return nil, nil
 	}
 
-	workDir = expandTilde(workDir)
+	workDir = ExpandTilde(workDir)
 
 	var files []OutputFile
 	for _, dir := range dirs {
@@ -53,8 +53,13 @@ func DiscoverOutputs(workDir string, dirs []string) ([]OutputFile, error) {
 	return files, nil
 }
 
-// expandTilde replaces a leading "~/" with the user's home directory.
-func expandTilde(path string) string {
+// ExpandTilde replaces a leading "~" with the user's home directory.
+func ExpandTilde(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+	}
 	if strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, path[2:])

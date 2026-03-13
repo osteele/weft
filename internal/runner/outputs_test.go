@@ -102,6 +102,26 @@ func TestDiscoverOutputs(t *testing.T) {
 			t.Fatalf("expected 2 files, got %d", len(files))
 		}
 	})
+
+	t.Run("expands bare tilde", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		outputDir := filepath.Join(homeDir, "output")
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			t.Fatalf("mkdir output: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(outputDir, "results.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatalf("write results: %v", err)
+		}
+
+		files, err := DiscoverOutputs("~", []string{"output/"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) != 1 || files[0].RelPath != "output/results.json" {
+			t.Fatalf("unexpected files: %+v", files)
+		}
+	})
 }
 
 func TestTotalSizeMB(t *testing.T) {

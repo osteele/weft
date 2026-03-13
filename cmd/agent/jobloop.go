@@ -233,6 +233,7 @@ func patchPhaseUploadWindow(logDir string, jobID, uploadStart, uploadEnd int64) 
 }
 
 func hasOutputDirs(workDir string) bool {
+	workDir = runner.ExpandTilde(workDir)
 	for _, dir := range config.DefaultOutputDirs {
 		dir = filepath.Clean(dir)
 		info, err := os.Stat(filepath.Join(workDir, dir))

@@ -73,7 +73,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	ArchiveExistingFiles(cfg.LogDir, cfg.JobID)
 
 	// Expand ~ in working directory
-	expandedDir := expandTilde(workingDir)
+	expandedDir := ExpandTilde(workingDir)
 
 	// Write metadata
 	WriteMetaFile(paths, cfg.JobID, workingDir, command, job.Desc, "single", phases.WrapperStart)

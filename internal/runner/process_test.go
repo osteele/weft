@@ -75,3 +75,20 @@ func TestMergeEnvVars_EmptyOverlay(t *testing.T) {
 		t.Errorf("expected 2 vars, got %d", len(result))
 	}
 }
+
+func TestMergeEnvVars_ExpandsLeadingTildeValues(t *testing.T) {
+	base := []string{"HOME=/home/tester"}
+	overlay := []string{
+		"WEFT_ARTIFACT_MANIFEST=~/.cache/weft/artifacts/12.json",
+		"KEEP_LITERAL=~artifact",
+		"HOME=/srv/runner",
+		"RJ_ARTIFACT_MANIFEST=~/artifacts/12.json",
+	}
+
+	result := mergeEnvVars(base, overlay)
+
+	assertEnvVar(t, result, "HOME", "/srv/runner")
+	assertEnvVar(t, result, "WEFT_ARTIFACT_MANIFEST", "/srv/runner/.cache/weft/artifacts/12.json")
+	assertEnvVar(t, result, "RJ_ARTIFACT_MANIFEST", "/srv/runner/artifacts/12.json")
+	assertEnvVar(t, result, "KEEP_LITERAL", "~artifact")
+}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -93,7 +94,43 @@ func mergeEnvVars(base, overlay []string) []string {
 		addVar(ev)
 	}
 
+	homeDir := envValue(result, "HOME")
+	if homeDir == "" {
+		homeDir, _ = os.UserHomeDir()
+	}
+	for i, ev := range result {
+		result[i] = expandLeadingTildeEnvValue(ev, homeDir)
+	}
+
 	return result
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, ev := range env {
+		if strings.HasPrefix(ev, prefix) {
+			return strings.TrimPrefix(ev, prefix)
+		}
+	}
+	return ""
+}
+
+func expandLeadingTildeEnvValue(ev, homeDir string) string {
+	if homeDir == "" {
+		return ev
+	}
+	key, value, ok := strings.Cut(ev, "=")
+	if !ok {
+		return ev
+	}
+	switch {
+	case value == "~":
+		return key + "=" + homeDir
+	case strings.HasPrefix(value, "~/"):
+		return key + "=" + filepath.Join(homeDir, value[2:])
+	default:
+		return ev
+	}
 }
 
 // WritePIDFiles writes the PID and PGID files for a job.

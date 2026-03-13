@@ -16,7 +16,7 @@ type CacheProbe struct {
 
 // ProbeCacheSizes measures the sizes of common cache directories and root disk usage.
 func ProbeCacheSizes() CacheProbe {
-	home := expandTilde("~/")
+	home := ExpandTilde("~/")
 	probe := CacheProbe{
 		HFBytes: dirSizeBytes(filepath.Join(home, ".cache", "huggingface")),
 		UVBytes: dirSizeBytes(filepath.Join(home, ".cache", "uv")),

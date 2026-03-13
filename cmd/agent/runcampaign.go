@@ -210,6 +210,7 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 	var attempted int
 	var failed int
 	var totalDuration time.Duration
+	workDir = runner.ExpandTilde(workDir)
 
 	for _, dir := range config.DefaultOutputDirs {
 		dir = strings.TrimRight(dir, "/")
