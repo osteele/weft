@@ -751,6 +751,69 @@ func TestListActiveOnPremJobs(t *testing.T) {
 	}
 }
 
+func TestFilterJobsByHostsMatchesOnlyRequestedHosts(t *testing.T) {
+	cloudInstanceID := int64(17)
+	jobs := []*Job{
+		{ID: 1, Host: "studio", Status: StatusQueued},
+		{ID: 2, Host: "", Status: StatusQueued},
+		{ID: 3, Host: CloudInstanceHost(cloudInstanceID), Status: StatusQueued, CloudInstanceID: &cloudInstanceID},
+		{ID: 4, Host: "cool30", Status: StatusRunning},
+	}
+
+	filtered := FilterJobsByHosts(jobs, []string{"studio"})
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 studio job, got %d", len(filtered))
+	}
+	if filtered[0].ID != 1 {
+		t.Fatalf("filtered job ID = %d, want 1", filtered[0].ID)
+	}
+}
+
+func TestListJobsWithMaxAgeForHostsMatchesOnlyRequestedHosts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	studioJobID, err := RecordQueuedWithGPU(database, "studio", "/tmp/project-studio", "python train.py", "studio", "")
+	if err != nil {
+		t.Fatalf("record studio job: %v", err)
+	}
+	if _, err := RecordQueuedWithGPU(database, "cool30", "/tmp/project-cool30", "python eval.py", "cool30", ""); err != nil {
+		t.Fatalf("record other host job: %v", err)
+	}
+	if _, err := RecordQueuedWithGPU(database, "", "/tmp/project-unplaced", "python wait.py", "unplaced", ""); err != nil {
+		t.Fatalf("record unplaced job: %v", err)
+	}
+	cloudJobID, err := RecordQueuedWithGPU(database, CloudInstanceHost(17), "/tmp/project-cloud", "python cloud.py", "cloud", "")
+	if err != nil {
+		t.Fatalf("record cloud job: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, cloudJobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance on job: %v", err)
+	}
+
+	jobs, err := ListJobsWithMaxAgeForHosts(database, "", []string{"studio"}, 0, 0, nil, "")
+	if err != nil {
+		t.Fatalf("ListJobsWithMaxAgeForHosts: %v", err)
+	}
+
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 studio job, got %d", len(jobs))
+	}
+	if jobs[0].ID != studioJobID {
+		t.Fatalf("listed job ID = %d, want %d", jobs[0].ID, studioJobID)
+	}
+	if jobs[0].Host != "studio" {
+		t.Fatalf("listed host = %q, want studio", jobs[0].Host)
+	}
+}
+
 func TestListUniqueActiveHostsIncludesDeferredOpHosts(t *testing.T) {
 	database := SetupTestDB(t)
 

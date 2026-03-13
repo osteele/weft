@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"text/tabwriter"
 	"time"
 
-	"github.com/osteele/weft/internal/campaign"
-	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
@@ -22,7 +19,8 @@ var listCmd = &cobra.Command{
 	Long: `Query and search job history from the local database.
 
 This shows historical jobs, not queue contents. Use --queued to see only jobs
-waiting in a queue.
+waiting in a queue. In an interactive terminal this defaults to a paged TUI;
+otherwise it prints plain text. Use --tui or --plain to override.
 
 By default, only shows jobs from the last 7 days and hosts synced in the last 2 days.
 Use --all/-a to include older jobs and --all-hosts to include older hosts.
@@ -64,6 +62,8 @@ var (
 	listTags        []string
 	listExcludeTags []string
 	listProject     string
+	listTUI         bool
+	listPlain       bool
 )
 
 const defaultHostSyncWindow = 48 * time.Hour
@@ -89,6 +89,9 @@ func addListFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
+	cmd.Flags().BoolVar(&listTUI, "tui", false, "Force interactive TUI mode")
+	cmd.Flags().BoolVar(&listPlain, "plain", false, "Force plain text output")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
 func init() {
@@ -97,47 +100,26 @@ func init() {
 }
 
 func runList(cmd *cobra.Command, args []string) error {
+	useTUI := false
+	if listCleanup == 0 && listShow == 0 {
+		var err error
+		useTUI, err = resolveCampaignTUI(listTUI, listPlain)
+		if err != nil {
+			return err
+		}
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
 
-	// Sync logic: fast sync by default, full sync with --sync, skip with --no-sync
-	if !listNoSync {
-		if listSync {
-			// Full sync requested - respect --host filter if specified
-			if listHost != "" {
-				if err := performListSyncForHost(database, listHost); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
-				}
-			} else {
-				if err := performListSync(database); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: sync failed: %v\n", err)
-				}
-			}
-		} else {
-			// Fast sync by default - only sync filtered host if specified
-			var completed bool
-			var unreachable []string
-			if listHost != "" {
-				completed, unreachable = performFastSyncForHosts(database, []string{listHost}, false)
-			} else {
-				completed, unreachable = performFastSync(database, false)
-			}
-			if !completed {
-				if note := buildStaleDataNote(database, unreachable); note != "" {
-					fmt.Fprintln(os.Stderr, note)
-				}
-			}
+	// TUI shows current DB state immediately and syncs in the background.
+	if !useTUI {
+		for _, warning := range syncListData(database) {
+			fmt.Fprintln(os.Stderr, warning)
 		}
-
-		// Reconcile cloud instances and sync cloud job results — soft failure
-		cfg, _ := config.Load()
-		syncCloudState(cfg, database, campaign.NewReconciler(), false)
-
-		// Start queue runners on hosts with queued jobs
-		startQueueRunnersForQueuedHosts(database)
 	}
 
 	// Handle cleanup mode
@@ -155,17 +137,63 @@ func runList(cmd *cobra.Command, args []string) error {
 		return showJob(database, listShow)
 	}
 
+	jobs, err := collectJobsForList(database, args)
+	if err != nil {
+		return err
+	}
+
+	if useTUI {
+		return runListTUI(database, args, jobs, buildListTitle(args), !listNoSync)
+	}
+	return printJobs(jobs)
+}
+
+func syncListData(database *sql.DB) []string {
+	if listNoSync {
+		return nil
+	}
+
+	var warnings []string
+	if listSync {
+		if listHost != "" {
+			if err := performListSyncForHost(database, listHost); err != nil {
+				warnings = append(warnings, fmt.Sprintf("Warning: sync failed: %v", err))
+			}
+		} else {
+			if err := performListSync(database); err != nil {
+				warnings = append(warnings, fmt.Sprintf("Warning: sync failed: %v", err))
+			}
+		}
+		return warnings
+	}
+
+	var completed bool
+	var unreachable []string
+	if listHost != "" {
+		completed, unreachable = performFastSyncForHosts(database, []string{listHost}, false)
+	} else {
+		completed, unreachable = performFastSync(database, false)
+	}
+	if !completed {
+		if note := buildStaleDataNote(database, unreachable); note != "" {
+			warnings = append(warnings, note)
+		}
+	}
+	return warnings
+}
+
+func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	statusFilter, processedFilter := listStatusFilters()
 
 	// Handle explicit job IDs: weft list 12::14, weft list 12...13, weft list 12,13,14
 	if len(args) > 0 {
 		jobIDs, err := ParseJobIDs(args)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		jobs, missingIDs, err := listJobsByID(database, jobIDs)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if len(missingIDs) > 0 {
 			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", formatJobIDList(missingIDs))
@@ -174,7 +202,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
-		return printJobs(jobs)
+		return jobs, nil
 	}
 
 	hostFilterHosts := []string{}
@@ -186,7 +214,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	} else if !listAllHosts {
 		recentHosts, err := db.ListHostsSyncedSince(database, time.Now().Add(-defaultHostSyncWindow))
 		if err != nil {
-			return fmt.Errorf("list recent hosts: %w", err)
+			return nil, fmt.Errorf("list recent hosts: %w", err)
 		}
 		if len(recentHosts) > 0 {
 			hostFilterHosts = recentHosts
@@ -201,7 +229,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
 		if err != nil {
-			return fmt.Errorf("search: %w", err)
+			return nil, fmt.Errorf("search: %w", err)
 		}
 		jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
@@ -211,7 +239,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
-		return printJobs(jobs)
+		return jobs, nil
 	}
 
 	// Default to 7 days unless --all is specified
@@ -226,7 +254,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	jobs, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
 	if err != nil {
-		return fmt.Errorf("list jobs: %w", err)
+		return nil, fmt.Errorf("list jobs: %w", err)
 	}
 	jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
@@ -235,7 +263,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		jobs = jobs[:listLimit]
 	}
 
-	return printJobs(jobs)
+	return jobs, nil
 }
 
 func listStatusFilters() (statusFilter, processedFilter string) {
@@ -360,45 +388,40 @@ func showJob(database *sql.DB, id int64) error {
 }
 
 func printJobs(jobs []*db.Job) error {
-	if len(jobs) == 0 {
-		fmt.Println("No jobs found")
-		return nil
+	return writeListPlainOutput(renderJobListPlain(jobs, listOutputWidth()))
+}
+
+func buildListTitle(args []string) string {
+	parts := []string{"Jobs"}
+	if len(args) > 0 {
+		parts = append(parts, "selection")
 	}
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tHOST\tSTATUS\tSTARTED\tDIR\tDESCRIPTION")
-
-	for _, job := range jobs {
-		started := "—"
-		if job.StartTime > 0 {
-			started = time.Unix(job.StartTime, 0).Format("01/02 15:04")
-		}
-
-		status := job.EffectiveStatus()
-		if status == db.StatusCompleted && job.ExitCode != nil {
-			if *job.ExitCode == 0 {
-				status = "completed ✓"
-			} else {
-				status = fmt.Sprintf("failed (%d)", *job.ExitCode)
-				if job.RetryCount > 0 {
-					status += " retried"
-				} else if job.ErrorDiagnosis != "" {
-					status += " diagnosed"
-				}
-			}
-		}
-
-		// Show description (user or generated), otherwise truncated command
-		display := job.EffectiveDescription()
-		if len(display) > 50 {
-			display = display[:49] + "…"
-		}
-
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n",
-			job.ID, job.Host, status, started, job.DirectoryTailDisplay(), display)
+	if listHost != "" {
+		parts = append(parts, "host="+listHost)
 	}
-
-	return w.Flush()
+	status, processed := listStatusFilters()
+	if status != "" {
+		parts = append(parts, "status="+status)
+	} else if processed != "" {
+		parts = append(parts, processed)
+	} else {
+		if listQueued {
+			parts = append(parts, "queued")
+		}
+		if listRunning {
+			parts = append(parts, "running")
+		}
+		if listCompleted {
+			parts = append(parts, "completed")
+		}
+		if listDead {
+			parts = append(parts, "dead")
+		}
+	}
+	if listSearch != "" {
+		parts = append(parts, "search="+listSearch)
+	}
+	return strings.Join(parts, " • ")
 }
 
 // performListSync runs sync for list --sync flag
