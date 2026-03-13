@@ -197,6 +197,7 @@ func instanceToCloud(inst *Instance) *cloud.Instance {
 		SSHHost:     inst.SSHHost,
 		SSHPort:     inst.SSHPort,
 		CostPerHour: inst.CostPerHour,
+		DiskGB:      inst.DiskSpace,
 		Label:       inst.Label,
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
@@ -795,6 +797,30 @@ func LaunchInstance(
 		createOpts.Label = fmt.Sprintf("weft/c%d", *campaignID)
 	}
 
+	campaignLogID := "nil"
+	if campaignID != nil {
+		campaignLogID = fmt.Sprintf("%d", *campaignID)
+	}
+	jobIDs := make([]string, 0, len(group.Jobs))
+	for _, job := range group.Jobs {
+		jobIDs = append(jobIDs, fmt.Sprintf("%d", job.ID))
+	}
+	oplog.Log(oplog.OpCloudInstanceLaunchRequested, oplog.WithDetailf(
+		"cloud_instance_id=%d provider=%s campaign_id=%s offer_id=%s jobs=[%s] requested_disk_gb=%d base_disk_gb=%d group_disk_gb=%d offer_disk_gb=%.0f inputs=%d gpu=%s label=%s",
+		instanceID,
+		client.Provider(),
+		campaignLogID,
+		offer.ProviderID,
+		strings.Join(jobIDs, ","),
+		createOpts.DiskGB,
+		cloud.DefaultCreateOpts("").DiskGB,
+		group.DiskGB,
+		offer.DiskSpaceGB,
+		len(group.AllInputs()),
+		group.GPUSpec(),
+		createOpts.Label,
+	))
+
 	// Create cloud instance
 	progress("creating instance")
 	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
@@ -805,6 +831,52 @@ func LaunchInstance(
 	}
 
 	providerInstID := inst.ProviderID
+	oplog.Log(oplog.OpCloudInstanceLaunchCreated, oplog.WithDetailf(
+		"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d offer_id=%s status=%s",
+		instanceID,
+		client.Provider(),
+		providerInstID,
+		createOpts.DiskGB,
+		offer.ProviderID,
+		inst.Status,
+	))
+
+	readback, readbackErr := client.ShowInstance(providerInstID)
+	if readbackErr != nil {
+		oplog.Log(oplog.OpCloudInstanceLaunchReadback,
+			oplog.WithError(readbackErr),
+			oplog.WithDetailf(
+				"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d",
+				instanceID,
+				client.Provider(),
+				providerInstID,
+				createOpts.DiskGB,
+			),
+		)
+	} else {
+		oplog.Log(oplog.OpCloudInstanceLaunchReadback, oplog.WithDetailf(
+			"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f status=%s ssh_host=%s ssh_port=%d",
+			instanceID,
+			client.Provider(),
+			providerInstID,
+			createOpts.DiskGB,
+			readback.DiskGB,
+			readback.Status,
+			readback.SSHHost,
+			readback.SSHPort,
+		))
+		if createOpts.DiskGB > 0 && readback.DiskGB > 0 && math.Abs(readback.DiskGB-float64(createOpts.DiskGB)) >= 1 {
+			oplog.Log(oplog.OpCloudInstanceLaunchMismatch, oplog.WithDetailf(
+				"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f offer_disk_gb=%.0f",
+				instanceID,
+				client.Provider(),
+				providerInstID,
+				createOpts.DiskGB,
+				readback.DiskGB,
+				offer.DiskSpaceGB,
+			))
+		}
+	}
 
 	// Record provider instance ID
 	if err := db.SetCloudInstanceProviderID(database, instanceID, providerInstID); err != nil {

@@ -27,6 +27,7 @@ type Instance struct {
 	SSHHost     string  `json:"ssh_host"`
 	SSHPort     int     `json:"ssh_port"`
 	CostPerHour float64 `json:"dph_total"`
+	DiskSpace   float64 `json:"disk_space"`
 	Label       string  `json:"label"`
 }
 

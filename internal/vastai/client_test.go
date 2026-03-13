@@ -45,7 +45,8 @@ const showInstancesJSON = `[
     "actual_status": "running",
     "ssh_host": "ssh5.vast.ai",
     "ssh_port": 22222,
-    "dph_total": 0.45
+    "dph_total": 0.45,
+    "disk_space": 150.0
   }
 ]`
 
@@ -114,6 +115,9 @@ func TestParseShowInstances(t *testing.T) {
 	}
 	if inst.SSHPort != 22222 {
 		t.Errorf("instance.SSHPort = %d, want 22222", inst.SSHPort)
+	}
+	if inst.DiskSpace != 150.0 {
+		t.Errorf("instance.DiskSpace = %f, want 150.0", inst.DiskSpace)
 	}
 }
 

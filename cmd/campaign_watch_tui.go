@@ -71,8 +71,10 @@ type watchSyncDoneMsg struct{}
 
 // watchJobsRefreshedMsg carries refreshed job lists from a background DB query.
 type watchJobsRefreshedMsg struct {
-	jobs     map[int64][]*db.Job
-	outcomes map[int64]map[int64]string // instanceID → (jobID → outcome)
+	cloudInstances map[int64]*db.CloudInstance
+	jobs           map[int64][]*db.Job
+	outcomes       map[int64]map[int64]string // instanceID → (jobID → outcome)
+	quitAfter      bool
 }
 
 // watchCheckDoneMsg triggers a periodic DB-based check for all-terminal state.
@@ -212,29 +214,30 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(terminalIDs) == 0 {
 			return m, nil
 		}
-		return m, func() tea.Msg {
-			result := make(map[int64][]*db.Job, len(terminalIDs))
-			outcomesResult := make(map[int64]map[int64]string, len(terminalIDs))
-			for _, id := range terminalIDs {
-				if jobs, err := db.GetCloudInstanceJobsIncludingAttempts(m.database, id); err == nil && jobs != nil {
-					result[id] = jobs
-				}
-				if outcomes, err := db.GetAttemptOutcomesByInstance(m.database, id); err == nil {
-					outcomesResult[id] = outcomes
-				}
-			}
-			return watchJobsRefreshedMsg{jobs: result, outcomes: outcomesResult}
-		}
+		return m, refreshWatchInstancesFromDB(m.database, terminalIDs, false)
 
 	case watchJobsRefreshedMsg:
+		for id, ci := range msg.cloudInstances {
+			u := m.updates[id]
+			u.CloudInstance = ci
+			m.updates[id] = u
+		}
 		for id, jobs := range msg.jobs {
-			if u, ok := m.updates[id]; ok {
-				u.Jobs = jobs
-				if outcomes, ok := msg.outcomes[id]; ok {
-					u.JobAttemptOutcomes = outcomes
-				}
-				m.updates[id] = u
+			u := m.updates[id]
+			u.Jobs = jobs
+			if outcomes, ok := msg.outcomes[id]; ok {
+				u.JobAttemptOutcomes = outcomes
 			}
+			m.updates[id] = u
+		}
+		if msg.quitAfter {
+			m.done = true
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
+				return tea.QuitMsg{}
+			})
 		}
 		return m, nil
 
@@ -255,11 +258,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchCheckDoneResultMsg:
 		if msg.allTerminal {
-			m.done = true
-			m.cancel()
-			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg {
-				return tea.QuitMsg{}
-			})
+			return m, refreshWatchInstancesFromDB(m.database, m.instanceIDs, true)
 		}
 		return m, scheduleCheckDone()
 
@@ -273,23 +272,40 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) checkAllDone() tea.Cmd {
-	allDone := true
-	for _, id := range m.instanceIDs {
-		if u, ok := m.updates[id]; ok {
-			if u.CloudInstance != nil && !campaign.IsInstanceTerminal(u.CloudInstance.Status) {
-				allDone = false
-				break
+	return func() tea.Msg {
+		for _, id := range m.instanceIDs {
+			ci, err := db.GetCloudInstance(m.database, id)
+			if err != nil || ci == nil || !campaign.IsInstanceTerminal(ci.Status) {
+				return watchCheckDoneResultMsg{allTerminal: false}
 			}
-		} else {
-			allDone = false
-			break
+		}
+		return watchCheckDoneResultMsg{allTerminal: true}
+	}
+}
+
+func refreshWatchInstancesFromDB(database *sql.DB, instanceIDs []int64, quitAfter bool) tea.Cmd {
+	return func() tea.Msg {
+		cloudInstances := make(map[int64]*db.CloudInstance, len(instanceIDs))
+		jobs := make(map[int64][]*db.Job, len(instanceIDs))
+		outcomes := make(map[int64]map[int64]string, len(instanceIDs))
+		for _, id := range instanceIDs {
+			if ci, err := db.GetCloudInstance(database, id); err == nil && ci != nil {
+				cloudInstances[id] = ci
+			}
+			if instanceJobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, id); err == nil && instanceJobs != nil {
+				jobs[id] = instanceJobs
+			}
+			if instanceOutcomes, err := db.GetAttemptOutcomesByInstance(database, id); err == nil {
+				outcomes[id] = instanceOutcomes
+			}
+		}
+		return watchJobsRefreshedMsg{
+			cloudInstances: cloudInstances,
+			jobs:           jobs,
+			outcomes:       outcomes,
+			quitAfter:      quitAfter,
 		}
 	}
-	if allDone {
-		m.cancel()
-		return tea.Quit
-	}
-	return nil
 }
 
 func (m watchModel) View() string {

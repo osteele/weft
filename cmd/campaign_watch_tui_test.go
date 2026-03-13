@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -134,6 +135,87 @@ func TestWatchModelView_ShowsJobDirectoryTail(t *testing.T) {
 	out := stripANSI(m.View())
 	if !strings.Contains(out, "project-alpha") {
 		t.Fatalf("output missing job directory tail, got:\n%s", out)
+	}
+}
+
+func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, description)
+		 VALUES (199, ?, ?, 0, ?, 'uv run llm-perf run exp_035_memory_capacity_cliff', '/workspace/llm-performance-models', 'EXP-035')`,
+		instanceID, db.CloudInstanceHost(instanceID), db.StatusRunning,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := db.InsertJobCloudAttempt(database, 199, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	m := watchModel{
+		instanceIDs: []int64{instanceID},
+		updates: map[int64]campaign.InstanceUpdate{
+			instanceID: {
+				CloudInstance: &db.CloudInstance{
+					ID:       instanceID,
+					Status:   db.CloudInstanceStatusRunning,
+					Provider: "vastai",
+					GPUSpec:  "A40",
+				},
+				Instance: &cloud.Instance{Status: "running"},
+				Jobs: []*db.Job{
+					{
+						ID:              199,
+						Status:          db.StatusRunning,
+						CloudInstanceID: &instanceID,
+						Host:            db.CloudInstanceHost(instanceID),
+						WorkingDir:      "/workspace/llm-performance-models",
+						Description:     "EXP-035",
+					},
+				},
+			},
+		},
+		database:       database,
+		jobProgressHWM: map[int64]int{},
+	}
+
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonDiskFull); err != nil {
+		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
+	}
+	if _, err := db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetCloudInstanceJobs: %v", err)
+	}
+
+	nextModel, cmd := m.Update(watchCheckDoneResultMsg{allTerminal: true})
+	refreshMsg := cmd()
+	refreshedModel, _ := nextModel.(watchModel).Update(refreshMsg)
+	got := refreshedModel.(watchModel)
+
+	if !got.done {
+		t.Fatalf("expected done=true after final refresh")
+	}
+	if got.updates[instanceID].CloudInstance == nil || got.updates[instanceID].CloudInstance.Status != db.CloudInstanceStatusFailed {
+		t.Fatalf("instance status = %+v, want failed", got.updates[instanceID].CloudInstance)
+	}
+	if got.updates[instanceID].JobAttemptOutcomes[199] != db.AttemptOutcomeOrphaned {
+		t.Fatalf("job outcome = %q, want %q", got.updates[instanceID].JobAttemptOutcomes[199], db.AttemptOutcomeOrphaned)
+	}
+
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "failed (disk_full)") {
+		t.Fatalf("expected failed instance in view, got:\n%s", out)
+	}
+	if !strings.Contains(out, "orphaned") {
+		t.Fatalf("expected orphaned job in view, got:\n%s", out)
 	}
 }
 

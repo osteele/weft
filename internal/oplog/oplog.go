@@ -62,6 +62,12 @@ const (
 	OpR2Put    = "r2.put"
 	OpR2Delete = "r2.delete"
 	OpR2Copy   = "r2.copy" // rclone copy (bulk upload)
+
+	// Cloud launch telemetry
+	OpCloudInstanceLaunchRequested = "cloud.instance.launch.requested"
+	OpCloudInstanceLaunchCreated   = "cloud.instance.launch.created"
+	OpCloudInstanceLaunchReadback  = "cloud.instance.launch.readback"
+	OpCloudInstanceLaunchMismatch  = "cloud.instance.launch.mismatch"
 )
 
 // Entry represents a single log entry in JSONL format.

@@ -43,6 +43,7 @@ type Instance struct {
 	SSHHost     string
 	SSHPort     int
 	CostPerHour float64
+	DiskGB      float64
 	DataCenter  string
 	Label       string // provider-assigned label/name (e.g., "weft/c42")
 }
