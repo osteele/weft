@@ -4,7 +4,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/llm"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/progress"
@@ -207,6 +209,15 @@ type jobEnvLoadedMsg struct {
 type hostSyncTimesLoadedMsg struct {
 	times map[string]time.Time
 	err   error
+}
+
+type cloudDiscoveryLoadedMsg struct {
+	clients []cloud.Client
+	err     error
+}
+
+type llmGeneratorLoadedMsg struct {
+	generator *llm.DescriptionGenerator
 }
 
 // Cloud menu messages

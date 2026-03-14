@@ -64,14 +64,15 @@ type SyncRequest struct {
 
 // SyncResult is the result of a sync operation
 type SyncResult struct {
-	Host             string
-	Updated          int
-	QueueStarted     bool
-	QueueRunnerError string
-	HostInfo         *db.CachedHostInfo      // Refreshed host info (nil on error)
-	HostFull         *Host                   // Full host with dynamic metrics (nil on error)
-	QueueStatus      *queuerunner.StatusInfo // Queue runner status (nil on error)
-	Error            error
+	Host               string
+	Updated            int
+	QueueStarted       bool
+	QueueDispatchError string
+	QueueRunnerError   string
+	HostInfo           *db.CachedHostInfo      // Refreshed host info (nil on error)
+	HostFull           *Host                   // Full host with dynamic metrics (nil on error)
+	QueueStatus        *queuerunner.StatusInfo // Queue runner status (nil on error)
+	Error              error
 }
 
 // hostSyncState tracks sync state for a single host
@@ -145,6 +146,13 @@ func (w *SyncWorker) Request(req SyncRequest) {
 // Results returns the channel for receiving sync results
 func (w *SyncWorker) Results() <-chan SyncResult {
 	return w.results
+}
+
+// SetCloudClients updates the cloud clients used by periodic cloud reconciliation.
+func (w *SyncWorker) SetCloudClients(clients []cloud.Client) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.cloudClients = append([]cloud.Client(nil), clients...)
 }
 
 func (w *SyncWorker) run() {
@@ -226,7 +234,12 @@ func (w *SyncWorker) checkUnplacedJobs() {
 // reconcileCloudJobs runs full cloud reconciliation: queries provider APIs,
 // discovers dead instances, resets orphaned jobs, and auto-closes campaigns.
 func (w *SyncWorker) reconcileCloudJobs() {
-	if len(w.cloudClients) == 0 {
+	w.mu.Lock()
+	cloudClients := append([]cloud.Client(nil), w.cloudClients...)
+	r2Client := w.r2Client
+	w.mu.Unlock()
+
+	if len(cloudClients) == 0 {
 		// No cloud clients — fall back to DB-only reconciliation
 		n, err := db.ResetJobsOnTerminalCloudInstances(w.database)
 		if err != nil {
@@ -243,7 +256,7 @@ func (w *SyncWorker) reconcileCloudJobs() {
 		return
 	}
 
-	result := cloudsync.SyncState(w.database, w.reconciler, w.cloudClients, w.r2Client, nil)
+	result := cloudsync.SyncState(w.database, w.reconciler, cloudClients, r2Client, nil)
 	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
 		log.Printf("cloud reconcile: reconciled %d dead instance(s)", result.ReconcileResult.Reconciled)
 		select {
@@ -336,6 +349,7 @@ func (w *SyncWorker) doSync(host string) {
 
 	result.Updated = syncResult.Updated
 	result.QueueStarted = syncResult.QueueStarted
+	result.QueueDispatchError = syncResult.QueueDispatchError
 	result.QueueRunnerError = syncResult.QueueRunnerError
 
 	// Fetch host info and queue status in a single SSH call (best-effort)
@@ -517,6 +531,9 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 	}
 	if result.QueueRunnerError != "" {
 		cmds = append(cmds, m.setFlash(fmt.Sprintf("Queue runner error (%s): %s", result.Host, result.QueueRunnerError), true))
+	}
+	if result.QueueDispatchError != "" {
+		cmds = append(cmds, m.setFlash(fmt.Sprintf("Queue dispatch error (%s): %s", result.Host, result.QueueDispatchError), true))
 	}
 
 	// Refresh jobs if updates occurred

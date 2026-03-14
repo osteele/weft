@@ -83,18 +83,17 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Enable embedded remediation so failed jobs get diagnosed
 	// even without the coordinator daemon running.
-	mon.EnableRemediation(cfg)
+	mon.EnableRemediationWithLogger(cfg, log.New(io.Discard, "[remediator] ", log.LstdFlags))
 
 	// Redirect log output away from the terminal while the TUI is running,
 	// since log.Printf writes to stderr and corrupts the alternate screen.
-	// This must come after EnableRemediation, which captures log.Writer()
-	// for the remediator's own logger.
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(origLogOutput)
-	mon.Start()
-	defer mon.Stop()
 	opts.Monitor = mon
+	defer mon.Stop()
+	snapshot := tui.LoadInitialSnapshot(database, opts.HostCacheDuration)
+	opts.InitialSnapshot = &snapshot
 
 	model := tui.NewModelWithOptions(database, opts)
 

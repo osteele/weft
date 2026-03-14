@@ -167,6 +167,14 @@ func New(database *sql.DB, cfg Config) *Monitor {
 // without requiring a separate coordinator daemon.
 func (m *Monitor) EnableRemediation(appConfig *config.Config) {
 	logger := log.New(log.Writer(), "[remediator] ", log.LstdFlags)
+	m.EnableRemediationWithLogger(appConfig, logger)
+}
+
+// EnableRemediationWithLogger starts the remediator service with a caller-provided logger.
+func (m *Monitor) EnableRemediationWithLogger(appConfig *config.Config, logger *log.Logger) {
+	if logger == nil {
+		logger = log.New(log.Writer(), "[remediator] ", log.LstdFlags)
+	}
 	m.remediator = services.NewRemediator(m.db, logger, appConfig, 30*time.Second)
 }
 

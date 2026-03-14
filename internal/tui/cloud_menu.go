@@ -142,7 +142,14 @@ func (m *Model) openCloudMenu(job *db.Job) tea.Cmd {
 // fetchCloudOffers fetches cloud offers from all enabled providers and builds the offerings list.
 func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 	clients := m.cloudClients
+	pending := m.cloudDiscoveryPending
 	return func() tea.Msg {
+		if pending {
+			return cloudOffersLoadedMsg{
+				job: job,
+				err: fmt.Errorf("cloud providers still initializing"),
+			}
+		}
 		if len(clients) == 0 {
 			err := m.cloudClientErr
 			if err == nil {

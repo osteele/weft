@@ -138,14 +138,15 @@ type Model struct {
 	showHelp bool
 
 	// Cloud menu overlay
-	showCloudMenu      bool
-	cloudMenuJob       *db.Job
-	cloudMenuOfferings []placement.CloudOffering
-	cloudMenuCursor    int
-	cloudMenuLoading   bool
-	cloudMenuConfirm   bool // true when showing cost confirmation
-	cloudClients       []cloud.Client
-	cloudClientErr     error
+	showCloudMenu         bool
+	cloudMenuJob          *db.Job
+	cloudMenuOfferings    []placement.CloudOffering
+	cloudMenuCursor       int
+	cloudMenuLoading      bool
+	cloudMenuConfirm      bool // true when showing cost confirmation
+	cloudClients          []cloud.Client
+	cloudClientErr        error
+	cloudDiscoveryPending bool
 
 	// Configurable intervals
 	syncActiveInterval  time.Duration
@@ -180,6 +181,9 @@ type Model struct {
 	hostSummaryHashes  map[string]string    // host name -> hash of job states used for summary
 	hostSummaryTimes   map[string]time.Time // host name -> last generation time
 	hostSummaryPending map[string]bool      // host name -> currently generating
+
+	cloudDiscoveryFn func(*config.Config) cloudproviders.Discovery
+	llmInitFn        func(*sql.DB, *config.Config) *llm.DescriptionGenerator
 }
 
 // ModelOptions contains configuration for the TUI model
@@ -190,6 +194,9 @@ type ModelOptions struct {
 	HostRefreshInterval time.Duration
 	HostCacheDuration   time.Duration // How long cached host info is considered fresh
 	Monitor             *monitor.Monitor
+	InitialSnapshot     *InitialSnapshot
+	CloudDiscoveryFn    func(*config.Config) cloudproviders.Discovery
+	LLMInitFn           func(*sql.DB, *config.Config) *llm.DescriptionGenerator
 }
 
 // DefaultModelOptions returns the default TUI options
@@ -282,24 +289,18 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 	// Load app config
 	appCfg, _ := config.Load()
 
-	// Create and start LLM generator if enabled and LLM backend is available
-	var llmGen *llm.DescriptionGenerator
-	if appCfg.IsAIEnabled() {
-		genOpts := []llm.GeneratorOption{}
-		if model := appCfg.AIModel(); model != "" {
-			genOpts = append(genOpts, llm.WithModel(model))
-		}
-		gen := llm.NewGenerator(database, genOpts...)
-		if gen.Start() {
-			llmGen = gen
-		}
-	}
-
 	detailVP := viewport.New(0, 0)
 
 	// Create context for cancellation on quit
 	ctx, cancel := context.WithCancel(context.Background())
-	cloudDiscovery := cloudproviders.Discover(appCfg)
+	cloudDiscoveryFn := opts.CloudDiscoveryFn
+	if cloudDiscoveryFn == nil {
+		cloudDiscoveryFn = cloudproviders.Discover
+	}
+	llmInitFn := opts.LLMInitFn
+	if llmInitFn == nil {
+		llmInitFn = defaultLLMInit
+	}
 
 	model := Model{
 		database:    database,
@@ -336,7 +337,6 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		jobProgress:             make(map[int64]*progress.Progress),
 		lastHostSyncTimes:       make(map[string]time.Time),
 		hostSyncTimes:           make(map[string]time.Time),
-		llmGenerator:            llmGen,
 		appConfig:               appCfg,
 		showHostSummaries:       true, // Default to showing AI summaries
 		hostSummaries:           make(map[string]string),
@@ -344,11 +344,22 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 		hostSummaryTimes:        make(map[string]time.Time),
 		hostSummaryPending:      make(map[string]bool),
 		initialSyncNeeded:       true, // Trigger priority sync after jobs load
-		cloudClients:            cloudDiscovery.Clients,
-		cloudClientErr:          cloudDiscovery.UnavailableError(),
+		cloudDiscoveryPending:   cloudDiscoveryFn != nil,
+		cloudDiscoveryFn:        cloudDiscoveryFn,
+		llmInitFn:               llmInitFn,
 	}
 
-	if opts.Monitor != nil {
+	if opts.InitialSnapshot != nil {
+		model.allJobs = opts.InitialSnapshot.Jobs
+		if opts.InitialSnapshot.JobDependencies != nil {
+			model.jobDependencies = opts.InitialSnapshot.JobDependencies
+		}
+		model.hosts = opts.InitialSnapshot.Hosts
+		if opts.InitialSnapshot.HostSyncTimes != nil {
+			model.hostSyncTimes = opts.InitialSnapshot.HostSyncTimes
+		}
+		model.applyJobFilter()
+	} else if opts.Monitor != nil {
 		model.allJobs = opts.Monitor.Jobs()
 		model.jobDependencies = opts.Monitor.JobDependencies()
 		model.hosts = opts.Monitor.Hosts()
@@ -400,13 +411,10 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 func (m Model) Init() tea.Cmd {
 	if m.monitor != nil {
 		return tea.Batch(
+			m.startMonitor(),
 			m.waitForMonitorEvent(),
-			func() tea.Msg {
-				m.monitor.RefreshJobs()
-				m.monitor.RefreshHosts()
-				m.monitor.RefreshHostSyncTimes()
-				return nil
-			},
+			m.startCloudDiscovery(),
+			m.startLLMInit(),
 			m.startLogTicker(),
 			m.startHostRefreshTicker(),
 			m.startHostSummaryTicker(),
@@ -417,6 +425,8 @@ func (m Model) Init() tea.Cmd {
 		m.refreshJobs(),
 		m.loadHosts(),
 		m.loadHostSyncTimes(),
+		m.startCloudDiscovery(),
+		m.startLLMInit(),
 		m.startSyncTicker(),
 		m.startLogTicker(),
 		m.startHostRefreshTicker(),
@@ -871,6 +881,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hostSyncTimesLoadedMsg:
 		return m.handleHostSyncTimesLoaded(msg)
 
+	case cloudDiscoveryLoadedMsg:
+		m.cloudDiscoveryPending = false
+		m.cloudClients = msg.clients
+		m.cloudClientErr = msg.err
+		if m.syncWorker != nil {
+			m.syncWorker.SetCloudClients(msg.clients)
+		}
+		return m, nil
+
+	case llmGeneratorLoadedMsg:
+		m.llmGenerator = msg.generator
+		if m.showHostSummaries && m.llmGenerator != nil {
+			return m, m.generateAllHostSummaries()
+		}
+		return m, nil
+
 	case hostInfoMsg:
 		return m.handleHostInfo(msg)
 
@@ -1006,6 +1032,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func defaultLLMInit(database *sql.DB, appCfg *config.Config) *llm.DescriptionGenerator {
+	if appCfg == nil || !appCfg.IsAIEnabled() {
+		return nil
+	}
+
+	genOpts := []llm.GeneratorOption{}
+	if model := appCfg.AIModel(); model != "" {
+		genOpts = append(genOpts, llm.WithModel(model))
+	}
+
+	gen := llm.NewGenerator(database, genOpts...)
+	if !gen.Start() {
+		return nil
+	}
+	return gen
 }
 
 // View renders the UI

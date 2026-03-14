@@ -118,6 +118,40 @@ func (m Model) waitForMonitorEvent() tea.Cmd {
 	}
 }
 
+func (m Model) startMonitor() tea.Cmd {
+	if m.monitor == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		m.monitor.Start()
+		return nil
+	}
+}
+
+func (m Model) startCloudDiscovery() tea.Cmd {
+	if m.cloudDiscoveryFn == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		discovery := m.cloudDiscoveryFn(m.appConfig)
+		return cloudDiscoveryLoadedMsg{
+			clients: discovery.Clients,
+			err:     discovery.UnavailableError(),
+		}
+	}
+}
+
+func (m Model) startLLMInit() tea.Cmd {
+	if m.llmInitFn == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		return llmGeneratorLoadedMsg{
+			generator: m.llmInitFn(m.database, m.appConfig),
+		}
+	}
+}
+
 func isWatchedDBFile(name string, targets map[string]struct{}) bool {
 	if name == "" {
 		return false

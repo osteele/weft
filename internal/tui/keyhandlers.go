@@ -161,6 +161,9 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cancel != nil {
 			m.cancel()
 		}
+		if m.llmGenerator != nil {
+			m.llmGenerator.Stop()
+		}
 		// Stop the sync worker
 		if m.syncWorker != nil {
 			m.syncWorker.Stop()
