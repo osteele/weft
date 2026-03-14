@@ -179,7 +179,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			func() tea.Msg {
 				cfg, _ := config.Load()
-				clients := buildCloudClients(cfg)
+				clients, _ := buildCloudClients(cfg)
 				r2Client, _ := buildR2Client(cfg)
 				result := syncCloudStateWithClients(cfg, m.database, m.reconciler, clients, r2Client, false)
 				if result.ReconcileResult != nil && len(result.ReconcileResult.TerminatedInstances) > 0 {

@@ -280,9 +280,9 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		return nil
 	}
 
-	clients := buildCloudClients(cfg)
-	if len(clients) == 0 {
-		return fmt.Errorf("no cloud providers available (check vastai/runpod CLI)")
+	clients, err := buildCloudClients(cfg)
+	if err != nil {
+		return err
 	}
 
 	// Fetch offers in parallel (with survival model for cost-optimal bidding)
@@ -396,7 +396,10 @@ func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campa
 }
 
 func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup) error {
-	clients := buildCloudClients(cfg)
+	clients, err := buildCloudClients(cfg)
+	if err != nil {
+		return err
+	}
 	survivalModel := buildSurvivalModel(database)
 	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5)
 

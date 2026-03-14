@@ -144,9 +144,13 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 	clients := m.cloudClients
 	return func() tea.Msg {
 		if len(clients) == 0 {
+			err := m.cloudClientErr
+			if err == nil {
+				err = fmt.Errorf("no cloud providers available")
+			}
 			return cloudOffersLoadedMsg{
 				job: job,
-				err: fmt.Errorf("no cloud providers available"),
+				err: err,
 			}
 		}
 

@@ -152,9 +152,12 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 }
 
 func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool) (launchModel, error) {
-	clients := buildCloudClients(cfg)
+	clients, providerErr := buildCloudClients(cfg)
+	if providerErr != nil {
+		return launchModel{err: providerErr}, nil
+	}
 	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch)
+	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)

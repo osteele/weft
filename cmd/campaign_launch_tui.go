@@ -68,6 +68,7 @@ type launchModel struct {
 	instanceIDs []int64
 	database    *sql.DB
 	clients     []cloud.Client
+	providerErr error
 	appConfig   *config.Config
 	launchOpts  campaign.LaunchOpts
 	gpuFilter   string // --gpu filter to reapply after reconciliation
@@ -161,7 +162,7 @@ func buildItemsFromGroups(groups []campaign.InstanceGroup) ([]listItem, map[int6
 	return items, selected, cursor
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool) launchModel {
 	items, selected, cursor := buildItemsFromGroups(groups)
 
 	s := spinner.New()
@@ -176,6 +177,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, cfg *config.Config
 		loading:       true,
 		database:      database,
 		clients:       clients,
+		providerErr:   providerErr,
 		appConfig:     cfg,
 		launchOpts:    opts,
 		predConfig:    predCfg,
@@ -242,6 +244,9 @@ func (m launchModel) fetchOffers() tea.Cmd {
 	clients := m.clients
 	return func() tea.Msg {
 		if len(clients) == 0 {
+			if m.providerErr != nil {
+				return offersLoadedMsg{err: m.providerErr}
+			}
 			return offersLoadedMsg{err: fmt.Errorf("no cloud providers available")}
 		}
 		offers := campaign.FetchGroupOffers(clients, groups, m.survivalModel, 1.0, 0.5)
@@ -318,7 +323,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.groups) == 0 {
 			// All jobs got placed during reconciliation
 			m.err = fmt.Errorf("no jobs need rental GPUs (all placed during reconciliation)")
-			return m, nil
+			return m, tea.Quit
 		}
 		// Only re-fetch offers if groups actually changed
 		if groupsChanged(m.groups, msg.groups) {
@@ -335,7 +340,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		if msg.err != nil {
 			m.err = msg.err
-			return m, nil
+			return m, tea.Quit
 		}
 		m.groupOffers = msg.offers
 		return m, tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh))
@@ -366,7 +371,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.launching = false
 		if msg.err != nil {
 			m.err = msg.err
-			return m, nil
+			return m, tea.Quit
 		}
 		m.done = true
 		m.instanceIDs = msg.instanceIDs
@@ -662,9 +667,6 @@ func (m launchModel) View() string {
 	if m.err != nil {
 		b.WriteString(launchErrStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n")
-		if m.fromWatch {
-			b.WriteString("\nPress Enter, Esc, or q to return to watch.\n")
-		}
 		return b.String()
 	}
 

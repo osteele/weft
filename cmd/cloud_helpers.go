@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/cloudproviders"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/runpod"
@@ -11,34 +12,9 @@ import (
 )
 
 // buildCloudClients creates cloud.Client instances for all enabled providers.
-// Falls back to creating a vastai client if vastai is enabled (or no providers specified
-// but vastai CLI is available).
-func buildCloudClients(cfg *config.Config) []cloud.Client {
-	var clients []cloud.Client
-
-	if cfg.Vastai.Enabled {
-		vc := vastai.NewClient()
-		if err := vc.Available(); err == nil {
-			clients = append(clients, vastai.NewCloudClient(vc))
-		}
-	}
-
-	if cfg.Runpod.Enabled {
-		rc := runpod.NewCloudClient()
-		if err := rc.Available(); err == nil {
-			clients = append(clients, rc)
-		}
-	}
-
-	// Fallback: if no providers explicitly enabled, try vastai
-	if len(clients) == 0 && !cfg.Vastai.Enabled && !cfg.Runpod.Enabled {
-		vc := vastai.NewClient()
-		if err := vc.Available(); err == nil {
-			clients = append(clients, vastai.NewCloudClient(vc))
-		}
-	}
-
-	return clients
+func buildCloudClients(cfg *config.Config) ([]cloud.Client, error) {
+	discovery := cloudproviders.Discover(cfg)
+	return discovery.Clients, discovery.UnavailableError()
 }
 
 // cloudClientForProvider finds the client matching a provider from a list.

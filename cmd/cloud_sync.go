@@ -24,7 +24,8 @@ func syncCloudState(cfg *config.Config, database *sql.DB, reconciler *campaign.R
 	if err != nil && verbose {
 		fmt.Printf("Warning: R2 client: %v\n", err)
 	}
-	return syncCloudStateWithClients(cfg, database, reconciler, buildCloudClients(cfg), r2Client, verbose)
+	clients, _ := buildCloudClients(cfg)
+	return syncCloudStateWithClients(cfg, database, reconciler, clients, r2Client, verbose)
 }
 
 func syncCloudStateWithClients(cfg *config.Config, database *sql.DB, reconciler *campaign.Reconciler, clients []cloud.Client, r2Client *r2.Client, verbose bool) cloudSyncResult {
