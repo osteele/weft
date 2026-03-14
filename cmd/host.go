@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -74,7 +76,7 @@ var hostDataScan bool
 var hostListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all known hosts and their capabilities",
-	Long: `List all hosts from the inventory (~/.config/weft/hosts/) with OS, architecture, and GPU specs.
+	Long: `List all known on-prem hosts from inventory and recent local state, with OS, architecture, and GPU specs.
 
 Example:
   weft host list`,
@@ -371,22 +373,163 @@ func runHostDataMap(database *sql.DB) error {
 }
 
 func runHostList(cmd *cobra.Command, args []string) error {
-	hosts, err := inventory.LoadHosts()
+	rows, err := loadHostListRows(time.Now())
 	if err != nil {
-		return fmt.Errorf("load inventory: %w", err)
+		return err
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintf(w, "NAME\tOS/ARCH\tCPU\tMEMORY\tGPUs\n")
+	for _, row := range rows {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			row.Name, row.OSArch, row.CPU, row.Memory, row.GPUs)
+	}
+	return w.Flush()
+}
 
-	for _, h := range hosts {
-		gpuSummary := formatGPUSummary(h.GPUs)
-		fmt.Fprintf(w, "%s\t%s/%s\t%d cores\t%s\t%s\n",
-			h.Name, h.OS, h.Arch, h.CPUCores, h.Memory, gpuSummary)
+type hostListRow struct {
+	Name   string
+	OSArch string
+	CPU    string
+	Memory string
+	GPUs   string
+}
+
+func loadHostListRows(now time.Time) ([]hostListRow, error) {
+	hosts, err := inventory.LoadHosts()
+	if err != nil {
+		return nil, fmt.Errorf("load inventory: %w", err)
 	}
 
-	w.Flush()
-	return nil
+	specByName := make(map[string]inventory.HostSpec, len(hosts))
+	for _, host := range hosts {
+		if host.Name == "" || db.IsCloudHost(host.Name) {
+			continue
+		}
+		specByName[host.Name] = host
+	}
+
+	cachedByName := map[string]*db.CachedHostInfo{}
+	recentHosts := map[string]struct{}{}
+	database, err := db.Open()
+	if err == nil {
+		defer database.Close()
+
+		for _, name := range listRecentHostNames(database, now.Add(-defaultHostSyncWindow)) {
+			if name != "" && !db.IsCloudHost(name) {
+				recentHosts[name] = struct{}{}
+			}
+		}
+
+		cachedHosts, cacheErr := db.LoadAllCachedHosts(database)
+		if cacheErr == nil {
+			for _, cached := range cachedHosts {
+				if cached == nil || cached.Name == "" || db.IsCloudHost(cached.Name) {
+					continue
+				}
+				cachedByName[cached.Name] = cached
+				if cached.LastUpdated >= now.Add(-defaultHostSyncWindow).Unix() {
+					recentHosts[cached.Name] = struct{}{}
+				}
+			}
+		}
+
+		activeJobs, activeErr := db.ListActiveOnPremJobs(database)
+		if activeErr == nil {
+			for _, job := range activeJobs {
+				if job == nil || job.Host == "" || db.IsCloudHost(job.Host) {
+					continue
+				}
+				recentHosts[job.Host] = struct{}{}
+			}
+		}
+	}
+
+	names := make([]string, 0, len(specByName)+len(recentHosts))
+	for name := range specByName {
+		names = append(names, name)
+	}
+	for name := range recentHosts {
+		if _, ok := specByName[name]; !ok {
+			names = append(names, name)
+		}
+	}
+	naturalSortStrings(names)
+
+	rows := make([]hostListRow, 0, len(names))
+	for _, name := range names {
+		if spec, ok := specByName[name]; ok {
+			rows = append(rows, hostListRowFromSpec(spec))
+			continue
+		}
+		if cached := cachedByName[name]; cached != nil {
+			host := hostinfo.HostFromCachedInfo(cached)
+			if host != nil {
+				host.Name = name
+				rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host)))
+				continue
+			}
+		}
+		rows = append(rows, hostListUnknownRow(name))
+	}
+
+	return rows, nil
+}
+
+func listRecentHostNames(database *sql.DB, since time.Time) []string {
+	names, err := db.ListHostsSyncedSince(database, since)
+	if err != nil {
+		return nil
+	}
+	return names
+}
+
+func hostListRowFromSpec(spec inventory.HostSpec) hostListRow {
+	osArch := "unknown/unknown"
+	if spec.OS != "" || spec.Arch != "" {
+		osPart := spec.OS
+		if osPart == "" {
+			osPart = "unknown"
+		}
+		archPart := spec.Arch
+		if archPart == "" {
+			archPart = "unknown"
+		}
+		osArch = osPart + "/" + archPart
+	}
+
+	cpu := "unknown"
+	if spec.CPUCores > 0 {
+		cpu = fmt.Sprintf("%d cores", spec.CPUCores)
+	}
+
+	memory := spec.Memory
+	if strings.TrimSpace(memory) == "" {
+		memory = "unknown"
+	}
+
+	gpus := formatGPUSummary(spec.GPUs)
+	if strings.TrimSpace(gpus) == "" {
+		gpus = "unknown"
+	}
+
+	return hostListRow{
+		Name:   spec.Name,
+		OSArch: osArch,
+		CPU:    cpu,
+		Memory: memory,
+		GPUs:   gpus,
+	}
+}
+
+func hostListUnknownRow(name string) hostListRow {
+	return hostListRow{
+		Name:   name,
+		OSArch: "unknown/unknown",
+		CPU:    "unknown",
+		Memory: "unknown",
+		GPUs:   "unknown",
+	}
 }
 
 func runHostDiscover(cmd *cobra.Command, args []string) error {
@@ -434,4 +577,89 @@ func formatGPUSummary(gpus []inventory.GPUSpec) string {
 		parts = append(parts, fmt.Sprintf("%dx %s (%s)", len(g.Indices), g.Name, g.Memory))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func naturalSortStrings(s []string) {
+	sort.Slice(s, func(i, j int) bool {
+		return naturalLess(s[i], s[j])
+	})
+}
+
+func naturalLess(a, b string) bool {
+	aParts := splitIntoSegments(a)
+	bParts := splitIntoSegments(b)
+
+	minLen := len(aParts)
+	if len(bParts) < minLen {
+		minLen = len(bParts)
+	}
+
+	for i := 0; i < minLen; i++ {
+		aSeg := aParts[i]
+		bSeg := bParts[i]
+		aNum, aIsNum := parseNumber(aSeg)
+		bNum, bIsNum := parseNumber(bSeg)
+
+		if aIsNum && bIsNum {
+			if aNum != bNum {
+				return aNum < bNum
+			}
+			continue
+		}
+
+		aLower := strings.ToLower(aSeg)
+		bLower := strings.ToLower(bSeg)
+		if aLower != bLower {
+			return aLower < bLower
+		}
+	}
+
+	if len(aParts) != len(bParts) {
+		return len(aParts) < len(bParts)
+	}
+	return a < b
+}
+
+func splitIntoSegments(s string) []string {
+	var segments []string
+	var current strings.Builder
+	var lastRune rune
+
+	for _, r := range s {
+		isDigit := r >= '0' && r <= '9'
+		isAlpha := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+
+		if current.Len() == 0 {
+			current.WriteRune(r)
+			lastRune = r
+			continue
+		}
+
+		lastIsDigit := lastRune >= '0' && lastRune <= '9'
+		lastIsAlpha := (lastRune >= 'a' && lastRune <= 'z') || (lastRune >= 'A' && lastRune <= 'Z')
+		sameType := (isDigit && lastIsDigit) || (isAlpha && lastIsAlpha) ||
+			(!isDigit && !isAlpha && !lastIsDigit && !lastIsAlpha)
+
+		if sameType {
+			current.WriteRune(r)
+			lastRune = r
+			continue
+		}
+
+		segments = append(segments, current.String())
+		current.Reset()
+		current.WriteRune(r)
+		lastRune = r
+	}
+
+	if current.Len() > 0 {
+		segments = append(segments, current.String())
+	}
+
+	return segments
+}
+
+func parseNumber(s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	return n, err == nil
 }
