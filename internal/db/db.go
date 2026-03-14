@@ -3130,6 +3130,31 @@ func ListRecentFailed(db *sql.DB, limit int) ([]*Job, error) {
 	return queryJobs(db, query, cutoff, StatusCompleted, StatusFailed, StatusDead, limit)
 }
 
+// ListUnprocessedJobs returns non-draft, non-tombstoned jobs without the
+// reserved processed tag.
+func ListUnprocessedJobs(db *sql.DB) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE tombstoned = 0 AND status != ?
+		ORDER BY CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, id DESC`, jobSelectColumns)
+	jobs, err := queryJobs(db, query, StatusDraft)
+	if err != nil {
+		return nil, err
+	}
+	return FilterJobsByTags(jobs, nil, "unprocessed"), nil
+}
+
+// ListRecentTerminalJobs returns terminal jobs whose end time is at or after
+// the provided Unix timestamp.
+func ListRecentTerminalJobs(db *sql.DB, sinceUnix int64) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE tombstoned = 0
+		AND end_time IS NOT NULL
+		AND end_time >= ?
+		AND status IN (?, ?, ?, ?, ?)
+		ORDER BY end_time DESC, id DESC`, jobSelectColumns)
+	return queryJobs(db, query, sinceUnix, StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
+}
+
 // UpdateErrorDiagnosis stores an error diagnosis and increments retry count for a job.
 func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int) error {
 	_, err := db.Exec(

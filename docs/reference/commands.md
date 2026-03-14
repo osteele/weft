@@ -340,6 +340,9 @@ weft job list [flags]
 - `--completed`: Show only completed jobs
 - `--queued`: Show only queued jobs
 - `--dead`: Show only dead jobs
+- `--failed`: Show only failed jobs (`failed`, `dead`, or completed with non-zero exit code)
+- `--processed`: Show only jobs with the reserved `processed` tag
+- `--unprocessed`: Show only jobs without the reserved `processed` tag
 - `--status STATUS`: Filter by status (`running`, `completed`, `queued`, `dead`, `processed`, `unprocessed`)
 - `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
@@ -355,6 +358,8 @@ weft job list                          # Recent jobs
 weft job list --running                # Running jobs
 weft job list --running --sync         # Running jobs (sync first)
 weft job list --host deepthought       # Jobs on deepthought
+weft job list --failed                 # Failed jobs
+weft job list --unprocessed            # Jobs missing the processed tag
 weft job list --tag exp-012            # Jobs with a tag
 weft job list --status unprocessed     # Jobs missing the processed tag
 weft job list --search training        # Search jobs
@@ -363,6 +368,51 @@ weft job list 12...13                  # Alternative range syntax
 weft job list 12,13,14                 # Comma-separated IDs
 weft job list --show 42                # Job details
 weft job list --cleanup 30             # Remove old jobs
+```
+
+### weft project jobs
+
+List jobs grouped by project instead of as one flat table.
+
+```bash
+weft project jobs [flags]
+```
+
+`weft project jobs` uses the same query flags as `weft job list`, but renders
+one block per project. Each block shows the project name, directories, and the
+matching jobs for that project.
+
+**Examples:**
+```bash
+weft project jobs
+weft project jobs --unprocessed
+weft project jobs --failed --tag exp-012
+weft project jobs --host cool30
+```
+
+### weft project watch
+
+Watch active and recent jobs grouped by project.
+
+```bash
+weft project watch [flags]
+```
+
+In an interactive terminal this defaults to a read-only TUI. Otherwise it
+prints a grouped snapshot of running, queued, and recent terminal jobs.
+
+**Flags:**
+- `--tui`: Force TUI mode
+- `--plain`: Force plain text output
+- `--sync`: Perform a full sync before loading data
+- `--no-sync`: Skip syncing before loading data
+- `--recent DURATION`: Window for recent terminal jobs (default: `24h`)
+
+**Examples:**
+```bash
+weft project watch
+weft project watch --plain
+weft project watch --recent 48h
 ```
 
 ### weft tag

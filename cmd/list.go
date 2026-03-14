@@ -31,6 +31,8 @@ Examples:
   weft list --all-hosts        # Include jobs from older hosts
   weft list --running          # Running jobs only
   weft list --queued           # Jobs waiting in queue
+  weft list --failed           # Failed jobs only
+  weft list --unprocessed      # Jobs missing the processed tag
   weft list --running --sync   # Running jobs (sync first)
   weft list --host cool30      # Jobs on cool30
   weft list --tag exp-012      # Jobs with tag exp-012
@@ -49,6 +51,7 @@ var (
 	listCompleted   bool
 	listQueued      bool
 	listDead        bool
+	listFailed      bool
 	listStatus      string
 	listHost        string
 	listAllHosts    bool
@@ -62,20 +65,23 @@ var (
 	listTags        []string
 	listExcludeTags []string
 	listProject     string
+	listProcessed   bool
+	listUnprocessed bool
 	listTUI         bool
 	listPlain       bool
 )
 
 const defaultHostSyncWindow = 48 * time.Hour
 
-// addListFlags registers all list-related flags on a command.
-// Used by both listCmd and jobListCmd to share the same flag definitions.
-func addListFlags(cmd *cobra.Command) {
+// addListQueryFlags registers list query/filter flags shared by job list and
+// project jobs.
+func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listRunning, "running", false, "Show only running jobs")
 	cmd.Flags().BoolVar(&listCompleted, "completed", false, "Show only completed jobs")
 	cmd.Flags().BoolVar(&listQueued, "queued", false, "Show only queued jobs (waiting in queue)")
 	cmd.Flags().BoolVar(&listDead, "dead", false, "Show only dead jobs")
-	cmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, paused, starting, completed, queued, dead, processed, unprocessed)")
+	cmd.Flags().BoolVar(&listFailed, "failed", false, "Show only failed jobs (failed, dead, or completed with non-zero exit code)")
+	cmd.Flags().StringVarP(&listStatus, "status", "s", "", "Filter by status (running, paused, starting, completed, queued, dead, failed, processed, unprocessed)")
 	cmd.Flags().StringVar(&listHost, "host", "", "Filter by host")
 	cmd.Flags().BoolVar(&listAllHosts, "all-hosts", false, "Include jobs from hosts not synced recently")
 	cmd.Flags().StringVar(&listSearch, "search", "", "Search by description or command")
@@ -83,12 +89,20 @@ func addListFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&listTags, "tag", nil, "Filter by tag (can be repeated)")
 	cmd.Flags().StringSliceVar(&listExcludeTags, "exclude-tag", nil, "Exclude jobs with tag (can be repeated)")
 	cmd.Flags().StringVar(&listProject, "project", "", "Filter by project name")
+	cmd.Flags().BoolVar(&listProcessed, "processed", false, "Show only jobs with the processed tag")
+	cmd.Flags().BoolVar(&listUnprocessed, "unprocessed", false, "Show only jobs without the processed tag")
 	cmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
-	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
-	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	cmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
+}
+
+// addListFlags registers all list-related flags on a command.
+// Used by both listCmd and jobListCmd to share the same flag definitions.
+func addListFlags(cmd *cobra.Command) {
+	addListQueryFlags(cmd)
+	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
+	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
 	cmd.Flags().BoolVar(&listTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&listPlain, "plain", false, "Force plain text output")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
@@ -183,7 +197,10 @@ func syncListData(database *sql.DB) []string {
 }
 
 func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
-	statusFilter, processedFilter := listStatusFilters()
+	statusFilter, processedFilter, failedOnly, err := listFilters()
+	if err != nil {
+		return nil, err
+	}
 
 	// Handle explicit job IDs: weft list 12::14, weft list 12...13, weft list 12,13,14
 	if len(args) > 0 {
@@ -198,7 +215,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		if len(missingIDs) > 0 {
 			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", formatJobIDList(missingIDs))
 		}
-		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter)
+		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter, failedOnly)
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -224,14 +241,15 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" {
+		if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
 		if err != nil {
 			return nil, fmt.Errorf("search: %w", err)
 		}
-		jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
+		jobs = jobsWithEffectiveStatus(jobs, statusFilter)
+		jobs = filterJobsByFailureState(jobs, failedOnly)
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
 		jobs = db.FilterJobsByHosts(jobs, hostFilterHosts)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
@@ -249,14 +267,15 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	}
 
 	queryLimit := listLimit
-	if len(listTags) > 0 || processedFilter != "" || len(listExcludeTags) > 0 || listProject != "" {
+	if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || listProject != "" {
 		queryLimit = 0
 	}
 	jobs, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
 	if err != nil {
 		return nil, fmt.Errorf("list jobs: %w", err)
 	}
-	jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
+	jobs = jobsWithEffectiveStatus(jobs, statusFilter)
+	jobs = filterJobsByFailureState(jobs, failedOnly)
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 	jobs = db.FilterJobsByProject(jobs, listProject)
 	if listLimit > 0 && len(jobs) > listLimit {
@@ -266,16 +285,24 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	return jobs, nil
 }
 
-func listStatusFilters() (statusFilter, processedFilter string) {
+func listFilters() (statusFilter, processedFilter string, failedOnly bool, err error) {
 	if listStatus == "processed" || listStatus == "unprocessed" {
 		processedFilter = listStatus
 	}
-
-	if listStatus != "" {
-		if processedFilter == "" {
-			statusFilter = listStatus
+	if listProcessed {
+		if processedFilter == "unprocessed" {
+			return "", "", false, usageErrorf("--processed and --unprocessed are mutually exclusive")
 		}
-		return statusFilter, processedFilter
+		processedFilter = "processed"
+	}
+	if listUnprocessed {
+		if processedFilter == "processed" {
+			return "", "", false, usageErrorf("--processed and --unprocessed are mutually exclusive")
+		}
+		processedFilter = "unprocessed"
+	}
+	if listStatus != "" && processedFilter == "" {
+		statusFilter = listStatus
 	}
 	if listRunning {
 		statusFilter = db.StatusRunning
@@ -286,7 +313,7 @@ func listStatusFilters() (statusFilter, processedFilter string) {
 	} else if listDead {
 		statusFilter = db.StatusDead
 	}
-	return statusFilter, processedFilter
+	return statusFilter, processedFilter, listFailed, nil
 }
 
 func listJobsByID(database *sql.DB, ids []int64) ([]*db.Job, []int64, error) {
@@ -306,8 +333,9 @@ func listJobsByID(database *sql.DB, ids []int64) ([]*db.Job, []int64, error) {
 	return jobs, missing, nil
 }
 
-func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string) []*db.Job {
-	jobs = filterJobsByEffectiveStatus(jobs, statusFilter)
+func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string, failedOnly bool) []*db.Job {
+	jobs = jobsWithEffectiveStatus(jobs, statusFilter)
+	jobs = filterJobsByFailureState(jobs, failedOnly)
 
 	if listSearch != "" {
 		filter := strings.ToLower(listSearch)
@@ -330,17 +358,31 @@ func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string)
 	return jobs
 }
 
-func filterJobsByEffectiveStatus(jobs []*db.Job, status string) []*db.Job {
-	if status == "" {
+func filterJobsByFailureState(jobs []*db.Job, failedOnly bool) []*db.Job {
+	if !failedOnly {
 		return jobs
 	}
 	filtered := make([]*db.Job, 0, len(jobs))
 	for _, job := range jobs {
-		if job != nil && job.EffectiveStatus() == status {
+		if isFailedJob(job) {
 			filtered = append(filtered, job)
 		}
 	}
 	return filtered
+}
+
+func isFailedJob(job *db.Job) bool {
+	if job == nil {
+		return false
+	}
+	switch job.EffectiveStatus() {
+	case db.StatusFailed, db.StatusDead:
+		return true
+	case db.StatusCompleted:
+		return job.ExitCode != nil && *job.ExitCode != 0
+	default:
+		return false
+	}
 }
 
 func showJob(database *sql.DB, id int64) error {
@@ -402,12 +444,20 @@ func buildListTitle(args []string) string {
 	if listHost != "" {
 		parts = append(parts, "host="+listHost)
 	}
-	status, processed := listStatusFilters()
+	status, processed, failedOnly, err := listFilters()
+	if err != nil {
+		return "Jobs"
+	}
 	if status != "" {
 		parts = append(parts, "status="+status)
-	} else if processed != "" {
+	}
+	if processed != "" {
 		parts = append(parts, processed)
-	} else {
+	}
+	if failedOnly {
+		parts = append(parts, "failed")
+	}
+	if status == "" && processed == "" && !failedOnly {
 		if listQueued {
 			parts = append(parts, "queued")
 		}

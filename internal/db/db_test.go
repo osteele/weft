@@ -751,6 +751,137 @@ func TestListActiveOnPremJobs(t *testing.T) {
 	}
 }
 
+func TestListUnprocessedJobsExcludesProcessedDraftAndTombstoned(t *testing.T) {
+	database := SetupTestDB(t)
+
+	keepID, err := RecordQueued(database, "cool30", "/tmp/project-alpha", "python train.py", "keep")
+	if err != nil {
+		t.Fatalf("record keep job: %v", err)
+	}
+
+	processedID, err := RecordQueued(database, "cool30", "/tmp/project-beta", "python eval.py", "processed")
+	if err != nil {
+		t.Fatalf("record processed job: %v", err)
+	}
+	if err := AddJobTag(database, processedID, ProcessedTag); err != nil {
+		t.Fatalf("add processed tag: %v", err)
+	}
+
+	draftID, err := RecordQueued(database, "cool30", "/tmp/project-gamma", "python draft.py", "draft")
+	if err != nil {
+		t.Fatalf("record draft job: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, StatusDraft, draftID); err != nil {
+		t.Fatalf("mark draft: %v", err)
+	}
+
+	tombstonedID, err := RecordQueued(database, "cool30", "/tmp/project-delta", "python old.py", "old")
+	if err != nil {
+		t.Fatalf("record tombstoned job: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET tombstoned = 1 WHERE id = ?`, tombstonedID); err != nil {
+		t.Fatalf("mark tombstoned: %v", err)
+	}
+
+	jobs, err := ListUnprocessedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnprocessedJobs: %v", err)
+	}
+
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 unprocessed job, got %d", len(jobs))
+	}
+	if jobs[0].ID != keepID {
+		t.Fatalf("unprocessed job ID = %d, want %d", jobs[0].ID, keepID)
+	}
+}
+
+func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) {
+	database := SetupTestDB(t)
+	now := time.Now().Unix()
+	cutoff := now - 3600
+
+	completedOKID, err := RecordJobStarting(database, "cool30", "/tmp/project-alpha", "python ok.py", "ok")
+	if err != nil {
+		t.Fatalf("record completed ok: %v", err)
+	}
+	if err := RecordCompletionByID(database, completedOKID, 0, now-10); err != nil {
+		t.Fatalf("complete ok: %v", err)
+	}
+
+	completedFailID, err := RecordJobStarting(database, "cool30", "/tmp/project-beta", "python fail.py", "fail")
+	if err != nil {
+		t.Fatalf("record completed fail: %v", err)
+	}
+	if err := RecordCompletionByID(database, completedFailID, 3, now-20); err != nil {
+		t.Fatalf("complete fail: %v", err)
+	}
+
+	deadID, err := RecordJobStarting(database, "cool30", "/tmp/project-gamma", "python dead.py", "dead")
+	if err != nil {
+		t.Fatalf("record dead: %v", err)
+	}
+	if err := MarkDeadByID(database, deadID); err != nil {
+		t.Fatalf("mark dead: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET end_time = ? WHERE id = ?`, now-30, deadID); err != nil {
+		t.Fatalf("set dead end_time: %v", err)
+	}
+
+	killedID, err := RecordQueued(database, "cool30", "/tmp/project-delta", "python killed.py", "killed")
+	if err != nil {
+		t.Fatalf("record killed: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, StatusKilled, now-40, killedID); err != nil {
+		t.Fatalf("mark killed: %v", err)
+	}
+
+	canceledID, err := RecordQueued(database, "cool30", "/tmp/project-epsilon", "python canceled.py", "canceled")
+	if err != nil {
+		t.Fatalf("record canceled: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, StatusCanceled, now-50, canceledID); err != nil {
+		t.Fatalf("mark canceled: %v", err)
+	}
+
+	oldID, err := RecordJobStarting(database, "cool30", "/tmp/project-old", "python old.py", "old")
+	if err != nil {
+		t.Fatalf("record old: %v", err)
+	}
+	if err := RecordCompletionByID(database, oldID, 0, cutoff-1); err != nil {
+		t.Fatalf("complete old: %v", err)
+	}
+
+	jobs, err := ListRecentTerminalJobs(database, cutoff)
+	if err != nil {
+		t.Fatalf("ListRecentTerminalJobs: %v", err)
+	}
+
+	gotIDs := make([]int64, 0, len(jobs))
+	for _, job := range jobs {
+		gotIDs = append(gotIDs, job.ID)
+		if job.EndTime == nil || *job.EndTime < cutoff {
+			t.Fatalf("job %d has end_time before cutoff: %+v", job.ID, job.EndTime)
+		}
+	}
+	wantIDs := []int64{completedOKID, completedFailID, deadID, killedID, canceledID}
+	if len(gotIDs) != len(wantIDs) {
+		t.Fatalf("recent terminal count = %d, want %d (ids=%v)", len(gotIDs), len(wantIDs), gotIDs)
+	}
+	for _, wantID := range wantIDs {
+		found := false
+		for _, gotID := range gotIDs {
+			if gotID == wantID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing job %d from recent terminal jobs: %v", wantID, gotIDs)
+		}
+	}
+}
+
 func TestFilterJobsByHostsMatchesOnlyRequestedHosts(t *testing.T) {
 	cloudInstanceID := int64(17)
 	jobs := []*Job{

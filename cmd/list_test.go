@@ -17,7 +17,7 @@ func TestFilterJobsByEffectiveStatusExcludesHostlessRunningFromRunning(t *testin
 		{ID: 3, Status: db.StatusQueued, Host: ""},
 	}
 
-	filtered := filterJobsByEffectiveStatus(jobs, db.StatusRunning)
+	filtered := jobsWithEffectiveStatus(jobs, db.StatusRunning)
 	if len(filtered) != 1 {
 		t.Fatalf("expected 1 running job after effective filter, got %d", len(filtered))
 	}

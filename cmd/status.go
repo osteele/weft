@@ -704,6 +704,9 @@ func printJobSummary(job *db.Job) {
 }
 
 func jobsWithEffectiveStatus(jobs []*db.Job, status string) []*db.Job {
+	if status == "" {
+		return jobs
+	}
 	filtered := make([]*db.Job, 0, len(jobs))
 	for _, job := range jobs {
 		if job != nil && job.EffectiveStatus() == status {
