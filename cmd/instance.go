@@ -330,7 +330,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				printInstanceJob(j)
 			}
 			if len(jobGroups.historical) > 0 {
-				fmt.Printf("  Previous attempts on this instance:\n")
+				fmt.Println(historicalCloudInstanceJobsHeader)
 			}
 			for _, j := range jobGroups.historical {
 				printInstanceJob(j)

@@ -29,7 +29,7 @@ func TestFormatWatchInstanceBlockSeparatesHistoricalAttempts(t *testing.T) {
 	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
 
 	currentIdx := strings.Index(out, "  199")
-	historyHeaderIdx := strings.Index(out, "Previous attempts on this instance:")
+	historyHeaderIdx := strings.Index(out, historicalCloudInstanceJobsHeader)
 	historicalIdx := strings.Index(out, "  249")
 	if currentIdx == -1 || historyHeaderIdx == -1 || historicalIdx == -1 {
 		t.Fatalf("expected current job, historical section, and historical job in output, got:\n%s", out)

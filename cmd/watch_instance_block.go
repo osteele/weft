@@ -103,7 +103,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	}
 
 	if len(jobGroups.historical) > 0 {
-		lines = append(lines, "  Previous attempts on this instance:")
+		lines = append(lines, historicalCloudInstanceJobsHeader)
 	}
 	for _, job := range jobGroups.historical {
 		i := findInstanceJobIndex(update.Jobs, job)
@@ -273,7 +273,16 @@ func formatWatchInstanceCostLine(ci *db.CloudInstance, inst *cloud.Instance, now
 		return ""
 	}
 
-	uptime := now.Sub(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second)
+	launchedAt := time.Unix(*ci.LaunchedAt, 0)
+	end := now
+	if ci.EndedAt != nil {
+		end = time.Unix(*ci.EndedAt, 0)
+	}
+	if end.Before(launchedAt) {
+		end = launchedAt
+	}
+
+	uptime := end.Sub(launchedAt).Truncate(time.Second)
 	if inst != nil && inst.CostPerHour > 0 {
 		cost := uptime.Hours() * inst.CostPerHour
 		return fmt.Sprintf("  Cost: $%.2f (uptime: %s)", cost, uptime)

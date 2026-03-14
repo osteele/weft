@@ -207,6 +207,28 @@ func TestFormatWatchInstanceBlockShowsDBHourlyCostFallback(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlockUsesEndedAtForTerminalUptime(t *testing.T) {
+	now := time.Unix(7200, 0)
+	launchedAt := int64(0)
+	endedAt := int64(3600)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:               108,
+			Status:           db.CloudInstanceStatusFailed,
+			Provider:         "vastai",
+			CostPerHourCents: 150,
+			LaunchedAt:       &launchedAt,
+			EndedAt:          &endedAt,
+			GPUSpec:          "A100",
+		},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: now}))
+	if !strings.Contains(out, "Cost: $1.50 (uptime: 1h0m0s)") {
+		t.Fatalf("expected terminal uptime to stop at ended_at, got:\n%s", out)
+	}
+}
+
 func TestUpdateWatchJobProgressHWMPrunesDisappearedJobs(t *testing.T) {
 	hwm := map[int64]int{
 		88: 40,

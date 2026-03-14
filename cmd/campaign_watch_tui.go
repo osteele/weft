@@ -165,6 +165,9 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.checkAllDone()
 		}
 		prev := m.updates[msg.instanceID]
+		if msg.update.CloudInstance != nil && campaign.IsInstanceTerminal(msg.update.CloudInstance.Status) {
+			msg.update.Jobs = preserveWatchCurrentJobs(msg.update.CloudInstance.ID, prev.Jobs, msg.update.Jobs)
+		}
 		updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
 		m.updates[msg.instanceID] = msg.update
 		// Continue reading from the same channel
@@ -224,7 +227,11 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		for id, jobs := range msg.jobs {
 			u := m.updates[id]
-			u.Jobs = jobs
+			if u.CloudInstance != nil && campaign.IsInstanceTerminal(u.CloudInstance.Status) {
+				u.Jobs = preserveWatchCurrentJobs(u.CloudInstance.ID, u.Jobs, jobs)
+			} else {
+				u.Jobs = jobs
+			}
 			if outcomes, ok := msg.outcomes[id]; ok {
 				u.JobAttemptOutcomes = outcomes
 			}
@@ -269,6 +276,45 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.Job {
+	if instanceID == 0 || len(jobs) == 0 {
+		return jobs
+	}
+
+	currentJobIDs := make(map[int64]struct{})
+	for _, job := range prevJobs {
+		if job == nil || job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
+			continue
+		}
+		currentJobIDs[job.ID] = struct{}{}
+	}
+	if len(currentJobIDs) == 0 {
+		return jobs
+	}
+
+	preserved := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job == nil {
+			preserved = append(preserved, nil)
+			continue
+		}
+		if _, ok := currentJobIDs[job.ID]; !ok {
+			preserved = append(preserved, job)
+			continue
+		}
+		if job.CloudInstanceID != nil && *job.CloudInstanceID == instanceID {
+			preserved = append(preserved, job)
+			continue
+		}
+
+		jobCopy := *job
+		preservedInstanceID := instanceID
+		jobCopy.CloudInstanceID = &preservedInstanceID
+		preserved = append(preserved, &jobCopy)
+	}
+	return preserved
 }
 
 func (m watchModel) checkAllDone() tea.Cmd {

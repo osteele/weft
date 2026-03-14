@@ -217,6 +217,71 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	if !strings.Contains(out, "orphaned") {
 		t.Fatalf("expected orphaned job in view, got:\n%s", out)
 	}
+	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+		t.Fatalf("expected failed instance to keep last attached jobs in the main list, got:\n%s", out)
+	}
+}
+
+func TestWatchModelTerminalUpdateKeepsPreviouslyCurrentJobsInMainGroup(t *testing.T) {
+	instanceID := int64(130)
+	m := watchModel{
+		instanceIDs: []int64{instanceID},
+		updates: map[int64]campaign.InstanceUpdate{
+			instanceID: {
+				CloudInstance: &db.CloudInstance{
+					ID:       instanceID,
+					Status:   db.CloudInstanceStatusRunning,
+					Provider: "vastai",
+					GPUSpec:  "A40",
+				},
+				Jobs: []*db.Job{
+					{ID: 203, Status: db.StatusRunning, CloudInstanceID: &instanceID, Description: "current"},
+					{ID: 249, Status: db.StatusQueued, Description: "historical"},
+				},
+				JobAttemptOutcomes: map[int64]string{
+					249: db.AttemptOutcomeFailed,
+				},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	terminalUpdate := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:                instanceID,
+			Status:            db.CloudInstanceStatusFailed,
+			Provider:          "vastai",
+			GPUSpec:           "A40",
+			TerminationReason: db.TerminationReasonInfraFailure,
+		},
+		Jobs: []*db.Job{
+			{ID: 203, Status: db.StatusQueued, Description: "current"},
+			{ID: 249, Status: db.StatusQueued, Description: "historical"},
+		},
+		JobAttemptOutcomes: map[int64]string{
+			203: db.AttemptOutcomeOrphaned,
+			249: db.AttemptOutcomeFailed,
+		},
+	}
+
+	nextModel, cmd := m.Update(watchUpdateMsg{instanceID: instanceID, update: terminalUpdate})
+	if cmd == nil {
+		t.Fatal("expected follow-up wait command after terminal update")
+	}
+
+	out := stripANSI(nextModel.(watchModel).View())
+	currentIdx := strings.Index(out, "  203")
+	headerIdx := strings.Index(out, historicalCloudInstanceJobsHeader)
+	historicalIdx := strings.Index(out, "  249")
+	if currentIdx == -1 || headerIdx == -1 || historicalIdx == -1 {
+		t.Fatalf("expected current job, historical header, and historical job in output, got:\n%s", out)
+	}
+	if !(currentIdx < headerIdx && headerIdx < historicalIdx) {
+		t.Fatalf("expected previously current job to stay in the main group, got:\n%s", out)
+	}
+	if !strings.Contains(out, "orphaned") {
+		t.Fatalf("expected orphaned status in output, got:\n%s", out)
+	}
 }
 
 func stripANSI(s string) string {

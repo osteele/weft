@@ -2,6 +2,8 @@ package cmd
 
 import "github.com/osteele/weft/internal/db"
 
+const historicalCloudInstanceJobsHeader = "  Previous attempts on this instance:"
+
 type cloudInstanceJobGroups struct {
 	current    []*db.Job
 	historical []*db.Job
