@@ -130,6 +130,7 @@ remote-build:
     echo "==> Syncing sources to ${HOST}..."
     rsync -az --delete \
         --exclude='.jj/' --exclude='.git/' --exclude='.claude/' \
+        --exclude='.gocache/' --exclude='.gomodcache/' --exclude='.cache/' \
         --exclude='weft' --exclude='dist/' \
         --exclude='internal/agentdeploy/binaries/weft-agent-*' \
         --exclude='internal/agentdeploy/binaries/VERSION' \
@@ -197,6 +198,7 @@ deploy-coordinator host="studio":
     echo "==> Syncing sources to ${HOST}..."
     rsync -az --delete \
         --exclude='.jj/' --exclude='.git/' --exclude='.claude/' \
+        --exclude='.gocache/' --exclude='.gomodcache/' --exclude='.cache/' \
         --exclude='weft' --exclude='dist/' \
         --exclude='internal/agentdeploy/binaries/weft-agent-*' \
         --exclude='internal/agentdeploy/binaries/VERSION' \
