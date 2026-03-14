@@ -37,7 +37,23 @@ func FormatJobLine(job *db.Job) string {
 	if desc == "" {
 		desc = TruncateCommand(job.Command, 60)
 	}
-	return fmt.Sprintf("%4d  %s", job.ID, desc)
+	project := JobProjectLabel(job)
+	if project == "" {
+		return fmt.Sprintf("%4d  %s", job.ID, desc)
+	}
+	return fmt.Sprintf("%4d  %-18s  %s", job.ID, project, desc)
+}
+
+// JobProjectLabel returns the display label for a job's project in summary
+// views, preferring the stored project and falling back to the directory tail.
+func JobProjectLabel(job *db.Job) string {
+	if job == nil {
+		return ""
+	}
+	if project := strings.TrimSpace(job.Project); project != "" {
+		return project
+	}
+	return job.DirectoryTailDisplay()
 }
 
 // FormatCostTable returns a rough cost estimate table (1hr/job) for the given

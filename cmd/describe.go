@@ -7,11 +7,13 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
 var (
 	describeMessage   string
+	describeProject   string
 	describeDirectory string
 	describeCommand   string
 	describeGPU       string
@@ -47,6 +49,7 @@ func init() {
 	// Removed: Describe command is now only available as `job describe`
 	// rootCmd.AddCommand(describeCmd)
 	describeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
+	describeCmd.Flags().StringVar(&describeProject, "project", "", "Set project name")
 	describeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
 	describeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 	describeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB) - queued jobs only")
@@ -110,8 +113,8 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 
 	// Check if trying to update command/directory/gpu/allotments on non-queued job
 	effectiveStatus := job.EffectiveStatus()
-	if (describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU) && effectiveStatus != db.StatusQueued {
-		return fmt.Errorf("can only update command/directory/gpu/allotments on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
+	if (describeProject != "" || describeCommand != "" || describeDirectory != "" || gpuValue != "" || hasGPUClass || hasGPUMem || hasCPU) && effectiveStatus != db.StatusQueued {
+		return fmt.Errorf("can only update command/directory/project/gpu/allotments on queued jobs (job %d has status: %s)", jobID, effectiveStatus)
 	}
 
 	// Track what was updated
@@ -145,6 +148,26 @@ func runDescribe(cmd *cobra.Command, args []string) error {
 		}
 		job.Command = describeCommand
 		updates = append(updates, fmt.Sprintf("command: %s", describeCommand))
+	}
+
+	if cmd.Flags().Changed("project") || describeDirectory != "" || describeCommand != "" {
+		projectName := describeProject
+		if !cmd.Flags().Changed("project") {
+			var err error
+			projectName, err = workdir.ResolveProjectName("", job.WorkingDir)
+			if err != nil {
+				return fmt.Errorf("resolve project: %w", err)
+			}
+		}
+		if err := db.SetJobProject(database, jobID, projectName); err != nil {
+			return fmt.Errorf("update project: %w", err)
+		}
+		job.Project = projectName
+		if projectName == "" {
+			updates = append(updates, "project cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("project: %s", projectName))
+		}
 	}
 
 	// Update GPU (CUDA_VISIBLE_DEVICES) if provided (queued jobs only)

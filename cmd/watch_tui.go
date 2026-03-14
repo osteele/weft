@@ -504,7 +504,7 @@ func (m watchAllModel) formatOnPremJobRow(job *db.Job) string {
 	}
 	return fmt.Sprintf("#%-4d %-12s %-28s %-9s %-8s%s",
 		job.ID,
-		job.DirectoryTailDisplay(),
+		campaign.JobProjectLabel(job),
 		truncate(job.EffectiveDescription(), 28),
 		status,
 		duration,
@@ -515,7 +515,7 @@ func (m watchAllModel) formatOnPremJobRow(job *db.Job) string {
 func (m watchAllModel) formatUnplacedJobRow(job *db.Job) string {
 	return fmt.Sprintf("#%-4d %-12s %-28s %s",
 		job.ID,
-		job.DirectoryTailDisplay(),
+		campaign.JobProjectLabel(job),
 		truncate(job.EffectiveDescription(), 28),
 		formatWatchGPUConstraint(job),
 	)

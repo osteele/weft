@@ -14,8 +14,6 @@ func jobAddFlagAliasNormalizer(_ *pflag.FlagSet, name string) pflag.NormalizedNa
 	switch name {
 	case "dir":
 		name = "directory"
-	case "project":
-		name = "tag"
 	}
 	return pflag.NormalizedName(name)
 }

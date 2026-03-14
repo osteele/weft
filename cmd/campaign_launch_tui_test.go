@@ -36,7 +36,7 @@ func TestLaunchModelView_ShowsCostPlaceholderWhileLoadingOffers(t *testing.T) {
 			GPUClass: "A100",
 			GPUMemGB: 80,
 			Jobs: []*db.Job{
-				{ID: 7, Description: "train", WorkingDir: "/tmp/project-alpha"},
+				{ID: 7, Description: "train", WorkingDir: "/tmp/project-alpha", Project: "exp-042"},
 			},
 		},
 	}
@@ -54,6 +54,7 @@ func TestLaunchModelView_ShowsCostPlaceholderWhileLoadingOffers(t *testing.T) {
 	for _, want := range []string{
 		"── Cost Estimate",
 		"Awaiting offers...",
+		"exp-042",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)

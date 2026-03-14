@@ -13,7 +13,6 @@ type MockClient struct {
 	WaitReadyFunc            func(string, time.Duration) (*Instance, error)
 	DestroyInstanceFunc      func(string) error
 	CopyBetweenInstancesFunc func(string, string, string, string) error
-	WorkspacePathVal         string
 	SelfDestructCmdVal       string
 }
 
@@ -73,13 +72,6 @@ func (m *MockClient) DestroyInstance(instanceID string) error {
 		return m.DestroyInstanceFunc(instanceID)
 	}
 	return nil
-}
-
-func (m *MockClient) WorkspacePath() string {
-	if m.WorkspacePathVal != "" {
-		return m.WorkspacePathVal
-	}
-	return "/workspace/"
 }
 
 func (m *MockClient) CopyBetweenInstances(srcID, srcPath, dstID, dstPath string) error {

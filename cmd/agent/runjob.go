@@ -12,7 +12,7 @@ import (
 )
 
 // runJob handles the "run-job" subcommand.
-// Usage: weft-agent run-job --job-id=123 --log-dir=/tmp/weft-logs [--working-dir=/workspace]
+// Usage: weft-agent run-job --job-id=123 --log-dir=/tmp/weft-logs [--working-dir=/path/to/project]
 // Reads JSON ops.CommandJob from stdin.
 func runJob(args []string) {
 	var jobID int64

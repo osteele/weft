@@ -217,9 +217,10 @@ func init() {
 	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Job description")
 	jobRunCmd.Flags().MarkHidden("description")
 	jobRunCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory on remote host (alias: --dir)")
+	jobRunCmd.Flags().StringVar(&runProject, "project", "", "Project name (default: repo root name for the working directory)")
 	jobRunCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
-	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated; alias: --project)")
+	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
 	addJobAddFlagAliases(jobRunCmd)
 
 	// Copy flags from log command to job log
@@ -234,6 +235,7 @@ func init() {
 
 	// Copy flags from describe command to job describe
 	jobDescribeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")
+	jobDescribeCmd.Flags().StringVar(&describeProject, "project", "", "Set project name")
 	jobDescribeCmd.Flags().StringVarP(&describeDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
 	jobDescribeCmd.Flags().StringVar(&describeCommand, "command", "", "Set command (queued jobs only)")
 	jobDescribeCmd.Flags().StringVar(&describeGPU, "gpu", "", "Set GPU: device index, class, or class>=NGB (e.g., 1, a100, nvidia>=24GB) - queued jobs only")

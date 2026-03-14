@@ -29,8 +29,8 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 			5: {
 				CloudInstance: cloudInstance,
 				Jobs: []*db.Job{
-					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
-					{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Description: "eval model"},
+					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
+					{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Project: "EXP-DELTA", Description: "eval model"},
 				},
 			},
 		},
@@ -38,12 +38,12 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 			{
 				Name: "cool30",
 				Jobs: []*db.Job{
-					{ID: 41, Status: db.StatusRunning, Host: "cool30", WorkingDir: "/tmp/project-beta", Description: "eval model"},
+					{ID: 41, Status: db.StatusRunning, Host: "cool30", WorkingDir: "/tmp/project-beta", Project: "BETA", Description: "eval model"},
 				},
 			},
 		},
 		unplacedJobs: []*db.Job{
-			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Description: "benchmark", GPUClass: "A100"},
+			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Project: "GAMMA", Description: "benchmark", GPUClass: "A100"},
 		},
 	}
 
@@ -56,10 +56,10 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		"Instance 5 — A100 — running",
 		"  vastai:",
 		"  Jobs: 0/2 resolved",
-		"project-alpha",
-		"project-delta",
-		"project-beta",
-		"project-gamma",
+		"EXP-ALPHA",
+		"EXP-DELTA",
+		"BETA",
+		"GAMMA",
 		"cool30",
 	} {
 		if !strings.Contains(out, expected) {
@@ -82,8 +82,8 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 	update := campaign.InstanceUpdate{
 		CloudInstance: ci,
 		Jobs: []*db.Job{
-			{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
-			{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Description: "eval model"},
+			{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
+			{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Project: "EXP-DELTA", Description: "eval model"},
 		},
 	}
 
@@ -92,8 +92,8 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 		"Instance 5 — A100 — running",
 		"  vastai: 32734388",
 		"  Jobs: 0/2 resolved",
-		"project-alpha",
-		"project-delta",
+		"EXP-ALPHA",
+		"EXP-DELTA",
 	} {
 		if !strings.Contains(out, expected) {
 			t.Fatalf("output missing %q, got:\n%s", expected, out)

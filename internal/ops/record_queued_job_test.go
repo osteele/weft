@@ -119,3 +119,27 @@ func TestRecordQueuedJob_NoSSHCalls(t *testing.T) {
 		t.Errorf("expected empty LastSyncedStatus, got %q", job.LastSyncedStatus)
 	}
 }
+
+func TestRecordQueuedJob_ExplicitProject(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	params := QueueJobParams{
+		Host:       "test-host",
+		WorkingDir: "/tmp/project/subdir",
+		Command:    "echo test",
+		Project:    "explicit-project",
+	}
+
+	jobID, err := RecordQueuedJob(database, params)
+	if err != nil {
+		t.Fatalf("RecordQueuedJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Project != "explicit-project" {
+		t.Errorf("expected Project=%q, got %q", "explicit-project", job.Project)
+	}
+}

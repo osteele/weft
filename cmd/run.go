@@ -71,6 +71,7 @@ var (
 	runHost        string
 	runDir         string
 	runDescription string
+	runProject     string
 	runDraft       bool
 	runFollow      bool
 	runWait        bool
@@ -100,6 +101,7 @@ func init() {
 	runCmd.Flags().StringVarP(&runHost, "host", "H", "", "Remote host to run on (default: auto-place)")
 	runCmd.Flags().BoolVar(&runDraft, "draft", false, "Create the job in draft status without contacting remote hosts")
 	runCmd.Flags().StringVarP(&runDir, "directory", "C", "", "Working directory (default: current directory path; alias: --dir)")
+	runCmd.Flags().StringVar(&runProject, "project", "", "Project name (default: repo root name for the working directory)")
 	runCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Description of the job")
 	runCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	runCmd.Flags().MarkHidden("description")
@@ -107,7 +109,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
-	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated; alias: --project)")
+	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
@@ -172,6 +174,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if runDescription == "" {
 			runDescription = fromJob.Description
 		}
+		if runProject == "" {
+			runProject = fromJob.Project
+		}
 		if len(runTags) == 0 {
 			runTags = append([]string(nil), fromJob.Tags...)
 		}
@@ -231,8 +236,35 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Parse "cd /path && command" pattern to extract working directory
+	// Only if -C/--directory wasn't explicitly provided
+	dirExplicit := runDir != ""
+	parsedDir, parsedCmd := parseCdPrefix(command)
+	if parsedDir != "" && runDir == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: \"cd %s && ...\" detected. Use -C %s instead.\n", parsedDir, shellQuote(parsedDir))
+		command = parsedCmd
+		runDir = parsedDir
+		dirExplicit = true
+	}
+
+	// Resolve working directory
+	workingDir, err := workdir.ResolveWorkingDir(runDir, cmd.ErrOrStderr())
+	if err != nil {
+		return fmt.Errorf("get working dir: %w", err)
+	}
+
+	// Warn about literal local home paths (e.g. /Users/osteele/...) that won't exist on remote
+	if dirExplicit {
+		maybeWarnHomePrefixedDir(host, workingDir)
+	}
+
+	projectName, err := workdir.ResolveProjectName(runProject, workingDir)
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+
 	// Load output directories from .weft.toml for convention-based output collection
-	localDir := workdir.ResolveLocal(runDir)
+	localDir := workdir.ResolveLocal(workingDir)
 	outputDirs := config.ProjectOutputDirs(localDir)
 
 	// Merge project-level inputs with CLI --input flags
@@ -312,7 +344,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		GPUMemGB: runGPUMem,
 		Inputs:   runInputs,
 		Command:  command,
-		Project:  workdir.ProjectName(runDir),
+		Project:  projectName,
 		Tags:     runTags,
 	}
 
@@ -349,28 +381,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Parse "cd /path && command" pattern to extract working directory
-	// Only if -C/--directory wasn't explicitly provided
-	dirExplicit := runDir != ""
-	parsedDir, parsedCmd := parseCdPrefix(command)
-	if parsedDir != "" && runDir == "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: \"cd %s && ...\" detected. Use -C %s instead.\n", parsedDir, shellQuote(parsedDir))
-		command = parsedCmd
-		runDir = parsedDir
-		dirExplicit = true
-	}
-
-	// Resolve working directory
-	workingDir, err := workdir.ResolveWorkingDir(runDir, cmd.ErrOrStderr())
-	if err != nil {
-		return fmt.Errorf("get working dir: %w", err)
-	}
-
-	// Warn about literal local home paths (e.g. /Users/osteele/...) that won't exist on remote
-	if dirExplicit {
-		maybeWarnHomePrefixedDir(host, workingDir)
-	}
-
 	// Route through local placement for non-draft, non-dependency submissions
 	if !runDraft && runAfter == 0 && runAfterAny == 0 {
 		var placementResult *placement.PlacementResult
@@ -398,6 +408,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			WorkingDir:  workingDir,
 			Command:     command,
 			Description: runDescription,
+			Project:     projectName,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
 			GPUClass:    runGPUClass,
@@ -487,6 +498,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			WorkingDir:  workingDir,
 			Command:     command,
 			Description: runDescription,
+			Project:     projectName,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
 			GPUClass:    runGPUClass,
@@ -525,6 +537,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		if err := db.SetJobTags(database, jobID, runTags); err != nil {
 			return fmt.Errorf("set job tags: %w", err)
+		}
+		if projectName != "" {
+			if err := db.SetJobProject(database, jobID, projectName); err != nil {
+				return fmt.Errorf("set project: %w", err)
+			}
 		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
@@ -568,6 +585,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			WorkingDir:   workingDir,
 			Command:      command,
 			Description:  runDescription,
+			Project:      projectName,
 			EnvVars:      runEnvVars,
 			Tags:         runTags,
 			GPU:          gpu,

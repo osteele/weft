@@ -39,7 +39,6 @@ type graceWaitConfig struct {
 	Timeout         time.Duration
 	SelfDestructCmd string
 	LogDir          string
-	Workspace       string
 }
 
 // parseGraceWaitArgs parses CLI args into a graceWaitConfig for the grace-wait subcommand.
@@ -64,8 +63,6 @@ func parseGraceWaitArgs(args []string) graceWaitConfig {
 			cfg.SelfDestructCmd = arg[len("--self-destruct-cmd="):]
 		case hasPrefix(arg, "--log-dir="):
 			cfg.LogDir = arg[len("--log-dir="):]
-		case hasPrefix(arg, "--workspace="):
-			cfg.Workspace = arg[len("--workspace="):]
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
 			os.Exit(1)
@@ -95,8 +92,6 @@ func graceWaitLoop(cfg graceWaitConfig) {
 	r2Bucket := cfg.R2Bucket
 	selfDestructCmd := cfg.SelfDestructCmd
 	logDir := cfg.LogDir
-	workspace := cfg.Workspace
-
 	instanceIDInt, err := strconv.ParseInt(instanceID, 10, 64)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid instance ID %q: %v\n", instanceID, err)
@@ -198,7 +193,6 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			InstanceID: instanceIDInt,
 			PhaseKey:   phaseKey,
 			LogDir:     logDir,
-			Workspace:  workspace,
 			StartTime:  time.Now(),
 		})
 		failedJobs := seqResult.FailedJobs

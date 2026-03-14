@@ -87,7 +87,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 		lines = append(lines, fmt.Sprintf("    %4d  %s  %-12s  %s",
 			job.ID,
 			renderWatchJobStatusText(statusText, displayStatuses[i], opts),
-			job.DirectoryTailDisplay(),
+			campaign.JobProjectLabel(job),
 			desc,
 		))
 		if campaign.IsJobTerminal(displayStatuses[i]) {

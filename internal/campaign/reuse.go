@@ -315,9 +315,8 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 			return fmt.Errorf("upload source for job %d: %w", job.ID, err)
 		}
 
-		// Compute remote working directory: /workspace/<project-name>
-		// This mirrors lifecycle.go which uses path.Join(wsPath, path.Base(localDir))
-		remoteDir := path.Join("/workspace", path.Base(sourceDir))
+		// Compute remote working directory under the synced project root.
+		remoteDir := path.Join(cloud.ProjectRootDir, path.Base(sourceDir))
 
 		payload.Jobs = append(payload.Jobs, cloud.AgentJob{
 			ID:      job.ID,

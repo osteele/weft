@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -9,7 +8,7 @@ import (
 
 func TestJobAddFlagAliasesParse(t *testing.T) {
 	var dir string
-	var tags []string
+	var project string
 	c := &cobra.Command{
 		Use: "test",
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -17,13 +16,12 @@ func TestJobAddFlagAliasesParse(t *testing.T) {
 		},
 	}
 	c.Flags().StringVarP(&dir, "directory", "C", "", "")
-	c.Flags().StringSliceVar(&tags, "tag", nil, "")
+	c.Flags().StringVar(&project, "project", "", "")
 	addJobAddFlagAliases(c)
 
 	c.SetArgs([]string{
 		"--dir", "/tmp/work",
 		"--project", "exp-a",
-		"--tag", "exp-b",
 	})
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute command: %v", err)
@@ -32,9 +30,8 @@ func TestJobAddFlagAliasesParse(t *testing.T) {
 	if dir != "/tmp/work" {
 		t.Fatalf("directory = %q, want %q", dir, "/tmp/work")
 	}
-	wantTags := []string{"exp-a", "exp-b"}
-	if !reflect.DeepEqual(tags, wantTags) {
-		t.Fatalf("tags = %#v, want %#v", tags, wantTags)
+	if project != "exp-a" {
+		t.Fatalf("project = %q, want %q", project, "exp-a")
 	}
 }
 
@@ -60,10 +57,7 @@ func TestJobAddFlagAliasesApplied(t *testing.T) {
 
 			projectFlag := tt.cmd.Flags().Lookup("project")
 			if projectFlag == nil {
-				t.Fatalf("project alias not found")
-			}
-			if projectFlag.Name != "tag" {
-				t.Fatalf("project alias normalized to %q, want %q", projectFlag.Name, "tag")
+				t.Fatalf("project flag not found")
 			}
 		})
 	}

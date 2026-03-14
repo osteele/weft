@@ -379,24 +379,22 @@ func LaunchCampaign(
 				}
 
 				var donorSources []SourceMapping
-				wsPath := donorClient.WorkspacePath()
 				for _, localDir := range donorCfg.SourceDirs {
 					if r2Key, ok := donorAssets.SourceR2Keys[localDir]; ok {
 						donorSources = append(donorSources, SourceMapping{
 							R2Key:     r2Key,
-							RemoteDir: path.Join(wsPath, path.Base(localDir)),
+							RemoteDir: path.Join(cloud.ProjectRootDir, path.Base(localDir)),
 						})
 					}
 				}
 
 				donorBootstrap := GenerateBootstrapScript(BootstrapManifest{
-					AgentR2Key:    donorAssets.AgentR2Key,
-					Sources:       donorSources,
-					WorkspacePath: wsPath,
-					DonorMode:     true,
-					HFModels:      donorCfg.HFModels,
-					DonorID:       fmt.Sprintf("%d", donorInstanceID),
-					DBInstanceID:  donorInstanceID,
+					AgentR2Key:   donorAssets.AgentR2Key,
+					Sources:      donorSources,
+					DonorMode:    true,
+					HFModels:     donorCfg.HFModels,
+					DonorID:      fmt.Sprintf("%d", donorInstanceID),
+					DBInstanceID: donorInstanceID,
 				})
 
 				bootstrapKey := r2keys.BootstrapScript(donorInstanceID)
@@ -726,10 +724,9 @@ func LaunchInstance(
 	}
 
 	// Build local-to-remote directory mapping and agent job list.
-	wsPath := client.WorkspacePath()
 	localToRemote := make(map[string]string)
 	for _, d := range group.SourceDirs() {
-		localToRemote[d] = path.Join(wsPath, path.Base(d))
+		localToRemote[d] = path.Join(cloud.ProjectRootDir, path.Base(d))
 	}
 
 	var agentJobs []cloud.AgentJob
@@ -936,7 +933,6 @@ func LaunchInstance(
 	bootstrapScript := GenerateBootstrapScript(BootstrapManifest{
 		AgentR2Key:         r2Assets.AgentR2Key,
 		Sources:            sources,
-		WorkspacePath:      wsPath,
 		HFModels:           collectHFModels([]InstanceGroup{group}),
 		DBInstanceID:       instanceID,
 		MaxTimeSeconds:     opts.MaxTimeSeconds,

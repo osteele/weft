@@ -25,11 +25,10 @@ import (
 )
 
 // runCampaign implements the "run-campaign" subcommand.
-// Usage: weft-agent run-campaign --r2-bucket=BUCKET --instance-id=ID [--workspace=/workspace/] [--log-dir=/tmp/weft-logs] [--max-time=2h] [--grace-period=15m]
+// Usage: weft-agent run-campaign --r2-bucket=BUCKET --instance-id=ID [--log-dir=/tmp/weft-logs] [--max-time=2h] [--grace-period=15m]
 func runCampaign(args []string) {
 	var r2Bucket string
 	var instanceID string
-	var workspace string
 	var logDir string
 	var maxTime time.Duration
 	var gracePeriod time.Duration
@@ -40,8 +39,6 @@ func runCampaign(args []string) {
 			r2Bucket = arg[len("--r2-bucket="):]
 		case hasPrefix(arg, "--instance-id="):
 			instanceID = arg[len("--instance-id="):]
-		case hasPrefix(arg, "--workspace="):
-			workspace = arg[len("--workspace="):]
 		case hasPrefix(arg, "--log-dir="):
 			logDir = arg[len("--log-dir="):]
 		case hasPrefix(arg, "--max-time="):
@@ -69,9 +66,6 @@ func runCampaign(args []string) {
 	if r2Bucket == "" || instanceID == "" {
 		fmt.Fprintln(os.Stderr, "required: --r2-bucket, --instance-id")
 		os.Exit(1)
-	}
-	if workspace == "" {
-		workspace = "/workspace/"
 	}
 	if logDir == "" {
 		logDir = "/tmp/weft-logs"
@@ -116,16 +110,17 @@ func runCampaign(args []string) {
 	// Track current phase for heartbeat reporting
 	var currentPhase syncString
 	currentPhase.Set("starting")
+	diskPath := campaignDiskPath(manifest.Jobs)
 
 	startTime := time.Now()
 	anyFailed := false
 
 	// Start heartbeat reporter (writes host metrics to R2 every 30s)
-	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, workspace, currentPhase.Get)
+	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get)
 	defer stopHeartbeat()
 	stopOpslogReporter := startOpslogReporter(r2Bucket, instanceIDInt, logDir)
 	defer stopOpslogReporter()
-	stopDiskMonitor := startDiskMonitor(r2Bucket, instanceIDInt, workspace, logDir, phaseKey, manifest.SelfDestructCmd, currentPhase.Get, currentPhase.Set)
+	stopDiskMonitor := startDiskMonitor(r2Bucket, instanceIDInt, diskPath, logDir, phaseKey, manifest.SelfDestructCmd, currentPhase.Get, currentPhase.Set)
 	defer stopDiskMonitor()
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
@@ -133,7 +128,6 @@ func runCampaign(args []string) {
 		InstanceID: instanceIDInt,
 		PhaseKey:   phaseKey,
 		LogDir:     logDir,
-		Workspace:  workspace,
 		MaxTime:    maxTime,
 		StartTime:  startTime,
 		OnPhase:    currentPhase.Set,
@@ -149,7 +143,6 @@ func runCampaign(args []string) {
 			Timeout:         gracePeriod,
 			SelfDestructCmd: manifest.SelfDestructCmd,
 			LogDir:          logDir,
-			Workspace:       workspace,
 		})
 	} else {
 		terminalStatus := db.CloudInstanceStatusCompleted
@@ -160,6 +153,20 @@ func runCampaign(args []string) {
 		}
 		selfDestruct(r2Bucket, instanceID, manifest.SelfDestructCmd, terminalStatus, terminationReason, currentPhase.Get(), 0)
 	}
+}
+
+func campaignDiskPath(jobs []cloud.AgentJob) string {
+	for _, job := range jobs {
+		if job.Dir == "" {
+			continue
+		}
+		parent := filepath.Dir(job.Dir)
+		if parent != "" && parent != "." {
+			return parent
+		}
+		return job.Dir
+	}
+	return "/"
 }
 
 // checkForNewJobs reads the grace/jobs.json R2 key and returns any newly

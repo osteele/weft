@@ -97,6 +97,7 @@ type queueJobOptions struct {
 	WorkingDir   string
 	Command      string
 	Description  string
+	Project      string
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting (extracted from EnvVars or set directly)
@@ -161,6 +162,7 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		WorkingDir:  opts.WorkingDir,
 		Command:     opts.Command,
 		Description: opts.Description,
+		Project:     opts.Project,
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
 		GPU:         opts.GPU,

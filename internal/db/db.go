@@ -2140,7 +2140,9 @@ func SetJobProject(db *sql.DB, jobID int64, project string) error {
 }
 
 // DeriveProject computes the project name from a working directory and command.
-// It checks for a "cd <dir> &&" prefix first, then falls back to the working directory basename.
+// It checks for a "cd <dir> &&" prefix first, then falls back to the working
+// directory basename. This function is used for stored job records (which may
+// have remote paths) and must not spawn subprocesses.
 func DeriveProject(workingDir, command string) string {
 	_, cdDir := ParseCdPrefix(command)
 	if cdDir != "" {

@@ -355,6 +355,9 @@ func showJob(database *sql.DB, id int64) error {
 	fmt.Printf("Job ID:       %d\n", job.ID)
 	fmt.Printf("Host:         %s\n", job.Host)
 	fmt.Printf("Working Dir:  %s\n", job.EffectiveWorkingDir())
+	if job.Project != "" {
+		fmt.Printf("Project:      %s\n", job.Project)
+	}
 	fmt.Printf("Command:      %s\n", job.EffectiveCommand())
 	if job.Description != "" {
 		fmt.Printf("Description:  %s\n", job.Description)

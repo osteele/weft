@@ -9,6 +9,10 @@ import (
 // exists in the provider's inventory.
 var ErrInstanceNotFound = errors.New("instance not found")
 
+// ProjectRootDir is the default root directory used for synced project trees on
+// cloud instances.
+const ProjectRootDir = "/workspace"
+
 // Client is the provider-neutral interface for interacting with cloud GPU providers.
 type Client interface {
 	// Provider returns which cloud provider this client connects to.
@@ -39,9 +43,6 @@ type Client interface {
 	// CopyBetweenInstances copies files from one instance to another.
 	// Uses provider-level copy (e.g., vastai copy) which is LAN-speed within a data center.
 	CopyBetweenInstances(srcInstanceID, srcPath, dstInstanceID, dstPath string) error
-
-	// WorkspacePath returns the default workspace path on instances (e.g., "/workspace/").
-	WorkspacePath() string
 
 	// SelfDestructCmd returns the shell command for an instance to destroy itself.
 	// providerInstanceID is the provider-specific instance ID (e.g., Vast.ai instance number).

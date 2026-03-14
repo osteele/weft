@@ -189,7 +189,7 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 		for _, job := range snapshot.UnplacedJobs {
 			b.WriteString(fmt.Sprintf("  #%d  %s  %s  %s\n",
 				job.ID,
-				job.DirectoryTailDisplay(),
+				campaign.JobProjectLabel(job),
 				truncate(job.EffectiveDescription(), 32),
 				formatWatchGPUConstraint(job),
 			))

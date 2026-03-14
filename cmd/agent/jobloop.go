@@ -21,7 +21,6 @@ type jobSequenceConfig struct {
 	InstanceID int64
 	PhaseKey   string
 	LogDir     string
-	Workspace  string
 	MaxTime    time.Duration // 0 = no limit
 	StartTime  time.Time     // for time budget accounting
 	OnPhase    func(string)  // update current phase string (for heartbeat)
@@ -58,9 +57,6 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, timeseriesPath)
 
 		workDir := job.Dir
-		if workDir == "" {
-			workDir = cfg.Workspace
-		}
 
 		// Compute per-job max time from remaining budget
 		var jobMaxTime time.Duration

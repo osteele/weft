@@ -9,7 +9,6 @@ import (
 type BootstrapManifest struct {
 	AgentR2Key         string          // R2 key for the agent binary
 	Sources            []SourceMapping // source tarballs to extract
-	WorkspacePath      string          // e.g. "/workspace/"
 	DonorMode          bool            // download caches and write ready marker, no wrapper
 	HFModels           []string        // HF model IDs to pre-download before jobs run
 	DonorID            string          // provider instance ID (for R2 ready marker key)
@@ -124,17 +123,11 @@ func generateDonorBootstrapTail(b *strings.Builder, manifest BootstrapManifest) 
 // generateWorkerBootstrapTail generates the worker-specific portion:
 // launches weft-agent run-campaign via nohup.
 func generateWorkerBootstrapTail(b *strings.Builder, manifest BootstrapManifest) {
-	wsPath := manifest.WorkspacePath
-	if wsPath == "" {
-		wsPath = "/workspace/"
-	}
-
 	b.WriteString("# Launch campaign agent\n")
 	b.WriteString(fmt.Sprintf("nohup weft-agent run-campaign"+
 		" --r2-bucket=$R2_BUCKET"+
-		" --instance-id=%d"+
-		" --workspace=%s",
-		manifest.DBInstanceID, wsPath))
+		" --instance-id=%d",
+		manifest.DBInstanceID))
 
 	if manifest.MaxTimeSeconds > 0 {
 		b.WriteString(fmt.Sprintf(" --max-time=%ds", manifest.MaxTimeSeconds))

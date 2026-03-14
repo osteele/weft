@@ -125,7 +125,7 @@ func TestWatchModelView_ShowsJobDirectoryTail(t *testing.T) {
 					GPUSpec:  "A100",
 				},
 				Jobs: []*db.Job{
-					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
+					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
 				},
 			},
 		},
@@ -133,8 +133,8 @@ func TestWatchModelView_ShowsJobDirectoryTail(t *testing.T) {
 	}
 
 	out := stripANSI(m.View())
-	if !strings.Contains(out, "project-alpha") {
-		t.Fatalf("output missing job directory tail, got:\n%s", out)
+	if !strings.Contains(out, "EXP-ALPHA") {
+		t.Fatalf("output missing job project, got:\n%s", out)
 	}
 }
 

@@ -127,10 +127,6 @@ func (c *CloudClient) CopyBetweenInstances(srcInstanceID, srcPath, dstInstanceID
 	return c.inner.CopyBetweenInstances(srcID, srcPath, dstID, dstPath)
 }
 
-func (c *CloudClient) WorkspacePath() string {
-	return "/workspace/"
-}
-
 func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
 	// Prefer Vast.ai's per-instance credentials (CONTAINER_ID + CONTAINER_API_KEY),
 	// which are set in PID 1's environment and inherited by the onstart script.

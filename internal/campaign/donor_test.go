@@ -190,12 +190,11 @@ func TestSeedWorkers_PhoneTreeFanOut(t *testing.T) {
 
 func TestGenerateBootstrapScript_DonorMode(t *testing.T) {
 	manifest := BootstrapManifest{
-		AgentR2Key:    "agent/v1/linux-amd64",
-		Sources:       []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
-		WorkspacePath: "/workspace/",
-		DonorMode:     true,
-		HFModels:      []string{"meta-llama/Llama-3-8B", "openai/whisper-large-v3"},
-		DonorID:       "42",
+		AgentR2Key: "agent/v1/linux-amd64",
+		Sources:    []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
+		DonorMode:  true,
+		HFModels:   []string{"meta-llama/Llama-3-8B", "openai/whisper-large-v3"},
+		DonorID:    "42",
 	}
 
 	script := GenerateBootstrapScript(manifest)
@@ -231,7 +230,6 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 	manifest := BootstrapManifest{
 		AgentR2Key:         "agent/v1/linux-amd64",
 		Sources:            []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
-		WorkspacePath:      "/workspace/",
 		DBInstanceID:       7,
 		MaxTimeSeconds:     3600,
 		GracePeriodSeconds: 900,
@@ -253,6 +251,9 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 	if !strings.Contains(script, "--grace-period=900s") {
 		t.Error("worker script should pass grace-period")
 	}
+	if strings.Contains(script, "--workspace=") {
+		t.Error("worker script should not pass a workspace flag")
+	}
 
 	// Should NOT contain donor-specific items
 	if strings.Contains(script, "uv sync") {
@@ -265,12 +266,11 @@ func TestGenerateBootstrapScript_WorkerMode(t *testing.T) {
 
 func TestGenerateBootstrapScript_WorkerWithHFModels(t *testing.T) {
 	manifest := BootstrapManifest{
-		AgentR2Key:    "agent/v1/linux-amd64",
-		Sources:       []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
-		WorkspacePath: "/workspace/",
-		DBInstanceID:  9,
-		HFModels:      []string{"EleutherAI/pythia-1.4b", "gpt2-xl"},
-		DonorMode:     false,
+		AgentR2Key:   "agent/v1/linux-amd64",
+		Sources:      []SourceMapping{{R2Key: "sources/abc.tar.gz", RemoteDir: "/workspace/project"}},
+		DBInstanceID: 9,
+		HFModels:     []string{"EleutherAI/pythia-1.4b", "gpt2-xl"},
+		DonorMode:    false,
 	}
 
 	script := GenerateBootstrapScript(manifest)

@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 const (
@@ -200,6 +201,7 @@ type QueueJobParams struct {
 	WorkingDir   string
 	Command      string
 	Description  string
+	Project      string
 	EnvVars      []string
 	Tags         []string
 	GPU          string // Explicit GPU setting; if empty, extracted from EnvVars
@@ -254,7 +256,18 @@ func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
 	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
 		return 0, fmt.Errorf("record dependencies: %w", err)
 	}
-	if project := db.DeriveProject(params.WorkingDir, params.Command); project != "" {
+	project := strings.TrimSpace(params.Project)
+	if project == "" {
+		var err error
+		project, err = workdir.ResolveProjectName("", params.WorkingDir)
+		if err != nil {
+			return 0, fmt.Errorf("resolve project: %w", err)
+		}
+	}
+	if project == "" {
+		project = db.DeriveProject(params.WorkingDir, params.Command)
+	}
+	if project != "" {
 		if err := db.SetJobProject(database, jobID, project); err != nil {
 			return 0, fmt.Errorf("record project: %w", err)
 		}

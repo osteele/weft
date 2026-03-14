@@ -24,7 +24,7 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 			5: {
 				CloudInstance: cloudInstance,
 				Jobs: []*db.Job{
-					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Description: "train model"},
+					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
 				},
 			},
 		},
@@ -32,7 +32,7 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 			{Name: "cool30", Jobs: []*db.Job{{ID: 41, Status: db.StatusRunning, Host: "cool30", WorkingDir: "/tmp/project-beta", Description: "eval"}}},
 		},
 		UnplacedJobs: []*db.Job{
-			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Description: "benchmark"},
+			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Project: "GAMMA", Description: "benchmark"},
 		},
 	}
 
@@ -44,8 +44,8 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 		"Instance 5 — A100 — running",
 		"  vastai: 32734388",
 		"  Jobs: 0/1 resolved",
-		"project-alpha",
-		"project-gamma",
+		"EXP-ALPHA",
+		"GAMMA",
 	} {
 		if !strings.Contains(out, expected) {
 			t.Fatalf("output missing %q, got:\n%s", expected, out)

@@ -192,6 +192,7 @@ var queueEditCmd = &cobra.Command{
 var (
 	queueDir_           string
 	queueDescription    string
+	queueProject        string
 	queueEnvVars        []string
 	queueTags           []string
 	queueAfter          int64
@@ -204,6 +205,7 @@ var (
 	queueEditDependsAny []string
 	queueEditClearDeps  bool
 	editMessage         string
+	editProject         string
 	editCommand         string
 	editDirectory       string
 	editEnvVars         []string
@@ -272,11 +274,12 @@ func init() {
 	addQueueHostFlag(queueUpdateCmd)
 
 	queueAddCmd.Flags().StringVarP(&queueDir_, "directory", "C", "", "Working directory (default: current directory path; alias: --dir)")
+	queueAddCmd.Flags().StringVar(&queueProject, "project", "", "Project name (default: repo root name for the working directory)")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "message", "m", "", "Description of the job")
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
-	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated; alias: --project). Special: 'exclusive' makes job run alone; 'benchmark' waits for system-wide idle")
+	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Special: 'exclusive' makes job run alone; 'benchmark' waits for system-wide idle")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
@@ -320,6 +323,11 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	if queueDir_ != "" {
 		maybeWarnHomePrefixedDir(host, workingDir)
+	}
+
+	projectName, err := workdir.ResolveProjectName(queueProject, workingDir)
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
 	}
 
 	database, err := db.Open()
@@ -376,6 +384,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record draft tags: %w", err)
 			}
 		}
+		if projectName != "" {
+			if err := db.SetJobProject(database, jobID, projectName); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft project: %w", err)
+			}
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -402,6 +416,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		WorkingDir:   workingDir,
 		Command:      command,
 		Description:  queueDescription,
+		Project:      projectName,
 		EnvVars:      queueEnvVars,
 		Tags:         queueTags,
 		Dependencies: deps,
@@ -835,6 +850,26 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		updates = append(updates, fmt.Sprintf("command: %s", editCommand))
 	}
 
+	if cmd.Flags().Changed("project") || cmd.Flags().Changed("directory") || cmd.Flags().Changed("command") {
+		projectName := editProject
+		if !cmd.Flags().Changed("project") {
+			var err error
+			projectName, err = workdir.ResolveProjectName("", job.WorkingDir)
+			if err != nil {
+				return fmt.Errorf("resolve project: %w", err)
+			}
+		}
+		if err := db.SetJobProject(database, jobID, projectName); err != nil {
+			return fmt.Errorf("update project: %w", err)
+		}
+		job.Project = projectName
+		if projectName == "" {
+			updates = append(updates, "project cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("project: %s", projectName))
+		}
+	}
+
 	if envChanged {
 		var newEnv []string
 		if !editClearEnv {
@@ -1114,6 +1149,7 @@ func decodeQueueDependencies(spec string) []queueDependency {
 
 func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&editMessage, "message", "m", "", "Set job description")
+	cmd.Flags().StringVar(&editProject, "project", "", "Set project name")
 	cmd.Flags().StringVarP(&editDirectory, "directory", "C", "", "Set working directory (queued jobs only)")
 	cmd.Flags().StringVar(&editCommand, "command", "", "Set command (queued jobs only)")
 	cmd.Flags().StringSliceVarP(&editEnvVars, "env", "e", nil, "Replace environment variables (VAR=value)")

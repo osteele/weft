@@ -38,8 +38,8 @@ type diskFailureReport struct {
 	DirectoryUsage       map[string]string `json:"directory_usage,omitempty"`
 }
 
-func startDiskMonitor(r2Bucket string, instanceID int64, workspace, logDir, phaseKey, selfDestructCmd string, getPhase func() string, setPhase func(string)) func() {
-	ballastDir := chooseBallastDir(workspace, logDir)
+func startDiskMonitor(r2Bucket string, instanceID int64, diskPath, logDir, phaseKey, selfDestructCmd string, getPhase func() string, setPhase func(string)) func() {
+	ballastDir := chooseBallastDir(diskPath, logDir)
 	ballastPath := filepath.Join(ballastDir, ".weft-ballast")
 	if err := ensureBallastFile(ballastPath, ballastSizeBytes); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: create ballast file: %v\n", err)
@@ -79,8 +79,8 @@ func startDiskMonitor(r2Bucket string, instanceID int64, workspace, logDir, phas
 	return stop
 }
 
-func chooseBallastDir(workspace, logDir string) string {
-	candidates := []string{workspace, filepath.Dir(workspace), logDir}
+func chooseBallastDir(diskPath, logDir string) string {
+	candidates := []string{diskPath, filepath.Dir(diskPath), logDir}
 	for _, candidate := range candidates {
 		if candidate == "" {
 			continue
@@ -192,7 +192,7 @@ func collectDiskFailureReport(ballastDir, ballastPath, phase string, jobID int64
 	}
 	home, _ := os.UserHomeDir()
 	for label, path := range map[string]string{
-		"workspace":   ballastDir,
+		"root_path":   ballastDir,
 		"uv_cache":    filepath.Join(home, ".cache", "uv"),
 		"huggingface": filepath.Join(home, ".cache", "huggingface"),
 		"weft_cache":  filepath.Join(home, ".cache", "weft"),
