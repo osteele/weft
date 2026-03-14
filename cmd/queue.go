@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -751,6 +752,19 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, effectiveStatus)
 	}
 
+	relayCfg, relayClient, err := loadCoordinatorRelay()
+	if err != nil {
+		return err
+	}
+	if relayEnabled(relayCfg, relayClient) {
+		if _, err := relaySimpleCommand(relayClient, coordinatorrelay.OpQueuePriority, jobID); err != nil {
+			return err
+		}
+		_ = db.SetQueuedAtBefore(database, jobID, job.Host)
+		fmt.Printf("Job %d submitted to coordinator to move to the front on %s\n", jobID, job.Host)
+		return nil
+	}
+
 	result, err := ops.RequestQueuePriority(database, job, ops.DefaultOptions())
 	if err != nil {
 		return err
@@ -1011,6 +1025,49 @@ func runEdit(cmd *cobra.Command, args []string) error {
 
 	// Push to remote queue
 	deferredUpdate := false
+	relayCfg, relayClient, err := loadCoordinatorRelay()
+	if err != nil {
+		return err
+	}
+	if relayEnabled(relayCfg, relayClient) {
+		var ack *coordinatorrelay.Ack
+		if wasRequeued {
+			ack, err = relayRequeueJob(relayCfg, relayClient, job)
+		} else {
+			update := &coordinatorrelay.UpdateJobPayload{
+				WorkingDir:   &job.WorkingDir,
+				Command:      &job.Command,
+				Project:      &job.Project,
+				EnvVars:      append([]string(nil), job.EnvVars...),
+				GPU:          stringPtr(job.GPU),
+				GPUClass:     stringPtr(job.GPUClass),
+				GPUMemGB:     job.GPUMemGB,
+				DepSpec:      stringPtr(job.DepSpec),
+				Inputs:       append([]string(nil), job.Inputs...),
+				Outputs:      append([]string(nil), job.Outputs...),
+				OutputDirs:   append([]string(nil), job.OutputDirs...),
+				Produces:     append([]string(nil), job.Produces...),
+				Needs:        append([]string(nil), job.Needs...),
+				CPUAllotment: job.CPUAllotment,
+			}
+			if cmd.Flags().Changed("message") {
+				update.Description = &job.Description
+			}
+			ack, err = relayUpdateJob(relayCfg, relayClient, job, update)
+		}
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Updated job %d via coordinator relay\n", jobID)
+		for _, update := range updates {
+			fmt.Printf("  %s\n", update)
+		}
+		if ack != nil && ack.Message != "" {
+			fmt.Printf("  relay: %s\n", ack.Message)
+		}
+		return nil
+	}
+
 	if wasRequeued {
 		// Reload job to get all fields (including tags, CPU allotment)
 		job, err = db.GetJobByID(database, jobID)

@@ -237,3 +237,21 @@ func AgentBinary(version, goos, goarch string) string {
 func SourceTarball(hash string) string {
 	return fmt.Sprintf("sources/%s.tar.gz", hash)
 }
+
+// Coordinator relay keys
+
+func CoordinatorRelayRequest(requestID string) string {
+	return fmt.Sprintf("coordinator/v1/inbox/%s.json", requestID)
+}
+
+func CoordinatorRelayAck(requestID string) string {
+	return fmt.Sprintf("coordinator/v1/acks/%s.json", requestID)
+}
+
+func CoordinatorRelayInboxPrefix() string {
+	return "coordinator/v1/inbox/"
+}
+
+func CoordinatorRelayAckPrefix() string {
+	return "coordinator/v1/acks/"
+}

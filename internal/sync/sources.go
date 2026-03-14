@@ -74,7 +74,15 @@ func rsyncSrcDst(host, localDir, remoteDir string) (src, dst string) {
 // host is the SSH hostname, localDir is an absolute local path (with trailing slash added),
 // remoteDir may contain ~ (rsync expands it on the remote side).
 func BuildRsyncArgs(host, localDir, remoteDir string, excludes []string) []string {
-	args := []string{"-az", "--delete"}
+	return BuildRsyncArgsWithOptions(host, localDir, remoteDir, excludes, true)
+}
+
+// BuildRsyncArgsWithOptions constructs rsync arguments with an optional --delete.
+func BuildRsyncArgsWithOptions(host, localDir, remoteDir string, excludes []string, delete bool) []string {
+	args := []string{"-az"}
+	if delete {
+		args = append(args, "--delete")
+	}
 	for _, pattern := range excludes {
 		args = append(args, "--exclude", pattern)
 	}
@@ -173,11 +181,15 @@ func SyncExtraPaths(host string, paths []string) error {
 }
 
 func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error {
+	return defaultSyncFuncWithDelete(host, localDir, remoteDir, excludes, true)
+}
+
+func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []string, delete bool) error {
 	var args []string
 	if excludes != nil {
-		args = BuildRsyncArgs(host, localDir, remoteDir, excludes)
+		args = BuildRsyncArgsWithOptions(host, localDir, remoteDir, excludes, delete)
 	} else {
-		args = BuildExtraPathRsyncArgs(host, localDir, remoteDir)
+		args = BuildRsyncArgsWithOptions(host, localDir, remoteDir, nil, delete)
 	}
 
 	// Use a timeout so a slow or unresponsive host doesn't block the caller
@@ -191,6 +203,42 @@ func defaultSyncFunc(host, localDir, remoteDir string, excludes []string) error 
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rsync to %s:%s: %w", host, remoteDir, err)
+	}
+	return nil
+}
+
+// SyncTree rsyncs a directory tree to a remote host. The local snapshot is
+// assumed to already contain the desired contents, so no exclude rules apply.
+func SyncTree(host, localDir, remoteDir string, delete bool) error {
+	start := time.Now()
+	err := defaultSyncFuncWithDelete(host, localDir, remoteDir, nil, delete)
+	oplog.Log("sync.tree",
+		oplog.WithHost(host),
+		oplog.WithDuration(time.Since(start)),
+		oplog.WithDetailf("%s -> %s delete=%t", localDir, remoteDir, delete),
+		oplog.WithError(err),
+	)
+	return err
+}
+
+// SyncFile copies a single file to a remote path on the target host.
+func SyncFile(host, localPath, remotePath string) error {
+	args := []string{"-az", localPath, host + ":" + remotePath}
+
+	ctx, cancel := context.WithTimeout(context.Background(), rsyncTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	start := time.Now()
+	err := cmd.Run()
+	oplog.Log("sync.file",
+		oplog.WithHost(host),
+		oplog.WithDuration(time.Since(start)),
+		oplog.WithDetailf("%s -> %s", localPath, remotePath),
+		oplog.WithError(err),
+	)
+	if err != nil {
+		return fmt.Errorf("rsync file to %s:%s: %w", host, remotePath, err)
 	}
 	return nil
 }

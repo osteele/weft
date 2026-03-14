@@ -301,6 +301,13 @@ func initSchema(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_name);
 	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 	CREATE INDEX IF NOT EXISTS idx_jobs_start ON jobs(start_time DESC);
+
+	CREATE TABLE IF NOT EXISTS processed_relay_requests (
+		request_id TEXT PRIMARY KEY,
+		op TEXT NOT NULL,
+		job_id INTEGER NOT NULL DEFAULT 0,
+		processed_at INTEGER NOT NULL
+	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return err
@@ -1905,6 +1912,16 @@ func RecordQueued(db *sql.DB, host, workingDir, command, description string) (in
 
 // RecordQueuedWithGPU records a queued job with GPU specification
 func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu string) (int64, error) {
+	return recordQueuedWithGPU(db, 0, host, workingDir, command, description, gpu, false)
+}
+
+// RecordQueuedWithGPUAndID records a queued job using an explicit ID.
+func RecordQueuedWithGPUAndID(db *sql.DB, id int64, host, workingDir, command, description, gpu string) error {
+	_, err := recordQueuedWithGPU(db, id, host, workingDir, command, description, gpu, true)
+	return err
+}
+
+func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, description, gpu string, explicitID bool) (int64, error) {
 	if gpu == "" {
 		gpu = ParseGPUFromCommandString(command)
 	}
@@ -1914,6 +1931,26 @@ func RecordQueuedWithGPU(db *sql.DB, host, workingDir, command, description, gpu
 		return 0, err
 	}
 	now := time.Now().Unix()
+	if explicitID {
+		_, err := db.Exec(
+			`INSERT INTO jobs (id, host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
+			 VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			 	host = excluded.host,
+			 	working_dir = excluded.working_dir,
+			 	command = excluded.command,
+			 	description = excluded.description,
+			 	queued_at = excluded.queued_at,
+			 	status = excluded.status,
+			 	queue_name = excluded.queue_name,
+			 	gpu = excluded.gpu`,
+			id, host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
 	result, err := db.Exec(
 		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
 		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
@@ -4686,6 +4723,27 @@ func DeletePendingOperation(db *sql.DB, jobID int64, operation string) error {
 	_, err := db.Exec(
 		`DELETE FROM deferred_operations WHERE job_id = ? AND operation = ?`,
 		jobID, operation,
+	)
+	return err
+}
+
+func IsRelayRequestProcessed(db *sql.DB, requestID string) (bool, error) {
+	var count int
+	err := db.QueryRow(
+		`SELECT COUNT(*) FROM processed_relay_requests WHERE request_id = ?`,
+		requestID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func RecordProcessedRelayRequest(db *sql.DB, requestID, op string, jobID int64) error {
+	_, err := db.Exec(
+		`INSERT OR IGNORE INTO processed_relay_requests (request_id, op, job_id, processed_at)
+		 VALUES (?, ?, ?, ?)`,
+		requestID, op, jobID, time.Now().Unix(),
 	)
 	return err
 }

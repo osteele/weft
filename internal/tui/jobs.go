@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuejob"
@@ -39,6 +40,31 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 
 		if workingDir == "" || command == "" {
 			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("missing working directory or command")}
+		}
+		if _, relayClient, err := m.coordinatorRelay(); err != nil {
+			return jobRestartedMsg{oldJobID: job.ID, err: err}
+		} else if relayClient != nil {
+			newJobID, _, err := m.relaySubmitJob(database, ops.QueueJobParams{
+				Host:         job.Host,
+				WorkingDir:   workingDir,
+				Command:      command,
+				Description:  description,
+				EnvVars:      job.EnvVars,
+				GPU:          job.GPU,
+				GPUClass:     job.GPUClass,
+				GPUMemGB:     job.GPUMemGB,
+				CPUAllotment: job.CPUAllotment,
+				DepSpec:      job.DepSpec,
+				Inputs:       job.Inputs,
+				Outputs:      job.Outputs,
+				OutputDirs:   job.OutputDirs,
+				Produces:     job.Produces,
+				Needs:        job.Needs,
+			})
+			if err != nil {
+				return jobRestartedMsg{oldJobID: job.ID, err: err}
+			}
+			return jobRestartedMsg{oldJobID: job.ID, newJobID: newJobID}
 		}
 
 		// Use ops package to restart job (queues if host offline)
@@ -81,24 +107,47 @@ func (m Model) retryJob(job *db.Job) tea.Cmd {
 				workingDir = "~"
 			}
 		}
-		result, err := ops.QueueJob(database, ops.QueueJobParams{
-			Host:        job.Host,
-			WorkingDir:  workingDir,
-			Command:     job.Command,
-			Description: job.Description,
-			EnvVars:     job.EnvVars,
-		}, ops.DefaultOptions())
+		params := ops.QueueJobParams{
+			Host:         job.Host,
+			WorkingDir:   workingDir,
+			Command:      job.Command,
+			Description:  job.Description,
+			EnvVars:      job.EnvVars,
+			GPU:          job.GPU,
+			GPUClass:     job.GPUClass,
+			GPUMemGB:     job.GPUMemGB,
+			CPUAllotment: job.CPUAllotment,
+			DepSpec:      job.DepSpec,
+			Inputs:       job.Inputs,
+			Outputs:      job.Outputs,
+			OutputDirs:   job.OutputDirs,
+			Produces:     job.Produces,
+			Needs:        job.Needs,
+		}
+		if _, relayClient, err := m.coordinatorRelay(); err != nil {
+			return jobRetriedMsg{oldJobID: job.ID, err: err}
+		} else if relayClient != nil {
+			newJobID, _, err := m.relaySubmitJob(database, params)
+			if err != nil {
+				return jobRetriedMsg{oldJobID: job.ID, err: err}
+			}
+			if err := m.rewireDependenciesForRetry(database, job.ID, newJobID); err != nil {
+				return jobRetriedMsg{oldJobID: job.ID, newJobID: newJobID, err: err}
+			}
+			return jobRetriedMsg{oldJobID: job.ID, newJobID: newJobID}
+		}
+		result, err := ops.QueueJob(database, params, ops.DefaultOptions())
 		if err != nil {
 			return jobRetriedMsg{oldJobID: job.ID, err: err}
 		}
-		if err := rewireDependenciesForRetry(database, job.ID, result.JobID); err != nil {
+		if err := m.rewireDependenciesForRetry(database, job.ID, result.JobID); err != nil {
 			return jobRetriedMsg{oldJobID: job.ID, newJobID: result.JobID, err: err, deferred: result.Deferred}
 		}
 		return jobRetriedMsg{oldJobID: job.ID, newJobID: result.JobID, deferred: result.Deferred}
 	}
 }
 
-func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
+func (m Model) rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
 	depJobs, err := db.ListQueuedJobsWithDependency(database, oldID)
 	if err != nil {
 		return err
@@ -112,6 +161,14 @@ func rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
 			return err
 		}
 		depJob.DepSpec = newSpec
+		if _, relayClient, err := m.coordinatorRelay(); err != nil {
+			return err
+		} else if relayClient != nil {
+			if _, err := m.relayUpdateJob(depJob, &coordinatorrelay.UpdateJobPayload{DepSpec: &depJob.DepSpec}); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := ops.RequestQueueUpdate(database, depJob, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
 			return err
 		}
@@ -149,6 +206,20 @@ func (m Model) moveJobToFront(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
+		if _, relayClient, err := m.coordinatorRelay(); err != nil {
+			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}
+		} else if relayClient != nil {
+			ack, err := m.relaySimpleCommand(coordinatorrelay.OpQueuePriority, job.ID)
+			if err != nil {
+				return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}
+			}
+			_ = db.SetQueuedAtBefore(database, job.ID, job.Host)
+			moved := true
+			if ack != nil && ack.Message == "already at front" {
+				moved = false
+			}
+			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, moved: moved}
+		}
 		result, err := ops.RequestQueuePriority(database, job, ops.OptionsForMode(ops.TimeoutFast))
 		if err != nil {
 			return jobMovedToFrontMsg{jobID: job.ID, host: job.Host, err: err}

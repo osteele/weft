@@ -53,6 +53,7 @@ type Coordinator struct {
 
 	// Composable services
 	prober     *services.HostProber
+	relay      *services.RelayProcessor
 	syncer     *services.HostSyncer
 	remediator *services.Remediator
 	reconciler *campaign.Reconciler
@@ -106,6 +107,7 @@ func New(database *sql.DB, cfg Config) *Coordinator {
 	}
 
 	c.prober = services.NewHostProber(hostState, cfg.PollInterval)
+	c.relay = services.NewRelayProcessor(database, logger, appCfg)
 	c.syncer = services.NewHostSyncer(database, hostState, logger, cfg.SyncInterval)
 	c.remediator = services.NewRemediator(database, logger, appCfg, cfg.RemediationInterval)
 
@@ -136,6 +138,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	// Start composable background services
 	go c.prober.Start(ctx)
+	go c.relay.Start(ctx)
 	go c.syncer.Start(ctx)
 	go c.remediator.Start(ctx)
 

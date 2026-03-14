@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
@@ -63,15 +64,25 @@ func (m Model) createJob() tea.Cmd {
 		if cpuErr != nil {
 			return jobCreatedMsg{err: cpuErr}
 		}
-		// Queue job for sequential execution via queue runner
-		result, err := ops.QueueJob(database, ops.QueueJobParams{
+		params := ops.QueueJobParams{
 			Host:         host,
 			WorkingDir:   workingDir,
 			Command:      command,
 			Description:  description,
 			EnvVars:      envVars,
 			CPUAllotment: cpuAllotment,
-		}, ops.DefaultOptions())
+		}
+		if _, relayClient, err := m.coordinatorRelay(); err != nil {
+			return jobCreatedMsg{err: err}
+		} else if relayClient != nil {
+			jobID, _, err := m.relaySubmitJob(database, params)
+			if err != nil {
+				return jobCreatedMsg{err: err}
+			}
+			return jobCreatedMsg{jobID: jobID}
+		}
+		// Queue job for sequential execution via queue runner
+		result, err := ops.QueueJob(database, params, ops.DefaultOptions())
 
 		if err != nil {
 			return jobCreatedMsg{err: err}
@@ -144,38 +155,81 @@ func (m Model) editJob() tea.Cmd {
 		}
 		envVars = mergeGPUEnvVars(envVars, gpuInput)
 
-		operationalChange := newWorkingDir != job.WorkingDir || newCommand != job.Command || gpuInput != job.GPU || !equalEnvVars(envVars, job.EnvVars) || !equalCPUAllotment(newAllotment, job.CPUAllotment)
+		descriptionChanged := newDescription != job.Description
+		workingDirChanged := newWorkingDir != job.WorkingDir
+		commandChanged := newCommand != job.Command
+		envChanged := !equalEnvVars(envVars, job.EnvVars)
+		gpuChanged := gpuInput != job.GPU
+		cpuChanged := !equalCPUAllotment(newAllotment, job.CPUAllotment)
+		operationalChange := workingDirChanged || commandChanged || gpuChanged || envChanged || cpuChanged
 
 		// Update the remote queue file
 		depSpec := m.editingJobDepSpec
 		if depSpec == "" {
 			depSpec = job.DepSpec
 		}
-		if !equalEnvVars(envVars, job.EnvVars) {
+		depSpecChanged := depSpec != job.DepSpec
+		if envChanged {
 			if err := db.SetJobEnvVars(database, jobID, envVars); err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update env vars: %w", err)}
 			}
 		}
-		if gpuInput != job.GPU {
+		if gpuChanged {
 			if err := db.SetJobGPU(database, jobID, gpuInput); err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update GPU: %w", err)}
 			}
 		}
-		if !equalCPUAllotment(newAllotment, job.CPUAllotment) {
+		if cpuChanged {
 			if err := db.SetJobCPUAllotment(database, jobID, newAllotment); err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: fmt.Errorf("update CPU allotment: %w", err)}
 			}
 		}
 
-		if operationalChange {
-			job.Command = newCommand
-			job.WorkingDir = newWorkingDir
-			job.Description = newDescription
-			job.EnvVars = envVars
-			job.GPU = gpuInput
-			job.CPUAllotment = newAllotment
-			job.DepSpec = depSpec
+		job.Command = newCommand
+		job.WorkingDir = newWorkingDir
+		job.Description = newDescription
+		job.EnvVars = envVars
+		job.GPU = gpuInput
+		job.CPUAllotment = newAllotment
+		job.DepSpec = depSpec
 
+		if descriptionChanged || operationalChange {
+			if _, relayClient, err := m.coordinatorRelay(); err != nil {
+				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
+			} else if relayClient != nil {
+				payload := &coordinatorrelay.UpdateJobPayload{}
+				if descriptionChanged {
+					payload.Description = &job.Description
+				}
+				if workingDirChanged {
+					payload.WorkingDir = &job.WorkingDir
+				}
+				if commandChanged {
+					payload.Command = &job.Command
+				}
+				if envChanged {
+					payload.EnvVars = job.EnvVars
+					if len(job.EnvVars) == 0 {
+						payload.ClearEnv = true
+					}
+				}
+				if gpuChanged {
+					payload.GPU = tuiStringPtr(job.GPU)
+				}
+				if cpuChanged {
+					payload.CPUAllotment = job.CPUAllotment
+				}
+				if depSpecChanged {
+					payload.DepSpec = &job.DepSpec
+				}
+				if _, err := m.relayUpdateJob(job, payload); err != nil {
+					return jobEditedMsg{jobID: jobID, host: job.Host, err: err}
+				}
+				return jobEditedMsg{jobID: jobID, host: job.Host}
+			}
+		}
+
+		if operationalChange {
 			result, err := ops.RequestQueueUpdate(database, job, ops.OptionsForMode(ops.TimeoutFast))
 			if err != nil {
 				return jobEditedMsg{jobID: jobID, host: job.Host, err: err}

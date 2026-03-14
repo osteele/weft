@@ -220,6 +220,16 @@ type QueueJobParams struct {
 // This is DB-only — no SSH or remote operations are performed.
 // The job will be pushed to the remote host by SyncHost on the next sync cycle.
 func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
+	return recordQueuedJob(database, 0, params, false)
+}
+
+// MirrorQueuedJobWithID records or updates a queued job using an explicit ID.
+func MirrorQueuedJobWithID(database *sql.DB, jobID int64, params QueueJobParams) error {
+	_, err := recordQueuedJob(database, jobID, params, true)
+	return err
+}
+
+func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParams, explicitID bool) (int64, error) {
 	// Extract GPU from env vars if not explicitly set
 	gpu := params.GPU
 	if gpu == "" {
@@ -239,17 +249,30 @@ func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
 	}
 
 	// Record job with queued status
-	jobID, err := db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
-	if err != nil {
-		return 0, fmt.Errorf("record job: %w", err)
+	var jobID int64
+	if explicitID {
+		jobID = explicitJobID
+		if err := db.RecordQueuedWithGPUAndID(database, jobID, params.Host, params.WorkingDir, params.Command, params.Description, gpu); err != nil {
+			return 0, fmt.Errorf("record job: %w", err)
+		}
+	} else {
+		var err error
+		jobID, err = db.RecordQueuedWithGPU(database, params.Host, params.WorkingDir, params.Command, params.Description, gpu)
+		if err != nil {
+			return 0, fmt.Errorf("record job: %w", err)
+		}
 	}
 	if err := db.SetJobEnvVars(database, jobID, params.EnvVars); err != nil {
-		db.DeleteJob(database, jobID)
+		if !explicitID {
+			db.DeleteJob(database, jobID)
+		}
 		return 0, fmt.Errorf("record env vars: %w", err)
 	}
 	if len(params.Tags) > 0 {
 		if err := db.SetJobTags(database, jobID, params.Tags); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record tags: %w", err)
 		}
 	}
@@ -274,49 +297,65 @@ func RecordQueuedJob(database *sql.DB, params QueueJobParams) (int64, error) {
 	}
 	if params.CPUAllotment != nil {
 		if err := db.SetJobCPUAllotment(database, jobID, params.CPUAllotment); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record CPU allotment: %w", err)
 		}
 	}
 	if gpuMemGB != nil {
 		if err := db.SetJobGPUMemGB(database, jobID, gpuMemGB); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record GPU memory: %w", err)
 		}
 	}
 	if params.GPUClass != "" {
 		if err := db.SetJobGPUClass(database, jobID, params.GPUClass); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record GPU class: %w", err)
 		}
 	}
 	if len(params.Inputs) > 0 {
 		if err := db.SetJobInputs(database, jobID, params.Inputs); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record inputs: %w", err)
 		}
 	}
 	if len(params.Outputs) > 0 {
 		if err := db.SetJobOutputs(database, jobID, params.Outputs); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record outputs: %w", err)
 		}
 	}
 	if len(params.OutputDirs) > 0 {
 		if err := db.SetJobOutputDirs(database, jobID, params.OutputDirs); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record output dirs: %w", err)
 		}
 	}
 	if len(params.Produces) > 0 {
 		if err := db.SetJobProduces(database, jobID, params.Produces); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record produces: %w", err)
 		}
 	}
 	if len(params.Needs) > 0 {
 		if err := db.SetJobNeeds(database, jobID, params.Needs); err != nil {
-			db.DeleteJob(database, jobID)
+			if !explicitID {
+				db.DeleteJob(database, jobID)
+			}
 			return 0, fmt.Errorf("record needs: %w", err)
 		}
 	}
@@ -333,25 +372,36 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 		return Result{}, err
 	}
 
-	backend, err := ResolveBackend(params.Host, opts.Timeout)
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		return Result{}, fmt.Errorf("get job: %w", err)
+	}
+	return submitRecordedQueuedJob(database, job, opts)
+}
+
+// SubmitRecordedQueuedJob submits an already-recorded queued job to its remote backend.
+func SubmitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	return submitRecordedQueuedJob(database, job, opts)
+}
+
+func submitRecordedQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	if job == nil {
+		return Result{}, fmt.Errorf("job is nil")
+	}
+	backend, err := ResolveBackend(job.Host, opts.Timeout)
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return Result{
 				Success:  true,
 				Deferred: true,
-				JobID:    jobID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+				JobID:    job.ID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", job.Host, job.ID),
 			}, nil
 		}
 		return Result{}, err
 	}
-	if err := db.SetJobBackend(database, jobID, backend); err != nil {
+	if err := db.SetJobBackend(database, job.ID, backend); err != nil {
 		return Result{}, fmt.Errorf("set job backend: %w", err)
-	}
-
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil {
-		return Result{}, fmt.Errorf("get job: %w", err)
 	}
 
 	if backend == db.BackendSlurm {
@@ -363,22 +413,22 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 			return Result{
 				Success:  true,
 				Deferred: true,
-				JobID:    jobID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+				JobID:    job.ID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", job.Host, job.ID),
 			}, nil
 		}
 		if !outcome.resolved {
 			return Result{
 				Success:  true,
 				Deferred: true,
-				JobID:    jobID,
-				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", params.Host, jobID),
+				JobID:    job.ID,
+				Message:  fmt.Sprintf("Host %s unreachable, job %d will start on next sync", job.Host, job.ID),
 			}, nil
 		}
 		return Result{
 			Success: true,
-			JobID:   jobID,
-			Message: fmt.Sprintf("Job %d submitted", jobID),
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d submitted", job.ID),
 		}, nil
 	}
 
@@ -387,19 +437,22 @@ func QueueJob(database *sql.DB, params QueueJobParams, opts ExecuteOptions) (Res
 			return Result{
 				Success:  true,
 				Deferred: true,
-				JobID:    jobID,
-				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", jobID),
+				JobID:    job.ID,
+				Message:  fmt.Sprintf("Job %d queued locally (will append to queue when host is online)", job.ID),
 			}, nil
 		}
 		return Result{}, err
 	}
-	if err := db.UpdateLastSyncedStatus(database, jobID, db.StatusQueued); err != nil {
+	if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
+		return Result{}, err
+	}
+	if err := db.SetQueuedAtNow(database, job.ID); err != nil {
 		return Result{}, err
 	}
 
 	return Result{
 		Success: true,
-		JobID:   jobID,
-		Message: fmt.Sprintf("Job %d added to queue", jobID),
+		JobID:   job.ID,
+		Message: fmt.Sprintf("Job %d added to queue", job.ID),
 	}, nil
 }

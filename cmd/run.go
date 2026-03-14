@@ -381,6 +381,72 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	relayCfg, relayClient, err := loadCoordinatorRelay()
+	if err != nil {
+		return err
+	}
+	if relayEnabled(relayCfg, relayClient) && !runDraft {
+		if runWait || runFollow {
+			return fmt.Errorf("--wait and --follow are not supported when coordinator relay mode is active")
+		}
+		if runAfter > 0 || runAfterAny > 0 {
+			depID := runAfter
+			if depID == 0 {
+				depID = runAfterAny
+			}
+			depJob, err := db.GetJobByID(database, depID)
+			if err != nil {
+				return fmt.Errorf("get dependency job %d: %w", depID, err)
+			}
+			if depJob == nil {
+				return fmt.Errorf("dependency job %d not found", depID)
+			}
+			if host == "" {
+				host = depJob.Host
+			}
+			if depJob.Host != host {
+				return fmt.Errorf("dependency job %d runs on host %s; relay submission must target the same host %s", depID, depJob.Host, host)
+			}
+		}
+
+		params := ops.QueueJobParams{
+			Host:        host,
+			WorkingDir:  workingDir,
+			Command:     command,
+			Description: runDescription,
+			Project:     projectName,
+			EnvVars:     runEnvVars,
+			Tags:        runTags,
+			GPUClass:    runGPUClass,
+			GPUMemGB:    intPtrOrNil(runGPUMem),
+			DepSpec:     encodeQueueDependencies(buildRunDependencies()),
+			Inputs:      runInputs,
+			Outputs:     runOutputs,
+			OutputDirs:  outputDirs,
+			Produces:    runProduces,
+			Needs:       runNeeds,
+		}
+		jobID, ack, err := relaySubmitJob(database, relayCfg, relayClient, params)
+		if err != nil {
+			return err
+		}
+		w := cmd.OutOrStdout()
+		if ack != nil && ack.Host != "" {
+			fmt.Fprintf(w, "Job #%d submitted to coordinator and queued on %s\n", jobID, ack.Host)
+		} else {
+			fmt.Fprintf(w, "Job #%d submitted to coordinator\n", jobID)
+		}
+		if ack != nil && ack.Message != "" {
+			fmt.Fprintf(w, "  %s\n", ack.Message)
+		}
+		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
+		fmt.Fprintf(w, "  Command: %s\n", command)
+		if runDescription != "" {
+			fmt.Fprintf(w, "  Description: %s\n", runDescription)
+		}
+		return nil
+	}
+
 	// Route through local placement for non-draft, non-dependency submissions
 	if !runDraft && runAfter == 0 && runAfterAny == 0 {
 		var placementResult *placement.PlacementResult
@@ -859,6 +925,17 @@ func intPtrOrNil(v int) *int {
 		return &v
 	}
 	return nil
+}
+
+func buildRunDependencies() []queueDependency {
+	var deps []queueDependency
+	if runAfter > 0 {
+		deps = append(deps, queueDependency{JobID: runAfter})
+	}
+	if runAfterAny > 0 {
+		deps = append(deps, queueDependency{JobID: runAfterAny, AllowFailure: true})
+	}
+	return deps
 }
 
 // syncHostQuietly syncs a host to push queued jobs to the remote.

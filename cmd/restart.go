@@ -100,6 +100,39 @@ func restartJob(database *sql.DB, jobID int64) error {
 
 	// Completed jobs: create a new job with the same metadata
 	if effectiveStatus == db.StatusCompleted {
+		cfg, relayClient, err := loadCoordinatorRelay()
+		if err != nil {
+			return err
+		}
+		if relayEnabled(cfg, relayClient) {
+			params := ops.QueueJobParams{
+				Host:        job.Host,
+				WorkingDir:  job.WorkingDir,
+				Command:     job.Command,
+				Description: job.Description,
+				Project:     job.Project,
+				EnvVars:     job.EnvVars,
+				Tags:        job.Tags,
+				GPU:         job.GPU,
+				GPUClass:    job.GPUClass,
+				GPUMemGB:    job.GPUMemGB,
+				DepSpec:     job.DepSpec,
+				Inputs:      job.Inputs,
+				Outputs:     job.Outputs,
+				OutputDirs:  job.OutputDirs,
+				Produces:    job.Produces,
+				Needs:       job.Needs,
+			}
+			newJobID, ack, err := relaySubmitJob(database, cfg, relayClient, params)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Created new job %d from completed job %d via coordinator relay\n", newJobID, jobID)
+			if ack != nil && ack.Message != "" {
+				fmt.Printf("  relay: %s\n", ack.Message)
+			}
+			return nil
+		}
 		result, err := ops.RestartJob(database, ops.RestartJobParams{
 			OriginalJob:  job,
 			EnvVars:      job.EnvVars,
@@ -127,6 +160,26 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 
 	oldStatus := job.Status
+
+	cfg, relayClient, err := loadCoordinatorRelay()
+	if err != nil {
+		return err
+	}
+	if relayEnabled(cfg, relayClient) {
+		if err := db.RequeueByID(database, jobID); err != nil {
+			return fmt.Errorf("update status to queued: %w", err)
+		}
+		ack, err := relayRequeueJob(cfg, relayClient, job)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Restarted job %d via coordinator relay\n", jobID)
+		fmt.Printf("  Status: %s → queued\n", oldStatus)
+		if ack != nil && ack.Message != "" {
+			fmt.Printf("  relay: %s\n", ack.Message)
+		}
+		return nil
+	}
 
 	result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
 	if err != nil {
