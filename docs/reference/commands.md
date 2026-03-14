@@ -413,6 +413,29 @@ weft sync              # Sync all hosts
 weft sync --verbose    # Show progress
 ```
 
+### weft sync inspect
+
+Inspect the local source snapshot using the same exclude rules as `weft sync`
+source uploads and campaign source tarballs.
+
+```bash
+weft sync inspect [dir] [flags]
+```
+
+**Flags:**
+- `--top-files N`: Show the N largest included files
+- `--top-dirs N`: Show the N largest included top-level directories
+- `--json`: Emit machine-readable JSON
+- `--show-excludes`: Print the effective exclude patterns
+
+**Examples:**
+```bash
+weft sync inspect
+weft sync inspect ~/code/project
+weft sync inspect --show-excludes
+weft sync inspect --json
+```
+
 ### weft prune
 
 Tombstone completed/dead jobs so they disappear from listings, and optionally delete their log files on remote hosts.

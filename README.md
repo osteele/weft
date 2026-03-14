@@ -684,6 +684,14 @@ max_auto_sync_mb = 200
 Project excludes are added on top of the global defaults. This is useful for
 research repos that keep large datasets or experiment artifacts alongside code.
 
+To inspect what will actually be included, run:
+
+```bash
+weft sync inspect                 # Summary for the current directory
+weft sync inspect --show-excludes # Also print the effective exclude patterns
+weft sync inspect --json          # Machine-readable output
+```
+
 Cloud instances automatically sync your project sources and collect detailed
 telemetry (CPU, memory, GPU usage, failure detection).
 
