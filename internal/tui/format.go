@@ -15,6 +15,7 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/util"
 )
 
 // formatDuration formats a duration in a human-readable form
@@ -407,98 +408,8 @@ func equalEnvVars(a, b []string) bool {
 	return true
 }
 
-// naturalSortStrings sorts strings using macOS Finder-style natural ordering
-// where numeric segments are compared as numbers (e.g., "host30" < "host100")
-func naturalSortStrings(s []string) {
-	sort.Slice(s, func(i, j int) bool {
-		return naturalLess(s[i], s[j])
-	})
-}
-
-// naturalLess compares two strings using natural ordering
-func naturalLess(a, b string) bool {
-	aParts := splitIntoSegments(a)
-	bParts := splitIntoSegments(b)
-
-	// Compare segment by segment
-	minLen := len(aParts)
-	if len(bParts) < minLen {
-		minLen = len(bParts)
-	}
-
-	for i := 0; i < minLen; i++ {
-		aSeg := aParts[i]
-		bSeg := bParts[i]
-
-		// If both are numeric, compare as numbers
-		aNum, aIsNum := parseNumber(aSeg)
-		bNum, bIsNum := parseNumber(bSeg)
-
-		if aIsNum && bIsNum {
-			if aNum != bNum {
-				return aNum < bNum
-			}
-			// Numbers are equal, continue to next segment
-		} else {
-			// Compare as strings (case-insensitive)
-			aLower := strings.ToLower(aSeg)
-			bLower := strings.ToLower(bSeg)
-			if aLower != bLower {
-				return aLower < bLower
-			}
-			// Case-insensitive equal, continue to next segment
-		}
-	}
-
-	// If all compared segments are equal, shorter one comes first
-	// If same length, use case-sensitive comparison as final tiebreaker
-	if len(aParts) != len(bParts) {
-		return len(aParts) < len(bParts)
-	}
-	return a < b
-}
-
-// splitIntoSegments splits a string into alternating alphabetic and numeric segments
-func splitIntoSegments(s string) []string {
-	var segments []string
-	var current strings.Builder
-
-	for _, r := range s {
-		isDigit := r >= '0' && r <= '9'
-		isAlpha := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-
-		if current.Len() == 0 {
-			current.WriteRune(r)
-		} else {
-			lastRune := []rune(current.String())[current.Len()-1]
-			lastIsDigit := lastRune >= '0' && lastRune <= '9'
-			lastIsAlpha := (lastRune >= 'a' && lastRune <= 'z') || (lastRune >= 'A' && lastRune <= 'Z')
-
-			// Check if we're in the same segment type
-			sameType := (isDigit && lastIsDigit) || (isAlpha && lastIsAlpha) || (!isDigit && !isAlpha && !lastIsDigit && !lastIsAlpha)
-
-			if sameType {
-				current.WriteRune(r)
-			} else {
-				segments = append(segments, current.String())
-				current.Reset()
-				current.WriteRune(r)
-			}
-		}
-	}
-
-	if current.Len() > 0 {
-		segments = append(segments, current.String())
-	}
-
-	return segments
-}
-
-// parseNumber attempts to parse a string as an integer
-func parseNumber(s string) (int, bool) {
-	n, err := strconv.Atoi(s)
-	return n, err == nil
-}
+func naturalSortStrings(s []string) { util.NaturalSortStrings(s) }
+func naturalLess(a, b string) bool  { return util.NaturalLess(a, b) }
 
 // parseGPUIndices parses a CUDA_VISIBLE_DEVICES value into GPU indices
 func parseGPUIndices(gpuStr string) []int {
