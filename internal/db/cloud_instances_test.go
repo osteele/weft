@@ -402,6 +402,16 @@ func TestResetCloudInstanceJobs_ArchivesPreviousRun(t *testing.T) {
 	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}
+	assignedJob, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after SetJobCloudInstanceID: %v", err)
+	}
+	if assignedJob.CloudInstanceID == nil || *assignedJob.CloudInstanceID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d", assignedJob.CloudInstanceID, instanceID)
+	}
+	if assignedJob.Host != "" {
+		t.Fatalf("host = %q, want empty", assignedJob.Host)
+	}
 
 	startTime := int64(1_700_000_100)
 	endTime := int64(1_700_000_120)

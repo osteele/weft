@@ -216,7 +216,7 @@ func (m Model) hostFilterCandidates() []string {
 	}
 	if len(hostSet) == 0 {
 		for _, job := range m.allJobs {
-			if job.Host != "" {
+			if job.HasInventoryHost() {
 				hostSet[job.Host] = struct{}{}
 			}
 		}

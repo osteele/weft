@@ -94,7 +94,7 @@ func restartJob(database *sql.DB, jobID int64) error {
 		return nil
 	}
 
-	if job.Host == "" {
+	if !job.HasInventoryHost() {
 		return fmt.Errorf("job missing host")
 	}
 

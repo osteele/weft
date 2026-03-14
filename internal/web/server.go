@@ -280,7 +280,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, jobRow{
 			ID:          job.ID,
-			Host:        job.Host,
+			Host:        job.TargetDisplay(),
 			Project:     job.Project,
 			Status:      status,
 			StatusClass: jobStatusClass(job),

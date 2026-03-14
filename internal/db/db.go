@@ -135,6 +135,15 @@ type JobRun struct {
 	CloudInstanceID  *int64
 }
 
+// JobTargetKind describes how a job is currently targeted.
+type JobTargetKind string
+
+const (
+	JobTargetUnplaced       JobTargetKind = "unplaced"
+	JobTargetInventoryHost  JobTargetKind = "inventory_host"
+	JobTargetRentalInstance JobTargetKind = "rental_instance"
+)
+
 // UsesQueueRunner reports whether this job should be managed by the queue runner backend.
 func (j *Job) UsesQueueRunner() bool {
 	if j == nil {
@@ -156,7 +165,61 @@ func (j *Job) UsesSlurm() bool {
 
 // IsCloudJob reports whether this job is associated with a cloud instance.
 func (j *Job) IsCloudJob() bool {
-	return j != nil && j.CloudInstanceID != nil && *j.CloudInstanceID > 0
+	return j.IsRentalJob()
+}
+
+// TargetKind reports whether the job is unplaced, assigned to an inventory
+// host, or assigned to a rental instance. Legacy synthetic rental host strings
+// are still recognized for compatibility with older rows.
+func (j *Job) TargetKind() JobTargetKind {
+	if j == nil {
+		return JobTargetUnplaced
+	}
+	if j.CloudInstanceID != nil && *j.CloudInstanceID > 0 {
+		return JobTargetRentalInstance
+	}
+	host := strings.TrimSpace(j.Host)
+	switch {
+	case host == "":
+		return JobTargetUnplaced
+	case IsCloudHost(host):
+		return JobTargetRentalInstance
+	default:
+		return JobTargetInventoryHost
+	}
+}
+
+// IsRentalJob reports whether the job is assigned to a rental instance.
+func (j *Job) IsRentalJob() bool {
+	return j != nil && j.TargetKind() == JobTargetRentalInstance
+}
+
+// HasInventoryHost reports whether the job is currently assigned to an
+// inventory host.
+func (j *Job) HasInventoryHost() bool {
+	return j != nil && j.TargetKind() == JobTargetInventoryHost
+}
+
+// TargetDisplay returns a user-facing label for the current target.
+func (j *Job) TargetDisplay() string {
+	switch j.TargetKind() {
+	case JobTargetRentalInstance:
+		if j != nil && j.CloudInstanceID != nil && *j.CloudInstanceID > 0 {
+			return fmt.Sprintf("rental:%d", *j.CloudInstanceID)
+		}
+		if j != nil {
+			host := strings.TrimSpace(j.Host)
+			if host != "" {
+				return host
+			}
+		}
+		return "rental"
+	case JobTargetInventoryHost:
+		if j != nil {
+			return strings.TrimSpace(j.Host)
+		}
+	}
+	return "(unplaced)"
 }
 
 // UsesRentalPlacement reports whether a job is explicitly or effectively on a
@@ -165,7 +228,7 @@ func (j *Job) UsesRentalPlacement() bool {
 	if j == nil {
 		return false
 	}
-	return j.HasTag(TagRental) || j.IsCloudJob() || IsCloudHost(j.Host)
+	return j.HasTag(TagRental) || j.IsRentalJob()
 }
 
 // UsesInventoryPlacement reports whether a job is inventory-only or currently
@@ -177,8 +240,7 @@ func (j *Job) UsesInventoryPlacement() bool {
 	if j.HasTag(TagInventory) {
 		return true
 	}
-	host := strings.TrimSpace(j.Host)
-	return host != "" && !IsCloudHost(host)
+	return j.HasInventoryHost()
 }
 
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
@@ -4109,7 +4171,7 @@ func (j *Job) DirectoryTailDisplay() string {
 
 // HasAssignedHost reports whether the job currently has a concrete host target.
 func (j *Job) HasAssignedHost() bool {
-	return strings.TrimSpace(j.Host) != ""
+	return j.HasInventoryHost()
 }
 
 // EffectiveStatus returns the status to use for UI decisions.
@@ -4122,7 +4184,7 @@ func (j *Job) EffectiveStatus() string {
 	if j.PendingStatus != nil {
 		status = *j.PendingStatus
 	}
-	if !j.HasAssignedHost() {
+	if j.TargetKind() == JobTargetUnplaced {
 		switch status {
 		case StatusRunning, StatusStarting, StatusPaused:
 			return StatusQueued
@@ -4224,10 +4286,11 @@ func (j *Job) GPUDevice() string {
 
 // HostWithGPU returns "host:gpu" if GPU devices are known, otherwise just the host.
 func (j *Job) HostWithGPU() string {
+	target := j.TargetDisplay()
 	if gpuDev := j.GPUDevice(); gpuDev != "" {
-		return fmt.Sprintf("%s:%s", j.Host, gpuDev)
+		return fmt.Sprintf("%s:%s", target, gpuDev)
 	}
-	return j.Host
+	return target
 }
 
 // ParseGPUFromCommandString extracts CUDA_VISIBLE_DEVICES from a command string.

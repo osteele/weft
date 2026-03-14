@@ -371,10 +371,8 @@ func (m Model) renderJobList(height int) string {
 		job := m.jobs[i]
 		status := m.formatStatus(job)
 		timeCol := formatJobTime(job)
-		hostStr := job.Host
-		if job.CloudInstanceID != nil && hostStr == "" {
-			hostStr = "vastai:" + gpuColumnText(job)
-		} else if job.GPUDevice() != "" {
+		hostStr := job.TargetDisplay()
+		if job.GPUDevice() != "" {
 			hostStr = job.HostWithGPU()
 		}
 		hostCol := fmt.Sprintf("%-14s", truncate(hostStr, 14))
@@ -551,7 +549,7 @@ func (m Model) renderUnplaceableBanner(maxWidth int) string {
 
 	jobs := make([]*db.Job, 0, len(m.allJobs))
 	for _, job := range m.allJobs {
-		if job != nil && !job.HasTag(db.TagInventory) && !job.HasAssignedHost() {
+		if job != nil && !job.HasTag(db.TagInventory) && job.TargetKind() == db.JobTargetUnplaced {
 			jobs = append(jobs, job)
 		}
 	}
@@ -660,7 +658,7 @@ func (m Model) renderLogsOnly(height int) string {
 		}
 	}
 
-	jobInfo := fmt.Sprintf("Job %d on %s", job.ID, job.Host)
+	jobInfo := fmt.Sprintf("Job %d on %s", job.ID, job.TargetDisplay())
 	if m.logStale {
 		staleIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render(" (cached - host offline)")
 	}
@@ -834,7 +832,7 @@ func (m Model) jobDetailContent(job *db.Job) string {
 	// Header line with job ID and host (progress shown in Progress section)
 	b.WriteString(headerStyle.Render(fmt.Sprintf("Job %d", job.ID)))
 	b.WriteString(dimStyle.Render(" on "))
-	b.WriteString(headerStyle.Render(job.Host))
+	b.WriteString(headerStyle.Render(job.TargetDisplay()))
 
 	// Show dependency info on same line if present
 	if depSpec := m.jobDependencies[job.ID]; depSpec != "" {

@@ -927,6 +927,68 @@ func TestFilterJobsByHostsMatchesOnlyRequestedHosts(t *testing.T) {
 	}
 }
 
+func TestJobTargetKindAndDisplay(t *testing.T) {
+	cloudInstanceID := int64(17)
+	tests := []struct {
+		name          string
+		job           *Job
+		wantKind      JobTargetKind
+		wantDisplay   string
+		wantRental    bool
+		wantInventory bool
+	}{
+		{
+			name:          "inventory host",
+			job:           &Job{Host: "studio", Status: StatusQueued},
+			wantKind:      JobTargetInventoryHost,
+			wantDisplay:   "studio",
+			wantRental:    false,
+			wantInventory: true,
+		},
+		{
+			name:          "unplaced",
+			job:           &Job{Host: "", Status: StatusQueued},
+			wantKind:      JobTargetUnplaced,
+			wantDisplay:   "(unplaced)",
+			wantRental:    false,
+			wantInventory: false,
+		},
+		{
+			name:          "rental instance id is canonical",
+			job:           &Job{CloudInstanceID: &cloudInstanceID, Status: StatusQueued},
+			wantKind:      JobTargetRentalInstance,
+			wantDisplay:   "rental:17",
+			wantRental:    true,
+			wantInventory: false,
+		},
+		{
+			name:          "legacy synthetic rental host still reads as rental",
+			job:           &Job{Host: CloudInstanceHost(cloudInstanceID), Status: StatusQueued},
+			wantKind:      JobTargetRentalInstance,
+			wantDisplay:   CloudInstanceHost(cloudInstanceID),
+			wantRental:    true,
+			wantInventory: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.job.TargetKind(); got != tt.wantKind {
+				t.Fatalf("TargetKind() = %q, want %q", got, tt.wantKind)
+			}
+			if got := tt.job.TargetDisplay(); got != tt.wantDisplay {
+				t.Fatalf("TargetDisplay() = %q, want %q", got, tt.wantDisplay)
+			}
+			if got := tt.job.IsRentalJob(); got != tt.wantRental {
+				t.Fatalf("IsRentalJob() = %v, want %v", got, tt.wantRental)
+			}
+			if got := tt.job.HasInventoryHost(); got != tt.wantInventory {
+				t.Fatalf("HasInventoryHost() = %v, want %v", got, tt.wantInventory)
+			}
+		})
+	}
+}
+
 func TestListJobsWithMaxAgeForHostsMatchesOnlyRequestedHosts(t *testing.T) {
 	database := SetupTestDB(t)
 

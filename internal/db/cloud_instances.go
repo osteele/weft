@@ -373,24 +373,27 @@ func SetCloudInstanceSeedCopySecs(db *sql.DB, id int64, secs int) error {
 }
 
 // CloudInstanceHost returns the synthetic host name for a cloud instance.
+// CloudInstanceHost returns the legacy synthetic host name used by older
+// records. New code should prefer CloudInstanceID and TargetKind helpers.
 func CloudInstanceHost(instanceID int64) string {
 	return fmt.Sprintf("vastai:%d", instanceID)
 }
 
-// IsCloudHost reports whether a host string refers to a cloud instance
-// (e.g. "vastai:123" or "runpod:456").
+// IsCloudHost reports whether a host string refers to a legacy synthetic
+// rental host name (e.g. "vastai:123" or "runpod:456").
 func IsCloudHost(host string) bool {
 	return strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:")
 }
 
 // SetJobCloudInstanceID associates a job with a cloud instance and records the attempt.
-// Also sets the job's host to "vastai:<instanceID>" so cloud jobs are visible in host-based views.
+// New assignments clear jobs.host so cloud_instance_id remains the canonical
+// rental target while preserving legacy synthetic host reads.
 func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ?, placement_reasons = NULL WHERE id = ?`, instanceID, CloudInstanceHost(instanceID), jobID); err != nil {
+	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = '', placement_reasons = NULL WHERE id = ?`, instanceID, jobID); err != nil {
 		tx.Rollback()
 		return err
 	}

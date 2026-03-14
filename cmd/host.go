@@ -436,7 +436,7 @@ func loadHostListRows(now time.Time) ([]hostListRow, error) {
 		activeJobs, activeErr := db.ListActiveOnPremJobs(database)
 		if activeErr == nil {
 			for _, job := range activeJobs {
-				if job == nil || job.Host == "" || db.IsCloudHost(job.Host) {
+				if job == nil || !job.HasInventoryHost() {
 					continue
 				}
 				recentHosts[job.Host] = struct{}{}

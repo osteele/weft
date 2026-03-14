@@ -105,7 +105,7 @@ func (s watchSystemSnapshot) IsEmpty() bool {
 func groupOnPremHosts(jobs []*db.Job) []onPremHostSummary {
 	grouped := make(map[string][]*db.Job)
 	for _, job := range jobs {
-		if job == nil || strings.TrimSpace(job.Host) == "" {
+		if job == nil || !job.HasInventoryHost() {
 			continue
 		}
 		grouped[job.Host] = append(grouped[job.Host], job)

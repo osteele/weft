@@ -196,10 +196,7 @@ func formatJobListHost(job *db.Job) string {
 	if job == nil {
 		return ""
 	}
-	if strings.TrimSpace(job.Host) == "" {
-		return "(unplaced)"
-	}
-	return job.Host
+	return job.TargetDisplay()
 }
 
 func formatJobListStarted(job *db.Job) string {

@@ -17,11 +17,8 @@ func UnplaceQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Resul
 	if job.EffectiveStatus() != db.StatusQueued {
 		return Result{}, fmt.Errorf("job %d is %s, not queued", job.ID, job.EffectiveStatus())
 	}
-	if job.Host == "" {
-		return Result{}, fmt.Errorf("job %d is already unplaced", job.ID)
-	}
-	if job.CloudInstanceID != nil || db.IsCloudHost(job.Host) {
-		return Result{}, fmt.Errorf("job %d is not an on-prem queued job", job.ID)
+	if !job.HasInventoryHost() {
+		return Result{}, fmt.Errorf("job %d is not an inventory queued job", job.ID)
 	}
 	if job.UsesSlurm() {
 		return Result{}, fmt.Errorf("job %d is not managed by an on-prem local queue", job.ID)

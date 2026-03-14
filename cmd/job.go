@@ -375,7 +375,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 
 		// Show full job details
 		fmt.Printf("Job ID:      %d\n", job.ID)
-		fmt.Printf("Host:        %s\n", job.Host)
+		fmt.Printf("Target:      %s\n", job.TargetDisplay())
 		// Show status with waiting info
 		statusStr := job.Status
 		fmt.Printf("Status:      %s\n", statusStr)

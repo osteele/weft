@@ -24,9 +24,9 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		return "", nil
 	}
 
-	// For queued cloud jobs with no instance or unplaced, just update DB
+	// For queued rental jobs that have not yet been assigned to an instance, just update DB.
 	effectiveStatus := job.EffectiveStatus()
-	if effectiveStatus == db.StatusQueued && (job.CloudInstanceID == nil || job.Host == "") {
+	if effectiveStatus == db.StatusQueued && job.CloudInstanceID == nil {
 		if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 			return "", err
 		}

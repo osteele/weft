@@ -93,7 +93,7 @@ func (m Model) retryJob(job *db.Job) tea.Cmd {
 	}
 	database := m.database
 	return func() tea.Msg {
-		if job.Host == "" {
+		if !job.HasInventoryHost() {
 			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing host")}
 		}
 		if job.Command == "" {
@@ -483,7 +483,7 @@ func (m Model) jobMatchesHostFilter(job *db.Job) bool {
 	case hostFilterRecent:
 		// Cloud-managed and unplaced jobs do not produce normal host sync timestamps,
 		// but they should remain visible in the default Jobs view.
-		if job.Host == "" || job.IsCloudJob() || db.IsCloudHost(job.Host) {
+		if !job.HasInventoryHost() {
 			return true
 		}
 		return m.isHostRecentlySynced(job.Host)

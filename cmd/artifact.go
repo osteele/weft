@@ -659,7 +659,7 @@ func syncJobOutputs(job *db.Job) error {
 		return syncCloudJobOutputs(job)
 	}
 
-	if job.Host == "" || job.WorkingDir == "" {
+	if !job.HasInventoryHost() || job.WorkingDir == "" {
 		return nil
 	}
 

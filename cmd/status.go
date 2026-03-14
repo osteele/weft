@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/remediation"
@@ -113,6 +115,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	// Check if all requested jobs are already in terminal state - skip sync if so
 	needsSync := false
 	hostsToSync := make(map[string]struct{})
+	needsRentalSync := false
 	if !statusNoSync {
 		for _, jobID := range jobIDs {
 			job, err := db.GetJobByID(database, jobID)
@@ -121,8 +124,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 			if !isTerminalStatus(job.Status) {
 				needsSync = true
-				if job.Host != "" {
+				if job.HasInventoryHost() {
 					hostsToSync[job.Host] = struct{}{}
+				}
+				if job.IsRentalJob() {
+					needsRentalSync = true
 				}
 			}
 		}
@@ -160,6 +166,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 			// Start queue runners (default mode)
 			startQueueRunnersForHosts(database, hosts)
+		}
+		if needsRentalSync {
+			syncRentalJobsStatus(database)
 		}
 	}
 
@@ -232,7 +241,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	}
 
 	// Sync host to update job status from remote when a host exists.
-	if job.HasAssignedHost() {
+	if job.HasInventoryHost() {
 		syncTimeout := 15 * time.Second
 		if statusSSHTimeout > syncTimeout {
 			syncTimeout = statusSSHTimeout
@@ -243,6 +252,8 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		if syncErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
 		}
+	} else if job.IsRentalJob() {
+		syncRentalJobsStatus(database)
 	}
 
 	// Re-read job from DB after sync
@@ -286,7 +297,16 @@ func waitForJobCompletion(database *sql.DB, jobID int64, timeout time.Duration, 
 		}
 
 		if shouldAttemptSync(job.Status) {
-			if _, err := ops.SyncJob(database, job, ops.DefaultSyncOptions()); err != nil {
+			if job.IsRentalJob() {
+				syncRentalJobsStatus(database)
+				job, err = db.GetJobByID(database, jobID)
+				if err != nil {
+					return nil, err
+				}
+				if job != nil && isWaitTerminalStatus(job.Status) {
+					return job, nil
+				}
+			} else if _, err := ops.SyncJob(database, job, ops.DefaultSyncOptions()); err != nil {
 				if ssh.IsConnectionError(err.Error()) {
 					if tracker != nil {
 						tracker.MarkDown(job.Host)
@@ -382,6 +402,22 @@ func waitForJobsCompletion(database *sql.DB, jobs []jobStatusRequest, timeout ti
 				continue
 			}
 			if shouldAttemptSync(job.Status) {
+				if job.IsRentalJob() {
+					syncRentalJobsStatus(database)
+					refreshed, err := db.GetJobByID(database, id)
+					if err != nil {
+						return final, err
+					}
+					if refreshed != nil {
+						final[id] = refreshed
+						job = refreshed
+					}
+					reportChange(job)
+					if job != nil && isWaitTerminalStatus(job.Status) {
+						delete(pending, id)
+					}
+					continue
+				}
 				if _, err := ops.SyncJob(database, job, ops.DefaultSyncOptions()); err != nil {
 					if ssh.IsConnectionError(err.Error()) {
 						if tracker != nil {
@@ -492,6 +528,14 @@ func shouldAttemptSync(status string) bool {
 	}
 }
 
+func syncRentalJobsStatus(database *sql.DB) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	_ = syncCloudState(cfg, database, campaign.NewReconciler(), false)
+}
+
 func printJobStatusLine(job *db.Job) {
 	if job == nil {
 		return
@@ -507,7 +551,7 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 	effectiveStatus := job.EffectiveStatus()
 
 	fmt.Printf("Job ID:   %d\n", job.ID)
-	fmt.Printf("Host:     %s\n", job.Host)
+	fmt.Printf("Target:   %s\n", job.TargetDisplay())
 	if gpuDev := job.GPUDevice(); gpuDev != "" {
 		fmt.Printf("GPU:      %s\n", gpuDev)
 	}
@@ -747,7 +791,7 @@ func printFailedJobSummary(job *db.Job) {
 		reason += " (diagnosed)"
 	}
 
-	fmt.Printf("  %4d  %-10s  %-14s  %s\n", job.ID, job.Host, reason, desc)
+	fmt.Printf("  %4d  %-10s  %-14s  %s\n", job.ID, job.TargetDisplay(), reason, desc)
 }
 
 // printDiagnosisSummary prints the auto-remediation diagnosis for a failed job.

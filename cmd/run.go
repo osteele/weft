@@ -164,7 +164,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		// Copy settings from existing job (explicit flags take priority)
-		if host == "" && !db.IsCloudHost(fromJob.Host) {
+		if host == "" && fromJob.HasInventoryHost() {
 			host = fromJob.Host
 		}
 		command = fromJob.Command

@@ -58,7 +58,7 @@ func filterJobsByHost(jobs []*db.Job, hostFilter string, hostSyncTimes map[strin
 			if job == nil {
 				continue
 			}
-			if isHostRecentlySynced(job.Host, hostSyncTimes) {
+			if !job.HasInventoryHost() || isHostRecentlySynced(job.Host, hostSyncTimes) {
 				filtered = append(filtered, job)
 			}
 		}
@@ -69,7 +69,7 @@ func filterJobsByHost(jobs []*db.Job, hostFilter string, hostSyncTimes map[strin
 			if job == nil {
 				continue
 			}
-			if job.Host == hostFilter {
+			if job.HasInventoryHost() && job.Host == hostFilter {
 				filtered = append(filtered, job)
 			}
 		}

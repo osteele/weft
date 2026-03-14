@@ -236,7 +236,7 @@ func addQueueHostFlag(cmd *cobra.Command) {
 
 // resolveQueueHost resolves host from --host flag or positional argument.
 // For commands that take host as first positional arg.
-// Returns an error if the resolved host is a cloud instance.
+// Returns an error if the resolved host is a legacy synthetic rental host.
 func resolveQueueHost(args []string) (string, error) {
 	var host string
 	if queueHost != "" {
@@ -247,7 +247,7 @@ func resolveQueueHost(args []string) (string, error) {
 		return "", fmt.Errorf("host is required (provide as argument or use --host)")
 	}
 	if db.IsCloudHost(host) {
-		return "", fmt.Errorf("queue commands are not supported for cloud instances; use 'weft campaign' commands instead")
+		return "", fmt.Errorf("queue commands are not supported for rental instances; use 'weft campaign' commands instead")
 	}
 	return host, nil
 }
@@ -700,13 +700,17 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 			errors = append(errors, fmt.Sprintf("job %d has status '%s', can only cancel queued jobs", jobID, effectiveStatus))
 			continue
 		}
-		if job.Host == "" {
+		if !job.HasInventoryHost() {
 			// Unplaced jobs have no remote queue entry — just update DB status
 			if err := db.UpdateStatusAndLastSynced(database, jobID, db.StatusCanceled); err != nil {
 				errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 				continue
 			}
-			fmt.Printf("Job %d cancelled (was awaiting rental instance)\n", jobID)
+			if job.IsRentalJob() {
+				fmt.Printf("Job %d cancelled (was assigned to %s)\n", jobID, job.TargetDisplay())
+			} else {
+				fmt.Printf("Job %d cancelled (was awaiting rental instance)\n", jobID)
+			}
 			continue
 		}
 
@@ -718,7 +722,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 		if result.Deferred {
 			fmt.Printf("Job %d marked for removal on next sync\n", jobID)
 		} else {
-			fmt.Printf("Job %d removed from queue on %s\n", jobID, job.Host)
+			fmt.Printf("Job %d removed from queue on %s\n", jobID, job.TargetDisplay())
 		}
 	}
 
@@ -751,6 +755,9 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 	if effectiveStatus != db.StatusQueued {
 		return fmt.Errorf("job %d has status '%s', can only move queued jobs", jobID, effectiveStatus)
 	}
+	if !job.HasInventoryHost() {
+		return fmt.Errorf("job %d is not queued on an inventory host", jobID)
+	}
 
 	relayCfg, relayClient, err := loadCoordinatorRelay()
 	if err != nil {
@@ -761,7 +768,7 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		_ = db.SetQueuedAtBefore(database, jobID, job.Host)
-		fmt.Printf("Job %d submitted to coordinator to move to the front on %s\n", jobID, job.Host)
+		fmt.Printf("Job %d submitted to coordinator to move to the front on %s\n", jobID, job.TargetDisplay())
 		return nil
 	}
 
@@ -770,14 +777,14 @@ func runQueueFront(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if result.Deferred {
-		fmt.Printf("Job %d saved locally. %s is offline — it will move to the front automatically when the host is reachable.\n", jobID, job.Host)
+		fmt.Printf("Job %d saved locally. %s is offline — it will move to the front automatically when the host is reachable.\n", jobID, job.TargetDisplay())
 		_ = syncHostAfterQueueChange(database, job.Host)
 		return nil
 	}
 	if result.Moved {
-		fmt.Printf("Job %d moved to front of queue on %s\n", jobID, job.Host)
+		fmt.Printf("Job %d moved to front of queue on %s\n", jobID, job.TargetDisplay())
 	} else {
-		fmt.Printf("Job %d is already at the front of queue on %s\n", jobID, job.Host)
+		fmt.Printf("Job %d is already at the front of queue on %s\n", jobID, job.TargetDisplay())
 	}
 	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil {
 		reportQueueChangeSyncFailure(job.Host, syncErr)
@@ -1076,7 +1083,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 		if err := ops.AppendJobToQueue(job, ops.DefaultOptions().Timeout); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
-			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.Host)
+			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.TargetDisplay())
 			deferredUpdate = true
 		} else {
 			if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
@@ -1094,15 +1101,15 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if result.Deferred {
-			fmt.Printf("Job %d saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.ID, job.Host)
+			fmt.Printf("Job %d saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.ID, job.TargetDisplay())
 			deferredUpdate = true
 		}
 	}
 
 	if deferredUpdate {
-		fmt.Printf("Updated job %d locally (will apply to %s when reachable)\n", jobID, job.Host)
+		fmt.Printf("Updated job %d locally (will apply to %s when reachable)\n", jobID, job.TargetDisplay())
 	} else {
-		fmt.Printf("Updated job %d in queue on %s\n", jobID, job.Host)
+		fmt.Printf("Updated job %d in queue on %s\n", jobID, job.TargetDisplay())
 	}
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)

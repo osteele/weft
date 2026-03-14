@@ -137,7 +137,7 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, refreshWatchSystem(m.database, m.config)
 		case "u":
 			job := m.selectedOnPremJob()
-			if job == nil || job.EffectiveStatus() != db.StatusQueued || job.Host == "" {
+			if job == nil || job.EffectiveStatus() != db.StatusQueued || !job.HasInventoryHost() {
 				m.flashMessage = watchFailedStyle.Render("Select a queued on-prem job to unplace")
 				return m, nil
 			}

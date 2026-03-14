@@ -52,7 +52,7 @@ func (m Model) formatStatusValue(job *db.Job, status string) string {
 		}
 		return fmt.Sprintf("✖ failed (%d)", *job.ExitCode)
 	case db.StatusQueued:
-		if job.Host == "" {
+		if job.TargetKind() == db.JobTargetUnplaced {
 			return "$ needs rental"
 		}
 		return "… queued"
