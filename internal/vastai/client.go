@@ -233,7 +233,12 @@ func (c *Client) run(args ...string) ([]byte, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("%s: %s", strings.Join(args, " "), strings.TrimSpace(string(exitErr.Stderr)))
+			// Only include the first 3 args (subcommand + ID) — later args may be large scripts.
+			prefix := args
+			if len(prefix) > 3 {
+				prefix = args[:3]
+			}
+			return nil, fmt.Errorf("%s: %s", strings.Join(prefix, " "), strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		return nil, err
 	}

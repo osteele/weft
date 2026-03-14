@@ -27,6 +27,13 @@ const (
 // Heartbeat staleness threshold: warn if heartbeat is older than this.
 const heartbeatStaleThreshold = 3 * time.Minute
 
+var (
+	fetchWatchBootstrapStage = fetchBootstrapStage
+	fetchWatchHeartbeat      = fetchHeartbeat
+	fetchWatchInstancePhase  = fetchInstancePhase
+	fetchWatchJobProgress    = fetchJobProgress
+)
+
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.
 type HeartbeatSample struct {
 	Ts             int64  `json:"ts"`
@@ -233,9 +240,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					_ = db.UpdateCloudInstanceTerminationIntent(database, cloudInstanceID, fetchedIntent)
 					ci.TerminationIntent = fetchedIntent
 				}
-				if hasStartedJob {
-					instancePhase = fetchInstancePhase(ctx, r2c, cloudInstanceID)
-					jobProgressID, jobProgress = fetchJobProgress(ctx, r2c, instancePhase, jobs)
+				instancePhase = fetchWatchInstancePhase(ctx, r2c, cloudInstanceID)
+				if instancePhase != "" {
+					jobProgressID, jobProgress = fetchWatchJobProgress(ctx, r2c, instancePhase, jobs)
 
 					// Detect grace transition: R2 phase says "grace" but DB still says "running"
 					if instancePhase == "grace" && ci.Status == db.CloudInstanceStatusRunning {
@@ -243,21 +250,21 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 							ci.Status = db.CloudInstanceStatusGrace
 						}
 					}
-				} else {
-					bootstrapStage = fetchBootstrapStage(ctx, r2c, cloudInstanceID)
+				} else if !hasStartedJob {
+					bootstrapStage = fetchWatchBootstrapStage(ctx, r2c, cloudInstanceID)
 				}
 			}
 
 			// Fetch heartbeat from R2 (only when jobs have started)
 			var heartbeatAge time.Duration
 			var heartbeat *HeartbeatSample
-			if r2c != nil && hasStartedJob && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
-				heartbeat, heartbeatAge = fetchHeartbeat(ctx, r2c, cloudInstanceID)
+			if r2c != nil && (hasStartedJob || instancePhase != "") && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
+				heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
 			}
 
 			// Detect bootstrap stall: instance running but no job progress
 			var stallMessage string
-			if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !hasStartedJob && bootstrapStage != bootstrapStageReady {
+			if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !hasStartedJob && instancePhase == "" && bootstrapStage != bootstrapStageReady {
 				// Check R2 for completion marker before declaring a stall — the agent
 				// may have completed all jobs but failed to self-destruct, so the local
 				// DB still shows jobs as queued while the instance is actually done.

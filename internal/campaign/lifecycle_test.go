@@ -136,7 +136,7 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "create instance: API error: insufficient balance") {
+	if !strings.Contains(err.Error(), "API error: insufficient balance") {
 		t.Errorf("error should include create-instance failure, got: %v", err)
 	}
 

@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -83,6 +84,56 @@ func TestEstimateGroupDisk_UsesCachedUVManifestUnion(t *testing.T) {
 	}
 }
 
+// addHistoricalDiskRecord records a completed job with disk usage for testing empirical disk estimation.
+func addHistoricalDiskRecord(t *testing.T, database *sql.DB, project, cmd string, diskBytes int64) {
+	t.Helper()
+	jobID, err := db.RecordQueued(database, "", "/tmp/project", cmd, "hist")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobProject(database, jobID, project); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+	if err := db.UpsertJobPhaseTimings(database, &db.JobPhaseTimings{
+		JobID:         jobID,
+		DiskUsedBytes: int64Ptr(diskBytes),
+	}); err != nil {
+		t.Fatalf("upsert phase timings: %v", err)
+	}
+}
+
+// llmPerfModelsTestGroup returns a two-job group for the llm-performance-models project.
+func llmPerfModelsTestGroup() InstanceGroup {
+	return InstanceGroup{
+		Jobs: []*db.Job{
+			{ID: 222, Project: "llm-performance-models", Command: "bash scripts/collect_all.sh --skip-vllm"},
+			{ID: 223, Project: "llm-performance-models", Command: "uv run python scripts/calibrate_power.py --duration 10 --sweep"},
+		},
+	}
+}
+
+func TestEstimateGroupDisk_UsesEmpiricalHistoryWhenAllJobsMatch(t *testing.T) {
+	database := db.SetupTestDB(t)
+	addHistoricalDiskRecord(t, database, "llm-performance-models", "bash scripts/collect_all.sh --skip-vllm", 47_607_521_280)
+	addHistoricalDiskRecord(t, database, "llm-performance-models", "uv run python scripts/calibrate_power.py --duration 10 --sweep", 47_607_513_088)
+
+	disk := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
+	if disk != 60 {
+		t.Fatalf("disk = %d, want 60", disk)
+	}
+}
+
+func TestEstimateGroupDisk_FallsBackWhenAnyJobLacksHistory(t *testing.T) {
+	database := db.SetupTestDB(t)
+	addHistoricalDiskRecord(t, database, "llm-performance-models", "bash scripts/collect_all.sh --skip-vllm", 47_607_521_280)
+	// Second job has no history → should fall back
+
+	disk := EstimateGroupDisk(llmPerfModelsTestGroup(), database, nil)
+	if disk != DefaultMinDiskGB {
+		t.Fatalf("disk = %d, want %d", disk, DefaultMinDiskGB)
+	}
+}
+
 func Test_hasCUDAPackages(t *testing.T) {
 	dir := t.TempDir()
 
@@ -155,4 +206,8 @@ func writeCachedUVManifest(t *testing.T, home, dir string, manifest *estimate.UV
 	if err := os.WriteFile(cachePath, data, 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
 }

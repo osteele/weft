@@ -824,6 +824,10 @@ func LaunchInstance(
 	if err != nil {
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		_, _ = db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		oplog.Log(oplog.OpCloudInstanceLaunchFailed, oplog.WithDetailf(
+			"cloud_instance_id=%d provider=%s offer_id=%s error=%s",
+			instanceID, client.Provider(), offer.ProviderID, err,
+		))
 		return instanceID, fmt.Errorf("create instance: %w", err)
 	}
 
