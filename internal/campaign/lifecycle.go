@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
@@ -264,6 +266,81 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 	return stager.AwaitAll()
 }
 
+type replacementOfferFunc func(failedOffer cloud.Offer) (*cloud.Offer, error)
+
+const replacementOfferMaxPriceMultiplier = 1.25
+
+func launchCostInputs(estimates []CostEstimate, idx int) (jobDurationHrs, setupOverheadHrs float64) {
+	jobDurationHrs = 1.0
+	setupOverheadHrs = 0.5
+	if idx < 0 || idx >= len(estimates) {
+		return jobDurationHrs, setupOverheadHrs
+	}
+	if runHours := estimates[idx].Breakdown.Run.Mean.Hours(); runHours > 0 {
+		jobDurationHrs = runHours
+	}
+	if setupHours := estimates[idx].SetupOverhead.Hours(); setupHours > 0 {
+		setupOverheadHrs = setupHours
+	}
+	return jobDurationHrs, setupOverheadHrs
+}
+
+func replacementOfferAllowed(failedOffer, replacementOffer cloud.Offer) bool {
+	if failedOffer.CostPerHour <= 0 || replacementOffer.CostPerHour <= 0 {
+		return true
+	}
+	return replacementOffer.CostPerHour <= failedOffer.CostPerHour*replacementOfferMaxPriceMultiplier
+}
+
+func createInstanceWithReplacement(
+	client cloud.Client,
+	group InstanceGroup,
+	offer cloud.Offer,
+	createOpts cloud.CreateOpts,
+	progress cloud.ProgressFunc,
+	updateOfferMetadata func(cloud.Offer) error,
+	replacementOffer replacementOfferFunc,
+) (*cloud.Instance, cloud.Offer, error) {
+	currentOffer := offer
+
+	progress("creating instance")
+	inst, err := client.CreateInstance(currentOffer.ProviderID, createOpts)
+	if err == nil {
+		return inst, currentOffer, nil
+	}
+	if replacementOffer == nil || !errors.Is(err, cloud.ErrOfferUnavailable) {
+		return nil, currentOffer, fmt.Errorf("create instance: %w", err)
+	}
+
+	log.Printf("launch: offer %s disappeared for %s; searching for replacement", currentOffer.ProviderID, group.GPUSpec())
+	progress("offer disappeared; searching again")
+
+	nextOffer, retryErr := replacementOffer(currentOffer)
+	if retryErr != nil {
+		return nil, currentOffer, fmt.Errorf("search replacement offer: %w", retryErr)
+	}
+	if nextOffer == nil {
+		progress("offer disappeared; no replacement offer found")
+		return nil, currentOffer, fmt.Errorf("offer %s disappeared and no replacement offer found", currentOffer.ProviderID)
+	}
+
+	if updateOfferMetadata != nil {
+		if err := updateOfferMetadata(*nextOffer); err != nil {
+			return nil, currentOffer, fmt.Errorf("update replacement offer metadata: %w", err)
+		}
+	}
+
+	currentOffer = *nextOffer
+	log.Printf("launch: retrying %s with replacement offer %s", group.GPUSpec(), currentOffer.ProviderID)
+	progress("retrying with replacement offer")
+
+	inst, err = client.CreateInstance(currentOffer.ProviderID, createOpts)
+	if err != nil {
+		return nil, currentOffer, fmt.Errorf("create instance: %w", err)
+	}
+	return inst, currentOffer, nil
+}
+
 // LaunchCampaign creates a campaign record and launches instances for each group
 // in parallel. It collects results and updates the campaign status.
 // The onPhase callback, if non-nil, is called with progress updates for campaign
@@ -274,6 +351,7 @@ func LaunchCampaign(
 	groups []InstanceGroup,
 	offers []cloud.Offer, // parallel to groups
 	estimates []CostEstimate, // parallel to groups; may be nil
+	survivalModel *bidding.SurvivalModel,
 	opts LaunchOpts,
 	r2Cfg cloud.R2Config,
 	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
@@ -469,9 +547,10 @@ func LaunchCampaign(
 
 	for i, g := range groups {
 		offer := offers[i]
+		jobDurationHrs, setupOverheadHrs := launchCostInputs(estimates, i)
 
 		wg.Add(1)
-		go func(group InstanceGroup, ofr cloud.Offer) {
+		go func(group InstanceGroup, ofr cloud.Offer, jobDurationHrs, setupOverheadHrs float64) {
 			defer wg.Done()
 
 			client := clientForProvider(clients, ofr.Provider)
@@ -511,9 +590,32 @@ func LaunchCampaign(
 				return
 			}
 
+			replacementOffer := replacementOfferFunc(func(failedOffer cloud.Offer) (*cloud.Offer, error) {
+				replacement := SearchBestOfferForGroup(
+					[]cloud.Client{client},
+					group,
+					survivalModel,
+					jobDurationHrs,
+					setupOverheadHrs,
+					map[string]struct{}{offerExclusionKey(failedOffer): {}},
+				)
+				if replacement.Err != nil {
+					return nil, replacement.Err
+				}
+				if replacement.Offer != nil && !replacementOfferAllowed(failedOffer, *replacement.Offer) {
+					return nil, fmt.Errorf(
+						"replacement offer price $%.2f/hr exceeds %.0f%% cap over expired offer $%.2f/hr",
+						replacement.Offer.CostPerHour,
+						(replacementOfferMaxPriceMultiplier-1)*100,
+						failedOffer.CostPerHour,
+					)
+				}
+				return replacement.Offer, nil
+			})
+
 			cID, err := LaunchInstance(
 				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-				groupAssets, progress,
+				groupAssets, replacementOffer, progress,
 			)
 
 			mu.Lock()
@@ -534,7 +636,7 @@ func LaunchCampaign(
 					}
 				}
 			}
-		}(g, offer)
+		}(g, offer, jobDurationHrs, setupOverheadHrs)
 	}
 
 	wg.Wait()
@@ -664,6 +766,7 @@ func LaunchInstance(
 	r2Cfg cloud.R2Config,
 	createOpts cloud.CreateOpts,
 	r2Assets R2Assets,
+	replacementOffer replacementOfferFunc,
 	progress cloud.ProgressFunc,
 ) (int64, error) {
 	if progress == nil {
@@ -819,16 +922,25 @@ func LaunchInstance(
 	))
 
 	// Create cloud instance
-	progress("creating instance")
-	inst, err := client.CreateInstance(offer.ProviderID, createOpts)
+	inst, finalOffer, err := createInstanceWithReplacement(
+		client,
+		group,
+		offer,
+		createOpts,
+		progress,
+		func(replacement cloud.Offer) error {
+			return db.UpdateCloudInstanceOfferMetadata(database, instanceID, replacement)
+		},
+		replacementOffer,
+	)
 	if err != nil {
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
 		_, _ = db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		oplog.Log(oplog.OpCloudInstanceLaunchFailed, oplog.WithDetailf(
 			"cloud_instance_id=%d provider=%s offer_id=%s error=%s",
-			instanceID, client.Provider(), offer.ProviderID, err,
+			instanceID, client.Provider(), finalOffer.ProviderID, err,
 		))
-		return instanceID, fmt.Errorf("create instance: %w", err)
+		return instanceID, err
 	}
 
 	providerInstID := inst.ProviderID
@@ -838,7 +950,7 @@ func LaunchInstance(
 		client.Provider(),
 		providerInstID,
 		createOpts.DiskGB,
-		offer.ProviderID,
+		finalOffer.ProviderID,
 		inst.Status,
 	))
 
@@ -874,7 +986,7 @@ func LaunchInstance(
 				providerInstID,
 				createOpts.DiskGB,
 				readback.DiskGB,
-				offer.DiskSpaceGB,
+				finalOffer.DiskSpaceGB,
 			))
 		}
 	}
@@ -887,8 +999,8 @@ func LaunchInstance(
 	}
 
 	// Record data center if available
-	if offer.DataCenter != "" {
-		_ = db.SetCloudInstanceDataCenter(database, instanceID, offer.DataCenter)
+	if finalOffer.DataCenter != "" {
+		_ = db.SetCloudInstanceDataCenter(database, instanceID, finalOffer.DataCenter)
 	}
 
 	// Generate and upload bootstrap script (must happen after CreateInstance

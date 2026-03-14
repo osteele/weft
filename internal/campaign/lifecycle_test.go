@@ -3,6 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -77,6 +78,7 @@ func TestLaunchInstanceNilR2Client(t *testing.T) {
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		R2Assets{Client: nil, AgentR2Key: "agents/test-version/linux-amd64", SourceR2Keys: map[string]string{}},
+		nil,
 		func(phase string) {},
 	)
 	if err == nil {
@@ -131,6 +133,7 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 		LaunchOpts{},
 		r2Cfg, createOpts,
 		R2Assets{Client: &r2.Client{}},
+		nil,
 		func(phase string) {},
 	)
 	if err == nil {
@@ -183,7 +186,7 @@ func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	defer database.Close()
 
 	result, err := LaunchCampaign(
-		nil, database, nil, nil, nil, LaunchOpts{}, cloud.R2Config{}, nil,
+		nil, database, nil, nil, nil, nil, LaunchOpts{}, cloud.R2Config{}, nil,
 		nil, nil,
 	)
 	if err == nil {
@@ -202,5 +205,144 @@ func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	}
 	if campaigns != 0 {
 		t.Fatalf("campaign count = %d, want 0", campaigns)
+	}
+}
+
+func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai, CostPerHour: 1.00}
+	replacement := cloud.Offer{ProviderID: "1001", Provider: cloud.ProviderVastai, CostPerHour: 1.20}
+
+	var createCalls []string
+	var updatedOffer cloud.Offer
+	var progress []string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			createCalls = append(createCalls, offerID)
+			if len(createCalls) == 1 {
+				return nil, fmt.Errorf("%w: ask 999 no longer exists", cloud.ErrOfferUnavailable)
+			}
+			return &cloud.Instance{ProviderID: "inst-123", Status: "creating"}, nil
+		},
+	}
+
+	inst, finalOffer, err := createInstanceWithReplacement(
+		mockClient,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(phase string) { progress = append(progress, phase) },
+		func(offer cloud.Offer) error {
+			updatedOffer = offer
+			return nil
+		},
+		func(failedOffer cloud.Offer) (*cloud.Offer, error) {
+			if failedOffer.ProviderID != initialOffer.ProviderID {
+				t.Fatalf("failed offer ID = %s, want %s", failedOffer.ProviderID, initialOffer.ProviderID)
+			}
+			return &replacement, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("createInstanceWithReplacement: %v", err)
+	}
+	if inst == nil || inst.ProviderID != "inst-123" {
+		t.Fatalf("instance = %+v, want inst-123", inst)
+	}
+	if finalOffer.ProviderID != replacement.ProviderID {
+		t.Fatalf("final offer ID = %s, want %s", finalOffer.ProviderID, replacement.ProviderID)
+	}
+	if updatedOffer.ProviderID != replacement.ProviderID {
+		t.Fatalf("updated offer ID = %s, want %s", updatedOffer.ProviderID, replacement.ProviderID)
+	}
+	if got := strings.Join(createCalls, ","); got != "999,1001" {
+		t.Fatalf("create calls = %q, want %q", got, "999,1001")
+	}
+	if got := strings.Join(progress, " | "); got != "creating instance | offer disappeared; searching again | retrying with replacement offer" {
+		t.Fatalf("progress = %q", got)
+	}
+}
+
+func TestCreateInstanceWithReplacementNoReplacementOffer(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai, CostPerHour: 1.00}
+
+	var replacementCalled bool
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, fmt.Errorf("%w: ask %s no longer exists", cloud.ErrOfferUnavailable, offerID)
+		},
+	}
+
+	_, _, err := createInstanceWithReplacement(
+		mockClient,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		func(cloud.Offer) error {
+			t.Fatal("metadata update should not be called")
+			return nil
+		},
+		func(cloud.Offer) (*cloud.Offer, error) {
+			replacementCalled = true
+			return nil, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !replacementCalled {
+		t.Fatal("replacement callback was not called")
+	}
+	if !strings.Contains(err.Error(), "no replacement offer found") {
+		t.Fatalf("error = %v, want no replacement offer found", err)
+	}
+}
+
+func TestCreateInstanceWithReplacementDoesNotRetryGenericError(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai, CostPerHour: 1.00}
+
+	replacementCalled := false
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, errors.New("API error: insufficient balance")
+		},
+	}
+
+	_, _, err := createInstanceWithReplacement(
+		mockClient,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		nil,
+		func(cloud.Offer) (*cloud.Offer, error) {
+			replacementCalled = true
+			return nil, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if replacementCalled {
+		t.Fatal("replacement callback should not be called")
+	}
+	if !strings.Contains(err.Error(), "insufficient balance") {
+		t.Fatalf("error = %v, want insufficient balance", err)
+	}
+}
+
+func TestReplacementOfferAllowed(t *testing.T) {
+	failed := cloud.Offer{CostPerHour: 1.00}
+	if !replacementOfferAllowed(failed, cloud.Offer{CostPerHour: 1.25}) {
+		t.Fatal("expected replacement at 25% premium to be allowed")
+	}
+	if replacementOfferAllowed(failed, cloud.Offer{CostPerHour: 1.26}) {
+		t.Fatal("expected replacement above 25% premium to be rejected")
 	}
 }

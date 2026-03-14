@@ -288,6 +288,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		campaignID, err := campaign.LaunchInstance(
 			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts,
 			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys},
+			nil,
 			func(phase string) {
 				log.Printf("cloud: job %d instance: %s", job.ID, phase)
 			},

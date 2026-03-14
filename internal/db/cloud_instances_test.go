@@ -3,6 +3,8 @@ package db
 import (
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
@@ -80,6 +82,55 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 	}
 	if jobsIncl[0].ID != 1 {
 		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: got job ID %d, want 1", jobsIncl[0].ID)
+	}
+}
+
+func TestUpdateCloudInstanceOfferMetadata(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:            CloudInstanceStatusPlanned,
+		Provider:          "vastai",
+		GPUSpec:           "RTX_4090",
+		ResolvedGPUName:   "RTX_4090",
+		CostPerHourCents:  100,
+		NumGPUs:           1,
+		DLPerf:            10,
+		Reliability:       0.98,
+		InetDownMbps:      100,
+		InetUpMbps:        50,
+		CUDAVersion:       12.1,
+		DiskGB:            80,
+		ProvisionedInputs: []string{"hf:test/model"},
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	replacement := cloud.Offer{
+		GPUName:           "RTX_5090",
+		CostPerHour:       1.24,
+		NumGPUs:           2,
+		DLPerf:            42,
+		Reliability:       0.995,
+		DownloadBandwidth: 500,
+		UploadBandwidth:   200,
+		CUDAVersion:       12.4,
+		DiskSpaceGB:       160,
+	}
+	if err := UpdateCloudInstanceOfferMetadata(database, instanceID, replacement); err != nil {
+		t.Fatalf("UpdateCloudInstanceOfferMetadata: %v", err)
+	}
+
+	inst, err := GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstance: %v", err)
+	}
+	if inst.ResolvedGPUName != "RTX_5090" || inst.CostPerHourCents != 124 || inst.NumGPUs != 2 {
+		t.Fatalf("updated instance metadata = %+v", inst)
+	}
+	if inst.DiskGB != 160 || inst.CUDAVersion != 12.4 || inst.InetDownMbps != 500 || inst.InetUpMbps != 200 {
+		t.Fatalf("updated network/disk metadata = %+v", inst)
 	}
 }
 

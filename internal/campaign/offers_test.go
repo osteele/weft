@@ -80,3 +80,36 @@ func TestFetchGroupOffersMock(t *testing.T) {
 		t.Errorf("group 2: expected no offer, got %v", results[2].Offer)
 	}
 }
+
+func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			if constraints.GPUClass != "RTX_4090" {
+				t.Fatalf("GPUClass = %q, want RTX_4090", constraints.GPUClass)
+			}
+			return []cloud.Offer{
+				{ProviderID: "1", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.45},
+				{ProviderID: "2", Provider: cloud.ProviderVastai, GPUName: "RTX_4090", GPUMemGB: 24, CostPerHour: 0.50},
+			}, nil
+		},
+	}
+
+	result := SearchBestOfferForGroup(
+		[]cloud.Client{mockClient},
+		InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24, DiskGB: 80},
+		nil,
+		1.0,
+		0.5,
+		map[string]struct{}{"vastai:1": {}},
+	)
+	if result.Err != nil {
+		t.Fatalf("SearchBestOfferForGroup: %v", result.Err)
+	}
+	if result.Offer == nil {
+		t.Fatal("expected replacement offer, got nil")
+	}
+	if result.Offer.ProviderID != "2" {
+		t.Fatalf("replacement offer ID = %s, want 2", result.Offer.ProviderID)
+	}
+}

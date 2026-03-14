@@ -154,7 +154,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			instanceID, err := LaunchInstance(
 				client, cfg.Database, campaignID, group, offer,
 				cfg.LaunchOpts, cfg.R2Cfg, cfg.CreateOpts,
-				*r2Assets, nil,
+				*r2Assets, nil, nil,
 			)
 			mu.Lock()
 			defer mu.Unlock()

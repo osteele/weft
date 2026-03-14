@@ -333,7 +333,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 
 	result, err := campaign.LaunchCampaign(
-		clients, database, groups, offers, estimates, opts, r2Cfg,
+		clients, database, groups, offers, estimates, survivalModel, opts, r2Cfg,
 		func(provider cloud.Provider) (cloud.CreateOpts, error) {
 			return createOptsForProvider(cfg, provider)
 		},

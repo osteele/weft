@@ -15,6 +15,59 @@ type GroupOffer struct {
 	Err          error
 }
 
+func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
+	return cloud.OfferConstraints{
+		GPUClass:       group.GPUClass,
+		MinGPUMemGB:    group.GPUMemGB,
+		MinDiskGB:      group.DiskGB,
+		MinReliability: cloud.DefaultMinReliability,
+	}
+}
+
+func offerExclusionKey(offer cloud.Offer) string {
+	return string(offer.Provider) + ":" + offer.ProviderID
+}
+
+// SearchBestOfferForGroup searches cloud providers for the best offer matching a
+// group's requirements, optionally excluding previously failed offer IDs.
+func SearchBestOfferForGroup(
+	clients []cloud.Client,
+	group InstanceGroup,
+	survivalModel *bidding.SurvivalModel,
+	jobDurationHrs, setupOverheadHrs float64,
+	excludeOfferIDs map[string]struct{},
+) GroupOffer {
+	result := GroupOffer{Group: group}
+
+	offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
+	if err != nil {
+		result.Err = err
+		return result
+	}
+
+	if len(excludeOfferIDs) > 0 {
+		filtered := offers[:0]
+		for _, offer := range offers {
+			if _, excluded := excludeOfferIDs[offerExclusionKey(offer)]; excluded {
+				continue
+			}
+			filtered = append(filtered, offer)
+		}
+		offers = filtered
+	}
+
+	if len(offers) == 0 {
+		return result
+	}
+
+	_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs)
+	result.Offer = &best
+	if survivalModel != nil {
+		result.SurvivalProb = survivalModel.OfferSurvival(best)
+	}
+	return result
+}
+
 // FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
 // retry risk from preemption). Otherwise falls back to cheapest offer.
@@ -28,29 +81,7 @@ func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalMo
 		wg.Add(1)
 		go func(idx int, group InstanceGroup) {
 			defer wg.Done()
-
-			constraints := cloud.OfferConstraints{
-				GPUClass:       group.GPUClass,
-				MinGPUMemGB:    group.GPUMemGB,
-				MinDiskGB:      group.DiskGB,
-				MinReliability: cloud.DefaultMinReliability,
-			}
-
-			offers, err := cloud.SearchAllProviders(clients, constraints)
-			if err != nil {
-				results[idx].Err = err
-				return
-			}
-			if len(offers) == 0 {
-				return
-			}
-
-			_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs)
-			results[idx].Offer = &best
-
-			if survivalModel != nil {
-				results[idx].SurvivalProb = survivalModel.OfferSurvival(best)
-			}
+			results[idx] = SearchBestOfferForGroup(clients, group, survivalModel, jobDurationHrs, setupOverheadHrs, nil)
 		}(i, g)
 	}
 

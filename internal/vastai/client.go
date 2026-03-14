@@ -121,6 +121,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 
 	out, err := c.run(args...)
 	if err != nil {
+		if isUnavailableOfferError(err) {
+			return nil, fmt.Errorf("%w: %v", cloud.ErrOfferUnavailable, err)
+		}
 		return nil, fmt.Errorf("create instance: %w", err)
 	}
 
@@ -137,6 +140,23 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 	}
 
 	return &Instance{ID: resp.NewContract}, nil
+}
+
+func isUnavailableOfferError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "ask") && (strings.Contains(msg, "no longer exists") || strings.Contains(msg, "does not exist") || strings.Contains(msg, "not found")):
+		return true
+	case strings.Contains(msg, "offer") && (strings.Contains(msg, "no longer exists") || strings.Contains(msg, "does not exist") || strings.Contains(msg, "not found") || strings.Contains(msg, "unavailable")):
+		return true
+	case strings.Contains(msg, "machine") && (strings.Contains(msg, "no longer available") || strings.Contains(msg, "unavailable")):
+		return true
+	default:
+		return false
+	}
 }
 
 // ShowInstance fetches the current state of an instance.

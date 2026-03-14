@@ -9,6 +9,10 @@ import (
 // exists in the provider's inventory.
 var ErrInstanceNotFound = errors.New("instance not found")
 
+// ErrOfferUnavailable is returned when a previously discovered provider offer
+// disappears before instance creation succeeds.
+var ErrOfferUnavailable = errors.New("offer unavailable")
+
 // ProjectRootDir is the default root directory used for synced project trees on
 // cloud instances.
 const ProjectRootDir = "/workspace"

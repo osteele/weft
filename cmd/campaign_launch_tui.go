@@ -631,7 +631,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		sendPhase("preparing campaign launch")
 
 		result, err := campaign.LaunchCampaign(
-			clients, database, launchGroups, offers, selectedEstimates, opts, r2Cfg,
+			clients, database, launchGroups, offers, selectedEstimates, survivalModel, opts, r2Cfg,
 			func(provider cloud.Provider) (cloud.CreateOpts, error) {
 				return createOptsForProvider(cfg, provider)
 			},

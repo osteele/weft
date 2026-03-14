@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
@@ -256,6 +257,28 @@ func SetCloudInstanceReadyAt(db *sql.DB, id int64) error {
 // Also sets vastai_instance_id for backwards compatibility when the provider is vastai.
 func SetCloudInstanceProviderID(db *sql.DB, id int64, providerID string) error {
 	_, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = ?, vastai_instance_id = ? WHERE id = ?`, providerID, providerID, id)
+	return err
+}
+
+// UpdateCloudInstanceOfferMetadata refreshes the offer-derived fields on a cloud
+// instance row before a create-instance retry uses a replacement offer.
+func UpdateCloudInstanceOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) error {
+	_, err := database.Exec(
+		`UPDATE cloud_instances
+		 SET resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
+		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?, disk_gb = ?
+		 WHERE id = ?`,
+		offer.GPUName,
+		int(offer.CostPerHour*100),
+		offer.NumGPUs,
+		offer.DLPerf,
+		offer.Reliability,
+		offer.DownloadBandwidth,
+		offer.UploadBandwidth,
+		offer.CUDAVersion,
+		int(offer.DiskSpaceGB),
+		id,
+	)
 	return err
 }
 
