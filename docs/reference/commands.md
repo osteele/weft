@@ -25,7 +25,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated). Special tags: `exclusive` makes the job run alone (waits for other jobs to finish, blocks new jobs while running); `benchmark` like exclusive but also waits for system-wide idle (low CPU, RAM, GPU, VRAM)
+- `--tag TAG`: Tag to attach to the job (can be repeated). Reserved tags: `exclusive` makes the job run alone; `benchmark` is like `exclusive` but also waits for system-wide idle; `rental` skips local placement and sends the job toward rental-GPU workflows; `inventory` blocks rental placement and keeps the job on inventory hosts only. Legacy aliases `cloud` and `on-prem` are accepted for compatibility.
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -89,6 +89,12 @@ weft run --tag exclusive deepthought 'python large_model.py'
 
 # Run a benchmark (exclusive + waits for system-wide idle: low CPU, RAM, GPU, VRAM)
 weft run --tag benchmark deepthought 'python bench_encode.py'
+
+# Force rental placement (legacy alias: --tag cloud)
+weft run --tag rental --gpu a100 'python train.py'
+
+# Keep a job on inventory hosts only (legacy alias: --tag on-prem)
+weft run --tag inventory --gpu a100 'python train.py'
 
 # Run job after another succeeds
 weft run --after 42 deepthought 'python eval.py'
@@ -343,6 +349,8 @@ weft job list [flags]
 - `--failed`: Show only failed jobs (`failed`, `dead`, or completed with non-zero exit code)
 - `--processed`: Show only jobs with the reserved `processed` tag
 - `--unprocessed`: Show only jobs without the reserved `processed` tag
+- `--rental`: Show jobs tagged for rental placement or assigned to rental instances
+- `--inventory`: Show inventory-only jobs and jobs assigned to inventory hosts
 - `--status STATUS`: Filter by status (`running`, `completed`, `queued`, `dead`, `processed`, `unprocessed`)
 - `--host HOST`: Filter by host (replaces old `check <host>` command)
 - `--search QUERY`: Search by description or command
@@ -360,6 +368,8 @@ weft job list --running --sync         # Running jobs (sync first)
 weft job list --host deepthought       # Jobs on deepthought
 weft job list --failed                 # Failed jobs
 weft job list --unprocessed            # Jobs missing the processed tag
+weft job list --rental                 # Rental-tagged or rental-assigned jobs
+weft job list --inventory              # Inventory-only or inventory-assigned jobs
 weft job list --tag exp-012            # Jobs with a tag
 weft job list --status unprocessed     # Jobs missing the processed tag
 weft job list --search training        # Search jobs
@@ -429,6 +439,10 @@ weft tag rm <job-id> <tag>
 weft tag add 42 exp-012
 weft tag rm 42 exp-012
 ```
+
+Reserved placement tags use the preferred names `rental` and `inventory`.
+Legacy aliases `cloud` and `on-prem` are accepted on input and mapped to the
+preferred names in CLI/TUI output.
 
 ### weft mark-processed
 

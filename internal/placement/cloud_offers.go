@@ -84,7 +84,7 @@ func BuildCloudOfferings(
 		}
 		providerLabel := string(offer.Provider)
 		if providerLabel == "" {
-			providerLabel = "cloud"
+			providerLabel = "rental"
 		}
 		if off.SurvivalProb > 0 {
 			off.DisplayName = fmt.Sprintf("%s %s %.0fGB: ~$%.2f (%.0f%% surv, ~%.0fm)",

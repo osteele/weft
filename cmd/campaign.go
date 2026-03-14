@@ -151,6 +151,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list unplaced jobs: %w", err)
 	}
+	jobs = filterRentalLaunchJobs(jobs)
 
 	// Filter by --jobs if specified
 	if campaignLaunchJobs != "" {
@@ -259,6 +260,16 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job != nil && !job.HasTag(db.TagInventory) {
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.

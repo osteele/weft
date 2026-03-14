@@ -290,8 +290,8 @@ func runPlanShow(cmd *cobra.Command, args []string) error {
 			}
 		}
 		fmt.Printf("    cmd: %s\n", job.Source.Command)
-		if len(job.Tags) > 0 {
-			fmt.Printf("    tags: %s\n", strings.Join(job.Tags, ", "))
+		if tags := db.DisplayTags(job.Tags); len(tags) > 0 {
+			fmt.Printf("    tags: %s\n", strings.Join(tags, ", "))
 		}
 		if len(job.Dependencies) > 0 {
 			fmt.Printf("    depends_on:\n")

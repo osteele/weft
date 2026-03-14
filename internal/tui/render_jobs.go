@@ -69,7 +69,7 @@ func (m Model) renderHelpOverlay(background string) string {
 			{"p", "Pause running job"},
 			{"d", "Toggle draft/queue status"},
 			{"g", "Start queued/draft job now or resume paused"},
-			{"c", "Cloud GPU options (queued jobs)"},
+			{"c", "Rental GPU options (queued jobs)"},
 			{"G", "Generate AI description"},
 			{"x", "Remove job from list"},
 			{"P", "Prune completed/dead jobs"},
@@ -549,7 +549,13 @@ func (m Model) renderUnplaceableBanner(maxWidth int) string {
 		return ""
 	}
 
-	groups := campaign.GroupByGPUSupremum(m.allJobs)
+	jobs := make([]*db.Job, 0, len(m.allJobs))
+	for _, job := range m.allJobs {
+		if job != nil && !job.HasTag(db.TagInventory) && !job.HasAssignedHost() {
+			jobs = append(jobs, job)
+		}
+	}
+	groups := campaign.GroupByGPUSupremum(jobs)
 	if len(groups) == 0 {
 		return ""
 	}
@@ -565,7 +571,7 @@ func (m Model) renderUnplaceableBanner(maxWidth int) string {
 	if total == 1 {
 		jobWord = "job"
 	}
-	text := fmt.Sprintf("\u26a0 %d %s need rental GPUs (%s)  [c] cloud", total, jobWord, strings.Join(specs, ", "))
+	text := fmt.Sprintf("\u26a0 %d %s need rental GPUs (%s)  [c] rental", total, jobWord, strings.Join(specs, ", "))
 
 	rendered := bannerStyle.Render(text)
 	if lipgloss.Width(rendered) > maxWidth {
@@ -847,9 +853,9 @@ func (m Model) jobDetailContent(job *db.Job) string {
 		b.WriteString(descStyle.Render(job.Description))
 		b.WriteString("\n")
 	}
-	if len(job.Tags) > 0 {
+	if tags := job.DisplayTags(); len(tags) > 0 {
 		b.WriteString(labelStyle.Render("Tags"))
-		b.WriteString(valueStyle.Render(strings.Join(job.Tags, ", ")))
+		b.WriteString(valueStyle.Render(strings.Join(tags, ", ")))
 		b.WriteString("\n")
 	}
 
@@ -1286,7 +1292,7 @@ func (m Model) renderFlash() string {
 }
 
 func (m Model) renderStatusBar() string {
-	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft c:cloud P:prune")
+	help := helpStyle.Render("?:help q:quit ↑/↓:nav space/b/t:page ←/→:views l:logs f:filter H:host o:sort r:refresh n:new e:edit R:restart k:kill d:draft c:rental P:prune")
 
 	// Right-align the help text
 	gap := m.width - lipgloss.Width(help) - 2

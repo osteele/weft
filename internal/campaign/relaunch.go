@@ -50,11 +50,14 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	result := &RelaunchResult{}
 	var eligible []*db.Job
 	for _, j := range unplaced {
+		if j.HasTag(db.TagInventory) {
+			continue
+		}
 		count, err := db.CountJobCloudAttempts(cfg.Database, j.ID)
 		if err != nil {
 			continue
 		}
-		if count == 0 && !j.HasTag("cloud") {
+		if count == 0 && !j.HasTag(db.TagRental) {
 			continue
 		}
 		if count >= maxAttempts {

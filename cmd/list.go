@@ -67,6 +67,9 @@ var (
 	listProject     string
 	listProcessed   bool
 	listUnprocessed bool
+	listRental      bool
+	listInventory   bool
+	listCloud       bool
 	listTUI         bool
 	listPlain       bool
 )
@@ -91,6 +94,10 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&listProject, "project", "", "Filter by project name")
 	cmd.Flags().BoolVar(&listProcessed, "processed", false, "Show only jobs with the processed tag")
 	cmd.Flags().BoolVar(&listUnprocessed, "unprocessed", false, "Show only jobs without the processed tag")
+	cmd.Flags().BoolVar(&listRental, "rental", false, "Show jobs tagged for rental placement or assigned to rental instances")
+	cmd.Flags().BoolVar(&listInventory, "inventory", false, "Show inventory-only jobs and jobs assigned to inventory hosts")
+	cmd.Flags().BoolVar(&listCloud, "cloud", false, "Alias for --rental")
+	cmd.Flags().MarkHidden("cloud")
 	cmd.Flags().IntVar(&listLimit, "limit", 50, "Limit results")
 	cmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
@@ -203,6 +210,10 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	wantRental, wantInventory, err := listPlacementFlags()
+	if err != nil {
+		return nil, err
+	}
 
 	// Handle explicit job IDs: weft list 12::14, weft list 12...13, weft list 12,13,14
 	if len(args) > 0 {
@@ -217,7 +228,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		if len(missingIDs) > 0 {
 			fmt.Fprintf(os.Stderr, "Warning: job(s) not found: %s\n", formatJobIDList(missingIDs))
 		}
-		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter, failedOnly)
+		jobs = filterJobsForListArgs(jobs, statusFilter, processedFilter, failedOnly, wantRental, wantInventory)
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -243,7 +254,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	// Handle search
 	if listSearch != "" {
 		searchLimit := listLimit
-		if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" {
+		if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || len(hostFilterHosts) > 0 || listProject != "" || wantRental || wantInventory {
 			searchLimit = 0
 		}
 		jobs, err := db.SearchJobs(database, listSearch, searchLimit)
@@ -256,6 +267,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		jobs = db.FilterJobsByHosts(jobs, hostFilterHosts)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		jobs = db.FilterJobsByProject(jobs, listProject)
+		jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
 		if listLimit > 0 && len(jobs) > listLimit {
 			jobs = jobs[:listLimit]
 		}
@@ -269,7 +281,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	}
 
 	queryLimit := listLimit
-	if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || listProject != "" {
+	if len(listTags) > 0 || processedFilter != "" || failedOnly || len(listExcludeTags) > 0 || listProject != "" || wantRental || wantInventory {
 		queryLimit = 0
 	}
 	jobs, err := db.ListJobsWithMaxAgeForHosts(database, statusFilter, hostFilterHosts, queryLimit, maxAgeDays, listTags, processedFilter)
@@ -280,6 +292,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 	jobs = filterJobsByFailureState(jobs, failedOnly)
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 	jobs = db.FilterJobsByProject(jobs, listProject)
+	jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
 	if listLimit > 0 && len(jobs) > listLimit {
 		jobs = jobs[:listLimit]
 	}
@@ -335,7 +348,7 @@ func listJobsByID(database *sql.DB, ids []int64) ([]*db.Job, []int64, error) {
 	return jobs, missing, nil
 }
 
-func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string, failedOnly bool) []*db.Job {
+func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string, failedOnly, wantRental, wantInventory bool) []*db.Job {
 	jobs = jobsWithEffectiveStatus(jobs, statusFilter)
 	jobs = filterJobsByFailureState(jobs, failedOnly)
 
@@ -354,10 +367,36 @@ func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string,
 	jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
 	jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 	jobs = db.FilterJobsByProject(jobs, listProject)
+	jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
 	if listHost != "" {
 		jobs = db.FilterJobsByHosts(jobs, []string{listHost})
 	}
 	return jobs
+}
+
+func listPlacementFlags() (wantRental, wantInventory bool, err error) {
+	wantRental = listRental || listCloud
+	wantInventory = listInventory
+	if wantRental && wantInventory {
+		return false, false, usageErrorf("--rental and --inventory are mutually exclusive")
+	}
+	return wantRental, wantInventory, nil
+}
+
+func filterJobsByPlacementScope(jobs []*db.Job, wantRental, wantInventory bool) []*db.Job {
+	if !wantRental && !wantInventory {
+		return jobs
+	}
+	filtered := make([]*db.Job, 0, len(jobs))
+	for _, job := range jobs {
+		switch {
+		case wantRental && job.UsesRentalPlacement():
+			filtered = append(filtered, job)
+		case wantInventory && job.UsesInventoryPlacement():
+			filtered = append(filtered, job)
+		}
+	}
+	return filtered
 }
 
 func filterJobsByFailureState(jobs []*db.Job, failedOnly bool) []*db.Job {
@@ -408,8 +447,8 @@ func showJob(database *sql.DB, id int64) error {
 	} else if job.GeneratedDescription != "" {
 		fmt.Printf("Description:  %s (AI-generated)\n", job.GeneratedDescription)
 	}
-	if len(job.Tags) > 0 {
-		fmt.Printf("Tags:         %s\n", strings.Join(job.Tags, ", "))
+	if tags := job.DisplayTags(); len(tags) > 0 {
+		fmt.Printf("Tags:         %s\n", strings.Join(tags, ", "))
 	}
 	fmt.Printf("Status:       %s\n", job.EffectiveStatus())
 	fmt.Printf("Start Time:   %s\n", time.Unix(job.StartTime, 0).Format("2006-01-02 15:04:05"))
@@ -455,6 +494,15 @@ func buildListTitle(args []string) string {
 	}
 	if processed != "" {
 		parts = append(parts, processed)
+	}
+	wantRental, wantInventory, err := listPlacementFlags()
+	if err == nil {
+		if wantRental {
+			parts = append(parts, db.TagRental)
+		}
+		if wantInventory {
+			parts = append(parts, db.TagInventory)
+		}
 	}
 	if failedOnly {
 		parts = append(parts, "failed")

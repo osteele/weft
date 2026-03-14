@@ -340,21 +340,18 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 // PlaceWithFallback tries live placement first, falls back to static scoring,
 // and returns ErrNoEligibleHost if no host matches at all.
 // This encapsulates the common BestReachableHost → BestHostWithPredictor fallback chain.
-func PlaceWithFallback(db *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
-	// Jobs tagged "cloud" skip local placement entirely.
-	if slices.Contains(constraints.Tags, "cloud") {
+func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
+	// Rental-tagged jobs skip local placement entirely.
+	if db.HasRentalTag(constraints.Tags) {
 		return nil, ErrNoEligibleHost
 	}
 
-	result, err := BestReachableHost(db, constraints, 5*time.Second)
+	result, err := BestReachableHost(database, constraints, 5*time.Second)
 	if err == nil {
 		return result, nil
 	}
 	if errors.Is(err, ErrNoReachableHost) {
-		return BestHostWithPredictor(db, constraints, nil, predict)
-	}
-	if errors.Is(err, ErrNoEligibleHost) {
-		return nil, err
+		return BestHostWithPredictor(database, constraints, nil, predict)
 	}
 	return nil, err
 }
@@ -809,8 +806,11 @@ func DescribeConstraints(c Constraints) string {
 	if hasBenchmarkTag(c.Tags) {
 		parts = append(parts, "benchmark")
 	}
-	if slices.Contains(c.Tags, db.TagCloud) {
-		parts = append(parts, "cloud")
+	if db.HasRentalTag(c.Tags) {
+		parts = append(parts, db.TagRental)
+	}
+	if db.HasInventoryTag(c.Tags) {
+		parts = append(parts, db.TagInventory)
 	}
 	if c.Command != "" {
 		cmd := c.Command
@@ -828,8 +828,8 @@ func DescribeConstraints(c Constraints) string {
 // ExplainUnplaced returns compact user-facing reasons for why local placement
 // left a job unplaced.
 func ExplainUnplaced(database *sql.DB, constraints Constraints) ([]string, error) {
-	if slices.Contains(constraints.Tags, db.TagCloud) {
-		return []string{"cloud-tagged job skips local placement"}, nil
+	if db.HasRentalTag(constraints.Tags) {
+		return []string{"rental-tagged job skips local placement"}, nil
 	}
 
 	scores, err := ScoreHostsWithMetrics(database, constraints, nil)
@@ -853,28 +853,30 @@ func ExplainUnplaced(database *sql.DB, constraints Constraints) ([]string, error
 		reasonHosts[reason] = append(reasonHosts[reason], score.Host)
 	}
 
-	if len(reasonHosts) == 0 {
-		return []string{fmt.Sprintf("no local host matched %s", DescribeConstraints(constraints))}, nil
-	}
-
-	groups := make([]reasonGroup, 0, len(reasonHosts))
-	for reason, hosts := range reasonHosts {
-		slices.Sort(hosts)
-		groups = append(groups, reasonGroup{reason: reason, hosts: hosts})
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		if len(groups[i].hosts) != len(groups[j].hosts) {
-			return len(groups[i].hosts) > len(groups[j].hosts)
-		}
-		return groups[i].reason < groups[j].reason
-	})
-
 	reasons := []string{fmt.Sprintf("no local host matched %s", DescribeConstraints(constraints))}
-	for i, group := range groups {
-		if i >= 2 {
-			break
+
+	if len(reasonHosts) > 0 {
+		groups := make([]reasonGroup, 0, len(reasonHosts))
+		for reason, hosts := range reasonHosts {
+			slices.Sort(hosts)
+			groups = append(groups, reasonGroup{reason: reason, hosts: hosts})
 		}
-		reasons = append(reasons, fmt.Sprintf("%d host%s: %s", len(group.hosts), pluralSuffix(len(group.hosts)), group.reason))
+		sort.Slice(groups, func(i, j int) bool {
+			if len(groups[i].hosts) != len(groups[j].hosts) {
+				return len(groups[i].hosts) > len(groups[j].hosts)
+			}
+			return groups[i].reason < groups[j].reason
+		})
+		for i, group := range groups {
+			if i >= 2 {
+				break
+			}
+			reasons = append(reasons, fmt.Sprintf("%d host%s: %s", len(group.hosts), pluralSuffix(len(group.hosts)), group.reason))
+		}
+	}
+
+	if db.HasInventoryTag(constraints.Tags) {
+		reasons = append(reasons, "inventory-tagged job will not use rental GPUs")
 	}
 	return reasons, nil
 }

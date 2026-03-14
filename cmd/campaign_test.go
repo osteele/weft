@@ -76,6 +76,24 @@ func TestFilterJobsByIDs(t *testing.T) {
 	}
 }
 
+func TestFilterRentalLaunchJobsExcludesInventoryJobs(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Tags: []string{db.TagInventory}},
+		{ID: 2, Tags: []string{db.TagRental}},
+		{ID: 3, Host: ""},
+	}
+
+	filtered := filterRentalLaunchJobs(jobs)
+	if len(filtered) != 2 {
+		t.Fatalf("expected 2 rental-eligible jobs, got %d", len(filtered))
+	}
+	for _, job := range filtered {
+		if job.HasTag(db.TagInventory) {
+			t.Fatalf("inventory job should be excluded: %+v", job)
+		}
+	}
+}
+
 func TestNonInteractiveLaunchGrouping(t *testing.T) {
 	// Verify that jobs are grouped correctly for non-interactive launch
 	jobs := []*db.Job{

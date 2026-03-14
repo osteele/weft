@@ -30,7 +30,7 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Job %d %s (was awaiting cloud instance)", jobID, targetStatus), nil
+		return fmt.Sprintf("Job %d %s (was awaiting rental instance)", jobID, targetStatus), nil
 	}
 
 	// Fetch instance once, share with KillCloudJob
@@ -52,7 +52,7 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	if wasTerminal {
 		return fmt.Sprintf("Job %d %s (cloud instance already terminated)", jobID, targetStatus), nil
 	}
-	return fmt.Sprintf("Job %d %s on cloud instance", jobID, targetStatus), nil
+	return fmt.Sprintf("Job %d %s on rental instance", jobID, targetStatus), nil
 }
 
 // isCloudJob checks if a job is a cloud job using an existing database connection.

@@ -352,11 +352,11 @@ rejecting it:
 laptop$ weft run --gpu-class hopper+ 'python train.py'
 No local host matches constraints: gpu-class=hopper+
 Job #4820 accepted (needs rental host)
-Use 'weft campaign launch' or press 'c' in the TUI to launch on a cloud GPU.
+Use 'weft campaign launch' or press 'c' in the TUI to launch on a rental GPU.
 ```
 
 The job appears in the TUI with status `$ needs rental`. From there, press `c`
-to open the cloud menu for a single job, or use `weft campaign launch` to batch-
+to open the rental menu for a single job, or use `weft campaign launch` to batch-
 launch all unplaced jobs at once.
 
 ### Prerequisites
@@ -397,16 +397,16 @@ laptop$ weft instance ssh <id>            # SSH into an instance
 
 See [Campaigns](campaigns.md) for the full campaign guide.
 
-### Using the TUI cloud menu (single job)
+### Using the TUI rental menu (single job)
 
 For launching a single job from the TUI:
 
 1. Open the TUI: `weft tui`
 2. Navigate to a **queued** or **needs rental** job
-3. Press `c` to open the cloud GPU menu
+3. Press `c` to open the rental GPU menu
 
 ```
-┌─ Send to Cloud GPU ──────────────────────────────────────────┐
+┌─ Send to Rental GPU ────────────────────────────────────────┐
 │                                                              │
 │  > Free: wait ~25 min (queue: ~15 min + run: ~10 min)        │
 │    Vast.ai RTX 4090 24GB: ~$0.45 (~2m setup + ~15m run)      │
@@ -448,6 +448,28 @@ laptop$ weft run atlas \
   --tag benchmark \
   -m "Measure throughput at batch_size=64" \
   'uv run python benchmark.py --batch 64'
+```
+
+Use the `rental` tag when a job should skip local placement and go straight to
+the rental-GPU workflow:
+
+```bash
+laptop$ weft run \
+  --tag rental \
+  --gpu a100 \
+  -m "Run on rental GPU" \
+  'uv run python train.py'
+```
+
+Use `inventory` for the opposite behavior: the job may wait unplaced, but it
+will not launch on rental GPUs.
+
+```bash
+laptop$ weft run \
+  --tag inventory \
+  --gpu a100 \
+  -m "Wait for inventory A100 capacity" \
+  'uv run python train.py'
 ```
 
 ## Auto-placement across hosts

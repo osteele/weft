@@ -221,6 +221,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		if err != nil {
 			return reconcileDoneMsg{}
 		}
+		jobs = filterRentalLaunchJobs(jobs)
 
 		groups := campaign.GroupByGPUSupremum(jobs)
 
@@ -247,7 +248,7 @@ func (m launchModel) fetchOffers() tea.Cmd {
 			if m.providerErr != nil {
 				return offersLoadedMsg{err: m.providerErr}
 			}
-			return offersLoadedMsg{err: fmt.Errorf("no cloud providers available")}
+			return offersLoadedMsg{err: fmt.Errorf("no rental providers available")}
 		}
 		offers := campaign.FetchGroupOffers(clients, groups, m.survivalModel, 1.0, 0.5)
 		return offersLoadedMsg{offers: offers}
@@ -717,7 +718,7 @@ func (m launchModel) View() string {
 		totalJobs += len(g.Jobs)
 	}
 
-	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Cloud GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
+	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Rental GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
 	// Show loading/reconciling status inline after the title
 	if m.reconciling || m.loading {
 		var status []string

@@ -46,7 +46,7 @@ func runPause(cmd *cobra.Command, args []string) error {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		} else if isCloud {
-			errors = append(errors, fmt.Sprintf("job %d: pause is not supported for cloud jobs", jobID))
+			errors = append(errors, fmt.Sprintf("job %d: pause is not supported for rental jobs", jobID))
 			continue
 		}
 

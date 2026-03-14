@@ -220,7 +220,7 @@ func init() {
 	jobRunCmd.Flags().StringVar(&runProject, "project", "", "Project name (default: repo root name for the working directory)")
 	jobRunCmd.Flags().BoolVarP(&runFollow, "follow", "f", false, "Follow log output after starting")
 	jobRunCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
-	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
+	jobRunCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement")
 	addJobAddFlagAliases(jobRunCmd)
 
 	// Copy flags from log command to job log
@@ -382,8 +382,8 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
 		fmt.Printf("Command:     %s\n", job.Command)
-		if len(job.Tags) > 0 {
-			fmt.Printf("Tags:        %s\n", strings.Join(job.Tags, ", "))
+		if tags := job.DisplayTags(); len(tags) > 0 {
+			fmt.Printf("Tags:        %s\n", strings.Join(tags, ", "))
 		}
 
 		// Show effective command/directory if different

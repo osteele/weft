@@ -9,7 +9,7 @@ hosts can't satisfy GPU requirements.
 |------|---------|
 | **Campaign** | A batch of cloud instances launched together |
 | **Instance** | A single Vast.ai deployment running one or more jobs |
-| **Unplaced job** | A queued job with no host assigned (needs cloud GPU) |
+| **Unplaced job** | A queued job with no host assigned (needs a rental GPU unless tagged `inventory`) |
 
 ## Quick start
 
@@ -25,9 +25,9 @@ vastai set api-key YOUR_API_KEY
 # access_key_id = "..."
 # secret_access_key = "..."
 
-# 3. Queue jobs that need cloud GPUs
+# 3. Queue jobs that need rental GPUs
 weft run --gpu hopper+ -m "Train on H100" 'python train.py'
-# Job accepted (unplaced — needs cloud GPU)
+# Job accepted (unplaced — needs rental GPU)
 
 # 4. Launch a campaign
 weft campaign launch
@@ -214,13 +214,13 @@ The grace period is tracked in the database (`grace_period_seconds`,
 `grace_started_at`, `grace_deadline`) and the instance status changes to
 `grace` during the wait.
 
-## TUI cloud menu (single job)
+## TUI rental menu (single job)
 
 For launching a single job without the full campaign flow, use the TUI:
 
 1. Open `weft tui`
 2. Navigate to an unplaced job (queued with no host)
-3. Press `c` to open the cloud GPU menu
+3. Press `c` to open the rental GPU menu
 4. Select a Vast.ai offer and confirm the cost
 
 This creates a campaign with a single instance for that job.

@@ -674,7 +674,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.setFlash("No job selected", true)
 		}
 		if job.EffectiveStatus() != db.StatusQueued {
-			return m, m.setFlash("Cloud GPU only available for queued jobs", true)
+			return m, m.setFlash("Rental GPU only available for queued jobs", true)
 		}
 		return m, m.openCloudMenu(job)
 	}

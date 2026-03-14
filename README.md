@@ -750,10 +750,15 @@ Log files are stored on remote hosts at `~/.cache/weft/logs/{id}-{timestamp}.log
 - `completed`: Job finished (check exit code for success/failure)
 - `dead`: Job terminated unexpectedly without capturing exit code
 - `queued`: Job waiting in a remote queue for scheduling
-- `queued` (unplaced): No local host matches constraints; awaiting cloud GPU launch via TUI
+- `queued` (unplaced): No local host matches constraints; awaiting rental GPU launch via TUI
 - `failed`: Job failed to start (e.g., connection error)
 
 The database is automatically created on first use and updated when checking job status.
+
+**Reserved placement tags:**
+- `rental`: Skip local placement and push the job toward rental GPU workflows
+- `inventory`: Keep the job on inventory hosts only; do not launch on rental GPUs
+- Legacy aliases `cloud` and `on-prem` are still accepted on input for compatibility
 
 ## Manual Monitoring
 

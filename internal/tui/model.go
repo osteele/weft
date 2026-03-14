@@ -983,7 +983,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cloudMenuLoading = false
 		if msg.err != nil {
 			m.showCloudMenu = false
-			return m, m.setFlash(fmt.Sprintf("Cloud GPU: %v", msg.err), true)
+			return m, m.setFlash(fmt.Sprintf("Rental GPU: %v", msg.err), true)
 		}
 		offerings := msg.offerings
 		// For unplaced jobs, no local host can run this job — omit local option
@@ -1002,22 +1002,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cloudJobLaunchedMsg:
 		if msg.err != nil {
 			return m, tea.Batch(
-				m.setFlash(fmt.Sprintf("Cloud launch failed: %v", msg.err), true),
+				m.setFlash(fmt.Sprintf("Rental launch failed: %v", msg.err), true),
 				m.refreshJobs(),
 			)
 		}
 		return m, tea.Batch(
-			m.setFlash(fmt.Sprintf("Cloud job launched (instance %d) — results via R2", msg.instanceID), false),
+			m.setFlash(fmt.Sprintf("Rental job launched (instance %d) — results via R2", msg.instanceID), false),
 			m.refreshJobs(),
 		)
 
 	case cloudJobProgressMsg:
-		return m, m.setFlash(fmt.Sprintf("Cloud job %d: %s", msg.jobID, msg.phase), false)
+		return m, m.setFlash(fmt.Sprintf("Rental job %d: %s", msg.jobID, msg.phase), false)
 
 	case cloudJobCompletedMsg:
 		if msg.err != nil {
 			return m, tea.Batch(
-				m.setFlash(fmt.Sprintf("Cloud job failed: %v", msg.err), true),
+				m.setFlash(fmt.Sprintf("Rental job failed: %v", msg.err), true),
 				m.refreshJobs(),
 			)
 		}
@@ -1026,7 +1026,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			costStr = fmt.Sprintf(" (cost: $%.2f)", msg.cost)
 		}
 		return m, tea.Batch(
-			m.setFlash(fmt.Sprintf("Cloud job completed (exit %d)%s", msg.exitCode, costStr), false),
+			m.setFlash(fmt.Sprintf("Rental job completed (exit %d)%s", msg.exitCode, costStr), false),
 			m.refreshJobs(),
 		)
 	}

@@ -75,7 +75,7 @@ func (m Model) handleCloudMenuKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// renderCloudMenu renders the cloud GPU offering overlay.
+// renderCloudMenu renders the rental GPU offering overlay.
 func (m Model) renderCloudMenu(background string) string {
 	modalStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -89,12 +89,12 @@ func (m Model) renderCloudMenu(background string) string {
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Send to Cloud GPU"))
+	b.WriteString(titleStyle.Render("Send to Rental GPU"))
 	b.WriteString("\n\n")
 
 	if m.cloudMenuLoading {
 		b.WriteString(m.spinner.View())
-		b.WriteString(" Searching for GPU offers...")
+		b.WriteString(" Searching for rental GPU offers...")
 	} else if len(m.cloudMenuOfferings) == 0 {
 		b.WriteString(dimStyle.Render("No offers available"))
 	} else if m.cloudMenuConfirm {
@@ -127,8 +127,11 @@ func (m Model) renderCloudMenu(background string) string {
 	)
 }
 
-// openCloudMenu opens the cloud menu for the selected job.
+// openCloudMenu opens the rental menu for the selected job.
 func (m *Model) openCloudMenu(job *db.Job) tea.Cmd {
+	if job != nil && job.HasTag(db.TagInventory) {
+		return m.setFlash("Inventory-only jobs cannot launch on rental GPUs", true)
+	}
 	m.showCloudMenu = true
 	m.cloudMenuJob = job
 	m.cloudMenuCursor = 0
@@ -147,13 +150,13 @@ func (m *Model) fetchCloudOffers(job *db.Job) tea.Cmd {
 		if pending {
 			return cloudOffersLoadedMsg{
 				job: job,
-				err: fmt.Errorf("cloud providers still initializing"),
+				err: fmt.Errorf("rental providers still initializing"),
 			}
 		}
 		if len(clients) == 0 {
 			err := m.cloudClientErr
 			if err == nil {
-				err = fmt.Errorf("no cloud providers available")
+				err = fmt.Errorf("no rental providers available")
 			}
 			return cloudOffersLoadedMsg{
 				job: job,

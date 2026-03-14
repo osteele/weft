@@ -159,6 +159,28 @@ func (j *Job) IsCloudJob() bool {
 	return j != nil && j.CloudInstanceID != nil && *j.CloudInstanceID > 0
 }
 
+// UsesRentalPlacement reports whether a job is explicitly or effectively on a
+// rental workflow.
+func (j *Job) UsesRentalPlacement() bool {
+	if j == nil {
+		return false
+	}
+	return j.HasTag(TagRental) || j.IsCloudJob() || IsCloudHost(j.Host)
+}
+
+// UsesInventoryPlacement reports whether a job is inventory-only or currently
+// assigned to a non-rental host.
+func (j *Job) UsesInventoryPlacement() bool {
+	if j == nil || j.UsesRentalPlacement() {
+		return false
+	}
+	if j.HasTag(TagInventory) {
+		return true
+	}
+	host := strings.TrimSpace(j.Host)
+	return host != "" && !IsCloudHost(host)
+}
+
 // PlacementMeta holds placement telemetry stored as JSON on the job record.
 type PlacementMeta struct {
 	PredictedDurationS *float64 `json:"pred_dur_s,omitempty"`
@@ -188,7 +210,17 @@ const (
 	ProcessedTag = "processed"
 	TagExclusive = "exclusive"
 	TagBenchmark = "benchmark"
-	TagCloud     = "cloud"
+	TagRental    = "rental"
+	TagInventory = "inventory"
+
+	// Legacy tag aliases accepted on input and in existing database rows.
+	TagCloudLegacy  = "cloud"
+	TagOnPremLegacy = "on-prem"
+
+	// Deprecated aliases kept for internal compatibility while the codebase
+	// moves to the preferred rental/inventory terminology.
+	TagCloud  = TagRental
+	TagOnPrem = TagInventory
 )
 
 const BackendQueueRunner = "queue-runner"
@@ -1759,10 +1791,10 @@ func RequeueByID(db *sql.DB, id int64) error {
 	return tx.Commit()
 }
 
-// MoveQueuedJobToUnplaced clears a queued job's host assignment and adds the
-// cloud tag so future placement skips local hosts. Unlike ResetJobToUnplaced,
-// this does not archive a run because the job has not started; it only clears
-// queue placement metadata.
+// MoveQueuedJobToUnplaced clears a queued job's host assignment. Jobs that are
+// not inventory-only gain the rental placement tag so they remain eligible for
+// rental launch workflows. Unlike ResetJobToUnplaced, this does not archive a
+// run because the job has not started; it only clears queue placement metadata.
 func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 	job, err := GetJobByID(db, id)
 	if err != nil {
@@ -1772,8 +1804,8 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 		return nil
 	}
 	tags := append([]string(nil), job.Tags...)
-	if !job.HasTag(TagCloud) {
-		tags = append(tags, TagCloud)
+	if !job.HasTag(TagInventory) && !job.HasTag(TagRental) {
+		tags = append(tags, TagRental)
 	}
 	tagValue, err := encodeTags(tags)
 	if err != nil {
@@ -2083,7 +2115,7 @@ func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
 
 // AddJobTag adds a tag to a job if it doesn't already exist.
 func AddJobTag(db *sql.DB, jobID int64, tag string) error {
-	tag = strings.TrimSpace(tag)
+	tag = CanonicalizeTag(tag)
 	if tag == "" {
 		return fmt.Errorf("tag cannot be empty")
 	}
@@ -2105,7 +2137,7 @@ func AddJobTag(db *sql.DB, jobID int64, tag string) error {
 
 // RemoveJobTag removes a tag from a job if present.
 func RemoveJobTag(db *sql.DB, jobID int64, tag string) error {
-	tag = strings.TrimSpace(tag)
+	tag = CanonicalizeTag(tag)
 	if tag == "" {
 		return fmt.Errorf("tag cannot be empty")
 	}
@@ -2744,6 +2776,9 @@ func encodeTags(tags []string) (interface{}, error) {
 	if len(normalized) == 0 {
 		return nil, nil
 	}
+	if err := validateReservedPlacementTags(normalized); err != nil {
+		return nil, err
+	}
 	data, err := json.Marshal(normalized)
 	if err != nil {
 		return nil, fmt.Errorf("encode tags: %w", err)
@@ -2782,7 +2817,7 @@ func normalizeTags(tags []string) []string {
 	seen := make(map[string]struct{}, len(tags))
 	normalized := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		tag = strings.TrimSpace(tag)
+		tag = CanonicalizeTag(tag)
 		if tag == "" {
 			continue
 		}
@@ -2796,6 +2831,61 @@ func normalizeTags(tags []string) []string {
 		return nil
 	}
 	return normalized
+}
+
+// CanonicalizeTag rewrites accepted legacy aliases to their preferred names.
+func CanonicalizeTag(tag string) string {
+	tag = strings.TrimSpace(tag)
+	switch tag {
+	case TagCloudLegacy:
+		return TagRental
+	case TagOnPremLegacy:
+		return TagInventory
+	default:
+		return tag
+	}
+}
+
+// DisplayTags returns tags normalized to their preferred user-facing names.
+func DisplayTags(tags []string) []string {
+	return normalizeTags(tags)
+}
+
+// IsRentalTag reports whether the tag means "rental placement", including aliases.
+func IsRentalTag(tag string) bool {
+	return CanonicalizeTag(tag) == TagRental
+}
+
+// IsInventoryTag reports whether the tag means "inventory-only placement", including aliases.
+func IsInventoryTag(tag string) bool {
+	return CanonicalizeTag(tag) == TagInventory
+}
+
+// HasRentalTag reports whether the tag set requests rental placement semantics.
+func HasRentalTag(tags []string) bool {
+	for _, tag := range tags {
+		if IsRentalTag(tag) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasInventoryTag reports whether the tag set requests inventory-only placement.
+func HasInventoryTag(tags []string) bool {
+	for _, tag := range tags {
+		if IsInventoryTag(tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateReservedPlacementTags(tags []string) error {
+	if HasRentalTag(tags) && HasInventoryTag(tags) {
+		return fmt.Errorf("tags %q and %q cannot be combined", TagRental, TagInventory)
+	}
+	return nil
 }
 
 func FilterJobsByTags(jobs []*Job, tags []string, processedFilter string) []*Job {
@@ -4043,16 +4133,24 @@ func (j *Job) EffectiveStatus() string {
 
 // HasTag returns true if the job has the given tag.
 func (j *Job) HasTag(tag string) bool {
-	tag = strings.TrimSpace(tag)
+	tag = CanonicalizeTag(tag)
 	if tag == "" {
 		return false
 	}
 	for _, existing := range j.Tags {
-		if existing == tag {
+		if CanonicalizeTag(existing) == tag {
 			return true
 		}
 	}
 	return false
+}
+
+// DisplayTags returns normalized user-facing tags for a job.
+func (j *Job) DisplayTags() []string {
+	if j == nil {
+		return nil
+	}
+	return DisplayTags(j.Tags)
 }
 
 // EffectiveDescription returns the best description for display.

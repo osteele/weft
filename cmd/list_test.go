@@ -158,6 +158,52 @@ func TestListTUIJobsLoadedRefreshesRows(t *testing.T) {
 	}
 }
 
+func TestFilterJobsByPlacementScope_RentalMatchesTagOrCloudAssignment(t *testing.T) {
+	cloudInstanceID := int64(17)
+	jobs := []*db.Job{
+		{ID: 1, Tags: []string{db.TagRental}},
+		{ID: 2, Tags: []string{db.TagCloudLegacy}},
+		{ID: 3, Host: db.CloudInstanceHost(cloudInstanceID), CloudInstanceID: &cloudInstanceID},
+		{ID: 4, Host: "cool30"},
+		{ID: 5, Tags: []string{db.TagInventory}},
+	}
+
+	filtered := filterJobsByPlacementScope(jobs, true, false)
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 rental jobs, got %d (%+v)", len(filtered), filtered)
+	}
+}
+
+func TestFilterJobsByPlacementScope_InventoryMatchesInventoryTagOrInventoryHost(t *testing.T) {
+	cloudInstanceID := int64(17)
+	jobs := []*db.Job{
+		{ID: 1, Tags: []string{db.TagInventory}},
+		{ID: 2, Host: "cool30"},
+		{ID: 3, Host: "", Tags: []string{db.TagInventory}},
+		{ID: 4, Tags: []string{db.TagRental}},
+		{ID: 5, Host: db.CloudInstanceHost(cloudInstanceID), CloudInstanceID: &cloudInstanceID},
+		{ID: 6, Host: ""},
+	}
+
+	filtered := filterJobsByPlacementScope(jobs, false, true)
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 inventory jobs, got %d (%+v)", len(filtered), filtered)
+	}
+	for _, job := range filtered {
+		if job.UsesRentalPlacement() {
+			t.Fatalf("inventory filter should exclude rental jobs, got %+v", job)
+		}
+	}
+}
+
+func TestFilterJobsByPlacementScope_NoFilterReturnsInput(t *testing.T) {
+	jobs := []*db.Job{{ID: 1}, {ID: 2}}
+	filtered := filterJobsByPlacementScope(jobs, false, false)
+	if len(filtered) != len(jobs) {
+		t.Fatalf("expected unfiltered jobs, got %d", len(filtered))
+	}
+}
+
 func testIntPtr(v int) *int {
 	return &v
 }

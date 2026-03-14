@@ -670,6 +670,33 @@ func TestMoveQueuedJobToUnplaced(t *testing.T) {
 	}
 }
 
+func TestMoveQueuedJobToUnplacedKeepsInventoryTag(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := SetJobTags(database, jobID, []string{TagInventory}); err != nil {
+		t.Fatalf("set inventory tag: %v", err)
+	}
+
+	if err := MoveQueuedJobToUnplaced(database, jobID); err != nil {
+		t.Fatalf("MoveQueuedJobToUnplaced: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !job.HasTag(TagInventory) {
+		t.Fatalf("expected inventory tag to remain, got %v", job.Tags)
+	}
+	if job.HasTag(TagRental) {
+		t.Fatalf("inventory job should not gain rental tag, got %v", job.Tags)
+	}
+}
+
 func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	database := SetupTestDB(t)
 
@@ -1233,6 +1260,67 @@ func TestSetJobTags(t *testing.T) {
 	job, err = GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("get job after clear: %v", err)
+	}
+	if len(job.Tags) != 0 {
+		t.Fatalf("expected tags cleared, got %v", job.Tags)
+	}
+}
+
+func TestSetJobTagsCanonicalizesLegacyPlacementAliases(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	if err := SetJobTags(database, jobID, []string{TagCloudLegacy, TagOnPremLegacy, TagCloudLegacy}); err == nil {
+		t.Fatalf("expected conflicting placement tags to fail")
+	}
+
+	if err := SetJobTags(database, jobID, []string{TagCloudLegacy, "exp-012"}); err != nil {
+		t.Fatalf("set tags: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	want := []string{TagRental, "exp-012"}
+	if got := job.Tags; len(got) != len(want) {
+		t.Fatalf("tags len = %d, want %d (%v)", len(got), len(want), got)
+	} else {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("tags[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestAddAndRemoveJobTagSupportLegacyPlacementAliases(t *testing.T) {
+	database := SetupTestDB(t)
+	jobID, err := RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+
+	if err := AddJobTag(database, jobID, TagCloudLegacy); err != nil {
+		t.Fatalf("add legacy rental tag: %v", err)
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if !job.HasTag(TagRental) {
+		t.Fatalf("expected canonical rental tag, got %v", job.Tags)
+	}
+
+	if err := RemoveJobTag(database, jobID, TagRental); err != nil {
+		t.Fatalf("remove canonical rental tag: %v", err)
+	}
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after remove: %v", err)
 	}
 	if len(job.Tags) != 0 {
 		t.Fatalf("expected tags cleared, got %v", job.Tags)

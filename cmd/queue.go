@@ -281,7 +281,7 @@ func init() {
 	queueAddCmd.Flags().StringVarP(&queueDescription, "description", "d", "", "[deprecated: use -m] Description of the job")
 	queueAddCmd.Flags().MarkHidden("description")
 	queueAddCmd.Flags().StringSliceVarP(&queueEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
-	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Special: 'exclusive' makes job run alone; 'benchmark' waits for system-wide idle")
+	queueAddCmd.Flags().StringSliceVar(&queueTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "after", 0, "Start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (job ID)")
 	queueAddCmd.Flags().Int64Var(&queueAfterAny, "after-any", 0, "Start job after another job completes, success or failure (job ID)")
@@ -429,7 +429,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
 		}
 		if len(queueTags) > 0 {
-			fmt.Printf("  Tags: %s\n", strings.Join(queueTags, ", "))
+			fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 		}
 		if queueAfter > 0 {
 			fmt.Printf("  After job: %d (will wait for success when queued)\n", queueAfter)
@@ -468,7 +468,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Env vars: %s\n", strings.Join(queueEnvVars, ", "))
 	}
 	if len(queueTags) > 0 {
-		fmt.Printf("  Tags: %s\n", strings.Join(queueTags, ", "))
+		fmt.Printf("  Tags: %s\n", strings.Join(db.DisplayTags(queueTags), ", "))
 	}
 	if queueAfter > 0 {
 		fmt.Printf("  After job: %d (will wait for success)\n", queueAfter)
@@ -706,7 +706,7 @@ func runQueueRemove(cmd *cobra.Command, args []string) error {
 				errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
 				continue
 			}
-			fmt.Printf("Job %d cancelled (was awaiting cloud instance)\n", jobID)
+			fmt.Printf("Job %d cancelled (was awaiting rental instance)\n", jobID)
 			continue
 		}
 

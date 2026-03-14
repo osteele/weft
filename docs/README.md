@@ -6,7 +6,7 @@ detail quickly.
 ## Start Here
 
 - [Workflow Guide](guides/workflow-guide.md) for common end-to-end usage
-- [Campaigns](guides/campaigns.md) for cloud GPU workflows
+- [Campaigns](guides/campaigns.md) for rental GPU workflows
 - [Network Resilience](guides/network-resilience.md) for disconnected/offline behavior
 - [Debugging](guides/debugging.md) for operational troubleshooting
 

@@ -297,7 +297,7 @@ var (
 		),
 		Cloud: key.NewBinding(
 			key.WithKeys("c"),
-			key.WithHelp("c", "cloud GPU options"),
+			key.WithHelp("c", "rental GPU options"),
 		),
 	}
 	localUserName = detectLocalUsername()

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
+	dbpkg "github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/transferbw"
 	_ "modernc.org/sqlite"
@@ -1291,13 +1292,37 @@ func TestNonBenchmarkTag_IgnoresIdleCheck(t *testing.T) {
 	}
 }
 
-func TestCloudTag_SkipsLocalPlacement(t *testing.T) {
+func TestRentalTag_SkipsLocalPlacement(t *testing.T) {
 	db := setupTestDB(t)
-	constraints := Constraints{Tags: []string{"cloud"}}
+	constraints := Constraints{Tags: []string{dbpkg.TagRental}}
 
 	_, err := PlaceWithFallback(db, constraints, nil)
 	if !errors.Is(err, ErrNoEligibleHost) {
-		t.Errorf("cloud tag should skip local placement, got err=%v", err)
+		t.Errorf("rental tag should skip local placement, got err=%v", err)
+	}
+}
+
+func TestLegacyCloudTag_SkipsLocalPlacement(t *testing.T) {
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{dbpkg.TagCloudLegacy}}
+
+	_, err := PlaceWithFallback(db, constraints, nil)
+	if !errors.Is(err, ErrNoEligibleHost) {
+		t.Errorf("legacy cloud tag should skip local placement, got err=%v", err)
+	}
+}
+
+func TestInventoryTag_DoesNotSkipLocalPlacement(t *testing.T) {
+	inventory.UseTestHosts(t)
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{dbpkg.TagInventory}}
+
+	result, err := PlaceWithFallback(db, constraints, nil)
+	if err != nil {
+		t.Fatalf("inventory placement returned err=%v", err)
+	}
+	if result == nil || result.Host == "" {
+		t.Fatalf("expected an inventory host, got %+v", result)
 	}
 }
 

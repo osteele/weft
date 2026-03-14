@@ -43,6 +43,7 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tag := args[len(args)-1]
+	displayTag := db.CanonicalizeTag(tag)
 
 	database, err := db.Open()
 	if err != nil {
@@ -56,7 +57,7 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-		fmt.Printf("Added tag %q to job %d\n", tag, jobID)
+		fmt.Printf("Added tag %q to job %d\n", displayTag, jobID)
 	}
 
 	if len(errorsList) > 0 {
@@ -71,6 +72,7 @@ func runTagRemove(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tag := args[len(args)-1]
+	displayTag := db.CanonicalizeTag(tag)
 
 	database, err := db.Open()
 	if err != nil {
@@ -84,7 +86,7 @@ func runTagRemove(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
 			continue
 		}
-		fmt.Printf("Removed tag %q from job %d\n", tag, jobID)
+		fmt.Printf("Removed tag %q from job %d\n", displayTag, jobID)
 	}
 
 	if len(errorsList) > 0 {

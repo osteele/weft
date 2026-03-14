@@ -109,7 +109,7 @@ func init() {
 	runCmd.Flags().Int64Var(&runKillJobID, "kill", 0, "Kill a job by ID (synonym for 'weft kill')")
 	runCmd.Flags().Int64Var(&runFrom, "from", 0, "Copy settings from existing job ID before running")
 	runCmd.Flags().StringSliceVarP(&runEnvVars, "env", "e", nil, "Environment variable (VAR=value), can be repeated")
-	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated)")
+	runCmd.Flags().StringSliceVar(&runTags, "tag", nil, "Tag to attach to the job (can be repeated). Reserved tags: 'exclusive' runs alone; 'benchmark' waits for system-wide idle; 'rental' skips local placement; 'inventory' blocks rental placement")
 	runCmd.Flags().Int64Var(&runAfter, "after", 0, "Start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfter, "depends-on", 0, "Alias for --after; start job after another job succeeds (implies --queue)")
 	runCmd.Flags().Int64Var(&runAfterAny, "after-any", 0, "Start job after another job completes, success or failure (implies --queue)")
@@ -691,8 +691,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Constraints) {
 	constraintDesc := placement.DescribeConstraints(constraints)
 	fmt.Fprintf(w, "No local host matches constraints: %s\n", constraintDesc)
+	if db.HasInventoryTag(constraints.Tags) {
+		fmt.Fprintf(w, "Job #%d accepted (waiting for inventory capacity)\n", jobID)
+		fmt.Fprintf(w, "This job is inventory-only and will not launch on rental GPUs.\n")
+		return
+	}
 	fmt.Fprintf(w, "Job #%d accepted (needs rental host)\n", jobID)
-	fmt.Fprintf(w, "Use 'weft tui' and press 'c' on this job to launch on a cloud GPU.\n")
+	fmt.Fprintf(w, "Use 'weft tui' and press 'c' on this job to launch on a rental GPU.\n")
 }
 
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.
@@ -965,6 +970,9 @@ func tryCloudReuse(database *sql.DB, jobID int64) bool {
 	if err != nil || job == nil {
 		return false
 	}
+	if job.HasTag(db.TagInventory) {
+		return false
+	}
 
 	ranked := campaign.RankForJob(job, instances)
 	if len(ranked) == 0 {
@@ -982,7 +990,7 @@ func tryCloudReuse(database *sql.DB, jobID int64) bool {
 		return false
 	}
 
-	fmt.Printf("Job #%d submitted to cloud instance #%d (%s, %s)\n",
+	fmt.Printf("Job #%d submitted to rental instance #%d (%s, %s)\n",
 		jobID, best.Instance.ID, best.Instance.DisplayGPUSpec(), best.Instance.Status)
 	return true
 }

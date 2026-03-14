@@ -27,12 +27,15 @@ func TestFilterJobsByFailureState(t *testing.T) {
 	}
 }
 
-func TestProjectCommandsExposeFailedAndProcessedFlags(t *testing.T) {
+func TestProjectCommandsExposeSharedListFlags(t *testing.T) {
 	for _, cmd := range []*cobra.Command{jobListCmd, projectJobsCmd} {
-		for _, name := range []string{"failed", "processed", "unprocessed"} {
+		for _, name := range []string{"failed", "processed", "unprocessed", "rental", "inventory", "cloud"} {
 			if flag := cmd.Flags().Lookup(name); flag == nil {
 				t.Fatalf("%s missing flag %q", cmd.Name(), name)
 			}
+		}
+		if flag := cmd.Flags().Lookup("cloud"); flag != nil && !flag.Hidden {
+			t.Fatalf("%s cloud alias flag should be hidden", cmd.Name())
 		}
 	}
 }
