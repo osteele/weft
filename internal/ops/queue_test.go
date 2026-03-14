@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -245,5 +247,49 @@ func TestAppendJobToQueue_IncludesArtifactEnvVars(t *testing.T) {
 	// Verify user env vars are also included
 	if !strings.Contains(capturedCommand, "USER_VAR=xyz") {
 		t.Error("expected queue command to contain USER_VAR=xyz env var")
+	}
+}
+
+func TestRequeueJob_RefreshesProjectMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	cfg := "inputs = [\"hf:config-model\"]\n\n[outputs]\ndirs = [\"results/\"]\n"
+	if err := os.WriteFile(filepath.Join(workDir, ".weft.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	jobID, err := db.RecordQueued(database, "test-host", workDir, "python train.py", "needs refresh")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, db.StatusFailed, time.Now().Unix(), jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		return "", "ssh: connect to host test-host port 22: Connection refused", 255
+	})
+
+	result, err := RequeueJob(database, job, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("RequeueJob failed: %v", err)
+	}
+	if !result.Deferred {
+		t.Fatalf("expected deferred requeue")
+	}
+
+	updated, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get updated job: %v", err)
+	}
+	if len(updated.Inputs) != 1 || updated.Inputs[0] != "hf:config-model" {
+		t.Fatalf("updated inputs = %v, want [hf:config-model]", updated.Inputs)
+	}
+	if len(updated.OutputDirs) != 1 || updated.OutputDirs[0] != "results/" {
+		t.Fatalf("updated output dirs = %v, want [results/]", updated.OutputDirs)
 	}
 }

@@ -73,7 +73,43 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	}
 	lines = append(lines, fmt.Sprintf("  Jobs: %d/%d resolved", resolved, len(update.Jobs)))
 
-	for i, job := range update.Jobs {
+	jobGroups := groupCloudInstanceJobs(ci.ID, update.Jobs)
+	for _, job := range jobGroups.current {
+		i := findInstanceJobIndex(update.Jobs, job)
+		if i < 0 {
+			continue
+		}
+		desc := job.Description
+		if desc == "" {
+			desc = campaign.TruncateCommand(job.Command, 50)
+		}
+
+		statusText := displayStatuses[i]
+		if progress := watchJobProgressPercent(update, job, jobProgressHWM); progress > 0 {
+			statusText = fmt.Sprintf("running %3d%%", progress)
+		}
+
+		lines = append(lines, fmt.Sprintf("    %4d  %s  %-12s  %s",
+			job.ID,
+			renderWatchJobStatusText(statusText, displayStatuses[i], opts),
+			campaign.JobProjectLabel(job),
+			desc,
+		))
+		if campaign.IsJobTerminal(displayStatuses[i]) {
+			if summary := formatUploadSummary(update.JobPhaseTimings[job.ID]); summary != "" {
+				lines = append(lines, fmt.Sprintf("          uploads: %s", summary))
+			}
+		}
+	}
+
+	if len(jobGroups.historical) > 0 {
+		lines = append(lines, "  Previous attempts on this instance:")
+	}
+	for _, job := range jobGroups.historical {
+		i := findInstanceJobIndex(update.Jobs, job)
+		if i < 0 {
+			continue
+		}
 		desc := job.Description
 		if desc == "" {
 			desc = campaign.TruncateCommand(job.Command, 50)
@@ -98,6 +134,18 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	}
 
 	return lines
+}
+
+func findInstanceJobIndex(jobs []*db.Job, target *db.Job) int {
+	for i, job := range jobs {
+		if job == target {
+			return i
+		}
+		if job != nil && target != nil && job.ID == target.ID {
+			return i
+		}
+	}
+	return -1
 }
 
 func formatWatchInstanceHeaderLine(ci *db.CloudInstance, inst *cloud.Instance, opts watchInstanceBlockOptions) string {

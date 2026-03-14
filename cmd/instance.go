@@ -301,7 +301,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				}
 			}
 			fmt.Printf("  Jobs:     %d/%d completed\n", completed, len(jobs))
-			for _, j := range jobs {
+			printInstanceJob := func(j *db.Job) {
 				displayStatus := campaign.JobDisplayStatus(j, outcomes)
 				desc := j.Description
 				if desc == "" {
@@ -324,6 +324,16 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 						fmt.Printf("             failure: %s\n", excerpt)
 					}
 				}
+			}
+			jobGroups := groupCloudInstanceJobs(ci.ID, jobs)
+			for _, j := range jobGroups.current {
+				printInstanceJob(j)
+			}
+			if len(jobGroups.historical) > 0 {
+				fmt.Printf("  Previous attempts on this instance:\n")
+			}
+			for _, j := range jobGroups.historical {
+				printInstanceJob(j)
 			}
 		}
 	}

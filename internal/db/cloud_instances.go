@@ -417,12 +417,25 @@ func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
 // cloud_instance_id on re-queued jobs, those jobs are still visible via the
 // job_cloud_attempts table.
 func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT DISTINCT %s FROM jobs
-		LEFT JOIN job_cloud_attempts ON jobs.id = job_cloud_attempts.job_id
-		WHERE (jobs.cloud_instance_id = ? OR job_cloud_attempts.cloud_instance_id = ?)
-		AND jobs.tombstoned = 0
-		ORDER BY jobs.id ASC`, qualifiedJobSelectColumns("jobs"))
-	return queryJobs(database, query, instanceID, instanceID)
+	query := fmt.Sprintf(`SELECT %s FROM jobs
+		WHERE jobs.tombstoned = 0
+		AND (
+			jobs.cloud_instance_id = ?
+			OR EXISTS (
+				SELECT 1 FROM job_cloud_attempts
+				WHERE job_cloud_attempts.job_id = jobs.id
+				AND job_cloud_attempts.cloud_instance_id = ?
+			)
+		)
+		ORDER BY
+			CASE WHEN jobs.cloud_instance_id = ? THEN 0 ELSE 1 END,
+			CASE
+				WHEN jobs.cloud_instance_id = ? AND jobs.campaign_job_index IS NULL THEN 1
+				ELSE 0
+			END,
+			jobs.campaign_job_index ASC,
+			jobs.id ASC`, qualifiedJobSelectColumns("jobs"))
+	return queryJobs(database, query, instanceID, instanceID, instanceID, instanceID)
 }
 
 // ListUnplacedJobs returns all queued jobs with no host assignment (needing placement or rental).

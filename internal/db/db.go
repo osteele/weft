@@ -82,6 +82,7 @@ type Job struct {
 	PlacementMeta        *PlacementMeta // Placement telemetry (predictions, scores)
 	PlacementReasons     []string       // Why the job is currently unplaced
 	CloudInstanceID      *int64         // Cloud instance ID if this job is part of a cloud instance
+	CampaignJobIndex     *int           // Position within a cloud campaign sequence, if assigned
 	LatestRunID          *int64         // Latest execution attempt row for this logical job
 
 	// Three-way merge state for reconciliation
@@ -168,7 +169,7 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
 
 const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
@@ -817,6 +818,12 @@ func initSchema(db *sql.DB) error {
 	);
 	`
 	if _, err := db.Exec(jobCloudAttemptsSchema); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_instance ON job_cloud_attempts(cloud_instance_id)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_job ON job_cloud_attempts(job_id)`); err != nil {
 		return err
 	}
 
@@ -2520,9 +2527,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var placementMeta sql.NullString
 	var placementReasons sql.NullString
 	var cloudInstanceID sql.NullInt64
+	var campaignJobIndex sql.NullInt64
 	var latestRunID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &latestRunID)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -2633,6 +2641,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	j.PlacementReasons = decodeStringSlice(placementReasons)
 	if cloudInstanceID.Valid {
 		j.CloudInstanceID = &cloudInstanceID.Int64
+	}
+	if campaignJobIndex.Valid {
+		v := int(campaignJobIndex.Int64)
+		j.CampaignJobIndex = &v
 	}
 	if latestRunID.Valid {
 		j.LatestRunID = &latestRunID.Int64
@@ -2872,9 +2884,10 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var placementMeta sql.NullString
 		var placementReasons sql.NullString
 		var cloudInstanceID sql.NullInt64
+		var campaignJobIndex sql.NullInt64
 		var latestRunID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &latestRunID)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 		if err != nil {
 			return nil, err
 		}
@@ -2982,6 +2995,10 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		j.PlacementReasons = decodeStringSlice(placementReasons)
 		if cloudInstanceID.Valid {
 			j.CloudInstanceID = &cloudInstanceID.Int64
+		}
+		if campaignJobIndex.Valid {
+			v := int(campaignJobIndex.Int64)
+			j.CampaignJobIndex = &v
 		}
 		if latestRunID.Valid {
 			j.LatestRunID = &latestRunID.Int64

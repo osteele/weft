@@ -97,6 +97,9 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 			return Result{}, fmt.Errorf("set project: %w", err)
 		}
 	}
+	if err := RefreshProjectDerivedMetadata(database, newJobID, workingDir, command, orig.Inputs); err != nil {
+		return Result{}, err
+	}
 	backend := orig.Backend
 	if backend == "" {
 		var resolveErr error

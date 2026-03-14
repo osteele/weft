@@ -83,6 +83,61 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 	}
 }
 
+func TestGetCloudInstanceJobsIncludingAttemptsOrdersCurrentJobsBeforeHistoricalAttempts(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES
+		 (249, NULL, '', 0, 'queued', 'historical', '/tmp'),
+		 (203, ?, ?, 0, 'queued', 'current later id', '/tmp'),
+		 (199, ?, ?, 0, 'running', 'current earlier campaign slot', '/tmp')`,
+		instanceID, CloudInstanceHost(instanceID),
+		instanceID, CloudInstanceHost(instanceID),
+	); err != nil {
+		t.Fatalf("insert jobs: %v", err)
+	}
+
+	if err := InsertJobCloudAttempt(database, 249, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(249): %v", err)
+	}
+	if err := CloseJobCloudAttempt(database, 249, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseJobCloudAttempt(249): %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 203, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(203): %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 199, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(199): %v", err)
+	}
+	if err := SetJobCampaignIndex(database, 203, 1); err != nil {
+		t.Fatalf("SetJobCampaignIndex(203): %v", err)
+	}
+	if err := SetJobCampaignIndex(database, 199, 0); err != nil {
+		t.Fatalf("SetJobCampaignIndex(199): %v", err)
+	}
+
+	jobs, err := GetCloudInstanceJobsIncludingAttempts(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: %v", err)
+	}
+	if len(jobs) != 3 {
+		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: got %d jobs, want 3", len(jobs))
+	}
+	if jobs[0].ID != 199 || jobs[1].ID != 203 || jobs[2].ID != 249 {
+		t.Fatalf("job order = [%d %d %d], want [199 203 249]", jobs[0].ID, jobs[1].ID, jobs[2].ID)
+	}
+}
+
 func TestResetOrphanedCloudJobsSetsPlacementReasons(t *testing.T) {
 	database := setupTestDB(t)
 

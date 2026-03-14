@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -122,5 +124,41 @@ func TestRestartJob_OverrideParams(t *testing.T) {
 	}
 	if newJob.Description != "new description" {
 		t.Errorf("expected description to be 'new description', got %s", newJob.Description)
+	}
+}
+
+func TestRestartJob_RefreshesProjectMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+	workDir := t.TempDir()
+	cfg := "inputs = [\"hf:config-model\"]\n\n[outputs]\ndirs = [\"results/\"]\n"
+	if err := os.WriteFile(filepath.Join(workDir, ".weft.toml"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	origJobID, _ := db.RecordJobStarting(database, "test-host", workDir, "python train.py", "original job")
+	if err := db.SetJobInputs(database, origJobID, []string{"hf:explicit-model"}); err != nil {
+		t.Fatalf("set original inputs: %v", err)
+	}
+	db.RecordCompletionByID(database, origJobID, 0, time.Now().Unix())
+	origJob, _ := db.GetJobByID(database, origJobID)
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		return "", "ssh: connect to host test-host port 22: Connection refused", 255
+	})
+
+	result, err := RestartJob(database, RestartJobParams{OriginalJob: origJob}, ExecuteOptions{Timeout: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("RestartJob failed: %v", err)
+	}
+
+	newJob, err := db.GetJobByID(database, result.JobID)
+	if err != nil {
+		t.Fatalf("get restarted job: %v", err)
+	}
+	if len(newJob.Inputs) != 2 || newJob.Inputs[0] != "hf:config-model" || newJob.Inputs[1] != "hf:explicit-model" {
+		t.Fatalf("restarted job inputs = %v, want [hf:config-model hf:explicit-model]", newJob.Inputs)
+	}
+	if len(newJob.OutputDirs) != 1 || newJob.OutputDirs[0] != "results/" {
+		t.Fatalf("restarted job output dirs = %v, want [results/]", newJob.OutputDirs)
 	}
 }

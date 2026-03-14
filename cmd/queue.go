@@ -12,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
@@ -330,6 +331,21 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve project: %w", err)
 	}
 
+	localDir := workdir.ResolveLocal(workingDir)
+	outputDirs := config.ProjectOutputDirs(localDir)
+
+	projectInputs := config.ProjectInputs(localDir)
+	queueInputs := projectInputs
+	if detected := dataloc.ScanPythonHFRefs(localDir); len(detected) > 0 {
+		queueInputs = mergeDedup(queueInputs, detected)
+	}
+	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
+		queueInputs = mergeDedup(queueInputs, detected)
+	}
+	if newInputs := filterNew(queueInputs, projectInputs); len(newInputs) > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
@@ -390,6 +406,18 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record draft project: %w", err)
 			}
 		}
+		if len(queueInputs) > 0 {
+			if err := db.SetJobInputs(database, jobID, queueInputs); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft inputs: %w", err)
+			}
+		}
+		if len(outputDirs) > 0 {
+			if err := db.SetJobOutputDirs(database, jobID, outputDirs); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft output dirs: %w", err)
+			}
+		}
 		fmt.Printf("Draft job #%d saved for %s\n\n", jobID, host)
 		fmt.Printf("  Working dir: %s\n", workingDir)
 		fmt.Printf("  Command: %s\n", command)
@@ -421,6 +449,8 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 		Tags:         queueTags,
 		Dependencies: deps,
 		AutoStart:    !queueNoStart,
+		Inputs:       queueInputs,
+		OutputDirs:   outputDirs,
 	})
 	if err != nil {
 		return err
@@ -814,6 +844,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	var oldStatus string
 	if statusChanged && editStatus == db.StatusQueued {
 		oldStatus = job.Status
+		if err := ops.RefreshProjectDerivedMetadata(database, jobID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+			return err
+		}
 		if err := db.RequeueByID(database, jobID); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}

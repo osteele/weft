@@ -11,6 +11,9 @@ import (
 // RequeueJob changes a job's status to queued and appends it to the remote queue.
 // If the host is unreachable, the job is queued locally and will be synced later.
 func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
+	if err := RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+		return Result{}, err
+	}
 	if err := db.RequeueByID(database, job.ID); err != nil {
 		return Result{}, fmt.Errorf("update status to queued: %w", err)
 	}

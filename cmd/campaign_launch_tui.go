@@ -549,6 +549,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		fg := campaign.InstanceGroup{
 			GPUClass: g.GPUClass,
 			GPUMemGB: g.GPUMemGB,
+			DiskGB:   g.DiskGB,
 			Jobs:     selectedJobs,
 		}
 		filteredGroups = append(filteredGroups, fg)
