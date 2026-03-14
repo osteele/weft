@@ -731,7 +731,7 @@ func configureBootstrapCreateOpts(client cloud.Client, createOpts *cloud.CreateO
 	switch client.Provider() {
 	case cloud.ProviderRunpod:
 		if createOpts.TemplateID == "" {
-			return fmt.Errorf("runpod bootstrap requires a template with startup command %q", cloud.R2BootstrapTemplateStartCmd())
+			return fmt.Errorf("runpod bootstrap requires a compatible template; run `weft runpod setup` or use startup command %q", cloud.R2BootstrapTemplateStartCmd())
 		}
 		if createOpts.EnvVars == nil {
 			createOpts.EnvVars = make(map[string]string)

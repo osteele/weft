@@ -264,6 +264,46 @@ func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
 	}
 }
 
+func TestCreateInstanceWithReplacementRetriesUnavailableRunpodOffer(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "RTX4090", Provider: cloud.ProviderRunpod, CostPerHour: 0.80}
+	replacement := cloud.Offer{ProviderID: "RTX4090-B", Provider: cloud.ProviderRunpod, CostPerHour: 0.90}
+
+	var createCalls []string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderRunpod,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			createCalls = append(createCalls, offerID)
+			if len(createCalls) == 1 {
+				return nil, fmt.Errorf("%w: gpu %s no longer exists", cloud.ErrOfferUnavailable, offerID)
+			}
+			return &cloud.Instance{ProviderID: "pod-123", Status: "creating"}, nil
+		},
+	}
+
+	inst, finalOffer, err := createInstanceWithReplacement(
+		mockClient,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		nil,
+		func(cloud.Offer) (*cloud.Offer, error) { return &replacement, nil },
+	)
+	if err != nil {
+		t.Fatalf("createInstanceWithReplacement: %v", err)
+	}
+	if inst == nil || inst.ProviderID != "pod-123" {
+		t.Fatalf("instance = %+v, want pod-123", inst)
+	}
+	if finalOffer.ProviderID != replacement.ProviderID {
+		t.Fatalf("final offer ID = %s, want %s", finalOffer.ProviderID, replacement.ProviderID)
+	}
+	if got := strings.Join(createCalls, ","); got != "RTX4090,RTX4090-B" {
+		t.Fatalf("create calls = %q, want %q", got, "RTX4090,RTX4090-B")
+	}
+}
+
 func TestCreateInstanceWithReplacementNoReplacementOffer(t *testing.T) {
 	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
 	initialOffer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai, CostPerHour: 1.00}

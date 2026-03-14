@@ -697,6 +697,41 @@ telemetry (CPU, memory, GPU usage, failure detection).
 
 Requires the `vastai` CLI: `pip install vastai && vastai set api-key YOUR_KEY`.
 
+### RunPod Cloud GPU
+
+RunPod can be enabled for cloud offer search independently from launch-time
+template setup.
+
+```toml
+# ~/.config/weft/config.toml
+[runpod]
+enabled = true
+default_image = "nvidia/cuda:12.4.1-runtime-ubuntu22.04"
+```
+
+Install and authenticate the CLI first:
+
+```bash
+brew install runpodctl
+runpodctl doctor
+```
+
+Then use the built-in setup flow:
+
+```bash
+weft runpod doctor
+weft runpod template print-bootstrap
+weft runpod setup
+```
+
+`weft runpod setup` enables RunPod, creates or reuses a compatible bootstrap
+template, and writes `runpod.bootstrap_template_id` into
+`~/.config/weft/config.toml`.
+
+RunPod launches still use the shared R2 bootstrap configuration under
+`[vastai.r2]`, so `weft runpod doctor` also validates that block before
+reporting launch readiness.
+
 ## Job Database
 
 Jobs are tracked in a local SQLite database at `~/.config/weft/jobs.db`. The database records:

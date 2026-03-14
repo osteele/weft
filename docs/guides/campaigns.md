@@ -33,6 +33,21 @@ weft run --gpu hopper+ -m "Train on H100" 'python train.py'
 weft campaign launch
 ```
 
+RunPod is also supported for cloud search and launch. The equivalent setup flow
+is:
+
+```bash
+brew install runpodctl
+runpodctl doctor
+weft runpod doctor
+weft runpod setup
+```
+
+RunPod launch readiness depends on the shared R2 bootstrap config under
+`[vastai.r2]` plus a compatible `runpod.bootstrap_template_id`. Use
+`weft runpod template print-bootstrap` to inspect the exact startup command that
+the managed template must run.
+
 ## Launching campaigns
 
 ### Interactive launch

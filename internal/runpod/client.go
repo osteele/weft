@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/placement"
 )
 
 // cliTimeout is the maximum time to wait for a runpodctl CLI command to complete.
@@ -17,13 +18,19 @@ const cliTimeout = 30 * time.Second
 // CloudClient implements cloud.Client via the runpodctl CLI.
 type CloudClient struct {
 	cliPath string
+	runner  *cliRunner
 }
 
 var _ cloud.Client = (*CloudClient)(nil)
 
 // NewCloudClient creates a CloudClient that uses runpodctl from PATH.
 func NewCloudClient() *CloudClient {
-	return &CloudClient{cliPath: "runpodctl"}
+	cliPath := "runpodctl"
+	return &CloudClient{cliPath: cliPath, runner: newCLIRunner(cliPath)}
+}
+
+func newCloudClientForTests(runner *cliRunner) *CloudClient {
+	return &CloudClient{cliPath: runner.cliPath, runner: runner}
 }
 
 func (c *CloudClient) Provider() cloud.Provider {
@@ -31,33 +38,32 @@ func (c *CloudClient) Provider() cloud.Provider {
 }
 
 func (c *CloudClient) Available() error {
-	path, err := exec.LookPath(c.cliPath)
-	if err != nil {
-		return fmt.Errorf("runpodctl not found in PATH (install: https://docs.runpod.io/cli/install)")
-	}
-	// Quick check: runpodctl version
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "version")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("runpodctl check failed: %s", strings.TrimSpace(string(out)))
+
+	caps, err := c.capabilities(ctx)
+	if err != nil {
+		return err
+	}
+	if err := c.checkAuth(ctx, caps); err != nil {
+		return err
 	}
 	return nil
 }
 
 func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
-	// runpodctl get gpu lists available GPU types
-	out, err := c.run("get", "gpu")
-	if err != nil {
-		return nil, fmt.Errorf("list GPU types: %w", err)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
 
-	offers, err := parseGPUTypeOutput(out, constraints)
+	caps, err := c.capabilities(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	return offers, nil
+	out, err := c.runner.runOutput(ctx, caps.path, caps.searchCommand...)
+	if err != nil {
+		return nil, fmt.Errorf("search offers: %w", err)
+	}
+	return parseSearchOutput(out, constraints)
 }
 
 func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
@@ -66,12 +72,22 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 		return nil, err
 	}
 
-	out, err := c.run(args...)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	caps, err := c.capabilities(ctx)
 	if err != nil {
+		return nil, err
+	}
+	out, err := c.runner.runOutput(ctx, caps.path, args...)
+	if err != nil {
+		if isOfferUnavailableError(err) {
+			return nil, fmt.Errorf("%w: %v", cloud.ErrOfferUnavailable, err)
+		}
 		return nil, fmt.Errorf("create pod: %w", err)
 	}
 
-	podID, err := parseCreatedPodID(out)
+	podID, err := parseCreatedResourceID(out)
 	if err != nil {
 		return nil, err
 	}
@@ -82,53 +98,62 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 	}, nil
 }
 
+func podToInstance(pod Pod) cloud.Instance {
+	return cloud.Instance{
+		ProviderID:  pod.ID,
+		Provider:    cloud.ProviderRunpod,
+		Status:      strings.ToLower(pod.Status),
+		SSHHost:     pod.SSHHost,
+		SSHPort:     pod.SSHPort,
+		CostPerHour: pod.CostPerHour,
+		Label:       pod.Name,
+	}
+}
+
 func (c *CloudClient) ListAllInstances() ([]cloud.Instance, error) {
-	out, err := c.run("get", "pod")
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	caps, err := c.capabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out, err := c.runner.runOutput(ctx, caps.path, caps.podListCommand...)
 	if err != nil {
 		return nil, fmt.Errorf("list pods: %w", err)
 	}
 
-	var pods []Pod
-	if err := json.Unmarshal(out, &pods); err != nil {
+	pods, err := parsePods(out)
+	if err != nil {
 		return nil, fmt.Errorf("parse pods: %w", err)
 	}
-
 	result := make([]cloud.Instance, len(pods))
 	for i, pod := range pods {
-		result[i] = cloud.Instance{
-			ProviderID:  pod.ID,
-			Provider:    cloud.ProviderRunpod,
-			Status:      strings.ToLower(pod.Status),
-			SSHHost:     pod.SSHHost,
-			SSHPort:     pod.SSHPort,
-			CostPerHour: pod.CostPerHour,
-			Label:       pod.Name,
-		}
+		result[i] = podToInstance(pod)
 	}
 	return result, nil
 }
 
 func (c *CloudClient) ShowInstance(instanceID string) (*cloud.Instance, error) {
-	out, err := c.run("get", "pod", instanceID)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	caps, err := c.capabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	args := append(append([]string{}, caps.podGetCommand...), instanceID)
+	out, err := c.runner.runOutput(ctx, caps.path, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get pod %s: %w", instanceID, err)
 	}
 
-	var pod Pod
-	if err := json.Unmarshal(out, &pod); err != nil {
+	pod, err := parsePod(out)
+	if err != nil {
 		return nil, fmt.Errorf("parse pod response: %w", err)
 	}
-
-	status := strings.ToLower(pod.Status)
-
-	return &cloud.Instance{
-		ProviderID:  pod.ID,
-		Provider:    cloud.ProviderRunpod,
-		Status:      status,
-		SSHHost:     pod.SSHHost,
-		SSHPort:     pod.SSHPort,
-		CostPerHour: pod.CostPerHour,
-	}, nil
+	inst := podToInstance(*pod)
+	return &inst, nil
 }
 
 func (c *CloudClient) WaitReady(instanceID string, timeout time.Duration) (*cloud.Instance, error) {
@@ -153,8 +178,15 @@ func (c *CloudClient) WaitReady(instanceID string, timeout time.Duration) (*clou
 }
 
 func (c *CloudClient) DestroyInstance(instanceID string) error {
-	_, err := c.run("remove", "pod", instanceID)
+	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
+	defer cancel()
+
+	caps, err := c.capabilities(ctx)
 	if err != nil {
+		return err
+	}
+	args := append(append([]string{}, caps.podDeleteCommand...), instanceID)
+	if _, err := c.runner.runOutput(ctx, caps.path, args...); err != nil {
 		return fmt.Errorf("remove pod %s: %w", instanceID, err)
 	}
 	return nil
@@ -165,22 +197,86 @@ func (c *CloudClient) CopyBetweenInstances(_, _ string, _, _ string) error {
 }
 
 func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
-	// RunPod sets $RUNPOD_POD_ID in the container, and runpodctl is pre-installed.
-	return `runpodctl remove pod "$RUNPOD_POD_ID" 2>/dev/null || true`
+	return `runpodctl pod delete "${RUNPOD_POD_ID:-` + providerInstanceID + `}" 2>/dev/null || true`
 }
 
-func (c *CloudClient) run(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, c.cliPath, args...)
-	out, err := cmd.Output()
+func (c *CloudClient) capabilities(ctx context.Context) (*cliCapabilities, error) {
+	return c.runner.detectCapabilities(ctx)
+}
+
+func (c *CloudClient) checkAuth(ctx context.Context, caps *cliCapabilities) error {
+	if _, err := c.runner.runOutput(ctx, caps.path, "user"); err != nil {
+		return fmt.Errorf("runpodctl auth check failed: %w", err)
+	}
+	return nil
+}
+
+func (c *CloudClient) listTemplates(ctx context.Context, caps *cliCapabilities) ([]*TemplateInfo, error) {
+	if len(caps.templateListCommand) == 0 || len(caps.templateGetCommand) == 0 {
+		return nil, fmt.Errorf("runpodctl template commands are unavailable")
+	}
+	out, err := c.runner.runOutput(ctx, caps.path, caps.templateListCommand...)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("%s: %s", strings.Join(args, " "), strings.TrimSpace(string(exitErr.Stderr)))
+		return nil, fmt.Errorf("list templates: %w", err)
+	}
+	items, err := decodeJSONArray(out)
+	if err != nil {
+		return nil, fmt.Errorf("parse template list: %w", err)
+	}
+	templates := make([]*TemplateInfo, 0, len(items))
+	for _, item := range items {
+		id := firstString(item, "id", "templateId")
+		if id == "" {
+			continue
 		}
+		tmpl, err := c.getTemplate(ctx, caps, id)
+		if err != nil {
+			return nil, err
+		}
+		templates = append(templates, tmpl)
+	}
+	return templates, nil
+}
+
+func (c *CloudClient) getTemplate(ctx context.Context, caps *cliCapabilities, id string) (*TemplateInfo, error) {
+	if len(caps.templateGetCommand) == 0 {
+		return nil, fmt.Errorf("runpodctl template get is unavailable")
+	}
+	args := append(append([]string{}, caps.templateGetCommand...), id)
+	out, err := c.runner.runOutput(ctx, caps.path, args...)
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "not found") {
+			return nil, fmt.Errorf("%w: %s", ErrTemplateNotFound, id)
+		}
+		return nil, fmt.Errorf("get template %s: %w", id, err)
+	}
+	obj, err := decodeJSONObject(out)
+	if err != nil {
+		return nil, fmt.Errorf("parse template %s: %w", id, err)
+	}
+	return templateInfoFromMap(obj), nil
+}
+
+func (c *CloudClient) createTemplate(ctx context.Context, caps *cliCapabilities, spec BootstrapTemplateSpec) (*TemplateInfo, error) {
+	if len(caps.templateCreateCommand) == 0 {
+		return nil, fmt.Errorf("runpodctl template create is unavailable")
+	}
+	args := append(append([]string{}, caps.templateCreateCommand...),
+		"--name", spec.Name,
+		"--image", spec.Image,
+		"--docker-start-cmd", spec.StartCommand,
+		"--readme", spec.Readme,
+	)
+	out, err := c.runner.runOutput(ctx, caps.path, args...)
+	if err != nil {
+		return nil, fmt.Errorf("create template: %w", err)
+	}
+	id, err := parseCreatedResourceID(out)
+	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	return c.getTemplate(ctx, caps, id)
 }
 
 func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error) {
@@ -195,7 +291,7 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 			return nil, fmt.Errorf("runpod templates manage startup commands; remove OnStartCmd when using template %q", opts.TemplateID)
 		}
 	case opts.OnStartCmd != "":
-		return nil, fmt.Errorf("runpod pods do not support per-pod startup commands; configure runpod.bootstrap_template_id and bake startup into the template")
+		return nil, fmt.Errorf("runpod pods do not support per-pod startup commands; configure runpod.bootstrap_template_id or run `weft runpod setup`")
 	case opts.Image != "":
 		args = append(args, "--image", opts.Image)
 	default:
@@ -208,7 +304,7 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 		args = append(args, "--name", opts.Label)
 	}
 	if len(opts.EnvVars) > 0 {
-		data, err := json.Marshal(opts.EnvVars)
+		data, err := jsonMarshal(opts.EnvVars)
 		if err != nil {
 			return nil, fmt.Errorf("encode runpod env vars: %w", err)
 		}
@@ -217,68 +313,135 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 	return args, nil
 }
 
-func parseCreatedPodID(out []byte) (string, error) {
+func parseCreatedResourceID(out []byte) (string, error) {
 	trimmed := strings.TrimSpace(string(out))
-	if trimmed == "" {
-		return "", fmt.Errorf("create pod returned empty output")
+	if trimmed == "" || trimmed == "null" {
+		return "", fmt.Errorf("create command returned empty output")
 	}
-
-	var pod Pod
-	if err := json.Unmarshal(out, &pod); err == nil && pod.ID != "" {
-		return pod.ID, nil
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(out, &payload); err == nil {
-		if id, ok := payload["id"].(string); ok && id != "" {
+	if obj, err := decodeJSONObject(out); err == nil && obj != nil {
+		if id := firstString(obj, "id", "templateId", "podId"); id != "" {
 			return id, nil
 		}
 	}
-
 	trimmed = strings.Trim(trimmed, "\"")
 	if trimmed != "" && !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
 		return trimmed, nil
 	}
-
-	return "", fmt.Errorf("could not parse runpod pod ID from output: %s", strings.TrimSpace(string(out)))
+	return "", fmt.Errorf("could not parse resource ID from output: %s", strings.TrimSpace(string(out)))
 }
 
-// parseGPUTypeOutput parses runpodctl get gpu output and filters by constraints.
+func parseCreatedPodID(out []byte) (string, error) {
+	return parseCreatedResourceID(out)
+}
+
 func parseGPUTypeOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
-	var gpuTypes []GPUType
-	if err := json.Unmarshal(data, &gpuTypes); err != nil {
-		return nil, fmt.Errorf("parse GPU types: %w", err)
+	return parseSearchOutput(data, constraints)
+}
+
+func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+	rows, err := decodeJSONArray(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse GPU offers: %w", err)
 	}
-
 	var offers []cloud.Offer
-	for _, gt := range gpuTypes {
-		// Filter by memory
-		if constraints.MinGPUMemGB > 0 && gt.MemoryInGB < constraints.MinGPUMemGB {
+	var constraint placement.GPUConstraint
+	if constraints.GPUClass != "" {
+		constraint = placement.ParseGPUConstraint(constraints.GPUClass)
+	}
+	for _, row := range rows {
+		memGB := firstInt(row, "memoryInGb", "gpuMemoryInGb", "gpuMemoryGb", "memory")
+		if constraints.MinGPUMemGB > 0 && memGB < constraints.MinGPUMemGB {
 			continue
 		}
 
-		// Get best price (prefer community cloud for lower cost)
-		price := gt.CommunityPrice
-		if price <= 0 {
-			price = gt.SecurePrice
+		maxGPUs := firstInt(row, "maxGpuCount", "gpuCount", "availableGpuCount")
+		numGPUs := constraints.NumGPUs
+		if numGPUs == 0 {
+			numGPUs = 1
 		}
-		if price <= 0 && gt.LowestPrice != nil {
-			price = gt.LowestPrice.Uninterruptable
+		if maxGPUs > 0 && maxGPUs < numGPUs {
+			continue
+		}
+
+		name := firstString(row, "displayName", "gpuType", "gpuName", "name", "id")
+		if constraints.GPUClass != "" && !constraint.MatchesGPUFullName(name) && !constraint.MatchesGPU(inventory.NormalizeGPUClass(name)) {
+			continue
+		}
+
+		price := firstFloat(row, "communityPrice", "securePrice", "costPerHr", "price")
+		if price <= 0 {
+			price = firstFloat(row, "uninterruptablePrice")
 		}
 		if price <= 0 {
 			continue
 		}
 
+		offerID := firstString(row, "id", "gpuTypeId", "gpuId", "displayName")
+		if offerID == "" {
+			continue
+		}
 		offers = append(offers, cloud.Offer{
-			ProviderID:  gt.ID,
+			ProviderID:  offerID,
 			Provider:    cloud.ProviderRunpod,
-			GPUName:     gt.DisplayName,
-			NumGPUs:     1,
-			GPUMemGB:    float64(gt.MemoryInGB),
+			GPUName:     name,
+			NumGPUs:     numGPUs,
+			GPUMemGB:    float64(memGB),
 			CostPerHour: price,
-			Verified:    gt.SecureCloud,
+			Verified:    firstBool(row, "secureCloud", "verified"),
+			DataCenter:  firstString(row, "dataCenterId", "dataCenter"),
+			DiskSpaceGB: firstFloat(row, "diskGb", "diskSpaceGb"),
 		})
 	}
-
 	return offers, nil
+}
+
+func parsePods(data []byte) ([]Pod, error) {
+	rows, err := decodeJSONArray(data)
+	if err != nil {
+		return nil, err
+	}
+	pods := make([]Pod, 0, len(rows))
+	for _, row := range rows {
+		pods = append(pods, podFromMap(row))
+	}
+	return pods, nil
+}
+
+func parsePod(data []byte) (*Pod, error) {
+	obj, err := decodeJSONObject(data)
+	if err != nil {
+		return nil, err
+	}
+	pod := podFromMap(obj)
+	return &pod, nil
+}
+
+func podFromMap(row map[string]any) Pod {
+	return Pod{
+		ID:          firstString(row, "id", "podId"),
+		Name:        firstString(row, "name"),
+		Status:      firstString(row, "desiredStatus", "status"),
+		GPUType:     firstString(row, "gpuType", "gpuName"),
+		GPUCount:    firstInt(row, "gpuCount"),
+		CostPerHour: firstFloat(row, "costPerHr", "price"),
+		SSHHost:     firstString(row, "sshHost", "ipAddress", "publicIp"),
+		SSHPort:     firstInt(row, "sshPort", "port"),
+	}
+}
+
+func templateInfoFromMap(row map[string]any) *TemplateInfo {
+	if row == nil {
+		return nil
+	}
+	return &TemplateInfo{
+		ID:             firstString(row, "id", "templateId"),
+		Name:           firstString(row, "name"),
+		Image:          firstString(row, "imageName", "image"),
+		DockerStartCmd: firstString(row, "dockerStartCmd", "dockerStartCommand", "startCommand"),
+		Readme:         firstString(row, "readme", "README"),
+	}
+}
+
+func jsonMarshal(v any) ([]byte, error) {
+	return json.Marshal(v)
 }

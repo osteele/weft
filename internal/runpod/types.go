@@ -1,35 +1,68 @@
 // Package runpod wraps the runpodctl CLI for searching GPU pods,
-// creating instances, and managing their lifecycle.
+// creating instances, template management, and provider diagnostics.
 package runpod
 
-// Pod represents a Runpod pod from the API.
+// Pod represents a RunPod pod from the CLI/API.
 type Pod struct {
 	ID          string  `json:"id"`
 	Name        string  `json:"name"`
-	Status      string  `json:"desiredStatus"` // "RUNNING", "EXITED", etc.
+	Status      string  `json:"desiredStatus"`
 	GPUType     string  `json:"gpuType"`
 	GPUCount    int     `json:"gpuCount"`
 	CostPerHour float64 `json:"costPerHr"`
-	// SSH connection info (parsed from pod details)
-	SSHHost string
-	SSHPort int
+	SSHHost     string  `json:"sshHost"`
+	SSHPort     int     `json:"sshPort"`
 }
 
-// GPUType represents a Runpod GPU type from the marketplace.
-type GPUType struct {
-	ID             string  `json:"id"`
-	DisplayName    string  `json:"displayName"`
-	MemoryInGB     int     `json:"memoryInGb"`
-	SecureCloud    bool    `json:"secureCloud"`
-	CommunityCloud bool    `json:"communityCloud"`
-	SecurePrice    float64 `json:"securePrice"`
-	CommunityPrice float64 `json:"communityPrice"`
-	LowestPrice    *LowestPrice
-	MaxGPUCount    int `json:"maxGpuCount"`
+// TemplateInfo captures the subset of template fields we care about.
+type TemplateInfo struct {
+	ID             string
+	Name           string
+	Image          string
+	DockerStartCmd string
+	Readme         string
 }
 
-// LowestPrice holds the cheapest available price for a GPU type.
-type LowestPrice struct {
-	MinimumBidPrice float64 `json:"minimumBidPrice"`
-	Uninterruptable float64 `json:"uninterruptablePrice"`
+// BootstrapTemplateSpec is the desired managed-template configuration.
+type BootstrapTemplateSpec struct {
+	Name         string
+	SpecHash     string
+	Image        string
+	StartCommand string
+	Readme       string
+}
+
+// Check is a single readiness check emitted by doctor/setup.
+type Check struct {
+	Name   string
+	OK     bool
+	Detail string
+}
+
+// Diagnosis captures RunPod readiness for search and launch workflows.
+type Diagnosis struct {
+	Enabled               bool
+	CLIPath               string
+	Version               string
+	SearchCommand         string
+	PodCommandFamily      string
+	TemplateCommandFamily string
+	RequiredStartCommand  string
+	DefaultImage          string
+	TemplateID            string
+	Template              *TemplateInfo
+	TemplateCompatible    bool
+	SearchReady           bool
+	LaunchReady           bool
+	SearchChecks          []Check
+	LaunchChecks          []Check
+}
+
+// SetupResult describes what runpod setup changed.
+type SetupResult struct {
+	Diagnosis       *Diagnosis
+	Template        *TemplateInfo
+	ConfigPath      string
+	CreatedTemplate bool
+	UpdatedConfig   bool
 }

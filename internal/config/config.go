@@ -255,7 +255,7 @@ func (c *Config) CloudCreateOpts(provider cloud.Provider) (cloud.CreateOpts, err
 	switch provider {
 	case cloud.ProviderRunpod:
 		if c == nil || c.Runpod.BootstrapTemplateID == "" {
-			return cloud.CreateOpts{}, fmt.Errorf("runpod campaigns require runpod.bootstrap_template_id because runpod pods do not accept per-pod startup commands")
+			return cloud.CreateOpts{}, fmt.Errorf("runpod campaigns require runpod.bootstrap_template_id; run `weft runpod setup` or `weft runpod template print-bootstrap`")
 		}
 		return cloud.CreateOpts{
 			DiskGB:     50,
