@@ -103,7 +103,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Checking %s...\n", host)
 		}
 
-		updated, err := syncHost(database, host)
+		result, err := syncHost(database, host)
 		if err != nil {
 			// Check if it's a connection error
 			if ssh.IsConnectionError(err.Error()) {
@@ -118,10 +118,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		totalUpdated += result.Updated
+		reportHostSyncWarnings(host, result)
 		hostsReached++
-		totalUpdated += updated
-		if syncVerbose && updated > 0 {
-			fmt.Printf("  %s: %d job(s) updated\n", host, updated)
+		if syncVerbose && result.Updated > 0 {
+			fmt.Printf("  %s: %d job(s) updated\n", host, result.Updated)
 		}
 	}
 
@@ -157,12 +158,12 @@ func runSync(cmd *cobra.Command, args []string) error {
 }
 
 // syncHost syncs all active jobs (running and queued) for a host and returns the count of updated jobs
-func syncHost(database *sql.DB, host string) (int, error) {
+func syncHost(database *sql.DB, host string) (ops.HostSyncResult, error) {
 	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{
 		Timeout:      syncTimeout,
 		NoQueueStart: true, // Queue runners are started separately in runSync
 	}, nil)
-	return result.Updated, err
+	return result, err
 }
 
 // performSyncWithTimeout performs a sync with specified timeout for list/status commands
@@ -172,7 +173,9 @@ func performSyncWithTimeout(database *sql.DB, timeout time.Duration, verbose boo
 	if err != nil || len(hosts) == 0 {
 		return true, nil
 	}
-	return performSyncWithTimeoutForHosts(database, hosts, timeout, verbose)
+	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, hosts, timeout, verbose)
+	emitWarnings(warnings)
+	return completed, unreachable
 }
 
 // performFastSync performs a quick sync with fast timeout for list/status commands
@@ -185,32 +188,48 @@ func performFastSync(database *sql.DB, verbose bool) (bool, []string) {
 // The sshTimeout is used for individual SSH calls; overall host timeout is FastSyncHostTimeout.
 // Returns true if sync completed, false if timed out, along with hosts that timed out.
 func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string) {
+	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, hosts, sshTimeout, verbose)
+	emitWarnings(warnings)
+	return completed, unreachable
+}
+
+func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string, []string) {
+	if len(hosts) == 0 {
+		var err error
+		hosts, err = db.ListUniqueActiveHosts(database)
+		if err != nil || len(hosts) == 0 {
+			return true, nil, nil
+		}
+	}
 	hosts = uniqueHosts(hosts)
 	if len(hosts) == 0 {
-		return true, nil
+		return true, nil, nil
 	}
 
 	// Set timeout for SSH operations
 	// We'll use goroutines with a timeout context
 	allCompleted := true
 	var unreachable []string
+	var warnings []string
 	for _, host := range hosts {
 		// Try quick sync, but don't wait if it times out
-		done := make(chan error, 1)
+		done := make(chan hostSyncOutcome, 1)
 		go func(h string) {
-			_, err := syncHostWithTimeout(database, h, sshTimeout)
-			done <- err
+			result, err := syncHostWithTimeout(database, h, sshTimeout)
+			done <- hostSyncOutcome{result: result, err: err}
 		}(host)
 
 		select {
-		case err := <-done:
-			if err != nil {
+		case outcome := <-done:
+			if outcome.err != nil {
 				allCompleted = false
 				unreachable = append(unreachable, host)
-				if verbose && !ssh.IsConnectionError(err.Error()) {
-					fmt.Fprintf(os.Stderr, "Warning: quick sync %s failed: %v\n", host, err)
+				if verbose && !ssh.IsConnectionError(outcome.err.Error()) {
+					fmt.Fprintf(os.Stderr, "Warning: quick sync %s failed: %v\n", host, outcome.err)
 				}
+				continue
 			}
+			warnings = append(warnings, hostSyncWarnings(host, outcome.result)...)
 		case <-time.After(FastSyncHostTimeout):
 			// Overall host sync timed out - host likely unreachable
 			allCompleted = false
@@ -218,7 +237,7 @@ func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, sshTimeout
 		}
 	}
 
-	return allCompleted, unreachable
+	return allCompleted, unreachable, warnings
 }
 
 // performFastSyncForHosts performs a quick sync with fast timeout for a host subset.
@@ -229,27 +248,54 @@ func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bo
 // syncHostWithTimeout syncs a host with a specific timeout.
 // Returns (updated count, error). Only returns error if host is truly unreachable
 // (all SSH calls failed). Individual job sync failures are tolerated.
-func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (int, error) {
+func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (ops.HostSyncResult, error) {
 	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{
 		Timeout:      timeout,
 		SkipSamples:  true,
 		UseBatchSync: true,
 		NoQueueStart: true,
 	}, nil)
-	return result.Updated, err
+	return result, err
 }
 
 func syncHostAfterQueueChange(database *sql.DB, host string) error {
 	if host == "" {
 		return nil
 	}
-	_, err := ops.SyncHost(database, host, ops.HostSyncOptions{
+	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{
 		Timeout:      ops.TimeoutFast.Duration(),
 		SkipSamples:  true,
 		UseBatchSync: true,
 		NoQueueStart: true,
 	}, nil)
+	reportHostSyncWarnings(host, result)
 	return err
+}
+
+type hostSyncOutcome struct {
+	result ops.HostSyncResult
+	err    error
+}
+
+func hostSyncWarnings(host string, result ops.HostSyncResult) []string {
+	var warnings []string
+	if result.QueueDispatchError != "" {
+		warnings = append(warnings, fmt.Sprintf("Warning: queued jobs were not dispatched on %s: %s", host, result.QueueDispatchError))
+	}
+	if result.QueueRunnerError != "" {
+		warnings = append(warnings, fmt.Sprintf("Warning: queue runner error on %s: %s", host, result.QueueRunnerError))
+	}
+	return warnings
+}
+
+func reportHostSyncWarnings(host string, result ops.HostSyncResult) {
+	emitWarnings(hostSyncWarnings(host, result))
+}
+
+func emitWarnings(warnings []string) {
+	for _, warning := range warnings {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 }
 
 func reportQueueChangeSyncFailure(host string, err error) {

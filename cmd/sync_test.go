@@ -7,6 +7,7 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 )
 
 func TestBase64EncodingPreservesSpecialCharacters(t *testing.T) {
@@ -263,5 +264,21 @@ func TestJobEligibleForStartedMarker_AllowsQueuedJobOnRunningInstance(t *testing
 	}
 	if runID == 0 {
 		t.Fatal("runID = 0, want non-zero latest run ID")
+	}
+}
+
+func TestHostSyncWarningsIncludesQueueDispatchFailure(t *testing.T) {
+	warnings := hostSyncWarnings("studio", ops.HostSyncResult{
+		QueueDispatchError: "job 289 input staging failed: context deadline exceeded",
+	})
+
+	if len(warnings) != 1 {
+		t.Fatalf("len(warnings) = %d, want 1", len(warnings))
+	}
+	if !strings.Contains(warnings[0], "queued jobs were not dispatched on studio") {
+		t.Fatalf("warning = %q", warnings[0])
+	}
+	if !strings.Contains(warnings[0], "job 289 input staging failed") {
+		t.Fatalf("warning = %q", warnings[0])
 	}
 }

@@ -62,11 +62,14 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 	})
 
 	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
-	if err != nil {
-		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
+	if err == nil {
+		t.Fatal("expected ensureQueuedJobsOnRemote to surface the sync failure")
 	}
 	if ensured != 0 {
 		t.Errorf("expected 0 jobs ensured (sync failed), got %d", ensured)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("job %d source sync failed", jobID)) {
+		t.Fatalf("error = %q, want job-specific source sync failure", err)
 	}
 
 	// Job should still be unsynced in the database
@@ -76,6 +79,37 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 	}
 	if job.LastSyncedStatus != "" {
 		t.Errorf("expected LastSyncedStatus empty (unsynced), got %q", job.LastSyncedStatus)
+	}
+}
+
+func TestSyncHost_SurfacesQueueDispatchFailure(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "test-host", "/tmp", "echo hello", "sync-fail job")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	t.Cleanup(srcsync.SetSyncFunc(func(host, localDir, remoteDir string, excludes []string) error {
+		return fmt.Errorf("rsync timeout")
+	}))
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		return "", "", 0
+	})
+
+	result, err := SyncHost(database, "test-host", HostSyncOptions{Timeout: time.Second}, nil)
+	if err != nil {
+		t.Fatalf("SyncHost: %v", err)
+	}
+	if result.QueueDispatchError == "" {
+		t.Fatal("expected QueueDispatchError to be populated")
+	}
+	if !strings.Contains(result.QueueDispatchError, fmt.Sprintf("job %d source sync failed", jobID)) {
+		t.Fatalf("QueueDispatchError = %q, want job-specific source sync failure", result.QueueDispatchError)
+	}
+	if result.Updated != 0 {
+		t.Fatalf("Updated = %d, want 0", result.Updated)
 	}
 }
 

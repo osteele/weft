@@ -3,8 +3,10 @@ package ops
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -27,10 +29,11 @@ type HostSyncOptions struct {
 
 // HostSyncResult contains the outcome of syncing all jobs on a host.
 type HostSyncResult struct {
-	Updated          int
-	HostContacted    bool
-	QueueStarted     bool
-	QueueRunnerError string
+	Updated            int
+	HostContacted      bool
+	QueueStarted       bool
+	QueueDispatchError string
+	QueueRunnerError   string
 }
 
 // EnsureQueueRunnerFunc is the function signature for starting queue runners.
@@ -150,11 +153,13 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// active jobs on the host can still be pushed.
 	{
 		ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout)
-		if err == nil {
-			result.Updated += ensured
-			if contacted {
-				result.HostContacted = true
-			}
+		result.Updated += ensured
+		if contacted {
+			result.HostContacted = true
+		}
+		if err != nil {
+			result.QueueDispatchError = err.Error()
+			log.Printf("sync: failed to dispatch queued jobs on %s: %v", host, err)
 		}
 	}
 
@@ -348,6 +353,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 
 	ensured := 0
 	syncedDirs := make(map[string]bool)
+	var failures []string
+	recordFailure := func(jobID int64, stage string, err error) {
+		failures = append(failures, fmt.Sprintf("job %d %s: %v", jobID, stage, err))
+	}
 	for _, job := range jobs {
 		// Set backend if not yet stored
 		if job.Backend == "" {
@@ -364,6 +373,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			if err := srcsync.SyncSourcesToHost(job.Host, localDir, job.WorkingDir, job.Inputs); err != nil {
 				log.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
 				syncedDirs[job.WorkingDir] = true // don't retry same dir
+				recordFailure(job.ID, "source sync failed", err)
 				continue
 			}
 			syncedDirs[job.WorkingDir] = true
@@ -372,6 +382,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if job.Backend != db.BackendSlurm {
 			if err := ensureHFInputsAvailable(database, job.Host, job.Inputs, timeout); err != nil {
 				log.Printf("sync: skipping job %d, HF input ensure failed on %s: %v", job.ID, job.Host, err)
+				recordFailure(job.ID, "input staging failed", err)
 				continue
 			}
 		}
@@ -380,7 +391,8 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if job.Backend == db.BackendSlurm {
 			outcome, err := requestJobStatus(database, job, db.StatusQueued, ExecuteOptions{Timeout: timeout})
 			if err != nil {
-				return ensured, contacted, err
+				recordFailure(job.ID, "slurm submission failed", err)
+				continue
 			}
 			if !outcome.hostAvailable {
 				return ensured, contacted, nil
@@ -399,13 +411,17 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			if ssh.IsConnectionError(err.Error()) {
 				return ensured, contacted, nil
 			}
-			return ensured, contacted, err
+			recordFailure(job.ID, "queue append failed", err)
+			continue
 		}
 		contacted = true
 		if err := db.UpdateLastSyncedStatus(database, job.ID, db.StatusQueued); err != nil {
 			return ensured, contacted, err
 		}
 		ensured++
+	}
+	if len(failures) > 0 {
+		return ensured, contacted, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 	return ensured, contacted, nil
 }
