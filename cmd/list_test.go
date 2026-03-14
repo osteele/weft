@@ -122,7 +122,7 @@ func TestRenderJobListPlainIncludesDirectoryOnWideTerminals(t *testing.T) {
 
 func TestListTUIEmptyStateText(t *testing.T) {
 	m := listTUIModel{syncInProgress: true}
-	if got := m.emptyStateText(); !strings.Contains(got, "Waiting for background sync") {
+	if got := m.emptyStateText(); !strings.Contains(got, "Waiting for startup sync") {
 		t.Fatalf("emptyStateText() = %q", got)
 	}
 

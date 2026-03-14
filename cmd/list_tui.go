@@ -41,6 +41,7 @@ type listJobsLoadedMsg struct {
 
 type listSyncFinishedMsg struct {
 	warnings []string
+	full     bool
 }
 
 type listDBWatcherReadyMsg struct {
@@ -87,7 +88,7 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 func (m listTUIModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs()}
 	if m.syncEnabled {
-		cmds = append(cmds, m.runBackgroundSync())
+		cmds = append(cmds, m.runBackgroundSync(false))
 	}
 	return tea.Batch(cmds...)
 }
@@ -151,6 +152,15 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case listSyncFinishedMsg:
+		if !msg.full {
+			if len(msg.warnings) > 0 {
+				m.statusMessage = strings.Join(msg.warnings, " | ")
+			} else {
+				m.statusMessage = "Running full sync..."
+			}
+			return m, tea.Batch(m.reloadJobs(), m.runBackgroundSync(true))
+		}
+
 		m.syncInProgress = false
 		if len(msg.warnings) > 0 {
 			m.statusMessage = strings.Join(msg.warnings, " | ")
@@ -255,7 +265,7 @@ func (m listTUIModel) footerText(rows int) string {
 
 func (m listTUIModel) emptyStateText() string {
 	if m.syncInProgress {
-		return "No jobs in this view yet. Waiting for background sync and DB updates..."
+		return "No jobs in this view yet. Waiting for startup sync and DB updates..."
 	}
 	if m.statusMessage != "" {
 		return "No jobs in this view. " + m.statusMessage
@@ -313,11 +323,25 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 	}
 }
 
-func (m listTUIModel) runBackgroundSync() tea.Cmd {
+func (m listTUIModel) runBackgroundSync(full bool) tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
-		return listSyncFinishedMsg{warnings: syncListData(database)}
+		return listSyncFinishedMsg{warnings: syncListTUIData(database, full), full: full}
 	}
+}
+
+func syncListTUIData(database *sql.DB, full bool) []string {
+	timeout := FastSyncTimeout
+	if full {
+		timeout = NormalSyncTimeout
+	}
+	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, nil, timeout, false)
+	if !completed {
+		if note := buildStaleDataNote(database, unreachable); note != "" {
+			warnings = append(warnings, note)
+		}
+	}
+	return warnings
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {

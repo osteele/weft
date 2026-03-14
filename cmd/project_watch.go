@@ -58,6 +58,7 @@ type projectWatchLoadedMsg struct {
 
 type projectWatchSyncFinishedMsg struct {
 	warnings []string
+	full     bool
 }
 
 type projectWatchDBWatcherReadyMsg struct {
@@ -131,7 +132,7 @@ func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnable
 func (m projectWatchModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadGroups()}
 	if m.syncEnabled {
-		cmds = append(cmds, m.runBackgroundSync())
+		cmds = append(cmds, m.runBackgroundSync(false))
 	}
 	return tea.Batch(cmds...)
 }
@@ -173,7 +174,7 @@ func (m projectWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncInProgress = true
 			m.statusMessage = "Refreshing..."
-			return m, m.runBackgroundSync()
+			return m, m.runBackgroundSync(false)
 		}
 		m.clampCursor()
 		m.adjustOffset()
@@ -194,6 +195,15 @@ func (m projectWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case projectWatchSyncFinishedMsg:
+		if !msg.full {
+			if len(msg.warnings) > 0 {
+				m.statusMessage = strings.Join(msg.warnings, " | ")
+			} else {
+				m.statusMessage = "Running full sync..."
+			}
+			return m, tea.Batch(m.reloadGroups(), m.runBackgroundSync(true))
+		}
+
 		m.syncInProgress = false
 		if len(msg.warnings) > 0 {
 			m.statusMessage = strings.Join(msg.warnings, " | ")
@@ -313,7 +323,7 @@ func (m projectWatchModel) footerText(rows, total int) string {
 
 func (m projectWatchModel) emptyStateText() string {
 	if m.syncInProgress {
-		return "No project activity yet. Waiting for background sync and DB updates..."
+		return "No project activity yet. Waiting for startup sync and DB updates..."
 	}
 	if m.statusMessage != "" {
 		return "No project activity. " + m.statusMessage
@@ -373,11 +383,25 @@ func (m projectWatchModel) reloadGroups() tea.Cmd {
 	}
 }
 
-func (m projectWatchModel) runBackgroundSync() tea.Cmd {
+func (m projectWatchModel) runBackgroundSync(full bool) tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
-		return projectWatchSyncFinishedMsg{warnings: syncProjectWatchData(database)}
+		return projectWatchSyncFinishedMsg{warnings: syncProjectWatchTUIData(database, full), full: full}
 	}
+}
+
+func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
+	timeout := FastSyncTimeout
+	if full {
+		timeout = NormalSyncTimeout
+	}
+	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, nil, timeout, false)
+	if !completed {
+		if note := buildStaleDataNote(database, unreachable); note != "" {
+			warnings = append(warnings, note)
+		}
+	}
+	return warnings
 }
 
 func (m projectWatchModel) startDBWatcher() tea.Cmd {
@@ -472,7 +496,8 @@ func syncProjectWatchData(database *sql.DB) []string {
 
 	var warnings []string
 	if projectWatchSync {
-		completed, unreachable := performSyncWithTimeout(database, DefaultSyncTimeout, false)
+		completed, unreachable, syncWarnings := performSyncWithTimeoutForHostsDetailed(database, nil, DefaultSyncTimeout, false)
+		warnings = append(warnings, syncWarnings...)
 		if !completed {
 			if note := buildStaleDataNote(database, unreachable); note != "" {
 				warnings = append(warnings, note)
@@ -481,7 +506,8 @@ func syncProjectWatchData(database *sql.DB) []string {
 		return warnings
 	}
 
-	completed, unreachable := performFastSync(database, false)
+	completed, unreachable, syncWarnings := performSyncWithTimeoutForHostsDetailed(database, nil, FastSyncTimeout, false)
+	warnings = append(warnings, syncWarnings...)
 	if !completed {
 		if note := buildStaleDataNote(database, unreachable); note != "" {
 			warnings = append(warnings, note)

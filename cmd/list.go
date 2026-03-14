@@ -183,11 +183,13 @@ func syncListData(database *sql.DB) []string {
 
 	var completed bool
 	var unreachable []string
+	var syncWarnings []string
 	if listHost != "" {
-		completed, unreachable = performFastSyncForHosts(database, []string{listHost}, false)
+		completed, unreachable, syncWarnings = performSyncWithTimeoutForHostsDetailed(database, []string{listHost}, FastSyncTimeout, false)
 	} else {
-		completed, unreachable = performFastSync(database, false)
+		completed, unreachable, syncWarnings = performSyncWithTimeoutForHostsDetailed(database, nil, FastSyncTimeout, false)
 	}
+	warnings = append(warnings, syncWarnings...)
 	if !completed {
 		if note := buildStaleDataNote(database, unreachable); note != "" {
 			warnings = append(warnings, note)
@@ -490,7 +492,7 @@ func performListSync(database *sql.DB) error {
 
 	var updated int
 	for _, host := range hosts {
-		hostUpdated, err := syncHost(database, host)
+		result, err := syncHost(database, host)
 		if err != nil {
 			// Silently skip connection errors, warn on others
 			if !ssh.IsConnectionError(err.Error()) {
@@ -498,7 +500,7 @@ func performListSync(database *sql.DB) error {
 			}
 			continue
 		}
-		updated += hostUpdated
+		updated += result.Updated
 	}
 
 	if updated > 0 {
@@ -510,7 +512,7 @@ func performListSync(database *sql.DB) error {
 
 // performListSyncForHost runs sync for a single host (used with --host flag)
 func performListSyncForHost(database *sql.DB, host string) error {
-	updated, err := syncHost(database, host)
+	result, err := syncHost(database, host)
 	if err != nil {
 		if ssh.IsConnectionError(err.Error()) {
 			return nil // Silently skip connection errors
@@ -518,8 +520,8 @@ func performListSyncForHost(database *sql.DB, host string) error {
 		return err
 	}
 
-	if updated > 0 {
-		fmt.Printf("(synced %d job status(es))\n", updated)
+	if result.Updated > 0 {
+		fmt.Printf("(synced %d job status(es))\n", result.Updated)
 	}
 
 	return nil

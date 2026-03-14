@@ -134,7 +134,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		if statusSync {
 			// Full sync requested (30s timeout)
 			for _, host := range hosts {
-				syncHost(database, host)
+				_, _ = syncHost(database, host)
 			}
 			// Start queue runners (full sync mode)
 			startQueueRunnersForHosts(database, hosts)
@@ -593,7 +593,7 @@ func showActiveJobs(database *sql.DB) error {
 			hosts, err := db.ListUniqueActiveHosts(database)
 			if err == nil && len(hosts) > 0 {
 				for _, host := range hosts {
-					syncHost(database, host)
+					_, _ = syncHost(database, host)
 				}
 			}
 		} else if statusFast && statusSSHTimeout == 0 {
