@@ -42,7 +42,8 @@ Remote Hosts (titan, atlas)
 - **Automatic placement**: Omit the host and let the coordinator pick the best
   one based on GPU class, memory, data locality, and current load
 - **Data locality**: Declare `--input hf:model-name` and the coordinator prefers
-  hosts with the data cached, or pre-stages it via rsync
+  hosts with the data cached, pre-stages it via rsync, or downloads missing HF
+  assets before the job starts
 - **Occasionally connected**: Jobs are recorded locally first and synced when
   hosts are reachable — your laptop can sleep, travel, or disconnect
 - **Graceful degradation**: When the coordinator is unreachable, the CLI falls
@@ -401,12 +402,17 @@ When a job has no explicit host, the coordinator scores all eligible hosts:
    deep job queues
 5. **Explicit host** (+10): strong preference when user specifies a host
 
-### Pre-staging
+### Pre-staging and HF downloads
 
 Before dispatching a job, the coordinator pre-stages missing input data via
 rsync. If a job needs `hf:meta-llama/Llama-3-8B` and it exists on titan but
 not atlas, the coordinator transfers it before dispatch. Pre-staging is
-best-effort — dispatch proceeds even if transfers fail.
+best-effort.
+
+If no host already has a declared `hf:` or `hf-dataset:` input, the
+coordinator downloads it onto the target on-prem host before queueing the job.
+Downloads use `huggingface-cli download` and first check that the target HF
+cache volume has enough free space.
 
 ### Data Locality
 
@@ -418,7 +424,8 @@ The system tracks what data exists on which hosts:
   jobs complete successfully
 - **Manual scans**: `weft host data <host> --scan` updates the local inventory
 - **Explicit fetch requests**: `weft data fetch ... --host ...` downloads a HF
-  model or dataset onto a specific host and records the request lifecycle
+  model or dataset onto a specific host or `localhost` and records the request
+  lifecycle
 
 ```bash
 # Scan a host's HF cache
@@ -429,6 +436,9 @@ weft data where hf:meta-llama/Llama-3-8B
 
 # Download a model to a specific host
 weft data fetch hf:meta-llama/Llama-3-8B --host cool100
+
+# Download to the local machine without SSH
+weft data fetch hf:meta-llama/Llama-3-8B --host localhost
 
 # Review past and current download requests
 weft data requests --host cool100

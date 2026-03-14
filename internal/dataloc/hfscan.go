@@ -1,11 +1,10 @@
 package dataloc
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/osteele/weft/internal/ssh"
 )
 
 // ScanHFCache scans the HuggingFace cache on a remote host and returns
@@ -31,7 +30,7 @@ func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
 	// du -sb outputs: <bytes>\t<path>
 	// Falls back to ls -1d if du fails (e.g., macOS without coreutils).
 	cmd := `du -sb ~/.cache/huggingface/hub/models--* ~/.cache/huggingface/hub/datasets--* 2>/dev/null || ls -1d ~/.cache/huggingface/hub/models--* ~/.cache/huggingface/hub/datasets--* 2>/dev/null || true`
-	stdout, _, err := ssh.Run(host, cmd)
+	stdout, _, err := hostCommandRunner(context.Background(), host, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)
 	}

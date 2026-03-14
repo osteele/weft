@@ -1,6 +1,7 @@
 package dataloc
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -43,5 +44,30 @@ func TestBuildHFDownloadCommand_Dataset(t *testing.T) {
 func TestBuildHFDownloadCommand_RejectsUnsupportedKinds(t *testing.T) {
 	if _, err := buildHFDownloadCommand(DataAsset{Kind: AssetCheckpoint, ID: "ckpt"}, "main"); err == nil {
 		t.Fatal("expected unsupported asset kind to fail")
+	}
+}
+
+func TestRunHostCommand_LocalhostUsesLocalRunner(t *testing.T) {
+	orig := localCommandRunner
+	t.Cleanup(func() { localCommandRunner = orig })
+
+	called := false
+	localCommandRunner = func(ctx context.Context, command string) (string, string, error) {
+		called = true
+		if command != "echo local" {
+			t.Fatalf("command = %q, want %q", command, "echo local")
+		}
+		return "ok", "", nil
+	}
+
+	stdout, stderr, err := hostCommandRunner(context.Background(), "localhost", "echo local")
+	if err != nil {
+		t.Fatalf("hostCommandRunner: %v", err)
+	}
+	if !called {
+		t.Fatal("expected local command runner to be used")
+	}
+	if stdout != "ok" || stderr != "" {
+		t.Fatalf("unexpected outputs stdout=%q stderr=%q", stdout, stderr)
 	}
 }

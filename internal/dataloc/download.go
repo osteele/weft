@@ -1,12 +1,28 @@
 package dataloc
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strconv"
+	"strings"
+	gosync "sync"
 
 	"github.com/osteele/weft/internal/ssh"
 )
+
+const (
+	hfCacheLowSpaceFloorBytes = 10 * 1024 * 1024 * 1024
+	hfCacheExtraHeadroomBytes = 5 * 1024 * 1024 * 1024
+)
+
+var localCommandRunner = defaultLocalCommandRunner
+
+type commandRunnerFunc func(ctx context.Context, host, command string) (string, string, error)
+
+var hostCommandRunner commandRunnerFunc = defaultHostCommandRunner
 
 // DownloadAssetToHost ensures the requested HF asset is present in the host's
 // local HF cache, then returns the discovered cache entry.
@@ -14,11 +30,14 @@ func DownloadAssetToHost(ctx context.Context, host string, asset DataAsset, revi
 	if revision == "" {
 		revision = "main"
 	}
+	if err := checkHFCacheFreeSpace(ctx, host, asset); err != nil {
+		return HostDataEntry{}, err
+	}
 	cmd, err := buildHFDownloadCommand(asset, revision)
 	if err != nil {
 		return HostDataEntry{}, err
 	}
-	if _, stderr, err := ssh.RunWithContext(ctx, host, cmd); err != nil {
+	if _, stderr, err := hostCommandRunner(ctx, host, cmd); err != nil {
 		return HostDataEntry{}, fmt.Errorf("download %s on %s: %s: %w", asset, host, stderr, err)
 	}
 
@@ -78,4 +97,108 @@ func hfRepoType(kind AssetKind) (string, error) {
 	default:
 		return "", fmt.Errorf("downloads only support hf models and datasets, got %s", kind)
 	}
+}
+
+func defaultHostCommandRunner(ctx context.Context, host string, command string) (string, string, error) {
+	if isLocalHost(host) {
+		return localCommandRunner(ctx, command)
+	}
+	return ssh.RunWithContext(ctx, host, command)
+}
+
+func defaultLocalCommandRunner(ctx context.Context, command string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", command)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+	err := cmd.Run()
+	return stdoutBuf.String(), stderrBuf.String(), err
+}
+
+func checkHFCacheFreeSpace(ctx context.Context, host string, asset DataAsset) error {
+	freeBytes, err := getHFCacheFreeBytes(ctx, host)
+	if err != nil {
+		return fmt.Errorf("check HF cache free space on %s: %w", host, err)
+	}
+
+	requiredBytes := int64(hfCacheLowSpaceFloorBytes)
+	if estimateBytes, err := estimateAssetBytes(asset); err == nil && estimateBytes > 0 {
+		estimatedNeed := estimateBytes + estimateBytes/2 + int64(hfCacheExtraHeadroomBytes)
+		if estimatedNeed > requiredBytes {
+			requiredBytes = estimatedNeed
+		}
+	}
+
+	if freeBytes < requiredBytes {
+		return fmt.Errorf(
+			"HF cache volume on %s is low on free space (%s free, need at least %s before downloading %s)",
+			host,
+			formatByteSize(freeBytes),
+			formatByteSize(requiredBytes),
+			asset,
+		)
+	}
+	return nil
+}
+
+func getHFCacheFreeBytes(ctx context.Context, host string) (int64, error) {
+	cmd := `mkdir -p ~/.cache/huggingface && df -Pk ~/.cache/huggingface 2>/dev/null | awk 'NR==2 {print $4}'`
+	stdout, stderr, err := hostCommandRunner(ctx, host, cmd)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", strings.TrimSpace(stderr), err)
+	}
+	value := strings.TrimSpace(stdout)
+	if value == "" {
+		return 0, fmt.Errorf("df returned no free-space value")
+	}
+	freeKB, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse df output %q: %w", value, err)
+	}
+	return freeKB * 1024, nil
+}
+
+func estimateAssetBytes(asset DataAsset) (int64, error) {
+	switch asset.Kind {
+	case AssetHFModel:
+		return FetchHFModelSize(asset.ID)
+	case AssetHFDataset:
+		return 0, nil
+	default:
+		return 0, fmt.Errorf("unsupported asset kind %s", asset.Kind)
+	}
+}
+
+func formatByteSize(size int64) string {
+	if size <= 0 {
+		return "0B"
+	}
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	value := float64(size)
+	unit := units[0]
+	for i := 1; i < len(units) && value >= 1024; i++ {
+		value /= 1024
+		unit = units[i]
+	}
+	if unit == "B" {
+		return fmt.Sprintf("%d%s", size, unit)
+	}
+	formatted := fmt.Sprintf("%.1f", value)
+	formatted = strings.TrimSuffix(formatted, ".0")
+	return formatted + unit
+}
+
+var (
+	cachedHostname     string
+	cachedHostnameOnce gosync.Once
+)
+
+func isLocalHost(host string) bool {
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	cachedHostnameOnce.Do(func() {
+		cachedHostname, _ = os.Hostname()
+	})
+	return cachedHostname != "" && host == cachedHostname
 }

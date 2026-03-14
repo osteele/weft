@@ -40,8 +40,10 @@ gpus:
 			return "", "", fmt.Errorf("unexpected host %q", host)
 		}
 		switch {
+		case strings.Contains(command, "df -Pk ~/.cache/huggingface"):
+			return "20971520\n", "", nil
 		case strings.Contains(command, "hf download --repo-type model"),
-			strings.Contains(command, "snapshot_download"):
+			strings.Contains(command, "huggingface-cli download --repo-type model"):
 			return "", "", nil
 		case strings.Contains(command, "du -sb ~/.cache/huggingface/hub/models--*"):
 			return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", nil
@@ -117,5 +119,11 @@ func TestRunDataWherePrintsKnownHosts(t *testing.T) {
 func TestParseDataAssetArgRejectsCheckpoint(t *testing.T) {
 	if _, err := parseDataAssetArg("checkpoint:model"); err == nil {
 		t.Fatal("expected checkpoint asset to be rejected")
+	}
+}
+
+func TestIsValidDataFetchHostAllowsLocalhost(t *testing.T) {
+	if !isValidDataFetchHost("localhost") {
+		t.Fatal("localhost should be accepted as a special-case fetch target")
 	}
 }

@@ -1,12 +1,15 @@
 package ops
 
 import (
+	"context"
 	"database/sql"
 	"log"
+	"slices"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/prestage"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
 	srcsync "github.com/osteele/weft/internal/sync"
@@ -366,6 +369,13 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			syncedDirs[job.WorkingDir] = true
 		}
 
+		if job.Backend != db.BackendSlurm {
+			if err := ensureHFInputsAvailable(database, job.Host, job.Inputs, timeout); err != nil {
+				log.Printf("sync: skipping job %d, HF input ensure failed on %s: %v", job.ID, job.Host, err)
+				continue
+			}
+		}
+
 		// Route Slurm jobs to sbatch
 		if job.Backend == db.BackendSlurm {
 			outcome, err := requestJobStatus(database, job, db.StatusQueued, ExecuteOptions{Timeout: timeout})
@@ -398,6 +408,63 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		ensured++
 	}
 	return ensured, contacted, nil
+}
+
+func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, timeout time.Duration) error {
+	var hfInputs []dataloc.DataAsset
+	for _, ref := range inputs {
+		asset, ok := dataloc.ParseAssetRef(ref)
+		if !ok {
+			continue
+		}
+		if asset.Kind != dataloc.AssetHFModel && asset.Kind != dataloc.AssetHFDataset {
+			continue
+		}
+		hfInputs = append(hfInputs, asset)
+	}
+	if len(hfInputs) == 0 {
+		return nil
+	}
+
+	// Refresh target-host cache state first so we do not re-download assets that
+	// are already present but missing from the local inventory DB.
+	scanHFCacheDuringSync(database, host)
+
+	plan, err := prestage.BuildPlan(database, host, inputs)
+	if err != nil {
+		return err
+	}
+	if err := prestage.Execute(database, plan, timeout); err != nil {
+		return err
+	}
+	if len(plan.Transfers) > 0 {
+		scanHFCacheDuringSync(database, host)
+	}
+
+	for _, asset := range hfInputs {
+		entries, err := dataloc.FindAssetHosts(database, asset)
+		if err != nil {
+			return err
+		}
+		if slices.ContainsFunc(entries, func(e dataloc.HostDataEntry) bool {
+			return e.Host == host
+		}) {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		entry, err := dataloc.DownloadAssetToHost(ctx, host, asset, "main")
+		cancel()
+		if err != nil {
+			return err
+		}
+		entry.LastSeen = time.Now().UTC().Truncate(time.Second)
+		if err := dataloc.RecordAsset(database, entry); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // scanHFCacheDuringSync scans the remote HF cache and records discovered assets

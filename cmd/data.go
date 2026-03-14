@@ -13,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -122,7 +123,7 @@ func runDataFetch(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if inventory.FindHost(dataFetchHost) == nil {
+	if !isValidDataFetchHost(dataFetchHost) {
 		return fmt.Errorf("host %q not found in inventory", dataFetchHost)
 	}
 
@@ -239,6 +240,10 @@ func parseDataAssetArg(arg string) (dataloc.DataAsset, error) {
 	default:
 		return dataloc.DataAsset{}, usageErrorf("asset ref %q is not a supported downloadable HF asset", arg)
 	}
+}
+
+func isValidDataFetchHost(host string) bool {
+	return inventory.FindHost(host) != nil || srcsync.IsLocalHost(host)
 }
 
 func formatBytes(size int64) string {

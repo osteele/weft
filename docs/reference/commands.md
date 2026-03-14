@@ -34,7 +34,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
-- `--input ASSET`: Declare a data input (e.g., `hf:meta-llama/Llama-3-8B`). Influences placement scoring and triggers pre-staging
+- `--input ASSET`: Declare a data input (e.g., `hf:meta-llama/Llama-3-8B`). Influences placement scoring, triggers pre-staging, and for HF assets can trigger an automatic download onto the target on-prem host
 - `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`). Recorded on successful completion for downstream jobs
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
 - `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `ampere+`)
@@ -133,10 +133,11 @@ Supported asset refs for `weft data` are:
 `where` looks up the local inventory database and shows which hosts are known
 to have the asset, including the last seen time and discovered cache path.
 
-`fetch` creates a persistent download request record, runs the remote download
-on the target host, rescans the HF cache, and updates the local inventory on
-success. It uses the `hf` CLI when present on the remote host, or falls back to
-`python3` with the `huggingface_hub` package installed.
+`fetch` creates a persistent download request record, runs the download on the
+target host, rescans the HF cache, and updates the local inventory on success.
+It uses `huggingface-cli download` and checks free space on the target HF cache
+volume before starting the transfer. `localhost` is treated as a special case
+and runs locally instead of over SSH.
 
 `requests` shows past and current download requests recorded by the CLI. Use it
 to audit which host was asked to download what, and whether the request
@@ -144,7 +145,7 @@ completed or failed.
 
 **Flags:**
 - `--json`: Emit JSON instead of a table
-- `weft data fetch --host HOST`: Host that should cache the asset
+- `weft data fetch --host HOST`: Host that should cache the asset; may be an inventory host or `localhost`
 - `weft data fetch --revision REV`: HF revision to download (default: `main`)
 - `weft data requests --host HOST`: Filter recorded requests by host
 
@@ -155,6 +156,9 @@ weft data where hf:meta-llama/Llama-3-8B
 
 # Download a model to a specific host
 weft data fetch hf:meta-llama/Llama-3-8B --host cool100
+
+# Download a model onto the local machine
+weft data fetch hf:meta-llama/Llama-3-8B --host localhost
 
 # Download a dataset revision to a host
 weft data fetch hf-dataset:HuggingFaceFW/fineweb --host cool30 --revision main

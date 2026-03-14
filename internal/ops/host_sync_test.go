@@ -2,9 +2,11 @@ package ops
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	srcsync "github.com/osteele/weft/internal/sync"
 )
@@ -165,5 +167,45 @@ func TestProcessDeferredQueueOps_RemoveQueued(t *testing.T) {
 	}
 	if pending {
 		t.Error("expected remove_queued deferred op to be cleared")
+	}
+}
+
+func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
+	database := db.SetupTestDB(t)
+	scanCount := 0
+
+	mockSSHFunc(t, func(host, command string) (string, string, int) {
+		if host != "test-host" {
+			t.Fatalf("unexpected host %q", host)
+		}
+		switch {
+		case strings.Contains(command, "df -Pk ~/.cache/huggingface"):
+			return "20971520\n", "", 0
+		case strings.Contains(command, "huggingface-cli download --repo-type model"):
+			return "", "", 0
+		case strings.Contains(command, "du -sb ~/.cache/huggingface/hub/models--*"):
+			scanCount++
+			if scanCount >= 2 {
+				return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", 0
+			}
+			return "", "", 0
+		default:
+			return "", "", 0
+		}
+	})
+
+	if err := ensureHFInputsAvailable(database, "test-host", []string{"hf:bert-base-uncased"}, 5*time.Second); err != nil {
+		t.Fatalf("ensureHFInputsAvailable: %v", err)
+	}
+
+	entries, err := dataloc.FindAssetHosts(database, dataloc.DataAsset{Kind: dataloc.AssetHFModel, ID: "bert-base-uncased"})
+	if err != nil {
+		t.Fatalf("FindAssetHosts: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Host != "test-host" {
+		t.Fatalf("host = %q, want test-host", entries[0].Host)
 	}
 }

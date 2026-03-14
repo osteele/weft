@@ -29,7 +29,8 @@ them with `--input`. The coordinator uses these declarations to:
 
 1. **Pick the best host** — prefer hosts that already have the data cached
 2. **Pre-stage data** — rsync assets from another host if needed
-3. **Download automatically** — fetch HF models/datasets if no host has them yet
+3. **Download automatically** — fetch HF models/datasets onto the target
+   on-prem host if no host has them yet
 
 ```
 laptop$ weft run \
@@ -43,8 +44,10 @@ laptop$ weft run \
 
 If the model is on atlas but not titan, the coordinator places the job on
 atlas. If neither host has it, the coordinator can download it before the job
-starts. When you want to warm a cache ahead of time or ensure a specific host
-has the asset, use `weft data fetch`; you do not need a separate prefetch job.
+starts using `huggingface-cli`, after checking that the target HF cache volume
+has enough free space. When you want to warm a cache ahead of time or ensure a
+specific host has the asset, use `weft data fetch`; you do not need a separate
+prefetch job.
 
 **Declare all models your job downloads**, not just the primary one. If your
 script uses `AutoTokenizer.from_pretrained("bert-base-uncased")` in addition to
@@ -112,6 +115,14 @@ laptop$ weft data fetch hf:meta-llama/Llama-3-8B --host atlas
 laptop$ weft data requests --host atlas
 ID  HOST   ASSET                           REVISION  STATUS     REQUESTED  SIZE
 17  atlas  hf:meta-llama/Llama-3-8B       main      completed  0s ago     15.2GB
+```
+
+`localhost` is also supported as a fetch target when you want to populate the
+local machine's Hugging Face cache without going through SSH:
+
+```
+laptop$ weft data fetch hf:meta-llama/Llama-3-8B --host localhost
+# Request 18 completed
 ```
 
 ## Ablation sweep with a fan-out dependency chain
