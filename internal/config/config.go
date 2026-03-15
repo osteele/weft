@@ -209,6 +209,9 @@ type SSHConfig struct {
 type HostConfig struct {
 	// Backend sets the execution backend for this host ("queue-runner" or "slurm").
 	Backend string `yaml:"backend" toml:"backend"`
+	// Shared marks an inventory host as multi-tenant, so benchmark auto-placement
+	// avoids it unless the job is explicitly inventory-tagged.
+	Shared bool `yaml:"shared" toml:"shared"`
 }
 
 // PredictorConfig holds configuration for the job-estimator integration.
@@ -317,6 +320,15 @@ func (c *Config) HostBackend(host string) string {
 		return strings.ToLower(strings.TrimSpace(cfg.Backend))
 	}
 	return ""
+}
+
+// HostShared reports whether the host is marked as shared in the global config.
+func (c *Config) HostShared(host string) bool {
+	if c == nil || host == "" {
+		return false
+	}
+	cfg, ok := c.Hosts[host]
+	return ok && cfg.Shared
 }
 
 var (

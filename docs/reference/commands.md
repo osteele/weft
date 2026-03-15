@@ -25,7 +25,7 @@ Use `start <job-id>` to start a queued job immediately.
 - `-C, --directory DIR`: Working directory (default: current directory path)
 - `-m, --message TEXT`: Description of the job (for logging and queries)
 - `-e, --env VAR=value`: Set environment variable (can be repeated)
-- `--tag TAG`: Tag to attach to the job (can be repeated). Reserved tags: `exclusive` makes the job run alone; `benchmark` is like `exclusive` but also waits for system-wide idle; `rental` skips local placement and sends the job toward rental-GPU workflows; `inventory` blocks rental placement and keeps the job on inventory hosts only. Legacy aliases `cloud` and `on-prem` are accepted for compatibility.
+- `--tag TAG`: Tag to attach to the job (can be repeated). Reserved tags: `exclusive` makes the job run alone; `benchmark` is like `exclusive` but also waits for system-wide idle and skips hosts marked `shared = true` during auto-placement; `rental` skips local placement and sends the job toward rental-GPU workflows; `inventory` blocks rental placement, keeps the job on inventory hosts only, and allows benchmark jobs to use shared inventory hosts. Legacy aliases `cloud` and `on-prem` are accepted for compatibility.
 - `--draft`: Record the job locally in draft status (never contacts the host until you later promote it)
 - `-f, --follow`: Follow log output after starting (requires `--immediate`)
 - `--allow`: Stream the job log live and stay attached (requires `--immediate`)
@@ -87,13 +87,15 @@ weft run --tag exp-012 --tag notebook-sync deepthought 'python train.py'
 # Run a job exclusively (waits until no other jobs are running, blocks others while running)
 weft run --tag exclusive deepthought 'python large_model.py'
 
-# Run a benchmark (exclusive + waits for system-wide idle: low CPU, RAM, GPU, VRAM)
+# Run a benchmark (exclusive + waits for system-wide idle: low CPU, RAM, GPU, VRAM;
+# auto-placement skips hosts marked shared = true)
 weft run --tag benchmark deepthought 'python bench_encode.py'
 
 # Force rental placement (legacy alias: --tag cloud)
 weft run --tag rental --gpu a100 'python train.py'
 
 # Keep a job on inventory hosts only (legacy alias: --tag on-prem)
+# Inventory-tagged benchmark jobs may still use shared inventory hosts
 weft run --tag inventory --gpu a100 'python train.py'
 
 # Run job after another succeeds

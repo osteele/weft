@@ -110,3 +110,36 @@ bucket = "bucket"
 		t.Fatalf("vastai.r2 decoded incorrectly: %+v", cfg.Vastai.R2)
 	}
 }
+
+func TestLoadTOMLDecodesSharedHostOverrides(t *testing.T) {
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+
+	content := `
+[hosts.cool30]
+shared = true
+
+[hosts.cool100]
+backend = "queue-runner"
+`
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	defer restore()
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HostShared("cool30") {
+		t.Fatal("cool30 should be marked shared")
+	}
+	if cfg.HostShared("cool100") {
+		t.Fatal("cool100 should not be marked shared")
+	}
+	if cfg.HostShared("missing") {
+		t.Fatal("missing host should not be marked shared")
+	}
+}

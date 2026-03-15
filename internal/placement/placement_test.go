@@ -4,10 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	dbpkg "github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -45,6 +48,17 @@ func scoreTestHostsWithMetrics(db *sql.DB, constraints Constraints, metrics map[
 
 func scoreTestHostsWithPredictor(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) []Score {
 	return ScoreHostListWithPredictor(db, testHosts(), constraints, metrics, predict)
+}
+
+func setPlacementTestConfig(t *testing.T, content string) {
+	t.Helper()
+	dir := t.TempDir()
+	tomlPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore := config.SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	t.Cleanup(restore)
 }
 
 func TestScoreHosts_NoConstraints(t *testing.T) {
@@ -1353,6 +1367,48 @@ func TestBenchmarkTag_MixedHosts_OnlyIdleEligible(t *testing.T) {
 	}
 }
 
+func TestBenchmarkTag_SharedHost_Ineligible(t *testing.T) {
+	db := setupTestDB(t)
+	setPlacementTestConfig(t, `
+[hosts.host-beta]
+shared = true
+`)
+	constraints := Constraints{Tags: []string{"benchmark"}}
+	metrics := map[string]*HostMetrics{
+		"host-alpha": {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+		"host-gamma": {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+	}
+
+	scores := scoreTestHostsWithMetrics(db, constraints, metrics)
+	shared := findScore(scores, "host-beta")
+	if shared.Eligible {
+		t.Fatal("shared host should be ineligible for benchmark auto-placement")
+	}
+	if len(shared.Reasons) == 0 || shared.Reasons[0] != "shared host excluded for benchmark auto-placement" {
+		t.Fatalf("unexpected reasons: %v", shared.Reasons)
+	}
+}
+
+func TestBenchmarkTag_InventoryAllowsSharedHost(t *testing.T) {
+	db := setupTestDB(t)
+	setPlacementTestConfig(t, `
+[hosts.host-beta]
+shared = true
+`)
+	constraints := Constraints{Tags: []string{dbpkg.TagBenchmark, dbpkg.TagInventory}}
+	metrics := map[string]*HostMetrics{
+		"host-alpha": {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+		"host-beta":  {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+		"host-gamma": {CPUPercent: 1, GPUPercent: 0, RAMPercent: 5},
+	}
+
+	shared := findScore(scoreTestHostsWithMetrics(db, constraints, metrics), "host-beta")
+	if !shared.Eligible {
+		t.Fatalf("shared host should remain eligible for inventory-tagged benchmark: %v", shared.Reasons)
+	}
+}
+
 func TestNonBenchmarkTag_IgnoresIdleCheck(t *testing.T) {
 	db := setupTestDB(t)
 	constraints := Constraints{Tags: []string{"exclusive"}}
@@ -1364,6 +1420,20 @@ func TestNonBenchmarkTag_IgnoresIdleCheck(t *testing.T) {
 		if !s.Eligible {
 			t.Errorf("host %s should be eligible for non-benchmark tagged job", s.Host)
 		}
+	}
+}
+
+func TestNonBenchmarkTag_IgnoresSharedHostFlag(t *testing.T) {
+	db := setupTestDB(t)
+	setPlacementTestConfig(t, `
+[hosts.host-beta]
+shared = true
+`)
+	constraints := Constraints{Tags: []string{"exclusive"}}
+
+	shared := findScore(scoreTestHosts(db, constraints), "host-beta")
+	if !shared.Eligible {
+		t.Fatalf("shared flag should not affect non-benchmark job: %v", shared.Reasons)
 	}
 }
 
@@ -1408,6 +1478,34 @@ func TestDescribeConstraints_IncludesBenchmark(t *testing.T) {
 	})
 	if !strings.Contains(desc, "benchmark") {
 		t.Errorf("DescribeConstraints should mention benchmark, got: %s", desc)
+	}
+}
+
+func TestExplainUnplaced_IncludesSharedHostReason(t *testing.T) {
+	inventory.UseTestHosts(t)
+	db := setupTestDB(t)
+	setPlacementTestConfig(t, `
+[hosts.host-alpha]
+shared = true
+[hosts.host-beta]
+shared = true
+[hosts.host-gamma]
+shared = true
+`)
+
+	reasons, err := ExplainUnplaced(db, Constraints{Tags: []string{dbpkg.TagBenchmark}})
+	if err != nil {
+		t.Fatalf("ExplainUnplaced: %v", err)
+	}
+	found := false
+	for _, reason := range reasons {
+		if strings.Contains(reason, "shared host excluded for benchmark auto-placement") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected shared-host reason, got %v", reasons)
 	}
 }
 

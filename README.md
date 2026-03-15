@@ -638,6 +638,23 @@ Environment variables override the config file:
 
 Increasing `connect_timeout` also extends the session ready timeout (connect timeout + 5s).
 
+### Per-Host Overrides
+
+Use the `hosts` table in `~/.config/weft/config.toml` for per-host overrides:
+
+```toml
+[hosts.cool30]
+shared = true
+
+[hosts.cool100]
+backend = "queue-runner"
+shared = true
+```
+
+Hosts marked `shared = true` are treated as multi-tenant for placement.
+Auto-placed `benchmark` jobs skip them unless the job is explicitly
+inventory-tagged. Direct `--host` submissions still target the named host.
+
 ### Vast.ai Cloud GPU
 
 Configure cloud GPU bursting with Vast.ai and optional R2 result upload:
@@ -757,7 +774,8 @@ The database is automatically created on first use and updated when checking job
 
 **Reserved placement tags:**
 - `rental`: Skip local placement and push the job toward rental GPU workflows
-- `inventory`: Keep the job on inventory hosts only; do not launch on rental GPUs
+- `inventory`: Keep the job on inventory hosts only; do not launch on rental GPUs. Inventory-tagged benchmark jobs may still use hosts marked `shared = true`.
+- `benchmark`: Require an idle host for placement and runtime checks. Auto-placement skips hosts marked `shared = true`, but `weft run <host> --tag benchmark ...` still targets that host directly.
 - Legacy aliases `cloud` and `on-prem` are still accepted on input for compatibility
 
 ## Manual Monitoring

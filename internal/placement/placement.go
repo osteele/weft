@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -236,13 +237,17 @@ func ScoreHostListWithPredictor(db *sql.DB, hosts []inventory.HostSpec, constrai
 
 // scoreAll runs scoreHost for each host. Does not sort.
 func scoreAll(db *sql.DB, hosts []inventory.HostSpec, constraints Constraints, metrics map[string]*HostMetrics) []Score {
+	cfg, err := config.Load()
+	if err != nil {
+		cfg = nil
+	}
 	scores := make([]Score, 0, len(hosts))
 	for _, h := range hosts {
 		var m *HostMetrics
 		if metrics != nil {
 			m = metrics[h.Name]
 		}
-		scores = append(scores, scoreHost(db, h, constraints, m))
+		scores = append(scores, scoreHost(db, h, constraints, m, cfg))
 	}
 	return scores
 }
@@ -371,7 +376,7 @@ func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPre
 	return nil, err
 }
 
-func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics) Score {
+func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics, cfg *config.Config) Score {
 	s := Score{Host: host.Name, Eligible: true}
 
 	// Hard constraint: GPU class (supports exact model, generation, or minimum generation)
@@ -414,7 +419,12 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 
 	// Hard constraint: benchmark jobs require an idle host
 	if hasBenchmarkTag(c.Tags) {
-		reason := benchmarkIdleCheck(db, host.Name, metrics)
+		if !db.HasInventoryTag(c.Tags) && cfg != nil && cfg.HostShared(host.Name) {
+			s.Eligible = false
+			s.Reasons = append(s.Reasons, "shared host excluded for benchmark auto-placement")
+			return s
+		}
+		reason := benchmarkIdleCheck(database, host.Name, metrics)
 		if reason != "" {
 			s.Eligible = false
 			s.Reasons = append(s.Reasons, reason)
@@ -424,7 +434,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 	}
 
 	// Soft factor: data locality + transfer cost
-	if db != nil && len(c.Inputs) > 0 {
+	if database != nil && len(c.Inputs) > 0 {
 		localCount := 0
 		var totalMissingBytes int64
 		missingCount := 0
@@ -433,7 +443,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 			if !ok {
 				continue
 			}
-			entries, err := dataloc.FindAssetHosts(db, asset)
+			entries, err := dataloc.FindAssetHosts(database, asset)
 			if err != nil {
 				log.Printf("placement: failed to find asset hosts for %v: %v", asset, err)
 				continue
@@ -468,7 +478,7 @@ func scoreHost(db *sql.DB, host inventory.HostSpec, c Constraints, metrics *Host
 		if missingCount > 0 && totalMissingBytes > 0 {
 			staticBW := host.NetworkBWBytesPerSec()
 			destKey := transferbw.OnPremEndpoint(host.Name).Key()
-			effectiveBW, nObs := transferbw.EffectiveBandwidthToDest(db, destKey, staticBW)
+			effectiveBW, nObs := transferbw.EffectiveBandwidthToDest(database, destKey, staticBW)
 			if effectiveBW > 0 {
 				transferTimeSec := float64(totalMissingBytes) / effectiveBW
 				penalty := math.Min(transferTimeSec/60.0, 5.0)
