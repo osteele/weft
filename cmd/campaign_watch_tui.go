@@ -354,8 +354,35 @@ func refreshWatchInstancesFromDB(database *sql.DB, instanceIDs []int64, quitAfte
 	}
 }
 
+func (m watchModel) campaignViews() []cloudInstanceView {
+	views := make([]cloudInstanceView, 0, len(m.instanceIDs))
+	for _, id := range m.instanceIDs {
+		if update, ok := m.updates[id]; ok {
+			views = append(views, cloudInstanceView{
+				CloudInstance: update.CloudInstance,
+				Instance:      update.Instance,
+			})
+			continue
+		}
+		if info, ok := m.initInfo[id]; ok {
+			views = append(views, cloudInstanceView{CloudInstance: info.ci})
+		}
+	}
+	return views
+}
+
+func formatCampaignWatchSummaryLine(launchedAt time.Time, views []cloudInstanceView, now time.Time) string {
+	agg := summarizeCloudInstances(views, now)
+	label := "Summary:"
+	if !launchedAt.IsZero() {
+		label = "Summary: uptime: " + now.Sub(launchedAt).Truncate(time.Second).String()
+	}
+	return formatCloudAggregateSummary(label, agg)
+}
+
 func (m watchModel) View() string {
 	var b strings.Builder
+	now := time.Now()
 
 	// Campaign header
 	if m.campaignID > 0 {
@@ -363,9 +390,13 @@ func (m watchModel) View() string {
 		if !m.launchedAt.IsZero() {
 			header += fmt.Sprintf(" — launched %s (%s ago)",
 				m.launchedAt.Format("15:04"),
-				time.Since(m.launchedAt).Truncate(time.Second))
+				now.Sub(m.launchedAt).Truncate(time.Second))
 		}
 		b.WriteString(watchTitleStyle.Render(header))
+		b.WriteString("\n\n")
+	}
+	if summary := formatCampaignWatchSummaryLine(m.launchedAt, m.campaignViews(), now); summary != "" {
+		b.WriteString(summary)
 		b.WriteString("\n\n")
 	}
 
@@ -399,25 +430,6 @@ func (m watchModel) View() string {
 
 		b.WriteString(formatWatchInstanceBlock(u, m.jobProgressHWM, watchInstanceBlockOptions{}))
 		b.WriteString("\n\n")
-	}
-
-	// Campaign cost total
-	if len(m.instanceIDs) > 1 {
-		var totalCost float64
-		hasCost := false
-		for _, id := range m.instanceIDs {
-			u, ok := m.updates[id]
-			if !ok || u.CloudInstance == nil || u.Instance == nil || u.CloudInstance.LaunchedAt == nil {
-				continue
-			}
-			uptime := time.Since(time.Unix(*u.CloudInstance.LaunchedAt, 0)).Truncate(time.Second)
-			totalCost += uptime.Hours() * u.Instance.CostPerHour
-			hasCost = true
-		}
-		if hasCost {
-			b.WriteString(watchTitleStyle.Render(fmt.Sprintf("Total: $%.2f (%d instances)", totalCost, len(m.instanceIDs))))
-			b.WriteString("\n\n")
-		}
 	}
 
 	if !m.done {

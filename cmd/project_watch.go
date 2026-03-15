@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -486,7 +487,54 @@ func loadProjectWatchGroups(database *sql.DB, recentWindow time.Duration) ([]pro
 		return nil, fmt.Errorf("list recent terminal jobs: %w", err)
 	}
 
-	return groupProjectActivity(activeJobs, recentJobs), nil
+	groups := groupProjectActivity(activeJobs, recentJobs)
+	if err := attachProjectCloudInstances(database, groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
+}
+
+func attachProjectCloudInstances(database *sql.DB, groups []projectGroup) error {
+	cache := make(map[int64]*db.CloudInstance)
+	for i := range groups {
+		seen := make(map[int64]struct{})
+		appendJobInstance := func(job *db.Job) error {
+			if job == nil || job.CloudInstanceID == nil || *job.CloudInstanceID <= 0 {
+				return nil
+			}
+			instanceID := *job.CloudInstanceID
+			if _, ok := seen[instanceID]; ok {
+				return nil
+			}
+			seen[instanceID] = struct{}{}
+
+			inst, ok := cache[instanceID]
+			if !ok {
+				var err error
+				inst, err = db.GetCloudInstance(database, instanceID)
+				if err != nil {
+					return fmt.Errorf("get cloud instance %d: %w", instanceID, err)
+				}
+				cache[instanceID] = inst
+			}
+			if inst != nil {
+				groups[i].CloudInsts = append(groups[i].CloudInsts, inst)
+			}
+			return nil
+		}
+
+		for _, bucket := range [][]*db.Job{groups[i].Running, groups[i].Queued, groups[i].Recent} {
+			for _, job := range bucket {
+				if err := appendJobInstance(job); err != nil {
+					return err
+				}
+			}
+		}
+		sort.SliceStable(groups[i].CloudInsts, func(a, b int) bool {
+			return groups[i].CloudInsts[a].ID < groups[i].CloudInsts[b].ID
+		})
+	}
+	return nil
 }
 
 func syncProjectWatchData(database *sql.DB) []string {

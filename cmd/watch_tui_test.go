@@ -246,7 +246,7 @@ func TestFormatWatchInstanceBlockShowsDBHourlyCostFallback(t *testing.T) {
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: now}))
-	if !strings.Contains(out, "Cost: $3.00 (uptime: 2h0m0s)") {
+	if !strings.Contains(out, "Cost: $3.00 (uptime: 2h0m0s, rate: $1.50/hr)") {
 		t.Fatalf("expected DB hourly cost fallback in output, got:\n%s", out)
 	}
 }
@@ -268,7 +268,7 @@ func TestFormatWatchInstanceBlockUsesEndedAtForTerminalUptime(t *testing.T) {
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: now}))
-	if !strings.Contains(out, "Cost: $1.50 (uptime: 1h0m0s)") {
+	if !strings.Contains(out, "Cost: $1.50 (uptime: 1h0m0s, rate: $1.50/hr)") {
 		t.Fatalf("expected terminal uptime to stop at ended_at, got:\n%s", out)
 	}
 }
@@ -297,6 +297,46 @@ func TestUpdateWatchJobProgressHWMPrunesDisappearedJobs(t *testing.T) {
 	}
 	if got := hwm[89]; got != 20 {
 		t.Fatalf("job 89 progress = %d, want 20", got)
+	}
+}
+
+func TestWatchAllModelViewShowsCloudSummaryRate(t *testing.T) {
+	launchedAt := time.Now().Add(-2 * time.Hour).Unix()
+	instanceID := int64(51)
+	m := watchAllModel{
+		width:  120,
+		height: 16,
+		cloudInstances: []*db.CloudInstance{
+			{
+				ID:               instanceID,
+				Status:           db.CloudInstanceStatusRunning,
+				Provider:         "vastai",
+				GPUSpec:          "A100",
+				CostPerHourCents: 150,
+				LaunchedAt:       &launchedAt,
+			},
+		},
+		instanceUpdates: map[int64]campaign.InstanceUpdate{
+			instanceID: {
+				CloudInstance: &db.CloudInstance{
+					ID:               instanceID,
+					Status:           db.CloudInstanceStatusRunning,
+					Provider:         "vastai",
+					GPUSpec:          "A100",
+					CostPerHourCents: 150,
+					LaunchedAt:       &launchedAt,
+				},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Summary:  cost:") {
+		t.Fatalf("expected cloud summary line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "current rate: $1.50/hr") {
+		t.Fatalf("expected cloud summary rate, got:\n%s", out)
 	}
 }
 

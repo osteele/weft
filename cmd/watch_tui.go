@@ -450,6 +450,18 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 	if len(m.cloudInstances) == 0 {
 		addPlain(watchDimStyle.Render("  no active cloud instances"))
 	} else {
+		views := make([]cloudInstanceView, 0, len(m.cloudInstances))
+		for _, ci := range m.cloudInstances {
+			update := normalizeWatchInstanceUpdate(m.instanceUpdates[ci.ID], ci)
+			views = append(views, cloudInstanceView{
+				CloudInstance: update.CloudInstance,
+				Instance:      update.Instance,
+			})
+		}
+		if summary := formatCloudAggregateSummary("  Summary:", summarizeCloudInstances(views, time.Now())); summary != "" {
+			addPlain(summary)
+			addPlain("")
+		}
 		for i, ci := range m.cloudInstances {
 			if i > 0 {
 				addPlain("")

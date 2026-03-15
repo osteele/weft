@@ -153,6 +153,18 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 	if len(snapshot.CloudInstances) == 0 {
 		b.WriteString("  none\n")
 	} else {
+		views := make([]cloudInstanceView, 0, len(snapshot.CloudInstances))
+		for _, ci := range snapshot.CloudInstances {
+			update := normalizeWatchInstanceUpdate(snapshot.InstanceUpdates[ci.ID], ci)
+			views = append(views, cloudInstanceView{
+				CloudInstance: update.CloudInstance,
+				Instance:      update.Instance,
+			})
+		}
+		if summary := formatCloudAggregateSummary("  Summary:", summarizeCloudInstances(views, now)); summary != "" {
+			b.WriteString(summary)
+			b.WriteString("\n\n")
+		}
 		for i, ci := range snapshot.CloudInstances {
 			if i > 0 {
 				b.WriteString("\n")

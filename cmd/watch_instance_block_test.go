@@ -3,8 +3,10 @@ package cmd
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -123,5 +125,26 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 	}
 	if !(idx253 < headerIdx && headerIdx < idx283) {
 		t.Fatalf("expected open-attempt jobs to remain in the current group, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockPrefersLiveProviderRate(t *testing.T) {
+	now := time.Unix(7200, 0)
+	launchedAt := int64(0)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:               125,
+			Status:           db.CloudInstanceStatusRunning,
+			Provider:         "vastai",
+			CostPerHourCents: 150,
+			LaunchedAt:       &launchedAt,
+			GPUSpec:          "A100",
+		},
+		Instance: &cloud.Instance{CostPerHour: 2.25},
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true, now: now})
+	if !strings.Contains(out, "Cost: $4.50 (uptime: 2h0m0s, rate: $2.25/hr)") {
+		t.Fatalf("expected live provider rate in output, got:\n%s", out)
 	}
 }

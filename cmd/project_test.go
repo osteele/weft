@@ -120,6 +120,7 @@ func TestGroupProjectActivityBucketsQueuedRunningAndRecent(t *testing.T) {
 func TestRenderProjectWatchPlainShowsSections(t *testing.T) {
 	now := time.Unix(200, 0)
 	end := int64(150)
+	launchedAt := int64(0)
 	out := renderProjectWatchPlain([]projectGroup{
 		{
 			Label:       "ALPHA",
@@ -130,13 +131,16 @@ func TestRenderProjectWatchPlainShowsSections(t *testing.T) {
 			Queued: []*db.Job{
 				{ID: 2, Status: db.StatusQueued, WorkingDir: "/tmp/project-alpha", Description: "eval", QueuedAt: 120},
 			},
+			CloudInsts: []*db.CloudInstance{
+				{ID: 21, Status: db.CloudInstanceStatusRunning, GPUSpec: "A100", CostPerHourCents: 150, LaunchedAt: &launchedAt},
+			},
 			Recent: []*db.Job{
 				{ID: 3, Status: db.StatusFailed, Host: "cool30", WorkingDir: "/tmp/project-alpha", Description: "old", EndTime: &end},
 			},
 		},
 	}, 120, now, 24*time.Hour)
 
-	for _, want := range []string{"ALPHA (1 running, 1 queued, 1 recent/1d)", "Running", "Queued", "Recent", "#1", "#2", "#3"} {
+	for _, want := range []string{"ALPHA (1 running, 1 queued, 1 recent/1d)", "Running", "Queued", "Cloud instances", "Recent", "#1", "#2", "#3", "instance 21", "rate: $1.50/hr"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
 		}
@@ -168,5 +172,40 @@ func TestProjectWatchModelViewShowsGroupedContent(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("view missing %q, got:\n%s", want, out)
 		}
+	}
+}
+
+func TestAttachProjectCloudInstancesDedupesWithinProject(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	groups := []projectGroup{
+		{
+			Label: "ALPHA",
+			Running: []*db.Job{
+				{ID: 1, Project: "ALPHA", CloudInstanceID: &instanceID},
+			},
+			Recent: []*db.Job{
+				{ID: 2, Project: "ALPHA", CloudInstanceID: &instanceID},
+			},
+		},
+	}
+
+	if err := attachProjectCloudInstances(database, groups); err != nil {
+		t.Fatalf("attachProjectCloudInstances: %v", err)
+	}
+	if len(groups[0].CloudInsts) != 1 {
+		t.Fatalf("cloud instance count = %d, want 1", len(groups[0].CloudInsts))
+	}
+	if groups[0].CloudInsts[0].ID != instanceID {
+		t.Fatalf("cloud instance id = %d, want %d", groups[0].CloudInsts[0].ID, instanceID)
 	}
 }

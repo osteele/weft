@@ -17,13 +17,12 @@ import (
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Watch cloud instances, on-prem jobs, and unplaced jobs",
-	Long: `Watch the full active system state.
+	Short: "Alias for `cloud watch`",
+	Long: `Alias for "weft cloud watch".
 
-In an interactive terminal this launches an instance-centric TUI. In plain mode
-it prints periodic summaries of cloud instances, on-prem active jobs, and
-unplaced jobs.`,
-	RunE: runWatch,
+This preserves the legacy top-level entrypoint while "weft cloud watch" is the
+primary command for the full active system watch.`,
+	RunE: runWatchCommand,
 }
 
 var (
@@ -34,13 +33,17 @@ var (
 
 func init() {
 	rootCmd.AddCommand(watchCmd)
-	watchCmd.Flags().BoolVar(&watchTUI, "tui", false, "Force interactive TUI mode")
-	watchCmd.Flags().BoolVar(&watchPlain, "plain", false, "Force plain text mode")
-	watchCmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing summaries even when nothing is active")
-	watchCmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	configureWatchFlags(watchCmd)
 }
 
-func runWatch(cmd *cobra.Command, args []string) error {
+func configureWatchFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&watchTUI, "tui", false, "Force interactive TUI mode")
+	cmd.Flags().BoolVar(&watchPlain, "plain", false, "Force plain text mode")
+	cmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing summaries even when nothing is active")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+}
+
+func runWatchCommand(cmd *cobra.Command, args []string) error {
 	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
 	if err != nil {
 		return err

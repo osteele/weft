@@ -284,6 +284,49 @@ func TestWatchModelTerminalUpdateKeepsPreviouslyCurrentJobsInMainGroup(t *testin
 	}
 }
 
+func TestWatchModelViewShowsCampaignSummaryRate(t *testing.T) {
+	launchUnix := time.Now().Add(-2 * time.Hour).Unix()
+	instanceA := int64(10)
+	instanceB := int64(11)
+	m := watchModel{
+		instanceIDs: []int64{instanceA, instanceB},
+		updates: map[int64]campaign.InstanceUpdate{
+			instanceA: {
+				CloudInstance: &db.CloudInstance{
+					ID:               instanceA,
+					Status:           db.CloudInstanceStatusRunning,
+					Provider:         "vastai",
+					GPUSpec:          "A100",
+					CostPerHourCents: 150,
+					LaunchedAt:       &launchUnix,
+				},
+			},
+			instanceB: {
+				CloudInstance: &db.CloudInstance{
+					ID:               instanceB,
+					Status:           db.CloudInstanceStatusFailed,
+					Provider:         "vastai",
+					GPUSpec:          "A100",
+					CostPerHourCents: 200,
+					LaunchedAt:       &launchUnix,
+					EndedAt:          &launchUnix,
+				},
+			},
+		},
+		campaignID:     77,
+		launchedAt:     time.Unix(launchUnix, 0),
+		jobProgressHWM: map[int64]int{},
+	}
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "Summary: uptime:") {
+		t.Fatalf("expected campaign uptime summary, got:\n%s", out)
+	}
+	if !strings.Contains(out, "current rate: $1.50/hr") {
+		t.Fatalf("expected current rate to include only non-terminal instances, got:\n%s", out)
+	}
+}
+
 func stripANSI(s string) string {
 	re := regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	return re.ReplaceAllString(s, "")

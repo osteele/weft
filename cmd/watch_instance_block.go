@@ -261,38 +261,18 @@ func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string 
 }
 
 func formatWatchInstanceCostLine(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) string {
-	if ci == nil {
+	obs := observeCloudInstance(ci, inst, now)
+	if !obs.HasCost {
 		return ""
 	}
-	if ci.ActualSpendCents > 0 {
-		return fmt.Sprintf("  Cost: $%.2f", float64(ci.ActualSpendCents)/100.0)
+	if obs.HasUptime {
+		details := []string{fmt.Sprintf("uptime: %s", obs.Uptime)}
+		if obs.HasRate {
+			details = append(details, fmt.Sprintf("rate: $%.2f/hr", obs.Rate))
+		}
+		return fmt.Sprintf("  Cost: $%.2f (%s)", obs.Cost, strings.Join(details, ", "))
 	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if ci.LaunchedAt == nil {
-		return ""
-	}
-
-	launchedAt := time.Unix(*ci.LaunchedAt, 0)
-	end := now
-	if ci.EndedAt != nil {
-		end = time.Unix(*ci.EndedAt, 0)
-	}
-	if end.Before(launchedAt) {
-		end = launchedAt
-	}
-
-	uptime := end.Sub(launchedAt).Truncate(time.Second)
-	if inst != nil && inst.CostPerHour > 0 {
-		cost := uptime.Hours() * inst.CostPerHour
-		return fmt.Sprintf("  Cost: $%.2f (uptime: %s)", cost, uptime)
-	}
-	if ci.CostPerHourCents > 0 {
-		cost := uptime.Hours() * float64(ci.CostPerHourCents) / 100.0
-		return fmt.Sprintf("  Cost: $%.2f (uptime: %s)", cost, uptime)
-	}
-	return ""
+	return fmt.Sprintf("  Cost: $%.2f", obs.Cost)
 }
 
 func updateWatchJobProgressHWM(hwm map[int64]int, prev, curr campaign.InstanceUpdate) {

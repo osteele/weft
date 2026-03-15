@@ -24,9 +24,27 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
 
+	campaignID, launchTime := campaignInfoFromInstances(database, instanceIDs)
+
+	updates := make(map[int64]campaign.InstanceUpdate, len(instanceIDs))
+	for _, id := range instanceIDs {
+		ci, _ := db.GetCloudInstance(database, id)
+		jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, id)
+		outcomes, _ := db.GetAttemptOutcomesByInstance(database, id)
+		updates[id] = campaign.InstanceUpdate{
+			CloudInstance:      ci,
+			Jobs:               jobs,
+			JobAttemptOutcomes: outcomes,
+		}
+	}
+
 	// Print campaign header if instances belong to a campaign
-	if campaignID, launchTime := campaignInfoFromInstances(database, instanceIDs); campaignID > 0 {
+	if campaignID > 0 {
 		fmt.Printf("Campaign %d — launched %s\n\n", campaignID, launchTime.Format("2006-01-02 15:04"))
+	}
+	if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now()); summary != "" {
+		fmt.Println(summary)
+		fmt.Println()
 	}
 
 	// Handle ctrl-c gracefully
@@ -55,6 +73,8 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	}()
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var prevSummary string
 	for _, id := range instanceIDs {
 		wg.Add(1)
 		go func(instanceID int64) {
@@ -67,9 +87,16 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 
 			for update := range ch {
 				output := campaign.FormatPlainUpdate(prev, update)
+				mu.Lock()
 				if output != "" {
 					fmt.Println(output)
 				}
+				updates[instanceID] = normalizeWatchInstanceUpdate(update, updates[instanceID].CloudInstance)
+				if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now()); summary != "" && summary != prevSummary {
+					fmt.Println(summary)
+					prevSummary = summary
+				}
+				mu.Unlock()
 				prev = update
 			}
 		}(id)
@@ -77,6 +104,18 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 
 	wg.Wait()
 	return nil
+}
+
+func campaignPlainViews(instanceIDs []int64, updates map[int64]campaign.InstanceUpdate) []cloudInstanceView {
+	views := make([]cloudInstanceView, 0, len(instanceIDs))
+	for _, id := range instanceIDs {
+		update := updates[id]
+		views = append(views, cloudInstanceView{
+			CloudInstance: update.CloudInstance,
+			Instance:      update.Instance,
+		})
+	}
+	return views
 }
 
 // clientForInstance creates a cloud.Client based on the provider stored in the DB.
