@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -120,6 +121,112 @@ func TestLaunchModelView_ErrorHasNoDismissPrompt(t *testing.T) {
 	}
 	if strings.Contains(out, "Press Enter") {
 		t.Fatalf("unexpected dismiss prompt in error view:\n%s", out)
+	}
+}
+
+func TestLaunchModelUpdate_SwitchesToInlineWatchWhenAllInstancesRegistered(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	firstID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusLaunching,
+		Provider: "vastai",
+		GPUSpec:  "RTX 3090",
+	})
+	if err != nil {
+		t.Fatalf("create first instance: %v", err)
+	}
+	secondID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusLaunching,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("create second instance: %v", err)
+	}
+
+	m := launchModel{
+		launching:               true,
+		expectedInstanceCount:   2,
+		inlineWatchEnabled:      true,
+		database:                database,
+		appConfig:               &config.Config{},
+		instanceCh:              make(chan launchInstanceRegisteredMsg, 2),
+		registeredInstanceIDSet: make(map[int64]struct{}),
+	}
+
+	model, cmd := m.Update(launchInstanceRegisteredMsg{instanceID: firstID})
+	got := model.(launchModel)
+	if got.inlineWatchUsed {
+		t.Fatal("inline watch should not start until all planned instances are registered")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up registration wait command")
+	}
+
+	model, cmd = got.Update(launchInstanceRegisteredMsg{instanceID: secondID})
+	got = model.(launchModel)
+	if !got.inlineWatchUsed {
+		t.Fatal("expected inline watch handoff once all planned instances are registered")
+	}
+	if got.inlineWatch == nil {
+		t.Fatal("expected inline watch model")
+	}
+	if cmd == nil {
+		t.Fatal("expected inline watch init command")
+	}
+
+	out := stripANSI(got.View())
+	for _, want := range []string{
+		fmt.Sprintf("Instance %d — RTX 3090 — launching", firstID),
+		fmt.Sprintf("Instance %d — A40 — launching", secondID),
+		"Bootstrap: provisioning instance",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestLaunchModelUpdate_InlineWatchKeepsRunningWithPartialFailures(t *testing.T) {
+	inlineWatch := watchModel{
+		instanceIDs: []int64{42},
+		updates: map[int64]campaign.InstanceUpdate{
+			42: {
+				CloudInstance: &db.CloudInstance{
+					ID:       42,
+					Status:   db.CloudInstanceStatusLaunching,
+					Provider: "vastai",
+					GPUSpec:  "A40",
+				},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+	model, cmd := launchModel{
+		launching:       true,
+		inlineWatch:     &inlineWatch,
+		inlineWatchUsed: true,
+	}.Update(instancesLaunchedMsg{
+		instanceIDs: []int64{42},
+		errors:      []error{fmt.Errorf("quota exceeded")},
+	})
+	got := model.(launchModel)
+	if !got.done {
+		t.Fatal("expected done state")
+	}
+	if len(got.partialErrors) != 1 {
+		t.Fatalf("expected 1 partial error, got %d", len(got.partialErrors))
+	}
+	if cmd != nil {
+		t.Fatalf("expected no quit command for inline watch partial failures, got %T", cmd)
+	}
+
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "1 planned launch(es) failed:") {
+		t.Fatalf("expected partial failure banner, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Instance 42 — A40 — launching") {
+		t.Fatalf("expected watch view to remain visible, got:\n%s", out)
 	}
 }
 

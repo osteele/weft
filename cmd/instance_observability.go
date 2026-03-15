@@ -10,6 +10,11 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 )
 
+type observedActivity struct {
+	Bootstrap string
+	Phase     string
+}
+
 func formatObservedPhase(update campaign.InstanceUpdate, now time.Time) string {
 	label := campaign.InstancePhaseLabel(update.InstancePhase)
 	if update.PhaseChangedAt == nil {
@@ -19,6 +24,49 @@ func formatObservedPhase(update campaign.InstanceUpdate, now time.Time) string {
 		now = time.Now()
 	}
 	return fmt.Sprintf("%s (for %s)", label, now.Sub(*update.PhaseChangedAt).Truncate(time.Second))
+}
+
+func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) observedActivity {
+	activity := observedActivity{}
+	if update.BootstrapStage != "" {
+		activity.Bootstrap = campaign.BootstrapStageLabel(update.BootstrapStage)
+	}
+	if update.InstancePhase != "" {
+		activity.Phase = formatObservedPhase(update, now)
+		return activity
+	}
+	if activity.Bootstrap != "" {
+		return activity
+	}
+
+	if runningJob := observedRunningJob(update); runningJob != nil {
+		activity.Phase = fmt.Sprintf("running job %d (observed from DB)", runningJob.ID)
+		return activity
+	}
+
+	ci := update.CloudInstance
+	if ci == nil || campaign.IsInstanceTerminal(ci.Status) {
+		return activity
+	}
+	if ci.EffectiveProviderID() == "" {
+		activity.Bootstrap = "provisioning instance"
+		return activity
+	}
+	activity.Bootstrap = "waiting for bootstrap activity"
+	return activity
+}
+
+func observedRunningJob(update campaign.InstanceUpdate) *db.Job {
+	jobs := update.Jobs
+	if update.CloudInstance != nil {
+		jobs = groupCloudInstanceJobs(update.CloudInstance.ID, update.Jobs).current
+	}
+	for _, job := range jobs {
+		if job != nil && job.Status == db.StatusRunning {
+			return job
+		}
+	}
+	return nil
 }
 
 func formatUploadSummary(timings *db.JobPhaseTimings) string {

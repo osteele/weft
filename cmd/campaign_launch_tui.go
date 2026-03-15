@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/r2"
 )
 
 // Styles for the launch TUI (allocated once, not per-render).
@@ -64,15 +65,22 @@ type launchModel struct {
 	progressCh       chan estimateProgressMsg
 	campaignCh       chan int64
 	phaseCh          chan launchPhaseMsg
+	instanceCh       chan launchInstanceRegisteredMsg
 
-	instanceIDs []int64
-	database    *sql.DB
-	clients     []cloud.Client
-	providerErr error
-	appConfig   *config.Config
-	launchOpts  campaign.LaunchOpts
-	gpuFilter   string // --gpu filter to reapply after reconciliation
-	reconciler  *campaign.Reconciler
+	instanceIDs             []int64
+	expectedInstanceCount   int
+	inlineWatchEnabled      bool
+	inlineWatchUsed         bool
+	registeredInstanceIDs   []int64
+	registeredInstanceIDSet map[int64]struct{}
+	inlineWatch             *watchModel
+	database                *sql.DB
+	clients                 []cloud.Client
+	providerErr             error
+	appConfig               *config.Config
+	launchOpts              campaign.LaunchOpts
+	gpuFilter               string // --gpu filter to reapply after reconciliation
+	reconciler              *campaign.Reconciler
 
 	spinner spinner.Model
 	width   int
@@ -110,6 +118,10 @@ type campaignCreatedMsg struct {
 
 type launchPhaseMsg struct {
 	phase string
+}
+
+type launchInstanceRegisteredMsg struct {
+	instanceID int64
 }
 
 // groupsChanged returns true if the groups differ in count or job composition.
@@ -162,34 +174,37 @@ func buildItemsFromGroups(groups []campaign.InstanceGroup) ([]listItem, map[int6
 	return items, selected, cursor
 }
 
-func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool) launchModel {
+func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) launchModel {
 	items, selected, cursor := buildItemsFromGroups(groups)
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 
 	return launchModel{
-		groups:        groups,
-		items:         items,
-		cursor:        cursor,
-		selected:      selected,
-		reconciling:   reconciling,
-		loading:       true,
-		database:      database,
-		clients:       clients,
-		providerErr:   providerErr,
-		appConfig:     cfg,
-		launchOpts:    opts,
-		predConfig:    predCfg,
-		overheadModel: buildOverheadModel(database),
-		survivalModel: buildSurvivalModel(database),
-		progressCh:    make(chan estimateProgressMsg, 1),
-		campaignCh:    make(chan int64, 1),
-		phaseCh:       make(chan launchPhaseMsg, 16),
-		gpuFilter:     gpuFilter,
-		reconciler:    campaign.NewReconciler(),
-		spinner:       s,
-		fromWatch:     fromWatch,
+		groups:                  groups,
+		items:                   items,
+		cursor:                  cursor,
+		selected:                selected,
+		reconciling:             reconciling,
+		loading:                 true,
+		database:                database,
+		clients:                 clients,
+		providerErr:             providerErr,
+		appConfig:               cfg,
+		launchOpts:              opts,
+		predConfig:              predCfg,
+		overheadModel:           buildOverheadModel(database),
+		survivalModel:           buildSurvivalModel(database),
+		progressCh:              make(chan estimateProgressMsg, 1),
+		campaignCh:              make(chan int64, 1),
+		phaseCh:                 make(chan launchPhaseMsg, 16),
+		instanceCh:              make(chan launchInstanceRegisteredMsg, len(groups)),
+		gpuFilter:               gpuFilter,
+		reconciler:              campaign.NewReconciler(),
+		spinner:                 s,
+		fromWatch:               fromWatch,
+		inlineWatchEnabled:      inlineWatchEnabled,
+		registeredInstanceIDSet: make(map[int64]struct{}),
 	}
 }
 
@@ -306,9 +321,63 @@ func waitForLaunchPhase(ch chan launchPhaseMsg) tea.Cmd {
 	}
 }
 
+func waitForLaunchInstanceRegistered(ch chan launchInstanceRegisteredMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func (m launchModel) updateInlineWatch(msg tea.Msg) (launchModel, tea.Cmd, bool) {
+	if m.inlineWatch == nil {
+		return m, nil, false
+	}
+	next, cmd := m.inlineWatch.Update(msg)
+	watch, ok := next.(watchModel)
+	if ok {
+		m.inlineWatch = &watch
+	}
+	return m, cmd, true
+}
+
+func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
+	if !m.inlineWatchEnabled || m.inlineWatch != nil || m.expectedInstanceCount == 0 {
+		return m, nil
+	}
+	if len(m.registeredInstanceIDs) < m.expectedInstanceCount {
+		return m, nil
+	}
+	var r2Client *r2.Client
+	if m.appConfig != nil {
+		r2Client, _ = buildR2Client(m.appConfig)
+	}
+	inlineWatch := newWatchModel(m.database, append([]int64(nil), m.registeredInstanceIDs...), r2Client)
+	m.inlineWatch = &inlineWatch
+	m.inlineWatchUsed = true
+	return m, inlineWatch.Init()
+}
+
 func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.inlineWatch != nil {
+		switch msg.(type) {
+		case campaignCreatedMsg, launchPhaseMsg, launchInstanceRegisteredMsg, instancesLaunchedMsg:
+		default:
+			next, cmd, handled := m.updateInlineWatch(msg)
+			if handled {
+				return next, cmd
+			}
+		}
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.inlineWatch != nil {
+			next, cmd, _ := m.updateInlineWatch(msg)
+			return next, cmd
+		}
 		return m.handleKey(msg)
 
 	case tea.WindowSizeMsg:
@@ -368,10 +437,32 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case launchInstanceRegisteredMsg:
+		if _, ok := m.registeredInstanceIDSet[msg.instanceID]; !ok {
+			m.registeredInstanceIDSet[msg.instanceID] = struct{}{}
+			m.registeredInstanceIDs = append(m.registeredInstanceIDs, msg.instanceID)
+		}
+		cmds := []tea.Cmd{}
+		if m.launching {
+			cmds = append(cmds, waitForLaunchInstanceRegistered(m.instanceCh))
+		}
+		next, watchCmd := m.maybeStartInlineWatch()
+		m = next
+		if watchCmd != nil {
+			cmds = append(cmds, watchCmd)
+		}
+		if len(cmds) == 0 {
+			return m, nil
+		}
+		return m, tea.Batch(cmds...)
+
 	case instancesLaunchedMsg:
 		m.launching = false
 		if msg.err != nil {
 			m.err = msg.err
+			if m.inlineWatch != nil {
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 		m.done = true
@@ -381,6 +472,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				m.partialErrors = append(m.partialErrors, err.Error())
 			}
+		}
+		if m.inlineWatch != nil {
+			return m, nil
 		}
 		if len(m.partialErrors) == 0 {
 			return m, tea.Quit
@@ -397,7 +491,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.launching {
+	if m.launching && m.inlineWatch == nil {
 		return m, nil // ignore keys while launching
 	}
 
@@ -420,7 +514,21 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.launching = true
-		return m, tea.Batch(m.spinner.Tick, m.launchInstances(), m.waitForCampaignCreated(), waitForLaunchPhase(m.phaseCh))
+		m.expectedInstanceCount = m.selectedLaunchGroupCount()
+		m.registeredInstanceIDs = nil
+		m.registeredInstanceIDSet = make(map[int64]struct{})
+		m.inlineWatch = nil
+		m.inlineWatchUsed = false
+		m.partialErrors = nil
+		m.err = nil
+		m.instanceIDs = nil
+		return m, tea.Batch(
+			m.spinner.Tick,
+			m.launchInstances(),
+			m.waitForCampaignCreated(),
+			waitForLaunchPhase(m.phaseCh),
+			waitForLaunchInstanceRegistered(m.instanceCh),
+		)
 
 	case "q", "esc", "ctrl+c":
 		return m, tea.Quit
@@ -537,6 +645,22 @@ func (m launchModel) selectedCountByGroup() []int {
 	return counts
 }
 
+func (m launchModel) selectedLaunchGroupCount() int {
+	count := 0
+	for i, group := range m.groups {
+		if i >= len(m.groupOffers) || m.groupOffers[i].Offer == nil {
+			continue
+		}
+		for _, job := range group.Jobs {
+			if m.selected[job.ID] {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
 func (m launchModel) launchInstances() tea.Cmd {
 	// Build filtered groups with only selected jobs
 	var filteredGroups []campaign.InstanceGroup
@@ -587,6 +711,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 	opts := m.launchOpts
 	campaignCh := m.campaignCh
 	phaseCh := m.phaseCh
+	instanceCh := m.instanceCh
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
@@ -617,16 +742,22 @@ func (m launchModel) launchInstances() tea.Cmd {
 	return func() tea.Msg {
 		defer close(campaignCh)
 		defer close(phaseCh)
+		defer close(instanceCh)
 		sendPhase := func(phase string) {
 			select {
 			case phaseCh <- launchPhaseMsg{phase: phase}:
 			default:
 			}
 		}
+		sendInstanceRegistered := func(instanceID int64) {
+			select {
+			case instanceCh <- launchInstanceRegisteredMsg{instanceID: instanceID}:
+			default:
+			}
+		}
 		if len(launchGroups) == 0 {
 			return instancesLaunchedMsg{err: fmt.Errorf("no selected groups have available offers")}
 		}
-
 		// If async estimation has not finished yet, compute estimates now so
 		// launched campaigns still persist estimated_cost_cents.
 		if len(selectedEstimates) == 0 {
@@ -649,6 +780,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 				sendPhase(fmt.Sprintf("%s: %s", group.GPUSpec(), phase))
 			},
 			func(id int64) { campaignCh <- id },
+			func(_ campaign.InstanceGroup, instanceID int64) { sendInstanceRegistered(instanceID) },
 		)
 		if err != nil {
 			return instancesLaunchedMsg{err: err}
@@ -665,9 +797,27 @@ func (m launchModel) launchInstances() tea.Cmd {
 func (m launchModel) View() string {
 	var b strings.Builder
 
-	if m.err != nil {
+	if m.err != nil && m.inlineWatch == nil {
 		b.WriteString(launchErrStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n")
+		return b.String()
+	}
+	if m.inlineWatch != nil {
+		if m.err != nil {
+			b.WriteString(launchErrStyle.Render(fmt.Sprintf("Launch error: %v", m.err)))
+			b.WriteString("\n\n")
+		}
+		if len(m.partialErrors) > 0 {
+			b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(m.partialErrors))))
+			b.WriteString("\n")
+			for _, err := range m.partialErrors {
+				b.WriteString("  - ")
+				b.WriteString(err)
+				b.WriteString("\n")
+			}
+			b.WriteString("\n")
+		}
+		b.WriteString(m.inlineWatch.View())
 		return b.String()
 	}
 
@@ -705,7 +855,7 @@ func (m launchModel) View() string {
 		} else {
 			b.WriteString(" Launching instances...")
 		}
-		if m.phase != "" {
+		if m.phase != "" && (m.expectedInstanceCount == 0 || len(m.registeredInstanceIDs) < m.expectedInstanceCount) {
 			b.WriteString(fmt.Sprintf(" (%s)", m.phase))
 		}
 		b.WriteString("\n")

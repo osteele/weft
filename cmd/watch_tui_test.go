@@ -121,6 +121,50 @@ func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
 	if !strings.Contains(out, "Instance 111 — A100 — loading") {
 		t.Fatalf("expected provider loading status in header, got:\n%s", out)
 	}
+	if !strings.Contains(out, "Bootstrap: waiting for bootstrap activity") {
+		t.Fatalf("expected bootstrap fallback in output, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockShowsObservedDBRunningPhase(t *testing.T) {
+	instanceID := int64(112)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:                 instanceID,
+			Status:             db.CloudInstanceStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "32740494",
+			GPUSpec:            "A100",
+		},
+		Jobs: []*db.Job{
+			{ID: 203, Status: db.StatusRunning, CloudInstanceID: &instanceID, Description: "current"},
+			{ID: 249, Status: db.StatusQueued, Description: "queued"},
+		},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
+	if !strings.Contains(out, "Phase: running job 203 (observed from DB)") {
+		t.Fatalf("expected DB-observed phase fallback, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockShowsProvisioningFallbackWithoutProviderID(t *testing.T) {
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:       113,
+			Status:   db.CloudInstanceStatusLaunching,
+			Provider: "vastai",
+			GPUSpec:  "A100",
+		},
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
+	if !strings.Contains(out, "  vastai: (provisioning...)") {
+		t.Fatalf("expected provisioning provider line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Bootstrap: provisioning instance") {
+		t.Fatalf("expected provisioning bootstrap fallback, got:\n%s", out)
+	}
 }
 
 func TestFormatWatchInstanceBlockShowsObservabilityDetails(t *testing.T) {

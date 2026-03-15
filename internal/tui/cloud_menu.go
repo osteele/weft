@@ -306,6 +306,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			func(phase string) {
 				log.Printf("cloud: job %d instance: %s", job.ID, phase)
 			},
+			nil,
 		)
 		if err != nil {
 			return cloudJobLaunchedMsg{

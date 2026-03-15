@@ -40,11 +40,12 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	lines := []string{formatWatchInstanceHeaderLine(ci, update.Instance, opts)}
 	lines = append(lines, formatWatchProviderLine(ci, update.Instance))
 
-	if update.BootstrapStage != "" {
-		lines = append(lines, fmt.Sprintf("  Bootstrap: %s", campaign.BootstrapStageLabel(update.BootstrapStage)))
+	activity := formatObservedActivity(update, opts.now)
+	if activity.Bootstrap != "" {
+		lines = append(lines, fmt.Sprintf("  Bootstrap: %s", activity.Bootstrap))
 	}
-	if update.InstancePhase != "" {
-		lines = append(lines, fmt.Sprintf("  Phase: %s", formatObservedPhase(update, opts.now)))
+	if activity.Phase != "" {
+		lines = append(lines, fmt.Sprintf("  Phase: %s", activity.Phase))
 	}
 	if label := campaign.TerminationIntentLabel(update.TerminationIntent); label != "" {
 		lines = append(lines, fmt.Sprintf("  Termination: %s", label))

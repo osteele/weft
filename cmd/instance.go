@@ -277,8 +277,32 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Cost:     $%.2f\n", float64(ci.ActualSpendCents)/100)
 			}
 		}
-		if liveUpdate != nil && liveUpdate.InstancePhase != "" {
-			fmt.Printf("  Phase:    %s\n", formatObservedPhase(*liveUpdate, time.Now()))
+		// Jobs
+		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
+		if err != nil {
+			return fmt.Errorf("get instance %d jobs: %w", ci.ID, err)
+		}
+		if liveUpdate == nil {
+			liveUpdate = &campaign.InstanceUpdate{
+				CloudInstance: ci,
+				Instance:      inst,
+				Jobs:          jobs,
+			}
+		} else {
+			liveUpdate.CloudInstance = ci
+			if liveUpdate.Instance == nil {
+				liveUpdate.Instance = inst
+			}
+			if len(liveUpdate.Jobs) == 0 {
+				liveUpdate.Jobs = jobs
+			}
+		}
+		activity := formatObservedActivity(*liveUpdate, time.Now())
+		if activity.Bootstrap != "" {
+			fmt.Printf("  Bootstrap: %s\n", activity.Bootstrap)
+		}
+		if activity.Phase != "" {
+			fmt.Printf("  Phase:    %s\n", activity.Phase)
 		}
 		if liveUpdate != nil && liveUpdate.HeartbeatAge > 0 {
 			fmt.Printf("  Heartbeat: %s ago\n", liveUpdate.HeartbeatAge.Truncate(time.Second))
@@ -287,11 +311,6 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Termination detail: %s\n", detail)
 		}
 
-		// Jobs
-		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
-		if err != nil {
-			return fmt.Errorf("get instance %d jobs: %w", ci.ID, err)
-		}
 		outcomes, _ := db.GetAttemptOutcomesByInstance(database, ci.ID)
 		if len(jobs) > 0 {
 			completed := 0

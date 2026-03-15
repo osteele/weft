@@ -241,7 +241,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments, useTUI)
 	}
 
-	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false)
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false, !campaignLaunchNoWatch)
 	if err != nil {
 		return err
 	}
@@ -251,7 +251,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Segue into watch mode if instances were launched
-	if len(finalModel.instanceIDs) > 0 && !campaignLaunchNoWatch {
+	if len(finalModel.instanceIDs) > 0 && !campaignLaunchNoWatch && !finalModel.inlineWatchUsed {
 		fmt.Println()
 		if useTUI {
 			return watchInstances(database, finalModel.instanceIDs)
@@ -358,6 +358,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		func(id int64) {
 			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(groups))
 		},
+		nil,
 	)
 	if err != nil {
 		return err

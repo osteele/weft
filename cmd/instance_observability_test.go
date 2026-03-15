@@ -3,6 +3,7 @@ package cmd
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
@@ -50,5 +51,43 @@ func TestFormatWatchInstanceBlock_HidesStaleUploadSummaryForQueuedRetry(t *testi
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
 	if strings.Contains(out, "uploads:") {
 		t.Fatalf("formatWatchInstanceBlock() should hide stale upload summaries for queued jobs, got:\n%s", out)
+	}
+}
+
+func TestFormatObservedActivityFallsBackToDBRunningJob(t *testing.T) {
+	instanceID := int64(107)
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:                 instanceID,
+			Status:             db.CloudInstanceStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "32712487",
+			GPUSpec:            "A100",
+		},
+		Jobs: []*db.Job{
+			{ID: 88, Status: db.StatusRunning, CloudInstanceID: &instanceID},
+		},
+	}, time.Now())
+
+	if activity.Phase != "running job 88 (observed from DB)" {
+		t.Fatalf("phase = %q, want DB-running fallback", activity.Phase)
+	}
+	if activity.Bootstrap != "" {
+		t.Fatalf("bootstrap = %q, want empty", activity.Bootstrap)
+	}
+}
+
+func TestFormatObservedActivityShowsProvisioningFallback(t *testing.T) {
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:       108,
+			Status:   db.CloudInstanceStatusLaunching,
+			Provider: "vastai",
+			GPUSpec:  "A100",
+		},
+	}, time.Now())
+
+	if activity.Bootstrap != "provisioning instance" {
+		t.Fatalf("bootstrap = %q, want provisioning fallback", activity.Bootstrap)
 	}
 }

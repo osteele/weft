@@ -129,7 +129,7 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 		}
 	}
 
-	finalModel, err := runLaunchProgram(database, cfg, groups, opts, "", true, true)
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, "", true, true, true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -151,13 +151,13 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 	return finalModel.instanceIDs, message, nil
 }
 
-func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool) (launchModel, error) {
+func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (launchModel, error) {
 	clients, providerErr := buildCloudClients(cfg)
 	if providerErr != nil {
 		return launchModel{err: providerErr}, nil
 	}
 	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch)
+	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)

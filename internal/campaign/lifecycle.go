@@ -357,6 +357,7 @@ func LaunchCampaign(
 	createOptsForProvider func(cloud.Provider) (cloud.CreateOpts, error),
 	onPhase func(group InstanceGroup, phase string),
 	onCampaignCreated func(id int64), // called after campaign record is created, before instances launch; may be nil
+	onInstanceRegistered func(group InstanceGroup, instanceID int64),
 ) (*LaunchResult, error) {
 	if len(groups) == 0 {
 		return nil, fmt.Errorf("no instance groups to launch")
@@ -569,6 +570,14 @@ func LaunchCampaign(
 					mu.Unlock()
 				}
 			}
+			var instanceRegistered func(int64)
+			if onInstanceRegistered != nil {
+				instanceRegistered = func(instanceID int64) {
+					mu.Lock()
+					onInstanceRegistered(group, instanceID)
+					mu.Unlock()
+				}
+			}
 
 			createOpts := cloud.CreateOpts{}
 			if createOptsForProvider != nil {
@@ -615,7 +624,7 @@ func LaunchCampaign(
 
 			cID, err := LaunchInstance(
 				client, database, &campaignID, group, ofr, opts, r2Cfg, createOpts,
-				groupAssets, replacementOffer, progress,
+				groupAssets, replacementOffer, progress, instanceRegistered,
 			)
 
 			mu.Lock()
@@ -768,6 +777,7 @@ func LaunchInstance(
 	r2Assets R2Assets,
 	replacementOffer replacementOfferFunc,
 	progress cloud.ProgressFunc,
+	onInstanceRegistered func(instanceID int64),
 ) (int64, error) {
 	if progress == nil {
 		progress = func(string) {}
@@ -824,6 +834,9 @@ func LaunchInstance(
 	// Update status to launching
 	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusLaunching); err != nil {
 		return instanceID, fmt.Errorf("update instance status: %w", err)
+	}
+	if onInstanceRegistered != nil {
+		onInstanceRegistered(instanceID)
 	}
 
 	// Build local-to-remote directory mapping and agent job list.

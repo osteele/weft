@@ -65,8 +65,9 @@ parallel, and presents an interactive selector:
    estimated setup time and total cost.
 3. **Launch**: Press `Enter` to create a campaign and provision instances.
    All instances are launched **in parallel** for faster startup.
-4. **Watch**: The TUI automatically transitions to watch mode showing
-   instance status, SSH info, uptime, and job progress.
+4. **Watch**: As soon as the instance rows are registered, the TUI switches
+   into the watch-style view so you can follow provisioning, bootstrap,
+   uptime, and job progress without waiting for the full launch to finish.
 
 ### Non-interactive launch
 

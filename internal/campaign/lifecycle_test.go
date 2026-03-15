@@ -80,6 +80,7 @@ func TestLaunchInstanceNilR2Client(t *testing.T) {
 		R2Assets{Client: nil, AgentR2Key: "agents/test-version/linux-amd64", SourceR2Keys: map[string]string{}},
 		nil,
 		func(phase string) {},
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for nil r2Client, got nil")
@@ -135,6 +136,7 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 		R2Assets{Client: &r2.Client{}},
 		nil,
 		func(phase string) {},
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -181,13 +183,88 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	}
 }
 
+func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+			return nil, errors.New("stop after registration")
+		},
+	}
+
+	job := &db.Job{
+		ID:      101,
+		Status:  db.StatusQueued,
+		Command: "python train.py",
+	}
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs:     []*db.Job{job},
+	}
+	offer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai}
+	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
+	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, host, working_dir, status, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '', '/tmp', ?, ?, ?, ?, 0)`,
+		job.ID, db.StatusQueued, group.GPUClass, group.GPUMemGB, job.Command,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	var callbackInstanceID int64
+	var callbackJobCloudInstance sql.NullInt64
+	var callbackJobHost string
+	instanceID, err := LaunchInstance(
+		mockClient, database, nil, group, offer,
+		LaunchOpts{},
+		r2Cfg, createOpts,
+		R2Assets{Client: &r2.Client{}},
+		nil,
+		func(string) {},
+		func(registeredID int64) {
+			callbackInstanceID = registeredID
+
+			ci, err := db.GetCloudInstance(database, registeredID)
+			if err != nil {
+				t.Fatalf("get registered cloud instance: %v", err)
+			}
+			if ci.Status != db.CloudInstanceStatusLaunching {
+				t.Fatalf("registered instance status = %q, want %q", ci.Status, db.CloudInstanceStatusLaunching)
+			}
+
+			if err := database.QueryRow(`SELECT cloud_instance_id, host FROM jobs WHERE id = ?`, job.ID).Scan(&callbackJobCloudInstance, &callbackJobHost); err != nil {
+				t.Fatalf("select job during registration callback: %v", err)
+			}
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "stop after registration") {
+		t.Fatalf("LaunchInstance() error = %v, want stop-after-registration failure", err)
+	}
+	if instanceID == 0 {
+		t.Fatal("expected DB instance ID")
+	}
+	if callbackInstanceID != instanceID {
+		t.Fatalf("callback instance ID = %d, want %d", callbackInstanceID, instanceID)
+	}
+	if !callbackJobCloudInstance.Valid || callbackJobCloudInstance.Int64 != instanceID {
+		t.Fatalf("callback job cloud_instance_id = %+v, want %d", callbackJobCloudInstance, instanceID)
+	}
+	if callbackJobHost != "" {
+		t.Fatalf("callback job host = %q, want empty string", callbackJobHost)
+	}
+}
+
 func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	result, err := LaunchCampaign(
 		nil, database, nil, nil, nil, nil, LaunchOpts{}, cloud.R2Config{}, nil,
-		nil, nil,
+		nil, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("expected error for empty groups, got nil")
