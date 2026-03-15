@@ -1513,6 +1513,34 @@ func TestCloudInstanceStatusChecksRejectInvalidValues(t *testing.T) {
 	}
 }
 
+func TestCloudInstanceTerminationReasonChecksRejectInvalidValues(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE cloud_instances SET termination_reason = ? WHERE id = ?`, "bogus", instanceID); err == nil {
+		t.Fatal("expected invalid cloud_instances.termination_reason update to fail")
+	}
+}
+
+func TestCampaignStatusChecksRejectInvalidValues(t *testing.T) {
+	database := SetupTestDB(t)
+
+	if _, err := database.Exec(
+		`INSERT INTO campaigns (status, created_at) VALUES (?, ?)`,
+		"bogus", time.Now().Unix(),
+	); err == nil {
+		t.Fatal("expected invalid campaigns.status insert to fail")
+	}
+}
+
 func TestJobCloudAttemptShapeChecksRejectInvalidValues(t *testing.T) {
 	database := SetupTestDB(t)
 

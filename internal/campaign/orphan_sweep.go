@@ -96,7 +96,7 @@ func shouldDestroyOrphan(database *sql.DB, campaignID int64, providerID string) 
 		}
 		return true, fmt.Sprintf("provider ID %s not tracked in active campaign %d", providerID, campaignID)
 	default:
-		// Campaign is terminal (completed/failed/cancelled) — instance is orphaned
+		// Campaign is terminal (completed/failed/canceled) — instance is orphaned
 		return true, fmt.Sprintf("campaign %d is %s", campaignID, campaign.Status)
 	}
 }

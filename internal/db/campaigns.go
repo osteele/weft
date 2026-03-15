@@ -12,7 +12,7 @@ const (
 	CampaignStatusRunning   = "running"
 	CampaignStatusCompleted = "completed"
 	CampaignStatusFailed    = "failed"
-	CampaignStatusCancelled = "cancelled"
+	CampaignStatusCancelled = "canceled"
 )
 
 // Campaign represents a batch of cloud instances launched together.

@@ -697,7 +697,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 }
 
 // IsJobTerminal returns true if a display status represents a terminal job state.
-// This covers both job statuses (completed, failed) and attempt outcomes (orphaned, cancelled).
+// This covers both job statuses (completed, failed) and attempt outcomes (orphaned, canceled).
 func IsJobTerminal(displayStatus string) bool {
 	switch displayStatus {
 	case db.StatusCompleted, db.StatusFailed,

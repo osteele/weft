@@ -157,7 +157,7 @@ weft campaign cancel <id>
 ```
 
 Termination destroys the Vast.ai instance, resets associated jobs to
-unplaced (queued with no host), and updates the instance status to `cancelled`.
+unplaced (queued with no host), and updates the instance status to `canceled`.
 
 ## Grace period
 
@@ -366,7 +366,7 @@ feature (index 0 = cold caches, index 1+ = warm caches).
 Campaigns use three tables:
 
 - **`campaigns`**: Batch record with status (`planned`, `launching`, `running`,
-  `completed`, `failed`, `cancelled`)
+  `completed`, `failed`, `canceled`)
 - **`cloud_instances`**: Individual Vast.ai deployments linked to a campaign,
   tracking GPU spec, resolved GPU name, cost per hour, bandwidth, reliability,
   spend limits, Vast.ai instance ID, and lifecycle timestamps

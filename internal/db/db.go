@@ -259,6 +259,8 @@ const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, ho
 
 const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
 
+const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
+
 const cloudInstanceTableColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json`
 
 const jobCloudAttemptTableColumns = `id, job_id, cloud_instance_id, started_at, ended_at, outcome`
@@ -307,6 +309,28 @@ func cloudInstanceStatusValues() []string {
 	}
 }
 
+func campaignStatusValues() []string {
+	return []string{
+		CampaignStatusPlanned,
+		CampaignStatusLaunching,
+		CampaignStatusRunning,
+		CampaignStatusCompleted,
+		CampaignStatusFailed,
+		CampaignStatusCancelled,
+	}
+}
+
+func terminationReasonValues() []string {
+	return []string{
+		TerminationReasonCompleted,
+		TerminationReasonPreempted,
+		TerminationReasonJobFailure,
+		TerminationReasonDiskFull,
+		TerminationReasonInfraFailure,
+		TerminationReasonCancelled,
+	}
+}
+
 func jobCloudAttemptOutcomeValues() []string {
 	return []string{
 		AttemptOutcomeCompleted,
@@ -314,6 +338,21 @@ func jobCloudAttemptOutcomeValues() []string {
 		AttemptOutcomeCancelled,
 		AttemptOutcomeOrphaned,
 	}
+}
+
+func createCampaignsTableSQL(table string, ifNotExists bool) string {
+	ifClause := ""
+	if ifNotExists {
+		ifClause = "IF NOT EXISTS "
+	}
+	return fmt.Sprintf(`CREATE TABLE %s%s (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		status TEXT NOT NULL DEFAULT 'planned',
+		created_at INTEGER NOT NULL,
+		ended_at INTEGER,
+		estimated_cost_cents INTEGER,
+		CONSTRAINT campaigns_status_check CHECK (%s)
+	)`, ifClause, table, statusCheckConstraintSQL("status", campaignStatusValues(), false))
 }
 
 func createJobsTableSQL(table string, ifNotExists bool) string {
@@ -421,8 +460,11 @@ func createCloudInstancesTableSQL(table string, ifNotExists bool) string {
 		provisioned_inputs TEXT,
 		termination_requested_at INTEGER,
 		termination_intent_json TEXT,
+		CONSTRAINT cloud_instances_termination_reason_check CHECK (%s),
 		CONSTRAINT cloud_instances_status_check CHECK (%s)
-	)`, ifClause, table, statusCheckConstraintSQL("status", cloudInstanceStatusValues(), false))
+	)`, ifClause, table,
+		statusCheckConstraintSQL("termination_reason", terminationReasonValues(), true),
+		statusCheckConstraintSQL("status", cloudInstanceStatusValues(), false))
 }
 
 func createJobCloudAttemptsTableSQL(table string, ifNotExists bool) string {
@@ -925,11 +967,15 @@ func ensureJobsTableConstraints(db *sql.DB) error {
 }
 
 func ensureCloudInstancesTableConstraints(db *sql.DB) error {
-	hasConstraint, err := tableSchemaContains(db, "cloud_instances", "cloud_instances_status_check")
+	hasStatusConstraint, err := tableSchemaContains(db, "cloud_instances", "cloud_instances_status_check")
 	if err != nil {
 		return err
 	}
-	if hasConstraint {
+	hasTerminationReasonConstraint, err := tableSchemaContains(db, "cloud_instances", "cloud_instances_termination_reason_check")
+	if err != nil {
+		return err
+	}
+	if hasStatusConstraint && hasTerminationReasonConstraint {
 		return nil
 	}
 	return rebuildTable(
@@ -938,6 +984,23 @@ func ensureCloudInstancesTableConstraints(db *sql.DB) error {
 		fmt.Sprintf(`INSERT INTO cloud_instances_new (%s) SELECT %s FROM cloud_instances`, cloudInstanceTableColumns, cloudInstanceTableColumns),
 		`DROP TABLE cloud_instances`,
 		`ALTER TABLE cloud_instances_new RENAME TO cloud_instances`,
+	)
+}
+
+func ensureCampaignsTableConstraints(db *sql.DB) error {
+	hasConstraint, err := tableSchemaContains(db, "campaigns", "campaigns_status_check")
+	if err != nil {
+		return err
+	}
+	if hasConstraint {
+		return nil
+	}
+	return rebuildTable(
+		db,
+		createCampaignsTableSQL("campaigns_new", false),
+		fmt.Sprintf(`INSERT INTO campaigns_new (%s) SELECT %s FROM campaigns`, campaignTableColumns, campaignTableColumns),
+		`DROP TABLE campaigns`,
+		`ALTER TABLE campaigns_new RENAME TO campaigns`,
 	)
 }
 
@@ -1000,7 +1063,9 @@ func validateRepresentativeRows(db *sql.DB, query string, format func(*sql.Rows)
 
 func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 	jobStatusSQL := sqlStringList(jobStatusValues())
+	campaignStatusSQL := sqlStringList(campaignStatusValues())
 	cloudStatusSQL := sqlStringList(cloudInstanceStatusValues())
+	terminationReasonSQL := sqlStringList(terminationReasonValues())
 	attemptOutcomeSQL := sqlStringList(jobCloudAttemptOutcomeValues())
 
 	validations := []struct {
@@ -1033,6 +1098,18 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 			message: "invalid jobs.pending_status values",
 		},
 		{
+			query: fmt.Sprintf(`SELECT id, status FROM campaigns WHERE status NOT IN (%s) ORDER BY id ASC LIMIT 5`, campaignStatusSQL),
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var status string
+				if err := rows.Scan(&id, &status); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=%q", id, status), nil
+			},
+			message: "invalid campaigns.status values",
+		},
+		{
 			query: fmt.Sprintf(`SELECT id, status FROM cloud_instances WHERE status NOT IN (%s) ORDER BY id ASC LIMIT 5`, cloudStatusSQL),
 			format: func(rows *sql.Rows) (string, error) {
 				var id int64
@@ -1043,6 +1120,18 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 				return fmt.Sprintf("%d=%q", id, status), nil
 			},
 			message: "invalid cloud_instances.status values",
+		},
+		{
+			query: fmt.Sprintf(`SELECT id, termination_reason FROM cloud_instances WHERE termination_reason IS NOT NULL AND termination_reason != '' AND termination_reason NOT IN (%s) ORDER BY id ASC LIMIT 5`, terminationReasonSQL),
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var reason string
+				if err := rows.Scan(&id, &reason); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=%q", id, reason), nil
+			},
+			message: "invalid cloud_instances.termination_reason values",
 		},
 		{
 			query: fmt.Sprintf(`SELECT id, outcome FROM job_cloud_attempts WHERE outcome IS NOT NULL AND outcome NOT IN (%s) ORDER BY id ASC LIMIT 5`, attemptOutcomeSQL),
@@ -1736,14 +1825,7 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Create campaigns table (batch of cloud instances)
-	campaignsBatchSchema := `
-	CREATE TABLE IF NOT EXISTS campaigns (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		status TEXT NOT NULL DEFAULT 'planned',
-		created_at INTEGER NOT NULL,
-		ended_at INTEGER
-	);
-	`
+	campaignsBatchSchema := createCampaignsTableSQL("campaigns", true)
 	if _, err := db.Exec(campaignsBatchSchema); err != nil {
 		return err
 	}
@@ -2044,6 +2126,9 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := ensureJobsTableConstraints(db); err != nil {
+		return err
+	}
+	if err := ensureCampaignsTableConstraints(db); err != nil {
 		return err
 	}
 	if err := ensureCloudInstancesTableConstraints(db); err != nil {

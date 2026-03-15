@@ -32,7 +32,7 @@ const (
 	CloudInstanceStatusGrace     = "grace"
 	CloudInstanceStatusCompleted = "completed"
 	CloudInstanceStatusFailed    = "failed"
-	CloudInstanceStatusCancelled = "cancelled"
+	CloudInstanceStatusCancelled = "canceled"
 )
 
 // Termination reason constants for CloudInstance.TerminationReason.
@@ -42,7 +42,7 @@ const (
 	TerminationReasonJobFailure   = "job_failure"
 	TerminationReasonDiskFull     = "disk_full"
 	TerminationReasonInfraFailure = "infra_failure"
-	TerminationReasonCancelled    = "cancelled"
+	TerminationReasonCancelled    = "canceled"
 )
 
 // CloudInstance represents a single cloud GPU deployment (e.g. one Vast.ai instance).
@@ -75,7 +75,7 @@ type CloudInstance struct {
 	GraceDeadline      *int64 // when the grace period expires
 
 	// Termination classification
-	TerminationReason      string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "cancelled"
+	TerminationReason      string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "canceled"
 	TerminationRequestedAt *int64
 	TerminationIntent      *instanceintent.Marker
 
@@ -211,7 +211,7 @@ func ListCloudInstances(db *sql.DB) ([]*CloudInstance, error) {
 }
 
 // UpdateCloudInstanceStatus updates a cloud instance's status and optionally sets timestamps.
-// For terminal statuses (completed, failed, cancelled), an optional terminationReason
+// For terminal statuses (completed, failed, canceled), an optional terminationReason
 // classifies why the instance ended (e.g. "preempted", "infra_failure").
 func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string, terminationReason ...string) error {
 	now := time.Now().Unix()
@@ -599,7 +599,7 @@ func cloudResetPlacementReasons(ci *CloudInstance, outcome string) []string {
 		}
 		return []string{fmt.Sprintf("cloud instance %d failed", ci.ID)}
 	case CloudInstanceStatusCancelled:
-		return []string{fmt.Sprintf("cloud instance %d was cancelled", ci.ID)}
+		return []string{fmt.Sprintf("cloud instance %d was canceled", ci.ID)}
 	default:
 		if outcome != "" {
 			return []string{fmt.Sprintf("cloud instance %d returned job to queue (%s)", ci.ID, outcome)}
@@ -898,7 +898,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 const (
 	AttemptOutcomeCompleted = "completed"
 	AttemptOutcomeFailed    = "failed"
-	AttemptOutcomeCancelled = "cancelled"
+	AttemptOutcomeCancelled = "canceled"
 	AttemptOutcomeOrphaned  = "orphaned"
 )
 
@@ -909,7 +909,7 @@ type JobCloudAttempt struct {
 	CloudInstanceID int64
 	StartedAt       int64
 	EndedAt         *int64
-	Outcome         string // "completed", "failed", "cancelled", "orphaned"
+	Outcome         string // "completed", "failed", "canceled", "orphaned"
 }
 
 // InsertJobCloudAttempt records a new job ↔ cloud instance association.
@@ -1030,7 +1030,7 @@ func ExtendCloudInstanceGrace(db *sql.DB, id int64, newDeadline int64) error {
 }
 
 // ListRecentlyTerminalCloudInstances returns cloud instances that reached a terminal status
-// (failed, completed, cancelled) within the last `since` duration and have a provider ID.
+// (failed, completed, canceled) within the last `since` duration and have a provider ID.
 // Used as a safety net to destroy leaked provider instances.
 func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) ([]*CloudInstance, error) {
 	cutoff := time.Now().Add(-since).Unix()
@@ -1060,7 +1060,7 @@ func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) (
 }
 
 // NormalizeTerminalCloudInstanceJobs repairs unresolved jobs on a terminal cloud
-// instance. Failed instances orphan active jobs; cancelled instances cancel them.
+// instance. Failed instances orphan active jobs; canceled instances cancel them.
 // Completed instances are left unchanged so result sync can still finalize them.
 func NormalizeTerminalCloudInstanceJobs(database *sql.DB, instanceID int64) (int64, error) {
 	ci, err := GetCloudInstance(database, instanceID)
@@ -1082,7 +1082,7 @@ func NormalizeTerminalCloudInstanceJobs(database *sql.DB, instanceID int64) (int
 }
 
 // ResetJobsOnTerminalCloudInstances finds non-terminal jobs associated with
-// failed or cancelled cloud instances and resets them to queued/unplaced.
+// failed or canceled cloud instances and resets them to queued/unplaced.
 // Completed instances are intentionally skipped until result sync finalizes them.
 // This is a DB-only repair pass that doesn't require cloud provider clients.
 func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {

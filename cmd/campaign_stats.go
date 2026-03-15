@@ -48,7 +48,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name,
 		       launched_at, ended_at, actual_spend_cents
 		FROM cloud_instances
-		WHERE status IN ('completed', 'failed', 'cancelled')
+		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
 		ORDER BY id
@@ -127,7 +127,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 		{db.TerminationReasonPreempted, "Preempted"},
 		{db.TerminationReasonInfraFailure, "Infra failure"},
 		{db.TerminationReasonJobFailure, "Job failure"},
-		{db.TerminationReasonCancelled, "Cancelled"},
+		{db.TerminationReasonCancelled, "Canceled"},
 	}
 	for _, r := range reasonOrder {
 		if count, ok := reasonCounts[r.key]; ok {

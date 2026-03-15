@@ -18,7 +18,7 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
 		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability
 		FROM cloud_instances
-		WHERE status IN ('completed', 'failed', 'cancelled')
+		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''
 		  AND launched_at IS NOT NULL
