@@ -172,12 +172,13 @@ Examples:
 var editCmd = &cobra.Command{
 	Use:   "edit <job-id>",
 	Short: "Edit queued job metadata",
-	Long: `Edit a queued job's description, command, directory, environment variables, or dependencies.
+	Long: `Edit a queued job's description, command, directory, environment variables, tags, or dependencies.
 
 Examples:
   weft edit 1595 --depends-on 1599
   weft edit 1595 --command "python eval.py"
   weft edit 1595 --env FOO=bar --env BAZ=qux
+  weft edit 1595 --tag benchmark --tag exp-012
   weft edit 1595 --input hf:meta-llama/Llama-3-8B`,
 	Args: usageArgs(cobra.ExactArgs(1)),
 	RunE: runEdit,
@@ -212,6 +213,8 @@ var (
 	editDirectory       string
 	editEnvVars         []string
 	editClearEnv        bool
+	editTags            []string
+	editClearTags       bool
 	editStatus          string
 	editRetry           bool
 	editGPUClass        string
@@ -808,12 +811,14 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	statusChanged := cmd.Flags().Changed("status") || editRetry
 	dependsChanged := cmd.Flags().Changed("depends-on") || cmd.Flags().Changed("depends-on-any")
 	envChanged := cmd.Flags().Changed("env") || editClearEnv
+	tagsChanged := cmd.Flags().Changed("tag") || editClearTags
 	gpuClassChanged := cmd.Flags().Changed("gpu-class")
 	inputsChanged := cmd.Flags().Changed("input") || editClearInputs
-	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("command") ||
+	fieldChanged := cmd.Flags().Changed("message") || cmd.Flags().Changed("project") || cmd.Flags().Changed("command") ||
 		cmd.Flags().Changed("directory") || envChanged || dependsChanged || queueEditClearDeps || statusChanged || gpuClassChanged || inputsChanged
+	fieldChanged = fieldChanged || tagsChanged
 	if !fieldChanged {
-		return usageErrorf("no changes specified; use --message/--command/--directory/--env/--status/--retry/--gpu-class/--input or dependency flags")
+		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--input or dependency flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
 		return fmt.Errorf("cannot combine --input and --clear-inputs")
@@ -823,6 +828,9 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 	if editClearEnv && cmd.Flags().Changed("env") {
 		return fmt.Errorf("cannot combine --env and --clear-env")
+	}
+	if editClearTags && cmd.Flags().Changed("tag") {
+		return fmt.Errorf("cannot combine --tag and --clear-tags")
 	}
 	if editRetry && cmd.Flags().Changed("status") {
 		return fmt.Errorf("cannot combine --retry with --status")
@@ -950,6 +958,29 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			updates = append(updates, "env vars cleared")
 		} else {
 			updates = append(updates, fmt.Sprintf("env vars: %s", strings.Join(newEnv, ", ")))
+		}
+	}
+
+	if tagsChanged {
+		var newTags []string
+		if !editClearTags {
+			newTags = append([]string(nil), editTags...)
+		}
+		if err := db.SetJobTags(database, jobID, newTags); err != nil {
+			return fmt.Errorf("update tags: %w", err)
+		}
+		updatedJob, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return fmt.Errorf("reload tags: %w", err)
+		}
+		if updatedJob == nil {
+			return fmt.Errorf("job %d not found after updating tags", jobID)
+		}
+		job.Tags = updatedJob.Tags
+		if len(job.Tags) == 0 {
+			updates = append(updates, "tags cleared")
+		} else {
+			updates = append(updates, fmt.Sprintf("tags: %s", strings.Join(job.Tags, ", ")))
 		}
 	}
 
@@ -1258,6 +1289,8 @@ func addEditFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&editCommand, "command", "", "Set command (queued jobs only)")
 	cmd.Flags().StringSliceVarP(&editEnvVars, "env", "e", nil, "Replace environment variables (VAR=value)")
 	cmd.Flags().BoolVar(&editClearEnv, "clear-env", false, "Remove all environment variables")
+	cmd.Flags().StringSliceVar(&editTags, "tag", nil, "Replace job tags (repeat or comma-separate values)")
+	cmd.Flags().BoolVar(&editClearTags, "clear-tags", false, "Remove all job tags")
 	cmd.Flags().StringSliceVar(&queueEditDepends, "depends-on", nil, "Wait for these job IDs to succeed before running (comma-separated or repeated)")
 	cmd.Flags().StringSliceVar(&queueEditDependsAny, "depends-on-any", nil, "Wait for these job IDs to finish (success or failure)")
 	cmd.Flags().BoolVar(&queueEditClearDeps, "clear-depends", false, "Remove all dependencies from the job")

@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ssh"
+	"github.com/spf13/cobra"
 )
 
 func TestBuildQueueEditDependencies(t *testing.T) {
@@ -172,4 +176,201 @@ func TestDecodeQueueDependencies(t *testing.T) {
 	if out := formatQueueDependencies(decodeQueueDependencies("")); out != "" {
 		t.Fatalf("expected empty decode, got %s", out)
 	}
+}
+
+func TestRunEditReplacesTags(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{"old", "train"}); err != nil {
+		t.Fatalf("set initial tags: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("tag", "benchmark,processed,benchmark, "); err != nil {
+		t.Fatalf("set tag flag: %v", err)
+	}
+
+	var remoteTags []string
+	cleanupSSH := ssh.SetRunner(func(host, command string) (string, string, error) {
+		if host != "hostA" {
+			return "", "", fmt.Errorf("unexpected host %q", host)
+		}
+		if strings.Contains(command, fmt.Sprintf("job-%d.json", jobID)) {
+			remoteTags, err = extractQueuedJobTags(command, jobID)
+			if err != nil {
+				t.Fatalf("extract queued tags: %v", err)
+			}
+			return "", "", nil
+		}
+		return "", "connection timed out", fmt.Errorf("exit status 255")
+	})
+	t.Cleanup(cleanupSSH)
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "tags: benchmark, processed") {
+		t.Fatalf("output missing tag update, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	wantTags := []string{"benchmark", "processed"}
+	if got := job.Tags; len(got) != len(wantTags) {
+		t.Fatalf("tags len = %d, want %d (%v)", len(got), len(wantTags), got)
+	} else {
+		for i := range wantTags {
+			if got[i] != wantTags[i] {
+				t.Fatalf("tags[%d] = %q, want %q", i, got[i], wantTags[i])
+			}
+		}
+	}
+
+	if len(remoteTags) != len(wantTags) {
+		t.Fatalf("remote tags len = %d, want %d (%v)", len(remoteTags), len(wantTags), remoteTags)
+	}
+	for i := range wantTags {
+		if remoteTags[i] != wantTags[i] {
+			t.Fatalf("remoteTags[%d] = %q, want %q", i, remoteTags[i], wantTags[i])
+		}
+	}
+}
+
+func TestRunEditClearsTags(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+	if err := db.SetJobTags(database, jobID, []string{"old", "train"}); err != nil {
+		t.Fatalf("set initial tags: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("clear-tags", "true"); err != nil {
+		t.Fatalf("set clear-tags flag: %v", err)
+	}
+
+	var remoteTags []string
+	cleanupSSH := ssh.SetRunner(func(host, command string) (string, string, error) {
+		if host != "hostA" {
+			return "", "", fmt.Errorf("unexpected host %q", host)
+		}
+		if strings.Contains(command, fmt.Sprintf("job-%d.json", jobID)) {
+			remoteTags, err = extractQueuedJobTags(command, jobID)
+			if err != nil {
+				t.Fatalf("extract queued tags: %v", err)
+			}
+			return "", "", nil
+		}
+		return "", "connection timed out", fmt.Errorf("exit status 255")
+	})
+	t.Cleanup(cleanupSSH)
+
+	out := captureStdout(t, func() {
+		if err := runEdit(cmd, []string{fmt.Sprintf("%d", jobID)}); err != nil {
+			t.Fatalf("runEdit: %v", err)
+		}
+	})
+	if !strings.Contains(out, "tags cleared") {
+		t.Fatalf("output missing clear message, got %q", out)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if len(job.Tags) != 0 {
+		t.Fatalf("expected tags cleared, got %v", job.Tags)
+	}
+	if len(remoteTags) != 0 {
+		t.Fatalf("expected remote tags cleared, got %v", remoteTags)
+	}
+}
+
+func TestRunEditRejectsTagAndClearTags(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "hostA", "/tmp", "echo test", "test")
+	if err != nil {
+		t.Fatalf("record queued job: %v", err)
+	}
+
+	resetEditState()
+	cmd := newEditTestCommand()
+	if err := cmd.Flags().Set("tag", "benchmark"); err != nil {
+		t.Fatalf("set tag flag: %v", err)
+	}
+	if err := cmd.Flags().Set("clear-tags", "true"); err != nil {
+		t.Fatalf("set clear-tags flag: %v", err)
+	}
+
+	err = runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
+	if err == nil || !strings.Contains(err.Error(), "cannot combine --tag and --clear-tags") {
+		t.Fatalf("expected tag/clear-tags validation error, got %v", err)
+	}
+}
+
+func resetEditState() {
+	queueEditDepends = nil
+	queueEditDependsAny = nil
+	queueEditClearDeps = false
+	editMessage = ""
+	editProject = ""
+	editCommand = ""
+	editDirectory = ""
+	editEnvVars = nil
+	editClearEnv = false
+	editTags = nil
+	editClearTags = false
+	editStatus = ""
+	editRetry = false
+	editGPUClass = ""
+	editInputs = nil
+	editClearInputs = false
+}
+
+func newEditTestCommand() *cobra.Command {
+	cmd := &cobra.Command{Use: "edit <job-id>"}
+	addEditFlags(cmd)
+	return cmd
+}
+
+func extractQueuedJobTags(command string, jobID int64) ([]string, error) {
+	const marker = "printf '%s\\n' "
+	suffix := fmt.Sprintf(" > ~/.cache/weft/queue/job-%d.json", jobID)
+
+	start := strings.Index(command, marker)
+	if start == -1 {
+		return nil, fmt.Errorf("queue write command missing printf marker")
+	}
+	rest := command[start+len(marker):]
+	end := strings.Index(rest, suffix)
+	if end == -1 {
+		return nil, fmt.Errorf("queue write command missing job file suffix")
+	}
+
+	payloadJSON, err := strconv.Unquote(strings.TrimSpace(rest[:end]))
+	if err != nil {
+		return nil, fmt.Errorf("unquote queue payload: %w", err)
+	}
+
+	var payload struct {
+		Tags []string `json:"tags"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("decode queue payload: %w", err)
+	}
+	return payload.Tags, nil
 }

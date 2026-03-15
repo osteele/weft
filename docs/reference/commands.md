@@ -792,7 +792,7 @@ weft queue add --after-any 42 titan 'python cleanup.py' # Run after job 42 compl
 
 #### weft edit
 
-Edit a queued job’s metadata—description, working directory, command, environment variables, or dependencies.  
+Edit a queued job’s metadata—description, working directory, command, environment variables, tags, or dependencies.  
 `weft queue edit` is an alias for this command and accepts the same flags.
 
 ```bash
@@ -805,6 +805,8 @@ weft edit [flags] <job-id>
 - `--command CMD`: Replace the queued command
 - `-e, --env VAR=value`: Replace environment variables (repeat flag to set multiple)
 - `--clear-env`: Remove all environment variables
+- `--tag TAG`: Replace the job's tags (repeat flag to set multiple)
+- `--clear-tags`: Remove all job tags
 - `--depends-on ID[,ID...]`: Require the listed jobs to succeed before running
 - `--depends-on-any ID[,ID...]`: Wait for the listed jobs to finish (success or failure)
 - `--clear-depends`: Remove all dependencies from the job
@@ -816,6 +818,7 @@ IDs can also be suffixed with `+` or `:any` to mark them as completion-based dep
 weft edit 1595 --depends-on 1599
 weft edit 1600 --depends-on 1400 --depends-on-any 1401
 weft edit 1700 --clear-depends
+weft edit 1750 --tag benchmark --tag exp-012
 weft edit 1800 --command "python eval.py" -C ~/project -e FOO=bar
 ```
 
