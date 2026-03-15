@@ -4,13 +4,21 @@
 default:
     @just --list
 
-# Build the binary (builds agent binaries for embedding first)
-build: build-agents
-    @echo "Building weft binary..."
-    go build -o weft .
+# Build the binary and agent binaries in parallel
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Building weft binary and agent binaries in parallel..."
+    pids=()
+    just build-agents &
+    pids+=($!)
+    go build -o weft . &
+    pids+=($!)
+    for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+    echo "Build complete."
 
 # Install to $GOPATH/bin
-install: build-agents
+install:
     go install .
 
 # Run tests (skips slow build tests; use test-all for full suite)
@@ -66,7 +74,7 @@ lint:
 # Check: format, lint, test
 check: format lint test
 
-# Build agent binaries for embedding into the weft CLI
+# Build agent binaries into internal/agentdeploy/binaries/
 build-agents:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -75,9 +83,41 @@ build-agents:
     LDFLAGS="-X main.version=${VERSION}"
     echo "Building agent binaries in parallel (version: ${VERSION})..."
     pids=()
-    GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-amd64 ./cmd/agent & pids+=($!)
-    GOOS=linux GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-linux-arm64 ./cmd/agent & pids+=($!)
-    GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent & pids+=($!)
+
+    # linux/amd64: use Fly builder if configured, otherwise skip
+    if [ -n "${WEFT_FLY_BUILDER_APP:-}" ] && [ -n "${WEFT_FLY_BUILDER_MACHINE:-}" ]; then
+        ./scripts/build-agent-on-fly.sh "${VERSION}" internal/agentdeploy/binaries/weft-agent-linux-amd64 &
+        pids+=($!)
+    else
+        echo "info: WEFT_FLY_BUILDER_APP/MACHINE not set; skipping linux/amd64 agent build"
+        echo "      set these env vars to enable Fly-based cross-compilation"
+    fi
+
+    # darwin/arm64: build on WEFT_MACOS_BUILDER_HOST via SSH if set, otherwise build locally
+    if [ -n "${WEFT_MACOS_BUILDER_HOST:-}" ]; then
+        (
+            REMOTE_DIR="${WEFT_MACOS_BUILDER_DIR:-~/.cache/weft/agent-build}"
+            rsync -az --delete \
+                --exclude='.git/' --exclude='.jj/' --exclude='.claude/' \
+                --exclude='.cache/' --exclude='.gocache/' --exclude='.gomodcache/' \
+                --exclude='.bench-*-gocache/' --exclude='.bench-*-gomodcache/' \
+                --exclude='testdata/' --exclude='dist/' \
+                '--exclude=internal/agentdeploy/binaries/weft-agent-*' \
+                '--exclude=internal/agentdeploy/binaries/VERSION' \
+                '--exclude=weft' '--exclude=placement.test' \
+                ./ "${WEFT_MACOS_BUILDER_HOST}:${REMOTE_DIR}/"
+            ssh "${WEFT_MACOS_BUILDER_HOST}" \
+                "cd ${REMOTE_DIR} && GOOS=darwin GOARCH=arm64 go build ${LDFLAGS} -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent"
+            rsync -az \
+                "${WEFT_MACOS_BUILDER_HOST}:${REMOTE_DIR}/internal/agentdeploy/binaries/weft-agent-darwin-arm64" \
+                internal/agentdeploy/binaries/weft-agent-darwin-arm64
+        ) &
+        pids+=($!)
+    else
+        GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent &
+        pids+=($!)
+    fi
+
     for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
     echo "${VERSION}" > internal/agentdeploy/binaries/VERSION
 
@@ -94,7 +134,12 @@ build-agent target="local":
             echo "Built dist/weft-agent (version: ${VERSION})"
             ;;
         linux-amd64)
-            GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/weft-agent-linux-amd64 ./cmd/agent
+            if [ -n "${WEFT_FLY_BUILDER_APP:-}" ] && [ -n "${WEFT_FLY_BUILDER_MACHINE:-}" ]; then
+                ./scripts/build-agent-on-fly.sh "${VERSION}" dist/weft-agent-linux-amd64
+            else
+                echo "info: WEFT_FLY_BUILDER_APP/MACHINE not set; attempting local cross-compile (may fail without gcc cross-toolchain)"
+                GOOS=linux GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o dist/weft-agent-linux-amd64 ./cmd/agent
+            fi
             echo "Built dist/weft-agent-linux-amd64 (version: ${VERSION})"
             ;;
         darwin-arm64)
@@ -131,6 +176,7 @@ remote-build:
     rsync -az --delete \
         --exclude='.jj/' --exclude='.git/' --exclude='.claude/' \
         --exclude='.gocache/' --exclude='.gomodcache/' --exclude='.cache/' \
+        --exclude='.bench-*-gocache/' --exclude='.bench-*-gomodcache/' \
         --exclude='weft' --exclude='dist/' \
         --exclude='internal/agentdeploy/binaries/weft-agent-*' \
         --exclude='internal/agentdeploy/binaries/VERSION' \
@@ -199,6 +245,7 @@ deploy-coordinator host="studio":
     rsync -az --delete \
         --exclude='.jj/' --exclude='.git/' --exclude='.claude/' \
         --exclude='.gocache/' --exclude='.gomodcache/' --exclude='.cache/' \
+        --exclude='.bench-*-gocache/' --exclude='.bench-*-gomodcache/' \
         --exclude='weft' --exclude='dist/' \
         --exclude='internal/agentdeploy/binaries/weft-agent-*' \
         --exclude='internal/agentdeploy/binaries/VERSION' \
@@ -220,4 +267,3 @@ clean:
     rm -f weft
     rm -rf dist
     rm -f internal/agentdeploy/binaries/weft-agent-* internal/agentdeploy/binaries/VERSION
-

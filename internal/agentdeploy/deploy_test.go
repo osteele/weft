@@ -110,10 +110,11 @@ func TestEnsureBuilt_CacheHit(t *testing.T) {
 
 func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 	var captured struct {
-		goos, goarch, outputPath string
+		version, goos, goarch, outputPath string
 	}
 
-	cleanup := SetExtractFunc(func(goos, goarch, outputPath string) error {
+	cleanup := SetExtractFunc(func(version, goos, goarch, outputPath string) error {
+		captured.version = version
 		captured.goos = goos
 		captured.goarch = goarch
 		captured.outputPath = outputPath
@@ -133,6 +134,9 @@ func TestEnsureBuilt_CacheMiss_InvokesExtract(t *testing.T) {
 		t.Errorf("got %s, want %s", got, path)
 	}
 
+	if captured.version != version {
+		t.Errorf("version = %q, want %q", captured.version, version)
+	}
 	if captured.goos != "linux" {
 		t.Errorf("GOOS = %q, want %q", captured.goos, "linux")
 	}
@@ -171,19 +175,24 @@ func TestEnsureBuilt_CacheHit_SkipsExtract(t *testing.T) {
 	}
 }
 
-func TestEnsureBuilt_ExtractFromEmbed(t *testing.T) {
+func TestEnsureBuilt_ExtractFromFilesystem(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping embed extraction test in short mode")
+		t.Skip("skipping filesystem extraction test in short mode")
 	}
 
 	// This test only works if agent binaries have been built with "just build-agents"
-	version := "test-embed-extract-" + t.Name()
-	path := CachePath(version, "linux", "amd64")
+	// and the VERSION file matches the current agent version.
+	localVersion, err := LocalAgentVersion()
+	if err != nil {
+		t.Skipf("cannot determine local agent version: %v", err)
+	}
+
+	path := CachePath(localVersion, "linux", "amd64")
 	t.Cleanup(func() { os.RemoveAll(filepath.Dir(filepath.Dir(path))) })
 
-	got, err := EnsureBuilt(version, "linux", "amd64")
+	got, err := EnsureBuilt(localVersion, "linux", "amd64")
 	if err != nil {
-		t.Skipf("embedded agent binary not available (run 'just build-agents' first): %v", err)
+		t.Skipf("agent binary not available (run 'just build-agents' first): %v", err)
 	}
 
 	info, err := os.Stat(got)

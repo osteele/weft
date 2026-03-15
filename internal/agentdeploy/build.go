@@ -1,6 +1,7 @@
 package agentdeploy
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -8,9 +9,14 @@ import (
 	"strings"
 )
 
-// ExtractFunc is the function signature for extracting an embedded agent binary.
-// Tests can replace it with SetExtractFunc to avoid requiring real embedded binaries.
-type ExtractFunc func(goos, goarch, outputPath string) error
+// ErrAgentNotAvailable is returned when the agent binary for a platform is not
+// available in the binaries/ directory. Callers should warn and continue rather
+// than treating this as a fatal error.
+var ErrAgentNotAvailable = errors.New("agent binary not available for this platform")
+
+// ExtractFunc is the function signature for extracting an agent binary.
+// Tests can replace it with SetExtractFunc to avoid requiring real binaries.
+type ExtractFunc func(version, goos, goarch, outputPath string) error
 
 var extractFunc ExtractFunc = defaultExtractFunc
 
@@ -32,8 +38,9 @@ func CachePath(version, goos, goarch string) string {
 	return filepath.Join(cacheDir, "weft", "builds", version, goos+"-"+goarch, "weft-agent")
 }
 
-// EnsureBuilt checks the local build cache and extracts the embedded agent
-// binary if the cached binary is missing. Returns the path to the binary.
+// EnsureBuilt checks the local build cache and extracts the agent binary from
+// the binaries/ directory if the cached binary is missing. Returns the path to
+// the binary, or ErrAgentNotAvailable if no binary exists for this platform.
 func EnsureBuilt(version, goos, goarch string) (string, error) {
 	path := CachePath(version, goos, goarch)
 
@@ -45,28 +52,52 @@ func EnsureBuilt(version, goos, goarch string) (string, error) {
 		return "", fmt.Errorf("create cache dir: %w", err)
 	}
 
-	if err := extractFunc(goos, goarch, path); err != nil {
+	if err := extractFunc(version, goos, goarch, path); err != nil {
 		return "", err
 	}
 
 	return path, nil
 }
 
-// EmbeddedVersion returns the version recorded for the embedded agent binaries.
-// Returns os.ErrNotExist if no VERSION file was embedded.
-func EmbeddedVersion() (string, error) {
-	embeddedVerBytes, err := agentBinaries.ReadFile("binaries/VERSION")
+// BinariesVersion returns the version recorded in the binaries/ directory.
+// Returns os.ErrNotExist if no VERSION file is present.
+func BinariesVersion() (string, error) {
+	root, err := RepoRoot()
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(embeddedVerBytes)), nil
+	versionFile := filepath.Join(root, "internal", "agentdeploy", "binaries", "VERSION")
+	data, err := os.ReadFile(versionFile)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
-func defaultExtractFunc(goos, goarch, outputPath string) error {
-	name := fmt.Sprintf("binaries/weft-agent-%s-%s", goos, goarch)
-	src, err := agentBinaries.Open(name)
+func defaultExtractFunc(version, goos, goarch, outputPath string) error {
+	root, err := RepoRoot()
 	if err != nil {
-		return fmt.Errorf("agent binary for %s/%s not embedded; run \"just build-agents\" then rebuild weft: %w", goos, goarch, err)
+		return fmt.Errorf("%w: run 'just build-agents' first: %w", ErrAgentNotAvailable, err)
+	}
+
+	binDir := filepath.Join(root, "internal", "agentdeploy", "binaries")
+	srcPath := filepath.Join(binDir, fmt.Sprintf("weft-agent-%s-%s", goos, goarch))
+
+	// Check VERSION matches before opening the binary
+	versionFile := filepath.Join(binDir, "VERSION")
+	if versionData, err := os.ReadFile(versionFile); err == nil {
+		if builtVersion := strings.TrimSpace(string(versionData)); builtVersion != version {
+			return fmt.Errorf("%w for %s/%s: binary in binaries/ is version %s, need %s; run 'just build-agents'",
+				ErrAgentNotAvailable, goos, goarch, builtVersion, version)
+		}
+	}
+
+	src, err := os.Open(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("%w for %s/%s: run 'just build-agents' first", ErrAgentNotAvailable, goos, goarch)
+		}
+		return fmt.Errorf("%w for %s/%s: %w", ErrAgentNotAvailable, goos, goarch, err)
 	}
 	defer src.Close()
 

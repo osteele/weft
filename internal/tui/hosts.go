@@ -3,7 +3,9 @@ package tui
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -160,7 +162,11 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	// Deploy agent binary if out of date
 	if spec := findHostSpecFunc(host); spec != nil {
 		if _, err := ensureAgentUpToDateFunc(host, *spec); err != nil {
-			return false, fmt.Errorf("agent deploy failed: %w", err)
+			if errors.Is(err, agentdeploy.ErrAgentNotAvailable) {
+				fmt.Fprintf(os.Stderr, "Warning: agent binary not available for %s/%s; skipping deploy\n", spec.OS, spec.Arch)
+			} else {
+				return false, fmt.Errorf("agent deploy failed: %w", err)
+			}
 		}
 	}
 
