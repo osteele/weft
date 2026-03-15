@@ -4,11 +4,27 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 )
+
+func TestSyncHostWaitTimeout(t *testing.T) {
+	if got := syncHostWaitTimeout(false); got != FastSyncHostTimeout {
+		t.Fatalf("syncHostWaitTimeout(false) = %s, want %s", got, FastSyncHostTimeout)
+	}
+	if got := syncHostWaitTimeout(true); got != NormalSyncHostTimeout {
+		t.Fatalf("syncHostWaitTimeout(true) = %s, want %s", got, NormalSyncHostTimeout)
+	}
+	if NormalSyncHostTimeout <= FastSyncHostTimeout {
+		t.Fatalf("NormalSyncHostTimeout = %s, want > %s", NormalSyncHostTimeout, FastSyncHostTimeout)
+	}
+	if NormalSyncHostTimeout < 5*time.Minute {
+		t.Fatalf("NormalSyncHostTimeout = %s, want a generous full-sync timeout", NormalSyncHostTimeout)
+	}
+}
 
 func TestBase64EncodingPreservesSpecialCharacters(t *testing.T) {
 	// Test that base64 encoding properly handles commands with shell-special characters

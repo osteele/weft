@@ -49,9 +49,9 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 		lines = append(lines, fmt.Sprintf("  Phase: %s", activity.Phase))
 	}
 	if label := campaign.TerminationIntentLabel(update.TerminationIntent); label != "" {
-		lines = append(lines, fmt.Sprintf("  Termination: %s", label))
+		lines = append(lines, fmt.Sprintf("  Cleanup: %s", label))
 		if detail := campaign.TerminationIntentDetail(update.TerminationIntent); detail != "" {
-			lines = append(lines, fmt.Sprintf("  Detail: %s", detail))
+			lines = append(lines, fmt.Sprintf("  Status: %s", detail))
 		}
 	}
 	if costLine := formatWatchInstanceCostLine(ci, update.Instance, opts.now); costLine != "" {

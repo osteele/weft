@@ -18,6 +18,8 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
+const minHFInputStageTimeout = 10 * time.Minute
+
 // HostSyncOptions configures a full host sync.
 type HostSyncOptions struct {
 	Timeout      time.Duration
@@ -446,11 +448,12 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 	// are already present but missing from the local inventory DB.
 	scanHFCacheDuringSync(database, host)
 
+	stageTimeout := hfInputStageTimeout(timeout)
 	plan, err := prestage.BuildPlan(database, host, inputs)
 	if err != nil {
 		return err
 	}
-	if err := prestage.Execute(database, plan, timeout); err != nil {
+	if err := prestage.Execute(database, plan, stageTimeout); err != nil {
 		return err
 	}
 	if len(plan.Transfers) > 0 {
@@ -468,7 +471,7 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 			continue
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), stageTimeout)
 		entry, err := dataloc.DownloadAssetToHost(ctx, host, asset, "main")
 		cancel()
 		if err != nil {
@@ -481,6 +484,13 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 	}
 
 	return nil
+}
+
+func hfInputStageTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 || timeout < minHFInputStageTimeout {
+		return minHFInputStageTimeout
+	}
+	return timeout
 }
 
 // scanHFCacheDuringSync scans the remote HF cache and records discovered assets

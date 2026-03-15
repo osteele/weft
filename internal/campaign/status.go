@@ -553,43 +553,53 @@ func InstancePhaseLabel(phase string) string {
 }
 
 func TerminationIntentLabel(marker *instanceintent.Marker) string {
-	if marker == nil {
+	if !HasActiveTerminationIntent(marker) {
 		return ""
 	}
 	reason := marker.TerminationReason
 	if reason == "" {
 		reason = marker.TerminalStatus
 	}
+	if reason == db.TerminationReasonCompleted || reason == db.CloudInstanceStatusCompleted {
+		reason = "after completion"
+	}
 	switch {
-	case marker.DestroySucceededAtUnix > 0:
-		return fmt.Sprintf("self-destruct succeeded (%s)", reason)
 	case marker.LastError != "" && marker.DestroyAttempts > 0:
-		return fmt.Sprintf("self-destruct retry %d failed (%s)", marker.DestroyAttempts, reason)
+		return fmt.Sprintf("cleanup needs attention (%s)", reason)
 	case marker.DestroyStartedAtUnix > 0:
-		if marker.DestroyAttempts > 0 {
-			return fmt.Sprintf("self-destructing (%s, attempt %d)", reason, marker.DestroyAttempts)
-		}
-		return fmt.Sprintf("self-destructing (%s)", reason)
+		return fmt.Sprintf("cleanup in progress (%s)", reason)
 	default:
-		return fmt.Sprintf("termination requested (%s)", reason)
+		return fmt.Sprintf("cleanup requested (%s)", reason)
 	}
 }
 
 func TerminationIntentDetail(marker *instanceintent.Marker) string {
-	if marker == nil {
+	if !HasActiveTerminationIntent(marker) {
 		return ""
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
+	switch {
+	case marker.LastError != "" && marker.DestroyAttempts > 0:
+		parts = append(parts, "destroy request failed; retry pending")
+	case marker.DestroyStartedAtUnix > 0:
+		parts = append(parts, "waiting for provider to confirm destruction")
+	default:
+		parts = append(parts, "waiting to start cleanup")
+	}
 	if marker.RequestedAtUnix > 0 {
 		parts = append(parts, fmt.Sprintf("requested %s ago", time.Since(time.Unix(marker.RequestedAtUnix, 0)).Truncate(time.Second)))
 	}
-	if marker.DestroyAttempts > 0 {
+	if marker.DestroyAttempts > 1 || marker.LastError != "" {
 		parts = append(parts, fmt.Sprintf("attempts=%d", marker.DestroyAttempts))
 	}
 	if marker.LastError != "" {
-		parts = append(parts, truncateText(marker.LastError, 160))
+		parts = append(parts, "last error: "+truncateText(marker.LastError, 160))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func HasActiveTerminationIntent(marker *instanceintent.Marker) bool {
+	return marker != nil && marker.TerminalStatus != "" && marker.DestroySucceededAtUnix == 0
 }
 
 func truncateText(s string, maxLen int) string {
@@ -656,13 +666,13 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 		lines = append(lines, line)
 	}
 
-	if curr.TerminationIntent != nil {
+	if HasActiveTerminationIntent(curr.TerminationIntent) {
 		prevLabel := TerminationIntentLabel(prev.TerminationIntent)
 		currLabel := TerminationIntentLabel(curr.TerminationIntent)
 		if currLabel != "" && currLabel != prevLabel {
 			lines = append(lines, fmt.Sprintf("instance %d: %s", id, currLabel))
 			if detail := TerminationIntentDetail(curr.TerminationIntent); detail != "" {
-				lines = append(lines, fmt.Sprintf("instance %d: termination detail: %s", id, detail))
+				lines = append(lines, fmt.Sprintf("instance %d: cleanup detail: %s", id, detail))
 			}
 		}
 	}

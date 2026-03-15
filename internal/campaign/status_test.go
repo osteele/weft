@@ -268,11 +268,26 @@ func TestFormatPlainUpdate_TerminationDetail(t *testing.T) {
 	}
 
 	output := FormatPlainUpdate(prev, curr)
-	if !strings.Contains(output, "termination detail:") {
-		t.Fatalf("expected termination detail, got %q", output)
+	if !strings.Contains(output, "cleanup detail:") {
+		t.Fatalf("expected cleanup detail, got %q", output)
 	}
 	if !strings.Contains(output, "attempts=2") {
 		t.Fatalf("expected attempt count, got %q", output)
+	}
+}
+
+func TestTerminationIntentDetail_HidesCompletedCleanup(t *testing.T) {
+	marker := &instanceintent.Marker{
+		TerminalStatus:         db.CloudInstanceStatusCompleted,
+		RequestedAtUnix:        time.Now().Add(-5 * time.Second).Unix(),
+		DestroyStartedAtUnix:   time.Now().Add(-4 * time.Second).Unix(),
+		DestroySucceededAtUnix: time.Now().Add(-3 * time.Second).Unix(),
+	}
+	if got := TerminationIntentLabel(marker); got != "" {
+		t.Fatalf("TerminationIntentLabel() = %q, want empty", got)
+	}
+	if got := TerminationIntentDetail(marker); got != "" {
+		t.Fatalf("TerminationIntentDetail() = %q, want empty", got)
 	}
 }
 

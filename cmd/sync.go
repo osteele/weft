@@ -58,6 +58,9 @@ const (
 	// FastSyncHostTimeout is the overall timeout per host for quick syncs
 	// Must be long enough to sync multiple jobs (each with FastSyncTimeout)
 	FastSyncHostTimeout = 30 * time.Second
+	// NormalSyncHostTimeout is the overall timeout per host for background full syncs.
+	// Full syncs may need to stage code, assert the agent, and fetch missing inputs.
+	NormalSyncHostTimeout = 10 * time.Minute
 	// DefaultSyncTimeout is used for default syncs in status commands
 	DefaultSyncTimeout = 5 * time.Second
 	// NormalSyncTimeout is used for explicit sync commands
@@ -215,6 +218,7 @@ func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts [
 	allCompleted := true
 	var unreachable []string
 	var warnings []string
+	hostWaitTimeout := syncHostWaitTimeout(startQueueRunner)
 	for _, host := range hosts {
 		// Try quick sync, but don't wait if it times out
 		done := make(chan hostSyncOutcome, 1)
@@ -234,7 +238,7 @@ func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts [
 				continue
 			}
 			warnings = append(warnings, hostSyncWarnings(host, outcome.result)...)
-		case <-time.After(FastSyncHostTimeout):
+		case <-time.After(hostWaitTimeout):
 			// Overall host sync timed out - host likely unreachable
 			allCompleted = false
 			unreachable = append(unreachable, host)
@@ -289,6 +293,13 @@ func syncHostAfterQueueChange(database *sql.DB, host string) error {
 type hostSyncOutcome struct {
 	result ops.HostSyncResult
 	err    error
+}
+
+func syncHostWaitTimeout(startQueueRunner bool) time.Duration {
+	if startQueueRunner {
+		return NormalSyncHostTimeout
+	}
+	return FastSyncHostTimeout
 }
 
 func hostSyncWarnings(host string, result ops.HostSyncResult) []string {

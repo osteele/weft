@@ -204,8 +204,8 @@ func TestFormatWatchInstanceBlockShowsObservabilityDetails(t *testing.T) {
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: time.Now()}))
 	for _, want := range []string{
 		"Phase: uploading logs/results (job 88) (for",
-		"Termination:",
-		"Detail: requested",
+		"Cleanup:",
+		"Status: destroy request failed; retry pending",
 		"uploads: outputs 2 files, 4.0 KiB, 250ms | logs 4 files, 8.0 KiB, 600ms",
 	} {
 		if !strings.Contains(out, want) {

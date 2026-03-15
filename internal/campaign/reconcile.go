@@ -150,19 +150,33 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 		go func(ci *db.CloudInstance, providerID string, client cloud.Client) {
 			defer wg2.Done()
 			inst, err := client.ShowInstance(providerID)
+			if errors.Is(err, cloud.ErrInstanceNotFound) {
+				if markTerminationIntentDestroyed(database, ci, time.Now()) {
+					mu.Lock()
+					result.Reconciled++
+					mu.Unlock()
+				}
+				return
+			}
 			if err != nil {
 				return // can't check — skip
 			}
-			if !isProviderTerminal(inst) {
-				log.Printf("reconcile: safety-net destroying leaked provider instance %s (db instance %d, status %s)",
-					providerID, ci.ID, ci.Status)
-				if err := client.DestroyInstance(providerID); err != nil {
-					log.Printf("reconcile: safety-net destroy %s failed: %v", providerID, err)
+			if isProviderTerminal(inst) {
+				if markTerminationIntentDestroyed(database, ci, time.Now()) {
+					mu.Lock()
+					result.Reconciled++
+					mu.Unlock()
 				}
-				mu.Lock()
-				result.Reconciled++
-				mu.Unlock()
+				return
 			}
+			log.Printf("reconcile: safety-net destroying leaked provider instance %s (db instance %d, status %s)",
+				providerID, ci.ID, ci.Status)
+			if err := client.DestroyInstance(providerID); err != nil {
+				log.Printf("reconcile: safety-net destroy %s failed: %v", providerID, err)
+			}
+			mu.Lock()
+			result.Reconciled++
+			mu.Unlock()
 		}(ci, providerID, client)
 	}
 	wg2.Wait()
@@ -436,6 +450,11 @@ func (r *Reconciler) reconcileTerminationIntent(database *sql.DB, client cloud.C
 		log.Printf("reconcile: update instance %d status from termination intent: %v", ci.ID, err)
 		return false, false
 	}
+	if isProviderTerminal(inst) {
+		if markTerminationIntentDestroyed(database, ci, time.Now()) {
+			intent = ci.TerminationIntent
+		}
+	}
 
 	switch intent.TerminalStatus {
 	case db.CloudInstanceStatusCompleted:
@@ -454,6 +473,26 @@ func (r *Reconciler) reconcileTerminationIntent(database *sql.DB, client cloud.C
 	delete(r.firstDeadAt, ci.ID)
 	r.mu.Unlock()
 	return true, true
+}
+
+func markTerminationIntentDestroyed(database *sql.DB, ci *db.CloudInstance, confirmedAt time.Time) bool {
+	if ci == nil || !HasActiveTerminationIntent(ci.TerminationIntent) {
+		return false
+	}
+	marker := *ci.TerminationIntent
+	if marker.RequestedAtUnix == 0 && ci.TerminationRequestedAt != nil {
+		marker.RequestedAtUnix = *ci.TerminationRequestedAt
+	}
+	if marker.DestroyStartedAtUnix == 0 {
+		marker.DestroyStartedAtUnix = confirmedAt.Unix()
+	}
+	marker.DestroySucceededAtUnix = confirmedAt.Unix()
+	if err := db.UpdateCloudInstanceTerminationIntent(database, ci.ID, &marker); err != nil {
+		log.Printf("reconcile: persist destroy success for instance %d: %v", ci.ID, err)
+		return false
+	}
+	ci.TerminationIntent = &marker
+	return true
 }
 
 const (

@@ -243,3 +243,16 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 		t.Fatalf("host = %q, want test-host", entries[0].Host)
 	}
 }
+
+func TestHFInputStageTimeout(t *testing.T) {
+	if got := hfInputStageTimeout(0); got != minHFInputStageTimeout {
+		t.Fatalf("hfInputStageTimeout(0) = %s, want %s", got, minHFInputStageTimeout)
+	}
+	if got := hfInputStageTimeout(30 * time.Second); got != minHFInputStageTimeout {
+		t.Fatalf("hfInputStageTimeout(30s) = %s, want %s", got, minHFInputStageTimeout)
+	}
+	longTimeout := 15 * time.Minute
+	if got := hfInputStageTimeout(longTimeout); got != longTimeout {
+		t.Fatalf("hfInputStageTimeout(15m) = %s, want %s", got, longTimeout)
+	}
+}

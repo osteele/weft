@@ -48,6 +48,7 @@ func TestPrintJobsShowsDirectoryTailColumn(t *testing.T) {
 			Status:      db.StatusRunning,
 			StartTime:   1,
 			WorkingDir:  "/workspace/project-alpha",
+			Project:     "llm-performance-models",
 			Description: "train model",
 		},
 	}
@@ -61,8 +62,14 @@ func TestPrintJobsShowsDirectoryTailColumn(t *testing.T) {
 	if !strings.Contains(output, "DIR") {
 		t.Fatalf("output missing DIR header, got:\n%s", output)
 	}
+	if !strings.Contains(output, "PROJECT") {
+		t.Fatalf("output missing PROJECT header, got:\n%s", output)
+	}
 	if !strings.Contains(output, "project-alpha") {
 		t.Fatalf("output missing directory tail, got:\n%s", output)
+	}
+	if !strings.Contains(output, "llm-perf-mod") {
+		t.Fatalf("output missing abbreviated project, got:\n%s", output)
 	}
 }
 
@@ -74,6 +81,7 @@ func TestRenderJobListPlainTruncatesToWidth(t *testing.T) {
 			Status:      db.StatusCompleted,
 			StartTime:   1,
 			WorkingDir:  "/workspace/project-alpha-with-a-long-name",
+			Project:     "llm-performance-models",
 			Description: "train model with a very long description that should not fit in a narrow terminal window",
 			ExitCode:    testIntPtr(0),
 		},
@@ -97,9 +105,40 @@ func TestRenderJobListPlainTruncatesToWidth(t *testing.T) {
 	if !strings.Contains(out, "(unplaced)") {
 		t.Fatalf("expected hostless job marker, got:\n%s", out)
 	}
+	if !strings.Contains(out, "PROJECT") {
+		t.Fatalf("expected project header, got:\n%s", out)
+	}
 }
 
 func TestRenderJobListPlainIncludesDirectoryOnWideTerminals(t *testing.T) {
+	jobs := []*db.Job{
+		{
+			ID:          42,
+			Host:        "cool30",
+			Status:      db.StatusRunning,
+			StartTime:   1,
+			WorkingDir:  "/workspace/project-alpha",
+			Project:     "llm-performance-models",
+			Description: "train model",
+		},
+	}
+
+	out := renderJobListPlain(jobs, 120)
+	if !strings.Contains(out, "DIR") {
+		t.Fatalf("output missing DIR header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "PROJECT") {
+		t.Fatalf("output missing PROJECT header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "project-alpha") {
+		t.Fatalf("output missing directory tail, got:\n%s", out)
+	}
+	if !strings.Contains(out, "llm-perf-mod") {
+		t.Fatalf("output missing abbreviated project, got:\n%s", out)
+	}
+}
+
+func TestRenderJobListPlainProjectFallsBackToDirectoryTail(t *testing.T) {
 	jobs := []*db.Job{
 		{
 			ID:          42,
@@ -111,12 +150,12 @@ func TestRenderJobListPlainIncludesDirectoryOnWideTerminals(t *testing.T) {
 		},
 	}
 
-	out := renderJobListPlain(jobs, 120)
-	if !strings.Contains(out, "DIR") {
-		t.Fatalf("output missing DIR header, got:\n%s", out)
+	out := renderJobListPlain(jobs, 80)
+	if !strings.Contains(out, "PROJECT") {
+		t.Fatalf("output missing PROJECT header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "project-alpha") {
-		t.Fatalf("output missing directory tail, got:\n%s", out)
+	if !strings.Contains(out, "projec-alpha") {
+		t.Fatalf("expected directory-tail fallback in project column, got:\n%s", out)
 	}
 }
 

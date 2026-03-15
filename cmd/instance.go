@@ -299,8 +299,11 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if liveUpdate != nil && liveUpdate.HeartbeatAge > 0 {
 			fmt.Printf("  Heartbeat: %s ago\n", liveUpdate.HeartbeatAge.Truncate(time.Second))
 		}
-		if detail := campaign.TerminationIntentDetail(ci.TerminationIntent); detail != "" {
-			fmt.Printf("  Termination detail: %s\n", detail)
+		if label := campaign.TerminationIntentLabel(ci.TerminationIntent); label != "" {
+			fmt.Printf("  Cleanup: %s\n", label)
+			if detail := campaign.TerminationIntentDetail(ci.TerminationIntent); detail != "" {
+				fmt.Printf("  Cleanup status: %s\n", detail)
+			}
 		}
 
 		outcomes, _ := db.GetAttemptOutcomesByInstance(database, ci.ID)

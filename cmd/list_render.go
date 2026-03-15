@@ -12,7 +12,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/tui"
 )
 
 type jobListColumn struct {
@@ -137,6 +139,7 @@ func newJobListLayout(width int) jobListLayout {
 			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
 			jobListColumn{title: "STARTED", width: 11, value: func(job *db.Job) string { return formatJobListStarted(job) }},
+			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
 			jobListColumn{title: "DIR", width: 14, value: func(job *db.Job) string { return job.DirectoryTailDisplay() }},
 		)
 	case width >= 80:
@@ -144,14 +147,17 @@ func newJobListLayout(width int) jobListLayout {
 			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
 			jobListColumn{title: "STARTED", width: 11, value: func(job *db.Job) string { return formatJobListStarted(job) }},
+			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
 		)
 	case width >= 64:
 		columns = append(columns,
 			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
+			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
 		)
 	default:
 		columns = append(columns,
+			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
 		)
 	}
@@ -224,6 +230,13 @@ func formatJobListStatus(job *db.Job) string {
 		}
 	}
 	return status
+}
+
+func formatJobListProject(job *db.Job) string {
+	if job == nil {
+		return ""
+	}
+	return tui.AbbreviateProject(campaign.JobProjectLabel(job), 12)
 }
 
 func padOrTruncateDisplay(value string, width int, alignRight bool) string {

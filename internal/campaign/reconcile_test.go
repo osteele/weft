@@ -320,8 +320,8 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if result.Reconciled != 1 {
-		t.Fatalf("reconciled = %d, want 1", result.Reconciled)
+	if result.Reconciled != 2 {
+		t.Fatalf("reconciled = %d, want 2", result.Reconciled)
 	}
 	if destroyedID != "intent-123" {
 		t.Fatalf("DestroyInstance called with %q, want %q", destroyedID, "intent-123")
@@ -353,6 +353,57 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 	}
 	if job.CloudInstanceID != nil {
 		t.Fatalf("job cloud_instance_id = %v, want nil", job.CloudInstanceID)
+	}
+}
+
+func TestReconcileCloudInstances_SafetyNetMarksDestroyConfirmedWhenProviderGone(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
+		t.Fatalf("mark completed: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "intent-gone-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	if err := db.UpdateCloudInstanceTerminationIntent(database, instanceID, &instanceintent.Marker{
+		TerminalStatus:       db.CloudInstanceStatusCompleted,
+		TerminationReason:    db.TerminationReasonCompleted,
+		RequestedAtUnix:      time.Now().Add(-30 * time.Second).Unix(),
+		DestroyStartedAtUnix: time.Now().Add(-25 * time.Second).Unix(),
+	}); err != nil {
+		t.Fatalf("set termination intent: %v", err)
+	}
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return nil, cloud.ErrInstanceNotFound
+		},
+	}
+
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Fatalf("reconciled = %d, want 1", result.Reconciled)
+	}
+
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.TerminationIntent == nil || ci.TerminationIntent.DestroySucceededAtUnix == 0 {
+		t.Fatalf("termination intent = %+v, want destroy_succeeded_at_unix set", ci.TerminationIntent)
 	}
 }
 
