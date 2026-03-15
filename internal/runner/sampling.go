@@ -62,6 +62,7 @@ func SampleJob(pid, pgid int, cpuCount int, paths JobPaths, rs *RunningJobState,
 		Tenant:         tenant,
 	}
 	WriteTimeseriesSample(paths, sample)
+	WriteTelemetrySample(paths, buildTelemetrySample(now, pid, pgid, rs))
 
 	// High-water marks
 	if MemPressureSeverity(pressure) > MemPressureSeverity(rs.PeakMemPressure) {

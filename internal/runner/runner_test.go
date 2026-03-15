@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
@@ -153,5 +154,33 @@ func TestStartJob_GPUResolutionFailure_DoesNotLogStartOrCreateArtifacts(t *testi
 	}
 	if len(entries) != 0 {
 		t.Fatalf("expected no oplog entries, got %v", entries)
+	}
+}
+
+func TestNewRunner_DefaultTelemetryDoesNotReuseCPUInterval(t *testing.T) {
+	r, _ := initTestRunner(t)
+	if r.telemetryConfig.Interval != time.Second {
+		t.Fatalf("telemetry interval = %v, want %v", r.telemetryConfig.Interval, time.Second)
+	}
+	if r.cpuConfig.SampleInterval != 15 {
+		t.Fatalf("cpu sample interval = %d, want 15", r.cpuConfig.SampleInterval)
+	}
+}
+
+func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
+	policy := TelemetryPolicyForJob(&ops.CommandJob{Tags: []string{"benchmark"}})
+	if policy.Interval != 5*time.Second {
+		t.Fatalf("benchmark telemetry interval = %v, want %v", policy.Interval, 5*time.Second)
+	}
+	if policy.CollectAdvancedGPU {
+		t.Fatal("benchmark jobs should disable advanced GPU telemetry")
+	}
+
+	normal := TelemetryPolicyForJob(&ops.CommandJob{})
+	if normal.Interval != time.Second {
+		t.Fatalf("normal telemetry interval = %v, want %v", normal.Interval, time.Second)
+	}
+	if !normal.CollectAdvancedGPU {
+		t.Fatal("normal jobs should keep advanced GPU telemetry")
 	}
 }

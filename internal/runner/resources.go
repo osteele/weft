@@ -111,6 +111,35 @@ func ProcCurrentRSSKB(pid int) int64 {
 	return totalRSS
 }
 
+// ProcIOBytes returns cumulative read_bytes and write_bytes for a process tree.
+// Returns zeros when /proc is unavailable or the kernel does not expose io stats.
+func ProcIOBytes(pid int) (readBytes, writeBytes uint64) {
+	if _, err := os.Stat("/proc"); err != nil {
+		return 0, 0
+	}
+	for _, p := range GetProcessTree(pid) {
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/io", p))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			switch fields[0] {
+			case "read_bytes:":
+				value, _ := strconv.ParseUint(fields[1], 10, 64)
+				readBytes += value
+			case "write_bytes:":
+				value, _ := strconv.ParseUint(fields[1], 10, 64)
+				writeBytes += value
+			}
+		}
+	}
+	return readBytes, writeBytes
+}
+
 // HostMemoryKB returns (totalKB, usedKB) for system memory.
 // On Linux reads /proc/meminfo; on macOS uses sysctl + vm_stat.
 // Returns (0, 0) if unable to determine.

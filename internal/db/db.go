@@ -1694,6 +1694,47 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	telemetrySchema := `
+	CREATE TABLE IF NOT EXISTS job_telemetry_samples (
+		job_id INTEGER NOT NULL,
+		job_run_id INTEGER NOT NULL,
+		ts INTEGER NOT NULL,
+		elapsed_s REAL,
+		proc_cpu_user_s REAL,
+		proc_cpu_sys_s REAL,
+		proc_rss_kb INTEGER,
+		host_cpu_util_pct REAL,
+		proc_disk_read_bps REAL,
+		proc_disk_write_bps REAL,
+		proc_net_rx_bps REAL,
+		proc_net_tx_bps REAL,
+		PRIMARY KEY (job_run_id, ts)
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_telemetry_samples_job ON job_telemetry_samples(job_id);
+	CREATE INDEX IF NOT EXISTS idx_job_telemetry_samples_run ON job_telemetry_samples(job_run_id);
+	CREATE TABLE IF NOT EXISTS job_telemetry_gpus (
+		job_id INTEGER NOT NULL,
+		job_run_id INTEGER NOT NULL,
+		ts INTEGER NOT NULL,
+		gpu_index TEXT NOT NULL,
+		gpu_name TEXT,
+		gpu_mem_used_mib INTEGER,
+		gpu_util_pct REAL,
+		gpu_mem_util_pct REAL,
+		gpu_power_w REAL,
+		gpu_pcie_tx_mib_s REAL,
+		gpu_pcie_rx_mib_s REAL,
+		gpu_sm_clock_mhz INTEGER,
+		gpu_mem_clock_mhz INTEGER,
+		PRIMARY KEY (job_run_id, ts, gpu_index)
+	);
+	CREATE INDEX IF NOT EXISTS idx_job_telemetry_gpus_job ON job_telemetry_gpus(job_id);
+	CREATE INDEX IF NOT EXISTS idx_job_telemetry_gpus_run ON job_telemetry_gpus(job_run_id);
+	`
+	if _, err := db.Exec(telemetrySchema); err != nil {
+		return err
+	}
+
 	// Create campaigns table (batch of cloud instances)
 	campaignsBatchSchema := `
 	CREATE TABLE IF NOT EXISTS campaigns (

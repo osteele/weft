@@ -861,6 +861,7 @@ func LaunchInstance(
 			RunID:   runID,
 			Command: job.EffectiveCommand(),
 			Dir:     remoteDir,
+			Tags:    append([]string(nil), job.Tags...),
 		})
 	}
 

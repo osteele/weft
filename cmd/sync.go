@@ -481,6 +481,13 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		updated++
 		completedJobIDs[jobID] = true
 
+		if err := importCloudTimeseriesFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)), "single"); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: cloud job %d final timeseries import failed: %v\n", jobID, err)
+		}
+		if err := importCloudTelemetryFile(database, jobID, filepath.Join(tmpDir, fmt.Sprintf("%d.telemetry.jsonl", jobID))); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: cloud job %d final telemetry import failed: %v\n", jobID, err)
+		}
+
 		// Extract and store phase timing data
 		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
 			if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
@@ -551,6 +558,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 		if err := syncCloudLiveTimeseries(ctx, r2Client, database, jobID); err != nil && verbose {
 			fmt.Fprintf(os.Stderr, "Warning: cloud job %d live timeseries sync failed: %v\n", jobID, err)
+		}
+		if err := syncCloudLiveTelemetry(ctx, r2Client, database, jobID); err != nil && verbose {
+			fmt.Fprintf(os.Stderr, "Warning: cloud job %d live telemetry sync failed: %v\n", jobID, err)
 		}
 	}
 
@@ -750,6 +760,85 @@ func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database 
 		return fmt.Errorf("insert timeseries: %w", err)
 	}
 	return nil
+}
+
+func syncCloudLiveTelemetry(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID int64) error {
+	var status string
+	var latestRunID sql.NullInt64
+	if err := database.QueryRow("SELECT status, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &latestRunID); err != nil {
+		return nil
+	}
+	if db.IsTerminalStatus(status) {
+		return nil
+	}
+
+	runID := int64(0)
+	if latestRunID.Valid {
+		runID = latestRunID.Int64
+	}
+	data, err := r2Client.GetObject(ctx, r2keys.JobAttemptLiveTelemetry(jobID, runID))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+
+	lastTS, err := db.GetTelemetryLastTS(database, jobID)
+	if err != nil {
+		return fmt.Errorf("get telemetry last ts: %w", err)
+	}
+
+	samples := db.ParseTelemetrySamplesJSONL(string(data), lastTS)
+	if len(samples) == 0 {
+		return nil
+	}
+
+	if err := db.InsertTelemetrySamples(database, jobID, samples); err != nil {
+		return fmt.Errorf("insert telemetry: %w", err)
+	}
+	return nil
+}
+
+func importCloudTimeseriesFile(database *sql.DB, jobID int64, path, tenant string) error {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	lastTS, err := db.GetTimeseriesLastTS(database, jobID)
+	if err != nil {
+		return err
+	}
+	var samples []db.TimeseriesSample
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var sample db.TimeseriesSample
+		if err := json.Unmarshal([]byte(line), &sample); err != nil {
+			continue
+		}
+		if sample.Ts <= lastTS {
+			continue
+		}
+		sample.Tenant = tenant
+		samples = append(samples, sample)
+	}
+	return db.InsertTimeseries(database, jobID, samples)
+}
+
+func importCloudTelemetryFile(database *sql.DB, jobID int64, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	lastTS, err := db.GetTelemetryLastTS(database, jobID)
+	if err != nil {
+		return err
+	}
+	samples := db.ParseTelemetrySamplesJSONL(string(data), lastTS)
+	if err := db.InsertTelemetrySamples(database, jobID, samples); err != nil {
+		return err
+	}
+	return db.RefreshJobTelemetrySummary(database, jobID)
 }
 
 // deployAgentsToHosts deploys the agent binary to hosts that have an outdated

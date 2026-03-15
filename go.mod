@@ -24,6 +24,7 @@ require (
 )
 
 require (
+	github.com/NVIDIA/go-nvml v0.13.0-1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.5 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.18 // indirect

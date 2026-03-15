@@ -1,0 +1,94 @@
+package db
+
+import "testing"
+
+func TestInsertAndSummarizeTelemetry(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
+	if err != nil {
+		t.Fatalf("RecordQueued: %v", err)
+	}
+	if err := UpdateQueuedToRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateQueuedToRunning: %v", err)
+	}
+	meta := &JobMetadata{
+		Resource: &ResourceUsage{GPUDevices: "0,1"},
+	}
+	if err := SetJobMetadata(database, jobID, meta); err != nil {
+		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if err := RecordCompletionByID(database, jobID, 0, job.StartTime+2); err != nil {
+		t.Fatalf("RecordCompletionByID: %v", err)
+	}
+
+	samples := []TelemetrySample{
+		{
+			Ts:           1000,
+			ElapsedS:     0,
+			ProcCPUUserS: 0.4,
+			ProcCPUSysS:  0.1,
+			ProcRSSKB:    1000,
+			GPUs: []TelemetryGPUSample{
+				{GPUIndex: "0", GPUName: "A100", GPUMemUsedMiB: 100, GPUUtilPct: telemetryFloat64Ptr(50), GPUMemUtilPct: telemetryFloat64Ptr(25)},
+			},
+		},
+		{
+			Ts:           1001,
+			ElapsedS:     1,
+			ProcCPUUserS: 0.8,
+			ProcCPUSysS:  0.2,
+			ProcRSSKB:    2000,
+			GPUs: []TelemetryGPUSample{
+				{GPUIndex: "0", GPUName: "A100", GPUMemUsedMiB: 120, GPUUtilPct: telemetryFloat64Ptr(100), GPUMemUtilPct: telemetryFloat64Ptr(50)},
+				{GPUIndex: "1", GPUName: "A100", GPUMemUsedMiB: 80},
+			},
+		},
+	}
+	if err := InsertTelemetrySamples(database, jobID, samples); err != nil {
+		t.Fatalf("InsertTelemetrySamples: %v", err)
+	}
+	if err := RefreshJobTelemetrySummary(database, jobID); err != nil {
+		t.Fatalf("RefreshJobTelemetrySummary: %v", err)
+	}
+
+	updated, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID updated: %v", err)
+	}
+	if updated.Metadata == nil || updated.Metadata.Telemetry == nil {
+		t.Fatalf("expected telemetry summary in metadata, got %+v", updated.Metadata)
+	}
+	summary := updated.Metadata.Telemetry
+	if summary.CPUCoreSeconds != 1.0 {
+		t.Fatalf("cpu_core_seconds = %v, want 1.0", summary.CPUCoreSeconds)
+	}
+	if summary.MeanCPUCores != 0.5 {
+		t.Fatalf("mean_cpu_cores = %v, want 0.5", summary.MeanCPUCores)
+	}
+	if summary.MaxRSSKB != 2000 {
+		t.Fatalf("max_rss_kb = %d, want 2000", summary.MaxRSSKB)
+	}
+	if len(summary.AssignedGPUIndices) != 2 || summary.AssignedGPUIndices[0] != "0" || summary.AssignedGPUIndices[1] != "1" {
+		t.Fatalf("assigned_gpu_indices = %v", summary.AssignedGPUIndices)
+	}
+	if len(summary.GPUs) != 2 {
+		t.Fatalf("gpu summary count = %d, want 2", len(summary.GPUs))
+	}
+
+	got, err := GetTelemetryByRun(database, *updated.LatestRunID)
+	if err != nil {
+		t.Fatalf("GetTelemetryByRun: %v", err)
+	}
+	if len(got) != 2 || len(got[1].GPUs) != 2 {
+		t.Fatalf("telemetry rows = %+v", got)
+	}
+}
+
+func telemetryFloat64Ptr(value float64) *float64 {
+	return &value
+}

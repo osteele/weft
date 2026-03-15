@@ -89,6 +89,7 @@ type JobPaths struct {
 	Rusage        string
 	FailureReason string
 	Timeseries    string
+	Telemetry     string
 	KillReason    string
 	Heartbeat     string
 	Completion    string
@@ -127,6 +128,7 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 		Rusage:        filepath.Join(logDir, fmt.Sprintf("%d.rusage", jobID)),
 		FailureReason: filepath.Join(logDir, fmt.Sprintf("%d.failure_reason", jobID)),
 		Timeseries:    filepath.Join(logDir, fmt.Sprintf("%d.timeseries.jsonl", jobID)),
+		Telemetry:     filepath.Join(logDir, fmt.Sprintf("%d.telemetry.jsonl", jobID)),
 		KillReason:    filepath.Join(logDir, fmt.Sprintf("%d.kill_reason", jobID)),
 		Heartbeat:     filepath.Join(logDir, fmt.Sprintf("%d.heartbeat", jobID)),
 		Completion:    filepath.Join(logDir, fmt.Sprintf("%d.completion.json", jobID)),
@@ -136,7 +138,7 @@ func NewJobPaths(logDir string, jobID int64) JobPaths {
 
 // ArchiveExistingFiles renames existing job files with a timestamp suffix.
 func ArchiveExistingFiles(logDir string, jobID int64) {
-	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json"}
+	extensions := []string{"log", "status", "meta", "pid", "pgid", "samples", "paused", "rusage", "failure_reason", "timeseries.jsonl", "telemetry.jsonl", "kill_reason", "heartbeat", "completion.json", "phases.json"}
 	for _, ext := range extensions {
 		path := filepath.Join(logDir, fmt.Sprintf("%d.%s", jobID, ext))
 		info, err := os.Stat(path)

@@ -23,12 +23,13 @@ type Runner struct {
 	queueDir  string
 	logDir    string
 
-	state     *State
-	cmdProc   *CommandProcessor
-	gpuInv    *GPUInventory
-	cpuConfig CPUConfig
-	benchCfg  BenchmarkConfig
-	cpuCount  int
+	state           *State
+	cmdProc         *CommandProcessor
+	gpuInv          *GPUInventory
+	cpuConfig       CPUConfig
+	telemetryConfig TelemetryConfig
+	benchCfg        BenchmarkConfig
+	cpuCount        int
 
 	// File paths
 	commandsFile string
@@ -70,18 +71,19 @@ func DefaultConfig(queueName string) Config {
 // New creates a new Runner with the given configuration.
 func New(cfg Config) *Runner {
 	return &Runner{
-		queueName:    cfg.QueueName,
-		queueDir:     cfg.QueueDir,
-		logDir:       cfg.LogDir,
-		commandsFile: filepath.Join(cfg.QueueDir, cfg.QueueName+".commands"),
-		stateFile:    filepath.Join(cfg.QueueDir, cfg.QueueName+".state.json"),
-		currentFile:  filepath.Join(cfg.QueueDir, cfg.QueueName+".current"),
-		pidFile:      filepath.Join(cfg.QueueDir, cfg.QueueName+".runner.pid"),
-		runnerLog:    filepath.Join(cfg.QueueDir, "runner-"+cfg.QueueName+".log"),
-		cpuConfig:    DefaultCPUConfig(),
-		benchCfg:     DefaultBenchmarkConfig(),
-		processes:    make(map[string]*Process),
-		stopCh:       make(chan struct{}),
+		queueName:       cfg.QueueName,
+		queueDir:        cfg.QueueDir,
+		logDir:          cfg.LogDir,
+		commandsFile:    filepath.Join(cfg.QueueDir, cfg.QueueName+".commands"),
+		stateFile:       filepath.Join(cfg.QueueDir, cfg.QueueName+".state.json"),
+		currentFile:     filepath.Join(cfg.QueueDir, cfg.QueueName+".current"),
+		pidFile:         filepath.Join(cfg.QueueDir, cfg.QueueName+".runner.pid"),
+		runnerLog:       filepath.Join(cfg.QueueDir, "runner-"+cfg.QueueName+".log"),
+		cpuConfig:       DefaultCPUConfig(),
+		telemetryConfig: DefaultTelemetryConfig(),
+		benchCfg:        DefaultBenchmarkConfig(),
+		processes:       make(map[string]*Process),
+		stopCh:          make(chan struct{}),
 	}
 }
 
@@ -151,6 +153,11 @@ func (r *Runner) mainLoop() error {
 
 	sampleTicker := time.NewTicker(time.Duration(r.cpuConfig.SampleInterval) * time.Second)
 	defer sampleTicker.Stop()
+	var telemetryTicker *time.Ticker
+	if r.telemetryConfig.Enabled && r.telemetryConfig.Interval > 0 {
+		telemetryTicker = time.NewTicker(r.telemetryConfig.Interval)
+		defer telemetryTicker.Stop()
+	}
 
 	// Run once immediately before entering the ticker loop
 	if err := r.tick(); err != nil {
@@ -169,6 +176,8 @@ func (r *Runner) mainLoop() error {
 			}
 
 		case <-sampleTicker.C:
+			r.adjustRunningJobAllotments()
+		case <-tickerChan(telemetryTicker):
 			r.sampleRunningJobs()
 		}
 	}
@@ -463,15 +472,23 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	// Update running state
 	allotment := r.jobAllotment(job)
 	gpuMemGB := GetJobGPUMem(job, DefaultGPUMemGB)
+	telemetryPolicy := TelemetryPolicyForJob(job)
 
 	r.state.AddRunning(jobIDStr, RunningJobState{
-		StartedAt:      startTime,
-		WarmupUntil:    startTime + int64(r.cpuConfig.WarmupDuration),
-		LocalAllotment: allotment,
-		Samples:        []int{},
-		GPUDevices:     gpuDevices,
-		GPUMemGB:       gpuMemGB,
+		StartedAt:                startTime,
+		WarmupUntil:              startTime + int64(r.cpuConfig.WarmupDuration),
+		LocalAllotment:           allotment,
+		Samples:                  []int{},
+		GPUDevices:               gpuDevices,
+		GPUMemGB:                 gpuMemGB,
+		TelemetryIntervalSeconds: int64(telemetryPolicy.Interval / time.Second),
+		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
 	})
+	if r.telemetryConfig.Enabled {
+		rs := r.state.Running[jobIDStr]
+		SampleJob(proc.PID, proc.PGID, r.cpuCount, paths, &rs, "multi")
+		r.state.Running[jobIDStr] = rs
+	}
 
 	return nil
 }
@@ -677,9 +694,11 @@ func (r *Runner) sampleRunningJobs() {
 		if !ok {
 			continue
 		}
-
-		// Skip during warmup
-		if rs.WarmupUntil > now.Unix() {
+		if rs.TelemetryIntervalSeconds <= 0 {
+			rs.TelemetryIntervalSeconds = int64(DefaultJobTelemetryPolicy().Interval / time.Second)
+			rs.TelemetryAdvancedGPU = DefaultJobTelemetryPolicy().CollectAdvancedGPU
+		}
+		if rs.LastSample > 0 && now.Unix()-rs.LastSample < rs.TelemetryIntervalSeconds {
 			continue
 		}
 
@@ -696,7 +715,7 @@ func (r *Runner) sampleRunningJobs() {
 
 		// Collect telemetry sample
 		oldPressure := rs.PeakMemPressure
-		pressure, hostPct := SampleJob(pid, pgid, r.cpuCount, paths, &rs, "multi")
+		pressure, _ := SampleJob(pid, pgid, r.cpuCount, paths, &rs, "multi")
 
 		// Log pressure escalation
 		if MemPressureSeverity(pressure) > MemPressureSeverity(oldPressure) {
@@ -705,10 +724,36 @@ func (r *Runner) sampleRunningJobs() {
 			}
 		}
 
-		// CPU sample history for allotment hysteresis
+		r.state.Running[jobIDStr] = rs
+		updated = true
+	}
+
+	if updated {
+		r.state.Save(r.stateFile)
+	}
+}
+
+func (r *Runner) adjustRunningJobAllotments() {
+	now := time.Now()
+	updated := false
+
+	for _, jobIDStr := range r.state.RunningIDs() {
+		jobID := mustParseInt64(jobIDStr)
+		paths := NewJobPaths(r.logDir, jobID)
+
+		rs, ok := r.state.Running[jobIDStr]
+		if !ok || rs.WarmupUntil > now.Unix() {
+			continue
+		}
+
+		pid, ok := ReadPIDFile(paths.PID)
+		if !ok || !CheckPIDAlive(pid) {
+			continue
+		}
+
+		hostPct := ProcCPUHostPct(pid, r.cpuCount)
 		rs.Samples = appendBounded(rs.Samples, hostPct, r.cpuConfig.SampleCount())
 
-		// CPU allotment hysteresis
 		newAllotment, newOverHist, newUnderHist := r.cpuConfig.AdjustAllotment(
 			rs.LocalAllotment, rs.Samples, rs.OverHist, rs.UnderHist, r.state.TotalAllotment())
 		if newAllotment != rs.LocalAllotment {
@@ -730,6 +775,13 @@ func (r *Runner) sampleRunningJobs() {
 	if updated {
 		r.state.Save(r.stateFile)
 	}
+}
+
+func tickerChan(ticker *time.Ticker) <-chan time.Time {
+	if ticker == nil {
+		return nil
+	}
+	return ticker.C
 }
 
 func (r *Runner) warmupActive() bool {

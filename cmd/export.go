@@ -47,24 +47,31 @@ func init() {
 
 // trainingDataRecord is the JSONL output format for job-estimator.
 type trainingDataRecord struct {
-	RunID      int64                 `json:"run_id"`
-	JobID      int64                 `json:"job_id"`
-	Host       string                `json:"host"`
-	WorkingDir string                `json:"working_dir,omitempty"`
-	Command    string                `json:"command"`
-	Project    string                `json:"project,omitempty"`
-	GPUClass   string                `json:"gpu_class,omitempty"`
-	Backend    string                `json:"backend"`
-	Tenant     string                `json:"tenant"`
-	StartTime  int64                 `json:"start_time"`
-	EndTime    int64                 `json:"end_time"`
-	DurationS  int64                 `json:"duration_s"`
-	ExitCode   int                   `json:"exit_code"`
-	PeakRSSKB  int64                 `json:"peak_rss_kb,omitempty"`
-	MaxGPUMiB  int64                 `json:"max_gpu_mem_mib,omitempty"`
-	CPUMean    float64               `json:"cpu_mean,omitempty"`
-	HostSpecs  *trainingHostSpecs    `json:"host_specs,omitempty"`
-	Timeseries []db.TimeseriesSample `json:"timeseries,omitempty"`
+	RunID              int64                 `json:"run_id"`
+	JobID              int64                 `json:"job_id"`
+	Host               string                `json:"host"`
+	WorkingDir         string                `json:"working_dir,omitempty"`
+	Command            string                `json:"command"`
+	Project            string                `json:"project,omitempty"`
+	GPUClass           string                `json:"gpu_class,omitempty"`
+	Backend            string                `json:"backend"`
+	Tenant             string                `json:"tenant"`
+	StartTime          int64                 `json:"start_time"`
+	EndTime            int64                 `json:"end_time"`
+	DurationS          int64                 `json:"duration_s"`
+	ExitCode           int                   `json:"exit_code"`
+	PeakRSSKB          int64                 `json:"peak_rss_kb,omitempty"`
+	MaxGPUMiB          int64                 `json:"max_gpu_mem_mib,omitempty"`
+	CPUMean            float64               `json:"cpu_mean,omitempty"`
+	AssignedGPUIndices []string              `json:"assigned_gpu_indices,omitempty"`
+	HostSpecs          *trainingHostSpecs    `json:"host_specs,omitempty"`
+	Timeseries         []db.TimeseriesSample `json:"timeseries,omitempty"`
+	TelemetryV2        *trainingTelemetryV2  `json:"telemetry_v2,omitempty"`
+}
+
+type trainingTelemetryV2 struct {
+	Summary *db.JobTelemetrySummary `json:"summary,omitempty"`
+	Samples []db.TelemetrySample    `json:"samples,omitempty"`
 }
 
 type trainingHostSpecs struct {
@@ -153,11 +160,28 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 		if run.Metadata != nil && run.Metadata.CPU != nil && run.Metadata.CPU.Mean != nil {
 			rec.CPUMean = *run.Metadata.CPU.Mean
 		}
+		if run.Metadata != nil {
+			if run.Metadata.Telemetry != nil {
+				rec.AssignedGPUIndices = append([]string(nil), run.Metadata.Telemetry.AssignedGPUIndices...)
+				rec.TelemetryV2 = &trainingTelemetryV2{Summary: run.Metadata.Telemetry}
+			} else if run.Metadata.Resource != nil && run.Metadata.Resource.GPUDevices != "" {
+				rec.AssignedGPUIndices = splitCSV(run.Metadata.Resource.GPUDevices)
+			}
+		}
 
 		// Fetch timeseries
 		ts, err := db.GetTimeseriesByRun(database, run.RunID)
 		if err == nil && len(ts) > 0 {
 			rec.Timeseries = ts
+		}
+		if telemetrySamples, err := db.GetTelemetryByRun(database, run.RunID); err == nil && len(telemetrySamples) > 0 {
+			if rec.TelemetryV2 == nil {
+				rec.TelemetryV2 = &trainingTelemetryV2{}
+			}
+			rec.TelemetryV2.Samples = telemetrySamples
+		}
+		if rec.TelemetryV2 != nil && rec.TelemetryV2.Summary == nil && len(rec.TelemetryV2.Samples) == 0 {
+			rec.TelemetryV2 = nil
 		}
 
 		if err := encoder.Encode(rec); err != nil {
@@ -230,4 +254,16 @@ func parseMiB(value string) int {
 		return 0
 	}
 	return n
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	var result []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

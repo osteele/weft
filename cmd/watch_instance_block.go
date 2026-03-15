@@ -262,17 +262,17 @@ func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string 
 
 func formatWatchInstanceCostLine(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) string {
 	obs := observeCloudInstance(ci, inst, now)
-	if !obs.HasCost {
+	if obs.Cost == nil {
 		return ""
 	}
-	if obs.HasUptime {
-		details := []string{fmt.Sprintf("uptime: %s", obs.Uptime)}
-		if obs.HasRate {
-			details = append(details, fmt.Sprintf("rate: $%.2f/hr", obs.Rate))
+	if obs.Uptime != nil {
+		details := []string{fmt.Sprintf("uptime: %s", *obs.Uptime)}
+		if obs.Rate != nil {
+			details = append(details, fmt.Sprintf("rate: $%.2f/hr", *obs.Rate))
 		}
-		return fmt.Sprintf("  Cost: $%.2f (%s)", obs.Cost, strings.Join(details, ", "))
+		return fmt.Sprintf("  Cost: $%.2f (%s)", *obs.Cost, strings.Join(details, ", "))
 	}
-	return fmt.Sprintf("  Cost: $%.2f", obs.Cost)
+	return fmt.Sprintf("  Cost: $%.2f", *obs.Cost)
 }
 
 func updateWatchJobProgressHWM(hwm map[int64]int, prev, curr campaign.InstanceUpdate) {

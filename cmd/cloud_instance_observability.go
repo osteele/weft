@@ -11,13 +11,10 @@ import (
 )
 
 type cloudInstanceObservability struct {
-	HasUptime bool
-	Uptime    time.Duration
-	HasCost   bool
-	Cost      float64
-	HasRate   bool
-	Rate      float64
-	Terminal  bool
+	Uptime   *time.Duration
+	Cost     *float64
+	Rate     *float64
+	Terminal bool
 }
 
 type cloudInstanceView struct {
@@ -27,10 +24,8 @@ type cloudInstanceView struct {
 
 type cloudInstanceAggregate struct {
 	Count       int
-	HasCost     bool
-	TotalCost   float64
-	HasRate     bool
-	CurrentRate float64
+	TotalCost   *float64
+	CurrentRate *float64
 }
 
 func observeCloudInstance(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) cloudInstanceObservability {
@@ -46,11 +41,11 @@ func observeCloudInstance(ci *db.CloudInstance, inst *cloud.Instance, now time.T
 
 	switch {
 	case inst != nil && inst.CostPerHour > 0:
-		obs.HasRate = true
-		obs.Rate = inst.CostPerHour
+		rate := inst.CostPerHour
+		obs.Rate = &rate
 	case ci.CostPerHourCents > 0:
-		obs.HasRate = true
-		obs.Rate = float64(ci.CostPerHourCents) / 100.0
+		rate := float64(ci.CostPerHourCents) / 100.0
+		obs.Rate = &rate
 	}
 
 	if ci.LaunchedAt != nil {
@@ -62,38 +57,38 @@ func observeCloudInstance(ci *db.CloudInstance, inst *cloud.Instance, now time.T
 		if end.Before(launchedAt) {
 			end = launchedAt
 		}
-		obs.HasUptime = true
-		obs.Uptime = end.Sub(launchedAt).Truncate(time.Second)
+		uptime := end.Sub(launchedAt).Truncate(time.Second)
+		obs.Uptime = &uptime
 	}
 
-	if obs.HasRate && obs.HasUptime {
-		obs.HasCost = true
-		obs.Cost = obs.Uptime.Hours() * obs.Rate
+	if obs.Rate != nil && obs.Uptime != nil {
+		cost := obs.Uptime.Hours() * *obs.Rate
+		obs.Cost = &cost
 	} else if ci.ActualSpendCents > 0 {
-		obs.HasCost = true
-		obs.Cost = float64(ci.ActualSpendCents) / 100.0
+		cost := float64(ci.ActualSpendCents) / 100.0
+		obs.Cost = &cost
 	}
 
 	return obs
 }
 
 func (o cloudInstanceObservability) currentRate() float64 {
-	if !o.HasRate || o.Terminal {
+	if o.Rate == nil || o.Terminal {
 		return 0
 	}
-	return o.Rate
+	return *o.Rate
 }
 
 func formatCloudInstanceMetricParts(obs cloudInstanceObservability) []string {
 	parts := make([]string, 0, 3)
-	if obs.HasUptime {
+	if obs.Uptime != nil {
 		parts = append(parts, "uptime: "+obs.Uptime.String())
 	}
-	if obs.HasCost {
-		parts = append(parts, fmt.Sprintf("cost: $%.2f", obs.Cost))
+	if obs.Cost != nil {
+		parts = append(parts, fmt.Sprintf("cost: $%.2f", *obs.Cost))
 	}
-	if obs.HasRate {
-		parts = append(parts, fmt.Sprintf("rate: $%.2f/hr", obs.Rate))
+	if obs.Rate != nil {
+		parts = append(parts, fmt.Sprintf("rate: $%.2f/hr", *obs.Rate))
 	}
 	return parts
 }
@@ -110,13 +105,17 @@ func summarizeCloudInstances(instances []cloudInstanceView, now time.Time) cloud
 		}
 		agg.Count++
 		obs := observeCloudInstance(view.CloudInstance, view.Instance, now)
-		if obs.HasCost {
-			agg.HasCost = true
-			agg.TotalCost += obs.Cost
+		if obs.Cost != nil {
+			if agg.TotalCost == nil {
+				agg.TotalCost = new(float64)
+			}
+			*agg.TotalCost += *obs.Cost
 		}
-		if obs.HasRate {
-			agg.HasRate = true
-			agg.CurrentRate += obs.currentRate()
+		if obs.Rate != nil {
+			if agg.CurrentRate == nil {
+				agg.CurrentRate = new(float64)
+			}
+			*agg.CurrentRate += obs.currentRate()
 		}
 	}
 	return agg
@@ -124,11 +123,11 @@ func summarizeCloudInstances(instances []cloudInstanceView, now time.Time) cloud
 
 func formatCloudAggregateSummary(label string, agg cloudInstanceAggregate) string {
 	parts := make([]string, 0, 2)
-	if agg.HasCost {
-		parts = append(parts, fmt.Sprintf("cost: $%.2f", agg.TotalCost))
+	if agg.TotalCost != nil {
+		parts = append(parts, fmt.Sprintf("cost: $%.2f", *agg.TotalCost))
 	}
-	if agg.HasRate {
-		parts = append(parts, fmt.Sprintf("current rate: $%.2f/hr", agg.CurrentRate))
+	if agg.CurrentRate != nil {
+		parts = append(parts, fmt.Sprintf("current rate: $%.2f/hr", *agg.CurrentRate))
 	}
 	if len(parts) == 0 {
 		return ""

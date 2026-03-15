@@ -19,7 +19,7 @@ type SingleJobConfig struct {
 	Job            ops.CommandJob
 	LogDir         string
 	WorkingDir     string             // Override job.Dir if non-empty
-	SampleInterval time.Duration      // Default 15s
+	SampleInterval time.Duration      // Default 1s
 	MaxTime        time.Duration      // If >0, kill the job after this duration
 	SkipProbes     bool               // Skip cache size probes (useful in tests)
 	OnPhase        func(phase string) // Called at phase transitions: "setup", "running"
@@ -31,7 +31,11 @@ type SingleJobConfig struct {
 // but without queue/scheduling logic.
 func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	if cfg.SampleInterval == 0 {
-		cfg.SampleInterval = 15 * time.Second
+		cfg.SampleInterval = time.Second
+	}
+	telemetryPolicy := TelemetryPolicyForJob(&cfg.Job)
+	if HasTag(&cfg.Job, "benchmark") && telemetryPolicy.Interval > cfg.SampleInterval {
+		cfg.SampleInterval = telemetryPolicy.Interval
 	}
 
 	job := &cfg.Job
@@ -166,6 +170,8 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	rs.StartedAt = phases.RunStart
 	rs.GPUDevices = gpuDevices
 	rs.GPUMemGB = GetJobGPUMem(job, DefaultGPUMemGB)
+	rs.TelemetryIntervalSeconds = int64(cfg.SampleInterval / time.Second)
+	rs.TelemetryAdvancedGPU = telemetryPolicy.CollectAdvancedGPU
 
 	takeSample := func() bool {
 		if !CheckPIDAlive(proc.PID) {

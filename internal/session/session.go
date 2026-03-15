@@ -76,6 +76,11 @@ func SimpleTimeseriesFile(jobID int64) string {
 	return fmt.Sprintf("%s/%d.timeseries.jsonl", LogDir, jobID)
 }
 
+// SimpleTelemetryFile returns the richer telemetry JSONL file path for a job.
+func SimpleTelemetryFile(jobID int64) string {
+	return fmt.Sprintf("%s/%d.telemetry.jsonl", LogDir, jobID)
+}
+
 // TimeseriesFilePattern returns a glob pattern to find timeseries files for a job ID
 func TimeseriesFilePattern(jobID int64) string {
 	return fmt.Sprintf("%s/%d*.timeseries.jsonl", LogDir, jobID)
@@ -93,7 +98,7 @@ func ArchiveCommand(jobID int64) string {
 	// For each extension, check if file exists and rename it with its mtime
 	// Uses stat to get mtime: stat -c %Y on Linux, stat -f %m on macOS
 	return fmt.Sprintf(`
-		for ext in log status meta pid samples rusage timeseries.jsonl kill_reason heartbeat completion.json; do
+		for ext in log status meta pid samples rusage timeseries.jsonl telemetry.jsonl kill_reason heartbeat completion.json; do
 			f="%s/%d.$ext"
 			if [ -f "$f" ]; then
 				mtime=$(stat -c %%Y "$f" 2>/dev/null || stat -f %%m "$f" 2>/dev/null)

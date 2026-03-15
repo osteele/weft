@@ -50,6 +50,8 @@ func SyncQueueRunnerJobWithProber(
 		CacheCompletedJobLog(job, timeout)
 		// Fetch resource usage data (best-effort)
 		_, _ = updateJobResourceUsage(database, job, timeout)
+		_ = syncJobTimeseries(database, job, timeout)
+		_ = syncJobTelemetry(database, job, timeout)
 		// Clear the current job marker on remote if it matches this job.
 		clearCurrentJobIfMatches(job.Host, job.ID, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil

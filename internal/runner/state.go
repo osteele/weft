@@ -50,6 +50,13 @@ type RunningJobState struct {
 	// Heartbeat / liveness (updated during sampling)
 	LastHeartbeat int64 `json:"last_heartbeat,omitempty"`
 	LastSample    int64 `json:"last_sample,omitempty"`
+
+	// Previous counters for deriving per-sample throughput.
+	TelemetryLastSampleAt    int64  `json:"telemetry_last_sample_at,omitempty"`
+	TelemetryLastReadBytes   uint64 `json:"telemetry_last_read_bytes,omitempty"`
+	TelemetryLastWriteBytes  uint64 `json:"telemetry_last_write_bytes,omitempty"`
+	TelemetryIntervalSeconds int64  `json:"telemetry_interval_seconds,omitempty"`
+	TelemetryAdvancedGPU     bool   `json:"telemetry_advanced_gpu,omitempty"`
 }
 
 // FinishedJobState records terminal state for deduplication.

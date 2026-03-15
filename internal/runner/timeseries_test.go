@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -87,5 +88,39 @@ func TestNewJobPaths_IncludesTimeseries(t *testing.T) {
 	expected := "/tmp/logs/456.timeseries.jsonl"
 	if paths.Timeseries != expected {
 		t.Errorf("expected %s, got %s", expected, paths.Timeseries)
+	}
+	if paths.Telemetry != "/tmp/logs/456.telemetry.jsonl" {
+		t.Errorf("expected telemetry path, got %s", paths.Telemetry)
+	}
+}
+
+func TestWriteTelemetrySample(t *testing.T) {
+	dir := t.TempDir()
+	paths := NewJobPaths(dir, 321)
+
+	sample := TelemetrySample{
+		Ts:           1704067200,
+		ElapsedS:     1,
+		ProcCPUUserS: 0.5,
+		ProcCPUSysS:  0.25,
+		ProcRSSKB:    12345,
+		GPUs: []TelemetryGPUSample{
+			{GPUIndex: "0", GPUName: "RTX 3090", GPUMemUsedMiB: 1024},
+		},
+	}
+	if err := WriteTelemetrySample(paths, sample); err != nil {
+		t.Fatalf("WriteTelemetrySample: %v", err)
+	}
+
+	data, err := os.ReadFile(paths.Telemetry)
+	if err != nil {
+		t.Fatalf("read telemetry: %v", err)
+	}
+	var parsed TelemetrySample
+	if err := json.Unmarshal(bytes.TrimSpace(data), &parsed); err != nil {
+		t.Fatalf("unmarshal telemetry: %v", err)
+	}
+	if parsed.ProcRSSKB != 12345 || len(parsed.GPUs) != 1 || parsed.GPUs[0].GPUIndex != "0" {
+		t.Fatalf("parsed telemetry = %+v", parsed)
 	}
 }

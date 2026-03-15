@@ -53,8 +53,11 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 
 		// Write .started marker to R2
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", time.Now().Unix()))
-		timeseriesPath := runner.NewJobPaths(cfg.LogDir, job.ID).Timeseries
+		paths := runner.NewJobPaths(cfg.LogDir, job.ID)
+		timeseriesPath := paths.Timeseries
+		telemetryPath := paths.Telemetry
 		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, timeseriesPath)
+		stopTelemetryUploader := startTelemetryUploader(cfg.R2Bucket, job.ID, job.RunID, telemetryPath)
 
 		workDir := job.Dir
 
@@ -67,7 +70,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		jobCfg := runner.SingleJobConfig{
 			JobID: job.ID,
 			Job: ops.CommandJob{
-				Cmd: job.Command,
+				Cmd:  job.Command,
+				Tags: append([]string(nil), job.Tags...),
 			},
 			LogDir:     cfg.LogDir,
 			WorkingDir: workDir,
@@ -139,7 +143,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			fmt.Fprintf(os.Stderr, "patch phase timing for job %d: upload end: %v\n", job.ID, err)
 		}
 		stopTimeseriesUploader()
+		stopTelemetryUploader()
 		r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
+		r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
 
 		// Promote uv manifest
 		promoteUVManifest(cfg.R2Bucket, cfg.LogDir)

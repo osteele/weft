@@ -9,8 +9,9 @@ import (
 
 // JobMetadata stores optional derived or cached metadata for a job.
 type JobMetadata struct {
-	CPU      *JobCPUStats   `json:"cpu,omitempty"`
-	Resource *ResourceUsage `json:"resource,omitempty"`
+	CPU       *JobCPUStats         `json:"cpu,omitempty"`
+	Resource  *ResourceUsage       `json:"resource,omitempty"`
+	Telemetry *JobTelemetrySummary `json:"telemetry,omitempty"`
 }
 
 // ResourceUsage stores resource consumption captured when a job completes.
@@ -29,6 +30,28 @@ type JobCPUStats struct {
 	Mean    *float64 `json:"mean,omitempty"`
 	Stddev  *float64 `json:"stddev,omitempty"`
 	Samples int      `json:"samples,omitempty"`
+}
+
+// JobTelemetrySummary stores derived summary telemetry for a completed job run.
+type JobTelemetrySummary struct {
+	WallDurationS      float64                     `json:"wall_duration_s,omitempty"`
+	ProcCPUUserSFinal  float64                     `json:"proc_cpu_user_s_final,omitempty"`
+	ProcCPUSysSFinal   float64                     `json:"proc_cpu_sys_s_final,omitempty"`
+	CPUCoreSeconds     float64                     `json:"cpu_core_seconds,omitempty"`
+	MeanCPUCores       float64                     `json:"mean_cpu_cores,omitempty"`
+	MaxRSSKB           int64                       `json:"max_rss_kb,omitempty"`
+	AssignedGPUIndices []string                    `json:"assigned_gpu_indices,omitempty"`
+	GPUs               []JobTelemetryDeviceSummary `json:"gpus,omitempty"`
+}
+
+// JobTelemetryDeviceSummary stores per-device derived telemetry.
+type JobTelemetryDeviceSummary struct {
+	GPUIndex          string   `json:"gpu_index"`
+	GPUName           string   `json:"gpu_name,omitempty"`
+	GPUActiveSeconds  float64  `json:"gpu_active_seconds,omitempty"`
+	GPUMeanUtilPct    *float64 `json:"gpu_mean_util_pct,omitempty"`
+	GPUMeanMemUtilPct *float64 `json:"gpu_mean_mem_util_pct,omitempty"`
+	GPUPeakMemMiB     int      `json:"gpu_peak_mem_mib,omitempty"`
 }
 
 func decodeJobMetadata(value sql.NullString) *JobMetadata {

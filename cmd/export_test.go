@@ -47,11 +47,29 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 		Resource: &db.ResourceUsage{
 			PeakRSSKB:    int64Ptr(123456),
 			MaxGPUMemMiB: int64Ptr(8192),
+			GPUDevices:   "0",
 		},
 		CPU: &db.JobCPUStats{Mean: float64Ptr(12.5)},
+		Telemetry: &db.JobTelemetrySummary{
+			WallDurationS:      42,
+			CPUCoreSeconds:     10.5,
+			AssignedGPUIndices: []string{"0"},
+		},
 	}
 	if err := db.SetJobMetadata(database, jobID, meta); err != nil {
 		t.Fatalf("SetJobMetadata: %v", err)
+	}
+	if err := db.InsertTelemetrySamples(database, jobID, []db.TelemetrySample{{
+		Ts:           1700000000,
+		ElapsedS:     1,
+		ProcCPUUserS: 1.0,
+		ProcCPUSysS:  0.5,
+		ProcRSSKB:    1024,
+		GPUs: []db.TelemetryGPUSample{
+			{GPUIndex: "0", GPUName: "RTX 3090", GPUMemUsedMiB: 2048},
+		},
+	}}); err != nil {
+		t.Fatalf("InsertTelemetrySamples: %v", err)
 	}
 	if err := db.RecordCompletionByID(database, jobID, 0, job.StartTime+42); err != nil {
 		t.Fatalf("RecordCompletionByID: %v", err)
@@ -96,6 +114,12 @@ func TestExportTrainingDataIncludesHostSpecsAndRunTiming(t *testing.T) {
 	}
 	if rec.PeakRSSKB != 123456 || rec.MaxGPUMiB != 8192 || rec.CPUMean != 12.5 {
 		t.Fatalf("record resources = %+v", rec)
+	}
+	if len(rec.AssignedGPUIndices) != 1 || rec.AssignedGPUIndices[0] != "0" {
+		t.Fatalf("assigned gpus = %+v", rec.AssignedGPUIndices)
+	}
+	if rec.TelemetryV2 == nil || rec.TelemetryV2.Summary == nil || len(rec.TelemetryV2.Samples) != 1 {
+		t.Fatalf("telemetry_v2 = %+v", rec.TelemetryV2)
 	}
 	if rec.HostSpecs == nil {
 		t.Fatalf("host specs missing")

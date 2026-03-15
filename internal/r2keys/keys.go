@@ -71,6 +71,10 @@ func JobLiveTimeseries(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/timeseries.jsonl", jobID)
 }
 
+func JobLiveTelemetry(jobID int64) string {
+	return fmt.Sprintf("jobs/%d/telemetry.jsonl", jobID)
+}
+
 func JobPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d", jobID)
 }
@@ -150,6 +154,13 @@ func JobAttemptLiveTimeseries(jobID, runID int64) string {
 		return JobLiveTimeseries(jobID)
 	}
 	return fmt.Sprintf("%s/timeseries.jsonl", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptLiveTelemetry(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobLiveTelemetry(jobID)
+	}
+	return fmt.Sprintf("%s/telemetry.jsonl", JobRunPrefix(jobID, runID))
 }
 
 // Grace period keys

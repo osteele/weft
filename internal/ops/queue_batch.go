@@ -180,6 +180,9 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				if err := syncJobTimeseries(database, job, timeout); err != nil {
 					log.Printf("sync: failed to sync timeseries for job %d: %v", job.ID, err)
 				}
+				if err := syncJobTelemetry(database, job, timeout); err != nil {
+					log.Printf("sync: failed to sync telemetry for job %d: %v", job.ID, err)
+				}
 				updated++
 			}
 		}

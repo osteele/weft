@@ -470,6 +470,16 @@ func startOpslogReporter(bucket string, instanceID int64, logDir string) func() 
 // startTimeseriesUploader starts a goroutine that periodically uploads the
 // local timeseries JSONL file to a live R2 checkpoint key.
 func startTimeseriesUploader(bucket string, jobID, runID int64, timeseriesPath string) func() {
+	return startFileUploader(bucket, jobID, timeseriesPath, r2keys.JobAttemptLiveTimeseries(jobID, runID), "live timeseries")
+}
+
+// startTelemetryUploader starts a goroutine that periodically uploads the
+// richer telemetry JSONL file to a live R2 checkpoint key.
+func startTelemetryUploader(bucket string, jobID, runID int64, telemetryPath string) func() {
+	return startFileUploader(bucket, jobID, telemetryPath, r2keys.JobAttemptLiveTelemetry(jobID, runID), "live telemetry")
+}
+
+func startFileUploader(bucket string, jobID int64, filePath, key, detail string) func() {
 	var once sync.Once
 	done := make(chan struct{})
 	stopped := make(chan struct{})
@@ -479,7 +489,7 @@ func startTimeseriesUploader(bucket string, jobID, runID int64, timeseriesPath s
 	}
 
 	upload := func() {
-		info, err := os.Stat(timeseriesPath)
+		info, err := os.Stat(filePath)
 		if err != nil || info.Size() == 0 {
 			return
 		}
@@ -487,18 +497,18 @@ func startTimeseriesUploader(bucket string, jobID, runID int64, timeseriesPath s
 		start := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, "rclone", "copyto",
-			timeseriesPath, fmt.Sprintf("r2:%s/%s", bucket, r2keys.JobAttemptLiveTimeseries(jobID, runID)))
+			filePath, fmt.Sprintf("r2:%s/%s", bucket, key))
 		cmd.Stderr = os.Stderr
 		err = cmd.Run()
 		cancel()
 		if err != nil {
 			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-				oplog.WithDetail("live timeseries"), oplog.WithError(err),
+				oplog.WithDetail(detail), oplog.WithError(err),
 				oplog.WithDuration(time.Since(start)))
 			return
 		}
 		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-			oplog.WithDetail("live timeseries"), oplog.WithDuration(time.Since(start)))
+			oplog.WithDetail(detail), oplog.WithDuration(time.Since(start)))
 	}
 
 	go func() {

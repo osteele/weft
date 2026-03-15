@@ -260,14 +260,14 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		obs := observeCloudInstance(ci, inst, time.Now())
-		if obs.HasUptime {
-			fmt.Printf("  Uptime:   %s\n", obs.Uptime)
+		if obs.Uptime != nil {
+			fmt.Printf("  Uptime:   %s\n", *obs.Uptime)
 		}
-		if obs.HasCost {
-			fmt.Printf("  Cost:     $%.2f\n", obs.Cost)
+		if obs.Cost != nil {
+			fmt.Printf("  Cost:     $%.2f\n", *obs.Cost)
 		}
-		if obs.HasRate {
-			fmt.Printf("  Rate:     $%.2f/hr\n", obs.Rate)
+		if obs.Rate != nil {
+			fmt.Printf("  Rate:     $%.2f/hr\n", *obs.Rate)
 		}
 		// Jobs
 		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)

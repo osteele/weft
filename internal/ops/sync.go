@@ -298,6 +298,8 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 		CacheCompletedJobLog(job, timeout)
 		// Fetch resource usage data (best-effort)
 		_, _ = updateJobResourceUsage(database, job, timeout)
+		_ = syncJobTimeseries(database, job, timeout)
+		_ = syncJobTelemetry(database, job, timeout)
 		return SyncResult{Updated: true, HostContacted: true}, nil
 	}
 
