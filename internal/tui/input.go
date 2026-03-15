@@ -13,6 +13,8 @@ import (
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/logfiles"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/placement"
+	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -64,6 +66,9 @@ func (m Model) createJob() tea.Cmd {
 		if cpuErr != nil {
 			return jobCreatedMsg{err: cpuErr}
 		}
+		predCfg := placement.PredictorConfigFromApp(m.appConfig)
+		projectName := db.DeriveProject(workingDir, command)
+		gpuMemGB, _ := predictor.ResolveGPUMemGB(predCfg, nil, gpuInput != "", host, projectName, "", command, ops.DefaultGPUMemGB)
 		params := ops.QueueJobParams{
 			Host:         host,
 			WorkingDir:   workingDir,
@@ -71,6 +76,7 @@ func (m Model) createJob() tea.Cmd {
 			Description:  description,
 			EnvVars:      envVars,
 			CPUAllotment: cpuAllotment,
+			GPUMemGB:     gpuMemGB,
 		}
 		if _, relayClient, err := m.coordinatorRelay(); err != nil {
 			return jobCreatedMsg{err: err}

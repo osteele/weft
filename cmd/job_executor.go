@@ -50,10 +50,6 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 
 	// Always queue — the sync worker / queue runner handles actual execution.
 	gpu := extractGPUFromEnvVars(opts.EnvVars)
-	gpuMem := opts.GPUMemGB
-	if gpuMem == nil {
-		gpuMem = resolveGPUMemGB(0, gpu, "")
-	}
 	res, err := queueJob(database, queueJobOptions{
 		Host:        opts.Host,
 		WorkingDir:  opts.WorkingDir,
@@ -62,7 +58,7 @@ func startJob(database *sql.DB, opts startJobOptions) (*startJobResult, error) {
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
 		GPU:         gpu,
-		GPUMemGB:    gpuMem,
+		GPUMemGB:    opts.GPUMemGB,
 	})
 	if err != nil {
 		return nil, err
@@ -157,6 +153,12 @@ func extractGPUFromEnvVars(envVars []string) string {
 // queueJob records a job locally via RecordQueuedJob (DB-only, no SSH).
 // The caller is responsible for calling syncAndReportOffline to push to the remote.
 func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
+	gpu := opts.GPU
+	if gpu == "" {
+		gpu = extractGPUFromEnvVars(opts.EnvVars)
+	}
+	gpuMemGB, _ := resolveEffectiveGPUMem(opts.GPUMemGB, gpu, opts.GPUClass, opts.Host, opts.Project, opts.Command)
+
 	params := ops.QueueJobParams{
 		Host:        opts.Host,
 		WorkingDir:  opts.WorkingDir,
@@ -165,9 +167,9 @@ func queueJob(database *sql.DB, opts queueJobOptions) (*queueJobResult, error) {
 		Project:     opts.Project,
 		EnvVars:     opts.EnvVars,
 		Tags:        opts.Tags,
-		GPU:         opts.GPU,
+		GPU:         gpu,
 		GPUClass:    opts.GPUClass,
-		GPUMemGB:    opts.GPUMemGB,
+		GPUMemGB:    gpuMemGB,
 		DepSpec:     encodeQueueDependencies(opts.Dependencies),
 		Inputs:      opts.Inputs,
 		Outputs:     opts.Outputs,

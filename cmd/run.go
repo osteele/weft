@@ -338,14 +338,25 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	gpu := extractGPUFromEnvVars(runEnvVars)
+	gpuClass := runGPUClass
+	// Non-numeric GPU env values are treated as class names.
+	if gpu != "" && !isNumericGPU(gpu) {
+		gpuClass = gpu
+		gpu = ""
+	}
+	resolvedGPUMemGB, _ := resolveEffectiveGPUMemWithConfig(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, host, projectName, command)
+
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
-		GPUClass: runGPUClass,
-		GPUMemGB: runGPUMem,
+		GPUClass: gpuClass,
 		Inputs:   runInputs,
 		Command:  command,
 		Project:  projectName,
 		Tags:     runTags,
+	}
+	if resolvedGPUMemGB != nil {
+		placementConstraints.GPUMemGB = *resolvedGPUMemGB
 	}
 
 	// Build predictor closure if configured
@@ -417,8 +428,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Project:     projectName,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
-			GPUClass:    runGPUClass,
-			GPUMemGB:    intPtrOrNil(runGPUMem),
+			GPUClass:    gpuClass,
+			GPUMemGB:    resolvedGPUMemGB,
 			DepSpec:     encodeQueueDependencies(buildRunDependencies()),
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
@@ -477,8 +488,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Project:     projectName,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
-			GPUClass:    runGPUClass,
-			GPUMemGB:    intPtrOrNil(runGPUMem),
+			GPUClass:    gpuClass,
+			GPUMemGB:    resolvedGPUMemGB,
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
@@ -567,7 +578,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Project:     projectName,
 			EnvVars:     runEnvVars,
 			Tags:        runTags,
-			GPUClass:    runGPUClass,
+			GPUClass:    gpuClass,
+			GPUMemGB:    resolvedGPUMemGB,
 			Inputs:      runInputs,
 			Outputs:     runOutputs,
 			OutputDirs:  outputDirs,
@@ -589,7 +601,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	oplog.Log(oplog.OpCLICommand, oplog.WithHost(host), oplog.WithDetailf("run mode=queue cmd=%s", command))
 
 	if runDraft {
-		gpu := extractGPUFromEnvVars(runEnvVars)
 		jobID, err := db.RecordDraftJobWithGPU(database, host, workingDir, command, runDescription, gpu)
 		if err != nil {
 			return fmt.Errorf("record draft job: %w", err)
@@ -604,6 +615,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if err := db.SetJobTags(database, jobID, runTags); err != nil {
 			return fmt.Errorf("set job tags: %w", err)
 		}
+		if gpuClass != "" {
+			if err := db.SetJobGPUClass(database, jobID, gpuClass); err != nil {
+				return fmt.Errorf("set GPU class: %w", err)
+			}
+		}
+		if resolvedGPUMemGB != nil {
+			if err := db.SetJobGPUMemGB(database, jobID, resolvedGPUMemGB); err != nil {
+				return fmt.Errorf("set GPU memory: %w", err)
+			}
+		}
 		if projectName != "" {
 			if err := db.SetJobProject(database, jobID, projectName); err != nil {
 				return fmt.Errorf("set project: %w", err)
@@ -617,16 +638,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
-
-	// Resolve GPU, GPU class, and GPU memory reservation
-	gpu := extractGPUFromEnvVars(runEnvVars)
-	gpuClass := runGPUClass
-	// Non-numeric --gpu values (e.g., "A100") are treated as GPU class names
-	if gpu != "" && !isNumericGPU(gpu) {
-		gpuClass = gpu
-		gpu = ""
-	}
-	gpuMemGB := resolveGPUMemGB(runGPUMem, gpu, gpuClass)
 
 	// Handle --after/--depends-on and --after-any dependencies (always uses remote queue)
 	if runAfter > 0 || runAfterAny > 0 {
@@ -656,7 +667,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			Tags:         runTags,
 			GPU:          gpu,
 			GPUClass:     gpuClass,
-			GPUMemGB:     gpuMemGB,
+			GPUMemGB:     resolvedGPUMemGB,
 			Dependencies: deps,
 			AutoStart:    true,
 			Inputs:       runInputs,

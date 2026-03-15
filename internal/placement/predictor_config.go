@@ -5,23 +5,29 @@ import (
 	"github.com/osteele/weft/internal/predictor"
 )
 
-// BuildJobPredictorFromConfig creates a JobPredictor from the app config and constraints.
-// Returns nil if the predictor is not configured or no command is set.
-func BuildJobPredictorFromConfig(cfg *config.Config, c Constraints) JobPredictor {
+// PredictorConfigFromApp builds a predictor.Config from the app config.
+// Returns a zero Config if cfg is nil.
+func PredictorConfigFromApp(cfg *config.Config) predictor.Config {
 	if cfg == nil {
-		return nil
+		return predictor.Config{}
 	}
-	pcfg := predictor.BuildConfig(
+	return predictor.BuildConfig(
 		cfg.Predictor.ProjectPath,
 		cfg.Predictor.ModelDir,
 		cfg.Predictor.RetrainInterval,
 		cfg.Predictor.DBPaths,
 	)
+}
+
+// BuildJobPredictorFromConfig creates a JobPredictor from the app config and constraints.
+// Returns nil if the predictor is not configured or no command is set.
+func BuildJobPredictorFromConfig(cfg *config.Config, c Constraints) JobPredictor {
+	pcfg := PredictorConfigFromApp(cfg)
 	if !pcfg.Configured() || c.Command == "" {
 		return nil
 	}
 	return NewJobPredictor(func(host string) *RawPrediction {
-		result, err := predictor.Predict(pcfg, host, c.Project, c.GPUClass, c.Command)
+		result, err := predictor.ResolvePredict(pcfg, host, c.Project, c.GPUClass, c.Command)
 		if err != nil {
 			return nil
 		}

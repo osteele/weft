@@ -379,6 +379,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	if queueDraft {
 		gpu := extractGPUFromEnvVars(queueEnvVars)
+		gpuMemGB, _ := resolveEffectiveGPUMem(nil, gpu, "", host, projectName, command)
 		depSpec := encodeQueueDependencies(deps)
 		jobID, err := db.RecordDraftJob(database, host, workingDir, command, queueDescription, gpu, depSpec)
 		if err != nil {
@@ -399,6 +400,12 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 			if err := db.SetJobTags(database, jobID, queueTags); err != nil {
 				db.DeleteJob(database, jobID)
 				return fmt.Errorf("record draft tags: %w", err)
+			}
+		}
+		if gpuMemGB != nil {
+			if err := db.SetJobGPUMemGB(database, jobID, gpuMemGB); err != nil {
+				db.DeleteJob(database, jobID)
+				return fmt.Errorf("record draft GPU memory: %w", err)
 			}
 		}
 		if projectName != "" {

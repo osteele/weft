@@ -12,6 +12,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudsync"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
@@ -87,6 +88,7 @@ type SyncWorker struct {
 	database     *sql.DB
 	cloudClients []cloud.Client
 	r2Client     *r2.Client
+	appConfig    *config.Config
 	requests     chan SyncRequest
 	results      chan SyncResult
 
@@ -105,12 +107,13 @@ type SyncWorker struct {
 }
 
 // NewSyncWorker creates a new sync worker
-func NewSyncWorker(database *sql.DB, cloudClients []cloud.Client, r2Client *r2.Client) *SyncWorker {
+func NewSyncWorker(database *sql.DB, cloudClients []cloud.Client, r2Client *r2.Client, appConfig *config.Config) *SyncWorker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &SyncWorker{
 		database:     database,
 		cloudClients: cloudClients,
 		r2Client:     r2Client,
+		appConfig:    appConfig,
 		requests:     make(chan SyncRequest, 100),
 		results:      make(chan SyncResult, 100),
 		hostState:    make(map[string]*hostSyncState),
@@ -204,13 +207,16 @@ func (w *SyncWorker) checkUnplacedJobs() {
 		constraints := placement.Constraints{
 			GPUClass: j.GPUClass,
 			Inputs:   j.Inputs,
+			Command:  j.Command,
+			Project:  j.Project,
 			Tags:     j.Tags,
 		}
 		if j.GPUMemGB != nil {
 			constraints.GPUMemGB = *j.GPUMemGB
 		}
 
-		result, err := placement.PlaceWithFallback(w.database, constraints, nil)
+		predict := placement.BuildJobPredictorFromConfig(w.appConfig, constraints)
+		result, err := placement.PlaceWithFallback(w.database, constraints, predict)
 		if err != nil {
 			continue
 		}

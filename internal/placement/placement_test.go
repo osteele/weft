@@ -229,6 +229,81 @@ func TestScoreHosts_CombinedConstraints(t *testing.T) {
 	}
 }
 
+func TestPlaceWithFallback_ReachableHostsUsePredictor(t *testing.T) {
+	db := setupTestDB(t)
+
+	oldLoadHosts := loadHosts
+	oldCollectMetrics := collectMetrics
+	t.Cleanup(func() {
+		loadHosts = oldLoadHosts
+		collectMetrics = oldCollectMetrics
+	})
+
+	loadHosts = func() ([]inventory.HostSpec, error) {
+		return testHosts(), nil
+	}
+	collectMetrics = func(*sql.DB, []string, time.Duration) map[string]*HostMetrics {
+		return map[string]*HostMetrics{
+			"host-alpha": {CPUPercent: 5, GPUPercent: 5},
+			"host-beta":  {CPUPercent: 5, GPUPercent: 5},
+			"host-gamma": {CPUPercent: 5, GPUPercent: 5},
+		}
+	}
+
+	predict := NewJobPredictor(func(host string) *RawPrediction {
+		switch host {
+		case "host-beta":
+			return &RawPrediction{
+				DurationS: &RawPredictionField{Mean: 60, Lower: 50, Upper: 70},
+			}
+		default:
+			return &RawPrediction{
+				DurationS: &RawPredictionField{Mean: 600, Lower: 500, Upper: 700},
+			}
+		}
+	})
+
+	result, err := PlaceWithFallback(db, Constraints{Command: "python train.py", Project: "proj"}, predict)
+	if err != nil {
+		t.Fatalf("PlaceWithFallback: %v", err)
+	}
+	if result.Host != "host-beta" {
+		t.Fatalf("PlaceWithFallback selected %s, want host-beta", result.Host)
+	}
+}
+
+func TestPlaceWithFallback_ReachableHostsApplyPredictedGPUMemFit(t *testing.T) {
+	db := setupTestDB(t)
+
+	oldLoadHosts := loadHosts
+	oldCollectMetrics := collectMetrics
+	t.Cleanup(func() {
+		loadHosts = oldLoadHosts
+		collectMetrics = oldCollectMetrics
+	})
+
+	loadHosts = func() ([]inventory.HostSpec, error) {
+		return []inventory.HostSpec{testHosts()[1]}, nil // host-beta: 24GB
+	}
+	collectMetrics = func(*sql.DB, []string, time.Duration) map[string]*HostMetrics {
+		return map[string]*HostMetrics{
+			"host-beta": {CPUPercent: 5, GPUPercent: 5},
+		}
+	}
+
+	predict := NewJobPredictor(func(host string) *RawPrediction {
+		return &RawPrediction{
+			DurationS:    &RawPredictionField{Mean: 60, Lower: 50, Upper: 70},
+			MaxGPUMemMiB: &RawPredictionField{Mean: 30 * 1024, Lower: 28 * 1024, Upper: 32 * 1024},
+		}
+	})
+
+	_, err := PlaceWithFallback(db, Constraints{GPUClass: "rtx3090", Command: "python train.py", Project: "proj"}, predict)
+	if !errors.Is(err, ErrNoEligibleHost) {
+		t.Fatalf("PlaceWithFallback err = %v, want ErrNoEligibleHost", err)
+	}
+}
+
 func TestBestHost_NoConstraints(t *testing.T) {
 	inventory.UseTestHosts(t)
 	db := setupTestDB(t)

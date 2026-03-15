@@ -401,7 +401,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 			}
 		}
 	}
-	model.syncWorker = NewSyncWorker(database, model.cloudClients, r2Client)
+	model.syncWorker = NewSyncWorker(database, model.cloudClients, r2Client, model.appConfig)
 	model.syncWorker.Start()
 
 	return model

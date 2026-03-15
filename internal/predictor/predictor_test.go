@@ -2,6 +2,7 @@ package predictor
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -231,6 +232,76 @@ func TestNeedsRetrain(t *testing.T) {
 		// 100 current - 80 trained = 20, which is < 50
 		if NeedsRetrain(cfg, 100) {
 			t.Error("expected NeedsRetrain=false for fresh meta")
+		}
+	})
+}
+
+func TestPredictedGPUMemGB(t *testing.T) {
+	memGB, ok := PredictedGPUMemGB(&Prediction{Upper: 2050})
+	if !ok {
+		t.Fatal("expected prediction to convert")
+	}
+	if memGB != 3 {
+		t.Fatalf("PredictedGPUMemGB upper=2050MiB = %d, want 3", memGB)
+	}
+}
+
+func TestResolveGPUMemGB(t *testing.T) {
+	original := predictFunc
+	t.Cleanup(func() { predictFunc = original })
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator"}
+
+	t.Run("explicit value wins", func(t *testing.T) {
+		explicit := 48
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return nil, fmt.Errorf("should not be called")
+		}
+		got, estimated := ResolveGPUMemGB(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20)
+		if got == nil || *got != 48 {
+			t.Fatalf("ResolveGPUMemGB explicit = %v, want 48", got)
+		}
+		if estimated {
+			t.Fatalf("expected explicit reservation to report estimated=false")
+		}
+	})
+
+	t.Run("predictor upper bound is rounded up", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: 2050}}, nil
+		}
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20)
+		if got == nil || *got != 3 {
+			t.Fatalf("ResolveGPUMemGB predicted = %v, want 3", got)
+		}
+		if !estimated {
+			t.Fatalf("expected predictor-backed reservation to report estimated=true")
+		}
+	})
+
+	t.Run("prediction fallback uses default reservation", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{}, nil
+		}
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20)
+		if got == nil || *got != 20 {
+			t.Fatalf("ResolveGPUMemGB fallback = %v, want 20", got)
+		}
+		if estimated {
+			t.Fatalf("expected fallback reservation to report estimated=false")
+		}
+	})
+
+	t.Run("cpu jobs keep nil reservation", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return nil, fmt.Errorf("should not be called")
+		}
+		got, estimated := ResolveGPUMemGB(cfg, nil, false, "", "proj", "", "echo hi", 20)
+		if got != nil {
+			t.Fatalf("ResolveGPUMemGB cpu job = %v, want nil", *got)
+		}
+		if estimated {
+			t.Fatalf("expected cpu job reservation to report estimated=false")
 		}
 	})
 }

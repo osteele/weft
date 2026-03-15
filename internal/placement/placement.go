@@ -28,6 +28,9 @@ var ErrNoReachableHost = errors.New("no eligible host is reachable")
 // ErrNoEligibleHost is returned when no host in the inventory satisfies the job constraints.
 var ErrNoEligibleHost = errors.New("no eligible host found")
 
+var loadHosts = inventory.LoadHosts
+var collectMetrics = CollectMetrics
+
 // Constraints describes hard requirements for a job placement.
 type Constraints struct {
 	GPUClass string   // Required GPU class (e.g., "a100"); empty = no preference
@@ -156,7 +159,7 @@ func ScoreHosts(db *sql.DB, constraints Constraints) ([]Score, error) {
 // ScoreHostsWithMetrics evaluates hosts with optional live utilization data.
 // The metrics map is keyed by host name. Nil or missing entries are skipped.
 func ScoreHostsWithMetrics(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics) ([]Score, error) {
-	hosts, err := inventory.LoadHosts()
+	hosts, err := loadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
 	}
@@ -173,7 +176,7 @@ func ScoreHostListWithMetrics(db *sql.DB, hosts []inventory.HostSpec, constraint
 
 // ScoreHostsWithPredictor evaluates hosts with optional predictor and metrics.
 func ScoreHostsWithPredictor(db *sql.DB, constraints Constraints, metrics map[string]*HostMetrics, predict JobPredictor) ([]Score, error) {
-	hosts, err := inventory.LoadHosts()
+	hosts, err := loadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
 	}
@@ -286,8 +289,14 @@ func bestFromScores(scores []Score, constraints Constraints, metrics map[string]
 // scores them with utilization data, and returns the highest-scored reachable host.
 // Returns ErrNoReachableHost if no eligible host responds.
 func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Duration) (*PlacementResult, error) {
+	return BestReachableHostWithPredictor(db, constraints, probeTimeout, nil)
+}
+
+// BestReachableHostWithPredictor returns the best eligible reachable host using
+// live metrics and optional predictor-based resource scoring.
+func BestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTimeout time.Duration, predict JobPredictor) (*PlacementResult, error) {
 	// First pass: static scoring to determine eligible hosts
-	hosts, err := inventory.LoadHosts()
+	hosts, err := loadHosts()
 	if err != nil {
 		return nil, fmt.Errorf("load inventory: %w", err)
 	}
@@ -303,7 +312,7 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 	}
 
 	// Collect live metrics (also proves reachability)
-	metrics := CollectMetrics(db, eligible, probeTimeout)
+	metrics := collectMetrics(db, eligible, probeTimeout)
 	if len(metrics) == 0 {
 		return nil, ErrNoReachableHost
 	}
@@ -317,11 +326,17 @@ func BestReachableHost(db *sql.DB, constraints Constraints, probeTimeout time.Du
 		}
 	}
 
-	// Re-score with live metrics
-	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
-	if err != nil {
-		return nil, err
+	reachableHosts := make([]inventory.HostSpec, 0, len(hosts))
+	for _, h := range hosts {
+		if metrics[h.Name] != nil {
+			reachableHosts = append(reachableHosts, h)
+		}
 	}
+	if len(reachableHosts) == 0 {
+		return nil, ErrNoReachableHost
+	}
+
+	scores := ScoreHostListWithPredictor(db, reachableHosts, constraints, metrics, predict)
 
 	for _, s := range scores {
 		if s.Eligible && metrics[s.Host] != nil {
@@ -346,7 +361,7 @@ func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPre
 		return nil, ErrNoEligibleHost
 	}
 
-	result, err := BestReachableHost(database, constraints, 5*time.Second)
+	result, err := BestReachableHostWithPredictor(database, constraints, 5*time.Second, predict)
 	if err == nil {
 		return result, nil
 	}

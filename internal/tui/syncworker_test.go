@@ -32,7 +32,7 @@ func TestIntegration_SyncWorkerRecordsSyncTimeOnSuccess(t *testing.T) {
 	_, _ = database.Exec(`DELETE FROM host_syncs WHERE name = ?`, host)
 
 	// Create a sync worker
-	worker := NewSyncWorker(database, nil, nil)
+	worker := NewSyncWorker(database, nil, nil, nil)
 	worker.Start()
 	defer worker.Stop()
 
@@ -80,7 +80,7 @@ func TestSyncWorkerNoJobsNoSyncTime(t *testing.T) {
 	_, _ = database.Exec(`DELETE FROM host_syncs WHERE name = ?`, testHost)
 
 	// Create a sync worker
-	worker := NewSyncWorker(database, nil, nil)
+	worker := NewSyncWorker(database, nil, nil, nil)
 	worker.Start()
 	defer worker.Stop()
 

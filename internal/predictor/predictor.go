@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,13 @@ type Meta struct {
 	JobCount  int            `json:"job_count"`
 	DBPaths   []string       `json:"db_paths"`
 	Models    map[string]any `json:"models"`
+}
+
+var predictFunc = Predict
+
+// ResolvePredict routes prediction calls through the package test seam.
+func ResolvePredict(cfg Config, host, project, gpuClass, command string) (*Result, error) {
+	return predictFunc(cfg, host, project, gpuClass, command)
 }
 
 // Configured returns true if the predictor has a project path set.
@@ -239,11 +247,45 @@ func EnsureAndPredict(cfg Config, currentJobCount int, host, project, gpuClass, 
 			return nil
 		}
 	}
-	result, err := Predict(cfg, host, project, gpuClass, command)
+	result, err := predictFunc(cfg, host, project, gpuClass, command)
 	if err != nil {
 		return nil
 	}
 	return result
+}
+
+// PredictedGPUMemGB converts a max_gpu_mem_mib prediction into a whole-GiB
+// reservation using the prediction's upper bound.
+func PredictedGPUMemGB(p *Prediction) (int, bool) {
+	if p == nil || p.Upper <= 0 {
+		return 0, false
+	}
+	return int(math.Ceil(p.Upper / 1024.0)), true
+}
+
+// ResolveGPUMemGB returns the effective GPU memory reservation for a job.
+// Explicit reservations win. Otherwise, predictor output is used when available,
+// falling back to fallbackGB for GPU jobs.
+func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int) (*int, bool) {
+	if explicit != nil {
+		return explicit, false
+	}
+	if !needsGPU {
+		return nil, false
+	}
+	if cfg.Configured() && command != "" {
+		result, err := predictFunc(cfg, host, project, gpuClass, command)
+		if err == nil && result != nil {
+			if memGB, ok := PredictedGPUMemGB(result.MaxGPUMemMiB); ok {
+				return &memGB, true
+			}
+		}
+	}
+	if fallbackGB <= 0 {
+		return nil, false
+	}
+	memGB := fallbackGB
+	return &memGB, false
 }
 
 // FormatDuration formats a duration prediction as a human-readable string.
