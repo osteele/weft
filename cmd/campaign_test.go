@@ -209,7 +209,7 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	_, err = database.Exec(
 		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
 		 VALUES (1, ?, ?, 0, ?, 'python train.py', '/tmp')`,
-		preemptedID, db.CloudInstanceHost(preemptedID), db.StatusQueued,
+		preemptedID, "", db.StatusQueued,
 	)
 	if err != nil {
 		t.Fatalf("insert orphaned job: %v", err)
@@ -246,7 +246,7 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	_, err = database.Exec(
 		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason, error_diagnosis)
 		 VALUES (2, ?, ?, 0, ?, 'python train.py', '/tmp', ?, ?)`,
-		jobFailureID, db.CloudInstanceHost(jobFailureID), db.StatusFailed, "gpu_oom", diagJSON,
+		jobFailureID, "", db.StatusFailed, "gpu_oom", diagJSON,
 	)
 	if err != nil {
 		t.Fatalf("insert failed job: %v", err)

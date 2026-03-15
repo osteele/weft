@@ -130,6 +130,15 @@ func (c *CloudInstance) IsTerminal() bool {
 		c.Status == CloudInstanceStatusCancelled
 }
 
+// HasActiveTerminationIntent reports whether the instance has started a
+// terminal self-destruct flow that has not yet succeeded.
+func (c *CloudInstance) HasActiveTerminationIntent() bool {
+	if c == nil || c.TerminationIntent == nil {
+		return false
+	}
+	return c.TerminationIntent.TerminalStatus != "" && c.TerminationIntent.DestroySucceededAtUnix == 0
+}
+
 // EffectiveProviderID returns ProviderInstanceID, falling back to VastaiInstanceID for legacy records.
 func (c *CloudInstance) EffectiveProviderID() string {
 	if c.ProviderInstanceID != "" {
@@ -433,51 +442,42 @@ func SetJobCampaignIndex(db *sql.DB, jobID int64, index int) error {
 
 // GetCloudInstanceJobs returns all jobs associated with a cloud instance.
 func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
-	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE cloud_instance_id = ? AND tombstoned = 0 ORDER BY id ASC"
+	query := "SELECT " + qualifiedJobSelectColumns("job_effective_state") + " FROM job_effective_state WHERE cloud_instance_id = ? AND tombstoned = 0 ORDER BY id ASC"
 	return queryJobs(db, query, instanceID)
 }
 
 // GetCloudInstanceJobsIncludingAttempts returns jobs currently associated with a
-// cloud instance OR that have a historical cloud attempt record for it. This is
-// useful for display purposes: after ResetCloudInstanceJobs clears
-// cloud_instance_id on re-queued jobs, those jobs are still visible via the
-// job_cloud_attempts table.
+// cloud instance, jobs with an open cloud attempt on that instance, or jobs
+// that only have historical cloud attempt records for it. This is useful for
+// display purposes: after ResetCloudInstanceJobs clears cloud_instance_id on
+// re-queued jobs, those jobs are still visible via the job_cloud_attempts
+// table.
 func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs
-		WHERE jobs.tombstoned = 0
-		AND (
-			jobs.cloud_instance_id = ?
-			OR EXISTS (
-				SELECT 1 FROM job_cloud_attempts
-				WHERE job_cloud_attempts.job_id = jobs.id
-				AND job_cloud_attempts.cloud_instance_id = ?
-			)
-		)
+	query := fmt.Sprintf(`SELECT %s FROM cloud_instance_job_membership
+		WHERE membership_cloud_instance_id = ?
+		  AND tombstoned = 0
 		ORDER BY
-			CASE WHEN jobs.cloud_instance_id = ? THEN 0 ELSE 1 END,
+			membership_rank ASC,
 			CASE
-				WHEN jobs.cloud_instance_id = ? AND jobs.campaign_job_index IS NULL THEN 1
+				WHEN membership_rank = 0 AND campaign_job_index IS NULL THEN 1
 				ELSE 0
 			END,
-			jobs.campaign_job_index ASC,
-			jobs.id ASC`, qualifiedJobSelectColumns("jobs"))
-	return queryJobs(database, query, instanceID, instanceID, instanceID, instanceID)
+			campaign_job_index ASC,
+			id ASC`, qualifiedJobSelectColumns("cloud_instance_job_membership"))
+	return queryJobs(database, query, instanceID)
 }
 
-// ListUnplacedJobs returns all queued jobs with no host assignment (needing placement or rental).
+// ListUnplacedJobs returns jobs that are truly unplaced: no inventory host, no
+// current cloud-instance assignment, and no open cloud attempt on a non-terminal
+// instance.
 func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
-	query := "SELECT " + jobSelectColumns + " FROM jobs WHERE host = '' AND tombstoned = 0 ORDER BY id ASC"
-	jobs, err := queryJobs(db, query)
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]*Job, 0, len(jobs))
-	for _, job := range jobs {
-		if job != nil && job.EffectiveStatus() == StatusQueued {
-			filtered = append(filtered, job)
-		}
-	}
-	return filtered, nil
+	query := fmt.Sprintf(`SELECT %s FROM job_effective_state
+		WHERE tombstoned = 0
+		  AND effective_target_kind = ?
+		  AND status = ?
+		  AND host = ''
+		ORDER BY id ASC`, qualifiedJobSelectColumns("job_effective_state"))
+	return queryJobs(db, query, string(JobTargetUnplaced), StatusQueued)
 }
 
 // AssignJobHost atomically assigns a host to an unplaced queued job.
@@ -527,6 +527,25 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 			return 0, err
 		}
 	}
+	if len(jobs) == 0 {
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+
+	jobIDs := make([]int64, 0, len(jobs))
+	placeholders := make([]string, 0, len(jobs))
+	for _, job := range jobs {
+		jobIDs = append(jobIDs, job.ID)
+		placeholders = append(placeholders, "?")
+	}
+	jobFilter := strings.Join(placeholders, ", ")
+	updateArgs := make([]any, 0, len(jobIDs)+2)
+	updateArgs = append(updateArgs, StatusQueued, placementReasons)
+	for _, jobID := range jobIDs {
+		updateArgs = append(updateArgs, jobID)
+	}
 
 	// Close open attempts only for jobs that are about to be reset. Completed or
 	// otherwise terminal jobs keep their recorded attempt outcomes.
@@ -546,13 +565,12 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	}
 
 	result, err := tx.Exec(
-		`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = '',
+		fmt.Sprintf(`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = '',
 		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
 		 session_name = NULL, failure_reason = NULL, error_diagnosis = NULL,
 		 remote_state = NULL, remote_id = NULL, placement_reasons = ?
-		 WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0`,
-		StatusQueued, placementReasons, instanceID,
-		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+		 WHERE id IN (%s)`, jobFilter),
+		updateArgs...,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -680,11 +698,13 @@ func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 // GetActiveCloudInstanceJobCounts returns a map from cloud instance ID to the
 // number of non-terminal jobs still assigned to that instance.
 func GetActiveCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
-	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM jobs
+	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM job_effective_state
 		WHERE cloud_instance_id IS NOT NULL
-		AND tombstoned = 0
-		AND status NOT IN (?, ?, ?, ?, ?, ?)
+		  AND tombstoned = 0
+		  AND effective_target_kind = ?
+		  AND status NOT IN (?, ?, ?, ?, ?, ?)
 		GROUP BY cloud_instance_id`,
+		string(JobTargetRentalInstance),
 		StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {

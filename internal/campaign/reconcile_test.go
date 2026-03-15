@@ -281,9 +281,6 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("assign job: %v", err)
 	}
-	if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
-		t.Fatalf("insert attempt: %v", err)
-	}
 
 	origFetchIntent := fetchReconcileTerminationIntent
 	t.Cleanup(func() {
@@ -381,9 +378,6 @@ func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedF
 	}
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("assign job: %v", err)
-	}
-	if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
-		t.Fatalf("insert attempt: %v", err)
 	}
 
 	origFetchHeartbeat := fetchReconcileHeartbeat

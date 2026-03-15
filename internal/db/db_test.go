@@ -1,12 +1,32 @@
 package db
 
 import (
+	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func setupRawInitSchemaDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	tmpFile, err := os.CreateTemp("", "weft-db-init-*.db")
+	if err != nil {
+		t.Fatalf("create temp file: %v", err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+
+	database, err := sql.Open("sqlite", fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)", tmpFile.Name()))
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	t.Cleanup(func() { database.Close() })
+	return database
+}
 
 func TestParseCdCommand(t *testing.T) {
 	tests := []struct {
@@ -574,6 +594,196 @@ func TestListUnplacedJobs(t *testing.T) {
 	}
 }
 
+func TestListUnplacedJobsExcludesAssignedCloudJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "cloud assigned", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected no unplaced jobs, got %d", len(jobs))
+	}
+}
+
+func TestListUnplacedJobsExcludesOpenAttemptsOnRunningInstances(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "open attempt", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("expected no unplaced jobs, got %d", len(jobs))
+	}
+}
+
+func TestListUnplacedJobsIncludesOpenAttemptsOnTerminalInstances(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "stale open attempt", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 unplaced job, got %d", len(jobs))
+	}
+	if jobs[0].ID != jobID {
+		t.Fatalf("expected job ID %d, got %d", jobID, jobs[0].ID)
+	}
+}
+
+func TestJobEffectiveStateViewTracksOpenLiveAttempts(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	var targetKind, status, attemptStatus string
+	var effectiveInstanceID sql.NullInt64
+	var attemptInstanceID int64
+	var hasOpenLive, isUnplaced int
+	err = database.QueryRow(`
+		SELECT effective_target_kind, effective_status, effective_cloud_instance_id,
+		       current_cloud_attempt_instance_id, current_cloud_attempt_instance_status,
+		       has_open_live_cloud_attempt, is_effectively_unplaced
+		FROM job_effective_state
+		WHERE id = ?`, jobID).
+		Scan(&targetKind, &status, &effectiveInstanceID, &attemptInstanceID, &attemptStatus, &hasOpenLive, &isUnplaced)
+	if err != nil {
+		t.Fatalf("QueryRow(job_effective_state): %v", err)
+	}
+	if targetKind != string(JobTargetRentalInstance) {
+		t.Fatalf("effective_target_kind = %q, want %q", targetKind, JobTargetRentalInstance)
+	}
+	if status != StatusQueued {
+		t.Fatalf("effective_status = %q, want %q", status, StatusQueued)
+	}
+	if !effectiveInstanceID.Valid || effectiveInstanceID.Int64 != instanceID {
+		t.Fatalf("effective_cloud_instance_id = %v, want %d", effectiveInstanceID, instanceID)
+	}
+	if attemptInstanceID != instanceID || attemptStatus != CloudInstanceStatusRunning {
+		t.Fatalf("current attempt = (%d, %q), want (%d, %q)", attemptInstanceID, attemptStatus, instanceID, CloudInstanceStatusRunning)
+	}
+	if hasOpenLive != 1 || isUnplaced != 0 {
+		t.Fatalf("flags = hasOpenLive=%d isUnplaced=%d, want 1/0", hasOpenLive, isUnplaced)
+	}
+}
+
+func TestJobEffectiveStateViewTreatsTerminalOpenAttemptAsUnplaced(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	var targetKind, status, attemptStatus string
+	var effectiveInstanceID sql.NullInt64
+	var attemptInstanceID int64
+	var hasOpenLive, isUnplaced int
+	err = database.QueryRow(`
+		SELECT effective_target_kind, effective_status, effective_cloud_instance_id,
+		       current_cloud_attempt_instance_id, current_cloud_attempt_instance_status,
+		       has_open_live_cloud_attempt, is_effectively_unplaced
+		FROM job_effective_state
+		WHERE id = ?`, jobID).
+		Scan(&targetKind, &status, &effectiveInstanceID, &attemptInstanceID, &attemptStatus, &hasOpenLive, &isUnplaced)
+	if err != nil {
+		t.Fatalf("QueryRow(job_effective_state): %v", err)
+	}
+	if targetKind != string(JobTargetUnplaced) {
+		t.Fatalf("effective_target_kind = %q, want %q", targetKind, JobTargetUnplaced)
+	}
+	if status != StatusQueued {
+		t.Fatalf("effective_status = %q, want %q", status, StatusQueued)
+	}
+	if effectiveInstanceID.Valid {
+		t.Fatalf("effective_cloud_instance_id = %v, want NULL", effectiveInstanceID)
+	}
+	if attemptInstanceID != instanceID || attemptStatus != CloudInstanceStatusFailed {
+		t.Fatalf("current attempt = (%d, %q), want (%d, %q)", attemptInstanceID, attemptStatus, instanceID, CloudInstanceStatusFailed)
+	}
+	if hasOpenLive != 0 || isUnplaced != 1 {
+		t.Fatalf("flags = hasOpenLive=%d isUnplaced=%d, want 0/1", hasOpenLive, isUnplaced)
+	}
+}
+
 func TestListUnplacedJobsIncludesHostlessRunning(t *testing.T) {
 	database := SetupTestDB(t)
 
@@ -700,7 +910,7 @@ func TestMoveQueuedJobToUnplacedKeepsInventoryTag(t *testing.T) {
 func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	database := SetupTestDB(t)
 
-	jobID, err := RecordQueuedWithGPU(database, CloudInstanceHost(42), "/tmp/project", "python train.py", "queued", "")
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
@@ -775,6 +985,40 @@ func TestListActiveOnPremJobs(t *testing.T) {
 		if job.Host == "" {
 			t.Fatalf("unexpected unplaced job in on-prem list: %+v", job)
 		}
+	}
+}
+
+func TestListActiveCloudJobsIncludesOpenLiveAttemptJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "cloud", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	jobs, err := ListActiveCloudJobs(database)
+	if err != nil {
+		t.Fatalf("ListActiveCloudJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 active cloud job, got %d", len(jobs))
+	}
+	if jobs[0].ID != jobID {
+		t.Fatalf("job ID = %d, want %d", jobs[0].ID, jobID)
+	}
+	if jobs[0].CloudInstanceID == nil || *jobs[0].CloudInstanceID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d", jobs[0].CloudInstanceID, instanceID)
 	}
 }
 
@@ -1131,6 +1375,388 @@ func TestJobCloudAttempts(t *testing.T) {
 	}
 	if len(attempts) != 2 {
 		t.Fatalf("expected 2 attempts, got %d", len(attempts))
+	}
+}
+
+func TestJobCloudAttemptTriggersRejectSecondOpenAttempt(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(first): %v", err)
+	}
+	instanceID2, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(second): %v", err)
+	}
+
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(first): %v", err)
+	}
+	err = InsertJobCloudAttempt(database, jobID, instanceID2)
+	if err == nil {
+		t.Fatal("expected second open attempt to fail")
+	}
+	if !strings.Contains(err.Error(), "open cloud attempt") {
+		t.Fatalf("second open attempt error = %v, want open-attempt guard", err)
+	}
+}
+
+func TestJobCloudAttemptTriggersSyncJobAssignment(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID(after open): %v", err)
+	}
+	if job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d", job.CloudInstanceID, instanceID)
+	}
+	if job.Host != "" {
+		t.Fatalf("host = %q, want empty", job.Host)
+	}
+
+	if err := CloseJobCloudAttempt(database, jobID, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseJobCloudAttempt: %v", err)
+	}
+
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID(after close): %v", err)
+	}
+	if job.CloudInstanceID != nil {
+		t.Fatalf("cloud_instance_id = %v, want nil", job.CloudInstanceID)
+	}
+}
+
+func TestJobCloudAttemptTriggersPreventClearingLiveAssignment(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	}
+
+	_, err = database.Exec(`UPDATE jobs SET cloud_instance_id = NULL WHERE id = ?`, jobID)
+	if err == nil {
+		t.Fatal("expected clearing live cloud assignment to fail")
+	}
+	if !strings.Contains(err.Error(), "live cloud attempt") {
+		t.Fatalf("clear cloud_instance_id error = %v, want live-attempt guard", err)
+	}
+}
+
+func TestJobStatusChecksRejectInvalidValues(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, "bogus", jobID); err == nil {
+		t.Fatal("expected invalid jobs.status update to fail")
+	}
+	if _, err := database.Exec(`UPDATE jobs SET pending_status = ? WHERE id = ?`, "bogus", jobID); err == nil {
+		t.Fatal("expected invalid jobs.pending_status update to fail")
+	}
+}
+
+func TestCloudInstanceStatusChecksRejectInvalidValues(t *testing.T) {
+	database := SetupTestDB(t)
+
+	if _, err := database.Exec(
+		`INSERT INTO cloud_instances (status, provider, created_at) VALUES (?, ?, ?)`,
+		"bogus", "vastai", time.Now().Unix(),
+	); err == nil {
+		t.Fatal("expected invalid cloud_instances.status insert to fail")
+	}
+}
+
+func TestJobCloudAttemptShapeChecksRejectInvalidValues(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at, outcome) VALUES (?, ?, ?, ?)`,
+		jobID, instanceID, time.Now().Unix(), AttemptOutcomeCompleted,
+	); err == nil {
+		t.Fatal("expected open attempt with outcome to fail")
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at, ended_at) VALUES (?, ?, ?, ?)`,
+		jobID, instanceID, time.Now().Unix(), time.Now().Unix(),
+	); err == nil {
+		t.Fatal("expected closed attempt without outcome to fail")
+	}
+
+	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_cloud_attempts SET outcome = ? WHERE job_id = ? AND ended_at IS NULL`, AttemptOutcomeFailed, jobID); err == nil {
+		t.Fatal("expected shape-preserving update to open attempt to fail")
+	}
+	if _, err := database.Exec(`UPDATE job_cloud_attempts SET ended_at = ? WHERE job_id = ? AND ended_at IS NULL`, time.Now().Unix(), jobID); err == nil {
+		t.Fatal("expected closing attempt without outcome to fail")
+	}
+	if _, err := database.Exec(`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`, time.Now().Unix(), "bogus", jobID); err == nil {
+		t.Fatal("expected invalid outcome update to fail")
+	}
+}
+
+func TestLatestRunOwnershipTriggerRejectsMismatchedJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID1, err := RecordQueuedWithGPU(database, "", "/tmp/project-a", "python train.py", "job1", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(job1): %v", err)
+	}
+	jobID2, err := RecordQueuedWithGPU(database, "", "/tmp/project-b", "python train.py", "job2", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(job2): %v", err)
+	}
+	if err := PersistLatestRunSnapshot(database, jobID1, ""); err != nil {
+		t.Fatalf("PersistLatestRunSnapshot(job1): %v", err)
+	}
+
+	job1, err := GetJobByID(database, jobID1)
+	if err != nil {
+		t.Fatalf("GetJobByID(job1): %v", err)
+	}
+	if job1.LatestRunID == nil {
+		t.Fatal("expected job1 latest run to be populated")
+	}
+
+	if _, err := database.Exec(`UPDATE jobs SET latest_run_id = ? WHERE id = ?`, *job1.LatestRunID, jobID2); err == nil {
+		t.Fatal("expected mismatched latest_run_id update to fail")
+	}
+}
+
+func TestRunOwnedArtifactAndTimeseriesTriggersRejectMismatchedJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID1, err := RecordQueuedWithGPU(database, "", "/tmp/project-a", "python train.py", "job1", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(job1): %v", err)
+	}
+	jobID2, err := RecordQueuedWithGPU(database, "", "/tmp/project-b", "python train.py", "job2", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU(job2): %v", err)
+	}
+	if err := PersistLatestRunSnapshot(database, jobID1, ""); err != nil {
+		t.Fatalf("PersistLatestRunSnapshot(job1): %v", err)
+	}
+
+	job1, err := GetJobByID(database, jobID1)
+	if err != nil {
+		t.Fatalf("GetJobByID(job1): %v", err)
+	}
+	if job1.LatestRunID == nil {
+		t.Fatal("expected job1 latest run to be populated")
+	}
+
+	if _, err := database.Exec(
+		`INSERT INTO artifacts (job_id, job_run_id, name, path, stored_path, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		jobID2, *job1.LatestRunID, "metrics", "out/metrics.json", "/tmp/metrics.json", 12, time.Now().Unix(),
+	); err == nil {
+		t.Fatal("expected mismatched artifact job_run_id insert to fail")
+	}
+	if _, err := database.Exec(
+		`INSERT INTO job_timeseries (job_id, ts, cpu_pct, job_run_id) VALUES (?, ?, ?, ?)`,
+		jobID2, time.Now().Unix(), 42, *job1.LatestRunID,
+	); err == nil {
+		t.Fatal("expected mismatched timeseries job_run_id insert to fail")
+	}
+}
+
+func TestPlacementTriggerRejectsNonEmptyHostForCloudJobs(t *testing.T) {
+	database := SetupTestDB(t)
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	if _, err := database.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ? WHERE id = ?`, instanceID, "studio", jobID); err == nil {
+		t.Fatal("expected mixed host/cloud placement update to fail")
+	}
+}
+
+func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
+	database := setupRawInitSchemaDB(t)
+
+	if _, err := database.Exec(`
+		CREATE TABLE jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			host TEXT NOT NULL,
+			session_name TEXT,
+			working_dir TEXT NOT NULL,
+			command TEXT NOT NULL,
+			description TEXT,
+			start_time INTEGER,
+			end_time INTEGER,
+			exit_code INTEGER,
+			status TEXT NOT NULL DEFAULT 'running',
+			tombstoned INTEGER NOT NULL DEFAULT 0,
+			cloud_instance_id INTEGER
+		);
+		CREATE TABLE cloud_instances (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			campaign_id INTEGER,
+			status TEXT NOT NULL DEFAULT 'planned',
+			provider TEXT NOT NULL DEFAULT 'vastai',
+			gpu_spec TEXT,
+			gpu_class TEXT,
+			gpu_mem_gb INTEGER,
+			vastai_instance_id TEXT,
+			max_spend_cents INTEGER,
+			max_time_seconds INTEGER,
+			actual_spend_cents INTEGER,
+			created_at INTEGER NOT NULL
+			,launched_at INTEGER,
+			ended_at INTEGER
+		);
+		CREATE TABLE job_cloud_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL,
+			cloud_instance_id INTEGER NOT NULL,
+			started_at INTEGER NOT NULL,
+			ended_at INTEGER,
+			outcome TEXT
+		);`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+
+	if _, err := database.Exec(`INSERT INTO cloud_instances (id, status, provider, created_at) VALUES (1, ?, 'vastai', ?)`, CloudInstanceStatusRunning, time.Now().Unix()); err != nil {
+		t.Fatalf("insert cloud instance: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, command, status, tombstoned, cloud_instance_id) VALUES (1, ?, '/tmp/project', 'python train.py', ?, 0, NULL)`, CloudInstanceHost(1), StatusQueued); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (1, 1, ?)`, time.Now().Unix()); err != nil {
+		t.Fatalf("insert job_cloud_attempts: %v", err)
+	}
+
+	if err := initSchema(database); err != nil {
+		t.Fatalf("initSchema: %v", err)
+	}
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Host != "" {
+		t.Fatalf("host = %q, want empty after repair", job.Host)
+	}
+	if job.CloudInstanceID == nil || *job.CloudInstanceID != 1 {
+		t.Fatalf("cloud_instance_id = %v, want 1 after repair", job.CloudInstanceID)
+	}
+}
+
+func TestInitSchemaFailsOnInvalidLatestRunOwnership(t *testing.T) {
+	database := setupRawInitSchemaDB(t)
+
+	if _, err := database.Exec(`
+		CREATE TABLE jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			host TEXT NOT NULL,
+			session_name TEXT,
+			working_dir TEXT NOT NULL,
+			command TEXT NOT NULL,
+			description TEXT,
+			start_time INTEGER,
+			end_time INTEGER,
+			exit_code INTEGER,
+			status TEXT NOT NULL DEFAULT 'running',
+			tombstoned INTEGER NOT NULL DEFAULT 0,
+			latest_run_id INTEGER
+		);
+		CREATE TABLE job_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL,
+			archived_at INTEGER NOT NULL,
+			archive_reason TEXT NOT NULL,
+			status TEXT NOT NULL,
+			host TEXT NOT NULL,
+			working_dir TEXT NOT NULL,
+			command TEXT NOT NULL
+		);`); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+
+	if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, command, status, tombstoned, latest_run_id) VALUES (1, '', '/tmp/a', 'echo a', ?, 0, 10)`, StatusQueued); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if _, err := database.Exec(`INSERT INTO job_runs (id, job_id, archived_at, archive_reason, status, host, working_dir, command) VALUES (10, 2, ?, 'legacy', ?, '', '/tmp/b', 'echo b')`, time.Now().Unix(), StatusQueued); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	err := initSchema(database)
+	if err == nil {
+		t.Fatal("expected initSchema to fail on invalid latest_run ownership")
+	}
+	if !strings.Contains(err.Error(), "latest_run_id ownership") {
+		t.Fatalf("initSchema error = %v, want latest_run ownership diagnostic", err)
 	}
 }
 

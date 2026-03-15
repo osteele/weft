@@ -40,6 +40,19 @@ type ReuseAssignment struct {
 	Instance InstanceCapacity
 }
 
+func instanceAcceptsReuse(inst *db.CloudInstance) (bool, string) {
+	if inst == nil {
+		return false, "instance not found"
+	}
+	if inst.Status != db.CloudInstanceStatusGrace && inst.Status != db.CloudInstanceStatusRunning {
+		return false, fmt.Sprintf("instance %d is not reusable (status=%s)", inst.ID, inst.Status)
+	}
+	if inst.HasActiveTerminationIntent() {
+		return false, fmt.Sprintf("instance %d is self-destructing", inst.ID)
+	}
+	return true, ""
+}
+
 // FindReusableInstances returns non-terminal cloud instances that could accept new jobs.
 // Returns instances with status "grace" or "running".
 func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
@@ -52,7 +65,7 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 
 	var result []InstanceCapacity
 	for _, inst := range instances {
-		if inst.Status != db.CloudInstanceStatusGrace && inst.Status != db.CloudInstanceStatusRunning {
+		if ok, _ := instanceAcceptsReuse(inst); !ok {
 			continue // skip "launching"
 		}
 
@@ -301,6 +314,14 @@ type GracePayload struct {
 // SubmitJobsToInstance submits one or more jobs to an existing cloud instance
 // via R2 grace protocol. Works for both grace and running instances.
 func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
+	inst, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		return fmt.Errorf("get instance %d: %w", instanceID, err)
+	}
+	if ok, reason := instanceAcceptsReuse(inst); !ok {
+		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
+	}
+
 	payload := GracePayload{
 		Sources: make(map[string]string),
 	}
@@ -332,9 +353,25 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
+	inst, err = db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		return fmt.Errorf("re-check instance %d: %w", instanceID, err)
+	}
+	if ok, reason := instanceAcceptsReuse(inst); !ok {
+		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
+	}
+
 	graceKey := r2keys.GraceJobs(instanceID)
 	if err := r2Client.PutObject(ctx, graceKey, strings.NewReader(string(payloadJSON)), "application/json"); err != nil {
 		return fmt.Errorf("write jobs.json to R2: %w", err)
+	}
+
+	inst, err = db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		return fmt.Errorf("final re-check instance %d: %w", instanceID, err)
+	}
+	if ok, reason := instanceAcceptsReuse(inst); !ok {
+		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
 	}
 
 	// Reset jobs to queued and associate with the cloud instance

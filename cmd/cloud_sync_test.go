@@ -36,9 +36,6 @@ func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}
-	if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
-	}
 
 	var destroyed string
 	destroyedOnce := false

@@ -1,10 +1,12 @@
 package campaign
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
 )
 
 func TestMatchJobToInstance_GPUClass(t *testing.T) {
@@ -189,5 +191,121 @@ func TestSubtractInputs(t *testing.T) {
 				t.Errorf("subtractInputs() returned %d items, want %d", len(result), tt.want)
 			}
 		})
+	}
+}
+
+func TestFindReusableInstancesExcludesActiveTerminationIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	runningID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(running): %v", err)
+	}
+	terminatingID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(terminating): %v", err)
+	}
+	if err := db.UpdateCloudInstanceTerminationIntent(database, terminatingID, &instanceintent.Marker{
+		TerminalStatus:       db.CloudInstanceStatusCompleted,
+		TerminationReason:    db.TerminationReasonCompleted,
+		RequestedAtUnix:      time.Now().Add(-30 * time.Second).Unix(),
+		DestroyStartedAtUnix: time.Now().Add(-20 * time.Second).Unix(),
+	}); err != nil {
+		t.Fatalf("UpdateCloudInstanceTerminationIntent: %v", err)
+	}
+
+	instances, err := FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances: %v", err)
+	}
+
+	if len(instances) != 1 {
+		t.Fatalf("expected 1 reusable instance, got %d", len(instances))
+	}
+	if instances[0].Instance.ID != runningID {
+		t.Fatalf("reusable instance id = %d, want %d", instances[0].Instance.ID, runningID)
+	}
+}
+
+func TestFindReusableInstancesIncludesNormalGraceAndRunningInstances(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	runningID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(running): %v", err)
+	}
+	graceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusGrace,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance(grace): %v", err)
+	}
+	if err := db.SetCloudInstanceGraceStarted(database, graceID, time.Now().Add(10*time.Minute).Unix()); err != nil {
+		t.Fatalf("SetCloudInstanceGraceStarted: %v", err)
+	}
+
+	instances, err := FindReusableInstances(database)
+	if err != nil {
+		t.Fatalf("FindReusableInstances: %v", err)
+	}
+
+	if len(instances) != 2 {
+		t.Fatalf("expected 2 reusable instances, got %d", len(instances))
+	}
+	got := map[int64]bool{}
+	for _, inst := range instances {
+		got[inst.Instance.ID] = true
+	}
+	if !got[runningID] || !got[graceID] {
+		t.Fatalf("reusable instances = %v, want both running=%d and grace=%d", got, runningID, graceID)
+	}
+}
+
+func TestSubmitJobsToInstanceRejectsActiveTerminationIntent(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := db.UpdateCloudInstanceTerminationIntent(database, instanceID, &instanceintent.Marker{
+		TerminalStatus:       db.CloudInstanceStatusCompleted,
+		TerminationReason:    db.TerminationReasonCompleted,
+		RequestedAtUnix:      time.Now().Add(-35 * time.Second).Unix(),
+		DestroyStartedAtUnix: time.Now().Add(-25 * time.Second).Unix(),
+	}); err != nil {
+		t.Fatalf("UpdateCloudInstanceTerminationIntent: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected SubmitJobsToInstance to reject self-destructing instance")
 	}
 }

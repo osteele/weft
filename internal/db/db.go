@@ -257,6 +257,195 @@ const jobSelectColumns = `id, host, session_name, working_dir, command, descript
 
 const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
+const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
+
+const cloudInstanceTableColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json`
+
+const jobCloudAttemptTableColumns = `id, job_id, cloud_instance_id, started_at, ended_at, outcome`
+
+func sqlStringList(values []string) string {
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = "'" + strings.ReplaceAll(value, "'", "''") + "'"
+	}
+	return strings.Join(quoted, ", ")
+}
+
+func statusCheckConstraintSQL(column string, values []string, allowNull bool) string {
+	expr := fmt.Sprintf("%s IN (%s)", column, sqlStringList(values))
+	if allowNull {
+		return fmt.Sprintf("%s IS NULL OR %s", column, expr)
+	}
+	return expr
+}
+
+func jobStatusValues() []string {
+	return []string{
+		StatusStarting,
+		StatusRunning,
+		StatusCompleted,
+		StatusDead,
+		StatusQueued,
+		StatusFailed,
+		StatusKilled,
+		StatusCanceled,
+		StatusPaused,
+		StatusDraft,
+		StatusPendingPlacement,
+	}
+}
+
+func cloudInstanceStatusValues() []string {
+	return []string{
+		CloudInstanceStatusPlanned,
+		CloudInstanceStatusLaunching,
+		CloudInstanceStatusRunning,
+		CloudInstanceStatusGrace,
+		CloudInstanceStatusCompleted,
+		CloudInstanceStatusFailed,
+		CloudInstanceStatusCancelled,
+	}
+}
+
+func jobCloudAttemptOutcomeValues() []string {
+	return []string{
+		AttemptOutcomeCompleted,
+		AttemptOutcomeFailed,
+		AttemptOutcomeCancelled,
+		AttemptOutcomeOrphaned,
+	}
+}
+
+func createJobsTableSQL(table string, ifNotExists bool) string {
+	ifClause := ""
+	if ifNotExists {
+		ifClause = "IF NOT EXISTS "
+	}
+	return fmt.Sprintf(`CREATE TABLE %s%s (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		host TEXT NOT NULL,
+		session_name TEXT,
+		working_dir TEXT NOT NULL,
+		command TEXT NOT NULL,
+		description TEXT,
+		generated_description TEXT,
+		generation_hash TEXT,
+		created_at INTEGER,
+		queued_at INTEGER,
+		start_time INTEGER,
+		end_time INTEGER,
+		exit_code INTEGER,
+		status TEXT NOT NULL DEFAULT 'running',
+		error_message TEXT,
+		backend TEXT DEFAULT 'queue-runner',
+		remote_id TEXT,
+		remote_state TEXT,
+		failure_reason TEXT,
+		queue_name TEXT,
+		gpu TEXT,
+		gpu_class TEXT,
+		cpu_allotment INTEGER,
+		gpu_mem_gb INTEGER,
+		env_vars TEXT,
+		tags TEXT,
+		dep_spec TEXT,
+		inputs TEXT,
+		outputs TEXT,
+		output_dirs TEXT,
+		produces TEXT,
+		needs TEXT,
+		project TEXT,
+		tombstoned INTEGER NOT NULL DEFAULT 0,
+		last_synced_status TEXT,
+		pending_status TEXT,
+		pending_at INTEGER,
+		job_metadata TEXT,
+		cost REAL,
+		vastai_instance_id INTEGER,
+		error_diagnosis TEXT,
+		retry_count INTEGER DEFAULT 0,
+		placement_meta TEXT,
+		placement_host TEXT,
+		placement_reasons TEXT,
+		cloud_instance_id INTEGER,
+		campaign_job_index INTEGER,
+		latest_run_id INTEGER,
+		CONSTRAINT jobs_status_check CHECK (%s),
+		CONSTRAINT jobs_pending_status_check CHECK (%s)
+	)`, ifClause, table,
+		statusCheckConstraintSQL("status", jobStatusValues(), false),
+		statusCheckConstraintSQL("pending_status", jobStatusValues(), true),
+	)
+}
+
+func createCloudInstancesTableSQL(table string, ifNotExists bool) string {
+	ifClause := ""
+	if ifNotExists {
+		ifClause = "IF NOT EXISTS "
+	}
+	return fmt.Sprintf(`CREATE TABLE %s%s (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		campaign_id INTEGER REFERENCES campaigns(id),
+		status TEXT NOT NULL DEFAULT 'planned',
+		provider TEXT NOT NULL DEFAULT 'vastai',
+		gpu_spec TEXT,
+		gpu_class TEXT,
+		gpu_mem_gb INTEGER,
+		vastai_instance_id TEXT,
+		max_spend_cents INTEGER,
+		max_time_seconds INTEGER,
+		actual_spend_cents INTEGER,
+		created_at INTEGER NOT NULL,
+		ready_at INTEGER,
+		launched_at INTEGER,
+		ended_at INTEGER,
+		resolved_gpu_name TEXT,
+		cost_per_hour_cents INTEGER,
+		num_gpus INTEGER,
+		dl_perf REAL,
+		reliability REAL,
+		inet_down_mbps REAL,
+		inet_up_mbps REAL,
+		cuda_version REAL,
+		provider_instance_id TEXT,
+		data_center TEXT,
+		instance_role TEXT DEFAULT 'worker',
+		donor_instance_id INTEGER,
+		seed_download_secs INTEGER,
+		seed_copy_secs INTEGER,
+		grace_period_seconds INTEGER,
+		grace_started_at INTEGER,
+		grace_deadline INTEGER,
+		termination_reason TEXT,
+		disk_gb INTEGER,
+		provisioned_inputs TEXT,
+		termination_requested_at INTEGER,
+		termination_intent_json TEXT,
+		CONSTRAINT cloud_instances_status_check CHECK (%s)
+	)`, ifClause, table, statusCheckConstraintSQL("status", cloudInstanceStatusValues(), false))
+}
+
+func createJobCloudAttemptsTableSQL(table string, ifNotExists bool) string {
+	ifClause := ""
+	if ifNotExists {
+		ifClause = "IF NOT EXISTS "
+	}
+	return fmt.Sprintf(`CREATE TABLE %s%s (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		job_id INTEGER NOT NULL REFERENCES jobs(id),
+		cloud_instance_id INTEGER NOT NULL REFERENCES cloud_instances(id),
+		started_at INTEGER NOT NULL,
+		ended_at INTEGER,
+		outcome TEXT,
+		CONSTRAINT job_cloud_attempts_outcome_check CHECK (%s),
+		CONSTRAINT job_cloud_attempts_shape_check CHECK (
+			(ended_at IS NULL AND outcome IS NULL)
+			OR
+			(ended_at IS NOT NULL AND outcome IS NOT NULL)
+		)
+	)`, ifClause, table, statusCheckConstraintSQL("outcome", jobCloudAttemptOutcomeValues(), true))
+}
+
 // qualifiedJobSelectColumns returns jobSelectColumns with each column prefixed
 // by the given table alias (e.g. "jobs" → "jobs.id, jobs.host, ...").
 func qualifiedJobSelectColumns(table string) string {
@@ -265,6 +454,779 @@ func qualifiedJobSelectColumns(table string) string {
 		cols[i] = table + "." + strings.TrimSpace(col)
 	}
 	return strings.Join(cols, ", ")
+}
+
+// qualifiedJobSelectColumnsWithOverrides returns jobSelectColumns with each
+// column prefixed by table, except for any columns present in overrides. The
+// override expression should omit the alias; this function aliases it to the
+// original column name in place.
+func qualifiedJobSelectColumnsWithOverrides(table string, overrides map[string]string) string {
+	cols := strings.Split(jobSelectColumns, ",")
+	for i, rawCol := range cols {
+		col := strings.TrimSpace(rawCol)
+		if override, ok := overrides[col]; ok {
+			cols[i] = override + " AS " + col
+			continue
+		}
+		cols[i] = table + "." + col
+	}
+	return strings.Join(cols, ", ")
+}
+
+func createJobStateViews(db *sql.DB) error {
+	for _, name := range []string{"cloud_instance_job_membership", "job_effective_state"} {
+		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + name); err != nil {
+			return err
+		}
+	}
+
+	effectiveColumns := qualifiedJobSelectColumnsWithOverrides("decorated", map[string]string{
+		"host":              "decorated.effective_host",
+		"status":            "decorated.effective_status",
+		"cloud_instance_id": "decorated.effective_cloud_instance_id",
+	})
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE VIEW job_effective_state AS
+		WITH latest_open_cloud_attempt AS (
+			SELECT jca.job_id,
+			       jca.cloud_instance_id,
+			       ci.status AS instance_status
+			FROM job_cloud_attempts jca
+			JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
+			WHERE jca.ended_at IS NULL
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM job_cloud_attempts newer
+				WHERE newer.job_id = jca.job_id
+				  AND newer.ended_at IS NULL
+				  AND (newer.started_at > jca.started_at
+				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
+			  )
+		),
+		base AS (
+			SELECT jobs.*,
+			       assigned_ci.status AS assigned_instance_status,
+			       open_attempt.cloud_instance_id AS current_cloud_attempt_instance_id,
+			       open_attempt.instance_status AS current_cloud_attempt_instance_status,
+			       CASE
+					WHEN jobs.cloud_instance_id IS NOT NULL
+					     AND assigned_ci.status IN ('running', 'launching', 'grace')
+					THEN jobs.cloud_instance_id
+					WHEN open_attempt.cloud_instance_id IS NOT NULL
+					     AND open_attempt.instance_status IN ('running', 'launching', 'grace')
+					THEN open_attempt.cloud_instance_id
+					ELSE NULL
+			       END AS effective_cloud_instance_id
+			FROM jobs
+			LEFT JOIN cloud_instances assigned_ci ON assigned_ci.id = jobs.cloud_instance_id
+			LEFT JOIN latest_open_cloud_attempt open_attempt ON open_attempt.job_id = jobs.id
+		),
+		decorated AS (
+			SELECT base.*,
+			       CASE
+					WHEN base.effective_cloud_instance_id IS NOT NULL THEN ''
+					ELSE base.host
+			       END AS effective_host,
+			       CASE
+					WHEN base.effective_cloud_instance_id IS NOT NULL THEN 'rental_instance'
+					WHEN base.host != ''
+					     AND base.host NOT LIKE 'vastai:%%'
+					     AND base.host NOT LIKE 'runpod:%%'
+					THEN 'inventory_host'
+					WHEN base.host LIKE 'vastai:%%' OR base.host LIKE 'runpod:%%'
+					THEN 'rental_instance'
+					ELSE 'unplaced'
+			       END AS effective_target_kind,
+			       CASE
+					WHEN (
+						CASE
+							WHEN base.effective_cloud_instance_id IS NOT NULL THEN 'rental_instance'
+							WHEN base.host != ''
+							     AND base.host NOT LIKE 'vastai:%%'
+							     AND base.host NOT LIKE 'runpod:%%'
+							THEN 'inventory_host'
+							WHEN base.host LIKE 'vastai:%%' OR base.host LIKE 'runpod:%%'
+							THEN 'rental_instance'
+							ELSE 'unplaced'
+						END
+					) = 'unplaced'
+					AND COALESCE(base.pending_status, base.status) IN ('running', 'starting', 'paused')
+					THEN 'queued'
+					ELSE COALESCE(base.pending_status, base.status)
+			       END AS effective_status
+			FROM base
+		)
+		SELECT %s,
+		       decorated.host AS raw_host,
+		       decorated.status AS raw_status,
+		       decorated.cloud_instance_id AS raw_cloud_instance_id,
+		       decorated.effective_status,
+		       decorated.effective_host,
+		       decorated.effective_cloud_instance_id,
+		       decorated.effective_target_kind,
+		       decorated.current_cloud_attempt_instance_id,
+		       decorated.current_cloud_attempt_instance_status,
+		       CASE
+				WHEN decorated.current_cloud_attempt_instance_id IS NOT NULL THEN 1
+				ELSE 0
+		       END AS has_open_cloud_attempt,
+		       CASE
+				WHEN decorated.current_cloud_attempt_instance_status IN ('running', 'launching', 'grace') THEN 1
+				ELSE 0
+		       END AS has_open_live_cloud_attempt,
+		       CASE
+				WHEN decorated.effective_target_kind = 'unplaced' THEN 1
+				ELSE 0
+		       END AS is_effectively_unplaced,
+		       CASE
+				WHEN decorated.effective_target_kind = 'rental_instance' THEN 1
+				ELSE 0
+		       END AS is_effectively_current_rental
+		FROM decorated
+	`, effectiveColumns)); err != nil {
+		return err
+	}
+
+	currentMembershipColumns := qualifiedJobSelectColumnsWithOverrides("jes", map[string]string{
+		"cloud_instance_id": "current_memberships.membership_cloud_instance_id",
+	})
+	historicalMembershipColumns := qualifiedJobSelectColumns("jes")
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE VIEW cloud_instance_job_membership AS
+		WITH current_memberships AS (
+			SELECT DISTINCT
+			       jobs.id AS job_id,
+			       jobs.cloud_instance_id AS membership_cloud_instance_id
+			FROM jobs
+			WHERE jobs.cloud_instance_id IS NOT NULL
+			UNION
+			SELECT DISTINCT
+			       jes.id AS job_id,
+			       jes.current_cloud_attempt_instance_id AS membership_cloud_instance_id
+			FROM job_effective_state jes
+			WHERE jes.current_cloud_attempt_instance_id IS NOT NULL
+		),
+		historical_memberships AS (
+			SELECT DISTINCT
+			       jes.id AS job_id,
+			       jca.cloud_instance_id AS membership_cloud_instance_id
+			FROM job_effective_state jes
+			JOIN job_cloud_attempts jca ON jca.job_id = jes.id
+			WHERE jca.cloud_instance_id IS NOT NULL
+			  AND (jes.cloud_instance_id IS NULL OR jca.cloud_instance_id != jes.cloud_instance_id)
+		)
+		SELECT %s,
+		       current_memberships.membership_cloud_instance_id,
+		       'current' AS membership_kind,
+		       0 AS membership_rank
+		FROM job_effective_state jes
+		JOIN current_memberships ON current_memberships.job_id = jes.id
+		UNION ALL
+		SELECT %s,
+		       historical_memberships.membership_cloud_instance_id,
+		       'historical' AS membership_kind,
+		       1 AS membership_rank
+		FROM job_effective_state jes
+		JOIN historical_memberships ON historical_memberships.job_id = jes.id
+	`, currentMembershipColumns, historicalMembershipColumns)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func createCloudAttemptTriggers(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TRIGGER job_cloud_attempts_require_instance
+		BEFORE INSERT ON job_cloud_attempts
+		FOR EACH ROW
+		WHEN NOT EXISTS (SELECT 1 FROM cloud_instances WHERE id = NEW.cloud_instance_id)
+		BEGIN
+			SELECT RAISE(ABORT, 'job_cloud_attempt references missing cloud instance');
+		END`,
+		`CREATE TRIGGER job_cloud_attempts_prevent_second_open
+		BEFORE INSERT ON job_cloud_attempts
+		FOR EACH ROW
+		WHEN NEW.ended_at IS NULL
+		     AND EXISTS (
+				SELECT 1
+				FROM job_cloud_attempts
+				WHERE job_id = NEW.job_id
+				  AND ended_at IS NULL
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'job already has an open cloud attempt');
+		END`,
+		`CREATE TRIGGER job_cloud_attempts_shape_on_insert
+		BEFORE INSERT ON job_cloud_attempts
+		FOR EACH ROW
+		WHEN (NEW.ended_at IS NULL AND NEW.outcome IS NOT NULL)
+		     OR (NEW.ended_at IS NOT NULL AND NEW.outcome IS NULL)
+		BEGIN
+			SELECT RAISE(ABORT, 'job_cloud_attempt ended_at and outcome must both be NULL or both be set');
+		END`,
+		`CREATE TRIGGER job_cloud_attempts_shape_on_update
+		BEFORE UPDATE OF ended_at, outcome ON job_cloud_attempts
+		FOR EACH ROW
+		WHEN (NEW.ended_at IS NULL AND NEW.outcome IS NOT NULL)
+		     OR (NEW.ended_at IS NOT NULL AND NEW.outcome IS NULL)
+		BEGIN
+			SELECT RAISE(ABORT, 'job_cloud_attempt ended_at and outcome must both be NULL or both be set');
+		END`,
+		`CREATE TRIGGER job_cloud_attempts_sync_job_on_open
+		AFTER INSERT ON job_cloud_attempts
+		FOR EACH ROW
+		WHEN NEW.ended_at IS NULL
+		     AND EXISTS (
+				SELECT 1
+				FROM cloud_instances
+				WHERE id = NEW.cloud_instance_id
+				  AND status IN ('running', 'launching', 'grace')
+		     )
+		BEGIN
+			UPDATE jobs
+			SET cloud_instance_id = NEW.cloud_instance_id,
+			    host = '',
+			    placement_reasons = NULL
+			WHERE id = NEW.job_id;
+		END`,
+		`CREATE TRIGGER job_cloud_attempts_sync_job_on_close
+		AFTER UPDATE OF ended_at ON job_cloud_attempts
+		FOR EACH ROW
+		WHEN OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL
+		BEGIN
+			UPDATE jobs
+			SET cloud_instance_id = (
+					SELECT jca.cloud_instance_id
+					FROM job_cloud_attempts jca
+					JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
+					WHERE jca.job_id = NEW.job_id
+					  AND jca.ended_at IS NULL
+					  AND ci.status IN ('running', 'launching', 'grace')
+					ORDER BY jca.started_at DESC, jca.id DESC
+					LIMIT 1
+			    ),
+			    host = CASE
+					WHEN EXISTS (
+						SELECT 1
+						FROM job_cloud_attempts jca
+						JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
+						WHERE jca.job_id = NEW.job_id
+						  AND jca.ended_at IS NULL
+						  AND ci.status IN ('running', 'launching', 'grace')
+					) THEN ''
+					ELSE host
+			    END
+			WHERE id = NEW.job_id;
+		END`,
+		`CREATE TRIGGER jobs_prevent_clearing_live_cloud_assignment
+		BEFORE UPDATE OF cloud_instance_id ON jobs
+		FOR EACH ROW
+		WHEN OLD.cloud_instance_id IS NOT NULL
+		     AND NEW.cloud_instance_id IS NULL
+		     AND EXISTS (
+				SELECT 1
+				FROM job_cloud_attempts jca
+				JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
+				WHERE jca.job_id = OLD.id
+				  AND jca.ended_at IS NULL
+				  AND ci.status IN ('running', 'launching', 'grace')
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'cannot clear cloud_instance_id while a live cloud attempt exists');
+		END`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createIntegrityTriggers(db *sql.DB) error {
+	stmts := []string{
+		`CREATE TRIGGER jobs_prevent_mixed_cloud_host_on_insert
+		BEFORE INSERT ON jobs
+		FOR EACH ROW
+		WHEN NEW.cloud_instance_id IS NOT NULL AND TRIM(COALESCE(NEW.host, '')) <> ''
+		BEGIN
+			SELECT RAISE(ABORT, 'jobs.host must be empty when cloud_instance_id is set');
+		END`,
+		`CREATE TRIGGER jobs_prevent_mixed_cloud_host_on_update
+		BEFORE UPDATE OF host, cloud_instance_id ON jobs
+		FOR EACH ROW
+		WHEN NEW.cloud_instance_id IS NOT NULL AND TRIM(COALESCE(NEW.host, '')) <> ''
+		BEGIN
+			SELECT RAISE(ABORT, 'jobs.host must be empty when cloud_instance_id is set');
+		END`,
+		`CREATE TRIGGER jobs_validate_latest_run_id_on_insert
+		AFTER INSERT ON jobs
+		FOR EACH ROW
+		WHEN NEW.latest_run_id IS NOT NULL
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_runs
+				WHERE id = NEW.latest_run_id
+				  AND job_id = NEW.id
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
+		END`,
+		`CREATE TRIGGER jobs_validate_latest_run_id_on_update
+		BEFORE UPDATE OF latest_run_id ON jobs
+		FOR EACH ROW
+		WHEN NEW.latest_run_id IS NOT NULL
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_runs
+				WHERE id = NEW.latest_run_id
+				  AND job_id = NEW.id
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
+		END`,
+		`CREATE TRIGGER artifacts_validate_job_run_ownership_on_insert
+		BEFORE INSERT ON artifacts
+		FOR EACH ROW
+		WHEN NEW.job_run_id IS NOT NULL
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_runs
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'artifacts.job_run_id must reference a run owned by artifacts.job_id');
+		END`,
+		`CREATE TRIGGER artifacts_validate_job_run_ownership_on_update
+		BEFORE UPDATE OF job_id, job_run_id ON artifacts
+		FOR EACH ROW
+		WHEN NEW.job_run_id IS NOT NULL
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_runs
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'artifacts.job_run_id must reference a run owned by artifacts.job_id');
+		END`,
+		`CREATE TRIGGER job_timeseries_validate_job_run_ownership_on_insert
+		BEFORE INSERT ON job_timeseries
+		FOR EACH ROW
+		WHEN NEW.job_run_id IS NOT NULL
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_runs
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'job_timeseries.job_run_id must reference a run owned by job_timeseries.job_id');
+		END`,
+		`CREATE TRIGGER job_timeseries_validate_job_run_ownership_on_update
+		BEFORE UPDATE OF job_id, job_run_id ON job_timeseries
+		FOR EACH ROW
+		WHEN NEW.job_run_id IS NOT NULL
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_runs
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
+		BEGIN
+			SELECT RAISE(ABORT, 'job_timeseries.job_run_id must reference a run owned by job_timeseries.job_id');
+		END`,
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func dropIntegrityViewsAndTriggers(db *sql.DB) error {
+	for _, name := range []string{"cloud_instance_job_membership", "job_effective_state"} {
+		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + name); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{
+		"job_cloud_attempts_require_instance",
+		"job_cloud_attempts_prevent_second_open",
+		"job_cloud_attempts_shape_on_insert",
+		"job_cloud_attempts_shape_on_update",
+		"job_cloud_attempts_sync_job_on_open",
+		"job_cloud_attempts_sync_job_on_close",
+		"jobs_prevent_clearing_live_cloud_assignment",
+		"jobs_prevent_mixed_cloud_host_on_insert",
+		"jobs_prevent_mixed_cloud_host_on_update",
+		"jobs_validate_latest_run_id_on_insert",
+		"jobs_validate_latest_run_id_on_update",
+		"artifacts_validate_job_run_ownership_on_insert",
+		"artifacts_validate_job_run_ownership_on_update",
+		"job_timeseries_validate_job_run_ownership_on_insert",
+		"job_timeseries_validate_job_run_ownership_on_update",
+	} {
+		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tableSchemaContains(db *sql.DB, tableName, needle string) (bool, error) {
+	var sqlText sql.NullString
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?`, tableName).Scan(&sqlText); err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return sqlText.Valid && strings.Contains(strings.ToLower(sqlText.String), strings.ToLower(needle)), nil
+}
+
+func rebuildTable(db *sql.DB, createSQL, copySQL, dropSQL, renameSQL string, postStatements ...string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, stmt := range append([]string{createSQL, copySQL, dropSQL, renameSQL}, postStatements...) {
+		if _, err := tx.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func ensureJobsTableConstraints(db *sql.DB) error {
+	hasConstraint, err := tableSchemaContains(db, "jobs", "jobs_status_check")
+	if err != nil {
+		return err
+	}
+	if hasConstraint {
+		return nil
+	}
+	return rebuildTable(
+		db,
+		createJobsTableSQL("jobs_new", false),
+		fmt.Sprintf(`INSERT INTO jobs_new (%s) SELECT %s FROM jobs`, jobTableColumns, jobTableColumns),
+		`DROP TABLE jobs`,
+		`ALTER TABLE jobs_new RENAME TO jobs`,
+		`CREATE INDEX idx_jobs_host ON jobs(host)`,
+		`CREATE INDEX idx_jobs_session ON jobs(session_name)`,
+		`CREATE INDEX idx_jobs_status ON jobs(status)`,
+		`CREATE INDEX idx_jobs_start ON jobs(start_time DESC)`,
+	)
+}
+
+func ensureCloudInstancesTableConstraints(db *sql.DB) error {
+	hasConstraint, err := tableSchemaContains(db, "cloud_instances", "cloud_instances_status_check")
+	if err != nil {
+		return err
+	}
+	if hasConstraint {
+		return nil
+	}
+	return rebuildTable(
+		db,
+		createCloudInstancesTableSQL("cloud_instances_new", false),
+		fmt.Sprintf(`INSERT INTO cloud_instances_new (%s) SELECT %s FROM cloud_instances`, cloudInstanceTableColumns, cloudInstanceTableColumns),
+		`DROP TABLE cloud_instances`,
+		`ALTER TABLE cloud_instances_new RENAME TO cloud_instances`,
+	)
+}
+
+func ensureJobCloudAttemptsTableConstraints(db *sql.DB) error {
+	hasConstraint, err := tableSchemaContains(db, "job_cloud_attempts", "job_cloud_attempts_shape_check")
+	if err != nil {
+		return err
+	}
+	if hasConstraint {
+		return nil
+	}
+	return rebuildTable(
+		db,
+		createJobCloudAttemptsTableSQL("job_cloud_attempts_new", false),
+		fmt.Sprintf(`INSERT INTO job_cloud_attempts_new (%s) SELECT %s FROM job_cloud_attempts`, jobCloudAttemptTableColumns, jobCloudAttemptTableColumns),
+		`DROP TABLE job_cloud_attempts`,
+		`ALTER TABLE job_cloud_attempts_new RENAME TO job_cloud_attempts`,
+		`CREATE INDEX idx_job_cloud_attempts_instance ON job_cloud_attempts(cloud_instance_id)`,
+		`CREATE INDEX idx_job_cloud_attempts_job ON job_cloud_attempts(job_id)`,
+		`CREATE INDEX idx_job_cloud_attempts_open ON job_cloud_attempts(job_id, ended_at, started_at DESC, id DESC)`,
+	)
+}
+
+func repairLegacyCloudPlacementHosts(db *sql.DB) error {
+	_, err := db.Exec(`
+		UPDATE jobs
+		SET host = ''
+		WHERE cloud_instance_id IS NOT NULL
+		  AND (
+				TRIM(COALESCE(host, '')) = ''
+				OR host LIKE 'vastai:%'
+				OR host LIKE 'runpod:%'
+		  )`)
+	return err
+}
+
+func validateRepresentativeRows(db *sql.DB, query string, format func(*sql.Rows) (string, error), message string) error {
+	rows, err := db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var samples []string
+	for rows.Next() {
+		sample, err := format(rows)
+		if err != nil {
+			return err
+		}
+		samples = append(samples, sample)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(samples) > 0 {
+		return fmt.Errorf("%s: %s", message, strings.Join(samples, ", "))
+	}
+	return nil
+}
+
+func validateEnumAndRelationshipConstraints(db *sql.DB) error {
+	jobStatusSQL := sqlStringList(jobStatusValues())
+	cloudStatusSQL := sqlStringList(cloudInstanceStatusValues())
+	attemptOutcomeSQL := sqlStringList(jobCloudAttemptOutcomeValues())
+
+	validations := []struct {
+		query   string
+		format  func(*sql.Rows) (string, error)
+		message string
+	}{
+		{
+			query: fmt.Sprintf(`SELECT id, status FROM jobs WHERE status NOT IN (%s) ORDER BY id ASC LIMIT 5`, jobStatusSQL),
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var status string
+				if err := rows.Scan(&id, &status); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=%q", id, status), nil
+			},
+			message: "invalid jobs.status values",
+		},
+		{
+			query: fmt.Sprintf(`SELECT id, pending_status FROM jobs WHERE pending_status IS NOT NULL AND pending_status NOT IN (%s) ORDER BY id ASC LIMIT 5`, jobStatusSQL),
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var status string
+				if err := rows.Scan(&id, &status); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=%q", id, status), nil
+			},
+			message: "invalid jobs.pending_status values",
+		},
+		{
+			query: fmt.Sprintf(`SELECT id, status FROM cloud_instances WHERE status NOT IN (%s) ORDER BY id ASC LIMIT 5`, cloudStatusSQL),
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var status string
+				if err := rows.Scan(&id, &status); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=%q", id, status), nil
+			},
+			message: "invalid cloud_instances.status values",
+		},
+		{
+			query: fmt.Sprintf(`SELECT id, outcome FROM job_cloud_attempts WHERE outcome IS NOT NULL AND outcome NOT IN (%s) ORDER BY id ASC LIMIT 5`, attemptOutcomeSQL),
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var outcome string
+				if err := rows.Scan(&id, &outcome); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=%q", id, outcome), nil
+			},
+			message: "invalid job_cloud_attempts.outcome values",
+		},
+		{
+			query: `SELECT id, ended_at, outcome FROM job_cloud_attempts
+				WHERE (ended_at IS NULL AND outcome IS NOT NULL)
+				   OR (ended_at IS NOT NULL AND outcome IS NULL)
+				ORDER BY id ASC LIMIT 5`,
+			format: func(rows *sql.Rows) (string, error) {
+				var id int64
+				var endedAt sql.NullInt64
+				var outcome sql.NullString
+				if err := rows.Scan(&id, &endedAt, &outcome); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=(ended_at=%v,outcome=%q)", id, endedAt.Valid, outcome.String), nil
+			},
+			message: "invalid job_cloud_attempts ended_at/outcome shape",
+		},
+		{
+			query: `SELECT j.id, j.latest_run_id, jr.job_id
+				FROM jobs j
+				LEFT JOIN job_runs jr ON jr.id = j.latest_run_id
+				WHERE j.latest_run_id IS NOT NULL
+				  AND (jr.id IS NULL OR jr.job_id != j.id)
+				ORDER BY j.id ASC LIMIT 5`,
+			format: func(rows *sql.Rows) (string, error) {
+				var jobID int64
+				var latestRunID int64
+				var runJobID sql.NullInt64
+				if err := rows.Scan(&jobID, &latestRunID, &runJobID); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("job %d -> run %d owned by %v", jobID, latestRunID, runJobID), nil
+			},
+			message: "invalid jobs.latest_run_id ownership",
+		},
+		{
+			query: `SELECT a.id, a.job_id, a.job_run_id, jr.job_id
+				FROM artifacts a
+				LEFT JOIN job_runs jr ON jr.id = a.job_run_id
+				WHERE a.job_run_id IS NOT NULL
+				  AND (jr.id IS NULL OR jr.job_id != a.job_id)
+				ORDER BY a.id ASC LIMIT 5`,
+			format: func(rows *sql.Rows) (string, error) {
+				var id, jobID int64
+				var runID sql.NullInt64
+				var runJobID sql.NullInt64
+				if err := rows.Scan(&id, &jobID, &runID, &runJobID); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("artifact %d job=%d run=%v run_job=%v", id, jobID, runID, runJobID), nil
+			},
+			message: "invalid artifacts job_run ownership",
+		},
+		{
+			query: `SELECT jt.job_id, jt.ts, jt.job_run_id, jr.job_id
+				FROM job_timeseries jt
+				LEFT JOIN job_runs jr ON jr.id = jt.job_run_id
+				WHERE jt.job_run_id IS NOT NULL
+				  AND (jr.id IS NULL OR jr.job_id != jt.job_id)
+				ORDER BY jt.job_id ASC, jt.ts ASC LIMIT 5`,
+			format: func(rows *sql.Rows) (string, error) {
+				var jobID, ts int64
+				var runID sql.NullInt64
+				var runJobID sql.NullInt64
+				if err := rows.Scan(&jobID, &ts, &runID, &runJobID); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("timeseries (%d,%d) run=%v run_job=%v", jobID, ts, runID, runJobID), nil
+			},
+			message: "invalid job_timeseries job_run ownership",
+		},
+		{
+			query: `SELECT id, host, cloud_instance_id
+				FROM jobs
+				WHERE cloud_instance_id IS NOT NULL
+				  AND TRIM(COALESCE(host, '')) <> ''
+				ORDER BY id ASC LIMIT 5`,
+			format: func(rows *sql.Rows) (string, error) {
+				var id, cloudInstanceID int64
+				var host string
+				if err := rows.Scan(&id, &host, &cloudInstanceID); err != nil {
+					return "", err
+				}
+				return fmt.Sprintf("%d=(host=%q,cloud_instance_id=%d)", id, host, cloudInstanceID), nil
+			},
+			message: "invalid jobs host/cloud placement conflicts",
+		},
+	}
+
+	for _, validation := range validations {
+		if err := validateRepresentativeRows(db, validation.query, validation.format, validation.message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func detectMultipleOpenCloudAttempts(db *sql.DB) error {
+	rows, err := db.Query(`
+		SELECT job_id, COUNT(*)
+		FROM job_cloud_attempts
+		WHERE ended_at IS NULL
+		GROUP BY job_id
+		HAVING COUNT(*) > 1
+		ORDER BY job_id ASC
+		LIMIT 5`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var jobIDs []string
+	for rows.Next() {
+		var jobID int64
+		var count int
+		if err := rows.Scan(&jobID, &count); err != nil {
+			return err
+		}
+		jobIDs = append(jobIDs, fmt.Sprintf("%d(%d)", jobID, count))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(jobIDs) > 0 {
+		return fmt.Errorf("multiple open cloud attempts detected for jobs: %s", strings.Join(jobIDs, ", "))
+	}
+	return nil
+}
+
+func repairLiveCloudAssignments(db *sql.DB) error {
+	_, err := db.Exec(`
+		WITH latest_live_open_attempt AS (
+			SELECT jca.job_id,
+			       jca.cloud_instance_id
+			FROM job_cloud_attempts jca
+			JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
+			WHERE jca.ended_at IS NULL
+			  AND ci.status IN ('running', 'launching', 'grace')
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM job_cloud_attempts newer
+				JOIN cloud_instances newer_ci ON newer_ci.id = newer.cloud_instance_id
+				WHERE newer.job_id = jca.job_id
+				  AND newer.ended_at IS NULL
+				  AND newer_ci.status IN ('running', 'launching', 'grace')
+				  AND (newer.started_at > jca.started_at
+				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
+			  )
+		)
+		UPDATE jobs
+		SET cloud_instance_id = (
+				SELECT latest_live_open_attempt.cloud_instance_id
+				FROM latest_live_open_attempt
+				WHERE latest_live_open_attempt.job_id = jobs.id
+		    ),
+		    host = '',
+		    placement_reasons = NULL
+		WHERE EXISTS (
+				SELECT 1
+				FROM latest_live_open_attempt
+				WHERE latest_live_open_attempt.job_id = jobs.id
+		    )
+		  AND (
+				jobs.cloud_instance_id IS NULL
+				OR jobs.cloud_instance_id != (
+					SELECT latest_live_open_attempt.cloud_instance_id
+					FROM latest_live_open_attempt
+					WHERE latest_live_open_attempt.job_id = jobs.id
+				)
+				OR jobs.host != ''
+		    )`)
+	return err
 }
 
 // Special job tags that affect scheduling and execution behavior.
@@ -375,22 +1337,7 @@ func SetDBPath(path string) func() {
 }
 
 func initSchema(db *sql.DB) error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS jobs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		host TEXT NOT NULL,
-		session_name TEXT,
-		working_dir TEXT NOT NULL,
-	command TEXT NOT NULL,
-	description TEXT,
-	job_metadata TEXT,
-	tags TEXT,
-	start_time INTEGER,
-	end_time INTEGER,
-	exit_code INTEGER,
-	status TEXT NOT NULL DEFAULT 'running',
-	tombstoned INTEGER NOT NULL DEFAULT 0
-	);
+	schema := createJobsTableSQL("jobs", true) + `;
 	CREATE INDEX IF NOT EXISTS idx_jobs_host ON jobs(host);
 	CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_name);
 	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -761,24 +1708,7 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Create cloud_instances table (individual cloud GPU deployments)
-	cloudInstancesSchema := `
-	CREATE TABLE IF NOT EXISTS cloud_instances (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		campaign_id INTEGER REFERENCES campaigns(id),
-		status TEXT NOT NULL DEFAULT 'planned',
-		provider TEXT NOT NULL DEFAULT 'vastai',
-		gpu_spec TEXT,
-		gpu_class TEXT,
-		gpu_mem_gb INTEGER,
-		vastai_instance_id TEXT,
-		max_spend_cents INTEGER,
-		max_time_seconds INTEGER,
-		actual_spend_cents INTEGER,
-		created_at INTEGER NOT NULL,
-		launched_at INTEGER,
-		ended_at INTEGER
-	);
-	`
+	cloudInstancesSchema := createCloudInstancesTableSQL("cloud_instances", true)
 	if _, err := db.Exec(cloudInstancesSchema); err != nil {
 		return err
 	}
@@ -908,16 +1838,7 @@ func initSchema(db *sql.DB) error {
 	}
 
 	// Create job_cloud_attempts table (tracks each job ↔ cloud instance association)
-	jobCloudAttemptsSchema := `
-	CREATE TABLE IF NOT EXISTS job_cloud_attempts (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		job_id INTEGER NOT NULL REFERENCES jobs(id),
-		cloud_instance_id INTEGER NOT NULL REFERENCES cloud_instances(id),
-		started_at INTEGER NOT NULL,
-		ended_at INTEGER,
-		outcome TEXT
-	);
-	`
+	jobCloudAttemptsSchema := createJobCloudAttemptsTableSQL("job_cloud_attempts", true)
 	if _, err := db.Exec(jobCloudAttemptsSchema); err != nil {
 		return err
 	}
@@ -925,6 +1846,9 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_job ON job_cloud_attempts(job_id)`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_open ON job_cloud_attempts(job_id, ended_at, started_at DESC, id DESC)`); err != nil {
 		return err
 	}
 
@@ -1061,6 +1985,39 @@ func initSchema(db *sql.DB) error {
 
 	// Migration: convert legacy needs_rental status to queued (host is already empty)
 	if _, err := db.Exec(`UPDATE jobs SET status = ? WHERE status = ?`, StatusQueued, statusNeedsRental); err != nil {
+		return err
+	}
+	if err := repairLegacyCloudPlacementHosts(db); err != nil {
+		return err
+	}
+	if err := detectMultipleOpenCloudAttempts(db); err != nil {
+		return err
+	}
+	if err := repairLiveCloudAssignments(db); err != nil {
+		return err
+	}
+	if err := validateEnumAndRelationshipConstraints(db); err != nil {
+		return err
+	}
+	if err := dropIntegrityViewsAndTriggers(db); err != nil {
+		return err
+	}
+	if err := ensureJobsTableConstraints(db); err != nil {
+		return err
+	}
+	if err := ensureCloudInstancesTableConstraints(db); err != nil {
+		return err
+	}
+	if err := ensureJobCloudAttemptsTableConstraints(db); err != nil {
+		return err
+	}
+	if err := createJobStateViews(db); err != nil {
+		return err
+	}
+	if err := createCloudAttemptTriggers(db); err != nil {
+		return err
+	}
+	if err := createIntegrityTriggers(db); err != nil {
 		return err
 	}
 
@@ -1557,8 +2514,12 @@ func ListActiveVastaiJobs(db *sql.DB) ([]*Job, error) {
 // ListActiveCloudJobs returns jobs associated with a cloud instance that are in a non-terminal status.
 // This covers both legacy vastai-backend jobs and campaign-launched queue-runner jobs.
 func ListActiveCloudJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE cloud_instance_id IS NOT NULL AND status NOT IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY id`, jobSelectColumns)
-	rows, err := db.Query(query, StatusCompleted, StatusFailed, StatusKilled, StatusCanceled)
+	query := fmt.Sprintf(`SELECT %s FROM job_effective_state
+		WHERE effective_target_kind = ?
+		  AND status NOT IN (?, ?, ?, ?)
+		  AND tombstoned = 0
+		ORDER BY id`, qualifiedJobSelectColumns("job_effective_state"))
+	rows, err := db.Query(query, string(JobTargetRentalInstance), StatusCompleted, StatusFailed, StatusKilled, StatusCanceled)
 	if err != nil {
 		return nil, err
 	}
@@ -3489,13 +4450,13 @@ func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 
 // ListActiveOnPremJobs returns all non-cloud active jobs with host assignments.
 func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs
-		WHERE host != '' AND cloud_instance_id IS NULL
+	query := fmt.Sprintf(`SELECT %s FROM job_effective_state
+		WHERE effective_target_kind = ?
 		AND status IN (?, ?, ?, ?) AND tombstoned = 0
 		ORDER BY host ASC,
 			CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END,
-			id ASC`, jobSelectColumns)
-	return queryJobs(db, query, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
+			id ASC`, qualifiedJobSelectColumns("job_effective_state"))
+	return queryJobs(db, query, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
 // ListUnsyncedQueuedJobs returns queued jobs on a host that haven't been pushed
