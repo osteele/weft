@@ -77,3 +77,34 @@ func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
 	}
 }
+
+func TestSyncCloudStateWithClientsTimeout_TimesOut(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "slow-123"); err != nil {
+		t.Fatalf("SetCloudInstanceProviderID: %v", err)
+	}
+
+	result, completed := syncCloudStateWithClientsTimeout(&config.Config{}, database, campaign.NewReconciler(), []cloud.Client{&cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			time.Sleep(50 * time.Millisecond)
+			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+		},
+	}}, nil, 5*time.Millisecond, false)
+
+	if completed {
+		t.Fatal("expected timeout")
+	}
+	if result.ReconcileResult != nil || result.Updated != 0 {
+		t.Fatalf("unexpected result on timeout: %+v", result)
+	}
+}

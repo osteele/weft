@@ -5,14 +5,19 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 )
+
+const campaignListSyncInterval = 30 * time.Second
 
 // Styles for the campaign list TUI (allocated once, not per-render).
 var (
@@ -32,15 +37,54 @@ type campaignListItem struct {
 }
 
 type campaignListModel struct {
-	items    []campaignListItem
-	cursor   int
-	database *sql.DB
-	quitting bool
-	chosen   *db.Campaign // selected campaign to watch
+	items            []campaignListItem
+	cursor           int
+	database         *sql.DB
+	quitting         bool
+	chosen           *db.Campaign
+	syncEnabled      bool
+	syncInProgress   bool
+	statusMessage    string
+	dbWatcher        *fsnotify.Watcher
+	dbWatcherTargets map[string]struct{}
+	debounceActive   bool
 }
 
-func newCampaignListModel(database *sql.DB, campaigns []*db.Campaign) campaignListModel {
-	// Group campaigns by date
+type campaignListLoadedMsg struct {
+	items []campaignListItem
+	err   error
+}
+
+type campaignListSyncFinishedMsg struct {
+	warnings []string
+	full     bool
+}
+
+type campaignListDBWatcherReadyMsg struct {
+	watcher *fsnotify.Watcher
+	targets map[string]struct{}
+	err     error
+}
+
+type campaignListDBWatchEventMsg struct {
+	err error
+}
+
+type campaignListDBRefreshTriggeredMsg struct{}
+
+type campaignListSyncTickMsg struct{}
+
+func newCampaignListModel(database *sql.DB, campaigns []*db.Campaign, syncEnabled bool) campaignListModel {
+	model := campaignListModel{
+		database:       database,
+		syncEnabled:    syncEnabled,
+		syncInProgress: syncEnabled,
+	}
+	model.applyItems(buildCampaignListItems(database, campaigns))
+	return model
+}
+
+func buildCampaignListItems(database *sql.DB, campaigns []*db.Campaign) []campaignListItem {
 	var items []campaignListItem
 	var lastDate string
 
@@ -58,24 +102,50 @@ func newCampaignListModel(database *sql.DB, campaigns []*db.Campaign) campaignLi
 		})
 	}
 
-	// Set cursor to first non-header item
-	cursor := 0
-	for i, item := range items {
-		if !item.isHeader {
-			cursor = i
-			break
+	return items
+}
+
+func (m *campaignListModel) applyItems(items []campaignListItem) {
+	selectedID := int64(0)
+	if m.cursor >= 0 && m.cursor < len(m.items) {
+		if current := m.items[m.cursor]; !current.isHeader && current.campaign != nil {
+			selectedID = current.campaign.ID
 		}
 	}
 
-	return campaignListModel{
-		items:    items,
-		cursor:   cursor,
-		database: database,
+	m.items = items
+	m.cursor = 0
+	if selectedID == 0 {
+		m.cursor = firstCampaignListSelectable(items)
+		return
 	}
+	for i, item := range items {
+		if item.isHeader || item.campaign == nil {
+			continue
+		}
+		if item.campaign.ID == selectedID {
+			m.cursor = i
+			return
+		}
+	}
+	m.cursor = firstCampaignListSelectable(items)
+}
+
+func firstCampaignListSelectable(items []campaignListItem) int {
+	for i, item := range items {
+		if !item.isHeader {
+			return i
+		}
+	}
+	return 0
 }
 
 func (m campaignListModel) Init() tea.Cmd {
-	return nil
+	cmds := []tea.Cmd{m.startDBWatcher(), scheduleCampaignListSyncTick()}
+	if m.syncEnabled {
+		cmds = append(cmds, m.runBackgroundSync(false))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -84,6 +154,9 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
 			m.quitting = true
+			if m.dbWatcher != nil {
+				_ = m.dbWatcher.Close()
+			}
 			return m, tea.Quit
 		case "up", "k":
 			m.cursor = m.prevSelectable(m.cursor)
@@ -92,9 +165,82 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.cursor >= 0 && m.cursor < len(m.items) && !m.items[m.cursor].isHeader {
 				m.chosen = m.items[m.cursor].campaign
+				if m.dbWatcher != nil {
+					_ = m.dbWatcher.Close()
+				}
 				return m, tea.Quit
 			}
 		}
+		return m, nil
+
+	case campaignListLoadedMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("Refresh error: %v", msg.err)
+			return m, nil
+		}
+		m.applyItems(msg.items)
+		if len(m.items) > 0 && strings.HasPrefix(m.statusMessage, "No campaigns") {
+			m.statusMessage = ""
+		}
+		return m, nil
+
+	case campaignListSyncFinishedMsg:
+		if !msg.full {
+			if len(msg.warnings) > 0 {
+				m.statusMessage = strings.Join(msg.warnings, " | ")
+			} else {
+				m.statusMessage = "Running full sync..."
+			}
+			return m, tea.Batch(m.reloadCampaigns(), m.runBackgroundSync(true))
+		}
+
+		m.syncInProgress = false
+		if len(msg.warnings) > 0 {
+			m.statusMessage = strings.Join(msg.warnings, " | ")
+		} else if len(m.items) == 0 {
+			m.statusMessage = "No campaigns yet."
+		} else {
+			m.statusMessage = "Synced."
+		}
+		return m, m.reloadCampaigns()
+
+	case campaignListDBWatcherReadyMsg:
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("DB watch error: %v", msg.err)
+			return m, nil
+		}
+		m.dbWatcher = msg.watcher
+		m.dbWatcherTargets = msg.targets
+		return m, m.waitForDBEvent()
+
+	case campaignListDBWatchEventMsg:
+		cmds := []tea.Cmd{}
+		if msg.err != nil {
+			m.statusMessage = fmt.Sprintf("DB watch error: %v", msg.err)
+		} else if !m.debounceActive {
+			m.debounceActive = true
+			cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+				return campaignListDBRefreshTriggeredMsg{}
+			}))
+		}
+		if cmd := m.waitForDBEvent(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+
+	case campaignListDBRefreshTriggeredMsg:
+		m.debounceActive = false
+		return m, m.reloadCampaigns()
+
+	case campaignListSyncTickMsg:
+		cmds := []tea.Cmd{scheduleCampaignListSyncTick()}
+		if !m.syncEnabled || m.syncInProgress {
+			return m, tea.Batch(cmds...)
+		}
+		m.syncInProgress = true
+		m.statusMessage = "Refreshing..."
+		cmds = append(cmds, m.runBackgroundSync(true))
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -121,57 +267,178 @@ func (m campaignListModel) View() string {
 	var b strings.Builder
 
 	b.WriteString(listTitleStyle.Render("Campaigns"))
+	if m.syncInProgress {
+		b.WriteString("  ")
+		b.WriteString(watchDimStyle.Render("syncing..."))
+	}
 	b.WriteString("\n\n")
 
-	for i, item := range m.items {
-		if item.isHeader {
-			b.WriteString(listTitleStyle.Render(item.headerText))
+	if len(m.items) == 0 {
+		b.WriteString(watchDimStyle.Render(m.emptyStateText()))
+		b.WriteString("\n\n")
+	} else {
+		for i, item := range m.items {
+			if item.isHeader {
+				b.WriteString(listTitleStyle.Render(item.headerText))
+				b.WriteString("\n")
+				continue
+			}
+
+			c := item.campaign
+			cursor := "  "
+			if i == m.cursor {
+				cursor = listCursorStyle.Render("> ")
+			}
+
+			estCost := campaign.FormatEstimatedCostCents(c.EstimatedCostCents)
+			created := time.Unix(c.CreatedAt, 0).Format("15:04")
+
+			var statusStyle lipgloss.Style
+			switch c.Status {
+			case db.CampaignStatusRunning, db.CampaignStatusLaunching:
+				statusStyle = listActiveStyle
+			default:
+				statusStyle = listTerminalStyle
+			}
+
+			line := fmt.Sprintf("%s#%-4d %s  %d inst  est %s  actual %s  %s",
+				cursor,
+				c.ID,
+				statusStyle.Render(fmt.Sprintf("%-10s", c.Status)),
+				len(item.instances),
+				estCost,
+				item.actualCost,
+				created,
+			)
+			b.WriteString(line)
 			b.WriteString("\n")
-			continue
 		}
-
-		c := item.campaign
-		cursor := "  "
-		if i == m.cursor {
-			cursor = listCursorStyle.Render("> ")
-		}
-
-		estCost := campaign.FormatEstimatedCostCents(c.EstimatedCostCents)
-
-		created := time.Unix(c.CreatedAt, 0).Format("15:04")
-
-		var statusStyle lipgloss.Style
-		switch c.Status {
-		case db.CampaignStatusRunning, db.CampaignStatusLaunching:
-			statusStyle = listActiveStyle
-		default:
-			statusStyle = listTerminalStyle
-		}
-
-		line := fmt.Sprintf("%s#%-4d %s  %d inst  est %s  actual %s  %s",
-			cursor,
-			c.ID,
-			statusStyle.Render(fmt.Sprintf("%-10s", c.Status)),
-			len(item.instances),
-			estCost,
-			item.actualCost,
-			created,
-		)
-		b.WriteString(line)
 		b.WriteString("\n")
 	}
 
-	b.WriteString("\n")
-	b.WriteString(watchDimStyle.Render("↑/↓ navigate • enter to watch • q to quit"))
+	footer := []string{}
+	if m.statusMessage != "" {
+		footer = append(footer, m.statusMessage)
+	}
+	footer = append(footer, "↑/↓ navigate", "enter to watch", "q to quit")
+	b.WriteString(watchDimStyle.Render(strings.Join(footer, "  ")))
 	b.WriteString("\n")
 
 	return b.String()
 }
 
+func (m campaignListModel) emptyStateText() string {
+	if m.syncInProgress {
+		return "No campaigns yet. Waiting for startup sync and DB updates..."
+	}
+	if m.statusMessage != "" {
+		return "No campaigns. " + m.statusMessage
+	}
+	return "No campaigns."
+}
+
+func (m campaignListModel) reloadCampaigns() tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		campaigns, err := db.ListCampaigns(database)
+		if err != nil {
+			return campaignListLoadedMsg{err: err}
+		}
+		return campaignListLoadedMsg{items: buildCampaignListItems(database, campaigns)}
+	}
+}
+
+func (m campaignListModel) runBackgroundSync(full bool) tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		return campaignListSyncFinishedMsg{warnings: syncCampaignListTUIData(database, full), full: full}
+	}
+}
+
+func syncCampaignListTUIData(database *sql.DB, full bool) []string {
+	timeout := FastCloudSyncTimeout
+	if full {
+		timeout = NormalCloudSyncTimeout
+	}
+	cfg, _ := config.Load()
+	if _, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false); !completed {
+		return []string{fmt.Sprintf("Cloud sync timed out after %s; waiting for DB updates.", timeout)}
+	}
+	return nil
+}
+
+func (m campaignListModel) startDBWatcher() tea.Cmd {
+	dbFile := db.Path()
+	if dbFile == "" {
+		return nil
+	}
+	dir := filepath.Dir(dbFile)
+	targets := map[string]struct{}{}
+	addTarget := func(name string) {
+		if name == "" {
+			return
+		}
+		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
+	}
+	base := filepath.Base(dbFile)
+	addTarget(base)
+	addTarget(base + "-wal")
+	addTarget(base + "-shm")
+
+	return func() tea.Msg {
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			return campaignListDBWatcherReadyMsg{err: err}
+		}
+		if err := watcher.Add(dir); err != nil {
+			_ = watcher.Close()
+			return campaignListDBWatcherReadyMsg{err: err}
+		}
+		return campaignListDBWatcherReadyMsg{watcher: watcher, targets: targets}
+	}
+}
+
+func (m campaignListModel) waitForDBEvent() tea.Cmd {
+	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
+		return nil
+	}
+	watcher := m.dbWatcher
+	targets := m.dbWatcherTargets
+
+	return func() tea.Msg {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return campaignListDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
+				}
+				if !listTUIWatchedDBFile(event.Name, targets) {
+					continue
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+					continue
+				}
+				return campaignListDBWatchEventMsg{}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return campaignListDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
+				}
+				return campaignListDBWatchEventMsg{err: err}
+			}
+		}
+	}
+}
+
+func scheduleCampaignListSyncTick() tea.Cmd {
+	return tea.Tick(campaignListSyncInterval, func(time.Time) tea.Msg {
+		return campaignListSyncTickMsg{}
+	})
+}
+
 // runCampaignListTUI launches the interactive campaign list TUI.
 // Returns the selected campaign for watching, or nil if the user quit.
 func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
-	model := newCampaignListModel(database, campaigns)
+	model := newCampaignListModel(database, campaigns, true)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
