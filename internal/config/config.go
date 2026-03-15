@@ -404,12 +404,6 @@ func AutomapDirs() []string {
 	return append([]string(nil), cfg.AutomapDirs...)
 }
 
-// GetCoordinatorHost returns the configured coordinator host.
-// Returns "" if not configured.
-func (c *Config) GetCoordinatorHost() string {
-	return c.CoordinatorHost
-}
-
 // DefaultGracePeriod returns the configured grace period string, or "5m" if not set.
 func (c *Config) DefaultGracePeriod() string {
 	if c.Campaign.GracePeriod != "" {

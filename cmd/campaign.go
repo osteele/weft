@@ -440,7 +440,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 			gpuStr = campaign.FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName)
 			memStr = fmt.Sprintf("%dGB", int(go_.Offer.GPUMemGB))
 			costStr = fmt.Sprintf("$%.2f/hr", go_.Offer.CostPerHour)
-			durStr = campaign.FormatEstDuration(est.TotalTime, est.HasPrediction)
+			durStr = campaign.FormatEstDuration(est.TotalTime, len(est.JobDurations) > 0)
 			estCostStr = fmt.Sprintf("~$%.2f", est.TotalCost)
 		} else {
 			gpuStr = fmt.Sprintf("%s (no offers)", go_.Group.GPUSpec())

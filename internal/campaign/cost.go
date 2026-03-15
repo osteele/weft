@@ -25,7 +25,6 @@ type CostEstimate struct {
 	UVSyncBytes   int64         // estimated cold uv sync download bytes
 	TotalTime     time.Duration
 	TotalCost     float64
-	HasPrediction bool // false = fell back to default job duration
 
 	// Survival model fields (zero values if no model available)
 	SurvivalProb     float64 // 0-1, probability of completing without preemption
@@ -161,12 +160,10 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 
 		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
 
-		hasPrediction := false
 		var runEst estimate.Estimate
 		for _, job := range go_.Group.Jobs {
 			if pred, ok := allPredictions[job.ID]; ok {
 				est.JobDurations[job.ID] = pred.Mean
-				hasPrediction = true
 				runEst = runEst.Add(pred)
 			} else {
 				runEst = runEst.Add(estimate.DefaultJobDuration)
@@ -181,19 +178,16 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 
 		total := startup.Add(sshSetup).Add(provision).Add(jobSetup).Add(runEst).Add(upload)
 		bd := estimate.Breakdown{
-			Startup:               startup,
-			SSHSetup:              sshSetup,
-			JobSetup:              jobSetup,
-			Provision:             provision,
-			Run:                   runEst,
-			Upload:                upload,
-			Total:                 total,
-			HasRunPrediction:      hasPrediction,
-			HasOverheadPrediction: overheadModel != nil,
+			Startup:   startup,
+			SSHSetup:  sshSetup,
+			JobSetup:  jobSetup,
+			Provision: provision,
+			Run:       runEst,
+			Upload:    upload,
+			Total:     total,
 		}
 
 		est.Breakdown = bd
-		est.HasPrediction = hasPrediction
 		est.SetupOverhead = startup.Mean + sshSetup.Mean + provision.Mean + jobSetup.Mean
 		est.DownloadBytes = downloadBytes
 		est.UVSyncBytes = uvSyncBytes

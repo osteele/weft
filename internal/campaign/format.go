@@ -134,7 +134,7 @@ func FormatCostTableWithEstimates(estimates []CostEstimate) string {
 		totalCost += est.TotalCost
 
 		gpuLabel := FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName)
-		durStr := FormatEstDuration(est.TotalTime, est.HasPrediction)
+		durStr := FormatEstDuration(est.TotalTime, len(est.JobDurations) > 0)
 		costStr := fmt.Sprintf("~$%.2f", est.TotalCost)
 		if est.SurvivalProb > 0 && est.RiskAdjustedCost > est.TotalCost*1.1 {
 			costStr = fmt.Sprintf("~$%.2f (risk: ~$%.2f)", est.TotalCost, est.RiskAdjustedCost)

@@ -25,7 +25,7 @@ func TestEstimateCosts_NoPredictions(t *testing.T) {
 	}
 
 	est := estimates[0]
-	if est.HasPrediction {
+	if len(est.JobDurations) > 0 {
 		t.Error("should not have prediction with nil config")
 	}
 

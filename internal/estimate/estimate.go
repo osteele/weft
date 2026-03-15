@@ -21,10 +21,6 @@ type Breakdown struct {
 	Run       Estimate
 	Upload    Estimate
 	Total     Estimate
-	// HasRunPrediction is true when Run came from the ML predictor rather than a fallback.
-	HasRunPrediction bool
-	// HasOverheadPrediction is true when overhead phases used historical data.
-	HasOverheadPrediction bool
 }
 
 // Constant returns an Estimate with no uncertainty.

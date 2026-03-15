@@ -63,7 +63,7 @@ func StageSources(ctx context.Context, cfg *config.Config, r2Client *r2.Client, 
 
 	coordinatorHost := ""
 	if cfg != nil {
-		coordinatorHost = cfg.GetCoordinatorHost()
+		coordinatorHost = cfg.CoordinatorHost
 	}
 	if coordinatorHost != "" && stageToCoordinatorCache(coordinatorHost, stageRoot, ref.Path) == nil {
 		return &StagedBundle{Root: stageRoot, Ref: ref}, nil

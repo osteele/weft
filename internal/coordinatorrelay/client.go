@@ -33,7 +33,7 @@ func NewClientFromConfig(cfg *config.Config) (*Client, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config is required")
 	}
-	if cfg.GetCoordinatorHost() == "" {
+	if cfg.CoordinatorHost == "" {
 		return nil, nil
 	}
 	if cfg.Vastai.R2.Bucket == "" || cfg.Vastai.R2.AccessKeyID == "" {
@@ -52,7 +52,7 @@ func NewClientFromConfig(cfg *config.Config) (*Client, error) {
 }
 
 func Enabled(cfg *config.Config) bool {
-	return cfg != nil && cfg.GetCoordinatorHost() != ""
+	return cfg != nil && cfg.CoordinatorHost != ""
 }
 
 func (c *Client) Submit(ctx context.Context, req *Request) (*Ack, error) {
