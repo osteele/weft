@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,10 +71,22 @@ type SyncResult struct {
 	QueueStarted       bool
 	QueueDispatchError string
 	QueueRunnerError   string
+	HostWarning        string
 	HostInfo           *db.CachedHostInfo      // Refreshed host info (nil on error)
 	HostFull           *Host                   // Full host with dynamic metrics (nil on error)
 	QueueStatus        *queuerunner.StatusInfo // Queue runner status (nil on error)
 	Error              error
+}
+
+func buildSyncWarning(result ops.HostSyncResult) string {
+	var parts []string
+	if result.QueueRunnerError != "" {
+		parts = append(parts, result.QueueRunnerError)
+	}
+	if result.QueueDispatchError != "" {
+		parts = append(parts, "queue dispatch failed: "+result.QueueDispatchError)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // hostSyncState tracks sync state for a single host
@@ -357,6 +370,7 @@ func (w *SyncWorker) doSync(host string) {
 	result.QueueStarted = syncResult.QueueStarted
 	result.QueueDispatchError = syncResult.QueueDispatchError
 	result.QueueRunnerError = syncResult.QueueRunnerError
+	result.HostWarning = buildSyncWarning(syncResult)
 
 	// Fetch host info and queue status in a single SSH call (best-effort)
 	if hostStatus, err := ops.FetchHostStatusCombined(w.database, host, queuerunner.StatusCommand(), 10*time.Second); err == nil {
@@ -484,6 +498,14 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	// Apply host info from sync result (prefer HostFull for dynamic metrics)
+	hostRef := func() *Host {
+		for _, host := range m.hosts {
+			if host.Name == result.Host {
+				return host
+			}
+		}
+		return nil
+	}
 	if result.HostFull != nil || result.HostInfo != nil {
 		var host *Host
 		if result.HostFull != nil {
@@ -505,6 +527,14 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 			m.hosts = append(m.hosts, host)
 		}
 	}
+	if host := hostRef(); host != nil {
+		host.SyncWarning = result.HostWarning
+	} else if result.HostWarning != "" {
+		m.hosts = append(m.hosts, &Host{
+			Name:        result.Host,
+			SyncWarning: result.HostWarning,
+		})
+	}
 
 	// Apply queue status from sync result
 	if result.QueueStatus != nil {
@@ -516,7 +546,7 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 				m.hosts[i].CurrentQueueJob = result.QueueStatus.CurrentJob
 				m.hosts[i].QueueStopPending = result.QueueStatus.StopPending
 
-				if !result.QueueStatus.RunnerActive && !m.queueStoppedWarnedHosts[result.Host] {
+				if result.HostWarning == "" && !result.QueueStatus.RunnerActive && !m.queueStoppedWarnedHosts[result.Host] {
 					queuedCount, _ := db.CountQueuedByHost(m.database, result.Host)
 					if queuedCount > 0 {
 						m.queueStoppedWarnedHosts[result.Host] = true
@@ -532,14 +562,8 @@ func (m Model) handleSyncResult(msg syncResultMsg) (Model, tea.Cmd) {
 	}
 
 	// Flash message for significant events
-	if result.QueueStarted {
-		cmds = append(cmds, m.setFlash(fmt.Sprintf("Started queue on %s", result.Host), false))
-	}
-	if result.QueueRunnerError != "" {
-		cmds = append(cmds, m.setFlash(fmt.Sprintf("Queue runner error (%s): %s", result.Host, result.QueueRunnerError), true))
-	}
-	if result.QueueDispatchError != "" {
-		cmds = append(cmds, m.setFlash(fmt.Sprintf("Queue dispatch error (%s): %s", result.Host, result.QueueDispatchError), true))
+	if result.HostWarning != "" {
+		cmds = append(cmds, m.setFlash(fmt.Sprintf("Sync warning (%s): %s", result.Host, result.HostWarning), true))
 	}
 
 	// Refresh jobs if updates occurred

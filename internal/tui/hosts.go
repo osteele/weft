@@ -19,6 +19,9 @@ import (
 	"github.com/osteele/weft/internal/ssh"
 )
 
+var findHostSpecFunc = inventory.FindHost
+var ensureAgentUpToDateFunc = agentdeploy.EnsureAgentUpToDate
+
 func (m Model) loadHosts() tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
@@ -155,8 +158,10 @@ func (m Model) startQueue(host string) tea.Cmd {
 // Returns (true, nil) if started, (false, nil) if already running, (false, err) on error.
 func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	// Deploy agent binary if out of date
-	if spec := inventory.FindHost(host); spec != nil {
-		agentdeploy.EnsureAgentUpToDate(host, *spec) //nolint:errcheck // best-effort
+	if spec := findHostSpecFunc(host); spec != nil {
+		if _, err := ensureAgentUpToDateFunc(host, *spec); err != nil {
+			return false, fmt.Errorf("agent deploy failed: %w", err)
+		}
 	}
 
 	// Deploy notify script and build env vars if Slack is configured
@@ -165,7 +170,11 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
 	runner := queuerunner.NewRunner(host)
-	return runner.EnsureStarted(envVars)
+	started, err := runner.EnsureStarted(envVars)
+	if err != nil {
+		return false, fmt.Errorf("queue runner start failed: %w", err)
+	}
+	return started, nil
 }
 
 func (m *Model) cycleHostFilter() {

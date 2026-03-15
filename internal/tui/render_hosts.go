@@ -452,6 +452,10 @@ func (m Model) renderHostDetail(height int) string {
 				lines = append(lines, "  Runner:       Stopped")
 			}
 		}
+		if host.SyncWarning != "" {
+			lines = append(lines, "")
+			lines = append(lines, failedStyle.Render("Sync warning: "+host.SyncWarning))
+		}
 
 	}
 
