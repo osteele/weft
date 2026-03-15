@@ -3,11 +3,9 @@ package ops
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ssh"
-	"github.com/osteele/weft/internal/workdir"
 )
 
 // RestartJobParams contains parameters for restarting a job
@@ -81,16 +79,9 @@ func RestartJob(database *sql.DB, params RestartJobParams, opts ExecuteOptions) 
 			return Result{}, fmt.Errorf("set CPU allotment: %w", err)
 		}
 	}
-	project := strings.TrimSpace(params.Project)
-	if project == "" {
-		var err error
-		project, err = workdir.ResolveProjectName("", workingDir)
-		if err != nil {
-			return Result{}, fmt.Errorf("resolve project: %w", err)
-		}
-	}
-	if project == "" {
-		project = db.DeriveProject(workingDir, command)
+	project, err := db.NormalizeProjectName(params.Project, workingDir, command)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve project: %w", err)
 	}
 	if project != "" {
 		if err := db.SetJobProject(database, newJobID, project); err != nil {

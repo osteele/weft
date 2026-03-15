@@ -76,8 +76,39 @@ func JobDisplayStatus(j *db.Job, outcomes map[int64]string) string {
 	return j.Status
 }
 
-func inferInitialPhaseChangedAt(phase string, jobs []*db.Job, timings map[int64]*db.JobPhaseTimings) *time.Time {
-	verb, jobID, ok := parsePhaseJobID(phase)
+func cloudInstanceLifecycleStart(ci *db.CloudInstance) *time.Time {
+	if ci == nil {
+		return nil
+	}
+	if ci.LaunchedAt != nil && *ci.LaunchedAt > 0 {
+		ts := time.Unix(*ci.LaunchedAt, 0)
+		return &ts
+	}
+	if ci.ReadyAt != nil && *ci.ReadyAt > 0 {
+		ts := time.Unix(*ci.ReadyAt, 0)
+		return &ts
+	}
+	if ci.CreatedAt > 0 {
+		ts := time.Unix(ci.CreatedAt, 0)
+		return &ts
+	}
+	return nil
+}
+
+func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.CloudInstance) *time.Time {
+	if changedAt == nil {
+		return nil
+	}
+	lifecycleStart := cloudInstanceLifecycleStart(ci)
+	if lifecycleStart == nil || !changedAt.Before(*lifecycleStart) {
+		return changedAt
+	}
+	ts := *lifecycleStart
+	return &ts
+}
+
+func inferInitialPhaseChangedAt(phase string, ci *db.CloudInstance, jobs []*db.Job, timings map[int64]*db.JobPhaseTimings) *time.Time {
+	verb, jobID, ok := ParsePhaseJobID(phase)
 	if !ok {
 		return nil
 	}
@@ -95,32 +126,32 @@ func inferInitialPhaseChangedAt(phase string, jobs []*db.Job, timings map[int64]
 	case "setup":
 		if jobTimings != nil && jobTimings.SetupStart != nil && *jobTimings.SetupStart > 0 {
 			ts := time.Unix(*jobTimings.SetupStart, 0)
-			return &ts
+			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
 	case "running":
 		if job != nil && job.StartTime > 0 {
 			ts := time.Unix(job.StartTime, 0)
-			return &ts
+			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
 		if jobTimings != nil && jobTimings.RunStart != nil && *jobTimings.RunStart > 0 {
 			ts := time.Unix(*jobTimings.RunStart, 0)
-			return &ts
+			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
 	case "finalizing":
 		if jobTimings != nil && jobTimings.RunEnd != nil && *jobTimings.RunEnd > 0 {
 			ts := time.Unix(*jobTimings.RunEnd, 0)
-			return &ts
+			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
 	case "uploading":
 		if jobTimings != nil && jobTimings.UploadStart != nil && *jobTimings.UploadStart > 0 {
 			ts := time.Unix(*jobTimings.UploadStart, 0)
-			return &ts
+			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
 	}
 	return nil
 }
 
-func parsePhaseJobID(phase string) (string, int64, bool) {
+func ParsePhaseJobID(phase string) (string, int64, bool) {
 	verb, jobIDText, ok := strings.Cut(phase, ":")
 	if !ok || jobIDText == "" {
 		return "", 0, false
@@ -310,7 +341,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				prevPhase := currentPhase
 				currentPhase = instancePhase
 				if prevPhase == "" {
-					phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, jobs, jobPhaseTimings)
+					phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, ci, jobs, jobPhaseTimings)
 				} else {
 					now := time.Now()
 					phaseChangedAt = &now

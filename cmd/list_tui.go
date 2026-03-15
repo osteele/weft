@@ -16,6 +16,7 @@ import (
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
+const listTUISyncInterval = 30 * time.Second
 
 type listTUIModel struct {
 	database         *sql.DB
@@ -55,6 +56,7 @@ type listDBWatchEventMsg struct {
 }
 
 type listDBRefreshTriggeredMsg struct{}
+type listSyncTickMsg struct{}
 
 var (
 	listTUITitleStyle    = lipgloss.NewStyle().Bold(true)
@@ -86,7 +88,7 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 }
 
 func (m listTUIModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs()}
+	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), scheduleListSyncTick()}
 	if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
@@ -198,6 +200,16 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case listDBRefreshTriggeredMsg:
 		m.debounceActive = false
 		return m, m.reloadJobs()
+
+	case listSyncTickMsg:
+		cmds := []tea.Cmd{scheduleListSyncTick()}
+		if !m.syncEnabled || m.syncInProgress {
+			return m, tea.Batch(cmds...)
+		}
+		m.syncInProgress = true
+		m.statusMessage = "Refreshing..."
+		cmds = append(cmds, m.runBackgroundSync(true))
+		return m, tea.Batch(cmds...)
 	}
 
 	return m, nil
@@ -335,13 +347,19 @@ func syncListTUIData(database *sql.DB, full bool) []string {
 	if full {
 		timeout = NormalSyncTimeout
 	}
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, nil, timeout, false)
+	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailedWithOptions(database, nil, timeout, false, full)
 	if !completed {
 		if note := buildStaleDataNote(database, unreachable); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
 	return warnings
+}
+
+func scheduleListSyncTick() tea.Cmd {
+	return tea.Tick(listTUISyncInterval, func(time.Time) tea.Msg {
+		return listSyncTickMsg{}
+	})
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {

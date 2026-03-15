@@ -1559,7 +1559,6 @@ func initSchema(db *sql.DB) error {
 	if err := backfillRecentProjects(db); err != nil {
 		return err
 	}
-
 	// Migration: add queued_at column for queue ordering (independent of job ID)
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queued_at INTEGER`); err != nil {
 		return err
@@ -2103,6 +2102,9 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := backfillLegacyJobRuns(db); err != nil {
+		return err
+	}
+	if err := repairPlaceholderProjects(db); err != nil {
 		return err
 	}
 
@@ -3358,10 +3360,44 @@ func setJobStringSlice(db *sql.DB, jobID int64, column string, values []string) 
 	return err
 }
 
+// NormalizeProjectName resolves placeholder project values such as "." to a
+// stable derived project name using the working directory or command.
+func NormalizeProjectName(project, workingDir, command string) (string, error) {
+	project = strings.TrimSpace(project)
+	if project != "" && project != "." {
+		return project, nil
+	}
+	if strings.TrimSpace(workingDir) != "" {
+		derived, err := workdir.ResolveProjectName("", workingDir)
+		if err != nil {
+			return "", err
+		}
+		derived = strings.TrimSpace(derived)
+		if derived != "" && derived != "." {
+			return derived, nil
+		}
+	}
+	derived := strings.TrimSpace(DeriveProject(workingDir, command))
+	if derived == "." {
+		return "", nil
+	}
+	return derived, nil
+}
+
 // SetJobProject sets the project name for a job.
 func SetJobProject(db *sql.DB, jobID int64, project string) error {
-	_, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, project, jobID)
-	return err
+	var workingDir, command string
+	if err := db.QueryRow(`SELECT working_dir, command FROM jobs WHERE id = ?`, jobID).Scan(&workingDir, &command); err != nil {
+		return err
+	}
+	normalized, err := NormalizeProjectName(project, workingDir, command)
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, normalized, jobID); err != nil {
+		return err
+	}
+	return PersistLatestRunSnapshotIfExists(db, jobID, "")
 }
 
 // DeriveProject computes the project name from a working directory and command.
@@ -3371,12 +3407,20 @@ func SetJobProject(db *sql.DB, jobID int64, project string) error {
 func DeriveProject(workingDir, command string) string {
 	_, cdDir := ParseCdPrefix(command)
 	if cdDir != "" {
-		return filepath.Base(cdDir)
+		return projectBase(cdDir)
 	}
 	if workingDir != "" {
-		return filepath.Base(workingDir)
+		return projectBase(workingDir)
 	}
 	return ""
+}
+
+func projectBase(dir string) string {
+	base := filepath.Base(filepath.Clean(dir))
+	if base == "." {
+		return ""
+	}
+	return base
 }
 
 // FilterJobsByProject filters jobs by project name. Empty project returns all jobs.
@@ -3412,11 +3456,50 @@ func backfillRecentProjects(db *sql.DB) error {
 		if err := rows.Scan(&id, &workingDir, &command); err != nil {
 			return err
 		}
-		project := DeriveProject(workingDir, command)
+		project, err := NormalizeProjectName("", workingDir, command)
+		if err != nil {
+			return err
+		}
 		if project != "" {
 			if _, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, project, id); err != nil {
 				return err
 			}
+		}
+	}
+	return rows.Err()
+}
+
+func repairPlaceholderProjects(db *sql.DB) error {
+	for _, table := range []string{"jobs", "job_runs"} {
+		if err := repairPlaceholderProjectsInTable(db, table); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func repairPlaceholderProjectsInTable(db *sql.DB, table string) error {
+	rows, err := db.Query(fmt.Sprintf(`SELECT id, working_dir, command FROM %s WHERE TRIM(COALESCE(project, '')) = '.'`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		var workingDir, command string
+		if err := rows.Scan(&id, &workingDir, &command); err != nil {
+			return err
+		}
+		project, err := NormalizeProjectName("", workingDir, command)
+		if err != nil {
+			return err
+		}
+		if project == "" {
+			continue
+		}
+		if _, err := db.Exec(fmt.Sprintf(`UPDATE %s SET project = ? WHERE id = ?`, table), project, id); err != nil {
+			return err
 		}
 	}
 	return rows.Err()
@@ -4852,6 +4935,10 @@ func insertJobRunSnapshotAtTx(tx *sql.Tx, job *Job, reason string, archivedAt in
 	if err != nil {
 		return 0, err
 	}
+	project, err := NormalizeProjectName(job.Project, job.WorkingDir, job.Command)
+	if err != nil {
+		return 0, err
+	}
 	result, err := tx.Exec(
 		`INSERT INTO job_runs (
 			job_id, archived_at, archive_reason, status, host, working_dir, command, description,
@@ -4867,7 +4954,7 @@ func insertJobRunSnapshotAtTx(tx *sql.Tx, job *Job, reason string, archivedAt in
 		nullIfEmpty(job.GPU), nullIfEmpty(job.GPUClass), job.CPUAllotment, job.GPUMemGB,
 		encodeStringSlice(job.EnvVars), encodeTagsForRun(job.Tags), nullIfEmpty(job.DepSpec),
 		encodeStringSlice(job.Inputs), encodeStringSlice(job.Outputs), encodeStringSlice(job.OutputDirs),
-		encodeStringSlice(job.Produces), encodeStringSlice(job.Needs), nullIfEmpty(job.Project),
+		encodeStringSlice(job.Produces), encodeStringSlice(job.Needs), nullIfEmpty(project),
 		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
 		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), jobMetadata, placementMeta,
 		job.Cost, nullableInt(job.VastaiInstanceID), job.RetryCount, job.CloudInstanceID,
@@ -5003,18 +5090,24 @@ func persistLatestRunSnapshotTx(tx *sql.Tx, job *Job, reason string) error {
 	if err != nil {
 		return err
 	}
+	project, err := NormalizeProjectName(job.Project, job.WorkingDir, job.Command)
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec(
 		`UPDATE job_runs SET
 			archived_at = ?,
 			archive_reason = CASE WHEN ? <> '' THEN ? ELSE archive_reason END,
 			status = ?,
 			session_name = ?, remote_id = ?, remote_state = ?,
+			project = ?,
 			start_time = ?, end_time = ?, exit_code = ?, error_message = ?, failure_reason = ?,
 			error_diagnosis = ?, job_metadata = ?, placement_meta = ?, cost = ?,
 			vastai_instance_id = ?, retry_count = ?, cloud_instance_id = ?
 		 WHERE id = ?`,
 		now, reason, reason, job.Status,
 		nullIfEmpty(job.SessionName), nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
+		nullIfEmpty(project),
 		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
 		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), jobMetadata, placementMeta, job.Cost,
 		nullableInt(job.VastaiInstanceID), job.RetryCount, job.CloudInstanceID,

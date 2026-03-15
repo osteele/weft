@@ -222,7 +222,7 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	}
 }
 
-func TestWatchModelTerminalUpdateKeepsPreviouslyCurrentJobsInMainGroup(t *testing.T) {
+func TestWatchModelTerminalUpdateKeepsJobsInlineInRunOrder(t *testing.T) {
 	instanceID := int64(130)
 	m := watchModel{
 		instanceIDs: []int64{instanceID},
@@ -271,13 +271,15 @@ func TestWatchModelTerminalUpdateKeepsPreviouslyCurrentJobsInMainGroup(t *testin
 
 	out := stripANSI(nextModel.(watchModel).View())
 	currentIdx := strings.Index(out, "  203")
-	headerIdx := strings.Index(out, historicalCloudInstanceJobsHeader)
 	historicalIdx := strings.Index(out, "  249")
-	if currentIdx == -1 || headerIdx == -1 || historicalIdx == -1 {
-		t.Fatalf("expected current job, historical header, and historical job in output, got:\n%s", out)
+	if currentIdx == -1 || historicalIdx == -1 {
+		t.Fatalf("expected both jobs in output, got:\n%s", out)
 	}
-	if !(currentIdx < headerIdx && headerIdx < historicalIdx) {
-		t.Fatalf("expected previously current job to stay in the main group, got:\n%s", out)
+	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+		t.Fatalf("expected attempts to remain inline, got:\n%s", out)
+	}
+	if !(currentIdx < historicalIdx) {
+		t.Fatalf("expected previously current job to stay in run order, got:\n%s", out)
 	}
 	if !strings.Contains(out, "orphaned") {
 		t.Fatalf("expected orphaned status in output, got:\n%s", out)

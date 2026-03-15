@@ -619,10 +619,10 @@ func wrapText(text string, width int) string {
 	return result.String()
 }
 
-// abbreviateProject shortens a hyphenated project name to fit within maxWidth.
+// AbbreviateProject shortens a hyphenated project name to fit within maxWidth.
 // It iteratively shortens the longest segment first, preserving shorter segments,
 // then falls back to initials, then truncates.
-func abbreviateProject(name string, maxWidth int) string {
+func AbbreviateProject(name string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
 	}

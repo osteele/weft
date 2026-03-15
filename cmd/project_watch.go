@@ -35,6 +35,8 @@ var (
 	projectWatchRecent time.Duration
 )
 
+const projectWatchSyncInterval = 30 * time.Second
+
 type projectWatchModel struct {
 	database         *sql.DB
 	groups           []projectGroup
@@ -73,6 +75,7 @@ type projectWatchDBWatchEventMsg struct {
 }
 
 type projectWatchDBRefreshTriggeredMsg struct{}
+type projectWatchSyncTickMsg struct{}
 
 func init() {
 	projectCmd.AddCommand(projectWatchCmd)
@@ -131,7 +134,7 @@ func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnable
 }
 
 func (m projectWatchModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadGroups()}
+	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadGroups(), scheduleProjectWatchSyncTick()}
 	if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
@@ -240,6 +243,16 @@ func (m projectWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectWatchDBRefreshTriggeredMsg:
 		m.debounceActive = false
 		return m, m.reloadGroups()
+
+	case projectWatchSyncTickMsg:
+		cmds := []tea.Cmd{scheduleProjectWatchSyncTick()}
+		if !m.syncEnabled || m.syncInProgress {
+			return m, tea.Batch(cmds...)
+		}
+		m.syncInProgress = true
+		m.statusMessage = "Refreshing..."
+		cmds = append(cmds, m.runBackgroundSync(true))
+		return m, tea.Batch(cmds...)
 	}
 
 	return m, nil
@@ -396,13 +409,19 @@ func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
 	if full {
 		timeout = NormalSyncTimeout
 	}
-	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailed(database, nil, timeout, false)
+	completed, unreachable, warnings := performSyncWithTimeoutForHostsDetailedWithOptions(database, nil, timeout, false, full)
 	if !completed {
 		if note := buildStaleDataNote(database, unreachable); note != "" {
 			warnings = append(warnings, note)
 		}
 	}
 	return warnings
+}
+
+func scheduleProjectWatchSyncTick() tea.Cmd {
+	return tea.Tick(projectWatchSyncInterval, func(time.Time) tea.Msg {
+		return projectWatchSyncTickMsg{}
+	})
 }
 
 func (m projectWatchModel) startDBWatcher() tea.Cmd {

@@ -134,6 +134,7 @@ func TestInferInitialPhaseChangedAt_RunningUsesJobStartTime(t *testing.T) {
 	startTime := time.Now().Add(-45 * time.Second).Unix()
 	got := inferInitialPhaseChangedAt(
 		"running:42",
+		nil,
 		[]*db.Job{{ID: 42, StartTime: startTime}},
 		nil,
 	)
@@ -148,12 +149,88 @@ func TestInferInitialPhaseChangedAt_RunningUsesJobStartTime(t *testing.T) {
 func TestInferInitialPhaseChangedAt_UnknownUploadPhaseReturnsNil(t *testing.T) {
 	got := inferInitialPhaseChangedAt(
 		"uploading-results:42",
+		nil,
 		[]*db.Job{{ID: 42, StartTime: time.Now().Unix()}},
 		nil,
 	)
 	if got != nil {
 		t.Fatalf("phase start = %v, want nil", got)
 	}
+}
+
+func TestInferInitialPhaseChangedAt_ClampsToLaunchedAt(t *testing.T) {
+	launchedAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	staleSetupStart := launchedAt.Add(-108 * time.Hour).Unix()
+	ci := &db.CloudInstance{LaunchedAt: phaseTestInt64Ptr(launchedAt.Unix())}
+
+	got := inferInitialPhaseChangedAt(
+		"setup:42",
+		ci,
+		[]*db.Job{{ID: 42}},
+		map[int64]*db.JobPhaseTimings{
+			42: {JobID: 42, SetupStart: phaseTestInt64Ptr(staleSetupStart)},
+		},
+	)
+	if got == nil {
+		t.Fatal("expected non-nil phase start")
+	}
+	if !got.Equal(launchedAt) {
+		t.Fatalf("phase start = %v, want launched_at %v", got, launchedAt)
+	}
+}
+
+func TestInferInitialPhaseChangedAt_PreservesCurrentAttemptSetupStart(t *testing.T) {
+	launchedAt := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	setupStart := launchedAt.Add(90 * time.Second)
+	ci := &db.CloudInstance{LaunchedAt: phaseTestInt64Ptr(launchedAt.Unix())}
+
+	got := inferInitialPhaseChangedAt(
+		"setup:42",
+		ci,
+		[]*db.Job{{ID: 42}},
+		map[int64]*db.JobPhaseTimings{
+			42: {JobID: 42, SetupStart: phaseTestInt64Ptr(setupStart.Unix())},
+		},
+	)
+	if got == nil {
+		t.Fatal("expected non-nil phase start")
+	}
+	if !got.Equal(setupStart) {
+		t.Fatalf("phase start = %v, want setup_start %v", got, setupStart)
+	}
+}
+
+func TestInferInitialPhaseChangedAt_FallsBackToReadyAtThenCreatedAt(t *testing.T) {
+	readyAt := time.Now().Add(-3 * time.Minute).Truncate(time.Second)
+	staleSetupStart := readyAt.Add(-2 * time.Hour).Unix()
+	gotReady := inferInitialPhaseChangedAt(
+		"setup:42",
+		&db.CloudInstance{ReadyAt: phaseTestInt64Ptr(readyAt.Unix())},
+		[]*db.Job{{ID: 42}},
+		map[int64]*db.JobPhaseTimings{
+			42: {JobID: 42, SetupStart: phaseTestInt64Ptr(staleSetupStart)},
+		},
+	)
+	if gotReady == nil || !gotReady.Equal(readyAt) {
+		t.Fatalf("phase start with ready_at = %v, want %v", gotReady, readyAt)
+	}
+
+	createdAt := time.Now().Add(-4 * time.Minute).Truncate(time.Second)
+	gotCreated := inferInitialPhaseChangedAt(
+		"setup:42",
+		&db.CloudInstance{CreatedAt: createdAt.Unix()},
+		[]*db.Job{{ID: 42}},
+		map[int64]*db.JobPhaseTimings{
+			42: {JobID: 42, SetupStart: phaseTestInt64Ptr(staleSetupStart)},
+		},
+	)
+	if gotCreated == nil || !gotCreated.Equal(createdAt) {
+		t.Fatalf("phase start with created_at = %v, want %v", gotCreated, createdAt)
+	}
+}
+
+func phaseTestInt64Ptr(v int64) *int64 {
+	return &v
 }
 
 func TestFailureTerminationReasonFromPhase(t *testing.T) {

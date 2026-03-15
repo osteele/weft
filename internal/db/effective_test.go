@@ -17,12 +17,40 @@ func TestDeriveProject(t *testing.T) {
 		{"trailing slash", "/home/user/projects/my-project/", "", "my-project"},
 		{"tilde path", "~/projects/my-project", "", "my-project"},
 		{"cd override", "", "cd ~/other-project && python train.py", "other-project"},
+		{"dot path", ".", "", ""},
 		{"root path", "/", "", "/"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := DeriveProject(tt.workingDir, tt.command); got != tt.want {
 				t.Errorf("DeriveProject(%q, %q) = %q, want %q", tt.workingDir, tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeProjectName(t *testing.T) {
+	tests := []struct {
+		name       string
+		project    string
+		workingDir string
+		command    string
+		want       string
+	}{
+		{"explicit valid", "exp-123", "/tmp/project", "", "exp-123"},
+		{"dot absolute dir", ".", "/tmp/adaptive-escalation", "", "adaptive-escalation"},
+		{"empty uses dir", "", "/tmp/project", "", "project"},
+		{"empty uses command cd", "", "", "cd /tmp/command-project && python train.py", "command-project"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeProjectName(tt.project, tt.workingDir, tt.command)
+			if err != nil {
+				t.Fatalf("NormalizeProjectName: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("NormalizeProjectName(%q, %q, %q) = %q, want %q", tt.project, tt.workingDir, tt.command, got, tt.want)
 			}
 		})
 	}
@@ -94,6 +122,67 @@ func TestSetJobProjectRoundtrip(t *testing.T) {
 	}
 	if job.Project != "my-project" {
 		t.Errorf("job.Project = %q, want %q", job.Project, "my-project")
+	}
+}
+
+func TestOpenRepairsPlaceholderProjects(t *testing.T) {
+	tmpfile, err := os.CreateTemp("", "project-repair-*.db")
+	if err != nil {
+		t.Fatalf("create temp db: %v", err)
+	}
+	tmpfile.Close()
+	defer os.Remove(tmpfile.Name())
+
+	cleanup := SetDBPath(tmpfile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+
+	jobID, err := RecordQueuedWithGPU(database, "", "/Users/osteele/code/research/adaptive-escalation", "uv run python scripts/run_backtracking_search.py --resume", "retry", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := SetJobProject(database, jobID, "."); err != nil {
+		t.Fatalf("set project: %v", err)
+	}
+	if err := PersistLatestRunSnapshot(database, jobID, ""); err != nil {
+		t.Fatalf("persist latest run: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET project = '.' WHERE id = ?`, jobID); err != nil {
+		t.Fatalf("seed placeholder job project: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_runs SET project = '.' WHERE job_id = ?`, jobID); err != nil {
+		t.Fatalf("seed placeholder run project: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	database, err = Open()
+	if err != nil {
+		t.Fatalf("reopen database: %v", err)
+	}
+	defer database.Close()
+
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Project != "adaptive-escalation" {
+		t.Fatalf("job.Project = %q, want %q", job.Project, "adaptive-escalation")
+	}
+	runs, err := ListJobRuns(database, jobID)
+	if err != nil {
+		t.Fatalf("list job runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("len(runs) = %d, want 1", len(runs))
+	}
+	if runs[0].Project != "adaptive-escalation" {
+		t.Fatalf("run.Project = %q, want %q", runs[0].Project, "adaptive-escalation")
 	}
 }
 

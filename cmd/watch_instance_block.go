@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/tui"
 )
 
 type watchInstanceBlockOptions struct {
@@ -74,10 +75,9 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	}
 	lines = append(lines, fmt.Sprintf("  Jobs: %d/%d resolved", resolved, len(update.Jobs)))
 
-	jobGroups := groupCloudInstanceJobs(ci.ID, update.Jobs)
-	for _, job := range jobGroups.current {
-		i := findInstanceJobIndex(update.Jobs, job)
-		if i < 0 {
+	activePhaseJobID, activePhaseStatus := watchActivePhaseStatus(update.InstancePhase)
+	for i, job := range update.Jobs {
+		if job == nil {
 			continue
 		}
 		desc := job.Description
@@ -85,46 +85,27 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 			desc = campaign.TruncateCommand(job.Command, 50)
 		}
 
-		statusText := displayStatuses[i]
-		if progress := watchJobProgressPercent(update, job, jobProgressHWM); progress > 0 {
-			statusText = fmt.Sprintf("running %3d%%", progress)
-		}
-
-		lines = append(lines, fmt.Sprintf("    %4d  %s  %-12s  %s",
-			job.ID,
-			renderWatchJobStatusText(statusText, displayStatuses[i], opts),
-			campaign.JobProjectLabel(job),
-			desc,
-		))
-		if campaign.IsJobTerminal(displayStatuses[i]) {
-			if summary := formatUploadSummary(update.JobPhaseTimings[job.ID]); summary != "" {
-				lines = append(lines, fmt.Sprintf("          uploads: %s", summary))
+		displayStatus := displayStatuses[i]
+		statusText := displayStatus
+		if activePhaseJobID != 0 {
+			switch {
+			case job.ID == activePhaseJobID && activePhaseStatus != "":
+				displayStatus = activePhaseStatus
+				statusText = activePhaseStatus
+			case job.ID != activePhaseJobID && isWatchActiveJobDBStatus(displayStatus):
+				displayStatus = db.StatusQueued
+				statusText = db.StatusQueued
 			}
 		}
-	}
-
-	if len(jobGroups.historical) > 0 {
-		lines = append(lines, historicalCloudInstanceJobsHeader)
-	}
-	for _, job := range jobGroups.historical {
-		i := findInstanceJobIndex(update.Jobs, job)
-		if i < 0 {
-			continue
-		}
-		desc := job.Description
-		if desc == "" {
-			desc = campaign.TruncateCommand(job.Command, 50)
-		}
-
-		statusText := displayStatuses[i]
-		if progress := watchJobProgressPercent(update, job, jobProgressHWM); progress > 0 {
+		if progress := watchJobProgressPercent(update, job, displayStatus, jobProgressHWM); progress > 0 {
 			statusText = fmt.Sprintf("running %3d%%", progress)
 		}
+		projectLabel := tui.AbbreviateProject(campaign.JobProjectLabel(job), 12)
 
 		lines = append(lines, fmt.Sprintf("    %4d  %s  %-12s  %s",
 			job.ID,
-			renderWatchJobStatusText(statusText, displayStatuses[i], opts),
-			campaign.JobProjectLabel(job),
+			renderWatchJobStatusText(statusText, displayStatus, opts),
+			projectLabel,
 			desc,
 		))
 		if campaign.IsJobTerminal(displayStatuses[i]) {
@@ -137,16 +118,34 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	return lines
 }
 
-func findInstanceJobIndex(jobs []*db.Job, target *db.Job) int {
-	for i, job := range jobs {
-		if job == target {
-			return i
-		}
-		if job != nil && target != nil && job.ID == target.ID {
-			return i
-		}
+func watchActivePhaseStatus(phase string) (int64, string) {
+	verb, jobID, ok := campaign.ParsePhaseJobID(phase)
+	if !ok {
+		return 0, ""
 	}
-	return -1
+	switch verb {
+	case "setup":
+		return jobID, "setup"
+	case "running":
+		return jobID, db.StatusRunning
+	case "finalizing":
+		return jobID, "finalizing"
+	case "uploading", "uploading-results":
+		return jobID, "uploading"
+	case "disk-full":
+		return jobID, db.StatusFailed
+	default:
+		return 0, ""
+	}
+}
+
+func isWatchActiveJobDBStatus(status string) bool {
+	switch status {
+	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+		return true
+	default:
+		return false
+	}
 }
 
 func formatWatchInstanceHeaderLine(ci *db.CloudInstance, inst *cloud.Instance, opts watchInstanceBlockOptions) string {
@@ -230,8 +229,8 @@ func renderWatchJobStatusText(statusText, displayStatus string, opts watchInstan
 	}
 }
 
-func watchJobProgressPercent(update campaign.InstanceUpdate, job *db.Job, jobProgressHWM map[int64]int) int {
-	if job == nil || job.EffectiveStatus() != db.StatusRunning {
+func watchJobProgressPercent(update campaign.InstanceUpdate, job *db.Job, displayStatus string, jobProgressHWM map[int64]int) int {
+	if job == nil || displayStatus != db.StatusRunning {
 		return -1
 	}
 	if jobProgressHWM != nil && jobProgressHWM[job.ID] > 0 {

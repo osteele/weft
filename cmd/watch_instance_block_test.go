@@ -10,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-func TestFormatWatchInstanceBlockSeparatesHistoricalAttempts(t *testing.T) {
+func TestFormatWatchInstanceBlockKeepsAttemptsInlineInRunOrder(t *testing.T) {
 	instanceID := int64(124)
 	update := campaign.InstanceUpdate{
 		CloudInstance: &db.CloudInstance{
@@ -31,13 +31,15 @@ func TestFormatWatchInstanceBlockSeparatesHistoricalAttempts(t *testing.T) {
 	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
 
 	currentIdx := strings.Index(out, "  199")
-	historyHeaderIdx := strings.Index(out, historicalCloudInstanceJobsHeader)
 	historicalIdx := strings.Index(out, "  249")
-	if currentIdx == -1 || historyHeaderIdx == -1 || historicalIdx == -1 {
-		t.Fatalf("expected current job, historical section, and historical job in output, got:\n%s", out)
+	if currentIdx == -1 || historicalIdx == -1 {
+		t.Fatalf("expected both jobs in output, got:\n%s", out)
 	}
-	if !(currentIdx < historyHeaderIdx && historyHeaderIdx < historicalIdx) {
-		t.Fatalf("expected current jobs before historical attempts, got:\n%s", out)
+	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+		t.Fatalf("expected attempts to remain inline, got:\n%s", out)
+	}
+	if !(currentIdx < historicalIdx) {
+		t.Fatalf("expected jobs to stay in run order, got:\n%s", out)
 	}
 	if !strings.Contains(out, "failed") {
 		t.Fatalf("expected historical attempt outcome in output, got:\n%s", out)
@@ -118,13 +120,15 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 	}
 
 	idx253 := strings.Index(out, "  253")
-	headerIdx := strings.Index(out, historicalCloudInstanceJobsHeader)
 	idx283 := strings.Index(out, "  283")
-	if idx253 == -1 || headerIdx == -1 || idx283 == -1 {
-		t.Fatalf("expected final current job, historical header, and historical job in output, got:\n%s", out)
+	if idx253 == -1 || idx283 == -1 {
+		t.Fatalf("expected final current job and failed attempt in output, got:\n%s", out)
 	}
-	if !(idx253 < headerIdx && headerIdx < idx283) {
-		t.Fatalf("expected open-attempt jobs to remain in the current group, got:\n%s", out)
+	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+		t.Fatalf("expected attempts to remain inline, got:\n%s", out)
+	}
+	if !(idx253 < idx283) {
+		t.Fatalf("expected failed attempts to stay in chronological order, got:\n%s", out)
 	}
 }
 
@@ -146,5 +150,93 @@ func TestFormatWatchInstanceBlockPrefersLiveProviderRate(t *testing.T) {
 	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true, now: now})
 	if !strings.Contains(out, "Cost: $4.50 (uptime: 2h0m0s, rate: $2.25/hr)") {
 		t.Fatalf("expected live provider rate in output, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockAbbreviatesLongProjectNames(t *testing.T) {
+	instanceID := int64(142)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:       instanceID,
+			Status:   db.CloudInstanceStatusRunning,
+			Provider: "vastai",
+			GPUSpec:  "A100",
+		},
+		Jobs: []*db.Job{
+			{
+				ID:              175,
+				Status:          db.StatusQueued,
+				CloudInstanceID: &instanceID,
+				Project:         "llm-performance-models",
+				Description:     "EXP-042: vLLM cross-GPU profiles (A100)",
+			},
+		},
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
+	if strings.Contains(out, "llm-performance-models") {
+		t.Fatalf("expected abbreviated project label, got:\n%s", out)
+	}
+	if !strings.Contains(out, "llm-perf-mod") {
+		t.Fatalf("expected hyphen-aware abbreviation in output, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockUsesLivePhaseForActiveJobStatus(t *testing.T) {
+	instanceID := int64(142)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:       instanceID,
+			Status:   db.CloudInstanceStatusRunning,
+			Provider: "vastai",
+			GPUSpec:  "A100",
+		},
+		InstancePhase: "uploading-results:205",
+		Jobs: []*db.Job{
+			{ID: 205, Status: db.StatusQueued, Project: "adaptive-escalation", Description: "phase 1 retry"},
+			{ID: 226, Status: db.StatusRunning, Project: "head-type-ontology", Description: "stale running row"},
+		},
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
+	if !strings.Contains(out, "Phase: uploading logs/results (job 205)") {
+		t.Fatalf("expected live phase in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "  205  uploading") {
+		t.Fatalf("expected active phase job to show uploading status, got:\n%s", out)
+	}
+	if strings.Contains(out, "  226  running") {
+		t.Fatalf("expected stale running row to be suppressed while job 205 is active, got:\n%s", out)
+	}
+	if !strings.Contains(out, "  226  queued") {
+		t.Fatalf("expected non-active stale running row to fall back to queued, got:\n%s", out)
+	}
+}
+
+func TestFormatWatchInstanceBlockUsesRunningPhaseForQueuedActiveJob(t *testing.T) {
+	instanceID := int64(140)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:       instanceID,
+			Status:   db.CloudInstanceStatusRunning,
+			Provider: "vastai",
+			GPUSpec:  "A40",
+		},
+		InstancePhase: "running:249",
+		Jobs: []*db.Job{
+			{ID: 249, Status: db.StatusQueued, Project: "llm-performance-models", Description: "spec decoding"},
+			{ID: 295, Status: db.StatusQueued, Project: "llm-performance-models", Description: "framework overhead"},
+		},
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
+	if !strings.Contains(out, "Phase: running job 249") {
+		t.Fatalf("expected live running phase in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "  249  running") {
+		t.Fatalf("expected active queued row to render as running, got:\n%s", out)
+	}
+	if strings.Contains(out, "  249  queued") {
+		t.Fatalf("did not expect active job to stay queued, got:\n%s", out)
 	}
 }

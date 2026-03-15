@@ -336,14 +336,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
-			jobGroups := groupCloudInstanceJobs(ci.ID, jobs)
-			for _, j := range jobGroups.current {
-				printInstanceJob(j)
-			}
-			if len(jobGroups.historical) > 0 {
-				fmt.Println(historicalCloudInstanceJobsHeader)
-			}
-			for _, j := range jobGroups.historical {
+			for _, j := range jobs {
 				printInstanceJob(j)
 			}
 		}

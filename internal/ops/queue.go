@@ -11,7 +11,6 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/ssh"
-	"github.com/osteele/weft/internal/workdir"
 )
 
 const (
@@ -279,16 +278,9 @@ func recordQueuedJob(database *sql.DB, explicitJobID int64, params QueueJobParam
 	if err := db.SetJobDepSpec(database, jobID, params.DepSpec); err != nil {
 		return 0, fmt.Errorf("record dependencies: %w", err)
 	}
-	project := strings.TrimSpace(params.Project)
-	if project == "" {
-		var err error
-		project, err = workdir.ResolveProjectName("", params.WorkingDir)
-		if err != nil {
-			return 0, fmt.Errorf("resolve project: %w", err)
-		}
-	}
-	if project == "" {
-		project = db.DeriveProject(params.WorkingDir, params.Command)
+	project, err := db.NormalizeProjectName(params.Project, params.WorkingDir, params.Command)
+	if err != nil {
+		return 0, fmt.Errorf("resolve project: %w", err)
 	}
 	if project != "" {
 		if err := db.SetJobProject(database, jobID, project); err != nil {

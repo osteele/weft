@@ -143,3 +143,28 @@ func TestRecordQueuedJob_ExplicitProject(t *testing.T) {
 		t.Errorf("expected Project=%q, got %q", "explicit-project", job.Project)
 	}
 }
+
+func TestRecordQueuedJob_DotProjectFallsBackToDirectory(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	params := QueueJobParams{
+		Host:       "",
+		WorkingDir: "/Users/osteele/code/research/adaptive-escalation",
+		Command:    "uv run python scripts/run_backtracking_search.py --resume",
+		Project:    ".",
+		Tags:       []string{"cloud"},
+	}
+
+	jobID, err := RecordQueuedJob(database, params)
+	if err != nil {
+		t.Fatalf("RecordQueuedJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Project != "adaptive-escalation" {
+		t.Errorf("expected Project=%q, got %q", "adaptive-escalation", job.Project)
+	}
+}

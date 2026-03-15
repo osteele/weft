@@ -251,6 +251,33 @@ func TestFormatWatchInstanceBlockShowsDBHourlyCostFallback(t *testing.T) {
 	}
 }
 
+func TestFormatWatchInstanceBlockClampsPhaseDurationToInstanceUptime(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	launchedAt := now.Add(-2*time.Minute - 24*time.Second)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:                 142,
+			Status:             db.CloudInstanceStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "32896734",
+			GPUSpec:            "A100 >=40GB",
+			ResolvedGPUName:    "A100 SXM4",
+			CostPerHourCents:   66,
+			LaunchedAt:         watchTestInt64Ptr(launchedAt.Unix()),
+		},
+		InstancePhase:  "setup:175",
+		PhaseChangedAt: watchTimePtr(launchedAt),
+	}
+
+	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{now: now}))
+	if !strings.Contains(out, "Phase: setup (job 175) (for 2m24s)") {
+		t.Fatalf("expected clamped phase duration, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Cost: $0.03 (uptime: 2m24s, rate: $0.66/hr)") {
+		t.Fatalf("expected matching uptime, got:\n%s", out)
+	}
+}
+
 func TestFormatWatchInstanceBlockUsesEndedAtForTerminalUptime(t *testing.T) {
 	now := time.Unix(7200, 0)
 	launchedAt := int64(0)
@@ -271,6 +298,10 @@ func TestFormatWatchInstanceBlockUsesEndedAtForTerminalUptime(t *testing.T) {
 	if !strings.Contains(out, "Cost: $1.50 (uptime: 1h0m0s, rate: $1.50/hr)") {
 		t.Fatalf("expected terminal uptime to stop at ended_at, got:\n%s", out)
 	}
+}
+
+func watchTimePtr(t time.Time) *time.Time {
+	return &t
 }
 
 func TestUpdateWatchJobProgressHWMPrunesDisappearedJobs(t *testing.T) {

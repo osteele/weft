@@ -45,9 +45,9 @@ func TestAbbreviateProject(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := abbreviateProject(tt.input, tt.maxWidth)
+			got := AbbreviateProject(tt.input, tt.maxWidth)
 			if got != tt.want {
-				t.Errorf("abbreviateProject(%q, %d) = %q, want %q", tt.input, tt.maxWidth, got, tt.want)
+				t.Errorf("AbbreviateProject(%q, %d) = %q, want %q", tt.input, tt.maxWidth, got, tt.want)
 			}
 		})
 	}

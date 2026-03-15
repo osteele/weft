@@ -194,6 +194,10 @@ func performSyncWithTimeoutForHosts(database *sql.DB, hosts []string, sshTimeout
 }
 
 func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool) (bool, []string, []string) {
+	return performSyncWithTimeoutForHostsDetailedWithOptions(database, hosts, sshTimeout, verbose, false)
+}
+
+func performSyncWithTimeoutForHostsDetailedWithOptions(database *sql.DB, hosts []string, sshTimeout time.Duration, verbose bool, startQueueRunner bool) (bool, []string, []string) {
 	if len(hosts) == 0 {
 		var err error
 		hosts, err = db.ListUniqueActiveHosts(database)
@@ -215,7 +219,7 @@ func performSyncWithTimeoutForHostsDetailed(database *sql.DB, hosts []string, ss
 		// Try quick sync, but don't wait if it times out
 		done := make(chan hostSyncOutcome, 1)
 		go func(h string) {
-			result, err := syncHostWithTimeout(database, h, sshTimeout)
+			result, err := syncHostWithTimeoutDetailed(database, h, sshTimeout, startQueueRunner)
 			done <- hostSyncOutcome{result: result, err: err}
 		}(host)
 
@@ -249,12 +253,22 @@ func performFastSyncForHosts(database *sql.DB, hosts []string, verbose bool) (bo
 // Returns (updated count, error). Only returns error if host is truly unreachable
 // (all SSH calls failed). Individual job sync failures are tolerated.
 func syncHostWithTimeout(database *sql.DB, host string, timeout time.Duration) (ops.HostSyncResult, error) {
+	return syncHostWithTimeoutDetailed(database, host, timeout, false)
+}
+
+func syncHostWithTimeoutDetailed(database *sql.DB, host string, timeout time.Duration, startQueueRunner bool) (ops.HostSyncResult, error) {
+	onQueueStart := func(string) (bool, error) { return false, nil }
+	if startQueueRunner {
+		onQueueStart = func(h string) (bool, error) {
+			return ensureQueueRunnerStarted(h, defaultQueueName)
+		}
+	}
 	result, err := ops.SyncHost(database, host, ops.HostSyncOptions{
 		Timeout:      timeout,
 		SkipSamples:  true,
 		UseBatchSync: true,
-		NoQueueStart: true,
-	}, nil)
+		NoQueueStart: !startQueueRunner,
+	}, onQueueStart)
 	return result, err
 }
 

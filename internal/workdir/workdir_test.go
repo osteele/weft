@@ -76,6 +76,45 @@ func TestResolveProjectNameExplicitOverride(t *testing.T) {
 	}
 }
 
+func TestResolveProjectNameDotUsesDirectoryBase(t *testing.T) {
+	original := repoRootResolver
+	repoRootResolver = func(string) string { return "" }
+	t.Cleanup(func() { repoRootResolver = original })
+
+	got, err := ResolveProjectName(".", "/tmp/adaptive-escalation")
+	if err != nil {
+		t.Fatalf("ResolveProjectName: %v", err)
+	}
+	if got != "adaptive-escalation" {
+		t.Errorf("ResolveProjectName('.', abs) = %q, want %q", got, "adaptive-escalation")
+	}
+}
+
+func TestResolveProjectNameDotUsesRepoRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo-root")
+	child := filepath.Join(root, "pkg", "subdir")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+
+	original := repoRootResolver
+	repoRootResolver = func(dir string) string {
+		if dir == child {
+			return root
+		}
+		return ""
+	}
+	t.Cleanup(func() { repoRootResolver = original })
+
+	got, err := ResolveProjectName(".", child)
+	if err != nil {
+		t.Fatalf("ResolveProjectName: %v", err)
+	}
+	if got != "repo-root" {
+		t.Errorf("ResolveProjectName('.', repo child) = %q, want %q", got, "repo-root")
+	}
+}
+
 func TestResolveLocal(t *testing.T) {
 	tests := []struct {
 		name string

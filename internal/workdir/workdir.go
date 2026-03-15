@@ -33,7 +33,7 @@ func ProjectDir(dir string) (string, error) {
 // derives it from the repo root (or working directory fallback).
 func ResolveProjectName(project, dir string) (string, error) {
 	project = strings.TrimSpace(project)
-	if project != "" {
+	if project != "" && project != "." {
 		return project, nil
 	}
 	projectDir, err := ProjectDir(dir)

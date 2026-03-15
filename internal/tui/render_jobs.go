@@ -381,7 +381,7 @@ func (m Model) renderJobList(height int) string {
 
 		project := job.DirectoryTailDisplay()
 		if project != "—" {
-			project = abbreviateProject(project, projectWidth)
+			project = AbbreviateProject(project, projectWidth)
 		}
 		projectCol := fmt.Sprintf("%-*s", projectWidth, truncate(project, projectWidth))
 
