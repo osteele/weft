@@ -387,6 +387,25 @@ type syncResultMsg struct {
 	result SyncResult
 }
 
+// WaitForResult returns a cmd that blocks until the next sync result is
+// available or ctx is cancelled, then wraps it with the provided function.
+func (w *SyncWorker) WaitForResult(ctx context.Context, wrap func(SyncResult) tea.Msg) tea.Cmd {
+	if w == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case result, ok := <-w.Results():
+			if !ok {
+				return nil
+			}
+			return wrap(result)
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
 // Model methods for sync worker integration
 
 // requestSyncsForActiveHosts sends sync requests for all hosts with jobs

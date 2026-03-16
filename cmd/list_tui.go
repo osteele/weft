@@ -116,7 +116,9 @@ func (m listTUIModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), scheduleListSyncTick()}
 	if m.syncWorker != nil {
 		m.requestActiveSyncs()
-		cmds = append(cmds, waitForListSyncResult(m.ctx, m.syncWorker))
+		cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			return listSyncWorkerResultMsg{result: r}
+		}))
 	} else if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
@@ -241,7 +243,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(
 			m.reloadJobs(),
-			waitForListSyncResult(m.ctx, m.syncWorker),
+			m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+				return listSyncWorkerResultMsg{result: r}
+			}),
 		)
 
 	case listSyncTickMsg:
@@ -399,23 +403,6 @@ func syncListTUIData(database *sql.DB, full bool) []string {
 		}
 	}
 	return warnings
-}
-
-func waitForListSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
-	if sw == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		select {
-		case result, ok := <-sw.Results():
-			if !ok {
-				return nil
-			}
-			return listSyncWorkerResultMsg{result: result}
-		case <-ctx.Done():
-			return nil
-		}
-	}
 }
 
 func (m listTUIModel) requestActiveSyncs() {

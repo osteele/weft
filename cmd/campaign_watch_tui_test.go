@@ -38,6 +38,7 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	}
 
 	m := newWatchModel(database, []int64{failedID, launchingID}, nil, nil)
+	defer m.cancel()
 	m.spinner.Spinner = spinner.Spinner{Frames: []string{"SPIN"}, FPS: time.Second}
 	spinnerMarker := m.spinner.View()
 	if spinnerMarker == "" {

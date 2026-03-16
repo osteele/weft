@@ -131,7 +131,9 @@ func (m watchAllModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.spinner.Tick,
 		scheduleWatchAllTick(),
-		waitForWatchSyncResult(m.ctx, m.syncWorker),
+		m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			return watchSyncResultMsg{result: r}
+		}),
 	}
 	for _, ci := range m.cloudInstances {
 		if cmd := m.watchInstance(ci.ID); cmd != nil {
@@ -235,7 +237,9 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// On-prem sync completed — reload on-prem data from DB, re-arm for next result
 		return m, tea.Batch(
 			refreshWatchOnPrem(m.database),
-			waitForWatchSyncResult(m.ctx, m.syncWorker),
+			m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+				return watchSyncResultMsg{result: r}
+			}),
 		)
 
 	case watchOnPremRefreshedMsg:
@@ -638,23 +642,6 @@ func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
 			return watchUnplaceDoneMsg{err: fmt.Errorf("reload job %d: %w", jobID, err)}
 		}
 		return watchUnplaceDoneMsg{job: updatedJob, message: result.Message}
-	}
-}
-
-func waitForWatchSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
-	if sw == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		select {
-		case result, ok := <-sw.Results():
-			if !ok {
-				return nil
-			}
-			return watchSyncResultMsg{result: result}
-		case <-ctx.Done():
-			return nil
-		}
 	}
 }
 

@@ -86,9 +86,7 @@ type watchCheckDoneMsg struct{}
 type watchCheckDoneResultMsg struct{ allTerminal bool }
 
 // campaignWatchSyncResultMsg is sent when the background SyncWorker produces a result.
-type campaignWatchSyncResultMsg struct {
-	result tui.SyncResult
-}
+type campaignWatchSyncResultMsg struct{}
 
 func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
 	s := spinner.New()
@@ -151,7 +149,9 @@ func (m watchModel) Init() tea.Cmd {
 	cmds = append(cmds, scheduleCheckDone())
 
 	// Arm the background on-prem sync result drainer
-	cmds = append(cmds, waitForCampaignWatchSyncResult(m.ctx, m.syncWorker))
+	cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
+		return campaignWatchSyncResultMsg{}
+	}))
 
 	return tea.Batch(cmds...)
 }
@@ -286,7 +286,9 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case campaignWatchSyncResultMsg:
 		// Background on-prem sync completed — re-arm and continue (no display update needed)
-		return m, waitForCampaignWatchSyncResult(m.ctx, m.syncWorker)
+		return m, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
+			return campaignWatchSyncResultMsg{}
+		})
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -295,23 +297,6 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
-}
-
-func waitForCampaignWatchSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
-	if sw == nil {
-		return nil
-	}
-	return func() tea.Msg {
-		select {
-		case result, ok := <-sw.Results():
-			if !ok {
-				return nil
-			}
-			return campaignWatchSyncResultMsg{result: result}
-		case <-ctx.Done():
-			return nil
-		}
-	}
 }
 
 func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.Job {
