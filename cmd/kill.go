@@ -24,6 +24,7 @@ Examples:
 }
 
 func init() {
+	killCmd.Deprecated = "use 'weft job kill' instead"
 	rootCmd.AddCommand(killCmd)
 }
 

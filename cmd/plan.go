@@ -20,8 +20,9 @@ import (
 )
 
 var planCmd = &cobra.Command{
-	Use:   "plan",
-	Short: "Submit and manage job execution plans",
+	Use:     "plan",
+	Aliases: []string{"plans"},
+	Short:   "Submit and manage job execution plans",
 }
 
 var planSubmitCmd = &cobra.Command{

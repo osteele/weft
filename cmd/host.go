@@ -20,8 +20,9 @@ import (
 )
 
 var hostCmd = &cobra.Command{
-	Use:   "host",
-	Short: "Show information about remote hosts",
+	Use:     "host",
+	Aliases: []string{"hosts"},
+	Short:   "Show information about remote hosts",
 	Long: `Show information about remote hosts including system info, active jobs, and load.
 
 Available subcommands:

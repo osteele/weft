@@ -17,6 +17,7 @@ var markProcessedCmd = &cobra.Command{
 }
 
 func init() {
+	markProcessedCmd.Deprecated = "use 'weft job mark-processed' instead"
 	rootCmd.AddCommand(markProcessedCmd)
 }
 

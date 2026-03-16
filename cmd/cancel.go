@@ -27,6 +27,7 @@ Examples:
 }
 
 func init() {
+	cancelCmd.Deprecated = "use 'weft job cancel' instead"
 	rootCmd.AddCommand(cancelCmd)
 }
 

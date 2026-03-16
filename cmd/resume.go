@@ -23,6 +23,7 @@ Examples:
 }
 
 func init() {
+	resumeCmd.Deprecated = "use 'weft job resume' instead"
 	rootCmd.AddCommand(resumeCmd)
 }
 

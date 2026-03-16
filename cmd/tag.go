@@ -32,6 +32,7 @@ var tagRemoveCmd = &cobra.Command{
 }
 
 func init() {
+	tagCmd.Deprecated = "use 'weft job tag' instead"
 	rootCmd.AddCommand(tagCmd)
 	tagCmd.AddCommand(tagAddCmd)
 	tagCmd.AddCommand(tagRemoveCmd)

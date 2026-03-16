@@ -30,8 +30,9 @@ const (
 )
 
 var queueCmd = &cobra.Command{
-	Use:   "queue",
-	Short: "Manage job queues for sequential execution on remote hosts",
+	Use:     "queue",
+	Aliases: []string{"queues"},
+	Short:   "Manage job queues for sequential execution on remote hosts",
 	Long: `Manage job queues that run sequentially on remote hosts.
 
 Jobs added to a queue run one after another without requiring the local

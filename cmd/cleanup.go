@@ -34,6 +34,7 @@ var (
 )
 
 func init() {
+	cleanupCmd.Deprecated = "use 'weft job cleanup' instead"
 	rootCmd.AddCommand(cleanupCmd)
 
 	cleanupCmd.Flags().BoolVar(&cleanupSessions, "sessions", false, "Clean finished sessions only")

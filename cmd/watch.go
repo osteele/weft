@@ -17,11 +17,11 @@ import (
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Alias for `cloud watch`",
-	Long: `Alias for "weft cloud watch".
+	Short: "Alias for `instance watch`",
+	Long: `Alias for "weft instance watch".
 
-This preserves the legacy top-level entrypoint while "weft cloud watch" is the
-primary command for the full active system watch.`,
+This preserves the top-level shortcut while "weft instance watch" is the
+canonical command for the full active system watch.`,
 	RunE: runWatchCommand,
 }
 

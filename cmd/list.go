@@ -116,6 +116,7 @@ func addListFlags(cmd *cobra.Command) {
 }
 
 func init() {
+	listCmd.Deprecated = "use 'weft jobs list' instead"
 	rootCmd.AddCommand(listCmd)
 	addListFlags(listCmd)
 }

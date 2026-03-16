@@ -33,6 +33,7 @@ var (
 )
 
 func init() {
+	pruneCmd.Deprecated = "use 'weft job prune' instead"
 	rootCmd.AddCommand(pruneCmd)
 	pruneCmd.Flags().StringVar(&pruneOlderThan, "older-than", "", "Only remove jobs older than this duration (e.g., 7d, 24h, 30m)")
 	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Preview without actually deleting")

@@ -22,10 +22,6 @@ The predictor must be configured in ~/.config/weft/config.toml:
 	RunE: runRetrain,
 }
 
-func init() {
-	rootCmd.AddCommand(retrainCmd)
-}
-
 func runRetrain(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load()
 	if err != nil {

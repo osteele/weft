@@ -23,8 +23,9 @@ import (
 )
 
 var instanceCmd = &cobra.Command{
-	Use:   "instance",
-	Short: "Manage individual cloud GPU instances",
+	Use:     "instance",
+	Aliases: []string{"instances"},
+	Short:   "Manage individual cloud GPU instances",
 }
 
 var instanceListCmd = &cobra.Command{
@@ -86,6 +87,25 @@ Unlike terminate, this does a clean shutdown with proper completion markers.`,
 	RunE: runInstanceRelease,
 }
 
+var instanceWatchCmd = &cobra.Command{
+	Use:   "watch",
+	Short: "Watch cloud instances, on-prem jobs, and unplaced jobs",
+	Long: `Watch the full active system state.
+
+In an interactive terminal this launches an instance-centric TUI. In plain mode
+it prints periodic summaries of cloud instances, on-prem active jobs, and
+unplaced jobs.`,
+	RunE: runWatchCommand,
+}
+
+var instanceLaunchCmd = &cobra.Command{
+	Use:     "launch",
+	Aliases: []string{"run", "start"},
+	Short:   "Interactively select and launch cloud instances for unplaceable jobs",
+	Long:    campaignLaunchCmd.Long,
+	RunE:    runCampaignLaunch,
+}
+
 func init() {
 	rootCmd.AddCommand(instanceCmd)
 	instanceCmd.AddCommand(instanceListCmd)
@@ -95,9 +115,14 @@ func init() {
 	instanceCmd.AddCommand(instanceSubmitCmd)
 	instanceCmd.AddCommand(instanceExtendCmd)
 	instanceCmd.AddCommand(instanceReleaseCmd)
+	instanceCmd.AddCommand(instanceWatchCmd)
+	instanceCmd.AddCommand(instanceLaunchCmd)
 
 	instanceSSHCmd.Flags().BoolVar(&instanceSSHPrint, "print", false, "Print the SSH command instead of connecting")
 	instanceSubmitCmd.Flags().StringVar(&instanceSubmitCommand, "command", "", "Override the job command")
+
+	configureWatchFlags(instanceWatchCmd)
+	addCampaignLaunchFlags(instanceLaunchCmd)
 }
 
 // newR2ClientFromConfig loads config and creates an R2 client.

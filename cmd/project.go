@@ -7,8 +7,9 @@ import (
 )
 
 var projectCmd = &cobra.Command{
-	Use:   "project",
-	Short: "View jobs grouped by project",
+	Use:     "project",
+	Aliases: []string{"projects"},
+	Short:   "View jobs grouped by project",
 	Long: `View jobs grouped by project.
 
 Available subcommands:

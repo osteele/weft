@@ -29,13 +29,6 @@ Examples:
 	RunE: runPredict,
 }
 
-func init() {
-	rootCmd.AddCommand(predictCmd)
-	predictCmd.Flags().StringVar(&predictHost, "host", "", "Target host")
-	predictCmd.Flags().StringVar(&predictProject, "project", "", "Project name")
-	predictCmd.Flags().StringVar(&predictGPUClass, "gpu-class", "", "GPU class")
-}
-
 func runPredict(cmd *cobra.Command, args []string) error {
 	command := args[0]
 

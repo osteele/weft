@@ -28,6 +28,7 @@ Examples:
 }
 
 func init() {
+	restartCmd.Deprecated = "use 'weft job restart' instead"
 	rootCmd.AddCommand(restartCmd)
 }
 

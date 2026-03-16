@@ -23,6 +23,7 @@ Examples:
 }
 
 func init() {
+	pauseCmd.Deprecated = "use 'weft job pause' instead"
 	rootCmd.AddCommand(pauseCmd)
 }
 

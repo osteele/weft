@@ -12,8 +12,9 @@ import (
 )
 
 var jobCmd = &cobra.Command{
-	Use:   "job",
-	Short: "Manage jobs",
+	Use:     "job",
+	Aliases: []string{"jobs"},
+	Short:   "Manage jobs",
 	Long: `Manage jobs including running, monitoring, and controlling them.
 
 All job-related operations are available under this subcommand. Common
@@ -190,11 +191,91 @@ Examples:
 	RunE: runJobStartNow,
 }
 
+var jobCancelCmd = &cobra.Command{
+	Use:     "cancel <job-id>...",
+	Aliases: []string{"remove"},
+	Short:   cancelCmd.Short,
+	Long:    cancelCmd.Long,
+	Args:    usageArgs(cobra.MinimumNArgs(1)),
+	RunE:    runCancel,
+}
+
+var jobPauseCmd = &cobra.Command{
+	Use:   "pause <job-id>...",
+	Short: pauseCmd.Short,
+	Long:  pauseCmd.Long,
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
+	RunE:  runPause,
+}
+
+var jobResumeCmd = &cobra.Command{
+	Use:   "resume <job-id>...",
+	Short: resumeCmd.Short,
+	Long:  resumeCmd.Long,
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
+	RunE:  runResume,
+}
+
+var jobCleanupCmd = &cobra.Command{
+	Use:   "cleanup <host>",
+	Short: cleanupCmd.Short,
+	Long:  cleanupCmd.Long,
+	Args:  usageArgs(cobra.ExactArgs(1)),
+	RunE:  runCleanup,
+}
+
+var jobMarkProcessedCmd = &cobra.Command{
+	Use:   "mark-processed <job-id>...",
+	Short: markProcessedCmd.Short,
+	Long:  markProcessedCmd.Long,
+	Args:  usageArgs(cobra.MinimumNArgs(1)),
+	RunE:  runMarkProcessed,
+}
+
+var jobPruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: pruneCmd.Short,
+	Long:  pruneCmd.Long,
+	RunE:  runPrune,
+}
+
+var jobPredictCmd = &cobra.Command{
+	Use:   "predict <command>",
+	Short: "Predict job duration and resource usage",
+	Long:  predictCmd.Long,
+	Args:  usageArgs(cobra.ExactArgs(1)),
+	RunE:  runPredict,
+}
+
+var jobTagCmd = &cobra.Command{
+	Use:   "tag",
+	Short: tagCmd.Short,
+	Long:  tagCmd.Long,
+}
+
+var jobTagAddCmd = &cobra.Command{
+	Use:   "add <job-id>... <tag>",
+	Short: tagAddCmd.Short,
+	Args:  usageArgs(cobra.MinimumNArgs(2)),
+	RunE:  runTagAdd,
+}
+
+var jobTagRemoveCmd = &cobra.Command{
+	Use:     "rm <job-id>... <tag>",
+	Aliases: []string{"remove", "delete"},
+	Short:   tagRemoveCmd.Short,
+	Args:    usageArgs(cobra.MinimumNArgs(2)),
+	RunE:    runTagRemove,
+}
+
 func init() {
 	// Register job command with root
 	rootCmd.AddCommand(jobCmd)
 
-	// Register top-level aliases
+	// Register top-level aliases (deprecated)
+	infoCmd.Deprecated = "use 'weft job info' instead"
+	showCmd.Deprecated = "use 'weft job info' instead"
+	startCmd.Deprecated = "use 'weft job start' instead"
 	rootCmd.AddCommand(infoCmd)
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(startCmd)
@@ -211,6 +292,16 @@ func init() {
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
 	jobCmd.AddCommand(jobInfoCmd)
+	jobCmd.AddCommand(jobCancelCmd)
+	jobCmd.AddCommand(jobPauseCmd)
+	jobCmd.AddCommand(jobResumeCmd)
+	jobCmd.AddCommand(jobCleanupCmd)
+	jobCmd.AddCommand(jobMarkProcessedCmd)
+	jobCmd.AddCommand(jobPruneCmd)
+	jobCmd.AddCommand(jobPredictCmd)
+	jobCmd.AddCommand(jobTagCmd)
+	jobTagCmd.AddCommand(jobTagAddCmd)
+	jobTagCmd.AddCommand(jobTagRemoveCmd)
 
 	// Copy flags from run command to job run
 	jobRunCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Job description")
@@ -242,6 +333,23 @@ func init() {
 	jobDescribeCmd.Flags().StringVar(&describeGPUs, "gpus", "", "Set GPUs (CUDA_VISIBLE_DEVICES) - queued jobs only")
 	jobDescribeCmd.Flags().IntVar(&describeGPUMem, "gpu-mem", 0, "Set GPU memory reservation in GB per device")
 	jobDescribeCmd.Flags().IntVar(&describeCPU, "cpu", 0, "Set CPU allotment percent")
+
+	// Flags for job cleanup
+	jobCleanupCmd.Flags().BoolVar(&cleanupSessions, "sessions", false, "Clean finished sessions only")
+	jobCleanupCmd.Flags().BoolVar(&cleanupLogs, "logs", false, "Clean log files only")
+	jobCleanupCmd.Flags().IntVar(&cleanupOlderThan, "older-than", 7, "Only clean items older than N days")
+	jobCleanupCmd.Flags().BoolVar(&cleanupDryRun, "dry-run", false, "Preview without actually deleting")
+
+	// Flags for job prune
+	jobPruneCmd.Flags().StringVar(&pruneOlderThan, "older-than", "", "Only remove jobs older than this duration (e.g., 7d, 24h, 30m)")
+	jobPruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "Preview without actually deleting")
+	jobPruneCmd.Flags().BoolVar(&pruneDeadOnly, "dead-only", false, "Only remove dead jobs (not completed)")
+	jobPruneCmd.Flags().BoolVar(&pruneKeepFiles, "keep-files", false, "Don't delete remote log files")
+
+	// Flags for job predict
+	jobPredictCmd.Flags().StringVar(&predictHost, "host", "", "Target host")
+	jobPredictCmd.Flags().StringVar(&predictProject, "project", "", "Project name")
+	jobPredictCmd.Flags().StringVar(&predictGPUClass, "gpu-class", "", "GPU class")
 }
 
 func runJobMove(cmd *cobra.Command, args []string) error {

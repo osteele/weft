@@ -23,8 +23,9 @@ import (
 )
 
 var campaignCmd = &cobra.Command{
-	Use:   "campaign",
-	Short: "Manage cloud GPU campaigns (batches of instances)",
+	Use:     "campaign",
+	Aliases: []string{"campaigns"},
+	Short:   "Manage cloud GPU campaigns (batches of instances)",
 }
 
 var campaignLaunchCmd = &cobra.Command{
@@ -99,19 +100,7 @@ func init() {
 	campaignCmd.AddCommand(campaignShowCmd)
 	campaignCmd.AddCommand(campaignStatsCmd)
 
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchMaxSpend, "max-spend", "", "Maximum spend per instance (e.g., '$5.00')")
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchMaxTime, "max-time", "", "Maximum time per instance (e.g., '2h')")
-	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchDryRun, "dry-run", false, "Print plan table and exit without launching")
-	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
-	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchNoDonor, "no-donor", false, "Skip donor instance strategy (each instance downloads independently)")
-	campaignLaunchCmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
-	campaignLaunchCmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
-	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
-	campaignLaunchCmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
-	campaignLaunchCmd.MarkFlagsMutuallyExclusive("tui", "plain")
-	campaignLaunchCmd.MarkFlagsMutuallyExclusive("tui", "yes")
+	addCampaignLaunchFlags(campaignLaunchCmd)
 
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Force interactive TUI display")
 	campaignWatchCmd.Flags().BoolVar(&campaignWatchPlain, "plain", false, "Force plain text output")
@@ -120,6 +109,22 @@ func init() {
 	campaignListCmd.Flags().BoolVar(&campaignListTUI, "tui", false, "Force interactive list with drill-down to watch")
 	campaignListCmd.Flags().BoolVar(&campaignListPlain, "plain", false, "Force plain table output")
 	campaignListCmd.MarkFlagsMutuallyExclusive("tui", "plain")
+}
+
+func addCampaignLaunchFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&campaignLaunchMaxSpend, "max-spend", "", "Maximum spend per instance (e.g., '$5.00')")
+	cmd.Flags().StringVar(&campaignLaunchMaxTime, "max-time", "", "Maximum time per instance (e.g., '2h')")
+	cmd.Flags().BoolVar(&campaignLaunchDryRun, "dry-run", false, "Print plan table and exit without launching")
+	cmd.Flags().BoolVar(&campaignLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
+	cmd.Flags().BoolVar(&campaignLaunchNoDonor, "no-donor", false, "Skip donor instance strategy (each instance downloads independently)")
+	cmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
+	cmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
+	cmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
+	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
+	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
+	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
 }
 
 func runCampaignLaunch(cmd *cobra.Command, args []string) error {
