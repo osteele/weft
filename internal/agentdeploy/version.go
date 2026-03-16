@@ -1,6 +1,7 @@
 package agentdeploy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,15 +143,45 @@ func gitVersion(repoRoot string) (string, error) {
 
 const remoteAgentPath = "~/.cache/weft/bin/weft-agent"
 
+// ErrAgentIncompatible is returned by RemoteAgentVersion when the agent binary
+// exists on the remote host but fails to run (e.g. glibc version mismatch).
+// Callers should treat this the same as "not installed" and redeploy.
+var ErrAgentIncompatible = errors.New("agent binary incompatible")
+
 // RemoteAgentVersion runs the agent binary on the remote host and parses
 // the version string. Returns empty string if the agent is not installed.
+// Returns ErrAgentIncompatible (wrapping the output) if the binary exists but
+// fails to run (e.g. glibc mismatch) — callers should redeploy in that case.
 func RemoteAgentVersion(host string) (string, error) {
-	cmd := fmt.Sprintf("%s --version 2>/dev/null || true", remoteAgentPath)
-	stdout, _, err := ssh.Run(host, cmd)
+	// Use a two-step check: first test if the binary exists, then run it.
+	// This distinguishes "not installed" (return "") from "exists but crashes"
+	// (return ErrAgentIncompatible), so callers can deploy the correct variant.
+	checkCmd := fmt.Sprintf(
+		`if [ ! -f %s ]; then echo "not-installed"; exit 0; fi; %s --version 2>&1`,
+		remoteAgentPath, remoteAgentPath,
+	)
+	stdout, _, err := ssh.Run(host, checkCmd)
 	if err != nil {
-		return "", fmt.Errorf("remote agent version: %w", err)
+		// If this is an SSH connection error, we can't tell anything about the binary.
+		if ssh.IsConnectionError(err.Error()) {
+			return "", fmt.Errorf("remote agent version: %w", err)
+		}
+		// Non-zero exit: the binary exists but crashed (e.g. glibc mismatch).
+		// stdout contains the crash output from 2>&1.
+		output := strings.TrimSpace(stdout)
+		return "", fmt.Errorf("%w on %s: %s", ErrAgentIncompatible, host, output)
 	}
-	return parseAgentVersionOutput(strings.TrimSpace(stdout)), nil
+	output := strings.TrimSpace(stdout)
+	if output == "not-installed" {
+		return "", nil
+	}
+	ver := parseAgentVersionOutput(output)
+	if ver == "" && output != "" {
+		// Binary exists but didn't print a recognizable version — likely a
+		// runtime error such as a glibc version mismatch.
+		return "", fmt.Errorf("%w on %s: %s", ErrAgentIncompatible, host, output)
+	}
+	return ver, nil
 }
 
 // parseAgentVersionOutput extracts the version from "weft-agent <version>" output.

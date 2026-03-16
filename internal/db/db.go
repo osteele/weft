@@ -2848,6 +2848,14 @@ func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
 	return err
 }
 
+// ResetLastSyncedStatus clears last_synced_status for a job, marking it as
+// needing re-dispatch. Used when the runner state shows a job is missing despite
+// the DB believing it was already dispatched.
+func ResetLastSyncedStatus(db *sql.DB, jobID int64) error {
+	_, err := db.Exec(`UPDATE jobs SET last_synced_status = NULL WHERE id = ?`, jobID)
+	return err
+}
+
 // UpdateStatusAndLastSynced updates both the current status and last synced status together.
 // Used when sync confirms the remote state.
 func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
@@ -4677,6 +4685,14 @@ func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
 // to the remote queue yet (last_synced_status is not 'queued' and no pending operation).
 func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
 	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND (last_synced_status IS NULL OR last_synced_status != ?) AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	return queryJobs(db, query, host, StatusQueued, StatusQueued)
+}
+
+// ListSyncedQueuedJobs returns queued jobs on a host that were already pushed to
+// the remote queue (last_synced_status = 'queued') but may be missing from the
+// runner's live state (e.g. runner crashed before processing the command).
+func ListSyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND last_synced_status = ? AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusQueued, StatusQueued)
 }
 

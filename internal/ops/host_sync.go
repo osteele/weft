@@ -3,9 +3,11 @@ package ops
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -325,6 +327,40 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	return result, nil
 }
 
+// fetchRemoteRunnerState reads the runner's state.json from the remote host.
+// Returns nil (no error) if the file does not exist.
+func fetchRemoteRunnerState(host string, timeout time.Duration) (*RunnerState, error) {
+	stdout, _, err := ssh.TryRunWithTimeout(host, fmt.Sprintf("cat %s 2>/dev/null || true", StateFilePath()), timeout)
+	if err != nil {
+		return nil, err
+	}
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
+		return nil, nil
+	}
+	var state RunnerState
+	if err := json.Unmarshal([]byte(stdout), &state); err != nil {
+		return nil, fmt.Errorf("parse runner state: %w", err)
+	}
+	return &state, nil
+}
+
+// isJobInRunnerState reports whether a job ID is present in the runner's live state
+// (pending queue, current job, or running map). A nil state is treated as empty.
+func isJobInRunnerState(jobID int64, state *RunnerState) bool {
+	if state == nil {
+		return false
+	}
+	if state.Current != nil && *state.Current == jobID {
+		return true
+	}
+	if slices.Contains(state.Pending, jobID) {
+		return true
+	}
+	_, ok := state.Running[strconv.FormatInt(jobID, 10)]
+	return ok
+}
+
 // ensureQueuedJobsOnRemote pushes locally-queued jobs to the remote host.
 // It fetches its own job list via ListUnsyncedQueuedJobs, resolves the backend
 // once per host, syncs sources (deduplicated by working directory), and appends
@@ -335,6 +371,36 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 	if err != nil {
 		return 0, false, err
 	}
+
+	// Check jobs that were previously dispatched (last_synced_status='queued') but
+	// may be missing from the runner's live state (runner crashed, glibc mismatch, etc.).
+	// These are safe to re-dispatch because AppendJobToQueue / AddPending is idempotent.
+	syncedJobs, err := db.ListSyncedQueuedJobs(database, host)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(syncedJobs) > 0 {
+		state, stateErr := fetchRemoteRunnerState(host, timeout)
+		if stateErr != nil {
+			// Can't read state — skip re-dispatch check, we'll retry next sync cycle
+			log.Printf("sync: could not read runner state on %s: %v", host, stateErr)
+		} else {
+			// state may be nil if the state file doesn't exist yet (runner not started)
+			for _, job := range syncedJobs {
+				if isJobInRunnerState(job.ID, state) {
+					continue // runner has it — nothing to do
+				}
+				// Runner doesn't know about this job. Reset so it gets re-dispatched below.
+				log.Printf("sync: job %d on %s is missing from runner state, re-dispatching", job.ID, host)
+				if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
+					log.Printf("sync: failed to reset last_synced_status for job %d: %v", job.ID, err)
+					continue
+				}
+				jobs = append(jobs, job)
+			}
+		}
+	}
+
 	if len(jobs) == 0 {
 		return 0, false, nil
 	}

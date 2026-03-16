@@ -193,11 +193,11 @@ func AppendCommandLocal(commandsFile string, cmd QueueCommand) error {
 // RunnerState represents the queue runner's internal state.
 // Only the queue runner writes to this file.
 type RunnerState struct {
-	Cursor     string                   `json:"cursor"`            // Timestamp of last processed command
-	CursorLine int                      `json:"cursor_line"`       // Line number of last processed command
-	Pending    []int64                  `json:"pending"`           // Job IDs waiting to run (in order)
-	Current    *int64                   `json:"current"`           // Currently running job ID (nil if none)
-	Running    map[int64]RunnerJobState `json:"running,omitempty"` // Active jobs keyed by ID
+	Cursor     string                    `json:"cursor"`            // Timestamp of last processed command
+	CursorLine int                       `json:"cursor_line"`       // Line number of last processed command
+	Pending    []int64                   `json:"pending"`           // Job IDs waiting to run (in order)
+	Current    *int64                    `json:"current"`           // Currently running job ID (nil if none)
+	Running    map[string]RunnerJobState `json:"running,omitempty"` // Active jobs keyed by string ID (matches runner JSON format)
 }
 
 // RunnerJobState captures per-job runtime state for concurrent execution.

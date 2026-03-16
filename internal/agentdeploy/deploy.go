@@ -1,7 +1,9 @@
 package agentdeploy
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
@@ -20,7 +22,10 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 	}
 
 	remoteVer, err := RemoteAgentVersion(host)
-	if err != nil {
+	if errors.Is(err, ErrAgentIncompatible) {
+		// Binary exists but is broken (e.g. wrong arch). Deploy the correct build.
+		log.Printf("agent on %s is incompatible, redeploying: %v", host, err)
+	} else if err != nil {
 		return false, fmt.Errorf("remote agent version on %s: %w", host, err)
 	}
 
@@ -28,12 +33,12 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, nil
 	}
 
-	binaryPath, err := EnsureBuilt(localVer, spec.OS, spec.Arch)
+	binaryPath, err := EnsureBuilt(localVer, spec.OS, spec.Arch, "")
 	if err != nil {
 		return false, err
 	}
 
-	// Ensure remote bin directory exists
+	// Ensure remote bin directory exists.
 	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteBinDir)
 	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
 		return false, fmt.Errorf("create remote bin dir: %s", strings.TrimSpace(stderr))
@@ -50,12 +55,18 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 		return false, fmt.Errorf("install agent: %s", strings.TrimSpace(stderr))
 	}
 
-	// Kill the runner tmux session so EnsureRunnerStarted (called later)
-	// recreates it with the new binary. We don't rely on the restart command +
-	// syscall.Exec because NFS silly-rename keeps the old inode open, causing
-	// the re-exec'd process to still run the old binary.
+	// Verify the newly deployed binary actually runs.
+	deployedVer, err := RemoteAgentVersion(host)
+	if err != nil {
+		return false, fmt.Errorf("deployed agent is not runnable on %s: %w", host, err)
+	}
+	if deployedVer != localVer {
+		return false, fmt.Errorf("deployed agent version mismatch on %s: want %s, got %q (binary may be incompatible)", host, localVer, deployedVer)
+	}
+
+	// Kill the runner tmux session so EnsureRunnerStarted recreates it with the new binary.
 	if err := ssh.TmuxKillSession(host, queuerunner.RunnerSessionName()); err != nil {
-		fmt.Printf("warning: failed to kill runner session on %s: %v\n", host, err)
+		log.Printf("warning: failed to kill runner session on %s: %v", host, err)
 	}
 
 	return true, nil

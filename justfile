@@ -93,7 +93,7 @@ build-agents:
         echo "      set these env vars to enable Fly-based cross-compilation"
     fi
 
-    # darwin/arm64: build on WEFT_MACOS_BUILDER_HOST via SSH if set, otherwise build locally
+    # darwin/arm64: build on WEFT_MACOS_BUILDER_HOST via SSH if set, otherwise skip
     if [ -n "${WEFT_MACOS_BUILDER_HOST:-}" ]; then
         (
             REMOTE_DIR="${WEFT_MACOS_BUILDER_DIR:-~/.cache/weft/agent-build}"
@@ -114,8 +114,8 @@ build-agents:
         ) &
         pids+=($!)
     else
-        GOOS=darwin GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o internal/agentdeploy/binaries/weft-agent-darwin-arm64 ./cmd/agent &
-        pids+=($!)
+        echo "info: WEFT_MACOS_BUILDER_HOST not set; skipping darwin/arm64 agent build"
+        echo "      set this env var to enable macOS cross-compilation"
     fi
 
     for pid in "${pids[@]}"; do wait "$pid" || exit 1; done

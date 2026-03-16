@@ -22,7 +22,7 @@ func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, go
 		return key, nil
 	}
 
-	localPath, err := EnsureBuilt(version, goos, goarch)
+	localPath, err := EnsureBuilt(version, goos, goarch, "")
 	if err != nil {
 		return "", fmt.Errorf("build agent: %w", err)
 	}
