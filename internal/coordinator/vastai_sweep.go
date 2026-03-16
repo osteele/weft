@@ -134,9 +134,11 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		}
 	}
 
-	// Update job in DB — always StatusCompleted; exit code stored separately
+	// Update job in DB — always StatusCompleted; exit code stored separately.
+	// Clear pending_status: the job already ran on the cloud instance, so any
+	// pending intent (e.g. pending_status=queued set before this run) is moot.
 	_, err = c.db.Exec(
-		`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ? WHERE id = ?`,
+		`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL WHERE id = ?`,
 		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, jobID,
 	)
 	if err != nil {

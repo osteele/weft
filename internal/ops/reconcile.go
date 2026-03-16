@@ -428,6 +428,12 @@ func applyQueueToRemote(database *sql.DB, job *db.Job, timeout time.Duration) er
 		_, _, err := submitSlurmJob(database, job, timeout)
 		return err
 	}
+	// Jobs with no host (e.g., cloud instance jobs whose instance has ended)
+	// are requeued locally — no SSH needed. The scheduler will place them on a
+	// new host when the user launches a new campaign or assignment.
+	if job.Host == "" {
+		return nil
+	}
 	return AppendJobToQueue(job, timeout)
 }
 
