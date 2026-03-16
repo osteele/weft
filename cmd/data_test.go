@@ -40,12 +40,12 @@ gpus:
 			return "", "", fmt.Errorf("unexpected host %q", host)
 		}
 		switch {
-		case strings.Contains(command, "df -Pk ~/.cache/huggingface"):
+		case strings.Contains(command, "df -Pk"):
 			return "20971520\n", "", nil
 		case strings.Contains(command, "hf download --repo-type model"),
-			strings.Contains(command, "huggingface-cli download --repo-type model"):
+			strings.Contains(command, "$_hfdl download --repo-type model"):
 			return "", "", nil
-		case strings.Contains(command, "du -sb ~/.cache/huggingface/hub/models--*"):
+		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
 			return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", nil
 		default:
 			return "", "", fmt.Errorf("unexpected command %q", command)

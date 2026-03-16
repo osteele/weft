@@ -83,6 +83,70 @@ func FindAssetHosts(db *sql.DB, asset DataAsset) ([]HostDataEntry, error) {
 	return scanEntries(rows)
 }
 
+// HostDataEntryWithUsage extends HostDataEntry with the last time the asset
+// was used in a job (zero if it has never appeared in a job's inputs).
+type HostDataEntryWithUsage struct {
+	HostDataEntry
+	LastUsedAt time.Time
+}
+
+// FindAssetsNotUsedSince returns host_data entries whose last job usage (via
+// the jobs.inputs column) is before the cutoff, or that have never been used
+// in a job at all. If host is non-empty, only entries for that host are
+// returned.
+func FindAssetsNotUsedSince(db *sql.DB, host string, cutoff time.Time) ([]HostDataEntryWithUsage, error) {
+	hostClause := "1=1"
+	args := []any{cutoff.Unix()}
+	if host != "" {
+		hostClause = "hd.host = ?"
+		args = append([]any{host}, args...)
+	}
+
+	// The subquery finds the most recent start_time of any job on the same host
+	// whose inputs JSON array contains the matching asset ref.
+	// COALESCE(..., 0) treats "never used" as epoch 0, so it's always < cutoff.
+	query := `
+		SELECT hd.host, hd.asset_kind, hd.asset_id, hd.path, hd.size_bytes, hd.last_seen,
+		       COALESCE((
+		           SELECT MAX(j.start_time)
+		           FROM jobs j, json_each(j.inputs) je
+		           WHERE j.host = hd.host
+		             AND j.inputs IS NOT NULL
+		             AND je.value = CASE hd.asset_kind
+		                 WHEN 'hf-model'   THEN 'hf:' || hd.asset_id
+		                 WHEN 'hf-dataset' THEN 'hf-dataset:' || hd.asset_id
+		                 ELSE NULL
+		               END
+		       ), 0) AS last_used_at
+		FROM host_data hd
+		WHERE ` + hostClause + `
+		  AND last_used_at < ?
+		ORDER BY last_used_at, hd.host, hd.asset_kind, hd.asset_id
+	`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []HostDataEntryWithUsage
+	for rows.Next() {
+		var e HostDataEntryWithUsage
+		var kind string
+		var lastSeen, lastUsedAt int64
+		if err := rows.Scan(&e.Host, &kind, &e.Asset.ID, &e.Path, &e.SizeBytes, &lastSeen, &lastUsedAt); err != nil {
+			return nil, err
+		}
+		e.Asset.Kind = AssetKind(kind)
+		e.LastSeen = time.Unix(lastSeen, 0)
+		if lastUsedAt > 0 {
+			e.LastUsedAt = time.Unix(lastUsedAt, 0)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
 // RemoveStaleEntries deletes entries that haven't been seen since the given time.
 func RemoveStaleEntries(db *sql.DB, host string, before time.Time) (int64, error) {
 	result, err := db.Exec(`

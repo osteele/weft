@@ -26,10 +26,23 @@ func ScanHFCache(host string) ([]DataAsset, error) {
 // ScanHFCacheDetailed scans the HuggingFace cache on a remote host and returns
 // entries with full path and size information for each discovered asset.
 func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
-	// Use du -sb to get both size and path in one command.
-	// du -sb outputs: <bytes>\t<path>
-	// Falls back to ls -1d if du fails (e.g., macOS without coreutils).
-	cmd := `du -sb ~/.cache/huggingface/hub/models--* ~/.cache/huggingface/hub/datasets--* 2>/dev/null || ls -1d ~/.cache/huggingface/hub/models--* ~/.cache/huggingface/hub/datasets--* 2>/dev/null || true`
+	// Try GNU du -sb (bytes) first; fall back to BSD du -sk (1K blocks) with
+	// awk conversion; last resort ls -1d (no size).
+	cmd := resolveHFCacheDirShellVar() + `
+_dirs=()
+for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
+[ ${#_dirs[@]} -eq 0 ] && exit 0
+_out=$(du -sb "${_dirs[@]}" 2>/dev/null)
+if [ -n "$_out" ]; then
+  printf '%s\n' "$_out"
+else
+  _out=$(du -sk "${_dirs[@]}" 2>/dev/null)
+  if [ -n "$_out" ]; then
+    printf '%s\n' "$_out" | awk '{printf "%d\t%s\n", $1*1024, $2}'
+  else
+    printf '%s\n' "${_dirs[@]}"
+  fi
+fi`
 	stdout, _, err := hostCommandRunner(context.Background(), host, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("scan HF cache on %s: %w", host, err)

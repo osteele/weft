@@ -22,6 +22,11 @@ var (
 	dataFetchHost    string
 	dataFetchRev     string
 	dataRequestsHost string
+
+	dataEvictHost     string
+	dataEvictLastUsed string
+	dataEvictDryRun   bool
+	dataEvictYes      bool
 )
 
 var dataCmd = &cobra.Command{
@@ -60,18 +65,41 @@ var dataRequestsCmd = &cobra.Command{
 	RunE:  runDataRequests,
 }
 
+var dataEvictCmd = &cobra.Command{
+	Use:   "evict",
+	Short: "Evict HuggingFace cache items not accessed recently",
+	Long: `Evict HuggingFace cache directories from remote hosts based on last filesystem
+access time, and remove them from the local asset inventory.
+
+Respects HF_HUB_CACHE and HF_HOME on the remote host.
+
+Examples:
+  weft data evict --last-used 90d --dry-run
+  weft data evict --host cool100 --last-used 30d
+  weft data evict --last-used 60d --yes`,
+	Args: cobra.NoArgs,
+	RunE: runDataEvict,
+}
+
 func init() {
 	rootCmd.AddCommand(dataCmd)
 	dataCmd.PersistentFlags().BoolVar(&dataJSON, "json", false, "Print machine-readable JSON output")
 	dataCmd.AddCommand(dataWhereCmd)
 	dataCmd.AddCommand(dataFetchCmd)
 	dataCmd.AddCommand(dataRequestsCmd)
+	dataCmd.AddCommand(dataEvictCmd)
 
 	dataFetchCmd.Flags().StringVar(&dataFetchHost, "host", "", "On-prem host that should cache the asset")
 	dataFetchCmd.Flags().StringVar(&dataFetchRev, "revision", "main", "HF revision to download")
 	dataFetchCmd.MarkFlagRequired("host")
 
 	dataRequestsCmd.Flags().StringVar(&dataRequestsHost, "host", "", "Filter recorded requests by host")
+
+	dataEvictCmd.Flags().StringVar(&dataEvictHost, "host", "", "Restrict to a specific host (default: all inventory hosts)")
+	dataEvictCmd.Flags().StringVar(&dataEvictLastUsed, "last-used", "", "Evict items not seen in the inventory for longer than this duration (e.g. 90d, 720h)")
+	dataEvictCmd.Flags().BoolVar(&dataEvictDryRun, "dry-run", false, "Preview what would be evicted without making changes")
+	dataEvictCmd.Flags().BoolVar(&dataEvictYes, "yes", false, "Skip confirmation prompt")
+	_ = dataEvictCmd.MarkFlagRequired("last-used")
 }
 
 func runDataWhere(_ *cobra.Command, args []string) error {
@@ -244,6 +272,205 @@ func parseDataAssetArg(arg string) (dataloc.DataAsset, error) {
 
 func isValidDataFetchHost(host string) bool {
 	return inventory.FindHost(host) != nil || srcsync.IsLocalHost(host)
+}
+
+func runDataEvict(_ *cobra.Command, _ []string) error {
+	duration, err := parseDuration(dataEvictLastUsed)
+	if err != nil {
+		return usageErrorf("invalid --last-used value %q: %v", dataEvictLastUsed, err)
+	}
+	cutoff := time.Now().Add(-duration)
+
+	if dataEvictHost != "" && !isValidDataFetchHost(dataEvictHost) {
+		return fmt.Errorf("host %q not found in inventory", dataEvictHost)
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	candidates, err := dataloc.FindAssetsNotUsedSince(database, dataEvictHost, cutoff)
+	if err != nil {
+		return fmt.Errorf("query unused assets: %w", err)
+	}
+
+	// Fill in missing sizes with a live scan, grouped by host.
+	needScan := map[string]bool{}
+	for _, e := range candidates {
+		if e.SizeBytes == 0 && e.Path != "" {
+			needScan[e.Host] = true
+		}
+	}
+	if len(needScan) > 0 {
+		liveSizes := map[string]int64{} // path -> bytes
+		for host := range needScan {
+			entries, err := dataloc.ScanHFCacheDetailed(host)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: size scan %s: %v\n", host, err)
+				continue
+			}
+			for _, e := range entries {
+				liveSizes[e.Path] = e.SizeBytes
+			}
+		}
+		for i := range candidates {
+			if candidates[i].SizeBytes == 0 && candidates[i].Path != "" {
+				candidates[i].SizeBytes = liveSizes[candidates[i].Path]
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		fmt.Println("Nothing to evict.")
+		return nil
+	}
+
+	// Build map of asset -> other on-prem hosts that have it.
+	inventoryHosts, err := inventory.LoadHosts()
+	if err != nil {
+		return fmt.Errorf("load inventory: %w", err)
+	}
+	inventoryHostSet := map[string]bool{}
+	for _, h := range inventoryHosts {
+		inventoryHostSet[h.Name] = true
+	}
+	allEntries, err := dataloc.ListAllAssets(database)
+	if err != nil {
+		return fmt.Errorf("list assets: %w", err)
+	}
+	type assetKey struct{ kind, id string }
+	assetToHosts := map[assetKey][]string{} // asset -> all on-prem hosts with it
+	for _, e := range allEntries {
+		if !inventoryHostSet[e.Host] {
+			continue
+		}
+		k := assetKey{string(e.Asset.Kind), e.Asset.ID}
+		assetToHosts[k] = append(assetToHosts[k], e.Host)
+	}
+	// For each candidate, find other on-prem hosts (excluding the candidate's own host).
+	elsewhere := make([][]string, len(candidates))
+	for i, c := range candidates {
+		k := assetKey{string(c.Asset.Kind), c.Asset.ID}
+		for _, h := range assetToHosts[k] {
+			if h != c.Host {
+				elsewhere[i] = append(elsewhere[i], h)
+			}
+		}
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "HOST\tASSET\tSIZE\tLAST USED\tELSEWHERE\n")
+	var totalBytes, safeBytes int64
+	var safeCount int
+	for i, e := range candidates {
+		lastUsed := "never"
+		if !e.LastUsedAt.IsZero() {
+			lastUsed = db.FormatDuration(int64(time.Since(e.LastUsedAt).Seconds())) + " ago"
+		}
+		elsewhereCol := "—"
+		if len(elsewhere[i]) > 0 {
+			elsewhereCol = strings.Join(elsewhere[i], ", ")
+			safeBytes += e.SizeBytes
+			safeCount++
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			e.Host, e.Asset,
+			formatBytes(e.SizeBytes),
+			lastUsed,
+			elsewhereCol,
+		)
+		totalBytes += e.SizeBytes
+	}
+	w.Flush()
+	fmt.Printf("\nTotal: %d item(s), %s", len(candidates), formatBytes(totalBytes))
+	if safeCount > 0 && safeCount < len(candidates) {
+		fmt.Printf(" (%d available elsewhere: %s)", safeCount, formatBytes(safeBytes))
+	}
+	fmt.Println()
+
+	if dataEvictDryRun {
+		fmt.Println("(dry run — no changes made)")
+		return nil
+	}
+
+	// Determine which candidates to evict based on user choice.
+	var toEvict []dataloc.HostDataEntryWithUsage
+	if dataEvictYes {
+		toEvict = candidates
+	} else {
+		choice := evictPrompt(len(candidates), safeCount)
+		switch choice {
+		case "a":
+			toEvict = candidates
+		case "s":
+			for i, e := range candidates {
+				if len(elsewhere[i]) > 0 {
+					toEvict = append(toEvict, e)
+				}
+			}
+		default:
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	var evicted, failed int
+	var freedBytes int64
+	for _, e := range toEvict {
+		if e.Path == "" {
+			fmt.Fprintf(os.Stderr, "warning: no path for %s on %s; skipping remote deletion\n", e.Asset, e.Host)
+		} else if err := dataloc.EvictAsset(e.Host, e.Path); err != nil {
+			fmt.Fprintf(os.Stderr, "error: evict %s on %s: %v\n", e.Asset, e.Host, err)
+			failed++
+			continue
+		}
+		if err := dataloc.DeleteHostDataEntry(database, e.Host, e.Asset); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: remove DB entry for %s on %s: %v\n", e.Asset, e.Host, err)
+		}
+		evicted++
+		freedBytes += e.SizeBytes
+	}
+	freed := formatBytes(freedBytes)
+	if failed > 0 {
+		freed = "~" + freed
+	}
+	fmt.Printf("Evicted %d item(s), freed %s\n", evicted, freed)
+	if failed > 0 {
+		return fmt.Errorf("%d eviction(s) failed", failed)
+	}
+	return nil
+}
+
+// evictPrompt asks the user what to evict and returns "a" (all), "s" (safe/elsewhere only), or "".
+func evictPrompt(total, safeCount int) string {
+	var r string
+	if safeCount < total && safeCount > 0 {
+		// Mixed: some available elsewhere, some not — offer all, safe-only, or cancel.
+		fmt.Printf("Evict: [a]ll %d item(s), [s]afe %d (available elsewhere), [N]o cancel? ",
+			total, safeCount)
+		fmt.Scanln(&r)
+		switch strings.ToLower(strings.TrimSpace(r)) {
+		case "a":
+			return "a"
+		case "s":
+			return "s"
+		default:
+			return ""
+		}
+	}
+	// All items are in the same category (none or all available elsewhere).
+	if safeCount == total {
+		fmt.Printf("Evict all %d item(s) (all available elsewhere)? [y/N] ", total)
+	} else {
+		fmt.Printf("Evict all %d item(s)? [y/N] ", total)
+	}
+	fmt.Scanln(&r)
+	if strings.ToLower(strings.TrimSpace(r)) == "y" {
+		return "a"
+	}
+	return ""
 }
 
 func formatBytes(size int64) string {
