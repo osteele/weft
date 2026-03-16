@@ -63,6 +63,10 @@ const (
 	OpR2Delete = "r2.delete"
 	OpR2Copy   = "r2.copy" // rclone copy (bulk upload)
 
+	// Cloud source upload and job assignment
+	OpR2UploadSource      = "r2.upload_source"
+	OpCloudSetJobInstance = "cloud.set_job_instance"
+
 	// Cloud launch telemetry
 	OpCloudInstanceLaunchRequested = "cloud.instance.launch.requested"
 	OpCloudInstanceLaunchCreated   = "cloud.instance.launch.created"

@@ -337,6 +337,7 @@ func jobCloudAttemptOutcomeValues() []string {
 		AttemptOutcomeFailed,
 		AttemptOutcomeCancelled,
 		AttemptOutcomeOrphaned,
+		AttemptOutcomeSuperseded,
 	}
 }
 
@@ -1005,11 +1006,15 @@ func ensureCampaignsTableConstraints(db *sql.DB) error {
 }
 
 func ensureJobCloudAttemptsTableConstraints(db *sql.DB) error {
-	hasConstraint, err := tableSchemaContains(db, "job_cloud_attempts", "job_cloud_attempts_shape_check")
+	hasShapeCheck, err := tableSchemaContains(db, "job_cloud_attempts", "job_cloud_attempts_shape_check")
 	if err != nil {
 		return err
 	}
-	if hasConstraint {
+	hasSuperseded, err := tableSchemaContains(db, "job_cloud_attempts", "'superseded'")
+	if err != nil {
+		return err
+	}
+	if hasShapeCheck && hasSuperseded {
 		return nil
 	}
 	return rebuildTable(

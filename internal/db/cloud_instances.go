@@ -424,6 +424,14 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 			}
 		}
 	}
+	// Close any existing open attempts for this job before recording the new one
+	if _, err := tx.Exec(
+		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
+		time.Now().Unix(), AttemptOutcomeSuperseded, jobID,
+	); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("close existing attempt: %w", err)
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (?, ?, ?)`,
 		jobID, instanceID, time.Now().Unix(),
@@ -453,18 +461,34 @@ func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
 // re-queued jobs, those jobs are still visible via the job_cloud_attempts
 // table.
 func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job, error) {
+	// Jobs with a campaign_job_index (the launched jobs) sort by that index;
+	// historical-only jobs (no index) follow. Within each group, sort by id.
+	// membership_rank is a final tiebreaker so the current row wins over the
+	// historical row for the same job when deduplicating below.
 	query := fmt.Sprintf(`SELECT %s FROM cloud_instance_job_membership
 		WHERE membership_cloud_instance_id = ?
 		  AND tombstoned = 0
 		ORDER BY
-			membership_rank ASC,
-			CASE
-				WHEN membership_rank = 0 AND campaign_job_index IS NULL THEN 1
-				ELSE 0
-			END,
+			CASE WHEN campaign_job_index IS NOT NULL THEN 0 ELSE 1 END ASC,
 			campaign_job_index ASC,
-			id ASC`, qualifiedJobSelectColumns("cloud_instance_job_membership"))
-	return queryJobs(database, query, instanceID)
+			id ASC,
+			membership_rank ASC`, qualifiedJobSelectColumns("cloud_instance_job_membership"))
+	all, err := queryJobs(database, query, instanceID)
+	if err != nil {
+		return nil, err
+	}
+	// Deduplicate: a job can appear as both current and historical membership.
+	// Keep the first occurrence (current, rank=0) since we sorted membership_rank ASC.
+	seen := make(map[int64]struct{}, len(all))
+	result := all[:0]
+	for _, job := range all {
+		if _, ok := seen[job.ID]; ok {
+			continue
+		}
+		seen[job.ID] = struct{}{}
+		result = append(result, job)
+	}
+	return result, nil
 }
 
 // ListUnplacedJobs returns jobs that are truly unplaced: no inventory host, no
@@ -896,10 +920,11 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 
 // Job cloud attempt outcome constants.
 const (
-	AttemptOutcomeCompleted = "completed"
-	AttemptOutcomeFailed    = "failed"
-	AttemptOutcomeCancelled = "canceled"
-	AttemptOutcomeOrphaned  = "orphaned"
+	AttemptOutcomeCompleted  = "completed"
+	AttemptOutcomeFailed     = "failed"
+	AttemptOutcomeCancelled  = "canceled"
+	AttemptOutcomeOrphaned   = "orphaned"
+	AttemptOutcomeSuperseded = "superseded"
 )
 
 // JobCloudAttempt records a single association between a job and a cloud instance.

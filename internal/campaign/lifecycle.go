@@ -189,6 +189,10 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 			defer uploadWg.Done()
 			key, err := weftsync.UploadSourceToR2(uploadCtx, r2Client, localDir)
 			if err != nil {
+				oplog.Log(oplog.OpR2UploadSource,
+					oplog.WithDetailf("dir: %s", localDir),
+					oplog.WithError(err),
+				)
 				promise.resolve("", fmt.Errorf("upload source %s: %w", localDir, err))
 				return
 			}
@@ -817,6 +821,10 @@ func LaunchInstance(
 	// Associate jobs with cloud instance and record campaign position
 	for i, job := range group.Jobs {
 		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
+			oplog.Log(oplog.OpCloudSetJobInstance,
+				oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
+				oplog.WithError(err),
+			)
 			return instanceID, fmt.Errorf("set cloud_instance_id for job %d: %w", job.ID, err)
 		}
 		updatedJob, err := db.GetJobByID(database, job.ID)

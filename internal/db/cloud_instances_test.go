@@ -171,7 +171,7 @@ func TestUpdateCloudInstanceOfferMetadata(t *testing.T) {
 	}
 }
 
-func TestGetCloudInstanceJobsIncludingAttemptsOrdersCurrentJobsBeforeHistoricalAttempts(t *testing.T) {
+func TestGetCloudInstanceJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T) {
 	database := setupTestDB(t)
 
 	instanceID, err := CreateCloudInstance(database, &CloudInstance{
@@ -222,6 +222,62 @@ func TestGetCloudInstanceJobsIncludingAttemptsOrdersCurrentJobsBeforeHistoricalA
 	}
 	if jobs[0].ID != 199 || jobs[1].ID != 203 || jobs[2].ID != 249 {
 		t.Fatalf("job order = [%d %d %d], want [199 203 249]", jobs[0].ID, jobs[1].ID, jobs[2].ID)
+	}
+}
+
+// TestGetCloudInstanceJobsIncludingAttemptsRetainsOrderAfterFailure verifies that
+// a failed (historical) job keeps its campaign position instead of moving after
+// still-running jobs.
+func TestGetCloudInstanceJobsIncludingAttemptsRetainsOrderAfterFailure(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	// Job 292 (campaign index 0) failed and was reset — cloud_instance_id cleared.
+	// Job 293 (campaign index 1) is still running.
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES
+		 (292, NULL, '', 0, 'failed',  'echo first',  '/tmp'),
+		 (293, ?,    '',  0, 'running', 'echo second', '/tmp')`,
+		instanceID,
+	); err != nil {
+		t.Fatalf("insert jobs: %v", err)
+	}
+	if err := SetJobCampaignIndex(database, 292, 0); err != nil {
+		t.Fatalf("SetJobCampaignIndex(292): %v", err)
+	}
+	if err := SetJobCampaignIndex(database, 293, 1); err != nil {
+		t.Fatalf("SetJobCampaignIndex(293): %v", err)
+	}
+
+	// Simulate what ResetCloudInstanceJobs does: insert + close the attempt for 292.
+	if err := InsertJobCloudAttempt(database, 292, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(292): %v", err)
+	}
+	if err := CloseJobCloudAttempt(database, 292, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseJobCloudAttempt(292): %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 293, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt(293): %v", err)
+	}
+
+	jobs, err := GetCloudInstanceJobsIncludingAttempts(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("got %d jobs, want 2", len(jobs))
+	}
+	if jobs[0].ID != 292 || jobs[1].ID != 293 {
+		t.Fatalf("job order = [%d %d], want [292 293]", jobs[0].ID, jobs[1].ID)
 	}
 }
 
