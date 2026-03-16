@@ -33,6 +33,7 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 	reconciler := campaign.NewReconciler()
 
 	for {
+		performFastSync(database, false)
 		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true)
 		if err != nil {
 			return err
@@ -54,7 +55,6 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 
 func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool) (watchSystemSnapshot, error) {
 	if refresh {
-		performFastSync(database, false)
 		syncCloudState(cfg, database, reconciler, false)
 	}
 

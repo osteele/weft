@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -12,7 +13,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/tui"
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
@@ -33,6 +36,9 @@ type listTUIModel struct {
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
+	syncWorker       *tui.SyncWorker
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 type listJobsLoadedMsg struct {
@@ -57,6 +63,9 @@ type listDBWatchEventMsg struct {
 
 type listDBRefreshTriggeredMsg struct{}
 type listSyncTickMsg struct{}
+type listSyncWorkerResultMsg struct {
+	result tui.SyncResult
+}
 
 var (
 	listTUITitleStyle    = lipgloss.NewStyle().Bold(true)
@@ -67,6 +76,15 @@ var (
 )
 
 func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool) error {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var sw *tui.SyncWorker
+	if syncEnabled {
+		cfg, _ := config.Load()
+		sw = tui.NewSyncWorker(database, nil, nil, cfg)
+		sw.Start()
+	}
+
 	model := listTUIModel{
 		database:       database,
 		args:           append([]string(nil), args...),
@@ -74,6 +92,9 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		jobs:           jobs,
 		syncEnabled:    syncEnabled,
 		syncInProgress: syncEnabled,
+		syncWorker:     sw,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	origLogOutput := log.Writer()
@@ -81,6 +102,10 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 	defer log.SetOutput(origLogOutput)
 
 	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	cancel()
+	if sw != nil {
+		sw.Stop()
+	}
 	if err != nil {
 		return fmt.Errorf("run list TUI: %w", err)
 	}
@@ -89,7 +114,10 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 
 func (m listTUIModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), scheduleListSyncTick()}
-	if m.syncEnabled {
+	if m.syncWorker != nil {
+		m.requestActiveSyncs()
+		cmds = append(cmds, waitForListSyncResult(m.ctx, m.syncWorker))
+	} else if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
 	return tea.Batch(cmds...)
@@ -109,6 +137,9 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q", "esc":
 			if m.dbWatcher != nil {
 				_ = m.dbWatcher.Close()
+			}
+			if m.cancel != nil {
+				m.cancel()
 			}
 			return m, tea.Quit
 		case "up", "k":
@@ -201,14 +232,28 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.debounceActive = false
 		return m, m.reloadJobs()
 
+	case listSyncWorkerResultMsg:
+		m.syncInProgress = false
+		if msg.result.Error != nil {
+			m.statusMessage = fmt.Sprintf("Sync error (%s): %v", msg.result.Host, msg.result.Error)
+		} else if msg.result.Updated > 0 || m.statusMessage == "Refreshing..." {
+			m.statusMessage = ""
+		}
+		return m, tea.Batch(
+			m.reloadJobs(),
+			waitForListSyncResult(m.ctx, m.syncWorker),
+		)
+
 	case listSyncTickMsg:
 		cmds := []tea.Cmd{scheduleListSyncTick()}
-		if !m.syncEnabled || m.syncInProgress {
-			return m, tea.Batch(cmds...)
+		if m.syncWorker != nil {
+			m.requestActiveSyncs()
+			cmds = append(cmds, m.reloadJobs())
+		} else if m.syncEnabled && !m.syncInProgress {
+			m.syncInProgress = true
+			m.statusMessage = "Refreshing..."
+			cmds = append(cmds, m.runBackgroundSync(true))
 		}
-		m.syncInProgress = true
-		m.statusMessage = "Refreshing..."
-		cmds = append(cmds, m.runBackgroundSync(true))
 		return m, tea.Batch(cmds...)
 	}
 
@@ -354,6 +399,41 @@ func syncListTUIData(database *sql.DB, full bool) []string {
 		}
 	}
 	return warnings
+}
+
+func waitForListSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
+	if sw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case result, ok := <-sw.Results():
+			if !ok {
+				return nil
+			}
+			return listSyncWorkerResultMsg{result: result}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (m listTUIModel) requestActiveSyncs() {
+	if m.syncWorker == nil {
+		return
+	}
+	hosts := make(map[string][]*db.Job)
+	for _, job := range m.jobs {
+		if job != nil && job.Host != "" {
+			hosts[job.Host] = append(hosts[job.Host], job)
+		}
+	}
+	for host, jobs := range hosts {
+		m.syncWorker.Request(tui.SyncRequest{
+			Host: host,
+			Rate: tui.GetHostSyncRate(jobs),
+		})
+	}
 }
 
 func scheduleListSyncTick() tea.Cmd {

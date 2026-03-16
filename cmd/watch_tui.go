@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/tui"
 )
 
 type watchExitAction int
@@ -47,6 +48,7 @@ type watchAllModel struct {
 	cancel          context.CancelFunc
 	exitAction      watchExitAction
 	jobProgressHWM  map[int64]int
+	syncWorker      *tui.SyncWorker
 }
 
 type watchAllTickMsg struct{}
@@ -54,6 +56,16 @@ type watchAllTickMsg struct{}
 type watchAllRefreshedMsg struct {
 	snapshot watchSystemSnapshot
 	err      error
+}
+
+type watchSyncResultMsg struct {
+	result tui.SyncResult
+}
+
+type watchOnPremRefreshedMsg struct {
+	onPremHosts  []onPremHostSummary
+	unplacedJobs []*db.Job
+	err          error
 }
 
 type watchUnplaceDoneMsg struct {
@@ -76,6 +88,9 @@ func newWatchAllModel(database *sql.DB, cfg *config.Config, flashMessage string)
 	ctx, cancel := context.WithCancel(context.Background())
 	r2Client, _ := buildR2Client(cfg)
 
+	sw := tui.NewSyncWorker(database, nil, r2Client, cfg)
+	sw.Start()
+
 	model := watchAllModel{
 		database:        database,
 		config:          cfg,
@@ -88,6 +103,7 @@ func newWatchAllModel(database *sql.DB, cfg *config.Config, flashMessage string)
 		ctx:             ctx,
 		cancel:          cancel,
 		jobProgressHWM:  map[int64]int{},
+		syncWorker:      sw,
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
@@ -99,11 +115,24 @@ func newWatchAllModel(database *sql.DB, cfg *config.Config, flashMessage string)
 	model.instanceUpdates = snapshot.InstanceUpdates
 	model.onPremHosts = snapshot.OnPremHosts
 	model.unplacedJobs = snapshot.UnplacedJobs
+
+	// Request initial syncs for on-prem hosts (starts queue runners, syncs status)
+	for _, host := range model.onPremHosts {
+		sw.Request(tui.SyncRequest{
+			Host: host.Name,
+			Rate: tui.GetHostSyncRate(host.Jobs),
+		})
+	}
+
 	return model
 }
 
 func (m watchAllModel) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.spinner.Tick, scheduleWatchAllTick()}
+	cmds := []tea.Cmd{
+		m.spinner.Tick,
+		scheduleWatchAllTick(),
+		waitForWatchSyncResult(m.ctx, m.syncWorker),
+	}
 	for _, ci := range m.cloudInstances {
 		if cmd := m.watchInstance(ci.ID); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -192,8 +221,32 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.onPremHosts = msg.snapshot.OnPremHosts
 		m.unplacedJobs = msg.snapshot.UnplacedJobs
 		cmds := m.mergeSnapshot(msg.snapshot)
+		// Request on-prem syncs for newly refreshed hosts (starts queue runners)
+		for _, host := range m.onPremHosts {
+			m.syncWorker.Request(tui.SyncRequest{
+				Host: host.Name,
+				Rate: tui.GetHostSyncRate(host.Jobs),
+			})
+		}
 		m.clampCursor()
 		return m, tea.Batch(cmds...)
+
+	case watchSyncResultMsg:
+		// On-prem sync completed — reload on-prem data from DB, re-arm for next result
+		return m, tea.Batch(
+			refreshWatchOnPrem(m.database),
+			waitForWatchSyncResult(m.ctx, m.syncWorker),
+		)
+
+	case watchOnPremRefreshedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.onPremHosts = msg.onPremHosts
+		m.unplacedJobs = msg.unplacedJobs
+		m.clampCursor()
+		return m, nil
 
 	case watchUnplaceDoneMsg:
 		if msg.err != nil {
@@ -585,6 +638,40 @@ func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
 			return watchUnplaceDoneMsg{err: fmt.Errorf("reload job %d: %w", jobID, err)}
 		}
 		return watchUnplaceDoneMsg{job: updatedJob, message: result.Message}
+	}
+}
+
+func waitForWatchSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
+	if sw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case result, ok := <-sw.Results():
+			if !ok {
+				return nil
+			}
+			return watchSyncResultMsg{result: result}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		onPremJobs, err := db.ListActiveOnPremJobs(database)
+		if err != nil {
+			return watchOnPremRefreshedMsg{err: err}
+		}
+		unplacedJobs, err := db.ListUnplacedJobs(database)
+		if err != nil {
+			return watchOnPremRefreshedMsg{err: err}
+		}
+		return watchOnPremRefreshedMsg{
+			onPremHosts:  groupOnPremHosts(onPremJobs),
+			unplacedJobs: unplacedJobs,
+		}
 	}
 }
 

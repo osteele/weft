@@ -77,6 +77,9 @@ func runWatchLoop(database *sql.DB, cfg *config.Config) error {
 		p := tea.NewProgram(model, tea.WithAltScreen())
 		finalModel, err := p.Run()
 		log.SetOutput(origLogOutput)
+		if m, ok := finalModel.(watchAllModel); ok && m.syncWorker != nil {
+			m.syncWorker.Stop()
+		}
 		if err != nil {
 			return fmt.Errorf("watch TUI error: %w", err)
 		}

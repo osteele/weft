@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -13,7 +14,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -52,6 +55,9 @@ type projectWatchModel struct {
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
+	syncWorker       *tui.SyncWorker
+	ctx              context.Context
+	cancel           context.CancelFunc
 }
 
 type projectWatchLoadedMsg struct {
@@ -62,6 +68,10 @@ type projectWatchLoadedMsg struct {
 type projectWatchSyncFinishedMsg struct {
 	warnings []string
 	full     bool
+}
+
+type projectSyncWorkerResultMsg struct {
+	result tui.SyncResult
 }
 
 type projectWatchDBWatcherReadyMsg struct {
@@ -115,11 +125,23 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 }
 
 func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnabled bool) error {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var sw *tui.SyncWorker
+	if syncEnabled {
+		cfg, _ := config.Load()
+		sw = tui.NewSyncWorker(database, nil, nil, cfg)
+		sw.Start()
+	}
+
 	model := projectWatchModel{
 		database:       database,
 		recentWindow:   recentWindow,
 		syncEnabled:    syncEnabled,
 		syncInProgress: syncEnabled,
+		syncWorker:     sw,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	origLogOutput := log.Writer()
@@ -127,6 +149,10 @@ func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnable
 	defer log.SetOutput(origLogOutput)
 
 	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	cancel()
+	if sw != nil {
+		sw.Stop()
+	}
 	if err != nil {
 		return fmt.Errorf("run project watch TUI: %w", err)
 	}
@@ -135,7 +161,10 @@ func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnable
 
 func (m projectWatchModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadGroups(), scheduleProjectWatchSyncTick()}
-	if m.syncEnabled {
+	if m.syncWorker != nil {
+		m.requestActiveSyncs()
+		cmds = append(cmds, waitForProjectSyncResult(m.ctx, m.syncWorker))
+	} else if m.syncEnabled {
 		cmds = append(cmds, m.runBackgroundSync(false))
 	}
 	return tea.Batch(cmds...)
@@ -156,6 +185,9 @@ func (m projectWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q", "esc":
 			if m.dbWatcher != nil {
 				_ = m.dbWatcher.Close()
+			}
+			if m.cancel != nil {
+				m.cancel()
 			}
 			return m, tea.Quit
 		case "up", "k":
@@ -244,14 +276,28 @@ func (m projectWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.debounceActive = false
 		return m, m.reloadGroups()
 
+	case projectSyncWorkerResultMsg:
+		m.syncInProgress = false
+		if msg.result.Error != nil {
+			m.statusMessage = fmt.Sprintf("Sync error (%s): %v", msg.result.Host, msg.result.Error)
+		} else if msg.result.Updated > 0 || m.statusMessage == "Refreshing..." {
+			m.statusMessage = ""
+		}
+		return m, tea.Batch(
+			m.reloadGroups(),
+			waitForProjectSyncResult(m.ctx, m.syncWorker),
+		)
+
 	case projectWatchSyncTickMsg:
 		cmds := []tea.Cmd{scheduleProjectWatchSyncTick()}
-		if !m.syncEnabled || m.syncInProgress {
-			return m, tea.Batch(cmds...)
+		if m.syncWorker != nil {
+			m.requestActiveSyncs()
+			cmds = append(cmds, m.reloadGroups())
+		} else if m.syncEnabled && !m.syncInProgress {
+			m.syncInProgress = true
+			m.statusMessage = "Refreshing..."
+			cmds = append(cmds, m.runBackgroundSync(true))
 		}
-		m.syncInProgress = true
-		m.statusMessage = "Refreshing..."
-		cmds = append(cmds, m.runBackgroundSync(true))
 		return m, tea.Batch(cmds...)
 	}
 
@@ -416,6 +462,43 @@ func syncProjectWatchTUIData(database *sql.DB, full bool) []string {
 		}
 	}
 	return warnings
+}
+
+func waitForProjectSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
+	if sw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case result, ok := <-sw.Results():
+			if !ok {
+				return nil
+			}
+			return projectSyncWorkerResultMsg{result: result}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+func (m projectWatchModel) requestActiveSyncs() {
+	if m.syncWorker == nil {
+		return
+	}
+	hosts := make(map[string][]*db.Job)
+	for _, g := range m.groups {
+		for _, job := range append(g.Running, g.Queued...) {
+			if job != nil && job.Host != "" {
+				hosts[job.Host] = append(hosts[job.Host], job)
+			}
+		}
+	}
+	for host, jobs := range hosts {
+		m.syncWorker.Request(tui.SyncRequest{
+			Host: host,
+			Rate: tui.GetHostSyncRate(jobs),
+		})
+	}
 }
 
 func scheduleProjectWatchSyncTick() tea.Cmd {

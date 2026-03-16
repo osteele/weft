@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/tui"
 )
 
 // initialInstanceInfo holds pre-fetched DB data for instances that haven't
@@ -44,6 +45,7 @@ type watchModel struct {
 	launchedAt     time.Time     // campaign launch time
 	jobProgressHWM map[int64]int // high-water mark per job ID (prevents progress regression)
 	reconciler     *campaign.Reconciler
+	syncWorker     *tui.SyncWorker
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -83,7 +85,12 @@ type watchCheckDoneMsg struct{}
 // watchCheckDoneResultMsg carries the result of a background DB terminal check.
 type watchCheckDoneResultMsg struct{ allTerminal bool }
 
-func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) watchModel {
+// campaignWatchSyncResultMsg is sent when the background SyncWorker produces a result.
+type campaignWatchSyncResultMsg struct {
+	result tui.SyncResult
+}
+
+func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
@@ -105,6 +112,10 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) w
 
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
 
+	sw := tui.NewSyncWorker(database, nil, nil, cfg)
+	sw.Start()
+	go func() { <-ctx.Done(); sw.Stop() }()
+
 	return watchModel{
 		instanceIDs:    instanceIDs,
 		updates:        make(map[int64]campaign.InstanceUpdate),
@@ -120,6 +131,7 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client) w
 		launchedAt:     launchedAt,
 		jobProgressHWM: make(map[int64]int),
 		reconciler:     campaign.NewReconciler(),
+		syncWorker:     sw,
 	}
 }
 
@@ -137,6 +149,9 @@ func (m watchModel) Init() tea.Cmd {
 	// Start periodic cloud job sync and DB-based done check
 	cmds = append(cmds, scheduleSyncTick())
 	cmds = append(cmds, scheduleCheckDone())
+
+	// Arm the background on-prem sync result drainer
+	cmds = append(cmds, waitForCampaignWatchSyncResult(m.ctx, m.syncWorker))
 
 	return tea.Batch(cmds...)
 }
@@ -269,6 +284,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, scheduleCheckDone()
 
+	case campaignWatchSyncResultMsg:
+		// Background on-prem sync completed — re-arm and continue (no display update needed)
+		return m, waitForCampaignWatchSyncResult(m.ctx, m.syncWorker)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -276,6 +295,23 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func waitForCampaignWatchSyncResult(ctx context.Context, sw *tui.SyncWorker) tea.Cmd {
+	if sw == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case result, ok := <-sw.Results():
+			if !ok {
+				return nil
+			}
+			return campaignWatchSyncResultMsg{result: result}
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }
 
 func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.Job {
@@ -458,7 +494,7 @@ func scheduleCheckDone() tea.Cmd {
 func watchInstances(database *sql.DB, instanceIDs []int64) error {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
-	model := newWatchModel(database, instanceIDs, r2Client)
+	model := newWatchModel(database, instanceIDs, r2Client, cfg)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
