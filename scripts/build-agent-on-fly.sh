@@ -50,7 +50,7 @@ echo "Starting SSH proxy on localhost:${PROXY_PORT}..."
 flyctl proxy "${PROXY_PORT}:22" -a "$WEFT_FLY_BUILDER_APP" &
 PROXY_PID=$!
 
-FLY_SSH="ssh -p ${PROXY_PORT} -i ${FLY_SSH_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+FLY_SSH="ssh -p ${PROXY_PORT} -i ${FLY_SSH_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
 # Wait for proxy to be ready (poll instead of fixed sleep)
 for i in $(seq 1 20); do

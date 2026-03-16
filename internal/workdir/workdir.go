@@ -82,6 +82,23 @@ func ResolveLocal(workingDir string) string {
 	return ""
 }
 
+// ToTildeRelative converts an absolute path to a tilde-relative path if it
+// is under the current user's home directory. Otherwise returns it unchanged.
+// This is used to make local absolute paths portable for use as remote paths.
+func ToTildeRelative(path string) string {
+	if !filepath.IsAbs(path) {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return path
+	}
+	if strings.HasPrefix(path, home+"/") {
+		return "~/" + path[len(home)+1:]
+	}
+	return path
+}
+
 // expandTilde replaces a leading "~" in prefix with the given home directory.
 func expandTilde(prefix, home string) string {
 	return strings.Replace(prefix, "~", home, 1)

@@ -68,12 +68,16 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 
 	// Expand PATH to include common user bin dirs so hf/hf_xet are found in
 	// non-interactive SSH sessions where ~/.profile may not be sourced.
+	// Also forward the HF token from the default cache location if present.
 	prefix := "set -e; " +
 		"export PATH=\"$HOME/.local/bin:$HOME/bin:${PATH}\"; " +
+		"if [ -f \"$HOME/.cache/huggingface/token\" ] && [ -z \"${HF_TOKEN:-}\" ]; then " +
+		"export HF_TOKEN=$(tr -d '\\n' < \"$HOME/.cache/huggingface/token\"); fi; " +
 		resolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
 	body := fmt.Sprintf(
 		"if command -v hf_xet >/dev/null 2>&1; then _hfdl=hf_xet; "+
 			"elif command -v hf >/dev/null 2>&1; then _hfdl=hf; "+
+			"elif command -v hf-download >/dev/null 2>&1; then _hfdl=hf-download; "+
 			"fi; "+
 			"if [ -n \"${_hfdl:-}\" ]; then "+
 			"$_hfdl download --repo-type %s --revision %s %s >/dev/null; "+

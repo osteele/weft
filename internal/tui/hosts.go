@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -162,11 +161,10 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	// Deploy agent binary if out of date
 	if spec := findHostSpecFunc(host); spec != nil {
 		if _, err := ensureAgentUpToDateFunc(host, *spec); err != nil {
-			if errors.Is(err, agentdeploy.ErrAgentNotAvailable) {
-				fmt.Fprintf(os.Stderr, "Warning: agent binary not available for %s/%s; skipping deploy\n", spec.OS, spec.Arch)
-			} else {
+			if !errors.Is(err, agentdeploy.ErrAgentNotAvailable) {
 				return false, fmt.Errorf("agent deploy failed: %w", err)
 			}
+			// ErrAgentNotAvailable: binaries not built yet; skip deploy silently.
 		}
 	}
 

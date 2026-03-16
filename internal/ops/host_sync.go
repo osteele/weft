@@ -368,17 +368,20 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			job.Backend = backend
 		}
 
-		// Sync sources, deduplicated by working directory.
+		// Sync sources, deduplicated by remote path.
 		// If sync fails, skip this job — don't queue it with stale code.
-		if job.WorkingDir != "" && !syncedDirs[job.WorkingDir] {
+		if job.WorkingDir != "" {
 			localDir := workdir.ResolveLocal(job.WorkingDir)
-			if err := srcsync.SyncSourcesToHost(job.Host, localDir, job.WorkingDir, job.Inputs); err != nil {
-				log.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
-				syncedDirs[job.WorkingDir] = true // don't retry same dir
-				recordFailure(job.ID, "source sync failed", err)
-				continue
+			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+			if !syncedDirs[remoteDir] {
+				if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+					log.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
+					syncedDirs[remoteDir] = true // don't retry same dir
+					recordFailure(job.ID, "source sync failed", err)
+					continue
+				}
+				syncedDirs[remoteDir] = true
 			}
-			syncedDirs[job.WorkingDir] = true
 		}
 
 		if job.Backend != db.BackendSlurm {

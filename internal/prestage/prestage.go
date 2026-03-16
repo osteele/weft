@@ -76,7 +76,7 @@ func BuildPlan(db *sql.DB, targetHost string, inputs []string) (*Plan, error) {
 		var bestSource *dataloc.HostDataEntry
 		for i := range entries {
 			e := &entries[i]
-			if e.Host == targetHost {
+			if e.Host == "" || e.Host == targetHost {
 				continue
 			}
 			if e.Path == "" {
