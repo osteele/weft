@@ -51,6 +51,7 @@ var (
 	syncVerbose      bool
 	syncNoQueueStart bool
 	syncTimeout      time.Duration
+	syncHosts        []string
 )
 
 const (
@@ -73,6 +74,7 @@ func init() {
 	syncCmd.Flags().BoolVarP(&syncVerbose, "verbose", "v", false, "Show detailed progress")
 	syncCmd.Flags().BoolVar(&syncNoQueueStart, "no-queue-start", false, "Don't auto-start queue runners")
 	syncCmd.Flags().DurationVarP(&syncTimeout, "timeout", "t", NormalSyncTimeout, "Timeout per host (e.g., 10s, 1m)")
+	syncCmd.Flags().StringArrayVar(&syncHosts, "host", nil, "Host(s) to sync (repeatable; also accepted as positional args)")
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
@@ -83,9 +85,15 @@ func runSync(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	var hosts []string
-	if len(args) > 0 {
-		// Filter to specified hosts only
-		hosts = args
+	if len(syncHosts) > 0 || len(args) > 0 {
+		// Merge --host flags and positional args, deduplicating
+		seen := make(map[string]bool)
+		for _, h := range append(syncHosts, args...) {
+			if !seen[h] {
+				hosts = append(hosts, h)
+				seen[h] = true
+			}
+		}
 	} else {
 		// Get all unique hosts with running or queued jobs
 		var err error

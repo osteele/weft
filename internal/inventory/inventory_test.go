@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/osteele/weft/internal/config"
 )
 
 func TestLoadHostsFromDir(t *testing.T) {
@@ -112,6 +114,97 @@ func TestLoadHostsFromDir_InvalidYAML(t *testing.T) {
 	_, err := LoadHostsFromDir(dir)
 	if err == nil {
 		t.Fatal("expected error for invalid YAML")
+	}
+}
+
+func TestLoadHosts_MergesConfigAndDiscoveredHosts(t *testing.T) {
+	dir := t.TempDir()
+	hostsDir := filepath.Join(dir, "hosts")
+	if err := os.MkdirAll(hostsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostsDir, "cool30.yaml"), []byte(`
+name: cool30
+os: linux
+arch: amd64
+cpu_cores: 16
+memory: 64GB
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tomlPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte(`
+[hosts.cool100]
+os = "darwin"
+arch = "arm64"
+cpu_cores = 12
+memory = "96GB"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreConfig := config.SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	t.Cleanup(restoreConfig)
+	restoreHostsDir := SetHostsDir(hostsDir)
+	t.Cleanup(restoreHostsDir)
+
+	hosts, err := LoadHosts()
+	if err != nil {
+		t.Fatalf("LoadHosts: %v", err)
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("got %d hosts, want 2", len(hosts))
+	}
+	if FindHost("cool30") == nil {
+		t.Fatal("expected discovered host cool30 to be present")
+	}
+	if FindHost("cool100") == nil {
+		t.Fatal("expected config host cool100 to be present")
+	}
+}
+
+func TestLoadHosts_ConfigOverridesDiscoveredHost(t *testing.T) {
+	dir := t.TempDir()
+	hostsDir := filepath.Join(dir, "hosts")
+	if err := os.MkdirAll(hostsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostsDir, "cool30.yaml"), []byte(`
+name: cool30
+os: linux
+arch: amd64
+cpu_cores: 16
+memory: 64GB
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tomlPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(tomlPath, []byte(`
+[hosts.cool30]
+os = "linux"
+arch = "amd64"
+cpu_cores = 32
+memory = "128GB"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restoreConfig := config.SetConfigPathsForTesting(tomlPath, filepath.Join(dir, "config.yaml"))
+	t.Cleanup(restoreConfig)
+	restoreHostsDir := SetHostsDir(hostsDir)
+	t.Cleanup(restoreHostsDir)
+
+	host := FindHost("cool30")
+	if host == nil {
+		t.Fatal("expected cool30 to be present")
+	}
+	if host.CPUCores != 32 {
+		t.Fatalf("cpu_cores = %d, want 32", host.CPUCores)
+	}
+	if host.Memory != "128GB" {
+		t.Fatalf("memory = %q, want 128GB", host.Memory)
 	}
 }
 

@@ -7,9 +7,6 @@ import (
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
-	"gopkg.in/yaml.v3"
-	"os"
-	"path/filepath"
 )
 
 func TestHostListIncludesInventoryHosts(t *testing.T) {
@@ -237,18 +234,7 @@ func TestHostListDeduplicatesInventoryAndRecentStateAndPrefersInventory(t *testi
 func setTestHostInventory(t *testing.T, hosts []inventory.HostSpec) {
 	t.Helper()
 
-	dir := t.TempDir()
-	for _, host := range hosts {
-		data, err := yaml.Marshal(host)
-		if err != nil {
-			t.Fatalf("yaml.Marshal(%s): %v", host.Name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, host.Name+".yaml"), data, 0o644); err != nil {
-			t.Fatalf("WriteFile(%s): %v", host.Name, err)
-		}
-	}
-
-	cleanup := inventory.SetHostsDir(dir)
+	cleanup := inventory.SetHosts(hosts)
 	t.Cleanup(cleanup)
 }
 

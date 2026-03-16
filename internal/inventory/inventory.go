@@ -5,29 +5,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"unicode"
 
-	"gopkg.in/yaml.v3"
+	"github.com/osteele/weft/internal/config"
 )
 
+var hostsOverride []HostSpec
 var hostsDirOverride string
 
-// HostsDir returns the directory for host YAML files.
-// Defaults to ~/.config/weft/hosts/.
+// HostsDir returns the directory for discovered host YAML files.
+// Defaults to ~/.config/weft/hosts/ (same base as config.toml).
 func HostsDir() string {
 	if hostsDirOverride != "" {
 		return hostsDirOverride
 	}
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		configDir = filepath.Join(os.Getenv("HOME"), ".config")
-	}
-	return filepath.Join(configDir, "weft", "hosts")
+	home := os.Getenv("HOME")
+	return filepath.Join(home, ".config", "weft", "hosts")
 }
 
-// SetHostsDir overrides the hosts directory. Returns a cleanup function
-// that restores the original value. Intended for testing.
+// SetHosts overrides the runtime inventory. Intended for testing.
+func SetHosts(hosts []HostSpec) func() {
+	old := hostsOverride
+	hostsOverride = slices.Clone(hosts)
+	return func() { hostsOverride = old }
+}
+
+// SetHostsDir overrides the discovered-hosts directory. Intended for testing.
 func SetHostsDir(dir string) func() {
 	old := hostsDirOverride
 	hostsDirOverride = dir
@@ -35,40 +41,50 @@ func SetHostsDir(dir string) func() {
 }
 
 // LoadHostsFromDir reads all YAML host specs from a filesystem directory.
+// Retained for tests and migration helpers.
 func LoadHostsFromDir(dir string) ([]HostSpec, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read hosts dir %s: %w", dir, err)
-	}
-
-	var hosts []HostSpec
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", entry.Name(), err)
-		}
-		var spec HostSpec
-		if err := yaml.Unmarshal(data, &spec); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", entry.Name(), err)
-		}
-		hosts = append(hosts, spec)
-	}
-	return hosts, nil
+	return loadHostsFromDir(dir)
 }
 
-// LoadHosts loads host specs from ~/.config/weft/hosts/.
-// Returns an empty slice (no error) if the directory does not exist.
+// LoadHosts loads host specs from discovered host files and [hosts.<name>] in
+// ~/.config/weft/config.toml. Config entries override discovered host specs
+// when the same host appears in both places.
 func LoadHosts() ([]HostSpec, error) {
-	dir := HostsDir()
-	hosts, err := LoadHostsFromDir(dir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
+	if hostsOverride != nil {
+		return slices.Clone(hostsOverride), nil
+	}
+
+	merged := make(map[string]HostSpec)
+	discovered, err := loadHostsFromDir(HostsDir())
+	if err == nil {
+		for _, host := range discovered {
+			merged[host.Name] = host
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(merged)+len(cfg.Hosts))
+	for name := range merged {
+		names = append(names, name)
+	}
+	for name, hostCfg := range cfg.Hosts {
+		base := merged[name] // zero value if not in discovered hosts
+		base.Name = name
+		merged[name] = applyHostConfig(base, hostCfg)
+	}
+	names = names[:0]
+	for name := range merged {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	hosts := make([]HostSpec, 0, len(names))
+	for _, name := range names {
+		hosts = append(hosts, merged[name])
 	}
 	return hosts, nil
 }
@@ -183,4 +199,44 @@ func FindHost(name string) *HostSpec {
 		}
 	}
 	return nil
+}
+
+// applyHostConfig merges non-zero fields from cfg into base, returning the result.
+// This lets config.toml entries augment or override YAML-discovered specs without
+// wiping out fields that config.toml doesn't mention.
+func applyHostConfig(base HostSpec, cfg config.HostConfig) HostSpec {
+	if cfg.OS != "" {
+		base.OS = cfg.OS
+	}
+	if cfg.Arch != "" {
+		base.Arch = cfg.Arch
+	}
+	if cfg.CPUCores != 0 {
+		base.CPUCores = cfg.CPUCores
+	}
+	if cfg.Memory != "" {
+		base.Memory = cfg.Memory
+	}
+	if cfg.NetworkBW != "" {
+		base.NetworkBW = cfg.NetworkBW
+	}
+	if len(cfg.GPUs) > 0 {
+		gpus := make([]GPUSpec, 0, len(cfg.GPUs))
+		for _, gpu := range cfg.GPUs {
+			gpus = append(gpus, GPUSpec{
+				Name:    gpu.Name,
+				Class:   gpu.Class,
+				Memory:  gpu.Memory,
+				Indices: slices.Clone(gpu.Indices),
+			})
+		}
+		base.GPUs = gpus
+	}
+	if cfg.CPUFactor != 0 {
+		base.CPUFactor = cfg.CPUFactor
+	}
+	if cfg.GPUFactor != 0 {
+		base.GPUFactor = cfg.GPUFactor
+	}
+	return base
 }

@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,22 +15,19 @@ import (
 func TestRunDataFetchRecordsCompletedRequest(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	hostsDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(hostsDir, "cool30.yaml"), []byte(`
-name: cool30
-os: linux
-arch: amd64
-cpu_cores: 16
-memory: 64 GiB
-gpus:
-  - name: RTX 3090
-    class: rtx3090
-    memory: 24 GiB
-    indices: [0]
-`), 0o644); err != nil {
-		t.Fatalf("write host inventory: %v", err)
-	}
-	cleanupHosts := inventory.SetHostsDir(hostsDir)
+	cleanupHosts := inventory.SetHosts([]inventory.HostSpec{{
+		Name:     "cool30",
+		OS:       "linux",
+		Arch:     "amd64",
+		CPUCores: 16,
+		Memory:   "64 GiB",
+		GPUs: []inventory.GPUSpec{{
+			Name:    "RTX 3090",
+			Class:   "rtx3090",
+			Memory:  "24 GiB",
+			Indices: []int{0},
+		}},
+	}})
 	t.Cleanup(cleanupHosts)
 
 	cleanupSSH := ssh.SetRunner(func(host, command string) (string, string, error) {

@@ -207,11 +207,30 @@ type SSHConfig struct {
 
 // HostConfig holds per-host configuration.
 type HostConfig struct {
+	// Static inventory fields. A host listed under [hosts.<name>] is part of
+	// the inventory even if only some of these fields are populated.
+	OS        string          `yaml:"os" toml:"os"`
+	Arch      string          `yaml:"arch" toml:"arch"`
+	CPUCores  int             `yaml:"cpu_cores" toml:"cpu_cores"`
+	Memory    string          `yaml:"memory" toml:"memory"`
+	NetworkBW string          `yaml:"network_bw" toml:"network_bw"`
+	GPUs      []HostGPUConfig `yaml:"gpus" toml:"gpus"`
+	CPUFactor float64         `yaml:"cpu_factor" toml:"cpu_factor"`
+	GPUFactor float64         `yaml:"gpu_factor" toml:"gpu_factor"`
+
 	// Backend sets the execution backend for this host ("queue-runner" or "slurm").
 	Backend string `yaml:"backend" toml:"backend"`
 	// Shared marks an inventory host as multi-tenant, so benchmark auto-placement
 	// avoids it unless the job is explicitly inventory-tagged.
 	Shared bool `yaml:"shared" toml:"shared"`
+}
+
+// HostGPUConfig describes a homogeneous GPU group for a host.
+type HostGPUConfig struct {
+	Name    string `yaml:"name" toml:"name"`
+	Class   string `yaml:"class" toml:"class"`
+	Memory  string `yaml:"memory" toml:"memory"`
+	Indices []int  `yaml:"indices" toml:"indices"`
 }
 
 // PredictorConfig holds configuration for the job-estimator integration.

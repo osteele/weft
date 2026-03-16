@@ -1,29 +1,14 @@
 package inventory
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
-// UseTestHosts writes test host YAML files to a temp directory and sets the
-// hosts dir override so that LoadHosts() returns these fixtures. Call from
-// TestMain or individual tests. The cleanup is registered via t.Cleanup.
+// UseTestHosts overrides the runtime inventory with test fixtures. The cleanup
+// is registered via t.Cleanup.
 func UseTestHosts(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	for _, h := range TestHosts() {
-		data, err := yaml.Marshal(h)
-		if err != nil {
-			t.Fatalf("marshal test host %s: %v", h.Name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, h.Name+".yaml"), data, 0644); err != nil {
-			t.Fatalf("write test host %s: %v", h.Name, err)
-		}
-	}
-	cleanup := SetHostsDir(dir)
+	cleanup := SetHosts(TestHosts())
 	t.Cleanup(cleanup)
 }
 

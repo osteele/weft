@@ -119,7 +119,8 @@ func isUsageError(err error) bool {
 		return true
 	}
 	msg := err.Error()
-	return strings.HasPrefix(msg, "unknown command")
+	return strings.HasPrefix(msg, "unknown command") ||
+		strings.HasPrefix(msg, "required flag(s)")
 }
 
 type usageError struct {

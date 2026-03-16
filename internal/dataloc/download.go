@@ -66,7 +66,11 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 	repoIDPython := strconv.Quote(asset.ID)
 	revisionPython := strconv.Quote(revision)
 
-	prefix := "set -e; " + resolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
+	// Expand PATH to include common user bin dirs so hf/hf_xet are found in
+	// non-interactive SSH sessions where ~/.profile may not be sourced.
+	prefix := "set -e; " +
+		"export PATH=\"$HOME/.local/bin:$HOME/bin:${PATH}\"; " +
+		resolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
 	body := fmt.Sprintf(
 		"if command -v hf_xet >/dev/null 2>&1; then _hfdl=hf_xet; "+
 			"elif command -v hf >/dev/null 2>&1; then _hfdl=hf; "+

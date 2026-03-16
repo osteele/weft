@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -199,9 +200,13 @@ func defaultSyncFuncWithDelete(host, localDir, remoteDir string, excludes []stri
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "rsync", args...)
-	cmd.Stderr = nil
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderrBuf.String()); msg != "" {
+			return fmt.Errorf("rsync to %s:%s: %s: %w", host, remoteDir, msg, err)
+		}
 		return fmt.Errorf("rsync to %s:%s: %w", host, remoteDir, err)
 	}
 	return nil
