@@ -17,8 +17,8 @@ build:
     for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
     echo "Build complete."
 
-# Install to $GOPATH/bin
-install:
+# Install to $GOPATH/bin (also builds agents so they are ready to deploy)
+install: build-agents
     go install .
 
 # Run tests (skips slow build tests; use test-all for full suite)

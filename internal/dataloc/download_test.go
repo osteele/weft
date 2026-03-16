@@ -14,13 +14,16 @@ func TestBuildHFDownloadCommand_Model(t *testing.T) {
 	if !strings.Contains(cmd, "HF_HUB_CACHE") || !strings.Contains(cmd, "HF_HOME") {
 		t.Fatalf("command should resolve HF_HUB_CACHE/HF_HOME: %s", cmd)
 	}
-	if !strings.Contains(cmd, "_hfdl=hf_xet") {
+	if !strings.Contains(cmd, "_hfdl='hf_xet download'") {
 		t.Fatalf("command missing hf_xet candidate: %s", cmd)
 	}
-	if !strings.Contains(cmd, "_hfdl=hf") {
+	if !strings.Contains(cmd, "_hfdl='hf download'") {
 		t.Fatalf("command missing hf candidate: %s", cmd)
 	}
-	if !strings.Contains(cmd, "$_hfdl download --repo-type model") {
+	if !strings.Contains(cmd, "_hfdl=hf-download") {
+		t.Fatalf("command missing hf-download candidate: %s", cmd)
+	}
+	if !strings.Contains(cmd, "$_hfdl --repo-type model") {
 		t.Fatalf("command missing hf cli dispatch: %s", cmd)
 	}
 	if !strings.Contains(cmd, "snapshot_download") {

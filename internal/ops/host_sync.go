@@ -11,6 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/prestage"
 	"github.com/osteele/weft/internal/remote"
 	"github.com/osteele/weft/internal/ssh"
@@ -376,6 +377,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			if !syncedDirs[remoteDir] {
 				if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
 					log.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
+					oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
+						oplog.WithDetail("source sync failed"),
+						oplog.WithError(err),
+					)
 					syncedDirs[remoteDir] = true // don't retry same dir
 					recordFailure(job.ID, "source sync failed", err)
 					continue
@@ -387,6 +392,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		if job.Backend != db.BackendSlurm {
 			if err := ensureHFInputsAvailable(database, job.Host, job.Inputs, timeout); err != nil {
 				log.Printf("sync: skipping job %d, HF input ensure failed on %s: %v", job.ID, job.Host, err)
+				oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
+					oplog.WithDetail("input staging failed"),
+					oplog.WithError(err),
+				)
 				recordFailure(job.ID, "input staging failed", err)
 				continue
 			}

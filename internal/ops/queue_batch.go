@@ -203,8 +203,11 @@ func fetchQueueBatchStatus(host string, jobIDs []int64, timeout time.Duration) (
 
 	agentPath := "~/.cache/weft/bin/weft-agent"
 	cmd := fmt.Sprintf("%s batch-status --queue %s %s", agentPath, DefaultQueueName, idsArg)
-	stdout, _, err := ssh.RunWithTimeout(host, cmd, timeout)
+	stdout, stderr, err := ssh.RunWithTimeout(host, cmd, timeout)
 	if err != nil {
+		if s := strings.TrimSpace(stderr); s != "" {
+			return nil, fmt.Errorf("%w: %s", err, s)
+		}
 		return nil, err
 	}
 

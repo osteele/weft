@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	gosync "sync"
@@ -68,19 +69,31 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 
 	// Expand PATH to include common user bin dirs so hf/hf_xet are found in
 	// non-interactive SSH sessions where ~/.profile may not be sourced.
-	// Also forward the HF token from the default cache location if present.
+	// Forward HF token: prefer local coordinator token (so gated models work
+	// even if the remote host has no token), fall back to the remote host's
+	// cached token file.
+	var tokenExport string
+	if token := localHFToken(); token != "" {
+		tokenExport = "export HF_TOKEN='" + ssh.EscapeForSingleQuotes(token) + "'; "
+	} else {
+		tokenExport = "if [ -f \"$HOME/.cache/huggingface/token\" ] && [ -z \"${HF_TOKEN:-}\" ]; then " +
+			"export HF_TOKEN=$(tr -d '\\n' < \"$HOME/.cache/huggingface/token\"); fi; "
+	}
 	prefix := "set -e; " +
 		"export PATH=\"$HOME/.local/bin:$HOME/bin:${PATH}\"; " +
-		"if [ -f \"$HOME/.cache/huggingface/token\" ] && [ -z \"${HF_TOKEN:-}\" ]; then " +
-		"export HF_TOKEN=$(tr -d '\\n' < \"$HOME/.cache/huggingface/token\"); fi; " +
+		tokenExport +
 		resolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
 	body := fmt.Sprintf(
-		"if command -v hf_xet >/dev/null 2>&1; then _hfdl=hf_xet; "+
-			"elif command -v hf >/dev/null 2>&1; then _hfdl=hf; "+
+		// _hfdl stores the full download invocation prefix (tool + subcommand
+		// where needed). hf_xet and hf require an explicit 'download'
+		// subcommand; hf-download is already 'huggingface-cli download' so it
+		// takes flags directly.
+		"if command -v hf_xet >/dev/null 2>&1; then _hfdl='hf_xet download'; "+
+			"elif command -v hf >/dev/null 2>&1; then _hfdl='hf download'; "+
 			"elif command -v hf-download >/dev/null 2>&1; then _hfdl=hf-download; "+
 			"fi; "+
 			"if [ -n \"${_hfdl:-}\" ]; then "+
-			"$_hfdl download --repo-type %s --revision %s %s >/dev/null; "+
+			"$_hfdl --repo-type %s --revision %s %s >/dev/null; "+
 			"elif python3 -c 'import huggingface_hub' >/dev/null 2>&1; then "+
 			"python3 -c \"from huggingface_hub import snapshot_download; snapshot_download(repo_id=%s, repo_type=%s, revision=%s)\" >/dev/null; "+
 			"else "+
@@ -104,6 +117,23 @@ func resolveHFCacheDirShellVar() string {
 	return `if [ -n "${HF_HUB_CACHE:-}" ]; then _hf_cache="$HF_HUB_CACHE"; ` +
 		`elif [ -n "${HF_HOME:-}" ]; then _hf_cache="$HF_HOME/hub"; ` +
 		`else _hf_cache="$HOME/.cache/huggingface/hub"; fi`
+}
+
+// localHFToken returns the HuggingFace token from the local environment,
+// checking HF_TOKEN env var then ~/.cache/huggingface/token.
+func localHFToken() string {
+	if token := os.Getenv("HF_TOKEN"); token != "" {
+		return token
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".cache", "huggingface", "token"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func hfRepoType(kind AssetKind) (string, error) {
