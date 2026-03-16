@@ -191,7 +191,7 @@ func (r *Runner) tick() error {
 	}
 
 	if result.RestartRequested {
-		r.state.Save(r.stateFile)
+		r.saveState()
 		// Re-exec ourselves
 		oplog.Log("cmd.restart")
 		exe, _ := os.Executable()
@@ -202,7 +202,7 @@ func (r *Runner) tick() error {
 	r.refreshRunningJobs()
 
 	// Save state after processing
-	r.state.Save(r.stateFile)
+	r.saveState()
 
 	// Check stop condition
 	if r.state.StopRequested && r.state.PendingEmpty() && r.state.RunningCount() == 0 {
@@ -252,14 +252,14 @@ func (r *Runner) tryStartNextJob() {
 	// Check exclusive constraints
 	if AnyRunningExclusive(r.state, r.queueDir) {
 		r.state.AddPending(jobID)
-		r.state.Save(r.stateFile)
+		r.saveState()
 		return
 	}
 
 	runningCount := r.state.RunningCount()
 	if HasExclusiveOrBenchmarkTag(rj) && runningCount > 0 {
 		r.state.AddPending(jobID)
-		r.state.Save(r.stateFile)
+		r.saveState()
 		return
 	}
 
@@ -273,13 +273,13 @@ func (r *Runner) tryStartNextJob() {
 			}
 			r.benchmarkIdleCount = 0
 			r.state.AddPending(jobID)
-			r.state.Save(r.stateFile)
+			r.saveState()
 			return
 		}
 		r.benchmarkIdleCount++
 		if r.benchmarkIdleCount < r.benchCfg.IdleSamples {
 			r.state.AddPending(jobID)
-			r.state.Save(r.stateFile)
+			r.saveState()
 			return
 		}
 		oplog.LogJob("benchmark.idle_confirmed", jobID, "", oplog.WithDetailf("samples=%d", r.benchmarkIdleCount))
@@ -293,7 +293,7 @@ func (r *Runner) tryStartNextJob() {
 		nextAllotment := r.jobAllotment(job)
 		if currentAllotment+nextAllotment > r.cpuConfig.HostUtilizationTarget {
 			r.state.AddPending(jobID)
-			r.state.Save(r.stateFile)
+			r.saveState()
 			return
 		}
 	}
@@ -311,7 +311,7 @@ func (r *Runner) tryStartNextJob() {
 		canStart, resolvedGPUDevices = r.gpuInv.CanStartGPUJob(r.state, rj)
 		if !canStart {
 			r.state.AddPending(jobID)
-			r.state.Save(r.stateFile)
+			r.saveState()
 			return
 		}
 	}
@@ -328,7 +328,7 @@ func (r *Runner) tryStartNextJob() {
 	} else {
 		log.Printf("Job %d: started successfully", jobID)
 	}
-	r.state.Save(r.stateFile)
+	r.saveState()
 }
 
 var errRequeue = fmt.Errorf("requeue")
@@ -576,7 +576,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	CleanupPIDFiles(paths)
 	removeJobFile(r.queueDir, jobID)
 
-	r.state.Save(r.stateFile)
+	r.saveState()
 }
 
 func (r *Runner) refreshRunningJobs() {
@@ -678,7 +678,7 @@ func (r *Runner) refreshRunningJobs() {
 	}
 
 	if changed {
-		r.state.Save(r.stateFile)
+		r.saveState()
 	}
 }
 
@@ -729,7 +729,7 @@ func (r *Runner) sampleRunningJobs() {
 	}
 
 	if updated {
-		r.state.Save(r.stateFile)
+		r.saveState()
 	}
 }
 
@@ -773,7 +773,17 @@ func (r *Runner) adjustRunningJobAllotments() {
 	}
 
 	if updated {
-		r.state.Save(r.stateFile)
+		r.saveState()
+	}
+}
+
+// saveState saves the runner state to disk, logging any error.
+// All callers use this instead of r.state.Save directly so that
+// write failures (e.g. NFS unavailability) are never silently swallowed.
+func (r *Runner) saveState() {
+	if err := r.state.Save(r.stateFile); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: save state: %v\n", err)
+		oplog.Log("queue.save_state_failed", oplog.WithError(err))
 	}
 }
 
