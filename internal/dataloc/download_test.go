@@ -11,6 +11,9 @@ func TestBuildHFDownloadCommand_Model(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildHFDownloadCommand: %v", err)
 	}
+	if !strings.Contains(cmd, "HF_HUB_CACHE") || !strings.Contains(cmd, "HF_HOME") {
+		t.Fatalf("command should resolve HF_HUB_CACHE/HF_HOME: %s", cmd)
+	}
 	if !strings.Contains(cmd, "_hfdl=hf_xet") {
 		t.Fatalf("command missing hf_xet candidate: %s", cmd)
 	}

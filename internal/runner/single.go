@@ -53,12 +53,6 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	var phases PhaseTiming
 	phases.WrapperStart = time.Now().Unix()
 
-	// Cache probe (pre-job)
-	if !cfg.SkipProbes {
-		cachePre := ProbeCacheSizes()
-		phases.CachePre = &cachePre
-	}
-
 	// Discover hardware
 	gpuInv := DiscoverGPUs()
 	cpuCount := DetectCPUCount()
@@ -90,6 +84,12 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		envVars = append(envVars, dotenvVars...)
 	}
 	envVars = append(envVars, job.Env...)
+
+	// Cache probe (pre-job) should use the same HF env the job will run with.
+	if !cfg.SkipProbes {
+		cachePre := ProbeCacheSizesForEnv(mergeEnvVars(os.Environ(), envVars))
+		phases.CachePre = &cachePre
+	}
 
 	// Resolve GPU devices
 	var gpuDevices []string
@@ -253,7 +253,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	// Cache probe (post-job) and write phases
 	if !cfg.SkipProbes {
-		cachePost := ProbeCacheSizes()
+		cachePost := ProbeCacheSizesForEnv(mergeEnvVars(os.Environ(), envVars))
 		phases.CachePost = &cachePost
 	}
 	WritePhasesFile(paths, phases)

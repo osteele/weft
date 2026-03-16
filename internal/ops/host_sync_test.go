@@ -213,11 +213,11 @@ func TestEnsureHFInputsAvailable_DownloadsMissingHFAsset(t *testing.T) {
 			t.Fatalf("unexpected host %q", host)
 		}
 		switch {
-		case strings.Contains(command, "df -Pk ~/.cache/huggingface"):
+		case strings.Contains(command, "df -Pk"):
 			return "20971520\n", "", 0
-		case strings.Contains(command, "huggingface-cli download --repo-type model"):
+		case strings.Contains(command, "$_hfdl download --repo-type model"):
 			return "", "", 0
-		case strings.Contains(command, "du -sb ~/.cache/huggingface/hub/models--*"):
+		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
 			scanCount++
 			if scanCount >= 2 {
 				return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", 0

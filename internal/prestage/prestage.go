@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -152,18 +153,35 @@ func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 	return firstErr
 }
 
-// runTransfer executes a single rsync from sourceHost:remotePath to targetHost:remotePath.
+// runTransfer executes a single rsync from sourceHost:remotePath to targetHost.
+// It first tries a push (SSH into source, rsync to target). If that fails with a
+// connection error, it falls back to a pull (SSH into target, rsync from source),
+// which works when the target can reach the source but not vice versa.
 func runTransfer(ctx context.Context, t Transfer, targetHost string) error {
-	// rsync from source to target via the coordinator (SSH hop)
-	// Format: ssh sourceHost "rsync -az <path> targetHost:<path>"
-	cmd := fmt.Sprintf("rsync -az --timeout=300 %s %s:%s",
-		t.RemotePath,
-		targetHost,
-		t.RemotePath,
-	)
-	_, stderr, err := ssh.RunWithContext(ctx, t.SourceHost, cmd)
-	if err != nil {
-		return fmt.Errorf("rsync: %s: %w", stderr, err)
+	pushCmd := fmt.Sprintf("rsync -az --timeout=300 %s %s:%s",
+		t.RemotePath, targetHost, t.RemotePath)
+	_, stderr, err := ssh.RunWithContext(ctx, t.SourceHost, pushCmd)
+	if err == nil {
+		return nil
+	}
+	pushErr := fmt.Errorf("rsync: %s: %w", stderr, err)
+
+	// Push failed — if it looks like a connectivity failure from source to target,
+	// try pulling from target instead (target SSHes into source).
+	if !ssh.IsConnectionError(stderr) {
+		return pushErr
+	}
+
+	// The destination path may differ from the source path (e.g. different OS,
+	// different home directory). Use a tilde-relative path so it expands correctly
+	// on the target host: ~/.cache/huggingface/hub/<model-dir-name>.
+	targetPath := fmt.Sprintf("~/.cache/huggingface/hub/%s", filepath.Base(t.RemotePath))
+	pullCmd := fmt.Sprintf("mkdir -p ~/.cache/huggingface/hub && rsync -az --timeout=300 %s:%s %s",
+		t.SourceHost, t.RemotePath, targetPath)
+	_, stderr2, err2 := ssh.RunWithContext(ctx, targetHost, pullCmd)
+	if err2 != nil {
+		// Report both errors so it's clear what was tried
+		return fmt.Errorf("push (%w); pull: rsync: %s: %v", pushErr, stderr2, err2)
 	}
 	return nil
 }

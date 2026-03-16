@@ -2,7 +2,9 @@ package runner
 
 import (
 	"io/fs"
+	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -16,13 +18,43 @@ type CacheProbe struct {
 
 // ProbeCacheSizes measures the sizes of common cache directories and root disk usage.
 func ProbeCacheSizes() CacheProbe {
-	home := ExpandTilde("~/")
+	return ProbeCacheSizesForEnv(os.Environ())
+}
+
+// ProbeCacheSizesForEnv measures cache sizes using the provided environment.
+// HF_HUB_CACHE takes precedence over HF_HOME, matching huggingface_hub behavior.
+func ProbeCacheSizesForEnv(env []string) CacheProbe {
+	home := envValue(env, "HOME")
+	if home == "" {
+		home = ExpandTilde("~/")
+	}
 	probe := CacheProbe{
-		HFBytes: dirSizeBytes(filepath.Join(home, ".cache", "huggingface")),
+		HFBytes: dirSizeBytes(resolveHFCacheProbeDir(env, home)),
 		UVBytes: dirSizeBytes(filepath.Join(home, ".cache", "uv")),
 	}
 	probe.DiskUsedBytes, probe.DiskTotalBytes = ProbeDiskUsage()
 	return probe
+}
+
+func resolveHFCacheProbeDir(env []string, home string) string {
+	if cacheDir := envValue(env, "HF_HUB_CACHE"); cacheDir != "" {
+		return expandHomePath(cacheDir, home)
+	}
+	if hfHome := envValue(env, "HF_HOME"); hfHome != "" {
+		return filepath.Join(expandHomePath(hfHome, home), "hub")
+	}
+	return filepath.Join(home, ".cache", "huggingface", "hub")
+}
+
+func expandHomePath(path, home string) string {
+	switch {
+	case path == "~":
+		return home
+	case strings.HasPrefix(path, "~/"):
+		return filepath.Join(home, path[2:])
+	default:
+		return path
+	}
 }
 
 // ProbeDiskUsage returns (used, total) bytes for the root filesystem.
