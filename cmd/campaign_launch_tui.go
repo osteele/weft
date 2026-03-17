@@ -474,6 +474,11 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.inlineWatch != nil {
+			// Pass unplaced jobs to the watch model for retry
+			if len(m.partialErrors) > 0 && m.database != nil {
+				unplaced, _ := db.ListUnplacedJobs(m.database)
+				m.inlineWatch.partialErrorJobs = unplaced
+			}
 			return m, nil
 		}
 		if len(m.partialErrors) == 0 {
@@ -807,7 +812,7 @@ func (m launchModel) View() string {
 			b.WriteString(launchErrStyle.Render(fmt.Sprintf("Launch error: %v", m.err)))
 			b.WriteString("\n\n")
 		}
-		if len(m.partialErrors) > 0 {
+		if len(m.partialErrors) > 0 && !m.inlineWatch.partialErrorsRetried {
 			b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(m.partialErrors))))
 			b.WriteString("\n")
 			for _, err := range m.partialErrors {

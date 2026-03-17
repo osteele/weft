@@ -46,6 +46,13 @@ type watchModel struct {
 	jobProgressHWM map[int64]int // high-water mark per job ID (prevents progress regression)
 	reconciler     *campaign.Reconciler
 	syncWorker     *tui.SyncWorker
+
+	// Retry state
+	appConfig            *config.Config // config for building cloud clients on retry
+	retrying             bool           // true while retry launch is in progress
+	retryResult          string         // status line after retry completes (or error)
+	partialErrorJobs     []*db.Job      // jobs from launch failures (inline watch only)
+	partialErrorsRetried bool           // true after partial error jobs have been retried
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -87,6 +94,12 @@ type watchCheckDoneResultMsg struct{ allTerminal bool }
 
 // campaignWatchSyncResultMsg is sent when the background SyncWorker produces a result.
 type campaignWatchSyncResultMsg struct{}
+
+// retryResultMsg carries the result of retrying failed instances.
+type retryResultMsg struct {
+	instanceIDs []int64
+	err         error
+}
 
 func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
 	s := spinner.New()
@@ -130,6 +143,7 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, c
 		jobProgressHWM: make(map[int64]int),
 		reconciler:     campaign.NewReconciler(),
 		syncWorker:     sw,
+		appConfig:      cfg,
 	}
 }
 
@@ -171,6 +185,17 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			m.cancel()
 			return m, tea.Quit
+		case "r":
+			if m.retrying || m.done {
+				break
+			}
+			jobs := m.retryableJobs()
+			if len(jobs) == 0 {
+				break
+			}
+			m.retrying = true
+			m.retryResult = ""
+			return m, m.retryFailedInstances(jobs)
 		}
 
 	case watchUpdateMsg:
@@ -284,6 +309,43 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, scheduleCheckDone()
 
+	case retryResultMsg:
+		m.retrying = false
+		if msg.err != nil {
+			m.retryResult = fmt.Sprintf("Retry failed: %v", msg.err)
+			return m, nil
+		}
+		if len(msg.instanceIDs) == 0 {
+			m.retryResult = "Retry: no instances launched (no offers available)"
+			return m, nil
+		}
+		// Add new instances to the watch view
+		var cmds []tea.Cmd
+		for _, id := range msg.instanceIDs {
+			m.instanceIDs = append(m.instanceIDs, id)
+			m.clients[id] = clientForInstance(m.database, id)
+			// Pre-fetch initial info
+			ci, _ := db.GetCloudInstance(m.database, id)
+			jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(m.database, id)
+			outcomes, _ := db.GetAttemptOutcomesByInstance(m.database, id)
+			m.initInfo[id] = initialInstanceInfo{ci: ci, jobs: jobs, outcomes: outcomes}
+			// Start watching
+			client := m.clients[id]
+			ch := campaign.WatchInstance(m.ctx, client, m.database, id, 2*time.Second, 10*time.Second, m.r2Client)
+			m.channels[id] = ch
+			cmds = append(cmds, waitForUpdate(id, ch))
+		}
+		// Mark partial errors as retried (clears the banner in inline watch)
+		m.partialErrorJobs = nil
+		m.partialErrorsRetried = true
+		// Build result string
+		ids := make([]string, len(msg.instanceIDs))
+		for i, id := range msg.instanceIDs {
+			ids[i] = fmt.Sprintf("%d", id)
+		}
+		m.retryResult = fmt.Sprintf("Retried: launched instances %s", strings.Join(ids, ", "))
+		return m, tea.Batch(cmds...)
+
 	case campaignWatchSyncResultMsg:
 		// Background on-prem sync completed — re-arm and continue (no display update needed)
 		return m, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
@@ -348,6 +410,126 @@ func (m watchModel) checkAllDone() tea.Cmd {
 		}
 		return watchCheckDoneResultMsg{allTerminal: true}
 	}
+}
+
+// retryableJobs collects unplaced jobs from failed instances in this watch session,
+// plus any jobs from partial launch failures (inline watch only).
+func (m watchModel) retryableJobs() []*db.Job {
+	seen := make(map[int64]struct{})
+	var jobs []*db.Job
+
+	// Jobs from failed instances that are now unplaced
+	for _, id := range m.instanceIDs {
+		u, ok := m.updates[id]
+		if !ok {
+			continue
+		}
+		if u.CloudInstance == nil || u.CloudInstance.Status != db.CloudInstanceStatusFailed {
+			continue
+		}
+		// Get unplaced jobs that were on this instance
+		instanceJobs, err := db.GetCloudInstanceJobsIncludingAttempts(m.database, id)
+		if err != nil {
+			continue
+		}
+		for _, j := range instanceJobs {
+			if j == nil {
+				continue
+			}
+			if _, ok := seen[j.ID]; ok {
+				continue
+			}
+			// Only include jobs that are queued and unplaced (ready for retry)
+			fresh, err := db.GetJobByID(m.database, j.ID)
+			if err != nil || fresh == nil {
+				continue
+			}
+			if fresh.Status == db.StatusQueued && (fresh.Host == "" || fresh.CloudInstanceID == nil) {
+				seen[fresh.ID] = struct{}{}
+				jobs = append(jobs, fresh)
+			}
+		}
+	}
+
+	// Jobs from partial launch failures (never got an instance)
+	for _, j := range m.partialErrorJobs {
+		if j == nil {
+			continue
+		}
+		if _, ok := seen[j.ID]; ok {
+			continue
+		}
+		fresh, err := db.GetJobByID(m.database, j.ID)
+		if err != nil || fresh == nil {
+			continue
+		}
+		if fresh.Status == db.StatusQueued {
+			seen[fresh.ID] = struct{}{}
+			jobs = append(jobs, fresh)
+		}
+	}
+
+	return jobs
+}
+
+// retryFailedInstances launches new cloud instances for the given jobs.
+func (m watchModel) retryFailedInstances(jobs []*db.Job) tea.Cmd {
+	database := m.database
+	cfg := m.appConfig
+	return func() tea.Msg {
+		if cfg == nil {
+			cfg, _ = config.Load()
+		}
+		clients, err := buildCloudClients(cfg)
+		if err != nil || len(clients) == 0 {
+			return retryResultMsg{err: fmt.Errorf("no cloud providers available: %v", err)}
+		}
+
+		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+		relaunchCfg := campaign.RelaunchConfig{
+			Clients:    clients,
+			R2Cfg:      r2Cfg,
+			CreateOpts: cloud.CreateOpts{},
+			LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
+			Database:   database,
+		}
+
+		// Use RelaunchOrphanedJobs which handles grouping, offers, and launching
+		result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
+		if err != nil {
+			return retryResultMsg{err: err}
+		}
+		if result == nil {
+			return retryResultMsg{}
+		}
+		return retryResultMsg{instanceIDs: result.InstanceIDs}
+	}
+}
+
+// hasFailedInstances returns true if any watched instance has failed status.
+func (m watchModel) hasFailedInstances() bool {
+	for _, id := range m.instanceIDs {
+		u, ok := m.updates[id]
+		if ok && u.CloudInstance != nil && u.CloudInstance.Status == db.CloudInstanceStatusFailed {
+			return true
+		}
+	}
+	return len(m.partialErrorJobs) > 0
+}
+
+// countFailedInstances returns the number of failed instances in the watch view.
+func (m watchModel) countFailedInstances() int {
+	count := 0
+	for _, id := range m.instanceIDs {
+		u, ok := m.updates[id]
+		if ok && u.CloudInstance != nil && u.CloudInstance.Status == db.CloudInstanceStatusFailed {
+			count++
+		}
+	}
+	if len(m.partialErrorJobs) > 0 {
+		count++ // count partial errors as one logical failure group
+	}
+	return count
 }
 
 func refreshWatchInstancesFromDB(database *sql.DB, instanceIDs []int64, quitAfter bool) tea.Cmd {
@@ -453,8 +635,21 @@ func (m watchModel) View() string {
 		b.WriteString("\n\n")
 	}
 
+	// Retry status line
+	if m.retrying {
+		b.WriteString(m.spinner.View())
+		b.WriteString(fmt.Sprintf(" Retrying %d failed instance(s)...\n", m.countFailedInstances()))
+	} else if m.retryResult != "" {
+		b.WriteString(m.retryResult)
+		b.WriteString("\n")
+	}
+
 	if !m.done {
-		b.WriteString(watchDimStyle.Render("q to quit (instances continue in background)"))
+		if m.hasFailedInstances() && !m.retrying {
+			b.WriteString(watchDimStyle.Render("r to retry failed • q to quit (instances continue in background)"))
+		} else {
+			b.WriteString(watchDimStyle.Render("q to quit (instances continue in background)"))
+		}
 		b.WriteString("\n")
 	}
 
