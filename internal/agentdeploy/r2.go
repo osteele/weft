@@ -2,7 +2,9 @@ package agentdeploy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"os"
 
 	"github.com/osteele/weft/internal/r2"
@@ -11,6 +13,7 @@ import (
 
 // EnsureAgentInR2 uploads the agent binary for the given version to R2.
 // If the object is already present, it skips build and upload.
+// If the binary is not in the local cache, it attempts to build via the Fly builder.
 func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string) (string, error) {
 	key := r2keys.AgentBinary(version, goos, goarch)
 
@@ -23,7 +26,13 @@ func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, go
 	}
 
 	localPath, err := EnsureBuilt(version, goos, goarch, "")
-	if err != nil {
+	if errors.Is(err, ErrAgentNotAvailable) {
+		log.Printf("agent binary not in cache; building via Fly builder...")
+		localPath, err = BuildViaFly(version, goos, goarch)
+		if err != nil {
+			return "", fmt.Errorf("build agent: %w", err)
+		}
+	} else if err != nil {
 		return "", fmt.Errorf("build agent: %w", err)
 	}
 

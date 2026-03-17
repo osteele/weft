@@ -18,8 +18,17 @@ build:
     echo "Build complete."
 
 # Install to $GOPATH/bin (also builds agents so they are ready to deploy)
-install: build-agents
-    go install .
+install:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Building and installing in parallel..."
+    pids=()
+    just build-agents &
+    pids+=($!)
+    go install . &
+    pids+=($!)
+    for pid in "${pids[@]}"; do wait "$pid" || exit 1; done
+    echo "Install complete."
 
 # Run tests (skips slow build tests; use test-all for full suite)
 test:
@@ -80,6 +89,11 @@ build-agents:
     set -euo pipefail
     mkdir -p internal/agentdeploy/binaries
     VERSION=$(jj log --no-graph -r 'ancestors(@-, 200)' -T 'commit_id.short(12)' --limit 1 cmd/agent/ internal/ 2>/dev/null || echo "dev")
+    EXISTING=$(cat internal/agentdeploy/binaries/VERSION 2>/dev/null || echo "")
+    if [ "$VERSION" = "$EXISTING" ]; then
+        echo "Agent binaries already up to date (version: ${VERSION})"
+        exit 0
+    fi
     LDFLAGS="-X main.version=${VERSION}"
     echo "Building agent binaries in parallel (version: ${VERSION})..."
     pids=()
