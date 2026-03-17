@@ -117,6 +117,16 @@ func (g InstanceGroup) AllInputs() []string {
 	return inputs
 }
 
+// HasComputeIntensiveJob returns true if any job in the group has the compute-intensive tag.
+func (g InstanceGroup) HasComputeIntensiveJob() bool {
+	for _, job := range g.Jobs {
+		if job.HasTag(db.TagComputeIntensive) {
+			return true
+		}
+	}
+	return false
+}
+
 // GPUSpec returns a human-readable GPU spec string for the group.
 func (g InstanceGroup) GPUSpec() string {
 	switch {

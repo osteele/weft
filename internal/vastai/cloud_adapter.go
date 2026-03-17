@@ -33,12 +33,13 @@ func (c *CloudClient) Available() error {
 
 func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
 	vc := OfferConstraints{
-		GPUClass:       constraints.GPUClass,
-		MinGPUMemGB:    constraints.MinGPUMemGB,
-		MinDiskGB:      constraints.MinDiskGB,
-		MinReliability: constraints.MinReliability,
-		NumGPUs:        constraints.NumGPUs,
-		ExcludeGeos:    constraints.ExcludeGeos,
+		GPUClass:             constraints.GPUClass,
+		MinGPUMemGB:          constraints.MinGPUMemGB,
+		MinDiskGB:            constraints.MinDiskGB,
+		MinReliability:       constraints.MinReliability,
+		NumGPUs:              constraints.NumGPUs,
+		ExcludeGeos:          constraints.ExcludeGeos,
+		MinCPUCoresEffective: constraints.MinCPUCoresEffective,
 	}
 	offers, err := c.inner.SearchOffers(vc)
 	if err != nil {

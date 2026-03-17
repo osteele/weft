@@ -1325,11 +1325,12 @@ func repairLiveCloudAssignments(db *sql.DB) error {
 
 // Special job tags that affect scheduling and execution behavior.
 const (
-	ProcessedTag = "processed"
-	TagExclusive = "exclusive"
-	TagBenchmark = "benchmark"
-	TagRental    = "rental"
-	TagInventory = "inventory"
+	ProcessedTag        = "processed"
+	TagExclusive        = "exclusive"
+	TagBenchmark        = "benchmark"
+	TagRental           = "rental"
+	TagInventory        = "inventory"
+	TagComputeIntensive = "compute-intensive"
 
 	// Legacy tag aliases accepted on input and in existing database rows.
 	TagCloudLegacy  = "cloud"

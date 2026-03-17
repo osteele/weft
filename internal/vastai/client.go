@@ -290,6 +290,9 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	if c.MinDiskGB > 0 {
 		parts = append(parts, fmt.Sprintf("disk_space>=%d", c.MinDiskGB))
 	}
+	if c.MinCPUCoresEffective > 0 {
+		parts = append(parts, fmt.Sprintf("cpu_cores_effective>=%d", c.MinCPUCoresEffective))
+	}
 	if c.MinReliability > 0 {
 		parts = append(parts, fmt.Sprintf("reliability>=%g", c.MinReliability))
 	}

@@ -5,6 +5,7 @@ import (
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
 )
 
 func TestCheapestOffer(t *testing.T) {
@@ -111,5 +112,33 @@ func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
 	}
 	if result.Offer.ProviderID != "2" {
 		t.Fatalf("replacement offer ID = %s, want 2", result.Offer.ProviderID)
+	}
+}
+
+func TestOfferConstraintsForGroup_ComputeIntensive(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs: []*db.Job{
+			{ID: 1, Tags: []string{"compute-intensive"}},
+		},
+	}
+	c := offerConstraintsForGroup(group)
+	if c.MinCPUCoresEffective != 16 {
+		t.Errorf("MinCPUCoresEffective = %d, want 16", c.MinCPUCoresEffective)
+	}
+}
+
+func TestOfferConstraintsForGroup_NoComputeIntensive(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass: "RTX_4090",
+		GPUMemGB: 24,
+		Jobs: []*db.Job{
+			{ID: 1, Tags: []string{"rental"}},
+		},
+	}
+	c := offerConstraintsForGroup(group)
+	if c.MinCPUCoresEffective != 0 {
+		t.Errorf("MinCPUCoresEffective = %d, want 0", c.MinCPUCoresEffective)
 	}
 }

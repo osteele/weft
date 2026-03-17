@@ -56,6 +56,32 @@ func TestGroupByGPUSupremum_Empty(t *testing.T) {
 	}
 }
 
+func TestInstanceGroupHasComputeIntensiveJob(t *testing.T) {
+	group := InstanceGroup{
+		Jobs: []*db.Job{
+			{ID: 1, Tags: []string{"rental"}},
+			{ID: 2, Tags: []string{"compute-intensive", "rental"}},
+		},
+	}
+	if !group.HasComputeIntensiveJob() {
+		t.Error("expected HasComputeIntensiveJob() = true")
+	}
+
+	groupNo := InstanceGroup{
+		Jobs: []*db.Job{
+			{ID: 3, Tags: []string{"rental"}},
+		},
+	}
+	if groupNo.HasComputeIntensiveJob() {
+		t.Error("expected HasComputeIntensiveJob() = false")
+	}
+
+	empty := InstanceGroup{}
+	if empty.HasComputeIntensiveJob() {
+		t.Error("expected HasComputeIntensiveJob() = false for empty group")
+	}
+}
+
 func TestInstanceGroupGPUSpec(t *testing.T) {
 	tests := []struct {
 		group InstanceGroup

@@ -185,6 +185,22 @@ func TestBuildSearchFilter(t *testing.T) {
 	}
 }
 
+func TestBuildSearchFilter_CPUCores(t *testing.T) {
+	filter, _ := buildSearchFilter(OfferConstraints{
+		MinCPUCoresEffective: 16,
+	})
+	if !strings.Contains(filter, "cpu_cores_effective>=16") {
+		t.Errorf("filter %q missing cpu_cores_effective>=16", filter)
+	}
+}
+
+func TestBuildSearchFilter_NoCPUCores(t *testing.T) {
+	filter, _ := buildSearchFilter(OfferConstraints{})
+	if strings.Contains(filter, "cpu_cores_effective") {
+		t.Errorf("filter %q should not contain cpu_cores_effective when MinCPUCoresEffective=0", filter)
+	}
+}
+
 func TestIsUnavailableOfferError(t *testing.T) {
 	tests := []struct {
 		err  error

@@ -50,12 +50,13 @@ type Instance struct {
 
 // OfferConstraints describes what GPU capabilities a job needs.
 type OfferConstraints struct {
-	GPUClass       string   // e.g., "RTX_4090", "A100"
-	MinGPUMemGB    int      // minimum per-GPU memory
-	MinDiskGB      int      // minimum disk space
-	MinReliability float64  // minimum reliability score (0-1)
-	NumGPUs        int      // number of GPUs needed (default 1)
-	ExcludeGeos    []string // two-letter country codes to exclude (e.g., ["CN"])
+	GPUClass             string   // e.g., "RTX_4090", "A100"
+	MinGPUMemGB          int      // minimum per-GPU memory
+	MinDiskGB            int      // minimum disk space
+	MinReliability       float64  // minimum reliability score (0-1)
+	NumGPUs              int      // number of GPUs needed (default 1)
+	ExcludeGeos          []string // two-letter country codes to exclude (e.g., ["CN"])
+	MinCPUCoresEffective int      // minimum effective CPU cores (e.g., for compute-intensive jobs)
 }
 
 // DefaultExcludeGeos lists countries excluded by default from cloud offers.

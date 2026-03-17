@@ -1,6 +1,8 @@
 package campaign
 
 import (
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -16,12 +18,25 @@ type GroupOffer struct {
 }
 
 func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
-	return cloud.OfferConstraints{
+	c := cloud.OfferConstraints{
 		GPUClass:       group.GPUClass,
 		MinGPUMemGB:    group.GPUMemGB,
 		MinDiskGB:      group.DiskGB,
 		MinReliability: cloud.DefaultMinReliability,
 	}
+	if group.HasComputeIntensiveJob() {
+		c.MinCPUCoresEffective = intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", 16)
+	}
+	return c
+}
+
+func intFromEnvOrDefault(key string, defaultVal int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return defaultVal
 }
 
 func offerExclusionKey(offer cloud.Offer) string {
