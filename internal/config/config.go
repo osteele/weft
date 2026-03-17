@@ -218,6 +218,10 @@ type HostConfig struct {
 	CPUFactor float64         `yaml:"cpu_factor" toml:"cpu_factor"`
 	GPUFactor float64         `yaml:"gpu_factor" toml:"gpu_factor"`
 
+	// HFCacheDir is the resolved HF hub cache directory on this host (e.g. /mnt/nas/.cache/huggingface/hub).
+	// Set by `weft host discover` or manually. Used by prestage to construct correct rsync destination paths.
+	HFCacheDir string `yaml:"hf_cache_dir" toml:"hf_cache_dir"`
+
 	// Backend sets the execution backend for this host ("queue-runner" or "slurm").
 	Backend string `yaml:"backend" toml:"backend"`
 	// Shared marks an inventory host as multi-tenant, so benchmark auto-placement

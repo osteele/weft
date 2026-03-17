@@ -708,7 +708,7 @@ func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Con
 		return
 	}
 	fmt.Fprintf(w, "Job #%d accepted (needs rental host)\n", jobID)
-	fmt.Fprintf(w, "Use 'weft tui' and press 'c' on this job to launch on a rental GPU.\n")
+	fmt.Fprintf(w, "Use 'weft instance launch' to launch on a rental GPU.\n")
 }
 
 // buildPlacementMeta extracts telemetry from a placement result and optional predictor.

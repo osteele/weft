@@ -38,7 +38,7 @@ func TestBuildPlan_MissingData(t *testing.T) {
 	}
 
 	// Build plan targeting cool100 (doesn't have the model)
-	plan, err := BuildPlan(db, "host-alpha", []string{"hf:meta-llama/Llama-3-8B"})
+	plan, err := BuildPlan(db, "host-alpha", "/home/test/.cache/huggingface/hub", []string{"hf:meta-llama/Llama-3-8B"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestBuildPlan_AllLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan(db, "host-alpha", []string{"hf:model-a"})
+	plan, err := BuildPlan(db, "host-alpha", "", []string{"hf:model-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestBuildPlan_MultipleInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan(db, "host-alpha", []string{"hf:model-a", "hf-dataset:wikitext"})
+	plan, err := BuildPlan(db, "host-alpha", "/home/test/.cache/huggingface/hub", []string{"hf:model-a", "hf-dataset:wikitext"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestBuildPlan_NoSourceWithPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan, err := BuildPlan(db, "host-alpha", []string{"hf:model-x"})
+	plan, err := BuildPlan(db, "host-alpha", "", []string{"hf:model-x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestBuildPlan_UnknownAsset(t *testing.T) {
 	db := setupTestDB(t)
 
 	// No assets recorded at all
-	plan, err := BuildPlan(db, "host-alpha", []string{"hf:unknown-model"})
+	plan, err := BuildPlan(db, "host-alpha", "", []string{"hf:unknown-model"})
 	if err != nil {
 		t.Fatal(err)
 	}

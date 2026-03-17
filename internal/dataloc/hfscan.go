@@ -28,7 +28,7 @@ func ScanHFCache(host string) ([]DataAsset, error) {
 func ScanHFCacheDetailed(host string) ([]HostDataEntry, error) {
 	// Try GNU du -sb (bytes) first; fall back to BSD du -sk (1K blocks) with
 	// awk conversion; last resort ls -1d (no size).
-	cmd := resolveHFCacheDirShellVar() + `
+	cmd := ResolveHFCacheDirShellVar() + `
 _dirs=()
 for _p in "$_hf_cache"/models--* "$_hf_cache"/datasets--*; do [ -d "$_p" ] && _dirs+=("$_p"); done
 [ ${#_dirs[@]} -eq 0 ] && exit 0

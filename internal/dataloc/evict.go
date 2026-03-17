@@ -22,7 +22,7 @@ type HostDataEntryWithAtime struct {
 func ScanHFCacheWithAtime(host string) ([]HostDataEntryWithAtime, error) {
 	// find -printf '%A@\t%s\t%p\n' gives: atime_float\tsize_bytes\tpath (GNU find, Linux)
 	// Fallback: shell loop using stat, works on macOS.
-	cmd := resolveHFCacheDirShellVar() + `
+	cmd := ResolveHFCacheDirShellVar() + `
 if find "$_hf_cache" -maxdepth 1 -printf '' 2>/dev/null; then
   find "$_hf_cache" -maxdepth 1 \( -name 'models--*' -o -name 'datasets--*' \) \
     -type d -printf '%A@\t%s\t%p\n' 2>/dev/null

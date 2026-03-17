@@ -82,7 +82,7 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 	prefix := "set -e; " +
 		"export PATH=\"$HOME/.local/bin:$HOME/bin:${PATH}\"; " +
 		tokenExport +
-		resolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
+		ResolveHFCacheDirShellVar() + "; mkdir -p \"$_hf_cache\"; "
 	body := fmt.Sprintf(
 		// _hfdl stores the full download invocation prefix (tool + subcommand
 		// where needed). hf_xet and hf require an explicit 'download'
@@ -110,10 +110,10 @@ func buildHFDownloadCommand(asset DataAsset, revision string) (string, error) {
 	return prefix + body, nil
 }
 
-// resolveHFCacheDirShellVar returns a shell snippet that sets $_hf_cache to the
+// ResolveHFCacheDirShellVar returns a shell snippet that sets $_hf_cache to the
 // HuggingFace hub cache directory, honouring HF_HUB_CACHE > HF_HOME > default,
 // matching huggingface_hub precedence rules.
-func resolveHFCacheDirShellVar() string {
+func ResolveHFCacheDirShellVar() string {
 	return `if [ -n "${HF_HUB_CACHE:-}" ]; then _hf_cache="$HF_HUB_CACHE"; ` +
 		`elif [ -n "${HF_HOME:-}" ]; then _hf_cache="$HF_HOME/hub"; ` +
 		`else _hf_cache="$HOME/.cache/huggingface/hub"; fi`
@@ -190,7 +190,7 @@ func checkHFCacheFreeSpace(ctx context.Context, host string, asset DataAsset) er
 }
 
 func getHFCacheFreeBytes(ctx context.Context, host string) (int64, error) {
-	cmd := resolveHFCacheDirShellVar() + `; mkdir -p "$_hf_cache" && df -Pk "$_hf_cache" 2>/dev/null | awk 'NR==2 {print $4}'`
+	cmd := ResolveHFCacheDirShellVar() + `; mkdir -p "$_hf_cache" && df -Pk "$_hf_cache" 2>/dev/null | awk 'NR==2 {print $4}'`
 	stdout, stderr, err := hostCommandRunner(ctx, host, cmd)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", strings.TrimSpace(stderr), err)

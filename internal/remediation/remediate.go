@@ -8,6 +8,7 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/prestage"
 	remotesync "github.com/osteele/weft/internal/sync"
@@ -82,7 +83,7 @@ func remediateData(ctx RemediationContext, diagnosis *ErrorDiagnosis, diagJSON s
 			return "diagnosis only (no asset refs extracted)", false
 		}
 
-		plan, err := prestage.BuildPlan(ctx.DB, host, diagnosis.MissingAssets)
+		plan, err := prestage.BuildPlan(ctx.DB, host, inventory.HostHFCacheDir(host), diagnosis.MissingAssets)
 		if err != nil {
 			ctx.Logger.Printf("build prestage plan for job %d: %v", ctx.Job.ID, err)
 			storeDiagnosis(ctx, diagJSON, ctx.Job.RetryCount)

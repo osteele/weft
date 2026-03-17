@@ -29,8 +29,9 @@ type Transfer struct {
 
 // Plan describes all transfers needed to prepare a target host for a job.
 type Plan struct {
-	Host      string
-	Transfers []Transfer
+	Host       string
+	HFCacheDir string // target host's resolved HF hub cache dir; required when transfers are needed
+	Transfers  []Transfer
 }
 
 // TotalBytes returns the total bytes to transfer.
@@ -45,8 +46,11 @@ func (p *Plan) TotalBytes() int64 {
 // BuildPlan determines which inputs are missing on the target host and
 // identifies source hosts that have them. Returns a plan with zero
 // transfers if all data is already local.
-func BuildPlan(db *sql.DB, targetHost string, inputs []string) (*Plan, error) {
-	plan := &Plan{Host: targetHost}
+// hfCacheDir is the resolved HF hub cache directory on the target host
+// (e.g. from HostSpec.HFCacheDir). If empty and any HF transfer is needed,
+// an error is returned with guidance to run 'weft host discover'.
+func BuildPlan(db *sql.DB, targetHost string, hfCacheDir string, inputs []string) (*Plan, error) {
+	plan := &Plan{Host: targetHost, HFCacheDir: hfCacheDir}
 
 	for _, ref := range inputs {
 		asset, ok := dataloc.ParseAssetRef(ref)
@@ -92,6 +96,13 @@ func BuildPlan(db *sql.DB, targetHost string, inputs []string) (*Plan, error) {
 			continue
 		}
 
+		if hfCacheDir == "" {
+			return nil, fmt.Errorf(
+				"cannot prestage %s to %s: hf_cache_dir not configured for target host; run 'weft host discover %s'",
+				asset, targetHost, targetHost,
+			)
+		}
+
 		plan.Transfers = append(plan.Transfers, Transfer{
 			Asset:      asset,
 			SourceHost: bestSource.Host,
@@ -119,7 +130,7 @@ func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 	var firstErr error
 	for _, t := range plan.Transfers {
 		start := time.Now()
-		err := runTransfer(ctx, t, plan.Host)
+		err := runTransfer(ctx, t, plan.Host, plan.HFCacheDir)
 		elapsed := time.Since(start)
 
 		if err != nil {
@@ -154,12 +165,15 @@ func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 }
 
 // runTransfer executes a single rsync from sourceHost:remotePath to targetHost.
+// hfCacheDir is the target host's resolved HF hub cache directory.
 // It first tries a push (SSH into source, rsync to target). If that fails with a
 // connection error, it falls back to a pull (SSH into target, rsync from source),
 // which works when the target can reach the source but not vice versa.
-func runTransfer(ctx context.Context, t Transfer, targetHost string) error {
+func runTransfer(ctx context.Context, t Transfer, targetHost string, hfCacheDir string) error {
+	destPath := filepath.Join(hfCacheDir, filepath.Base(t.RemotePath))
+
 	pushCmd := fmt.Sprintf("rsync -az --timeout=300 %s %s:%s",
-		t.RemotePath, targetHost, t.RemotePath)
+		t.RemotePath, targetHost, destPath)
 	_, stderr, err := ssh.RunWithContext(ctx, t.SourceHost, pushCmd)
 	if err == nil {
 		return nil
@@ -172,12 +186,8 @@ func runTransfer(ctx context.Context, t Transfer, targetHost string) error {
 		return pushErr
 	}
 
-	// The destination path may differ from the source path (e.g. different OS,
-	// different home directory). Use a tilde-relative path so it expands correctly
-	// on the target host: ~/.cache/huggingface/hub/<model-dir-name>.
-	targetPath := fmt.Sprintf("~/.cache/huggingface/hub/%s", filepath.Base(t.RemotePath))
-	pullCmd := fmt.Sprintf("mkdir -p ~/.cache/huggingface/hub && rsync -az --timeout=300 %s:%s %s",
-		t.SourceHost, t.RemotePath, targetPath)
+	pullCmd := fmt.Sprintf("mkdir -p %s && rsync -az --timeout=300 %s:%s %s",
+		hfCacheDir, t.SourceHost, t.RemotePath, destPath)
 	_, stderr2, err2 := ssh.RunWithContext(ctx, targetHost, pullCmd)
 	if err2 != nil {
 		// Report both errors so it's clear what was tried

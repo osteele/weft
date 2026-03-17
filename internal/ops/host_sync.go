@@ -13,6 +13,7 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/prestage"
 	"github.com/osteele/weft/internal/remote"
@@ -527,7 +528,7 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 	scanHFCacheDuringSync(database, host)
 
 	stageTimeout := hfInputStageTimeout(timeout)
-	plan, err := prestage.BuildPlan(database, host, inputs)
+	plan, err := prestage.BuildPlan(database, host, inventory.HostHFCacheDir(host), inputs)
 	if err != nil {
 		return err
 	}

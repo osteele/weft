@@ -141,7 +141,7 @@ func runHostInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n(cached %s ago)\n", db.FormatDuration(cacheAge))
 	} else {
 		fmt.Printf("No cached information for %s\n", host)
-		fmt.Printf("Run 'weft tui' to fetch and cache host information\n")
+		fmt.Printf("Run 'weft host discover %s' to probe and cache host information\n", host)
 	}
 
 	return nil
@@ -466,7 +466,7 @@ func loadHostListRows(now time.Time) ([]hostListRow, error) {
 			host := hostinfo.HostFromCachedInfo(cached)
 			if host != nil {
 				host.Name = name
-				rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host)))
+				rows = append(rows, hostListRowFromSpec(inventory.HostSpecFromHostInfo(name, host, "")))
 				continue
 			}
 		}
@@ -543,7 +543,16 @@ func runHostDiscover(cmd *cobra.Command, args []string) error {
 	}
 
 	info := hostinfo.ParseHostInfo(stdout)
-	spec := inventory.HostSpecFromHostInfo(host, info)
+
+	// Detect HF cache directory, honouring HF_HUB_CACHE / HF_HOME on the remote host.
+	hfCacheDir := ""
+	if hfOut, _, hfErr := ssh.Run(host, inventory.DetectHFCacheDirCommand()); hfErr == nil {
+		hfCacheDir = hfOut
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: could not detect HF cache dir on %s: %v\n", host, hfErr)
+	}
+
+	spec := inventory.HostSpecFromHostInfo(host, info, hfCacheDir)
 
 	// Ensure hosts directory exists
 	hostsDir := inventory.HostsDir()

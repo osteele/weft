@@ -3,17 +3,27 @@ package inventory
 import (
 	"strings"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/hostinfo"
 )
 
+// DetectHFCacheDirCommand returns a shell command that prints the resolved HF
+// hub cache directory on a remote host, honouring HF_HUB_CACHE > HF_HOME > default.
+func DetectHFCacheDirCommand() string {
+	return dataloc.ResolveHFCacheDirShellVar() + `; echo "$_hf_cache"`
+}
+
 // HostSpecFromHostInfo converts probed runtime host information to a static HostSpec.
-func HostSpecFromHostInfo(name string, info *hostinfo.Host) HostSpec {
+// hfCacheDir is the resolved HF hub cache directory detected on the host; pass ""
+// if detection was not performed or failed.
+func HostSpecFromHostInfo(name string, info *hostinfo.Host, hfCacheDir string) HostSpec {
 	spec := HostSpec{
-		Name:      name,
-		CPUCores:  info.CPUs,
-		Memory:    info.MemTotal,
-		CPUFactor: 1.0,
-		GPUFactor: 1.0,
+		Name:       name,
+		CPUCores:   info.CPUs,
+		Memory:     info.MemTotal,
+		CPUFactor:  1.0,
+		GPUFactor:  1.0,
+		HFCacheDir: strings.TrimSpace(hfCacheDir),
 	}
 
 	// Parse "Linux x86_64" or "Darwin arm64"
