@@ -37,8 +37,7 @@ func TestRunDataFetchRecordsCompletedRequest(t *testing.T) {
 		switch {
 		case strings.Contains(command, "df -Pk"):
 			return "20971520\n", "", nil
-		case strings.Contains(command, "hf download --repo-type model"),
-			strings.Contains(command, "$_hfdl download --repo-type model"):
+		case strings.Contains(command, "$_hfdl --repo-type model"):
 			return "", "", nil
 		case strings.Contains(command, "du -sb"), strings.Contains(command, "ls -1d"):
 			return "2048\t/home/test/.cache/huggingface/hub/models--bert-base-uncased\n", "", nil

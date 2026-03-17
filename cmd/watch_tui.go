@@ -619,7 +619,7 @@ func (m watchAllModel) truncateFooterDetail(detail string, prefixWidth int) stri
 
 func refreshWatchSystem(database *sql.DB, cfg *config.Config) tea.Cmd {
 	return func() tea.Msg {
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, true)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
 		return watchAllRefreshedMsg{snapshot: snapshot, err: err}
 	}
 }

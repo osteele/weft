@@ -162,7 +162,8 @@ func (m watchModel) Init() tea.Cmd {
 	cmds = append(cmds, scheduleSyncTick())
 	cmds = append(cmds, scheduleCheckDone())
 
-	// Arm the background on-prem sync result drainer
+	// Start on-prem syncs and arm the result drainer
+	m.requestOnPremSyncs()
 	cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
 		return campaignWatchSyncResultMsg{}
 	}))
@@ -215,29 +216,16 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForUpdate(msg.instanceID, ch)
 
 	case watchSyncTickMsg:
-		// Reconcile cloud instances and sync job results without blocking the UI
+		// Sync on-prem hosts alongside cloud instances
+		m.requestOnPremSyncs()
+		// Lightweight DB-only reconciliation — WatchInstance goroutines handle cloud API calls
 		return m, tea.Batch(
 			func() tea.Msg {
-				cfg, _ := config.Load()
-				clients, _ := buildCloudClients(cfg)
-				r2Client, _ := buildR2Client(cfg)
-				result := syncCloudStateWithClients(cfg, m.database, m.reconciler, clients, r2Client, false)
-				if result.ReconcileResult != nil && len(result.ReconcileResult.TerminatedInstances) > 0 {
-					// Trigger relaunch in background
-					go func() {
-						relaunchCfg := campaign.RelaunchConfig{
-							Clients:    clients,
-							R2Cfg:      cfg.Vastai.R2.ToCloudR2Config(),
-							CreateOpts: cloud.CreateOpts{},
-							LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
-							Database:   m.database,
-						}
-						if rr, err := campaign.RelaunchOrphanedJobs(relaunchCfg); err != nil {
-							log.Printf("relaunch: %v", err)
-						} else if rr != nil && len(rr.InstanceIDs) > 0 {
-							log.Printf("relaunch: launched %d new instances", len(rr.InstanceIDs))
-						}
-					}()
+				if _, err := db.ResetJobsOnTerminalCloudInstances(m.database); err != nil {
+					log.Printf("reset jobs on terminal instances: %v", err)
+				}
+				if _, err := campaign.ReconcileCampaigns(m.database); err != nil {
+					log.Printf("reconcile campaigns: %v", err)
 				}
 				return watchSyncDoneMsg{}
 			},
@@ -654,6 +642,26 @@ func (m watchModel) View() string {
 	}
 
 	return b.String()
+}
+
+// requestOnPremSyncs requests background syncs for on-prem hosts with active jobs.
+func (m watchModel) requestOnPremSyncs() {
+	jobs, err := db.ListActiveOnPremJobs(m.database)
+	if err != nil {
+		return
+	}
+	byHost := make(map[string][]*db.Job)
+	for _, job := range jobs {
+		if job != nil && job.Host != "" {
+			byHost[job.Host] = append(byHost[job.Host], job)
+		}
+	}
+	for host, hostJobs := range byHost {
+		m.syncWorker.Request(tui.SyncRequest{
+			Host: host,
+			Rate: tui.GetHostSyncRate(hostJobs),
+		})
+	}
 }
 
 // scheduleSyncTick returns a command that fires a sync tick after 15 seconds.

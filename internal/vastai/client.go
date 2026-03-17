@@ -45,17 +45,12 @@ func NewClient() *Client {
 
 // Available checks that the vastai CLI is installed and authenticated.
 func (c *Client) Available() error {
-	path, err := exec.LookPath(c.CLIPath)
-	if err != nil {
+	if _, err := exec.LookPath(c.CLIPath); err != nil {
 		return fmt.Errorf("vastai CLI not found in PATH (install: pip install vastai)")
 	}
 	// Quick auth check: "vastai show user" fails if not authenticated
-	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "show", "user", "--raw")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("vastai CLI not authenticated: %s", strings.TrimSpace(string(out)))
+	if _, err := c.run("show", "user", "--raw"); err != nil {
+		return fmt.Errorf("vastai CLI not authenticated: %v", err)
 	}
 	return nil
 }
@@ -245,8 +240,14 @@ func (c *Client) CopyBetweenInstances(srcInstanceID int, srcPath string, dstInst
 	return nil
 }
 
+// cliSemaphore limits the number of concurrent vastai CLI processes to prevent
+// process exhaustion when multiple goroutines query the API simultaneously.
+var cliSemaphore = make(chan struct{}, 4)
+
 // run executes a vastai CLI command and returns stdout.
 func (c *Client) run(args ...string) ([]byte, error) {
+	cliSemaphore <- struct{}{}
+	defer func() { <-cliSemaphore }()
 	ctx, cancel := context.WithTimeout(context.Background(), cliTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.CLIPath, args...)
