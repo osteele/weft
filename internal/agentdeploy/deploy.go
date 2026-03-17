@@ -34,25 +34,31 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 	}
 
 	binaryPath, err := EnsureBuilt(localVer, spec.OS, spec.Arch, "")
-	if err != nil {
+	if errors.Is(err, ErrAgentNotAvailable) {
+		// No pre-built binary — build natively on the remote host.
+		if err := BuildOnHost(host, localVer); err != nil {
+			return false, fmt.Errorf("native build on %s: %w", host, err)
+		}
+		// Binary was built directly into place; skip SCP.
+	} else if err != nil {
 		return false, err
-	}
+	} else {
+		// Ensure remote bin directory exists.
+		mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteBinDir)
+		if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
+			return false, fmt.Errorf("create remote bin dir: %s", strings.TrimSpace(stderr))
+		}
 
-	// Ensure remote bin directory exists.
-	mkdirCmd := fmt.Sprintf("mkdir -p %s", remoteBinDir)
-	if _, stderr, err := ssh.Run(host, mkdirCmd); err != nil {
-		return false, fmt.Errorf("create remote bin dir: %s", strings.TrimSpace(stderr))
-	}
+		// Deploy via temp file + atomic rename to avoid partial writes.
+		tmpPath := remoteAgentPath + ".tmp"
+		if err := ssh.CopyTo(binaryPath, host, tmpPath); err != nil {
+			return false, fmt.Errorf("deploy agent to %s: %w", host, err)
+		}
 
-	// Deploy via temp file + atomic rename to avoid partial writes.
-	tmpPath := remoteAgentPath + ".tmp"
-	if err := ssh.CopyTo(binaryPath, host, tmpPath); err != nil {
-		return false, fmt.Errorf("deploy agent to %s: %w", host, err)
-	}
-
-	installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", tmpPath, tmpPath, remoteAgentPath)
-	if _, stderr, err := ssh.Run(host, installCmd); err != nil {
-		return false, fmt.Errorf("install agent: %s", strings.TrimSpace(stderr))
+		installCmd := fmt.Sprintf("chmod +x %s && mv %s %s", tmpPath, tmpPath, remoteAgentPath)
+		if _, stderr, err := ssh.Run(host, installCmd); err != nil {
+			return false, fmt.Errorf("install agent: %s", strings.TrimSpace(stderr))
+		}
 	}
 
 	// Verify the newly deployed binary actually runs.
