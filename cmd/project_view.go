@@ -240,7 +240,7 @@ func renderProjectWatchPlain(groups []projectGroup, width int, now time.Time, re
 			}
 		}
 		if len(group.CloudInsts) > 0 {
-			b.WriteString("  Cloud instances\n")
+			b.WriteString("  Rental instances\n")
 			for _, inst := range group.CloudInsts {
 				b.WriteString(truncateDisplayWidth("    "+formatProjectCloudInstanceRow(inst, now), width))
 				b.WriteString("\n")

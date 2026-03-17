@@ -49,8 +49,8 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 
 	out := stripANSI(m.View())
 	for _, expected := range []string{
-		"Cloud Instances (1)",
-		"On-Prem Hosts (1 active)",
+		"Rental Instances (1)",
+		"Inventory Hosts (1 active)",
 		"Unplaced Jobs (1)",
 		"[u] unplace queued job",
 		"Instance 5 — A100 — running",

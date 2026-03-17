@@ -149,7 +149,7 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 
 	b.WriteString(fmt.Sprintf("=== System Watch %s ===\n\n", now.Format("2006-01-02 15:04:05")))
 
-	b.WriteString(fmt.Sprintf("CLOUD INSTANCES (%d)\n", len(snapshot.CloudInstances)))
+	b.WriteString(fmt.Sprintf("RENTAL INSTANCES (%d)\n", len(snapshot.CloudInstances)))
 	if len(snapshot.CloudInstances) == 0 {
 		b.WriteString("  none\n")
 	} else {
@@ -179,7 +179,7 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 	}
 
 	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("ON-PREM HOSTS (%d active)\n", len(snapshot.OnPremHosts)))
+	b.WriteString(fmt.Sprintf("INVENTORY HOSTS (%d active)\n", len(snapshot.OnPremHosts)))
 	if len(snapshot.OnPremHosts) == 0 {
 		b.WriteString("  none\n")
 	} else {

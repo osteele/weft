@@ -41,9 +41,9 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 
 	out := formatWatchPlainSnapshot(snapshot, time.Unix(0, 0))
 	for _, expected := range []string{
-		"CLOUD INSTANCES (1)",
+		"RENTAL INSTANCES (1)",
 		"Summary:  cost: $0.00  current rate: $2.00/hr",
-		"ON-PREM HOSTS (1 active)",
+		"INVENTORY HOSTS (1 active)",
 		"UNPLACED JOBS (1)",
 		"Instance 5 — A100 — running",
 		"Cost: $0.00 (uptime: 0s, rate: $2.00/hr)",

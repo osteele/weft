@@ -140,7 +140,7 @@ func TestRenderProjectWatchPlainShowsSections(t *testing.T) {
 		},
 	}, 120, now, 24*time.Hour)
 
-	for _, want := range []string{"ALPHA (1 running, 1 queued, 1 recent/1d)", "Running", "Queued", "Cloud instances", "Recent", "#1", "#2", "#3", "instance 21", "rate: $1.50/hr"} {
+	for _, want := range []string{"ALPHA (1 running, 1 queued, 1 recent/1d)", "Running", "Queued", "Rental instances", "Recent", "#1", "#2", "#3", "instance 21", "rate: $1.50/hr"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
 		}

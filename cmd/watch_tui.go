@@ -503,9 +503,9 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 	addHeader(title)
 	addPlain("")
 
-	addHeader(fmt.Sprintf("Cloud Instances (%d)", len(m.cloudInstances)))
+	addHeader(fmt.Sprintf("Rental Instances (%d)", len(m.cloudInstances)))
 	if len(m.cloudInstances) == 0 {
-		addPlain(watchDimStyle.Render("  no active cloud instances"))
+		addPlain(watchDimStyle.Render("  no active rental instances"))
 	} else {
 		views := make([]cloudInstanceView, 0, len(m.cloudInstances))
 		for _, ci := range m.cloudInstances {
@@ -536,9 +536,9 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 	}
 	addPlain("")
 
-	addHeader(fmt.Sprintf("On-Prem Hosts (%d active)", len(m.onPremHosts)))
+	addHeader(fmt.Sprintf("Inventory Hosts (%d active)", len(m.onPremHosts)))
 	if len(m.onPremHosts) == 0 {
-		addPlain(watchDimStyle.Render("  no active on-prem jobs"))
+		addPlain(watchDimStyle.Render("  no active inventory jobs"))
 	} else {
 		for _, host := range m.onPremHosts {
 			addPlain(watchStatusStyle.Render("  " + host.Name))

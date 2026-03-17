@@ -117,7 +117,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 
 	// Print overall summary
 	total := len(instances)
-	fmt.Printf("Cloud Instance Statistics (%d instances)\n\n", total)
+	fmt.Printf("Rental Instance Statistics (%d instances)\n\n", total)
 	fmt.Println("Overall:")
 
 	// Print reasons in a stable order
