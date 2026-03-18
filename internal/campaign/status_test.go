@@ -413,6 +413,75 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	}
 }
 
+func TestWatchInstance_GraceExpiration(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Create a grace-period instance with an expired deadline
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusGrace,
+		Provider: "mock",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "grace-test-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+	// Set grace deadline in the past
+	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
+	if err := db.SetCloudInstanceGraceStarted(database, instanceID, pastDeadline); err != nil {
+		t.Fatalf("set grace started: %v", err)
+	}
+
+	// Create a queued job assigned to this instance
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
+	}
+
+	var destroyed bool
+	mockClient := &cloud.MockClient{
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyed = true
+			return nil
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ch := WatchInstance(ctx, mockClient, database, instanceID, 100*time.Millisecond, 100*time.Millisecond)
+
+	var gotGraceExpiredMsg bool
+	for update := range ch {
+		if strings.Contains(update.StallMessage, "grace period expired") {
+			gotGraceExpiredMsg = true
+		}
+	}
+
+	if !gotGraceExpiredMsg {
+		t.Error("expected grace period expired stall message")
+	}
+	if !destroyed {
+		t.Error("expected DestroyInstance to be called for expired grace instance")
+	}
+
+	// Verify instance was marked as failed in DB
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	}
+}
+
 func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
 	database := db.SetupTestDB(t)
 

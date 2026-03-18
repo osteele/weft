@@ -179,9 +179,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		defer close(ch)
 		var lastProviderPoll time.Time
 		var cachedInstance *cloud.Instance
-		var firstDeadAt time.Time
 		var currentPhase string
 		var phaseChangedAt *time.Time
+		watchReconciler := NewReconciler()
 
 		for {
 			select {
@@ -210,55 +210,17 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			// Refresh cloud instance info periodically
 			providerInstID := ci.EffectiveProviderID()
+			var providerErr error
 			if providerInstID != "" && time.Since(lastProviderPoll) >= providerInterval {
 				inst, showErr := client.ShowInstance(providerInstID)
 				if showErr == nil {
 					cachedInstance = inst
 				}
+				providerErr = showErr
 				lastProviderPoll = time.Now()
-
-				// Detect dead instances: provider says dead but DB says running.
-				// Skip grace-period instances — they legitimately keep the provider
-				// alive, and a transient API failure shouldn't kill the grace session.
-				if showErr == nil && isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
-					if firstDeadAt.IsZero() {
-						firstDeadAt = time.Now()
-						status := "not found"
-						if inst != nil {
-							status = inst.Status
-						}
-						log.Printf("watch: cloud instance %d appears dead (status: %s), waiting %s to confirm",
-							cloudInstanceID, status, minDeadConfirmTime)
-					}
-					if time.Since(firstDeadAt) >= minDeadConfirmTime {
-						if r2c != nil && hasR2CompletionMarker(r2c, cloudInstanceID) {
-							_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
-							_ = db.CloseJobCloudAttemptsByInstance(database, cloudInstanceID, db.AttemptOutcomeCompleted)
-							ci.Status = db.CloudInstanceStatusCompleted
-							jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
-						} else {
-							reason := failureTerminationReasonFromR2(ctx, r2c, cloudInstanceID, db.TerminationReasonPreempted)
-							_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, reason)
-							_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
-							ci.Status = db.CloudInstanceStatusFailed
-							ci.TerminationReason = reason
-							jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
-						}
-						firstDeadAt = time.Time{}
-					}
-				} else if showErr == nil && !isProviderTerminal(inst) {
-					firstDeadAt = time.Time{}
-				}
 			}
 
-			// Check if any job has progressed beyond queued
-			hasStartedJob := false
-			for _, j := range jobs {
-				if j.Status != db.StatusQueued {
-					hasStartedJob = true
-					break
-				}
-			}
+			jobState := ComputeJobState(jobs)
 
 			// Fetch bootstrap stage or instance phase from R2
 			var bootstrapStage, instancePhase string
@@ -281,7 +243,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 							ci.Status = db.CloudInstanceStatusGrace
 						}
 					}
-				} else if !hasStartedJob {
+				} else if !jobState.HasStartedJob {
 					bootstrapStage = fetchWatchBootstrapStage(ctx, r2c, cloudInstanceID)
 				}
 			}
@@ -289,49 +251,39 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// Fetch heartbeat from R2 (only when jobs have started)
 			var heartbeatAge time.Duration
 			var heartbeat *HeartbeatSample
-			if r2c != nil && (hasStartedJob || instancePhase != "") && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
+			if r2c != nil && (jobState.HasStartedJob || instancePhase != "") && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
 				heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
 			}
 
-			// Detect bootstrap stall: instance running but no job progress
+			// Run shared reconciliation checks
+			now := time.Now()
+			action := watchReconciler.CheckInstance(CheckInstanceParams{
+				CI:                ci,
+				ProviderInst:      cachedInstance,
+				ProviderErr:       providerErr,
+				R2Client:          r2c,
+				JobState:          jobState,
+				InstancePhase:     instancePhase,
+				BootstrapStage:    bootstrapStage,
+				HeartbeatAge:      heartbeatAge,
+				Now:               now,
+				TerminationIntent: terminationIntent,
+			})
+
+			// Execute non-display actions (destroy, mark failed/completed, reset jobs)
 			var stallMessage string
-			if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !hasStartedJob && instancePhase == "" && bootstrapStage != bootstrapStageReady {
-				// Check R2 for completion marker before declaring a stall — the agent
-				// may have completed all jobs but failed to self-destruct, so the local
-				// DB still shows jobs as queued while the instance is actually done.
-				instanceComplete := hasR2CompletionMarker(r2c, cloudInstanceID)
-
-				elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
-				if instanceComplete {
-					// Instance completed its work but self-destruct failed.
-					// Clean up the provider instance and mark as completed, not failed.
-					if providerInstID != "" {
-						_ = client.DestroyInstance(providerInstID)
-					}
-					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted)
-					ci.Status = db.CloudInstanceStatusCompleted
-					jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
-					stallMessage = "instance completed but self-destruct failed — cleaning up"
-				} else if elapsed >= bootstrapTerminateTimeout {
-					// Auto-terminate: destroy provider instance, mark failed, reset jobs
-					if providerInstID != "" {
-						_ = client.DestroyInstance(providerInstID)
-					}
-					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
-					_, _ = db.ResetCloudInstanceJobs(database, cloudInstanceID, db.AttemptOutcomeOrphaned)
-					ci.Status = db.CloudInstanceStatusFailed
-					jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
-					stallMessage = fmt.Sprintf("bootstrap timeout after %s — terminating instance, jobs reset to queued",
-						elapsed.Truncate(time.Minute))
-				} else if elapsed >= bootstrapWarnTimeout {
-					stallMessage = fmt.Sprintf("bootstrap stalled — no activity after %s",
-						elapsed.Truncate(time.Minute))
+			if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
+				log.Printf("watch: instance %d action=%d (%s)", cloudInstanceID, action.Kind, action.StallMessage)
+				ExecuteAction(database, client, ci, action)
+				// Refresh state after action
+				ci, _ = db.GetCloudInstance(database, cloudInstanceID)
+				if ci == nil {
+					return
 				}
-			}
-
-			// Detect stale heartbeat: agent may have crashed
-			if heartbeatAge > heartbeatStaleThreshold && stallMessage == "" {
-				stallMessage = fmt.Sprintf("heartbeat stale (%s since last update)", heartbeatAge.Truncate(time.Second))
+				jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+				stallMessage = action.StallMessage
+			} else if action.StallMessage != "" {
+				stallMessage = action.StallMessage
 			}
 
 			if instancePhase == "" {
@@ -343,33 +295,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				if prevPhase == "" {
 					phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, ci, jobs, jobPhaseTimings)
 				} else {
-					now := time.Now()
 					phaseChangedAt = &now
-				}
-			}
-
-			// Detect failed self-destruct: all jobs finished but instance still running.
-			// Give 2 minutes after the last job for uploads + self-destruct attempts.
-			if ci.Status == db.CloudInstanceStatusRunning && hasStartedJob && len(jobs) > 0 {
-				allJobsTerminal := true
-				var latestEnd int64
-				for _, j := range jobs {
-					if !IsJobTerminal(j.Status) {
-						allJobsTerminal = false
-						break
-					}
-					if j.EndTime != nil && *j.EndTime > latestEnd {
-						latestEnd = *j.EndTime
-					}
-				}
-				if allJobsTerminal && latestEnd > 0 && time.Since(time.Unix(latestEnd, 0)) > 2*time.Minute {
-					// Self-destruct failed — clean up
-					if providerInstID != "" {
-						_ = client.DestroyInstance(providerInstID)
-					}
-					_ = db.UpdateCloudInstanceStatus(database, cloudInstanceID, db.CloudInstanceStatusCompleted)
-					ci.Status = db.CloudInstanceStatusCompleted
-					stallMessage = "all jobs finished but self-destruct failed — cleaning up"
 				}
 			}
 

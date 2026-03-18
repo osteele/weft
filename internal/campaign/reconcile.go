@@ -197,73 +197,29 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 // Returns (reconciled, terminated) where reconciled means state changed and
 // terminated means the instance was moved to a terminal state (failed/completed).
 func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance) (bool, bool) {
-	// Check for grace-wait state for running instances via R2
+	// Check for grace-wait state for running instances via R2.
+	// This is handled outside CheckInstance because it writes to the DB as a side effect.
 	if ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
 		if graceDetected := checkR2GraceStatus(r2Client, ci, database); graceDetected {
 			return true, false // reconciled but not terminal (grace is not terminal)
 		}
 	}
 
-	// Expire grace-period instances whose deadline has passed
-	if ci.Status == db.CloudInstanceStatusGrace && ci.GraceDeadline != nil && time.Now().Unix() > *ci.GraceDeadline {
-		log.Printf("reconcile: instance %d grace period expired, destroying and marking failed", ci.ID)
-
-		providerID := ci.EffectiveProviderID()
-		if providerID != "" {
-			if client := clientForProvider(clients, cloud.Provider(ci.Provider)); client != nil {
-				if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-					log.Printf("reconcile: failed to destroy expired grace instance %d: %v", ci.ID, destroyErr)
-				}
-			}
-		}
-
-		if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
-			log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-			return false, false
-		}
-		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-			log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-		} else if resetCount > 0 {
-			log.Printf("reconcile: reset %d jobs from expired grace instance %d to unplaced", resetCount, ci.ID)
-		}
-		return true, true
-	}
-
-	// Clean up completed donor instances
-	if ci.InstanceRole == "donor" && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		exists, _ := r2Client.ObjectExists(ctx, r2keys.DonorReady(ci.ID))
-		cancel()
-		if exists {
-			providerID := ci.EffectiveProviderID()
-			if providerID != "" {
-				if client := clientForProvider(clients, cloud.Provider(ci.Provider)); client != nil {
-					if err := client.DestroyInstance(providerID); err != nil {
-						log.Printf("reconcile: failed to destroy completed donor %d: %v", ci.ID, err)
-					}
-				}
-			}
-			_ = db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
-			return true, true
-		}
-	}
-
+	// Fetch provider instance state
 	providerID := ci.EffectiveProviderID()
-	if providerID == "" {
-		return false, false
-	}
-
+	var inst *cloud.Instance
+	var providerErr error
 	client := clientForProvider(clients, cloud.Provider(ci.Provider))
-	if client == nil {
-		return false, false
+	if providerID != "" && client != nil {
+		inst, providerErr = client.ShowInstance(providerID)
+		if providerErr != nil && !errors.Is(providerErr, cloud.ErrInstanceNotFound) {
+			log.Printf("reconcile: ShowInstance(%s) for instance %d: %v", providerID, ci.ID, providerErr)
+			providerErr = nil // treat as no data, don't propagate
+			inst = nil
+		}
 	}
 
-	inst, err := client.ShowInstance(providerID)
-	if err != nil && !errors.Is(err, cloud.ErrInstanceNotFound) {
-		log.Printf("reconcile: ShowInstance(%s) for instance %d: %v", providerID, ci.ID, err)
-		return false, false
-	}
-
+	// Fetch and persist termination intent from R2
 	intent, intentErr := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID)
 	if intentErr != nil {
 		log.Printf("reconcile: fetch termination intent for instance %d: %v", ci.ID, intentErr)
@@ -275,204 +231,39 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	} else if ci.TerminationIntent != nil {
 		intent = ci.TerminationIntent
 	}
-	if intent != nil {
-		if reconciled, terminated := r.reconcileTerminationIntent(database, client, ci, inst, intent); reconciled {
-			return true, terminated
-		}
+
+	jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
+	jobState := ComputeJobState(jobs)
+
+	now := time.Now()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI:                ci,
+		ProviderInst:      inst,
+		ProviderErr:       providerErr,
+		R2Client:          r2Client,
+		JobState:          jobState,
+		Now:               now,
+		TerminationIntent: intent,
+	})
+
+	// Handle termination intent post-processing (mark destroy succeeded)
+	if action.Kind == ActionTerminationIntent && isProviderTerminal(inst) {
+		markTerminationIntentDestroyed(database, ci, now)
 	}
 
-	// Detect instances stuck with empty provider status (never started).
-	// Do NOT add "" to isProviderTerminal — that's used in the safety-net loop
-	// where treating empty as terminal would destroy provisioning instances.
-	if inst != nil && inst.Status == "" && ci.LaunchedAt != nil {
-		age := time.Since(time.Unix(*ci.LaunchedAt, 0))
-		if age > maxEmptyStatusTime {
-			log.Printf("reconcile: instance %d has empty provider status after %s, terminating",
-				ci.ID, age.Truncate(time.Second))
-
-			if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-				log.Printf("reconcile: failed to destroy empty-status instance %d: %v", ci.ID, destroyErr)
-			}
-			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
-				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-				return false, false
-			}
-			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-			} else if resetCount > 0 {
-				log.Printf("reconcile: reset %d jobs from empty-status instance %d to unplaced", resetCount, ci.ID)
-			}
-			return true, true
-		}
+	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
+		log.Printf("reconcile: instance %d action=%d (%s)", ci.ID, action.Kind, action.StallMessage)
+		return ExecuteAction(database, client, ci, action)
 	}
 
-	// Detect wedged instances: provider says "running" but no bootstrap progress
-	if !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
-		if isBootstrapStalled(r2Client, ci) {
-			log.Printf("reconcile: instance %d is wedged (no bootstrap progress after %s), terminating",
-				ci.ID, time.Since(time.Unix(*ci.LaunchedAt, 0)).Truncate(time.Second))
-
-			if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-				log.Printf("reconcile: failed to destroy wedged instance %d: %v", ci.ID, destroyErr)
-			}
-			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
-				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-				return false, false
-			}
-			if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-				log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-			} else if resetCount > 0 {
-				log.Printf("reconcile: reset %d jobs from wedged instance %d to unplaced", resetCount, ci.ID)
-			}
-			return true, true
-		}
-	}
-
-	if !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
+	if client != nil && !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
 		if reconciled, terminated := r.reconcileStaleHeartbeat(database, client, r2Client, ci, inst); reconciled {
 			return true, terminated
 		}
 	}
 
-	// If provider reports terminal state (or instance is gone) but DB doesn't, reconcile.
-	// Skip grace-period instances — a transient API failure shouldn't kill the session.
-	if isProviderTerminal(inst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
-		status := "not found"
-		if inst != nil {
-			status = inst.Status
-		}
-
-		// Check R2 for completion marker before assuming failure.
-		if hasR2CompletionMarker(r2Client, ci.ID) {
-			log.Printf("reconcile: instance %d completed (R2 marker found), marking completed", ci.ID)
-			if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
-				log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-			}
-			// Don't reset jobs — leave them for syncCloudJobResults to update from R2.
-			// Just close the attempt records.
-			if err := db.CloseJobCloudAttemptsByInstance(database, ci.ID, db.AttemptOutcomeCompleted); err != nil {
-				log.Printf("reconcile: close attempts for instance %d: %v", ci.ID, err)
-			}
-			r.mu.Lock()
-			delete(r.firstDeadAt, ci.ID)
-			r.mu.Unlock()
-			return true, true
-		}
-
-		// Require the instance to appear dead for minDeadConfirmTime before
-		// declaring it terminal. Transient API blips (false "exited" status,
-		// ErrInstanceNotFound) can otherwise kill a healthy running instance.
-		confirmTime := r.confirmTime()
-		r.mu.Lock()
-		first, seen := r.firstDeadAt[ci.ID]
-		if !seen {
-			r.firstDeadAt[ci.ID] = time.Now()
-			r.mu.Unlock()
-			if confirmTime > 0 {
-				log.Printf("reconcile: instance %d (provider %s) appears dead (status: %s); waiting %s to confirm",
-					ci.ID, providerID, status, confirmTime)
-				return false, false
-			}
-		} else {
-			r.mu.Unlock()
-		}
-		if confirmTime > 0 && time.Since(first) < confirmTime {
-			log.Printf("reconcile: instance %d still appears dead (status: %s); confirming for %s more",
-				ci.ID, status, (confirmTime - time.Since(first)).Truncate(time.Second))
-			return false, false
-		}
-		r.mu.Lock()
-		delete(r.firstDeadAt, ci.ID)
-		r.mu.Unlock()
-
-		// Provider dead + had been launched (running) → preempted
-		reason := db.TerminationReasonPreempted
-		if ci.LaunchedAt == nil {
-			reason = db.TerminationReasonInfraFailure
-		}
-		reason = failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
-
-		log.Printf("reconcile: instance %d (provider %s) is dead (provider status: %s), marking failed (%s)", ci.ID, providerID, status, reason)
-
-		if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, reason); err != nil {
-			log.Printf("reconcile: update instance %d status: %v", ci.ID, err)
-			return false, false
-		}
-		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-			log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
-		} else if resetCount > 0 {
-			log.Printf("reconcile: reset %d jobs from instance %d to unplaced", resetCount, ci.ID)
-		}
-		return true, true
-	}
-
 	return false, false
-}
-
-func (r *Reconciler) reconcileTerminationIntent(database *sql.DB, client cloud.Client, ci *db.CloudInstance, inst *cloud.Instance, intent *instanceintent.Marker) (bool, bool) {
-	if intent == nil {
-		return false, false
-	}
-
-	reason := intent.TerminationReason
-	switch intent.TerminalStatus {
-	case db.CloudInstanceStatusCompleted:
-		if reason == "" {
-			reason = db.TerminationReasonCompleted
-		}
-	case db.CloudInstanceStatusFailed:
-		if reason == "" {
-			reason = db.TerminationReasonJobFailure
-		}
-	default:
-		return false, false
-	}
-
-	providerID := ci.EffectiveProviderID()
-	requestedAt := intent.RequestedAtUnix
-	if requestedAt == 0 && ci.TerminationRequestedAt != nil {
-		requestedAt = *ci.TerminationRequestedAt
-	}
-	age := time.Duration(0)
-	if requestedAt > 0 {
-		age = time.Since(time.Unix(requestedAt, 0)).Truncate(time.Second)
-	}
-	if !isProviderTerminal(inst) && providerID != "" {
-		log.Printf("reconcile: instance %d registered termination intent (%s, age=%s), destroying provider instance %s", ci.ID, reason, age, providerID)
-		if err := client.DestroyInstance(providerID); err != nil {
-			log.Printf("reconcile: destroy intent-marked instance %d: %v", ci.ID, err)
-			return false, false
-		}
-	}
-
-	log.Printf("reconcile: instance %d registered termination intent, marking %s (%s)", ci.ID, intent.TerminalStatus, reason)
-	if err := db.UpdateCloudInstanceStatus(database, ci.ID, intent.TerminalStatus, reason); err != nil {
-		log.Printf("reconcile: update instance %d status from termination intent: %v", ci.ID, err)
-		return false, false
-	}
-	if isProviderTerminal(inst) {
-		if markTerminationIntentDestroyed(database, ci, time.Now()) {
-			intent = ci.TerminationIntent
-		}
-	}
-
-	switch intent.TerminalStatus {
-	case db.CloudInstanceStatusCompleted:
-		if err := db.CloseJobCloudAttemptsByInstance(database, ci.ID, db.AttemptOutcomeCompleted); err != nil {
-			log.Printf("reconcile: close attempts for completion intent instance %d: %v", ci.ID, err)
-		}
-	case db.CloudInstanceStatusFailed:
-		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-			log.Printf("reconcile: reset jobs for intent-marked instance %d: %v", ci.ID, err)
-		} else if resetCount > 0 {
-			log.Printf("reconcile: reset %d jobs from intent-marked instance %d to unplaced", resetCount, ci.ID)
-		}
-	}
-
-	r.mu.Lock()
-	delete(r.firstDeadAt, ci.ID)
-	r.mu.Unlock()
-	return true, true
 }
 
 func markTerminationIntentDestroyed(database *sql.DB, ci *db.CloudInstance, confirmedAt time.Time) bool {
@@ -745,31 +536,6 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 // report a non-empty status. Instances stuck with empty actual_status beyond
 // this threshold are terminated as infra failures.
 const maxEmptyStatusTime = 1 * time.Minute
-
-// maxBootstrapInitTime is the maximum time to wait for the first bootstrap stage marker.
-// If no marker appears after this duration, the instance is considered wedged.
-const maxBootstrapInitTime = 15 * time.Minute
-
-// isBootstrapStalled returns true if a running instance has no bootstrap progress
-// within the expected timeframe. Requires r2Client and a non-nil LaunchedAt.
-func isBootstrapStalled(r2Client *r2.Client, ci *db.CloudInstance) bool {
-	if r2Client == nil || ci.LaunchedAt == nil {
-		return false
-	}
-
-	age := time.Since(time.Unix(*ci.LaunchedAt, 0))
-	if age < maxBootstrapInitTime {
-		return false // too early to declare stalled
-	}
-
-	// Check if any bootstrap stage marker exists
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	stage := fetchBootstrapStage(ctx, r2Client, ci.ID)
-
-	// No bootstrap stage at all after 15+ min → wedged
-	return stage == ""
-}
 
 // isProviderTerminal returns true if the provider instance is in a terminal/dead state.
 func isProviderTerminal(inst *cloud.Instance) bool {
