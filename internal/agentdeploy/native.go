@@ -98,10 +98,16 @@ func ensureGoOnHost(host string) (string, error) {
 VERSION=%s
 URL="https://go.dev/dl/go${VERSION}.linux-amd64.tar.gz"
 DEST=%s
-mkdir -p "$(dirname "$DEST")"
+PARENT="$(dirname "$DEST")"
+mkdir -p "$PARENT"
 rm -rf "$DEST"
-curl -fsSL "$URL" | tar -xz -C "$(dirname "$DEST")"
-mv "$(dirname "$DEST")/go" "$DEST"
+curl -fsSL "$URL" | tar -xz -C "$PARENT"
+# The tarball extracts as go/ into $PARENT, which is already $DEST
+# when DEST ends with /go. Only rename if names differ.
+EXTRACTED="$PARENT/go"
+if [ "$EXTRACTED" != "$DEST" ]; then
+  mv "$EXTRACTED" "$DEST"
+fi
 echo "installed Go $("$DEST/bin/go" version)"
 `, goVersion, remoteGoDir)
 
