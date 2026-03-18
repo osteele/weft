@@ -281,6 +281,65 @@ func TestGetCloudInstanceJobsIncludingAttemptsRetainsOrderAfterFailure(t *testin
 	}
 }
 
+// TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical verifies
+// that after a job is reset (orphaned), its display status reflects the attempt
+// outcome rather than the current global status.
+func TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical(t *testing.T) {
+	database := setupTestDB(t)
+
+	instanceID, err := CreateCloudInstance(database, &CloudInstance{
+		Status:   CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateCloudInstance: %v", err)
+	}
+
+	// Insert a job, associate it with the instance, then reset (simulating instance failure).
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
+		 VALUES (317, ?, '', 0, 'running', 'python train.py', '/tmp')`,
+		instanceID,
+	); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := InsertJobCloudAttempt(database, 317, instanceID); err != nil {
+		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	}
+
+	// Simulate ResetCloudInstanceJobs: close attempt as orphaned, clear instance assignment, reset to queued.
+	n, err := ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned)
+	if err != nil {
+		t.Fatalf("ResetCloudInstanceJobs: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reset count = %d, want 1", n)
+	}
+
+	// Verify the job's global status is now "queued".
+	job, err := GetJobByID(database, 317)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("global status = %q, want %q", job.Status, StatusQueued)
+	}
+
+	// GetCloudInstanceJobsIncludingAttempts should show "failed" (from orphaned outcome),
+	// not "queued" (the current global status).
+	jobs, err := GetCloudInstanceJobsIncludingAttempts(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	if jobs[0].Status != StatusFailed {
+		t.Fatalf("display status = %q, want %q", jobs[0].Status, StatusFailed)
+	}
+}
+
 func TestResetOrphanedCloudJobsSetsPlacementReasons(t *testing.T) {
 	database := setupTestDB(t)
 

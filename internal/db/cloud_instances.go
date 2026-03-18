@@ -488,6 +488,38 @@ func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) (
 		seen[job.ID] = struct{}{}
 		result = append(result, job)
 	}
+
+	// For historical jobs (no longer assigned to this instance), override the
+	// display status with the attempt outcome so the UI shows what happened on
+	// this instance rather than the job's current global status.
+	var historical []*Job
+	for _, job := range result {
+		if job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
+			historical = append(historical, job)
+		}
+	}
+	if len(historical) > 0 {
+		outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
+		if err != nil {
+			return nil, fmt.Errorf("get attempt outcomes: %w", err)
+		}
+		for _, job := range historical {
+			outcome, ok := outcomes[job.ID]
+			if !ok {
+				continue
+			}
+			switch outcome {
+			case AttemptOutcomeOrphaned, AttemptOutcomeFailed:
+				job.Status = StatusFailed
+			case AttemptOutcomeCompleted:
+				job.Status = StatusCompleted
+			case AttemptOutcomeCancelled:
+				job.Status = StatusCanceled
+				// AttemptOutcomeSuperseded: keep current status (moved to another instance)
+			}
+		}
+	}
+
 	return result, nil
 }
 
