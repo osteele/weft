@@ -10,7 +10,7 @@ import (
 
 func TestDefaultExcludes(t *testing.T) {
 	excludes := DefaultExcludes()
-	required := []string{".git", ".jj", ".venv", "__pycache__", "node_modules", ".DS_Store", "build", "dist", ".weft.toml", ".weft.yaml", "output", "outputs"}
+	required := []string{".git", ".jj", ".venv", "__pycache__", "node_modules", ".DS_Store", "build", "dist", ".weft.toml", ".weft.yaml", "output", "outputs", ".gocache", ".gomodcache"}
 	for _, pattern := range required {
 		if !slices.Contains(excludes, pattern) {
 			t.Errorf("DefaultExcludes() missing expected pattern %q", pattern)

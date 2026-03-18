@@ -37,6 +37,8 @@ func DefaultExcludes() []string {
 		".git", ".jj",
 		// Python environments and caches
 		".venv", "venv", ".conda", ".direnv", ".pixi",
+		// Go build caches
+		".gocache", ".gomodcache",
 		"__pycache__", ".ruff_cache", ".pyright", ".uv", ".uv-cache",
 		".mypy_cache", ".pytest_cache",
 		"*.pyc",
