@@ -532,8 +532,19 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 	// Build environment variables for the runner
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
+	// Load R2 bucket from config for inventory host uploads
+	var r2Bucket string
+	if cfg, err := config.Load(); err == nil && cfg.Vastai.R2.Bucket != "" {
+		r2Bucket = cfg.Vastai.R2.Bucket
+		// Deploy rclone config to inventory host (best-effort)
+		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+		if err := agentdeploy.EnsureRcloneConfig(host, r2Cfg); err != nil {
+			log.Printf("warning: deploy rclone config to %s: %v", host, err)
+		}
+	}
+
 	runner := queuerunner.NewRunner(host)
-	return runner.EnsureStarted(envVars)
+	return runner.EnsureStarted(envVars, r2Bucket)
 }
 
 func runQueueStart(cmd *cobra.Command, args []string) error {

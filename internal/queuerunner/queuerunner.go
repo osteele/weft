@@ -21,8 +21,13 @@ func QueueDir() string {
 const agentBinaryPath = "$HOME/.cache/weft/bin/weft-agent"
 
 // RunnerCommand builds the command to start the Go queue runner.
-func RunnerCommand(envPrefix string) string {
-	return fmt.Sprintf("%s%s run-queue %s", envPrefix, agentBinaryPath, ops.DefaultQueueName)
+func RunnerCommand(envPrefix, r2Bucket string) string {
+	cmd := fmt.Sprintf("%s%s run-queue", envPrefix, agentBinaryPath)
+	if r2Bucket != "" {
+		cmd += fmt.Sprintf(" --r2-bucket=%s", r2Bucket)
+	}
+	cmd += fmt.Sprintf(" %s", ops.DefaultQueueName)
+	return cmd
 }
 
 // RunnerSessionName returns the tmux session name for the queue runner.
@@ -85,8 +90,8 @@ func (r *Runner) Queue() string { return ops.DefaultQueueName }
 func (r *Runner) SessionName() string { return RunnerSessionName() }
 
 // EnsureStarted ensures the runner is active, starting tmux if needed.
-func (r *Runner) EnsureStarted(envPrefix string) (bool, error) {
-	runnerCmd := RunnerCommand(envPrefix)
+func (r *Runner) EnsureStarted(envPrefix, r2Bucket string) (bool, error) {
+	runnerCmd := RunnerCommand(envPrefix, r2Bucket)
 	return EnsureRunnerStarted(r.host, runnerCmd)
 }
 

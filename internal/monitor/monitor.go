@@ -933,7 +933,7 @@ func ensureQueueRunnerStarted(host string) (bool, error) {
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
 	runner := queuerunner.NewRunner(host)
-	return runner.EnsureStarted(envVars)
+	return runner.EnsureStarted(envVars, "")
 }
 
 // killTombstonedJob kills a job that was tombstoned locally but may still be running remotely.

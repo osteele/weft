@@ -40,12 +40,17 @@ type Runner struct {
 
 	// Runtime state
 	processes      map[string]*Process // jobID -> process
+	hookStopFuncs  map[string]func()   // jobID -> stop function from OnJobStart
 	processesMu    sync.Mutex
 	lastSampleTime time.Time
 
 	// Benchmark tracking
 	benchmarkIdleCount  int
 	benchmarkLastReason string
+
+	// Lifecycle hooks (optional, best-effort)
+	OnJobStart  func(jobID int64, logPath string) func() // returns stop function for live upload
+	OnJobFinish func(jobID int64, logDir string, exitCode int)
 
 	// Shutdown
 	stopCh chan struct{}
@@ -83,6 +88,7 @@ func New(cfg Config) *Runner {
 		telemetryConfig: DefaultTelemetryConfig(),
 		benchCfg:        DefaultBenchmarkConfig(),
 		processes:       make(map[string]*Process),
+		hookStopFuncs:   make(map[string]func()),
 		stopCh:          make(chan struct{}),
 	}
 }
@@ -402,6 +408,15 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	// Write log header
 	WriteLogHeader(paths, jobID, job.Dir, command)
 
+	// Call OnJobStart hook (best-effort)
+	if r.OnJobStart != nil {
+		if stopFn := r.OnJobStart(jobID, paths.Log); stopFn != nil {
+			r.processesMu.Lock()
+			r.hookStopFuncs[jobIDStr] = stopFn
+			r.processesMu.Unlock()
+		}
+	}
+
 	// Write gpu_devices to meta file so the coordinator can discover them
 	if len(gpuDevices) > 0 {
 		if f, err := os.OpenFile(paths.Meta, os.O_APPEND|os.O_WRONLY, 0644); err == nil {
@@ -559,10 +574,20 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	// Write rusage and completion record
 	r.processesMu.Lock()
 	rs := r.state.Running[jobIDStr]
+	stopFn := r.hookStopFuncs[jobIDStr]
+	delete(r.hookStopFuncs, jobIDStr)
 	r.processesMu.Unlock()
 	WriteRusageFile(paths, rs)
 	killReason := ReadKillReasonFile(paths.KillReason)
 	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, startTime, endTime, outputFiles)
+
+	// Stop live log uploader, then call OnJobFinish (best-effort)
+	if stopFn != nil {
+		stopFn()
+	}
+	if r.OnJobFinish != nil {
+		r.OnJobFinish(jobID, filepath.Dir(paths.Log), ei.ExitCode)
+	}
 
 	// Record finished and remove from running
 	r.state.RecordFinished(jobIDStr, ei.ExitCode, endTime)

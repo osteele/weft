@@ -146,7 +146,7 @@ func (m Model) fetchTopProcesses(host string, jobView bool) tea.Cmd {
 func (m Model) startQueue(host string) tea.Cmd {
 	return func() tea.Msg {
 		runner := queuerunner.NewRunner(host)
-		started, err := runner.EnsureStarted("")
+		started, err := runner.EnsureStarted("", "")
 		if err != nil {
 			return queueStartedMsg{host: host, err: err}
 		}
@@ -174,7 +174,7 @@ func ensureQueueRunnerStartedTUI(host string) (bool, error) {
 	envVars := slack.BuildRunnerEnvPrefix(slackWebhook)
 
 	runner := queuerunner.NewRunner(host)
-	started, err := runner.EnsureStarted(envVars)
+	started, err := runner.EnsureStarted(envVars, "")
 	if err != nil {
 		return false, fmt.Errorf("queue runner start failed: %w", err)
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/osteele/weft/internal/oplog"
@@ -32,11 +33,7 @@ func main() {
 
 	// Handle run-queue subcommand
 	if len(os.Args) > 1 && os.Args[1] == "run-queue" {
-		queueName := ops.DefaultQueueName
-		if len(os.Args) > 2 {
-			queueName = os.Args[2]
-		}
-		runQueue(queueName)
+		runQueue(os.Args[2:])
 		return
 	}
 
@@ -86,9 +83,21 @@ func main() {
 	fmt.Printf("\nReceived %s, shutting down.\n", sig)
 }
 
-func runQueue(queueName string) {
+func runQueue(args []string) {
+	var r2Bucket string
+	queueName := ops.DefaultQueueName
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--r2-bucket=") {
+			r2Bucket = arg[len("--r2-bucket="):]
+		} else {
+			queueName = arg
+		}
+	}
 	cfg := runner.DefaultConfig(queueName)
 	r := runner.New(cfg)
+	if r2Bucket != "" {
+		setupInventoryR2(r, r2Bucket)
+	}
 	if err := r.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "runner error: %v\n", err)
 		os.Exit(1)

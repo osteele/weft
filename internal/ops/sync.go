@@ -317,6 +317,7 @@ func SyncJob(database *sql.DB, job *db.Job, opts SyncOptions) (result SyncResult
 
 // SyncQueueRunnerJob checks and updates a queue runner job's status using pattern-based file lookup.
 // Uses multiple SSH calls with trinary logic for maximum accuracy.
+// Falls back to R2 when SSH to inventory hosts fails.
 func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncResult, error) {
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
@@ -324,7 +325,14 @@ func SyncQueueRunnerJob(database *sql.DB, job *db.Job, opts SyncOptions) (SyncRe
 	prober := remote.NewSSHProber(job.Host, timeout)
 	host := remote.NewSSHHost(job.Host, timeout)
 
-	return SyncQueueRunnerJobWithProber(database, job, prober, host, opts)
+	result, err := SyncQueueRunnerJobWithProber(database, job, prober, host, opts)
+	if err != nil && !result.HostContacted {
+		// SSH failed — try R2 fallback for inventory hosts
+		if r2Result, r2Err := syncJobStatusFromR2(database, job); r2Err == nil {
+			return r2Result, nil
+		}
+	}
+	return result, err
 }
 
 // SyncDraftJob ensures that a job marked as draft has no remote execution state.

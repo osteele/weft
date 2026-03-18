@@ -233,6 +233,10 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		}
 	}
 	if !exists {
+		// Try R2 fallback before giving up
+		if r2Err := tryLogFromR2(cmd, job); r2Err == nil {
+			return nil
+		}
 		return fmt.Errorf("log file not found for job %d on %s", jobID, job.Host)
 	}
 
@@ -275,6 +279,10 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 				fmt.Fprintf(os.Stderr, "Warning: host unreachable; using cached log for job %d.\n", jobID)
 				output := filterLogContent(cached, logFrom, logTo, logLines, logGrep)
 				fmt.Print(processCarriageReturns(output))
+				return nil
+			}
+			// Try R2 fallback for inventory hosts
+			if r2Err := tryLogFromR2(cmd, job); r2Err == nil {
 				return nil
 			}
 		}
@@ -407,6 +415,19 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 
 // runLogFromR2 fetches log output from R2 for a cloud-based job.
 func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
+	if logFollow {
+		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud job logs from R2; showing current log.\n")
+	}
+
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+	return fetchAndDisplayLogFromR2(cmd, job, runID)
+}
+
+// fetchAndDisplayLogFromR2 fetches a log from R2 with the given runID, displays it, and caches if terminal.
+func fetchAndDisplayLogFromR2(cmd *cobra.Command, job *db.Job, runID int64) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -417,20 +438,12 @@ func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
 		return fmt.Errorf("create R2 client: %w", err)
 	}
 	if r2Client == nil {
-		return fmt.Errorf("R2 not configured; cannot fetch cloud job logs")
-	}
-
-	if logFollow {
-		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud job logs from R2; showing current log.\n")
+		return fmt.Errorf("R2 not configured")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
-	}
 	fetched, err := fetchCloudLogFromR2(ctx, r2Client, job.ID, runID, logFrom, logTo, logLines)
 	if err != nil {
 		return err
@@ -441,8 +454,7 @@ func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
 		_ = logcache.Write(job.ID, fetched.Content)
 	}
 
-	defaultTailHint := shouldShowDefaultTailHint(cmd, false)
-	if defaultTailHint {
+	if shouldShowDefaultTailHint(cmd, false) {
 		printDefaultTailHint(job.ID)
 	}
 
@@ -785,6 +797,17 @@ func printPostLogDiagnostics(job *db.Job) {
 	fmt.Println()
 	fmt.Println("--- diagnosis ---")
 	printDiagnosisSummary(job)
+}
+
+// tryLogFromR2 attempts to fetch a log from R2 for an inventory host job.
+// Returns nil on success (output already printed), error if R2 fetch fails.
+func tryLogFromR2(cmd *cobra.Command, job *db.Job) error {
+	// Inventory hosts use runID=0
+	if err := fetchAndDisplayLogFromR2(cmd, job, 0); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Warning: host unreachable; fetched log from R2 for job %d.\n", job.ID)
+	return nil
 }
 
 // runOpsLog displays the operations log with optional filtering
