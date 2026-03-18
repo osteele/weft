@@ -12,6 +12,16 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 )
 
+// SelectionStrategy controls how BestOffer ranks offers.
+type SelectionStrategy string
+
+const (
+	// StrategyCost minimizes expected dollar cost (including retry risk).
+	StrategyCost SelectionStrategy = "cost"
+	// StrategyFast minimizes expected wall-clock time (prefers higher DLPerf).
+	StrategyFast SelectionStrategy = "fast"
+)
+
 // PriceBucket classifies an offer's price relative to its GPU family.
 type PriceBucket string
 
@@ -135,33 +145,87 @@ func (m *SurvivalModel) PriceBucketFor(gpuFamily string, pricePerHour float64) P
 	}
 }
 
-// BestOffer selects the offer with the lowest expected cost (including retry risk).
-// Returns the index of the best offer and the offer itself.
-// If the model is nil, falls back to the cheapest offer.
-func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs, setupOverheadHrs float64) (int, cloud.Offer) {
+// ExpectedWallclockTime computes the expected wall-clock time for a job,
+// scaling duration by DLPerf relative to the median, and accounting for
+// preemption retries using a geometric retry model:
+//
+//	scaledJobHrs = jobDurationHrs × (medianDLPerf / dlPerf)
+//	E[wallclock] = scaledJobHrs / p + (1-p)/p × setupOverheadHrs
+func ExpectedWallclockTime(dlPerf, medianDLPerf, jobDurationHrs, setupOverheadHrs, survivalProb float64) float64 {
+	if dlPerf <= 0 || medianDLPerf <= 0 {
+		return math.Inf(1)
+	}
+	scaledHrs := jobDurationHrs * (medianDLPerf / dlPerf)
+	if survivalProb <= 0 {
+		return math.Inf(1)
+	}
+	if survivalProb >= 1 {
+		return scaledHrs
+	}
+	return scaledHrs/survivalProb + (1-survivalProb)/survivalProb*setupOverheadHrs
+}
+
+// BestOffer selects the best offer according to the given strategy.
+// When strategy is empty or StrategyCost, minimizes expected dollar cost.
+// When strategy is StrategyFast, minimizes expected wall-clock time.
+// If the model is nil, falls back to cheapest (cost) or highest DLPerf (fast).
+func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs, setupOverheadHrs float64, strategy SelectionStrategy) (int, cloud.Offer) {
 	if len(offers) == 0 {
 		return -1, cloud.Offer{}
 	}
+
 	if model == nil {
-		return cheapestOffer(offers)
+		if strategy == StrategyFast {
+			return bestOfferByScore(offers, func(o cloud.Offer) float64 { return -o.DLPerf })
+		}
+		return bestOfferByScore(offers, func(o cloud.Offer) float64 { return o.CostPerHour })
 	}
 
+	var medianDLPerf float64
+	if strategy == StrategyFast {
+		medianDLPerf = medianOfferDLPerf(offers)
+	}
+
+	return bestOfferByScore(offers, func(o cloud.Offer) float64 {
+		surv := model.OfferSurvival(o)
+		if strategy == StrategyFast {
+			return ExpectedWallclockTime(o.DLPerf, medianDLPerf, jobDurationHrs, setupOverheadHrs, surv)
+		}
+		return ExpectedCost(o.CostPerHour, jobDurationHrs, setupOverheadHrs, surv)
+	})
+}
+
+// bestOfferByScore returns the offer with the lowest score value.
+func bestOfferByScore(offers []cloud.Offer, score func(cloud.Offer) float64) (int, cloud.Offer) {
 	bestIdx := 0
-	bestCost := math.Inf(1)
-
-	for i, o := range offers {
-		gpuFamily := NormalizeGPUFamily(o.GPUName)
-		bucket := model.PriceBucketFor(gpuFamily, o.CostPerHour)
-		surv := model.SurvivalProbability(gpuFamily, bucket, o.Reliability)
-		ec := ExpectedCost(o.CostPerHour, jobDurationHrs, setupOverheadHrs, surv)
-
-		if ec < bestCost {
-			bestCost = ec
-			bestIdx = i
+	bestScore := score(offers[0])
+	for i, o := range offers[1:] {
+		s := score(o)
+		if s < bestScore {
+			bestScore = s
+			bestIdx = i + 1
 		}
 	}
-
 	return bestIdx, offers[bestIdx]
+}
+
+// medianOfferDLPerf returns the median DLPerf across offers.
+func medianOfferDLPerf(offers []cloud.Offer) float64 {
+	perfs := make([]float64, 0, len(offers))
+	for _, o := range offers {
+		if o.DLPerf > 0 {
+			perfs = append(perfs, o.DLPerf)
+		}
+	}
+	if len(perfs) == 0 {
+		return 1.0
+	}
+	sort.Float64s(perfs)
+	n := len(perfs)
+	if n%2 == 0 {
+		return (perfs[n/2-1] + perfs[n/2]) / 2
+	}
+	return perfs[n/2]
 }
 
 // OfferSurvival returns the survival probability for a specific offer.
@@ -169,17 +233,6 @@ func (m *SurvivalModel) OfferSurvival(o cloud.Offer) float64 {
 	gpuFamily := NormalizeGPUFamily(o.GPUName)
 	bucket := m.PriceBucketFor(gpuFamily, o.CostPerHour)
 	return m.SurvivalProbability(gpuFamily, bucket, o.Reliability)
-}
-
-// cheapestOffer returns the index and offer with the lowest cost per hour.
-func cheapestOffer(offers []cloud.Offer) (int, cloud.Offer) {
-	bestIdx := 0
-	for i, o := range offers[1:] {
-		if o.CostPerHour < offers[bestIdx].CostPerHour {
-			bestIdx = i + 1
-		}
-	}
-	return bestIdx, offers[bestIdx]
 }
 
 // NormalizeGPUFamily canonicalizes GPU names into family identifiers.

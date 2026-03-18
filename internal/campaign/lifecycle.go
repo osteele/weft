@@ -36,8 +36,9 @@ const (
 type LaunchOpts struct {
 	MaxSpendCents      int
 	MaxTimeSeconds     int
-	NoDonor            bool // skip donor instance strategy
-	GracePeriodSeconds int  // grace period after job failure (0 = disabled)
+	NoDonor            bool                      // skip donor instance strategy
+	GracePeriodSeconds int                       // grace period after job failure (0 = disabled)
+	Strategy           bidding.SelectionStrategy // "cost" (default) or "fast"
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -611,6 +612,7 @@ func LaunchCampaign(
 					jobDurationHrs,
 					setupOverheadHrs,
 					map[string]struct{}{offerExclusionKey(failedOffer): {}},
+					opts.Strategy,
 				)
 				if replacement.Err != nil {
 					return nil, replacement.Err

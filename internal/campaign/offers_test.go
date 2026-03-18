@@ -15,7 +15,7 @@ func TestCheapestOffer(t *testing.T) {
 		{ProviderID: "3", CostPerHour: 1.20, GPUName: "RTX_4090"},
 	}
 	// nil model falls back to cheapest
-	_, best := bidding.BestOffer(nil, offers, 1.0, 0.5)
+	_, best := bidding.BestOffer(nil, offers, 1.0, 0.5, bidding.StrategyCost)
 	if best.ProviderID != "2" {
 		t.Errorf("BestOffer(nil) returned id=%s, want 2", best.ProviderID)
 	}
@@ -60,7 +60,7 @@ func TestFetchGroupOffersMock(t *testing.T) {
 		{GPUClass: "H100", GPUMemGB: 80},
 	}
 
-	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, 0.5)
+	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, 0.5, bidding.StrategyCost)
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
@@ -103,6 +103,7 @@ func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
 		1.0,
 		0.5,
 		map[string]struct{}{"vastai:1": {}},
+		bidding.StrategyCost,
 	)
 	if result.Err != nil {
 		t.Fatalf("SearchBestOfferForGroup: %v", result.Err)

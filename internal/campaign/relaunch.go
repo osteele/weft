@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
@@ -94,7 +95,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	}
 
 	// Fetch offers
-	groupOffers := FetchGroupOffers(cfg.Clients, groups, nil, 1.0, 0.5)
+	groupOffers := FetchGroupOffers(cfg.Clients, groups, nil, 1.0, 0.5, bidding.StrategyCost)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup

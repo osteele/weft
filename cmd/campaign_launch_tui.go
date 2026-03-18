@@ -265,7 +265,7 @@ func (m launchModel) fetchOffers() tea.Cmd {
 			}
 			return offersLoadedMsg{err: fmt.Errorf("no rental providers available")}
 		}
-		offers := campaign.FetchGroupOffers(clients, groups, m.survivalModel, 1.0, 0.5)
+		offers := campaign.FetchGroupOffers(clients, groups, m.survivalModel, 1.0, 0.5, m.launchOpts.Strategy)
 		return offersLoadedMsg{offers: offers}
 	}
 }
@@ -873,7 +873,11 @@ func (m launchModel) View() string {
 		totalJobs += len(g.Jobs)
 	}
 
-	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Rental GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
+	strategyLabel := "cost-effective"
+	if m.launchOpts.Strategy == bidding.StrategyFast {
+		strategyLabel = "fastest"
+	}
+	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Rental GPU jobs (%d jobs, %d GPU groups)  Strategy: %s", totalJobs, len(m.groups), strategyLabel)))
 	// Show loading/reconciling status inline after the title
 	if m.reconciling || m.loading {
 		var status []string

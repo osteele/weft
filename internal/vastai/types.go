@@ -29,6 +29,9 @@ type Instance struct {
 	CostPerHour float64 `json:"dph_total"`
 	DiskSpace   float64 `json:"disk_space"`
 	Label       string  `json:"label"`
+	CPUCores    int     `json:"cpu_cores_effective"`
+	CPUName     string  `json:"cpu_name"`
+	CPURAMMB    int     `json:"cpu_ram"` // total system RAM in MB
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.

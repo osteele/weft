@@ -40,6 +40,9 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 
 	lines := []string{formatWatchInstanceHeaderLine(ci, update.Instance, opts)}
 	lines = append(lines, formatWatchProviderLine(ci, update.Instance))
+	if specLine := formatWatchInstanceSpecLine(update.Instance); specLine != "" {
+		lines = append(lines, specLine)
+	}
 
 	activity := formatObservedActivity(update, opts.now)
 	if activity.Bootstrap != "" {
@@ -257,6 +260,26 @@ func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string 
 	}
 
 	return line + " (provisioning...)"
+}
+
+func formatWatchInstanceSpecLine(inst *cloud.Instance) string {
+	if inst == nil {
+		return ""
+	}
+	var parts []string
+	if inst.CPUName != "" {
+		parts = append(parts, inst.CPUName)
+	}
+	if inst.CPUCores > 0 {
+		parts = append(parts, fmt.Sprintf("%d cores", inst.CPUCores))
+	}
+	if inst.RAMGB > 0 {
+		parts = append(parts, fmt.Sprintf("%d GB RAM", inst.RAMGB))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("  Specs: %s", strings.Join(parts, ", "))
 }
 
 func formatWatchInstanceCostLine(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) string {

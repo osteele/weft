@@ -51,6 +51,7 @@ func SearchBestOfferForGroup(
 	survivalModel *bidding.SurvivalModel,
 	jobDurationHrs, setupOverheadHrs float64,
 	excludeOfferIDs map[string]struct{},
+	strategy bidding.SelectionStrategy,
 ) GroupOffer {
 	result := GroupOffer{Group: group}
 
@@ -75,7 +76,7 @@ func SearchBestOfferForGroup(
 		return result
 	}
 
-	_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs)
+	_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs, strategy)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
@@ -87,7 +88,7 @@ func SearchBestOfferForGroup(
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
 // retry risk from preemption). Otherwise falls back to cheapest offer.
 // jobDurationHrs and setupOverheadHrs are used for expected cost computation.
-func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64) []GroupOffer {
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) []GroupOffer {
 	results := make([]GroupOffer, len(groups))
 	var wg sync.WaitGroup
 
@@ -96,7 +97,7 @@ func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalMo
 		wg.Add(1)
 		go func(idx int, group InstanceGroup) {
 			defer wg.Done()
-			results[idx] = SearchBestOfferForGroup(clients, group, survivalModel, jobDurationHrs, setupOverheadHrs, nil)
+			results[idx] = SearchBestOfferForGroup(clients, group, survivalModel, jobDurationHrs, setupOverheadHrs, nil, strategy)
 		}(i, g)
 	}
 

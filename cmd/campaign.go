@@ -82,6 +82,7 @@ var (
 	campaignLaunchYes         bool
 	campaignLaunchJobs        string
 	campaignLaunchGPU         string
+	campaignLaunchStrategy    string
 	campaignLaunchTUI         bool
 	campaignLaunchPlain       bool
 	campaignWatchTUI          bool
@@ -121,6 +122,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	cmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
+	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cost", "Offer selection strategy: 'cost' (minimize expected cost) or 'fast' (minimize wall-clock time)")
 	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
@@ -230,7 +232,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Dry run: print plan table
 	if campaignLaunchDryRun {
-		return runDryRunPlanWithReuse(database, cfg, groups, reuseAssignments)
+		return runDryRunPlanWithReuse(database, cfg, groups, reuseAssignments, opts.Strategy)
 	}
 
 	if len(groups) == 0 && len(reuseAssignments) == 0 {
@@ -306,7 +308,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Fetch offers in parallel (with survival model for cost-optimal bidding)
 	fmt.Println("Searching for GPU offers...")
 	survivalModel := buildSurvivalModel(database)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, opts.Strategy)
 
 	// Print plan summary with cost estimates
 	totalJobs := 0
@@ -400,7 +402,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	return nil
 }
 
-func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, reuseAssignments []campaign.ReuseAssignment) error {
+func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, reuseAssignments []campaign.ReuseAssignment, strategy bidding.SelectionStrategy) error {
 	if len(reuseAssignments) > 0 {
 		fmt.Print(campaign.FormatReuseAssignments(reuseAssignments))
 		fmt.Println()
@@ -411,16 +413,16 @@ func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campa
 		return nil
 	}
 
-	return runDryRunPlan(database, cfg, groups)
+	return runDryRunPlan(database, cfg, groups, strategy)
 }
 
-func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup) error {
+func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, strategy bidding.SelectionStrategy) error {
 	clients, err := buildCloudClients(cfg)
 	if err != nil {
 		return err
 	}
 	survivalModel := buildSurvivalModel(database)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, strategy)
 
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
@@ -675,7 +677,8 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 
 func parseLaunchOpts() campaign.LaunchOpts {
 	opts := campaign.LaunchOpts{
-		NoDonor: campaignLaunchNoDonor,
+		NoDonor:  campaignLaunchNoDonor,
+		Strategy: bidding.SelectionStrategy(campaignLaunchStrategy),
 	}
 	if campaignLaunchMaxSpend != "" {
 		cleaned := strings.TrimPrefix(campaignLaunchMaxSpend, "$")

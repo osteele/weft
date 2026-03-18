@@ -46,6 +46,9 @@ type Instance struct {
 	DiskGB      float64
 	DataCenter  string
 	Label       string // provider-assigned label/name (e.g., "weft/c42")
+	CPUCores    int    // effective CPU cores granted
+	CPUName     string // CPU model name
+	RAMGB       int    // total system RAM in GB
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.
