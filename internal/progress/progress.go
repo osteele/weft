@@ -1,6 +1,7 @@
 package progress
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -67,6 +68,8 @@ func (t *Tracker) Clear(path string) {
 // - Progress: 9/14
 // - Progress: 9 of 14
 // - Progress: 9 out of 14
+// - tqdm: 45%|████▌     | 450/1000 [01:23<01:42]
+// - Epoch 3/10, Epoch [3/10]
 var (
 	// Matches "Progress: 75%" or "Progress: 75 %"
 	percentPattern = regexp.MustCompile(`(?i)^Progress:\s*(\d+)\s*%`)
@@ -76,6 +79,12 @@ var (
 
 	// Matches "Progress: 9 of 14" or "Progress: 9 out of 14"
 	ofPattern = regexp.MustCompile(`(?i)^Progress:\s*(\d+)\s+(?:of|out of)\s+(\d+)`)
+
+	// Matches tqdm progress bars: "45%|████▌     |"
+	tqdmPattern = regexp.MustCompile(`(\d+)%\|`)
+
+	// Matches "Epoch 3/10", "Epoch [3/10]", "Epoch 3/10:", etc.
+	epochPattern = regexp.MustCompile(`(?i)Epoch\s*\[?(\d+)\s*/\s*(\d+)\]?`)
 )
 
 // ParseProgress parses a single line for progress information.
@@ -85,44 +94,62 @@ func ParseProgress(line string) *Progress {
 	if idx := strings.LastIndex(line, "\r"); idx >= 0 {
 		line = strings.TrimSpace(line[idx+1:])
 	}
-	if idx := strings.LastIndex(strings.ToLower(line), "progress:"); idx >= 0 {
-		line = strings.TrimSpace(line[idx:])
+
+	// Quick pre-filter: skip lines that can't match any pattern.
+	lower := strings.ToLower(line)
+	hasProgress := strings.Contains(lower, "progress:")
+	hasTqdm := strings.Contains(line, "%|")
+	hasEpoch := strings.Contains(lower, "epoch")
+	if !hasProgress && !hasTqdm && !hasEpoch {
+		return nil
 	}
 
-	// Try percent pattern first
-	if m := percentPattern.FindStringSubmatch(line); m != nil {
-		percent, _ := strconv.Atoi(m[1])
-		return &Progress{
-			Percent: percent,
-			RawLine: line,
+	// "Progress:" patterns take priority — extract the Progress: portion.
+	if hasProgress {
+		if idx := strings.LastIndex(lower, "progress:"); idx >= 0 {
+			line = strings.TrimSpace(line[idx:])
+		}
+
+		if m := percentPattern.FindStringSubmatch(line); m != nil {
+			percent, _ := strconv.Atoi(m[1])
+			return &Progress{Percent: percent, RawLine: line}
+		}
+		if m := slashPattern.FindStringSubmatch(line); m != nil {
+			current, _ := strconv.Atoi(m[1])
+			total, _ := strconv.Atoi(m[2])
+			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line}
+		}
+		if m := ofPattern.FindStringSubmatch(line); m != nil {
+			current, _ := strconv.Atoi(m[1])
+			total, _ := strconv.Atoi(m[2])
+			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line}
 		}
 	}
 
-	// Try slash pattern (N/M)
-	if m := slashPattern.FindStringSubmatch(line); m != nil {
-		current, _ := strconv.Atoi(m[1])
-		total, _ := strconv.Atoi(m[2])
-		return &Progress{
-			Percent: -1,
-			Current: current,
-			Total:   total,
-			RawLine: line,
+	// tqdm: prefer over epoch since it gives a direct percentage.
+	if hasTqdm {
+		if m := tqdmPattern.FindStringSubmatch(line); m != nil {
+			percent, _ := strconv.Atoi(m[1])
+			return &Progress{Percent: percent, RawLine: line}
 		}
 	}
 
-	// Try "of" pattern (N of M, N out of M)
-	if m := ofPattern.FindStringSubmatch(line); m != nil {
-		current, _ := strconv.Atoi(m[1])
-		total, _ := strconv.Atoi(m[2])
-		return &Progress{
-			Percent: -1,
-			Current: current,
-			Total:   total,
-			RawLine: line,
+	// Epoch N/M fallback.
+	if hasEpoch {
+		if m := epochPattern.FindStringSubmatch(line); m != nil {
+			current, _ := strconv.Atoi(m[1])
+			total, _ := strconv.Atoi(m[2])
+			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line}
 		}
 	}
 
 	return nil
+}
+
+// GrepCommand returns a shell command that greps for progress lines in logFile.
+// Used by TUI and web server to fetch progress via SSH.
+func GrepCommand(logFile string) string {
+	return fmt.Sprintf("grep -iE 'Progress:|%%\\||Epoch [0-9\\[]' %s 2>/dev/null | tail -1", logFile)
 }
 
 // FindLastProgress searches content for the last progress line.

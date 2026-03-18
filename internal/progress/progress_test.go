@@ -67,6 +67,57 @@ func TestParseProgress(t *testing.T) {
 			want: &Progress{Percent: -1, Current: 9, Total: 14, RawLine: "Progress: 9 out of 14"},
 		},
 
+		// tqdm patterns
+		{
+			name: "tqdm basic",
+			line: "  2%|▏         | 50/2500 [00:30<25:00, 1.63it/s]",
+			want: &Progress{Percent: 2, RawLine: "2%|▏         | 50/2500 [00:30<25:00, 1.63it/s]"},
+		},
+		{
+			name: "tqdm with epoch prefix",
+			line: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]",
+			want: &Progress{Percent: 45, RawLine: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]"},
+		},
+		{
+			name: "tqdm 100%",
+			line: "100%|██████████| 500/500 [00:45<00:00, 11.11it/s, loss=0.234]",
+			want: &Progress{Percent: 100, RawLine: "100%|██████████| 500/500 [00:45<00:00, 11.11it/s, loss=0.234]"},
+		},
+		{
+			name: "tqdm 0%",
+			line: "  0%|          | 0/1000 [00:00<?, ?it/s]",
+			want: &Progress{Percent: 0, RawLine: "0%|          | 0/1000 [00:00<?, ?it/s]"},
+		},
+
+		// Epoch patterns
+		{
+			name: "epoch basic",
+			line: "Epoch 3/10",
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10"},
+		},
+		{
+			name: "epoch with brackets",
+			line: "Epoch [3/10]",
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch [3/10]"},
+		},
+		{
+			name: "epoch with trailing colon",
+			line: "Epoch 3/10:",
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10:"},
+		},
+		{
+			name: "epoch case insensitive",
+			line: "epoch 5/20",
+			want: &Progress{Percent: -1, Current: 5, Total: 20, RawLine: "epoch 5/20"},
+		},
+
+		// Priority: Progress: patterns take precedence over tqdm/epoch
+		{
+			name: "Progress: preferred over epoch in same line",
+			line: "Progress: 75%",
+			want: &Progress{Percent: 75, RawLine: "Progress: 75%"},
+		},
+
 		// Edge cases
 		{
 			name:    "no match - random text",
@@ -221,6 +272,20 @@ Progress: 100%`,
 Progress: 2/10
 Progress: 30%`,
 			want: &Progress{Percent: 30, RawLine: "Progress: 30%"},
+		},
+		{
+			name: "tqdm progress in log output",
+			content: `Loading model...
+Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]
+Some other output`,
+			want: &Progress{Percent: 45, RawLine: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]"},
+		},
+		{
+			name: "epoch-only progress",
+			content: `Starting training...
+Epoch 3/10
+Training loss: 0.234`,
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10"},
 		},
 	}
 

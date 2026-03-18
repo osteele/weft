@@ -404,8 +404,7 @@ func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 		// Find the log file via shared resolver
 		logFile, _ := logfiles.Resolve(job)
 
-		// Quick grep for last progress line (case-insensitive)
-		grepCmd := fmt.Sprintf("grep -i 'Progress:' %s 2>/dev/null | tail -1", logFile)
+		grepCmd := progress.GrepCommand(logFile)
 		stdout, _, err := ssh.RunWithContext(ctx, job.Host, grepCmd)
 		if err != nil || strings.TrimSpace(stdout) == "" {
 			return quickProgressMsg{jobID: job.ID, progress: nil}

@@ -689,7 +689,7 @@ func (s *Server) fetchJobProgress(job *db.Job) *progress.Progress {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	grepCmd := fmt.Sprintf("grep -i 'Progress:' %s 2>/dev/null | tail -1", logFile)
+	grepCmd := progress.GrepCommand(logFile)
 	stdout, _, err := ssh.RunWithContext(ctx, job.Host, grepCmd)
 	if err != nil || strings.TrimSpace(stdout) == "" {
 		return nil
