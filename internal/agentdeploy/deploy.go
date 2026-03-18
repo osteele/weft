@@ -63,6 +63,14 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 
 	// Verify the newly deployed binary actually runs.
 	deployedVer, err := RemoteAgentVersion(host)
+	if errors.Is(err, ErrAgentIncompatible) {
+		// Cross-compiled binary doesn't run (e.g. GLIBC mismatch). Fall back to native build.
+		log.Printf("cross-compiled agent incompatible on %s, building natively: %v", host, err)
+		if err := BuildOnHost(host, localVer); err != nil {
+			return false, fmt.Errorf("native build on %s: %w", host, err)
+		}
+		deployedVer, err = RemoteAgentVersion(host)
+	}
 	if err != nil {
 		return false, fmt.Errorf("deployed agent is not runnable on %s: %w", host, err)
 	}
