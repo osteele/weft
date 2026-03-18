@@ -147,7 +147,6 @@ func (w *SyncWorker) Start() {
 func (w *SyncWorker) Stop() {
 	w.cancel()
 	w.wg.Wait()
-	close(w.results)
 }
 
 // Request sends a sync request (non-blocking)
@@ -404,6 +403,8 @@ func (w *SyncWorker) WaitForResult(ctx context.Context, wrap func(SyncResult) te
 				return nil
 			}
 			return wrap(result)
+		case <-w.ctx.Done():
+			return nil
 		case <-ctx.Done():
 			return nil
 		}
