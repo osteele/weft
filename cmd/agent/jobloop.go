@@ -38,7 +38,8 @@ type jobSequenceResult struct {
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
 	var result jobSequenceResult
 
-	for i, job := range jobs {
+	for i := 0; i < len(jobs); i++ {
+		job := jobs[i]
 		// Check time budget
 		if cfg.MaxTime > 0 {
 			remaining := cfg.MaxTime - time.Since(cfg.StartTime)
