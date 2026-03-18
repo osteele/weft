@@ -6,6 +6,22 @@ Timing data and analysis for weft build strategies (measured 2026-03-16).
 
 ### linux/amd64
 
+#### Compile-only times (build cache cleared, module cache warm)
+
+| VM size | Cold compile | Warm incremental |
+|---|---|---|
+| shared-cpu-1x (1GB) | 1m39s | 2.1s |
+| shared-cpu-2x (4GB) | 4m45s | 6.8s |
+| **performance-2x** (4GB) | **55s** | **0.23s** |
+
+Measured 2026-03-18. Cold = build cache wiped, module cache warm. Warm = touch
+one `.go` file, rebuild. The shared-cpu-2x is slower than 1x due to CPU
+throttling on sustained workloads (user CPU time is similar, but real time
+balloons from scheduling delays). performance-2x uses dedicated cores and
+parallelizes effectively (real < user on cold compile).
+
+#### End-to-end pipeline times (measured 2026-03-16)
+
 | Method | Warm | Cold |
 |---|---|---|
 | Fly builder (shared-cpu-1x) | 50–72s | ~1,664s (cold everything) / ~1,576s (warm modules) |
@@ -15,9 +31,10 @@ Local macOS cross-compile for linux/amd64 with CGO fails: missing Linux sysroot
 headers (`stdlib.h`, `pthread.h`, `grp.h`). CGO_ENABLED=0 builds would succeed
 but omit NVML telemetry.
 
-Fly warm range: 50–52s (rsync from /data/bin, Go cache warm) to ~72s (first run
-after machine restart when rsync not yet on /data). Cold: ~1,576s compile +
-~88s module download = ~1,664s.
+End-to-end includes: machine start, rsync restore, source sync, compile, binary
+download, machine stop. Fly warm range: 50–52s (rsync from /data/bin, Go cache
+warm) to ~72s (first run after machine restart when rsync not yet on /data).
+Cold: ~1,576s compile + ~88s module download = ~1,664s.
 
 Source transfer method: rsync over `flyctl proxy` SSH tunnel. First run installs
 rsync via apt-get and copies binary + libpopt to `/data/bin` and `/data/lib` for

@@ -336,7 +336,11 @@ func (w *SyncWorker) maybeStartSync(host string, state *hostSyncState) {
 	state.lastSync = time.Now()
 	w.inFlight++
 
-	go w.doSync(host)
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.doSync(host)
+	}()
 }
 
 func (w *SyncWorker) doSync(host string) {

@@ -164,8 +164,10 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			result.HostContacted = true
 		}
 		if err != nil {
-			result.QueueDispatchError = err.Error()
-			log.Printf("sync: failed to dispatch queued jobs on %s: %v", host, err)
+			if !ssh.IsConnectionError(err.Error()) {
+				result.QueueDispatchError = err.Error()
+				log.Printf("sync: failed to dispatch queued jobs on %s: %v", host, err)
+			}
 		}
 	}
 
@@ -443,6 +445,10 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
 			if !syncedDirs[remoteDir] {
 				if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+					if ssh.IsConnectionError(err.Error()) {
+						// Host is offline — bail out silently
+						return ensured, contacted, nil
+					}
 					log.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
 					oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
 						oplog.WithDetail("source sync failed"),
@@ -458,6 +464,9 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 
 		if job.Backend != db.BackendSlurm {
 			if err := ensureHFInputsAvailable(database, job.Host, job.Inputs, timeout); err != nil {
+				if ssh.IsConnectionError(err.Error()) {
+					return ensured, contacted, nil
+				}
 				log.Printf("sync: skipping job %d, HF input ensure failed on %s: %v", job.ID, job.Host, err)
 				oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
 					oplog.WithDetail("input staging failed"),
