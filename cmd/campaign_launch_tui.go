@@ -579,6 +579,19 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "s":
+		// Toggle strategy between cost and fast
+		if m.launchOpts.Strategy == bidding.StrategyFast {
+			m.launchOpts.Strategy = bidding.StrategyCost
+		} else {
+			m.launchOpts.Strategy = bidding.StrategyFast
+		}
+		// Re-fetch offers with new strategy
+		m.loading = true
+		m.groupOffers = nil
+		m.costEstimates = nil
+		return m, tea.Batch(m.spinner.Tick, m.fetchOffers())
+
 	}
 
 	return m, nil
@@ -978,9 +991,9 @@ func (m launchModel) View() string {
 	if m.showCostDetail {
 		help = "d back  q quit"
 	} else if selectedCount == 0 {
-		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter quit  q quit"
+		help = "↑/↓ navigate  space toggle  a all  n none  s strategy  d details  enter quit  q quit"
 	} else {
-		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit"
+		help = "↑/↓ navigate  space toggle  a all  n none  s strategy  d details  enter launch  q quit"
 	}
 	b.WriteString(launchDimStyle.Render(help))
 	b.WriteString("\n")
