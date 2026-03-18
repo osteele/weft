@@ -103,13 +103,8 @@ func init() {
 
 	addCampaignLaunchFlags(campaignLaunchCmd)
 
-	campaignWatchCmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Force interactive TUI display")
-	campaignWatchCmd.Flags().BoolVar(&campaignWatchPlain, "plain", false, "Force plain text output")
-	campaignWatchCmd.MarkFlagsMutuallyExclusive("tui", "plain")
-
-	campaignListCmd.Flags().BoolVar(&campaignListTUI, "tui", false, "Force interactive list with drill-down to watch")
-	campaignListCmd.Flags().BoolVar(&campaignListPlain, "plain", false, "Force plain table output")
-	campaignListCmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	addCampaignWatchFlags(campaignWatchCmd)
+	addCampaignListFlags(campaignListCmd)
 }
 
 func addCampaignLaunchFlags(cmd *cobra.Command) {
@@ -127,6 +122,18 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
+}
+
+func addCampaignWatchFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Force interactive TUI display")
+	cmd.Flags().BoolVar(&campaignWatchPlain, "plain", false, "Force plain text output")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+}
+
+func addCampaignListFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&campaignListTUI, "tui", false, "Force interactive list with drill-down to watch")
+	cmd.Flags().BoolVar(&campaignListPlain, "plain", false, "Force plain table output")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
 func runCampaignLaunch(cmd *cobra.Command, args []string) error {

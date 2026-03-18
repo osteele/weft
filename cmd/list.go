@@ -15,35 +15,26 @@ import (
 )
 
 var listCmd = &cobra.Command{
-	Use:   "list [job-id]...",
-	Short: "List and search job history",
-	Long: `Query and search job history from the local database.
+	Use:   "list [jobs|campaigns|instances|hosts|queues|artifacts] [flags]",
+	Short: "List jobs, campaigns, instances, hosts, queues, or artifacts",
+	Long: `List resources. Without a subcommand, lists jobs (same as "weft list jobs").
 
-This shows historical jobs, not queue contents. Use --queued to see only jobs
-waiting in a queue. In an interactive terminal this defaults to a paged TUI;
-otherwise it prints plain text. Use --tui or --plain to override.
-
-By default, only shows jobs from the last 7 days and hosts synced in the last 2 days.
-Use --all/-a to include older jobs and --all-hosts to include older hosts.
+Subcommands:
+  jobs        List and search job history (default)
+  campaigns   List campaigns with instance counts
+  instances   List cloud instances
+  hosts       List known hosts
+  queues      List job queues
+  artifacts   List job output artifacts
 
 Examples:
   weft list                    # Recent jobs (last 7 days)
+  weft list jobs --running     # Running jobs only
+  weft list campaigns          # All campaigns
+  weft list instances          # All cloud instances
+  weft list hosts              # Known hosts
   weft list --all              # All jobs including older
-  weft list --all-hosts        # Include jobs from older hosts
-  weft list --running          # Running jobs only
-  weft list --queued           # Jobs waiting in queue
-  weft list --failed           # Failed jobs only
-  weft list --unprocessed      # Jobs missing the processed tag
-  weft list --running --sync   # Running jobs (sync first)
-  weft list --host cool30      # Jobs on cool30
-  weft list --tag exp-012      # Jobs with tag exp-012
-  weft list --exclude-tag exp-012  # Jobs without tag exp-012
-  weft list --status unprocessed --tag exp-012
-  weft list --search training  # Search jobs
-  weft list 12::14             # List jobs 12 through 14
-  weft list 12...13            # List jobs 12 and 13
-  weft list 12,13,14           # List jobs 12, 13, and 14
-  weft list --show 42          # Job details`,
+  weft list --queued           # Jobs waiting in queue`,
 	RunE: runList,
 }
 
@@ -117,7 +108,6 @@ func addListFlags(cmd *cobra.Command) {
 }
 
 func init() {
-	listCmd.Deprecated = "use 'weft jobs list' instead"
 	rootCmd.AddCommand(listCmd)
 	addListFlags(listCmd)
 }

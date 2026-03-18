@@ -16,12 +16,12 @@ import (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch",
-	Short: "Alias for `instance watch`",
-	Long: `Alias for "weft instance watch".
+	Use:   "watch [campaign|instance|project]",
+	Short: "Watch instances, campaigns, or projects",
+	Long: `Watch active system state.
 
-This preserves the top-level shortcut while "weft instance watch" is the
-canonical command for the full active system watch.`,
+Without a subcommand, watches all cloud instances and on-prem jobs (same as
+"weft watch instance"). Use a subcommand to watch a specific resource type.`,
 	RunE: runWatchCommand,
 }
 

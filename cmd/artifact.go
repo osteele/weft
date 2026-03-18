@@ -115,13 +115,17 @@ func init() {
 	artifactCmd.AddCommand(artifactCatCmd)
 	artifactCmd.AddCommand(artifactAddCmd)
 
-	artifactListCmd.Flags().BoolVar(&artifactListSync, "sync", false, "Sync artifacts from remote before listing")
+	addArtifactListFlags(artifactListCmd)
 	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
 	artifactGetCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactGetCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
 	artifactCatCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactCatCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
+}
+
+func addArtifactListFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&artifactListSync, "sync", false, "Sync artifacts from remote before listing")
 }
 
 func runArtifactSync(cmd *cobra.Command, args []string) error {

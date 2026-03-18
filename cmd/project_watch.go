@@ -89,12 +89,16 @@ type projectWatchSyncTickMsg struct{}
 
 func init() {
 	projectCmd.AddCommand(projectWatchCmd)
-	projectWatchCmd.Flags().BoolVar(&projectWatchTUI, "tui", false, "Force interactive TUI mode")
-	projectWatchCmd.Flags().BoolVar(&projectWatchPlain, "plain", false, "Force plain text output")
-	projectWatchCmd.Flags().BoolVar(&projectWatchSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
-	projectWatchCmd.Flags().BoolVar(&projectWatchNoSync, "no-sync", false, "Skip syncing job statuses before displaying")
-	projectWatchCmd.Flags().DurationVar(&projectWatchRecent, "recent", 24*time.Hour, "Window for recent terminal jobs")
-	projectWatchCmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	addProjectWatchFlags(projectWatchCmd)
+}
+
+func addProjectWatchFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&projectWatchTUI, "tui", false, "Force interactive TUI mode")
+	cmd.Flags().BoolVar(&projectWatchPlain, "plain", false, "Force plain text output")
+	cmd.Flags().BoolVar(&projectWatchSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
+	cmd.Flags().BoolVar(&projectWatchNoSync, "no-sync", false, "Skip syncing job statuses before displaying")
+	cmd.Flags().DurationVar(&projectWatchRecent, "recent", 24*time.Hour, "Window for recent terminal jobs")
+	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
 func runProjectWatch(cmd *cobra.Command, args []string) error {
