@@ -44,11 +44,14 @@ exec flyctl ssh console \
 EOF
 chmod +x "$FLY_RSH"
 
+MACHINE_STARTED=false
 cleanup() {
     rm -rf "$TMPDIR_RSH"
-    flyctl machine stop "$WEFT_FLY_BUILDER_MACHINE" \
-        -a "$WEFT_FLY_BUILDER_APP" \
-        --wait-timeout 2m >/dev/null
+    if [ "$MACHINE_STARTED" = true ]; then
+        flyctl machine stop "$WEFT_FLY_BUILDER_MACHINE" \
+            -a "$WEFT_FLY_BUILDER_APP" \
+            --wait-timeout 2m >/dev/null
+    fi
 }
 trap cleanup EXIT
 
@@ -56,6 +59,7 @@ FLY_CONSOLE="flyctl ssh console -a ${WEFT_FLY_BUILDER_APP} --machine ${WEFT_FLY_
 
 echo "Starting Fly builder ${WEFT_FLY_BUILDER_APP}/${WEFT_FLY_BUILDER_MACHINE}..."
 flyctl machine start "$WEFT_FLY_BUILDER_MACHINE" -a "$WEFT_FLY_BUILDER_APP" >/dev/null
+MACHINE_STARTED=true
 
 echo "Preparing Fly builder..."
 # Restore tools from /data/bin (persistent volume) or install and cache them there.
@@ -116,13 +120,13 @@ rsync -az --delete \
 
 if [ -n "${ZIG_TARGET}" ]; then
     echo "Building linux/amd64 agent on Fly (zig cc -target ${ZIG_TARGET})..."
-    printf 'set -euo pipefail; ZIG_DIR=/data/zig-%s; cd %s && GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC="${ZIG_DIR}/zig cc -target %s" %s build -ldflags "-X main.version=%s" -o %s ./cmd/agent\n' \
+    printf 'set -euo pipefail; ZIG_DIR=/data/zig-%s; cd %s && GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC="${ZIG_DIR}/zig cc -target %s" %s build -buildvcs=false -ldflags "-X main.version=%s" -o %s ./cmd/agent\n' \
         "${ZIG_VERSION}" "${REMOTE_WORKTREE}" "${REMOTE_GOCACHE}" "${REMOTE_GOMODCACHE}" \
         "${ZIG_TARGET}" "${REMOTE_GO_BIN}" "${VERSION}" "${REMOTE_OUTPUT}" \
         | ${FLY_CONSOLE} -C "bash -s"
 else
     echo "Building linux/amd64 agent on Fly..."
-    printf 'cd %s && GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64 %s build -ldflags "-X main.version=%s" -o %s ./cmd/agent\n' \
+    printf 'cd %s && GOCACHE=%s GOMODCACHE=%s CGO_ENABLED=1 GOOS=linux GOARCH=amd64 %s build -buildvcs=false -ldflags "-X main.version=%s" -o %s ./cmd/agent\n' \
         "${REMOTE_WORKTREE}" "${REMOTE_GOCACHE}" "${REMOTE_GOMODCACHE}" \
         "${REMOTE_GO_BIN}" "${VERSION}" "${REMOTE_OUTPUT}" \
         | ${FLY_CONSOLE} -C "bash -s"
