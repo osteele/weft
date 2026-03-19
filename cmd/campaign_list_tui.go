@@ -470,5 +470,5 @@ func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	return watchInstances(database, instanceIDs)
+	return watchAndReport(database, true, instanceIDs)
 }

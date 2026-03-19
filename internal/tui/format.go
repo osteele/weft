@@ -60,8 +60,8 @@ func formatInlineRangeDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
-// formatCompactDuration renders a duration using up to two time units (e.g. "3m20s")
-func formatCompactDuration(d time.Duration) string {
+// FormatCompactDuration renders a duration using up to two time units (e.g. "3m20s")
+func FormatCompactDuration(d time.Duration) string {
 	if d < 0 {
 		d = -d
 	}

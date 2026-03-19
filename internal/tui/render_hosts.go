@@ -1013,7 +1013,7 @@ func (m Model) formatHostStatus(host *Host) string {
 		status := "○ offline"
 		if !host.LastCheck.IsZero() {
 			elapsed := time.Since(host.LastCheck)
-			status = fmt.Sprintf("%s %s", status, formatCompactDuration(elapsed))
+			status = fmt.Sprintf("%s %s", status, FormatCompactDuration(elapsed))
 		}
 		return status
 	case HostStatusChecking:

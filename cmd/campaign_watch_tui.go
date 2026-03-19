@@ -676,7 +676,8 @@ func scheduleCheckDone() tea.Cmd {
 }
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
-func watchInstances(database *sql.DB, instanceIDs []int64) error {
+// Returns the final list of instance IDs (which may include auto-relaunched instances).
+func watchInstances(database *sql.DB, instanceIDs []int64) ([]int64, error) {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
 	model := newWatchModel(database, instanceIDs, r2Client, cfg)
@@ -688,13 +689,18 @@ func watchInstances(database *sql.DB, instanceIDs []int64) error {
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
-		return err
+		return instanceIDs, err
 	}
 
 	if finalView := renderWatchExitSnapshot(finalModel); finalView != "" {
 		fmt.Print(finalView)
 	}
-	return nil
+
+	// Extract final instance IDs (may include auto-relaunched instances)
+	if m, ok := finalModel.(watchModel); ok {
+		return m.instanceIDs, nil
+	}
+	return instanceIDs, nil
 }
 
 func renderWatchExitSnapshot(model tea.Model) string {
