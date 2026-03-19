@@ -783,6 +783,33 @@ func TestResetJobsOnTerminalCloudInstances_SkipsCompletedInstances(t *testing.T)
 	}
 }
 
+func TestIsRetryableTermination(t *testing.T) {
+	tests := []struct {
+		name   string
+		ci     *CloudInstance
+		expect bool
+	}{
+		{"nil instance", nil, false},
+		{"running instance", &CloudInstance{Status: CloudInstanceStatusRunning}, false},
+		{"completed", &CloudInstance{Status: CloudInstanceStatusCompleted}, false},
+		{"canceled", &CloudInstance{Status: CloudInstanceStatusCancelled}, false},
+		{"preempted", &CloudInstance{Status: CloudInstanceStatusFailed, TerminationReason: TerminationReasonPreempted}, true},
+		{"infra failure", &CloudInstance{Status: CloudInstanceStatusFailed, TerminationReason: TerminationReasonInfraFailure}, true},
+		{"failed to launch (empty reason)", &CloudInstance{Status: CloudInstanceStatusFailed, TerminationReason: ""}, true},
+		{"job failure", &CloudInstance{Status: CloudInstanceStatusFailed, TerminationReason: TerminationReasonJobFailure}, false},
+		{"disk full", &CloudInstance{Status: CloudInstanceStatusFailed, TerminationReason: TerminationReasonDiskFull}, false},
+		{"canceled reason", &CloudInstance{Status: CloudInstanceStatusFailed, TerminationReason: TerminationReasonCancelled}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsRetryableTermination(tt.ci)
+			if got != tt.expect {
+				t.Errorf("IsRetryableTermination() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
 func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
 	database := setupTestDB(t)
 

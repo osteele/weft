@@ -186,17 +186,6 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			m.cancel()
 			return m, tea.Quit
-		case "r":
-			if m.retrying || m.done {
-				break
-			}
-			jobs := m.retryableJobs()
-			if len(jobs) == 0 {
-				break
-			}
-			m.retrying = true
-			m.retryResult = ""
-			return m, m.retryFailedInstances(jobs)
 		}
 
 	case watchUpdateMsg:
@@ -211,8 +200,20 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
 		m.updates[msg.instanceID] = msg.update
-		// Continue reading from the same channel
+
+		// Auto-relaunch on retryable infrastructure failure (preemption, infra failure, failed to launch)
+		ci := msg.update.CloudInstance
 		ch := m.channels[msg.instanceID]
+		if ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
+			m.retrying = true
+			m.retryResult = ""
+			return m, tea.Batch(
+				waitForUpdate(msg.instanceID, ch),
+				m.retryFailedInstances(nil),
+			)
+		}
+
+		// Continue reading from the same channel
 		return m, waitForUpdate(msg.instanceID, ch)
 
 	case watchSyncTickMsg:
@@ -293,6 +294,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchCheckDoneResultMsg:
 		if msg.allTerminal {
+			if m.retrying {
+				// Retry in progress — don't quit yet, recheck later
+				return m, scheduleCheckDone()
+			}
 			return m, refreshWatchInstancesFromDB(m.database, m.instanceIDs, true)
 		}
 		return m, scheduleCheckDone()
@@ -301,11 +306,11 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.retrying = false
 		if msg.err != nil {
 			m.retryResult = fmt.Sprintf("Retry failed: %v", msg.err)
-			return m, nil
+			return m, m.checkAllDone()
 		}
 		if len(msg.instanceIDs) == 0 {
 			m.retryResult = "Retry: no instances launched (no offers available)"
-			return m, nil
+			return m, m.checkAllDone()
 		}
 		// Add new instances to the watch view
 		var cmds []tea.Cmd
@@ -460,11 +465,19 @@ func (m watchModel) retryableJobs() []*db.Job {
 	return jobs
 }
 
-// retryFailedInstances launches new cloud instances for the given jobs.
-func (m watchModel) retryFailedInstances(jobs []*db.Job) tea.Cmd {
+// retryFailedInstances resets orphaned jobs on terminal instances and launches
+// new cloud instances for them. Runs in a background goroutine.
+func (m watchModel) retryFailedInstances(_ []*db.Job) tea.Cmd {
 	database := m.database
 	cfg := m.appConfig
 	return func() tea.Msg {
+		// Reset jobs on terminal instances so they become unplaced and eligible
+		// for relaunch. Without this, RelaunchOrphanedJobs may find no candidates
+		// if the periodic sync hasn't run yet.
+		if _, err := db.ResetJobsOnTerminalCloudInstances(database); err != nil {
+			log.Printf("auto-relaunch: reset jobs: %v", err)
+		}
+
 		if cfg == nil {
 			cfg, _ = config.Load()
 		}
@@ -482,7 +495,6 @@ func (m watchModel) retryFailedInstances(jobs []*db.Job) tea.Cmd {
 			Database:   database,
 		}
 
-		// Use RelaunchOrphanedJobs which handles grouping, offers, and launching
 		result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
 		if err != nil {
 			return retryResultMsg{err: err}
@@ -492,17 +504,6 @@ func (m watchModel) retryFailedInstances(jobs []*db.Job) tea.Cmd {
 		}
 		return retryResultMsg{instanceIDs: result.InstanceIDs}
 	}
-}
-
-// hasFailedInstances returns true if any watched instance has failed status.
-func (m watchModel) hasFailedInstances() bool {
-	for _, id := range m.instanceIDs {
-		u, ok := m.updates[id]
-		if ok && u.CloudInstance != nil && u.CloudInstance.Status == db.CloudInstanceStatusFailed {
-			return true
-		}
-	}
-	return len(m.partialErrorJobs) > 0
 }
 
 // countFailedInstances returns the number of failed instances in the watch view.
@@ -633,11 +634,7 @@ func (m watchModel) View() string {
 	}
 
 	if !m.done {
-		if m.hasFailedInstances() && !m.retrying {
-			b.WriteString(watchDimStyle.Render("r to retry failed • q to quit (instances continue in background)"))
-		} else {
-			b.WriteString(watchDimStyle.Render("q to quit (instances continue in background)"))
-		}
+		b.WriteString(watchDimStyle.Render("q to quit (instances continue in background)"))
 		b.WriteString("\n")
 	}
 

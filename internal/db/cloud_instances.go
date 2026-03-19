@@ -45,6 +45,23 @@ const (
 	TerminationReasonCancelled    = "canceled"
 )
 
+// IsRetryableTermination reports whether a failed cloud instance should be
+// automatically relaunched. Returns true for infrastructure-level failures
+// (preemption, infra failure, failed to launch) where retrying on a different
+// instance is likely to succeed. Returns false for job-level failures, disk
+// full, user cancellations, and completed instances.
+func IsRetryableTermination(ci *CloudInstance) bool {
+	if ci == nil || ci.Status != CloudInstanceStatusFailed {
+		return false
+	}
+	switch ci.TerminationReason {
+	case TerminationReasonPreempted, TerminationReasonInfraFailure, "":
+		return true
+	default:
+		return false
+	}
+}
+
 // CloudInstance represents a single cloud GPU deployment (e.g. one Vast.ai instance).
 type CloudInstance struct {
 	ID                 int64
