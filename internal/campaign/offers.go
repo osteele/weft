@@ -39,8 +39,18 @@ func intFromEnvOrDefault(key string, defaultVal int) int {
 	return defaultVal
 }
 
-func offerExclusionKey(offer cloud.Offer) string {
-	return string(offer.Provider) + ":" + offer.ProviderID
+// rankOffer selects the best offer from a slice and returns a GroupOffer.
+func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) GroupOffer {
+	result := GroupOffer{Group: group}
+	if len(offers) == 0 {
+		return result
+	}
+	_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs, strategy)
+	result.Offer = &best
+	if survivalModel != nil {
+		result.SurvivalProb = survivalModel.OfferSurvival(best)
+	}
+	return result
 }
 
 // SearchBestOfferForGroup searches cloud providers for the best offer matching a
@@ -53,18 +63,15 @@ func SearchBestOfferForGroup(
 	excludeOfferIDs map[string]struct{},
 	strategy bidding.SelectionStrategy,
 ) GroupOffer {
-	result := GroupOffer{Group: group}
-
 	offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
 	if err != nil {
-		result.Err = err
-		return result
+		return GroupOffer{Group: group, Err: err}
 	}
 
 	if len(excludeOfferIDs) > 0 {
 		filtered := offers[:0]
 		for _, offer := range offers {
-			if _, excluded := excludeOfferIDs[offerExclusionKey(offer)]; excluded {
+			if _, excluded := excludeOfferIDs[offer.Key()]; excluded {
 				continue
 			}
 			filtered = append(filtered, offer)
@@ -72,24 +79,20 @@ func SearchBestOfferForGroup(
 		offers = filtered
 	}
 
-	if len(offers) == 0 {
-		return result
-	}
-
-	_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs, strategy)
-	result.Offer = &best
-	if survivalModel != nil {
-		result.SurvivalProb = survivalModel.OfferSurvival(best)
-	}
-	return result
+	return rankOffer(group, offers, survivalModel, jobDurationHrs, setupOverheadHrs, strategy)
 }
 
-// FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
-// When survivalModel is non-nil, selects the offer with lowest expected cost (including
-// retry risk from preemption). Otherwise falls back to cheapest offer.
-// jobDurationHrs and setupOverheadHrs are used for expected cost computation.
-func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) []GroupOffer {
-	results := make([]GroupOffer, len(groups))
+// GroupRawOffers pairs an instance group with all available cloud offers (unranked).
+type GroupRawOffers struct {
+	Group  InstanceGroup
+	Offers []cloud.Offer
+	Err    error
+}
+
+// FetchGroupRawOffers searches cloud providers for all offers per group, in parallel.
+// Returns unranked offers suitable for caching and later ranking by strategy.
+func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup) []GroupRawOffers {
+	results := make([]GroupRawOffers, len(groups))
 	var wg sync.WaitGroup
 
 	for i, g := range groups {
@@ -97,10 +100,34 @@ func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalMo
 		wg.Add(1)
 		go func(idx int, group InstanceGroup) {
 			defer wg.Done()
-			results[idx] = SearchBestOfferForGroup(clients, group, survivalModel, jobDurationHrs, setupOverheadHrs, nil, strategy)
+			offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
+			results[idx] = GroupRawOffers{Group: group, Offers: offers, Err: err}
 		}(i, g)
 	}
 
 	wg.Wait()
 	return results
+}
+
+// RankGroupOffers selects the best offer per group from cached raw offers using
+// the given strategy. This is a pure computation with no API calls.
+func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) []GroupOffer {
+	results := make([]GroupOffer, len(raw))
+	for i, r := range raw {
+		if r.Err != nil {
+			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
+			continue
+		}
+		results[i] = rankOffer(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverheadHrs, strategy)
+	}
+	return results
+}
+
+// FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
+// When survivalModel is non-nil, selects the offer with lowest expected cost (including
+// retry risk from preemption). Otherwise falls back to cheapest offer.
+// jobDurationHrs and setupOverheadHrs are used for expected cost computation.
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) []GroupOffer {
+	raw := FetchGroupRawOffers(clients, groups)
+	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupOverheadHrs, strategy)
 }

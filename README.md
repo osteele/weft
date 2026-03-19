@@ -64,7 +64,7 @@ Remote Hosts (titan, atlas)
 `weft campaign launch` opens an interactive planner:
 
 ```
-Cloud GPU jobs (12 jobs, 3 GPU groups)
+Rental GPU jobs (12 jobs, 3 GPU groups)
 
   [x] A100 (3 jobs)
   [x]   42  Llama-3 70B fine-tune on RedPajama (LoRA, 3 epochs)
@@ -73,12 +73,12 @@ Cloud GPU jobs (12 jobs, 3 GPU groups)
   [-] RTX 4090 (5 jobs)
   ...
 
-── Cost Estimate ──────────────────────────────────────────────────
+── Cost Estimate (cheap) ──────────────────────────────────────────
 A100 → A100 PCIE    2/3 jobs  80GB  $0.52/hr  ~2h (1h–4h)   ~$1.04±0.52
 RTX 4090             5/5 jobs  24GB  $0.24/hr  ~5h (2h–10h)  ~$1.20±0.96
                                                    Total: ~$2.24
 
-↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit
+↑/↓ navigate  space toggle  a all  n none  s strategy  d details  enter launch  q quit
 ```
 
 #### Campaign Watch
@@ -509,14 +509,27 @@ historical data. These estimates feed into placement as:
 
 ### Cost-Optimal Cloud Bidding
 
-The `weft campaign launch` command selects the cheapest cloud instance likely to
-survive the predicted job duration. A Beta-Binomial survival model learns
-price-reliability curves from campaign history — cheaper instances fail more
-often, so the bidding system balances cost against the probability of completion.
+The `weft campaign launch` command selects cloud instances using one of three
+strategies (`--strategy`):
+
+- **cheap** (default): Minimizes expected dollar cost including retry risk from
+  preemption, using the Beta-Binomial survival model.
+- **fast**: Minimizes expected wall-clock time, weighting DLPerf by survival
+  probability.
+- **fastest**: Picks the highest raw DLPerf, ignoring the survival model entirely.
+
+A Beta-Binomial survival model learns price-reliability curves from campaign
+history — cheaper instances fail more often, so the `cheap` and `fast`
+strategies balance their objective against the probability of completion.
+
+Press `s` in the TUI to cycle between strategies.
 
 ```bash
-# Launch with automatic instance selection
+# Launch with automatic instance selection (default: cheap)
 weft campaign launch
+
+# Launch with fastest strategy
+weft campaign launch --strategy fastest
 
 # Dry-run to see the cost plan
 weft campaign launch --dry-run

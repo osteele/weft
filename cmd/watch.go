@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -128,7 +129,7 @@ func runWatchLaunchPlanner(database *sql.DB, cfg *config.Config) ([]int64, strin
 		return nil, "", fmt.Errorf("R2 not configured in ~/.config/weft/config.toml (vastai.r2)")
 	}
 
-	opts := campaign.LaunchOpts{}
+	opts := campaign.LaunchOpts{Strategy: bidding.StrategyCheap}
 	if gracePeriod := cfg.DefaultGracePeriod(); gracePeriod != "0" {
 		if d, err := time.ParseDuration(gracePeriod); err == nil {
 			opts.GracePeriodSeconds = int(d.Seconds())

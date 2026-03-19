@@ -95,7 +95,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	}
 
 	// Fetch offers
-	groupOffers := FetchGroupOffers(cfg.Clients, groups, nil, 1.0, 0.5, bidding.StrategyCost)
+	groupOffers := FetchGroupOffers(cfg.Clients, groups, nil, 1.0, 0.5, bidding.StrategyCheap)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup

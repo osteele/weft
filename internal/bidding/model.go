@@ -16,10 +16,13 @@ import (
 type SelectionStrategy string
 
 const (
-	// StrategyCost minimizes expected dollar cost (including retry risk).
-	StrategyCost SelectionStrategy = "cost"
-	// StrategyFast minimizes expected wall-clock time (prefers higher DLPerf).
+	// StrategyCheap minimizes expected dollar cost (including retry risk).
+	StrategyCheap SelectionStrategy = "cheap"
+	// StrategyFast minimizes expected wall-clock time (prefers higher DLPerf,
+	// weighted by survival probability).
 	StrategyFast SelectionStrategy = "fast"
+	// StrategyFastest picks the highest raw DLPerf, ignoring the survival model.
+	StrategyFastest SelectionStrategy = "fastest"
 )
 
 // PriceBucket classifies an offer's price relative to its GPU family.
@@ -166,12 +169,18 @@ func ExpectedWallclockTime(dlPerf, medianDLPerf, jobDurationHrs, setupOverheadHr
 }
 
 // BestOffer selects the best offer according to the given strategy.
-// When strategy is empty or StrategyCost, minimizes expected dollar cost.
-// When strategy is StrategyFast, minimizes expected wall-clock time.
-// If the model is nil, falls back to cheapest (cost) or highest DLPerf (fast).
+// StrategyCheap minimizes expected dollar cost. StrategyFast minimizes expected
+// wall-clock time (survival-weighted). StrategyFastest picks the highest raw
+// DLPerf, ignoring the survival model entirely.
+// If the model is nil, cheap falls back to lowest price and fast/fastest to highest DLPerf.
 func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs, setupOverheadHrs float64, strategy SelectionStrategy) (int, cloud.Offer) {
 	if len(offers) == 0 {
 		return -1, cloud.Offer{}
+	}
+
+	// Fastest always ignores the survival model.
+	if strategy == StrategyFastest {
+		return bestOfferByScore(offers, func(o cloud.Offer) float64 { return -o.DLPerf })
 	}
 
 	if model == nil {

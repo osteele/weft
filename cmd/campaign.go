@@ -117,7 +117,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	cmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
-	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cost", "Offer selection strategy: 'cost' (minimize expected cost) or 'fast' (minimize wall-clock time)")
+	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize wall-clock time), or 'fastest' (highest raw DLPerf)")
 	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
@@ -683,9 +683,16 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 }
 
 func parseLaunchOpts() campaign.LaunchOpts {
+	strategy := bidding.SelectionStrategy(campaignLaunchStrategy)
+	switch strategy {
+	case bidding.StrategyCheap, bidding.StrategyFast, bidding.StrategyFastest:
+	default:
+		fmt.Fprintf(os.Stderr, "warning: unknown strategy %q, using %q\n", campaignLaunchStrategy, bidding.StrategyCheap)
+		strategy = bidding.StrategyCheap
+	}
 	opts := campaign.LaunchOpts{
 		NoDonor:  campaignLaunchNoDonor,
-		Strategy: bidding.SelectionStrategy(campaignLaunchStrategy),
+		Strategy: strategy,
 	}
 	if campaignLaunchMaxSpend != "" {
 		cleaned := strings.TrimPrefix(campaignLaunchMaxSpend, "$")

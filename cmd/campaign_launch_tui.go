@@ -39,12 +39,14 @@ type listItem struct {
 }
 
 type launchModel struct {
-	groups        []campaign.InstanceGroup
-	groupOffers   []campaign.GroupOffer
-	costEstimates []campaign.CostEstimate
-	predConfig    *predictor.Config
-	overheadModel *estimate.OverheadModel
-	survivalModel *bidding.SurvivalModel
+	groups          []campaign.InstanceGroup
+	groupOffers     []campaign.GroupOffer
+	cachedRawOffers []campaign.GroupRawOffers // cached raw offers from providers
+	costEstimates   []campaign.CostEstimate
+	estimateCache   map[string][]campaign.CostEstimate // offerIdentity → estimates
+	predConfig      *predictor.Config
+	overheadModel   *estimate.OverheadModel
+	survivalModel   *bidding.SurvivalModel
 
 	items    []listItem
 	cursor   int
@@ -92,13 +94,15 @@ type reconcileDoneMsg struct {
 	groups []campaign.InstanceGroup
 }
 
-type offersLoadedMsg struct {
-	offers []campaign.GroupOffer
-	err    error
+type rawOffersLoadedMsg struct {
+	raw        []campaign.GroupRawOffers
+	err        error
+	background bool // true if this is a background refresh (don't show loading state)
 }
 
 type estimatesLoadedMsg struct {
 	estimates []campaign.CostEstimate
+	cacheKey  string // offerIdentity key for cache storage
 }
 
 type estimateProgressMsg struct {
@@ -122,6 +126,40 @@ type launchPhaseMsg struct {
 
 type launchInstanceRegisteredMsg struct {
 	instanceID int64
+}
+
+// offersMatch returns true if both slices select the same best offer per group.
+// Uses provider+ID composite key to avoid false matches across providers.
+func offersMatch(a, b []campaign.GroupOffer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		aKey := offerKey(a[i].Offer)
+		bKey := offerKey(b[i].Offer)
+		if aKey != bKey {
+			return false
+		}
+	}
+	return true
+}
+
+func offerKey(o *cloud.Offer) string {
+	if o == nil {
+		return ""
+	}
+	return o.Key()
+}
+
+// offerIdentity returns a deterministic cache key for a set of group offers,
+// based on provider+ID of each offer. Two strategies that select the same
+// offers produce the same identity.
+func offerIdentity(offers []campaign.GroupOffer) string {
+	keys := make([]string, len(offers))
+	for i, gOffer := range offers {
+		keys[i] = offerKey(gOffer.Offer)
+	}
+	return strings.Join(keys, "|")
 }
 
 // groupsChanged returns true if the groups differ in count or job composition.
@@ -200,6 +238,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		phaseCh:                 make(chan launchPhaseMsg, 16),
 		instanceCh:              make(chan launchInstanceRegisteredMsg, len(groups)),
 		gpuFilter:               gpuFilter,
+		estimateCache:           make(map[string][]campaign.CostEstimate),
 		reconciler:              campaign.NewReconciler(),
 		spinner:                 s,
 		fromWatch:               fromWatch,
@@ -211,7 +250,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 func (m launchModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.spinner.Tick,
-		m.fetchOffers(),
+		m.fetchRawOffers(false),
 	}
 	if m.reconciling {
 		cmds = append(cmds, m.runReconciliation())
@@ -255,36 +294,80 @@ func (m launchModel) runReconciliation() tea.Cmd {
 	}
 }
 
-func (m launchModel) fetchOffers() tea.Cmd {
+func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 	groups := m.groups
 	clients := m.clients
+	providerErr := m.providerErr
 	return func() tea.Msg {
 		if len(clients) == 0 {
-			if m.providerErr != nil {
-				return offersLoadedMsg{err: m.providerErr}
+			err := providerErr
+			if err == nil {
+				err = fmt.Errorf("no rental providers available")
 			}
-			return offersLoadedMsg{err: fmt.Errorf("no rental providers available")}
+			return rawOffersLoadedMsg{err: err}
 		}
-		offers := campaign.FetchGroupOffers(clients, groups, m.survivalModel, 1.0, 0.5, m.launchOpts.Strategy)
-		return offersLoadedMsg{offers: offers}
+		raw := campaign.FetchGroupRawOffers(clients, groups)
+		return rawOffersLoadedMsg{raw: raw, background: background}
+	}
+}
+
+// rankCachedOffersForStrategy ranks cached raw offers with a specific strategy.
+func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
+	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, 0.5, strategy)
+}
+
+// rankCachedOffers ranks cached raw offers with the current strategy.
+func (m launchModel) rankCachedOffers() []campaign.GroupOffer {
+	return m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
+}
+
+// allStrategies returns the three bidding strategies in cycle order.
+var allStrategies = []bidding.SelectionStrategy{
+	bidding.StrategyCheap,
+	bidding.StrategyFast,
+	bidding.StrategyFastest,
+}
+
+// preflightOtherStrategies launches background estimate fetches for strategies
+// whose offer sets are not already in the cache.
+func (m launchModel) preflightOtherStrategies() []tea.Cmd {
+	var cmds []tea.Cmd
+	for _, strat := range allStrategies {
+		if strat == m.launchOpts.Strategy {
+			continue
+		}
+		offers := m.rankCachedOffersForStrategy(strat)
+		key := offerIdentity(offers)
+		if _, ok := m.estimateCache[key]; ok {
+			continue
+		}
+		cmds = append(cmds, m.fetchEstimatesForOffers(offers, key, false))
+	}
+	return cmds
+}
+
+func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cacheKey string, reportProgress bool) tea.Cmd {
+	predConfig := m.predConfig
+	ch := m.progressCh
+	overheadModel := m.overheadModel
+	survivalModel := m.survivalModel
+	return func() tea.Msg {
+		var onProgress func(string, int, int)
+		if reportProgress {
+			onProgress = func(phase string, resolved, total int) {
+				select {
+				case ch <- estimateProgressMsg{phase: phase, resolved: resolved, total: total}:
+				default:
+				}
+			}
+		}
+		estimates := campaign.EstimateCosts(offers, predConfig, overheadModel, nil, survivalModel, onProgress)
+		return estimatesLoadedMsg{estimates: estimates, cacheKey: cacheKey}
 	}
 }
 
 func (m launchModel) fetchEstimates() tea.Cmd {
-	groupOffers := m.groupOffers
-	predConfig := m.predConfig
-	ch := m.progressCh
-	return func() tea.Msg {
-		onProgress := func(phase string, resolved, total int) {
-			// Non-blocking send — if channel is full, skip this update
-			select {
-			case ch <- estimateProgressMsg{phase: phase, resolved: resolved, total: total}:
-			default:
-			}
-		}
-		estimates := campaign.EstimateCosts(groupOffers, predConfig, m.overheadModel, nil, m.survivalModel, onProgress)
-		return estimatesLoadedMsg{estimates: estimates}
-	}
+	return m.fetchEstimatesForOffers(m.groupOffers, offerIdentity(m.groupOffers), true)
 }
 
 // waitForCampaignCreated returns a Cmd that reads the campaign ID from the channel.
@@ -401,19 +484,43 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.items, m.selected, m.cursor = buildItemsFromGroups(m.groups)
 			m.loading = true
 			m.groupOffers = nil
+			m.cachedRawOffers = nil
 			m.costEstimates = nil
-			return m, m.fetchOffers()
+			m.estimateCache = make(map[string][]campaign.CostEstimate)
+			return m, m.fetchRawOffers(false)
 		}
 		return m, nil
 
-	case offersLoadedMsg:
-		m.loading = false
+	case rawOffersLoadedMsg:
 		if msg.err != nil {
+			m.loading = false
 			m.err = msg.err
 			return m, tea.Quit
 		}
-		m.groupOffers = msg.offers
-		return m, tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh))
+		m.cachedRawOffers = msg.raw
+		oldOffers := m.groupOffers
+		m.groupOffers = m.rankCachedOffers()
+		if !msg.background {
+			m.loading = false
+		}
+		if offersMatch(oldOffers, m.groupOffers) && m.costEstimates != nil {
+			return m, nil // offers unchanged, keep cached estimates
+		}
+		// Check estimate cache for current strategy's offers
+		key := offerIdentity(m.groupOffers)
+		if cached, ok := m.estimateCache[key]; ok {
+			m.costEstimates = cached
+			// Still pre-flight other strategies
+			cmds := m.preflightOtherStrategies()
+			if len(cmds) > 0 {
+				return m, tea.Batch(cmds...)
+			}
+			return m, nil
+		}
+		m.costEstimates = nil
+		cmds := []tea.Cmd{m.fetchEstimates(), waitForProgress(m.progressCh)}
+		cmds = append(cmds, m.preflightOtherStrategies()...)
+		return m, tea.Batch(cmds...)
 
 	case estimateProgressMsg:
 		m.estimateProgress = msg
@@ -423,7 +530,11 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case estimatesLoadedMsg:
-		m.costEstimates = msg.estimates
+		m.estimateCache[msg.cacheKey] = msg.estimates
+		// Only update display if this is for the current strategy's offers
+		if msg.cacheKey == offerIdentity(m.groupOffers) {
+			m.costEstimates = msg.estimates
+		}
 		return m, nil
 
 	case campaignCreatedMsg:
@@ -580,17 +691,30 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Toggle strategy between cost and fast
-		if m.launchOpts.Strategy == bidding.StrategyFast {
-			m.launchOpts.Strategy = bidding.StrategyCost
-		} else {
-			m.launchOpts.Strategy = bidding.StrategyFast
+		// Cycle strategy: cheap → fast → fastest → cheap
+		for i, s := range allStrategies {
+			if s == m.launchOpts.Strategy {
+				m.launchOpts.Strategy = allStrategies[(i+1)%len(allStrategies)]
+				break
+			}
 		}
-		// Re-fetch offers with new strategy
+		if m.cachedRawOffers != nil {
+			// Re-rank cached offers instantly
+			m.groupOffers = m.rankCachedOffers()
+			key := offerIdentity(m.groupOffers)
+			if cached, ok := m.estimateCache[key]; ok {
+				m.costEstimates = cached
+				return m, nil
+			}
+			// Cache miss — compute estimates, refresh offers in background
+			m.costEstimates = nil
+			return m, tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh), m.fetchRawOffers(true))
+		}
+		// No cache yet — full loading
 		m.loading = true
 		m.groupOffers = nil
 		m.costEstimates = nil
-		return m, tea.Batch(m.spinner.Tick, m.fetchOffers())
+		return m, tea.Batch(m.spinner.Tick, m.fetchRawOffers(false))
 
 	}
 
@@ -640,7 +764,16 @@ func (m launchModel) groupCheckState(groupIdx int) string {
 	}
 }
 
-// selectedCountByGroup returns the number of selected jobs per group.
+// costEstimateHeader renders the section header for the cost estimate table.
+func costEstimateHeader(strategy bidding.SelectionStrategy, rough bool) string {
+	s := fmt.Sprintf("── Cost Estimate (%s)", strategy)
+	if rough {
+		s += " · rough"
+	}
+	s += " ─────────────────────────────"
+	return launchDimStyle.Render(s)
+}
+
 // renderCostTable writes a CostTable to the builder, dimming lines as needed.
 func renderCostTable(b *strings.Builder, table campaign.CostTable) {
 	for _, cl := range table.Lines {
@@ -653,6 +786,7 @@ func renderCostTable(b *strings.Builder, table campaign.CostTable) {
 	}
 }
 
+// selectedCountByGroup returns the number of selected jobs per group.
 func (m launchModel) selectedCountByGroup() []int {
 	counts := make([]int, len(m.groups))
 	for _, item := range m.items {
@@ -886,11 +1020,7 @@ func (m launchModel) View() string {
 		totalJobs += len(g.Jobs)
 	}
 
-	strategyLabel := "cost-effective"
-	if m.launchOpts.Strategy == bidding.StrategyFast {
-		strategyLabel = "fastest"
-	}
-	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Rental GPU jobs (%d jobs, %d GPU groups)  Strategy: %s", totalJobs, len(m.groups), strategyLabel)))
+	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Rental GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
 	// Show loading/reconciling status inline after the title
 	if m.reconciling || m.loading {
 		var status []string
@@ -952,20 +1082,20 @@ func (m launchModel) View() string {
 		// Cost estimate table
 		if m.costEstimates != nil {
 			b.WriteString("\n")
-			b.WriteString(launchDimStyle.Render("── Cost Estimate ─────────────────────────────────────"))
+			b.WriteString(costEstimateHeader(m.launchOpts.Strategy, false))
 			b.WriteString("\n")
 			costTable := campaign.FormatCostTableSelected(m.costEstimates, selected)
 			renderCostTable(&b, costTable)
 		} else if m.loading && m.groupOffers == nil {
 			b.WriteString("\n")
-			b.WriteString(launchDimStyle.Render("── Cost Estimate ─────────────────────────────────────"))
+			b.WriteString(costEstimateHeader(m.launchOpts.Strategy, false))
 			b.WriteString("\n")
 			b.WriteString(m.spinner.View())
 			b.WriteString(launchDimStyle.Render(" Awaiting offers..."))
 			b.WriteString("\n")
 		} else if m.groupOffers != nil {
 			b.WriteString("\n")
-			b.WriteString(launchDimStyle.Render("── Cost Estimate (rough) ─────────────────────────────"))
+			b.WriteString(costEstimateHeader(m.launchOpts.Strategy, true))
 			b.WriteString("\n")
 			costTable := campaign.FormatCostTable(m.groupOffers, selected)
 			renderCostTable(&b, costTable)

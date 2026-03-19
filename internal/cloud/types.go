@@ -35,6 +35,11 @@ type Offer struct {
 	Verified          bool
 }
 
+// Key returns a provider-qualified identifier for the offer (e.g. "vastai:12345").
+func (o Offer) Key() string {
+	return string(o.Provider) + ":" + o.ProviderID
+}
+
 // Instance represents a running cloud instance from any provider.
 type Instance struct {
 	ProviderID  string // provider-specific instance ID

@@ -66,7 +66,7 @@ func TestLaunchModelView_ShowsCostPlaceholderWhileLoadingOffers(t *testing.T) {
 }
 
 func TestLaunchModelUpdate_OffersErrorQuits(t *testing.T) {
-	model, cmd := launchModel{}.Update(offersLoadedMsg{err: fmt.Errorf("vastai: DNS lookup failed")})
+	model, cmd := launchModel{}.Update(rawOffersLoadedMsg{err: fmt.Errorf("vastai: DNS lookup failed")})
 	got := model.(launchModel)
 	if got.err == nil || !strings.Contains(got.err.Error(), "DNS lookup failed") {
 		t.Fatalf("expected stored error, got %v", got.err)

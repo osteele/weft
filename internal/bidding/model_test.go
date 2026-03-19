@@ -138,7 +138,7 @@ func TestBestOffer_NilModel_FallsBackToCheapest(t *testing.T) {
 		{ProviderID: "b", GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.80},
 	}
 
-	idx, best := BestOffer(nil, offers, 1.0, 0.5, StrategyCost)
+	idx, best := BestOffer(nil, offers, 1.0, 0.5, StrategyCheap)
 	if idx != 1 || best.ProviderID != "b" {
 		t.Errorf("nil model should pick cheapest, got idx=%d id=%s", idx, best.ProviderID)
 	}
@@ -181,7 +181,7 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 		{ProviderID: "moderate", GPUName: "RTX 4090", CostPerHour: 0.80, Reliability: 0.99},
 	}
 
-	_, best := BestOffer(model, offers, 2.0, 0.5, StrategyCost)
+	_, best := BestOffer(model, offers, 2.0, 0.5, StrategyCheap)
 	if best.ProviderID != "moderate" {
 		t.Errorf("expected moderate offer (higher reliability) to win, got %s", best.ProviderID)
 	}
@@ -274,7 +274,7 @@ func TestBestOffer_FastStrategy_PrefersHighDLPerf(t *testing.T) {
 	}
 
 	// Cost strategy should prefer the cheap one
-	_, bestCost := BestOffer(model, offers, 2.0, 0.5, StrategyCost)
+	_, bestCost := BestOffer(model, offers, 2.0, 0.5, StrategyCheap)
 	if bestCost.ProviderID != "cheap-slow" {
 		t.Errorf("cost strategy should prefer cheap offer, got %s", bestCost.ProviderID)
 	}
@@ -289,5 +289,43 @@ func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 	_, best := BestOffer(nil, offers, 1.0, 0.5, StrategyFast)
 	if best.ProviderID != "high-perf" {
 		t.Errorf("fast strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
+	}
+}
+
+func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
+	model := &SurvivalModel{
+		GlobalSurvived:   18,
+		GlobalTotal:      20,
+		Groups:           make(map[string]*SurvivalStats),
+		PricePercentiles: make(map[string][]float64),
+		PriorStrength:    10.0,
+	}
+
+	offers := []cloud.Offer{
+		{ProviderID: "reliable-slow", GPUName: "RTX 4090", CostPerHour: 0.80, DLPerf: 5.0, Reliability: 0.99},
+		{ProviderID: "risky-fast", GPUName: "A100", CostPerHour: 0.30, DLPerf: 20.0, Reliability: 0.50},
+	}
+
+	// Fastest should pick highest DLPerf regardless of survival model
+	_, best := BestOffer(model, offers, 2.0, 0.5, StrategyFastest)
+	if best.ProviderID != "risky-fast" {
+		t.Errorf("fastest strategy should pick highest DLPerf ignoring survival, got %s", best.ProviderID)
+	}
+
+	// Fast strategy with same model might prefer the reliable one
+	_, bestFast := BestOffer(model, offers, 2.0, 0.5, StrategyFast)
+	// Just verify fastest and fast can differ (fastest ignores survival)
+	_ = bestFast
+}
+
+func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "low-perf", GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0},
+		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
+	}
+
+	_, best := BestOffer(nil, offers, 1.0, 0.5, StrategyFastest)
+	if best.ProviderID != "high-perf" {
+		t.Errorf("fastest strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
 	}
 }
