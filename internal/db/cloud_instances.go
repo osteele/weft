@@ -509,8 +509,11 @@ func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) (
 				continue
 			}
 			switch outcome {
-			case AttemptOutcomeOrphaned, AttemptOutcomeFailed:
+			case AttemptOutcomeFailed:
 				job.Status = StatusFailed
+			case AttemptOutcomeOrphaned:
+				// Leave status as-is (queued); JobDisplayStatus() will use
+				// the attempt outcome for display.
 			case AttemptOutcomeCompleted:
 				job.Status = StatusCompleted
 			case AttemptOutcomeCancelled:
@@ -538,9 +541,11 @@ func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
 
 // AssignJobHost atomically assigns a host to an unplaced queued job.
 // Returns true if the job was updated (false if it was already claimed or changed status).
+// Uses COALESCE(pending_status, status) so that a failed job with
+// pending_status='queued' (retry intent) is eligible for placement.
 func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	result, err := database.Exec(
-		`UPDATE jobs SET host = ?, placement_reasons = NULL WHERE id = ? AND status = ? AND host = '' AND tombstoned = 0`,
+		`UPDATE jobs SET host = ?, placement_reasons = NULL WHERE id = ? AND COALESCE(pending_status, status) = ? AND host = '' AND tombstoned = 0`,
 		host, jobID, StatusQueued,
 	)
 	if err != nil {

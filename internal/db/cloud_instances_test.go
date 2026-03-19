@@ -326,8 +326,8 @@ func TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical(t *te
 		t.Fatalf("global status = %q, want %q", job.Status, StatusQueued)
 	}
 
-	// GetCloudInstanceJobsIncludingAttempts should show "failed" (from orphaned outcome),
-	// not "queued" (the current global status).
+	// GetCloudInstanceJobsIncludingAttempts should preserve "queued" status for
+	// orphaned jobs — JobDisplayStatus() maps queued + orphaned outcome to "orphaned".
 	jobs, err := GetCloudInstanceJobsIncludingAttempts(database, instanceID)
 	if err != nil {
 		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: %v", err)
@@ -335,8 +335,8 @@ func TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical(t *te
 	if len(jobs) != 1 {
 		t.Fatalf("got %d jobs, want 1", len(jobs))
 	}
-	if jobs[0].Status != StatusFailed {
-		t.Fatalf("display status = %q, want %q", jobs[0].Status, StatusFailed)
+	if jobs[0].Status != StatusQueued {
+		t.Fatalf("display status = %q, want %q", jobs[0].Status, StatusQueued)
 	}
 }
 

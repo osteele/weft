@@ -563,6 +563,54 @@ func TestAssignJobHost(t *testing.T) {
 	}
 }
 
+func TestAssignJobHost_FailedJob(t *testing.T) {
+	queued := StatusQueued
+	tests := []struct {
+		name         string
+		pending      *string
+		wantAssigned bool
+	}{
+		{"with pending_status=queued", &queued, true},
+		{"without pending_status", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			database := SetupTestDB(t)
+
+			jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
+			if err != nil {
+				t.Fatalf("record unplaced: %v", err)
+			}
+			if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, StatusFailed, jobID); err != nil {
+				t.Fatalf("set failed: %v", err)
+			}
+			if tt.pending != nil {
+				if err := SetPendingStatus(database, jobID, *tt.pending); err != nil {
+					t.Fatalf("set pending: %v", err)
+				}
+			}
+
+			assigned, err := AssignJobHost(database, jobID, "host-beta")
+			if err != nil {
+				t.Fatalf("assign: %v", err)
+			}
+			if assigned != tt.wantAssigned {
+				t.Errorf("assigned = %v, want %v", assigned, tt.wantAssigned)
+			}
+
+			if tt.wantAssigned {
+				job, err := GetJobByID(database, jobID)
+				if err != nil {
+					t.Fatalf("get job: %v", err)
+				}
+				if job.Host != "host-beta" {
+					t.Errorf("Host = %q, want %q", job.Host, "host-beta")
+				}
+			}
+		})
+	}
+}
+
 func TestListUnplacedJobs(t *testing.T) {
 	database := SetupTestDB(t)
 

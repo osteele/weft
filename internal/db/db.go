@@ -546,6 +546,18 @@ func createJobStateViews(db *sql.DB) error {
 				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
 			  )
 		),
+		latest_any_cloud_attempt AS (
+			SELECT jca.job_id,
+			       jca.cloud_instance_id
+			FROM job_cloud_attempts jca
+			WHERE NOT EXISTS (
+				SELECT 1
+				FROM job_cloud_attempts newer
+				WHERE newer.job_id = jca.job_id
+				  AND (newer.started_at > jca.started_at
+				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
+			)
+		),
 		base AS (
 			SELECT jobs.*,
 			       assigned_ci.status AS assigned_instance_status,
@@ -558,11 +570,17 @@ func createJobStateViews(db *sql.DB) error {
 					WHEN open_attempt.cloud_instance_id IS NOT NULL
 					     AND open_attempt.instance_status IN ('running', 'launching', 'grace')
 					THEN open_attempt.cloud_instance_id
+					-- Terminal statuses (IsTerminalStatus minus draft)
+					WHEN jobs.status IN ('completed', 'failed', 'dead', 'killed', 'canceled')
+					     AND any_attempt.cloud_instance_id IS NOT NULL
+					     AND COALESCE(jobs.pending_status, jobs.status) != 'queued'
+					THEN any_attempt.cloud_instance_id
 					ELSE NULL
 			       END AS effective_cloud_instance_id
 			FROM jobs
 			LEFT JOIN cloud_instances assigned_ci ON assigned_ci.id = jobs.cloud_instance_id
 			LEFT JOIN latest_open_cloud_attempt open_attempt ON open_attempt.job_id = jobs.id
+			LEFT JOIN latest_any_cloud_attempt any_attempt ON any_attempt.job_id = jobs.id
 		),
 		decorated AS (
 			SELECT base.*,
@@ -656,7 +674,7 @@ func createJobStateViews(db *sql.DB) error {
 			FROM job_effective_state jes
 			JOIN job_cloud_attempts jca ON jca.job_id = jes.id
 			WHERE jca.cloud_instance_id IS NOT NULL
-			  AND (jes.cloud_instance_id IS NULL OR jca.cloud_instance_id != jes.cloud_instance_id)
+			  AND (jes.raw_cloud_instance_id IS NULL OR jca.cloud_instance_id != jes.raw_cloud_instance_id)
 		)
 		SELECT %s,
 		       current_memberships.membership_cloud_instance_id,

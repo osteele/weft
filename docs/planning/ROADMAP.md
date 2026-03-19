@@ -85,3 +85,54 @@ Add to `internal/campaign/`:
 
 Add `copy_source_id`, `copy_status`, `copy_duration_s` columns to
 `cloud_instances` table.
+
+## Future: Rename status/pending_status to outcome/intent
+
+The `status` column conflates two concerns: what happened on the last attempt
+(outcome) and whether the job should be placed (intent). `pending_status` already
+serves as an intent override, but the column names don't reflect these roles.
+
+### Column mapping
+
+| Current | Proposed | Meaning |
+|---------|----------|---------|
+| `status` | `outcome` | What happened on the last attempt (`pending`, `running`, `starting`, `paused`, `completed`, `failed`, `dead`, `killed`) |
+| `pending_status` | `intent` | What the user wants next (`run`, `cancel`, `pause`, `draft`, `NULL` = accept current outcome) |
+| `last_synced_status` | `last_synced_outcome` | Three-way merge base |
+
+### New value sets
+
+**outcome**: Drop `queued`, `canceled`, `draft` (those are intents, not outcomes).
+Add `pending` for jobs that have never been attempted.
+
+**intent**: `run` (place/retry me), `cancel`, `pause`, `draft`, `NULL` (no action).
+
+### Placement query
+
+```sql
+WHERE intent = 'run' AND host = ''
+```
+
+### Display status (derived)
+
+| intent | outcome | Display |
+|--------|---------|---------|
+| `cancel` | any | "canceled" |
+| `draft` | any | "draft" |
+| `run` | `pending` | "queued" |
+| `run` | `failed` | "retry-pending" |
+| `NULL` | any | show outcome directly |
+
+### Migration sketch
+
+1. Add `outcome` and `intent` columns
+2. Backfill from existing data
+3. Audit and update all queries
+4. Drop old columns
+
+### Why defer this
+
+The behavioral fix (retry without losing failure info) is already achieved by
+making placement queries use `COALESCE(pending_status, status)`. The rename
+improves clarity but touches every file that references status — significant
+migration work for self-documenting column names.
