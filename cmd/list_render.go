@@ -130,6 +130,12 @@ func newJobListLayout(width int) jobListLayout {
 	}
 
 	columns := []jobListColumn{
+		{title: "", width: 2, value: func(job *db.Job) string {
+			if job.HasTag(db.ProcessedTag) {
+				return "✓"
+			}
+			return " "
+		}},
 		{title: "ID", width: 6, alignRight: true, value: func(job *db.Job) string { return fmt.Sprintf("%d", job.ID) }},
 	}
 

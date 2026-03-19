@@ -121,6 +121,11 @@ func init() {
 func runHostInfo(cmd *cobra.Command, args []string) error {
 	host := args[0]
 
+	// Handle rental:NN format — delegate to instance status
+	if instanceID, ok := strings.CutPrefix(host, "rental:"); ok {
+		return runInstanceStatus(cmd, []string{instanceID})
+	}
+
 	database, err := db.Open()
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

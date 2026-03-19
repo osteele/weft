@@ -4412,7 +4412,7 @@ func ListJobs(db *sql.DB, status, host string, limit int, tags []string, process
 // ListJobsWithMaxAge returns jobs, optionally filtered by status, host, and age.
 // maxAgeDays of 0 means no age limit.
 func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, tags []string, processedFilter string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_effective_state WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_effective_state"))
 	args := []interface{}{}
 
 	if status != "" {
@@ -4454,7 +4454,7 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 		return ListJobsWithMaxAge(db, status, "", limit, maxAgeDays, tags, processedFilter)
 	}
 
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_effective_state WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_effective_state"))
 	args := []interface{}{}
 
 	if status != "" {

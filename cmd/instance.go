@@ -266,22 +266,24 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Location: %s\n", ci.DataCenter)
 		}
 
-		// Agent version from R2
+		// Agent version and live status from R2 (skip for terminal instances)
 		var liveUpdate *campaign.InstanceUpdate
-		if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			versionKey := r2keys.InstanceAgentVersion(ci.ID)
-			if data, err := r2c.GetObject(ctx, versionKey); err == nil && len(data) > 0 {
-				fmt.Printf("  Agent:    %s\n", strings.TrimSpace(string(data)))
-			}
-			cancel()
+		if !campaign.IsInstanceTerminal(ci.Status) {
+			if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				versionKey := r2keys.InstanceAgentVersion(ci.ID)
+				if data, err := r2c.GetObject(ctx, versionKey); err == nil && len(data) > 0 {
+					fmt.Printf("  Agent:    %s\n", strings.TrimSpace(string(data)))
+				}
+				cancel()
 
-			watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
-			if update, ok := <-ch; ok {
-				liveUpdate = &update
+				watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
+				if update, ok := <-ch; ok {
+					liveUpdate = &update
+				}
+				watchCancel()
 			}
-			watchCancel()
 		}
 
 		obs := observeCloudInstance(ci, inst, time.Now())
