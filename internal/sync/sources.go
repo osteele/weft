@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	gosync "sync"
 	"time"
 
 	"github.com/osteele/weft/internal/config"
@@ -65,6 +66,71 @@ func DefaultExcludes() []string {
 	}
 }
 
+// gitignoreFilters returns rsync --filter directives that make rsync respect
+// git exclusion rules (.gitignore, .git/info/exclude, global gitignore).
+// The returned slice contains interleaved flag/value pairs ready to append
+// to an rsync args slice.
+func gitignoreFilters(localDir string) []string {
+	var filters []string
+
+	// Per-directory .gitignore files (dir-merge rule: applied in each subdirectory)
+	filters = append(filters, "--filter", ":- .gitignore")
+
+	// Repo-level .git/info/exclude (only if .git/ exists)
+	excludeFile := filepath.Join(localDir, ".git", "info", "exclude")
+	if _, err := os.Stat(excludeFile); err == nil {
+		filters = append(filters, "--filter", ".- "+excludeFile)
+	}
+
+	// Global gitignore
+	if globalIgnore := globalGitIgnorePath(); globalIgnore != "" {
+		filters = append(filters, "--filter", ".- "+globalIgnore)
+	}
+
+	return filters
+}
+
+var (
+	globalGitIgnoreOnce  gosync.Once
+	globalGitIgnoreValue string
+)
+
+// globalGitIgnorePath returns the absolute path to the user's global gitignore
+// file, or "" if none exists or git is not installed. The result is cached
+// since the global gitignore path is constant for the process lifetime.
+func globalGitIgnorePath() string {
+	globalGitIgnoreOnce.Do(func() {
+		globalGitIgnoreValue = resolveGlobalGitIgnorePath()
+	})
+	return globalGitIgnoreValue
+}
+
+func resolveGlobalGitIgnorePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	if out, err := exec.Command("git", "config", "--global", "core.excludesFile").Output(); err == nil {
+		p := strings.TrimSpace(string(out))
+		if p != "" {
+			p = ExpandTildeDir(p)
+			if p != "" {
+				if _, err := os.Stat(p); err == nil {
+					return p
+				}
+			}
+		}
+	}
+
+	// Fallback: XDG default location
+	defaultPath := filepath.Join(home, ".config", "git", "ignore")
+	if _, err := os.Stat(defaultPath); err == nil {
+		return defaultPath
+	}
+	return ""
+}
+
 // rsyncSrcDst returns the source and destination arguments for rsync,
 // ensuring trailing slashes so rsync syncs contents, not the directory itself.
 func rsyncSrcDst(host, localDir, remoteDir string) (src, dst string) {
@@ -85,6 +151,9 @@ func BuildRsyncArgsWithOptions(host, localDir, remoteDir string, excludes []stri
 	args := []string{"-az"}
 	if delete {
 		args = append(args, "--delete")
+	}
+	if excludes != nil {
+		args = append(args, gitignoreFilters(localDir)...)
 	}
 	for _, pattern := range excludes {
 		args = append(args, "--exclude", pattern)
@@ -261,6 +330,7 @@ func SyncSourcesWithSSH(target, localDir, remoteDir, sshCmd string) error {
 	excludes := sourceExcludes(localDir)
 
 	args := []string{"-az", "--delete", "-e", sshCmd}
+	args = append(args, gitignoreFilters(localDir)...)
 	for _, pattern := range excludes {
 		args = append(args, "--exclude", pattern)
 	}

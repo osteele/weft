@@ -117,6 +117,86 @@ func TestBuildRsyncArgs(t *testing.T) {
 	}
 }
 
+func TestGitignoreFiltersAlwaysHasPerDirRule(t *testing.T) {
+	tmpDir := t.TempDir()
+	filters := gitignoreFilters(tmpDir)
+
+	// The per-directory .gitignore dir-merge rule should always be present
+	found := false
+	for i := 0; i+1 < len(filters); i += 2 {
+		if filters[i] == "--filter" && filters[i+1] == ":- .gitignore" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("gitignoreFilters missing per-directory .gitignore rule, got: %v", filters)
+	}
+}
+
+func TestGitignoreFiltersWithGitInfoExclude(t *testing.T) {
+	tmpDir := t.TempDir()
+	infoDir := filepath.Join(tmpDir, ".git", "info")
+	if err := os.MkdirAll(infoDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	excludeFile := filepath.Join(infoDir, "exclude")
+	if err := os.WriteFile(excludeFile, []byte("# test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	filters := gitignoreFilters(tmpDir)
+
+	// Should contain a filter pointing to the exclude file
+	found := false
+	for i := 0; i+1 < len(filters); i += 2 {
+		if filters[i] == "--filter" && filters[i+1] == ".- "+excludeFile {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("gitignoreFilters missing .git/info/exclude rule, got: %v", filters)
+	}
+}
+
+func TestGitignoreFiltersNoGitDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	filters := gitignoreFilters(tmpDir)
+
+	for _, f := range filters {
+		if strings.Contains(f, "info/exclude") {
+			t.Errorf("gitignoreFilters should not reference info/exclude without .git dir, got: %v", filters)
+		}
+	}
+}
+
+func TestBuildRsyncArgsFiltersBeforeExcludes(t *testing.T) {
+	tmpDir := t.TempDir()
+	args := BuildRsyncArgsWithOptions("host", tmpDir, "~/remote", []string{".git"}, true)
+
+	firstFilter := -1
+	firstExclude := -1
+	for i, arg := range args {
+		if arg == "--filter" && firstFilter == -1 {
+			firstFilter = i
+		}
+		if arg == "--exclude" && firstExclude == -1 {
+			firstExclude = i
+		}
+	}
+
+	if firstFilter == -1 {
+		t.Fatal("no --filter found in rsync args")
+	}
+	if firstExclude == -1 {
+		t.Fatal("no --exclude found in rsync args")
+	}
+	if firstFilter > firstExclude {
+		t.Errorf("--filter (index %d) should come before --exclude (index %d)", firstFilter, firstExclude)
+	}
+}
+
 func TestBuildExtraPathRsyncArgs(t *testing.T) {
 	tests := []struct {
 		name      string
