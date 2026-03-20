@@ -78,7 +78,7 @@ func parseHFCacheDetailedOutput(output string, host string) []HostDataEntry {
 		parts := strings.Split(path, "/")
 		dirName := parts[len(parts)-1]
 
-		asset, ok := parseHFDirName(dirName)
+		asset, ok := ParseHFDirName(dirName)
 		if !ok {
 			continue
 		}
@@ -105,16 +105,16 @@ func parseHFCacheOutput(output string) []DataAsset {
 		parts := strings.Split(line, "/")
 		dirName := parts[len(parts)-1]
 
-		if asset, ok := parseHFDirName(dirName); ok {
+		if asset, ok := ParseHFDirName(dirName); ok {
 			assets = append(assets, asset)
 		}
 	}
 	return assets
 }
 
-// parseHFDirName parses a HuggingFace cache directory name like
+// ParseHFDirName parses a HuggingFace cache directory name like
 // "models--meta-llama--Llama-3-8B" into a DataAsset.
-func parseHFDirName(name string) (DataAsset, bool) {
+func ParseHFDirName(name string) (DataAsset, bool) {
 	if strings.HasPrefix(name, "models--") {
 		id := strings.TrimPrefix(name, "models--")
 		id = hfDirToID(id)

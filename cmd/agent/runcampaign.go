@@ -151,7 +151,12 @@ func runCampaign(args []string) {
 			terminalStatus = db.CloudInstanceStatusFailed
 			terminationReason = db.TerminationReasonJobFailure
 		}
-		selfDestruct(r2Bucket, instanceID, manifest.SelfDestructCmd, terminalStatus, terminationReason, currentPhase.Get(), 0)
+		cm := collectCompletionManifest(logDir, manifest.Jobs)
+		selfDestruct(selfDestructOpts{
+			Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: manifest.SelfDestructCmd,
+			TerminalStatus: terminalStatus, TerminationReason: terminationReason,
+			Phase: currentPhase.Get(), CompletionManifest: cm,
+		})
 	}
 }
 

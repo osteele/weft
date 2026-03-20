@@ -3,6 +3,7 @@ package campaign
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"math"
 	"os"
@@ -61,8 +62,15 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 		return diskGB
 	}
 
+	// Merge declared inputs with observed inputs from prior runs of same commands
+	allInputs := group.AllInputs()
+	if localDB != nil {
+		observed := lookupObservedInputs(group, localDB)
+		allInputs = mergeStringSlices(allInputs, observed)
+	}
+
 	var hfBytes int64
-	totalBytes, err := dataloc.ResolveInputSizes(group.AllInputs(), localDB)
+	totalBytes, err := dataloc.ResolveInputSizes(allInputs, localDB)
 	if err != nil {
 		log.Printf("warning: resolving input sizes: %v; continuing without HF input sizes", err)
 	} else {
@@ -210,6 +218,78 @@ func estimateGroupUVBytes(sourceDirs []string, r2Client *r2.Client) int64 {
 		return 0
 	}
 	return estimate.EstimateUVSyncBytes(manifests)
+}
+
+// lookupObservedInputs queries the DB for observed_inputs from prior runs of
+// jobs with matching command signatures. This creates a feedback loop: if a
+// previous run failed with disk-full and undeclared HF models were detected,
+// future runs of the same command automatically account for those models.
+func lookupObservedInputs(group InstanceGroup, localDB *sql.DB) []string {
+	if localDB == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var result []string
+	// Collect unique command signatures to query
+	sigSet := make(map[string]string) // sig -> project
+	for _, job := range group.Jobs {
+		sig, ok := diskHistorySignature(job)
+		if !ok {
+			continue
+		}
+		sigSet[sig] = job.Project
+	}
+	for _, project := range sigSet {
+		rows, err := localDB.Query(
+			`SELECT command, observed_inputs FROM jobs WHERE project = ? AND observed_inputs IS NOT NULL AND observed_inputs != ''`,
+			project,
+		)
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var command, obsJSON string
+			if rows.Scan(&command, &obsJSON) != nil {
+				continue
+			}
+			rowSig, ok := commandHistorySignature(project, command)
+			if !ok {
+				continue
+			}
+			if _, matches := sigSet[rowSig]; !matches {
+				continue
+			}
+			var obs []string
+			if json.Unmarshal([]byte(obsJSON), &obs) != nil {
+				continue
+			}
+			for _, input := range obs {
+				if !seen[input] {
+					seen[input] = true
+					result = append(result, input)
+				}
+			}
+		}
+		rows.Close()
+	}
+	return result
+}
+
+func mergeStringSlices(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a))
+	for _, s := range a {
+		seen[s] = true
+	}
+	merged := append([]string(nil), a...)
+	for _, s := range b {
+		if !seen[s] {
+			merged = append(merged, s)
+		}
+	}
+	return merged
 }
 
 // hasCUDAPackages checks whether any pyproject.toml in the given directories

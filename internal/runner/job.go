@@ -392,6 +392,56 @@ type CompletionRecord struct {
 	ResultsUpload    *UploadSummary      `json:"results_upload,omitempty"`
 }
 
+// InstanceCompletionManifest is the structured payload written to the R2
+// completion marker (campaigns/<instanceID>/.complete) when an instance
+// self-destructs. It replaces the legacy bare exit-code string ("0") and
+// allows the reconciler to verify that job results were actually uploaded.
+type InstanceCompletionManifest struct {
+	ExitCode        int                    `json:"exit_code"`
+	CompletedAtUnix int64                  `json:"completed_at_unix"`
+	Jobs            []JobCompletionSummary `json:"jobs"`
+}
+
+// JobCompletionSummary is a per-job entry inside an InstanceCompletionManifest.
+type JobCompletionSummary struct {
+	JobID        int64  `json:"job_id"`
+	ExitCode     int    `json:"exit_code"`
+	UploadStatus string `json:"upload_status"` // "ok", "partial", "failed", ""
+	OutputBytes  int64  `json:"output_bytes,omitempty"`
+}
+
+// ParseCompletionMarker parses the R2 completion marker content, handling both
+// the legacy bare exit-code format ("0") and the new JSON manifest format.
+// Returns nil for legacy markers.
+func ParseCompletionMarker(data string) (*InstanceCompletionManifest, error) {
+	data = strings.TrimSpace(data)
+	if data == "" {
+		return nil, nil
+	}
+	// Legacy format: bare integer exit code
+	if len(data) <= 3 && data[0] != '{' {
+		return nil, nil
+	}
+	var m InstanceCompletionManifest
+	if err := json.Unmarshal([]byte(data), &m); err != nil {
+		return nil, fmt.Errorf("parse completion manifest: %w", err)
+	}
+	return &m, nil
+}
+
+// AllUploadsOK returns true if every job in the manifest has upload_status "ok".
+func (m *InstanceCompletionManifest) AllUploadsOK() bool {
+	if m == nil || len(m.Jobs) == 0 {
+		return false
+	}
+	for _, j := range m.Jobs {
+		if j.UploadStatus != "ok" {
+			return false
+		}
+	}
+	return true
+}
+
 // WriteCompletionRecord writes a structured completion.json for post-mortem analysis.
 func WriteCompletionRecord(paths JobPaths, ei ExitInfo, rs RunningJobState, killReason, failureReason string, startTime, endTime int64, outputFiles []OutputFile) error {
 	peakRSS := rs.RusagePeakRSS

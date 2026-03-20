@@ -243,6 +243,14 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if ci.TerminationReason != "" {
 			fmt.Printf("  Terminated: %s\n", ci.TerminationReason)
 		}
+		if ci.Status == db.CloudInstanceStatusCompleted {
+			switch {
+			case ci.ResultsVerified != nil && !*ci.ResultsVerified:
+				fmt.Printf("  Results: UNVERIFIED (upload was partial/failed)\n")
+			case ci.ResultsVerified != nil && *ci.ResultsVerified:
+				fmt.Printf("  Results: verified\n")
+			}
+		}
 		fmt.Printf("  Provider: %s\n", ci.Provider)
 
 		// Cloud instance info

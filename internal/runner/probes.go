@@ -29,8 +29,8 @@ func ProbeCacheSizesForEnv(env []string) CacheProbe {
 		home = ExpandTilde("~/")
 	}
 	probe := CacheProbe{
-		HFBytes: dirSizeBytes(resolveHFCacheProbeDir(env, home)),
-		UVBytes: dirSizeBytes(filepath.Join(home, ".cache", "uv")),
+		HFBytes: DirSizeBytes(resolveHFCacheProbeDir(env, home)),
+		UVBytes: DirSizeBytes(filepath.Join(home, ".cache", "uv")),
 	}
 	probe.DiskUsedBytes, probe.DiskTotalBytes = ProbeDiskUsage()
 	return probe
@@ -69,9 +69,9 @@ func ProbeDiskUsage() (used, total int64) {
 	return total - free, total
 }
 
-// dirSizeBytes returns the total size of all regular files under dir.
+// DirSizeBytes returns the total size of all regular files under dir.
 // Returns 0 if the directory does not exist or cannot be read.
-func dirSizeBytes(dir string) int64 {
+func DirSizeBytes(dir string) int64 {
 	var total int64
 	filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

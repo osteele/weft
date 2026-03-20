@@ -131,7 +131,11 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		if time.Now().After(deadline) {
 			fmt.Println("Grace period expired. Self-destructing.")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			selfDestruct(r2Bucket, instanceID, selfDestructCmd, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure, "destroying", 0)
+			selfDestruct(selfDestructOpts{
+				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
+				TerminalStatus: db.CloudInstanceStatusFailed, TerminationReason: db.TerminationReasonJobFailure,
+				Phase: "destroying",
+			})
 			return
 		}
 
@@ -140,7 +144,11 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			fmt.Println("Release signal received. Self-destructing.")
 			r2Delete(r2Bucket, prefix+"/release")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			selfDestruct(r2Bucket, instanceID, selfDestructCmd, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure, "destroying", 0)
+			selfDestruct(selfDestructOpts{
+				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
+				TerminalStatus: db.CloudInstanceStatusFailed, TerminationReason: db.TerminationReasonJobFailure,
+				Phase: "destroying",
+			})
 			return
 		}
 
@@ -201,7 +209,12 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			// All jobs succeeded — self-destruct
 			fmt.Println("All resubmitted jobs succeeded. Self-destructing.")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			selfDestruct(r2Bucket, instanceID, selfDestructCmd, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted, "destroying", 0)
+			cm := collectCompletionManifest(logDir, payload.Jobs)
+			selfDestruct(selfDestructOpts{
+				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
+				TerminalStatus: db.CloudInstanceStatusCompleted, TerminationReason: db.TerminationReasonCompleted,
+				Phase: "destroying", CompletionManifest: cm,
+			})
 			return
 		}
 
@@ -260,27 +273,44 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 	return summary
 }
 
-func selfDestruct(bucket, instanceID, selfDestructCmd, terminalStatus, terminationReason, phase string, jobID int64) {
-	instanceIDInt, _ := strconv.ParseInt(instanceID, 10, 64)
+type selfDestructOpts struct {
+	Bucket             string
+	InstanceID         string
+	SelfDestructCmd    string
+	TerminalStatus     string
+	TerminationReason  string
+	Phase              string
+	JobID              int64
+	CompletionManifest *runner.InstanceCompletionManifest
+}
+
+func selfDestruct(opts selfDestructOpts) {
+	instanceIDInt, _ := strconv.ParseInt(opts.InstanceID, 10, 64)
 	phaseKey := r2keys.InstancePhase(instanceIDInt)
 	marker := &instanceintent.Marker{
-		TerminalStatus:    terminalStatus,
-		TerminationReason: terminationReason,
-		Phase:             phase,
-		JobID:             jobID,
+		TerminalStatus:    opts.TerminalStatus,
+		TerminationReason: opts.TerminationReason,
+		Phase:             opts.Phase,
+		JobID:             opts.JobID,
 		RequestedAtUnix:   time.Now().Unix(),
 	}
 
-	// Write completion marker and phase
-	r2Put(bucket, r2keys.CampaignComplete(instanceIDInt), "0")
-	writePhase(bucket, phaseKey, "destroying")
-	writeTerminationIntent(bucket, instanceIDInt, *marker)
+	// Write completion marker: JSON manifest if available, bare "0" as fallback
+	completionPayload := "0"
+	if opts.CompletionManifest != nil {
+		if data, err := json.Marshal(opts.CompletionManifest); err == nil {
+			completionPayload = string(data)
+		}
+	}
+	r2Put(opts.Bucket, r2keys.CampaignComplete(instanceIDInt), completionPayload)
+	writePhase(opts.Bucket, phaseKey, "destroying")
+	writeTerminationIntent(opts.Bucket, instanceIDInt, *marker)
 
 	// Clean up grace keys
 	prefix := r2keys.GracePrefix(instanceIDInt)
-	r2Delete(bucket, prefix+"/status")
+	r2Delete(opts.Bucket, prefix+"/status")
 
-	executeSelfDestruct(bucket, instanceIDInt, selfDestructCmd, marker)
+	executeSelfDestruct(opts.Bucket, instanceIDInt, opts.SelfDestructCmd, marker)
 }
 
 func writeTerminationIntent(bucket string, instanceID int64, marker instanceintent.Marker) {

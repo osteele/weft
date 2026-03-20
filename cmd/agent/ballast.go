@@ -13,10 +13,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/runner"
 )
 
 const (
@@ -36,6 +38,13 @@ type diskFailureReport struct {
 	FreeBytesAfterDelete int64             `json:"free_bytes_after_delete"`
 	DFHuman              string            `json:"df_h,omitempty"`
 	DirectoryUsage       map[string]string `json:"directory_usage,omitempty"`
+	HFCacheModels        []hfCacheEntry    `json:"hf_cache_models,omitempty"`
+}
+
+// hfCacheEntry records a single model or dataset found in the HuggingFace cache.
+type hfCacheEntry struct {
+	AssetID   string `json:"asset_id"` // e.g. "hf:EleutherAI/pythia-1.4b"
+	SizeBytes int64  `json:"size_bytes"`
 }
 
 func startDiskMonitor(r2Bucket string, instanceID int64, diskPath, logDir, phaseKey, selfDestructCmd string, getPhase func() string, setPhase func(string)) func() {
@@ -201,7 +210,34 @@ func collectDiskFailureReport(ballastDir, ballastPath, phase string, jobID int64
 			report.DirectoryUsage[label] = out
 		}
 	}
+	report.HFCacheModels = scanHFCache(filepath.Join(home, ".cache", "huggingface", "hub"))
 	return report
+}
+
+// scanHFCache lists HuggingFace model/dataset directories and their sizes.
+// Uses dataloc.ParseHFDirName for directory name parsing to stay consistent
+// with the remote HF cache scanner.
+func scanHFCache(hubDir string) []hfCacheEntry {
+	entries, err := os.ReadDir(hubDir)
+	if err != nil {
+		return nil
+	}
+	var result []hfCacheEntry
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		asset, ok := dataloc.ParseHFDirName(entry.Name())
+		if !ok {
+			continue
+		}
+		dirPath := filepath.Join(hubDir, entry.Name())
+		result = append(result, hfCacheEntry{
+			AssetID:   asset.Ref(),
+			SizeBytes: runner.DirSizeBytes(dirPath),
+		})
+	}
+	return result
 }
 
 func commandOutput(timeout time.Duration, name string, args ...string) (string, error) {

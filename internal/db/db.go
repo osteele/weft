@@ -63,6 +63,7 @@ type Job struct {
 	Tags                 []string
 	DepSpec              string   // Dependency specification (e.g., "42" or "42+" for after-any)
 	Inputs               []string // Data asset refs consumed by this job (e.g., "hf:meta-llama/Llama-3-8B")
+	ObservedInputs       []string // Data inputs discovered post-mortem (e.g., from disk-full HF cache scan)
 	Outputs              []string // Data asset refs produced by this job
 	OutputDirs           []string // Convention-based output directories from .weft.toml
 	Produces             []string // Artifact specs this job produces (e.g., "output/model.pt" or "output/model.pt:100")
@@ -253,15 +254,15 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
 
 const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
-const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
+const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
-const cloudInstanceTableColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json`
+const cloudInstanceTableColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified`
 
 const jobCloudAttemptTableColumns = `id, job_id, cloud_instance_id, started_at, ended_at, outcome`
 
@@ -390,6 +391,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		tags TEXT,
 		dep_spec TEXT,
 		inputs TEXT,
+		observed_inputs TEXT,
 		outputs TEXT,
 		output_dirs TEXT,
 		produces TEXT,
@@ -461,6 +463,7 @@ func createCloudInstancesTableSQL(table string, ifNotExists bool) string {
 		provisioned_inputs TEXT,
 		termination_requested_at INTEGER,
 		termination_intent_json TEXT,
+		results_verified INTEGER,
 		CONSTRAINT cloud_instances_termination_reason_check CHECK (%s),
 		CONSTRAINT cloud_instances_status_check CHECK (%s)
 	)`, ifClause, table,
@@ -1592,6 +1595,9 @@ func initSchema(db *sql.DB) error {
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN inputs TEXT`); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN observed_inputs TEXT`); err != nil {
+		return err
+	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN outputs TEXT`); err != nil {
 		return err
 	}
@@ -1975,6 +1981,9 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN termination_intent_json TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN results_verified INTEGER`); err != nil {
 		return err
 	}
 
@@ -3359,6 +3368,13 @@ func SetJobInputs(db *sql.DB, jobID int64, inputs []string) error {
 	return setJobStringSlice(db, jobID, "inputs", inputs)
 }
 
+// SetJobObservedInputs sets the post-mortem observed inputs for a job.
+// These are data inputs discovered after a failure (e.g., HF models found
+// in the cache during a disk-full event that weren't declared via --input).
+func SetJobObservedInputs(db *sql.DB, jobID int64, inputs []string) error {
+	return setJobStringSlice(db, jobID, "observed_inputs", inputs)
+}
+
 // SetJobOutputs sets the data asset outputs for a job (stored as JSON array).
 func SetJobOutputs(db *sql.DB, jobID int64, outputs []string) error {
 	return setJobStringSlice(db, jobID, "outputs", outputs)
@@ -3838,6 +3854,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var tags sql.NullString
 	var depSpec sql.NullString
 	var inputs sql.NullString
+	var observedInputs sql.NullString
 	var outputs sql.NullString
 	var outputDirs sql.NullString
 	var produces sql.NullString
@@ -3863,7 +3880,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var campaignJobIndex sql.NullInt64
 	var latestRunID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -3921,6 +3938,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 		j.DepSpec = depSpec.String
 	}
 	j.Inputs = decodeStringSlice(inputs)
+	j.ObservedInputs = decodeStringSlice(observedInputs)
 	j.Outputs = decodeStringSlice(outputs)
 	j.OutputDirs = decodeStringSlice(outputDirs)
 	j.Produces = decodeStringSlice(produces)
@@ -4253,6 +4271,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var tags sql.NullString
 		var depSpec sql.NullString
 		var inputs sql.NullString
+		var observedInputs sql.NullString
 		var outputs sql.NullString
 		var outputDirs sql.NullString
 		var produces sql.NullString
@@ -4278,7 +4297,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var campaignJobIndex sql.NullInt64
 		var latestRunID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 		if err != nil {
 			return nil, err
 		}
@@ -4333,6 +4352,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 			j.DepSpec = depSpec.String
 		}
 		j.Inputs = decodeStringSlice(inputs)
+		j.ObservedInputs = decodeStringSlice(observedInputs)
 		j.Outputs = decodeStringSlice(outputs)
 		j.OutputDirs = decodeStringSlice(outputDirs)
 		j.Produces = decodeStringSlice(produces)

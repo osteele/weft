@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/runner"
 )
 
 // ReconcileResult holds the outcome of a reconciliation pass.
@@ -253,7 +254,18 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
 		log.Printf("reconcile: instance %d action=%d (%s)", ci.ID, action.Kind, action.StallMessage)
-		return ExecuteAction(database, client, ci, action)
+		reconciled, terminated := ExecuteAction(database, client, ci, action)
+		if terminated && r2Client != nil {
+			// Verify results for completed instances via the R2 completion manifest
+			if action.TerminalStatus == db.CloudInstanceStatusCompleted {
+				verifyInstanceResults(database, r2Client, ci.ID)
+			}
+			// Extract undeclared HF models from disk-full failures
+			if action.TerminationReason == db.TerminationReasonDiskFull {
+				ProcessDiskFailureReport(r2Client, ci.ID, database)
+			}
+		}
+		return reconciled, terminated
 	}
 
 	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
@@ -264,6 +276,24 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	return false, false
+}
+
+// verifyInstanceResults reads the R2 completion manifest for a completed instance
+// and sets the results_verified flag based on upload statuses.
+func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int64) {
+	manifest := readR2CompletionManifest(r2Client, instanceID)
+	if manifest == nil {
+		// Legacy marker or missing — leave results_verified as NULL
+		return
+	}
+	verified := manifest.AllUploadsOK()
+	if err := db.UpdateCloudInstanceResultsVerified(database, instanceID, verified); err != nil {
+		log.Printf("reconcile: update results_verified for instance %d: %v", instanceID, err)
+		return
+	}
+	if !verified {
+		log.Printf("reconcile: instance %d completed but uploads were partial/failed", instanceID)
+	}
 }
 
 func markTerminationIntentDestroyed(database *sql.DB, ci *db.CloudInstance, confirmedAt time.Time) bool {
@@ -505,6 +535,27 @@ func hasR2CompletionMarker(r2Client *r2.Client, instanceID int64) (exists bool) 
 	key := r2keys.CampaignComplete(instanceID)
 	exists, err := r2Client.ObjectExists(context.Background(), key)
 	return err == nil && exists
+}
+
+// readR2CompletionManifest reads and parses the R2 completion marker.
+// Returns nil if the marker doesn't exist, is empty, or uses the legacy bare
+// exit-code format. Only returns a manifest for the new JSON format.
+func readR2CompletionManifest(r2Client *r2.Client, instanceID int64) *runner.InstanceCompletionManifest {
+	if r2Client == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	data := fetchR2Marker(ctx, r2Client, r2keys.CampaignComplete(instanceID))
+	if data == "" {
+		return nil
+	}
+	m, err := runner.ParseCompletionMarker(data)
+	if err != nil {
+		log.Printf("reconcile: parse completion manifest for instance %d: %v", instanceID, err)
+		return nil
+	}
+	return m
 }
 
 func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, instanceID int64) (_ *instanceintent.Marker, err error) {

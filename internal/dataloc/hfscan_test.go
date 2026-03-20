@@ -22,13 +22,13 @@ func TestParseHFDirName(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := parseHFDirName(tt.name)
+			got, ok := ParseHFDirName(tt.name)
 			if ok != tt.wantOK {
-				t.Errorf("parseHFDirName(%q) ok = %v, want %v", tt.name, ok, tt.wantOK)
+				t.Errorf("ParseHFDirName(%q) ok = %v, want %v", tt.name, ok, tt.wantOK)
 				return
 			}
 			if ok && (got.Kind != tt.want.Kind || got.ID != tt.want.ID) {
-				t.Errorf("parseHFDirName(%q) = %v, want %v", tt.name, got, tt.want)
+				t.Errorf("ParseHFDirName(%q) = %v, want %v", tt.name, got, tt.want)
 			}
 		})
 	}

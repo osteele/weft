@@ -48,6 +48,22 @@ func ParseAssetRef(ref string) (DataAsset, bool) {
 	return DataAsset{}, false
 }
 
+// Ref returns the string reference form of a DataAsset (e.g., "hf:meta-llama/Llama-3-8B").
+func (a DataAsset) Ref() string {
+	switch a.Kind {
+	case AssetHFModel:
+		return "hf:" + a.ID
+	case AssetHFDataset:
+		return "hf-dataset:" + a.ID
+	case AssetCheckpoint:
+		return "checkpoint:" + a.ID
+	case AssetJobOutput:
+		return "job-output:" + a.ID
+	default:
+		return string(a.Kind) + ":" + a.ID
+	}
+}
+
 // InputRef represents a parsed --input value, which is either a data asset
 // reference (e.g., "hf:meta-llama/Llama-3-8B") or a local file path
 // (e.g., "~/sources/vidur/data/").

@@ -127,6 +127,7 @@ func buildCampaignDiagnosisReport(database *sql.DB, campaignID int64) (*campaign
 
 func buildInstanceDiagnosis(inst *db.CloudInstance, jobs []*db.Job, outcomes map[int64]string) instanceDiagnosis {
 	result := instanceDiagnosis{Instance: inst}
+	undeclaredInputCount := 0
 	for _, job := range jobs {
 		if summary := summarizeJobIssue(job, outcomes[job.ID]); summary != "" {
 			result.JobFindings = append(result.JobFindings, jobFinding{
@@ -134,12 +135,22 @@ func buildInstanceDiagnosis(inst *db.CloudInstance, jobs []*db.Job, outcomes map
 				Summary: summary,
 			})
 		}
+		// For disk-full failures, report undeclared HF models
+		if inst.TerminationReason == db.TerminationReasonDiskFull && len(job.ObservedInputs) > 0 {
+			undeclaredInputCount += len(job.ObservedInputs)
+			for _, input := range job.ObservedInputs {
+				result.JobFindings = append(result.JobFindings, jobFinding{
+					JobID:   job.ID,
+					Summary: fmt.Sprintf("undeclared input %s — re-submit with --input %s", input, input),
+				})
+			}
+		}
 	}
-	result.Summary = summarizeInstanceCause(inst, result.JobFindings, outcomes)
+	result.Summary = summarizeInstanceCause(inst, result.JobFindings, outcomes, undeclaredInputCount)
 	return result
 }
 
-func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outcomes map[int64]string) string {
+func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outcomes map[int64]string, undeclaredInputCount int) string {
 	switch inst.TerminationReason {
 	case db.TerminationReasonPreempted:
 		return "provider terminated/preempted the instance"
@@ -149,6 +160,9 @@ func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outco
 		}
 		return "instance setup or infrastructure failed"
 	case db.TerminationReasonDiskFull:
+		if undeclaredInputCount > 0 {
+			return fmt.Sprintf("instance disk filled — %d undeclared HF model(s) found in cache", undeclaredInputCount)
+		}
 		return "instance disk filled during execution"
 	case db.TerminationReasonJobFailure:
 		if len(findings) == 1 {
@@ -161,6 +175,9 @@ func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outco
 	case db.TerminationReasonCancelled:
 		return "terminated by user"
 	case db.TerminationReasonCompleted:
+		if inst.ResultsVerified != nil && !*inst.ResultsVerified {
+			return "completed but results upload was partial/failed"
+		}
 		return "completed successfully"
 	}
 

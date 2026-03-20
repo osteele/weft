@@ -22,7 +22,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		grace_period_seconds, grace_started_at, grace_deadline,
 		termination_reason,
 		disk_gb, provisioned_inputs,
-		termination_requested_at, termination_intent_json`
+		termination_requested_at, termination_intent_json,
+		results_verified`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -95,6 +96,10 @@ type CloudInstance struct {
 	TerminationReason      string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "canceled"
 	TerminationRequestedAt *int64
 	TerminationIntent      *instanceintent.Marker
+
+	// Result verification (set by reconciler from R2 completion manifest)
+	// nil = not checked (legacy marker), true = all uploads OK, false = uploads partial/failed
+	ResultsVerified *bool
 
 	// Instance capacity (for reuse matching)
 	DiskGB            int      // Actual disk space from offer (may exceed requested)
@@ -251,6 +256,12 @@ func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string, terminationR
 		_, err := db.Exec(`UPDATE cloud_instances SET status = ? WHERE id = ?`, status, id)
 		return err
 	}
+}
+
+// UpdateCloudInstanceResultsVerified sets the results_verified flag on a cloud instance.
+func UpdateCloudInstanceResultsVerified(db *sql.DB, id int64, verified bool) error {
+	_, err := db.Exec(`UPDATE cloud_instances SET results_verified = ? WHERE id = ?`, verified, id)
+	return err
 }
 
 func UpdateCloudInstanceTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
@@ -847,6 +858,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var provisionedInputsJSON sql.NullString
 	var terminationRequestedAt sql.NullInt64
 	var terminationIntentJSON sql.NullString
+	var resultsVerified sql.NullBool
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -860,6 +872,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&terminationReason,
 		&diskGB, &provisionedInputsJSON,
 		&terminationRequestedAt, &terminationIntentJSON,
+		&resultsVerified,
 	)
 	if err != nil {
 		return nil, err
@@ -968,6 +981,10 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		if json.Unmarshal([]byte(terminationIntentJSON.String), &marker) == nil {
 			c.TerminationIntent = &marker
 		}
+	}
+	if resultsVerified.Valid {
+		v := resultsVerified.Bool
+		c.ResultsVerified = &v
 	}
 	return &c, nil
 }

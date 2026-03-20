@@ -62,7 +62,7 @@ func parseHFCacheAtimeOutput(output, host string) []HostDataEntryWithAtime {
 		sizeBytes, _ := strconv.ParseInt(strings.TrimSpace(sizeStr), 10, 64)
 
 		dirName := filepath.Base(path)
-		asset, ok := parseHFDirName(dirName)
+		asset, ok := ParseHFDirName(dirName)
 		if !ok {
 			continue
 		}

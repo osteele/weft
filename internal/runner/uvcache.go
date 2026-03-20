@@ -169,7 +169,7 @@ func scanInstalledSitePackages(workingDir string) map[uvPkgKey]int64 {
 			distInfoDir := filepath.Join(sitePackages, entry.Name())
 			size, ok := sizeFromDistInfoRecord(sitePackages, distInfoDir)
 			if !ok {
-				size = dirSizeBytes(distInfoDir)
+				size = DirSizeBytes(distInfoDir)
 			}
 			if size > sizes[key] {
 				sizes[key] = size

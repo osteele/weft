@@ -180,6 +180,62 @@ func patchCompletionResultsUpload(logDir string, jobID int64, upload *runner.Upl
 	})
 }
 
+// collectCompletionManifest reads per-job completion records from the log
+// directory and assembles an InstanceCompletionManifest suitable for writing
+// to the R2 completion marker.
+func collectCompletionManifest(logDir string, jobs []cloud.AgentJob) *runner.InstanceCompletionManifest {
+	manifest := &runner.InstanceCompletionManifest{
+		CompletedAtUnix: time.Now().Unix(),
+	}
+	allOK := true
+	for _, job := range jobs {
+		summary, ok := summarizeJobCompletion(logDir, job.ID)
+		if !ok {
+			allOK = false
+		}
+		manifest.Jobs = append(manifest.Jobs, summary)
+	}
+	if !allOK {
+		manifest.ExitCode = 1
+	}
+	return manifest
+}
+
+// summarizeJobCompletion reads a job's completion record and returns a summary.
+// Returns (summary, ok) where ok is false if the job failed or the record is unreadable.
+func summarizeJobCompletion(logDir string, jobID int64) (runner.JobCompletionSummary, bool) {
+	paths := runner.NewJobPaths(logDir, jobID)
+	data, err := os.ReadFile(paths.Completion)
+	if err != nil {
+		return runner.JobCompletionSummary{JobID: jobID, ExitCode: -1, UploadStatus: "unknown"}, false
+	}
+	var rec runner.CompletionRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return runner.JobCompletionSummary{JobID: jobID, ExitCode: -1, UploadStatus: "unknown"}, false
+	}
+	uploadStatus := "ok"
+	if rec.OutputUpload != nil && rec.OutputUpload.Status != "ok" {
+		uploadStatus = rec.OutputUpload.Status
+	}
+	if rec.ResultsUpload != nil && rec.ResultsUpload.Status != "ok" {
+		if uploadStatus == "ok" {
+			uploadStatus = rec.ResultsUpload.Status
+		} else {
+			uploadStatus = "partial"
+		}
+	}
+	var outputBytes int64
+	if rec.OutputUpload != nil {
+		outputBytes = rec.OutputUpload.Bytes
+	}
+	return runner.JobCompletionSummary{
+		JobID:        jobID,
+		ExitCode:     rec.ExitCode,
+		UploadStatus: uploadStatus,
+		OutputBytes:  outputBytes,
+	}, rec.ExitCode == 0
+}
+
 func patchCompletionRecord(logDir string, jobID int64, mutate func(*runner.CompletionRecord)) {
 	if mutate == nil {
 		return
