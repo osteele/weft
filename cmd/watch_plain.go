@@ -224,6 +224,77 @@ func countHostJobStates(jobs []*db.Job) (running, queued int) {
 	return running, queued
 }
 
+// watchJobsPlain watches specific jobs by ID, printing their status periodically
+// until all reach a terminal state (or indefinitely with follow=true).
+func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	for {
+		// Sync only the hosts where the watched jobs are running,
+		// rather than doing a system-wide sync.
+		syncWatchedJobHosts(database, jobIDs)
+
+		allTerminal := true
+		for i, jobID := range jobIDs {
+			if i > 0 {
+				fmt.Println("---")
+			}
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Job %d: %v\n", jobID, err)
+				continue
+			}
+			if job == nil {
+				fmt.Printf("Job %d not found\n", jobID)
+				continue
+			}
+			printJobStatus(job, false)
+			if !isTerminalStatus(job.EffectiveStatus()) {
+				allTerminal = false
+			}
+		}
+
+		if !follow && allTerminal {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(30 * time.Second):
+		}
+	}
+}
+
+// syncWatchedJobHosts syncs only the hosts relevant to the given job IDs.
+func syncWatchedJobHosts(database *sql.DB, jobIDs []int64) {
+	hosts := make(map[string]struct{})
+	needsRentalSync := false
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil || job == nil || isTerminalStatus(job.EffectiveStatus()) {
+			continue
+		}
+		if job.HasInventoryHost() {
+			hosts[job.Host] = struct{}{}
+		}
+		if job.IsRentalJob() {
+			needsRentalSync = true
+		}
+	}
+	if len(hosts) > 0 {
+		hostList := make([]string, 0, len(hosts))
+		for h := range hosts {
+			hostList = append(hostList, h)
+		}
+		performFastSyncForHosts(database, hostList, false)
+	}
+	if needsRentalSync {
+		syncRentalJobsStatus(database)
+	}
+}
+
 func formatWatchGPUConstraint(job *db.Job) string {
 	switch {
 	case job.GPUClass != "" && job.GPUMemGB != nil:

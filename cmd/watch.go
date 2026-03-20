@@ -14,11 +14,12 @@ import (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch [campaign|instance|project]",
-	Short: "Watch instances, campaigns, or projects",
+	Use:   "watch [job-id... | campaign | instance | project]",
+	Short: "Watch jobs, instances, campaigns, or projects",
 	Long: `Watch active system state.
 
-Without a subcommand, watches all cloud instances and on-prem jobs (same as
+With job IDs, watches those specific jobs until they reach a terminal state.
+Without arguments, watches all cloud instances and on-prem jobs (same as
 "weft watch instance"). Use a subcommand to watch a specific resource type.`,
 	RunE: runWatchCommand,
 }
@@ -42,6 +43,21 @@ func configureWatchFlags(cmd *cobra.Command) {
 }
 
 func runWatchCommand(cmd *cobra.Command, args []string) error {
+	// If args look like job IDs, watch those specific jobs instead of
+	// showing system-wide state.
+	if len(args) > 0 {
+		jobIDs, err := ParseJobIDs(args)
+		if err != nil {
+			return err
+		}
+		database, err := db.Open()
+		if err != nil {
+			return fmt.Errorf("open database: %w", err)
+		}
+		defer database.Close()
+		return watchJobsPlain(database, jobIDs, watchFollow)
+	}
+
 	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
 	if err != nil {
 		return err
