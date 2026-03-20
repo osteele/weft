@@ -128,6 +128,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 		}
 
 		groups := campaign.GroupByGPUSupremum(jobs)
+		groups = campaign.SplitGroupsByImage(groups)
 		r2Client, err := buildR2Client(cfg)
 		if err != nil {
 			log.Printf("warning: build R2 client for disk estimation: %v", err)

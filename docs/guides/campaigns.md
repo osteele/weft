@@ -303,6 +303,21 @@ Example project config:
 exclude_dirs = ["data"]
 ```
 
+### Per-project Docker image
+
+By default, cloud instances use the image from `vastai.default_image` in the
+global config. Projects that need a different base image (e.g., `devel` instead
+of `runtime` for JIT kernel compilation) can override this in `.weft.toml`:
+
+```toml
+[cloud]
+image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+```
+
+When a campaign contains jobs from multiple projects with different images, weft
+automatically splits instance groups so each instance uses the correct image.
+Jobs with no `[cloud] image` setting share the global default.
+
 ## Cost estimation
 
 When launching a campaign, weft estimates the total cost per GPU group. If the

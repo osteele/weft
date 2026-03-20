@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -20,7 +21,14 @@ const (
 type ProjectConfig struct {
 	Sync    ProjectSyncConfig    `yaml:"sync" toml:"sync"`
 	Outputs ProjectOutputsConfig `yaml:"outputs" toml:"outputs"`
+	Cloud   ProjectCloudConfig   `yaml:"cloud" toml:"cloud"`
 	Inputs  []string             `yaml:"inputs" toml:"inputs"` // e.g. ["hf:gpt2", "hf:meta-llama/Llama-3.1-8B"]
+}
+
+// ProjectCloudConfig holds per-project cloud instance settings.
+type ProjectCloudConfig struct {
+	// Image overrides the default Docker image for cloud instances.
+	Image string `yaml:"image" toml:"image"`
 }
 
 // ProjectOutputsConfig holds output collection settings for convention-based output discovery.
@@ -113,30 +121,21 @@ func LoadProjectConfig(dir string) (*ProjectConfig, error) {
 }
 
 // ProjectExtraPaths returns the extra sync paths from the project config at
-// localDir, or nil if no config is found. Errors are silently ignored (the
-// project config is optional).
+// localDir, or nil if no config is found.
 func ProjectExtraPaths(localDir string) []string {
-	if localDir == "" {
-		return nil
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Sync.ExtraPaths
 	}
-	projCfg, err := LoadProjectConfig(localDir)
-	if err != nil || projCfg == nil {
-		return nil
-	}
-	return projCfg.Sync.ExtraPaths
+	return nil
 }
 
 // ProjectExcludeDirs returns additional source exclude patterns from the
 // project config at localDir, or nil if no config is found.
 func ProjectExcludeDirs(localDir string) []string {
-	if localDir == "" {
-		return nil
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Sync.ExcludeDirs
 	}
-	projCfg, err := LoadProjectConfig(localDir)
-	if err != nil || projCfg == nil {
-		return nil
-	}
-	return projCfg.Sync.ExcludeDirs
+	return nil
 }
 
 // ProjectOutputDirs returns the effective output directories from the project
@@ -152,25 +151,42 @@ func ProjectMaxAutoSyncMB(localDir string) int {
 }
 
 // ProjectInputs returns the input data assets from the project config at
-// localDir, or nil if no config is found. Errors are silently ignored.
+// localDir, or nil if no config is found.
 func ProjectInputs(localDir string) []string {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Inputs
+	}
+	return nil
+}
+
+// ProjectCloudImage returns the cloud image override from the project config at
+// localDir, or empty string if no config or image is found.
+func ProjectCloudImage(localDir string) string {
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return cfg.Cloud.Image
+	}
+	return ""
+}
+
+// loadProjectConfigOrWarn loads the project config, logging a warning on error.
+// Returns nil when localDir is empty, no config file exists, or the config fails to parse.
+func loadProjectConfigOrWarn(localDir string) *ProjectConfig {
 	if localDir == "" {
 		return nil
 	}
-	projCfg, err := LoadProjectConfig(localDir)
-	if err != nil || projCfg == nil {
+	cfg, err := LoadProjectConfig(localDir)
+	if err != nil {
+		log.Printf("warning: loading project config from %s: %v", localDir, err)
 		return nil
 	}
-	return projCfg.Inputs
+	return cfg
 }
 
 // projectOutputsConfig loads the outputs section from the project config,
 // returning a zero value if no config is found.
 func projectOutputsConfig(localDir string) *ProjectOutputsConfig {
-	if localDir != "" {
-		if projCfg, err := LoadProjectConfig(localDir); err == nil && projCfg != nil {
-			return &projCfg.Outputs
-		}
+	if cfg := loadProjectConfigOrWarn(localDir); cfg != nil {
+		return &cfg.Outputs
 	}
 	return &ProjectOutputsConfig{}
 }

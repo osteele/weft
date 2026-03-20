@@ -194,8 +194,8 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	groups := campaign.GroupByGPUSupremum(jobs)
-
 	groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
+	groups = campaign.SplitGroupsByImage(groups)
 
 	if len(groups) == 0 {
 		if campaignLaunchGPU != "" {
@@ -222,6 +222,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 			// Re-group remaining jobs for provisioning
 			groups = campaign.GroupByGPUSupremum(remainingJobs)
 			groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
+			groups = campaign.SplitGroupsByImage(groups)
 		}
 	}
 

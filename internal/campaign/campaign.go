@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/workdir"
 )
@@ -16,6 +17,7 @@ type InstanceGroup struct {
 	GPUClass string // Normalized GPU class (uppercase), e.g. "H100"
 	GPUMemGB int    // Supremum of GPU memory across all jobs in the group
 	DiskGB   int    // Estimated disk space needed (0 = use default)
+	Image    string // Per-project Docker image override ("" = use global default)
 	Jobs     []*db.Job
 }
 
@@ -84,6 +86,39 @@ func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
 		}
 	}
 	return filtered
+}
+
+// SplitGroupsByImage further subdivides instance groups so that all jobs in a
+// group share the same Docker image. Each job's image is resolved from its
+// project config (.weft.toml [cloud] image). Jobs with no configured image
+// (empty string) are grouped together and use the global default at launch time.
+func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
+	var result []InstanceGroup
+	for _, g := range groups {
+		byImage := make(map[string][]*db.Job)
+		for _, job := range g.Jobs {
+			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+			img := config.ProjectCloudImage(localDir)
+			byImage[img] = append(byImage[img], job)
+		}
+		if len(byImage) <= 1 {
+			for img := range byImage {
+				g.Image = img
+			}
+			result = append(result, g)
+			continue
+		}
+		for img, jobs := range byImage {
+			result = append(result, InstanceGroup{
+				GPUClass: g.GPUClass,
+				GPUMemGB: g.GPUMemGB,
+				DiskGB:   g.DiskGB,
+				Image:    img,
+				Jobs:     jobs,
+			})
+		}
+	}
+	return result
 }
 
 // SourceDirs returns the unique local absolute paths for all jobs in the group.

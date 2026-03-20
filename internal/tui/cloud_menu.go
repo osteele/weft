@@ -12,10 +12,12 @@ import (
 	"github.com/osteele/weft/internal/agentdeploy"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	weftsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 )
 
 // handleCloudMenuKeyPress handles key events when the cloud menu overlay is active.
@@ -265,6 +267,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		group := campaign.InstanceGroup{
 			GPUClass: job.GPUClass,
 			GPUMemGB: gpuMemGB,
+			Image:    config.ProjectCloudImage(workdir.ResolveLocal(job.EffectiveWorkingDir())),
 			Jobs:     []*db.Job{job},
 		}
 

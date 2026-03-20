@@ -232,8 +232,8 @@ working directory. On successful completion, the runner records discovered files
 in the completion record and auto-syncs small outputs (< 100 MB) back to the
 coordinator.
 
-Customize output directories, auto-sync behavior, and project-specific source
-excludes in `.weft.toml`:
+Customize output directories, auto-sync behavior, cloud image, and
+project-specific source excludes in `.weft.toml`:
 
 ```toml
 [outputs]
@@ -242,6 +242,9 @@ max_auto_sync_mb = 200       # Default: 100
 
 [sync]
 exclude_dirs = ["data"]      # Additional project-specific source excludes
+
+[cloud]
+image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"  # Override default Docker image
 ```
 
 Use `weft artifact list <job-id>` to see discovered outputs and

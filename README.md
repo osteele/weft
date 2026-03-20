@@ -709,10 +709,18 @@ exclude_dirs = ["data"]
 [outputs]
 dirs = ["results/"]
 max_auto_sync_mb = 200
+
+[cloud]
+image = "nvidia/cuda:12.4.1-devel-ubuntu22.04"  # Override default Docker image
 ```
 
 Project excludes are added on top of the global defaults. This is useful for
 research repos that keep large datasets or experiment artifacts alongside code.
+
+The `[cloud] image` setting overrides the global `vastai.default_image` for jobs
+from this project. When a campaign contains jobs from multiple projects with
+different images, weft automatically splits instance groups so each instance uses
+the correct image.
 
 To inspect what will actually be included, run:
 

@@ -880,6 +880,11 @@ func LaunchInstance(
 		createOpts.DiskGB = group.DiskGB
 	}
 
+	// Override image if the group has a per-project image
+	if group.Image != "" {
+		createOpts.Image = group.Image
+	}
+
 	// Build the bootstrap key using the DB instance ID (known before CreateInstance)
 	bootstrapKey := r2keys.BootstrapScript(instanceID)
 

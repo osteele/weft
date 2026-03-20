@@ -77,6 +77,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 
 	// Group by GPU requirements and estimate disk
 	groups := GroupByGPUSupremum(eligible)
+	groups = SplitGroupsByImage(groups)
 	var r2Client *r2.Client
 	if cfg.R2Cfg.Bucket != "" && cfg.R2Cfg.AccessKeyID != "" {
 		var err error

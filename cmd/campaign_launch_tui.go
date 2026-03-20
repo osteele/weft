@@ -278,8 +278,8 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		jobs = filterRentalLaunchJobs(jobs)
 
 		groups := campaign.GroupByGPUSupremum(jobs)
-
 		groups = campaign.FilterByGPUClass(groups, gpuFilter)
+		groups = campaign.SplitGroupsByImage(groups)
 
 		// Re-estimate disk needs
 		r2Client, err = buildR2Client(cfg)
