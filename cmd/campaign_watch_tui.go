@@ -471,38 +471,11 @@ func (m watchModel) retryFailedInstances(_ []*db.Job) tea.Cmd {
 	database := m.database
 	cfg := m.appConfig
 	return func() tea.Msg {
-		// Reset jobs on terminal instances so they become unplaced and eligible
-		// for relaunch. Without this, RelaunchOrphanedJobs may find no candidates
-		// if the periodic sync hasn't run yet.
-		if _, err := db.ResetJobsOnTerminalCloudInstances(database); err != nil {
-			log.Printf("auto-relaunch: reset jobs: %v", err)
-		}
-
-		if cfg == nil {
-			cfg, _ = config.Load()
-		}
-		clients, err := buildCloudClients(cfg)
-		if err != nil || len(clients) == 0 {
-			return retryResultMsg{err: fmt.Errorf("no cloud providers available: %v", err)}
-		}
-
-		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-		relaunchCfg := campaign.RelaunchConfig{
-			Clients:    clients,
-			R2Cfg:      r2Cfg,
-			CreateOpts: cloud.CreateOpts{},
-			LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
-			Database:   database,
-		}
-
-		result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
+		newIDs, err := attemptRelaunchOrphanedJobs(database, cfg)
 		if err != nil {
 			return retryResultMsg{err: err}
 		}
-		if result == nil {
-			return retryResultMsg{}
-		}
-		return retryResultMsg{instanceIDs: result.InstanceIDs}
+		return retryResultMsg{instanceIDs: newIDs}
 	}
 }
 

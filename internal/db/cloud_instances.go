@@ -23,7 +23,8 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		termination_reason,
 		disk_gb, provisioned_inputs,
 		termination_requested_at, termination_intent_json,
-		results_verified`
+		results_verified,
+		machine_id`
 
 // CloudInstance status constants (same values used for both CloudInstance and Campaign).
 const (
@@ -114,6 +115,9 @@ type CloudInstance struct {
 	InetDownMbps     float64
 	InetUpMbps       float64
 	CUDAVersion      float64
+
+	// Provider machine identifier (for reliability tracking)
+	MachineID string
 }
 
 // DisplayGPUSpec returns a human-readable GPU spec string, falling back to
@@ -185,13 +189,13 @@ func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 		 max_spend_cents, max_time_seconds, created_at,
 		 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		 inet_down_mbps, inet_up_mbps, cuda_version,
-		 disk_gb, provisioned_inputs)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 disk_gb, provisioned_inputs, machine_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 		c.MaxSpendCents, c.MaxTimeSeconds, now,
 		c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
 		c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
-		c.DiskGB, provisionedInputsJSON,
+		c.DiskGB, provisionedInputsJSON, c.MachineID,
 	)
 	if err != nil {
 		return 0, err
@@ -859,6 +863,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var terminationRequestedAt sql.NullInt64
 	var terminationIntentJSON sql.NullString
 	var resultsVerified sql.NullBool
+	var machineID sql.NullString
 
 	err := s.Scan(
 		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -873,6 +878,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&diskGB, &provisionedInputsJSON,
 		&terminationRequestedAt, &terminationIntentJSON,
 		&resultsVerified,
+		&machineID,
 	)
 	if err != nil {
 		return nil, err
@@ -985,6 +991,9 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	if resultsVerified.Valid {
 		v := resultsVerified.Bool
 		c.ResultsVerified = &v
+	}
+	if machineID.Valid {
+		c.MachineID = machineID.String
 	}
 	return &c, nil
 }

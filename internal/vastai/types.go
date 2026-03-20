@@ -18,20 +18,24 @@ type Offer struct {
 	DLPerf            float64 `json:"dlperf"`        // deep learning perf score
 	Geolocation       string  `json:"geolocation"`   // data center location
 	Verified          bool    `json:"verified"`
+	MachineID         int     `json:"machine_id"`
 }
 
 // Instance represents a running Vast.ai instance.
 type Instance struct {
-	ID          int     `json:"id"`
-	Status      string  `json:"actual_status"` // "running", "loading", "exited", etc.
-	SSHHost     string  `json:"ssh_host"`
-	SSHPort     int     `json:"ssh_port"`
-	CostPerHour float64 `json:"dph_total"`
-	DiskSpace   float64 `json:"disk_space"`
-	Label       string  `json:"label"`
-	CPUCores    float64 `json:"cpu_cores_effective"`
-	CPUName     string  `json:"cpu_name"`
-	CPURAMMB    float64 `json:"cpu_ram"` // total system RAM in MB
+	ID             int     `json:"id"`
+	Status         string  `json:"actual_status"` // "running", "loading", "exited", etc.
+	SSHHost        string  `json:"ssh_host"`
+	SSHPort        int     `json:"ssh_port"`
+	CostPerHour    float64 `json:"dph_total"`
+	DiskSpace      float64 `json:"disk_space"`
+	Label          string  `json:"label"`
+	CPUCores       float64 `json:"cpu_cores_effective"`
+	CPUName        string  `json:"cpu_name"`
+	CPURAMMB       float64 `json:"cpu_ram"` // total system RAM in MB
+	MachineID      int     `json:"machine_id"`
+	StatusMsg      string  `json:"status_msg"`
+	IntendedStatus string  `json:"intended_status"`
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.

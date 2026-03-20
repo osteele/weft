@@ -42,11 +42,12 @@ type SurvivalStats struct {
 }
 
 // SurvivalModel holds the Beta-Binomial survival model grouped by
-// (GPU family, price bucket).
+// (GPU family, price bucket), with optional per-machine penalty.
 type SurvivalModel struct {
 	GlobalSurvived   int
 	GlobalTotal      int
 	Groups           map[string]*SurvivalStats // key: "GPU_FAMILY:price_bucket"
+	MachineStats     map[string]*SurvivalStats // key: machine ID
 	PricePercentiles map[string][]float64      // GPU family → sorted prices seen
 	PriorStrength    float64                   // pseudo-observations from Vast.ai reliability
 }
@@ -237,11 +238,45 @@ func medianOfferDLPerf(offers []cloud.Offer) float64 {
 	return perfs[n/2]
 }
 
-// OfferSurvival returns the survival probability for a specific offer.
+// minMachineObs is the minimum number of observations before per-machine
+// penalty takes effect. Below this threshold, MachinePenalty returns 1.0.
+const minMachineObs = 3
+
+// MachinePenalty returns a multiplicative penalty for a specific machine.
+// Returns 1.0 (no penalty) if the machine has fewer than minMachineObs observations
+// or if no machine stats are available.
+func (m *SurvivalModel) MachinePenalty(machineID string) float64 {
+	if m.MachineStats == nil || machineID == "" {
+		return 1.0
+	}
+	ms, ok := m.MachineStats[machineID]
+	if !ok || ms.Total < minMachineObs {
+		return 1.0
+	}
+	machineRate := float64(ms.Survived) / float64(ms.Total)
+	globalRate := 0.95
+	if m.GlobalTotal > 0 {
+		globalRate = float64(m.GlobalSurvived) / float64(m.GlobalTotal)
+	}
+	if globalRate <= 0 {
+		return 1.0
+	}
+	// Penalty is the ratio of machine survival to global survival,
+	// clamped to [0, 1] so good machines don't get a bonus.
+	penalty := machineRate / globalRate
+	if penalty > 1.0 {
+		penalty = 1.0
+	}
+	return penalty
+}
+
+// OfferSurvival returns the survival probability for a specific offer,
+// incorporating per-machine penalty when available.
 func (m *SurvivalModel) OfferSurvival(o cloud.Offer) float64 {
 	gpuFamily := NormalizeGPUFamily(o.GPUName)
 	bucket := m.PriceBucketFor(gpuFamily, o.CostPerHour)
-	return m.SurvivalProbability(gpuFamily, bucket, o.Reliability)
+	groupSurvival := m.SurvivalProbability(gpuFamily, bucket, o.Reliability)
+	return groupSurvival * m.MachinePenalty(o.MachineID)
 }
 
 // NormalizeGPUFamily canonicalizes GPU names into family identifiers.

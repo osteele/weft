@@ -164,6 +164,15 @@ func (c *CloudClient) Inner() VastaiClient {
 	return c.inner
 }
 
+// machineIDToString converts a Vast.ai machine ID (int) to the cloud-layer
+// string representation. Zero means unknown/unset and maps to empty string.
+func machineIDToString(id int) string {
+	if id == 0 {
+		return ""
+	}
+	return strconv.Itoa(id)
+}
+
 func offerToCloud(o Offer) cloud.Offer {
 	return cloud.Offer{
 		ProviderID:        strconv.Itoa(o.ID),
@@ -180,6 +189,7 @@ func offerToCloud(o Offer) cloud.Offer {
 		DownloadBandwidth: o.DownloadBandwidth,
 		UploadBandwidth:   o.UploadBandwidth,
 		Verified:          o.Verified,
+		MachineID:         machineIDToString(o.MachineID),
 	}
 }
 
@@ -199,5 +209,6 @@ func instanceToCloud(inst *Instance) *cloud.Instance {
 		CPUCores:    int(inst.CPUCores),
 		CPUName:     inst.CPUName,
 		RAMGB:       (int(inst.CPURAMMB) + 512) / 1024,
+		MachineID:   machineIDToString(inst.MachineID),
 	}
 }

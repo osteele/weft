@@ -26,8 +26,9 @@ type ReconcileResult struct {
 }
 
 // minDeadConfirmTime is how long an instance must continuously appear dead
-// before we declare it terminal. Guards against transient API blips.
-const minDeadConfirmTime = 2 * time.Minute
+// before we declare it terminal. With transient API errors now skipping
+// reconciliation (rather than treating as dead), a shorter window is safe.
+const minDeadConfirmTime = 30 * time.Second
 
 // Reconciler runs reconciliation passes and remembers when each instance was
 // first seen dead, so we can require a sustained dead period before terminating.
@@ -101,6 +102,11 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 	}
 	r.mu.Unlock()
 
+	// Batch-fetch all provider instances once per reconciliation pass.
+	// This replaces N individual ShowInstance() calls with one ListAllInstances()
+	// per provider, eliminating transient-error-per-instance problems.
+	providerInstances := batchFetchProviderInstances(clients)
+
 	result := &ReconcileResult{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -109,7 +115,7 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 		wg.Add(1)
 		go func(ci *db.CloudInstance) {
 			defer wg.Done()
-			reconciled, terminated := r.reconcileOneInstance(database, clients, r2Client, ci)
+			reconciled, terminated := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
 			if reconciled {
 				mu.Lock()
 				result.Reconciled++
@@ -197,7 +203,8 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 // reconcileOneInstance processes a single cloud instance for reconciliation.
 // Returns (reconciled, terminated) where reconciled means state changed and
 // terminated means the instance was moved to a terminal state (failed/completed).
-func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance) (bool, bool) {
+// providerInstances is the batch-fetched map from batchFetchProviderInstances.
+func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance, providerInstances map[string]map[string]*cloud.Instance) (bool, bool) {
 	// Check for grace-wait state for running instances via R2.
 	// This is handled outside CheckInstance because it writes to the DB as a side effect.
 	if ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
@@ -206,17 +213,29 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		}
 	}
 
-	// Fetch provider instance state
+	// Look up provider instance state from the batch-fetched map.
 	providerID := ci.EffectiveProviderID()
 	var inst *cloud.Instance
 	var providerErr error
 	client := clientForProvider(clients, cloud.Provider(ci.Provider))
 	if providerID != "" && client != nil {
-		inst, providerErr = client.ShowInstance(providerID)
-		if providerErr != nil && !errors.Is(providerErr, cloud.ErrInstanceNotFound) {
-			log.Printf("reconcile: ShowInstance(%s) for instance %d: %v", providerID, ci.ID, providerErr)
-			providerErr = nil // treat as no data, don't propagate
-			inst = nil
+		providerKey := ci.Provider
+		if byProvider, ok := providerInstances[providerKey]; ok {
+			if cached, found := byProvider[providerID]; found {
+				inst = cached
+			}
+			// Not in batch results → instance is gone from provider
+		} else {
+			// Batch fetch failed for this provider — fall back to individual call
+			inst, providerErr = client.ShowInstance(providerID)
+			if providerErr != nil {
+				if errors.Is(providerErr, cloud.ErrInstanceNotFound) {
+					providerErr = nil
+				} else {
+					log.Printf("reconcile: ShowInstance(%s) for instance %d: %v (skipping)", providerID, ci.ID, providerErr)
+					return false, false
+				}
+			}
 		}
 	}
 
@@ -587,6 +606,34 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 // report a non-empty status. Instances stuck with empty actual_status beyond
 // this threshold are terminated as infra failures.
 const maxEmptyStatusTime = 1 * time.Minute
+
+// batchFetchProviderInstances calls ListAllInstances() once per provider and
+// returns a nested map: provider key → provider instance ID → *cloud.Instance.
+// If a provider's batch call fails, that provider is omitted from the map and
+// reconcileOneInstance falls back to individual ShowInstance() calls.
+func batchFetchProviderInstances(clients []cloud.Client) map[string]map[string]*cloud.Instance {
+	result := make(map[string]map[string]*cloud.Instance, len(clients))
+	for _, client := range clients {
+		if client == nil {
+			continue
+		}
+		instances, err := client.ListAllInstances()
+		if err != nil {
+			log.Printf("reconcile: batch ListAllInstances(%s) failed: %v (falling back to per-instance calls)", client.Provider(), err)
+			continue
+		}
+		if instances == nil {
+			// Provider doesn't support batch listing — fall back to per-instance calls
+			continue
+		}
+		byID := make(map[string]*cloud.Instance, len(instances))
+		for i := range instances {
+			byID[instances[i].ProviderID] = &instances[i]
+		}
+		result[string(client.Provider())] = byID
+	}
+	return result
+}
 
 // isProviderTerminal returns true if the provider instance is in a terminal/dead state.
 func isProviderTerminal(inst *cloud.Instance) bool {

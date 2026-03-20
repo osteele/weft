@@ -1986,6 +1986,9 @@ func initSchema(db *sql.DB) error {
 	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN results_verified INTEGER`); err != nil {
 		return err
 	}
+	if err := addColumnIfMissing(db, `ALTER TABLE cloud_instances ADD COLUMN machine_id TEXT DEFAULT ''`); err != nil {
+		return err
+	}
 
 	// Backfill provider_instance_id from vastai_instance_id
 	if _, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`); err != nil {

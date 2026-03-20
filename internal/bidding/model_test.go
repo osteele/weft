@@ -318,6 +318,65 @@ func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 	_ = bestFast
 }
 
+func TestMachinePenalty_HighFailureRate(t *testing.T) {
+	model := &SurvivalModel{
+		GlobalSurvived: 18,
+		GlobalTotal:    20,
+		Groups:         make(map[string]*SurvivalStats),
+		MachineStats: map[string]*SurvivalStats{
+			"bad-machine":  {Survived: 1, Total: 5}, // 20% survival
+			"good-machine": {Survived: 5, Total: 5}, // 100% survival
+			"new-machine":  {Survived: 1, Total: 2}, // insufficient data
+		},
+		PricePercentiles: make(map[string][]float64),
+		PriorStrength:    10.0,
+	}
+
+	badPenalty := model.MachinePenalty("bad-machine")
+	goodPenalty := model.MachinePenalty("good-machine")
+	newPenalty := model.MachinePenalty("new-machine")
+	unknownPenalty := model.MachinePenalty("unknown")
+
+	if badPenalty >= goodPenalty {
+		t.Errorf("bad machine penalty (%.3f) should be less than good machine penalty (%.3f)", badPenalty, goodPenalty)
+	}
+	if goodPenalty != 1.0 {
+		t.Errorf("good machine penalty should be capped at 1.0, got %.3f", goodPenalty)
+	}
+	if newPenalty != 1.0 {
+		t.Errorf("new machine (insufficient data) penalty should be 1.0, got %.3f", newPenalty)
+	}
+	if unknownPenalty != 1.0 {
+		t.Errorf("unknown machine penalty should be 1.0, got %.3f", unknownPenalty)
+	}
+	if badPenalty < 0.1 || badPenalty > 0.5 {
+		t.Errorf("bad machine (20%% survival vs 90%% global) should have penalty ~0.22, got %.3f", badPenalty)
+	}
+}
+
+func TestOfferSurvival_IncorporatesMachinePenalty(t *testing.T) {
+	model := &SurvivalModel{
+		GlobalSurvived: 18,
+		GlobalTotal:    20,
+		Groups:         make(map[string]*SurvivalStats),
+		MachineStats: map[string]*SurvivalStats{
+			"bad-machine": {Survived: 1, Total: 5},
+		},
+		PricePercentiles: make(map[string][]float64),
+		PriorStrength:    10.0,
+	}
+
+	normalOffer := cloud.Offer{GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.95}
+	badMachineOffer := cloud.Offer{GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.95, MachineID: "bad-machine"}
+
+	normalSurv := model.OfferSurvival(normalOffer)
+	badSurv := model.OfferSurvival(badMachineOffer)
+
+	if badSurv >= normalSurv {
+		t.Errorf("bad machine offer survival (%.3f) should be less than normal (%.3f)", badSurv, normalSurv)
+	}
+}
+
 func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 	offers := []cloud.Offer{
 		{ProviderID: "low-perf", GPUName: "RTX 4090", CostPerHour: 0.30, DLPerf: 5.0},

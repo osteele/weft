@@ -443,6 +443,7 @@ func LaunchCampaign(
 				InetUpMbps:       donorCfg.Offer.UploadBandwidth,
 				CUDAVersion:      donorCfg.Offer.CUDAVersion,
 				InstanceRole:     "donor",
+				MachineID:        donorCfg.Offer.MachineID,
 			}
 			var donorErr error
 			donorInstanceID, donorErr = db.CreateCloudInstance(database, donorInst)
@@ -814,6 +815,7 @@ func LaunchInstance(
 		CUDAVersion:       offer.CUDAVersion,
 		DiskGB:            int(offer.DiskSpaceGB),
 		ProvisionedInputs: group.AllInputs(),
+		MachineID:         offer.MachineID,
 	}
 	instanceID, err := db.CreateCloudInstance(database, instance)
 	if err != nil {

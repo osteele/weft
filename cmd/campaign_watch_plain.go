@@ -75,12 +75,16 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var prevSummary string
-	for _, id := range instanceIDs {
-		wg.Add(1)
-		go func(instanceID int64) {
-			defer wg.Done()
+	var retried sync.Once
 
-			// Look up the provider from the DB to get the right client
+	// startWatching launches a goroutine that watches a single instance and
+	// prints updates. Used for both initial instances and relaunched ones.
+	// Declared as a variable so the closure can reference itself for relaunch.
+	var startWatching func(int64)
+	startWatching = func(instanceID int64) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
 			client := clientForInstance(database, instanceID)
 			ch := campaign.WatchInstance(ctx, client, database, instanceID, 2*time.Second, 10*time.Second, r2Client)
 			var prev campaign.InstanceUpdate
@@ -97,9 +101,31 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 					prevSummary = summary
 				}
 				mu.Unlock()
+
+				// Auto-relaunch on retryable infrastructure failure (once across all instances)
+				ci := update.CloudInstance
+				if ci != nil && db.IsRetryableTermination(ci) {
+					retried.Do(func() {
+						fmt.Printf("instance %d: retryable failure (%s), attempting relaunch...\n", instanceID, ci.TerminationReason)
+						newIDs, err := attemptRelaunchOrphanedJobs(database, cfg)
+						if err != nil {
+							fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
+						} else if len(newIDs) > 0 {
+							fmt.Printf("instance %d: relaunched as instance(s) %v\n", instanceID, newIDs)
+							for _, newID := range newIDs {
+								startWatching(newID)
+							}
+						}
+					})
+				}
+
 				prev = update
 			}
-		}(id)
+		}()
+	}
+
+	for _, id := range instanceIDs {
+		startWatching(id)
 	}
 
 	wg.Wait()

@@ -298,6 +298,30 @@ The model uses:
 This is another partial-pooling idea: sparse buckets should not overfit a small
 number of wins or failures.
 
+### Machine-level penalty
+
+The survival model tracks per-machine reliability when the provider exposes a
+physical machine identifier (Vast.ai's `machine_id`). Once a machine has at
+least 3 observations, the model applies a multiplicative penalty:
+
+```text
+penalty = clamp(machine_survival_rate / global_survival_rate, 0, 1)
+```
+
+Machines with a track record worse than the fleet average get a penalty below
+1.0, reducing their effective survival probability. Machines that outperform the
+average are capped at 1.0 (no bonus). Machines with too few observations use
+penalty 1.0 until enough data accumulates.
+
+The penalty is applied to the group-level survival probability:
+
+```text
+offer_survival = group_survival(gpu_family, price_bucket, reliability) × machine_penalty
+```
+
+This lets the model avoid specific machines with a history of failures while
+still placing jobs on machines that lack enough data to judge.
+
 ### Expected cost with retries
 
 Weft scores offers by expected cost, not hourly price:
@@ -306,9 +330,30 @@ Weft scores offers by expected cost, not hourly price:
 E[cost] = job_cost / p + retry_setup_cost
 ```
 
-where `p` is the estimated survival probability. The model therefore prefers an
-offer that is slightly more expensive per hour when it is much more likely to
-finish without forcing a restart.
+where `p` is the estimated survival probability (including the machine-level
+penalty when available). The model therefore prefers an offer that is slightly
+more expensive per hour when it is much more likely to finish without forcing a
+restart.
+
+## Automatic Relaunch On Infrastructure Failure
+
+When `weft campaign watch` (TUI or plain mode) detects a retryable
+infrastructure failure — preemption, provider infra failure, or failed-to-launch
+— it automatically relaunches orphaned jobs on a new cloud instance.
+
+Retryable failures are defined in `db.IsRetryableTermination`: preempted, infra
+failure, or empty termination reason. Job-level failures (non-zero exit code),
+disk-full, and user cancellations are not retried.
+
+The relaunch logic:
+
+1. Resets jobs on terminal cloud instances to "unplaced" status.
+2. Filters to jobs with fewer than 3 prior cloud attempts (`DefaultMaxCloudAttempts`).
+3. Groups eligible jobs by GPU requirements and fetches new offers.
+4. Launches replacement instances (inheriting the original campaign).
+
+The watcher starts monitoring the new instances alongside the originals.
+Relaunch fires at most once per watch session to avoid retry storms.
 
 ## Uncertainty And Safety Margins
 

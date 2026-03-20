@@ -11,12 +11,14 @@ type InstanceOutcome struct {
 	CostPerHourCents  int
 	ResolvedGPUName   string
 	Reliability       float64
+	MachineID         string
 }
 
 // LoadInstanceOutcomes queries terminal cloud instances that have termination reasons.
 func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 	rows, err := db.Query(`
-		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability
+		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name, reliability,
+		       COALESCE(machine_id, '')
 		FROM cloud_instances
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
@@ -36,7 +38,7 @@ func LoadInstanceOutcomes(db *sql.DB) ([]InstanceOutcome, error) {
 		var o InstanceOutcome
 		var costCents sql.NullInt64
 		var reliability sql.NullFloat64
-		if err := rows.Scan(&o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability); err != nil {
+		if err := rows.Scan(&o.TerminationReason, &costCents, &o.ResolvedGPUName, &reliability, &o.MachineID); err != nil {
 			return nil, err
 		}
 		if costCents.Valid {
@@ -72,6 +74,7 @@ func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
 
 	model := &SurvivalModel{
 		Groups:           make(map[string]*SurvivalStats),
+		MachineStats:     make(map[string]*SurvivalStats),
 		PricePercentiles: familyPrices,
 		PriorStrength:    defaultPriorStrength,
 	}
@@ -90,14 +93,10 @@ func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
 		bucket := model.PriceBucketFor(fam, price)
 		key := groupKey(fam, bucket)
 
-		gs, ok := model.Groups[key]
-		if !ok {
-			gs = &SurvivalStats{}
-			model.Groups[key] = gs
-		}
-		gs.Total++
-		if survived {
-			gs.Survived++
+		accumulateStats(model.Groups, key, survived)
+
+		if o.MachineID != "" {
+			accumulateStats(model.MachineStats, o.MachineID, survived)
 		}
 	}
 
@@ -105,6 +104,18 @@ func BuildSurvivalModel(outcomes []InstanceOutcome) *SurvivalModel {
 }
 
 const defaultPriorStrength = 10.0
+
+func accumulateStats(m map[string]*SurvivalStats, key string, survived bool) {
+	s, ok := m[key]
+	if !ok {
+		s = &SurvivalStats{}
+		m[key] = s
+	}
+	s.Total++
+	if survived {
+		s.Survived++
+	}
+}
 
 // isSurvived returns true if the termination reason indicates the instance
 // completed its work (was not preempted or lost to infra failure).

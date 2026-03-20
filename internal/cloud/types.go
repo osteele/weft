@@ -33,6 +33,7 @@ type Offer struct {
 	DownloadBandwidth float64 // Mbps
 	UploadBandwidth   float64 // Mbps
 	Verified          bool
+	MachineID         string // provider-specific physical machine identifier
 }
 
 // Key returns a provider-qualified identifier for the offer (e.g. "vastai:12345").
@@ -54,6 +55,7 @@ type Instance struct {
 	CPUCores    int    // effective CPU cores granted
 	CPUName     string // CPU model name
 	RAMGB       int    // total system RAM in GB
+	MachineID   string // provider-specific physical machine identifier
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.

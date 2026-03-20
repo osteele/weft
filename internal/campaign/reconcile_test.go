@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -725,6 +726,96 @@ func TestReconcileCampaigns_RunningCampaignWithNoInstancesBecomesFailed(t *testi
 	}
 	if got.EndedAt == nil {
 		t.Fatal("ended_at was not set for failed campaign")
+	}
+}
+
+func TestReconcileCloudInstances_TransientAPIError_SkipsInstance(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "transient-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	// Mock client that returns a transient error (not ErrInstanceNotFound)
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return nil, fmt.Errorf("API timeout: connection reset")
+		},
+	}
+
+	// Even with zero hysteresis, transient errors should NOT mark instance dead
+	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), deadConfirmTime: -1}
+
+	// Run multiple reconciliation passes — instance must remain running
+	for i := 0; i < 5; i++ {
+		result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+		if err != nil {
+			t.Fatalf("reconcile pass %d: %v", i+1, err)
+		}
+		if result.Reconciled != 0 {
+			t.Fatalf("reconcile pass %d: reconciled = %d, want 0 (transient error should skip)", i+1, result.Reconciled)
+		}
+	}
+
+	// Verify instance is still running
+	ci, err := db.GetCloudInstance(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.CloudInstanceStatusRunning {
+		t.Errorf("instance status = %q, want %q (transient errors must not kill instance)", ci.Status, db.CloudInstanceStatusRunning)
+	}
+}
+
+func TestReconcileCloudInstances_BatchFetch_UsesListAllInstances(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetCloudInstanceProviderID(database, instanceID, "batch-123"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	var showCalls int
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "batch-123", Status: "running"},
+			}, nil
+		},
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			showCalls++
+			return &cloud.Instance{Status: "running"}, nil
+		},
+	}
+
+	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 0 {
+		t.Errorf("reconciled = %d, want 0", result.Reconciled)
+	}
+	if showCalls != 0 {
+		t.Errorf("ShowInstance called %d times, want 0 (should use batch)", showCalls)
 	}
 }
 

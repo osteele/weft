@@ -51,6 +51,9 @@ Remote Hosts (titan, atlas)
 - **Cloud GPU bursting**: When local GPUs are busy or no host matches,
   `weft campaign launch` batch-provisions Vast.ai instances, runs jobs, and
   tears down on completion. Failed jobs enter a grace period for resubmission
+- **Auto-relaunch on preemption**: When a cloud instance is preempted or hits an
+  infrastructure failure, `weft campaign watch` automatically relaunches orphaned
+  jobs on a new instance (up to 3 attempts per job)
 - **Campaign management**: Launch, watch, and terminate batches of cloud
   instances from the CLI or TUI. `weft campaign watch` streams live status,
   cost, and per-job progress until all instances finish
@@ -521,6 +524,8 @@ strategies (`--strategy`):
 A Beta-Binomial survival model learns price-reliability curves from campaign
 history — cheaper instances fail more often, so the `cheap` and `fast`
 strategies balance their objective against the probability of completion.
+The model also tracks per-machine reliability: physical machines with a history
+of failures are penalized, steering jobs toward more reliable hardware.
 
 Press `s` in the TUI to cycle between strategies.
 
