@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
@@ -230,10 +233,10 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
+	var lastIssues string
+
 	for {
-		// Sync only the hosts where the watched jobs are running,
-		// rather than doing a system-wide sync.
-		syncWatchedJobHosts(database, jobIDs)
+		warnings := syncWatchedJobHostsQuiet(database, jobIDs)
 
 		allTerminal := true
 		for i, jobID := range jobIDs {
@@ -255,6 +258,16 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
 			}
 		}
 
+		if len(warnings) > 0 {
+			issueBlock := formatIssuesBlock(warnings)
+			if issueBlock != lastIssues {
+				fmt.Fprint(os.Stderr, issueBlock)
+				lastIssues = issueBlock
+			}
+		} else {
+			lastIssues = ""
+		}
+
 		if !follow && allTerminal {
 			return nil
 		}
@@ -267,8 +280,9 @@ func watchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
 	}
 }
 
-// syncWatchedJobHosts syncs only the hosts relevant to the given job IDs.
-func syncWatchedJobHosts(database *sql.DB, jobIDs []int64) {
+// syncWatchedJobHostsQuiet syncs hosts for the given jobs, suppressing log noise
+// and returning actionable warnings as structured strings.
+func syncWatchedJobHostsQuiet(database *sql.DB, jobIDs []int64) []string {
 	hosts := make(map[string]struct{})
 	needsRentalSync := false
 	for _, jobID := range jobIDs {
@@ -283,16 +297,83 @@ func syncWatchedJobHosts(database *sql.DB, jobIDs []int64) {
 			needsRentalSync = true
 		}
 	}
+
+	var warnings []string
+
+	// Suppress log.Printf noise from sync internals. We use a thread-safe
+	// writer so goroutines that outlive the sync timeout don't race on the
+	// buffer or leak messages to stderr.
+	var logBuf safeLogBuffer
+	origOutput := log.Writer()
+	log.SetOutput(&logBuf)
+
 	if len(hosts) > 0 {
 		hostList := make([]string, 0, len(hosts))
 		for h := range hosts {
 			hostList = append(hostList, h)
 		}
-		performFastSyncForHosts(database, hostList, false)
+		_, _, hostWarnings := performSyncWithTimeoutForHostsDetailed(database, hostList, FastSyncTimeout, false)
+		warnings = append(warnings, hostWarnings...)
 	}
 	if needsRentalSync {
 		syncRentalJobsStatus(database)
 	}
+
+	log.SetOutput(origOutput)
+	warnings = append(warnings, extractLogWarnings(logBuf.String())...)
+	return warnings
+}
+
+// safeLogBuffer is a thread-safe bytes.Buffer for capturing log output.
+// Goroutines abandoned after a sync timeout may still write to it.
+type safeLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// extractLogWarnings parses captured log output for actionable messages,
+// stripping the standard log timestamp prefix.
+func extractLogWarnings(logOutput string) []string {
+	if logOutput == "" {
+		return nil
+	}
+	var warnings []string
+	for _, line := range strings.Split(strings.TrimSpace(logOutput), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Strip standard log timestamp prefix: "2006/01/02 15:04:05 message"
+		if len(line) > 20 && line[4] == '/' && line[7] == '/' && line[10] == ' ' {
+			line = line[20:]
+		}
+		warnings = append(warnings, line)
+	}
+	return warnings
+}
+
+// formatIssuesBlock renders warnings as a visually distinct block.
+func formatIssuesBlock(warnings []string) string {
+	var sb strings.Builder
+	sb.WriteString("\nIssues:\n")
+	for _, w := range warnings {
+		sb.WriteString("  * ")
+		sb.WriteString(w)
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
 func formatWatchGPUConstraint(job *db.Job) string {

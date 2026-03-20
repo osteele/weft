@@ -196,8 +196,8 @@ func instanceToCloud(inst *Instance) *cloud.Instance {
 		CostPerHour: inst.CostPerHour,
 		DiskGB:      inst.DiskSpace,
 		Label:       inst.Label,
-		CPUCores:    inst.CPUCores,
+		CPUCores:    int(inst.CPUCores),
 		CPUName:     inst.CPUName,
-		RAMGB:       (inst.CPURAMMB + 512) / 1024,
+		RAMGB:       (int(inst.CPURAMMB) + 512) / 1024,
 	}
 }

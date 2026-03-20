@@ -47,7 +47,10 @@ const showInstancesJSON = `[
     "ssh_host": "ssh5.vast.ai",
     "ssh_port": 22222,
     "dph_total": 0.45,
-    "disk_space": 150.0
+    "disk_space": 150.0,
+    "cpu_cores_effective": 24.0,
+    "cpu_name": "AMD EPYC 7763",
+    "cpu_ram": 131072.0
   }
 ]`
 
@@ -119,6 +122,15 @@ func TestParseShowInstances(t *testing.T) {
 	}
 	if inst.DiskSpace != 150.0 {
 		t.Errorf("instance.DiskSpace = %f, want 150.0", inst.DiskSpace)
+	}
+	if inst.CPUCores != 24.0 {
+		t.Errorf("instance.CPUCores = %f, want 24.0", inst.CPUCores)
+	}
+	if inst.CPUName != "AMD EPYC 7763" {
+		t.Errorf("instance.CPUName = %q, want %q", inst.CPUName, "AMD EPYC 7763")
+	}
+	if inst.CPURAMMB != 131072.0 {
+		t.Errorf("instance.CPURAMMB = %f, want 131072.0", inst.CPURAMMB)
 	}
 }
 
