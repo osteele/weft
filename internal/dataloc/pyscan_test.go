@@ -179,9 +179,140 @@ func TestPyScanIsHFModelID(t *testing.T) {
 	}
 }
 
+func TestPyScanDictValuePattern(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "config.py", `
+MODEL_CONFIGS = {
+    "pythia-1.4b": "EleutherAI/pythia-1.4b",
+    "llama-8b": "meta-llama/Llama-3-8B",
+    "local_only": "gpt2",
+    "some_key": "not-a-model",
+}
+`)
+	refs := ScanPythonHFRefs(dir)
+	assertSetEqual(t, refs, []string{
+		"hf:EleutherAI/pythia-1.4b",
+		"hf:meta-llama/Llama-3-8B",
+	})
+}
+
+func TestExtractPythonScripts(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"simple", "python train.py", []string{"train.py"}},
+		{"uv run", "uv run python foo.py", []string{"foo.py"}},
+		{"with flags", "python -u train.py --epochs 10", []string{"train.py"}},
+		{"subdirectory", "python experiments/train.py", []string{"experiments/train.py"}},
+		{"no py", "bash run.sh", nil},
+		{"module mode", "python -m pytest", nil},
+		{"multiple scripts", "python setup.py && python train.py", []string{"setup.py", "train.py"}},
+		{"env var assignment", "CONFIG=train.py python other.py", []string{"other.py"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractPythonScripts(tt.command)
+			assertSetEqual(t, got, tt.want)
+		})
+	}
+}
+
+func TestScanPythonHFRefsForCommand_ScopesToScript(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "train.py", `
+model = AutoModel.from_pretrained("meta-llama/Llama-3-8B")
+`)
+	writePyFile(t, dir, "other.py", `
+model = AutoModel.from_pretrained("google/gemma-2b")
+`)
+
+	refs := ScanPythonHFRefsForCommand(dir, "python train.py")
+	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
+}
+
+func TestScanPythonHFRefsForCommand_FollowsLocalImports(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "train.py", `
+from _utils import load_model
+model = AutoModel.from_pretrained("meta-llama/Llama-3-8B")
+`)
+	writePyFile(t, dir, "_utils.py", `
+tokenizer = AutoModel.from_pretrained("meta-llama/Llama-3-8B-Tokenizer")
+`)
+	writePyFile(t, dir, "unrelated.py", `
+model = AutoModel.from_pretrained("google/gemma-2b")
+`)
+
+	refs := ScanPythonHFRefsForCommand(dir, "python train.py")
+	assertSetEqual(t, refs, []string{
+		"hf:meta-llama/Llama-3-8B",
+		"hf:meta-llama/Llama-3-8B-Tokenizer",
+	})
+}
+
+func TestScanPythonHFRefsForCommand_SubdirectoryScript(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "experiments/train.py", `
+from _utils import helper
+model = AutoModel.from_pretrained("EleutherAI/pythia-1.4b")
+`)
+	writePyFile(t, dir, "experiments/_utils.py", `
+TOKENIZER = "EleutherAI/pythia-1.4b"
+`)
+
+	refs := ScanPythonHFRefsForCommand(dir, "python experiments/train.py")
+	assertContains(t, refs, "hf:EleutherAI/pythia-1.4b")
+}
+
+func TestScanPythonHFRefsForCommand_IgnoresInstalledPackages(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "train.py", `
+import transformers
+model = AutoModel.from_pretrained("meta-llama/Llama-3-8B")
+`)
+	// No transformers.py exists in dir — should not error
+
+	refs := ScanPythonHFRefsForCommand(dir, "python train.py")
+	assertSetEqual(t, refs, []string{"hf:meta-llama/Llama-3-8B"})
+}
+
+func TestScanPythonHFRefsForCommand_NoPyInCommand(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "train.py", `
+model = AutoModel.from_pretrained("meta-llama/Llama-3-8B")
+`)
+
+	refs := ScanPythonHFRefsForCommand(dir, "bash run.sh")
+	if refs != nil {
+		t.Fatalf("expected nil, got %v", refs)
+	}
+}
+
+func TestScanPythonHFRefsForCommand_DottedImport(t *testing.T) {
+	dir := t.TempDir()
+	writePyFile(t, dir, "train.py", `
+from experiments._utils import helper
+model = AutoModel.from_pretrained("meta-llama/Llama-3-8B")
+`)
+	writePyFile(t, dir, "experiments/_utils.py", `
+extra = AutoModel.from_pretrained("google/gemma-2b")
+`)
+
+	refs := ScanPythonHFRefsForCommand(dir, "python train.py")
+	assertSetEqual(t, refs, []string{
+		"hf:meta-llama/Llama-3-8B",
+		"hf:google/gemma-2b",
+	})
+}
+
 func writePyFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}

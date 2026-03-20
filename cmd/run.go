@@ -274,7 +274,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	inputsBeforeAutoDetect := mergeDedup(projectInputs, originalRunInputs)
 
 	// Auto-detect HF inputs from Python source and command string.
-	if detected := dataloc.ScanPythonHFRefs(localDir); len(detected) > 0 {
+	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
 		runInputs = mergeDedup(runInputs, detected)
 	}
 	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {

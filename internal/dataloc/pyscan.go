@@ -1,6 +1,7 @@
 package dataloc
 
 import (
+	"bufio"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ var (
 	hfHubDownloadPattern       = regexp.MustCompile(`hf_hub_download\(\s*["']([^"']+)["']`)
 	sentenceTransformerPattern = regexp.MustCompile(`SentenceTransformer\(\s*["']([^"']+)["']`)
 	loadDatasetPattern         = regexp.MustCompile(`load_dataset\(\s*["']([^"']+)["']`)
+	dictValueModelPattern      = regexp.MustCompile(`:\s*["']([^"']+/[^"'/]+)["']`)
 	argparseDefaultPattern     = regexp.MustCompile(`default\s*=\s*["']([^"']+)["']`)
 	modelFlagPattern           = regexp.MustCompile(`["']--(?:model|model-name|base-model)["']`)
 )
@@ -83,6 +85,7 @@ func scanPythonContent(content string, refs *[]string, seen map[string]struct{})
 	addModelMatches(content, snapshotDownloadPattern, refs, seen)
 	addModelMatches(content, hfHubDownloadPattern, refs, seen)
 	addModelMatches(content, sentenceTransformerPattern, refs, seen)
+	addModelMatches(content, dictValueModelPattern, refs, seen)
 	addDatasetMatches(content, loadDatasetPattern, refs, seen)
 
 	for _, block := range findArgparseBlocks(lines) {
@@ -263,4 +266,115 @@ func isHFModelID(s string) bool {
 		}
 	}
 	return true
+}
+
+var (
+	importPattern     = regexp.MustCompile(`^import\s+(\w+)`)
+	fromImportPattern = regexp.MustCompile(`^from\s+([\w.]+)\s+import`)
+)
+
+// ScanPythonHFRefsForCommand scans only the Python scripts referenced in command
+// (and their local imports) for HF model/dataset references. Falls back to empty
+// if no .py files are found in the command.
+func ScanPythonHFRefsForCommand(dir, command string) []string {
+	scripts := extractPythonScripts(command)
+	if len(scripts) == 0 {
+		return nil
+	}
+
+	var files []string
+	seen := map[string]struct{}{}
+	for _, script := range scripts {
+		abs := script
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(dir, abs)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			continue
+		}
+		if _, ok := seen[abs]; !ok {
+			seen[abs] = struct{}{}
+			files = append(files, abs)
+		}
+		for _, imp := range findLocalImports(abs, dir) {
+			if _, ok := seen[imp]; !ok {
+				seen[imp] = struct{}{}
+				files = append(files, imp)
+			}
+		}
+	}
+
+	var refs []string
+	refSeen := map[string]struct{}{}
+	for _, f := range files {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		scanPythonContent(string(content), &refs, refSeen)
+	}
+	return refs
+}
+
+// extractPythonScripts returns .py file paths from a shell command string.
+// Handles patterns like "python foo.py", "uv run python -u foo.py", etc.
+func extractPythonScripts(command string) []string {
+	tokens := strings.Fields(command)
+	var scripts []string
+	for _, tok := range tokens {
+		if strings.HasSuffix(tok, ".py") && !strings.Contains(tok, "=") {
+			scripts = append(scripts, tok)
+		}
+	}
+	return scripts
+}
+
+// findLocalImports parses a Python file for import statements and resolves them
+// to .py files under projectDir. Only returns files that exist on disk.
+func findLocalImports(filePath, projectDir string) []string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var imports []string
+	seen := map[string]struct{}{}
+	scriptDir := filepath.Dir(filePath)
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		var modulePath string
+		if m := fromImportPattern.FindStringSubmatch(line); m != nil {
+			modulePath = m[1]
+		} else if m := importPattern.FindStringSubmatch(line); m != nil {
+			modulePath = m[1]
+		} else {
+			continue
+		}
+
+		// Convert dotted module path to file path
+		relPath := strings.ReplaceAll(modulePath, ".", string(filepath.Separator)) + ".py"
+
+		// Try relative to the script's directory first
+		candidate := filepath.Join(scriptDir, relPath)
+		if _, err := os.Stat(candidate); err == nil {
+			if _, ok := seen[candidate]; !ok {
+				seen[candidate] = struct{}{}
+				imports = append(imports, candidate)
+			}
+			continue
+		}
+
+		// Try relative to project dir
+		candidate = filepath.Join(projectDir, relPath)
+		if _, err := os.Stat(candidate); err == nil {
+			if _, ok := seen[candidate]; !ok {
+				seen[candidate] = struct{}{}
+				imports = append(imports, candidate)
+			}
+		}
+	}
+	return imports
 }

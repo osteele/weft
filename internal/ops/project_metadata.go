@@ -17,7 +17,7 @@ func RefreshProjectDerivedMetadata(database *sql.DB, jobID int64, workingDir, co
 	localDir := workdir.ResolveLocal(workingDir)
 
 	inputs := mergeStringSlices(config.ProjectInputs(localDir), existingInputs)
-	if detected := dataloc.ScanPythonHFRefs(localDir); len(detected) > 0 {
+	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
 		inputs = mergeStringSlices(inputs, detected)
 	}
 	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {

@@ -341,7 +341,7 @@ func runQueueAdd(cmd *cobra.Command, args []string) error {
 
 	projectInputs := config.ProjectInputs(localDir)
 	queueInputs := projectInputs
-	if detected := dataloc.ScanPythonHFRefs(localDir); len(detected) > 0 {
+	if detected := dataloc.ScanPythonHFRefsForCommand(localDir, command); len(detected) > 0 {
 		queueInputs = mergeDedup(queueInputs, detected)
 	}
 	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
