@@ -118,7 +118,8 @@ func accumulateStats(m map[string]*SurvivalStats, key string, survived bool) {
 }
 
 // isSurvived returns true if the termination reason indicates the instance
-// completed its work (was not preempted or lost to infra failure).
+// ran its workload (was not preempted or lost to infra/provider failure).
+// "exited" and "disk_full" count as survived because the job actually ran.
 func isSurvived(reason string) bool {
-	return reason == "completed" || reason == "job_failure"
+	return reason == "completed" || reason == "job_failure" || reason == "disk_full" || reason == "exited"
 }

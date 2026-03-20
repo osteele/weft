@@ -258,7 +258,7 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	}
 
 	out := formatCampaignDiagnosisReport(report)
-	if !strings.Contains(out, "provider terminated/preempted the instance") {
+	if !strings.Contains(out, "provider preempted the instance") {
 		t.Fatalf("diagnosis output missing preemption summary:\n%s", out)
 	}
 	if !strings.Contains(out, "Job #1: orphaned after the instance terminated") {

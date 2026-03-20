@@ -153,7 +153,16 @@ func buildInstanceDiagnosis(inst *db.CloudInstance, jobs []*db.Job, outcomes map
 func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outcomes map[int64]string, undeclaredInputCount int) string {
 	switch inst.TerminationReason {
 	case db.TerminationReasonPreempted:
-		return "provider terminated/preempted the instance"
+		return "provider preempted the instance"
+	case "destroyed", "dead", "stopped":
+		return fmt.Sprintf("provider reported instance %s", inst.TerminationReason)
+	case "error":
+		return "provider reported instance error"
+	case "exited":
+		if len(findings) > 0 {
+			return findings[0].Summary
+		}
+		return "container process exited"
 	case db.TerminationReasonInfraFailure:
 		if countOutcome(outcomes, db.AttemptOutcomeOrphaned) > 0 {
 			return "instance became unreachable or was terminated before jobs finished"

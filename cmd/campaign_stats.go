@@ -28,11 +28,11 @@ type instanceStats struct {
 }
 
 type gpuFamilyStats struct {
-	Total     int
-	Survived  int
-	Preempted int
-	Wasted    float64 // dollars wasted on preempted instances
-	TotalRate float64 // sum of cost_per_hour for avg calculation
+	Total       int
+	Survived    int
+	WastedCount int
+	WastedSpend float64 // dollars wasted on infra/provider failures
+	TotalRate   float64 // sum of cost_per_hour for avg calculation
 }
 
 func runCampaignStats(cmd *cobra.Command, args []string) error {
@@ -89,9 +89,12 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 		spend := float64(inst.ActualSpendCents.Int64) / 100.0
 		totalSpend += spend
 
-		survived := inst.TerminationReason == db.TerminationReasonCompleted || inst.TerminationReason == db.TerminationReasonJobFailure
-		preempted := inst.TerminationReason == db.TerminationReasonPreempted
-		if preempted {
+		survived := inst.TerminationReason == db.TerminationReasonCompleted ||
+			inst.TerminationReason == db.TerminationReasonJobFailure ||
+			inst.TerminationReason == db.TerminationReasonDiskFull ||
+			inst.TerminationReason == "exited"
+		wasted := !survived && inst.TerminationReason != db.TerminationReasonCancelled
+		if wasted {
 			wastedSpend += spend
 		}
 
@@ -108,9 +111,9 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 		if survived {
 			gs.Survived++
 		}
-		if preempted {
-			gs.Preempted++
-			gs.Wasted += spend
+		if wasted {
+			gs.WastedCount++
+			gs.WastedSpend += spend
 		}
 		gs.TotalRate += float64(inst.CostPerHourCents) / 100.0
 	}
@@ -156,14 +159,14 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Total spend:          $%.2f\n", totalSpend)
 	if wastedSpend > 0 {
 		wastedPct := 100.0 * wastedSpend / totalSpend
-		fmt.Printf("  Wasted (preempted):   $%.2f (%.1f%%)\n", wastedSpend, wastedPct)
+		fmt.Printf("  Wasted (infra/provider): $%.2f (%.1f%%)\n", wastedSpend, wastedPct)
 	}
 
 	// Print GPU family breakdown
 	if len(gpuFamilies) > 0 {
 		fmt.Println("\nBy GPU family:")
 		fmt.Printf("  %-16s %9s  %8s  %9s  %9s  %8s  %6s\n",
-			"GPU", "INSTANCES", "SURVIVED", "PREEMPTED", "SURVIVAL%", "AVG $/HR", "WASTED")
+			"GPU", "INSTANCES", "SURVIVED", "WASTED", "SURVIVAL%", "AVG $/HR", "WASTE$")
 
 		families := make([]string, 0, len(gpuFamilies))
 		for k := range gpuFamilies {
@@ -176,9 +179,9 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 			survPct := 100.0 * float64(gs.Survived) / float64(gs.Total)
 			avgRate := gs.TotalRate / float64(gs.Total)
 			fmt.Printf("  %-16s %9d  %8d  %9d  %8.1f%%  %7s  %6s\n",
-				fam, gs.Total, gs.Survived, gs.Preempted, survPct,
+				fam, gs.Total, gs.Survived, gs.WastedCount, survPct,
 				fmt.Sprintf("$%.2f", avgRate),
-				fmt.Sprintf("$%.2f", gs.Wasted))
+				fmt.Sprintf("$%.2f", gs.WastedSpend))
 		}
 	}
 

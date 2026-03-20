@@ -59,7 +59,11 @@ func IsRetryableTermination(ci *CloudInstance) bool {
 	switch ci.TerminationReason {
 	case TerminationReasonPreempted, TerminationReasonInfraFailure, "":
 		return true
+	case "destroyed", "error", "dead", "stopped":
+		// Provider-level terminal statuses — worth retrying on a different instance.
+		return true
 	default:
+		// "exited" (process exited), job_failure, disk_full, completed, canceled, etc.
 		return false
 	}
 }

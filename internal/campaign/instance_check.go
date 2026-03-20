@@ -275,9 +275,11 @@ func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instanc
 	delete(r.firstDeadAt, ci.ID)
 	r.mu.Unlock()
 
-	reason := db.TerminationReasonPreempted
-	if ci.LaunchedAt == nil {
-		reason = db.TerminationReasonInfraFailure
+	// Use the provider status as the default reason — it's more informative
+	// than a catch-all. R2 markers may override below with a more specific reason.
+	reason := db.TerminationReasonInfraFailure
+	if ci.LaunchedAt != nil && inst != nil && inst.Status != "" {
+		reason = inst.Status // echo provider status: "exited", "error", "destroyed", etc.
 	}
 	reason = failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
 
