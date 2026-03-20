@@ -95,15 +95,13 @@ type jobQueuedMsg struct {
 }
 
 type jobRestartedMsg struct {
-	oldJobID int64
-	newJobID int64
+	jobID    int64
 	err      error
 	deferred bool // true if restart was queued for later (host offline)
 }
 
 type jobRetriedMsg struct {
-	oldJobID int64
-	newJobID int64
+	jobID    int64
 	err      error
 	deferred bool
 }

@@ -682,30 +682,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, m.setFlash(fmt.Sprintf("Restart failed: %v", msg.err), true)
 		}
-		m.pendingSelectJobID = msg.newJobID
 		if msg.deferred {
-			return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d created (will start when host is online)", msg.newJobID), false), m.refreshJobs())
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d restarted (will start when host is online)", msg.jobID), false), m.refreshJobs())
 		}
-		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job restarted (new ID: %d)", msg.newJobID), false), m.refreshJobs())
+		return m, tea.Batch(m.setFlash(fmt.Sprintf("Job %d restarted", msg.jobID), false), m.refreshJobs())
 
 	case jobRetriedMsg:
-		var flashCmd tea.Cmd
 		if msg.err != nil {
-			if msg.newJobID > 0 {
-				m.pendingSelectJobID = msg.newJobID
-			}
-			if msg.newJobID > 0 {
-				flashCmd = m.setFlash(fmt.Sprintf("Retry created job %d but dependency update failed: %v", msg.newJobID, msg.err), true)
-			} else {
-				flashCmd = m.setFlash(fmt.Sprintf("Retry failed: %v", msg.err), true)
-			}
+			return m, tea.Batch(m.setFlash(fmt.Sprintf("Retry failed: %v", msg.err), true), m.refreshJobs())
+		}
+		var flashCmd tea.Cmd
+		if msg.deferred {
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d retried (pending sync)", msg.jobID), false)
 		} else {
-			m.pendingSelectJobID = msg.newJobID
-			if msg.deferred {
-				flashCmd = m.setFlash(fmt.Sprintf("Job retried as %d (pending sync)", msg.newJobID), false)
-			} else {
-				flashCmd = m.setFlash(fmt.Sprintf("Job retried (new ID: %d)", msg.newJobID), false)
-			}
+			flashCmd = m.setFlash(fmt.Sprintf("Job %d retried", msg.jobID), false)
 		}
 		return m, tea.Batch(flashCmd, m.refreshJobs())
 

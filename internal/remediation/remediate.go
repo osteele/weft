@@ -140,22 +140,22 @@ func remediateCode(ctx RemediationContext, diagnosis *ErrorDiagnosis, diagJSON s
 	return "diagnosis only (no coding agent configured)", false
 }
 
-// retryJob restarts the failed job and updates the diagnosis/retry count.
+// retryJob requeues the failed job (same ID) and updates the diagnosis/retry count.
 // Returns the action description and whether the retry succeeded.
 func retryJob(ctx RemediationContext, diagJSON string, action string) (string, bool) {
 	newRetryCount := ctx.Job.RetryCount + 1
-	storeDiagnosis(ctx, diagJSON, newRetryCount)
 
-	_, err := ops.RestartJob(ctx.DB, ops.RestartJobParams{
-		OriginalJob: ctx.Job,
-		Tags:        ctx.Job.Tags,
-		Project:     ctx.Job.Project,
-	}, ops.ExecuteOptions{})
+	_, err := ops.RequeueJob(ctx.DB, ctx.Job, ops.ExecuteOptions{})
 	if err != nil {
-		ctx.Logger.Printf("restart job %d: %v", ctx.Job.ID, err)
+		ctx.Logger.Printf("requeue job %d: %v", ctx.Job.ID, err)
+		storeDiagnosis(ctx, diagJSON, newRetryCount)
 		return fmt.Sprintf("diagnosis found but retry failed: %v", err), false
 	}
 
+	// Store diagnosis after requeue: RequeueByID clears error_diagnosis,
+	// so we must write it back. The job won't start instantly (requires
+	// remote queue poll), so this is safe in practice.
+	storeDiagnosis(ctx, diagJSON, newRetryCount)
 	return action, true
 }
 

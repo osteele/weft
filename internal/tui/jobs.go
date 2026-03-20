@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"database/sql"
 	"fmt"
 	"sort"
 	"time"
@@ -32,148 +31,49 @@ func (m Model) restartJob(job *db.Job) tea.Cmd {
 	if job == nil {
 		return nil
 	}
-	database := m.database
-	return func() tea.Msg {
-		workingDir := job.WorkingDir
-		command := job.Command
-		description := job.Description
-
-		if workingDir == "" || command == "" {
-			return jobRestartedMsg{oldJobID: job.ID, err: fmt.Errorf("missing working directory or command")}
-		}
-		if _, relayClient, err := m.coordinatorRelay(); err != nil {
-			return jobRestartedMsg{oldJobID: job.ID, err: err}
-		} else if relayClient != nil {
-			newJobID, _, err := m.relaySubmitJob(database, ops.QueueJobParams{
-				Host:         job.Host,
-				WorkingDir:   workingDir,
-				Command:      command,
-				Description:  description,
-				EnvVars:      job.EnvVars,
-				GPU:          job.GPU,
-				GPUClass:     job.GPUClass,
-				GPUMemGB:     job.GPUMemGB,
-				CPUAllotment: job.CPUAllotment,
-				DepSpec:      job.DepSpec,
-				Inputs:       job.Inputs,
-				Outputs:      job.Outputs,
-				OutputDirs:   job.OutputDirs,
-				Produces:     job.Produces,
-				Needs:        job.Needs,
-			})
-			if err != nil {
-				return jobRestartedMsg{oldJobID: job.ID, err: err}
-			}
-			return jobRestartedMsg{oldJobID: job.ID, newJobID: newJobID}
-		}
-
-		// Use ops package to restart job (queues if host offline)
-		result, err := ops.RestartJob(database, ops.RestartJobParams{
-			OriginalJob: job,
-			WorkingDir:  workingDir,
-			Command:     command,
-			Description: description,
-		}, ops.DefaultOptions())
-
-		if err != nil {
-			return jobRestartedMsg{oldJobID: job.ID, err: err}
-		}
-
-		return jobRestartedMsg{
-			oldJobID: job.ID,
-			newJobID: result.JobID,
-			deferred: result.Deferred,
-		}
-	}
+	return m.requeueJobCmd(job, func(id int64, deferred bool, err error) tea.Msg {
+		return jobRestartedMsg{jobID: id, deferred: deferred, err: err}
+	})
 }
 
 func (m Model) retryJob(job *db.Job) tea.Cmd {
 	if job == nil {
 		return nil
 	}
+	return m.requeueJobCmd(job, func(id int64, deferred bool, err error) tea.Msg {
+		return jobRetriedMsg{jobID: id, deferred: deferred, err: err}
+	})
+}
+
+// requeueJobCmd archives the current run and requeues the job with the same ID.
+func (m Model) requeueJobCmd(job *db.Job, mkMsg func(int64, bool, error) tea.Msg) tea.Cmd {
 	database := m.database
 	return func() tea.Msg {
 		if !job.HasInventoryHost() {
-			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing host")}
+			return mkMsg(job.ID, false, fmt.Errorf("job missing host"))
 		}
 		if job.Command == "" {
-			return jobRetriedMsg{oldJobID: job.ID, err: fmt.Errorf("job missing command")}
-		}
-		workingDir := job.WorkingDir
-		if workingDir == "" {
-			if dir := job.EffectiveWorkingDir(); dir != "" {
-				workingDir = dir
-			} else {
-				workingDir = "~"
-			}
-		}
-		params := ops.QueueJobParams{
-			Host:         job.Host,
-			WorkingDir:   workingDir,
-			Command:      job.Command,
-			Description:  job.Description,
-			EnvVars:      job.EnvVars,
-			GPU:          job.GPU,
-			GPUClass:     job.GPUClass,
-			GPUMemGB:     job.GPUMemGB,
-			CPUAllotment: job.CPUAllotment,
-			DepSpec:      job.DepSpec,
-			Inputs:       job.Inputs,
-			Outputs:      job.Outputs,
-			OutputDirs:   job.OutputDirs,
-			Produces:     job.Produces,
-			Needs:        job.Needs,
+			return mkMsg(job.ID, false, fmt.Errorf("job missing command"))
 		}
 		if _, relayClient, err := m.coordinatorRelay(); err != nil {
-			return jobRetriedMsg{oldJobID: job.ID, err: err}
+			return mkMsg(job.ID, false, err)
 		} else if relayClient != nil {
-			newJobID, _, err := m.relaySubmitJob(database, params)
-			if err != nil {
-				return jobRetriedMsg{oldJobID: job.ID, err: err}
+			// Relay path: update DB locally, then notify coordinator
+			if err := db.RequeueByID(database, job.ID); err != nil {
+				return mkMsg(job.ID, false, err)
 			}
-			if err := m.rewireDependenciesForRetry(database, job.ID, newJobID); err != nil {
-				return jobRetriedMsg{oldJobID: job.ID, newJobID: newJobID, err: err}
+			if _, err := m.relayRequeueJob(job); err != nil {
+				return mkMsg(job.ID, false, err)
 			}
-			return jobRetriedMsg{oldJobID: job.ID, newJobID: newJobID}
+			return mkMsg(job.ID, false, nil)
 		}
-		result, err := ops.QueueJob(database, params, ops.DefaultOptions())
+		// Non-relay path: ops.RequeueJob handles DB + remote queue
+		result, err := ops.RequeueJob(database, job, ops.DefaultOptions())
 		if err != nil {
-			return jobRetriedMsg{oldJobID: job.ID, err: err}
+			return mkMsg(job.ID, false, err)
 		}
-		if err := m.rewireDependenciesForRetry(database, job.ID, result.JobID); err != nil {
-			return jobRetriedMsg{oldJobID: job.ID, newJobID: result.JobID, err: err, deferred: result.Deferred}
-		}
-		return jobRetriedMsg{oldJobID: job.ID, newJobID: result.JobID, deferred: result.Deferred}
+		return mkMsg(job.ID, result.Deferred, nil)
 	}
-}
-
-func (m Model) rewireDependenciesForRetry(database *sql.DB, oldID, newID int64) error {
-	depJobs, err := db.ListQueuedJobsWithDependency(database, oldID)
-	if err != nil {
-		return err
-	}
-	for _, depJob := range depJobs {
-		newSpec, changed := db.ReplaceDepSpecID(depJob.DepSpec, oldID, newID)
-		if !changed {
-			continue
-		}
-		if err := db.SetJobDepSpec(database, depJob.ID, newSpec); err != nil {
-			return err
-		}
-		depJob.DepSpec = newSpec
-		if _, relayClient, err := m.coordinatorRelay(); err != nil {
-			return err
-		} else if relayClient != nil {
-			if _, err := m.relayUpdateJob(depJob, &coordinatorrelay.UpdateJobPayload{DepSpec: &depJob.DepSpec}); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := ops.RequestQueueUpdate(database, depJob, ops.OptionsForMode(ops.TimeoutFast)); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // startQueuedJobNow starts a queued job immediately, bypassing any dependencies

@@ -185,7 +185,7 @@ Provides unified job operations used by both CLI and TUI. All operations follow 
 |----------|---------|
 | `KillJob` | Kill a running job's tmux session |
 | `RunJob` | Start a new job on a host |
-| `RestartJob` | Kill existing job and start a new one with same command |
+| `RequeueJob` | Archive current run and requeue job with same ID |
 | `QueueAndExecute` | Core pattern: queue operation, then drain |
 | `SyncAndReconcile`           | Probe remote, then reconcile local and remote states  |
 
