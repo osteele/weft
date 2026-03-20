@@ -143,10 +143,18 @@ func (w *SyncWorker) Start() {
 	go w.run()
 }
 
-// Stop gracefully shuts down the worker
+// Stop gracefully shuts down the worker, waiting up to 500ms for in-flight syncs.
 func (w *SyncWorker) Stop() {
 	w.cancel()
-	w.wg.Wait()
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+	}
 }
 
 // Request sends a sync request (non-blocking)

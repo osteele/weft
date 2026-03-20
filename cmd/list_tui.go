@@ -26,6 +26,7 @@ type listTUIModel struct {
 	args             []string
 	title            string
 	jobs             []*db.Job
+	layout           jobListLayout
 	cursor           int
 	offset           int
 	width            int
@@ -130,6 +131,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.rebuildLayout()
 		m.clampCursor()
 		m.adjustOffset()
 		return m, nil
@@ -179,6 +181,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.jobs = msg.jobs
+		m.rebuildLayout()
 		m.clampCursor()
 		m.adjustOffset()
 		if len(m.jobs) > 0 && strings.HasPrefix(m.statusMessage, "No jobs") {
@@ -269,7 +272,7 @@ func (m listTUIModel) View() string {
 		return "Loading..."
 	}
 
-	layout := newJobListLayout(max(20, m.width-2), m.jobs)
+	layout := m.layout
 	var b strings.Builder
 
 	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
@@ -334,6 +337,10 @@ func (m listTUIModel) emptyStateText() string {
 	return "No jobs match this view."
 }
 
+func (m *listTUIModel) rebuildLayout() {
+	m.layout = newJobListLayout(max(20, m.width-2), m.jobs)
+}
+
 func (m *listTUIModel) clampCursor() {
 	if len(m.jobs) == 0 {
 		m.cursor = 0
@@ -386,8 +393,18 @@ func (m listTUIModel) reloadJobs() tea.Cmd {
 
 func (m listTUIModel) runBackgroundSync(full bool) tea.Cmd {
 	database := m.database
+	ctx := m.ctx
 	return func() tea.Msg {
-		return listSyncFinishedMsg{warnings: syncListTUIData(database, full), full: full}
+		done := make(chan listSyncFinishedMsg, 1)
+		go func() {
+			done <- listSyncFinishedMsg{warnings: syncListTUIData(database, full), full: full}
+		}()
+		select {
+		case msg := <-done:
+			return msg
+		case <-ctx.Done():
+			return listSyncFinishedMsg{full: true} // return terminal msg so no further syncs are triggered
+		}
 	}
 }
 
