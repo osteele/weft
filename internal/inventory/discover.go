@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"log"
 	"strings"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -17,11 +18,16 @@ func DetectHFCacheDirCommand() string {
 // hfCacheDir is the resolved HF hub cache directory detected on the host; pass ""
 // if detection was not performed or failed.
 func HostSpecFromHostInfo(name string, info *hostinfo.Host, hfCacheDir string) HostSpec {
+	cpuFactor, cpuKnown := LookupCPUFactor(info.CPUModel)
+	if !cpuKnown && info.CPUModel != "" {
+		log.Printf("inventory: unknown CPU model %q — using cpu_factor=1.0; consider adding it to cpu_perf.go", info.CPUModel)
+	}
+
 	spec := HostSpec{
 		Name:       name,
 		CPUCores:   info.CPUs,
 		Memory:     info.MemTotal,
-		CPUFactor:  1.0,
+		CPUFactor:  cpuFactor,
 		GPUFactor:  1.0,
 		HFCacheDir: strings.TrimSpace(hfCacheDir),
 	}

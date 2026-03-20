@@ -531,8 +531,12 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		}
 	}
 
-	// Soft factor: performance multiplier (weighted by cpu_factor or gpu_factor)
-	if c.NeedsGPU() {
+	// Soft factor: performance / capacity scoring
+	if hasComputeIntensiveTag(c.Tags) {
+		// Compute-intensive: score by total free compute capacity (cores × factor × idle),
+		// replacing per-core CPU perf scoring since capacity already incorporates cpu_factor.
+		applyComputeIntensiveScoring(&s, host, metrics)
+	} else if c.NeedsGPU() {
 		applyPerfScoring(&s, "GPU", host.GPUPerformance(), 5.0)
 	} else {
 		applyPerfScoring(&s, "CPU", host.CPUPerformance(), 3.0)
@@ -1002,8 +1006,36 @@ func hasBenchmarkTag(tags []string) bool {
 	return slices.Contains(tags, db.TagBenchmark)
 }
 
-// benchmarkIdleCheck returns a non-empty reason string if the host is not idle
-// enough for a benchmark job. Returns "" if the host is idle.
+// hasComputeIntensiveTag returns true if tags contain the compute-intensive tag.
+func hasComputeIntensiveTag(tags []string) bool {
+	return slices.Contains(tags, db.TagComputeIntensive)
+}
+
+// applyComputeIntensiveScoring adds a bonus proportional to the host's effective
+// free compute capacity: CPUCores × CPUFactor × idle fraction. With live metrics,
+// hosts running GPU workloads that consume CPU are naturally penalized. Without
+// metrics, raw capacity (cores × factor) is used.
+func applyComputeIntensiveScoring(s *Score, host inventory.HostSpec, metrics *HostMetrics) {
+	capacity := float64(host.CPUCores) * host.CPUPerformance()
+	if metrics != nil && metrics.CPUPercent > 0 {
+		idleFraction := 1.0 - float64(metrics.CPUPercent)/100.0
+		effective := capacity * idleFraction
+		// Normalize: bonus of up to +5 scaled by effective capacity.
+		// 100 effective cores = +5, linearly down.
+		bonus := math.Min(effective/100.0*5.0, 5.0)
+		s.Total += bonus
+		s.Reasons = append(s.Reasons,
+			fmt.Sprintf("compute-intensive: %.0f effective cores (%.0f × %.0f%% idle, +%.1f)",
+				effective, capacity, idleFraction*100, bonus))
+	} else {
+		bonus := math.Min(capacity/100.0*5.0, 5.0)
+		s.Total += bonus
+		s.Reasons = append(s.Reasons,
+			fmt.Sprintf("compute-intensive: %.0f capacity (%.0f cores × %.2fx, +%.1f)",
+				capacity, float64(host.CPUCores), host.CPUPerformance(), bonus))
+	}
+}
+
 func benchmarkIdleCheck(database *sql.DB, host string, metrics *HostMetrics) string {
 	if metrics == nil {
 		return "no live metrics (benchmark requires idle verification)"

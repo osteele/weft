@@ -1471,6 +1471,86 @@ func TestInventoryTag_DoesNotSkipLocalPlacement(t *testing.T) {
 	}
 }
 
+func TestComputeIntensiveTag_PrefersMoreCores(t *testing.T) {
+	inventory.UseTestHosts(t)
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{dbpkg.TagComputeIntensive}}
+
+	scores, err := ScoreHosts(db, constraints)
+	if err != nil {
+		t.Fatalf("ScoreHosts: %v", err)
+	}
+
+	alpha := findScore(scores, "host-alpha") // 64 cores × 1.0 = 64 capacity
+	beta := findScore(scores, "host-beta")   // 16 cores × 0.5 = 8 capacity
+	gamma := findScore(scores, "host-gamma") // 12 cores × 2.0 = 24 capacity
+
+	if !alpha.Eligible || !beta.Eligible || !gamma.Eligible {
+		t.Fatal("all hosts should be eligible for compute-intensive")
+	}
+
+	// Without metrics, raw capacity order: alpha > gamma > beta
+	if alpha.Total <= gamma.Total {
+		t.Errorf("host-alpha (%.2f) should score higher than host-gamma (%.2f) — more raw capacity",
+			alpha.Total, gamma.Total)
+	}
+	if gamma.Total <= beta.Total {
+		t.Errorf("host-gamma (%.2f) should score higher than host-beta (%.2f) — more effective capacity",
+			gamma.Total, beta.Total)
+	}
+}
+
+func TestComputeIntensiveTag_WithMetrics_PrefersIdleCores(t *testing.T) {
+	inventory.UseTestHosts(t)
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{dbpkg.TagComputeIntensive}}
+
+	// host-alpha (64 cores) is 80% loaded → 12.8 effective
+	// host-gamma (12 cores × 2.2) is idle → 26.4 effective
+	metrics := map[string]*HostMetrics{
+		"host-alpha": {CPUPercent: 80},
+		"host-beta":  {CPUPercent: 50},
+		"host-gamma": {CPUPercent: 0},
+	}
+
+	scores, err := ScoreHostsWithMetrics(db, constraints, metrics)
+	if err != nil {
+		t.Fatalf("ScoreHostsWithMetrics: %v", err)
+	}
+
+	alpha := findScore(scores, "host-alpha")
+	gamma := findScore(scores, "host-gamma")
+
+	// With alpha heavily loaded, gamma's idle cores should outscore alpha
+	if gamma.Total <= alpha.Total {
+		t.Errorf("idle host-gamma (%.2f) should outscore 80%%-loaded host-alpha (%.2f)",
+			gamma.Total, alpha.Total)
+	}
+}
+
+func TestComputeIntensiveTag_ReasonIncluded(t *testing.T) {
+	inventory.UseTestHosts(t)
+	db := setupTestDB(t)
+	constraints := Constraints{Tags: []string{dbpkg.TagComputeIntensive}}
+
+	scores, err := ScoreHosts(db, constraints)
+	if err != nil {
+		t.Fatalf("ScoreHosts: %v", err)
+	}
+
+	alpha := findScore(scores, "host-alpha")
+	hasReason := false
+	for _, r := range alpha.Reasons {
+		if strings.Contains(r, "compute-intensive") {
+			hasReason = true
+			break
+		}
+	}
+	if !hasReason {
+		t.Errorf("expected compute-intensive reason, got: %v", alpha.Reasons)
+	}
+}
+
 func TestDescribeConstraints_IncludesBenchmark(t *testing.T) {
 	desc := DescribeConstraints(Constraints{
 		GPUClass: "a100",
