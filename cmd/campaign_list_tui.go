@@ -41,7 +41,6 @@ type campaignListModel struct {
 	cursor           int
 	database         *sql.DB
 	quitting         bool
-	chosen           *db.Campaign
 	syncEnabled      bool
 	syncInProgress   bool
 	statusMessage    string
@@ -164,11 +163,19 @@ func (m campaignListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = m.nextSelectable(m.cursor)
 		case "enter":
 			if m.cursor >= 0 && m.cursor < len(m.items) && !m.items[m.cursor].isHeader {
-				m.chosen = m.items[m.cursor].campaign
-				if m.dbWatcher != nil {
-					_ = m.dbWatcher.Close()
+				c := m.items[m.cursor].campaign
+				instances, _ := db.GetCampaignInstances(m.database, c.ID)
+				if len(instances) == 0 {
+					m.statusMessage = fmt.Sprintf("Campaign %d has no instances.", c.ID)
+					return m, nil
 				}
-				return m, tea.Quit
+				instanceIDs := make([]int64, len(instances))
+				for i, inst := range instances {
+					instanceIDs[i] = inst.ID
+				}
+				return m, func() tea.Msg {
+					return switchToCampaignWatchMsg{instanceIDs: instanceIDs}
+				}
 			}
 		}
 		return m, nil
@@ -436,39 +443,29 @@ func scheduleCampaignListSyncTick() tea.Cmd {
 }
 
 // runCampaignListTUI launches the interactive campaign list TUI.
-// Returns the selected campaign for watching, or nil if the user quit.
+// Uses a router model so that selecting a campaign transitions seamlessly
+// to the watch TUI without exiting the alt screen.
 func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
-	model := newCampaignListModel(database, campaigns, true)
+	router := newCampaignListRouterModel(database, campaigns)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
 	defer log.SetOutput(origLogOutput)
 
-	p := tea.NewProgram(model)
+	p := tea.NewProgram(router, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
 
-	m := finalModel.(campaignListModel)
-	if m.chosen == nil {
-		return nil
+	// Print exit report if we ended in watch mode
+	if r, ok := finalModel.(campaignListRouterModel); ok {
+		if w, ok := r.active.(watchModel); ok && w.done {
+			if finalView := renderWatchExitSnapshot(w); finalView != "" {
+				fmt.Print(finalView)
+			}
+			printWatchExitReport(database, w.instanceIDs)
+		}
 	}
-
-	// Get instance IDs for the chosen campaign and enter watch mode
-	instances, err := db.GetCampaignInstances(database, m.chosen.ID)
-	if err != nil {
-		return fmt.Errorf("get campaign instances: %w", err)
-	}
-	if len(instances) == 0 {
-		fmt.Printf("Campaign %d has no instances.\n", m.chosen.ID)
-		return nil
-	}
-
-	var instanceIDs []int64
-	for _, inst := range instances {
-		instanceIDs = append(instanceIDs, inst.ID)
-	}
-
-	return watchAndReport(database, true, instanceIDs)
+	return nil
 }

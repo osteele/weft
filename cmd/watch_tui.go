@@ -20,13 +20,6 @@ import (
 	"github.com/osteele/weft/internal/tui"
 )
 
-type watchExitAction int
-
-const (
-	watchExitQuit watchExitAction = iota
-	watchExitLaunch
-)
-
 type watchAllModel struct {
 	database        *sql.DB
 	config          *config.Config
@@ -46,7 +39,6 @@ type watchAllModel struct {
 	err             error
 	ctx             context.Context
 	cancel          context.CancelFunc
-	exitAction      watchExitAction
 	jobProgressHWM  map[int64]int
 	syncWorker      *tui.SyncWorker
 }
@@ -153,13 +145,14 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			m.exitAction = watchExitQuit
 			m.cancel()
 			return m, tea.Quit
 		case "l":
-			m.exitAction = watchExitLaunch
 			m.cancel()
-			return m, tea.Quit
+			if m.syncWorker != nil {
+				m.syncWorker.Stop()
+			}
+			return m, func() tea.Msg { return switchToLaunchMsg{} }
 		case "r":
 			if m.refreshing {
 				return m, nil

@@ -443,6 +443,15 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 	return m, inlineWatch.Init()
 }
 
+// quitOrSwitchToWatch returns tea.Quit for standalone launch, or
+// switchToWatchMsg when embedded in the watch router.
+func (m launchModel) quitOrSwitchToWatch(flash string) tea.Cmd {
+	if m.fromWatch {
+		return func() tea.Msg { return switchToWatchMsg{flash: flash} }
+	}
+	return tea.Quit
+}
+
 func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.inlineWatch != nil {
 		switch msg.(type) {
@@ -476,7 +485,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.groups) == 0 {
 			// All jobs got placed during reconciliation
 			m.err = fmt.Errorf("no jobs need rental GPUs (all placed during reconciliation)")
-			return m, tea.Quit
+			return m, m.quitOrSwitchToWatch("All jobs placed during reconciliation.")
 		}
 		// Only re-fetch offers if groups actually changed
 		if groupsChanged(m.groups, msg.groups) {
@@ -495,7 +504,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.loading = false
 			m.err = msg.err
-			return m, tea.Quit
+			return m, m.quitOrSwitchToWatch(fmt.Sprintf("Launch error: %v", msg.err))
 		}
 		m.cachedRawOffers = msg.raw
 		oldOffers := m.groupOffers
@@ -574,7 +583,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.inlineWatch != nil {
 				return m, nil
 			}
-			return m, tea.Quit
+			return m, m.quitOrSwitchToWatch(fmt.Sprintf("Launch error: %v", msg.err))
 		}
 		m.done = true
 		m.instanceIDs = msg.instanceIDs
@@ -593,7 +602,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.partialErrors) == 0 {
-			return m, tea.Quit
+			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
 		}
 		return m, nil
 
@@ -614,7 +623,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		if m.done {
-			return m, tea.Quit
+			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
 		}
 		if m.loading {
 			return m, nil
@@ -627,7 +636,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if count == 0 {
-			return m, tea.Quit
+			return m, m.quitOrSwitchToWatch("Launch canceled.")
 		}
 		m.launching = true
 		m.expectedInstanceCount = m.selectedLaunchGroupCount()
@@ -647,7 +656,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		)
 
 	case "q", "esc", "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitOrSwitchToWatch("Launch canceled.")
 
 	case "up", "k":
 		if m.cursor > 0 {
