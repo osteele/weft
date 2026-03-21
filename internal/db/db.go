@@ -5419,12 +5419,14 @@ func (j *Job) HasAssignedHost() bool {
 
 // EffectiveStatus returns the status to use for UI decisions.
 // Returns PendingStatus if set (the desired/target state), otherwise Status.
+// A terminal status always wins — a stale PendingStatus cannot override a
+// completed/failed/killed job.
 // A job without a host cannot actually be running, starting, or paused; treat
 // those impossible states as queued so the UI does not report them as active on
 // a nonexistent host.
 func (j *Job) EffectiveStatus() string {
 	status := j.Status
-	if j.PendingStatus != nil {
+	if j.PendingStatus != nil && !IsTerminalStatus(j.Status) {
 		status = *j.PendingStatus
 	}
 	if j.TargetKind() == JobTargetUnplaced {
