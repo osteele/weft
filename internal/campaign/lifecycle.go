@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -177,7 +178,7 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 		}
 	}()
 	go func() {
-		agentR2Key, err := agentdeploy.EnsureAgentInR2(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch)
+		agentR2Key, err := agentdeploy.EnsureAgentInR2(uploadCtx, r2Client, agentVersion, cloudOS, cloudArch, io.Discard)
 		stager.agentKey.resolve(agentR2Key, err)
 	}()
 

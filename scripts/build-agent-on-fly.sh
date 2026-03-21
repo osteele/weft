@@ -107,8 +107,20 @@ echo "zig ok: $(${ZIG_DIR}/zig version)"
 fi
 
 echo "Syncing source tree to Fly builder..."
+
+# Build gitignore filter args: per-directory .gitignore, repo exclude, global gitignore.
+# This ensures the sync respects the same ignore rules as git on this machine.
+GITIGNORE_FILTERS=(--filter ':- .gitignore')
+[ -f .git/info/exclude ] && GITIGNORE_FILTERS+=(--filter ".- $(pwd)/.git/info/exclude")
+GLOBAL_GITIGNORE="$(git config --global core.excludesFile 2>/dev/null || true)"
+if [ -n "${GLOBAL_GITIGNORE}" ]; then
+    GLOBAL_GITIGNORE="${GLOBAL_GITIGNORE/#\~/$HOME}"
+    [ -f "${GLOBAL_GITIGNORE}" ] && GITIGNORE_FILTERS+=(--filter ".- ${GLOBAL_GITIGNORE}")
+fi
+
 rsync -az --delete \
     -e "${FLY_RSH}" \
+    "${GITIGNORE_FILTERS[@]}" \
     --exclude='.git/' --exclude='.jj/' --exclude='.claude/' \
     --exclude='.cache/' --exclude='.gocache/' --exclude='.gomodcache/' \
     --exclude='.bench-*-gocache/' --exclude='.bench-*-gomodcache/' \

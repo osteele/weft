@@ -57,6 +57,8 @@ func DefaultExcludes() []string {
 		"out", "target", "bin", "*.so", "cache", ".cache",
 		// Job output directories (created by running jobs, not source files)
 		"output", "outputs",
+		// Test data
+		"testdata",
 		// Editor and tool configs
 		".vscode", ".claude", ".env",
 		// AI/dev guidance files

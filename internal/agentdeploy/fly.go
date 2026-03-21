@@ -2,7 +2,7 @@ package agentdeploy
 
 import (
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"path/filepath"
 )
@@ -10,7 +10,7 @@ import (
 // BuildViaFly builds the agent binary for the given platform using the Fly.io
 // builder. Requires WEFT_FLY_BUILDER_APP and WEFT_FLY_BUILDER_MACHINE env vars
 // (validated by the script). Returns the local cache path to the built binary.
-func BuildViaFly(version, goos, goarch string) (string, error) {
+func BuildViaFly(version, goos, goarch string, output io.Writer) (string, error) {
 	root, err := RepoRoot()
 	if err != nil {
 		return "", fmt.Errorf("locate repo root: %w", err)
@@ -21,8 +21,8 @@ func BuildViaFly(version, goos, goarch string) (string, error) {
 
 	cmd := exec.Command(script, version, outputPath)
 	cmd.Dir = root
-	cmd.Stdout = os.Stderr // build output goes to stderr so callers can capture stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = output
+	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("fly build failed: %w", err)
 	}

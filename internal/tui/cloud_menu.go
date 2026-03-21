@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 
@@ -288,7 +289,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 		}
 
 		ctx := context.Background()
-		agentR2Key, err := agentdeploy.EnsureAgentInR2(ctx, r2Client, agentVer, "linux", "amd64")
+		agentR2Key, err := agentdeploy.EnsureAgentInR2(ctx, r2Client, agentVer, "linux", "amd64", io.Discard)
 		if err != nil {
 			return cloudJobLaunchedMsg{jobID: job.ID, err: fmt.Errorf("upload agent: %w", err)}
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -14,7 +15,7 @@ import (
 // EnsureAgentInR2 uploads the agent binary for the given version to R2.
 // If the object is already present, it skips build and upload.
 // If the binary is not in the local cache, it attempts to build via the Fly builder.
-func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string) (string, error) {
+func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string, output io.Writer) (string, error) {
 	key := r2keys.AgentBinary(version, goos, goarch)
 
 	exists, err := r2Client.ObjectExists(ctx, key)
@@ -28,7 +29,7 @@ func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, go
 	localPath, err := EnsureBuilt(version, goos, goarch, "")
 	if errors.Is(err, ErrAgentNotAvailable) {
 		log.Printf("agent binary not in cache; building via Fly builder...")
-		localPath, err = BuildViaFly(version, goos, goarch)
+		localPath, err = BuildViaFly(version, goos, goarch, output)
 		if err != nil {
 			return "", fmt.Errorf("build agent: %w", err)
 		}
