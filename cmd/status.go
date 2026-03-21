@@ -251,6 +251,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		}
 		_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
 			Timeout: syncTimeout,
+			Logger:  ops.NewQuietSyncLogger(),
 		}, nil)
 		if syncErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)

@@ -31,6 +31,16 @@ type HostSyncOptions struct {
 	NoQueueStart bool
 	// UseBatchSync uses batched SSH calls for queue-runner jobs (faster for many jobs).
 	UseBatchSync bool
+	// Logger for sync messages. If nil, uses log.Default().
+	// Use NewQuietSyncLogger() to suppress SSH connection errors.
+	Logger *log.Logger
+}
+
+func (o HostSyncOptions) logger() *log.Logger {
+	if o.Logger != nil {
+		return o.Logger
+	}
+	return log.Default()
 }
 
 // HostSyncResult contains the outcome of syncing all jobs on a host.
@@ -52,6 +62,7 @@ type EnsureQueueRunnerFunc func(host string) (bool, error)
 func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRunner EnsureQueueRunnerFunc) (HostSyncResult, error) {
 	var result HostSyncResult
 	syncOpts := SyncOptions{Timeout: opts.Timeout, SkipSamples: opts.SkipSamples}
+	syncLog := opts.logger()
 	seenJobs := make(map[int64]bool)
 	timeout := effectiveSyncTimeout(opts.Timeout)
 
@@ -79,7 +90,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			if job.PendingStatus != nil {
 				res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
 				if err != nil {
-					log.Printf("sync: failed to reconcile job %d on %s: %v", job.ID, host, err)
+					syncLog.Printf("sync: failed to reconcile job %d on %s: %v", job.ID, host, err)
 					continue
 				}
 				if res != nil {
@@ -95,7 +106,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		if len(queueRunnerJobs) > 0 {
 			updatedCount, err := BatchSyncQueueRunnerJobs(database, host, queueRunnerJobs, timeout)
 			if err != nil {
-				log.Printf("sync: batch sync failed for %s: %v", host, err)
+				syncLog.Printf("sync: batch sync failed for %s: %v", host, err)
 			} else {
 				result.Updated += updatedCount
 				result.HostContacted = true
@@ -105,7 +116,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		for _, job := range tmuxJobs {
 			syncResult, err := SyncJob(database, job, syncOpts)
 			if err != nil {
-				log.Printf("sync: failed to sync job %d on %s: %v", job.ID, host, err)
+				syncLog.Printf("sync: failed to sync job %d on %s: %v", job.ID, host, err)
 				continue
 			}
 			if syncResult.HostContacted {
@@ -123,7 +134,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			if job.PendingStatus != nil {
 				_, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
 				if err != nil {
-					log.Printf("sync: failed to reconcile job %d on %s: %v", job.ID, host, err)
+					syncLog.Printf("sync: failed to reconcile job %d on %s: %v", job.ID, host, err)
 					continue
 				}
 				result.HostContacted = true
@@ -158,7 +169,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// Runs regardless of HostContacted so brand-new jobs with no other
 	// active jobs on the host can still be pushed.
 	{
-		ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout)
+		ensured, contacted, err := ensureQueuedJobsOnRemote(database, host, timeout, syncLog)
 		result.Updated += ensured
 		if contacted {
 			result.HostContacted = true
@@ -166,7 +177,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		if err != nil {
 			if !ssh.IsConnectionError(err.Error()) {
 				result.QueueDispatchError = err.Error()
-				log.Printf("sync: failed to dispatch queued jobs on %s: %v", host, err)
+				syncLog.Printf("sync: failed to dispatch queued jobs on %s: %v", host, err)
 			}
 		}
 	}
@@ -185,7 +196,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		seenJobs[job.ID] = true
 		res, err := SyncAndReconcile(database, job, ReconcileOptions{Timeout: syncOpts.Timeout})
 		if err != nil {
-			log.Printf("sync: failed to reconcile pending job %d on %s: %v", job.ID, host, err)
+			syncLog.Printf("sync: failed to reconcile pending job %d on %s: %v", job.ID, host, err)
 			continue
 		}
 		if res != nil {
@@ -241,7 +252,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		if len(restartedQueueJobs) > 0 {
 			updatedCount, err := BatchSyncQueueRunnerJobs(database, host, restartedQueueJobs, timeout)
 			if err != nil {
-				log.Printf("sync: batch sync of restarted jobs failed for %s: %v", host, err)
+				syncLog.Printf("sync: batch sync of restarted jobs failed for %s: %v", host, err)
 			} else {
 				result.Updated += updatedCount
 				result.HostContacted = true
@@ -255,7 +266,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 			seenJobs[job.ID] = true
 			syncResult, err := SyncJob(database, job, syncOpts)
 			if err != nil {
-				log.Printf("sync: failed to sync restarted job %d on %s: %v", job.ID, host, err)
+				syncLog.Printf("sync: failed to sync restarted job %d on %s: %v", job.ID, host, err)
 				continue
 			}
 			if syncResult.HostContacted {
@@ -270,7 +281,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// Update last restart check time only if we contacted the host
 	if result.HostContacted {
 		if err := db.UpdateLastRestartCheck(database, host, checkTime); err != nil {
-			log.Printf("sync: failed to update restart check time for %s: %v", host, err)
+			syncLog.Printf("sync: failed to update restart check time for %s: %v", host, err)
 		}
 	}
 
@@ -285,7 +296,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 		}
 		syncResult, err := SyncDraftJob(database, job, syncOpts)
 		if err != nil {
-			log.Printf("sync: failed to sync draft job %d on %s: %v", job.ID, host, err)
+			syncLog.Printf("sync: failed to sync draft job %d on %s: %v", job.ID, host, err)
 			continue
 		}
 		if syncResult.HostContacted {
@@ -322,7 +333,7 @@ func SyncHost(database *sql.DB, host string, opts HostSyncOptions, ensureQueueRu
 	// Step 6: Record host sync time and scan HF caches
 	if result.HostContacted {
 		if err := db.RecordHostSync(database, host, time.Now()); err != nil {
-			log.Printf("sync: failed to record host sync time for %s: %v", host, err)
+			syncLog.Printf("sync: failed to record host sync time for %s: %v", host, err)
 		}
 		scanHFCacheDuringSync(database, host)
 	}
@@ -369,7 +380,7 @@ func isJobInRunnerState(jobID int64, state *RunnerState) bool {
 // once per host, syncs sources (deduplicated by working directory), and appends
 // jobs to the remote queue (or submits via sbatch for Slurm hosts).
 // Returns (ensured count, host contacted, error).
-func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Duration) (int, bool, error) {
+func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Duration, syncLog *log.Logger) (int, bool, error) {
 	jobs, err := db.ListUnsyncedQueuedJobs(database, host)
 	if err != nil {
 		return 0, false, err
@@ -386,7 +397,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 		state, stateErr := fetchRemoteRunnerState(host, timeout)
 		if stateErr != nil {
 			// Can't read state — skip re-dispatch check, we'll retry next sync cycle
-			log.Printf("sync: could not read runner state on %s: %v", host, stateErr)
+			syncLog.Printf("sync: could not read runner state on %s: %v", host, stateErr)
 		} else {
 			// state may be nil if the state file doesn't exist yet (runner not started)
 			for _, job := range syncedJobs {
@@ -394,9 +405,9 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 					continue // runner has it — nothing to do
 				}
 				// Runner doesn't know about this job. Reset so it gets re-dispatched below.
-				log.Printf("sync: job %d on %s is missing from runner state, re-dispatching", job.ID, host)
+				syncLog.Printf("sync: job %d on %s is missing from runner state, re-dispatching", job.ID, host)
 				if err := db.ResetLastSyncedStatus(database, job.ID); err != nil {
-					log.Printf("sync: failed to reset last_synced_status for job %d: %v", job.ID, err)
+					syncLog.Printf("sync: failed to reset last_synced_status for job %d: %v", job.ID, err)
 					continue
 				}
 				jobs = append(jobs, job)
@@ -449,7 +460,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 						// Host is offline — bail out silently
 						return ensured, contacted, nil
 					}
-					log.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
+					syncLog.Printf("sync: skipping job %d, source sync failed for %s on %s: %v", job.ID, job.WorkingDir, job.Host, err)
 					oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
 						oplog.WithDetail("source sync failed"),
 						oplog.WithError(err),
@@ -467,7 +478,7 @@ func ensureQueuedJobsOnRemote(database *sql.DB, host string, timeout time.Durati
 				if ssh.IsConnectionError(err.Error()) {
 					return ensured, contacted, nil
 				}
-				log.Printf("sync: skipping job %d, HF input ensure failed on %s: %v", job.ID, job.Host, err)
+				syncLog.Printf("sync: skipping job %d, HF input ensure failed on %s: %v", job.ID, job.Host, err)
 				oplog.LogJob(oplog.OpJobStartFailed, job.ID, job.Host,
 					oplog.WithDetail("input staging failed"),
 					oplog.WithError(err),

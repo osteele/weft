@@ -371,6 +371,7 @@ func (w *SyncWorker) doSync(host string) {
 	syncResult, err := ops.SyncHost(w.database, host, ops.HostSyncOptions{
 		Timeout:      ops.DefaultSyncOptions().Timeout,
 		UseBatchSync: true,
+		Logger:       ops.NewQuietSyncLogger(),
 	}, ensureQueueRunnerStartedTUI)
 	if err != nil {
 		result.Error = err

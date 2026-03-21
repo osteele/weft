@@ -53,6 +53,7 @@ func (s *HostSyncer) SyncAll() {
 	for _, host := range onlineHosts {
 		_, err := ops.SyncHost(s.db, host, ops.HostSyncOptions{
 			Timeout: s.timeout,
+			Logger:  ops.NewQuietSyncLogger(),
 		}, nil)
 		if err != nil {
 			s.logger.Printf("sync %s: %v", host, err)

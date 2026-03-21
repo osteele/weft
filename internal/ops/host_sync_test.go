@@ -2,6 +2,7 @@ package ops
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,7 @@ func TestEnsureQueuedJobsOnRemote(t *testing.T) {
 		return "", "", 0
 	})
 
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, log.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsJobOnSyncFailure(t *testing.T) {
 		return "", "", 0
 	})
 
-	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
+	ensured, _, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, log.Default())
 	if err == nil {
 		t.Fatal("expected ensureQueuedJobsOnRemote to surface the sync failure")
 	}
@@ -127,7 +128,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsAlreadySynced(t *testing.T) {
 	}
 
 	// No SSH mock needed — should skip without making SSH calls
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, log.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestEnsureQueuedJobsOnRemote_SkipsPendingStatus(t *testing.T) {
 		t.Fatalf("set pending status: %v", err)
 	}
 
-	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second)
+	ensured, contacted, err := ensureQueuedJobsOnRemote(database, "test-host", 5*time.Second, log.Default())
 	if err != nil {
 		t.Fatalf("ensureQueuedJobsOnRemote: %v", err)
 	}
