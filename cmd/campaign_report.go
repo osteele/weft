@@ -84,6 +84,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		if err != nil {
 			continue
 		}
+		outcomes, _ := db.GetAttemptOutcomesByInstance(database, id)
 		for _, j := range instanceJobs {
 			if j == nil || seenJobs[j.ID] {
 				continue
@@ -91,7 +92,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 			seenJobs[j.ID] = true
 			jobs = append(jobs, jobRow{
 				id:          j.ID,
-				status:      jobStatusIcon(j),
+				status:      campaign.JobDisplayStatus(j, outcomes),
 				instanceID:  id,
 				description: truncate(j.EffectiveDescription(), 60),
 			})
@@ -132,27 +133,5 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	// Total cost
 	if totalCost > 0 {
 		fmt.Printf("\n  Total cost: $%.2f\n", totalCost)
-	}
-}
-
-// jobStatusIcon returns a compact status string for a job.
-func jobStatusIcon(j *db.Job) string {
-	switch j.Status {
-	case db.StatusCompleted:
-		if j.ExitCode != nil && *j.ExitCode != 0 {
-			return fmt.Sprintf("failed (%d)", *j.ExitCode)
-		}
-		return "completed"
-	case db.StatusFailed:
-		if j.ExitCode != nil {
-			return fmt.Sprintf("failed (%d)", *j.ExitCode)
-		}
-		return "failed"
-	case db.StatusRunning:
-		return "running"
-	case db.StatusQueued:
-		return "queued"
-	default:
-		return j.Status
 	}
 }

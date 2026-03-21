@@ -234,6 +234,9 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 		return
 	}
 
+	// Override queued status for jobs whose last cloud attempt failed
+	applyAttemptOutcomeOverrides(database, []*db.Job{job})
+
 	// If the effective state is already terminal, use cached result.
 	if isWaitTerminalStatus(job.EffectiveStatus()) {
 		printJobStatus(job, exitOnComplete)

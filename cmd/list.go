@@ -158,7 +158,7 @@ func runList(cmd *cobra.Command, args []string) error {
 	if useTUI {
 		return runListTUI(database, args, jobs, buildListTitle(args), !listNoSync)
 	}
-	return printJobs(jobs)
+	return printJobs(database, jobs)
 }
 
 func syncListData(database *sql.DB) []string {
@@ -465,8 +465,28 @@ func showJob(database *sql.DB, id int64) error {
 	return nil
 }
 
-func printJobs(jobs []*db.Job) error {
+func printJobs(database *sql.DB, jobs []*db.Job) error {
+	applyAttemptOutcomeOverrides(database, jobs)
 	return writeListPlainOutput(renderJobListPlain(jobs, listOutputWidth()))
+}
+
+// applyAttemptOutcomeOverrides overrides the display status for queued jobs
+// whose latest cloud attempt outcome is "failed". These are jobs that ran
+// and failed on a cloud instance, then were reset to queued — they should
+// display as "failed" rather than "queued".
+func applyAttemptOutcomeOverrides(database *sql.DB, jobs []*db.Job) {
+	if database == nil {
+		return
+	}
+	for _, job := range jobs {
+		if job == nil || job.Status != db.StatusQueued {
+			continue
+		}
+		outcome := db.GetLatestAttemptOutcome(database, job.ID)
+		if outcome == db.AttemptOutcomeFailed {
+			job.Status = db.StatusFailed
+		}
+	}
 }
 
 func buildListTitle(args []string) string {

@@ -255,6 +255,18 @@ func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instanc
 		}
 	}
 
+	// Check R2 termination intent — the agent may have written it before dying.
+	// This catches the race where the agent writes the intent, self-destructs,
+	// and the provider shows "exited" before the reconciler's step 3 picks it up.
+	if intent, err := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID); err == nil && intent != nil {
+		if action := r.checkTerminationIntent(ci, inst, intent); action.Kind != ActionNone {
+			r.mu.Lock()
+			delete(r.firstDeadAt, ci.ID)
+			r.mu.Unlock()
+			return action
+		}
+	}
+
 	// Require the instance to appear dead for confirmTime before declaring terminal.
 	confirmTime := r.confirmTime()
 	r.mu.Lock()
@@ -275,9 +287,9 @@ func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instanc
 	delete(r.firstDeadAt, ci.ID)
 	r.mu.Unlock()
 
-	// Use the provider status as the default reason — it's more informative
-	// than a catch-all. R2 markers may override below with a more specific reason.
-	reason := db.TerminationReasonInfraFailure
+	// Use "unknown" as the default reason — we can't determine what happened.
+	// R2 markers may override below with a more specific reason.
+	reason := db.TerminationReasonUnknown
 	if ci.LaunchedAt != nil && inst != nil && inst.Status != "" {
 		reason = inst.Status // echo provider status: "exited", "error", "destroyed", etc.
 	}

@@ -329,6 +329,7 @@ func terminationReasonValues() []string {
 		TerminationReasonDiskFull,
 		TerminationReasonInfraFailure,
 		TerminationReasonCancelled,
+		TerminationReasonUnknown,
 	}
 }
 

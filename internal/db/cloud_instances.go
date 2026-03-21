@@ -45,6 +45,7 @@ const (
 	TerminationReasonDiskFull     = "disk_full"
 	TerminationReasonInfraFailure = "infra_failure"
 	TerminationReasonCancelled    = "canceled"
+	TerminationReasonUnknown      = "unknown"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be
@@ -57,7 +58,7 @@ func IsRetryableTermination(ci *CloudInstance) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonPreempted, TerminationReasonInfraFailure, "":
+	case TerminationReasonPreempted, TerminationReasonInfraFailure, TerminationReasonUnknown, "":
 		return true
 	case "destroyed", "error", "dead", "stopped":
 		// Provider-level terminal statuses — worth retrying on a different instance.
@@ -1114,6 +1115,22 @@ func GetAttemptOutcomesByInstance(database *sql.DB, cloudInstanceID int64) (map[
 		outcomes[jobID] = outcome // later rows overwrite earlier, giving us the latest
 	}
 	return outcomes, rows.Err()
+}
+
+// GetLatestAttemptOutcome returns the most recent closed attempt outcome for a job.
+// Returns empty string if no closed attempts exist.
+func GetLatestAttemptOutcome(database *sql.DB, jobID int64) string {
+	var outcome sql.NullString
+	err := database.QueryRow(
+		`SELECT outcome FROM job_cloud_attempts
+		 WHERE job_id = ? AND ended_at IS NOT NULL AND outcome IS NOT NULL
+		 ORDER BY ended_at DESC LIMIT 1`,
+		jobID,
+	).Scan(&outcome)
+	if err != nil || !outcome.Valid {
+		return ""
+	}
+	return outcome.String
 }
 
 // SetCloudInstanceGracePeriod stores the configured grace period for a cloud instance.

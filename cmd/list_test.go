@@ -54,7 +54,7 @@ func TestPrintJobsShowsDirectoryTailColumn(t *testing.T) {
 	}
 
 	output := captureStdout(t, func() {
-		if err := printJobs(jobs); err != nil {
+		if err := printJobs(nil, jobs); err != nil {
 			t.Fatalf("printJobs: %v", err)
 		}
 	})
