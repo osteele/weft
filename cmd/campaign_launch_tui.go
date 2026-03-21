@@ -31,6 +31,19 @@ var (
 	launchErrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 )
 
+// formatPartialErrors renders a list of launch failure messages.
+func formatPartialErrors(errors []string) string {
+	var b strings.Builder
+	b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(errors))))
+	b.WriteString("\n")
+	for _, errMsg := range errors {
+		b.WriteString("  - ")
+		b.WriteString(errMsg)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // listItem is a union type for the flat list of items in the launch selector.
 type listItem struct {
 	isHeader bool
@@ -610,10 +623,13 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.inlineWatch != nil {
-			// Pass unplaced jobs to the watch model for retry
-			if len(m.partialErrors) > 0 && m.database != nil {
-				unplaced, _ := db.ListUnplacedJobs(m.database)
-				m.inlineWatch.partialErrorJobs = unplaced
+			// Pass partial errors and unplaced jobs to the watch model for retry
+			if len(m.partialErrors) > 0 {
+				m.inlineWatch.partialErrors = m.partialErrors
+				if m.database != nil {
+					unplaced, _ := db.ListUnplacedJobs(m.database)
+					m.inlineWatch.partialErrorJobs = unplaced
+				}
 			}
 			return m, nil
 		}
@@ -1008,16 +1024,6 @@ func (m launchModel) View() string {
 			b.WriteString(launchErrStyle.Render(fmt.Sprintf("Launch error: %v", m.err)))
 			b.WriteString("\n\n")
 		}
-		if len(m.partialErrors) > 0 && !m.inlineWatch.partialErrorsRetried {
-			b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(m.partialErrors))))
-			b.WriteString("\n")
-			for _, err := range m.partialErrors {
-				b.WriteString("  - ")
-				b.WriteString(err)
-				b.WriteString("\n")
-			}
-			b.WriteString("\n")
-		}
 		b.WriteString(m.inlineWatch.View())
 		return b.String()
 	}
@@ -1037,13 +1043,7 @@ func (m launchModel) View() string {
 		b.WriteString("\n")
 		if len(m.partialErrors) > 0 {
 			b.WriteString("\n")
-			b.WriteString(launchErrStyle.Render(fmt.Sprintf("%d planned launch(es) failed:", len(m.partialErrors))))
-			b.WriteString("\n")
-			for _, err := range m.partialErrors {
-				b.WriteString("  - ")
-				b.WriteString(err)
-				b.WriteString("\n")
-			}
+			b.WriteString(formatPartialErrors(m.partialErrors))
 			b.WriteString("\nPress Enter, Esc, or q to continue.\n")
 		}
 		return b.String()

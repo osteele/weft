@@ -124,14 +124,26 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 
 	// Parse response — vastai create returns {"new_contract": <id>, "success": true}
 	var resp struct {
-		NewContract int  `json:"new_contract"`
-		Success     bool `json:"success"`
+		NewContract int    `json:"new_contract"`
+		Success     bool   `json:"success"`
+		Error       string `json:"error"`
+		Msg         string `json:"msg"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
 		return nil, fmt.Errorf("parse create response: %w (output: %s)", err, truncate(string(out), 200))
 	}
 	if !resp.Success {
-		return nil, fmt.Errorf("create instance failed: %s", string(out))
+		reason := resp.Error
+		if reason == "" {
+			reason = resp.Msg
+		}
+		if reason == "" {
+			reason = "provider returned success=false"
+		}
+		if resp.NewContract != 0 {
+			return nil, fmt.Errorf("create instance failed (contract %d): %s", resp.NewContract, reason)
+		}
+		return nil, fmt.Errorf("create instance failed: %s", reason)
 	}
 
 	return &Instance{ID: resp.NewContract}, nil

@@ -268,6 +268,9 @@ func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string 
 		return line
 	}
 
+	if campaign.IsInstanceTerminal(ci.Status) {
+		return line
+	}
 	return line + " (provisioning...)"
 }
 

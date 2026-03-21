@@ -314,7 +314,7 @@ func createInstanceWithReplacement(
 		return inst, currentOffer, nil
 	}
 	if replacementOffer == nil || !errors.Is(err, cloud.ErrOfferUnavailable) {
-		return nil, currentOffer, fmt.Errorf("create instance: %w", err)
+		return nil, currentOffer, err
 	}
 
 	log.Printf("launch: offer %s disappeared for %s; searching for replacement", currentOffer.ProviderID, group.GPUSpec())
@@ -341,7 +341,7 @@ func createInstanceWithReplacement(
 
 	inst, err = client.CreateInstance(currentOffer.ProviderID, createOpts)
 	if err != nil {
-		return nil, currentOffer, fmt.Errorf("create instance: %w", err)
+		return nil, currentOffer, err
 	}
 	return inst, currentOffer, nil
 }

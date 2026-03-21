@@ -51,6 +51,7 @@ type watchModel struct {
 	appConfig            *config.Config // config for building cloud clients on retry
 	retrying             bool           // true while retry launch is in progress
 	retryResult          string         // status line after retry completes (or error)
+	partialErrors        []string       // human-readable launch failure messages (inline watch only)
 	partialErrorJobs     []*db.Job      // jobs from launch failures (inline watch only)
 	partialErrorsRetried bool           // true after partial error jobs have been retried
 }
@@ -595,6 +596,12 @@ func (m watchModel) View() string {
 
 		b.WriteString(formatWatchInstanceBlock(u, m.jobProgressHWM, watchInstanceBlockOptions{}))
 		b.WriteString("\n\n")
+	}
+
+	// Partial launch errors (shown between instance blocks and retry status)
+	if len(m.partialErrors) > 0 && !m.partialErrorsRetried {
+		b.WriteString(formatPartialErrors(m.partialErrors))
+		b.WriteString("\n")
 	}
 
 	// Retry status line
