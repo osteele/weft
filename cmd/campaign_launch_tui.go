@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -62,7 +63,9 @@ type launchModel struct {
 	err              error
 	partialErrors    []string
 	fromWatch        bool
-	phase            string              // launch progress phase
+	campaignPhase    string              // campaign-level phase text
+	groupPhases      map[int]string      // groupIndex -> current phase
+	groupDone        map[int]bool        // groupIndex -> registered
 	estimateProgress estimateProgressMsg // latest estimation progress
 	progressCh       chan estimateProgressMsg
 	campaignCh       chan int64
@@ -121,11 +124,13 @@ type campaignCreatedMsg struct {
 }
 
 type launchPhaseMsg struct {
-	phase string
+	groupIndex int // -1 for campaign-level phases
+	phase      string
 }
 
 type launchInstanceRegisteredMsg struct {
 	instanceID int64
+	groupIndex int
 }
 
 // offersMatch returns true if both slices select the same best offer per group.
@@ -551,7 +556,14 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case launchPhaseMsg:
-		m.phase = msg.phase
+		if msg.groupIndex < 0 {
+			m.campaignPhase = msg.phase
+		} else {
+			if m.groupPhases == nil {
+				m.groupPhases = make(map[int]string)
+			}
+			m.groupPhases[msg.groupIndex] = msg.phase
+		}
 		if m.launching {
 			return m, waitForLaunchPhase(m.phaseCh)
 		}
@@ -562,6 +574,10 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.registeredInstanceIDSet[msg.instanceID] = struct{}{}
 			m.registeredInstanceIDs = append(m.registeredInstanceIDs, msg.instanceID)
 		}
+		if m.groupDone == nil {
+			m.groupDone = make(map[int]bool)
+		}
+		m.groupDone[msg.groupIndex] = true
 		cmds := []tea.Cmd{}
 		if m.launching {
 			cmds = append(cmds, waitForLaunchInstanceRegistered(m.instanceCh))
@@ -647,6 +663,9 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.partialErrors = nil
 		m.err = nil
 		m.instanceIDs = nil
+		m.campaignPhase = ""
+		m.groupPhases = make(map[int]string)
+		m.groupDone = make(map[int]bool)
 		return m, tea.Batch(
 			m.spinner.Tick,
 			m.launchInstances(),
@@ -841,6 +860,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			GPUClass: g.GPUClass,
 			GPUMemGB: g.GPUMemGB,
 			DiskGB:   g.DiskGB,
+			Image:    g.Image,
 			Jobs:     selectedJobs,
 		}
 		filteredGroups = append(filteredGroups, fg)
@@ -904,17 +924,31 @@ func (m launchModel) launchInstances() tea.Cmd {
 		defer close(campaignCh)
 		defer close(phaseCh)
 		defer close(instanceCh)
-		sendPhase := func(phase string) {
+		sendCampaignPhase := func(phase string) {
 			select {
-			case phaseCh <- launchPhaseMsg{phase: phase}:
+			case phaseCh <- launchPhaseMsg{groupIndex: -1, phase: phase}:
 			default:
 			}
 		}
-		sendInstanceRegistered := func(instanceID int64) {
+		sendGroupPhase := func(groupIdx int, phase string) {
 			select {
-			case instanceCh <- launchInstanceRegisteredMsg{instanceID: instanceID}:
+			case phaseCh <- launchPhaseMsg{groupIndex: groupIdx, phase: phase}:
 			default:
 			}
+		}
+		sendInstanceRegistered := func(groupIdx int, instanceID int64) {
+			select {
+			case instanceCh <- launchInstanceRegisteredMsg{instanceID: instanceID, groupIndex: groupIdx}:
+			default:
+			}
+		}
+		findGroupIndex := func(group campaign.InstanceGroup) int {
+			for i, lg := range launchGroups {
+				if lg.GPUClass == group.GPUClass && lg.GPUMemGB == group.GPUMemGB {
+					return i
+				}
+			}
+			return -1
 		}
 		if len(launchGroups) == 0 {
 			return instancesLaunchedMsg{err: fmt.Errorf("no selected groups have available offers")}
@@ -926,7 +960,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		}
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
-		sendPhase("preparing campaign launch")
+		sendCampaignPhase("preparing campaign launch")
 
 		result, err := campaign.LaunchCampaign(
 			clients, database, launchGroups, offers, selectedEstimates, survivalModel, opts, r2Cfg,
@@ -935,13 +969,19 @@ func (m launchModel) launchInstances() tea.Cmd {
 			},
 			func(group campaign.InstanceGroup, phase string) {
 				if strings.EqualFold(group.GPUClass, "campaign") {
-					sendPhase(phase)
+					sendCampaignPhase(phase)
 					return
 				}
-				sendPhase(fmt.Sprintf("%s: %s", group.GPUSpec(), phase))
+				if idx := findGroupIndex(group); idx >= 0 {
+					sendGroupPhase(idx, phase)
+				} else {
+					sendCampaignPhase(fmt.Sprintf("%s: %s", group.GPUSpec(), phase))
+				}
 			},
 			func(id int64) { campaignCh <- id },
-			func(_ campaign.InstanceGroup, instanceID int64) { sendInstanceRegistered(instanceID) },
+			func(group campaign.InstanceGroup, instanceID int64) {
+				sendInstanceRegistered(findGroupIndex(group), instanceID)
+			},
 		)
 		if err != nil {
 			return instancesLaunchedMsg{err: err}
@@ -1016,10 +1056,24 @@ func (m launchModel) View() string {
 		} else {
 			b.WriteString(" Launching instances...")
 		}
-		if m.phase != "" && (m.expectedInstanceCount == 0 || len(m.registeredInstanceIDs) < m.expectedInstanceCount) {
-			b.WriteString(fmt.Sprintf(" (%s)", m.phase))
+		// Show campaign-level phase only when no per-group phases exist yet
+		if len(m.groupPhases) == 0 && m.campaignPhase != "" {
+			b.WriteString(fmt.Sprintf(" (%s)", m.campaignPhase))
 		}
 		b.WriteString("\n")
+		// Per-group progress lines
+		for _, idx := range sortedIntKeys(m.groupPhases, m.groupDone) {
+			spec := fmt.Sprintf("group %d", idx)
+			if idx >= 0 && idx < len(m.groups) {
+				spec = m.groups[idx].GPUSpec()
+			}
+			if m.groupDone[idx] {
+				b.WriteString(fmt.Sprintf("  ✓ %s\n", spec))
+			} else {
+				phase := m.groupPhases[idx]
+				b.WriteString(fmt.Sprintf("  · %s: %s\n", spec, phase))
+			}
+		}
 		return b.String()
 	}
 
@@ -1138,4 +1192,21 @@ func (m launchModel) View() string {
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+// sortedIntKeys returns the union of keys from groupPhases and groupDone, sorted ascending.
+func sortedIntKeys(phases map[int]string, done map[int]bool) []int {
+	seen := make(map[int]struct{})
+	for k := range phases {
+		seen[k] = struct{}{}
+	}
+	for k := range done {
+		seen[k] = struct{}{}
+	}
+	keys := make([]int, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	return keys
 }

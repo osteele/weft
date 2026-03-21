@@ -597,6 +597,7 @@ func LaunchCampaign(
 				}
 			}
 
+			progress("waiting for R2 assets")
 			groupAssets, assetErr := stager.AwaitAssetsForDirs(group.SourceDirs())
 			if assetErr != nil {
 				mu.Lock()
