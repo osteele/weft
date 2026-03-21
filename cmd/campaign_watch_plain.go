@@ -75,7 +75,8 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var prevSummary string
-	var retried sync.Once
+	var retryMu sync.Mutex
+	retryDone := false
 
 	// startWatching launches a goroutine that watches a single instance and
 	// prints updates. Used for both initial instances and relaunched ones.
@@ -102,21 +103,52 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 				}
 				mu.Unlock()
 
-				// Auto-relaunch on retryable infrastructure failure (once across all instances)
+				// Auto-relaunch on retryable infrastructure failure with backoff
 				ci := update.CloudInstance
 				if ci != nil && db.IsRetryableTermination(ci) {
-					retried.Do(func() {
-						fmt.Printf("instance %d: retryable failure (%s), attempting relaunch...\n", instanceID, ci.TerminationReason)
-						newIDs, err := attemptRelaunchOrphanedJobs(database, cfg)
-						if err != nil {
-							fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
-						} else if len(newIDs) > 0 {
-							fmt.Printf("instance %d: relaunched as instance(s) %v\n", instanceID, newIDs)
-							for _, newID := range newIDs {
-								startWatching(newID)
+					retryMu.Lock()
+					shouldRetry := !retryDone
+					if shouldRetry {
+						retryDone = true
+					}
+					retryMu.Unlock()
+
+					if shouldRetry {
+						go func() {
+							defer func() {
+								retryMu.Lock()
+								retryDone = false
+								retryMu.Unlock()
+							}()
+							maxAttempts := len(retryBackoffDelays) + 1
+							for attempt := range maxAttempts {
+								fmt.Printf("instance %d: retryable failure (%s), attempting relaunch (attempt %d/%d)...\n",
+									instanceID, ci.TerminationReason, attempt+1, maxAttempts)
+								newIDs, err := attemptRelaunchOrphanedJobs(database, cfg)
+								if err != nil {
+									fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
+									return
+								}
+								if len(newIDs) > 0 {
+									fmt.Printf("instance %d: relaunched as instance(s) %v\n", instanceID, newIDs)
+									for _, newID := range newIDs {
+										startWatching(newID)
+									}
+									return
+								}
+								if attempt < len(retryBackoffDelays) {
+									delay := retryBackoffDelays[attempt]
+									fmt.Printf("instance %d: no offers available, retrying in %s...\n", instanceID, delay)
+									select {
+									case <-time.After(delay):
+									case <-ctx.Done():
+										return
+									}
+								}
 							}
-						}
-					})
+							fmt.Printf("instance %d: no offers available after %d attempts\n", instanceID, maxAttempts)
+						}()
+					}
 				}
 
 				prev = update

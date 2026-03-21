@@ -51,6 +51,7 @@ type watchModel struct {
 	appConfig            *config.Config // config for building cloud clients on retry
 	retrying             bool           // true while retry launch is in progress
 	retryResult          string         // status line after retry completes (or error)
+	retryAttempt         int            // current retry attempt number (0-based)
 	partialErrors        []string       // human-readable launch failure messages (inline watch only)
 	partialErrorJobs     []*db.Job      // jobs from launch failures (inline watch only)
 	partialErrorsRetried bool           // true after partial error jobs have been retried
@@ -100,6 +101,18 @@ type campaignWatchSyncResultMsg struct{}
 type retryResultMsg struct {
 	instanceIDs []int64
 	err         error
+}
+
+// retryBackoffMsg triggers a delayed retry attempt after no offers were found.
+type retryBackoffMsg struct{}
+
+// retryBackoffDelays defines the delay before each retry attempt (indexed by attempt number).
+// The length of this slice determines the maximum number of retry attempts.
+var retryBackoffDelays = []time.Duration{
+	30 * time.Second,
+	60 * time.Second,
+	2 * time.Minute,
+	5 * time.Minute,
 }
 
 func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
@@ -187,6 +200,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			m.cancel()
 			return m, tea.Quit
+		case "r":
+			if !m.retrying && m.hasRetryableFailures() {
+				m.retryAttempt = 0
+				m.retrying = true
+				m.retryResult = ""
+				return m, m.retryFailedInstances(nil)
+			}
 		}
 
 	case watchUpdateMsg:
@@ -310,9 +330,18 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.checkAllDone()
 		}
 		if len(msg.instanceIDs) == 0 {
-			m.retryResult = "Retry: no instances launched (no offers available)"
+			if m.retryAttempt < len(retryBackoffDelays) {
+				delay := retryBackoffDelays[m.retryAttempt]
+				m.retryAttempt++
+				m.retryResult = fmt.Sprintf("Retry: no offers available, retrying in %s (attempt %d/%d)",
+					delay, m.retryAttempt+1, len(retryBackoffDelays)+1)
+				return m, tea.Tick(delay, func(time.Time) tea.Msg { return retryBackoffMsg{} })
+			}
+			m.retryResult = fmt.Sprintf("Retry: no instances launched after %d attempts (no offers available)", len(retryBackoffDelays)+1)
 			return m, m.checkAllDone()
 		}
+		// Success — reset retry counter
+		m.retryAttempt = 0
 		// Add new instances to the watch view
 		var cmds []tea.Cmd
 		for _, id := range msg.instanceIDs {
@@ -339,6 +368,11 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.retryResult = fmt.Sprintf("Retried: launched instances %s", strings.Join(ids, ", "))
 		return m, tea.Batch(cmds...)
+
+	case retryBackoffMsg:
+		m.retrying = true
+		m.retryResult = ""
+		return m, m.retryFailedInstances(nil)
 
 	case campaignWatchSyncResultMsg:
 		// Background on-prem sync completed — re-arm and continue (no display update needed)
@@ -480,6 +514,17 @@ func (m watchModel) retryFailedInstances(_ []*db.Job) tea.Cmd {
 	}
 }
 
+// hasRetryableFailures reports whether any instances have retryable infrastructure failures.
+func (m watchModel) hasRetryableFailures() bool {
+	for _, id := range m.instanceIDs {
+		u, ok := m.updates[id]
+		if ok && u.CloudInstance != nil && db.IsRetryableTermination(u.CloudInstance) {
+			return true
+		}
+	}
+	return len(m.partialErrors) > 0 && !m.partialErrorsRetried
+}
+
 // countFailedInstances returns the number of failed instances in the watch view.
 func (m watchModel) countFailedInstances() int {
 	count := 0
@@ -614,7 +659,11 @@ func (m watchModel) View() string {
 	}
 
 	if !m.done {
-		b.WriteString(watchDimStyle.Render("q to quit (instances continue in background)"))
+		hint := "q to quit (instances continue in background)"
+		if !m.retrying && m.hasRetryableFailures() {
+			hint = "r to retry, q to quit (instances continue in background)"
+		}
+		b.WriteString(watchDimStyle.Render(hint))
 		b.WriteString("\n")
 	}
 
