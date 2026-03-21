@@ -185,7 +185,11 @@ func renderProjectJobsPlain(groups []projectGroup, width int) string {
 		return "No jobs found\n"
 	}
 
-	layout := newJobListLayout(width)
+	var allJobs []*db.Job
+	for _, group := range groups {
+		allJobs = append(allJobs, group.Jobs...)
+	}
+	layout := newJobListLayout(width, allJobs)
 	var b strings.Builder
 	for i, group := range groups {
 		if i > 0 {

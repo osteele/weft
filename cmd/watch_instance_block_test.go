@@ -174,11 +174,8 @@ func TestFormatWatchInstanceBlockAbbreviatesLongProjectNames(t *testing.T) {
 	}
 
 	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{plain: true})
-	if strings.Contains(out, "llm-performance-models") {
-		t.Fatalf("expected abbreviated project label, got:\n%s", out)
-	}
-	if !strings.Contains(out, "llm-perf-mod") {
-		t.Fatalf("expected hyphen-aware abbreviation in output, got:\n%s", out)
+	if !strings.Contains(out, "llm-performance-models") {
+		t.Fatalf("expected full project label, got:\n%s", out)
 	}
 }
 

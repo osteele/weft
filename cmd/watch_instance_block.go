@@ -9,7 +9,6 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/tui"
 )
 
 type watchInstanceBlockOptions struct {
@@ -78,6 +77,16 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	}
 	lines = append(lines, fmt.Sprintf("  Jobs: %d/%d resolved", resolved, len(update.Jobs)))
 
+	projectWidth := len("PROJECT")
+	for _, job := range update.Jobs {
+		if job == nil {
+			continue
+		}
+		if w := len(campaign.JobProjectLabel(job)); w > projectWidth {
+			projectWidth = w
+		}
+	}
+
 	activePhaseJobID, activePhaseStatus := watchActivePhaseStatus(update.InstancePhase)
 	for i, job := range update.Jobs {
 		if job == nil {
@@ -103,12 +112,12 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 		if progress := watchJobProgressPercent(update, job, displayStatus, jobProgressHWM); progress > 0 {
 			statusText = fmt.Sprintf("running %3d%%", progress)
 		}
-		projectLabel := tui.AbbreviateProject(campaign.JobProjectLabel(job), 12)
+		projectLabel := campaign.JobProjectLabel(job)
 
-		lines = append(lines, fmt.Sprintf("    %4d  %s  %-12s  %s",
+		lines = append(lines, fmt.Sprintf("    %4d  %s  %-*s  %s",
 			job.ID,
 			renderWatchJobStatusText(statusText, displayStatus, opts),
-			projectLabel,
+			projectWidth, projectLabel,
 			desc,
 		))
 		if campaign.IsJobTerminal(displayStatuses[i]) {

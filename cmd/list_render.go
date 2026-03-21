@@ -14,7 +14,6 @@ import (
 	"github.com/charmbracelet/x/term"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/tui"
 )
 
 type jobListColumn struct {
@@ -34,7 +33,7 @@ func renderJobListPlain(jobs []*db.Job, width int) string {
 		return "No jobs found\n"
 	}
 
-	layout := newJobListLayout(width)
+	layout := newJobListLayout(width, jobs)
 	lines := make([]string, 0, len(jobs)+1)
 	lines = append(lines, truncateDisplayWidth(formatJobListHeader(layout), layout.width))
 	for _, job := range jobs {
@@ -124,9 +123,20 @@ func ignorePagerPipeError(err error) bool {
 	return errors.Is(err, syscall.EPIPE)
 }
 
-func newJobListLayout(width int) jobListLayout {
+func newJobListLayout(width int, jobs []*db.Job) jobListLayout {
 	if width <= 0 {
 		width = 120
+	}
+
+	// Compute project column width from actual data
+	projectWidth := len("PROJECT")
+	for _, job := range jobs {
+		if w := lipgloss.Width(campaign.JobProjectLabel(job)); w > projectWidth {
+			projectWidth = w
+		}
+	}
+	if projectWidth > 30 {
+		projectWidth = 30
 	}
 
 	columns := []jobListColumn{
@@ -145,7 +155,7 @@ func newJobListLayout(width int) jobListLayout {
 			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
 			jobListColumn{title: "STARTED", width: 11, value: func(job *db.Job) string { return formatJobListStarted(job) }},
-			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
+			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
 			jobListColumn{title: "DIR", width: 14, value: func(job *db.Job) string { return job.DirectoryTailDisplay() }},
 		)
 	case width >= 80:
@@ -153,17 +163,17 @@ func newJobListLayout(width int) jobListLayout {
 			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
 			jobListColumn{title: "STARTED", width: 11, value: func(job *db.Job) string { return formatJobListStarted(job) }},
-			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
+			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
 		)
 	case width >= 64:
 		columns = append(columns,
 			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
-			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
+			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
 		)
 	default:
 		columns = append(columns,
-			jobListColumn{title: "PROJECT", width: 12, value: func(job *db.Job) string { return formatJobListProject(job) }},
+			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
 			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
 		)
 	}
@@ -242,7 +252,7 @@ func formatJobListProject(job *db.Job) string {
 	if job == nil {
 		return ""
 	}
-	return tui.AbbreviateProject(campaign.JobProjectLabel(job), 12)
+	return campaign.JobProjectLabel(job)
 }
 
 func padOrTruncateDisplay(value string, width int, alignRight bool) string {

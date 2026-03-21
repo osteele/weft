@@ -68,8 +68,8 @@ func TestPrintJobsShowsDirectoryTailColumn(t *testing.T) {
 	if !strings.Contains(output, "project-alpha") {
 		t.Fatalf("output missing directory tail, got:\n%s", output)
 	}
-	if !strings.Contains(output, "llm-perf-mod") {
-		t.Fatalf("output missing abbreviated project, got:\n%s", output)
+	if !strings.Contains(output, "llm-performance-models") {
+		t.Fatalf("output missing project name, got:\n%s", output)
 	}
 }
 
@@ -133,8 +133,8 @@ func TestRenderJobListPlainIncludesDirectoryOnWideTerminals(t *testing.T) {
 	if !strings.Contains(out, "project-alpha") {
 		t.Fatalf("output missing directory tail, got:\n%s", out)
 	}
-	if !strings.Contains(out, "llm-perf-mod") {
-		t.Fatalf("output missing abbreviated project, got:\n%s", out)
+	if !strings.Contains(out, "llm-performance-models") {
+		t.Fatalf("output missing project name, got:\n%s", out)
 	}
 }
 
@@ -154,7 +154,7 @@ func TestRenderJobListPlainProjectFallsBackToDirectoryTail(t *testing.T) {
 	if !strings.Contains(out, "PROJECT") {
 		t.Fatalf("output missing PROJECT header, got:\n%s", out)
 	}
-	if !strings.Contains(out, "projec-alpha") {
+	if !strings.Contains(out, "project-alpha") {
 		t.Fatalf("expected directory-tail fallback in project column, got:\n%s", out)
 	}
 }

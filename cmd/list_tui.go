@@ -269,7 +269,7 @@ func (m listTUIModel) View() string {
 		return "Loading..."
 	}
 
-	layout := newJobListLayout(max(20, m.width-2))
+	layout := newJobListLayout(max(20, m.width-2), m.jobs)
 	var b strings.Builder
 
 	title := fmt.Sprintf("%s (%d)", m.title, len(m.jobs))
