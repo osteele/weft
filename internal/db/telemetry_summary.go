@@ -8,19 +8,19 @@ const ThermalThrottleThresholdC = 80
 
 // GPUTelemetryStats summarises GPU telemetry from timeseries samples.
 type GPUTelemetryStats struct {
-	SampleCount int
-	TempMin     int
-	TempMax     int
-	TempMean    float64
-	UtilMin     int
-	UtilMax     int
-	UtilMean    float64
-	ClockMin    int
-	ClockMax    int
-	ClockMean   float64
-	MemPeakMiB  int
-	MemTotalMiB int
-	Throttled   bool // any sample had temp > ThermalThrottleThresholdC
+	SampleCount int     `json:"sample_count"`
+	TempMin     int     `json:"temp_min_c"`
+	TempMax     int     `json:"temp_max_c"`
+	TempMean    float64 `json:"temp_mean_c"`
+	UtilMin     int     `json:"util_min_pct"`
+	UtilMax     int     `json:"util_max_pct"`
+	UtilMean    float64 `json:"util_mean_pct"`
+	ClockMin    int     `json:"clock_min_mhz"`
+	ClockMax    int     `json:"clock_max_mhz"`
+	ClockMean   float64 `json:"clock_mean_mhz"`
+	MemPeakMiB  int     `json:"mem_peak_mib"`
+	MemTotalMiB int     `json:"mem_total_mib"`
+	Throttled   bool    `json:"throttled"`
 }
 
 // ComputeGPUTelemetryStats computes aggregate GPU statistics from timeseries
