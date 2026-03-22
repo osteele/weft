@@ -217,14 +217,27 @@ func (s *R2AssetStager) Close() {
 	}
 }
 
-func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string) (R2Assets, error) {
+// AwaitAssetsForDirs waits for the agent binary and source tarballs needed by
+// the given dirs. If onProgress is non-nil, it is called with (completed, total)
+// counts starting at (0, total) and after each asset resolves.
+func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string, onProgress func(done, total int)) (R2Assets, error) {
 	if s == nil || s.Client == nil {
 		return R2Assets{}, fmt.Errorf("R2 asset stager is not initialized")
 	}
+	if onProgress == nil {
+		onProgress = func(int, int) {}
+	}
+	total := 1 + len(dirs) // agent + source dirs
+	done := 0
+	onProgress(done, total)
+
 	agentR2Key, err := s.agentKey.await()
 	if err != nil {
 		return R2Assets{}, fmt.Errorf("upload agent to R2: %w", err)
 	}
+	done++
+	onProgress(done, total)
+
 	assets := R2Assets{
 		Client:       s.Client,
 		AgentVersion: s.AgentVersion,
@@ -241,6 +254,8 @@ func (s *R2AssetStager) AwaitAssetsForDirs(dirs []string) (R2Assets, error) {
 			return R2Assets{}, err
 		}
 		assets.SourceR2Keys[localDir] = key
+		done++
+		onProgress(done, total)
 	}
 	return assets, nil
 }
@@ -253,7 +268,7 @@ func (s *R2AssetStager) AwaitAll() (*R2Assets, error) {
 	for localDir := range s.sourcePromises {
 		dirs = append(dirs, localDir)
 	}
-	assets, err := s.AwaitAssetsForDirs(dirs)
+	assets, err := s.AwaitAssetsForDirs(dirs, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +476,7 @@ func LaunchCampaign(
 				if onPhase != nil {
 					onPhase(InstanceGroup{GPUClass: "donor"}, "waiting for R2 assets")
 				}
-				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs)
+				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs, nil)
 				if donorAssetErr != nil {
 					log.Printf("donor: staging assets failed: %v", donorAssetErr)
 					donorCfg = nil
@@ -610,8 +625,9 @@ func LaunchCampaign(
 				}
 			}
 
-			progress("staging agent and sources")
-			groupAssets, assetErr := stager.AwaitAssetsForDirs(group.SourceDirs())
+			groupAssets, assetErr := stager.AwaitAssetsForDirs(group.SourceDirs(), func(done, total int) {
+				progress(fmt.Sprintf("staging (%d/%d assets ready)", done, total))
+			})
 			if assetErr != nil {
 				mu.Lock()
 				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), assetErr))
