@@ -21,56 +21,56 @@ type InstanceGroup struct {
 	Jobs     []*db.Job
 }
 
-// GroupByGPUSupremum groups unplaced jobs by GPU class, using the maximum
-// memory requirement across the group as the supremum. Jobs with the same
-// GPUClass (case-insensitive) are placed in the same group. Jobs with no class
-// are grouped by memory tier alone.
+// GroupByGPUSupremum groups unplaced jobs by compatible GPU class, using the
+// maximum memory requirement across the group as the supremum. Jobs with
+// compatible GPU constraints (e.g., "" and "nvidia", or "nvidia" and "ampere")
+// are merged into the same group using the most specific constraint.
 //
 // Returns groups sorted by descending GPU memory.
 func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
-	type groupKey struct {
-		class  string
-		hasGPU bool // distinguishes "" class with mem vs "" class without mem
-	}
-
-	groups := make(map[groupKey]*InstanceGroup)
+	var groups []InstanceGroup
 
 	for _, job := range jobs {
 		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasAssignedHost() {
 			continue
 		}
 
-		class := strings.ToUpper(job.GPUClass)
 		mem := 0
 		if job.GPUMemGB != nil {
 			mem = *job.GPUMemGB
 		}
 
-		key := groupKey{class: class, hasGPU: class != "" || mem > 0}
-		g, ok := groups[key]
-		if !ok {
-			g = &InstanceGroup{GPUClass: class}
-			groups[key] = g
+		merged := false
+		for i := range groups {
+			supremum, ok := gpuClassSupremum(groups[i].GPUClass, job.GPUClass)
+			if ok {
+				groups[i].GPUClass = supremum
+				groups[i].Jobs = append(groups[i].Jobs, job)
+				if mem > groups[i].GPUMemGB {
+					groups[i].GPUMemGB = mem
+				}
+				merged = true
+				break
+			}
 		}
-		g.Jobs = append(g.Jobs, job)
-		if mem > g.GPUMemGB {
-			g.GPUMemGB = mem
+
+		if !merged {
+			groups = append(groups, InstanceGroup{
+				GPUClass: strings.ToUpper(job.GPUClass),
+				GPUMemGB: mem,
+				Jobs:     []*db.Job{job},
+			})
 		}
 	}
 
-	result := make([]InstanceGroup, 0, len(groups))
-	for _, g := range groups {
-		result = append(result, *g)
-	}
-
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].GPUMemGB != result[j].GPUMemGB {
-			return result[i].GPUMemGB > result[j].GPUMemGB
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].GPUMemGB != groups[j].GPUMemGB {
+			return groups[i].GPUMemGB > groups[j].GPUMemGB
 		}
-		return result[i].GPUClass < result[j].GPUClass
+		return groups[i].GPUClass < groups[j].GPUClass
 	})
 
-	return result
+	return groups
 }
 
 // FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).
@@ -89,32 +89,46 @@ func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {
 }
 
 // SplitGroupsByImage further subdivides instance groups so that all jobs in a
-// group share the same Docker image. Each job's image is resolved from its
-// project config (.weft.toml [cloud] image). Jobs with no configured image
-// (empty string) are grouped together and use the global default at launch time.
+// group use a compatible Docker image. Each job's image is resolved from its
+// project config (.weft.toml [cloud] image). Compatible CUDA images with the
+// same version and OS but different variants (base/runtime/devel) are merged
+// using the most capable variant.
 func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
+	type imageGroup struct {
+		image string
+		jobs  []*db.Job
+	}
+
 	var result []InstanceGroup
 	for _, g := range groups {
-		byImage := make(map[string][]*db.Job)
+		var subs []imageGroup
+
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 			img := config.ProjectCloudImage(localDir)
-			byImage[img] = append(byImage[img], job)
-		}
-		if len(byImage) <= 1 {
-			for img := range byImage {
-				g.Image = img
+
+			merged := false
+			for i := range subs {
+				supremum, ok := imageSupremum(subs[i].image, img)
+				if ok {
+					subs[i].image = supremum
+					subs[i].jobs = append(subs[i].jobs, job)
+					merged = true
+					break
+				}
 			}
-			result = append(result, g)
-			continue
+			if !merged {
+				subs = append(subs, imageGroup{image: img, jobs: []*db.Job{job}})
+			}
 		}
-		for img, jobs := range byImage {
+
+		for _, sub := range subs {
 			result = append(result, InstanceGroup{
 				GPUClass: g.GPUClass,
 				GPUMemGB: g.GPUMemGB,
 				DiskGB:   g.DiskGB,
-				Image:    img,
-				Jobs:     jobs,
+				Image:    sub.image,
+				Jobs:     sub.jobs,
 			})
 		}
 	}

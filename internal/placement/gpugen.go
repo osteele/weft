@@ -208,6 +208,67 @@ func (c GPUConstraint) MatchesGPU(inventoryClass string) bool {
 	return false
 }
 
+// Subsumes returns true if every GPU that satisfies other also satisfies c.
+// In other words, c is a broader (or equal) constraint than other.
+//
+// Note: two zero-value GPUConstraints (from parsing "") will return true
+// (both are constraintExactModel with normalized ""). Callers that need to
+// treat empty strings as "unconstrained" should handle that before calling.
+func (c GPUConstraint) Subsumes(other GPUConstraint) bool {
+	switch c.mode {
+	case constraintFamily:
+		// Family subsumes anything within that family.
+		switch other.mode {
+		case constraintFamily:
+			return c.normalized == other.normalized
+		case constraintExactGen, constraintMinGen:
+			return familyCheckers[c.normalized](other.generation)
+		case constraintExactModel:
+			gen := generationOf(other.normalized)
+			return gen != GenUnknown && familyCheckers[c.normalized](gen)
+		}
+
+	case constraintMinGen:
+		// "ampere+" subsumes "hopper+" (higher min), exact gen at-or-above,
+		// and exact models whose generation is at-or-above.
+		switch other.mode {
+		case constraintFamily:
+			return false
+		case constraintMinGen:
+			if c.generation.isNVIDIA() != other.generation.isNVIDIA() ||
+				c.generation.isApple() != other.generation.isApple() {
+				return false
+			}
+			return c.generation <= other.generation
+		case constraintExactGen:
+			return c.matchesGeneration(other.generation)
+		case constraintExactModel:
+			gen := generationOf(other.normalized)
+			return gen != GenUnknown && c.matchesGeneration(gen)
+		}
+
+	case constraintExactGen:
+		// "ampere" (exact) subsumes only exact models within that generation.
+		switch other.mode {
+		case constraintFamily, constraintMinGen:
+			return false
+		case constraintExactGen:
+			return c.generation == other.generation
+		case constraintExactModel:
+			gen := generationOf(other.normalized)
+			return gen != GenUnknown && gen == c.generation
+		}
+
+	case constraintExactModel:
+		// Exact model only subsumes itself.
+		if other.mode == constraintExactModel {
+			return c.normalized == other.normalized
+		}
+		return false
+	}
+	return false
+}
+
 // MatchesGPUFullName returns true if a full nvidia-smi GPU name (e.g.
 // "NVIDIA A100-PCIE-80GB") satisfies this constraint. For exact model mode
 // it uses substring matching on the normalized full name. For generation

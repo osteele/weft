@@ -236,3 +236,69 @@ func TestMatchesGPUFullName(t *testing.T) {
 		}
 	}
 }
+
+func TestSubsumes(t *testing.T) {
+	tests := []struct {
+		broader  string
+		narrower string
+		want     bool
+	}{
+		// Family subsumes generations and models
+		{"nvidia", "ampere", true},
+		{"nvidia", "turing", true},
+		{"nvidia", "hopper+", true},
+		{"nvidia", "a100", true},
+		{"nvidia", "rtx3090", true},
+		{"nvidia", "nvidia", true},
+		{"nvidia", "apple", false},
+		{"nvidia", "m2max", false},
+		{"apple", "m2max", true},
+		{"apple", "applem2", true},
+		{"apple", "nvidia", false},
+
+		// MinGen subsumes higher minGen, same/higher exactGen, models in range
+		{"ampere+", "hopper+", true},
+		{"ampere+", "ampere+", true},
+		{"ampere+", "turing+", false}, // turing+ includes turing, which ampere+ doesn't
+		{"ampere+", "hopper", true},
+		{"ampere+", "ampere", true},
+		{"ampere+", "turing", false},
+		{"ampere+", "h100", true},
+		{"ampere+", "a100", true},
+		{"ampere+", "rtx2080ti", false},
+		{"hopper+", "ampere+", false},
+		{"hopper+", "blackwell", true},
+		{"hopper+", "h100", true},
+		{"hopper+", "a100", false},
+
+		// ExactGen subsumes models within that generation
+		{"ampere", "a100", true},
+		{"ampere", "rtx3090", true},
+		{"ampere", "h100", false},
+		{"ampere", "rtx2080ti", false},
+		{"ampere", "ampere", true},
+		{"ampere", "hopper", false},
+		{"ampere", "nvidia", false},
+		{"ampere", "ampere+", false},
+
+		// ExactModel subsumes only itself
+		{"a100", "a100", true},
+		{"a100", "rtx3090", false},
+		{"a100", "ampere", false},
+		{"a100", "nvidia", false},
+
+		// Cross-family never subsumes
+		{"ampere+", "m2max", false},
+		{"applem2+", "a100", false},
+	}
+
+	for _, tt := range tests {
+		c := ParseGPUConstraint(tt.broader)
+		other := ParseGPUConstraint(tt.narrower)
+		got := c.Subsumes(other)
+		if got != tt.want {
+			t.Errorf("ParseGPUConstraint(%q).Subsumes(ParseGPUConstraint(%q)) = %v, want %v",
+				tt.broader, tt.narrower, got, tt.want)
+		}
+	}
+}

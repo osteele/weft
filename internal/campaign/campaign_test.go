@@ -20,19 +20,21 @@ func TestGroupByGPUSupremum(t *testing.T) {
 
 	groups := GroupByGPUSupremum(jobs)
 
-	if len(groups) != 3 {
-		t.Fatalf("expected 3 groups, got %d", len(groups))
+	// Empty-class job merges into first compatible NVIDIA group (H100),
+	// so we get 2 groups: {H100, h100, "", H100(running)} and {A100}.
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 
-	// Groups should be sorted by descending memory
+	// Groups sorted by descending memory: H100 group (80GB) first
 	if groups[0].GPUMemGB != 80 {
 		t.Errorf("first group should have 80GB, got %d", groups[0].GPUMemGB)
 	}
 	if groups[0].GPUClass != "H100" {
 		t.Errorf("first group should be H100, got %s", groups[0].GPUClass)
 	}
-	if len(groups[0].Jobs) != 3 {
-		t.Errorf("H100 group should have 3 jobs, got %d", len(groups[0].Jobs))
+	if len(groups[0].Jobs) != 4 {
+		t.Errorf("H100 group should have 4 jobs (incl. empty-class and running-unplaced), got %d", len(groups[0].Jobs))
 	}
 
 	// A100 group
@@ -42,10 +44,44 @@ func TestGroupByGPUSupremum(t *testing.T) {
 	if groups[1].GPUMemGB != 40 {
 		t.Errorf("second group should have 40GB, got %d", groups[1].GPUMemGB)
 	}
+}
 
-	// No-class group
-	if groups[2].GPUMemGB != 24 {
-		t.Errorf("third group should have 24GB, got %d", groups[2].GPUMemGB)
+func TestGroupByGPUSupremum_NvidiaAndEmptyMerge(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20)},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "", GPUMemGB: intPtr(20)},
+		{ID: 3, Status: db.StatusQueued, GPUClass: "ampere", GPUMemGB: intPtr(40)},
+	}
+
+	groups := GroupByGPUSupremum(jobs)
+
+	// "nvidia" and "" merge (both unconstrained NVIDIA family).
+	// "ampere" is more specific — merges into nvidia group (nvidia subsumes ampere).
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d: %v", len(groups), groups)
+	}
+	if groups[0].GPUClass != "AMPERE" {
+		t.Errorf("merged group should use most specific class AMPERE, got %s", groups[0].GPUClass)
+	}
+	if len(groups[0].Jobs) != 3 {
+		t.Errorf("merged group should have 3 jobs, got %d", len(groups[0].Jobs))
+	}
+	if groups[0].GPUMemGB != 40 {
+		t.Errorf("merged group should have 40GB (supremum), got %d", groups[0].GPUMemGB)
+	}
+}
+
+func TestGroupByGPUSupremum_IncompatibleGenerations(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "ampere", GPUMemGB: intPtr(40)},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "turing", GPUMemGB: intPtr(20)},
+	}
+
+	groups := GroupByGPUSupremum(jobs)
+
+	// Different specific generations are incompatible
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups for incompatible generations, got %d", len(groups))
 	}
 }
 
