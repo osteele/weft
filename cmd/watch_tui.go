@@ -533,10 +533,18 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 	if len(m.onPremHosts) == 0 {
 		addPlain(watchDimStyle.Render("  no active inventory jobs"))
 	} else {
+		projectWidth := len("PROJECT")
+		for _, host := range m.onPremHosts {
+			for _, job := range host.Jobs {
+				if w := len(campaign.JobProjectLabel(job)); w > projectWidth {
+					projectWidth = w
+				}
+			}
+		}
 		for _, host := range m.onPremHosts {
 			addPlain(watchStatusStyle.Render("  " + host.Name))
 			for _, job := range host.Jobs {
-				addSelectable("    " + truncate(m.formatOnPremJobRow(job), width-4))
+				addSelectable("    " + truncate(m.formatOnPremJobRow(job, projectWidth), width-4))
 			}
 		}
 	}
@@ -554,23 +562,23 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 	return rows, selectedVisualIndex
 }
 
-func (m watchAllModel) formatOnPremJobRow(job *db.Job) string {
+func (m watchAllModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 	status := job.EffectiveStatus()
 	duration := "—"
 	if job.StartTime > 0 {
-		duration = db.FormatDuration(time.Now().Unix() - job.StartTime)
+		d := time.Duration(time.Now().Unix()-job.StartTime) * time.Second
+		duration = d.Truncate(time.Second).String()
 	}
-	gpu := ""
-	if gpuDev := job.GPUDevice(); gpuDev != "" {
-		gpu = "  GPU " + gpuDev
+	desc := job.EffectiveDescription()
+	if desc == "" {
+		desc = campaign.TruncateCommand(job.Command, 50)
 	}
-	return fmt.Sprintf("#%-4d %-12s %-28s %-9s %-8s%s",
+	return fmt.Sprintf("#%-4d  %s  %-10s  %-*s  %s",
 		job.ID,
-		campaign.JobProjectLabel(job),
-		truncate(job.EffectiveDescription(), 28),
-		status,
+		renderWatchJobStatusText(status, status, watchInstanceBlockOptions{}),
 		duration,
-		gpu,
+		projectWidth, campaign.JobProjectLabel(job),
+		desc,
 	)
 }
 
