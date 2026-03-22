@@ -73,6 +73,7 @@ func init() {
 		{withPluralAlias(verbAlias("hosts", hostListCmd)), nil},
 		{withPluralAlias(verbAlias("queues", queueListCmd)), nil},
 		{withPluralAlias(verbAlias("artifacts", artifactListCmd)), addArtifactListFlags},
+		{withPluralAlias(verbAlias("projects", projectListCmd)), addListQueryFlags},
 	} {
 		listCmd.AddCommand(sub.cmd)
 		if sub.addFlags != nil {

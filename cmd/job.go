@@ -26,6 +26,8 @@ Available subcommands:
   kill      Kill a running job
   status    Check status of one or more jobs
   describe  Set or update job description
+  info      Show detailed job information
+  show      Alias for info
   restart   Requeue a killed, dead, failed, canceled, or completed job
   retry     Alias for restart
   list      List and search job history
@@ -133,8 +135,9 @@ and launches the job right away.`,
 }
 
 var jobInfoCmd = &cobra.Command{
-	Use:   "info <job-id>...",
-	Short: "Show detailed job information",
+	Use:     "info <job-id>...",
+	Aliases: []string{"show"},
+	Short:   "Show detailed job information",
 	Long: `Show full details for a job including command, working directory,
 environment variables, and timing information.
 

@@ -180,6 +180,67 @@ func projectRecentLess(a, b *db.Job) bool {
 	return a.ID > b.ID
 }
 
+func renderProjectListPlain(groups []projectGroup, width int) string {
+	if len(groups) == 0 {
+		return "No projects found\n"
+	}
+
+	// Compute column widths
+	maxNameLen := len("PROJECT")
+	for _, g := range groups {
+		if len(g.Label) > maxNameLen {
+			maxNameLen = len(g.Label)
+		}
+	}
+	if maxNameLen > 30 {
+		maxNameLen = 30
+	}
+
+	now := time.Now()
+	var b strings.Builder
+	fmt.Fprintf(&b, "%-*s  %5s  %7s  %6s  %6s  %s\n", maxNameLen, "PROJECT", "JOBS", "RUNNING", "QUEUED", "FAILED", "LAST ACTIVITY")
+	for _, g := range groups {
+		var running, queued, failed int
+		var lastActivity int64
+		for _, job := range g.Jobs {
+			switch job.EffectiveStatus() {
+			case db.StatusRunning, db.StatusStarting, db.StatusPaused:
+				running++
+			case db.StatusQueued, db.StatusPendingPlacement:
+				queued++
+			case db.StatusFailed, db.StatusDead:
+				failed++
+			case db.StatusCompleted:
+				if job.ExitCode != nil && *job.ExitCode != 0 {
+					failed++
+				}
+			}
+			if job.EndTime != nil && *job.EndTime > lastActivity {
+				lastActivity = *job.EndTime
+			}
+			if job.StartTime > lastActivity {
+				lastActivity = job.StartTime
+			}
+		}
+
+		label := g.Label
+		if len(label) > maxNameLen {
+			label = label[:maxNameLen-1] + "…"
+		}
+
+		var activityStr string
+		if lastActivity == 0 {
+			activityStr = "-"
+		} else {
+			activityStr = shortRelativeTime(now.Unix() - lastActivity)
+		}
+
+		fmt.Fprintf(&b, "%-*s  %5d  %7d  %6d  %6d  %s\n",
+			maxNameLen, label, len(g.Jobs), running, queued, failed, activityStr)
+	}
+	return strings.TrimRight(b.String(), "\n") + "\n"
+}
+
 func renderProjectJobsPlain(groups []projectGroup, width int) string {
 	if len(groups) == 0 {
 		return "No jobs found\n"

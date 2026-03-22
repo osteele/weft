@@ -15,8 +15,8 @@ import (
 )
 
 var listCmd = &cobra.Command{
-	Use:   "list [jobs|campaigns|instances|hosts|queues|artifacts] [flags]",
-	Short: "List jobs, campaigns, instances, hosts, queues, or artifacts",
+	Use:   "list [jobs|campaigns|instances|hosts|queues|artifacts|projects] [flags]",
+	Short: "List jobs, campaigns, instances, hosts, queues, artifacts, or projects",
 	Long: `List resources. Without a subcommand, lists jobs (same as "weft list jobs").
 
 Subcommands:
@@ -26,6 +26,7 @@ Subcommands:
   hosts       List known hosts
   queues      List job queues
   artifacts   List job output artifacts
+  projects    List projects with summary stats
 
 Examples:
   weft list                    # Recent jobs (last 7 days)
@@ -33,6 +34,7 @@ Examples:
   weft list campaigns          # All campaigns
   weft list instances          # All cloud instances
   weft list hosts              # Known hosts
+  weft list projects           # Projects with job counts
   weft list --all              # All jobs including older
   weft list --queued           # Jobs waiting in queue`,
 	RunE: runList,

@@ -104,11 +104,11 @@ func parseJobIDArg(arg string) ([]int64, error) {
 
 		start, err := strconv.ParseInt(startStr, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("invalid job ID range start %q: %w", startStr, err)
+			return nil, fmt.Errorf("invalid job ID range start %q: expected a number", startStr)
 		}
 		end, err := strconv.ParseInt(endStr, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("invalid job ID range end %q: %w", endStr, err)
+			return nil, fmt.Errorf("invalid job ID range end %q: expected a number", endStr)
 		}
 
 		if start > end {
@@ -132,7 +132,7 @@ func parseJobIDArg(arg string) ([]int64, error) {
 	// Single ID
 	id, err := strconv.ParseInt(arg, 10, 64)
 	if err != nil {
-		return nil, fmt.Errorf("invalid job ID %q: %w", arg, err)
+		return nil, fmt.Errorf("invalid job ID %q: expected a number", arg)
 	}
 	return []int64{id}, nil
 }
