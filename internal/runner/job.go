@@ -218,16 +218,13 @@ func ReadStatusFile(path string) (int, bool) {
 	return code, true
 }
 
-// JobCompleted checks if a job has a status file (indicating completion).
+// JobCompleted checks if a job has a primary status file (indicating completion).
+// Archived status files (from previous runs) are intentionally ignored so that
+// requeued jobs are not skipped.
 func JobCompleted(logDir string, jobID int64) bool {
 	path := filepath.Join(logDir, fmt.Sprintf("%d.status", jobID))
-	if _, err := os.Stat(path); err == nil {
-		return true
-	}
-	// Check archived status files
-	pattern := filepath.Join(logDir, fmt.Sprintf("%d-*.status", jobID))
-	matches, _ := filepath.Glob(pattern)
-	return len(matches) > 0
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // WriteRusageFile writes resource usage data for a completed job.

@@ -2,9 +2,38 @@ package runner
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
+
+func TestJobCompleted(t *testing.T) {
+	logDir := t.TempDir()
+
+	// No status file → not completed
+	if JobCompleted(logDir, 371) {
+		t.Fatal("expected JobCompleted=false with no status file")
+	}
+
+	// Archived status file only → not completed (requeued job)
+	archived := filepath.Join(logDir, "371-20260101-120000.status")
+	if err := os.WriteFile(archived, []byte("0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if JobCompleted(logDir, 371) {
+		t.Fatal("expected JobCompleted=false with only archived status file")
+	}
+
+	// Primary status file → completed
+	primary := filepath.Join(logDir, "371.status")
+	if err := os.WriteFile(primary, []byte("0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if !JobCompleted(logDir, 371) {
+		t.Fatal("expected JobCompleted=true with primary status file")
+	}
+}
 
 func TestCompletionRecordOutputUploadRoundTrip(t *testing.T) {
 	rec := CompletionRecord{

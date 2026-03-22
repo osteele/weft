@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/queuerunner"
@@ -899,6 +900,14 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if err := db.RequeueByID(database, jobID); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}
+		// Remove processed tag so the retried job appears in unprocessed listings
+		if job.HasTag(db.ProcessedTag) {
+			if err := db.RemoveJobTag(database, jobID, db.ProcessedTag); err != nil {
+				return fmt.Errorf("remove processed tag: %w", err)
+			}
+		}
+		// Invalidate local log cache so stale logs aren't served
+		_ = logcache.Delete(jobID)
 		job.Status = db.StatusQueued
 		wasRequeued = true
 		updates = append(updates, fmt.Sprintf("status: %s → queued", oldStatus))
@@ -1132,7 +1141,12 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reload job: %w", err)
 		}
-		if err := ops.AppendJobToQueue(job, ops.DefaultOptions().Timeout); err != nil {
+		// Remove old completion files so the runner doesn't skip the requeued job
+		timeout := ops.DefaultOptions().Timeout
+		if err := ops.RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
+			log.Printf("edit: failed to remove remote completion files for job %d: %v", job.ID, err)
+		}
+		if err := ops.AppendJobToQueue(job, timeout); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
 			fmt.Fprintf(os.Stderr, "Job saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.TargetDisplay())
 			deferredUpdate = true
