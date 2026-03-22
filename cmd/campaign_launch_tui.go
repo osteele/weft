@@ -331,7 +331,7 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 
 // rankCachedOffersForStrategy ranks cached raw offers with a specific strategy.
 func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
-	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, 0.5, strategy)
+	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, 0.5, strategy, m.launchOpts.MinSurvival)
 }
 
 // rankCachedOffers ranks cached raw offers with the current strategy.

@@ -322,6 +322,29 @@ offer_survival = group_survival(gpu_family, price_bucket, reliability) × machin
 This lets the model avoid specific machines with a history of failures while
 still placing jobs on machines that lack enough data to judge.
 
+### Survival floor
+
+Offers with survival probability below a configurable floor are rejected before
+ranking. The default floor is 40% (`--min-survival 0.4`). This prevents weft
+from repeatedly selecting GPU classes or machines that consistently fail,
+regardless of price.
+
+When offers are rejected, the launch output shows a warning:
+
+```text
+Skipped 3 RTX_2080_Ti offers (32% survival, below 40% floor)
+```
+
+Use `--min-survival 0` to disable the floor and allow all offers.
+
+Use `weft campaign survival` to inspect the model's posterior probabilities and
+see which GPU families or machines would be filtered at a given floor:
+
+```bash
+weft campaign survival             # default floor (40%)
+weft campaign survival --floor 0.6 # stricter floor
+```
+
 ### Expected cost with retries
 
 Weft scores offers by expected cost, not hourly price:

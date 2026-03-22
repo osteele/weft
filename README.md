@@ -527,6 +527,13 @@ strategies balance their objective against the probability of completion.
 The model also tracks per-machine reliability: physical machines with a history
 of failures are penalized, steering jobs toward more reliable hardware.
 
+Offers with survival probability below a configurable floor (`--min-survival`,
+default 40%) are rejected entirely — GPU classes or machines that consistently
+fail won't be selected regardless of price. Use `--min-survival 0` to disable.
+
+Use `weft campaign survival` to inspect the model: posterior survival
+probabilities by GPU family and price bucket, and per-machine penalties.
+
 Press `s` in the TUI to cycle between strategies.
 
 ```bash
@@ -535,6 +542,12 @@ weft campaign launch
 
 # Launch with fastest strategy
 weft campaign launch --strategy fastest
+
+# Disable survival floor (allow all offers)
+weft campaign launch --min-survival 0
+
+# Show the survival model
+weft campaign survival
 
 # Dry-run to see the cost plan
 weft campaign launch --dry-run

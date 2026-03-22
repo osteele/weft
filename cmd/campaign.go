@@ -84,6 +84,7 @@ var (
 	campaignLaunchJobs        string
 	campaignLaunchGPU         string
 	campaignLaunchStrategy    string
+	campaignLaunchMinSurvival float64
 	campaignLaunchTUI         bool
 	campaignLaunchPlain       bool
 	campaignWatchTUI          bool
@@ -119,6 +120,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
 	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
 	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize wall-clock time), or 'fastest' (highest raw DLPerf)")
+	cmd.Flags().Float64Var(&campaignLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
 	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
@@ -322,7 +324,9 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Fetch offers in parallel (with survival model for cost-optimal bidding)
 	fmt.Println("Searching for GPU offers...")
 	survivalModel := buildSurvivalModel(database)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, opts.Strategy)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, opts.Strategy, opts.MinSurvival)
+
+	printSurvivalRejections(groupOffers, opts.MinSurvival)
 
 	// Print plan summary with cost estimates
 	totalJobs := 0
@@ -424,16 +428,18 @@ func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campa
 		return nil
 	}
 
-	return runDryRunPlan(database, cfg, groups, strategy)
+	return runDryRunPlan(database, cfg, groups, strategy, campaignLaunchMinSurvival)
 }
 
-func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, strategy bidding.SelectionStrategy) error {
+func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, strategy bidding.SelectionStrategy, minSurvival float64) error {
 	clients, err := buildCloudClients(cfg)
 	if err != nil {
 		return err
 	}
 	survivalModel := buildSurvivalModel(database)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, strategy)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, strategy, minSurvival)
+
+	printSurvivalRejections(groupOffers, minSurvival)
 
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
@@ -691,8 +697,9 @@ func parseLaunchOpts() campaign.LaunchOpts {
 		strategy = bidding.StrategyCheap
 	}
 	opts := campaign.LaunchOpts{
-		NoDonor:  campaignLaunchNoDonor,
-		Strategy: strategy,
+		NoDonor:     campaignLaunchNoDonor,
+		Strategy:    strategy,
+		MinSurvival: campaignLaunchMinSurvival,
 	}
 	if campaignLaunchMaxSpend != "" {
 		cleaned := strings.TrimPrefix(campaignLaunchMaxSpend, "$")
@@ -786,6 +793,15 @@ func buildOverheadModel(database *sql.DB) *estimate.OverheadModel {
 		return nil
 	}
 	return estimate.BuildOverheadModel(obs)
+}
+
+func printSurvivalRejections(groupOffers []campaign.GroupOffer, minSurvival float64) {
+	for _, go_ := range groupOffers {
+		for _, rg := range go_.RejectedGroups {
+			fmt.Fprintf(os.Stderr, "Skipped %d %s offers (%.0f%% survival, below %.0f%% floor)\n",
+				rg.Count, rg.GPUFamily, rg.SurvivalProb*100, minSurvival*100)
+		}
+	}
 }
 
 // buildSurvivalModel queries historical cloud instance data and builds a

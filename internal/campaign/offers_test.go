@@ -60,7 +60,7 @@ func TestFetchGroupOffersMock(t *testing.T) {
 		{GPUClass: "H100", GPUMemGB: 80},
 	}
 
-	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, 0.5, bidding.StrategyCheap)
+	results := FetchGroupOffers([]cloud.Client{mockClient}, groups, nil, 1.0, 0.5, bidding.StrategyCheap, 0)
 
 	if len(results) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(results))
@@ -104,6 +104,7 @@ func TestSearchBestOfferForGroupExcludesFailedOffer(t *testing.T) {
 		0.5,
 		map[string]struct{}{"vastai:1": {}},
 		bidding.StrategyCheap,
+		0,
 	)
 	if result.Err != nil {
 		t.Fatalf("SearchBestOfferForGroup: %v", result.Err)

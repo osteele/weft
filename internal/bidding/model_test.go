@@ -388,3 +388,113 @@ func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 		t.Errorf("fastest strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
 	}
 }
+
+func TestFilterOffersBySurvival_NilModel(t *testing.T) {
+	offers := []cloud.Offer{{ProviderID: "a", GPUName: "RTX 4090"}}
+	passed, rejected := FilterOffersBySurvival(nil, offers, 0.5)
+	if len(passed) != 1 || len(rejected) != 0 {
+		t.Errorf("nil model should pass all offers through")
+	}
+}
+
+func TestFilterOffersBySurvival_DisabledByZero(t *testing.T) {
+	model := &SurvivalModel{
+		GlobalSurvived:   1,
+		GlobalTotal:      10,
+		Groups:           make(map[string]*SurvivalStats),
+		PricePercentiles: make(map[string][]float64),
+		PriorStrength:    10.0,
+	}
+	offers := []cloud.Offer{{ProviderID: "a", GPUName: "RTX 4090", Reliability: 0.5}}
+	passed, rejected := FilterOffersBySurvival(model, offers, 0)
+	if len(passed) != 1 || len(rejected) != 0 {
+		t.Errorf("minSurvival=0 should pass all offers through")
+	}
+}
+
+func TestFilterOffersBySurvival_FiltersLowSurvival(t *testing.T) {
+	// Build model where RTX 2080 Ti has terrible survival
+	var outcomes []InstanceOutcome
+	for range 10 {
+		outcomes = append(outcomes, InstanceOutcome{
+			TerminationReason: "infra_failure",
+			CostPerHourCents:  7,
+			ResolvedGPUName:   "RTX 2080 Ti",
+			Reliability:       0.8,
+		})
+	}
+	for range 2 {
+		outcomes = append(outcomes, InstanceOutcome{
+			TerminationReason: "completed",
+			CostPerHourCents:  7,
+			ResolvedGPUName:   "RTX 2080 Ti",
+			Reliability:       0.8,
+		})
+	}
+	// RTX 4090 has good survival
+	for range 10 {
+		outcomes = append(outcomes, InstanceOutcome{
+			TerminationReason: "completed",
+			CostPerHourCents:  100,
+			ResolvedGPUName:   "RTX 4090",
+			Reliability:       0.95,
+		})
+	}
+
+	model := BuildSurvivalModel(outcomes)
+
+	offers := []cloud.Offer{
+		{ProviderID: "bad", GPUName: "RTX 2080 Ti", CostPerHour: 0.07, Reliability: 0.8},
+		{ProviderID: "good", GPUName: "RTX 4090", CostPerHour: 1.00, Reliability: 0.95},
+	}
+
+	passed, rejected := FilterOffersBySurvival(model, offers, 0.5)
+
+	if len(passed) != 1 || passed[0].ProviderID != "good" {
+		t.Errorf("expected only good offer to pass, got %d offers", len(passed))
+	}
+	if len(rejected) != 1 || rejected[0].GPUFamily != "RTX_2080_Ti" {
+		t.Errorf("expected RTX_2080_Ti rejected, got %v", rejected)
+	}
+	if rejected[0].Count != 1 {
+		t.Errorf("expected 1 rejected offer, got %d", rejected[0].Count)
+	}
+}
+
+func TestFilterOffersBySurvival_AllRejected(t *testing.T) {
+	// Model where everything has low survival
+	var outcomes []InstanceOutcome
+	for range 10 {
+		outcomes = append(outcomes, InstanceOutcome{
+			TerminationReason: "infra_failure",
+			CostPerHourCents:  50,
+			ResolvedGPUName:   "RTX 3060",
+			Reliability:       0.5,
+		})
+	}
+	model := BuildSurvivalModel(outcomes)
+
+	offers := []cloud.Offer{
+		{ProviderID: "a", GPUName: "RTX 3060", CostPerHour: 0.50, Reliability: 0.5},
+	}
+
+	passed, rejected := FilterOffersBySurvival(model, offers, 0.8)
+	if len(passed) != 0 {
+		t.Errorf("expected all offers rejected, got %d passed", len(passed))
+	}
+	if len(rejected) != 1 {
+		t.Errorf("expected 1 rejected group, got %d", len(rejected))
+	}
+}
+
+func TestFilterOffersBySurvival_EmptyOffers(t *testing.T) {
+	model := &SurvivalModel{
+		Groups:           make(map[string]*SurvivalStats),
+		PricePercentiles: make(map[string][]float64),
+		PriorStrength:    10.0,
+	}
+	passed, rejected := FilterOffersBySurvival(model, nil, 0.5)
+	if len(passed) != 0 || len(rejected) != 0 {
+		t.Errorf("empty offers should return empty results")
+	}
+}

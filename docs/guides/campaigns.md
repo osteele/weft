@@ -91,6 +91,8 @@ weft campaign launch --max-spend '$10'  # Budget limit per instance
 weft campaign launch --max-time 2h      # Time limit per instance
 weft campaign launch --yes              # Skip TUI, launch all groups
 weft campaign launch --jobs 42,43       # Filter to specific job IDs
+weft campaign launch --min-survival 0   # Disable survival floor (allow all offers)
+weft campaign launch --min-survival 0.6 # Stricter survival floor
 ```
 
 ## Monitoring campaigns
@@ -116,6 +118,9 @@ Press `Ctrl-C` to exit watch mode. Instances continue running in the background.
 ```bash
 weft campaign list                      # List all campaigns with instance counts
 weft campaign show <campaign-id>        # Detailed view with instances and jobs
+weft campaign stats                     # Aggregate instance statistics
+weft campaign survival                  # Survival model: posteriors and machine penalties
+weft campaign survival --floor 0.6      # Highlight entries below a stricter floor
 ```
 
 ## Managing instances

@@ -11,10 +11,11 @@ import (
 
 // GroupOffer pairs an instance group with its best cloud offer.
 type GroupOffer struct {
-	Group        InstanceGroup
-	Offer        *cloud.Offer // nil if no offers found
-	SurvivalProb float64      // 0 if no survival model available
-	Err          error
+	Group          InstanceGroup
+	Offer          *cloud.Offer // nil if no offers found
+	SurvivalProb   float64      // 0 if no survival model available
+	RejectedGroups []bidding.RejectedGroup
+	Err            error
 }
 
 func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
@@ -40,12 +41,17 @@ func intFromEnvOrDefault(key string, defaultVal int) int {
 }
 
 // rankOffer selects the best offer from a slice and returns a GroupOffer.
-func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) GroupOffer {
+func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
 	if len(offers) == 0 {
 		return result
 	}
-	_, best := bidding.BestOffer(survivalModel, offers, jobDurationHrs, setupOverheadHrs, strategy)
+	filtered, rejected := bidding.FilterOffersBySurvival(survivalModel, offers, minSurvival)
+	result.RejectedGroups = rejected
+	if len(filtered) == 0 {
+		return result
+	}
+	_, best := bidding.BestOffer(survivalModel, filtered, jobDurationHrs, setupOverheadHrs, strategy)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
@@ -62,6 +68,7 @@ func SearchBestOfferForGroup(
 	jobDurationHrs, setupOverheadHrs float64,
 	excludeOfferIDs map[string]struct{},
 	strategy bidding.SelectionStrategy,
+	minSurvival float64,
 ) GroupOffer {
 	offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
 	if err != nil {
@@ -79,7 +86,7 @@ func SearchBestOfferForGroup(
 		offers = filtered
 	}
 
-	return rankOffer(group, offers, survivalModel, jobDurationHrs, setupOverheadHrs, strategy)
+	return rankOffer(group, offers, survivalModel, jobDurationHrs, setupOverheadHrs, strategy, minSurvival)
 }
 
 // GroupRawOffers pairs an instance group with all available cloud offers (unranked).
@@ -111,14 +118,14 @@ func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup) []Group
 
 // RankGroupOffers selects the best offer per group from cached raw offers using
 // the given strategy. This is a pure computation with no API calls.
-func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) []GroupOffer {
+func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	results := make([]GroupOffer, len(raw))
 	for i, r := range raw {
 		if r.Err != nil {
 			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
 			continue
 		}
-		results[i] = rankOffer(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverheadHrs, strategy)
+		results[i] = rankOffer(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverheadHrs, strategy, minSurvival)
 	}
 	return results
 }
@@ -127,7 +134,7 @@ func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel,
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
 // retry risk from preemption). Otherwise falls back to cheapest offer.
 // jobDurationHrs and setupOverheadHrs are used for expected cost computation.
-func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy) []GroupOffer {
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	raw := FetchGroupRawOffers(clients, groups)
-	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupOverheadHrs, strategy)
+	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupOverheadHrs, strategy, minSurvival)
 }

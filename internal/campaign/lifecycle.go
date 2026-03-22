@@ -41,6 +41,7 @@ type LaunchOpts struct {
 	NoDonor            bool                      // skip donor instance strategy
 	GracePeriodSeconds int                       // grace period after job failure (0 = disabled)
 	Strategy           bidding.SelectionStrategy // "cheap" (default), "fast", or "fastest"
+	MinSurvival        float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -645,6 +646,7 @@ func LaunchCampaign(
 					setupOverheadHrs,
 					map[string]struct{}{failedOffer.Key(): {}},
 					opts.Strategy,
+					opts.MinSurvival,
 				)
 				if replacement.Err != nil {
 					return nil, replacement.Err

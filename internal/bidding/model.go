@@ -238,9 +238,9 @@ func medianOfferDLPerf(offers []cloud.Offer) float64 {
 	return perfs[n/2]
 }
 
-// minMachineObs is the minimum number of observations before per-machine
+// MinMachineObs is the minimum number of observations before per-machine
 // penalty takes effect. Below this threshold, MachinePenalty returns 1.0.
-const minMachineObs = 3
+const MinMachineObs = 3
 
 // MachinePenalty returns a multiplicative penalty for a specific machine.
 // Returns 1.0 (no penalty) if the machine has fewer than minMachineObs observations
@@ -250,7 +250,7 @@ func (m *SurvivalModel) MachinePenalty(machineID string) float64 {
 		return 1.0
 	}
 	ms, ok := m.MachineStats[machineID]
-	if !ok || ms.Total < minMachineObs {
+	if !ok || ms.Total < MinMachineObs {
 		return 1.0
 	}
 	machineRate := float64(ms.Survived) / float64(ms.Total)
@@ -277,6 +277,54 @@ func (m *SurvivalModel) OfferSurvival(o cloud.Offer) float64 {
 	bucket := m.PriceBucketFor(gpuFamily, o.CostPerHour)
 	groupSurvival := m.SurvivalProbability(gpuFamily, bucket, o.Reliability)
 	return groupSurvival * m.MachinePenalty(o.MachineID)
+}
+
+// RejectedGroup summarizes offers rejected by FilterOffersBySurvival.
+type RejectedGroup struct {
+	GPUFamily    string
+	Count        int
+	SurvivalProb float64 // minimum survival probability seen in the group
+}
+
+// FilterOffersBySurvival removes offers whose survival probability is below
+// minSurvival. Returns the passing offers and a summary of rejected groups.
+// If model is nil or minSurvival <= 0, all offers pass through unchanged.
+func FilterOffersBySurvival(model *SurvivalModel, offers []cloud.Offer, minSurvival float64) ([]cloud.Offer, []RejectedGroup) {
+	if model == nil || minSurvival <= 0 || len(offers) == 0 {
+		return offers, nil
+	}
+
+	var passed []cloud.Offer
+	rejected := make(map[string]*RejectedGroup) // keyed by GPU family
+
+	for _, o := range offers {
+		surv := model.OfferSurvival(o)
+		if surv >= minSurvival {
+			passed = append(passed, o)
+			continue
+		}
+		fam := NormalizeGPUFamily(o.GPUName)
+		rg, ok := rejected[fam]
+		if !ok {
+			rg = &RejectedGroup{GPUFamily: fam, SurvivalProb: surv}
+			rejected[fam] = rg
+		}
+		rg.Count++
+		if surv < rg.SurvivalProb {
+			rg.SurvivalProb = surv
+		}
+	}
+
+	if len(rejected) == 0 {
+		return offers, nil
+	}
+
+	groups := make([]RejectedGroup, 0, len(rejected))
+	for _, rg := range rejected {
+		groups = append(groups, *rg)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].GPUFamily < groups[j].GPUFamily })
+	return passed, groups
 }
 
 // NormalizeGPUFamily canonicalizes GPU names into family identifiers.
