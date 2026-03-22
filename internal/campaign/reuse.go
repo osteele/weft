@@ -326,6 +326,11 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		Sources: make(map[string]string),
 	}
 
+	// Sort jobs by ID so the agent executes them in submission order
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].ID < jobs[j].ID
+	})
+
 	// Upload sources and build payload
 	for _, job := range jobs {
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())

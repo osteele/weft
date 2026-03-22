@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -215,6 +216,9 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		for _, g := range groups {
 			allJobs = append(allJobs, g.Jobs...)
 		}
+		sort.Slice(allJobs, func(i, j int) bool {
+			return allJobs[i].ID < allJobs[j].ID
+		})
 		var remainingJobs []*db.Job
 		reuseAssignments, remainingJobs = campaign.PlanReuse(allJobs, reusable)
 

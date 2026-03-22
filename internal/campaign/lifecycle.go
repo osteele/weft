@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -906,6 +907,11 @@ func LaunchInstance(
 			Tags:    append([]string(nil), job.Tags...),
 		})
 	}
+
+	// Sort jobs by ID so the agent executes them in submission order
+	sort.Slice(agentJobs, func(i, j int) bool {
+		return agentJobs[i].ID < agentJobs[j].ID
+	})
 
 	// Override disk size if the group has a computed estimate
 	if group.DiskGB > 0 && group.DiskGB > createOpts.DiskGB {

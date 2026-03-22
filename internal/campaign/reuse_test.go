@@ -275,6 +275,39 @@ func TestFindReusableInstancesIncludesNormalGraceAndRunningInstances(t *testing.
 	}
 }
 
+func TestPlanReuse_JobIDOrder(t *testing.T) {
+	// Jobs with different GPU classes should still be assigned in ID order.
+	instances := []InstanceCapacity{{
+		Instance: &db.CloudInstance{
+			ID:       1,
+			Status:   db.CloudInstanceStatusGrace,
+			GPUMemGB: 80,
+		},
+		GraceRemaining: 30 * time.Minute,
+		DiskFreeGB:     200,
+	}}
+
+	// Submit jobs out of ID order (higher ID first), no GPU class constraint
+	jobs := []*db.Job{
+		{ID: 408, Status: "queued"},
+		{ID: 397, Status: "queued"},
+	}
+
+	assignments, remaining := PlanReuse(jobs, instances)
+	if len(remaining) != 0 {
+		t.Fatalf("expected 0 remaining, got %d", len(remaining))
+	}
+	if len(assignments) != 2 {
+		t.Fatalf("expected 2 assignments, got %d", len(assignments))
+	}
+
+	// Assignments should preserve input order (caller is responsible for sorting)
+	if assignments[0].Job.ID != 408 || assignments[1].Job.ID != 397 {
+		t.Errorf("PlanReuse changed job order: got [%d, %d], want [408, 397]",
+			assignments[0].Job.ID, assignments[1].Job.ID)
+	}
+}
+
 func TestSubmitJobsToInstanceRejectsActiveTerminationIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 
