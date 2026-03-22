@@ -165,7 +165,8 @@ func BuildRsyncArgsWithOptions(host, localDir, remoteDir string, excludes []stri
 	return args
 }
 
-// sourceExcludes returns DefaultExcludes plus any project-specific output dirs.
+// sourceExcludes returns DefaultExcludes plus .gitignore patterns and any
+// project-specific output dirs.
 func sourceExcludes(localDir string) []string {
 	excludes := DefaultExcludes()
 	if cfg, err := config.Load(); err == nil {
@@ -187,7 +188,46 @@ func sourceExcludes(localDir string) []string {
 			excludes = append(excludes, dir)
 		}
 	}
+	for _, pattern := range parseGitignorePatterns(localDir) {
+		if !slices.Contains(excludes, pattern) {
+			excludes = append(excludes, pattern)
+		}
+	}
 	return excludes
+}
+
+// parseGitignorePatterns reads the .gitignore file in localDir and returns
+// patterns compatible with shouldExclude (basename glob patterns).
+// Negation patterns, path-based patterns, and comments are skipped.
+func parseGitignorePatterns(localDir string) []string {
+	data, err := os.ReadFile(filepath.Join(localDir, ".gitignore"))
+	if err != nil {
+		return nil
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Skip negation patterns (e.g. "!important.txt")
+		if strings.HasPrefix(line, "!") {
+			continue
+		}
+		// Strip trailing slash (directory indicator) — shouldExclude
+		// matches against path components regardless
+		line = strings.TrimSuffix(line, "/")
+		if line == "" {
+			continue
+		}
+		// Skip path-based patterns (contain a slash) — shouldExclude
+		// only matches against individual path components / basenames
+		if strings.Contains(line, "/") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns
 }
 
 // SyncSources rsyncs localDir to host:remoteDir with standard excludes.

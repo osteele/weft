@@ -104,8 +104,9 @@ func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err
 
 		totalBytes += info.Size()
 		if totalBytes > MaxSourceTarballBytes {
-			return fmt.Errorf("source directory exceeds %d MB limit (at %s); check for large data files or build artifacts not in DefaultExcludes",
-				MaxSourceTarballBytes/(1024*1024), relPath)
+			report := collectSizeReport(localDir, excludes)
+			return fmt.Errorf("source directory exceeds %s limit\n%s",
+				formatSize(MaxSourceTarballBytes), report)
 		}
 
 		f, err := os.Open(path)
@@ -135,6 +136,84 @@ func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err
 	}
 
 	return tmpPath, hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+// collectSizeReport walks localDir (respecting excludes) and returns a
+// human-readable report of the largest directories and files.
+func collectSizeReport(localDir string, excludes []string) string {
+	var files []SnapshotItem
+	topLevelBytes := map[string]int64{}
+	var totalBytes int64
+
+	_ = filepath.Walk(localDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			if os.IsPermission(walkErr) {
+				if info != nil && info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			return walkErr
+		}
+		relPath, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return nil
+		}
+		if shouldExclude(relPath, info, excludes) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		size := info.Size()
+		totalBytes += size
+		files = append(files, SnapshotItem{Path: relPath, Bytes: size})
+		if top := topLevelDir(relPath); top != "" {
+			topLevelBytes[top] += size
+		}
+		return nil
+	})
+
+	const topN = 5
+	topDirs := topSnapshotItems(mapToSnapshotItems(topLevelBytes, nil), topN)
+	topFiles := topSnapshotItems(files, topN)
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nTotal non-excluded size: %s\n", formatSize(totalBytes))
+
+	if len(topDirs) > 0 {
+		fmt.Fprintf(&b, "\nLargest directories:\n")
+		for _, d := range topDirs {
+			fmt.Fprintf(&b, "  %-50s %s\n", d.Path+"/", formatSize(d.Bytes))
+		}
+	}
+	if len(topFiles) > 0 {
+		fmt.Fprintf(&b, "\nLargest files:\n")
+		for _, f := range topFiles {
+			fmt.Fprintf(&b, "  %-50s %s\n", f.Path, formatSize(f.Bytes))
+		}
+	}
+
+	fmt.Fprintf(&b, "\nAdd large directories to .gitignore or .weftignore to exclude them.")
+	return b.String()
+}
+
+func formatSize(b int64) string {
+	const (
+		mb = 1024 * 1024
+		gb = 1024 * mb
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%d MB", b/mb)
+	default:
+		return fmt.Sprintf("%d KB", b/1024)
+	}
 }
 
 // shouldExclude returns true if the given path should be excluded from the tarball.

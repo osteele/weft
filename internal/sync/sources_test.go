@@ -197,6 +197,72 @@ func TestBuildRsyncArgsFiltersBeforeExcludes(t *testing.T) {
 	}
 }
 
+func TestParseGitignorePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gitignore := `# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Training outputs
+checkpoints/
+*.pt
+*.pth
+
+# Negation (should be skipped)
+!important.txt
+
+# Path-based (should be skipped)
+src/generated/output
+
+# Data
+data/
+wandb/
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte(gitignore), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	patterns := parseGitignorePatterns(tmpDir)
+
+	want := []string{"__pycache__", "*.py[cod]", "*.so", "checkpoints", "*.pt", "*.pth", "data", "wandb"}
+	for _, w := range want {
+		if !slices.Contains(patterns, w) {
+			t.Errorf("missing expected pattern %q, got: %v", w, patterns)
+		}
+	}
+
+	// Negation and path-based patterns should NOT be included
+	for _, bad := range []string{"!important.txt", "important.txt", "src/generated/output"} {
+		if slices.Contains(patterns, bad) {
+			t.Errorf("should not contain %q", bad)
+		}
+	}
+}
+
+func TestParseGitignorePatternsNoFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	patterns := parseGitignorePatterns(tmpDir)
+	if len(patterns) != 0 {
+		t.Errorf("expected empty patterns for dir without .gitignore, got: %v", patterns)
+	}
+}
+
+func TestSourceExcludesIncludesGitignore(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("checkpoints/\n*.pt\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	excludes := sourceExcludes(tmpDir)
+	for _, want := range []string{"checkpoints", "*.pt"} {
+		if !slices.Contains(excludes, want) {
+			t.Errorf("sourceExcludes missing .gitignore pattern %q", want)
+		}
+	}
+}
+
 func TestBuildExtraPathRsyncArgs(t *testing.T) {
 	tests := []struct {
 		name      string
