@@ -1201,7 +1201,28 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 	}
 }
 
-func TestFilterJobsByHostsMatchesOnlyRequestedHosts(t *testing.T) {
+func TestFilterByFreshStatusPassesNonInventoryJobs(t *testing.T) {
+	cloudInstanceID := int64(17)
+	jobs := []*Job{
+		{ID: 1, Host: "studio", Status: StatusQueued}, // inventory — matches
+		{ID: 2, Host: "", Status: StatusQueued},       // unplaced — always fresh
+		{ID: 3, Host: CloudInstanceHost(cloudInstanceID), Status: StatusQueued, CloudInstanceID: &cloudInstanceID}, // rental — always fresh
+		{ID: 4, Host: "cool30", Status: StatusRunning},                                                             // inventory — no match
+	}
+
+	filtered := FilterByFreshStatus(jobs, []string{"studio"})
+	wantIDs := []int64{1, 2, 3}
+	if len(filtered) != len(wantIDs) {
+		t.Fatalf("expected %d jobs, got %d", len(wantIDs), len(filtered))
+	}
+	for i, id := range wantIDs {
+		if filtered[i].ID != id {
+			t.Errorf("filtered[%d].ID = %d, want %d", i, filtered[i].ID, id)
+		}
+	}
+}
+
+func TestFilterByHostMatchesOnlyRequestedHosts(t *testing.T) {
 	cloudInstanceID := int64(17)
 	jobs := []*Job{
 		{ID: 1, Host: "studio", Status: StatusQueued},
@@ -1210,7 +1231,7 @@ func TestFilterJobsByHostsMatchesOnlyRequestedHosts(t *testing.T) {
 		{ID: 4, Host: "cool30", Status: StatusRunning},
 	}
 
-	filtered := FilterJobsByHosts(jobs, []string{"studio"})
+	filtered := FilterByHost(jobs, []string{"studio"})
 	if len(filtered) != 1 {
 		t.Fatalf("expected 1 studio job, got %d", len(filtered))
 	}
@@ -1281,17 +1302,19 @@ func TestJobTargetKindAndDisplay(t *testing.T) {
 	}
 }
 
-func TestListJobsWithMaxAgeForHostsMatchesOnlyRequestedHosts(t *testing.T) {
+func TestListJobsWithMaxAgeForHostsIncludesNonInventoryJobs(t *testing.T) {
 	database := SetupTestDB(t)
 
 	studioJobID, err := RecordQueuedWithGPU(database, "studio", "/tmp/project-studio", "python train.py", "studio", "")
 	if err != nil {
 		t.Fatalf("record studio job: %v", err)
 	}
-	if _, err := RecordQueuedWithGPU(database, "cool30", "/tmp/project-cool30", "python eval.py", "cool30", ""); err != nil {
+	cool30JobID, err := RecordQueuedWithGPU(database, "cool30", "/tmp/project-cool30", "python eval.py", "cool30", "")
+	if err != nil {
 		t.Fatalf("record other host job: %v", err)
 	}
-	if _, err := RecordQueuedWithGPU(database, "", "/tmp/project-unplaced", "python wait.py", "unplaced", ""); err != nil {
+	unplacedJobID, err := RecordQueuedWithGPU(database, "", "/tmp/project-unplaced", "python wait.py", "unplaced", "")
+	if err != nil {
 		t.Fatalf("record unplaced job: %v", err)
 	}
 	cloudJobID, err := RecordQueuedWithGPU(database, CloudInstanceHost(17), "/tmp/project-cloud", "python cloud.py", "cloud", "")
@@ -1310,20 +1333,29 @@ func TestListJobsWithMaxAgeForHostsMatchesOnlyRequestedHosts(t *testing.T) {
 		t.Fatalf("set cloud instance on job: %v", err)
 	}
 
+	// Freshness filter: studio is "fresh", cool30 is not.
+	// Unplaced and cloud jobs should pass through regardless.
 	jobs, err := ListJobsWithMaxAgeForHosts(database, "", []string{"studio"}, 0, 0, nil, "")
 	if err != nil {
 		t.Fatalf("ListJobsWithMaxAgeForHosts: %v", err)
 	}
 
-	if len(jobs) != 1 {
-		t.Fatalf("expected 1 studio job, got %d", len(jobs))
+	gotIDs := make(map[int64]bool)
+	for _, j := range jobs {
+		gotIDs[j.ID] = true
 	}
-	if jobs[0].ID != studioJobID {
-		t.Fatalf("listed job ID = %d, want %d", jobs[0].ID, studioJobID)
+
+	if !gotIDs[studioJobID] {
+		t.Errorf("studio job %d missing (inventory, host matches)", studioJobID)
 	}
-	if jobs[0].Host != "studio" {
-		t.Fatalf("listed host = %q, want studio", jobs[0].Host)
+	if !gotIDs[unplacedJobID] {
+		t.Errorf("unplaced job %d missing (should always pass)", unplacedJobID)
 	}
+	if gotIDs[cool30JobID] {
+		t.Errorf("cool30 job %d present (inventory, host not in fresh set)", cool30JobID)
+	}
+	// Cloud job (cloud:17) passes SQL via cloud_instance_id IS NOT NULL;
+	// in-memory FilterByFreshStatus also passes it via TargetKind().
 }
 
 func TestListUniqueActiveHostsIncludesDeferredOpHosts(t *testing.T) {

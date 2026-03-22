@@ -201,6 +201,18 @@ func (j *Job) HasInventoryHost() bool {
 	return j != nil && j.TargetKind() == JobTargetInventoryHost
 }
 
+// HasFreshStatus reports whether this job's status can be trusted without
+// a recent host sync. Inventory jobs require their host to appear in
+// freshHosts; cloud and unplaced jobs are always fresh because their
+// status is tracked locally.
+func (j *Job) HasFreshStatus(freshHosts map[string]struct{}) bool {
+	if j.TargetKind() != JobTargetInventoryHost {
+		return true
+	}
+	_, ok := freshHosts[j.Host]
+	return ok
+}
+
 // TargetDisplay returns a user-facing label for the current target.
 func (j *Job) TargetDisplay() string {
 	switch j.TargetKind() {
@@ -4227,19 +4239,40 @@ func FilterJobsByExcludedTags(jobs []*Job, excluded []string) []*Job {
 	return filtered
 }
 
-// FilterJobsByHosts keeps jobs whose host is in the provided list.
-func FilterJobsByHosts(jobs []*Job, hosts []string) []*Job {
-	if len(hosts) == 0 {
+// toHostSet builds a set from a host name slice, trimming whitespace and
+// skipping empty strings.
+func toHostSet(hosts []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			set[h] = struct{}{}
+		}
+	}
+	return set
+}
+
+// FilterByFreshStatus keeps jobs whose status is trustworthy: inventory jobs
+// on a recently-synced host, plus all cloud and unplaced jobs (whose status
+// is tracked locally). An empty freshHosts list means no filtering.
+func FilterByFreshStatus(jobs []*Job, freshHosts []string) []*Job {
+	hostSet := toHostSet(freshHosts)
+	if len(hostSet) == 0 {
 		return jobs
 	}
-	hostSet := make(map[string]struct{}, len(hosts))
-	for _, host := range hosts {
-		host = strings.TrimSpace(host)
-		if host == "" {
-			continue
+	filtered := make([]*Job, 0, len(jobs))
+	for _, job := range jobs {
+		if job.HasFreshStatus(hostSet) {
+			filtered = append(filtered, job)
 		}
-		hostSet[host] = struct{}{}
 	}
+	return filtered
+}
+
+// FilterByHost keeps only jobs whose host matches one of the given hosts.
+// Unlike FilterByFreshStatus, this is a strict content filter (e.g. for --host).
+func FilterByHost(jobs []*Job, hosts []string) []*Job {
+	hostSet := toHostSet(hosts)
 	if len(hostSet) == 0 {
 		return jobs
 	}
@@ -4490,7 +4523,7 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 		placeholders = append(placeholders, "?")
 		args = append(args, host)
 	}
-	query += fmt.Sprintf(` AND host IN (%s)`, strings.Join(placeholders, ", "))
+	query += fmt.Sprintf(` AND (host IN (%s) OR host = '' OR cloud_instance_id IS NOT NULL)`, strings.Join(placeholders, ", "))
 	if maxAgeDays > 0 {
 		cutoff := time.Now().AddDate(0, 0, -maxAgeDays).Unix()
 		query += ` AND (start_time > ? OR start_time IS NULL OR start_time = 0)`

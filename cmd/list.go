@@ -258,7 +258,7 @@ func collectJobsForList(database *sql.DB, args []string) ([]*db.Job, error) {
 		jobs = jobsWithEffectiveStatus(jobs, statusFilter)
 		jobs = filterJobsByFailureState(jobs, failedOnly)
 		jobs = db.FilterJobsByTags(jobs, listTags, processedFilter)
-		jobs = db.FilterJobsByHosts(jobs, hostFilterHosts)
+		jobs = db.FilterByFreshStatus(jobs, hostFilterHosts)
 		jobs = db.FilterJobsByExcludedTags(jobs, listExcludeTags)
 		jobs = db.FilterJobsByProject(jobs, listProject)
 		jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
@@ -363,7 +363,7 @@ func filterJobsForListArgs(jobs []*db.Job, statusFilter, processedFilter string,
 	jobs = db.FilterJobsByProject(jobs, listProject)
 	jobs = filterJobsByPlacementScope(jobs, wantRental, wantInventory)
 	if listHost != "" {
-		jobs = db.FilterJobsByHosts(jobs, []string{listHost})
+		jobs = db.FilterByHost(jobs, []string{listHost})
 	}
 	return jobs
 }
