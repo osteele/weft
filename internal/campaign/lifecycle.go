@@ -410,6 +410,9 @@ func LaunchCampaign(
 	if !opts.NoDonor && len(groups) >= 2 {
 		client := clientForProvider(clients, offers[0].Provider)
 		if supportsDonorStrategy(client) {
+			if onPhase != nil {
+				onPhase(InstanceGroup{GPUClass: "campaign"}, "searching for donor instance")
+			}
 			donorCfg, err = FindDonorOffer(client, offers, estimates, groups)
 			if err != nil {
 				log.Printf("donor: offer search failed, proceeding without donor: %v", err)
@@ -455,6 +458,9 @@ func LaunchCampaign(
 				_ = db.SetCloudInstanceRole(database, donorInstanceID, "donor")
 
 				// Generate donor bootstrap script
+				if onPhase != nil {
+					onPhase(InstanceGroup{GPUClass: "donor"}, "waiting for R2 assets")
+				}
 				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs)
 				if donorAssetErr != nil {
 					log.Printf("donor: staging assets failed: %v", donorAssetErr)
@@ -483,6 +489,9 @@ func LaunchCampaign(
 					DBInstanceID: donorInstanceID,
 				})
 
+				if onPhase != nil {
+					onPhase(InstanceGroup{GPUClass: "donor"}, "uploading bootstrap script")
+				}
 				bootstrapKey := r2keys.BootstrapScript(donorInstanceID)
 				donorUploadCtx, donorUploadCancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer donorUploadCancel()
@@ -521,6 +530,9 @@ func LaunchCampaign(
 					}
 					if donorCfg != nil {
 						donorCreateOpts.Label = fmt.Sprintf("weft/c%d", campaignID)
+						if onPhase != nil {
+							onPhase(InstanceGroup{GPUClass: "donor"}, "creating donor instance")
+						}
 
 						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 						if createErr != nil {
