@@ -81,6 +81,13 @@ func restartJob(database *sql.DB, jobID int64) error {
 		return fmt.Errorf("job missing command")
 	}
 
+	// Remove processed tag so the retried job appears in unprocessed listings
+	if job.HasTag(db.ProcessedTag) {
+		if err := db.RemoveJobTag(database, jobID, db.ProcessedTag); err != nil {
+			return fmt.Errorf("remove processed tag: %w", err)
+		}
+	}
+
 	// Cloud jobs: reset to unplaced (the original instance is gone)
 	if job.IsCloudJob() {
 		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {

@@ -71,3 +71,42 @@ func TestRestartCloudJob_RefreshesProjectMetadata(t *testing.T) {
 		t.Fatalf("cloud instance id = %v, want nil", job.CloudInstanceID)
 	}
 }
+
+func TestRestartJob_RemovesProcessedTag(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueued(database, "", t.TempDir(), "python train.py", "processed-retry")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	// Mark as cloud job so restart uses the ResetJobToUnplaced path (no SSH needed)
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "H200",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance id: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, db.StatusFailed, jobID); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+	if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {
+		t.Fatalf("add processed tag: %v", err)
+	}
+
+	if err := restartJob(database, jobID); err != nil {
+		t.Fatalf("restartJob failed: %v", err)
+	}
+
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.HasTag(db.ProcessedTag) {
+		t.Fatalf("job still has processed tag after restart")
+	}
+}
