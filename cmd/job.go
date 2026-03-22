@@ -565,6 +565,29 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 				fmt.Printf("GPU Memory:  %d MiB (peak)\n", *r.MaxGPUMemMiB)
 			}
 		}
+
+		// Telemetry summary for benchmark jobs
+		if job.HasTag(db.TagBenchmark) {
+			samples, telErr := db.GetTimeseries(database, job.ID)
+			if telErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: telemetry: %v\n", telErr)
+			} else if len(samples) > 0 {
+				stats := db.ComputeGPUTelemetryStats(samples)
+				if stats != nil {
+					fmt.Println()
+					fmt.Println("Telemetry:")
+					if stats.TempMax > 0 {
+						fmt.Printf("  GPU Temp:  %d°C peak, %.0f°C mean\n", stats.TempMax, stats.TempMean)
+					}
+					if stats.UtilMax > 0 {
+						fmt.Printf("  GPU Util:  %.0f%% mean\n", stats.UtilMean)
+					}
+					if stats.Throttled {
+						fmt.Printf("  ⚠ Thermal throttling likely (temp > %d°C)\n", db.ThermalThrottleThresholdC)
+					}
+				}
+			}
+		}
 	}
 
 	if len(errorsList) > 0 {
