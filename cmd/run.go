@@ -241,7 +241,6 @@ func runRun(cmd *cobra.Command, args []string) error {
 	dirExplicit := runDir != ""
 	parsedDir, parsedCmd := parseCdPrefix(command)
 	if parsedDir != "" && runDir == "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Deprecation: \"cd %s && ...\" detected. Use -C %s instead.\n", parsedDir, shellQuote(parsedDir))
 		command = parsedCmd
 		runDir = parsedDir
 		dirExplicit = true
