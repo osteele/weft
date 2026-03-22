@@ -281,7 +281,7 @@ func syncHostWithTimeoutDetailed(database *sql.DB, host string, timeout time.Dur
 		SkipSamples:  true,
 		UseBatchSync: true,
 		NoQueueStart: !startQueueRunner,
-		Logger:       ops.NewQuietSyncLogger(),
+		Logger:       ops.NewSilentSyncLogger(),
 	}, onQueueStart)
 	return result, err
 }
@@ -295,7 +295,7 @@ func syncHostAfterQueueChange(database *sql.DB, host string) error {
 		SkipSamples:  true,
 		UseBatchSync: true,
 		NoQueueStart: true,
-		Logger:       ops.NewQuietSyncLogger(),
+		Logger:       ops.NewSilentSyncLogger(),
 	}, nil)
 	reportHostSyncWarnings(host, result)
 	return err

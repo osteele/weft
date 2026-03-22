@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"io"
 	"log"
 	"os"
 
@@ -24,4 +25,11 @@ func (w *connFilterWriter) Write(p []byte) (int, error) {
 // hosts are expected and should not produce stderr noise.
 func NewQuietSyncLogger() *log.Logger {
 	return log.New(&connFilterWriter{}, "", log.LstdFlags)
+}
+
+// NewSilentSyncLogger returns a logger that discards all output.
+// Use this for background syncs in list/project commands where structured
+// warnings from HostSyncResult are sufficient.
+func NewSilentSyncLogger() *log.Logger {
+	return log.New(io.Discard, "", 0)
 }
