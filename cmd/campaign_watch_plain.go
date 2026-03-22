@@ -15,6 +15,17 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+func summaryInterval(elapsed time.Duration) time.Duration {
+	switch {
+	case elapsed < 2*time.Minute:
+		return 30 * time.Second
+	case elapsed < 10*time.Minute:
+		return 1 * time.Minute
+	default:
+		return 5 * time.Minute
+	}
+}
+
 // watchInstancesPlain prints line-oriented status updates for cloud instances.
 // Suitable for non-TTY output and parsing by coding agents.
 func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
@@ -74,7 +85,7 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var prevSummary string
+	var lastSummaryTime time.Time
 	var retryMu sync.Mutex
 	retryDone := false
 
@@ -93,13 +104,17 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 			for update := range ch {
 				output := campaign.FormatPlainUpdate(prev, update)
 				mu.Lock()
-				if output != "" {
+				hasStateChange := output != ""
+				if hasStateChange {
 					fmt.Println(output)
 				}
 				updates[instanceID] = normalizeWatchInstanceUpdate(update, updates[instanceID].CloudInstance)
-				if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now()); summary != "" && summary != prevSummary {
-					fmt.Println(summary)
-					prevSummary = summary
+				now := time.Now()
+				if hasStateChange || now.Sub(lastSummaryTime) >= summaryInterval(now.Sub(launchTime)) {
+					if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now); summary != "" {
+						fmt.Println(summary)
+						lastSummaryTime = now
+					}
 				}
 				mu.Unlock()
 
