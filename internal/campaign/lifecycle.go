@@ -373,7 +373,7 @@ func LaunchCampaign(
 	}
 
 	if onPhase != nil {
-		onPhase(InstanceGroup{GPUClass: "campaign"}, "preparing R2 assets")
+		onPhase(InstanceGroup{GPUClass: "campaign"}, "staging agent and sources")
 	}
 	stager, err := StartR2AssetStaging(r2Cfg, groups)
 	if err != nil {
@@ -598,7 +598,7 @@ func LaunchCampaign(
 				}
 			}
 
-			progress("waiting for R2 assets")
+			progress("staging agent and sources")
 			groupAssets, assetErr := stager.AwaitAssetsForDirs(group.SourceDirs())
 			if assetErr != nil {
 				mu.Lock()
