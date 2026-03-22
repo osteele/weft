@@ -677,6 +677,17 @@ func (r *Runner) refreshRunningJobs() {
 			continue
 		}
 
+		// If the waitForJob goroutine is still tracking this process,
+		// it will handle the exit — don't treat it as an orphan.
+		// This avoids a race where bash exits, Wait() returns, but
+		// the status file hasn't been written yet when we check here.
+		r.processesMu.Lock()
+		_, hasWaiter := r.processes[jobIDStr]
+		r.processesMu.Unlock()
+		if hasWaiter {
+			continue
+		}
+
 		// Wrapper gone — kill orphaned process group
 		if hasPGID && CheckPIDAlive(pgid) {
 			WriteKillReasonFile(paths, "orphan")

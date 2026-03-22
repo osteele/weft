@@ -167,6 +167,95 @@ func TestNewRunner_DefaultTelemetryDoesNotReuseCPUInterval(t *testing.T) {
 	}
 }
 
+// TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists verifies that
+// refreshRunningJobs does not mark a job as orphaned when the waitForJob
+// goroutine is still tracking the process (i.e., the process has exited
+// but the status file hasn't been written yet).
+func TestRefreshRunningJobs_SkipsOrphanWhenWaiterExists(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(381)
+	jobIDStr := "381"
+	paths := NewJobPaths(r.logDir, jobID)
+
+	// Create log dir for the job
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	// Write PID/PGID files pointing to a PID that doesn't exist (simulates
+	// bash having exited). Use PID 1999999999 which won't exist.
+	deadPID := 1999999999
+	os.WriteFile(paths.PID, []byte("1999999999\n"), 0644)
+	os.WriteFile(paths.PGID, []byte("1999999999\n"), 0644)
+	_ = deadPID
+
+	// Add the job to running state
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		StartedAt: time.Now().Unix() - 10,
+	})
+
+	// Simulate waitForJob goroutine still tracking the process
+	r.processesMu.Lock()
+	r.processes[jobIDStr] = &Process{PID: deadPID, PGID: deadPID}
+	r.processesMu.Unlock()
+
+	// Run refreshRunningJobs — should skip because waiter exists
+	r.refreshRunningJobs()
+
+	// Job should still be in running state (not removed as orphan)
+	if r.state.Running[jobIDStr].StartedAt == 0 {
+		t.Fatal("job was removed from running state; should have been skipped because waiter exists")
+	}
+
+	// No status file should have been written
+	if _, err := os.Stat(paths.Status); err == nil {
+		t.Fatal("status file was written; refreshRunningJobs should not have treated this as an orphan")
+	}
+
+	// No completion record should exist
+	if _, err := os.Stat(paths.Completion); err == nil {
+		t.Fatal("completion record was written; refreshRunningJobs should not have treated this as an orphan")
+	}
+}
+
+// TestRefreshRunningJobs_DetectsOrphanWhenNoWaiter verifies that orphan
+// detection still works when there is genuinely no waitForJob goroutine
+// (e.g., after a runner restart recovering state from disk).
+func TestRefreshRunningJobs_DetectsOrphanWhenNoWaiter(t *testing.T) {
+	r, _ := initTestRunner(t)
+
+	jobID := int64(382)
+	jobIDStr := "382"
+	paths := NewJobPaths(r.logDir, jobID)
+
+	if err := os.MkdirAll(filepath.Dir(paths.Log), 0755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	// Write PID/PGID files pointing to a dead PID
+	os.WriteFile(paths.PID, []byte("1999999999\n"), 0644)
+	os.WriteFile(paths.PGID, []byte("1999999999\n"), 0644)
+
+	// Add the job to running state but do NOT add to r.processes
+	// (simulates a runner restart where wait goroutines are gone)
+	r.state.AddRunning(jobIDStr, RunningJobState{
+		StartedAt: time.Now().Unix() - 10,
+	})
+
+	r.refreshRunningJobs()
+
+	// Job should have been removed from running state
+	if _, exists := r.state.Running[jobIDStr]; exists {
+		t.Fatal("job should have been removed from running state as orphan")
+	}
+
+	// Status file should have been written
+	if _, err := os.Stat(paths.Status); err != nil {
+		t.Fatalf("status file should exist after orphan detection: %v", err)
+	}
+}
+
 func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
 	policy := TelemetryPolicyForJob(&ops.CommandJob{Tags: []string{"benchmark"}})
 	if policy.Interval != 5*time.Second {
