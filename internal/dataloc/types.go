@@ -2,7 +2,10 @@
 // enabling data-locality-aware job placement.
 package dataloc
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // AssetKind identifies the type of data asset.
 type AssetKind string
@@ -86,6 +89,10 @@ func (r InputRef) IsFilePath() bool { return r.FilePath != "" }
 func ParseInputRef(s string) InputRef {
 	if asset, ok := ParseAssetRef(s); ok {
 		return InputRef{Asset: &asset}
+	}
+	// "local:" prefix marks a project-relative path; strip prefix and treat as file path.
+	if strings.HasPrefix(s, "local:") {
+		return InputRef{FilePath: s[len("local:"):]}
 	}
 	return InputRef{FilePath: s}
 }

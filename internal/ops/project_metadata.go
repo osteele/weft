@@ -23,6 +23,9 @@ func RefreshProjectDerivedMetadata(database *sql.DB, jobID int64, workingDir, co
 	if detected := dataloc.ScanCommandHFRefs(command); len(detected) > 0 {
 		inputs = mergeStringSlices(inputs, detected)
 	}
+	if meta, err := dataloc.ScanScriptMeta(localDir, command); err == nil && meta != nil {
+		inputs = mergeStringSlices(inputs, meta.Inputs)
+	}
 	if err := db.SetJobInputs(database, jobID, inputs); err != nil {
 		return fmt.Errorf("refresh job inputs: %w", err)
 	}

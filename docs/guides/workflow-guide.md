@@ -123,6 +123,32 @@ sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
 
+### Project-relative data inputs
+
+Use the `local:` prefix to declare project-relative directories that should be
+synced to the remote host before the job runs:
+
+```python
+# /// script
+# [tool.weft]
+# inputs = ["local:data/conllu/", "hf:bert-base-uncased"]
+# outputs = ["local:cache/representations/"]
+# ///
+```
+
+Or via CLI:
+
+```
+weft run --input local:data/conllu/ -- uv run python src/extract_representations.py
+```
+
+`local:` paths are resolved relative to the project directory and synced via
+rsync as extra paths — they bypass default sync excludes (like `cache/`). Use
+subdirectories rather than syncing an entire large `data/` tree.
+
+On restart (`weft job restart`), script metadata is re-scanned so updated
+`local:` declarations take effect without manual `--input` flags.
+
 ### Checking data locality
 
 See what's cached where:

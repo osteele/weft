@@ -34,8 +34,8 @@ Use `start <job-id>` to start a queued job immediately.
 - `--after, --depends-on ID`: Start job after another job succeeds
 - `--after-any ID`: Start job after another job completes, success or failure
 - `--kill ID`: Kill a job by ID (synonym for `weft kill`)
-- `--input ASSET`: Declare a data input (e.g., `hf:meta-llama/Llama-3-8B`). Influences placement scoring, triggers pre-staging, and for HF assets can trigger an automatic download onto the target on-prem host
-- `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`). Recorded on successful completion for downstream jobs
+- `--input ASSET`: Declare a data input. Accepts HF refs (`hf:model-id`), project-relative directories (`local:data/conllu/`), or absolute/tilde paths. HF assets influence placement scoring and trigger downloads; `local:` paths are synced via rsync before the job runs
+- `--output ASSET`: Declare a data output (e.g., `checkpoint:llama-ft-v1`, `local:cache/representations/`). Recorded on successful completion for downstream jobs
 - `--gpu CLASS`: GPU constraint with optional memory (e.g., `a100`, `ampere+`, `nvidia>=24GB`)
 - `--gpu-class CLASS`: Require a specific GPU class or generation (e.g., `a100`, `ampere+`)
 - `--gpu-mem GB`: Require minimum GPU memory in GB

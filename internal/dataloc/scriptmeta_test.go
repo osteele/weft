@@ -72,6 +72,19 @@ import torch
 			want: &ScriptMeta{GPUClass: "ampere+"},
 		},
 		{
+			name: "local: inputs with outputs",
+			content: `# /// script
+# [tool.weft]
+# inputs = ["local:data/conllu/", "hf:gpt2"]
+# outputs = ["local:cache/representations/"]
+# ///
+`,
+			want: &ScriptMeta{
+				Inputs:  []string{"local:data/conllu/", "hf:gpt2"},
+				Outputs: []string{"local:cache/representations/"},
+			},
+		},
+		{
 			name: "mixed with uv dependencies",
 			content: `# /// script
 # requires-python = ">=3.10"

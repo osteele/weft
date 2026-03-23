@@ -3,6 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
@@ -117,6 +118,10 @@ func restartJob(database *sql.DB, jobID int64) error {
 		return err
 	}
 	if relayEnabled(cfg, relayClient) {
+		// Refresh here since the relay path bypasses ops.RequeueJob (which does its own refresh).
+		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
+			log.Printf("warning: refresh metadata: %v", err)
+		}
 		if err := db.RequeueByID(database, jobID); err != nil {
 			return fmt.Errorf("update status to queued: %w", err)
 		}

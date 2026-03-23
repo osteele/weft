@@ -69,6 +69,10 @@ func TestParseInputRef(t *testing.T) {
 		{"/absolute/path/to/data", false, "/absolute/path/to/data"},
 		{"./relative/path", false, "./relative/path"},
 		{"relative/path", false, "relative/path"},
+		// local: prefix stripped to file path
+		{"local:data/", false, "data/"},
+		{"local:cache/representations/", false, "cache/representations/"},
+		{"local:models/best.pt", false, "models/best.pt"},
 		// Edge cases: unknown prefix treated as file path
 		{"unknown:something", false, "unknown:something"},
 		{"", false, ""},
@@ -106,6 +110,28 @@ func TestClassifyInputs(t *testing.T) {
 	}
 	if len(filePaths) > 0 && filePaths[0] != "~/sources/vidur/data/" {
 		t.Errorf("first file path = %q, want %q", filePaths[0], "~/sources/vidur/data/")
+	}
+}
+
+func TestClassifyInputs_LocalPrefix(t *testing.T) {
+	inputs := []string{
+		"local:data/",
+		"hf:gpt2",
+		"local:cache/representations/",
+	}
+	assetRefs, filePaths := ClassifyInputs(inputs)
+
+	if len(assetRefs) != 1 {
+		t.Errorf("got %d asset refs, want 1: %v", len(assetRefs), assetRefs)
+	}
+	if len(filePaths) != 2 {
+		t.Errorf("got %d file paths, want 2: %v", len(filePaths), filePaths)
+	}
+	if len(filePaths) > 0 && filePaths[0] != "data/" {
+		t.Errorf("first file path = %q, want %q", filePaths[0], "data/")
+	}
+	if len(filePaths) > 1 && filePaths[1] != "cache/representations/" {
+		t.Errorf("second file path = %q, want %q", filePaths[1], "cache/representations/")
 	}
 }
 
