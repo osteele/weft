@@ -45,6 +45,11 @@ Use `start <job-id>` to start a queued job immediately.
 - `--no-sync`: Skip source sync before submission
 - `--wait`: Wait for the job to complete before returning
 
+**Script metadata:** Python scripts can declare resource requirements inline
+using a [PEP 723](https://peps.python.org/pep-0723/) `[tool.weft]` table.
+These are applied as defaults — CLI flags take precedence. See
+[Workflow Guide § Script metadata](../guides/workflow-guide.md#script-metadata).
+
 If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
 touches that host) will append the saved entry so it runs as soon as the host is

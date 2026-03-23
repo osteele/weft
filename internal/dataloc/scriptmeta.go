@@ -1,0 +1,163 @@
+package dataloc
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	toml "github.com/pelletier/go-toml"
+)
+
+// ScriptMeta holds weft resource requirements parsed from a PEP 723
+// inline metadata block ([tool.weft] table).
+type ScriptMeta struct {
+	GPU      string   // GPU constraint (e.g., "nvidia", "ampere+", "a100")
+	GPUClass string   // GPU class/generation
+	GPUMemGB int      // Minimum GPU memory in GB
+	Inputs   []string // Data asset refs (e.g., "hf:gpt2")
+	Outputs  []string // Data asset refs
+	Tags     []string // Job tags
+}
+
+var (
+	pep723StartRe = regexp.MustCompile(`^# /// script\s*$`)
+	pep723EndRe   = regexp.MustCompile(`^# ///\s*$`)
+)
+
+// ParseScriptMeta extracts [tool.weft] from a PEP 723 inline metadata block.
+// Returns nil if no metadata block or no [tool.weft] table is found.
+func ParseScriptMeta(content string) (*ScriptMeta, error) {
+	block := extractPEP723Block(content)
+	if block == "" {
+		return nil, nil
+	}
+
+	tree, err := toml.Load(block)
+	if err != nil {
+		return nil, fmt.Errorf("parse script metadata TOML: %w", err)
+	}
+
+	weftTree := tree.Get("tool.weft")
+	if weftTree == nil {
+		return nil, nil
+	}
+
+	wt, ok := weftTree.(*toml.Tree)
+	if !ok {
+		return nil, nil
+	}
+
+	meta := &ScriptMeta{}
+
+	if v, ok := wt.Get("gpu").(string); ok {
+		meta.GPU = v
+	}
+	if v, ok := wt.Get("gpu-class").(string); ok {
+		meta.GPUClass = v
+	}
+	meta.GPUMemGB = parseGPUMem(wt.Get("gpu-mem"))
+	meta.Inputs = tomlStringSlice(wt, "inputs")
+	meta.Outputs = tomlStringSlice(wt, "outputs")
+	meta.Tags = tomlStringSlice(wt, "tags")
+
+	if meta.GPU == "" && meta.GPUClass == "" && meta.GPUMemGB == 0 &&
+		len(meta.Inputs) == 0 && len(meta.Outputs) == 0 && len(meta.Tags) == 0 {
+		return nil, nil
+	}
+
+	return meta, nil
+}
+
+// ScanScriptMeta extracts PEP 723 [tool.weft] metadata from the first Python
+// script referenced in a shell command. Returns nil if no script is found or
+// the script has no weft metadata.
+func ScanScriptMeta(dir, command string) (*ScriptMeta, error) {
+	scripts := extractPythonScripts(command)
+	for _, script := range scripts {
+		abs := script
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(dir, abs)
+		}
+		content, err := os.ReadFile(abs)
+		if err != nil {
+			continue
+		}
+		meta, err := ParseScriptMeta(string(content))
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", script, err)
+		}
+		if meta != nil {
+			return meta, nil
+		}
+	}
+	return nil, nil
+}
+
+// extractPEP723Block returns the TOML content from a PEP 723 inline metadata
+// block (between `# /// script` and `# ///`), stripping the `# ` prefix from
+// each line.
+func extractPEP723Block(content string) string {
+	lines := strings.Split(content, "\n")
+	var inBlock bool
+	var blockLines []string
+
+	for _, line := range lines {
+		if !inBlock {
+			if pep723StartRe.MatchString(line) {
+				inBlock = true
+			}
+			continue
+		}
+		if pep723EndRe.MatchString(line) {
+			break
+		}
+		// Strip "# " prefix (PEP 723 convention)
+		if strings.HasPrefix(line, "# ") {
+			blockLines = append(blockLines, line[2:])
+		} else if line == "#" {
+			blockLines = append(blockLines, "")
+		}
+	}
+
+	if len(blockLines) == 0 {
+		return ""
+	}
+	return strings.Join(blockLines, "\n")
+}
+
+// parseGPUMem interprets a gpu-mem value as an integer GB count.
+// Accepts int64 or string formats like "40", "40GB", ">=80GB".
+func parseGPUMem(v interface{}) int {
+	switch val := v.(type) {
+	case int64:
+		return int(val)
+	case string:
+		s := strings.TrimPrefix(val, ">=")
+		s = strings.TrimSuffix(strings.TrimSuffix(s, "GB"), "gb")
+		var n int
+		if _, err := fmt.Sscanf(s, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func tomlStringSlice(tree *toml.Tree, key string) []string {
+	v := tree.Get(key)
+	if v == nil {
+		return nil
+	}
+	arr, ok := v.([]interface{})
+	if !ok {
+		return nil
+	}
+	var result []string
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			result = append(result, s)
+		}
+	}
+	return result
+}

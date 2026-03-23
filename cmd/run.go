@@ -283,6 +283,40 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Auto-detected inputs: %s\n", strings.Join(newInputs, ", "))
 	}
 
+	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
+	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
+		log.Printf("warning: script metadata: %v", err)
+	} else if meta != nil {
+		var applied []string
+		if runGPU == "" && runGPUClass == "" && meta.GPU != "" {
+			runGPU = meta.GPU
+			applied = append(applied, fmt.Sprintf("gpu=%s", meta.GPU))
+		}
+		if runGPU == "" && runGPUClass == "" && meta.GPUClass != "" {
+			runGPUClass = meta.GPUClass
+			applied = append(applied, fmt.Sprintf("gpu-class=%s", meta.GPUClass))
+		}
+		if runGPUMem == 0 && meta.GPUMemGB > 0 {
+			runGPUMem = meta.GPUMemGB
+			applied = append(applied, fmt.Sprintf("gpu-mem=%dGB", meta.GPUMemGB))
+		}
+		if len(meta.Inputs) > 0 {
+			runInputs = mergeDedup(runInputs, meta.Inputs)
+			applied = append(applied, fmt.Sprintf("inputs=%v", meta.Inputs))
+		}
+		if len(meta.Outputs) > 0 {
+			runOutputs = mergeDedup(runOutputs, meta.Outputs)
+			applied = append(applied, fmt.Sprintf("outputs=%v", meta.Outputs))
+		}
+		if len(meta.Tags) > 0 {
+			runTags = mergeDedup(runTags, meta.Tags)
+			applied = append(applied, fmt.Sprintf("tags=%v", meta.Tags))
+		}
+		if len(applied) > 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Script metadata: %s\n", strings.Join(applied, ", "))
+		}
+	}
+
 	// Print recommendations for common patterns
 	printCommandRecommendations(command)
 

@@ -89,6 +89,40 @@ laptop$ weft run atlas \
 The coordinator handles the cross-host rsync automatically. You declare what the
 job needs and what it produces; the coordinator figures out the rest.
 
+### Script metadata
+
+Instead of passing `--gpu`, `--gpu-mem`, `--input`, etc. on every invocation,
+you can declare requirements inside the script using a
+[PEP 723](https://peps.python.org/pep-0723/) inline metadata block with a
+`[tool.weft]` table:
+
+```python
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["torch", "transformer_lens"]
+#
+# [tool.weft]
+# gpu-mem = 40
+# inputs = ["hf:gpt2"]
+# ///
+```
+
+Supported keys (all optional):
+
+| Key         | Type             | Equivalent CLI flag |
+|-------------|------------------|---------------------|
+| `gpu`       | string           | `--gpu`             |
+| `gpu-class` | string           | `--gpu-class`       |
+| `gpu-mem`   | int or `">=NGB"` | `--gpu-mem`         |
+| `inputs`    | list of strings  | `--input`           |
+| `outputs`   | list of strings  | `--output`          |
+| `tags`      | list of strings  | `--tag`             |
+
+CLI flags always override script metadata. Tags are additive (merged from both
+sources). This format is compatible with `uv`'s own PEP 723 support — you can
+declare both Python dependencies and weft resource requirements in the same
+block.
+
 ### Checking data locality
 
 See what's cached where:
