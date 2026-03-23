@@ -38,6 +38,13 @@ func AttemptRemediation(ctx RemediationContext) *RemediationResult {
 		return nil
 	}
 
+	// Enrich gpu_oom diagnoses with the host's GPU capacity
+	if diagnosis.Pattern == "gpu_oom" && ctx.Job.Host != "" {
+		if capGB := inventory.HostMaxGPUMemoryGB(ctx.Job.Host); capGB > 0 {
+			diagnosis.GPUCapacityGB = capGB
+		}
+	}
+
 	result := &RemediationResult{Diagnosis: diagnosis}
 
 	diagJSON, err := MarshalDiagnosis(diagnosis)

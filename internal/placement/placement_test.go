@@ -374,9 +374,9 @@ func TestParseMemGB(t *testing.T) {
 		{"0GB", 0},
 	}
 	for _, tt := range tests {
-		got := parseMemGB(tt.input)
+		got := inventory.ParseMemGB(tt.input)
 		if got != tt.want {
-			t.Errorf("parseMemGB(%q) = %d, want %d", tt.input, got, tt.want)
+			t.Errorf("ParseMemGB(%q) = %d, want %d", tt.input, got, tt.want)
 		}
 	}
 }

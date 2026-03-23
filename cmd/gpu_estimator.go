@@ -5,16 +5,16 @@ import (
 	"github.com/osteele/weft/internal/predictor"
 )
 
-func resolveEffectiveGPUMemWithConfig(cfg *config.Config, explicit *int, gpu string, gpuClass string, host string, project string, command string) (*int, bool) {
+func resolveEffectiveGPUMemWithConfig(cfg *config.Config, explicit *int, gpu string, gpuClass string, host string, project string, command string, oomFloorGB int) (*int, bool) {
 	pcfg := predictor.Config{}
 	if cfg != nil {
 		pcfg = buildPredictorConfig(cfg)
 	}
 	needsGPU := gpu != "" || gpuClass != ""
-	return predictor.ResolveGPUMemGB(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB)
+	return predictor.ResolveGPUMemGB(pcfg, explicit, needsGPU, host, project, gpuClass, command, defaultGPUMemGB, oomFloorGB)
 }
 
 func resolveEffectiveGPUMem(explicit *int, gpu string, gpuClass string, host string, project string, command string) (*int, bool) {
 	cfg, _ := config.Load()
-	return resolveEffectiveGPUMemWithConfig(cfg, explicit, gpu, gpuClass, host, project, command)
+	return resolveEffectiveGPUMemWithConfig(cfg, explicit, gpu, gpuClass, host, project, command, 0)
 }

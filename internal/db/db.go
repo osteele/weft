@@ -4612,6 +4612,15 @@ func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int
 	return err
 }
 
+// UpdateRunErrorDiagnosis updates the error_diagnosis on a job_run by run ID.
+func UpdateRunErrorDiagnosis(db *sql.DB, runID int64, diagnosis string) error {
+	_, err := db.Exec(
+		`UPDATE job_runs SET error_diagnosis = ? WHERE id = ?`,
+		diagnosis, runID,
+	)
+	return err
+}
+
 // ListRecentFailedUndiagnosed returns recently failed jobs that have not been diagnosed yet.
 // These are completed jobs with non-zero exit code, retry_count == 0, and no error_diagnosis.
 func ListRecentFailedUndiagnosed(db *sql.DB, limit int) ([]*Job, error) {

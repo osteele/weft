@@ -257,7 +257,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return nil, fmt.Errorf("should not be called")
 		}
-		got, estimated := ResolveGPUMemGB(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20)
+		got, estimated := ResolveGPUMemGB(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0)
 		if got == nil || *got != 48 {
 			t.Fatalf("ResolveGPUMemGB explicit = %v, want 48", got)
 		}
@@ -266,13 +266,13 @@ func TestResolveGPUMemGB(t *testing.T) {
 		}
 	})
 
-	t.Run("predictor upper bound is rounded up", func(t *testing.T) {
+	t.Run("predictor upper bound wins when above fallback", func(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
-			return &Result{MaxGPUMemMiB: &Prediction{Upper: 2050}}, nil
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: 25 * 1024}}, nil // 25GB
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20)
-		if got == nil || *got != 3 {
-			t.Fatalf("ResolveGPUMemGB predicted = %v, want 3", got)
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		if got == nil || *got != 25 {
+			t.Fatalf("ResolveGPUMemGB predicted = %v, want 25", got)
 		}
 		if !estimated {
 			t.Fatalf("expected predictor-backed reservation to report estimated=true")
@@ -283,7 +283,7 @@ func TestResolveGPUMemGB(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return &Result{}, nil
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20)
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 0)
 		if got == nil || *got != 20 {
 			t.Fatalf("ResolveGPUMemGB fallback = %v, want 20", got)
 		}
@@ -292,11 +292,37 @@ func TestResolveGPUMemGB(t *testing.T) {
 		}
 	})
 
+	t.Run("oom floor raises minimum", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{}, nil // no prediction
+		}
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 25)
+		if got == nil || *got != 25 {
+			t.Fatalf("ResolveGPUMemGB with oom floor = %v, want 25", got)
+		}
+		if estimated {
+			t.Fatalf("expected oom floor reservation to report estimated=false")
+		}
+	})
+
+	t.Run("predictor wins over oom floor when higher", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: 50 * 1024}}, nil // 50GB
+		}
+		got, estimated := ResolveGPUMemGB(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 20, 25)
+		if got == nil || *got != 50 {
+			t.Fatalf("ResolveGPUMemGB predictor>floor = %v, want 50", got)
+		}
+		if !estimated {
+			t.Fatalf("expected predictor to win and report estimated=true")
+		}
+	})
+
 	t.Run("cpu jobs keep nil reservation", func(t *testing.T) {
 		predictFunc = func(Config, string, string, string, string) (*Result, error) {
 			return nil, fmt.Errorf("should not be called")
 		}
-		got, estimated := ResolveGPUMemGB(cfg, nil, false, "", "proj", "", "echo hi", 20)
+		got, estimated := ResolveGPUMemGB(cfg, nil, false, "", "proj", "", "echo hi", 20, 0)
 		if got != nil {
 			t.Fatalf("ResolveGPUMemGB cpu job = %v, want nil", *got)
 		}

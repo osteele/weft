@@ -264,28 +264,36 @@ func PredictedGPUMemGB(p *Prediction) (int, bool) {
 }
 
 // ResolveGPUMemGB returns the effective GPU memory reservation for a job.
-// Explicit reservations win. Otherwise, predictor output is used when available,
-// falling back to fallbackGB for GPU jobs.
-func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int) (*int, bool) {
+// Explicit reservations win. Otherwise, the OOM floor (from prior failures),
+// predictor output, and fallbackGB are considered — the maximum wins.
+func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (*int, bool) {
 	if explicit != nil {
 		return explicit, false
 	}
 	if !needsGPU {
 		return nil, false
 	}
+
+	// Gather candidates: predictor, OOM floor, fallback
+	var predictedGB int
+	predicted := false
 	if cfg.Configured() && command != "" {
 		result, err := predictFunc(cfg, host, project, gpuClass, command)
 		if err == nil && result != nil {
 			if memGB, ok := PredictedGPUMemGB(result.MaxGPUMemMiB); ok {
-				return &memGB, true
+				predictedGB = memGB
+				predicted = true
 			}
 		}
 	}
-	if fallbackGB <= 0 {
+
+	// Take the maximum of all sources
+	memGB := max(predictedGB, oomFloorGB, fallbackGB)
+	if memGB <= 0 {
 		return nil, false
 	}
-	memGB := fallbackGB
-	return &memGB, false
+	// Report as "predicted" if the predictor was the winning source
+	return &memGB, predicted && predictedGB == memGB
 }
 
 // FormatDuration formats a duration prediction as a human-readable string.

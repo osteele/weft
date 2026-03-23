@@ -50,6 +50,12 @@ using a [PEP 723](https://peps.python.org/pep-0723/) `[tool.weft]` table.
 These are applied as defaults — CLI flags take precedence. See
 [Workflow Guide § Script metadata](../guides/workflow-guide.md#script-metadata).
 
+**OOM history:** When a job fails with a GPU out-of-memory error, weft records
+the GPU capacity. On subsequent submissions of the same command, the minimum
+`--gpu-mem` is automatically raised above the capacity that caused the OOM,
+preventing the same failure from repeating. An explicit `--gpu-mem` flag
+overrides this floor.
+
 If an immediate run can't reach the host, the CLI automatically records the job
 locally and defers it to the remote queue. The next sync (or any command that
 touches that host) will append the saved entry so it runs as soon as the host is

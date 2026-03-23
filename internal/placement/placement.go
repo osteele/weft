@@ -403,7 +403,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 	if c.GPUMemGB > 0 {
 		found := false
 		for _, gpu := range host.GPUs {
-			memGB := parseMemGB(gpu.Memory)
+			memGB := inventory.ParseMemGB(gpu.Memory)
 			if memGB >= c.GPUMemGB {
 				found = true
 				break
@@ -665,7 +665,7 @@ func removeStaticPerfScoring(s *Score) {
 func applyResourceHardConstraints(s *Score, p *JobPrediction, spec inventory.HostSpec) {
 	// Check RSS vs total host RAM
 	if p.PeakRSSKBUpper != nil {
-		hostMemGB := parseMemGB(spec.Memory)
+		hostMemGB := inventory.ParseMemGB(spec.Memory)
 		if hostMemGB > 0 {
 			hostMemKB := float64(hostMemGB) * 1024 * 1024 // GB to KB
 			if *p.PeakRSSKBUpper > hostMemKB {
@@ -682,7 +682,7 @@ func applyResourceHardConstraints(s *Score, p *JobPrediction, spec inventory.Hos
 	if p.MaxGPUMemMiBUpper != nil && len(spec.GPUs) > 0 {
 		var maxGPUMemGB int
 		for _, gpu := range spec.GPUs {
-			if mem := parseMemGB(gpu.Memory); mem > maxGPUMemGB {
+			if mem := inventory.ParseMemGB(gpu.Memory); mem > maxGPUMemGB {
 				maxGPUMemGB = mem
 			}
 		}
@@ -756,16 +756,6 @@ func betterThan(a, b Score) bool {
 		return a.Eligible
 	}
 	return a.Total > b.Total
-}
-
-// parseMemGB extracts the GB value from a string like "80GB" or "24GB".
-func parseMemGB(s string) int {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(s, "GB")
-	s = strings.TrimSuffix(s, "gb")
-	var n int
-	fmt.Sscanf(s, "%d", &n)
-	return n
 }
 
 // normalizeGPUClass is a package-local alias for inventory.NormalizeGPUClass.

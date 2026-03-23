@@ -60,6 +60,8 @@ type trainingDataRecord struct {
 	EndTime            int64                 `json:"end_time"`
 	DurationS          int64                 `json:"duration_s"`
 	ExitCode           int                   `json:"exit_code"`
+	FailureReason      string                `json:"failure_reason,omitempty"`
+	ErrorDiagnosis     string                `json:"error_diagnosis,omitempty"`
 	PeakRSSKB          int64                 `json:"peak_rss_kb,omitempty"`
 	MaxGPUMiB          int64                 `json:"max_gpu_mem_mib,omitempty"`
 	CPUMean            float64               `json:"cpu_mean,omitempty"`
@@ -131,20 +133,22 @@ func runExportTrainingData(cmd *cobra.Command, args []string) error {
 
 	for _, run := range runs {
 		rec := trainingDataRecord{
-			RunID:      run.RunID,
-			JobID:      run.JobID,
-			Host:       run.Host,
-			WorkingDir: run.WorkingDir,
-			Command:    run.Command,
-			Project:    run.Project,
-			GPUClass:   run.GPUClass,
-			Backend:    run.Backend,
-			Tenant:     run.Tenant,
-			StartTime:  run.StartTime,
-			EndTime:    run.EndTime,
-			DurationS:  run.DurationS,
-			ExitCode:   run.ExitCode,
-			HostSpecs:  hostSpecs[run.Host],
+			RunID:          run.RunID,
+			JobID:          run.JobID,
+			Host:           run.Host,
+			WorkingDir:     run.WorkingDir,
+			Command:        run.Command,
+			Project:        run.Project,
+			GPUClass:       run.GPUClass,
+			Backend:        run.Backend,
+			Tenant:         run.Tenant,
+			StartTime:      run.StartTime,
+			EndTime:        run.EndTime,
+			DurationS:      run.DurationS,
+			ExitCode:       run.ExitCode,
+			FailureReason:  run.FailureReason,
+			ErrorDiagnosis: run.ErrorDiagnosis,
+			HostSpecs:      hostSpecs[run.Host],
 		}
 
 		// Extract resource usage from metadata

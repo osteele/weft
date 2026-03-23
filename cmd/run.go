@@ -378,7 +378,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 		gpuClass = gpu
 		gpu = ""
 	}
-	resolvedGPUMemGB, _ := resolveEffectiveGPUMemWithConfig(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, host, projectName, command)
+	// Query OOM history for this command
+	oomFloor, _ := db.OOMFloor(database, command)
+	if oomFloor > 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "OOM history: requiring >=%dGB GPU memory (prior failure on %dGB GPU)\n", oomFloor, oomFloor-1)
+	}
+	resolvedGPUMemGB, _ := resolveEffectiveGPUMemWithConfig(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, host, projectName, command, oomFloor)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{

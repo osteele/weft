@@ -196,6 +196,31 @@ func HostHFCacheDir(name string) string {
 	return ""
 }
 
+// HostMaxGPUMemoryGB returns the maximum GPU memory (in GB) across all GPUs
+// on a host, or 0 if the host is not found or has no GPUs.
+func HostMaxGPUMemoryGB(name string) int {
+	spec := FindHost(name)
+	if spec == nil {
+		return 0
+	}
+	var maxMem int
+	for _, gpu := range spec.GPUs {
+		if mem := ParseMemGB(gpu.Memory); mem > maxMem {
+			maxMem = mem
+		}
+	}
+	return maxMem
+}
+
+// ParseMemGB extracts an integer GB value from a string like "24GB", "80gb", or "80".
+func ParseMemGB(s string) int {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSuffix(s, "gb")
+	var n int
+	fmt.Sscanf(s, "%d", &n)
+	return n
+}
+
 // FindHost looks up a host by name from the runtime inventory.
 // Returns nil if not found.
 func FindHost(name string) *HostSpec {

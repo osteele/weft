@@ -7,12 +7,13 @@ import "encoding/json"
 
 // ErrorDiagnosis describes a diagnosed error from a failed job's log output.
 type ErrorDiagnosis struct {
-	Pattern       string   `json:"pattern"`        // e.g., "missing_hf_model", "missing_import"
-	Category      string   `json:"category"`       // "data", "code", "environment"
-	Message       string   `json:"message"`        // human-readable summary
-	MissingAssets []string `json:"missing_assets"` // for data errors: ["hf:meta-llama/Llama-3-8B"]
-	Remediable    bool     `json:"remediable"`     // can the coordinator auto-fix this?
-	Details       string   `json:"details"`        // raw error text that matched
+	Pattern       string   `json:"pattern"`                   // e.g., "missing_hf_model", "missing_import"
+	Category      string   `json:"category"`                  // "data", "code", "environment"
+	Message       string   `json:"message"`                   // human-readable summary
+	MissingAssets []string `json:"missing_assets"`            // for data errors: ["hf:meta-llama/Llama-3-8B"]
+	Remediable    bool     `json:"remediable"`                // can the coordinator auto-fix this?
+	Details       string   `json:"details"`                   // raw error text that matched
+	GPUCapacityGB int      `json:"gpu_capacity_gb,omitempty"` // for gpu_oom: total GPU memory (GB) of the device that OOM'd
 }
 
 // DiagnoseFromLog scans log content for known error patterns and returns

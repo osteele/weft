@@ -7,27 +7,30 @@ import (
 
 // TrainingJobRun is a stable run-based record for predictor training and export.
 type TrainingJobRun struct {
-	RunID      int64
-	JobID      int64
-	Host       string
-	WorkingDir string
-	Command    string
-	Project    string
-	GPUClass   string
-	Backend    string
-	Tenant     string
-	StartTime  int64
-	EndTime    int64
-	DurationS  int64
-	ExitCode   int
-	Metadata   *JobMetadata
+	RunID          int64
+	JobID          int64
+	Host           string
+	WorkingDir     string
+	Command        string
+	Project        string
+	GPUClass       string
+	Backend        string
+	Tenant         string
+	StartTime      int64
+	EndTime        int64
+	DurationS      int64
+	ExitCode       int
+	FailureReason  string
+	ErrorDiagnosis string
+	Metadata       *JobMetadata
 }
 
 // ListTrainingJobRuns returns terminal execution attempts ordered by start time.
 func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) {
 	query := `
 		SELECT run_id, job_id, host, working_dir, command, project, gpu_class, backend, tenant,
-		       start_time, end_time, COALESCE(duration_s, 0), COALESCE(exit_code, 0), job_metadata
+		       start_time, end_time, COALESCE(duration_s, 0), COALESCE(exit_code, 0),
+		       failure_reason, error_diagnosis, job_metadata
 		FROM job_run_training_examples
 	`
 	var args []any
@@ -47,10 +50,11 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 	for rows.Next() {
 		var run TrainingJobRun
 		var workingDir, project, gpuClass, backend, tenant sql.NullString
-		var jobMetadata sql.NullString
+		var failureReason, errorDiagnosis, jobMetadata sql.NullString
 		if err := rows.Scan(
 			&run.RunID, &run.JobID, &run.Host, &workingDir, &run.Command, &project, &gpuClass, &backend, &tenant,
-			&run.StartTime, &run.EndTime, &run.DurationS, &run.ExitCode, &jobMetadata,
+			&run.StartTime, &run.EndTime, &run.DurationS, &run.ExitCode,
+			&failureReason, &errorDiagnosis, &jobMetadata,
 		); err != nil {
 			return nil, fmt.Errorf("scan training job run: %w", err)
 		}
@@ -70,6 +74,12 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 		}
 		if tenant.Valid {
 			run.Tenant = tenant.String
+		}
+		if failureReason.Valid {
+			run.FailureReason = failureReason.String
+		}
+		if errorDiagnosis.Valid {
+			run.ErrorDiagnosis = errorDiagnosis.String
 		}
 		run.Metadata = decodeJobMetadata(jobMetadata)
 		runs = append(runs, run)
