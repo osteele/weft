@@ -177,6 +177,7 @@ func (h *HostSpec) TotalGPUs() int {
 
 // NormalizeGPUClass strips spaces, punctuation, and lowercases for fuzzy matching.
 // e.g. "RTX 3090", "rtx3090", "rtx-3090" all normalize to "rtx3090".
+// Bare numeric GPU names like "3090" or "2080ti" are expanded to "rtx3090", "rtx2080ti".
 func NormalizeGPUClass(s string) string {
 	var b strings.Builder
 	for _, r := range strings.ToLower(s) {
@@ -184,7 +185,16 @@ func NormalizeGPUClass(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return b.String()
+	norm := b.String()
+	// Expand bare RTX model numbers: "3090" -> "rtx3090", "2080ti" -> "rtx2080ti"
+	if len(norm) >= 4 && norm[0] >= '0' && norm[0] <= '9' {
+		suffix := strings.TrimLeft(norm, "0123456789")
+		digits := norm[:len(norm)-len(suffix)]
+		if len(digits) == 4 && (suffix == "" || suffix == "ti") {
+			return "rtx" + norm
+		}
+	}
+	return norm
 }
 
 // HostHFCacheDir returns the configured HF hub cache directory for a host,

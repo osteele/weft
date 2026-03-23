@@ -63,6 +63,21 @@ func TestResolveGPUFilter(t *testing.T) {
 			rejectGPUName: "RTX 2080 Ti",
 		},
 		{
+			name:      "short alias 3090",
+			gpuClass:  "3090",
+			wantNames: []string{"RTX 3090"},
+		},
+		{
+			name:      "short alias 3080",
+			gpuClass:  "3080",
+			wantNames: []string{"RTX 3080"},
+		},
+		{
+			name:      "short alias 2080ti",
+			gpuClass:  "2080ti",
+			wantNames: []string{"RTX 2080 Ti"},
+		},
+		{
 			name:     "nvidia family",
 			gpuClass: "nvidia",
 		},

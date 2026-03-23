@@ -255,6 +255,10 @@ func TestNormalizeGPUClass(t *testing.T) {
 		{"RTX 3090", "rtx3090"},
 		{"rtx3090", "rtx3090"},
 		{"rtx-3090", "rtx3090"},
+		{"3090", "rtx3090"},
+		{"2080ti", "rtx2080ti"},
+		{"2080 Ti", "rtx2080ti"},
+		{"4090", "rtx4090"},
 		{"A100", "a100"},
 		{"M2 Max", "m2max"},
 	}
