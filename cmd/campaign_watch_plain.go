@@ -139,11 +139,16 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 							for attempt := range maxAttempts {
 								fmt.Printf("instance %d: retryable failure (%s), attempting relaunch (attempt %d/%d)...\n",
 									instanceID, ci.TerminationReason, attempt+1, maxAttempts)
-								newIDs, err := attemptRelaunchOrphanedJobs(database, cfg)
+								outcome, err := attemptRelaunchOrphanedJobs(database, cfg, 0)
 								if err != nil {
 									fmt.Printf("instance %d: relaunch failed: %v\n", instanceID, err)
 									return
 								}
+								if outcome != nil && outcome.Skipped > 0 && len(outcome.InstanceIDs) == 0 {
+									fmt.Printf("instance %d: %d job(s) exceeded max cloud attempts, giving up\n", instanceID, outcome.Skipped)
+									return
+								}
+								newIDs := outcome.InstanceIDs
 								if len(newIDs) > 0 {
 									fmt.Printf("instance %d: relaunched as instance(s) %v\n", instanceID, newIDs)
 									for _, newID := range newIDs {

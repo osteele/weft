@@ -11,8 +11,9 @@ import (
 )
 
 // attemptRelaunchOrphanedJobs resets jobs on terminal cloud instances and
-// launches new instances for orphaned cloud jobs. Returns the new instance IDs.
-func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config) ([]int64, error) {
+// launches new instances for orphaned cloud jobs. extraAttempts raises the
+// max attempt threshold (used for manual retries to allow more tries).
+func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAttempts int) (*campaign.RelaunchResult, error) {
 	// Reset jobs on terminal instances so they become unplaced
 	if _, err := db.ResetJobsOnTerminalCloudInstances(database); err != nil {
 		log.Printf("auto-relaunch: reset jobs: %v", err)
@@ -27,11 +28,15 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config) ([]int64,
 	}
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
+	survivalModel := buildSurvivalModel(database)
 	relaunchCfg := campaign.RelaunchConfig{
-		Clients:    clients,
-		R2Cfg:      r2Cfg,
-		LaunchOpts: campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
-		Database:   database,
+		Clients:       clients,
+		R2Cfg:         r2Cfg,
+		LaunchOpts:    campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
+		MaxAttempts:   campaign.DefaultMaxCloudAttempts + extraAttempts,
+		SurvivalModel: survivalModel,
+		MinSurvival:   campaignLaunchMinSurvival,
+		Database:      database,
 	}
 
 	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)
@@ -39,7 +44,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config) ([]int64,
 		return nil, err
 	}
 	if result == nil {
-		return nil, nil
+		return &campaign.RelaunchResult{}, nil
 	}
-	return result.InstanceIDs, nil
+	return result, nil
 }

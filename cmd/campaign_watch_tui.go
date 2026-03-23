@@ -52,6 +52,7 @@ type watchModel struct {
 	retrying             bool           // true while retry launch is in progress
 	retryResult          string         // status line after retry completes (or error)
 	retryAttempt         int            // current retry attempt number (0-based)
+	retryExtraAttempts   int            // extra attempts allowed for this retry round
 	partialErrors        []string       // human-readable launch failure messages (inline watch only)
 	partialErrorJobs     []*db.Job      // jobs from launch failures (inline watch only)
 	partialErrorsRetried bool           // true after partial error jobs have been retried
@@ -100,6 +101,7 @@ type campaignWatchSyncResultMsg struct{}
 // retryResultMsg carries the result of retrying failed instances.
 type retryResultMsg struct {
 	instanceIDs []int64
+	skipped     int // jobs that exceeded max attempts
 	err         error
 }
 
@@ -205,7 +207,8 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.retryAttempt = 0
 				m.retrying = true
 				m.retryResult = ""
-				return m, m.retryFailedInstances(nil)
+				m.retryExtraAttempts = campaign.DefaultMaxCloudAttempts
+				return m, m.retryFailedInstances(m.retryExtraAttempts)
 			}
 		}
 
@@ -230,7 +233,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.retryResult = ""
 			return m, tea.Batch(
 				waitForUpdate(msg.instanceID, ch),
-				m.retryFailedInstances(nil),
+				m.retryFailedInstances(0),
 			)
 		}
 
@@ -330,6 +333,12 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.checkAllDone()
 		}
 		if len(msg.instanceIDs) == 0 {
+			// All remaining jobs exceeded max retry attempts — stop retrying
+			if msg.skipped > 0 {
+				m.retryExtraAttempts = 0
+				m.retryResult = fmt.Sprintf("Retry: %d job(s) exceeded max cloud attempts, giving up", msg.skipped)
+				return m, m.checkAllDone()
+			}
 			if m.retryAttempt < len(retryBackoffDelays) {
 				delay := retryBackoffDelays[m.retryAttempt]
 				m.retryAttempt++
@@ -337,11 +346,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					delay, m.retryAttempt+1, len(retryBackoffDelays)+1)
 				return m, tea.Tick(delay, func(time.Time) tea.Msg { return retryBackoffMsg{} })
 			}
+			m.retryExtraAttempts = 0
 			m.retryResult = fmt.Sprintf("Retry: no instances launched after %d attempts (no offers available)", len(retryBackoffDelays)+1)
 			return m, m.checkAllDone()
 		}
-		// Success — reset retry counter
+		// Success — reset retry state
 		m.retryAttempt = 0
+		m.retryExtraAttempts = 0
 		// Add new instances to the watch view
 		var cmds []tea.Cmd
 		for _, id := range msg.instanceIDs {
@@ -372,7 +383,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case retryBackoffMsg:
 		m.retrying = true
 		m.retryResult = ""
-		return m, m.retryFailedInstances(nil)
+		return m, m.retryFailedInstances(m.retryExtraAttempts)
 
 	case campaignWatchSyncResultMsg:
 		// Background on-prem sync completed — re-arm and continue (no display update needed)
@@ -501,16 +512,20 @@ func (m watchModel) retryableJobs() []*db.Job {
 }
 
 // retryFailedInstances resets orphaned jobs on terminal instances and launches
-// new cloud instances for them. Runs in a background goroutine.
-func (m watchModel) retryFailedInstances(_ []*db.Job) tea.Cmd {
+// new cloud instances for them. extraAttempts raises the max attempt threshold
+// (used for manual retries). Runs in a background goroutine.
+func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 	database := m.database
 	cfg := m.appConfig
 	return func() tea.Msg {
-		newIDs, err := attemptRelaunchOrphanedJobs(database, cfg)
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, extraAttempts)
 		if err != nil {
 			return retryResultMsg{err: err}
 		}
-		return retryResultMsg{instanceIDs: newIDs}
+		if result == nil {
+			return retryResultMsg{}
+		}
+		return retryResultMsg{instanceIDs: result.InstanceIDs, skipped: result.Skipped}
 	}
 }
 

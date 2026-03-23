@@ -18,12 +18,15 @@ const DefaultMaxCloudAttempts = 3
 
 // RelaunchConfig configures automatic relaunch of orphaned cloud jobs.
 type RelaunchConfig struct {
-	Clients     []cloud.Client
-	R2Cfg       cloud.R2Config
-	CreateOpts  cloud.CreateOpts
-	LaunchOpts  LaunchOpts
-	MaxAttempts int // default DefaultMaxCloudAttempts
-	Database    *sql.DB
+	Clients       []cloud.Client
+	R2Cfg         cloud.R2Config
+	CreateOpts    cloud.CreateOpts
+	LaunchOpts    LaunchOpts
+	MaxAttempts   int // default DefaultMaxCloudAttempts
+	SurvivalModel *bidding.SurvivalModel
+	MinSurvival   float64 // 0 to disable survival filtering
+	Strategy      bidding.SelectionStrategy
+	Database      *sql.DB
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
@@ -96,7 +99,11 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	}
 
 	// Fetch offers
-	groupOffers := FetchGroupOffers(cfg.Clients, groups, nil, 1.0, 0.5, bidding.StrategyCheap, 0)
+	strategy := cfg.Strategy
+	if strategy == "" {
+		strategy = bidding.StrategyCheap
+	}
+	groupOffers := FetchGroupOffers(cfg.Clients, groups, cfg.SurvivalModel, 1.0, 0.5, strategy, cfg.MinSurvival)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup
@@ -142,6 +149,21 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		break
 	}
 
+	// Build a map from group index to the most recent failed instance ID,
+	// so we can record it as donor_instance_id on the new instance.
+	groupDonorIDs := make(map[int]int64)
+	for i, group := range launchGroups {
+		for _, j := range group.Jobs {
+			attempts, err := db.GetJobCloudAttempts(cfg.Database, j.ID)
+			if err != nil || len(attempts) == 0 {
+				continue
+			}
+			lastAttempt := attempts[len(attempts)-1]
+			groupDonorIDs[i] = lastAttempt.CloudInstanceID
+			break
+		}
+	}
+
 	// Launch instances in parallel
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -153,8 +175,9 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			continue
 		}
 
+		donorID, hasDonor := groupDonorIDs[i]
 		wg.Add(1)
-		go func(group InstanceGroup, offer cloud.Offer, client cloud.Client) {
+		go func(group InstanceGroup, offer cloud.Offer, client cloud.Client, donorID int64, hasDonor bool) {
 			defer wg.Done()
 			instanceID, err := LaunchInstance(
 				client, cfg.Database, campaignID, group, offer,
@@ -168,9 +191,14 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
 				return
 			}
+			if hasDonor {
+				if setErr := db.SetCloudInstanceDonorID(cfg.Database, instanceID, donorID); setErr != nil {
+					log.Printf("relaunch: failed to set donor_instance_id on instance %d: %v", instanceID, setErr)
+				}
+			}
 			log.Printf("relaunch: launched instance %d for %d jobs (group %s)", instanceID, len(group.Jobs), group.GPUSpec())
 			result.InstanceIDs = append(result.InstanceIDs, instanceID)
-		}(group, offer, client)
+		}(group, offer, client, donorID, hasDonor)
 	}
 	wg.Wait()
 
