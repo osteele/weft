@@ -54,15 +54,13 @@ func parseCUDAImage(image string) (cudaMajorMinor, variant string, ok bool) {
 			return "", "", false
 		}
 		// Find the cuda<ver> part
-		for i, p := range parts {
+		for _, p := range parts {
 			if strings.HasPrefix(p, "cuda") {
 				cudaVer := strings.TrimPrefix(p, "cuda")
-				// Last part is the variant
 				variant = parts[len(parts)-1]
 				if _, known := cudaVariantRank[variant]; !known {
 					return "", "", false
 				}
-				_ = i
 				return cudaMajorMinorVersion(cudaVer), variant, true
 			}
 		}

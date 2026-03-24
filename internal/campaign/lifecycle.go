@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -36,12 +37,13 @@ const (
 
 // LaunchOpts configures an instance launch.
 type LaunchOpts struct {
-	MaxSpendCents      int
-	MaxTimeSeconds     int
-	NoDonor            bool                      // skip donor instance strategy
-	GracePeriodSeconds int                       // grace period after job failure (0 = disabled)
-	Strategy           bidding.SelectionStrategy // "cheap" (default), "fast", or "fastest"
-	MinSurvival        float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
+	MaxSpendCents       int
+	MaxTimeSeconds      int
+	NoDonor             bool                      // skip donor instance strategy
+	GracePeriodSeconds  int                       // grace period after job failure (0 = disabled)
+	Strategy            bidding.SelectionStrategy // "cheap" (default), "fast", or "fastest"
+	MinSurvival         float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
+	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -1095,7 +1097,12 @@ func LaunchInstance(
 
 	// Generate and upload campaign manifest (needs providerInstID for self-destruct)
 	selfDestructCmd := client.SelfDestructCmd(providerInstID)
-	manifestJSON, err := cloud.GenerateCampaignManifest(agentJobs, selfDestructCmd, nil)
+	manifest := cloud.CampaignManifest{
+		Jobs:                agentJobs,
+		SelfDestructCmd:     selfDestructCmd,
+		SkipWorkdirDeletion: opts.SkipWorkdirDeletion,
+	}
+	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		_ = client.DestroyInstance(providerInstID)
 		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)

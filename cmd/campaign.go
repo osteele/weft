@@ -74,23 +74,24 @@ var campaignShowCmd = &cobra.Command{
 }
 
 var (
-	campaignLaunchMaxSpend    string
-	campaignLaunchMaxTime     string
-	campaignLaunchGracePeriod string
-	campaignLaunchDryRun      bool
-	campaignLaunchNoWatch     bool
-	campaignLaunchNoDonor     bool
-	campaignLaunchYes         bool
-	campaignLaunchJobs        string
-	campaignLaunchGPU         string
-	campaignLaunchStrategy    string
-	campaignLaunchMinSurvival float64
-	campaignLaunchTUI         bool
-	campaignLaunchPlain       bool
-	campaignWatchTUI          bool
-	campaignWatchPlain        bool
-	campaignListTUI           bool
-	campaignListPlain         bool
+	campaignLaunchMaxSpend          string
+	campaignLaunchMaxTime           string
+	campaignLaunchGracePeriod       string
+	campaignLaunchDryRun            bool
+	campaignLaunchNoWatch           bool
+	campaignLaunchNoDonor           bool
+	campaignLaunchYes               bool
+	campaignLaunchJobs              string
+	campaignLaunchGPU               string
+	campaignLaunchStrategy          string
+	campaignLaunchMinSurvival       float64
+	campaignLaunchSkipWorkdirDelete bool
+	campaignLaunchTUI               bool
+	campaignLaunchPlain             bool
+	campaignWatchTUI                bool
+	campaignWatchPlain              bool
+	campaignListTUI                 bool
+	campaignListPlain               bool
 )
 
 func init() {
@@ -121,6 +122,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
 	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize wall-clock time), or 'fastest' (highest raw DLPerf)")
 	cmd.Flags().Float64Var(&campaignLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
+	cmd.Flags().BoolVar(&campaignLaunchSkipWorkdirDelete, "skip-workdir-deletion", false, "Don't delete working directories after job completion (for debugging)")
 	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
@@ -697,9 +699,10 @@ func parseLaunchOpts() campaign.LaunchOpts {
 		strategy = bidding.StrategyCheap
 	}
 	opts := campaign.LaunchOpts{
-		NoDonor:     campaignLaunchNoDonor,
-		Strategy:    strategy,
-		MinSurvival: campaignLaunchMinSurvival,
+		NoDonor:             campaignLaunchNoDonor,
+		Strategy:            strategy,
+		MinSurvival:         campaignLaunchMinSurvival,
+		SkipWorkdirDeletion: campaignLaunchSkipWorkdirDelete,
 	}
 	if campaignLaunchMaxSpend != "" {
 		cleaned := strings.TrimPrefix(campaignLaunchMaxSpend, "$")

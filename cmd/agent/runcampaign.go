@@ -33,6 +33,7 @@ func runCampaign(args []string) {
 	var logDir string
 	var maxTime time.Duration
 	var gracePeriod time.Duration
+	var skipWorkdirDeletion bool
 
 	for _, arg := range args {
 		switch {
@@ -58,6 +59,8 @@ func runCampaign(args []string) {
 				fmt.Fprintf(os.Stderr, "invalid --grace-period: %s\n", val)
 				os.Exit(1)
 			}
+		case arg == "--skip-workdir-deletion":
+			skipWorkdirDeletion = true
 		default:
 			fmt.Fprintf(os.Stderr, "unknown flag: %s\n", arg)
 			os.Exit(1)
@@ -125,13 +128,14 @@ func runCampaign(args []string) {
 	defer stopDiskMonitor()
 
 	seqResult := runJobSequence(manifest.Jobs, jobSequenceConfig{
-		R2Bucket:   r2Bucket,
-		InstanceID: instanceIDInt,
-		PhaseKey:   phaseKey,
-		LogDir:     logDir,
-		MaxTime:    maxTime,
-		StartTime:  startTime,
-		OnPhase:    currentPhase.Set,
+		R2Bucket:            r2Bucket,
+		InstanceID:          instanceIDInt,
+		PhaseKey:            phaseKey,
+		LogDir:              logDir,
+		MaxTime:             maxTime,
+		StartTime:           startTime,
+		OnPhase:             currentPhase.Set,
+		SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 	})
 	anyFailed = seqResult.AnyFailed
 
@@ -139,11 +143,12 @@ func runCampaign(args []string) {
 	if anyFailed && gracePeriod > 0 {
 		fmt.Printf("Jobs failed. Entering grace period (%s).\n", gracePeriod)
 		graceWaitLoop(graceWaitConfig{
-			InstanceID:      instanceID,
-			R2Bucket:        r2Bucket,
-			Timeout:         gracePeriod,
-			SelfDestructCmd: manifest.SelfDestructCmd,
-			LogDir:          logDir,
+			InstanceID:          instanceID,
+			R2Bucket:            r2Bucket,
+			Timeout:             gracePeriod,
+			SelfDestructCmd:     manifest.SelfDestructCmd,
+			LogDir:              logDir,
+			SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 		})
 	} else {
 		terminalStatus := db.CloudInstanceStatusCompleted

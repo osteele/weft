@@ -13,9 +13,10 @@ type AgentJob struct {
 
 // CampaignManifest is uploaded to R2 by the coordinator and read by weft-agent run-campaign.
 type CampaignManifest struct {
-	Jobs            []AgentJob        `json:"jobs"`
-	SelfDestructCmd string            `json:"self_destruct_cmd"`
-	Env             map[string]string `json:"env,omitempty"`
+	Jobs                []AgentJob        `json:"jobs"`
+	SelfDestructCmd     string            `json:"self_destruct_cmd"`
+	Env                 map[string]string `json:"env,omitempty"`
+	SkipWorkdirDeletion bool              `json:"skip_workdir_deletion,omitempty"`
 }
 
 // GenerateCampaignManifest produces JSON bytes for the campaign manifest

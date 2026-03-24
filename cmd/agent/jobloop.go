@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -17,13 +18,14 @@ import (
 
 // jobSequenceConfig holds parameters for runJobSequence.
 type jobSequenceConfig struct {
-	R2Bucket   string
-	InstanceID int64
-	PhaseKey   string
-	LogDir     string
-	MaxTime    time.Duration // 0 = no limit
-	StartTime  time.Time     // for time budget accounting
-	OnPhase    func(string)  // update current phase string (for heartbeat)
+	R2Bucket            string
+	InstanceID          int64
+	PhaseKey            string
+	LogDir              string
+	MaxTime             time.Duration // 0 = no limit
+	StartTime           time.Time     // for time budget accounting
+	OnPhase             func(string)  // update current phase string (for heartbeat)
+	SkipWorkdirDeletion bool          // disable background workdir cleanup (for debugging)
 }
 
 // jobSequenceResult holds the outcome of running a sequence of jobs.
@@ -32,14 +34,21 @@ type jobSequenceResult struct {
 	AnyFailed  bool
 }
 
-// runJobSequence runs a slice of agent jobs sequentially, handling time budgets,
-// R2 markers, output uploads, uv manifest promotion, log cleanup, opslog re-init,
-// and between-job reuse checks. Both run-campaign and grace-wait call this.
+// runJobSequence runs a slice of agent jobs sequentially, overlapping post-job
+// uploads with the next job's execution. Benchmark jobs act as a barrier —
+// all background work must finish before a benchmark job starts.
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
 	var result jobSequenceResult
+	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
 
 	for i := 0; i < len(jobs); i++ {
 		job := jobs[i]
+
+		// Benchmark barrier: wait for all background uploads/deletions
+		if slices.Contains(job.Tags, "benchmark") {
+			bgm.Barrier()
+		}
+
 		// Check time budget
 		if cfg.MaxTime > 0 {
 			remaining := cfg.MaxTime - time.Since(cfg.StartTime)
@@ -55,10 +64,8 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// Write .started marker to R2
 		r2Put(cfg.R2Bucket, r2keys.JobAttemptStarted(job.ID, job.RunID), fmt.Sprintf("%d", time.Now().Unix()))
 		paths := runner.NewJobPaths(cfg.LogDir, job.ID)
-		timeseriesPath := paths.Timeseries
-		telemetryPath := paths.Telemetry
-		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, timeseriesPath)
-		stopTelemetryUploader := startTelemetryUploader(cfg.R2Bucket, job.ID, job.RunID, telemetryPath)
+		stopTimeseriesUploader := startTimeseriesUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Timeseries)
+		stopTelemetryUploader := startTelemetryUploader(cfg.R2Bucket, job.ID, job.RunID, paths.Telemetry)
 
 		workDir := job.Dir
 
@@ -96,6 +103,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			oplog.LogJob(oplog.OpJobComplete, job.ID, "", oplog.WithDetail("exit=0"))
 		}
 
+		// === Synchronous post-job work ===
 		finalizePhase := fmt.Sprintf("finalizing:%d", job.ID)
 		if cfg.OnPhase != nil {
 			cfg.OnPhase(finalizePhase)
@@ -103,68 +111,52 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(finalizePhase))
 		writePhase(cfg.R2Bucket, cfg.PhaseKey, finalizePhase)
 
-		uploadStartedAt := time.Now()
-		uploadStartedUnix := uploadStartedAt.Unix()
+		uploadStartedUnix := time.Now().Unix()
 		if err := patchPhaseUploadWindow(cfg.LogDir, job.ID, uploadStartedUnix, 0); err != nil {
 			fmt.Fprintf(os.Stderr, "patch phase timing for job %d: upload start: %v\n", job.ID, err)
 		}
 
-		// Upload output directories when the job produced convention-based outputs.
-		if hasOutputDirs(workDir) {
-			uploadPhase := fmt.Sprintf("uploading:%d", job.ID)
-			if cfg.OnPhase != nil {
-				cfg.OnPhase(uploadPhase)
-			}
-			oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(uploadPhase))
-			writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadPhase)
-		}
-
-		uploadResult := uploadOutputDirs(cfg.R2Bucket, job.ID, job.RunID, workDir)
-		if uploadResult.Status != "ok" {
-			failPhase := fmt.Sprintf("upload-failed:%d", job.ID)
-			if cfg.OnPhase != nil {
-				cfg.OnPhase(failPhase)
-			}
-			oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(failPhase))
-			writePhase(cfg.R2Bucket, cfg.PhaseKey, failPhase)
-		}
-		patchCompletionUpload(cfg.LogDir, job.ID, &uploadResult)
-
-		// Upload per-job results
-		resultsPhase := fmt.Sprintf("uploading-results:%d", job.ID)
-		if cfg.OnPhase != nil {
-			cfg.OnPhase(resultsPhase)
-		}
-		oplog.Log(oplog.OpPhaseTransition, oplog.WithJobID(job.ID), oplog.WithDetail(resultsPhase))
-		writePhase(cfg.R2Bucket, cfg.PhaseKey, resultsPhase)
-		resultsUpload := uploadJobResults(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir)
-		patchCompletionResultsUpload(cfg.LogDir, job.ID, &resultsUpload)
-		uploadEndedUnix := time.Now().Unix()
-		if err := patchPhaseUploadWindow(cfg.LogDir, job.ID, uploadStartedUnix, uploadEndedUnix); err != nil {
-			fmt.Fprintf(os.Stderr, "patch phase timing for job %d: upload end: %v\n", job.ID, err)
-		}
+		// Stop per-job live uploaders before next job starts its own
 		stopTimeseriesUploader()
 		stopTelemetryUploader()
 		r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTimeseries(job.ID, job.RunID))
 		r2Delete(cfg.R2Bucket, r2keys.JobAttemptLiveTelemetry(job.ID, job.RunID))
 
-		// Promote uv manifest
 		promoteUVManifest(cfg.R2Bucket, cfg.LogDir)
-
-		// Upload opslog checkpoint and clean log dir for next job
 		uploadOpslog(cfg.R2Bucket, cfg.InstanceID, cfg.LogDir)
+
+		// Snapshot log dir so background uploads can read from it
+		// while the live log dir is cleaned for the next job
+		logSnapshot, snapErr := snapshotLogDir(cfg.LogDir, job.ID)
+		if snapErr != nil {
+			fmt.Fprintf(os.Stderr, "snapshot log dir for job %d: %v\n", job.ID, snapErr)
+		}
+
 		if i < len(jobs)-1 {
 			cleanLogDir(cfg.LogDir)
 			oplog.Init(filepath.Join(cfg.LogDir, agentOpslogFile), 0)
 		}
 
+		// === Background post-job work (uploads + workdir cleanup) ===
+		bgm.StartPostJobWork(postJobWork{
+			r2Bucket:          cfg.R2Bucket,
+			jobID:             job.ID,
+			runID:             job.RunID,
+			workDir:           runner.ExpandTilde(workDir),
+			logSnapshot:       logSnapshot,
+			uploadStartedUnix: uploadStartedUnix,
+		})
+
 		// Check for newly submitted jobs via R2 (between-job reuse)
 		if newJobs := checkForNewJobs(cfg.R2Bucket, cfg.InstanceID); len(newJobs) > 0 {
 			fmt.Printf("Picked up %d new job(s) from R2\n", len(newJobs))
+			bgm.RegisterNewJobs(newJobs)
 			jobs = append(jobs, newJobs...)
 		}
 	}
 
+	// Wait for remaining background work
+	bgm.Barrier()
 	return result
 }
 
@@ -289,6 +281,33 @@ func patchPhaseUploadWindow(logDir string, jobID, uploadStart, uploadEnd int64) 
 	}
 	out = append(out, '\n')
 	return os.WriteFile(paths.Phases, out, 0o644)
+}
+
+// snapshotLogDir copies the log directory contents to a temp dir so that
+// the main log dir can be cleaned for the next job while background uploads
+// read from the snapshot. The caller must os.RemoveAll the returned path.
+func snapshotLogDir(logDir string, jobID int64) (string, error) {
+	snapshot := filepath.Join(os.TempDir(), fmt.Sprintf("weft-logs-job-%d", jobID))
+	if err := os.MkdirAll(snapshot, 0o755); err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		return snapshot, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue // log dir is flat
+		}
+		src := filepath.Join(logDir, entry.Name())
+		dst := filepath.Join(snapshot, entry.Name())
+		data, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		os.WriteFile(dst, data, 0o644)
+	}
+	return snapshot, nil
 }
 
 func hasOutputDirs(workDir string) bool {

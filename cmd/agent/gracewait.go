@@ -34,11 +34,12 @@ type graceJobsPayload struct {
 
 // graceWaitConfig holds parameters for the grace-wait loop.
 type graceWaitConfig struct {
-	InstanceID      string
-	R2Bucket        string
-	Timeout         time.Duration
-	SelfDestructCmd string
-	LogDir          string
+	InstanceID          string
+	R2Bucket            string
+	Timeout             time.Duration
+	SelfDestructCmd     string
+	LogDir              string
+	SkipWorkdirDeletion bool
 }
 
 // parseGraceWaitArgs parses CLI args into a graceWaitConfig for the grace-wait subcommand.
@@ -197,11 +198,12 @@ func graceWaitLoop(cfg graceWaitConfig) {
 
 		// Run resubmitted jobs using the shared job loop
 		seqResult := runJobSequence(payload.Jobs, jobSequenceConfig{
-			R2Bucket:   r2Bucket,
-			InstanceID: instanceIDInt,
-			PhaseKey:   phaseKey,
-			LogDir:     logDir,
-			StartTime:  time.Now(),
+			R2Bucket:            r2Bucket,
+			InstanceID:          instanceIDInt,
+			PhaseKey:            phaseKey,
+			LogDir:              logDir,
+			StartTime:           time.Now(),
+			SkipWorkdirDeletion: cfg.SkipWorkdirDeletion,
 		})
 		failedJobs := seqResult.FailedJobs
 

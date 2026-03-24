@@ -176,3 +176,22 @@ rclone configuration problems.
 
 **Action:** Check if the agent binary was stale (`just build` rebuilds
 agents). Check R2 for bootstrap script artifacts.
+
+## Debugging with preserved working directories
+
+By default, the agent deletes completed jobs' working directories in the
+background to free disk space for subsequent jobs. To keep working
+directories intact for debugging:
+
+```bash
+# Via campaign launch flag
+weft campaign launch --skip-workdir-deletion
+
+# Via instance launch
+weft instance launch --skip-workdir-deletion
+```
+
+This preserves `.venv`, source files, and intermediate outputs on the
+instance after each job completes, allowing SSH inspection of the
+instance state. Uploads and job concurrency behavior are unaffected —
+only the post-upload directory deletion is skipped.
