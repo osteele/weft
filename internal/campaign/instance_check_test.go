@@ -260,6 +260,89 @@ func TestCheckInstance_NilCI(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_StaleCreatedStatus(t *testing.T) {
+	launchedAt := time.Now().Add(-6 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.CloudInstance{
+			ID:                 1,
+			Status:             db.CloudInstanceStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: "created"},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs to be true")
+	}
+}
+
+func TestCheckInstance_CreatedStatusUnderTimeout(t *testing.T) {
+	launchedAt := time.Now().Add(-2 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.CloudInstance{
+			ID:                 1,
+			Status:             db.CloudInstanceStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: "created"},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("action.Kind = %d, want ActionNone (%d) — instance still within timeout", action.Kind, ActionNone)
+	}
+}
+
+func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
+	// Provider allocated but intended_status is "stopped" while actual_status is "created".
+	// isProviderTerminal should detect this immediately via intended_status check.
+	r := &Reconciler{
+		firstDeadAt:     make(map[int64]time.Time),
+		probeFailures:   make(map[int64]probeFailureState),
+		deadConfirmTime: -1, // disable hysteresis
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.CloudInstance{
+			ID:                 1,
+			Status:             db.CloudInstanceStatusRunning,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: "created", IntendedStatus: "stopped"},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionProviderDead {
+		t.Fatalf("action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs to be true for dead instance")
+	}
+}
+
+func TestCheckInstance_IntendedStatusStoppedButRunning(t *testing.T) {
+	// If Status is "running", IntendedStatus "stopped" should NOT trigger
+	// provider-terminal — the instance is still alive and the stop hasn't taken effect.
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.CloudInstance{
+			ID:                 1,
+			Status:             db.CloudInstanceStatusRunning,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: "running", IntendedStatus: "stopped"},
+		JobState:     JobState{HasStartedJob: true},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("action.Kind = %d, want ActionNone (%d) — running overrides intended stop", action.Kind, ActionNone)
+	}
+}
+
 func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{

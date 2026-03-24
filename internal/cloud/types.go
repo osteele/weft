@@ -43,19 +43,20 @@ func (o Offer) Key() string {
 
 // Instance represents a running cloud instance from any provider.
 type Instance struct {
-	ProviderID  string // provider-specific instance ID
-	Provider    Provider
-	Status      string // "running", "loading", "exited", etc.
-	SSHHost     string
-	SSHPort     int
-	CostPerHour float64
-	DiskGB      float64
-	DataCenter  string
-	Label       string // provider-assigned label/name (e.g., "weft/c42")
-	CPUCores    int    // effective CPU cores granted
-	CPUName     string // CPU model name
-	RAMGB       int    // total system RAM in GB
-	MachineID   string // provider-specific physical machine identifier
+	ProviderID     string // provider-specific instance ID
+	Provider       Provider
+	Status         string // "running", "loading", "exited", etc.
+	IntendedStatus string // provider's intended/target status (e.g., "running", "stopped")
+	SSHHost        string
+	SSHPort        int
+	CostPerHour    float64
+	DiskGB         float64
+	DataCenter     string
+	Label          string // provider-assigned label/name (e.g., "weft/c42")
+	CPUCores       int    // effective CPU cores granted
+	CPUName        string // CPU model name
+	RAMGB          int    // total system RAM in GB
+	MachineID      string // provider-specific physical machine identifier
 }
 
 // OfferConstraints describes what GPU capabilities a job needs.

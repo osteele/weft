@@ -144,6 +144,24 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
+	// 4b. Stale "created" status: provider allocated but never started loading.
+	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
+	if p.ProviderInst != nil && p.ProviderInst.Status == "created" && ci.LaunchedAt != nil &&
+		!isProviderTerminal(p.ProviderInst) {
+		age := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
+		if age > maxCreatedStatusTime {
+			return InstanceAction{
+				Kind:              ActionEmptyStatusTimeout,
+				TerminalStatus:    db.CloudInstanceStatusFailed,
+				TerminationReason: db.TerminationReasonInfraFailure,
+				StallMessage:      "provider instance stuck in 'created' status — terminating",
+				DestroyProvider:   true,
+				ResetJobs:         true,
+				AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			}
+		}
+	}
+
 	// 5. Bootstrap stall: instance running but no job progress after timeout
 	if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		elapsed := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))

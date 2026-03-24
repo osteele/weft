@@ -198,17 +198,18 @@ func instanceToCloud(inst *Instance) *cloud.Instance {
 		return nil
 	}
 	return &cloud.Instance{
-		ProviderID:  strconv.Itoa(inst.ID),
-		Provider:    cloud.ProviderVastai,
-		Status:      inst.Status,
-		SSHHost:     inst.SSHHost,
-		SSHPort:     inst.SSHPort,
-		CostPerHour: inst.CostPerHour,
-		DiskGB:      inst.DiskSpace,
-		Label:       inst.Label,
-		CPUCores:    int(inst.CPUCores),
-		CPUName:     inst.CPUName,
-		RAMGB:       (int(inst.CPURAMMB) + 512) / 1024,
-		MachineID:   machineIDToString(inst.MachineID),
+		ProviderID:     strconv.Itoa(inst.ID),
+		Provider:       cloud.ProviderVastai,
+		Status:         inst.Status,
+		IntendedStatus: inst.IntendedStatus,
+		SSHHost:        inst.SSHHost,
+		SSHPort:        inst.SSHPort,
+		CostPerHour:    inst.CostPerHour,
+		DiskGB:         inst.DiskSpace,
+		Label:          inst.Label,
+		CPUCores:       int(inst.CPUCores),
+		CPUName:        inst.CPUName,
+		RAMGB:          (int(inst.CPURAMMB) + 512) / 1024,
+		MachineID:      machineIDToString(inst.MachineID),
 	}
 }

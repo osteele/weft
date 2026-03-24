@@ -616,6 +616,11 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 // this threshold are terminated as infra failures.
 const maxEmptyStatusTime = 1 * time.Minute
 
+// maxCreatedStatusTime is the maximum time to wait for a provider instance to
+// transition from "created" to "loading"/"running". Instances stuck in "created"
+// beyond this threshold are terminated as infra failures.
+const maxCreatedStatusTime = 5 * time.Minute
+
 // batchFetchProviderInstances calls ListAllInstances() once per provider and
 // returns a nested map: provider key → provider instance ID → *cloud.Instance.
 // If a provider's batch call fails, that provider is omitted from the map and
@@ -652,7 +657,12 @@ func isProviderTerminal(inst *cloud.Instance) bool {
 	switch inst.Status {
 	case "exited", "destroyed", "error", "dead", "stopped":
 		return true
-	default:
-		return false
 	}
+	// Provider intended to stop/destroy but Status hasn't caught up yet
+	// (e.g., Status still "created" while IntendedStatus is "stopped")
+	if (inst.IntendedStatus == "stopped" || inst.IntendedStatus == "destroyed") &&
+		inst.Status != "running" {
+		return true
+	}
+	return false
 }
