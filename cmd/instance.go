@@ -177,7 +177,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	jobCounts, _ := db.GetCloudInstanceJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "ID\tSTATUS\tPROVIDER\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
+	fmt.Fprintf(w, "ID\tCAMPAIGN\tSTATUS\tPROVIDER\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
 
 	for _, inst := range instances {
 		created := time.Unix(inst.CreatedAt, 0).Format("01/02 15:04")
@@ -202,8 +202,13 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 			dc = "—"
 		}
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
-			inst.ID, inst.Status, inst.Provider, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
+		campaignStr := "—"
+		if inst.CampaignID != nil {
+			campaignStr = fmt.Sprintf("%d", *inst.CampaignID)
+		}
+
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+			inst.ID, campaignStr, inst.Status, inst.Provider, gpuSpec, jobCounts[inst.ID], providerInstID, dc, created, costStr)
 	}
 	w.Flush()
 	return nil

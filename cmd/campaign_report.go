@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"slices"
 	"text/tabwriter"
 	"time"
 
@@ -35,22 +36,28 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	}
 
 	now := time.Now()
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	var totalCost float64
 	allTerminal := true
+	allCompleted := true
 	hasInstances := false
 	seenJobs := make(map[int64]bool)
+	watchedSet := make(map[int64]bool, len(instanceIDs))
+	for _, id := range instanceIDs {
+		watchedSet[id] = true
+	}
 
 	type jobRow struct {
-		id          int64
-		status      string
-		instanceID  int64
-		description string
+		id              int64
+		status          string
+		instanceID      int64
+		project         string
+		fullDescription string // untruncated; truncated at render time
 	}
+
+	var instances []exitReportInstanceRow
 	var jobs []jobRow
 
-	// Instance table header (deferred until we know we have data)
-	var instanceLines []string
+	// Collect instances and jobs from the watched session
 	for _, id := range instanceIDs {
 		ci, err := db.GetCloudInstance(database, id)
 		if err != nil || ci == nil {
@@ -59,25 +66,14 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		hasInstances = true
 		if !campaign.IsInstanceTerminal(ci.Status) {
 			allTerminal = false
+			allCompleted = false
+		} else if ci.Status != db.CloudInstanceStatusCompleted {
+			allCompleted = false
 		}
 
-		obs := observeCloudInstance(ci, nil, now)
-		uptimeStr := "—"
-		if obs.Uptime != nil {
-			uptimeStr = tui.FormatCompactDuration(*obs.Uptime)
-		}
-		costStr := "—"
-		if obs.Cost != nil {
-			costStr = fmt.Sprintf("$%.2f", *obs.Cost)
-			totalCost += *obs.Cost
-		}
-		reason := ci.TerminationReason
-		if reason == "" {
-			reason = "—"
-		}
-
-		instanceLines = append(instanceLines, fmt.Sprintf("  %d\t%s\t%s\t%s\t%s\t%s\n",
-			id, ci.DisplayGPUSpec(), ci.Status, uptimeStr, costStr, reason))
+		row := buildInstanceRow(ci, now)
+		totalCost += row.cost
+		instances = append(instances, row)
 
 		// Collect jobs for this instance
 		instanceJobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, id)
@@ -91,10 +87,11 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 			}
 			seenJobs[j.ID] = true
 			jobs = append(jobs, jobRow{
-				id:          j.ID,
-				status:      campaign.JobDisplayStatus(j, outcomes),
-				instanceID:  id,
-				description: truncate(j.EffectiveDescription(), 60),
+				id:              j.ID,
+				status:          campaign.JobDisplayStatus(j, outcomes),
+				instanceID:      id,
+				project:         campaign.JobProjectLabel(j),
+				fullDescription: j.EffectiveDescription(),
 			})
 		}
 	}
@@ -103,29 +100,96 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		return
 	}
 
+	// Collect historical instance attempts for the watched jobs (last 5 not already shown)
+	jobIDs := make([]int64, len(jobs))
+	for i, j := range jobs {
+		jobIDs[i] = j.id
+	}
+	historicalIDs := collectHistoricalInstanceIDs(database, jobIDs, watchedSet)
+	const maxHistorical = 5
+	omitted := 0
+	if len(historicalIDs) > maxHistorical {
+		omitted = len(historicalIDs) - maxHistorical
+		historicalIDs = historicalIDs[len(historicalIDs)-maxHistorical:]
+	}
+	var historicalInstances []exitReportInstanceRow
+	for _, id := range historicalIDs {
+		ci, err := db.GetCloudInstance(database, id)
+		if err != nil || ci == nil {
+			continue
+		}
+		historicalInstances = append(historicalInstances, buildInstanceRow(ci, now))
+	}
+
+	// Sort current instances by ID
+	slices.SortFunc(instances, func(a, b exitReportInstanceRow) int {
+		return int(a.id - b.id)
+	})
+
+	// Header
 	fmt.Println()
-	if allTerminal {
-		fmt.Println("Campaign complete.")
-	} else {
-		fmt.Println("Campaign summary:")
+	switch {
+	case !allTerminal:
+		fmt.Println("Rental summary:")
+	case allCompleted:
+		fmt.Println("All rentals completed.")
+	default:
+		fmt.Println("All rentals terminated.")
 	}
 	fmt.Println()
 
-	// Instance table
+	// Instance table — current campaign
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "  INSTANCE\tGPU\tSTATUS\tUPTIME\tCOST\tREASON\n")
-	for _, line := range instanceLines {
-		fmt.Fprint(w, line)
+	for _, inst := range instances {
+		fmt.Fprint(w, inst.line)
 	}
 	w.Flush()
 
+	// Historical attempts from prior campaigns
+	if len(historicalInstances) > 0 || omitted > 0 {
+		fmt.Println()
+		hw := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		total := len(historicalInstances) + omitted
+		fmt.Fprintf(hw, "  Prior attempts (%d):\n", total)
+		if omitted > 0 {
+			fmt.Fprintf(hw, "  ...\t\t\t\t\t(%d earlier)\n", omitted)
+		}
+		for _, inst := range historicalInstances {
+			fmt.Fprint(hw, inst.line)
+		}
+		hw.Flush()
+	}
+
 	// Job table
 	if len(jobs) > 0 {
+		// Compute project column width and description budget
+		projectWidth := 0
+		for _, j := range jobs {
+			if n := len(j.project); n > projectWidth {
+				projectWidth = n
+			}
+		}
+		if projectWidth > 30 {
+			projectWidth = 30
+		}
+
+		// Calculate description width from terminal width
+		// Fixed columns: indent(2) + JOB(~5) + STATUS(~10) + INSTANCE(~5) + PROJECT(projectWidth)
+		// Plus tab separators (4 gaps × ~4 chars each ≈ 16)
+		termWidth := listOutputWidth()
+		fixedWidth := 2 + 5 + 10 + 5 + projectWidth + 20 // columns + padding
+		descWidth := termWidth - fixedWidth
+		if descWidth < 30 {
+			descWidth = 30
+		}
+
 		fmt.Println()
 		w = tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintf(w, "  JOB\tSTATUS\tINSTANCE\tDESCRIPTION\n")
+		fmt.Fprintf(w, "  JOB\tSTATUS\tINSTANCE\tPROJECT\tDESCRIPTION\n")
 		for _, j := range jobs {
-			fmt.Fprintf(w, "  %d\t%s\t%d\t%s\n",
-				j.id, j.status, j.instanceID, j.description)
+			fmt.Fprintf(w, "  %d\t%s\t%d\t%s\t%s\n",
+				j.id, j.status, j.instanceID, truncate(j.project, projectWidth), truncate(j.fullDescription, descWidth))
 		}
 		w.Flush()
 	}
@@ -134,4 +198,59 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	if totalCost > 0 {
 		fmt.Printf("\n  Total cost: $%.2f\n", totalCost)
 	}
+}
+
+type exitReportInstanceRow struct {
+	id   int64
+	line string
+	cost float64
+}
+
+// buildInstanceRow creates a formatted instance row for the exit report.
+func buildInstanceRow(ci *db.CloudInstance, now time.Time) exitReportInstanceRow {
+	obs := observeCloudInstance(ci, nil, now)
+	uptimeStr := "—"
+	if obs.Uptime != nil {
+		uptimeStr = tui.FormatCompactDuration(*obs.Uptime)
+	}
+	costStr := "—"
+	var cost float64
+	if obs.Cost != nil {
+		costStr = fmt.Sprintf("$%.2f", *obs.Cost)
+		cost = *obs.Cost
+	}
+	reason := ci.TerminationReason
+	if reason == "" {
+		reason = "—"
+	}
+
+	return exitReportInstanceRow{
+		id:   ci.ID,
+		line: fmt.Sprintf("  %d\t%s\t%s\t%s\t%s\t%s\n", ci.ID, ci.DisplayGPUSpec(), ci.Status, uptimeStr, costStr, reason),
+		cost: cost,
+	}
+}
+
+// collectHistoricalInstanceIDs finds cloud instance IDs from prior attempts
+// for the given jobs, excluding instances already in the watched set.
+// Returns IDs sorted ascending.
+func collectHistoricalInstanceIDs(database *sql.DB, jobIDs []int64, watchedSet map[int64]bool) []int64 {
+	seen := make(map[int64]bool)
+	for _, jobID := range jobIDs {
+		attempts, err := db.GetJobCloudAttempts(database, jobID)
+		if err != nil {
+			continue
+		}
+		for _, a := range attempts {
+			if !watchedSet[a.CloudInstanceID] && !seen[a.CloudInstanceID] {
+				seen[a.CloudInstanceID] = true
+			}
+		}
+	}
+	ids := make([]int64, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	return ids
 }
