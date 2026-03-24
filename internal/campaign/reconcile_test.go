@@ -48,7 +48,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Use zero deadConfirmTime so the instance is terminated immediately (no hysteresis wait).
-	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), deadConfirmTime: -1}
+	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: -1}
 	result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
@@ -659,7 +659,7 @@ func TestReconcileCloudInstances_DeadInstanceHysteresis(t *testing.T) {
 	}
 
 	// Use a short confirm time so the test doesn't need real wall-clock time.
-	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), deadConfirmTime: 10 * time.Millisecond}
+	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: 10 * time.Millisecond}
 
 	// First call: instance appears dead but hasn't been confirmed yet.
 	result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
@@ -754,7 +754,7 @@ func TestReconcileCloudInstances_TransientAPIError_SkipsInstance(t *testing.T) {
 	}
 
 	// Even with zero hysteresis, transient errors should NOT mark instance dead
-	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), deadConfirmTime: -1}
+	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: -1}
 
 	// Run multiple reconciliation passes — instance must remain running
 	for i := 0; i < 5; i++ {

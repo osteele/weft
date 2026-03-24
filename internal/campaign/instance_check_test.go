@@ -212,9 +212,10 @@ func TestCheckInstance_ProviderDead_WithHysteresis(t *testing.T) {
 
 func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 	r := &Reconciler{
-		firstDeadAt:     make(map[int64]time.Time),
-		probeFailures:   make(map[int64]probeFailureState),
-		deadConfirmTime: -1, // disable hysteresis
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1, // disable hysteresis
 	}
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.CloudInstance{
@@ -232,9 +233,10 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 
 func TestCheckInstance_ProviderDead_SkipsGraceInstances(t *testing.T) {
 	r := &Reconciler{
-		firstDeadAt:     make(map[int64]time.Time),
-		probeFailures:   make(map[int64]probeFailureState),
-		deadConfirmTime: -1,
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
 	}
 	deadline := time.Now().Add(5 * time.Minute).Unix()
 	action := r.CheckInstance(CheckInstanceParams{
@@ -299,13 +301,53 @@ func TestCheckInstance_CreatedStatusUnderTimeout(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_StaleLoadingStatus(t *testing.T) {
+	launchedAt := time.Now().Add(-6 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.CloudInstance{
+			ID:                 1,
+			Status:             db.CloudInstanceStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: "loading"},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionEmptyStatusTimeout {
+		t.Fatalf("action.Kind = %d, want ActionEmptyStatusTimeout (%d)", action.Kind, ActionEmptyStatusTimeout)
+	}
+	if !action.ResetJobs {
+		t.Error("expected ResetJobs to be true")
+	}
+}
+
+func TestCheckInstance_LoadingStatusUnderTimeout(t *testing.T) {
+	launchedAt := time.Now().Add(-2 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.CloudInstance{
+			ID:                 1,
+			Status:             db.CloudInstanceStatusRunning,
+			LaunchedAt:         &launchedAt,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: "loading"},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("action.Kind = %d, want ActionNone (%d) — instance still within timeout", action.Kind, ActionNone)
+	}
+}
+
 func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 	// Provider allocated but intended_status is "stopped" while actual_status is "created".
 	// isProviderTerminal should detect this immediately via intended_status check.
 	r := &Reconciler{
-		firstDeadAt:     make(map[int64]time.Time),
-		probeFailures:   make(map[int64]probeFailureState),
-		deadConfirmTime: -1, // disable hysteresis
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1, // disable hysteresis
 	}
 	action := r.CheckInstance(CheckInstanceParams{
 		CI: &db.CloudInstance{

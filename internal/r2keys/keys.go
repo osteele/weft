@@ -203,6 +203,10 @@ func InstanceHeartbeat(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/heartbeat", instanceID)
 }
 
+func InstanceAgentStartup(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/agent-startup.json", instanceID)
+}
+
 func InstanceOpslog(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/opslog.jsonl", instanceID)
 }

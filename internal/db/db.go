@@ -1878,6 +1878,20 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Create provider_status_transitions table (empirical timing data)
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS provider_status_transitions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			cloud_instance_id INTEGER NOT NULL REFERENCES cloud_instances(id),
+			observed_at INTEGER NOT NULL,
+			old_status TEXT NOT NULL DEFAULT '',
+			new_status TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_pst_instance ON provider_status_transitions(cloud_instance_id);
+	`); err != nil {
+		return err
+	}
+
 	// Migration: add cloud_instance_id column to jobs
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN cloud_instance_id INTEGER`); err != nil {
 		return err

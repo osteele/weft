@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"time"
 
@@ -144,17 +145,18 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
-	// 4b. Stale "created" status: provider allocated but never started loading.
+	// 4b. Stale pre-running status: provider allocated but never reached "running".
+	// Covers "created", "loading", and any other non-running, non-terminal status.
 	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
-	if p.ProviderInst != nil && p.ProviderInst.Status == "created" && ci.LaunchedAt != nil &&
-		!isProviderTerminal(p.ProviderInst) {
+	if p.ProviderInst != nil && p.ProviderInst.Status != "running" && p.ProviderInst.Status != "" &&
+		!isProviderTerminal(p.ProviderInst) && ci.LaunchedAt != nil {
 		age := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
-		if age > maxCreatedStatusTime {
+		if age > maxPreRunningStatusTime {
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
 				TerminalStatus:    db.CloudInstanceStatusFailed,
 				TerminationReason: db.TerminationReasonInfraFailure,
-				StallMessage:      "provider instance stuck in 'created' status — terminating",
+				StallMessage:      fmt.Sprintf("provider instance stuck in %q status — terminating", p.ProviderInst.Status),
 				DestroyProvider:   true,
 				ResetJobs:         true,
 				AttemptOutcome:    db.AttemptOutcomeOrphaned,

@@ -179,6 +179,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		defer close(ch)
 		var lastProviderPoll time.Time
 		var cachedInstance *cloud.Instance
+		var lastProviderStatus string
 		var currentPhase string
 		var phaseChangedAt *time.Time
 		watchReconciler := NewReconciler()
@@ -215,6 +216,12 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				inst, showErr := client.ShowInstance(providerInstID)
 				if showErr == nil {
 					cachedInstance = inst
+					if inst.Status != lastProviderStatus {
+						if lastProviderStatus != "" {
+							_ = db.InsertProviderStatusTransition(database, cloudInstanceID, time.Now(), lastProviderStatus, inst.Status)
+						}
+						lastProviderStatus = inst.Status
+					}
 				}
 				providerErr = showErr
 				lastProviderPoll = time.Now()

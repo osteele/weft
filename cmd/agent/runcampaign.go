@@ -119,6 +119,12 @@ func runCampaign(args []string) {
 	startTime := time.Now()
 	anyFailed := false
 
+	// Upload agent startup timestamp to R2 for boot timing analysis
+	go func() {
+		payload, _ := json.Marshal(map[string]int64{"agent_start_unix": startTime.Unix()})
+		_ = r2Put(r2Bucket, r2keys.InstanceAgentStartup(instanceIDInt), string(payload))
+	}()
+
 	// Start heartbeat reporter (writes host metrics to R2 every 30s)
 	stopHeartbeat := startHeartbeatReporter(r2Bucket, instanceIDInt, diskPath, currentPhase.Get)
 	defer stopHeartbeat()

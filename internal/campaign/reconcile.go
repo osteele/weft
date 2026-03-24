@@ -33,10 +33,11 @@ const minDeadConfirmTime = 30 * time.Second
 // Reconciler runs reconciliation passes and remembers when each instance was
 // first seen dead, so we can require a sustained dead period before terminating.
 type Reconciler struct {
-	mu              sync.Mutex
-	firstDeadAt     map[int64]time.Time // keyed by CloudInstance.ID
-	probeFailures   map[int64]probeFailureState
-	deadConfirmTime time.Duration // 0 uses minDeadConfirmTime
+	mu                 sync.Mutex
+	firstDeadAt        map[int64]time.Time // keyed by CloudInstance.ID
+	probeFailures      map[int64]probeFailureState
+	lastProviderStatus map[int64]string // last observed provider status per instance
+	deadConfirmTime    time.Duration    // 0 uses minDeadConfirmTime
 }
 
 type probeFailureState struct {
@@ -47,8 +48,9 @@ type probeFailureState struct {
 // NewReconciler creates a Reconciler ready for use.
 func NewReconciler() *Reconciler {
 	return &Reconciler{
-		firstDeadAt:   make(map[int64]time.Time),
-		probeFailures: make(map[int64]probeFailureState),
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
 	}
 }
 
@@ -98,6 +100,11 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 	for id := range r.probeFailures {
 		if !activeIDs[id] {
 			delete(r.probeFailures, id)
+		}
+	}
+	for id := range r.lastProviderStatus {
+		if !activeIDs[id] {
+			delete(r.lastProviderStatus, id)
 		}
 	}
 	r.mu.Unlock()
@@ -237,6 +244,10 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				}
 			}
 		}
+	}
+
+	if inst != nil {
+		r.recordProviderStatusTransition(database, ci.ID, inst.Status)
 	}
 
 	// Fetch and persist termination intent from R2
@@ -616,10 +627,27 @@ func fetchTerminationIntentFromR2(ctx context.Context, r2Client *r2.Client, inst
 // this threshold are terminated as infra failures.
 const maxEmptyStatusTime = 1 * time.Minute
 
-// maxCreatedStatusTime is the maximum time to wait for a provider instance to
-// transition from "created" to "loading"/"running". Instances stuck in "created"
-// beyond this threshold are terminated as infra failures.
-const maxCreatedStatusTime = 5 * time.Minute
+// maxPreRunningStatusTime is the maximum time to wait for a provider instance to
+// reach "running" status. Instances stuck in any pre-running status ("created",
+// "loading", etc.) beyond this threshold are terminated as infra failures.
+const maxPreRunningStatusTime = 5 * time.Minute
+
+// recordProviderStatusTransition detects when a provider instance's status
+// changes and records the transition in the DB. The DB write is performed
+// outside the lock to avoid holding it during I/O.
+func (r *Reconciler) recordProviderStatusTransition(database *sql.DB, instanceID int64, newStatus string) {
+	r.mu.Lock()
+	oldStatus := r.lastProviderStatus[instanceID]
+	changed := oldStatus != newStatus
+	if changed {
+		r.lastProviderStatus[instanceID] = newStatus
+	}
+	r.mu.Unlock()
+
+	if changed && oldStatus != "" {
+		_ = db.InsertProviderStatusTransition(database, instanceID, time.Now(), oldStatus, newStatus)
+	}
+}
 
 // batchFetchProviderInstances calls ListAllInstances() once per provider and
 // returns a nested map: provider key → provider instance ID → *cloud.Instance.
