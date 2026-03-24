@@ -185,6 +185,38 @@ laptop$ weft data fetch hf:meta-llama/Llama-3-8B --host localhost
 # Request 18 completed
 ```
 
+### Registering research checkpoints
+
+For non-HuggingFace data (model checkpoints, gradient snapshots, etc.), register
+them manually so weft can use them for placement scoring:
+
+```
+laptop$ weft data add ~/code/research/LM2/runs/gpt2-ft-v1
+# Registered checkpoint:LM2/runs/gpt2-ft-v1 on studio
+
+laptop$ weft data add ~/code/research/LM2/runs/gpt2-ft-v1 --host cool100
+# Registered checkpoint:LM2/runs/gpt2-ft-v1 on cool100
+
+laptop$ weft data where checkpoint:LM2/runs/gpt2-ft-v1
+HOST     SIZE   LAST SEEN   PATH
+studio   -      0s ago      ~/code/research/LM2/runs/gpt2-ft-v1
+cool100  -      0s ago      ~/code/research/LM2/runs/gpt2-ft-v1
+```
+
+For data outside a repository, use `--name` to set an explicit asset ID:
+
+```
+laptop$ weft data add ~/research/data/gradient-datasets/gpt2-grads \
+  --host studio --name gpt2-grads-wikitext
+```
+
+Then use `--input checkpoint:<name>` for auto-placement:
+
+```
+laptop$ weft run --input checkpoint:LM2/runs/gpt2-ft-v1 'uv run python eval.py'
+# Auto-placed on studio or cool100 (whichever has the checkpoint)
+```
+
 ## Ablation sweep with a fan-out dependency chain
 
 A common ML research pattern: run one baseline configuration, then fan out

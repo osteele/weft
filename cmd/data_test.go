@@ -110,9 +110,83 @@ func TestRunDataWherePrintsKnownHosts(t *testing.T) {
 	}
 }
 
-func TestParseDataAssetArgRejectsCheckpoint(t *testing.T) {
-	if _, err := parseDataAssetArg("checkpoint:model"); err == nil {
-		t.Fatal("expected checkpoint asset to be rejected")
+func TestParseDataAssetArgAcceptsCheckpoint(t *testing.T) {
+	asset, err := parseDataAssetArg("checkpoint:model")
+	if err != nil {
+		t.Fatalf("expected checkpoint asset to be accepted, got: %v", err)
+	}
+	if asset.Kind != dataloc.AssetCheckpoint {
+		t.Fatalf("kind = %s, want %s", asset.Kind, dataloc.AssetCheckpoint)
+	}
+	if asset.ID != "model" {
+		t.Fatalf("id = %s, want model", asset.ID)
+	}
+}
+
+func TestRunDataAddRegistersCheckpoint(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	dataAddHost = "studio"
+	dataAddName = "test-checkpoint"
+	t.Cleanup(func() {
+		dataAddHost = ""
+		dataAddName = ""
+	})
+
+	out := captureStdout(t, func() {
+		if err := runDataAdd(nil, []string{"/tmp/test-data"}); err != nil {
+			t.Fatalf("runDataAdd: %v", err)
+		}
+	})
+	if !strings.Contains(out, "checkpoint:test-checkpoint") {
+		t.Fatalf("output missing asset ref: %q", out)
+	}
+	if !strings.Contains(out, "studio") {
+		t.Fatalf("output missing host: %q", out)
+	}
+
+	entries, err := dataloc.FindAssetHosts(database, dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "test-checkpoint"})
+	if err != nil {
+		t.Fatalf("FindAssetHosts: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	if entries[0].Host != "studio" {
+		t.Fatalf("host = %s, want studio", entries[0].Host)
+	}
+	if entries[0].Path != "/tmp/test-data" {
+		t.Fatalf("path = %s, want /tmp/test-data", entries[0].Path)
+	}
+}
+
+func TestDeriveCheckpointNameBasename(t *testing.T) {
+	name := deriveCheckpointName("/tmp/some-random-dir/my-checkpoint")
+	if name != "my-checkpoint" {
+		t.Fatalf("name = %s, want my-checkpoint", name)
+	}
+}
+
+func TestRunDataWhereCheckpoint(t *testing.T) {
+	database := db.SetupTestDB(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := dataloc.RecordAsset(database, dataloc.HostDataEntry{
+		Host:     "studio",
+		Asset:    dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: "my-ckpt"},
+		Path:     "~/code/research/LM2/runs/my-ckpt",
+		LastSeen: now,
+	}); err != nil {
+		t.Fatalf("RecordAsset: %v", err)
+	}
+
+	dataJSON = false
+	out := captureStdout(t, func() {
+		if err := runDataWhere(nil, []string{"checkpoint:my-ckpt"}); err != nil {
+			t.Fatalf("runDataWhere: %v", err)
+		}
+	})
+	if !strings.Contains(out, "studio") {
+		t.Fatalf("output missing host: %q", out)
 	}
 }
 

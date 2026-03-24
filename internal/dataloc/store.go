@@ -115,6 +115,8 @@ func FindAssetsNotUsedSince(db *sql.DB, host string, cutoff time.Time) ([]HostDa
 		             AND je.value = CASE hd.asset_kind
 		                 WHEN 'hf-model'   THEN 'hf:' || hd.asset_id
 		                 WHEN 'hf-dataset' THEN 'hf-dataset:' || hd.asset_id
+		                 WHEN 'checkpoint' THEN 'checkpoint:' || hd.asset_id
+		                 WHEN 'job-output' THEN 'job-output:' || hd.asset_id
 		                 ELSE NULL
 		               END
 		       ), 0) AS last_used_at

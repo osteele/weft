@@ -10,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 )
 
-var repoRootResolver = detectRepoRoot
+var repoRootResolver = DetectRepoRoot
 
 // ProjectDir resolves the local project directory for a submission.
 // It prefers the enclosing repo root (jj, repo, git) and falls back to the
@@ -132,7 +132,9 @@ func localProjectDir(dir string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
-func detectRepoRoot(dir string) string {
+// DetectRepoRoot returns the root directory of the repository containing dir,
+// trying jj, repo, and git in order. Returns "" if no repo root is found.
+func DetectRepoRoot(dir string) string {
 	for _, spec := range []struct {
 		name string
 		args []string

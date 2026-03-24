@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -13,7 +14,9 @@ import (
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
+	"github.com/osteele/weft/internal/runner"
 	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +25,9 @@ var (
 	dataFetchHost    string
 	dataFetchRev     string
 	dataRequestsHost string
+
+	dataAddHost string
+	dataAddName string
 
 	dataEvictHost     string
 	dataEvictLastUsed string
@@ -65,6 +71,27 @@ var dataRequestsCmd = &cobra.Command{
 	RunE:  runDataRequests,
 }
 
+var dataAddCmd = &cobra.Command{
+	Use:   "add <path>",
+	Short: "Register a checkpoint or dataset in the asset inventory",
+	Long: `Register a local directory as a checkpoint asset so that it is visible to
+placement scoring (--input checkpoint:<name>) and data locality queries
+(weft data where checkpoint:<name>).
+
+The asset name defaults to <repo-name>/<relative-path> when the path is inside
+a repository, or the directory basename otherwise. Use --name to override.
+
+The host defaults to the local machine's hostname. Use --host to register data
+on a remote host.
+
+Examples:
+  weft data add ~/code/research/LM2/runs/gpt2-ft-v1
+  weft data add ~/code/research/LM2/runs/gpt2-ft-v1 --host cool100
+  weft data add ~/research/data/grads --host studio --name gpt2-grads-wikitext`,
+	Args: usageArgs(cobra.ExactArgs(1)),
+	RunE: runDataAdd,
+}
+
 var dataEvictCmd = &cobra.Command{
 	Use:   "evict",
 	Short: "Evict HuggingFace cache items not accessed recently",
@@ -87,7 +114,11 @@ func init() {
 	dataCmd.AddCommand(dataWhereCmd)
 	dataCmd.AddCommand(dataFetchCmd)
 	dataCmd.AddCommand(dataRequestsCmd)
+	dataCmd.AddCommand(dataAddCmd)
 	dataCmd.AddCommand(dataEvictCmd)
+
+	dataAddCmd.Flags().StringVar(&dataAddHost, "host", "", "Host where the data lives (default: local hostname)")
+	dataAddCmd.Flags().StringVar(&dataAddName, "name", "", "Asset name (default: derived from repo-relative path)")
 
 	dataFetchCmd.Flags().StringVar(&dataFetchHost, "host", "", "On-prem host that should cache the asset")
 	dataFetchCmd.Flags().StringVar(&dataFetchRev, "revision", "main", "HF revision to download")
@@ -257,17 +288,70 @@ func runDataRequests(_ *cobra.Command, _ []string) error {
 	return w.Flush()
 }
 
+func runDataAdd(_ *cobra.Command, args []string) error {
+	path := filepath.Clean(runner.ExpandTilde(args[0]))
+
+	host := dataAddHost
+	if host == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			return fmt.Errorf("detect hostname: %w", err)
+		}
+		host = h
+	}
+
+	name := dataAddName
+	if name == "" {
+		name = deriveCheckpointName(path)
+	}
+
+	asset := dataloc.DataAsset{Kind: dataloc.AssetCheckpoint, ID: name}
+	entry := dataloc.HostDataEntry{
+		Host:     host,
+		Asset:    asset,
+		Path:     workdir.ToTildeRelative(path),
+		LastSeen: time.Now().UTC().Truncate(time.Second),
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	if err := dataloc.RecordAsset(database, entry); err != nil {
+		return fmt.Errorf("record asset: %w", err)
+	}
+
+	fmt.Printf("Registered checkpoint:%s on %s (%s)\n", name, host, entry.Path)
+	return nil
+}
+
+// deriveCheckpointName derives an asset ID from a filesystem path.
+// If the path is inside a repository, returns "<repo-basename>/<relative-path>".
+// Otherwise returns the path's basename.
+func deriveCheckpointName(path string) string {
+	// DetectRepoRoot needs a directory; try path first, then its parent
+	// in case path is a regular file.
+	root := workdir.DetectRepoRoot(path)
+	if root == "" {
+		root = workdir.DetectRepoRoot(filepath.Dir(path))
+	}
+	if root != "" {
+		rel, err := filepath.Rel(root, path)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.Base(root) + "/" + rel
+		}
+	}
+	return filepath.Base(path)
+}
+
 func parseDataAssetArg(arg string) (dataloc.DataAsset, error) {
 	asset, ok := dataloc.ParseAssetRef(arg)
 	if !ok {
-		return dataloc.DataAsset{}, usageErrorf("invalid asset ref %q (expected hf:<repo> or hf-dataset:<repo>)", arg)
+		return dataloc.DataAsset{}, usageErrorf("invalid asset ref %q (expected hf:<repo>, hf-dataset:<repo>, checkpoint:<name>, or job-output:<name>)", arg)
 	}
-	switch asset.Kind {
-	case dataloc.AssetHFModel, dataloc.AssetHFDataset:
-		return asset, nil
-	default:
-		return dataloc.DataAsset{}, usageErrorf("asset ref %q is not a supported downloadable HF asset", arg)
-	}
+	return asset, nil
 }
 
 func isValidDataFetchHost(host string) bool {
