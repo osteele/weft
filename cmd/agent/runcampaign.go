@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -503,12 +504,17 @@ func startFileUploader(bucket string, jobID int64, filePath, key, detail string)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, "rclone", "copyto",
 			filePath, fmt.Sprintf("r2:%s/%s", bucket, key))
-		cmd.Stderr = os.Stderr
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
 		err = cmd.Run()
 		cancel()
 		if err != nil {
+			errDetail := fmt.Sprintf("%s size=%d", detail, info.Size())
+			if s := strings.TrimSpace(stderr.String()); s != "" {
+				errDetail += " stderr=" + s
+			}
 			oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-				oplog.WithDetail(detail), oplog.WithError(err),
+				oplog.WithDetail(errDetail), oplog.WithError(err),
 				oplog.WithDuration(time.Since(start)))
 			return
 		}

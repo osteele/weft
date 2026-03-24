@@ -4,27 +4,30 @@ import "testing"
 
 func TestParseCUDAImage(t *testing.T) {
 	tests := []struct {
-		image                string
-		version, variant, os string
-		ok                   bool
+		image                   string
+		cudaMajorMinor, variant string
+		ok                      bool
 	}{
-		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "12.4.1", "runtime", "ubuntu22.04", true},
-		{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "12.4.1", "devel", "ubuntu22.04", true},
-		{"nvidia/cuda:12.4.1-base-ubuntu22.04", "12.4.1", "base", "ubuntu22.04", true},
-		{"nvidia/cuda:12.6.0-runtime-ubuntu24.04", "12.6.0", "runtime", "ubuntu24.04", true},
+		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "12.4", "runtime", true},
+		{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "12.4", "devel", true},
+		{"nvidia/cuda:12.4.1-base-ubuntu22.04", "12.4", "base", true},
+		{"nvidia/cuda:12.6.0-runtime-ubuntu24.04", "12.6", "runtime", true},
+
+		// PyTorch images
+		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "12.4", "runtime", true},
+		{"pytorch/pytorch:2.5.0-cuda12.4-cudnn9-devel", "12.4", "devel", true},
 
 		// Non-CUDA images
-		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "", "", "", false},
-		{"ubuntu:22.04", "", "", "", false},
-		{"", "", "", "", false},
+		{"ubuntu:22.04", "", "", false},
+		{"", "", "", false},
 
 		// Malformed CUDA tags
-		{"nvidia/cuda:12.4.1", "", "", "", false},
-		{"nvidia/cuda:12.4.1-unknown-ubuntu22.04", "", "", "", false},
+		{"nvidia/cuda:12.4.1", "", "", false},
+		{"nvidia/cuda:12.4.1-unknown-ubuntu22.04", "", "", false},
 	}
 
 	for _, tt := range tests {
-		version, variant, os, ok := parseCUDAImage(tt.image)
+		cudaMajorMinor, variant, ok := parseCUDAImage(tt.image)
 		if ok != tt.ok {
 			t.Errorf("parseCUDAImage(%q) ok = %v, want %v", tt.image, ok, tt.ok)
 			continue
@@ -32,9 +35,9 @@ func TestParseCUDAImage(t *testing.T) {
 		if !ok {
 			continue
 		}
-		if version != tt.version || variant != tt.variant || os != tt.os {
-			t.Errorf("parseCUDAImage(%q) = (%q, %q, %q), want (%q, %q, %q)",
-				tt.image, version, variant, os, tt.version, tt.variant, tt.os)
+		if cudaMajorMinor != tt.cudaMajorMinor || variant != tt.variant {
+			t.Errorf("parseCUDAImage(%q) = (%q, %q), want (%q, %q)",
+				tt.image, cudaMajorMinor, variant, tt.cudaMajorMinor, tt.variant)
 		}
 	}
 }
@@ -53,7 +56,7 @@ func TestImageSupremum(t *testing.T) {
 		// Same image
 		{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "nvidia/cuda:12.4.1-devel-ubuntu22.04", "nvidia/cuda:12.4.1-devel-ubuntu22.04", true},
 
-		// devel > runtime (same version+OS)
+		// devel > runtime (same CUDA major.minor)
 		{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "nvidia/cuda:12.4.1-runtime-ubuntu22.04", "nvidia/cuda:12.4.1-devel-ubuntu22.04", true},
 		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "nvidia/cuda:12.4.1-devel-ubuntu22.04", "nvidia/cuda:12.4.1-devel-ubuntu22.04", true},
 
@@ -66,18 +69,25 @@ func TestImageSupremum(t *testing.T) {
 		// Empty (default=runtime) + devel → devel
 		{"", "nvidia/cuda:12.4.1-devel-ubuntu22.04", "nvidia/cuda:12.4.1-devel-ubuntu22.04", true},
 
-		// Different CUDA version — incompatible
+		// Different CUDA major.minor — incompatible
 		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "nvidia/cuda:12.6.0-runtime-ubuntu22.04", "", false},
 
-		// Different OS — incompatible
-		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "nvidia/cuda:12.4.1-runtime-ubuntu24.04", "", false},
+		// pytorch/pytorch subsumes nvidia/cuda runtime (same CUDA major.minor)
+		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
+		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "nvidia/cuda:12.4.1-runtime-ubuntu22.04", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
 
-		// Non-CUDA image — incompatible with CUDA
-		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "", false},
+		// Empty (default=12.4 runtime) + pytorch 12.4 runtime → pytorch
+		{"", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
+
+		// pytorch with different CUDA version — incompatible
+		{"nvidia/cuda:12.6.0-runtime-ubuntu22.04", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "", false},
 
 		// Non-CUDA images — only exact match
 		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
-		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.5.0-cuda12.4-cudnn9-runtime", "", false},
+		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.5.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
+
+		// Non-CUDA image — incompatible
+		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "ubuntu:22.04", "", false},
 	}
 
 	for _, tt := range tests {

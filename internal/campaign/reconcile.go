@@ -365,7 +365,7 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, heartbeatAge := fetchReconcileHeartbeat(ctx, r2Client, ci.ID)
+	heartbeat, heartbeatAge := fetchReconcileHeartbeat(ctx, r2Client, ci.ID)
 	if heartbeatAge == 0 || heartbeatAge <= heartbeatStaleThreshold {
 		r.clearProbeFailure(ci.ID)
 		return false, false
@@ -389,7 +389,16 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		r.clearProbeFailure(ci.ID)
 	}
 
-	reason := failureTerminationReasonFromR2(ctx, r2Client, ci.ID, db.TerminationReasonInfraFailure)
+	reason := failureTerminationReasonFromR2(ctx, r2Client, ci.ID, db.TerminationReasonUnknown)
+
+	// Refine unknown failures using last heartbeat: low disk free → disk_full
+	if reason == db.TerminationReasonUnknown && heartbeat != nil && heartbeat.DiskFreeBytes > 0 && heartbeat.DiskTotalBytes > 0 {
+		freePercent := float64(heartbeat.DiskFreeBytes) / float64(heartbeat.DiskTotalBytes)
+		if freePercent < 0.05 {
+			reason = db.TerminationReasonDiskFull
+		}
+	}
+
 	log.Printf("reconcile: instance %d heartbeat stale (%s) and agent probe failed/alive=%t err=%v, marking failed (%s)",
 		ci.ID, heartbeatAge.Truncate(time.Second), agentAlive, err, reason)
 
