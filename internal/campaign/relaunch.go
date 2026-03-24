@@ -98,6 +98,22 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		groups[i].DiskGB = EstimateGroupDisk(groups[i], cfg.Database, r2Client)
 	}
 
+	// If the most recent attempt for a group failed with disk_full, bump the
+	// disk allocation so we don't retry a failing configuration. This only
+	// applies within the automatic relaunch path — manual relaunches re-estimate
+	// from scratch (the user may have edited the job or sources).
+	for i, group := range groups {
+		priorDisk := mostRecentDiskFullGB(cfg.Database, group)
+		if priorDisk > 0 {
+			floor := priorDisk + priorDisk/2 // 1.5x
+			if groups[i].DiskGB < floor {
+				log.Printf("relaunch: group %s: raising disk from %dGB to %dGB (prior disk_full at %dGB)",
+					group.GPUSpec(), groups[i].DiskGB, floor, priorDisk)
+				groups[i].DiskGB = floor
+			}
+		}
+	}
+
 	// Fetch offers
 	strategy := cfg.Strategy
 	if strategy == "" {
@@ -203,4 +219,25 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	wg.Wait()
 
 	return result, nil
+}
+
+// mostRecentDiskFullGB returns the disk_gb of the most recent cloud instance
+// that failed with disk_full for any job in the group. Returns 0 if no such
+// instance exists.
+func mostRecentDiskFullGB(database *sql.DB, group InstanceGroup) int {
+	for _, j := range group.Jobs {
+		attempts, err := db.GetJobCloudAttempts(database, j.ID)
+		if err != nil || len(attempts) == 0 {
+			continue
+		}
+		last := attempts[len(attempts)-1]
+		ci, err := db.GetCloudInstance(database, last.CloudInstanceID)
+		if err != nil || ci == nil {
+			continue
+		}
+		if ci.TerminationReason == db.TerminationReasonDiskFull && ci.DiskGB > 0 {
+			return ci.DiskGB
+		}
+	}
+	return 0
 }

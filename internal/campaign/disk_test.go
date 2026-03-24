@@ -79,8 +79,9 @@ func TestEstimateGroupDisk_UsesCachedUVManifestUnion(t *testing.T) {
 	}
 
 	disk := EstimateGroupDisk(group, nil, nil)
-	if disk != 65 {
-		t.Fatalf("disk = %d, want 65", disk)
+	// BaseOverheadGB(6) + NonCUDAOverheadGB(3) + uv(45) = 54
+	if disk != 54 {
+		t.Fatalf("disk = %d, want 54", disk)
 	}
 }
 

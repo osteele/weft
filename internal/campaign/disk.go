@@ -16,9 +16,10 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
-// BaseOverheadGB covers Docker image (~15GB) and working space (~2GB).
+// BaseOverheadGB covers the default Docker image (~4GB on disk) and working space (~2GB).
+// Additional image overhead for non-default images is added by imageOverheadGB.
 // Python/CUDA overhead is added separately via HasCUDAPackages.
-const BaseOverheadGB = 17
+const BaseOverheadGB = 6
 
 // CUDAOverheadGB is the additional overhead when CUDA packages (torch, etc.)
 // are detected in pyproject.toml. Covers venv (~8GB) + uv cache (~8GB) for
@@ -44,6 +45,20 @@ const EmpiricalDiskSafetyMultiplier = 1.15
 // multiplicative empirical safety margin.
 const EmpiricalDiskSafetyGB = 5
 
+// imageOverheadGB returns additional disk overhead in GB for non-default Docker images.
+// The default nvidia/cuda runtime image is ~4 GB on disk (accounted for in BaseOverheadGB).
+// Larger images like pytorch/pytorch add extra overhead.
+func imageOverheadGB(image string) int {
+	if image == "" {
+		return 0 // default image, already in BaseOverheadGB
+	}
+	if strings.HasPrefix(image, "pytorch/pytorch:") {
+		return 6 // pytorch runtime ~10 GB on disk vs ~4 GB default
+	}
+	// Unknown image — add a moderate buffer
+	return 3
+}
+
 // cudaPackages are Python packages with large Linux CUDA wheels.
 var cudaPackages = []string{
 	"torch", "torchvision", "torchaudio",
@@ -58,11 +73,7 @@ var cudaPackages = []string{
 // based on the deduplicated HF input footprint, deduplicated uv sync footprint,
 // and fixed project/runtime overhead. Returns at least DefaultMinDiskGB.
 func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client) int {
-	if diskGB, ok := estimateGroupDiskFromHistory(group, localDB); ok {
-		return diskGB
-	}
-
-	// Merge declared inputs with observed inputs from prior runs of same commands
+	// Compute input-based estimate (always, as a floor)
 	allInputs := group.AllInputs()
 	if localDB != nil {
 		observed := lookupObservedInputs(group, localDB)
@@ -77,7 +88,7 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 		hfBytes = totalBytes
 	}
 
-	overhead := BaseOverheadGB
+	overhead := BaseOverheadGB + imageOverheadGB(group.Image)
 	if hasCUDAPackages(group.SourceDirs()) {
 		overhead += CUDAOverheadGB
 	} else {
@@ -86,9 +97,17 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 
 	uvBytes := estimateGroupUVBytes(group.SourceDirs(), r2Client)
 
-	diskGB := int(math.Ceil(float64(hfBytes) / 1e9 * HFCacheMultiplier))
-	diskGB += int(math.Ceil(float64(uvBytes) / 1e9))
-	diskGB += overhead
+	inputDiskGB := int(math.Ceil(float64(hfBytes) / 1e9 * HFCacheMultiplier))
+	inputDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
+	inputDiskGB += overhead
+
+	// Use the larger of history-based and input-based estimates.
+	// History may underestimate if prior runs failed before completing.
+	diskGB := inputDiskGB
+	if historyGB, ok := estimateGroupDiskFromHistory(group, localDB); ok && historyGB > diskGB {
+		diskGB = historyGB
+	}
+
 	if diskGB < DefaultMinDiskGB {
 		return DefaultMinDiskGB
 	}
