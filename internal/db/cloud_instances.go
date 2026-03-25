@@ -588,18 +588,31 @@ func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
 // Uses COALESCE(pending_status, status) so that a failed job with
 // pending_status='queued' (retry intent) is eligible for placement.
 func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
+	// Check effective status and current host from job_status view
+	var effectiveStatus, currentHost string
+	if err := database.QueryRow(
+		`SELECT COALESCE(pending_status, status), host FROM job_status WHERE id = ? AND tombstoned = 0`, jobID,
+	).Scan(&effectiveStatus, &currentHost); err != nil {
+		return false, err
+	}
+	if effectiveStatus != StatusQueued || currentHost != "" {
+		return false, nil
+	}
+	// Update host on the attempt (may be closed if pending retry)
 	result, err := database.Exec(
-		`UPDATE jobs SET host = ?, placement_reasons = NULL WHERE id = ? AND COALESCE(pending_status, status) = ? AND host = '' AND tombstoned = 0`,
-		host, jobID, StatusQueued,
-	)
+		`UPDATE job_attempts SET host = ?
+		 WHERE id = `+latestAttemptSubquery+` AND host = ''`,
+		host, jobID)
 	if err != nil {
 		return false, err
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return false, err
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return false, nil
 	}
-	return n > 0, nil
+	// Update placement_reasons on the job (spec column)
+	_, _ = database.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID)
+	return true, nil
 }
 
 // ResetCloudInstanceJobs resets non-terminal jobs in a cloud instance back to

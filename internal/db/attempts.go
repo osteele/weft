@@ -230,9 +230,9 @@ func createJobStatusView(db *sql.DB) error {
 			j.needs,
 			j.project,
 			j.tombstoned,
-			COALESCE(la.last_synced_status, j.last_synced_status) AS last_synced_status,
-			COALESCE(la.pending_status, j.pending_status) AS pending_status,
-			COALESCE(la.pending_at, j.pending_at) AS pending_at,
+			CASE WHEN la.id IS NOT NULL THEN la.last_synced_status ELSE j.last_synced_status END AS last_synced_status,
+			CASE WHEN la.id IS NOT NULL THEN la.pending_status ELSE j.pending_status END AS pending_status,
+			CASE WHEN la.id IS NOT NULL THEN la.pending_at ELSE j.pending_at END AS pending_at,
 			la.job_metadata,
 			la.cost,
 			la.vastai_instance_id,
@@ -243,7 +243,7 @@ func createJobStatusView(db *sql.DB) error {
 			j.placement_reasons,
 			la.cloud_instance_id,
 			j.campaign_job_index,
-			j.latest_run_id
+			la.id AS latest_run_id
 		FROM jobs j
 		LEFT JOIN latest_attempt la ON la.job_id = j.id AND la.rn = 1
 	`)
@@ -345,6 +345,62 @@ func createJobsInsertToAttemptsTrigger(db *sql.DB) error {
 				NEW.vastai_instance_id, NEW.placement_meta, NEW.job_metadata, NEW.observed_inputs
 			);
 		END
+	`)
+	return err
+}
+
+// createTrainingExamplesView creates the job_run_training_examples view using
+// job_attempts joined with jobs for spec columns.
+func createTrainingExamplesView(db *sql.DB) error {
+	if _, err := db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`
+		CREATE VIEW job_run_training_examples AS
+		SELECT
+			ja.id AS run_id,
+			ja.job_id,
+			ja.end_time AS archived_at,
+			'' AS archive_reason,
+			ja.status,
+			ja.host,
+			j.working_dir,
+			j.command,
+			j.description,
+			j.gpu,
+			j.gpu_class,
+			j.cpu_allotment,
+			j.gpu_mem_gb,
+			j.env_vars,
+			j.tags,
+			j.dep_spec,
+			j.inputs,
+			j.outputs,
+			j.output_dirs,
+			j.produces,
+			j.needs,
+			j.project,
+			COALESCE(ja.backend, j.backend, 'queue-runner') AS backend,
+			CASE WHEN COALESCE(ja.backend, j.backend, 'queue-runner') = 'vastai' THEN 'single' ELSE 'multi' END AS tenant,
+			ja.start_time,
+			ja.end_time,
+			CASE
+				WHEN ja.start_time IS NOT NULL AND ja.end_time IS NOT NULL THEN ja.end_time - ja.start_time
+				ELSE NULL
+			END AS duration_s,
+			ja.exit_code,
+			ja.job_metadata,
+			ja.placement_meta,
+			ja.cost,
+			ja.vastai_instance_id,
+			ja.attempt_number - 1 AS retry_count,
+			ja.cloud_instance_id,
+			ja.error_message,
+			ja.failure_reason,
+			ja.error_diagnosis
+		FROM job_attempts ja
+		JOIN jobs j ON j.id = ja.job_id
+		WHERE ja.start_time IS NOT NULL AND ja.end_time IS NOT NULL
 	`)
 	return err
 }
@@ -466,22 +522,23 @@ func UpdateAttemptDead(execer interface {
 	return err
 }
 
-// SetAttemptPendingStatus sets pending_status on the latest open attempt.
+// SetAttemptPendingStatus sets pending_status on the latest attempt (open or closed).
+// Pending status can be set on a terminal attempt (e.g., retry intent on a failed job).
 func SetAttemptPendingStatus(db *sql.DB, jobID int64, status string) error {
 	now := time.Now().Unix()
 	_, err := db.Exec(`
 		UPDATE job_attempts SET pending_status = ?, pending_at = ?
-		WHERE id = `+latestOpenAttemptSubquery,
+		WHERE id = `+latestAttemptSubquery,
 		status, now, jobID,
 	)
 	return err
 }
 
-// ClearAttemptPendingStatus clears pending_status on the latest open attempt.
+// ClearAttemptPendingStatus clears pending_status on the latest attempt (open or closed).
 func ClearAttemptPendingStatus(db *sql.DB, jobID int64) error {
 	_, err := db.Exec(`
 		UPDATE job_attempts SET pending_status = NULL, pending_at = NULL
-		WHERE id = `+latestOpenAttemptSubquery,
+		WHERE id = `+latestAttemptSubquery,
 		jobID,
 	)
 	return err
@@ -581,10 +638,37 @@ func UpdateAttemptStatusAndLastSynced(execer interface {
 // ClearAttemptPendingAndUpdateStatus reconciles pending_status by clearing it
 // and updating status + last_synced_status on the latest open attempt.
 func ClearAttemptPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
+	// Use latestAttemptSubquery because this can reset a closed (terminal)
+	// attempt back to queued/draft status.
+	if status == StatusQueued || status == StatusDraft {
+		// When going back to queued/draft, clear all execution fields
+		_, err := db.Exec(`
+			UPDATE job_attempts
+			SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL,
+			    start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
+			    session_name = NULL, failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
+			WHERE id = `+latestAttemptSubquery,
+			status, status, jobID,
+		)
+		return err
+	}
+	if IsTerminalStatus(status) {
+		// For terminal states, set end_time if missing and clear session
+		now := time.Now().Unix()
+		_, err := db.Exec(`
+			UPDATE job_attempts
+			SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL,
+			    session_name = NULL,
+			    end_time = CASE WHEN end_time IS NULL OR end_time = 0 THEN ? ELSE end_time END
+			WHERE id = `+latestAttemptSubquery,
+			status, status, now, jobID,
+		)
+		return err
+	}
 	_, err := db.Exec(`
 		UPDATE job_attempts
 		SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL
-		WHERE id = `+latestOpenAttemptSubquery,
+		WHERE id = `+latestAttemptSubquery,
 		status, status, jobID,
 	)
 	return err
@@ -660,13 +744,15 @@ func ResetJobAttemptToUnplaced(db *sql.DB, jobID int64, placementReasons []strin
 func MarkAttemptQueuedByID(execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }, jobID int64) error {
+	// Use latestAttemptSubquery (not just open) because the attempt may have
+	// end_time set from a previous status. This resets all execution fields.
 	_, err := execer.Exec(`
 		UPDATE job_attempts
 		SET status = ?, last_synced_status = ?,
 		    start_time = NULL, end_time = NULL, exit_code = NULL,
 		    error_message = NULL, session_name = NULL, failure_reason = NULL,
 		    error_diagnosis = NULL, remote_state = NULL
-		WHERE id = `+latestOpenAttemptSubquery,
+		WHERE id = `+latestAttemptSubquery,
 		StatusQueued, StatusQueued, jobID,
 	)
 	return err

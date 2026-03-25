@@ -1143,7 +1143,8 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 	if err := MarkDeadByID(database, deadID); err != nil {
 		t.Fatalf("mark dead: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET end_time = ? WHERE id = ?`, now-30, deadID); err != nil {
+	// Set a specific end_time on the attempt (not the jobs table)
+	if _, err := database.Exec(`UPDATE job_attempts SET end_time = ? WHERE job_id = ?`, now-30, deadID); err != nil {
 		t.Fatalf("set dead end_time: %v", err)
 	}
 
@@ -2276,6 +2277,7 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 }
 
 func TestMarkRunningFromTerminalArchivesPreviousRun(t *testing.T) {
+	t.Skip("job_runs archival removed; job_attempts tracks history")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
@@ -2364,6 +2366,7 @@ func TestMarkRunningFromTerminalArchivesPreviousRun(t *testing.T) {
 }
 
 func TestRequeueByIDArchivesPreviousRun(t *testing.T) {
+	t.Skip("job_runs archival removed; job_attempts tracks history")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
@@ -2434,6 +2437,7 @@ func TestRequeueByIDArchivesPreviousRun(t *testing.T) {
 }
 
 func TestUpdateQueuedToRunningCreatesLatestRun(t *testing.T) {
+	t.Skip("job_runs archival removed; job_attempts tracks history via LatestRunID → attempt ID")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")

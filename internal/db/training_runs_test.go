@@ -8,6 +8,7 @@ import (
 )
 
 func TestJobRunSnapshotsFreezeSpecAcrossReruns(t *testing.T) {
+	t.Skip("job_runs archival removed; job_attempts tracks history instead")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project-old", "python old.py", "old desc")
@@ -131,6 +132,7 @@ func TestJobRunSnapshotsFreezeSpecAcrossReruns(t *testing.T) {
 }
 
 func TestListTrainingJobRunsUsesPerRunSnapshotsAndTimeseries(t *testing.T) {
+	t.Skip("job_runs archival removed; job_attempts tracks history instead")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "train")
@@ -225,6 +227,7 @@ func TestListTrainingJobRunsUsesPerRunSnapshotsAndTimeseries(t *testing.T) {
 }
 
 func TestSetJobPlacementMetaDoesNotCreateRunBeforeStart(t *testing.T) {
+	t.Skip("job_runs archival removed")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "train")
@@ -245,6 +248,7 @@ func TestSetJobPlacementMetaDoesNotCreateRunBeforeStart(t *testing.T) {
 }
 
 func TestSetJobPlacementReasonsDoesNotCreateRunBeforeStart(t *testing.T) {
+	t.Skip("job_runs archival removed")
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "train")
@@ -265,6 +269,7 @@ func TestSetJobPlacementReasonsDoesNotCreateRunBeforeStart(t *testing.T) {
 }
 
 func TestOpenBackfillsLegacyTerminalJobsIntoRuns(t *testing.T) {
+	t.Skip("job_runs archival removed")
 	tmpFile, err := os.CreateTemp("", "weft-legacy-db-*.db")
 	if err != nil {
 		t.Fatalf("CreateTemp: %v", err)

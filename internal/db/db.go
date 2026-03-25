@@ -853,6 +853,12 @@ func createIntegrityTriggers(db *sql.DB) error {
 				WHERE id = NEW.latest_run_id
 				  AND job_id = NEW.id
 		     )
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_attempts
+				WHERE id = NEW.latest_run_id
+				  AND job_id = NEW.id
+		     )
 		BEGIN
 			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
 		END`,
@@ -863,6 +869,12 @@ func createIntegrityTriggers(db *sql.DB) error {
 		     AND NOT EXISTS (
 				SELECT 1
 				FROM job_runs
+				WHERE id = NEW.latest_run_id
+				  AND job_id = NEW.id
+		     )
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_attempts
 				WHERE id = NEW.latest_run_id
 				  AND job_id = NEW.id
 		     )
@@ -879,6 +891,12 @@ func createIntegrityTriggers(db *sql.DB) error {
 				WHERE id = NEW.job_run_id
 				  AND job_id = NEW.job_id
 		     )
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_attempts
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
 		BEGIN
 			SELECT RAISE(ABORT, 'artifacts.job_run_id must reference a run owned by artifacts.job_id');
 		END`,
@@ -889,6 +907,12 @@ func createIntegrityTriggers(db *sql.DB) error {
 		     AND NOT EXISTS (
 				SELECT 1
 				FROM job_runs
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_attempts
 				WHERE id = NEW.job_run_id
 				  AND job_id = NEW.job_id
 		     )
@@ -905,6 +929,12 @@ func createIntegrityTriggers(db *sql.DB) error {
 				WHERE id = NEW.job_run_id
 				  AND job_id = NEW.job_id
 		     )
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_attempts
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
 		BEGIN
 			SELECT RAISE(ABORT, 'job_timeseries.job_run_id must reference a run owned by job_timeseries.job_id');
 		END`,
@@ -915,6 +945,12 @@ func createIntegrityTriggers(db *sql.DB) error {
 		     AND NOT EXISTS (
 				SELECT 1
 				FROM job_runs
+				WHERE id = NEW.job_run_id
+				  AND job_id = NEW.job_id
+		     )
+		     AND NOT EXISTS (
+				SELECT 1
+				FROM job_attempts
 				WHERE id = NEW.job_run_id
 				  AND job_id = NEW.job_id
 		     )
@@ -2134,58 +2170,7 @@ func initSchema(db *sql.DB) error {
 		}
 	}
 
-	if _, err := db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`
-		CREATE VIEW job_run_training_examples AS
-		SELECT
-			id AS run_id,
-			job_id,
-			archived_at,
-			archive_reason,
-			status,
-			host,
-			working_dir,
-			command,
-			description,
-			gpu,
-			gpu_class,
-			cpu_allotment,
-			gpu_mem_gb,
-			env_vars,
-			tags,
-			dep_spec,
-			inputs,
-			outputs,
-			output_dirs,
-			produces,
-			needs,
-			project,
-			COALESCE(backend, 'queue-runner') AS backend,
-			CASE WHEN COALESCE(backend, 'queue-runner') = 'vastai' THEN 'single' ELSE 'multi' END AS tenant,
-			start_time,
-			end_time,
-			CASE
-				WHEN start_time IS NOT NULL AND end_time IS NOT NULL THEN end_time - start_time
-				ELSE NULL
-			END AS duration_s,
-			exit_code,
-			job_metadata,
-			placement_meta,
-			cost,
-			vastai_instance_id,
-			retry_count,
-			cloud_instance_id,
-			error_message,
-			failure_reason,
-			error_diagnosis
-		FROM job_runs
-		WHERE start_time IS NOT NULL AND end_time IS NOT NULL
-	`); err != nil {
-		return err
-	}
-	if err := backfillLegacyJobRuns(db); err != nil {
+	if err := createTrainingExamplesView(db); err != nil {
 		return err
 	}
 	if err := repairPlaceholderProjects(db); err != nil {
@@ -2209,6 +2194,13 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := dropIntegrityViewsAndTriggers(db); err != nil {
+		return err
+	}
+	// Drop views that reference jobs before table rebuild
+	if _, err := db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`DROP VIEW IF EXISTS job_status`); err != nil {
 		return err
 	}
 	if err := ensureJobsTableConstraints(db); err != nil {
@@ -2240,6 +2232,11 @@ func initSchema(db *sql.DB) error {
 
 	// Create the job_status view (joins jobs with latest attempt)
 	if err := createJobStatusView(db); err != nil {
+		return err
+	}
+
+	// Recreate job_run_training_examples view (may have been dropped during table rebuild)
+	if err := createTrainingExamplesView(db); err != nil {
 		return err
 	}
 
@@ -2408,15 +2405,6 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 		return 0, err
 	}
 	// The INSERT trigger auto-creates an attempt
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
-	if err != nil {
-		tx.Rollback()
-		return 0, err
-	}
-	if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
-		tx.Rollback()
-		return 0, err
-	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -2425,133 +2413,27 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 
 // UpdateJobRunning transitions a starting job to running
 func UpdateJobRunning(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	_, _ = tx.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusRunning, id, StatusStarting)
-	// Dual-write to jobs
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
-		StatusRunning, id, StatusStarting,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 // UpdateJobFailed marks a starting job as failed to start
 func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 	endTime := time.Now().Unix()
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	_, _ = tx.Exec(`UPDATE job_attempts SET status = ?, end_time = ?, error_message = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+	_, err := db.Exec(`UPDATE job_attempts SET status = ?, end_time = ?, error_message = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusDead, endTime, errorMsg, id, StatusStarting)
-	// Dual-write to jobs
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, end_time = ?, error_message = ? WHERE id = ? AND status = ?`,
-		StatusDead, endTime, errorMsg, id, StatusStarting,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusDead)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, "failed_to_start"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return err
 }
 
 // UpdateJobStartingToQueued transitions a starting job to queued state and assigns a queue name.
 func UpdateJobStartingToQueued(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	_ = MarkAttemptQueuedByID(tx, id)
-	// Dual-write to jobs
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusStarting)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := archiveJobRunTx(tx, job, "starting_to_queued"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
-		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
-		 WHERE id = ? AND status = ?`,
-		StatusQueued, queuefile.DefaultQueueName, id, StatusStarting,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return MarkAttemptQueuedByID(db, id)
 }
 
 // UpdateJobRunningToQueued transitions a running job back to queued state.
 func UpdateJobRunningToQueued(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	_ = MarkAttemptQueuedByID(tx, id)
-	// Dual-write to jobs
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := archiveJobRunTx(tx, job, "running_to_queued"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, queue_name = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
-		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
-		 WHERE id = ? AND status = ?`,
-		StatusQueued, queuefile.DefaultQueueName, id, StatusRunning,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return MarkAttemptQueuedByID(db, id)
 }
 
 // UpdateJobDescription updates the description for a job
@@ -2607,13 +2489,7 @@ func UpdateJobCommand(db *sql.DB, id int64, command string) error {
 
 // UpdateJobHost updates the host for a job (only for queued jobs)
 func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET host = ? WHERE job_id = ? AND end_time IS NULL`, newHost, id)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET host = ? WHERE id = ? AND status = ?`,
-		newHost, id, StatusQueued,
-	)
+	_, err := db.Exec(`UPDATE job_attempts SET host = ? WHERE job_id = ? AND end_time IS NULL`, newHost, id)
 	return err
 }
 
@@ -2623,125 +2499,30 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 // Note: Also accepts failed/dead status because a status file appearing is authoritative
 // evidence of completion, even if the job was previously marked as failed due to race conditions.
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	if err := UpdateAttemptCompletion(tx, id, exitCode, endTime); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Dual-write to jobs (will be removed after read migration)
-	if _, err := tx.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
-		 WHERE id = ? AND status IN (?, ?, ?, ?, ?, ?)`,
-		exitCode, endTime, StatusCompleted, StatusCompleted, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused, StatusFailed, StatusDead,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return UpdateAttemptCompletion(db, id, exitCode, endTime)
 }
 
 // MarkDeadByID marks a running or queued job as failed (unexpected termination) by ID.
 // Clears session_name per spec: SessionImpliesRunning (session => status = running).
 // Also updates last_synced_status since this is detecting remote state.
 func MarkDeadByID(db *sql.DB, id int64) error {
-	endTime := time.Now().Unix()
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	if err := UpdateAttemptDead(tx, id); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Dual-write to jobs (will be removed after read migration)
-	if _, err := tx.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
-		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		endTime, StatusFailed, StatusFailed, id, StatusRunning, StatusStarting, StatusQueued, StatusPaused,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return UpdateAttemptDead(db, id)
 }
 
 // SetJobVastaiInstance stores the Vast.ai instance ID and backend on a job record.
 // This should be called immediately after creating the instance, before any other work.
 func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
-	// Update attempt
-	if err := SetAttemptVastaiInstance(db, jobID, instanceID); err != nil {
-		return err
-	}
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET vastai_instance_id = ?, backend = ? WHERE id = ?`,
-		instanceID, BackendVastai, jobID,
-	)
-	if err != nil {
-		return err
-	}
-	return PersistLatestRunSnapshotIfExists(db, jobID, "")
+	return SetAttemptVastaiInstance(db, jobID, instanceID)
 }
 
 // SetJobCost updates the actual cost for a cloud-run job.
 func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
-	// Update attempt
-	if err := SetAttemptCost(db, jobID, cost); err != nil {
-		return err
-	}
-	// Dual-write to jobs
-	_, err := db.Exec(`UPDATE jobs SET cost = ? WHERE id = ?`, cost, jobID)
-	if err != nil {
-		return err
-	}
-	return PersistLatestRunSnapshotIfExists(db, jobID, "")
+	return SetAttemptCost(db, jobID, cost)
 }
 
 // SetJobPlacementMeta stores placement telemetry on a job record.
 func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
-	// Update attempt
-	if err := SetAttemptPlacementMeta(db, jobID, meta); err != nil {
-		return err
-	}
-	// Dual-write to jobs
-	encoded, err := encodePlacementMeta(meta)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`UPDATE jobs SET placement_meta = ? WHERE id = ?`, encoded, jobID)
-	if err != nil {
-		return err
-	}
-	return PersistLatestRunSnapshotIfExists(db, jobID, "")
+	return SetAttemptPlacementMeta(db, jobID, meta)
 }
 
 // SetJobPlacementReasons stores why a job is currently unplaced.
@@ -2813,53 +2594,29 @@ func MarkJobDraftPending(db *sql.DB, id int64) error {
 
 // MarkRunningByID transitions a job from starting to running
 func MarkRunningByID(db *sql.DB, id int64) error {
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusRunning, id, StatusStarting)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
-		StatusRunning, id, StatusStarting,
-	)
 	return err
 }
 
 // MarkPausedByID transitions a job to paused from queued/starting/running.
 func MarkPausedByID(db *sql.DB, id int64) error {
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status IN (?, ?, ?)`,
+	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status IN (?, ?, ?)`,
 		StatusPaused, id, StatusQueued, StatusStarting, StatusRunning)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ? WHERE id = ? AND status IN (?, ?, ?)`,
-		StatusPaused, id, StatusQueued, StatusStarting, StatusRunning,
-	)
 	return err
 }
 
 // MarkPausedFromTerminal transitions a job from a terminal status back to paused.
 func MarkPausedFromTerminal(db *sql.DB, id int64) error {
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE job_id = ? AND status IN (?, ?, ?, ?)`,
+	_, err := db.Exec(`UPDATE job_attempts SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE job_id = ? AND status IN (?, ?, ?, ?)`,
 		StatusPaused, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		StatusPaused, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
-	)
 	return err
 }
 
 // MarkRunningFromPaused transitions a job from paused back to running.
 func MarkRunningFromPaused(db *sql.DB, id int64) error {
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusRunning, id, StatusPaused)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
-		StatusRunning, id, StatusPaused,
-	)
 	return err
 }
 
@@ -2887,39 +2644,6 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 		tx.Rollback()
 		return err
 	}
-	// Dual-write to jobs
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status IN (?, ?, ?, ?)`, jobSelectColumns), id, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := archiveJobRunTx(tx, job, "mark_running_from_terminal"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
-		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL, session_name = NULL
-		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
-		StatusRunning, StatusRunning, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err = queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job != nil {
-		if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
 	return tx.Commit()
 }
 
@@ -2927,78 +2651,13 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 // Called from sync when detecting a job has started running remotely.
 // Updates last_synced_status since this is a sync operation.
 func MarkQueuedJobRunning(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	if err := UpdateAttemptRunning(tx, id); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Dual-write to jobs
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ? AND status = ?`,
-		StatusRunning, StatusRunning, id, StatusQueued,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	// Cloud jobs already have a run from SetJobCloudInstanceID — creating a
-	// new run here would change latest_run_id and break the R2 progress key
-	// that the agent is writing to (agent uses the RunID from the manifest).
-	if job.CloudInstanceID == nil {
-		if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
+	return UpdateAttemptRunning(db, id)
 }
 
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
 // Updates last_synced_status since this is a sync operation.
 func MarkQueuedByID(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Update attempt
-	if err := MarkAttemptQueuedByID(tx, id); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Dual-write to jobs
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := archiveJobRunTx(tx, job, "mark_queued"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = ?, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
-		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
-		 WHERE id = ?`,
-		StatusQueued, StatusQueued, id,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return MarkAttemptQueuedByID(db, id)
 }
 
 // ClearQueueAssignment removes the queue association from a job so its queue
@@ -3014,46 +2673,32 @@ func ClearQueueAssignment(db *sql.DB, id int64) error {
 // SetPendingStatus sets the pending (target) status for a job.
 // This represents what the user wants the job state to become.
 func SetPendingStatus(db *sql.DB, jobID int64, status string) error {
-	// Update attempt
 	if err := SetAttemptPendingStatus(db, jobID, status); err != nil {
 		return err
 	}
-	// Dual-write to jobs
+	// Also set on jobs for draft jobs that have no attempt
 	now := time.Now().Unix()
-	_, err := db.Exec(
-		`UPDATE jobs SET pending_status = ?, pending_at = ? WHERE id = ?`,
-		status, now, jobID,
-	)
-	return err
+	_, _ = db.Exec(`UPDATE jobs SET pending_status = ?, pending_at = ? WHERE id = ?`, status, now, jobID)
+	return nil
 }
 
 // ClearPendingStatus clears the pending status after reconciliation succeeds.
 func ClearPendingStatus(db *sql.DB, jobID int64) error {
-	// Update attempt
 	if err := ClearAttemptPendingStatus(db, jobID); err != nil {
 		return err
 	}
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET pending_status = NULL, pending_at = NULL WHERE id = ?`,
-		jobID,
-	)
-	return err
+	// Also clear on jobs for draft jobs
+	_, _ = db.Exec(`UPDATE jobs SET pending_status = NULL, pending_at = NULL WHERE id = ?`, jobID)
+	return nil
 }
 
 // UpdateLastSyncedStatus updates the base status (what remote was at last sync).
 func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
-	// Update attempt (skip if attempt is in terminal status)
-	_, _ = db.Exec(`
+	_, err := db.Exec(`
 		UPDATE job_attempts SET last_synced_status = ?
 		WHERE id = `+latestOpenAttemptSubquery+`
 		  AND status NOT IN (?, ?, ?, ?)`,
 		status, jobID, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET last_synced_status = ? WHERE id = ? AND status NOT IN (?, ?, ?, ?)`,
-		status, jobID, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
-	)
 	return err
 }
 
@@ -3061,83 +2706,21 @@ func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
 // needing re-dispatch. Used when the runner state shows a job is missing despite
 // the DB believing it was already dispatched.
 func ResetLastSyncedStatus(db *sql.DB, jobID int64) error {
-	// Update attempt
-	_, _ = db.Exec(`UPDATE job_attempts SET last_synced_status = NULL WHERE job_id = ? AND end_time IS NULL`, jobID)
-	// Dual-write to jobs
-	_, err := db.Exec(`UPDATE jobs SET last_synced_status = NULL WHERE id = ?`, jobID)
+	_, err := db.Exec(`UPDATE job_attempts SET last_synced_status = NULL WHERE job_id = ? AND end_time IS NULL`, jobID)
 	return err
 }
 
 // UpdateStatusAndLastSynced updates both the current status and last synced status together.
 // Used when sync confirms the remote state.
 func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
-	// Update attempt
-	_ = UpdateAttemptStatusAndLastSynced(db, jobID, status)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?`,
-		status, status, jobID,
-	)
-	return err
+	return UpdateAttemptStatusAndLastSynced(db, jobID, status)
 }
 
 // ClearPendingAndUpdateStatus clears pending status and updates both status fields.
 // Used when reconciliation succeeds or when accepting remote state.
 // Clears session_name for non-running states per spec: SessionImpliesRunning.
 func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
-	// Update attempt
-	_ = ClearAttemptPendingAndUpdateStatus(db, jobID, status)
-
-	if status == StatusQueued || status == StatusDraft {
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-		if job == nil {
-			return tx.Commit()
-		}
-		reason := "clear_pending_to_queued"
-		if status == StatusDraft {
-			reason = "clear_pending_to_draft"
-		}
-		if err := archiveJobRunTx(tx, job, reason); err != nil {
-			tx.Rollback()
-			return err
-		}
-		// Reset all execution-related fields when going back to queued/draft
-		_, err = tx.Exec(
-			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
-			 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL
-			 WHERE id = ?`,
-			status, status, jobID,
-		)
-		if err != nil {
-			tx.Rollback()
-			return err
-		}
-		return tx.Commit()
-	}
-	if IsTerminalStatus(status) {
-		// Clear session_name for terminal states per spec: SessionImpliesRunning
-		now := time.Now().Unix()
-		_, err := db.Exec(
-			`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL, session_name = NULL,
-			 end_time = CASE WHEN end_time IS NULL OR end_time = 0 THEN ? ELSE end_time END
-			 WHERE id = ?`,
-			status, status, now, jobID,
-		)
-		return err
-	}
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, last_synced_status = ?, pending_status = NULL, pending_at = NULL WHERE id = ?`,
-		status, status, jobID,
-	)
-	return err
+	return ClearAttemptPendingAndUpdateStatus(db, jobID, status)
 }
 
 // RequeueByID resets a job back to queued status for user-initiated requeue.
@@ -3167,28 +2750,6 @@ func RequeueByID(db *sql.DB, id int64) error {
 		tx.Rollback()
 		return err
 	}
-	// Dual-write to jobs
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := archiveJobRunTx(tx, job, "requeue"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, pending_status = ?, last_synced_status = NULL, start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL, session_name = NULL,
-		 failure_reason = NULL, error_diagnosis = NULL, remote_state = NULL, remote_id = NULL, cloud_instance_id = NULL
-		 WHERE id = ?`,
-		StatusQueued, StatusQueued, id,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
 	return tx.Commit()
 }
 
@@ -3214,20 +2775,14 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 	}
 	// Update attempt
 	_, _ = db.Exec(`UPDATE job_attempts SET host = '', cloud_instance_id = NULL, pending_status = NULL, pending_at = NULL, last_synced_status = NULL, queued_at = NULL WHERE job_id = ? AND end_time IS NULL`, id)
-	// Dual-write to jobs
+	// Update spec columns on jobs (tags, placement_reasons, queue_name)
 	_, err = db.Exec(
 		`UPDATE jobs
-		 SET host = '',
-		     queue_name = NULL,
-		     queued_at = NULL,
-		     pending_status = NULL,
-		     pending_at = NULL,
-		     last_synced_status = NULL,
-		     cloud_instance_id = NULL,
+		 SET queue_name = NULL,
 		     tags = ?,
 		     placement_reasons = ?
-		 WHERE id = ? AND status = ?`,
-		tagValue, encodeStringSlice([]string{"manually moved to unplaced queue"}), id, StatusQueued,
+		 WHERE id = ?`,
+		tagValue, encodeStringSlice([]string{"manually moved to unplaced queue"}), id,
 	)
 	return err
 }
@@ -3236,17 +2791,12 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 // clearing cloud instance association and run metadata. Used when restarting cloud
 // jobs whose original instance is no longer available.
 func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
+	// Get the current job state for placement reason message
+	job, _ := GetJobByID(db, jobID)
+
 	tx, err := db.Begin()
 	if err != nil {
 		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
 	}
 	// Close current attempt + create new unplaced one
 	now := time.Now().Unix()
@@ -3260,26 +2810,9 @@ func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
 		tx.Rollback()
 		return err
 	}
-	// Update placement_reasons on the job
-	reasons := resetJobPlacementReasons(job)
+	// Update placement_reasons on the job (spec column)
 	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
-		encodeStringSlice(reasons), jobID); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Dual-write to jobs
-	if err := archiveJobRunTx(tx, job, "reset_to_unplaced"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, pending_status = ?, host = '', cloud_instance_id = NULL,
-		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
-		 session_name = NULL, last_synced_status = NULL, failure_reason = NULL,
-		 error_diagnosis = NULL, remote_state = NULL, remote_id = NULL
-		 WHERE id = ?`,
-		StatusQueued, StatusQueued, jobID,
-	); err != nil {
+		encodeStringSlice(resetJobPlacementReasons(job)), jobID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -3300,7 +2833,7 @@ func resetJobPlacementReasons(job *Job) []string {
 // Called when a job is successfully added to the remote queue.
 func SetQueuedAtNow(db *sql.DB, jobID int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET queued_at = ? WHERE id = ? AND (queued_at IS NULL OR queued_at = 0)`,
+		`UPDATE job_attempts SET queued_at = ? WHERE id = `+latestOpenAttemptSubquery+` AND (queued_at IS NULL OR queued_at = 0)`,
 		time.Now().Unix(), jobID,
 	)
 	return err
@@ -3470,13 +3003,13 @@ func SetJobBackend(db *sql.DB, jobID int64, backend string) error {
 
 // SetJobRemoteID sets the backend-specific job identifier.
 func SetJobRemoteID(db *sql.DB, jobID int64, remoteID string) error {
-	_, err := db.Exec(`UPDATE jobs SET remote_id = ? WHERE id = ?`, remoteID, jobID)
+	_, err := db.Exec(`UPDATE job_attempts SET remote_id = ? WHERE id = `+latestOpenAttemptSubquery, remoteID, jobID)
 	return err
 }
 
 // SetJobRemoteState sets the backend-specific state and optional failure reason.
 func SetJobRemoteState(db *sql.DB, jobID int64, remoteState, failureReason string) error {
-	_, err := db.Exec(`UPDATE jobs SET remote_state = ?, failure_reason = ? WHERE id = ?`, remoteState, failureReason, jobID)
+	_, err := db.Exec(`UPDATE job_attempts SET remote_state = ?, failure_reason = ? WHERE id = `+latestOpenAttemptSubquery, remoteState, failureReason, jobID)
 	return err
 }
 
@@ -3532,14 +3065,9 @@ func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
 	if err != nil {
 		return err
 	}
-	// Update attempt (use latest, not just open — metadata can be set after completion)
-	_, _ = db.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = `+latestAttemptSubquery, value, jobID)
-	// Dual-write to jobs
-	_, err = db.Exec(`UPDATE jobs SET job_metadata = ? WHERE id = ?`, value, jobID)
-	if err != nil {
-		return err
-	}
-	return PersistLatestRunSnapshotIfExists(db, jobID, "")
+	// Update latest attempt (open or not — metadata can be set after completion)
+	_, err = db.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = `+latestAttemptSubquery, value, jobID)
+	return err
 }
 
 // AddJobTag adds a tag to a job if it doesn't already exist.
@@ -3679,10 +3207,8 @@ func SetJobProject(db *sql.DB, jobID int64, project string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, normalized, jobID); err != nil {
-		return err
-	}
-	return PersistLatestRunSnapshotIfExists(db, jobID, "")
+	_, err = db.Exec(`UPDATE jobs SET project = ? WHERE id = ?`, normalized, jobID)
+	return err
 }
 
 // DeriveProject computes the project name from a working directory and command.
@@ -3867,146 +3393,62 @@ func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
 
 // UpdateQueuedToRunning transitions a queued job to running
 func UpdateQueuedToRunning(db *sql.DB, id int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	now := time.Now().Unix()
-	// Update attempt
-	if err := UpdateAttemptRunning(tx, id); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Dual-write to jobs
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, start_time = ? WHERE id = ? AND status = ?`,
-		StatusRunning, now, id, StatusQueued,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return UpdateAttemptRunning(db, id)
 }
 
 // UpdateQueuedToRunningWithSession transitions a queued job to running and sets session_name.
 // Used when starting a queued job directly via tmux (not through queue runner).
 func UpdateQueuedToRunningWithSession(db *sql.DB, id int64, sessionName string) error {
-	tx, err := db.Begin()
-	if err != nil {
+	if err := UpdateAttemptRunning(db, id); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET status = ?, start_time = ?, session_name = ? WHERE id = ? AND status = ?`,
-		StatusRunning, time.Now().Unix(), sessionName, id, StatusQueued,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return SetAttemptSessionName(db, id, sessionName)
 }
 
 // ClearSessionName removes the session_name from a job.
 // Used when a job that was started via tmux is now being managed by the queue runner.
 func ClearSessionName(db *sql.DB, id int64) error {
-	_, err := db.Exec(`UPDATE jobs SET session_name = NULL WHERE id = ?`, id)
+	_, err := db.Exec(`UPDATE job_attempts SET session_name = NULL WHERE job_id = ? AND end_time IS NULL`, id)
 	return err
 }
 
 // RecordCompletion updates a job with its exit code and end time.
 // Also updates last_synced_status since this is a sync operation.
 func RecordCompletion(db *sql.DB, host, sessionName string, exitCode int, endTime int64) error {
-	tx, err := db.Begin()
+	// Find the running job by host+session_name via the attempt
+	var jobID int64
+	err := db.QueryRow(`
+		SELECT ja.job_id FROM job_attempts ja
+		WHERE ja.host = ? AND ja.session_name = ? AND ja.status = ? AND ja.end_time IS NULL
+		ORDER BY ja.id DESC LIMIT 1`, host, sessionName, StatusRunning).Scan(&jobID)
 	if err != nil {
-		return err
+		return nil // no matching job found
 	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL
-		 WHERE host = ? AND session_name = ? AND status = ?`,
-		exitCode, endTime, StatusCompleted, StatusCompleted, host, sessionName, StatusRunning,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name = ? AND status = ? ORDER BY id DESC LIMIT 1`, jobSelectColumns), host, sessionName, StatusCompleted)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return UpdateAttemptCompletion(db, jobID, exitCode, endTime)
 }
 
 // MarkDead marks a running job as failed (unexpected termination).
 // Also updates last_synced_status since this is a sync operation.
 func MarkDead(db *sql.DB, host, sessionName string) error {
-	endTime := time.Now().Unix()
-	tx, err := db.Begin()
+	// Find the running job by host+session_name via the attempt
+	var jobID int64
+	err := db.QueryRow(`
+		SELECT ja.job_id FROM job_attempts ja
+		WHERE ja.host = ? AND ja.session_name = ? AND ja.status = ? AND ja.end_time IS NULL
+		ORDER BY ja.id DESC LIMIT 1`, host, sessionName, StatusRunning).Scan(&jobID)
 	if err != nil {
-		return err
+		return nil // no matching job found
 	}
-	if _, err := tx.Exec(
-		`UPDATE jobs SET end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL
-		 WHERE host = ? AND session_name = ? AND status = ?`,
-		endTime, StatusFailed, StatusFailed, host, sessionName, StatusRunning,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name = ? AND status = ? ORDER BY id DESC LIMIT 1`, jobSelectColumns), host, sessionName, StatusFailed)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return UpdateAttemptDead(db, jobID)
 }
 
 // UpdateStartTime updates the start_time for a job (for jobs where start_time was initially null/0)
 func UpdateStartTime(db *sql.DB, id int64, startTime int64) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET start_time = ? WHERE id = ? AND (start_time IS NULL OR start_time = 0)`,
+		`UPDATE job_attempts SET start_time = ? WHERE id = `+latestOpenAttemptSubquery+` AND (start_time IS NULL OR start_time = 0)`,
 		startTime, id,
 	)
-	if err != nil {
-		return err
-	}
-	return PersistLatestRunSnapshotIfExists(db, id, "")
+	return err
 }
 
 // DeleteJob removes a job from the database without touching remote files
@@ -4833,14 +4275,7 @@ func ListRecentTerminalJobs(db *sql.DB, sinceUnix int64) ([]*Job, error) {
 
 // UpdateErrorDiagnosis stores an error diagnosis and increments retry count for a job.
 func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int) error {
-	// Update attempt
-	_ = SetAttemptErrorDiagnosis(db, id, diagnosis)
-	// Dual-write to jobs
-	_, err := db.Exec(
-		`UPDATE jobs SET error_diagnosis = ?, retry_count = ? WHERE id = ?`,
-		diagnosis, retryCount, id,
-	)
-	return err
+	return SetAttemptErrorDiagnosis(db, id, diagnosis)
 }
 
 // UpdateRunErrorDiagnosis updates the error_diagnosis on a job_run by run ID.
