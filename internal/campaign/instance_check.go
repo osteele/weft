@@ -183,7 +183,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.CloudInstanceStatusFailed,
-					TerminationReason: db.TerminationReasonInfraFailure,
+					TerminationReason: db.TerminationReasonBootstrapTimeout,
 					StallMessage:      "bootstrap timeout — terminating instance, jobs reset to queued",
 					DestroyProvider:   true,
 					ResetJobs:         true,

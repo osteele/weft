@@ -340,6 +340,7 @@ func terminationReasonValues() []string {
 		TerminationReasonJobFailure,
 		TerminationReasonDiskFull,
 		TerminationReasonInfraFailure,
+		TerminationReasonBootstrapTimeout,
 		TerminationReasonCancelled,
 		TerminationReasonUnknown,
 	}
@@ -1010,7 +1011,12 @@ func ensureCloudInstancesTableConstraints(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	if hasStatusConstraint && hasTerminationReasonConstraint {
+	// Also check that the constraint includes bootstrap_timeout (added later).
+	hasBootstrapTimeout, err := tableSchemaContains(db, "cloud_instances", TerminationReasonBootstrapTimeout)
+	if err != nil {
+		return err
+	}
+	if hasStatusConstraint && hasTerminationReasonConstraint && hasBootstrapTimeout {
 		return nil
 	}
 	return rebuildTable(

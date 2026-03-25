@@ -266,6 +266,30 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
 	jobState := ComputeJobState(jobs)
 
+	// Fetch R2 phase markers so bootstrap-stall check has current data.
+	// Without this, the reconciler sees empty InstancePhase and may kill
+	// instances that are actually running jobs.
+	var instancePhase, bootstrapStage string
+	if r2Client != nil && ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil {
+		ctx := context.Background()
+		instancePhase = fetchInstancePhase(ctx, r2Client, ci.ID)
+		if instancePhase != "" {
+			if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
+				switch verb {
+				case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
+					if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
+						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
+							log.Printf("reconcile: mark job %d running from R2 phase: %v", phaseJobID, err)
+						}
+						jobState.HasStartedJob = true
+					}
+				}
+			}
+		} else if !jobState.HasStartedJob {
+			bootstrapStage = fetchBootstrapStage(ctx, r2Client, ci.ID)
+		}
+	}
+
 	now := time.Now()
 	action := r.CheckInstance(CheckInstanceParams{
 		CI:                ci,
@@ -273,6 +297,8 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		ProviderErr:       providerErr,
 		R2Client:          r2Client,
 		JobState:          jobState,
+		InstancePhase:     instancePhase,
+		BootstrapStage:    bootstrapStage,
 		Now:               now,
 		TerminationIntent: intent,
 	})

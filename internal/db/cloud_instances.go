@@ -39,13 +39,14 @@ const (
 
 // Termination reason constants for CloudInstance.TerminationReason.
 const (
-	TerminationReasonCompleted    = "completed"
-	TerminationReasonPreempted    = "preempted"
-	TerminationReasonJobFailure   = "job_failure"
-	TerminationReasonDiskFull     = "disk_full"
-	TerminationReasonInfraFailure = "infra_failure"
-	TerminationReasonCancelled    = "canceled"
-	TerminationReasonUnknown      = "unknown"
+	TerminationReasonCompleted        = "completed"
+	TerminationReasonPreempted        = "preempted"
+	TerminationReasonJobFailure       = "job_failure"
+	TerminationReasonDiskFull         = "disk_full"
+	TerminationReasonInfraFailure     = "infra_failure"
+	TerminationReasonBootstrapTimeout = "bootstrap_timeout"
+	TerminationReasonCancelled        = "canceled"
+	TerminationReasonUnknown          = "unknown"
 )
 
 // IsRetryableTermination reports whether a failed cloud instance should be
@@ -58,7 +59,7 @@ func IsRetryableTermination(ci *CloudInstance) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonPreempted, TerminationReasonInfraFailure, TerminationReasonUnknown, "":
+	case TerminationReasonPreempted, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonUnknown, "":
 		return true
 	case "destroyed", "error", "dead", "stopped":
 		// Provider-level terminal statuses — worth retrying on a different instance.
