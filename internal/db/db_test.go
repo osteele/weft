@@ -1670,68 +1670,11 @@ func TestJobCloudAttemptShapeChecksRejectInvalidValues(t *testing.T) {
 }
 
 func TestLatestRunOwnershipTriggerRejectsMismatchedJobs(t *testing.T) {
-	database := SetupTestDB(t)
-
-	jobID1, err := RecordQueuedWithGPU(database, "", "/tmp/project-a", "python train.py", "job1", "")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU(job1): %v", err)
-	}
-	jobID2, err := RecordQueuedWithGPU(database, "", "/tmp/project-b", "python train.py", "job2", "")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU(job2): %v", err)
-	}
-	if err := PersistLatestRunSnapshot(database, jobID1, ""); err != nil {
-		t.Fatalf("PersistLatestRunSnapshot(job1): %v", err)
-	}
-
-	job1, err := GetJobByID(database, jobID1)
-	if err != nil {
-		t.Fatalf("GetJobByID(job1): %v", err)
-	}
-	if job1.LatestRunID == nil {
-		t.Fatal("expected job1 latest run to be populated")
-	}
-
-	if _, err := database.Exec(`UPDATE jobs SET latest_run_id = ? WHERE id = ?`, *job1.LatestRunID, jobID2); err == nil {
-		t.Fatal("expected mismatched latest_run_id update to fail")
-	}
+	t.Skip("job_runs archival removed")
 }
 
 func TestRunOwnedArtifactAndTimeseriesTriggersRejectMismatchedJobs(t *testing.T) {
-	database := SetupTestDB(t)
-
-	jobID1, err := RecordQueuedWithGPU(database, "", "/tmp/project-a", "python train.py", "job1", "")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU(job1): %v", err)
-	}
-	jobID2, err := RecordQueuedWithGPU(database, "", "/tmp/project-b", "python train.py", "job2", "")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU(job2): %v", err)
-	}
-	if err := PersistLatestRunSnapshot(database, jobID1, ""); err != nil {
-		t.Fatalf("PersistLatestRunSnapshot(job1): %v", err)
-	}
-
-	job1, err := GetJobByID(database, jobID1)
-	if err != nil {
-		t.Fatalf("GetJobByID(job1): %v", err)
-	}
-	if job1.LatestRunID == nil {
-		t.Fatal("expected job1 latest run to be populated")
-	}
-
-	if _, err := database.Exec(
-		`INSERT INTO artifacts (job_id, job_run_id, name, path, stored_path, size_bytes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		jobID2, *job1.LatestRunID, "metrics", "out/metrics.json", "/tmp/metrics.json", 12, time.Now().Unix(),
-	); err == nil {
-		t.Fatal("expected mismatched artifact job_run_id insert to fail")
-	}
-	if _, err := database.Exec(
-		`INSERT INTO job_timeseries (job_id, ts, cpu_pct, job_run_id) VALUES (?, ?, ?, ?)`,
-		jobID2, time.Now().Unix(), 42, *job1.LatestRunID,
-	); err == nil {
-		t.Fatal("expected mismatched timeseries job_run_id insert to fail")
-	}
+	t.Skip("job_runs archival removed")
 }
 
 func TestPlacementTriggerRejectsNonEmptyHostForCloudJobs(t *testing.T) {
@@ -2278,194 +2221,14 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 
 func TestMarkRunningFromTerminalArchivesPreviousRun(t *testing.T) {
 	t.Skip("job_runs archival removed; job_attempts tracks history")
-	database := SetupTestDB(t)
-
-	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
-	if err != nil {
-		t.Fatalf("RecordQueued: %v", err)
-	}
-
-	startTime := time.Now().Add(-2 * time.Minute).Unix()
-	endTime := time.Now().Add(-1 * time.Minute).Unix()
-	exitCode := 17
-	errorDiagnosis := `{"kind":"transient_infra"}`
-	if err := UpdateQueuedToRunningWithSession(database, jobID, "rj-42"); err != nil {
-		t.Fatalf("UpdateQueuedToRunningWithSession: %v", err)
-	}
-	if _, err := database.Exec(
-		`UPDATE jobs
-		 SET start_time = ?, end_time = ?, exit_code = ?,
-		     error_message = ?, failure_reason = ?, error_diagnosis = ?, remote_state = ?
-		 WHERE id = ?`,
-		startTime, endTime, exitCode,
-		"lost worker", "infra_failure", errorDiagnosis, "missing", jobID,
-	); err != nil {
-		t.Fatalf("seed running fields: %v", err)
-	}
-	if err := MarkDeadByID(database, jobID); err != nil {
-		t.Fatalf("MarkDeadByID: %v", err)
-	}
-
-	if err := MarkRunningFromTerminal(database, jobID); err != nil {
-		t.Fatalf("MarkRunningFromTerminal: %v", err)
-	}
-
-	job, err := GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("GetJobByID: %v", err)
-	}
-	if job.Status != StatusRunning {
-		t.Fatalf("status = %q, want %q", job.Status, StatusRunning)
-	}
-	if job.LastSyncedStatus != StatusRunning {
-		t.Fatalf("last_synced_status = %q, want %q", job.LastSyncedStatus, StatusRunning)
-	}
-	if job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil {
-		t.Fatalf("expected runtime timestamps cleared, got start=%d end=%v exit=%v", job.StartTime, job.EndTime, job.ExitCode)
-	}
-	if job.ErrorMessage != "" || job.FailureReason != "" || job.ErrorDiagnosis != "" || job.RemoteState != "" || job.SessionName != "" {
-		t.Fatalf("expected runtime failure fields cleared, got err=%q reason=%q diagnosis=%q remote_state=%q session=%q",
-			job.ErrorMessage, job.FailureReason, job.ErrorDiagnosis, job.RemoteState, job.SessionName)
-	}
-
-	runs, err := ListJobRuns(database, jobID)
-	if err != nil {
-		t.Fatalf("ListJobRuns: %v", err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 run rows, got %d", len(runs))
-	}
-	oldRun := runs[0]
-	if oldRun.Status != StatusFailed {
-		t.Fatalf("old run status = %q, want %q", oldRun.Status, StatusFailed)
-	}
-	if oldRun.StartTime != startTime {
-		t.Fatalf("old run start_time = %d, want %d", oldRun.StartTime, startTime)
-	}
-	if oldRun.EndTime == nil {
-		t.Fatal("expected old run end_time to be set")
-	}
-	if oldRun.ExitCode == nil || *oldRun.ExitCode != exitCode {
-		t.Fatalf("old run exit_code = %v, want %d", oldRun.ExitCode, exitCode)
-	}
-	if oldRun.ErrorMessage != "lost worker" || oldRun.FailureReason != "infra_failure" || oldRun.ErrorDiagnosis != errorDiagnosis {
-		t.Fatalf("old run failure fields = (%q, %q, %q), want (%q, %q, %q)",
-			oldRun.ErrorMessage, oldRun.FailureReason, oldRun.ErrorDiagnosis,
-			"lost worker", "infra_failure", errorDiagnosis)
-	}
-	if oldRun.RemoteState != "missing" {
-		t.Fatalf("old run remote_state = %q, want %q", oldRun.RemoteState, "missing")
-	}
-	newRun := runs[1]
-	if newRun.Status != StatusRunning {
-		t.Fatalf("new run status = %q, want %q", newRun.Status, StatusRunning)
-	}
-	if newRun.StartTime != 0 || newRun.EndTime != nil || newRun.ExitCode != nil {
-		t.Fatalf("new run timestamps = start=%d end=%v exit=%v, want zero/nil", newRun.StartTime, newRun.EndTime, newRun.ExitCode)
-	}
 }
 
 func TestRequeueByIDArchivesPreviousRun(t *testing.T) {
 	t.Skip("job_runs archival removed; job_attempts tracks history")
-	database := SetupTestDB(t)
-
-	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
-	if err != nil {
-		t.Fatalf("RecordQueued: %v", err)
-	}
-
-	startTime := time.Now().Add(-90 * time.Second).Unix()
-	endTime := time.Now().Add(-30 * time.Second).Unix()
-	exitCode := 9
-	errorDiagnosis := `{"kind":"retryable"}`
-	if _, err := database.Exec(
-		`UPDATE jobs
-		 SET status = ?, last_synced_status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?,
-		     error_message = ?, failure_reason = ?, error_diagnosis = ?, remote_state = ?, remote_id = ?
-		 WHERE id = ?`,
-		StatusFailed, StatusFailed, "rj-77", startTime, endTime, exitCode,
-		"segfault", "crash", errorDiagnosis, "FAILED", "12345", jobID,
-	); err != nil {
-		t.Fatalf("seed failed job: %v", err)
-	}
-
-	if err := RequeueByID(database, jobID); err != nil {
-		t.Fatalf("RequeueByID: %v", err)
-	}
-
-	job, err := GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("GetJobByID: %v", err)
-	}
-	if job.Status != StatusQueued {
-		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
-	}
-	if job.PendingStatus == nil || *job.PendingStatus != StatusQueued {
-		t.Fatalf("pending_status = %v, want %q", job.PendingStatus, StatusQueued)
-	}
-	if job.LastSyncedStatus != "" {
-		t.Fatalf("last_synced_status = %q, want empty", job.LastSyncedStatus)
-	}
-	if job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil {
-		t.Fatalf("expected runtime timestamps cleared, got start=%d end=%v exit=%v", job.StartTime, job.EndTime, job.ExitCode)
-	}
-	if job.ErrorMessage != "" || job.FailureReason != "" || job.ErrorDiagnosis != "" || job.RemoteState != "" || job.RemoteID != "" || job.SessionName != "" {
-		t.Fatalf("expected runtime fields cleared, got err=%q reason=%q diagnosis=%q remote_state=%q remote_id=%q session=%q",
-			job.ErrorMessage, job.FailureReason, job.ErrorDiagnosis, job.RemoteState, job.RemoteID, job.SessionName)
-	}
-
-	runs, err := ListJobRuns(database, jobID)
-	if err != nil {
-		t.Fatalf("ListJobRuns: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("expected 1 archived run, got %d", len(runs))
-	}
-	run := runs[0]
-	if run.ArchiveReason != "requeue" {
-		t.Fatalf("archive_reason = %q, want %q", run.ArchiveReason, "requeue")
-	}
-	if run.Status != StatusFailed || run.RemoteID != "12345" || run.RemoteState != "FAILED" {
-		t.Fatalf("archived run = status %q remote_id %q remote_state %q, want %q %q %q",
-			run.Status, run.RemoteID, run.RemoteState, StatusFailed, "12345", "FAILED")
-	}
-	if run.ErrorMessage != "segfault" || run.FailureReason != "crash" || run.ErrorDiagnosis != errorDiagnosis {
-		t.Fatalf("archived failure fields = (%q, %q, %q), want (%q, %q, %q)",
-			run.ErrorMessage, run.FailureReason, run.ErrorDiagnosis,
-			"segfault", "crash", errorDiagnosis)
-	}
 }
 
 func TestUpdateQueuedToRunningCreatesLatestRun(t *testing.T) {
 	t.Skip("job_runs archival removed; job_attempts tracks history via LatestRunID → attempt ID")
-	database := SetupTestDB(t)
-
-	jobID, err := RecordQueued(database, "host1", "/tmp/project", "python train.py", "test")
-	if err != nil {
-		t.Fatalf("RecordQueued: %v", err)
-	}
-	if err := UpdateQueuedToRunning(database, jobID); err != nil {
-		t.Fatalf("UpdateQueuedToRunning: %v", err)
-	}
-
-	job, err := GetJobByID(database, jobID)
-	if err != nil {
-		t.Fatalf("GetJobByID: %v", err)
-	}
-	if job.LatestRunID == nil {
-		t.Fatal("expected latest_run_id to be set")
-	}
-
-	run, err := GetJobRunByID(database, *job.LatestRunID)
-	if err != nil {
-		t.Fatalf("GetJobRunByID: %v", err)
-	}
-	if run.JobID != jobID || run.Status != StatusRunning {
-		t.Fatalf("run = %+v, want job_id=%d status=%q", run, jobID, StatusRunning)
-	}
-	if run.StartTime == 0 {
-		t.Fatal("expected run start_time to be populated")
-	}
 }
 
 func TestGetGPU_DatabaseFieldTakesPrecedence(t *testing.T) {

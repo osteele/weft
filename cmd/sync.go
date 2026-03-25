@@ -577,9 +577,6 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			log.Printf("sync: failed to update cloud job %d to running: %v", jobID, err)
 			continue
 		}
-		if err := db.PersistLatestRunSnapshot(database, jobID, ""); err != nil {
-			log.Printf("sync: failed to persist cloud job %d running snapshot: %v", jobID, err)
-		}
 		updated++
 		if verbose {
 			fmt.Printf("  cloud job %d: started\n", jobID)
@@ -679,9 +676,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	); err != nil {
 		return 0, err
 	}
-	if err := db.PersistLatestRunSnapshot(database, jobID, ""); err != nil {
-		return 0, err
-	}
+	// job_runs archival removed; job_attempts tracks history
 	if err := db.CloseJobCloudAttempt(database, jobID, outcome); err != nil {
 		return 0, err
 	}

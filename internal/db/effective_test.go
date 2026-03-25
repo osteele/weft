@@ -148,14 +148,8 @@ func TestOpenRepairsPlaceholderProjects(t *testing.T) {
 	if err := SetJobProject(database, jobID, "."); err != nil {
 		t.Fatalf("set project: %v", err)
 	}
-	if err := PersistLatestRunSnapshot(database, jobID, ""); err != nil {
-		t.Fatalf("persist latest run: %v", err)
-	}
 	if _, err := database.Exec(`UPDATE jobs SET project = '.' WHERE id = ?`, jobID); err != nil {
 		t.Fatalf("seed placeholder job project: %v", err)
-	}
-	if _, err := database.Exec(`UPDATE job_runs SET project = '.' WHERE job_id = ?`, jobID); err != nil {
-		t.Fatalf("seed placeholder run project: %v", err)
 	}
 	if err := database.Close(); err != nil {
 		t.Fatalf("close database: %v", err)
@@ -173,16 +167,6 @@ func TestOpenRepairsPlaceholderProjects(t *testing.T) {
 	}
 	if job.Project != "adaptive-escalation" {
 		t.Fatalf("job.Project = %q, want %q", job.Project, "adaptive-escalation")
-	}
-	runs, err := ListJobRuns(database, jobID)
-	if err != nil {
-		t.Fatalf("list job runs: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("len(runs) = %d, want 1", len(runs))
-	}
-	if runs[0].Project != "adaptive-escalation" {
-		t.Fatalf("run.Project = %q, want %q", runs[0].Project, "adaptive-escalation")
 	}
 }
 

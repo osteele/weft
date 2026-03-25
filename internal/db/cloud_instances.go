@@ -450,24 +450,6 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 		tx.Rollback()
 		return err
 	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job != nil {
-		if job.LatestRunID == nil {
-			if err := startNewLatestRunTx(tx, job, "cloud_run_prepare"); err != nil {
-				tx.Rollback()
-				return err
-			}
-		} else {
-			if err := persistLatestRunSnapshotTx(tx, job, ""); err != nil {
-				tx.Rollback()
-				return err
-			}
-		}
-	}
 	// Close any existing open cloud attempts for this job before recording the new one
 	if _, err := tx.Exec(
 		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
@@ -638,12 +620,6 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	if err != nil {
 		tx.Rollback()
 		return 0, err
-	}
-	for _, job := range jobs {
-		if err := archiveJobRunTx(tx, job, "cloud_reset:"+outcome); err != nil {
-			tx.Rollback()
-			return 0, err
-		}
 	}
 	if len(jobs) == 0 {
 		if err := tx.Commit(); err != nil {

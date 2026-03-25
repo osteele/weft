@@ -92,50 +92,6 @@ type Job struct {
 	PendingAt        *int64  // When pending state was set
 }
 
-// JobRun stores the immutable spec snapshot plus mutable execution state for a
-// single execution attempt of a logical job.
-type JobRun struct {
-	ID               int64
-	JobID            int64
-	ArchivedAt       int64
-	ArchiveReason    string
-	Status           string
-	Host             string
-	WorkingDir       string
-	Command          string
-	Description      string
-	SessionName      string
-	QueueName        string
-	Backend          string
-	RemoteID         string
-	RemoteState      string
-	GPU              string
-	GPUClass         string
-	CPUAllotment     *int
-	GPUMemGB         *int
-	EnvVars          []string
-	Tags             []string
-	DepSpec          string
-	Inputs           []string
-	Outputs          []string
-	OutputDirs       []string
-	Produces         []string
-	Needs            []string
-	Project          string
-	StartTime        int64
-	EndTime          *int64
-	ExitCode         *int
-	ErrorMessage     string
-	FailureReason    string
-	ErrorDiagnosis   string
-	Metadata         *JobMetadata
-	PlacementMeta    *PlacementMeta
-	Cost             *float64
-	VastaiInstanceID *int
-	RetryCount       int
-	CloudInstanceID  *int64
-}
-
 // JobTargetKind describes how a job is currently targeted.
 type JobTargetKind string
 
@@ -267,8 +223,6 @@ type PlacementMeta struct {
 }
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
-
-const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
 const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id, requested_status`
 
@@ -4280,10 +4234,15 @@ func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int
 
 // UpdateRunErrorDiagnosis updates the error_diagnosis on a job_run by run ID.
 func UpdateRunErrorDiagnosis(db *sql.DB, runID int64, diagnosis string) error {
-	_, err := db.Exec(
-		`UPDATE job_runs SET error_diagnosis = ? WHERE id = ?`,
-		diagnosis, runID,
-	)
+	// Try job_attempts first, fall back to job_runs for legacy data
+	result, err := db.Exec(`UPDATE job_attempts SET error_diagnosis = ? WHERE id = ?`, diagnosis, runID)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n > 0 {
+		return nil
+	}
+	_, err = db.Exec(`UPDATE job_runs SET error_diagnosis = ? WHERE id = ?`, diagnosis, runID)
 	return err
 }
 
@@ -4597,312 +4556,15 @@ func queryJobTx(tx *sql.Tx, query string, args ...interface{}) (*Job, error) {
 	return jobs[0], nil
 }
 
-func shouldArchiveJobRun(job *Job) bool {
-	if job == nil {
-		return false
-	}
-	if job.CloudInstanceID != nil {
-		return true
-	}
-	if IsTerminalStatus(job.Status) {
-		return true
-	}
-	switch job.Status {
-	case StatusRunning, StatusStarting, StatusPaused:
-		return true
-	case StatusQueued:
-		return job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil ||
-			job.ErrorMessage != "" || job.FailureReason != "" || job.SessionName != ""
-	}
-	return job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil ||
-		job.ErrorMessage != "" || job.FailureReason != "" || job.SessionName != ""
-}
-
-func backfillLegacyJobRuns(db *sql.DB) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	jobs, err := queryJobsTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE COALESCE(latest_run_id, 0) = 0 ORDER BY id ASC`, jobSelectColumns))
-	if err != nil {
-		return err
-	}
-
-	for _, job := range jobs {
-		if !shouldArchiveJobRun(job) {
-			continue
-		}
-
-		runID, err := latestArchivedRunIDTx(tx, job.ID)
-		if err != nil {
-			return err
-		}
-		if runID == nil {
-			backfilledRunID, err := insertJobRunSnapshotAtTx(tx, job, "legacy_migration", legacyJobArchivedAt(job))
-			if err != nil {
-				return err
-			}
-			runID = &backfilledRunID
-		}
-
-		if err := setJobLatestRunIDTx(tx, job.ID, *runID); err != nil {
-			return err
-		}
-		if err := attachLegacyTimeseriesToRunTx(tx, job.ID, *runID); err != nil {
-			return err
-		}
-		if err := attachLegacyArtifactsToRunTx(tx, job.ID, *runID); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-func latestArchivedRunIDTx(tx *sql.Tx, jobID int64) (*int64, error) {
-	var runID sql.NullInt64
-	if err := tx.QueryRow(`SELECT id FROM job_runs WHERE job_id = ? ORDER BY archived_at DESC, id DESC LIMIT 1`, jobID).Scan(&runID); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if !runID.Valid {
-		return nil, nil
-	}
-	return &runID.Int64, nil
-}
-
-func legacyJobArchivedAt(job *Job) int64 {
-	if job == nil {
-		return time.Now().Unix()
-	}
-	if job.EndTime != nil && *job.EndTime > 0 {
-		return *job.EndTime
-	}
-	if job.StartTime > 0 {
-		return job.StartTime
-	}
-	if job.QueuedAt > 0 {
-		return job.QueuedAt
-	}
-	if job.CreatedAt > 0 {
-		return job.CreatedAt
-	}
-	return time.Now().Unix()
-}
-
-func insertJobRunSnapshotTx(tx *sql.Tx, job *Job, reason string) (int64, error) {
-	return insertJobRunSnapshotAtTx(tx, job, reason, time.Now().Unix())
-}
-
-func insertJobRunSnapshotAtTx(tx *sql.Tx, job *Job, reason string, archivedAt int64) (int64, error) {
-	jobMetadata, err := encodeJobMetadata(job.Metadata)
-	if err != nil {
-		return 0, err
-	}
-	placementMeta, err := encodePlacementMeta(job.PlacementMeta)
-	if err != nil {
-		return 0, err
-	}
-	project, err := NormalizeProjectName(job.Project, job.WorkingDir, job.Command)
-	if err != nil {
-		return 0, err
-	}
-	result, err := tx.Exec(
-		`INSERT INTO job_runs (
-			job_id, archived_at, archive_reason, status, host, working_dir, command, description,
-			session_name, queue_name, backend, remote_id, remote_state,
-			gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec,
-			inputs, outputs, output_dirs, produces, needs, project,
-			start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis,
-			job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		job.ID, archivedAt, reason, job.Status, job.Host, job.WorkingDir, job.Command, nullIfEmpty(job.Description),
-		nullIfEmpty(job.SessionName), nullIfEmpty(job.QueueName), nullIfEmpty(job.Backend),
-		nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
-		nullIfEmpty(job.GPU), nullIfEmpty(job.GPUClass), job.CPUAllotment, job.GPUMemGB,
-		encodeStringSlice(job.EnvVars), encodeTagsForRun(job.Tags), nullIfEmpty(job.DepSpec),
-		encodeStringSlice(job.Inputs), encodeStringSlice(job.Outputs), encodeStringSlice(job.OutputDirs),
-		encodeStringSlice(job.Produces), encodeStringSlice(job.Needs), nullIfEmpty(project),
-		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
-		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), jobMetadata, placementMeta,
-		job.Cost, nullableInt(job.VastaiInstanceID), job.RetryCount, job.CloudInstanceID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.LastInsertId()
-}
-
-func attachLegacyTimeseriesToRunTx(tx *sql.Tx, jobID, runID int64) error {
-	_, err := tx.Exec(`UPDATE job_timeseries SET job_run_id = ? WHERE job_id = ? AND job_run_id IS NULL`, runID, jobID)
-	return err
-}
-
-func attachLegacyArtifactsToRunTx(tx *sql.Tx, jobID, runID int64) error {
-	rows, err := tx.Query(`SELECT id, name, path FROM artifacts WHERE job_id = ? AND job_run_id IS NULL ORDER BY id ASC`, jobID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	type legacyArtifactRow struct {
-		id   int64
-		name sql.NullString
-		path string
-	}
-
-	var legacyRows []legacyArtifactRow
-	for rows.Next() {
-		var row legacyArtifactRow
-		if err := rows.Scan(&row.id, &row.name, &row.path); err != nil {
-			return err
-		}
-		legacyRows = append(legacyRows, row)
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	for _, row := range legacyRows {
-		var existingID int64
-		var err error
-		if row.name.Valid {
-			err = tx.QueryRow(
-				`SELECT id FROM artifacts WHERE job_run_id = ? AND path = ? AND name = ? LIMIT 1`,
-				runID, row.path, row.name.String,
-			).Scan(&existingID)
-		} else {
-			err = tx.QueryRow(
-				`SELECT id FROM artifacts WHERE job_run_id = ? AND path = ? AND name IS NULL LIMIT 1`,
-				runID, row.path,
-			).Scan(&existingID)
-		}
-		if err == nil {
-			continue
-		}
-		if err != sql.ErrNoRows {
-			return err
-		}
-		if _, err := tx.Exec(`UPDATE artifacts SET job_run_id = ? WHERE id = ?`, runID, row.id); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func setJobLatestRunIDTx(tx *sql.Tx, jobID, runID int64) error {
-	_, err := tx.Exec(`UPDATE jobs SET latest_run_id = ? WHERE id = ?`, runID, jobID)
-	return err
-}
-
-// PersistLatestRunSnapshot updates the current run row for a job from the live
-// jobs table. If the job has no run yet, this creates one and points
-// jobs.latest_run_id at it.
-func PersistLatestRunSnapshot(db *sql.DB, jobID int64, reason string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if job == nil {
-		return tx.Commit()
-	}
-	if err := persistLatestRunSnapshotTx(tx, job, reason); err != nil {
-		tx.Rollback()
-		return err
-	}
-	return tx.Commit()
-}
-
-// PersistLatestRunSnapshotIfExists updates the current run row only when the job
-// already has a tracked run. This avoids creating placeholder runs for queued
-// jobs whose mutable job row is being edited before execution starts.
-func PersistLatestRunSnapshotIfExists(db *sql.DB, jobID int64, reason string) error {
-	var latestRunID sql.NullInt64
-	if err := db.QueryRow(`SELECT latest_run_id FROM jobs WHERE id = ?`, jobID).Scan(&latestRunID); err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return err
-	}
-	if !latestRunID.Valid || latestRunID.Int64 == 0 {
-		return nil
-	}
-	return PersistLatestRunSnapshot(db, jobID, reason)
-}
-
-func persistLatestRunSnapshotTx(tx *sql.Tx, job *Job, reason string) error {
-	if job == nil {
-		return nil
-	}
-	if job.LatestRunID == nil || *job.LatestRunID == 0 {
-		runID, err := insertJobRunSnapshotTx(tx, job, reason)
-		if err != nil {
-			return err
-		}
-		job.LatestRunID = &runID
-		return setJobLatestRunIDTx(tx, job.ID, runID)
-	}
-
-	now := time.Now().Unix()
-	jobMetadata, err := encodeJobMetadata(job.Metadata)
-	if err != nil {
-		return err
-	}
-	placementMeta, err := encodePlacementMeta(job.PlacementMeta)
-	if err != nil {
-		return err
-	}
-	project, err := NormalizeProjectName(job.Project, job.WorkingDir, job.Command)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(
-		`UPDATE job_runs SET
-			archived_at = ?,
-			archive_reason = CASE WHEN ? <> '' THEN ? ELSE archive_reason END,
-			status = ?,
-			session_name = ?, remote_id = ?, remote_state = ?,
-			project = ?,
-			start_time = ?, end_time = ?, exit_code = ?, error_message = ?, failure_reason = ?,
-			error_diagnosis = ?, job_metadata = ?, placement_meta = ?, cost = ?,
-			vastai_instance_id = ?, retry_count = ?, cloud_instance_id = ?
-		 WHERE id = ?`,
-		now, reason, reason, job.Status,
-		nullIfEmpty(job.SessionName), nullIfEmpty(job.RemoteID), nullIfEmpty(job.RemoteState),
-		nullIfEmpty(project),
-		nullableUnix(job.StartTime), job.EndTime, job.ExitCode, nullIfEmpty(job.ErrorMessage),
-		nullIfEmpty(job.FailureReason), nullIfEmpty(job.ErrorDiagnosis), jobMetadata, placementMeta, job.Cost,
-		nullableInt(job.VastaiInstanceID), job.RetryCount, job.CloudInstanceID,
-		*job.LatestRunID,
-	)
-	return err
-}
-
-func startNewLatestRunTx(tx *sql.Tx, job *Job, reason string) error {
-	if job == nil {
-		return nil
-	}
-	runID, err := insertJobRunSnapshotTx(tx, job, reason)
-	if err != nil {
-		return err
-	}
-	job.LatestRunID = &runID
-	return setJobLatestRunIDTx(tx, job.ID, runID)
-}
-
-// GetJobRunIDs returns all run IDs for a job, ordered most recent first.
+// GetJobRunIDs returns all run/attempt IDs for a job, ordered most recent first.
+// Queries both job_attempts (current) and job_runs (legacy) for backward
+// compatibility with historical R2 log keys.
 func GetJobRunIDs(database *sql.DB, jobID int64) ([]int64, error) {
-	rows, err := database.Query(`SELECT id FROM job_runs WHERE job_id = ? ORDER BY id DESC`, jobID)
+	rows, err := database.Query(`
+		SELECT id FROM job_attempts WHERE job_id = ?
+		UNION
+		SELECT id FROM job_runs WHERE job_id = ?
+		ORDER BY id DESC`, jobID, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -4916,13 +4578,6 @@ func GetJobRunIDs(database *sql.DB, jobID int64) ([]int64, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
-}
-
-func archiveJobRunTx(tx *sql.Tx, job *Job, reason string) error {
-	if !shouldArchiveJobRun(job) {
-		return nil
-	}
-	return persistLatestRunSnapshotTx(tx, job, reason)
 }
 
 func nullIfEmpty(s string) *string {
@@ -4952,157 +4607,6 @@ func encodeStringSlice(values []string) any {
 		return nil
 	}
 	return string(data)
-}
-
-func encodeTagsForRun(tags []string) any {
-	value, err := encodeTags(tags)
-	if err != nil {
-		return nil
-	}
-	return value
-}
-
-func scanJobRuns(rows *sql.Rows) ([]JobRun, error) {
-	var runs []JobRun
-	for rows.Next() {
-		var run JobRun
-		var description, sessionName, queueName, backend, remoteID, remoteState sql.NullString
-		var gpu, gpuClass, envVars, tags, depSpec, inputs, outputs, outputDirs, produces, needs, project sql.NullString
-		var errorMessage, failureReason, errorDiagnosis, jobMetadata, placementMeta sql.NullString
-		var startTime, endTime sql.NullInt64
-		var exitCode, cpuAllotment, gpuMemGB, vastaiInstanceID, retryCount sql.NullInt64
-		var cost sql.NullFloat64
-		var cloudInstanceID sql.NullInt64
-
-		if err := rows.Scan(
-			&run.ID, &run.JobID, &run.ArchivedAt, &run.ArchiveReason, &run.Status, &run.Host,
-			&run.WorkingDir, &run.Command, &description, &sessionName, &queueName, &backend, &remoteID,
-			&remoteState, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec,
-			&inputs, &outputs, &outputDirs, &produces, &needs, &project,
-			&startTime, &endTime, &exitCode, &errorMessage, &failureReason, &errorDiagnosis,
-			&jobMetadata, &placementMeta, &cost, &vastaiInstanceID, &retryCount,
-			&cloudInstanceID,
-		); err != nil {
-			return nil, err
-		}
-		if description.Valid {
-			run.Description = description.String
-		}
-		if sessionName.Valid {
-			run.SessionName = sessionName.String
-		}
-		if queueName.Valid {
-			run.QueueName = queueName.String
-		}
-		if backend.Valid {
-			run.Backend = backend.String
-		}
-		if remoteID.Valid {
-			run.RemoteID = remoteID.String
-		}
-		if remoteState.Valid {
-			run.RemoteState = remoteState.String
-		}
-		if gpu.Valid {
-			run.GPU = gpu.String
-		}
-		if gpuClass.Valid {
-			run.GPUClass = gpuClass.String
-		}
-		if cpuAllotment.Valid {
-			v := int(cpuAllotment.Int64)
-			run.CPUAllotment = &v
-		}
-		if gpuMemGB.Valid {
-			v := int(gpuMemGB.Int64)
-			run.GPUMemGB = &v
-		}
-		run.EnvVars = decodeEnvVars(envVars)
-		run.Tags = decodeTags(tags)
-		if depSpec.Valid {
-			run.DepSpec = depSpec.String
-		}
-		run.Inputs = decodeStringSlice(inputs)
-		run.Outputs = decodeStringSlice(outputs)
-		run.OutputDirs = decodeStringSlice(outputDirs)
-		run.Produces = decodeStringSlice(produces)
-		run.Needs = decodeStringSlice(needs)
-		if project.Valid {
-			run.Project = project.String
-		}
-		if startTime.Valid {
-			run.StartTime = startTime.Int64
-		}
-		if endTime.Valid {
-			run.EndTime = &endTime.Int64
-		}
-		if exitCode.Valid {
-			v := int(exitCode.Int64)
-			run.ExitCode = &v
-		}
-		if errorMessage.Valid {
-			run.ErrorMessage = errorMessage.String
-		}
-		if failureReason.Valid {
-			run.FailureReason = failureReason.String
-		}
-		if errorDiagnosis.Valid {
-			run.ErrorDiagnosis = errorDiagnosis.String
-		}
-		run.Metadata = decodeJobMetadata(jobMetadata)
-		run.PlacementMeta = decodePlacementMeta(placementMeta)
-		if cost.Valid {
-			run.Cost = &cost.Float64
-		}
-		if vastaiInstanceID.Valid {
-			v := int(vastaiInstanceID.Int64)
-			run.VastaiInstanceID = &v
-		}
-		if retryCount.Valid {
-			run.RetryCount = int(retryCount.Int64)
-		}
-		if cloudInstanceID.Valid {
-			run.CloudInstanceID = &cloudInstanceID.Int64
-		}
-		if run.Backend == "" {
-			run.Backend = BackendQueueRunner
-		}
-		runs = append(runs, run)
-	}
-	return runs, rows.Err()
-}
-
-// GetJobRunByID returns a single run row by ID.
-func GetJobRunByID(db *sql.DB, runID int64) (*JobRun, error) {
-	rows, err := db.Query(`SELECT `+jobRunSelectColumns+` FROM job_runs WHERE id = ?`, runID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	runs, err := scanJobRuns(rows)
-	if err != nil {
-		return nil, err
-	}
-	if len(runs) == 0 {
-		return nil, sql.ErrNoRows
-	}
-	return &runs[0], nil
-}
-
-// ListJobRuns returns archived execution snapshots for a logical job, ordered
-// from oldest to newest archive.
-func ListJobRuns(db *sql.DB, jobID int64) ([]JobRun, error) {
-	rows, err := db.Query(
-		`SELECT `+jobRunSelectColumns+` FROM job_runs WHERE job_id = ? ORDER BY archived_at ASC, id ASC`,
-		jobID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return scanJobRuns(rows)
 }
 
 // EffectiveWorkingDir returns the actual working directory for display.
