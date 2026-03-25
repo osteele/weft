@@ -3,6 +3,7 @@ package campaign
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -734,5 +735,78 @@ func TestIsInstanceTerminal(t *testing.T) {
 		if got := IsInstanceTerminal(tt.status); got != tt.want {
 			t.Errorf("IsInstanceTerminal(%q) = %v, want %v", tt.status, got, tt.want)
 		}
+	}
+}
+
+func TestWatchInstance_TransitionsQueuedJobToRunningFromR2Phase(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		Status:   db.CloudInstanceStatusRunning,
+		Provider: "mock",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo test", "test", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
+	}
+
+	// Verify job starts as queued
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("initial status = %q, want %q", job.Status, db.StatusQueued)
+	}
+
+	prevFetchIntent := fetchReconcileTerminationIntent
+	prevFetchPhase := fetchWatchInstancePhase
+	prevFetchBootstrap := fetchWatchBootstrapStage
+	prevFetchHeartbeat := fetchWatchHeartbeat
+	prevFetchProgress := fetchWatchJobProgress
+	t.Cleanup(func() {
+		fetchReconcileTerminationIntent = prevFetchIntent
+		fetchWatchInstancePhase = prevFetchPhase
+		fetchWatchBootstrapStage = prevFetchBootstrap
+		fetchWatchHeartbeat = prevFetchHeartbeat
+		fetchWatchJobProgress = prevFetchProgress
+	})
+
+	fetchReconcileTerminationIntent = func(context.Context, *r2.Client, int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+	fetchWatchInstancePhase = func(context.Context, *r2.Client, int64) string {
+		return fmt.Sprintf("running:%d", jobID)
+	}
+	fetchWatchBootstrapStage = func(context.Context, *r2.Client, int64) string {
+		return ""
+	}
+	fetchWatchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int) {
+		return jobID, 50
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := WatchInstance(ctx, &cloud.MockClient{}, database, instanceID, 10*time.Millisecond, time.Hour, &r2.Client{})
+	<-ch
+
+	// Verify job was transitioned to running in the DB
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("get job after watch: %v", err)
+	}
+	if job.Status != db.StatusRunning {
+		t.Fatalf("status after R2 phase = %q, want %q", job.Status, db.StatusRunning)
 	}
 }

@@ -244,6 +244,21 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				if instancePhase != "" {
 					jobProgressID, jobProgress = fetchWatchJobProgress(ctx, r2c, instancePhase, jobs)
 
+					// Cloud jobs stay queued in the DB (unlike on-prem which uses sync to detect start).
+					if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
+						switch verb {
+						case "running", "uploading", "uploading-results", "finalizing":
+							for _, j := range jobs {
+								if j.ID == phaseJobID && j.Status == db.StatusQueued {
+									if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
+										log.Printf("watch: mark job %d running from R2 phase: %v", phaseJobID, err)
+									}
+									break
+								}
+							}
+						}
+					}
+
 					// Detect grace transition: R2 phase says "grace" but DB still says "running"
 					if instancePhase == "grace" && ci.Status == db.CloudInstanceStatusRunning {
 						if checkR2GraceStatus(r2c, ci, database) {
