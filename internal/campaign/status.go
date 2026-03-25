@@ -113,22 +113,16 @@ func inferInitialPhaseChangedAt(phase string, ci *db.CloudInstance, jobs []*db.J
 		return nil
 	}
 
-	var job *db.Job
-	for _, candidate := range jobs {
-		if candidate != nil && candidate.ID == jobID {
-			job = candidate
-			break
-		}
-	}
+	job := findJobInSlice(jobs, jobID)
 	jobTimings := timings[jobID]
 
 	switch verb {
-	case "setup":
+	case PhaseSetup:
 		if jobTimings != nil && jobTimings.SetupStart != nil && *jobTimings.SetupStart > 0 {
 			ts := time.Unix(*jobTimings.SetupStart, 0)
 			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
-	case "running":
+	case PhaseRunning:
 		if job != nil && job.StartTime > 0 {
 			ts := time.Unix(job.StartTime, 0)
 			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
@@ -137,15 +131,37 @@ func inferInitialPhaseChangedAt(phase string, ci *db.CloudInstance, jobs []*db.J
 			ts := time.Unix(*jobTimings.RunStart, 0)
 			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
-	case "finalizing":
+	case PhaseFinalizing:
 		if jobTimings != nil && jobTimings.RunEnd != nil && *jobTimings.RunEnd > 0 {
 			ts := time.Unix(*jobTimings.RunEnd, 0)
 			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
 		}
-	case "uploading":
+	case PhaseUploading:
 		if jobTimings != nil && jobTimings.UploadStart != nil && *jobTimings.UploadStart > 0 {
 			ts := time.Unix(*jobTimings.UploadStart, 0)
 			return clampPhaseChangedAtToInstanceLifecycle(&ts, ci)
+		}
+	}
+	return nil
+}
+
+// Phase verb constants for R2 instance phase strings (format "verb:jobID").
+const (
+	PhaseSetup            = "setup"
+	PhaseRunning          = "running"
+	PhaseFinalizing       = "finalizing"
+	PhaseUploading        = "uploading"
+	PhaseUploadingResults = "uploading-results"
+	PhaseDiskFull         = "disk-full"
+	PhaseGrace            = "grace"
+	PhaseDestroying       = "destroying"
+)
+
+// findJobInSlice returns the first job in the slice matching the given ID, or nil.
+func findJobInSlice(jobs []*db.Job, id int64) *db.Job {
+	for _, j := range jobs {
+		if j != nil && j.ID == id {
+			return j
 		}
 	}
 	return nil
@@ -247,20 +263,17 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					// Cloud jobs stay queued in the DB (unlike on-prem which uses sync to detect start).
 					if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
 						switch verb {
-						case "running", "uploading", "uploading-results", "finalizing":
-							for _, j := range jobs {
-								if j.ID == phaseJobID && j.Status == db.StatusQueued {
-									if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
-										log.Printf("watch: mark job %d running from R2 phase: %v", phaseJobID, err)
-									}
-									break
+						case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
+							if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
+								if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
+									log.Printf("watch: mark job %d running from R2 phase: %v", phaseJobID, err)
 								}
 							}
 						}
 					}
 
 					// Detect grace transition: R2 phase says "grace" but DB still says "running"
-					if instancePhase == "grace" && ci.Status == db.CloudInstanceStatusRunning {
+					if instancePhase == PhaseGrace && ci.Status == db.CloudInstanceStatusRunning {
 						if checkR2GraceStatus(r2c, ci, database) {
 							ci.Status = db.CloudInstanceStatusGrace
 						}
@@ -369,12 +382,8 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 // fetchJobProgress extracts the running job ID from an instance phase string
 // and fetches its progress percentage from R2. Returns (0, -1) if not applicable.
 func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string, jobs []*db.Job) (jobID int64, percent int) {
-	verb, idStr, ok := strings.Cut(instancePhase, ":")
-	if !ok || verb != "running" {
-		return 0, -1
-	}
-	jid, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
+	verb, jid, ok := ParsePhaseJobID(instancePhase)
+	if !ok || verb != PhaseRunning {
 		return 0, -1
 	}
 	pctStr := fetchR2Marker(ctx, r2c, jobAttemptProgressKey(jid, jobs))
@@ -389,14 +398,8 @@ func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string,
 }
 
 func jobAttemptProgressKey(jobID int64, jobs []*db.Job) string {
-	for _, job := range jobs {
-		if job != nil && job.ID == jobID {
-			runID := int64(0)
-			if job.LatestRunID != nil {
-				runID = *job.LatestRunID
-			}
-			return r2keys.JobAttemptProgress(jobID, runID)
-		}
+	if job := findJobInSlice(jobs, jobID); job != nil && job.LatestRunID != nil {
+		return r2keys.JobAttemptProgress(jobID, *job.LatestRunID)
 	}
 	return r2keys.JobAttemptProgress(jobID, 0)
 }
@@ -446,7 +449,7 @@ func fetchInstancePhase(ctx context.Context, r2Client *r2.Client, instanceID int
 }
 
 func failureTerminationReasonFromPhase(phase, fallback string) string {
-	if strings.HasPrefix(phase, "disk-full:") || phase == "disk-full" {
+	if strings.HasPrefix(phase, PhaseDiskFull+":") || phase == PhaseDiskFull {
 		return db.TerminationReasonDiskFull
 	}
 	return fallback
@@ -472,28 +475,28 @@ func failureTerminationReasonFromR2(ctx context.Context, r2Client *r2.Client, in
 // InstancePhaseLabel returns a human-readable label for an instance phase string.
 func InstancePhaseLabel(phase string) string {
 	switch phase {
-	case "grace":
+	case PhaseGrace:
 		return "grace period"
-	case "destroying":
+	case PhaseDestroying:
 		return "self-destructing"
-	case "disk-full":
+	case PhaseDiskFull:
 		return "disk full"
 	}
 	if colon := strings.IndexByte(phase, ':'); colon >= 0 {
 		verb := phase[:colon]
 		jobID := phase[colon+1:]
 		switch verb {
-		case "setup":
+		case PhaseSetup:
 			return fmt.Sprintf("setup (job %s)", jobID)
-		case "running":
+		case PhaseRunning:
 			return fmt.Sprintf("running job %s", jobID)
-		case "finalizing":
+		case PhaseFinalizing:
 			return fmt.Sprintf("finalizing job %s", jobID)
-		case "uploading":
+		case PhaseUploading:
 			return fmt.Sprintf("uploading outputs (job %s)", jobID)
-		case "uploading-results":
+		case PhaseUploadingResults:
 			return fmt.Sprintf("uploading logs/results (job %s)", jobID)
-		case "disk-full":
+		case PhaseDiskFull:
 			return fmt.Sprintf("disk full (job %s)", jobID)
 		}
 	}

@@ -136,15 +136,15 @@ func watchActivePhaseStatus(phase string) (int64, string) {
 		return 0, ""
 	}
 	switch verb {
-	case "setup":
-		return jobID, "setup"
-	case "running":
+	case campaign.PhaseSetup:
+		return jobID, campaign.PhaseSetup
+	case campaign.PhaseRunning:
 		return jobID, db.StatusRunning
-	case "finalizing":
-		return jobID, "finalizing"
-	case "uploading", "uploading-results":
-		return jobID, "uploading"
-	case "disk-full":
+	case campaign.PhaseFinalizing:
+		return jobID, campaign.PhaseFinalizing
+	case campaign.PhaseUploading, campaign.PhaseUploadingResults:
+		return jobID, campaign.PhaseUploading
+	case campaign.PhaseDiskFull:
 		return jobID, db.StatusFailed
 	default:
 		return 0, ""
