@@ -732,7 +732,7 @@ func TestListUnplacedJobsIncludesOpenAttemptsOnTerminalInstances(t *testing.T) {
 	}
 }
 
-func TestJobEffectiveStateViewTracksOpenLiveAttempts(t *testing.T) {
+func TestJobStatusViewTargetKind(t *testing.T) {
 	database := SetupTestDB(t)
 
 	instanceID, err := CreateCloudInstance(database, &CloudInstance{
@@ -751,96 +751,36 @@ func TestJobEffectiveStateViewTracksOpenLiveAttempts(t *testing.T) {
 		t.Fatalf("InsertJobCloudAttempt: %v", err)
 	}
 
-	var targetKind, status, attemptStatus string
-	var effectiveInstanceID sql.NullInt64
-	var attemptInstanceID int64
-	var hasOpenLive, isUnplaced int
-	err = database.QueryRow(`
-		SELECT effective_target_kind, effective_status, effective_cloud_instance_id,
-		       current_cloud_attempt_instance_id, current_cloud_attempt_instance_status,
-		       has_open_live_cloud_attempt, is_effectively_unplaced
-		FROM job_effective_state
-		WHERE id = ?`, jobID).
-		Scan(&targetKind, &status, &effectiveInstanceID, &attemptInstanceID, &attemptStatus, &hasOpenLive, &isUnplaced)
+	// Job with cloud instance should be rental_instance
+	var targetKind string
+	err = database.QueryRow(`SELECT effective_target_kind FROM job_status WHERE id = ?`, jobID).Scan(&targetKind)
 	if err != nil {
-		t.Fatalf("QueryRow(job_effective_state): %v", err)
+		t.Fatalf("QueryRow(job_status): %v", err)
 	}
 	if targetKind != string(JobTargetRentalInstance) {
 		t.Fatalf("effective_target_kind = %q, want %q", targetKind, JobTargetRentalInstance)
 	}
-	if status != StatusQueued {
-		t.Fatalf("effective_status = %q, want %q", status, StatusQueued)
-	}
-	if !effectiveInstanceID.Valid || effectiveInstanceID.Int64 != instanceID {
-		t.Fatalf("effective_cloud_instance_id = %v, want %d", effectiveInstanceID, instanceID)
-	}
-	if attemptInstanceID != instanceID || attemptStatus != CloudInstanceStatusRunning {
-		t.Fatalf("current attempt = (%d, %q), want (%d, %q)", attemptInstanceID, attemptStatus, instanceID, CloudInstanceStatusRunning)
-	}
-	if hasOpenLive != 1 || isUnplaced != 0 {
-		t.Fatalf("flags = hasOpenLive=%d isUnplaced=%d, want 1/0", hasOpenLive, isUnplaced)
-	}
-}
 
-func TestJobEffectiveStateViewTreatsTerminalOpenAttemptAsUnplaced(t *testing.T) {
-	database := SetupTestDB(t)
-
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusFailed,
-		Provider: "vastai",
-		GPUSpec:  "A40",
-	})
+	// Unplaced job
+	unplacedID, err := RecordQueuedWithGPU(database, "", "/tmp/project2", "python eval.py", "unplaced", "")
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("RecordQueuedWithGPU unplaced: %v", err)
 	}
-	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	err = database.QueryRow(`SELECT effective_target_kind FROM job_status WHERE id = ?`, unplacedID).Scan(&targetKind)
 	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU: %v", err)
-	}
-	if err := InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
-	}
-
-	var targetKind, status, attemptStatus string
-	var effectiveInstanceID sql.NullInt64
-	var attemptInstanceID int64
-	var hasOpenLive, isUnplaced int
-	err = database.QueryRow(`
-		SELECT effective_target_kind, effective_status, effective_cloud_instance_id,
-		       current_cloud_attempt_instance_id, current_cloud_attempt_instance_status,
-		       has_open_live_cloud_attempt, is_effectively_unplaced
-		FROM job_effective_state
-		WHERE id = ?`, jobID).
-		Scan(&targetKind, &status, &effectiveInstanceID, &attemptInstanceID, &attemptStatus, &hasOpenLive, &isUnplaced)
-	if err != nil {
-		t.Fatalf("QueryRow(job_effective_state): %v", err)
+		t.Fatalf("QueryRow(job_status unplaced): %v", err)
 	}
 	if targetKind != string(JobTargetUnplaced) {
 		t.Fatalf("effective_target_kind = %q, want %q", targetKind, JobTargetUnplaced)
 	}
-	if status != StatusQueued {
-		t.Fatalf("effective_status = %q, want %q", status, StatusQueued)
-	}
-	if effectiveInstanceID.Valid {
-		t.Fatalf("effective_cloud_instance_id = %v, want NULL", effectiveInstanceID)
-	}
-	if attemptInstanceID != instanceID || attemptStatus != CloudInstanceStatusFailed {
-		t.Fatalf("current attempt = (%d, %q), want (%d, %q)", attemptInstanceID, attemptStatus, instanceID, CloudInstanceStatusFailed)
-	}
-	if hasOpenLive != 0 || isUnplaced != 1 {
-		t.Fatalf("flags = hasOpenLive=%d isUnplaced=%d, want 0/1", hasOpenLive, isUnplaced)
-	}
 }
 
-func TestListUnplacedJobsIncludesHostlessRunning(t *testing.T) {
+func TestListUnplacedJobsIncludesHostlessQueued(t *testing.T) {
 	database := SetupTestDB(t)
 
-	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "hostless running", "")
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "hostless queued", "")
 	if err != nil {
 		t.Fatalf("record job: %v", err)
-	}
-	if err := MarkQueuedJobRunning(database, jobID); err != nil {
-		t.Fatalf("mark queued job running: %v", err)
 	}
 
 	jobs, err := ListUnplacedJobs(database)

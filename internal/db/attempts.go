@@ -243,7 +243,18 @@ func createJobStatusView(db *sql.DB) error {
 			j.placement_reasons,
 			la.cloud_instance_id,
 			j.campaign_job_index,
-			la.id AS latest_run_id
+			la.id AS latest_run_id,
+			-- Target kind for placement queries
+			CASE
+				WHEN la.cloud_instance_id IS NOT NULL THEN 'rental_instance'
+				WHEN COALESCE(la.host, '') != ''
+				     AND COALESCE(la.host, '') NOT LIKE 'vastai:%%'
+				     AND COALESCE(la.host, '') NOT LIKE 'runpod:%%'
+				THEN 'inventory_host'
+				WHEN COALESCE(la.host, '') LIKE 'vastai:%%' OR COALESCE(la.host, '') LIKE 'runpod:%%'
+				THEN 'rental_instance'
+				ELSE 'unplaced'
+			END AS effective_target_kind
 		FROM jobs j
 		LEFT JOIN latest_attempt la ON la.job_id = j.id AND la.rn = 1
 	`)

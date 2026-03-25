@@ -495,172 +495,43 @@ func createJobStateViews(db *sql.DB) error {
 		}
 	}
 
-	effectiveColumns := qualifiedJobSelectColumnsWithOverrides("decorated", map[string]string{
-		"host":              "decorated.effective_host",
-		"status":            "decorated.effective_status",
-		"cloud_instance_id": "decorated.effective_cloud_instance_id",
-	})
-	if _, err := db.Exec(fmt.Sprintf(`
-		CREATE VIEW job_effective_state AS
-		WITH latest_open_cloud_attempt AS (
-			SELECT jca.job_id,
-			       jca.cloud_instance_id,
-			       ci.status AS instance_status
-			FROM job_cloud_attempts jca
-			JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
-			WHERE jca.ended_at IS NULL
-			  AND NOT EXISTS (
-				SELECT 1
-				FROM job_cloud_attempts newer
-				WHERE newer.job_id = jca.job_id
-				  AND newer.ended_at IS NULL
-				  AND (newer.started_at > jca.started_at
-				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
-			  )
-		),
-		latest_any_cloud_attempt AS (
-			SELECT jca.job_id,
-			       jca.cloud_instance_id
-			FROM job_cloud_attempts jca
-			WHERE NOT EXISTS (
-				SELECT 1
-				FROM job_cloud_attempts newer
-				WHERE newer.job_id = jca.job_id
-				  AND (newer.started_at > jca.started_at
-				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
-			)
-		),
-		base AS (
-			SELECT jobs.*,
-			       assigned_ci.status AS assigned_instance_status,
-			       open_attempt.cloud_instance_id AS current_cloud_attempt_instance_id,
-			       open_attempt.instance_status AS current_cloud_attempt_instance_status,
-			       CASE
-					WHEN jobs.cloud_instance_id IS NOT NULL
-					     AND assigned_ci.status IN ('running', 'launching', 'grace')
-					THEN jobs.cloud_instance_id
-					WHEN open_attempt.cloud_instance_id IS NOT NULL
-					     AND open_attempt.instance_status IN ('running', 'launching', 'grace')
-					THEN open_attempt.cloud_instance_id
-					-- Terminal statuses (IsTerminalStatus minus draft)
-					WHEN jobs.status IN ('completed', 'failed', 'dead', 'killed', 'canceled')
-					     AND any_attempt.cloud_instance_id IS NOT NULL
-					     AND COALESCE(jobs.pending_status, jobs.status) != 'queued'
-					THEN any_attempt.cloud_instance_id
-					ELSE NULL
-			       END AS effective_cloud_instance_id
-			FROM jobs
-			LEFT JOIN cloud_instances assigned_ci ON assigned_ci.id = jobs.cloud_instance_id
-			LEFT JOIN latest_open_cloud_attempt open_attempt ON open_attempt.job_id = jobs.id
-			LEFT JOIN latest_any_cloud_attempt any_attempt ON any_attempt.job_id = jobs.id
-		),
-		decorated AS (
-			SELECT base.*,
-			       CASE
-					WHEN base.effective_cloud_instance_id IS NOT NULL THEN ''
-					ELSE base.host
-			       END AS effective_host,
-			       CASE
-					WHEN base.effective_cloud_instance_id IS NOT NULL THEN 'rental_instance'
-					WHEN base.host != ''
-					     AND base.host NOT LIKE 'vastai:%%'
-					     AND base.host NOT LIKE 'runpod:%%'
-					THEN 'inventory_host'
-					WHEN base.host LIKE 'vastai:%%' OR base.host LIKE 'runpod:%%'
-					THEN 'rental_instance'
-					ELSE 'unplaced'
-			       END AS effective_target_kind,
-			       CASE
-					WHEN (
-						CASE
-							WHEN base.effective_cloud_instance_id IS NOT NULL THEN 'rental_instance'
-							WHEN base.host != ''
-							     AND base.host NOT LIKE 'vastai:%%'
-							     AND base.host NOT LIKE 'runpod:%%'
-							THEN 'inventory_host'
-							WHEN base.host LIKE 'vastai:%%' OR base.host LIKE 'runpod:%%'
-							THEN 'rental_instance'
-							ELSE 'unplaced'
-						END
-					) = 'unplaced'
-					AND COALESCE(base.pending_status, base.status) IN ('running', 'starting', 'paused')
-					THEN 'queued'
-					ELSE COALESCE(base.pending_status, base.status)
-			       END AS effective_status
-			FROM base
-		)
-		SELECT %s,
-		       decorated.host AS raw_host,
-		       decorated.status AS raw_status,
-		       decorated.cloud_instance_id AS raw_cloud_instance_id,
-		       decorated.effective_status,
-		       decorated.effective_host,
-		       decorated.effective_cloud_instance_id,
-		       decorated.effective_target_kind,
-		       decorated.current_cloud_attempt_instance_id,
-		       decorated.current_cloud_attempt_instance_status,
-		       CASE
-				WHEN decorated.current_cloud_attempt_instance_id IS NOT NULL THEN 1
-				ELSE 0
-		       END AS has_open_cloud_attempt,
-		       CASE
-				WHEN decorated.current_cloud_attempt_instance_status IN ('running', 'launching', 'grace') THEN 1
-				ELSE 0
-		       END AS has_open_live_cloud_attempt,
-		       CASE
-				WHEN decorated.effective_target_kind = 'unplaced' THEN 1
-				ELSE 0
-		       END AS is_effectively_unplaced,
-		       CASE
-				WHEN decorated.effective_target_kind = 'rental_instance' THEN 1
-				ELSE 0
-		       END AS is_effectively_current_rental
-		FROM decorated
-	`, effectiveColumns)); err != nil {
-		return err
-	}
-
-	currentMembershipColumns := qualifiedJobSelectColumnsWithOverrides("jes", map[string]string{
+	// job_effective_state has been removed; job_status replaces it.
+	// Only cloud_instance_job_membership remains.
+	currentMembershipColumns := qualifiedJobSelectColumnsWithOverrides("js", map[string]string{
 		"cloud_instance_id": "current_memberships.membership_cloud_instance_id",
 	})
-	historicalMembershipColumns := qualifiedJobSelectColumns("jes")
+	historicalMembershipColumns := qualifiedJobSelectColumns("js")
 	if _, err := db.Exec(fmt.Sprintf(`
 		CREATE VIEW cloud_instance_job_membership AS
 		WITH current_memberships AS (
 			SELECT DISTINCT
-			       jobs.id AS job_id,
-			       jobs.cloud_instance_id AS membership_cloud_instance_id
-			FROM jobs
-			WHERE jobs.cloud_instance_id IS NOT NULL
-			UNION
-			SELECT DISTINCT
-			       jes.id AS job_id,
-			       jes.current_cloud_attempt_instance_id AS membership_cloud_instance_id
-			FROM job_effective_state jes
-			WHERE jes.current_cloud_attempt_instance_id IS NOT NULL
+			       js.id AS job_id,
+			       js.cloud_instance_id AS membership_cloud_instance_id
+			FROM job_status js
+			WHERE js.cloud_instance_id IS NOT NULL
 		),
 		historical_memberships AS (
 			SELECT DISTINCT
-			       jes.id AS job_id,
+			       js.id AS job_id,
 			       jca.cloud_instance_id AS membership_cloud_instance_id
-			FROM job_effective_state jes
-			JOIN job_cloud_attempts jca ON jca.job_id = jes.id
+			FROM job_status js
+			JOIN job_cloud_attempts jca ON jca.job_id = js.id
 			WHERE jca.cloud_instance_id IS NOT NULL
-			  AND (jes.raw_cloud_instance_id IS NULL OR jca.cloud_instance_id != jes.raw_cloud_instance_id)
+			  AND (js.cloud_instance_id IS NULL OR jca.cloud_instance_id != js.cloud_instance_id)
 		)
 		SELECT %s,
 		       current_memberships.membership_cloud_instance_id,
 		       'current' AS membership_kind,
 		       0 AS membership_rank
-		FROM job_effective_state jes
-		JOIN current_memberships ON current_memberships.job_id = jes.id
+		FROM job_status js
+		JOIN current_memberships ON current_memberships.job_id = js.id
 		UNION ALL
 		SELECT %s,
 		       historical_memberships.membership_cloud_instance_id,
 		       'historical' AS membership_kind,
 		       1 AS membership_rank
-		FROM job_effective_state jes
-		JOIN historical_memberships ON historical_memberships.job_id = jes.id
+		FROM job_status js
+		JOIN historical_memberships ON historical_memberships.job_id = js.id
 	`, currentMembershipColumns, historicalMembershipColumns)); err != nil {
 		return err
 	}
@@ -2523,11 +2394,11 @@ func ListActiveVastaiJobs(db *sql.DB) ([]*Job, error) {
 // ListActiveCloudJobs returns jobs associated with a cloud instance that are in a non-terminal status.
 // This covers both legacy vastai-backend jobs and campaign-launched queue-runner jobs.
 func ListActiveCloudJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_effective_state
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE effective_target_kind = ?
 		  AND status NOT IN (?, ?, ?, ?)
 		  AND tombstoned = 0
-		ORDER BY id`, qualifiedJobSelectColumns("job_effective_state"))
+		ORDER BY id`, jobSelectColumns)
 	rows, err := db.Query(query, string(JobTargetRentalInstance), StatusCompleted, StatusFailed, StatusKilled, StatusCanceled)
 	if err != nil {
 		return nil, err
@@ -4382,12 +4253,12 @@ func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
 
 // ListActiveOnPremJobs returns all non-cloud active jobs with host assignments.
 func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_effective_state
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE effective_target_kind = ?
 		AND status IN (?, ?, ?, ?) AND tombstoned = 0
 		ORDER BY host ASC,
 			CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END,
-			id ASC`, qualifiedJobSelectColumns("job_effective_state"))
+			id ASC`, jobSelectColumns)
 	return queryJobs(db, query, string(JobTargetInventoryHost), StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 

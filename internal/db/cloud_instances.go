@@ -476,7 +476,7 @@ func SetJobCampaignIndex(db *sql.DB, jobID int64, index int) error {
 
 // GetCloudInstanceJobs returns all jobs associated with a cloud instance.
 func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
-	query := "SELECT " + qualifiedJobSelectColumns("job_effective_state") + " FROM job_effective_state WHERE cloud_instance_id = ? AND tombstoned = 0 ORDER BY id ASC"
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE cloud_instance_id = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, instanceID)
 }
 
@@ -556,12 +556,12 @@ func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) (
 // current cloud-instance assignment, and no open cloud attempt on a non-terminal
 // instance.
 func ListUnplacedJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_effective_state
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		  AND effective_target_kind = ?
 		  AND status = ?
 		  AND host = ''
-		ORDER BY id ASC`, qualifiedJobSelectColumns("job_effective_state"))
+		ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, string(JobTargetUnplaced), StatusQueued)
 }
 
@@ -792,7 +792,7 @@ func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 // GetActiveCloudInstanceJobCounts returns a map from cloud instance ID to the
 // number of non-terminal jobs still assigned to that instance.
 func GetActiveCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
-	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM job_effective_state
+	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM job_status
 		WHERE cloud_instance_id IS NOT NULL
 		  AND tombstoned = 0
 		  AND effective_target_kind = ?
