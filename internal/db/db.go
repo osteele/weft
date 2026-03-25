@@ -2835,9 +2835,14 @@ func MarkQueuedJobRunning(db *sql.DB, id int64) error {
 	if job == nil {
 		return tx.Commit()
 	}
-	if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
-		tx.Rollback()
-		return err
+	// Cloud jobs already have a run from SetJobCloudInstanceID — creating a
+	// new run here would change latest_run_id and break the R2 progress key
+	// that the agent is writing to (agent uses the RunID from the manifest).
+	if job.CloudInstanceID == nil {
+		if err := startNewLatestRunTx(tx, job, "run_start"); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	return tx.Commit()
 }
