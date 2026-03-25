@@ -440,6 +440,12 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt's cloud_instance_id
+	if err := SetAttemptCloudInstanceID(tx, jobID, instanceID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = '', placement_reasons = NULL WHERE id = ?`, instanceID, jobID); err != nil {
 		tx.Rollback()
 		return err
@@ -462,7 +468,7 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 			}
 		}
 	}
-	// Close any existing open attempts for this job before recording the new one
+	// Close any existing open cloud attempts for this job before recording the new one
 	if _, err := tx.Exec(
 		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
 		time.Now().Unix(), AttemptOutcomeSuperseded, jobID,
@@ -612,7 +618,7 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	placementReasons := encodeStringSlice(cloudResetPlacementReasons(ci, outcome))
 
 	jobs, err := queryJobsTx(tx,
-		fmt.Sprintf(`SELECT %s FROM jobs WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
+		fmt.Sprintf(`SELECT %s FROM job_status WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
 		instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)

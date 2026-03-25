@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/slack"
 	"github.com/osteele/weft/internal/ssh"
+	srcsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -878,9 +879,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	effectiveStatus := job.EffectiveStatus()
 	if statusChanged && editStatus == db.StatusQueued {
 		if effectiveStatus == db.StatusQueued {
-			return fmt.Errorf("job %d is already queued", jobID)
-		}
-		if !requeueableStatuses[effectiveStatus] {
+			// Already queued — treat --retry as a no-op for status, but still
+			// allow the edit to proceed (e.g. to re-sync sources).
+			statusChanged = false
+		} else if !requeueableStatuses[effectiveStatus] {
 			return fmt.Errorf("cannot change job %d from '%s' to 'queued'; only killed/dead/failed/canceled jobs can be requeued", jobID, effectiveStatus)
 		}
 	} else if effectiveStatus != db.StatusQueued {
@@ -1161,25 +1163,40 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	} else {
 		// Job was already queued - update existing entry via sync path
 		job.DepSpec = depSpec
-		result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
-		if err != nil {
-			return err
+
+		// Re-sync sources so the queued job picks up local changes
+		if job.WorkingDir != "" && job.Host != "" {
+			localDir := workdir.ResolveLocal(job.WorkingDir)
+			remoteDir := workdir.ToTildeRelative(job.WorkingDir)
+			if err := srcsync.SyncSourcesToHost(job.Host, localDir, remoteDir, job.Inputs); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: source sync failed: %v\n", err)
+			}
 		}
-		if result.Deferred {
-			fmt.Printf("Job %d saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.ID, job.TargetDisplay())
-			deferredUpdate = true
+
+		// Update the remote queue entry (only if the job is placed on a host)
+		if job.Host != "" && job.UsesQueueRunner() {
+			result, err := ops.RequestQueueUpdate(database, job, ops.DefaultOptions())
+			if err != nil {
+				return err
+			}
+			if result.Deferred {
+				fmt.Printf("Job %d saved locally. %s is offline — changes will be applied automatically when the host is reachable.\n", job.ID, job.TargetDisplay())
+				deferredUpdate = true
+			}
 		}
 	}
 
 	if deferredUpdate {
 		fmt.Printf("Updated job %d locally (will apply to %s when reachable)\n", jobID, job.TargetDisplay())
+	} else if job.Host == "" {
+		fmt.Printf("Updated job %d (unplaced — sources will be synced at launch)\n", jobID)
 	} else {
 		fmt.Printf("Updated job %d in queue on %s\n", jobID, job.TargetDisplay())
 	}
 	for _, update := range updates {
 		fmt.Printf("  %s\n", update)
 	}
-	if len(updates) == 0 {
+	if len(updates) == 0 && job.Host != "" {
 		fmt.Println("  (no metadata fields changed)")
 	}
 	if syncErr := syncHostAfterQueueChange(database, job.Host); syncErr != nil && !deferredUpdate {

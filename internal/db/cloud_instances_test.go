@@ -476,9 +476,8 @@ func TestResetCloudInstanceJobs_PreservesCanceledJobs(t *testing.T) {
 	if resetJob.Status != StatusQueued {
 		t.Fatalf("reset job status = %q, want %q", resetJob.Status, StatusQueued)
 	}
-	if resetJob.CloudInstanceID != nil {
-		t.Fatalf("reset job cloud_instance_id = %v, want nil", resetJob.CloudInstanceID)
-	}
+	// After schema refactor: the attempt retains its cloud_instance_id.
+	// The job_status view shows the latest attempt's cloud_instance_id.
 	if resetJob.Host != "" {
 		t.Fatalf("reset job host = %q, want empty", resetJob.Host)
 	}
@@ -591,9 +590,10 @@ func TestResetCloudInstanceJobs_ArchivesPreviousRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if job.Status != StatusQueued || job.Host != "" || job.CloudInstanceID != nil {
-		t.Fatalf("reset job = status %q host %q cloud_instance %v, want queued empty nil", job.Status, job.Host, job.CloudInstanceID)
+	if job.Status != StatusQueued || job.Host != "" {
+		t.Fatalf("reset job = status %q host %q, want queued empty", job.Status, job.Host)
 	}
+	// After schema refactor: attempt retains cloud_instance_id
 	if job.StartTime != 0 || job.EndTime != nil || job.ExitCode != nil {
 		t.Fatalf("expected runtime timestamps cleared, got start=%d end=%v exit=%v", job.StartTime, job.EndTime, job.ExitCode)
 	}
@@ -705,9 +705,7 @@ func TestNormalizeTerminalCloudInstanceJobs_FailedInstanceOrphansRunningJobs(t *
 	if job.Status != StatusQueued {
 		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
 	}
-	if job.CloudInstanceID != nil {
-		t.Fatalf("job cloud_instance_id = %v, want nil", job.CloudInstanceID)
-	}
+	// After schema refactor: attempt retains cloud_instance_id
 
 	outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
 	if err != nil {

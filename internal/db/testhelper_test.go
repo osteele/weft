@@ -33,3 +33,16 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	return db
 }
+
+// setTestJobStatus updates both jobs and job_attempts tables for test setup.
+// Tests that directly set job status must use this to keep both tables in sync.
+func setTestJobStatus(db *sql.DB, jobID int64, status string, extra ...interface{}) {
+	db.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, status, jobID)
+	db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, status, jobID)
+}
+
+// setTestJobStatusWithEndTime updates both tables with status and end_time.
+func setTestJobStatusWithEndTime(db *sql.DB, jobID int64, status string, endTime int64) {
+	db.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, status, endTime, jobID)
+	db.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, status, endTime, jobID)
+}

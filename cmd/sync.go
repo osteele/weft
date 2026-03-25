@@ -466,7 +466,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		// Check current job status directly — skip if already terminal
 		var currentStatus string
 		var latestRunID sql.NullInt64
-		if err := database.QueryRow("SELECT status, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil || db.IsTerminalStatus(currentStatus) {
+		if err := database.QueryRow("SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil || db.IsTerminalStatus(currentStatus) {
 			// Job not found or already terminal — clean up stale R2 markers
 			_ = r2Client.DeletePrefix(ctx, r2keys.JobPrefix(jobID)+"/")
 			continue
@@ -619,7 +619,7 @@ func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, er
 	)
 	if err := database.QueryRow(
 		`SELECT status, latest_run_id, cloud_instance_id
-		 FROM jobs
+		 FROM job_status
 		 WHERE id = ? AND tombstoned = 0`,
 		jobID,
 	).Scan(&currentStatus, &latestRunID, &cloudInstanceID); err != nil {
@@ -666,7 +666,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	}
 
 	var cloudInstanceID sql.NullInt64
-	if err := database.QueryRow(`SELECT cloud_instance_id FROM jobs WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
+	if err := database.QueryRow(`SELECT cloud_instance_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
 		return 0, err
 	}
 
@@ -746,7 +746,7 @@ func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database 
 	var status string
 	var backend sql.NullString
 	var latestRunID sql.NullInt64
-	if err := database.QueryRow("SELECT status, backend, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend, &latestRunID); err != nil {
+	if err := database.QueryRow("SELECT status, backend, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &backend, &latestRunID); err != nil {
 		return nil
 	}
 	if db.IsTerminalStatus(status) {
@@ -801,7 +801,7 @@ func syncCloudLiveTimeseries(ctx context.Context, r2Client *r2.Client, database 
 func syncCloudLiveTelemetry(ctx context.Context, r2Client *r2.Client, database *sql.DB, jobID int64) error {
 	var status string
 	var latestRunID sql.NullInt64
-	if err := database.QueryRow("SELECT status, latest_run_id FROM jobs WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &latestRunID); err != nil {
+	if err := database.QueryRow("SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&status, &latestRunID); err != nil {
 		return nil
 	}
 	if db.IsTerminalStatus(status) {

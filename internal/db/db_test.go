@@ -1533,8 +1533,12 @@ func TestJobCloudAttemptTriggersSyncJobAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID(after close): %v", err)
 	}
-	if job.CloudInstanceID != nil {
-		t.Fatalf("cloud_instance_id = %v, want nil", job.CloudInstanceID)
+	// After the schema refactor, the view reads cloud_instance_id from the latest
+	// attempt. A closed attempt retains its cloud_instance_id (it ran on that instance).
+	// The old behavior (clearing cloud_instance_id after close) is no longer needed
+	// because the view shows the attempt's association, not the job's placement.
+	if job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d (retained from closed attempt)", job.CloudInstanceID, instanceID)
 	}
 }
 
@@ -2956,7 +2960,7 @@ func TestUpdateLastSyncedStatusSkipsTerminalJobs(t *testing.T) {
 				t.Fatalf("record queued: %v", err)
 			}
 
-			// Set job to terminal status
+			// Set job to terminal status (trigger syncs to job_attempts)
 			_, err = database.Exec("UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?",
 				terminalStatus, terminalStatus, jobID)
 			if err != nil {

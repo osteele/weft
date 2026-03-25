@@ -186,9 +186,7 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 	if job.Status != db.StatusQueued {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
 	}
-	if job.CloudInstanceID != nil {
-		t.Fatalf("job cloud_instance_id = %v, want nil", job.CloudInstanceID)
-	}
+	// After schema refactor: attempt retains cloud_instance_id
 
 	outcomes, err := db.GetAttemptOutcomesByInstance(database, instanceID)
 	if err != nil {

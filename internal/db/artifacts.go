@@ -203,7 +203,7 @@ func FindArtifactByNameOrPath(db *sql.DB, jobID int64, token string) (*Artifact,
 
 func latestRunIDForJob(db *sql.DB, jobID int64) (*int64, error) {
 	var runID sql.NullInt64
-	if err := db.QueryRow(`SELECT latest_run_id FROM jobs WHERE id = ?`, jobID).Scan(&runID); err != nil {
+	if err := db.QueryRow(`SELECT latest_run_id FROM job_status WHERE id = ?`, jobID).Scan(&runID); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}

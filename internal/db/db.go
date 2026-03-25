@@ -270,7 +270,7 @@ const jobSelectColumns = `id, host, session_name, working_dir, command, descript
 
 const jobRunSelectColumns = `id, job_id, archived_at, archive_reason, status, host, working_dir, command, description, session_name, queue_name, backend, remote_id, remote_state, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, job_metadata, placement_meta, cost, vastai_instance_id, retry_count, cloud_instance_id`
 
-const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
+const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id, requested_status`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
@@ -426,6 +426,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		cloud_instance_id INTEGER,
 		campaign_job_index INTEGER,
 		latest_run_id INTEGER,
+		requested_status TEXT,
 		CONSTRAINT jobs_status_check CHECK (%s),
 		CONSTRAINT jobs_pending_status_check CHECK (%s)
 	)`, ifClause, table,
@@ -767,6 +768,10 @@ func createCloudAttemptTriggers(db *sql.DB) error {
 			    host = '',
 			    placement_reasons = NULL
 			WHERE id = NEW.job_id;
+			UPDATE job_attempts
+			SET cloud_instance_id = NEW.cloud_instance_id,
+			    host = ''
+			WHERE id = (SELECT id FROM job_attempts WHERE job_id = NEW.job_id AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1);
 		END`,
 		`CREATE TRIGGER job_cloud_attempts_sync_job_on_close
 		AFTER UPDATE OF ended_at ON job_cloud_attempts
@@ -2043,6 +2048,16 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: create job_attempts table (one row per execution attempt).
+	if err := initJobAttemptsSchema(db); err != nil {
+		return err
+	}
+
+	// Migration: add requested_status column to jobs for user-level intent
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN requested_status TEXT`); err != nil {
+		return err
+	}
+
 	// Create job_runs table (archives overwritten execution state when a logical
 	// job row is reused for another attempt).
 	jobRunsSchema := `
@@ -2218,6 +2233,24 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Backfill job_attempts from existing jobs and job_runs data
+	if err := backfillJobAttempts(db); err != nil {
+		return err
+	}
+
+	// Create the job_status view (joins jobs with latest attempt)
+	if err := createJobStatusView(db); err != nil {
+		return err
+	}
+
+	// Sync triggers: mirror jobs writes to job_attempts
+	if err := createJobsToAttemptsSyncTrigger(db); err != nil {
+		return err
+	}
+	if err := createJobsInsertToAttemptsTrigger(db); err != nil {
+		return err
+	}
+
 	// Transfer bandwidth observations (used by internal/transferbw package).
 	// Defined here to avoid import cycle: db → transferbw → estimate → db.
 	if _, err := db.Exec(`
@@ -2374,6 +2407,7 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 		tx.Rollback()
 		return 0, err
 	}
+	// The INSERT trigger auto-creates an attempt
 	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), jobID)
 	if err != nil {
 		tx.Rollback()
@@ -2395,6 +2429,10 @@ func UpdateJobRunning(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	_, _ = tx.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+		StatusRunning, id, StatusStarting)
+	// Dual-write to jobs
 	if _, err := tx.Exec(
 		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
 		StatusRunning, id, StatusStarting,
@@ -2424,7 +2462,10 @@ func UpdateJobFailed(db *sql.DB, id int64, errorMsg string) error {
 	if err != nil {
 		return err
 	}
-	// Store error in error_message column (not description) for debugging
+	// Update attempt
+	_, _ = tx.Exec(`UPDATE job_attempts SET status = ?, end_time = ?, error_message = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+		StatusDead, endTime, errorMsg, id, StatusStarting)
+	// Dual-write to jobs
 	if _, err := tx.Exec(
 		`UPDATE jobs SET status = ?, end_time = ?, error_message = ? WHERE id = ? AND status = ?`,
 		StatusDead, endTime, errorMsg, id, StatusStarting,
@@ -2453,6 +2494,9 @@ func UpdateJobStartingToQueued(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	_ = MarkAttemptQueuedByID(tx, id)
+	// Dual-write to jobs
 	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusStarting)
 	if err != nil {
 		tx.Rollback()
@@ -2483,6 +2527,9 @@ func UpdateJobRunningToQueued(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	_ = MarkAttemptQueuedByID(tx, id)
+	// Dual-write to jobs
 	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status = ?`, jobSelectColumns), id, StatusRunning)
 	if err != nil {
 		tx.Rollback()
@@ -2527,7 +2574,7 @@ func UpdateJobGeneratedDescription(db *sql.DB, id int64, generatedDesc, generati
 
 // GetJobsNeedingDescriptions returns jobs without user or generated descriptions
 func GetJobsNeedingDescriptions(db *sql.DB, limit int) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		AND (description IS NULL OR description = '')
 		AND (generated_description IS NULL OR generated_description = '')
@@ -2560,6 +2607,9 @@ func UpdateJobCommand(db *sql.DB, id int64, command string) error {
 
 // UpdateJobHost updates the host for a job (only for queued jobs)
 func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET host = ? WHERE job_id = ? AND end_time IS NULL`, newHost, id)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET host = ? WHERE id = ? AND status = ?`,
 		newHost, id, StatusQueued,
@@ -2577,6 +2627,12 @@ func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) err
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	if err := UpdateAttemptCompletion(tx, id, exitCode, endTime); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs (will be removed after read migration)
 	if _, err := tx.Exec(
 		`UPDATE jobs SET exit_code = ?, end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?, ?, ?, ?, ?)`,
@@ -2609,6 +2665,12 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	if err := UpdateAttemptDead(tx, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs (will be removed after read migration)
 	if _, err := tx.Exec(
 		`UPDATE jobs SET end_time = ?, status = ?, last_synced_status = ?, pending_status = NULL, session_name = NULL
 		 WHERE id = ? AND status IN (?, ?, ?, ?)`,
@@ -2635,6 +2697,11 @@ func MarkDeadByID(db *sql.DB, id int64) error {
 // SetJobVastaiInstance stores the Vast.ai instance ID and backend on a job record.
 // This should be called immediately after creating the instance, before any other work.
 func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
+	// Update attempt
+	if err := SetAttemptVastaiInstance(db, jobID, instanceID); err != nil {
+		return err
+	}
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET vastai_instance_id = ?, backend = ? WHERE id = ?`,
 		instanceID, BackendVastai, jobID,
@@ -2647,6 +2714,11 @@ func SetJobVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
 
 // SetJobCost updates the actual cost for a cloud-run job.
 func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
+	// Update attempt
+	if err := SetAttemptCost(db, jobID, cost); err != nil {
+		return err
+	}
+	// Dual-write to jobs
 	_, err := db.Exec(`UPDATE jobs SET cost = ? WHERE id = ?`, cost, jobID)
 	if err != nil {
 		return err
@@ -2656,6 +2728,11 @@ func SetJobCost(db *sql.DB, jobID int64, cost float64) error {
 
 // SetJobPlacementMeta stores placement telemetry on a job record.
 func SetJobPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error {
+	// Update attempt
+	if err := SetAttemptPlacementMeta(db, jobID, meta); err != nil {
+		return err
+	}
+	// Dual-write to jobs
 	encoded, err := encodePlacementMeta(meta)
 	if err != nil {
 		return err
@@ -2699,7 +2776,7 @@ func decodePlacementMeta(value sql.NullString) *PlacementMeta {
 // ListActiveVastaiJobs returns jobs with backend=vastai that have an instance ID
 // and are in a non-terminal status.
 func ListActiveVastaiJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE backend = ? AND vastai_instance_id IS NOT NULL AND status NOT IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY id`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE backend = ? AND vastai_instance_id IS NOT NULL AND status NOT IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY id`, jobSelectColumns)
 	rows, err := db.Query(query, BackendVastai, StatusCompleted, StatusFailed, StatusKilled, StatusCanceled)
 	if err != nil {
 		return nil, err
@@ -2736,6 +2813,10 @@ func MarkJobDraftPending(db *sql.DB, id int64) error {
 
 // MarkRunningByID transitions a job from starting to running
 func MarkRunningByID(db *sql.DB, id int64) error {
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+		StatusRunning, id, StatusStarting)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
 		StatusRunning, id, StatusStarting,
@@ -2745,6 +2826,10 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 
 // MarkPausedByID transitions a job to paused from queued/starting/running.
 func MarkPausedByID(db *sql.DB, id int64) error {
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status IN (?, ?, ?)`,
+		StatusPaused, id, StatusQueued, StatusStarting, StatusRunning)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ? WHERE id = ? AND status IN (?, ?, ?)`,
 		StatusPaused, id, StatusQueued, StatusStarting, StatusRunning,
@@ -2754,6 +2839,10 @@ func MarkPausedByID(db *sql.DB, id int64) error {
 
 // MarkPausedFromTerminal transitions a job from a terminal status back to paused.
 func MarkPausedFromTerminal(db *sql.DB, id int64) error {
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE job_id = ? AND status IN (?, ?, ?, ?)`,
+		StatusPaused, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE id = ? AND status IN (?, ?, ?, ?)`,
 		StatusPaused, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
@@ -2763,6 +2852,10 @@ func MarkPausedFromTerminal(db *sql.DB, id int64) error {
 
 // MarkRunningFromPaused transitions a job from paused back to running.
 func MarkRunningFromPaused(db *sql.DB, id int64) error {
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
+		StatusRunning, id, StatusPaused)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ? WHERE id = ? AND status = ?`,
 		StatusRunning, id, StatusPaused,
@@ -2777,6 +2870,24 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Close current attempt, create new running attempt
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`
+		UPDATE job_attempts SET end_time = COALESCE(end_time, ?)
+		WHERE job_id = ? AND end_time IS NULL`, now, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	attemptID, err := createAttemptTx(tx, id, "", nil, StatusRunning)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE job_attempts SET last_synced_status = ? WHERE id = ?`, StatusRunning, attemptID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ? AND status IN (?, ?, ?, ?)`, jobSelectColumns), id, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
 	if err != nil {
 		tx.Rollback()
@@ -2820,6 +2931,12 @@ func MarkQueuedJobRunning(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	if err := UpdateAttemptRunning(tx, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	if _, err := tx.Exec(
 		`UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ? AND status = ?`,
 		StatusRunning, StatusRunning, id, StatusQueued,
@@ -2854,6 +2971,12 @@ func MarkQueuedByID(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	if err := MarkAttemptQueuedByID(tx, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
 	if err != nil {
 		tx.Rollback()
@@ -2891,6 +3014,11 @@ func ClearQueueAssignment(db *sql.DB, id int64) error {
 // SetPendingStatus sets the pending (target) status for a job.
 // This represents what the user wants the job state to become.
 func SetPendingStatus(db *sql.DB, jobID int64, status string) error {
+	// Update attempt
+	if err := SetAttemptPendingStatus(db, jobID, status); err != nil {
+		return err
+	}
+	// Dual-write to jobs
 	now := time.Now().Unix()
 	_, err := db.Exec(
 		`UPDATE jobs SET pending_status = ?, pending_at = ? WHERE id = ?`,
@@ -2901,6 +3029,11 @@ func SetPendingStatus(db *sql.DB, jobID int64, status string) error {
 
 // ClearPendingStatus clears the pending status after reconciliation succeeds.
 func ClearPendingStatus(db *sql.DB, jobID int64) error {
+	// Update attempt
+	if err := ClearAttemptPendingStatus(db, jobID); err != nil {
+		return err
+	}
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET pending_status = NULL, pending_at = NULL WHERE id = ?`,
 		jobID,
@@ -2910,6 +3043,13 @@ func ClearPendingStatus(db *sql.DB, jobID int64) error {
 
 // UpdateLastSyncedStatus updates the base status (what remote was at last sync).
 func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
+	// Update attempt (skip if attempt is in terminal status)
+	_, _ = db.Exec(`
+		UPDATE job_attempts SET last_synced_status = ?
+		WHERE id = `+latestOpenAttemptSubquery+`
+		  AND status NOT IN (?, ?, ?, ?)`,
+		status, jobID, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET last_synced_status = ? WHERE id = ? AND status NOT IN (?, ?, ?, ?)`,
 		status, jobID, StatusFailed, StatusDead, StatusKilled, StatusCanceled,
@@ -2921,6 +3061,9 @@ func UpdateLastSyncedStatus(db *sql.DB, jobID int64, status string) error {
 // needing re-dispatch. Used when the runner state shows a job is missing despite
 // the DB believing it was already dispatched.
 func ResetLastSyncedStatus(db *sql.DB, jobID int64) error {
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET last_synced_status = NULL WHERE job_id = ? AND end_time IS NULL`, jobID)
+	// Dual-write to jobs
 	_, err := db.Exec(`UPDATE jobs SET last_synced_status = NULL WHERE id = ?`, jobID)
 	return err
 }
@@ -2928,6 +3071,9 @@ func ResetLastSyncedStatus(db *sql.DB, jobID int64) error {
 // UpdateStatusAndLastSynced updates both the current status and last synced status together.
 // Used when sync confirms the remote state.
 func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
+	// Update attempt
+	_ = UpdateAttemptStatusAndLastSynced(db, jobID, status)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?`,
 		status, status, jobID,
@@ -2939,6 +3085,9 @@ func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
 // Used when reconciliation succeeds or when accepting remote state.
 // Clears session_name for non-running states per spec: SessionImpliesRunning.
 func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
+	// Update attempt
+	_ = ClearAttemptPendingAndUpdateStatus(db, jobID, status)
+
 	if status == StatusQueued || status == StatusDraft {
 		tx, err := db.Begin()
 		if err != nil {
@@ -3000,6 +3149,25 @@ func RequeueByID(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Close current attempt + create new one with pending_status
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`
+		UPDATE job_attempts SET end_time = COALESCE(end_time, ?), pending_status = NULL
+		WHERE job_id = ? AND end_time IS NULL`, now, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	attemptID, err := createAttemptTx(tx, id, "", nil, StatusQueued)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Set pending_status on the new attempt (requeue needs re-dispatch)
+	if _, err := tx.Exec(`UPDATE job_attempts SET pending_status = ? WHERE id = ?`, StatusQueued, attemptID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	job, err := queryJobTx(tx, fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns), id)
 	if err != nil {
 		tx.Rollback()
@@ -3044,6 +3212,9 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt
+	_, _ = db.Exec(`UPDATE job_attempts SET host = '', cloud_instance_id = NULL, pending_status = NULL, pending_at = NULL, last_synced_status = NULL, queued_at = NULL WHERE job_id = ? AND end_time IS NULL`, id)
+	// Dual-write to jobs
 	_, err = db.Exec(
 		`UPDATE jobs
 		 SET host = '',
@@ -3077,6 +3248,26 @@ func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
 	if job == nil {
 		return tx.Commit()
 	}
+	// Close current attempt + create new unplaced one
+	now := time.Now().Unix()
+	if _, err := tx.Exec(`
+		UPDATE job_attempts SET end_time = COALESCE(end_time, ?), pending_status = NULL
+		WHERE job_id = ? AND end_time IS NULL`, now, jobID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Update placement_reasons on the job
+	reasons := resetJobPlacementReasons(job)
+	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
+		encodeStringSlice(reasons), jobID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	if err := archiveJobRunTx(tx, job, "reset_to_unplaced"); err != nil {
 		tx.Rollback()
 		return err
@@ -3085,9 +3276,9 @@ func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
 		`UPDATE jobs SET status = ?, pending_status = ?, host = '', cloud_instance_id = NULL,
 		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
 		 session_name = NULL, last_synced_status = NULL, failure_reason = NULL,
-		 error_diagnosis = NULL, remote_state = NULL, remote_id = NULL, placement_reasons = ?
+		 error_diagnosis = NULL, remote_state = NULL, remote_id = NULL
 		 WHERE id = ?`,
-		StatusQueued, StatusQueued, encodeStringSlice(resetJobPlacementReasons(job)), jobID,
+		StatusQueued, StatusQueued, jobID,
 	); err != nil {
 		tx.Rollback()
 		return err
@@ -3214,6 +3405,7 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 		if err != nil {
 			return 0, err
 		}
+		// INSERT trigger auto-creates an attempt
 		return id, nil
 	}
 	result, err := db.Exec(
@@ -3224,6 +3416,7 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 	if err != nil {
 		return 0, err
 	}
+	// INSERT trigger auto-creates an attempt
 	return result.LastInsertId()
 }
 
@@ -3339,6 +3532,9 @@ func SetJobMetadata(db *sql.DB, jobID int64, meta *JobMetadata) error {
 	if err != nil {
 		return err
 	}
+	// Update attempt (use latest, not just open — metadata can be set after completion)
+	_, _ = db.Exec(`UPDATE job_attempts SET job_metadata = ? WHERE id = `+latestAttemptSubquery, value, jobID)
+	// Dual-write to jobs
 	_, err = db.Exec(`UPDATE jobs SET job_metadata = ? WHERE id = ?`, value, jobID)
 	if err != nil {
 		return err
@@ -3596,7 +3792,7 @@ func repairPlaceholderProjectsInTable(db *sql.DB, table string) error {
 
 // ListQueuedJobsWithDependency returns queued jobs whose dependency list references depID.
 func ListQueuedJobsWithDependency(db *sql.DB, depID int64) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND dep_spec IS NOT NULL AND dep_spec != '' AND tombstoned = 0`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND dep_spec IS NOT NULL AND dep_spec != '' AND tombstoned = 0`, jobSelectColumns)
 	jobs, err := queryJobs(db, query, StatusQueued)
 	if err != nil {
 		return nil, err
@@ -3665,7 +3861,7 @@ func ReplaceDepSpecID(spec string, oldID, newID int64) (string, bool) {
 
 // ListQueued returns queued jobs for a host and queue name
 func ListQueued(db *sql.DB, host, queueName string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, StatusQueued, host)
 }
 
@@ -3675,9 +3871,16 @@ func UpdateQueuedToRunning(db *sql.DB, id int64) error {
 	if err != nil {
 		return err
 	}
+	now := time.Now().Unix()
+	// Update attempt
+	if err := UpdateAttemptRunning(tx, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Dual-write to jobs
 	if _, err := tx.Exec(
 		`UPDATE jobs SET status = ?, start_time = ? WHERE id = ? AND status = ?`,
-		StatusRunning, time.Now().Unix(), id, StatusQueued,
+		StatusRunning, now, id, StatusQueued,
 	); err != nil {
 		tx.Rollback()
 		return err
@@ -3821,27 +4024,27 @@ func TombstoneJob(db *sql.DB, id int64) error {
 // GetTombstonedActiveJobs returns jobs that are tombstoned but still marked as running/queued/starting
 // These need to be killed on remote hosts during sync
 func GetTombstonedActiveJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 1 AND status IN (?, ?, ?, ?)`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 1 AND status IN (?, ?, ?, ?)`, jobSelectColumns)
 	return queryJobs(db, query, StatusRunning, StatusQueued, StatusStarting, StatusPaused)
 }
 
 // GetJob retrieves a job by host and session name (most recent)
 func GetJob(db *sql.DB, host, sessionName string) (*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND session_name = ? ORDER BY start_time DESC LIMIT 1`, jobSelectColumns)
 	row := db.QueryRow(query, host, sessionName)
 	return scanJob(row)
 }
 
 // GetJobByID retrieves a job by ID
 func GetJobByID(db *sql.DB, id int64) (*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE id = ?`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE id = ?`, jobSelectColumns)
 	row := db.QueryRow(query, id)
 	return scanJob(row)
 }
 
 // GetRunningJobsByHost retrieves all running jobs for a specific host
 func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?) ORDER BY start_time DESC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status IN (?, ?) ORDER BY start_time DESC`, jobSelectColumns)
 	rows, err := db.Query(query, host, StatusRunning, StatusPaused)
 	if err != nil {
 		return nil, err
@@ -3853,7 +4056,7 @@ func GetRunningJobsByHost(db *sql.DB, host string) ([]*Job, error) {
 
 // GetJobsByHostAndStatus retrieves jobs for a specific host with a specific status
 func GetJobsByHostAndStatus(db *sql.DB, host, status string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0 ORDER BY created_at ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND tombstoned = 0 ORDER BY created_at ASC`, jobSelectColumns)
 	rows, err := db.Query(query, host, status)
 	if err != nil {
 		return nil, err
@@ -3865,7 +4068,7 @@ func GetJobsByHostAndStatus(db *sql.DB, host, status string) ([]*Job, error) {
 
 // GetJobsByHost retrieves all jobs for a specific host
 func GetJobsByHost(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? ORDER BY id DESC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? ORDER BY id DESC`, jobSelectColumns)
 	rows, err := db.Query(query, host)
 	if err != nil {
 		return nil, err
@@ -4494,7 +4697,7 @@ func ListJobs(db *sql.DB, status, host string, limit int, tags []string, process
 // ListJobsWithMaxAge returns jobs, optionally filtered by status, host, and age.
 // maxAgeDays of 0 means no age limit.
 func ListJobsWithMaxAge(db *sql.DB, status, host string, limit, maxAgeDays int, tags []string, processedFilter string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_effective_state WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_effective_state"))
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_status"))
 	args := []interface{}{}
 
 	if status != "" {
@@ -4536,7 +4739,7 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 		return ListJobsWithMaxAge(db, status, "", limit, maxAgeDays, tags, processedFilter)
 	}
 
-	query := fmt.Sprintf(`SELECT %s FROM job_effective_state WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_effective_state"))
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 0`, qualifiedJobSelectColumns("job_status"))
 	args := []interface{}{}
 
 	if status != "" {
@@ -4576,13 +4779,13 @@ func ListJobsWithMaxAgeForHosts(db *sql.DB, status string, hosts []string, limit
 
 // ListRunning returns running jobs for a host
 func ListRunning(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND host = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
 	return queryJobs(db, query, StatusRunning, host)
 }
 
 // ListAllRunning returns all running jobs across all hosts
 func ListAllRunning(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND tombstoned = 0 ORDER BY start_time DESC`, jobSelectColumns)
 	return queryJobs(db, query, StatusRunning)
 }
 
@@ -4590,7 +4793,7 @@ func ListAllRunning(db *sql.DB) ([]*Job, error) {
 // Includes: completed with non-zero exit code, status=failed, status=dead
 func ListRecentFailed(db *sql.DB, limit int) ([]*Job, error) {
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
-	query := fmt.Sprintf(`SELECT %s FROM jobs
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		AND end_time > ?
 		AND (
@@ -4606,7 +4809,7 @@ func ListRecentFailed(db *sql.DB, limit int) ([]*Job, error) {
 // ListUnprocessedJobs returns non-draft, non-tombstoned jobs without the
 // reserved processed tag.
 func ListUnprocessedJobs(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0 AND status != ?
 		ORDER BY CASE WHEN status IN ('running', 'starting', 'paused') THEN 0 ELSE 1 END, id DESC`, jobSelectColumns)
 	jobs, err := queryJobs(db, query, StatusDraft)
@@ -4619,7 +4822,7 @@ func ListUnprocessedJobs(db *sql.DB) ([]*Job, error) {
 // ListRecentTerminalJobs returns terminal jobs whose end time is at or after
 // the provided Unix timestamp.
 func ListRecentTerminalJobs(db *sql.DB, sinceUnix int64) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		AND end_time IS NOT NULL
 		AND end_time >= ?
@@ -4630,6 +4833,9 @@ func ListRecentTerminalJobs(db *sql.DB, sinceUnix int64) ([]*Job, error) {
 
 // UpdateErrorDiagnosis stores an error diagnosis and increments retry count for a job.
 func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int) error {
+	// Update attempt
+	_ = SetAttemptErrorDiagnosis(db, id, diagnosis)
+	// Dual-write to jobs
 	_, err := db.Exec(
 		`UPDATE jobs SET error_diagnosis = ?, retry_count = ? WHERE id = ?`,
 		diagnosis, retryCount, id,
@@ -4650,7 +4856,7 @@ func UpdateRunErrorDiagnosis(db *sql.DB, runID int64, diagnosis string) error {
 // These are completed jobs with non-zero exit code, retry_count == 0, and no error_diagnosis.
 func ListRecentFailedUndiagnosed(db *sql.DB, limit int) ([]*Job, error) {
 	cutoff := time.Now().Add(-24 * time.Hour).Unix()
-	query := fmt.Sprintf(`SELECT %s FROM jobs
+	query := fmt.Sprintf(`SELECT %s FROM job_status
 		WHERE tombstoned = 0
 		AND end_time > ?
 		AND status = ?
@@ -4776,7 +4982,7 @@ func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
 
 // ListActiveJobs returns all running and queued jobs for a host
 func ListActiveJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status IN (?, ?, ?, ?) AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusRunning, StatusStarting, StatusPaused, StatusQueued)
 }
 
@@ -4794,7 +5000,7 @@ func ListActiveOnPremJobs(db *sql.DB) ([]*Job, error) {
 // ListUnsyncedQueuedJobs returns queued jobs on a host that haven't been pushed
 // to the remote queue yet (last_synced_status is not 'queued' and no pending operation).
 func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND (last_synced_status IS NULL OR last_synced_status != ?) AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND (last_synced_status IS NULL OR last_synced_status != ?) AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusQueued, StatusQueued)
 }
 
@@ -4802,13 +5008,13 @@ func ListUnsyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
 // the remote queue (last_synced_status = 'queued') but may be missing from the
 // runner's live state (e.g. runner crashed before processing the command).
 func ListSyncedQueuedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND last_synced_status = ? AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND last_synced_status = ? AND pending_status IS NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusQueued, StatusQueued)
 }
 
 // ListDraftJobsPendingSync returns draft jobs that still need remote cleanup.
 func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?) ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?) ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, StatusDraft, StatusDraft, StatusDraft)
 }
 
@@ -4816,7 +5022,7 @@ func ListDraftJobsPendingSync(db *sql.DB, host string) ([]*Job, error) {
 // These are jobs where the user requested a status change (kill, cancel, etc.) that
 // may not have been applied to the remote yet.
 func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND pending_status IS NOT NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND pending_status IS NOT NULL AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host)
 }
 
@@ -4824,13 +5030,13 @@ func ListJobsPendingReconciliation(db *sql.DB, host string) ([]*Job, error) {
 // These are queue runner jobs (no session name) that are in terminal status (failed, dead)
 // but may have been re-queued and started again.
 func ListPotentiallyRestartedJobs(db *sql.DB, host string) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE host = ? AND (backend IS NULL OR backend = ?) AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE host = ? AND (backend IS NULL OR backend = ?) AND status IN (?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, host, BackendQueueRunner, StatusFailed, StatusDead)
 }
 
 // ListAllQueued returns all queued jobs across all hosts
 func ListAllQueued(db *sql.DB) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE status = ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE status = ? AND tombstoned = 0 ORDER BY start_time ASC`, jobSelectColumns)
 	return queryJobs(db, query, StatusQueued)
 }
 
@@ -4856,7 +5062,7 @@ func ListUniqueHosts(db *sql.DB) ([]string, error) {
 // SearchJobs searches jobs by description or command
 func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 	pattern := "%" + query + "%"
-	stmt := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0 AND (description LIKE ? OR command LIKE ?) ORDER BY start_time DESC`, jobSelectColumns)
+	stmt := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 0 AND (description LIKE ? OR command LIKE ?) ORDER BY start_time DESC`, jobSelectColumns)
 	args := []interface{}{pattern, pattern}
 	if limit > 0 {
 		stmt += ` LIMIT ?`
@@ -4905,7 +5111,7 @@ func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 
 // ListJobsForPrune returns jobs that would be deleted by prune
 func ListJobsForPrune(db *sql.DB, deadOnly bool, olderThan *time.Time) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM jobs WHERE tombstoned = 0 AND `, jobSelectColumns)
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE tombstoned = 0 AND `, jobSelectColumns)
 	var args []interface{}
 
 	if deadOnly {
