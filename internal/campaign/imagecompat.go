@@ -88,6 +88,23 @@ func cudaMajorMinorVersion(ver string) string {
 	return ver
 }
 
+// isPyTorchImage returns true if the image is a pytorch/pytorch image.
+func isPyTorchImage(image string) bool {
+	return imageRepo(image) == "pytorch/pytorch"
+}
+
+// torchImageForCUDAVersion returns a popular PyTorch Docker image tag for the
+// given CUDA major.minor version, or "" if no known image exists. The selected
+// images are widely used on Vast.ai and likely pre-cached in data centers.
+func torchImageForCUDAVersion(cudaMajorMinor string) string {
+	switch cudaMajorMinor {
+	case "12.4":
+		return "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime"
+	default:
+		return ""
+	}
+}
+
 // imageSupremum returns the most capable compatible image for both a and b,
 // or ok=false if they are incompatible.
 //
@@ -95,6 +112,12 @@ func cudaMajorMinorVersion(ver string) string {
 // CUDA images with the same version and OS but different variants (base/runtime/devel)
 // are compatible — the higher-capability variant is returned.
 // Non-CUDA images are only compatible with exact matches.
+//
+// When comparing across frameworks (pytorch vs nvidia/cuda), pytorch subsumes
+// nvidia/cuda at runtime level, so pytorch/pytorch:...-runtime beats
+// nvidia/cuda:...-runtime. However, nvidia/cuda:...-devel (with nvcc/build tools)
+// is incompatible with pytorch/pytorch:...-runtime since neither fully subsumes
+// the other.
 func imageSupremum(a, b string) (merged string, ok bool) {
 	// Resolve empty to default
 	if a == "" {
@@ -122,18 +145,27 @@ func imageSupremum(a, b string) (merged string, ok bool) {
 		return "", false
 	}
 
-	// Return the higher-capability image. Compare by variant rank first,
-	// then by framework rank (pytorch > nvidia/cuda at same variant).
+	aFramework := imageFrameworkRank[imageRepo(a)]
+	bFramework := imageFrameworkRank[imageRepo(b)]
 	aRank := cudaVariantRank[aVar]
 	bRank := cudaVariantRank[bVar]
-	if aRank != bRank {
-		if aRank > bRank {
+
+	// Cross-framework with different variant ranks: incompatible.
+	// e.g. pytorch/pytorch:...-runtime vs nvidia/cuda:...-devel —
+	// neither fully subsumes the other.
+	if aFramework != bFramework && aRank != bRank {
+		return "", false
+	}
+
+	// Same framework: pick higher variant rank
+	if aFramework == bFramework {
+		if aRank >= bRank {
 			return a, true
 		}
 		return b, true
 	}
-	aFramework := imageFrameworkRank[imageRepo(a)]
-	bFramework := imageFrameworkRank[imageRepo(b)]
+
+	// PyTorch images are supersets of plain CUDA images at the same variant level.
 	if aFramework >= bFramework {
 		return a, true
 	}

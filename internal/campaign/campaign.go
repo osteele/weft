@@ -2,10 +2,12 @@
 package campaign
 
 import (
+	"log"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/workdir"
@@ -99,6 +101,10 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 		jobs  []*db.Job
 	}
 
+	// Pre-compute the auto-selected PyTorch image (constant across all jobs).
+	defaultCUDA, _, _ := parseCUDAImage(cloud.DefaultImage)
+	autoTorchImage := torchImageForCUDAVersion(defaultCUDA)
+
 	var result []InstanceGroup
 	for _, g := range groups {
 		var subs []imageGroup
@@ -106,6 +112,21 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 		for _, job := range g.Jobs {
 			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 			img := config.ProjectCloudImage(localDir)
+
+			hasTorch := localDir != "" && hasCUDAPackages([]string{localDir})
+
+			// Auto-select a PyTorch image when the project depends on torch
+			// but no explicit image is configured. This avoids a ~5min cold
+			// uv sync of torch + CUDA wheels on every instance launch.
+			if img == "" && hasTorch && autoTorchImage != "" {
+				img = autoTorchImage
+			}
+
+			// Warn when an explicit image doesn't include PyTorch but the
+			// project has torch dependencies.
+			if img != "" && hasTorch && !isPyTorchImage(img) {
+				log.Printf("warning: job %d has torch dependencies but image %q does not include PyTorch — consider a pytorch/pytorch image", job.ID, img)
+			}
 
 			merged := false
 			for i := range subs {

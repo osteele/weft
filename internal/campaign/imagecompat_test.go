@@ -1,6 +1,33 @@
 package campaign
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestTorchImageForCUDAVersion(t *testing.T) {
+	// Known CUDA version returns a pytorch image
+	img := torchImageForCUDAVersion("12.4")
+	if img == "" {
+		t.Fatal("expected pytorch image for CUDA 12.4")
+	}
+	if !strings.HasPrefix(img, "pytorch/pytorch:") {
+		t.Errorf("expected pytorch/pytorch: prefix, got %q", img)
+	}
+	// Verify the image parses correctly
+	cudaVer, _, ok := parseCUDAImage(img)
+	if !ok {
+		t.Fatalf("torchImageForCUDAVersion returned unparseable image %q", img)
+	}
+	if cudaVer != "12.4" {
+		t.Errorf("image CUDA version = %q, want 12.4", cudaVer)
+	}
+
+	// Unknown CUDA version returns empty
+	if got := torchImageForCUDAVersion("11.8"); got != "" {
+		t.Errorf("expected empty for unknown CUDA version, got %q", got)
+	}
+}
 
 func TestParseCUDAImage(t *testing.T) {
 	tests := []struct {
@@ -85,6 +112,14 @@ func TestImageSupremum(t *testing.T) {
 		// Non-CUDA images — only exact match
 		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
 		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.5.0-cuda12.4-cudnn9-runtime", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", true},
+
+		// Cross-framework with different variant ranks — incompatible
+		// pytorch runtime doesn't have build tools; nvidia devel doesn't have pytorch
+		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "nvidia/cuda:12.4.1-devel-ubuntu22.04", "", false},
+		{"nvidia/cuda:12.4.1-devel-ubuntu22.04", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime", "", false},
+
+		// Cross-framework same variant — pytorch wins
+		{"pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", "nvidia/cuda:12.4.1-devel-ubuntu22.04", "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", true},
 
 		// Non-CUDA image — incompatible
 		{"nvidia/cuda:12.4.1-runtime-ubuntu22.04", "ubuntu:22.04", "", false},

@@ -26,6 +26,11 @@ const BaseOverheadGB = 6
 // Linux CUDA wheels, which are ~10x larger than macOS wheels.
 const CUDAOverheadGB = 18
 
+// CUDAOverheadWithPyTorchImageGB is the reduced overhead when using a
+// pytorch/pytorch base image. Torch + CUDA runtime wheels are pre-installed
+// in the image, so only non-torch wheels and uv cache are needed.
+const CUDAOverheadWithPyTorchImageGB = 6
+
 // NonCUDAOverheadGB is the Python overhead when no CUDA packages are detected.
 const NonCUDAOverheadGB = 3
 
@@ -52,7 +57,7 @@ func imageOverheadGB(image string) int {
 	if image == "" {
 		return 0 // default image, already in BaseOverheadGB
 	}
-	if strings.HasPrefix(image, "pytorch/pytorch:") {
+	if isPyTorchImage(image) {
 		return 6 // pytorch runtime ~10 GB on disk vs ~4 GB default
 	}
 	// Unknown image — add a moderate buffer
@@ -90,7 +95,11 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 
 	overhead := BaseOverheadGB + imageOverheadGB(group.Image)
 	if hasCUDAPackages(group.SourceDirs()) {
-		overhead += CUDAOverheadGB
+		if isPyTorchImage(group.Image) {
+			overhead += CUDAOverheadWithPyTorchImageGB
+		} else {
+			overhead += CUDAOverheadGB
+		}
 	} else {
 		overhead += NonCUDAOverheadGB
 	}

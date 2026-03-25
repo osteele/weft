@@ -184,6 +184,14 @@ func Test_hasCUDAPackages(t *testing.T) {
 	}
 }
 
+func Test_CUDAOverheadWithPyTorchImage(t *testing.T) {
+	// pytorch/pytorch image should use reduced overhead
+	if CUDAOverheadWithPyTorchImageGB >= CUDAOverheadGB {
+		t.Errorf("CUDAOverheadWithPyTorchImageGB (%d) should be less than CUDAOverheadGB (%d)",
+			CUDAOverheadWithPyTorchImageGB, CUDAOverheadGB)
+	}
+}
+
 func Test_hasCUDAPackages_NoPyproject(t *testing.T) {
 	dir := t.TempDir()
 	if hasCUDAPackages([]string{dir}) {
