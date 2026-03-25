@@ -202,11 +202,9 @@ func TestFormatWatchInstanceBlockUsesLivePhaseForActiveJobStatus(t *testing.T) {
 	if !strings.Contains(out, "  205  uploading") {
 		t.Fatalf("expected active phase job to show uploading status, got:\n%s", out)
 	}
-	if strings.Contains(out, "  226  running") {
-		t.Fatalf("expected stale running row to be suppressed while job 205 is active, got:\n%s", out)
-	}
-	if !strings.Contains(out, "  226  queued") {
-		t.Fatalf("expected non-active stale running row to fall back to queued, got:\n%s", out)
+	// Non-active jobs show their DB status as-is — no demotion to queued.
+	if !strings.Contains(out, "  226  running") {
+		t.Fatalf("expected non-active job to retain DB status, got:\n%s", out)
 	}
 }
 

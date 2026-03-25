@@ -401,7 +401,10 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 
 	out, err := cloud.RunOnInstance(inst, remoteCmd, 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("ssh to cloud instance: %w", err)
+		// Log file may not exist if the job already finished and the
+		// agent cleaned the log directory. Fall back to R2.
+		fmt.Fprintf(os.Stderr, "Warning: SSH log read failed (%v); trying R2\n", err)
+		return runLogFromR2(cmd, job)
 	}
 
 	if defaultTailHint {

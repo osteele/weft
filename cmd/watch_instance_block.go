@@ -99,15 +99,9 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 
 		displayStatus := displayStatuses[i]
 		statusText := displayStatus
-		if activePhaseJobID != 0 {
-			switch {
-			case job.ID == activePhaseJobID && activePhaseStatus != "":
-				displayStatus = activePhaseStatus
-				statusText = activePhaseStatus
-			case job.ID != activePhaseJobID && isWatchActiveJobDBStatus(displayStatus):
-				displayStatus = db.StatusQueued
-				statusText = db.StatusQueued
-			}
+		if activePhaseJobID != 0 && job.ID == activePhaseJobID && activePhaseStatus != "" {
+			displayStatus = activePhaseStatus
+			statusText = activePhaseStatus
 		}
 		if progress := watchJobProgressPercent(update, job, displayStatus, jobProgressHWM); progress > 0 {
 			statusText = fmt.Sprintf("running %3d%%", progress)
@@ -148,15 +142,6 @@ func watchActivePhaseStatus(phase string) (int64, string) {
 		return jobID, db.StatusFailed
 	default:
 		return 0, ""
-	}
-}
-
-func isWatchActiveJobDBStatus(status string) bool {
-	switch status {
-	case db.StatusRunning, db.StatusStarting, db.StatusPaused:
-		return true
-	default:
-		return false
 	}
 }
 
