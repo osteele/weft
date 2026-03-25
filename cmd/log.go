@@ -314,10 +314,9 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 }
 
 // runLogForCloudJob fetches log output for a cloud-based job.
-// For running jobs, it SSHes into the cloud instance (same as on-prem).
-// For terminal jobs, it fetches from R2.
+// Uses local cache → R2 → SSH (live follow only) in that order.
 func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
-	// For terminal jobs, prefer local cache first.
+	// Prefer local cache for terminal jobs.
 	if shouldPreferCachedLog(job.Status) {
 		if cached, err := logcache.Read(job.ID); err == nil {
 			isComplete := logcache.IsComplete(job.ID)
@@ -333,16 +332,16 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 		}
 	}
 
-	// For running jobs, SSH into the cloud instance to read the log directly
-	if !isTerminalStatus(job.Status) {
+	// Follow mode requires a live SSH connection to the instance.
+	if logFollow && !isTerminalStatus(job.Status) {
 		inst, err := resolveCloudInstanceSSH(database, job)
 		if err == nil {
 			return runLogViaCloudSSH(cmd, database, job, inst)
 		}
-		// Fall through to R2 if we can't resolve SSH details
-		fmt.Fprintf(os.Stderr, "Warning: could not resolve cloud instance SSH (%v); trying R2\n", err)
+		fmt.Fprintf(os.Stderr, "Warning: could not resolve cloud instance SSH (%v); showing current R2 log\n", err)
 	}
 
+	// Default: fetch from R2 (works for both running and completed jobs).
 	return runLogFromR2(cmd, database, job)
 }
 
