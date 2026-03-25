@@ -5259,6 +5259,24 @@ func startNewLatestRunTx(tx *sql.Tx, job *Job, reason string) error {
 	return setJobLatestRunIDTx(tx, job.ID, runID)
 }
 
+// GetJobRunIDs returns all run IDs for a job, ordered most recent first.
+func GetJobRunIDs(database *sql.DB, jobID int64) ([]int64, error) {
+	rows, err := database.Query(`SELECT id FROM job_runs WHERE job_id = ? ORDER BY id DESC`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func archiveJobRunTx(tx *sql.Tx, job *Job, reason string) error {
 	if !shouldArchiveJobRun(job) {
 		return nil

@@ -343,7 +343,7 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 		fmt.Fprintf(os.Stderr, "Warning: could not resolve cloud instance SSH (%v); trying R2\n", err)
 	}
 
-	return runLogFromR2(cmd, job)
+	return runLogFromR2(cmd, database, job)
 }
 
 // resolveCloudInstanceSSH looks up the cloud instance for a job and returns its SSH details.
@@ -404,7 +404,7 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 		// Log file may not exist if the job already finished and the
 		// agent cleaned the log directory. Fall back to R2.
 		fmt.Fprintf(os.Stderr, "Warning: SSH log read failed (%v); trying R2\n", err)
-		return runLogFromR2(cmd, job)
+		return runLogFromR2(cmd, database, job)
 	}
 
 	if defaultTailHint {
@@ -417,7 +417,9 @@ func runLogViaCloudSSH(cmd *cobra.Command, database *sql.DB, job *db.Job, inst *
 }
 
 // runLogFromR2 fetches log output from R2 for a cloud-based job.
-func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
+// Tries LatestRunID first, then falls back to other known run IDs
+// (handles cases where the run ID changed after the agent was given its manifest).
+func runLogFromR2(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
 	if logFollow {
 		fmt.Fprintf(os.Stderr, "Follow mode is not supported for cloud job logs from R2; showing current log.\n")
 	}
@@ -426,7 +428,28 @@ func runLogFromR2(cmd *cobra.Command, job *db.Job) error {
 	if job.LatestRunID != nil {
 		runID = *job.LatestRunID
 	}
-	return fetchAndDisplayLogFromR2(cmd, job, runID)
+	err := fetchAndDisplayLogFromR2(cmd, job, runID)
+	if err == nil {
+		return nil
+	}
+
+	// Try other known run IDs for this job (the agent may have used an
+	// older run ID from the manifest if latest_run_id was bumped after launch).
+	if database != nil {
+		runIDs, dbErr := db.GetJobRunIDs(database, job.ID)
+		if dbErr == nil {
+			for _, altRunID := range runIDs {
+				if altRunID == runID {
+					continue
+				}
+				if altErr := fetchAndDisplayLogFromR2(cmd, job, altRunID); altErr == nil {
+					return nil
+				}
+			}
+		}
+	}
+
+	return err
 }
 
 // fetchAndDisplayLogFromR2 fetches a log from R2 with the given runID, displays it, and caches if terminal.
