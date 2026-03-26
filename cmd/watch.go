@@ -14,13 +14,19 @@ import (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch [job-id... | campaign | instance | project]",
+	Use:   "watch [job-id... | jobs | campaign | instance | project]",
 	Short: "Watch jobs, instances, campaigns, or projects",
 	Long: `Watch active system state.
 
 With job IDs, watches those specific jobs until they reach a terminal state.
 Without arguments, watches all cloud instances and on-prem jobs (same as
-"weft watch instance"). Use a subcommand to watch a specific resource type.`,
+"weft watch instance"). Use a subcommand to watch a specific resource type.
+
+Subcommands:
+  jobs        Watch job status changes (TUI or plain)
+  campaign    Watch a campaign
+  instance    Watch cloud instances
+  project     Watch a project`,
 	RunE: runWatchCommand,
 }
 

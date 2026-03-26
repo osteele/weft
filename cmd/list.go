@@ -64,8 +64,7 @@ var (
 	listRental      bool
 	listInventory   bool
 	listCloud       bool
-	listTUI         bool
-	listPlain       bool
+	listWatch       bool
 )
 
 const defaultHostSyncWindow = 48 * time.Hour
@@ -104,9 +103,7 @@ func addListFlags(cmd *cobra.Command) {
 	addListQueryFlags(cmd)
 	cmd.Flags().Int64Var(&listShow, "show", 0, "Show detailed info for a specific job ID")
 	cmd.Flags().IntVar(&listCleanup, "cleanup", 0, "Delete jobs older than N days")
-	cmd.Flags().BoolVar(&listTUI, "tui", false, "Force interactive TUI mode")
-	cmd.Flags().BoolVar(&listPlain, "plain", false, "Force plain text output")
-	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
+	cmd.Flags().BoolVarP(&listWatch, "watch", "w", false, "Watch mode: show live-updating TUI or poll for changes (same as 'weft job watch')")
 }
 
 func init() {
@@ -115,13 +112,8 @@ func init() {
 }
 
 func runList(cmd *cobra.Command, args []string) error {
-	useTUI := false
-	if listCleanup == 0 && listShow == 0 {
-		var err error
-		useTUI, err = resolveCampaignTUI(listTUI, listPlain)
-		if err != nil {
-			return err
-		}
+	if listWatch {
+		return runJobWatch(cmd, args)
 	}
 
 	database, err := db.Open()
@@ -130,11 +122,8 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	// TUI shows current DB state immediately and syncs in the background.
-	if !useTUI {
-		for _, warning := range syncListData(database) {
-			fmt.Fprintln(os.Stderr, warning)
-		}
+	for _, warning := range syncListData(database) {
+		fmt.Fprintln(os.Stderr, warning)
 	}
 
 	// Handle cleanup mode
@@ -157,9 +146,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if useTUI {
-		return runListTUI(database, args, jobs, buildListTitle(args), !listNoSync)
-	}
 	return printJobs(database, jobs)
 }
 

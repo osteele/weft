@@ -31,6 +31,7 @@ Available subcommands:
   restart   Requeue a killed, dead, failed, canceled, or completed job
   retry     Alias for restart
   list      List and search job history
+  watch     Watch job status changes
   move      Move a queued job to a different host`,
 }
 
@@ -291,6 +292,7 @@ func init() {
 	jobCmd.AddCommand(jobDescribeCmd)
 	jobCmd.AddCommand(jobRestartCmd)
 	jobCmd.AddCommand(jobListCmd)
+	jobCmd.AddCommand(jobWatchCmd)
 	jobCmd.AddCommand(jobMoveCmd)
 	jobCmd.AddCommand(jobDraftCmd)
 	jobCmd.AddCommand(jobStartCmd)
@@ -326,6 +328,9 @@ func init() {
 
 	// Use shared list flags helper (defined in list.go)
 	addListFlags(jobListCmd)
+
+	// Watch flags
+	addJobWatchFlags(jobWatchCmd)
 
 	// Copy flags from describe command to job describe
 	jobDescribeCmd.Flags().StringVarP(&describeMessage, "message", "m", "", "Set job description")

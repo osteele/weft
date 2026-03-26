@@ -86,6 +86,7 @@ func init() {
 		cmd      *cobra.Command
 		addFlags func(*cobra.Command)
 	}{
+		{withPluralAlias(verbAlias("jobs [job-id]...", jobWatchCmd)), addJobWatchFlags},
 		{withPluralAlias(verbAlias("campaign [campaign-id]", campaignWatchCmd)), addCampaignWatchFlags},
 		{withPluralAlias(verbAlias("instance", instanceWatchCmd)), configureWatchFlags},
 		{withPluralAlias(verbAlias("project", projectWatchCmd)), addProjectWatchFlags},
