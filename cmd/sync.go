@@ -571,7 +571,8 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		}
 
 		if _, err := database.Exec(
-			`UPDATE jobs SET status = ?, start_time = ? WHERE id = ?`,
+			`UPDATE job_attempts SET status = ?, start_time = ?
+			 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
 			db.StatusRunning, startTimeUnix, jobID,
 		); err != nil {
 			log.Printf("sync: failed to update cloud job %d to running: %v", jobID, err)
@@ -668,15 +669,13 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	}
 
 	if _, err := database.Exec(
-		`UPDATE jobs
+		`UPDATE job_attempts
 		 SET status = ?, exit_code = ?, start_time = ?, end_time = ?, last_synced_status = ?,
-		     failure_reason = COALESCE(NULLIF(?, ''), failure_reason)
-		 WHERE id = ?`,
-		status, exitCode, startTimeUnix, endTimeUnix, status, failureReason, jobID,
+		     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
+		     cloud_outcome = ?
+		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
+		status, exitCode, startTimeUnix, endTimeUnix, status, failureReason, outcome, jobID,
 	); err != nil {
-		return 0, err
-	}
-	if err := db.CloseJobCloudAttempt(database, jobID, outcome); err != nil {
 		return 0, err
 	}
 	if cloudInstanceID.Valid {

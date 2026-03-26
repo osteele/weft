@@ -454,7 +454,7 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = '', placement_reasons = NULL WHERE id = ?`, instanceID, jobID); err != nil {
+	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -654,11 +654,6 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		placeholders = append(placeholders, "?")
 	}
 	jobFilter := strings.Join(placeholders, ", ")
-	updateArgs := make([]any, 0, len(jobIDs)+2)
-	updateArgs = append(updateArgs, StatusQueued, placementReasons)
-	for _, jobID := range jobIDs {
-		updateArgs = append(updateArgs, jobID)
-	}
 
 	// Close the old attempt (preserves cloud_instance_id as historical record)
 	// and create a fresh unplaced attempt for each reset job.
@@ -696,13 +691,16 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		return 0, fmt.Errorf("close legacy cloud attempts: %w", err)
 	}
 
+	// Update spec columns on jobs (placement_reasons). Execution state is
+	// already handled by the attempt close+recreate above.
+	placementArgs := make([]any, 0, len(jobIDs)+1)
+	placementArgs = append(placementArgs, placementReasons)
+	for _, jobID := range jobIDs {
+		placementArgs = append(placementArgs, jobID)
+	}
 	result, err := tx.Exec(
-		fmt.Sprintf(`UPDATE jobs SET status = ?, cloud_instance_id = NULL, host = '',
-		 start_time = NULL, end_time = NULL, exit_code = NULL, error_message = NULL,
-		 session_name = NULL, failure_reason = NULL, error_diagnosis = NULL,
-		 remote_state = NULL, remote_id = NULL, placement_reasons = ?
-		 WHERE id IN (%s)`, jobFilter),
-		updateArgs...,
+		fmt.Sprintf(`UPDATE jobs SET placement_reasons = ? WHERE id IN (%s)`, jobFilter),
+		placementArgs...,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -786,11 +784,25 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 		return 0, err
 	}
 
+	now := time.Now().Unix()
 	for _, job := range jobs {
+		// Close old attempt and create fresh unplaced one
+		if _, err := tx.Exec(`
+			UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ?
+			WHERE job_id = ? AND end_time IS NULL`,
+			StatusCanceled, now, AttemptOutcomeOrphaned, job.id,
+		); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if _, err := createAttemptTx(tx, job.id, "", nil, StatusQueued); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		// Update spec columns on jobs
 		if _, err := tx.Exec(
-			`UPDATE jobs SET status = ?, host = '', cloud_instance_id = NULL, placement_reasons = ?
-			 WHERE id = ?`,
-			StatusQueued, encodeStringSlice(orphanedCloudPlacementReasons(job.host)), job.id,
+			`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
+			encodeStringSlice(orphanedCloudPlacementReasons(job.host)), job.id,
 		); err != nil {
 			tx.Rollback()
 			return 0, err
@@ -1250,10 +1262,10 @@ func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
 	rows, err := database.Query(`
 		SELECT DISTINCT ci.id
 		FROM cloud_instances ci
-		JOIN jobs j ON j.cloud_instance_id = ci.id
+		JOIN job_status js ON js.cloud_instance_id = ci.id
 		WHERE ci.status IN (?, ?)
-		AND j.status NOT IN (?, ?, ?, ?, ?, ?)
-		AND j.tombstoned = 0`,
+		AND js.status NOT IN (?, ?, ?, ?, ?, ?)
+		AND js.tombstoned = 0`,
 		CloudInstanceStatusFailed, CloudInstanceStatusCancelled,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)

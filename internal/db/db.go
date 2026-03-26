@@ -2313,7 +2313,8 @@ func ListActiveCloudJobs(db *sql.DB) ([]*Job, error) {
 func MarkJobDraftPending(db *sql.DB, id int64) error {
 	now := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, pending_status = ?, pending_at = ? WHERE id = ?`,
+		`UPDATE job_attempts SET status = ?, pending_status = ?, pending_at = ?
+		 WHERE id = `+latestOpenAttemptSubquery,
 		StatusDraft, StatusDraft, now, id,
 	)
 	return err

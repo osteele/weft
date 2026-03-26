@@ -236,7 +236,7 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 				t.Fatalf("registered instance status = %q, want %q", ci.Status, db.CloudInstanceStatusLaunching)
 			}
 
-			if err := database.QueryRow(`SELECT cloud_instance_id, host FROM jobs WHERE id = ?`, job.ID).Scan(&callbackJobCloudInstance, &callbackJobHost); err != nil {
+			if err := database.QueryRow(`SELECT cloud_instance_id, host FROM job_status WHERE id = ?`, job.ID).Scan(&callbackJobCloudInstance, &callbackJobHost); err != nil {
 				t.Fatalf("select job during registration callback: %v", err)
 			}
 		},
