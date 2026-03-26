@@ -676,7 +676,6 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	); err != nil {
 		return 0, err
 	}
-	// job_runs archival removed; job_attempts tracks history
 	if err := db.CloseJobCloudAttempt(database, jobID, outcome); err != nil {
 		return 0, err
 	}

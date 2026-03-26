@@ -253,7 +253,6 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 		if job.Status != db.StatusQueued {
 			t.Fatalf("job %d status = %q, want %q", jobID, job.Status, db.StatusQueued)
 		}
-		// After schema refactor: attempt retains cloud_instance_id
 	}
 }
 
@@ -350,7 +349,6 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 	if job.Status != db.StatusQueued {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
 	}
-	// After schema refactor: attempt retains cloud_instance_id
 }
 
 func TestReconcileCloudInstances_SafetyNetMarksDestroyConfirmedWhenProviderGone(t *testing.T) {

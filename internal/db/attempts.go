@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// jobAttemptStatusValues returns the valid status values for job attempts.
-func jobAttemptStatusValues() []string {
-	return jobStatusValues()
+// dbExecer is the common interface for *sql.DB and *sql.Tx.
+type dbExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
 }
 
 // createJobAttemptsTableSQL returns the DDL for the job_attempts table.
@@ -52,7 +52,7 @@ func createJobAttemptsTableSQL() string {
 
 		UNIQUE(job_id, attempt_number),
 		CONSTRAINT job_attempts_status_check CHECK (%s)
-	)`, statusCheckConstraintSQL("status", jobAttemptStatusValues(), false))
+	)`, statusCheckConstraintSQL("status", jobStatusValues(), false))
 }
 
 // initJobAttemptsSchema creates the job_attempts table and indexes.
@@ -156,9 +156,12 @@ func backfillJobAttempts(db *sql.DB) error {
 			j.job_metadata,
 			j.observed_inputs
 		FROM jobs j
-		WHERE j.status != 'draft'
+		WHERE NOT EXISTS (
+			SELECT 1 FROM job_attempts ja WHERE ja.job_id = j.id
+		)
+		AND (j.status != 'draft'
 		  OR j.start_time IS NOT NULL
-		  OR j.host != ''
+		  OR j.host != '')
 	`); err != nil {
 		return fmt.Errorf("backfill job_attempts from jobs: %w", err)
 	}
@@ -428,14 +431,22 @@ const latestOpenAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ?
 // latestAttemptSubquery returns a SQL subquery for the latest attempt (open or closed).
 const latestAttemptSubquery = `(SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`
 
+// closeOpenAttempts closes all open attempts for a job.
+func closeOpenAttempts(execer dbExecer, jobID int64, now int64) error {
+	_, err := execer.Exec(`
+		UPDATE job_attempts SET end_time = COALESCE(end_time, ?), pending_status = NULL
+		WHERE job_id = ? AND end_time IS NULL`,
+		now, jobID,
+	)
+	return err
+}
+
 // CreateAttempt inserts a new attempt for a job and returns its ID.
 func CreateAttempt(db *sql.DB, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
 	return createAttemptTx(db, jobID, host, cloudInstanceID, status)
 }
 
-func createAttemptTx(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
+func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
 	now := time.Now().Unix()
 	result, err := execer.Exec(`
 		INSERT INTO job_attempts (job_id, attempt_number, host, cloud_instance_id, status, queued_at)
@@ -475,22 +486,8 @@ func GetLatestAttemptID(db *sql.DB, jobID int64) (int64, error) {
 	return id, err
 }
 
-// UpdateAttemptStatus updates the status of the latest open attempt for a job.
-func UpdateAttemptStatus(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64, status string) error {
-	_, err := execer.Exec(`
-		UPDATE job_attempts SET status = ?, last_synced_status = ?
-		WHERE id = `+latestOpenAttemptSubquery,
-		status, status, jobID,
-	)
-	return err
-}
-
 // UpdateAttemptRunning marks the latest open attempt as running with a start time.
-func UpdateAttemptRunning(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64) error {
+func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 	now := time.Now().Unix()
 	_, err := execer.Exec(`
 		UPDATE job_attempts
@@ -505,9 +502,7 @@ func UpdateAttemptRunning(execer interface {
 // Uses latestAttemptSubquery (not just open attempts) because completion is
 // authoritative — it can override a previous "failed" status from a race
 // condition (e.g., job was marked dead locally but status file shows completion).
-func UpdateAttemptCompletion(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64, exitCode int, endTime int64) error {
+func UpdateAttemptCompletion(execer dbExecer, jobID int64, exitCode int, endTime int64) error {
 	_, err := execer.Exec(`
 		UPDATE job_attempts
 		SET status = ?, exit_code = ?, end_time = ?,
@@ -519,9 +514,7 @@ func UpdateAttemptCompletion(execer interface {
 }
 
 // UpdateAttemptDead marks the latest open attempt as failed (unexpected termination).
-func UpdateAttemptDead(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64) error {
+func UpdateAttemptDead(execer dbExecer, jobID int64) error {
 	endTime := time.Now().Unix()
 	_, err := execer.Exec(`
 		UPDATE job_attempts
@@ -556,9 +549,7 @@ func ClearAttemptPendingStatus(db *sql.DB, jobID int64) error {
 }
 
 // SetAttemptCloudInstanceID updates the cloud_instance_id on the latest open attempt.
-func SetAttemptCloudInstanceID(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID, instanceID int64) error {
+func SetAttemptCloudInstanceID(execer dbExecer, jobID, instanceID int64) error {
 	_, err := execer.Exec(`
 		UPDATE job_attempts SET cloud_instance_id = ?
 		WHERE id = `+latestOpenAttemptSubquery,
@@ -602,9 +593,7 @@ func SetAttemptPlacementMeta(db *sql.DB, jobID int64, meta *PlacementMeta) error
 }
 
 // SetAttemptSessionName updates the session_name on the latest open attempt.
-func SetAttemptSessionName(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64, sessionName string) error {
+func SetAttemptSessionName(execer dbExecer, jobID int64, sessionName string) error {
 	_, err := execer.Exec(`
 		UPDATE job_attempts SET session_name = ?
 		WHERE id = `+latestOpenAttemptSubquery,
@@ -635,9 +624,7 @@ func UpdateAttemptLastSyncedStatus(db *sql.DB, jobID int64, status string) error
 
 // UpdateAttemptStatusAndLastSynced updates both status and last_synced_status
 // on the latest open attempt.
-func UpdateAttemptStatusAndLastSynced(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64, status string) error {
+func UpdateAttemptStatusAndLastSynced(execer dbExecer, jobID int64, status string) error {
 	_, err := execer.Exec(`
 		UPDATE job_attempts SET status = ?, last_synced_status = ?
 		WHERE id = `+latestOpenAttemptSubquery,
@@ -685,76 +672,9 @@ func ClearAttemptPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) 
 	return err
 }
 
-// RequeueJobAttempt closes the current attempt and creates a new queued attempt.
-func RequeueJobAttempt(db *sql.DB, jobID int64) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-
-	// Close current attempt (closes ALL open attempts for this job)
-	now := time.Now().Unix()
-	if _, err := tx.Exec(`
-		UPDATE job_attempts
-		SET end_time = COALESCE(end_time, ?), pending_status = NULL
-		WHERE job_id = ? AND end_time IS NULL`,
-		now, jobID,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	// Create new queued attempt
-	if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	return tx.Commit()
-}
-
-// ResetJobAttemptToUnplaced closes the current attempt and creates a new
-// queued attempt with empty host (for re-placement).
-func ResetJobAttemptToUnplaced(db *sql.DB, jobID int64, placementReasons []string) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-
-	// Close current attempt
-	now := time.Now().Unix()
-	if _, err := tx.Exec(`
-		UPDATE job_attempts
-		SET end_time = COALESCE(end_time, ?), pending_status = NULL
-		WHERE job_id = ? AND end_time IS NULL`,
-		now, jobID,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	// Create new unplaced attempt
-	if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	// Update placement_reasons on the job
-	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
-		encodeStringSlice(placementReasons), jobID,
-	); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	return tx.Commit()
-}
-
 // MarkAttemptQueuedByID resets the latest open attempt back to queued status
 // (e.g., when sync finds the job is still in queue after it was thought to be running).
-func MarkAttemptQueuedByID(execer interface {
-	Exec(query string, args ...any) (sql.Result, error)
-}, jobID int64) error {
+func MarkAttemptQueuedByID(execer dbExecer, jobID int64) error {
 	// Use latestAttemptSubquery (not just open) because the attempt may have
 	// end_time set from a previous status. This resets all execution fields.
 	_, err := execer.Exec(`

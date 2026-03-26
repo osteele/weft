@@ -2454,9 +2454,7 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 	}
 	// Close current attempt, create new running attempt
 	now := time.Now().Unix()
-	if _, err := tx.Exec(`
-		UPDATE job_attempts SET end_time = COALESCE(end_time, ?)
-		WHERE job_id = ? AND end_time IS NULL`, now, id); err != nil {
+	if err := closeOpenAttempts(tx, id, now); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -2559,9 +2557,7 @@ func RequeueByID(db *sql.DB, id int64) error {
 	}
 	// Close current attempt + create new one with pending_status
 	now := time.Now().Unix()
-	if _, err := tx.Exec(`
-		UPDATE job_attempts SET end_time = COALESCE(end_time, ?), pending_status = NULL
-		WHERE job_id = ? AND end_time IS NULL`, now, id); err != nil {
+	if err := closeOpenAttempts(tx, id, now); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -2625,9 +2621,7 @@ func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
 	}
 	// Close current attempt + create new unplaced one
 	now := time.Now().Unix()
-	if _, err := tx.Exec(`
-		UPDATE job_attempts SET end_time = COALESCE(end_time, ?), pending_status = NULL
-		WHERE job_id = ? AND end_time IS NULL`, now, jobID); err != nil {
+	if err := closeOpenAttempts(tx, jobID, now); err != nil {
 		tx.Rollback()
 		return err
 	}

@@ -67,9 +67,6 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCloudInstanceJobs after reset: %v", err)
 	}
-	// After schema refactor: the latest attempt retains cloud_instance_id,
-	// so GetCloudInstanceJobs still finds the job. This is acceptable since
-	// the job's status is now 'queued' and will be re-placed elsewhere.
 
 	// GetCloudInstanceJobsIncludingAttempts should still return 1 job
 	jobsIncl, err = GetCloudInstanceJobsIncludingAttempts(database, instanceID)
@@ -614,7 +611,6 @@ func TestNormalizeTerminalCloudInstanceJobs_FailedInstanceOrphansRunningJobs(t *
 	if job.Status != StatusQueued {
 		t.Fatalf("job status = %q, want %q", job.Status, StatusQueued)
 	}
-	// After schema refactor: attempt retains cloud_instance_id
 
 	outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
 	if err != nil {

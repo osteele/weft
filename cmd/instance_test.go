@@ -49,7 +49,6 @@ func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 	if job.Status != db.StatusQueued {
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
 	}
-	// After schema refactor: attempt retains cloud_instance_id
 	if job.Host != "" {
 		t.Fatalf("job host = %q, want empty", job.Host)
 	}

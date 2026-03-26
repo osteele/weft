@@ -445,7 +445,6 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 		tx.Rollback()
 		return err
 	}
-	// Dual-write to jobs
 	if _, err := tx.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = '', placement_reasons = NULL WHERE id = ?`, instanceID, jobID); err != nil {
 		tx.Rollback()
 		return err
@@ -592,8 +591,9 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	if n == 0 {
 		return false, nil
 	}
-	// Update placement_reasons on the job (spec column)
-	_, _ = database.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID)
+	if _, err := database.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
