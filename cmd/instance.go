@@ -348,13 +348,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 
 		outcomes, _ := db.GetAttemptOutcomesByInstance(database, ci.ID)
 		if len(jobs) > 0 {
-			completed := 0
-			for _, j := range jobs {
-				if campaign.IsJobTerminal(campaign.JobDisplayStatus(j, outcomes)) {
-					completed++
-				}
-			}
-			fmt.Printf("  Jobs:     %d/%d completed\n", completed, len(jobs))
+			fmt.Printf("  Jobs:\n")
 			printInstanceJob := func(j *db.Job) {
 				displayStatus := campaign.JobDisplayStatus(j, outcomes)
 				desc := j.Description
