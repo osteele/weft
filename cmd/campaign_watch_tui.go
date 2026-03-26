@@ -56,6 +56,11 @@ type watchModel struct {
 	partialErrors        []string       // human-readable launch failure messages (inline watch only)
 	partialErrorJobs     []*db.Job      // jobs from launch failures (inline watch only)
 	partialErrorsRetried bool           // true after partial error jobs have been retried
+
+	// Donor relationship cache (recomputed when instanceIDs change)
+	cachedHiddenIDs   map[int64]bool
+	cachedDonorChains map[int64][]*db.CloudInstance
+	donorCacheDirty   bool // true when instanceIDs or donor info has changed
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -143,24 +148,27 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, c
 	sw.Start()
 	go func() { <-ctx.Done(); sw.Stop() }()
 
-	return watchModel{
-		instanceIDs:    instanceIDs,
-		updates:        make(map[int64]campaign.InstanceUpdate),
-		channels:       make(map[int64]<-chan campaign.InstanceUpdate),
-		initInfo:       initInfo,
-		database:       database,
-		clients:        clients,
-		r2Client:       r2Client,
-		spinner:        s,
-		ctx:            ctx,
-		cancel:         cancel,
-		campaignID:     campaignID,
-		launchedAt:     launchedAt,
-		jobProgressHWM: make(map[int64]int),
-		reconciler:     campaign.NewReconciler(),
-		syncWorker:     sw,
-		appConfig:      cfg,
+	m := watchModel{
+		instanceIDs:     instanceIDs,
+		updates:         make(map[int64]campaign.InstanceUpdate),
+		channels:        make(map[int64]<-chan campaign.InstanceUpdate),
+		initInfo:        initInfo,
+		database:        database,
+		clients:         clients,
+		r2Client:        r2Client,
+		spinner:         s,
+		ctx:             ctx,
+		cancel:          cancel,
+		campaignID:      campaignID,
+		launchedAt:      launchedAt,
+		jobProgressHWM:  make(map[int64]int),
+		reconciler:      campaign.NewReconciler(),
+		syncWorker:      sw,
+		appConfig:       cfg,
+		donorCacheDirty: true,
 	}
+	m.rebuildDonorCache()
+	return m
 }
 
 func (m watchModel) Init() tea.Cmd {
@@ -372,12 +380,8 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Mark partial errors as retried (clears the banner in inline watch)
 		m.partialErrorJobs = nil
 		m.partialErrorsRetried = true
-		// Build result string
-		ids := make([]string, len(msg.instanceIDs))
-		for i, id := range msg.instanceIDs {
-			ids[i] = fmt.Sprintf("%d", id)
-		}
-		m.retryResult = fmt.Sprintf("Retried: launched instances %s", strings.Join(ids, ", "))
+		// Rebuild donor cache since new instances may reference failed predecessors
+		m.rebuildDonorCache()
 		return m, tea.Batch(cmds...)
 
 	case retryBackoffMsg:
@@ -606,6 +610,42 @@ func formatCampaignWatchSummaryLine(launchedAt time.Time, views []cloudInstanceV
 	return formatCloudAggregateSummary(label, agg)
 }
 
+// rebuildDonorCache recomputes which instances are superseded and their
+// predecessor chains. Called from Update() when instance list changes.
+func (m *watchModel) rebuildDonorCache() {
+	hiddenIDs := make(map[int64]bool)
+	donorChains := make(map[int64][]*db.CloudInstance)
+
+	getCI := func(id int64) *db.CloudInstance {
+		if u, ok := m.updates[id]; ok && u.CloudInstance != nil {
+			return u.CloudInstance
+		}
+		if info, ok := m.initInfo[id]; ok && info.ci != nil {
+			return info.ci
+		}
+		ci, _ := db.GetCloudInstance(m.database, id)
+		return ci
+	}
+
+	for _, id := range m.instanceIDs {
+		ci := getCI(id)
+		if ci == nil || ci.DonorInstanceID == nil {
+			continue
+		}
+		chain := collectDonorChain(ci, getCI)
+		if len(chain) > 0 {
+			donorChains[id] = chain
+			for _, donor := range chain {
+				hiddenIDs[donor.ID] = true
+			}
+		}
+	}
+
+	m.cachedHiddenIDs = hiddenIDs
+	m.cachedDonorChains = donorChains
+	m.donorCacheDirty = false
+}
+
 func (m watchModel) View() string {
 	var b strings.Builder
 	now := time.Now()
@@ -627,6 +667,11 @@ func (m watchModel) View() string {
 	}
 
 	for _, id := range m.instanceIDs {
+		if m.cachedHiddenIDs[id] {
+			continue
+		}
+		donors := m.cachedDonorChains[id]
+
 		u, ok := m.updates[id]
 		if !ok {
 			// No channel update yet — show pre-fetched DB data
@@ -645,6 +690,7 @@ func (m watchModel) View() string {
 					showSpinnerIfNonTerminal: true,
 					resolvedJobsOverride:     &resolved,
 					dimJobStatuses:           true,
+					donorInstances:           donors,
 				}))
 				b.WriteString("\n\n")
 			} else {
@@ -654,7 +700,9 @@ func (m watchModel) View() string {
 			continue
 		}
 
-		b.WriteString(formatWatchInstanceBlock(u, m.jobProgressHWM, watchInstanceBlockOptions{}))
+		b.WriteString(formatWatchInstanceBlock(u, m.jobProgressHWM, watchInstanceBlockOptions{
+			donorInstances: donors,
+		}))
 		b.WriteString("\n\n")
 	}
 
@@ -664,7 +712,8 @@ func (m watchModel) View() string {
 		b.WriteString("\n")
 	}
 
-	// Retry status line
+	// Retry status: show spinner while retrying, or error/failure messages.
+	// Success results are conveyed by the "Previous:" line on the replacement block.
 	if m.retrying {
 		b.WriteString(m.spinner.View())
 		b.WriteString(fmt.Sprintf(" Retrying %d failed instance(s)...\n", m.countFailedInstances()))

@@ -208,6 +208,86 @@ func TestFormatWatchInstanceBlockUsesLivePhaseForActiveJobStatus(t *testing.T) {
 	}
 }
 
+func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
+	now := time.Unix(3600, 0)
+	launchedAt := int64(0)
+	donors := []*db.CloudInstance{
+		{
+			ID:                226,
+			Status:            db.CloudInstanceStatusFailed,
+			TerminationReason: "infra_failure",
+			CostPerHourCents:  30,
+			LaunchedAt:        &launchedAt,
+		},
+	}
+
+	line := formatPreviousInstanceLine(donors, now)
+	if !strings.Contains(line, "Instance 226") {
+		t.Fatalf("expected Instance 226, got: %s", line)
+	}
+	if !strings.Contains(line, "infra_failure") {
+		t.Fatalf("expected infra_failure, got: %s", line)
+	}
+	if !strings.Contains(line, "$0.30") {
+		t.Fatalf("expected cost, got: %s", line)
+	}
+	if !strings.HasPrefix(line, "  Previous:") {
+		t.Fatalf("expected Previous: prefix, got: %s", line)
+	}
+}
+
+func TestFormatPreviousInstanceLineChain(t *testing.T) {
+	now := time.Unix(3600, 0)
+	donors := []*db.CloudInstance{
+		{ID: 228, Status: db.CloudInstanceStatusFailed, TerminationReason: "infra_failure"},
+		{ID: 226, Status: db.CloudInstanceStatusFailed, TerminationReason: "bootstrap_timeout"},
+	}
+
+	line := formatPreviousInstanceLine(donors, now)
+	if !strings.Contains(line, "Instance 228 (infra_failure)") {
+		t.Fatalf("expected Instance 228 (infra_failure), got: %s", line)
+	}
+	if !strings.Contains(line, "Instance 226 (bootstrap_timeout)") {
+		t.Fatalf("expected Instance 226 (bootstrap_timeout), got: %s", line)
+	}
+	if !strings.Contains(line, " → ") {
+		t.Fatalf("expected arrow separator, got: %s", line)
+	}
+}
+
+func TestFormatPreviousInstanceLineEmpty(t *testing.T) {
+	line := formatPreviousInstanceLine(nil, time.Now())
+	if line != "" {
+		t.Fatalf("expected empty string for nil donors, got: %s", line)
+	}
+}
+
+func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
+	donorID := int64(226)
+	update := campaign.InstanceUpdate{
+		CloudInstance: &db.CloudInstance{
+			ID:              228,
+			Status:          db.CloudInstanceStatusRunning,
+			Provider:        "vastai",
+			GPUSpec:         "A100",
+			DonorInstanceID: &donorID,
+		},
+		Jobs: []*db.Job{
+			{ID: 419, Status: db.StatusQueued, Project: "llm-performance-models", Description: "EXP-068 batch sweep A100"},
+		},
+	}
+
+	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
+		plain: true,
+		donorInstances: []*db.CloudInstance{
+			{ID: 226, Status: db.CloudInstanceStatusFailed, TerminationReason: "infra_failure"},
+		},
+	})
+	if !strings.Contains(out, "Previous: Instance 226") {
+		t.Fatalf("expected Previous line in block output, got:\n%s", out)
+	}
+}
+
 func TestFormatWatchInstanceBlockUsesRunningPhaseForQueuedActiveJob(t *testing.T) {
 	instanceID := int64(140)
 	update := campaign.InstanceUpdate{

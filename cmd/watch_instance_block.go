@@ -18,6 +18,7 @@ type watchInstanceBlockOptions struct {
 	resolvedJobsOverride     *int
 	dimJobStatuses           bool
 	now                      time.Time
+	donorInstances           []*db.CloudInstance // predecessor chain, most-recent-first
 }
 
 func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.CloudInstance) campaign.InstanceUpdate {
@@ -58,6 +59,9 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	}
 	if costLine := formatWatchInstanceCostLine(ci, update.Instance, opts.now); costLine != "" {
 		lines = append(lines, costLine)
+	}
+	if prevLine := formatPreviousInstanceLine(opts.donorInstances, opts.now); prevLine != "" {
+		lines = append(lines, prevLine)
 	}
 
 	if len(update.Jobs) == 0 {
@@ -324,4 +328,54 @@ func clearWatchJobProgressHWM(hwm map[int64]int, update campaign.InstanceUpdate)
 	for _, j := range update.Jobs {
 		delete(hwm, j.ID)
 	}
+}
+
+// collectDonorChain walks DonorInstanceID links from ci using the provided
+// lookup function, returning the predecessor chain (most-recent-first).
+func collectDonorChain(ci *db.CloudInstance, getCI func(int64) *db.CloudInstance) []*db.CloudInstance {
+	if ci == nil || ci.DonorInstanceID == nil {
+		return nil
+	}
+	var chain []*db.CloudInstance
+	seen := map[int64]bool{ci.ID: true}
+	donorID := ci.DonorInstanceID
+	for donorID != nil {
+		if seen[*donorID] {
+			break
+		}
+		seen[*donorID] = true
+		donor := getCI(*donorID)
+		if donor == nil {
+			break
+		}
+		chain = append(chain, donor)
+		donorID = donor.DonorInstanceID
+	}
+	return chain
+}
+
+// formatPreviousInstanceLine renders a compact summary of predecessor instances.
+// Single predecessor: "  Previous: Instance 226 — infra_failure, $0.01, 1m3s"
+// Chain: "  Previous: Instance 227 (infra_failure) → Instance 226 (infra_failure)"
+func formatPreviousInstanceLine(donors []*db.CloudInstance, now time.Time) string {
+	if len(donors) == 0 {
+		return ""
+	}
+	if len(donors) == 1 {
+		di := donors[0]
+		parts := []string{di.DisplayTerminationReason()}
+		obs := observeCloudInstance(di, nil, now)
+		if obs.Cost != nil {
+			parts = append(parts, fmt.Sprintf("$%.2f", *obs.Cost))
+		}
+		if obs.Uptime != nil {
+			parts = append(parts, obs.Uptime.Truncate(time.Second).String())
+		}
+		return fmt.Sprintf("  Previous: Instance %d — %s", di.ID, strings.Join(parts, ", "))
+	}
+	summaries := make([]string, len(donors))
+	for i, di := range donors {
+		summaries[i] = fmt.Sprintf("Instance %d (%s)", di.ID, di.DisplayTerminationReason())
+	}
+	return "  Previous: " + strings.Join(summaries, " → ")
 }

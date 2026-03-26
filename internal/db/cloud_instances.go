@@ -179,6 +179,15 @@ func (c *CloudInstance) EffectiveProviderID() string {
 	return c.VastaiInstanceID
 }
 
+// DisplayTerminationReason returns TerminationReason, falling back to Status
+// when the termination reason is empty.
+func (c *CloudInstance) DisplayTerminationReason() string {
+	if c.TerminationReason != "" {
+		return c.TerminationReason
+	}
+	return c.Status
+}
+
 // CreateCloudInstance inserts a new cloud instance record and returns its ID.
 func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 	now := time.Now().Unix()

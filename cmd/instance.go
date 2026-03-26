@@ -383,8 +383,24 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				printInstanceJob(j)
 			}
 		}
+
+		// Previous instances (donor chain)
+		if donors := walkDonorChain(database, ci); len(donors) > 0 {
+			line := formatPreviousInstanceLine(donors, time.Now())
+			if line != "" {
+				fmt.Println(line)
+			}
+		}
 	}
 	return nil
+}
+
+// walkDonorChain follows DonorInstanceID links to build a predecessor chain.
+func walkDonorChain(database *sql.DB, ci *db.CloudInstance) []*db.CloudInstance {
+	return collectDonorChain(ci, func(id int64) *db.CloudInstance {
+		donor, _ := db.GetCloudInstance(database, id)
+		return donor
+	})
 }
 
 func runInstanceTerminate(cmd *cobra.Command, args []string) error {
