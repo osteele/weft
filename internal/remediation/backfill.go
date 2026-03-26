@@ -13,13 +13,12 @@ import (
 // Returns the number of diagnoses updated.
 func BackfillOOMCapacity(database *sql.DB, logger *log.Logger) (int, error) {
 	rows, err := database.Query(`
-		SELECT jr.id, j.host, jr.error_diagnosis
-		FROM job_runs jr
-		JOIN jobs j ON jr.job_id = j.id
-		WHERE jr.error_diagnosis IS NOT NULL
-		  AND json_extract(jr.error_diagnosis, '$.pattern') = 'gpu_oom'
-		  AND (json_extract(jr.error_diagnosis, '$.gpu_capacity_gb') IS NULL
-		    OR json_extract(jr.error_diagnosis, '$.gpu_capacity_gb') = 0)
+		SELECT ja.id, ja.host, ja.error_diagnosis
+		FROM job_attempts ja
+		WHERE ja.error_diagnosis IS NOT NULL
+		  AND json_extract(ja.error_diagnosis, '$.pattern') = 'gpu_oom'
+		  AND (json_extract(ja.error_diagnosis, '$.gpu_capacity_gb') IS NULL
+		    OR json_extract(ja.error_diagnosis, '$.gpu_capacity_gb') = 0)
 	`)
 	if err != nil {
 		return 0, err

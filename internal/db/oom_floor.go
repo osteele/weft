@@ -13,12 +13,12 @@ import (
 func OOMFloor(db *sql.DB, command string) (int, error) {
 	var floor sql.NullInt64
 	err := db.QueryRow(`
-		SELECT MAX(CAST(json_extract(jr.error_diagnosis, '$.gpu_capacity_gb') AS INTEGER)) + 1
-		FROM job_runs jr
-		JOIN jobs j ON jr.job_id = j.id
+		SELECT MAX(CAST(json_extract(ja.error_diagnosis, '$.gpu_capacity_gb') AS INTEGER)) + 1
+		FROM job_attempts ja
+		JOIN jobs j ON ja.job_id = j.id
 		WHERE j.command = ?
-		  AND json_extract(jr.error_diagnosis, '$.pattern') = 'gpu_oom'
-		  AND json_extract(jr.error_diagnosis, '$.gpu_capacity_gb') > 0
+		  AND json_extract(ja.error_diagnosis, '$.pattern') = 'gpu_oom'
+		  AND json_extract(ja.error_diagnosis, '$.gpu_capacity_gb') > 0
 	`, command).Scan(&floor)
 	if err != nil {
 		return 0, err

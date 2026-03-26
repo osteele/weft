@@ -590,8 +590,7 @@ func createCloudAttemptTriggers(db *sql.DB) error {
 	return nil
 }
 
-// createAllRunsView creates a union view over job_attempts and job_runs so that
-// ownership checks (triggers, validations) can query a single source.
+// createAllRunsView creates a view for ownership checks (triggers, validations).
 func createAllRunsView(db *sql.DB) error {
 	if _, err := db.Exec(`DROP VIEW IF EXISTS all_runs`); err != nil {
 		return err
@@ -599,10 +598,29 @@ func createAllRunsView(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE VIEW all_runs AS
 		SELECT id, job_id FROM job_attempts
-		UNION ALL
-		SELECT id, job_id FROM job_runs
 	`)
 	return err
+}
+
+// dropLegacyRunsTable clears stale references to job_runs IDs, then drops the table.
+func dropLegacyRunsTable(db *sql.DB) error {
+	for _, stmt := range []string{
+		`UPDATE jobs SET latest_run_id = NULL
+		 WHERE latest_run_id IS NOT NULL
+		   AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = jobs.latest_run_id)`,
+		`UPDATE job_timeseries SET job_run_id = NULL
+		 WHERE job_run_id IS NOT NULL
+		   AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = job_timeseries.job_run_id AND job_id = job_timeseries.job_id)`,
+		`UPDATE artifacts SET job_run_id = NULL
+		 WHERE job_run_id IS NOT NULL
+		   AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = artifacts.job_run_id AND job_id = artifacts.job_id)`,
+		`DROP TABLE IF EXISTS job_runs`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func createIntegrityTriggers(db *sql.DB) error {
@@ -620,22 +638,6 @@ func createIntegrityTriggers(db *sql.DB) error {
 		WHEN NEW.cloud_instance_id IS NOT NULL AND TRIM(COALESCE(NEW.host, '')) <> ''
 		BEGIN
 			SELECT RAISE(ABORT, 'jobs.host must be empty when cloud_instance_id is set');
-		END`,
-		`CREATE TRIGGER jobs_validate_latest_run_id_on_insert
-		AFTER INSERT ON jobs
-		FOR EACH ROW
-		WHEN NEW.latest_run_id IS NOT NULL
-		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.latest_run_id AND job_id = NEW.id)
-		BEGIN
-			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
-		END`,
-		`CREATE TRIGGER jobs_validate_latest_run_id_on_update
-		BEFORE UPDATE OF latest_run_id ON jobs
-		FOR EACH ROW
-		WHEN NEW.latest_run_id IS NOT NULL
-		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.latest_run_id AND job_id = NEW.id)
-		BEGIN
-			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
 		END`,
 		`CREATE TRIGGER artifacts_validate_job_run_ownership_on_insert
 		BEFORE INSERT ON artifacts
@@ -929,21 +931,6 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 				return fmt.Sprintf("%d=%q", id, reason), nil
 			},
 			message: "invalid cloud_instances.termination_reason values",
-		},
-		{
-			query: `SELECT j.id, j.latest_run_id
-				FROM jobs j
-				WHERE j.latest_run_id IS NOT NULL
-				  AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = j.latest_run_id AND job_id = j.id)
-				ORDER BY j.id ASC LIMIT 5`,
-			format: func(rows *sql.Rows) (string, error) {
-				var jobID, latestRunID int64
-				if err := rows.Scan(&jobID, &latestRunID); err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("job %d -> run %d", jobID, latestRunID), nil
-			},
-			message: "invalid jobs.latest_run_id ownership",
 		},
 		{
 			query: `SELECT a.id, a.job_id, a.job_run_id
@@ -1909,6 +1896,14 @@ func initSchema(db *sql.DB) error {
 	if err := createAllRunsView(db); err != nil {
 		return err
 	}
+	// Backfill + cleanup must run before validation, since dropping job_runs
+	// invalidates references that validation would flag.
+	if err := backfillJobAttempts(db); err != nil {
+		return err
+	}
+	if err := dropLegacyRunsTable(db); err != nil {
+		return err
+	}
 	if err := validateEnumAndRelationshipConstraints(db); err != nil {
 		return err
 	}
@@ -1938,11 +1933,6 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := createIntegrityTriggers(db); err != nil {
-		return err
-	}
-
-	// Backfill job_attempts from existing jobs and job_runs data
-	if err := backfillJobAttempts(db); err != nil {
 		return err
 	}
 
@@ -3003,10 +2993,8 @@ func backfillRecentProjects(db *sql.DB) error {
 }
 
 func repairPlaceholderProjects(db *sql.DB) error {
-	for _, table := range []string{"jobs", "job_runs"} {
-		if err := repairPlaceholderProjectsInTable(db, table); err != nil {
-			return err
-		}
+	if err := repairPlaceholderProjectsInTable(db, "jobs"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -4003,14 +3991,7 @@ func UpdateErrorDiagnosis(db *sql.DB, id int64, diagnosis string, retryCount int
 // UpdateRunErrorDiagnosis updates the error_diagnosis on a job_run by run ID.
 func UpdateRunErrorDiagnosis(db *sql.DB, runID int64, diagnosis string) error {
 	// Try job_attempts first, fall back to job_runs for legacy data
-	result, err := db.Exec(`UPDATE job_attempts SET error_diagnosis = ? WHERE id = ?`, diagnosis, runID)
-	if err != nil {
-		return err
-	}
-	if n, _ := result.RowsAffected(); n > 0 {
-		return nil
-	}
-	_, err = db.Exec(`UPDATE job_runs SET error_diagnosis = ? WHERE id = ?`, diagnosis, runID)
+	_, err := db.Exec(`UPDATE job_attempts SET error_diagnosis = ? WHERE id = ?`, diagnosis, runID)
 	return err
 }
 

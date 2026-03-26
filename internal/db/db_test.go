@@ -1603,53 +1603,6 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 	}
 }
 
-func TestInitSchemaFailsOnInvalidLatestRunOwnership(t *testing.T) {
-	database := setupRawInitSchemaDB(t)
-
-	if _, err := database.Exec(`
-		CREATE TABLE jobs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			host TEXT NOT NULL,
-			session_name TEXT,
-			working_dir TEXT NOT NULL,
-			command TEXT NOT NULL,
-			description TEXT,
-			start_time INTEGER,
-			end_time INTEGER,
-			exit_code INTEGER,
-			status TEXT NOT NULL DEFAULT 'running',
-			tombstoned INTEGER NOT NULL DEFAULT 0,
-			latest_run_id INTEGER
-		);
-		CREATE TABLE job_runs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			job_id INTEGER NOT NULL,
-			archived_at INTEGER NOT NULL,
-			archive_reason TEXT NOT NULL,
-			status TEXT NOT NULL,
-			host TEXT NOT NULL,
-			working_dir TEXT NOT NULL,
-			command TEXT NOT NULL
-		);`); err != nil {
-		t.Fatalf("create legacy schema: %v", err)
-	}
-
-	if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, command, status, tombstoned, latest_run_id) VALUES (1, '', '/tmp/a', 'echo a', ?, 0, 10)`, StatusQueued); err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
-	if _, err := database.Exec(`INSERT INTO job_runs (id, job_id, archived_at, archive_reason, status, host, working_dir, command) VALUES (10, 2, ?, 'legacy', ?, '', '/tmp/b', 'echo b')`, time.Now().Unix(), StatusQueued); err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-
-	err := initSchema(database)
-	if err == nil {
-		t.Fatal("expected initSchema to fail on invalid latest_run ownership")
-	}
-	if !strings.Contains(err.Error(), "latest_run_id ownership") {
-		t.Fatalf("initSchema error = %v, want latest_run ownership diagnostic", err)
-	}
-}
-
 func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 

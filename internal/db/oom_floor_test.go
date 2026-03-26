@@ -16,24 +16,18 @@ func TestOOMFloor(t *testing.T) {
 		t.Errorf("expected 0, got %d", floor)
 	}
 
-	// Insert a job with a gpu_oom diagnosis on a 24GB GPU
-	res, err := db.Exec(
-		`INSERT INTO jobs (command, host, working_dir, status, tombstoned) VALUES (?, ?, '/tmp/test', 'completed', 0)`,
-		"uv run python train.py", "cool30",
-	)
+	// Insert a job and set OOM diagnosis on its attempt (24GB GPU)
+	jobID, err := RecordQueuedWithGPU(db, "cool30", "/tmp/test", "uv run python train.py", "test", "")
 	if err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	jobID, _ := res.LastInsertId()
-
-	_, err = db.Exec(
-		`INSERT INTO job_runs (job_id, host, command, working_dir, status, exit_code, error_diagnosis, start_time, end_time, archived_at, archive_reason)
-		 VALUES (?, ?, ?, '/tmp/test', 'completed', 1, ?, 1000, 2000, 0, '')`,
-		jobID, "cool30", "uv run python train.py",
+	if _, err := db.Exec(
+		`UPDATE job_attempts SET error_diagnosis = ?, exit_code = 1, end_time = 2000
+		 WHERE job_id = ? AND end_time IS NULL`,
 		`{"pattern":"gpu_oom","category":"environment","message":"GPU out of memory","gpu_capacity_gb":24}`,
-	)
-	if err != nil {
-		t.Fatalf("insert job run: %v", err)
+		jobID,
+	); err != nil {
+		t.Fatalf("set diagnosis: %v", err)
 	}
 
 	floor, err = OOMFloor(db, "uv run python train.py")
@@ -54,23 +48,17 @@ func TestOOMFloor(t *testing.T) {
 	}
 
 	// Add a second OOM on a larger GPU → floor should increase
-	res, err = db.Exec(
-		`INSERT INTO jobs (command, host, working_dir, status, tombstoned) VALUES (?, ?, '/tmp/test', 'completed', 0)`,
-		"uv run python train.py", "cool100",
-	)
+	jobID2, err := RecordQueuedWithGPU(db, "cool100", "/tmp/test", "uv run python train.py", "test", "")
 	if err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	jobID2, _ := res.LastInsertId()
-
-	_, err = db.Exec(
-		`INSERT INTO job_runs (job_id, host, command, working_dir, status, exit_code, error_diagnosis, start_time, end_time, archived_at, archive_reason)
-		 VALUES (?, ?, ?, '/tmp/test', 'completed', 1, ?, 1000, 2000, 0, '')`,
-		jobID2, "cool100", "uv run python train.py",
+	if _, err := db.Exec(
+		`UPDATE job_attempts SET error_diagnosis = ?, exit_code = 1, end_time = 2000
+		 WHERE job_id = ? AND end_time IS NULL`,
 		`{"pattern":"gpu_oom","category":"environment","message":"GPU out of memory","gpu_capacity_gb":80}`,
-	)
-	if err != nil {
-		t.Fatalf("insert job run: %v", err)
+		jobID2,
+	); err != nil {
+		t.Fatalf("set diagnosis: %v", err)
 	}
 
 	floor, err = OOMFloor(db, "uv run python train.py")
@@ -82,23 +70,17 @@ func TestOOMFloor(t *testing.T) {
 	}
 
 	// OOM without gpu_capacity_gb → should not affect floor
-	res, err = db.Exec(
-		`INSERT INTO jobs (command, host, working_dir, status, tombstoned) VALUES (?, ?, '/tmp/test', 'completed', 0)`,
-		"uv run python nocap.py", "cool30",
-	)
+	jobID3, err := RecordQueuedWithGPU(db, "cool30", "/tmp/test", "uv run python nocap.py", "test", "")
 	if err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	jobID3, _ := res.LastInsertId()
-
-	_, err = db.Exec(
-		`INSERT INTO job_runs (job_id, host, command, working_dir, status, exit_code, error_diagnosis, start_time, end_time, archived_at, archive_reason)
-		 VALUES (?, ?, ?, '/tmp/test', 'completed', 1, ?, 1000, 2000, 0, '')`,
-		jobID3, "cool30", "uv run python nocap.py",
+	if _, err := db.Exec(
+		`UPDATE job_attempts SET error_diagnosis = ?, exit_code = 1, end_time = 2000
+		 WHERE job_id = ? AND end_time IS NULL`,
 		`{"pattern":"gpu_oom","category":"environment","message":"GPU out of memory"}`,
-	)
-	if err != nil {
-		t.Fatalf("insert job run: %v", err)
+		jobID3,
+	); err != nil {
+		t.Fatalf("set diagnosis: %v", err)
 	}
 
 	floor, err = OOMFloor(db, "uv run python nocap.py")
