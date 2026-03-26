@@ -269,7 +269,7 @@ func lookupObservedInputs(group InstanceGroup, localDB *sql.DB) []string {
 	}
 	for _, project := range sigSet {
 		rows, err := localDB.Query(
-			`SELECT command, observed_inputs FROM jobs WHERE project = ? AND observed_inputs IS NOT NULL AND observed_inputs != ''`,
+			`SELECT command, observed_inputs FROM job_status WHERE project = ? AND observed_inputs IS NOT NULL AND observed_inputs != ''`,
 			project,
 		)
 		if err != nil {

@@ -681,7 +681,7 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		 SET ended_at = ?, outcome = ?
 		 WHERE cloud_instance_id = ? AND ended_at IS NULL
 		 AND job_id IN (
-		 	SELECT id FROM jobs
+		 	SELECT id FROM job_status
 		 	WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0
 		 )`,
 		now, outcome, instanceID, instanceID,

@@ -71,7 +71,7 @@ func (c *Coordinator) sweepVastaiResults() *r2.Client {
 // writes logs to the log cache, and cleans up the R2 prefix.
 func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r2.Client, jobID int64) {
 	var latestRunID sql.NullInt64
-	if err := c.db.QueryRow(`SELECT latest_run_id FROM jobs WHERE id = ?`, jobID).Scan(&latestRunID); err != nil && err != sql.ErrNoRows {
+	if err := c.db.QueryRow(`SELECT latest_run_id FROM job_status WHERE id = ?`, jobID).Scan(&latestRunID); err != nil && err != sql.ErrNoRows {
 		c.logger.Printf("vastai sweep: latest_run_id for job %d: %v", jobID, err)
 	}
 	runID := int64(0)
@@ -146,7 +146,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		return
 	}
 	var cloudInstanceID sql.NullInt64
-	if err := c.db.QueryRow(`SELECT cloud_instance_id FROM jobs WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
+	if err := c.db.QueryRow(`SELECT cloud_instance_id FROM job_status WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
 		if err := db.RefineInstanceTerminationReason(c.db, cloudInstanceID.Int64); err != nil {
 			c.logger.Printf("vastai sweep: refine termination reason for instance %d: %v", cloudInstanceID.Int64, err)
 		}
