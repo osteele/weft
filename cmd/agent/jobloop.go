@@ -103,6 +103,14 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			oplog.LogJob(oplog.OpJobComplete, job.ID, "", oplog.WithDetail("exit=0"))
 		}
 
+		// Write .complete marker synchronously so the coordinator sees
+		// this job as finished before the next job's .started marker.
+		exitCode := 1
+		if err == nil {
+			exitCode = ei.ExitCode
+		}
+		r2Put(cfg.R2Bucket, r2keys.JobAttemptComplete(job.ID, job.RunID), fmt.Sprintf("%d", exitCode))
+
 		// === Synchronous post-job work ===
 		finalizePhase := fmt.Sprintf("finalizing:%d", job.ID)
 		if cfg.OnPhase != nil {

@@ -268,10 +268,9 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 		cleanupLiveLogUpload(bucket, jobID, runID)
 	}
 
-	// Write completion marker
-	if err := r2Put(bucket, r2keys.JobAttemptComplete(jobID, runID), "done"); err != nil {
-		fmt.Fprintf(os.Stderr, "write completion marker for job %d: %v\n", jobID, err)
-	}
+	// The .complete marker is written synchronously in runJobSequence
+	// (before background uploads start) so the coordinator sees jobs
+	// finish in order. This function only handles result uploads.
 	return summary
 }
 
