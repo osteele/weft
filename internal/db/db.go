@@ -2566,7 +2566,7 @@ func SetQueuedAtBefore(db *sql.DB, jobID int64, host string) error {
 	// Get the minimum queued_at for queued jobs on this host
 	var minQueuedAt sql.NullInt64
 	err := db.QueryRow(
-		`SELECT MIN(queued_at) FROM jobs WHERE host = ? AND status = ? AND queued_at > 0 AND id != ? AND tombstoned = 0`,
+		`SELECT MIN(queued_at) FROM job_status WHERE host = ? AND status = ? AND queued_at > 0 AND id != ? AND tombstoned = 0`,
 		host, StatusQueued, jobID,
 	).Scan(&minQueuedAt)
 	if err != nil && err != sql.ErrNoRows {
@@ -2594,7 +2594,7 @@ func IsTerminalStatus(status string) bool {
 func CountQueuedByHost(db *sql.DB, host string) (int, error) {
 	var count int
 	err := db.QueryRow(
-		`SELECT COUNT(*) FROM jobs WHERE host = ? AND status = ? AND tombstoned = 0`,
+		`SELECT COUNT(*) FROM job_status WHERE host = ? AND status = ? AND tombstoned = 0`,
 		host, StatusQueued,
 	).Scan(&count)
 	return count, err
@@ -2604,7 +2604,7 @@ func CountQueuedByHost(db *sql.DB, host string) (int, error) {
 func CountQueueRunnerActiveByHost(db *sql.DB, host string) (int, error) {
 	var count int
 	err := db.QueryRow(
-		`SELECT COUNT(*) FROM jobs
+		`SELECT COUNT(*) FROM job_status
 		 WHERE host = ?
 		 AND (backend IS NULL OR backend = ?)
 		 AND status IN (?, ?, ?, ?)
@@ -4031,7 +4031,7 @@ func ListRecentFailedUndiagnosed(db *sql.DB, limit int) ([]*Job, error) {
 
 // ListUniqueRunningHosts returns all unique hosts with running jobs
 func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status IN (?, ?, ?) AND tombstoned = 0`, StatusRunning, StatusStarting, StatusPaused)
+	rows, err := db.Query(`SELECT DISTINCT host FROM job_status WHERE status IN (?, ?, ?) AND tombstoned = 0`, StatusRunning, StatusStarting, StatusPaused)
 	if err != nil {
 		return nil, err
 	}
@@ -4052,7 +4052,7 @@ func ListUniqueRunningHosts(db *sql.DB) ([]string, error) {
 func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
 	rows, err := db.Query(`
 		SELECT DISTINCT host FROM (
-			SELECT host FROM jobs
+			SELECT host FROM job_status
 			WHERE tombstoned = 0
 			AND (
 				status IN (?, ?, ?, ?)
@@ -4081,7 +4081,7 @@ func ListUniqueActiveHosts(db *sql.DB) ([]string, error) {
 
 // ListHostsWithQueuedJobs returns unique hosts that have queued jobs
 func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0`, StatusQueued)
+	rows, err := db.Query(`SELECT DISTINCT host FROM job_status WHERE status = ? AND tombstoned = 0`, StatusQueued)
 	if err != nil {
 		return nil, err
 	}
@@ -4100,7 +4100,7 @@ func ListHostsWithQueuedJobs(db *sql.DB) ([]string, error) {
 
 // ListHostsWithQueueRunnerJobs returns unique hosts that have queued/running queue-runner jobs.
 func ListHostsWithQueueRunnerJobs(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs
+	rows, err := db.Query(`SELECT DISTINCT host FROM job_status
 		WHERE (backend IS NULL OR backend = ?)
 		AND status IN (?, ?, ?, ?)
 		AND tombstoned = 0`,
@@ -4123,7 +4123,7 @@ func ListHostsWithQueueRunnerJobs(db *sql.DB) ([]string, error) {
 
 // ListHostsWithDraftsPending returns hosts that have draft jobs needing remote cleanup.
 func ListHostsWithDraftsPending(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?)`,
+	rows, err := db.Query(`SELECT DISTINCT host FROM job_status WHERE status = ? AND tombstoned = 0 AND (pending_status = ? OR IFNULL(last_synced_status, '') <> ?)`,
 		StatusDraft, StatusDraft, StatusDraft)
 	if err != nil {
 		return nil, err
@@ -4203,7 +4203,7 @@ func ListAllQueued(db *sql.DB) ([]*Job, error) {
 
 // ListUniqueHosts returns all unique hosts from all jobs
 func ListUniqueHosts(db *sql.DB) ([]string, error) {
-	rows, err := db.Query(`SELECT DISTINCT host FROM jobs WHERE tombstoned = 0 AND host != '' ORDER BY host`)
+	rows, err := db.Query(`SELECT DISTINCT host FROM job_status WHERE tombstoned = 0 AND host != '' ORDER BY host`)
 	if err != nil {
 		return nil, err
 	}
@@ -4236,7 +4236,7 @@ func SearchJobs(db *sql.DB, query string, limit int) ([]*Job, error) {
 func CleanupOld(db *sql.DB, days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days).Unix()
 	result, err := db.Exec(
-		`DELETE FROM jobs WHERE status IN (?, ?, ?, ?, ?) AND start_time < ?`,
+		`DELETE FROM jobs WHERE id IN (SELECT id FROM job_status WHERE status IN (?, ?, ?, ?, ?) AND start_time < ?)`,
 		StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, cutoff,
 	)
 	if err != nil {

@@ -752,11 +752,11 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 		return 0, err
 	}
 	rows, err := tx.Query(`
-		SELECT id, host FROM jobs
+		SELECT id, host FROM job_status js
 		WHERE status IN (?, ?) AND host LIKE 'vastai:%' AND tombstoned = 0
 		AND NOT EXISTS (
 			SELECT 1 FROM cloud_instances ci
-			WHERE ci.id = CAST(SUBSTR(jobs.host, 8) AS INTEGER)
+			WHERE ci.id = CAST(SUBSTR(js.host, 8) AS INTEGER)
 			AND ci.status IN (?, ?, ?, ?)
 		)`,
 		StatusQueued, StatusRunning,
@@ -811,7 +811,7 @@ func orphanedCloudPlacementReasons(host string) []string {
 
 // GetCloudInstanceJobCounts returns a map from cloud instance ID to job count.
 func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
-	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM jobs WHERE cloud_instance_id IS NOT NULL AND tombstoned = 0 GROUP BY cloud_instance_id`)
+	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM job_status WHERE cloud_instance_id IS NOT NULL AND tombstoned = 0 GROUP BY cloud_instance_id`)
 	if err != nil {
 		return nil, err
 	}
