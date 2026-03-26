@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -61,6 +62,10 @@ type watchModel struct {
 	cachedHiddenIDs   map[int64]bool
 	cachedDonorChains map[int64][]*db.CloudInstance
 	donorCacheDirty   bool // true when instanceIDs or donor info has changed
+
+	// Viewport scrolling
+	height    int // terminal height from WindowSizeMsg
+	scrollOff int // lines scrolled up from bottom (0 = pinned to bottom)
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -205,6 +210,10 @@ func waitForUpdate(instanceID int64, ch <-chan campaign.InstanceUpdate) tea.Cmd 
 
 func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		return m, nil
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -218,6 +227,20 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.retryExtraAttempts = campaign.DefaultMaxCloudAttempts
 				return m, m.retryFailedInstances(m.retryExtraAttempts)
 			}
+		case "up", "k":
+			m.scrollOff++
+			return m, nil
+		case "down", "j":
+			if m.scrollOff > 0 {
+				m.scrollOff--
+			}
+			return m, nil
+		case "G":
+			m.scrollOff = 0
+			return m, nil
+		case "g":
+			m.scrollOff = math.MaxInt
+			return m, nil
 		}
 
 	case watchUpdateMsg:
@@ -382,6 +405,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.partialErrorsRetried = true
 		// Rebuild donor cache since new instances may reference failed predecessors
 		m.rebuildDonorCache()
+		m.scrollOff = 0 // snap to bottom to show new instances
 		return m, tea.Batch(cmds...)
 
 	case retryBackoffMsg:
@@ -723,15 +747,61 @@ func (m watchModel) View() string {
 	}
 
 	if !m.done {
-		hint := "q to quit (instances continue in background)"
+		hint := "j/k scroll  g/G top/bottom  q quit (instances continue in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "r to retry, q to quit (instances continue in background)"
+			hint = "j/k scroll  g/G top/bottom  r retry  q quit (instances continue in background)"
 		}
 		b.WriteString(watchDimStyle.Render(hint))
 		b.WriteString("\n")
 	}
 
-	return b.String()
+	return m.applyViewport(b.String())
+}
+
+// applyViewport slices rendered content to fit the terminal height.
+// Bottom-anchored: scrollOff=0 shows the bottom of the content.
+func (m watchModel) applyViewport(content string) string {
+	if m.height <= 0 || m.done {
+		return content
+	}
+
+	// Fast path: count newlines to check fit without allocating a []string
+	if strings.Count(content, "\n") < m.height {
+		return content
+	}
+
+	lines := strings.Split(content, "\n")
+	// strings.Split produces a trailing empty element for content ending in \n
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	if len(lines) <= m.height {
+		return content
+	}
+
+	maxOff := len(lines) - m.height
+	off := m.scrollOff
+	if off > maxOff {
+		off = maxOff
+	}
+
+	end := len(lines) - off
+	start := end - m.height
+	if start < 0 {
+		start = 0
+	}
+
+	visible := lines[start:end]
+
+	if start > 0 {
+		visible[0] = watchDimStyle.Render(fmt.Sprintf("↑ %d more lines above", start))
+	}
+	if off > 0 {
+		visible[len(visible)-1] = watchDimStyle.Render(fmt.Sprintf("↓ %d more lines below", off))
+	}
+
+	return strings.Join(visible, "\n")
 }
 
 // requestOnPremSyncs requests background syncs for on-prem hosts with active jobs.
