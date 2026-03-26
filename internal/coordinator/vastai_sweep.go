@@ -138,7 +138,8 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	// Clear pending_status: the job already ran on the cloud instance, so any
 	// pending intent (e.g. pending_status=queued set before this run) is moot.
 	_, err = c.db.Exec(
-		`UPDATE jobs SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL WHERE id = ?`,
+		`UPDATE job_attempts SET status = ?, exit_code = ?, end_time = ?, last_synced_status = ?, failure_reason = ?, pending_status = NULL
+		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
 		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, jobID,
 	)
 	if err != nil {

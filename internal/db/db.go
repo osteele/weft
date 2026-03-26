@@ -2582,7 +2582,7 @@ func SetQueuedAtBefore(db *sql.DB, jobID int64, host string) error {
 		newQueuedAt = time.Now().Unix()
 	}
 
-	_, err = db.Exec(`UPDATE jobs SET queued_at = ? WHERE id = ?`, newQueuedAt, jobID)
+	_, err = db.Exec(`UPDATE job_attempts SET queued_at = ? WHERE id = `+latestOpenAttemptSubquery, newQueuedAt, jobID)
 	return err
 }
 
