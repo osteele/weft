@@ -652,6 +652,21 @@ func createCloudAttemptTriggers(db *sql.DB) error {
 	return nil
 }
 
+// createAllRunsView creates a union view over job_attempts and job_runs so that
+// ownership checks (triggers, validations) can query a single source.
+func createAllRunsView(db *sql.DB) error {
+	if _, err := db.Exec(`DROP VIEW IF EXISTS all_runs`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`
+		CREATE VIEW all_runs AS
+		SELECT id, job_id FROM job_attempts
+		UNION ALL
+		SELECT id, job_id FROM job_runs
+	`)
+	return err
+}
+
 func createIntegrityTriggers(db *sql.DB) error {
 	stmts := []string{
 		`CREATE TRIGGER jobs_prevent_mixed_cloud_host_on_insert
@@ -672,18 +687,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		AFTER INSERT ON jobs
 		FOR EACH ROW
 		WHEN NEW.latest_run_id IS NOT NULL
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_runs
-				WHERE id = NEW.latest_run_id
-				  AND job_id = NEW.id
-		     )
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts
-				WHERE id = NEW.latest_run_id
-				  AND job_id = NEW.id
-		     )
+		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.latest_run_id AND job_id = NEW.id)
 		BEGIN
 			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
 		END`,
@@ -691,18 +695,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEFORE UPDATE OF latest_run_id ON jobs
 		FOR EACH ROW
 		WHEN NEW.latest_run_id IS NOT NULL
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_runs
-				WHERE id = NEW.latest_run_id
-				  AND job_id = NEW.id
-		     )
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts
-				WHERE id = NEW.latest_run_id
-				  AND job_id = NEW.id
-		     )
+		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.latest_run_id AND job_id = NEW.id)
 		BEGIN
 			SELECT RAISE(ABORT, 'jobs.latest_run_id must reference a run owned by the same job');
 		END`,
@@ -710,18 +703,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEFORE INSERT ON artifacts
 		FOR EACH ROW
 		WHEN NEW.job_run_id IS NOT NULL
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_runs
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
+		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.job_run_id AND job_id = NEW.job_id)
 		BEGIN
 			SELECT RAISE(ABORT, 'artifacts.job_run_id must reference a run owned by artifacts.job_id');
 		END`,
@@ -729,18 +711,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEFORE UPDATE OF job_id, job_run_id ON artifacts
 		FOR EACH ROW
 		WHEN NEW.job_run_id IS NOT NULL
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_runs
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
+		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.job_run_id AND job_id = NEW.job_id)
 		BEGIN
 			SELECT RAISE(ABORT, 'artifacts.job_run_id must reference a run owned by artifacts.job_id');
 		END`,
@@ -748,18 +719,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEFORE INSERT ON job_timeseries
 		FOR EACH ROW
 		WHEN NEW.job_run_id IS NOT NULL
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_runs
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
+		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.job_run_id AND job_id = NEW.job_id)
 		BEGIN
 			SELECT RAISE(ABORT, 'job_timeseries.job_run_id must reference a run owned by job_timeseries.job_id');
 		END`,
@@ -767,18 +727,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 		BEFORE UPDATE OF job_id, job_run_id ON job_timeseries
 		FOR EACH ROW
 		WHEN NEW.job_run_id IS NOT NULL
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_runs
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
-		     AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts
-				WHERE id = NEW.job_run_id
-				  AND job_id = NEW.job_id
-		     )
+		     AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = NEW.job_run_id AND job_id = NEW.job_id)
 		BEGIN
 			SELECT RAISE(ABORT, 'job_timeseries.job_run_id must reference a run owned by job_timeseries.job_id');
 		END`,
@@ -792,7 +741,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 }
 
 func dropIntegrityViewsAndTriggers(db *sql.DB) error {
-	for _, name := range []string{"cloud_instance_job_membership", "job_effective_state"} {
+	for _, name := range []string{"cloud_instance_job_membership", "job_effective_state", "all_runs"} {
 		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + name); err != nil {
 			return err
 		}
@@ -1073,56 +1022,47 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 			message: "invalid job_cloud_attempts ended_at/outcome shape",
 		},
 		{
-			query: `SELECT j.id, j.latest_run_id, jr.job_id
+			query: `SELECT j.id, j.latest_run_id
 				FROM jobs j
-				LEFT JOIN job_runs jr ON jr.id = j.latest_run_id
 				WHERE j.latest_run_id IS NOT NULL
-				  AND (jr.id IS NULL OR jr.job_id != j.id)
+				  AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = j.latest_run_id AND job_id = j.id)
 				ORDER BY j.id ASC LIMIT 5`,
 			format: func(rows *sql.Rows) (string, error) {
-				var jobID int64
-				var latestRunID int64
-				var runJobID sql.NullInt64
-				if err := rows.Scan(&jobID, &latestRunID, &runJobID); err != nil {
+				var jobID, latestRunID int64
+				if err := rows.Scan(&jobID, &latestRunID); err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("job %d -> run %d owned by %v", jobID, latestRunID, runJobID), nil
+				return fmt.Sprintf("job %d -> run %d", jobID, latestRunID), nil
 			},
 			message: "invalid jobs.latest_run_id ownership",
 		},
 		{
-			query: `SELECT a.id, a.job_id, a.job_run_id, jr.job_id
+			query: `SELECT a.id, a.job_id, a.job_run_id
 				FROM artifacts a
-				LEFT JOIN job_runs jr ON jr.id = a.job_run_id
 				WHERE a.job_run_id IS NOT NULL
-				  AND (jr.id IS NULL OR jr.job_id != a.job_id)
+				  AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = a.job_run_id AND job_id = a.job_id)
 				ORDER BY a.id ASC LIMIT 5`,
 			format: func(rows *sql.Rows) (string, error) {
-				var id, jobID int64
-				var runID sql.NullInt64
-				var runJobID sql.NullInt64
-				if err := rows.Scan(&id, &jobID, &runID, &runJobID); err != nil {
+				var id, jobID, runID int64
+				if err := rows.Scan(&id, &jobID, &runID); err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("artifact %d job=%d run=%v run_job=%v", id, jobID, runID, runJobID), nil
+				return fmt.Sprintf("artifact %d job=%d run=%d", id, jobID, runID), nil
 			},
 			message: "invalid artifacts job_run ownership",
 		},
 		{
-			query: `SELECT jt.job_id, jt.ts, jt.job_run_id, jr.job_id
+			query: `SELECT jt.job_id, jt.ts, jt.job_run_id
 				FROM job_timeseries jt
-				LEFT JOIN job_runs jr ON jr.id = jt.job_run_id
 				WHERE jt.job_run_id IS NOT NULL
-				  AND (jr.id IS NULL OR jr.job_id != jt.job_id)
+				  AND NOT EXISTS (SELECT 1 FROM all_runs WHERE id = jt.job_run_id AND job_id = jt.job_id)
 				ORDER BY jt.job_id ASC, jt.ts ASC LIMIT 5`,
 			format: func(rows *sql.Rows) (string, error) {
-				var jobID, ts int64
-				var runID sql.NullInt64
-				var runJobID sql.NullInt64
-				if err := rows.Scan(&jobID, &ts, &runID, &runJobID); err != nil {
+				var jobID, ts, runID int64
+				if err := rows.Scan(&jobID, &ts, &runID); err != nil {
 					return "", err
 				}
-				return fmt.Sprintf("timeseries (%d,%d) run=%v run_job=%v", jobID, ts, runID, runJobID), nil
+				return fmt.Sprintf("timeseries (%d,%d) run=%d", jobID, ts, runID), nil
 			},
 			message: "invalid job_timeseries job_run ownership",
 		},
@@ -2015,10 +1955,13 @@ func initSchema(db *sql.DB) error {
 	if err := repairLiveCloudAssignments(db); err != nil {
 		return err
 	}
-	if err := validateEnumAndRelationshipConstraints(db); err != nil {
+	if err := dropIntegrityViewsAndTriggers(db); err != nil {
 		return err
 	}
-	if err := dropIntegrityViewsAndTriggers(db); err != nil {
+	if err := createAllRunsView(db); err != nil {
+		return err
+	}
+	if err := validateEnumAndRelationshipConstraints(db); err != nil {
 		return err
 	}
 	// Drop views that reference jobs before table rebuild
@@ -4422,14 +4365,10 @@ func queryJobTx(tx *sql.Tx, query string, args ...interface{}) (*Job, error) {
 }
 
 // GetJobRunIDs returns all run/attempt IDs for a job, ordered most recent first.
-// Queries both job_attempts (current) and job_runs (legacy) for backward
-// compatibility with historical R2 log keys.
 func GetJobRunIDs(database *sql.DB, jobID int64) ([]int64, error) {
 	rows, err := database.Query(`
-		SELECT id FROM job_attempts WHERE job_id = ?
-		UNION
-		SELECT id FROM job_runs WHERE job_id = ?
-		ORDER BY id DESC`, jobID, jobID)
+		SELECT id FROM all_runs WHERE job_id = ?
+		ORDER BY id DESC`, jobID)
 	if err != nil {
 		return nil, err
 	}
