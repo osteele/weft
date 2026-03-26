@@ -158,9 +158,6 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	if err := db.InsertJobCloudAttempt(database, 199, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
-	}
 
 	m := watchModel{
 		instanceIDs: []int64{instanceID},

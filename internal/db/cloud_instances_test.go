@@ -31,11 +31,6 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 		t.Fatalf("insert job: %v", err)
 	}
 
-	// Record the cloud attempt (as SetJobCloudInstanceID would)
-	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
-	}
-
 	// Verify both functions return the job before reset
 	jobs, err := GetCloudInstanceJobs(database, instanceID)
 	if err != nil {
@@ -99,8 +94,8 @@ func TestGetCloudInstanceJobsIncludingAttemptsTreatsOpenAttemptsAsCurrent(t *tes
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 203, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(203): %v", err)
+	if err := SetJobCloudInstanceID(database, 203, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID(203): %v", err)
 	}
 
 	jobs, err := GetCloudInstanceJobsIncludingAttempts(database, instanceID)
@@ -190,17 +185,17 @@ func TestGetCloudInstanceJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T)
 		t.Fatalf("insert jobs: %v", err)
 	}
 
-	if err := InsertJobCloudAttempt(database, 249, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(249): %v", err)
+	if err := SetJobCloudInstanceID(database, 249, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID(249): %v", err)
 	}
 	if err := CloseJobCloudAttempt(database, 249, AttemptOutcomeFailed); err != nil {
 		t.Fatalf("CloseJobCloudAttempt(249): %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 203, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(203): %v", err)
+	if err := SetJobCloudInstanceID(database, 203, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID(203): %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 199, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(199): %v", err)
+	if err := SetJobCloudInstanceID(database, 199, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID(199): %v", err)
 	}
 	if err := SetJobCampaignIndex(database, 203, 1); err != nil {
 		t.Fatalf("SetJobCampaignIndex(203): %v", err)
@@ -254,15 +249,15 @@ func TestGetCloudInstanceJobsIncludingAttemptsRetainsOrderAfterFailure(t *testin
 		t.Fatalf("SetJobCampaignIndex(293): %v", err)
 	}
 
-	// Simulate what ResetCloudInstanceJobs does: insert + close the attempt for 292.
-	if err := InsertJobCloudAttempt(database, 292, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(292): %v", err)
+	// Simulate what ResetCloudInstanceJobs does: assign + close the attempt for 292.
+	if err := SetJobCloudInstanceID(database, 292, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID(292): %v", err)
 	}
 	if err := CloseJobCloudAttempt(database, 292, AttemptOutcomeFailed); err != nil {
 		t.Fatalf("CloseJobCloudAttempt(292): %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 293, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(293): %v", err)
+	if err := SetJobCloudInstanceID(database, 293, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID(293): %v", err)
 	}
 
 	jobs, err := GetCloudInstanceJobsIncludingAttempts(database, instanceID)
@@ -300,8 +295,8 @@ func TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical(t *te
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 317, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	if err := SetJobCloudInstanceID(database, 317, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}
 
 	// Simulate ResetCloudInstanceJobs: close attempt as orphaned, clear instance assignment, reset to queued.
@@ -385,9 +380,6 @@ func TestGetAttemptOutcomesByInstance(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatalf("insert job: %v", err)
-	}
-	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
 	}
 
 	// Before closing the attempt, outcomes should be empty
@@ -505,9 +497,6 @@ func TestResetCloudInstanceJobs_DoesNotRewriteCompletedAttempts(t *testing.T) {
 		); err != nil {
 			t.Fatalf("insert job %d: %v", stmt.id, err)
 		}
-		if err := InsertJobCloudAttempt(database, stmt.id, instanceID); err != nil {
-			t.Fatalf("InsertJobCloudAttempt(%d): %v", stmt.id, err)
-		}
 	}
 	if err := CloseJobCloudAttempt(database, 1, AttemptOutcomeCompleted); err != nil {
 		t.Fatalf("CloseJobCloudAttempt(completed): %v", err)
@@ -592,9 +581,6 @@ func TestNormalizeTerminalCloudInstanceJobs_FailedInstanceOrphansRunningJobs(t *
 	if err != nil {
 		t.Fatalf("insert running job: %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
-	}
 
 	n, err := NormalizeTerminalCloudInstanceJobs(database, instanceID)
 	if err != nil {
@@ -655,9 +641,6 @@ func TestResetJobsOnTerminalCloudInstances_SkipsCompletedInstances(t *testing.T)
 		)
 		if err != nil {
 			t.Fatalf("insert job %d: %v", tc.jobID, err)
-		}
-		if err := InsertJobCloudAttempt(database, tc.jobID, tc.instanceID); err != nil {
-			t.Fatalf("InsertJobCloudAttempt(%d): %v", tc.jobID, err)
 		}
 	}
 
@@ -810,8 +793,8 @@ func TestRefineInstanceTerminationReason_UsesHistoricalAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	if err := InsertJobCloudAttempt(database, 1, instanceID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt: %v", err)
+	if err := SetJobCloudInstanceID(database, 1, instanceID); err != nil {
+		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}
 
 	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {

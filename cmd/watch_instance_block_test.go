@@ -72,17 +72,13 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 	}
 
 	for _, jobID := range []int64{203, 249, 250, 253, 283} {
-		if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
-			t.Fatalf("InsertJobCloudAttempt(%d): %v", jobID, err)
+		if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+			t.Fatalf("SetJobCloudInstanceID(%d): %v", jobID, err)
 		}
 	}
-	if _, err := database.Exec(
-		`UPDATE job_cloud_attempts
-		 SET ended_at = strftime('%s', 'now'), outcome = ?
-		 WHERE job_id = ? AND cloud_instance_id = ? AND ended_at IS NULL`,
-		db.AttemptOutcomeFailed, 283, instanceID,
-	); err != nil {
-		t.Fatalf("close historical attempt: %v", err)
+	// Mark job 283's attempt as failed (historical)
+	if err := db.CloseJobCloudAttempt(database, 283, db.AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseJobCloudAttempt(283): %v", err)
 	}
 
 	jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, instanceID)

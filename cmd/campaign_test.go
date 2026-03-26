@@ -214,9 +214,6 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert orphaned job: %v", err)
 	}
-	if err := db.InsertJobCloudAttempt(database, 1, preemptedID); err != nil {
-		t.Fatalf("InsertJobCloudAttempt(orphaned): %v", err)
-	}
 	if err := db.CloseJobCloudAttemptsByInstance(database, preemptedID, db.AttemptOutcomeOrphaned); err != nil {
 		t.Fatalf("CloseJobCloudAttemptsByInstance(orphaned): %v", err)
 	}

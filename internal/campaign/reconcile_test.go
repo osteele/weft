@@ -34,10 +34,6 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	// Record the attempt
-	if err := db.InsertJobCloudAttempt(database, 1, instanceID); err != nil {
-		t.Fatalf("insert attempt: %v", err)
-	}
 
 	// Mock client that reports the instance as dead
 	mockClient := &cloud.MockClient{
@@ -183,9 +179,6 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 	for _, jobID := range []int64{1, 2} {
 		if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, status, command, cloud_instance_id) VALUES (?, '', '/tmp', 'queued', 'python train.py', ?)`, jobID, instanceID); err != nil {
 			t.Fatalf("create job %d: %v", jobID, err)
-		}
-		if err := db.InsertJobCloudAttempt(database, jobID, instanceID); err != nil {
-			t.Fatalf("insert attempt for job %d: %v", jobID, err)
 		}
 	}
 

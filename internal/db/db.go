@@ -512,12 +512,13 @@ func createJobStateViews(db *sql.DB) error {
 		),
 		historical_memberships AS (
 			SELECT DISTINCT
-			       js.id AS job_id,
-			       jca.cloud_instance_id AS membership_cloud_instance_id
-			FROM job_status js
-			JOIN job_cloud_attempts jca ON jca.job_id = js.id
-			WHERE jca.cloud_instance_id IS NOT NULL
-			  AND (js.cloud_instance_id IS NULL OR jca.cloud_instance_id != js.cloud_instance_id)
+			       ja.job_id AS job_id,
+			       ja.cloud_instance_id AS membership_cloud_instance_id
+			FROM job_attempts ja
+			JOIN job_status js ON js.id = ja.job_id
+			WHERE ja.cloud_instance_id IS NOT NULL
+			  AND ja.end_time IS NOT NULL
+			  AND (js.cloud_instance_id IS NULL OR ja.cloud_instance_id != js.cloud_instance_id)
 		)
 		SELECT %s,
 		       current_memberships.membership_cloud_instance_id,
@@ -577,72 +578,9 @@ func createCloudAttemptTriggers(db *sql.DB) error {
 		BEGIN
 			SELECT RAISE(ABORT, 'job_cloud_attempt ended_at and outcome must both be NULL or both be set');
 		END`,
-		`CREATE TRIGGER job_cloud_attempts_sync_job_on_open
-		AFTER INSERT ON job_cloud_attempts
-		FOR EACH ROW
-		WHEN NEW.ended_at IS NULL
-		     AND EXISTS (
-				SELECT 1
-				FROM cloud_instances
-				WHERE id = NEW.cloud_instance_id
-				  AND status IN ('running', 'launching', 'grace')
-		     )
-		BEGIN
-			UPDATE jobs
-			SET cloud_instance_id = NEW.cloud_instance_id,
-			    host = '',
-			    placement_reasons = NULL
-			WHERE id = NEW.job_id;
-			UPDATE job_attempts
-			SET cloud_instance_id = NEW.cloud_instance_id,
-			    host = ''
-			WHERE id = (SELECT id FROM job_attempts WHERE job_id = NEW.job_id AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1);
-		END`,
-		`CREATE TRIGGER job_cloud_attempts_sync_job_on_close
-		AFTER UPDATE OF ended_at ON job_cloud_attempts
-		FOR EACH ROW
-		WHEN OLD.ended_at IS NULL AND NEW.ended_at IS NOT NULL
-		BEGIN
-			UPDATE jobs
-			SET cloud_instance_id = (
-					SELECT jca.cloud_instance_id
-					FROM job_cloud_attempts jca
-					JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
-					WHERE jca.job_id = NEW.job_id
-					  AND jca.ended_at IS NULL
-					  AND ci.status IN ('running', 'launching', 'grace')
-					ORDER BY jca.started_at DESC, jca.id DESC
-					LIMIT 1
-			    ),
-			    host = CASE
-					WHEN EXISTS (
-						SELECT 1
-						FROM job_cloud_attempts jca
-						JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
-						WHERE jca.job_id = NEW.job_id
-						  AND jca.ended_at IS NULL
-						  AND ci.status IN ('running', 'launching', 'grace')
-					) THEN ''
-					ELSE host
-			    END
-			WHERE id = NEW.job_id;
-		END`,
-		`CREATE TRIGGER jobs_prevent_clearing_live_cloud_assignment
-		BEFORE UPDATE OF cloud_instance_id ON jobs
-		FOR EACH ROW
-		WHEN OLD.cloud_instance_id IS NOT NULL
-		     AND NEW.cloud_instance_id IS NULL
-		     AND EXISTS (
-				SELECT 1
-				FROM job_cloud_attempts jca
-				JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
-				WHERE jca.job_id = OLD.id
-				  AND jca.ended_at IS NULL
-				  AND ci.status IN ('running', 'launching', 'grace')
-		     )
-		BEGIN
-			SELECT RAISE(ABORT, 'cannot clear cloud_instance_id while a live cloud attempt exists');
-		END`,
+		// Legacy sync triggers (sync_job_on_open, sync_job_on_close, prevent_clearing)
+		// are no longer needed — cloud instance association is managed through
+		// job_attempts.cloud_instance_id and SetJobCloudInstanceID().
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -926,7 +864,6 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 	campaignStatusSQL := sqlStringList(campaignStatusValues())
 	cloudStatusSQL := sqlStringList(cloudInstanceStatusValues())
 	terminationReasonSQL := sqlStringList(terminationReasonValues())
-	attemptOutcomeSQL := sqlStringList(jobCloudAttemptOutcomeValues())
 
 	validations := []struct {
 		query   string
@@ -992,34 +929,6 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 				return fmt.Sprintf("%d=%q", id, reason), nil
 			},
 			message: "invalid cloud_instances.termination_reason values",
-		},
-		{
-			query: fmt.Sprintf(`SELECT id, outcome FROM job_cloud_attempts WHERE outcome IS NOT NULL AND outcome NOT IN (%s) ORDER BY id ASC LIMIT 5`, attemptOutcomeSQL),
-			format: func(rows *sql.Rows) (string, error) {
-				var id int64
-				var outcome string
-				if err := rows.Scan(&id, &outcome); err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("%d=%q", id, outcome), nil
-			},
-			message: "invalid job_cloud_attempts.outcome values",
-		},
-		{
-			query: `SELECT id, ended_at, outcome FROM job_cloud_attempts
-				WHERE (ended_at IS NULL AND outcome IS NOT NULL)
-				   OR (ended_at IS NOT NULL AND outcome IS NULL)
-				ORDER BY id ASC LIMIT 5`,
-			format: func(rows *sql.Rows) (string, error) {
-				var id int64
-				var endedAt sql.NullInt64
-				var outcome sql.NullString
-				if err := rows.Scan(&id, &endedAt, &outcome); err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("%d=(ended_at=%v,outcome=%q)", id, endedAt.Valid, outcome.String), nil
-			},
-			message: "invalid job_cloud_attempts ended_at/outcome shape",
 		},
 		{
 			query: `SELECT j.id, j.latest_run_id
@@ -1095,8 +1004,8 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 func detectMultipleOpenCloudAttempts(db *sql.DB) error {
 	rows, err := db.Query(`
 		SELECT job_id, COUNT(*)
-		FROM job_cloud_attempts
-		WHERE ended_at IS NULL
+		FROM job_attempts
+		WHERE end_time IS NULL AND cloud_instance_id IS NOT NULL
 		GROUP BY job_id
 		HAVING COUNT(*) > 1
 		ORDER BY job_id ASC
@@ -1125,23 +1034,23 @@ func detectMultipleOpenCloudAttempts(db *sql.DB) error {
 }
 
 func repairLiveCloudAssignments(db *sql.DB) error {
-	_, err := db.Exec(`
+	// Primary: check job_attempts for open attempts on live cloud instances.
+	if _, err := db.Exec(`
 		WITH latest_live_open_attempt AS (
-			SELECT jca.job_id,
-			       jca.cloud_instance_id
-			FROM job_cloud_attempts jca
-			JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
-			WHERE jca.ended_at IS NULL
+			SELECT ja.job_id,
+			       ja.cloud_instance_id
+			FROM job_attempts ja
+			JOIN cloud_instances ci ON ci.id = ja.cloud_instance_id
+			WHERE ja.end_time IS NULL
 			  AND ci.status IN ('running', 'launching', 'grace')
 			  AND NOT EXISTS (
 				SELECT 1
-				FROM job_cloud_attempts newer
+				FROM job_attempts newer
 				JOIN cloud_instances newer_ci ON newer_ci.id = newer.cloud_instance_id
-				WHERE newer.job_id = jca.job_id
-				  AND newer.ended_at IS NULL
+				WHERE newer.job_id = ja.job_id
+				  AND newer.end_time IS NULL
 				  AND newer_ci.status IN ('running', 'launching', 'grace')
-				  AND (newer.started_at > jca.started_at
-				       OR (newer.started_at = jca.started_at AND newer.id > jca.id))
+				  AND newer.attempt_number > ja.attempt_number
 			  )
 		)
 		UPDATE jobs
@@ -1165,8 +1074,50 @@ func repairLiveCloudAssignments(db *sql.DB) error {
 					WHERE latest_live_open_attempt.job_id = jobs.id
 				)
 				OR jobs.host != ''
-		    )`)
-	return err
+		    )`); err != nil {
+		return err
+	}
+
+	// Fallback: check legacy job_cloud_attempts table for open attempts that
+	// weren't migrated to job_attempts yet.
+	if _, err := db.Exec(`
+		WITH legacy_live AS (
+			SELECT jca.job_id,
+			       jca.cloud_instance_id
+			FROM job_cloud_attempts jca
+			JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
+			WHERE jca.ended_at IS NULL
+			  AND ci.status IN ('running', 'launching', 'grace')
+		)
+		UPDATE jobs
+		SET cloud_instance_id = (
+				SELECT legacy_live.cloud_instance_id
+				FROM legacy_live WHERE legacy_live.job_id = jobs.id
+		    ),
+		    host = '',
+		    placement_reasons = NULL
+		WHERE EXISTS (SELECT 1 FROM legacy_live WHERE legacy_live.job_id = jobs.id)
+		  AND (jobs.cloud_instance_id IS NULL OR jobs.host != '')`); err != nil && !isNoSuchTable(err) {
+		return err
+	}
+
+	// Sync cloud_instance_id and host to job_attempts for jobs repaired above.
+	// The sync trigger may not exist yet at this point in init, so do it directly.
+	if _, err := db.Exec(`
+		UPDATE job_attempts
+		SET cloud_instance_id = j.cloud_instance_id,
+		    host = ''
+		FROM jobs j
+		WHERE j.id = job_attempts.job_id
+		  AND job_attempts.end_time IS NULL
+		  AND j.cloud_instance_id IS NOT NULL
+		  AND (job_attempts.cloud_instance_id IS NULL
+		       OR job_attempts.cloud_instance_id != j.cloud_instance_id
+		       OR job_attempts.host != '')`); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Special job tags that affect scheduling and execution behavior.
@@ -1952,9 +1903,6 @@ func initSchema(db *sql.DB) error {
 	if err := detectMultipleOpenCloudAttempts(db); err != nil {
 		return err
 	}
-	if err := repairLiveCloudAssignments(db); err != nil {
-		return err
-	}
 	if err := dropIntegrityViewsAndTriggers(db); err != nil {
 		return err
 	}
@@ -1995,6 +1943,17 @@ func initSchema(db *sql.DB) error {
 
 	// Backfill job_attempts from existing jobs and job_runs data
 	if err := backfillJobAttempts(db); err != nil {
+		return err
+	}
+
+	// Repair cloud assignment state using job_attempts (must run after backfill).
+	if err := repairLiveCloudAssignments(db); err != nil {
+		return err
+	}
+
+	// Clean up stale attempt data: close duplicate open attempts and
+	// ensure orphaned cloud jobs have fresh unplaced attempts.
+	if err := cleanupStaleAttempts(db); err != nil {
 		return err
 	}
 

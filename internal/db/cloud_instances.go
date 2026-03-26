@@ -380,13 +380,13 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 	err = database.QueryRow(
 		`SELECT EXISTS(
 			SELECT 1
-			FROM jobs
-			LEFT JOIN job_cloud_attempts ON jobs.id = job_cloud_attempts.job_id
-			WHERE jobs.tombstoned = 0
-			  AND jobs.failure_reason = ?
-			  AND (jobs.cloud_instance_id = ? OR job_cloud_attempts.cloud_instance_id = ?)
+			FROM job_attempts ja
+			JOIN jobs j ON j.id = ja.job_id
+			WHERE j.tombstoned = 0
+			  AND ja.failure_reason = ?
+			  AND ja.cloud_instance_id = ?
 		)`,
-		TerminationReasonDiskFull, instanceID, instanceID,
+		TerminationReasonDiskFull, instanceID,
 	).Scan(&hasDiskFull)
 	if err != nil {
 		return err
@@ -458,20 +458,30 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 		tx.Rollback()
 		return err
 	}
-	// Close any existing open cloud attempts for this job before recording the new one
+	// Mark any previous cloud attempts as superseded
 	if _, err := tx.Exec(
-		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
-		time.Now().Unix(), AttemptOutcomeSuperseded, jobID,
+		`UPDATE job_attempts SET cloud_outcome = ?
+		 WHERE job_id = ? AND cloud_instance_id IS NOT NULL AND end_time IS NOT NULL AND cloud_outcome IS NULL`,
+		AttemptOutcomeSuperseded, jobID,
 	); err != nil {
 		tx.Rollback()
-		return fmt.Errorf("close existing attempt: %w", err)
+		return fmt.Errorf("mark superseded attempts: %w", err)
+	}
+	// Also close+supersede the legacy job_cloud_attempts table (if it still exists)
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
+		now, AttemptOutcomeSuperseded, jobID,
+	); err != nil && !isNoSuchTable(err) {
+		tx.Rollback()
+		return fmt.Errorf("close legacy cloud attempt: %w", err)
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (?, ?, ?)`,
-		jobID, instanceID, time.Now().Unix(),
-	); err != nil {
+		jobID, instanceID, now,
+	); err != nil && !isNoSuchTable(err) {
 		tx.Rollback()
-		return err
+		return fmt.Errorf("insert legacy cloud attempt: %w", err)
 	}
 	return tx.Commit()
 }
@@ -650,8 +660,27 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		updateArgs = append(updateArgs, jobID)
 	}
 
-	// Close open attempts only for jobs that are about to be reset. Completed or
-	// otherwise terminal jobs keep their recorded attempt outcomes.
+	// Close the old attempt (preserves cloud_instance_id as historical record)
+	// and create a fresh unplaced attempt for each reset job.
+	// Must happen BEFORE updating jobs.cloud_instance_id to NULL, because the
+	// trigger prevents clearing cloud_instance_id while live attempts exist.
+	now := time.Now().Unix()
+	for _, jobID := range jobIDs {
+		if _, err := tx.Exec(`
+			UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ?
+			WHERE job_id = ? AND end_time IS NULL`,
+			StatusCanceled, now, outcome, jobID,
+		); err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("close attempt for job %d: %w", jobID, err)
+		}
+		if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
+			tx.Rollback()
+			return 0, fmt.Errorf("create fresh attempt for job %d: %w", jobID, err)
+		}
+	}
+
+	// Close legacy job_cloud_attempts (if table still exists).
 	if _, err := tx.Exec(
 		`UPDATE job_cloud_attempts
 		 SET ended_at = ?, outcome = ?
@@ -660,11 +689,11 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		 	SELECT id FROM jobs
 		 	WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0
 		 )`,
-		time.Now().Unix(), outcome, instanceID, instanceID,
+		now, outcome, instanceID, instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
-	); err != nil {
+	); err != nil && !isNoSuchTable(err) {
 		tx.Rollback()
-		return 0, fmt.Errorf("close attempts: %w", err)
+		return 0, fmt.Errorf("close legacy cloud attempts: %w", err)
 	}
 
 	result, err := tx.Exec(
@@ -684,6 +713,7 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 		tx.Rollback()
 		return 0, err
 	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -1027,49 +1057,48 @@ type JobCloudAttempt struct {
 	Outcome         string // "completed", "failed", "canceled", "orphaned"
 }
 
-// InsertJobCloudAttempt records a new job ↔ cloud instance association.
-func InsertJobCloudAttempt(database *sql.DB, jobID, cloudInstanceID int64) error {
-	now := time.Now().Unix()
-	_, err := database.Exec(
-		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (?, ?, ?)`,
-		jobID, cloudInstanceID, now,
-	)
-	return err
-}
-
-// CloseJobCloudAttempt closes the open attempt for a specific job with the given outcome.
+// CloseJobCloudAttempt sets cloud_outcome on the latest cloud-associated attempt for a job.
 func CloseJobCloudAttempt(database *sql.DB, jobID int64, outcome string) error {
-	now := time.Now().Unix()
 	_, err := database.Exec(
-		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
-		now, outcome, jobID,
+		`UPDATE job_attempts SET cloud_outcome = ?
+		 WHERE id = (
+			SELECT id FROM job_attempts
+			WHERE job_id = ? AND cloud_instance_id IS NOT NULL
+			ORDER BY attempt_number DESC LIMIT 1
+		 )`,
+		outcome, jobID,
 	)
 	return err
 }
 
-// CloseJobCloudAttemptsByInstance closes all open attempts for jobs on the given instance.
+// CloseJobCloudAttemptsByInstance sets cloud_outcome on all open attempts
+// associated with the given cloud instance.
 func CloseJobCloudAttemptsByInstance(database *sql.DB, instanceID int64, outcome string) error {
-	now := time.Now().Unix()
 	_, err := database.Exec(
-		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ?
-		 WHERE cloud_instance_id = ? AND ended_at IS NULL`,
-		now, outcome, instanceID,
+		`UPDATE job_attempts SET cloud_outcome = ?
+		 WHERE cloud_instance_id = ? AND end_time IS NULL`,
+		outcome, instanceID,
 	)
 	return err
 }
 
-// CountJobCloudAttempts returns the number of cloud attempts for a job.
+// CountJobCloudAttempts returns the number of cloud-associated attempts for a job.
 func CountJobCloudAttempts(database *sql.DB, jobID int64) (int, error) {
 	var count int
-	err := database.QueryRow(`SELECT COUNT(*) FROM job_cloud_attempts WHERE job_id = ?`, jobID).Scan(&count)
+	err := database.QueryRow(
+		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND cloud_instance_id IS NOT NULL`,
+		jobID,
+	).Scan(&count)
 	return count, err
 }
 
-// GetJobCloudAttempts returns the attempt history for a job, ordered by start time.
+// GetJobCloudAttempts returns the cloud attempt history for a job, ordered by start time.
 func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, error) {
 	rows, err := database.Query(
-		`SELECT id, job_id, cloud_instance_id, started_at, ended_at, outcome
-		 FROM job_cloud_attempts WHERE job_id = ? ORDER BY started_at ASC`,
+		`SELECT id, job_id, cloud_instance_id, COALESCE(queued_at, start_time, 0), end_time, cloud_outcome
+		 FROM job_attempts
+		 WHERE job_id = ? AND cloud_instance_id IS NOT NULL
+		 ORDER BY attempt_number ASC`,
 		jobID,
 	)
 	if err != nil {
@@ -1096,13 +1125,13 @@ func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, erro
 	return attempts, rows.Err()
 }
 
-// GetAttemptOutcomesByInstance returns the latest closed attempt outcome for each job
+// GetAttemptOutcomesByInstance returns the cloud_outcome for each job attempt
 // that ran on the given cloud instance. Returns map[jobID]outcome.
 func GetAttemptOutcomesByInstance(database *sql.DB, cloudInstanceID int64) (map[int64]string, error) {
 	rows, err := database.Query(
-		`SELECT job_id, outcome FROM job_cloud_attempts
-		 WHERE cloud_instance_id = ? AND ended_at IS NOT NULL AND outcome IS NOT NULL
-		 ORDER BY started_at ASC`,
+		`SELECT job_id, cloud_outcome FROM job_attempts
+		 WHERE cloud_instance_id = ? AND cloud_outcome IS NOT NULL
+		 ORDER BY attempt_number ASC`,
 		cloudInstanceID,
 	)
 	if err != nil {
@@ -1117,19 +1146,19 @@ func GetAttemptOutcomesByInstance(database *sql.DB, cloudInstanceID int64) (map[
 		if err := rows.Scan(&jobID, &outcome); err != nil {
 			return nil, err
 		}
-		outcomes[jobID] = outcome // later rows overwrite earlier, giving us the latest
+		outcomes[jobID] = outcome
 	}
 	return outcomes, rows.Err()
 }
 
-// GetLatestAttemptOutcome returns the most recent closed attempt outcome for a job.
-// Returns empty string if no closed attempts exist.
+// GetLatestAttemptOutcome returns the most recent cloud_outcome for a job.
+// Returns empty string if no cloud attempts exist.
 func GetLatestAttemptOutcome(database *sql.DB, jobID int64) string {
 	var outcome sql.NullString
 	err := database.QueryRow(
-		`SELECT outcome FROM job_cloud_attempts
-		 WHERE job_id = ? AND ended_at IS NOT NULL AND outcome IS NOT NULL
-		 ORDER BY ended_at DESC LIMIT 1`,
+		`SELECT cloud_outcome FROM job_attempts
+		 WHERE job_id = ? AND cloud_outcome IS NOT NULL
+		 ORDER BY attempt_number DESC LIMIT 1`,
 		jobID,
 	).Scan(&outcome)
 	if err != nil || !outcome.Valid {

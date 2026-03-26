@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -50,6 +51,9 @@ func createJobAttemptsTableSQL() string {
 		job_metadata TEXT,
 		observed_inputs TEXT,
 
+		-- Cloud instance outcome (replaces job_cloud_attempts table)
+		cloud_outcome TEXT,
+
 		UNIQUE(job_id, attempt_number),
 		CONSTRAINT job_attempts_status_check CHECK (%s)
 	)`, statusCheckConstraintSQL("status", jobStatusValues(), false))
@@ -69,6 +73,10 @@ func initJobAttemptsSchema(db *sql.DB) error {
 		if _, err := db.Exec(idx); err != nil {
 			return fmt.Errorf("create job_attempts index: %w", err)
 		}
+	}
+	// Migration: add cloud_outcome column
+	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN cloud_outcome TEXT`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -167,6 +175,97 @@ func backfillJobAttempts(db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// cleanupStaleAttempts fixes data corruption from earlier bugs:
+//  1. Jobs with multiple open attempts — keeps only the latest, closes the rest.
+//  2. Jobs with cloud_instance_id on their latest attempt pointing to a terminated
+//     instance — closes that attempt and creates a fresh unplaced one.
+func cleanupStaleAttempts(db *sql.DB) error {
+	now := time.Now().Unix()
+
+	// Step 1: Close duplicate open attempts. For each job with multiple open
+	// attempts, keep only the one with the highest attempt_number.
+	if _, err := db.Exec(`
+		UPDATE job_attempts SET end_time = ?, status = 'canceled'
+		WHERE end_time IS NULL
+		  AND id NOT IN (
+			SELECT MAX(id) FROM job_attempts
+			WHERE end_time IS NULL
+			GROUP BY job_id
+		  )`, now); err != nil {
+		return fmt.Errorf("close duplicate open attempts: %w", err)
+	}
+
+	// Step 2: For jobs whose latest open attempt references a terminated cloud
+	// instance, close the attempt and create a fresh unplaced one.
+	rows, err := db.Query(`
+		SELECT ja.job_id, ja.id
+		FROM job_attempts ja
+		JOIN cloud_instances ci ON ci.id = ja.cloud_instance_id
+		WHERE ja.end_time IS NULL
+		  AND ci.status IN ('failed', 'completed', 'canceled')`)
+	if err != nil {
+		return fmt.Errorf("find orphaned cloud attempts: %w", err)
+	}
+	var orphaned []struct{ jobID, attemptID int64 }
+	for rows.Next() {
+		var jobID, attemptID int64
+		if err := rows.Scan(&jobID, &attemptID); err != nil {
+			rows.Close()
+			return err
+		}
+		orphaned = append(orphaned, struct{ jobID, attemptID int64 }{jobID, attemptID})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, o := range orphaned {
+		if _, err := db.Exec(`
+			UPDATE job_attempts SET status = 'canceled', end_time = ?
+			WHERE id = ?`, now, o.attemptID); err != nil {
+			return fmt.Errorf("close orphaned attempt %d: %w", o.attemptID, err)
+		}
+		if _, err := createAttemptTx(db, o.jobID, "", nil, StatusQueued); err != nil {
+			return fmt.Errorf("create fresh attempt for job %d: %w", o.jobID, err)
+		}
+	}
+
+	// Step 3: Backfill cloud_outcome from job_cloud_attempts into job_attempts.
+	// Match by (job_id, cloud_instance_id) where the attempt has an outcome but
+	// the job_attempt doesn't yet have cloud_outcome set.
+	if _, err := db.Exec(`
+		UPDATE job_attempts
+		SET cloud_outcome = (
+			SELECT jca.outcome
+			FROM job_cloud_attempts jca
+			WHERE jca.job_id = job_attempts.job_id
+			  AND jca.cloud_instance_id = job_attempts.cloud_instance_id
+			  AND jca.outcome IS NOT NULL
+			ORDER BY jca.ended_at DESC LIMIT 1
+		)
+		WHERE cloud_instance_id IS NOT NULL
+		  AND cloud_outcome IS NULL
+		  AND EXISTS (
+			SELECT 1 FROM job_cloud_attempts jca
+			WHERE jca.job_id = job_attempts.job_id
+			  AND jca.cloud_instance_id = job_attempts.cloud_instance_id
+			  AND jca.outcome IS NOT NULL
+		  )`); err != nil {
+		// Table may not exist yet on fresh DBs — that's fine
+		if !isNoSuchTable(err) {
+			return fmt.Errorf("backfill cloud_outcome: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// isNoSuchTable checks if an error is a "no such table" SQLite error.
+func isNoSuchTable(err error) bool {
+	return err != nil && strings.HasPrefix(err.Error(), "no such table: ")
 }
 
 // createJobStatusView creates the job_status view that joins jobs with their
