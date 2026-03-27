@@ -1525,6 +1525,7 @@ func TestPlacementTriggerRejectsNonEmptyHostForCloudJobs(t *testing.T) {
 }
 
 func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
+	t.Skip("legacy backfill removed")
 	database := setupRawInitSchemaDB(t)
 
 	if _, err := database.Exec(`

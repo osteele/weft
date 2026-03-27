@@ -287,18 +287,7 @@ func cleanupStaleAttempts(db *sql.DB) error {
 
 // isNoSuchTable checks if an error is a "no such table" SQLite error.
 func isNoSuchTable(err error) bool {
-	return err != nil && strings.HasPrefix(err.Error(), "no such table: ")
-}
-
-// isLegacyMigrationError returns true for errors expected during legacy table
-// migrations: missing tables or renamed columns.
-func isLegacyMigrationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.HasPrefix(msg, "no such table: ") ||
-		strings.Contains(msg, "no such column:")
+	return err != nil && strings.Contains(err.Error(), "no such table:")
 }
 
 // createJobStatusView creates the job_status view that joins jobs with their

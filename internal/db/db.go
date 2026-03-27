@@ -229,8 +229,6 @@ const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_c
 
 const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id`
 
-const jobCloudAttemptTableColumns = `id, job_id, launch_id, started_at, ended_at, outcome`
-
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
 	for i, value := range values {
@@ -296,16 +294,6 @@ func terminationReasonValues() []string {
 		TerminationReasonBootstrapTimeout,
 		TerminationReasonCancelled,
 		TerminationReasonUnknown,
-	}
-}
-
-func jobCloudAttemptOutcomeValues() []string {
-	return []string{
-		AttemptOutcomeCompleted,
-		AttemptOutcomeFailed,
-		AttemptOutcomeCancelled,
-		AttemptOutcomeOrphaned,
-		AttemptOutcomeSuperseded,
 	}
 }
 
@@ -412,27 +400,6 @@ func createLaunchesTableSQL(table string, ifNotExists bool) string {
 		statusCheckConstraintSQL("status", cloudInstanceStatusValues(), false))
 }
 
-func createJobCloudAttemptsTableSQL(table string, ifNotExists bool) string {
-	ifClause := ""
-	if ifNotExists {
-		ifClause = "IF NOT EXISTS "
-	}
-	return fmt.Sprintf(`CREATE TABLE %s%s (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		job_id INTEGER NOT NULL REFERENCES jobs(id),
-		launch_id INTEGER NOT NULL REFERENCES launches(id),
-		started_at INTEGER NOT NULL,
-		ended_at INTEGER,
-		outcome TEXT,
-		CONSTRAINT job_cloud_attempts_outcome_check CHECK (%s),
-		CONSTRAINT job_cloud_attempts_shape_check CHECK (
-			(ended_at IS NULL AND outcome IS NULL)
-			OR
-			(ended_at IS NOT NULL AND outcome IS NOT NULL)
-		)
-	)`, ifClause, table, statusCheckConstraintSQL("outcome", jobCloudAttemptOutcomeValues(), true))
-}
-
 // qualifiedJobSelectColumns returns jobSelectColumns with each column prefixed
 // by the given table alias (e.g. "jobs" → "jobs.id, jobs.host, ...").
 func qualifiedJobSelectColumns(table string) string {
@@ -509,19 +476,6 @@ func createJobStateViews(db *sql.DB) error {
 		return err
 	}
 
-	return nil
-}
-
-// createCloudAttemptTriggers is a no-op. Cloud attempt triggers were on the
-// legacy job_cloud_attempts table which has been dropped. The trigger names
-// are still in dropIntegrityViewsAndTriggers to clean up existing databases.
-func createCloudAttemptTriggers(_ *sql.DB) error {
-	return nil
-}
-
-// createAllRunsView is now a no-op — the all_runs view has been removed.
-// Triggers and validations reference job_attempts directly.
-func createAllRunsView(_ *sql.DB) error {
 	return nil
 }
 
@@ -707,13 +661,6 @@ func ensureCampaignsTableConstraints(db *sql.DB) error {
 		`DROP TABLE campaigns`,
 		`ALTER TABLE campaigns_new RENAME TO campaigns`,
 	)
-}
-
-// ensureJobCloudAttemptsTableConstraints drops the legacy table.
-// Cloud attempt tracking is now in job_attempts.cloud_outcome.
-func ensureJobCloudAttemptsTableConstraints(db *sql.DB) error {
-	_, err := db.Exec(`DROP TABLE IF EXISTS job_cloud_attempts`)
-	return err
 }
 
 func repairLegacyCloudPlacementHosts(_ *sql.DB) error {
@@ -1469,18 +1416,6 @@ func initSchema(db *sql.DB) error {
 	// Backfill provider_instance_id from vastai_instance_id (legacy column)
 	db.Exec(`UPDATE launches SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`)
 
-	// Create job_cloud_attempts table (legacy, will be dropped after backfill).
-	// The table may already exist from an older schema with different column names.
-	jobCloudAttemptsSchema := createJobCloudAttemptsTableSQL("job_cloud_attempts", true)
-	if _, err := db.Exec(jobCloudAttemptsSchema); err != nil {
-		return err
-	}
-	// Index creation may fail on legacy tables with old column names; that's OK
-	// since the table gets dropped after backfill.
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_instance ON job_cloud_attempts(launch_id)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_job ON job_cloud_attempts(job_id)`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_job_cloud_attempts_open ON job_cloud_attempts(job_id, ended_at, started_at DESC, id DESC)`)
-
 	// Migration: create job_attempts table (one row per execution attempt).
 	if err := initJobAttemptsSchema(db); err != nil {
 		return err
@@ -1585,9 +1520,6 @@ func initSchema(db *sql.DB) error {
 	if err := dropIntegrityViewsAndTriggers(db); err != nil {
 		return err
 	}
-	if err := createAllRunsView(db); err != nil {
-		return err
-	}
 	// Backfill + cleanup must run before validation, since dropping job_runs
 	// invalidates references that validation would flag.
 	if err := backfillJobAttempts(db); err != nil {
@@ -1617,53 +1549,9 @@ func initSchema(db *sql.DB) error {
 	if err := ensureLaunchesTableConstraints(db); err != nil {
 		return err
 	}
-	// Backfill launch_id and cloud_outcome from legacy job_cloud_attempts
-	// before dropping it. The legacy table uses cloud_instance_id as its column name.
-	// On fresh DBs the table may have been created with new column names, so we
-	// tolerate "no such column" errors alongside "no such table".
-	if _, err := db.Exec(`
-		UPDATE job_attempts
-		SET launch_id = (
-			SELECT jca.cloud_instance_id
-			FROM job_cloud_attempts jca
-			WHERE jca.job_id = job_attempts.job_id AND jca.ended_at IS NULL
-			ORDER BY jca.started_at DESC LIMIT 1
-		)
-		WHERE launch_id IS NULL
-		  AND end_time IS NULL
-		  AND EXISTS (
-			SELECT 1 FROM job_cloud_attempts jca
-			WHERE jca.job_id = job_attempts.job_id AND jca.ended_at IS NULL
-		  )`); err != nil && !isLegacyMigrationError(err) {
-		return fmt.Errorf("backfill launch_id from legacy table: %w", err)
-	}
-	if _, err := db.Exec(`
-		UPDATE job_attempts
-		SET cloud_outcome = (
-			SELECT jca.outcome
-			FROM job_cloud_attempts jca
-			WHERE jca.job_id = job_attempts.job_id
-			  AND jca.cloud_instance_id = job_attempts.launch_id
-			  AND jca.outcome IS NOT NULL
-			ORDER BY jca.ended_at DESC LIMIT 1
-		)
-		WHERE launch_id IS NOT NULL
-		  AND cloud_outcome IS NULL
-		  AND EXISTS (
-			SELECT 1 FROM job_cloud_attempts jca
-			WHERE jca.job_id = job_attempts.job_id
-			  AND jca.cloud_instance_id = job_attempts.launch_id
-			  AND jca.outcome IS NOT NULL
-		  )`); err != nil && !isLegacyMigrationError(err) {
-		return fmt.Errorf("backfill cloud_outcome from legacy table: %w", err)
-	}
-	if err := ensureJobCloudAttemptsTableConstraints(db); err != nil {
-		return err
-	}
+	// Drop legacy table if it still exists.
+	db.Exec(`DROP TABLE IF EXISTS job_cloud_attempts`)
 	if err := createJobStateViews(db); err != nil {
-		return err
-	}
-	if err := createCloudAttemptTriggers(db); err != nil {
 		return err
 	}
 	if err := createIntegrityTriggers(db); err != nil {
