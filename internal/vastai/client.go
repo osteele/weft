@@ -70,6 +70,9 @@ func (c *Client) SearchOffers(constraints OfferConstraints) ([]Offer, error) {
 
 	var offers []Offer
 	if err := json.Unmarshal(out, &offers); err != nil {
+		if msg := extractCLIError(out); msg != "" {
+			return nil, fmt.Errorf("search offers: %s", msg)
+		}
 		return nil, fmt.Errorf("parse offers: %w (output: %s)", err, truncate(string(out), 200))
 	}
 
@@ -130,6 +133,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		Msg         string `json:"msg"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
+		if msg := extractCLIError(out); msg != "" {
+			return nil, fmt.Errorf("create instance: %s", msg)
+		}
 		return nil, fmt.Errorf("parse create response: %w (output: %s)", err, truncate(string(out), 200))
 	}
 	if !resp.Success {
@@ -175,6 +181,9 @@ func (c *Client) ShowInstance(instanceID int) (*Instance, error) {
 
 	var instances []Instance
 	if err := json.Unmarshal(out, &instances); err != nil {
+		if msg := extractCLIError(out); msg != "" {
+			return nil, fmt.Errorf("show instances: %s", msg)
+		}
 		return nil, fmt.Errorf("parse instances: %w", err)
 	}
 
@@ -195,6 +204,9 @@ func (c *Client) ListAllInstances() ([]Instance, error) {
 
 	var instances []Instance
 	if err := json.Unmarshal(out, &instances); err != nil {
+		if msg := extractCLIError(out); msg != "" {
+			return nil, fmt.Errorf("show instances: %s", msg)
+		}
 		return nil, fmt.Errorf("parse instances: %w", err)
 	}
 	return instances, nil
@@ -333,6 +345,21 @@ func buildSearchFilter(c OfferConstraints) (string, func([]Offer) []Offer) {
 	parts = append(parts, "verified=true")
 
 	return strings.Join(parts, " "), postFilter
+}
+
+// extractCLIError checks if CLI output is a plain-text error message rather than
+// JSON. The vastai CLI sometimes writes errors to stdout (e.g., "failed with
+// error 400: Your account lacks credit"). Returns the message or "" if the
+// output doesn't look like a plain-text error.
+func extractCLIError(out []byte) string {
+	s := strings.TrimSpace(string(out))
+	if s == "" {
+		return ""
+	}
+	if s[0] == '{' || s[0] == '[' {
+		return ""
+	}
+	return s
 }
 
 func truncate(s string, max int) string {

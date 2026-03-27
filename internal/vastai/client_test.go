@@ -231,3 +231,26 @@ func TestIsUnavailableOfferError(t *testing.T) {
 		}
 	}
 }
+
+func TestExtractCLIError(t *testing.T) {
+	tests := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"json object", `{"success": true}`, ""},
+		{"json array", `[{"id": 1}]`, ""},
+		{"billing error", "failed with error 400: Your account lacks credit; see the billing page.\n", "failed with error 400: Your account lacks credit; see the billing page."},
+		{"plain error", "some unexpected error message", "some unexpected error message"},
+		{"whitespace trimmed", "  error with spaces  \n", "error with spaces"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractCLIError([]byte(tt.out))
+			if got != tt.want {
+				t.Errorf("extractCLIError(%q) = %q, want %q", tt.out, got, tt.want)
+			}
+		})
+	}
+}
