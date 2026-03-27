@@ -79,6 +79,10 @@ type CheckInstanceParams struct {
 
 	// TerminationIntent from R2 or DB (pre-fetched by caller)
 	TerminationIntent *instanceintent.Marker
+
+	// BootstrapSurvival holds adaptive bootstrap thresholds from historical
+	// survival analysis. Nil means use package defaults.
+	BootstrapSurvival *db.BootstrapSurvival
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -168,7 +172,14 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	if ci.Status == db.LaunchStatusRunning && ci.LaunchedAt != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		elapsed := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
 
-		if elapsed >= bootstrapWarnTimeout {
+		warnTimeout := bootstrapWarnTimeout
+		termTimeout := bootstrapTerminateTimeout
+		if p.BootstrapSurvival != nil {
+			warnTimeout = p.BootstrapSurvival.WarnAfter
+			termTimeout = p.BootstrapSurvival.TerminateAfter
+		}
+
+		if elapsed >= warnTimeout {
 			// Check R2 completion marker only past the warn threshold,
 			// to avoid an R2 call on every reconciliation tick.
 			if hasR2CompletionMarker(p.R2Client, ci.ID) {
@@ -179,20 +190,21 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 					DestroyProvider: true,
 				}
 			}
-			if elapsed >= bootstrapTerminateTimeout {
+			if elapsed >= termTimeout {
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
 					TerminalStatus:    db.LaunchStatusFailed,
 					TerminationReason: db.TerminationReasonBootstrapTimeout,
-					StallMessage:      "bootstrap timeout — terminating instance, jobs reset to queued",
+					StallMessage:      fmt.Sprintf("bootstrap timeout after %s — terminating instance, jobs reset to queued", elapsed.Truncate(time.Second)),
 					DestroyProvider:   true,
 					ResetJobs:         true,
 					AttemptOutcome:    db.AttemptOutcomeOrphaned,
 				}
 			}
+			remaining := termTimeout - elapsed
 			return InstanceAction{
 				Kind:         ActionDisplayOnly,
-				StallMessage: "bootstrap stalled — no activity",
+				StallMessage: fmt.Sprintf("bootstrap stalled — no activity (terminating in %s)", remaining.Truncate(time.Second)),
 			}
 		}
 	}

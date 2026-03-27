@@ -185,7 +185,6 @@ func ParsePhaseJobID(phase string) (string, int64, bool) {
 func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, cloudInstanceID int64, dbInterval, providerInterval time.Duration, r2Client ...*r2.Client) <-chan InstanceUpdate {
 	ch := make(chan InstanceUpdate, 1)
 
-	// Extract optional r2Client
 	var r2c *r2.Client
 	if len(r2Client) > 0 {
 		r2c = r2Client[0]
@@ -199,6 +198,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		var currentPhase string
 		var phaseChangedAt *time.Time
 		watchReconciler := NewReconciler()
+
+		var survival *db.BootstrapSurvival
+		survivalComputed := false
 
 		for {
 			select {
@@ -215,6 +217,11 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				case <-time.After(dbInterval):
 					continue
 				}
+			}
+
+			if !survivalComputed {
+				survivalComputed = true
+				survival, _ = db.ComputeBootstrapSurvival(database, ci.Provider)
 			}
 
 			jobs, _ := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
@@ -303,6 +310,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				HeartbeatAge:      heartbeatAge,
 				Now:               now,
 				TerminationIntent: terminationIntent,
+				BootstrapSurvival: survival,
 			})
 
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)

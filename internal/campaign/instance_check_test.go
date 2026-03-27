@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -87,6 +88,58 @@ func TestCheckInstance_BootstrapWarnOnly(t *testing.T) {
 	}
 	if action.StallMessage == "" {
 		t.Error("StallMessage should be non-empty for bootstrap warning")
+	}
+}
+
+func TestCheckInstance_AdaptiveBootstrapTimeout(t *testing.T) {
+	// With a custom 6-minute terminate timeout, an instance at 7 minutes
+	// should be terminated (even though it's under the default 20m).
+	launchedAt := time.Now().Add(-7 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:      time.Now(),
+		BootstrapSurvival: &db.BootstrapSurvival{
+			WarnAfter:      4 * time.Minute,
+			TerminateAfter: 6 * time.Minute,
+		},
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
+	}
+	if !strings.Contains(action.StallMessage, "bootstrap timeout after") {
+		t.Errorf("StallMessage = %q, want 'bootstrap timeout after...'", action.StallMessage)
+	}
+}
+
+func TestCheckInstance_AdaptiveBootstrapWarn(t *testing.T) {
+	// With a custom 4-minute warn, 6-minute terminate: at 5 minutes,
+	// should warn but not terminate.
+	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:      time.Now(),
+		BootstrapSurvival: &db.BootstrapSurvival{
+			WarnAfter:      4 * time.Minute,
+			TerminateAfter: 6 * time.Minute,
+		},
+	})
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
+	}
+	if !strings.Contains(action.StallMessage, "terminating in") {
+		t.Errorf("StallMessage = %q, should contain remaining time", action.StallMessage)
 	}
 }
 

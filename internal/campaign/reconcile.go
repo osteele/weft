@@ -30,6 +30,12 @@ type ReconcileResult struct {
 // reconciliation (rather than treating as dead), a shorter window is safe.
 const minDeadConfirmTime = 30 * time.Second
 
+// bootstrapTimeoutTTL controls how often adaptive bootstrap thresholds are
+// recomputed from historical data. The underlying survival statistics change
+// slowly (only when instances complete or fail), so recomputing every 5 minutes
+// is sufficient.
+const bootstrapTimeoutTTL = 5 * time.Minute
+
 // Reconciler runs reconciliation passes and remembers when each instance was
 // first seen dead, so we can require a sustained dead period before terminating.
 type Reconciler struct {
@@ -38,6 +44,11 @@ type Reconciler struct {
 	probeFailures      map[int64]probeFailureState
 	lastProviderStatus map[int64]string // last observed provider status per instance
 	deadConfirmTime    time.Duration    // 0 uses minDeadConfirmTime
+
+	// bootstrapTimeouts caches adaptive bootstrap thresholds per provider,
+	// recomputed at most once per bootstrapTimeoutTTL.
+	bootstrapTimeouts   map[string]*db.BootstrapSurvival
+	bootstrapTimeoutsAt time.Time // when the cache was last populated
 }
 
 type probeFailureState struct {
@@ -108,6 +119,25 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 		}
 	}
 	r.mu.Unlock()
+
+	// Recompute adaptive bootstrap timeouts only when the cache has expired.
+	if time.Since(r.bootstrapTimeoutsAt) >= bootstrapTimeoutTTL {
+		r.bootstrapTimeouts = make(map[string]*db.BootstrapSurvival)
+		providers := make(map[string]bool)
+		for _, ci := range instances {
+			providers[ci.Provider] = true
+		}
+		for provider := range providers {
+			if survival, err := db.ComputeBootstrapSurvival(database, provider); err != nil {
+				log.Printf("reconcile: compute bootstrap survival for %s: %v", provider, err)
+			} else {
+				r.bootstrapTimeouts[provider] = survival
+				log.Printf("reconcile: bootstrap thresholds for %s: warn=%s terminate=%s (n=%d)",
+					provider, survival.WarnAfter.Truncate(time.Second), survival.TerminateAfter.Truncate(time.Second), survival.SampleSize)
+			}
+		}
+		r.bootstrapTimeoutsAt = time.Now()
+	}
 
 	// Batch-fetch all provider instances once per reconciliation pass.
 	// This replaces N individual ShowInstance() calls with one ListAllInstances()
@@ -291,7 +321,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	now := time.Now()
-	action := r.CheckInstance(CheckInstanceParams{
+	params := CheckInstanceParams{
 		CI:                ci,
 		ProviderInst:      inst,
 		ProviderErr:       providerErr,
@@ -301,7 +331,11 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		BootstrapStage:    bootstrapStage,
 		Now:               now,
 		TerminationIntent: intent,
-	})
+	}
+	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
+		params.BootstrapSurvival = survival
+	}
+	action := r.CheckInstance(params)
 
 	// Handle termination intent post-processing (mark destroy succeeded)
 	if action.Kind == ActionTerminationIntent && isProviderTerminal(inst) {
