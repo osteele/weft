@@ -704,7 +704,8 @@ func syncJobOutputs(job *db.Job) error {
 	return srcsync.SyncOutputsBack(job.Host, job.WorkingDir, localDir, dirs, totalMB, 0)
 }
 
-// syncCloudJobOutputs downloads convention-based outputs from R2 for cloud jobs.
+// syncCloudJobOutputs downloads convention-based outputs and artifact manifest
+// entries from R2 for cloud jobs.
 func syncCloudJobOutputs(job *db.Job) error {
 	localDir := workdir.ResolveLocal(job.WorkingDir)
 	if localDir == "" {
@@ -723,43 +724,72 @@ func syncCloudJobOutputs(job *db.Job) error {
 		return fmt.Errorf("R2 not configured; cannot fetch cloud job outputs")
 	}
 
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+
+	// Download convention-based outputs
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	runID := int64(0)
-	if job.LatestRunID != nil {
-		runID = *job.LatestRunID
+	outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
+	if err := r2Client.DownloadResults(ctx, outputsPrefix, localDir); err != nil {
+		return err
 	}
-	prefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-	return r2Client.DownloadResults(ctx, prefix, localDir)
+
+	// Download artifact manifest entries (files declared via WEFT_ARTIFACT_MANIFEST)
+	artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel2()
+	return r2Client.DownloadResults(ctx2, artifactsPrefix, localDir)
 }
 
-// listCloudJobOutputFiles lists output files for a cloud job by checking R2 for the outputs prefix.
+// listCloudJobOutputFiles lists output files for a cloud job by checking R2 for
+// both the outputs/ and artifacts/files/ prefixes.
 func listCloudJobOutputFiles(r2Client *r2.Client, job *db.Job) []runner.OutputFile {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	runID := int64(0)
 	if job.LatestRunID != nil {
 		runID = *job.LatestRunID
-	}
-	prefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
-	files, err := r2Client.ListObjects(ctx, prefix)
-	if err != nil {
-		return nil
 	}
 
 	var result []runner.OutputFile
-	for _, f := range files {
-		relPath := strings.TrimPrefix(f.Key, prefix)
-		if relPath == "" {
-			continue
+
+	// Convention-based outputs
+	outputsPrefix := r2keys.JobAttemptOutputsPrefix(job.ID, runID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	files, err := r2Client.ListObjects(ctx, outputsPrefix)
+	cancel()
+	if err == nil {
+		for _, f := range files {
+			relPath := strings.TrimPrefix(f.Key, outputsPrefix)
+			if relPath == "" {
+				continue
+			}
+			result = append(result, runner.OutputFile{
+				RelPath:   relPath,
+				SizeBytes: f.SizeBytes,
+			})
 		}
-		result = append(result, runner.OutputFile{
-			RelPath:   relPath,
-			SizeBytes: f.SizeBytes,
-		})
 	}
+
+	// Artifact manifest entries
+	artifactsPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	aFiles, err := r2Client.ListObjects(ctx2, artifactsPrefix)
+	cancel2()
+	if err == nil {
+		for _, f := range aFiles {
+			relPath := strings.TrimPrefix(f.Key, artifactsPrefix)
+			if relPath == "" {
+				continue
+			}
+			result = append(result, runner.OutputFile{
+				RelPath:   "artifacts/" + relPath,
+				SizeBytes: f.SizeBytes,
+			})
+		}
+	}
+
 	return result
 }
 

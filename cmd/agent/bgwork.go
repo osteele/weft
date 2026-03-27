@@ -74,6 +74,17 @@ func (m *bgWorkManager) StartPostJobWork(pw postJobWork) {
 		if uploadResult.Status != "ok" {
 			m.recordError(pw.jobID, "upload-outputs", fmt.Errorf("status=%s", uploadResult.Status))
 		}
+
+		artifactResult := uploadArtifactManifestEntries(pw.r2Bucket, pw.jobID, pw.runID, pw.workDir)
+		if artifactResult.Status != "ok" {
+			m.recordError(pw.jobID, "upload-artifacts", fmt.Errorf("status=%s", artifactResult.Status))
+		}
+		uploadResult.FileCount += artifactResult.FileCount
+		uploadResult.Bytes += artifactResult.Bytes
+		if artifactResult.CompletedAtUnix > uploadResult.CompletedAtUnix {
+			uploadResult.CompletedAtUnix = artifactResult.CompletedAtUnix
+		}
+
 		patchCompletionUpload(pw.logSnapshot, pw.jobID, &uploadResult)
 
 		resultsUpload := uploadJobResults(pw.r2Bucket, pw.jobID, pw.runID, pw.logSnapshot)

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudlog"
 	"github.com/osteele/weft/internal/config"
@@ -314,10 +315,119 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		})
 	}
 
+	finalizeUploadResult(&result, attempted, failed, startedAt, totalDuration)
+	return result
+}
+
+// uploadArtifactManifestEntries reads the WEFT_ARTIFACT_MANIFEST written by the
+// job script and uploads each declared artifact file (plus the manifest itself)
+// to R2 under the artifacts/ prefix for this job attempt.
+func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir string) runner.OutputUploadResult {
+	startedAt := time.Now()
+	manifestPath := runner.ExpandTilde(artifacts.RemoteManifestPath(jobID))
+	manifest, err := artifacts.ReadManifestFile(manifestPath, jobID)
+	if err != nil || len(manifest.Artifacts) == 0 {
+		return runner.OutputUploadResult{Status: "ok"}
+	}
+
+	manifestData, err := json.Marshal(manifest)
+	if err == nil {
+		manifestKey := r2keys.JobAttemptArtifactManifest(jobID, runID)
+		if putErr := r2Put(bucket, manifestKey, string(manifestData)); putErr != nil {
+			fmt.Fprintf(os.Stderr, "upload artifact manifest for job %d: %v\n", jobID, putErr)
+		}
+	}
+
+	root := artifacts.ResolveArtifactRoot(manifest, workDir)
+	root = runner.ExpandTilde(root)
+	filesPrefix := r2keys.JobAttemptArtifactFilesPrefix(jobID, runID)
+
+	var result runner.OutputUploadResult
+	var attempted, failed int
+	var totalDuration time.Duration
+
+	for _, spec := range manifest.Artifacts {
+		if strings.TrimSpace(spec.Path) == "" {
+			continue
+		}
+		remotePath := artifacts.ResolveRemotePath(root, spec.Path)
+		remotePath = runner.ExpandTilde(remotePath)
+
+		info, statErr := os.Stat(remotePath)
+		if statErr != nil {
+			fmt.Fprintf(os.Stderr, "artifact %q for job %d: %v\n", spec.Path, jobID, statErr)
+			continue
+		}
+		attempted++
+		if info.IsDir() {
+			fileCount, bytes := measureUploadTree(remotePath)
+			r2Dest := filesPrefix + artifacts.LocalRelativePath(spec.Path) + "/"
+			start := time.Now()
+			uploadErr := rcloneUploadWithRetry(bucket, remotePath+"/", r2Dest, "copy", jobID, spec.Path)
+			duration := time.Since(start)
+			totalDuration += duration
+			status := "ok"
+			var errStr string
+			if uploadErr != nil {
+				failed++
+				status = "failed"
+				errStr = uploadErr.Error()
+			}
+			result.Dirs = append(result.Dirs, runner.OutputDirUpload{
+				Dir: spec.Path, Status: status, Error: errStr,
+				FileCount: fileCount, Bytes: bytes, DurationMS: duration.Milliseconds(),
+			})
+			result.FileCount += fileCount
+			result.Bytes += bytes
+		} else {
+			r2Key := filesPrefix + artifacts.LocalRelativePath(spec.Path)
+			start := time.Now()
+			uploadErr := rcloneUploadWithRetry(bucket, remotePath, r2Key, "copyto", jobID, spec.Path)
+			duration := time.Since(start)
+			totalDuration += duration
+			if uploadErr != nil {
+				failed++
+			}
+			result.FileCount++
+			result.Bytes += info.Size()
+		}
+	}
+
+	finalizeUploadResult(&result, attempted, failed, startedAt, totalDuration)
+	return result
+}
+
+// rcloneUploadWithRetry runs an rclone command with up to 3 attempts and backoff.
+func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, label string) error {
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		cmd := exec.CommandContext(ctx, "rclone", rcloneCmd, src, "r2:"+bucket+"/"+r2Key)
+		cmd.Stderr = os.Stderr
+		err := cmd.Run()
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if attempt < 3 {
+			backoff := 5 * time.Second
+			if attempt == 2 {
+				backoff = 10 * time.Second
+			}
+			fmt.Fprintf(os.Stderr, "upload %s for job %d (attempt %d/3): %v; retrying in %s\n",
+				label, jobID, attempt, err, backoff)
+			time.Sleep(backoff)
+		} else {
+			fmt.Fprintf(os.Stderr, "upload %s for job %d failed: %v\n", label, jobID, err)
+			return err
+		}
+	}
+	return nil
+}
+
+// finalizeUploadResult sets status and timing fields on an OutputUploadResult.
+func finalizeUploadResult(result *runner.OutputUploadResult, attempted, failed int, startedAt time.Time, totalDuration time.Duration) {
 	switch {
-	case attempted == 0:
-		result.Status = "ok"
-	case failed == 0:
+	case attempted == 0 || failed == 0:
 		result.Status = "ok"
 	case failed == attempted:
 		result.Status = "failed"
@@ -329,8 +439,6 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		result.StartedAtUnix = startedAt.Unix()
 		result.CompletedAtUnix = time.Now().Unix()
 	}
-
-	return result
 }
 
 func measureUploadTree(root string) (files int, bytes int64) {

@@ -149,6 +149,21 @@ func JobAttemptOutputDir(jobID, runID int64, dir string) string {
 	return fmt.Sprintf("%s/outputs/%s/", JobRunPrefix(jobID, runID), dir)
 }
 
+func JobAttemptArtifactsPrefix(jobID, runID int64) string {
+	if runID <= 0 {
+		return fmt.Sprintf("jobs/%d/artifacts/", jobID)
+	}
+	return fmt.Sprintf("%s/artifacts/", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptArtifactFilesPrefix(jobID, runID int64) string {
+	return JobAttemptArtifactsPrefix(jobID, runID) + "files/"
+}
+
+func JobAttemptArtifactManifest(jobID, runID int64) string {
+	return JobAttemptArtifactsPrefix(jobID, runID) + "manifest.json"
+}
+
 func JobAttemptLiveTimeseries(jobID, runID int64) string {
 	if runID <= 0 {
 		return JobLiveTimeseries(jobID)
