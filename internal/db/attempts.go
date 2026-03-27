@@ -96,6 +96,32 @@ func initJobAttemptsSchema(db *sql.DB) error {
 			return fmt.Errorf("create job_attempts index: %w", err)
 		}
 	}
+
+	// Rebuild if the table has stale columns (vastai_instance_id) or missing
+	// constraints (cloud_outcome CHECK). The DDL defines the canonical schema.
+	hasStaleCol, _ := tableSchemaContains(db, "job_attempts", "vastai_instance_id")
+	hasOutcomeCheck, _ := tableSchemaContains(db, "job_attempts", "job_attempts_cloud_outcome_check")
+	if hasStaleCol || !hasOutcomeCheck {
+		// Drop views/triggers that reference job_attempts before rebuild.
+		for _, v := range []string{"launch_job_membership", "cloud_instance_job_membership", "job_status", "training_examples"} {
+			db.Exec(`DROP VIEW IF EXISTS ` + v)
+		}
+		for _, t := range []string{"jobs_insert_create_attempt"} {
+			db.Exec(`DROP TRIGGER IF EXISTS ` + t)
+		}
+		const cols = `id, job_id, attempt_number, host, launch_id, status, queued_at, start_time, end_time, exit_code, error_message, failure_reason, error_diagnosis, session_name, remote_id, remote_state, backend, last_synced_status, pending_status, pending_at, cost, placement_meta, job_metadata, observed_inputs, cloud_outcome`
+		if err := rebuildTable(db,
+			strings.Replace(createJobAttemptsTableSQL(), "job_attempts", "job_attempts_new", 1),
+			fmt.Sprintf(`INSERT INTO job_attempts_new (%s) SELECT %s FROM job_attempts`, cols, cols),
+			`DROP TABLE job_attempts`,
+			`ALTER TABLE job_attempts_new RENAME TO job_attempts`,
+			`CREATE INDEX IF NOT EXISTS idx_job_attempts_job ON job_attempts(job_id, attempt_number DESC)`,
+			`CREATE INDEX IF NOT EXISTS idx_job_attempts_status ON job_attempts(status)`,
+			`CREATE INDEX IF NOT EXISTS idx_job_attempts_launch ON job_attempts(launch_id)`,
+		); err != nil {
+			return fmt.Errorf("rebuild job_attempts: %w", err)
+		}
+	}
 	return nil
 }
 
