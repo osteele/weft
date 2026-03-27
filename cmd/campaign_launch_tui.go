@@ -64,6 +64,7 @@ type launchModel struct {
 
 	items    []listItem
 	cursor   int
+	offset   int            // first visible item index for scrolling
 	selected map[int64]bool // job ID -> checked
 
 	showCostDetail bool
@@ -228,6 +229,38 @@ func buildItemsFromGroups(groups []campaign.InstanceGroup) ([]listItem, map[int6
 		}
 	}
 	return items, selected, cursor
+}
+
+// pageSize returns the number of item rows visible in the job list area.
+// It reserves lines for the title, cost table, help bar, and padding.
+func (m launchModel) pageSize() int {
+	if m.height <= 0 {
+		return 20
+	}
+	// Reserve: title(2) + cost table(~12) + help(2) + padding(2) = ~18 lines
+	return max(5, m.height-18)
+}
+
+// adjustOffset ensures the cursor is visible within the scrollable viewport.
+func (m *launchModel) adjustOffset() {
+	pageSize := m.pageSize()
+	if pageSize <= 0 {
+		m.offset = 0
+		return
+	}
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	}
+	if m.cursor >= m.offset+pageSize {
+		m.offset = m.cursor - pageSize + 1
+	}
+	maxOffset := max(0, len(m.items)-pageSize)
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
 }
 
 func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, predCfg *predictor.Config, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) launchModel {
@@ -493,6 +526,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.adjustOffset()
 		return m, nil
 
 	case reconcileDoneMsg:
@@ -697,12 +731,30 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor > 0 {
 			m.cursor--
 		}
+		m.adjustOffset()
 		return m, nil
 
 	case "down", "j":
 		if m.cursor < len(m.items)-1 {
 			m.cursor++
 		}
+		m.adjustOffset()
+		return m, nil
+
+	case "pgup":
+		m.cursor -= m.pageSize()
+		if m.cursor < 0 {
+			m.cursor = 0
+		}
+		m.adjustOffset()
+		return m, nil
+
+	case "pgdown":
+		m.cursor += m.pageSize()
+		if m.cursor >= len(m.items) {
+			m.cursor = len(m.items) - 1
+		}
+		m.adjustOffset()
 		return m, nil
 
 	case " ":
@@ -1105,8 +1157,20 @@ func (m launchModel) View() string {
 		// Detail view replaces job list
 		b.WriteString(campaign.FormatCostBreakdown(m.costEstimates, selected))
 	} else {
-		// Job list with checkboxes
-		for idx, item := range m.items {
+		// Job list with checkboxes (windowed by offset/pageSize)
+		pageSize := m.pageSize()
+		endIdx := m.offset + pageSize
+		if endIdx > len(m.items) {
+			endIdx = len(m.items)
+		}
+
+		if m.offset > 0 {
+			b.WriteString(launchDimStyle.Render(fmt.Sprintf("  ↑ %d more above", m.offset)))
+			b.WriteString("\n")
+		}
+
+		for idx := m.offset; idx < endIdx; idx++ {
+			item := m.items[idx]
 			isCursor := idx == m.cursor
 
 			if item.isHeader {
@@ -1139,6 +1203,11 @@ func (m launchModel) View() string {
 			} else {
 				b.WriteString(launchDimStyle.Render("  " + line))
 			}
+			b.WriteString("\n")
+		}
+
+		if endIdx < len(m.items) {
+			b.WriteString(launchDimStyle.Render(fmt.Sprintf("  ↓ %d more below", len(m.items)-endIdx)))
 			b.WriteString("\n")
 		}
 
