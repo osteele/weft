@@ -77,7 +77,6 @@ type Job struct {
 	Status               string
 	Tombstoned           bool
 	Cost                 *float64       // Actual cost in dollars (for cloud-run jobs)
-	VastaiInstanceID     *int           // Vast.ai instance ID (for vastai backend jobs)
 	ErrorDiagnosis       string         // JSON-encoded remediation diagnosis (see remediation.ErrorDiagnosis)
 	RetryCount           int            // Number of auto-remediation retries attempted
 	PlacementMeta        *PlacementMeta // Placement telemetry (predictions, scores)
@@ -222,7 +221,7 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, launch_id, campaign_job_index, latest_run_id`
 
 const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
@@ -3041,7 +3040,6 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var pendingAt sql.NullInt64
 	var jobMetadata sql.NullString
 	var cost sql.NullFloat64
-	var vastaiInstanceID sql.NullInt64
 	var errorDiagnosis sql.NullString
 	var retryCount sql.NullInt64
 	var placementMeta sql.NullString
@@ -3050,7 +3048,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var campaignJobIndex sql.NullInt64
 	var latestRunID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -3147,10 +3145,6 @@ func scanJob(row *sql.Row) (*Job, error) {
 	j.Metadata = decodeJobMetadata(jobMetadata)
 	if cost.Valid {
 		j.Cost = &cost.Float64
-	}
-	if vastaiInstanceID.Valid {
-		val := int(vastaiInstanceID.Int64)
-		j.VastaiInstanceID = &val
 	}
 	if errorDiagnosis.Valid {
 		j.ErrorDiagnosis = errorDiagnosis.String
@@ -3479,7 +3473,6 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var pendingAt sql.NullInt64
 		var jobMetadata sql.NullString
 		var cost sql.NullFloat64
-		var vastaiInstanceID sql.NullInt64
 		var errorDiagnosis sql.NullString
 		var retryCount sql.NullInt64
 		var placementMeta sql.NullString
@@ -3488,7 +3481,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var campaignJobIndex sql.NullInt64
 		var latestRunID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &vastaiInstanceID, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 		if err != nil {
 			return nil, err
 		}
@@ -3582,10 +3575,6 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		j.Metadata = decodeJobMetadata(jobMetadata)
 		if cost.Valid {
 			j.Cost = &cost.Float64
-		}
-		if vastaiInstanceID.Valid {
-			val := int(vastaiInstanceID.Int64)
-			j.VastaiInstanceID = &val
 		}
 		if errorDiagnosis.Valid {
 			j.ErrorDiagnosis = errorDiagnosis.String

@@ -370,7 +370,6 @@ func createJobStatusView(db *sql.DB) error {
 			la.pending_at,
 			la.job_metadata,
 			la.cost,
-			NULL AS vastai_instance_id,
 			la.error_diagnosis,
 			-- retry_count = number of prior attempts (attempt_count - 1), or 0
 			COALESCE(la.attempt_number - 1, 0) AS retry_count,
@@ -628,9 +627,8 @@ func SetAttemptLaunchID(execer dbExecer, jobID, instanceID int64) error {
 	return err
 }
 
-// SetAttemptVastaiInstance stores the backend on the latest open attempt.
-// Deprecated: vastai_instance_id is no longer stored on job_attempts.
-func SetAttemptVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
+// SetAttemptVastaiInstance sets the backend to 'vastai' on the latest open attempt.
+func SetAttemptVastaiInstance(db *sql.DB, jobID int64, _ int) error {
 	_, err := db.Exec(`
 		UPDATE job_attempts SET backend = ?
 		WHERE id = `+latestOpenAttemptSubquery,
