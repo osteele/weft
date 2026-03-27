@@ -233,33 +233,6 @@ func cleanupStaleAttempts(db *sql.DB) error {
 		}
 	}
 
-	// Step 3: Backfill cloud_outcome from job_cloud_attempts into job_attempts.
-	// Match by (job_id, cloud_instance_id) where the attempt has an outcome but
-	// the job_attempt doesn't yet have cloud_outcome set.
-	if _, err := db.Exec(`
-		UPDATE job_attempts
-		SET cloud_outcome = (
-			SELECT jca.outcome
-			FROM job_cloud_attempts jca
-			WHERE jca.job_id = job_attempts.job_id
-			  AND jca.cloud_instance_id = job_attempts.cloud_instance_id
-			  AND jca.outcome IS NOT NULL
-			ORDER BY jca.ended_at DESC LIMIT 1
-		)
-		WHERE cloud_instance_id IS NOT NULL
-		  AND cloud_outcome IS NULL
-		  AND EXISTS (
-			SELECT 1 FROM job_cloud_attempts jca
-			WHERE jca.job_id = job_attempts.job_id
-			  AND jca.cloud_instance_id = job_attempts.cloud_instance_id
-			  AND jca.outcome IS NOT NULL
-		  )`); err != nil {
-		// Table may not exist yet on fresh DBs — that's fine
-		if !isNoSuchTable(err) {
-			return fmt.Errorf("backfill cloud_outcome: %w", err)
-		}
-	}
-
 	return nil
 }
 

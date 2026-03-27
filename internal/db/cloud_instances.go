@@ -467,22 +467,6 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 		tx.Rollback()
 		return fmt.Errorf("mark superseded attempts: %w", err)
 	}
-	// Also close+supersede the legacy job_cloud_attempts table (if it still exists)
-	now := time.Now().Unix()
-	if _, err := tx.Exec(
-		`UPDATE job_cloud_attempts SET ended_at = ?, outcome = ? WHERE job_id = ? AND ended_at IS NULL`,
-		now, AttemptOutcomeSuperseded, jobID,
-	); err != nil && !isNoSuchTable(err) {
-		tx.Rollback()
-		return fmt.Errorf("close legacy cloud attempt: %w", err)
-	}
-	if _, err := tx.Exec(
-		`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (?, ?, ?)`,
-		jobID, instanceID, now,
-	); err != nil && !isNoSuchTable(err) {
-		tx.Rollback()
-		return fmt.Errorf("insert legacy cloud attempt: %w", err)
-	}
 	return tx.Commit()
 }
 
@@ -673,22 +657,6 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 			tx.Rollback()
 			return 0, fmt.Errorf("create fresh attempt for job %d: %w", jobID, err)
 		}
-	}
-
-	// Close legacy job_cloud_attempts (if table still exists).
-	if _, err := tx.Exec(
-		`UPDATE job_cloud_attempts
-		 SET ended_at = ?, outcome = ?
-		 WHERE cloud_instance_id = ? AND ended_at IS NULL
-		 AND job_id IN (
-		 	SELECT id FROM job_status
-		 	WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0
-		 )`,
-		now, outcome, instanceID, instanceID,
-		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
-	); err != nil && !isNoSuchTable(err) {
-		tx.Rollback()
-		return 0, fmt.Errorf("close legacy cloud attempts: %w", err)
 	}
 
 	// Update spec columns on jobs (placement_reasons). Execution state is

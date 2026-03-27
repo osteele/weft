@@ -540,53 +540,10 @@ func createJobStateViews(db *sql.DB) error {
 	return nil
 }
 
-func createCloudAttemptTriggers(db *sql.DB) error {
-	stmts := []string{
-		`CREATE TRIGGER job_cloud_attempts_require_instance
-		BEFORE INSERT ON job_cloud_attempts
-		FOR EACH ROW
-		WHEN NOT EXISTS (SELECT 1 FROM cloud_instances WHERE id = NEW.cloud_instance_id)
-		BEGIN
-			SELECT RAISE(ABORT, 'job_cloud_attempt references missing cloud instance');
-		END`,
-		`CREATE TRIGGER job_cloud_attempts_prevent_second_open
-		BEFORE INSERT ON job_cloud_attempts
-		FOR EACH ROW
-		WHEN NEW.ended_at IS NULL
-		     AND EXISTS (
-				SELECT 1
-				FROM job_cloud_attempts
-				WHERE job_id = NEW.job_id
-				  AND ended_at IS NULL
-		     )
-		BEGIN
-			SELECT RAISE(ABORT, 'job already has an open cloud attempt');
-		END`,
-		`CREATE TRIGGER job_cloud_attempts_shape_on_insert
-		BEFORE INSERT ON job_cloud_attempts
-		FOR EACH ROW
-		WHEN (NEW.ended_at IS NULL AND NEW.outcome IS NOT NULL)
-		     OR (NEW.ended_at IS NOT NULL AND NEW.outcome IS NULL)
-		BEGIN
-			SELECT RAISE(ABORT, 'job_cloud_attempt ended_at and outcome must both be NULL or both be set');
-		END`,
-		`CREATE TRIGGER job_cloud_attempts_shape_on_update
-		BEFORE UPDATE OF ended_at, outcome ON job_cloud_attempts
-		FOR EACH ROW
-		WHEN (NEW.ended_at IS NULL AND NEW.outcome IS NOT NULL)
-		     OR (NEW.ended_at IS NOT NULL AND NEW.outcome IS NULL)
-		BEGIN
-			SELECT RAISE(ABORT, 'job_cloud_attempt ended_at and outcome must both be NULL or both be set');
-		END`,
-		// Legacy sync triggers (sync_job_on_open, sync_job_on_close, prevent_clearing)
-		// are no longer needed — cloud instance association is managed through
-		// job_attempts.cloud_instance_id and SetJobCloudInstanceID().
-	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			return err
-		}
-	}
+// createCloudAttemptTriggers is a no-op. Cloud attempt triggers were on the
+// legacy job_cloud_attempts table which has been dropped. The trigger names
+// are still in dropIntegrityViewsAndTriggers to clean up existing databases.
+func createCloudAttemptTriggers(_ *sql.DB) error {
 	return nil
 }
 
@@ -800,28 +757,11 @@ func ensureCampaignsTableConstraints(db *sql.DB) error {
 	)
 }
 
+// ensureJobCloudAttemptsTableConstraints drops the legacy table.
+// Cloud attempt tracking is now in job_attempts.cloud_outcome.
 func ensureJobCloudAttemptsTableConstraints(db *sql.DB) error {
-	hasShapeCheck, err := tableSchemaContains(db, "job_cloud_attempts", "job_cloud_attempts_shape_check")
-	if err != nil {
-		return err
-	}
-	hasSuperseded, err := tableSchemaContains(db, "job_cloud_attempts", "'superseded'")
-	if err != nil {
-		return err
-	}
-	if hasShapeCheck && hasSuperseded {
-		return nil
-	}
-	return rebuildTable(
-		db,
-		createJobCloudAttemptsTableSQL("job_cloud_attempts_new", false),
-		fmt.Sprintf(`INSERT INTO job_cloud_attempts_new (%s) SELECT %s FROM job_cloud_attempts`, jobCloudAttemptTableColumns, jobCloudAttemptTableColumns),
-		`DROP TABLE job_cloud_attempts`,
-		`ALTER TABLE job_cloud_attempts_new RENAME TO job_cloud_attempts`,
-		`CREATE INDEX idx_job_cloud_attempts_instance ON job_cloud_attempts(cloud_instance_id)`,
-		`CREATE INDEX idx_job_cloud_attempts_job ON job_cloud_attempts(job_id)`,
-		`CREATE INDEX idx_job_cloud_attempts_open ON job_cloud_attempts(job_id, ended_at, started_at DESC, id DESC)`,
-	)
+	_, err := db.Exec(`DROP TABLE IF EXISTS job_cloud_attempts`)
+	return err
 }
 
 func repairLegacyCloudPlacementHosts(db *sql.DB) error {
@@ -1062,29 +1002,6 @@ func repairLiveCloudAssignments(db *sql.DB) error {
 				)
 				OR jobs.host != ''
 		    )`); err != nil {
-		return err
-	}
-
-	// Fallback: check legacy job_cloud_attempts table for open attempts that
-	// weren't migrated to job_attempts yet.
-	if _, err := db.Exec(`
-		WITH legacy_live AS (
-			SELECT jca.job_id,
-			       jca.cloud_instance_id
-			FROM job_cloud_attempts jca
-			JOIN cloud_instances ci ON ci.id = jca.cloud_instance_id
-			WHERE jca.ended_at IS NULL
-			  AND ci.status IN ('running', 'launching', 'grace')
-		)
-		UPDATE jobs
-		SET cloud_instance_id = (
-				SELECT legacy_live.cloud_instance_id
-				FROM legacy_live WHERE legacy_live.job_id = jobs.id
-		    ),
-		    host = '',
-		    placement_reasons = NULL
-		WHERE EXISTS (SELECT 1 FROM legacy_live WHERE legacy_live.job_id = jobs.id)
-		  AND (jobs.cloud_instance_id IS NULL OR jobs.host != '')`); err != nil && !isNoSuchTable(err) {
 		return err
 	}
 
@@ -1922,6 +1839,44 @@ func initSchema(db *sql.DB) error {
 	}
 	if err := ensureCloudInstancesTableConstraints(db); err != nil {
 		return err
+	}
+	// Backfill cloud_instance_id and cloud_outcome from legacy job_cloud_attempts
+	// before dropping it.
+	if _, err := db.Exec(`
+		UPDATE job_attempts
+		SET cloud_instance_id = (
+			SELECT jca.cloud_instance_id
+			FROM job_cloud_attempts jca
+			WHERE jca.job_id = job_attempts.job_id AND jca.ended_at IS NULL
+			ORDER BY jca.started_at DESC LIMIT 1
+		)
+		WHERE cloud_instance_id IS NULL
+		  AND end_time IS NULL
+		  AND EXISTS (
+			SELECT 1 FROM job_cloud_attempts jca
+			WHERE jca.job_id = job_attempts.job_id AND jca.ended_at IS NULL
+		  )`); err != nil && !isNoSuchTable(err) {
+		return fmt.Errorf("backfill cloud_instance_id from legacy table: %w", err)
+	}
+	if _, err := db.Exec(`
+		UPDATE job_attempts
+		SET cloud_outcome = (
+			SELECT jca.outcome
+			FROM job_cloud_attempts jca
+			WHERE jca.job_id = job_attempts.job_id
+			  AND jca.cloud_instance_id = job_attempts.cloud_instance_id
+			  AND jca.outcome IS NOT NULL
+			ORDER BY jca.ended_at DESC LIMIT 1
+		)
+		WHERE cloud_instance_id IS NOT NULL
+		  AND cloud_outcome IS NULL
+		  AND EXISTS (
+			SELECT 1 FROM job_cloud_attempts jca
+			WHERE jca.job_id = job_attempts.job_id
+			  AND jca.cloud_instance_id = job_attempts.cloud_instance_id
+			  AND jca.outcome IS NOT NULL
+		  )`); err != nil && !isNoSuchTable(err) {
+		return fmt.Errorf("backfill cloud_outcome from legacy table: %w", err)
 	}
 	if err := ensureJobCloudAttemptsTableConstraints(db); err != nil {
 		return err
