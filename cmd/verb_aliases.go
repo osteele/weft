@@ -82,6 +82,7 @@ func init() {
 	}
 
 	// watch (add noun subcommands to existing watchCmd)
+	watchSystemCmd := verbAlias("system", instanceWatchCmd)
 	for _, sub := range []struct {
 		cmd      *cobra.Command
 		addFlags func(*cobra.Command)
@@ -89,6 +90,7 @@ func init() {
 		{withPluralAlias(verbAlias("jobs [job-id]...", jobWatchCmd)), addJobWatchFlags},
 		{withPluralAlias(verbAlias("campaign [campaign-id]", campaignWatchCmd)), addCampaignWatchFlags},
 		{withPluralAlias(verbAlias("instance", instanceWatchCmd)), configureWatchFlags},
+		{watchSystemCmd, configureWatchFlags},
 		{withPluralAlias(verbAlias("project", projectWatchCmd)), addProjectWatchFlags},
 	} {
 		watchCmd.AddCommand(sub.cmd)
@@ -96,6 +98,24 @@ func init() {
 			sub.addFlags(sub.cmd)
 		}
 	}
+
+	// "start instances" / "start campaign" aliases (route to launch)
+	startInstanceCmd := withPluralAlias(verbAlias("instance", instanceLaunchCmd))
+	startCampaignCmd := withPluralAlias(verbAlias("campaign", campaignLaunchCmd))
+	startCmd.AddCommand(startInstanceCmd)
+	startCmd.AddCommand(startCampaignCmd)
+	addCampaignLaunchFlags(startInstanceCmd)
+	addCampaignLaunchFlags(startCampaignCmd)
+
+	// "system watch" top-level alias
+	systemCmd := &cobra.Command{
+		Use:   "system <watch>",
+		Short: "System-wide commands",
+	}
+	systemWatchCmd := verbAlias("watch", instanceWatchCmd)
+	configureWatchFlags(systemWatchCmd)
+	systemCmd.AddCommand(systemWatchCmd)
+	rootCmd.AddCommand(systemCmd)
 
 	// terminate
 	terminateCampaignCmd := withPluralAlias(verbAlias("campaign <campaign-id>", campaignTerminateCmd))

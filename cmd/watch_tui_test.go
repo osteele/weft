@@ -11,7 +11,7 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
-func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
+func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 	cloudInstance := &db.Launch{
 		ID:       5,
 		Status:   db.LaunchStatusRunning,
@@ -19,13 +19,15 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		GPUSpec:  "A100",
 	}
 
-	m := watchAllModel{
+	m := watchModel{
+		mode:   watchModeSystem,
 		width:  120,
 		height: 20,
 		cloudInstances: []*db.Launch{
 			cloudInstance,
 		},
-		instanceUpdates: map[int64]campaign.InstanceUpdate{
+		instanceIDs: []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
 			5: {
 				Launch: cloudInstance,
 				Jobs: []*db.Job{
@@ -45,6 +47,7 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		unplacedJobs: []*db.Job{
 			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Project: "GAMMA", Description: "benchmark", GPUClass: "A100"},
 		},
+		jobProgressHWM: map[int64]int{},
 	}
 
 	out := stripANSI(m.View())
@@ -331,10 +334,11 @@ func TestUpdateWatchJobProgressHWMPrunesDisappearedJobs(t *testing.T) {
 	}
 }
 
-func TestWatchAllModelViewShowsCloudSummaryRate(t *testing.T) {
+func TestSystemWatchModelViewShowsCloudSummaryRate(t *testing.T) {
 	launchedAt := time.Now().Add(-2 * time.Hour).Unix()
 	instanceID := int64(51)
-	m := watchAllModel{
+	m := watchModel{
+		mode:   watchModeSystem,
 		width:  120,
 		height: 16,
 		cloudInstances: []*db.Launch{
@@ -347,7 +351,8 @@ func TestWatchAllModelViewShowsCloudSummaryRate(t *testing.T) {
 				LaunchedAt:       &launchedAt,
 			},
 		},
-		instanceUpdates: map[int64]campaign.InstanceUpdate{
+		instanceIDs: []int64{instanceID},
+		updates: map[int64]campaign.InstanceUpdate{
 			instanceID: {
 				Launch: &db.Launch{
 					ID:               instanceID,
@@ -372,7 +377,7 @@ func TestWatchAllModelViewShowsCloudSummaryRate(t *testing.T) {
 }
 
 func TestFormatOnPremJobRowQueuedUsesDashDuration(t *testing.T) {
-	m := watchAllModel{}
+	m := watchModel{mode: watchModeSystem}
 	row := stripANSI(m.formatOnPremJobRow(&db.Job{
 		ID:          41,
 		Status:      db.StatusQueued,
@@ -392,8 +397,9 @@ func TestFormatOnPremJobRowQueuedUsesDashDuration(t *testing.T) {
 	}
 }
 
-func TestWatchAllModelUnplaceDoneMovesJobImmediately(t *testing.T) {
-	m := watchAllModel{
+func TestSystemWatchModelUnplaceDoneMovesJobImmediately(t *testing.T) {
+	m := watchModel{
+		mode: watchModeSystem,
 		onPremHosts: []onPremHostSummary{
 			{
 				Name: "cool30",
@@ -402,6 +408,8 @@ func TestWatchAllModelUnplaceDoneMovesJobImmediately(t *testing.T) {
 				},
 			},
 		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		jobProgressHWM: map[int64]int{},
 	}
 
 	msg := watchUnplaceDoneMsg{
@@ -417,7 +425,7 @@ func TestWatchAllModelUnplaceDoneMovesJobImmediately(t *testing.T) {
 	}
 
 	updatedModel, _ := m.Update(msg)
-	got := updatedModel.(watchAllModel)
+	got := updatedModel.(watchModel)
 
 	if len(got.onPremHosts) != 0 {
 		t.Fatalf("expected on-prem host list to be empty, got %+v", got.onPremHosts)
@@ -433,8 +441,9 @@ func TestWatchAllModelUnplaceDoneMovesJobImmediately(t *testing.T) {
 	}
 }
 
-func TestWatchAllModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
-	m := watchAllModel{
+func TestSystemWatchModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
+	m := watchModel{
+		mode:   watchModeSystem,
 		width:  180,
 		height: 12,
 		cursor: 0,
@@ -448,6 +457,8 @@ func TestWatchAllModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
 				PlacementReasons: []string{"no local host matched gpu-class=L40s, gpu-mem>=20GB", "2 hosts: no L40s GPU"},
 			},
 		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		jobProgressHWM: map[int64]int{},
 	}
 
 	out := stripANSI(m.View())
@@ -461,8 +472,9 @@ func TestWatchAllModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
 	}
 }
 
-func TestWatchAllModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.T) {
-	m := watchAllModel{
+func TestSystemWatchModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.T) {
+	m := watchModel{
+		mode:   watchModeSystem,
 		width:  90,
 		height: 12,
 		cursor: 0,
@@ -476,6 +488,8 @@ func TestWatchAllModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.T) 
 				PlacementReasons: []string{"no local host matched gpu-class=L40s, gpu-mem>=20GB", "2 hosts: no L40s GPU", "another long reason"},
 			},
 		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		jobProgressHWM: map[int64]int{},
 	}
 
 	out := stripANSI(m.View())

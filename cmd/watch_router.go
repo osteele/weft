@@ -14,7 +14,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-// switchToLaunchMsg is emitted by watchAllModel when the user presses 'l'.
+// switchToLaunchMsg is emitted by watchModel when the user presses 'l'.
 type switchToLaunchMsg struct{}
 
 // switchToWatchMsg is emitted by launchModel when it completes back to watch.
@@ -30,7 +30,7 @@ type launchPlanReadyMsg struct {
 }
 
 // watchRouterModel is a composite model that delegates to whichever inner
-// model (watchAllModel or launchModel) is currently active. A single
+// model (watchModel or launchModel) is currently active. A single
 // tea.Program with tea.WithAltScreen() stays running throughout the session,
 // eliminating the visual flash from alt-screen exit/re-enter on transitions.
 type watchRouterModel struct {
@@ -41,7 +41,7 @@ type watchRouterModel struct {
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) watchRouterModel {
-	watch := newWatchAllModel(database, cfg, flash)
+	watch := newSystemWatchModel(database, cfg, flash)
 	return watchRouterModel{
 		active:   watch,
 		database: database,
@@ -75,7 +75,7 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case switchToLaunchMsg:
 		// Clean up watch model
-		if w, ok := m.active.(watchAllModel); ok {
+		if w, ok := m.active.(watchModel); ok {
 			if w.syncWorker != nil {
 				w.syncWorker.Stop()
 			}
@@ -84,17 +84,17 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchPlanReadyMsg:
 		if msg.err != nil {
-			watch := newWatchAllModel(m.database, m.config, fmt.Sprintf("Launch error: %v", msg.err))
+			watch := newSystemWatchModel(m.database, m.config, fmt.Sprintf("Launch error: %v", msg.err))
 			return m.switchTo(watch)
 		}
 		if msg.model == nil {
-			watch := newWatchAllModel(m.database, m.config, msg.flash)
+			watch := newSystemWatchModel(m.database, m.config, msg.flash)
 			return m.switchTo(watch)
 		}
 		return m.switchTo(*msg.model)
 
 	case switchToWatchMsg:
-		watch := newWatchAllModel(m.database, m.config, msg.flash)
+		watch := newSystemWatchModel(m.database, m.config, msg.flash)
 		return m.switchTo(watch)
 	}
 

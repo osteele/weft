@@ -37,7 +37,7 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 		t.Fatalf("create launching instance: %v", err)
 	}
 
-	m := newWatchModel(database, []int64{failedID, launchingID}, nil, nil)
+	m := newCampaignWatchModel(database, []int64{failedID, launchingID}, nil, nil)
 	defer m.cancel()
 	m.spinner.Spinner = spinner.Spinner{Frames: []string{"SPIN"}, FPS: time.Second}
 	spinnerMarker := m.spinner.View()

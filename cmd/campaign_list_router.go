@@ -56,7 +56,7 @@ func (m campaignListRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cfg != nil {
 			r2Client, _ = buildR2Client(cfg)
 		}
-		watch := newWatchModel(m.database, msg.instanceIDs, r2Client, cfg)
+		watch := newCampaignWatchModel(m.database, msg.instanceIDs, r2Client, cfg)
 		m.active = watch
 		cmds := []tea.Cmd{watch.Init()}
 		if m.windowSize.Width > 0 {

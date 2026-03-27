@@ -14,18 +14,20 @@ import (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch [job-id... | jobs | campaign | instance | project]",
+	Use:   "watch [job-id... | jobs | campaign | instance | system | project]",
 	Short: "Watch jobs, instances, campaigns, or projects",
 	Long: `Watch active system state.
 
 With job IDs, watches those specific jobs until they reach a terminal state.
 Without arguments, watches all cloud instances and on-prem jobs (same as
-"weft watch instance"). Use a subcommand to watch a specific resource type.
+"weft watch instance" or "weft watch system"). Use a subcommand to watch a
+specific resource type.
 
 Subcommands:
   jobs        Watch job status changes (TUI or plain)
   campaign    Watch a campaign
   instance    Watch cloud instances
+  system      Watch all system state (alias for instance)
   project     Watch a project`,
 	RunE: runWatchCommand,
 }
@@ -97,7 +99,7 @@ func runWatchLoop(database *sql.DB, cfg *config.Config) error {
 
 	// Clean up syncWorker from whichever model was active at exit
 	if r, ok := finalModel.(watchRouterModel); ok {
-		if w, ok := r.active.(watchAllModel); ok && w.syncWorker != nil {
+		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
 			w.syncWorker.Stop()
 		}
 	}
