@@ -64,7 +64,7 @@ type launchModel struct {
 
 	items    []listItem
 	cursor   int
-	offset   int            // first visible item index for scrolling
+	offset   int
 	selected map[int64]bool // job ID -> checked
 
 	showCostDetail bool
@@ -244,10 +244,6 @@ func (m launchModel) pageSize() int {
 // adjustOffset ensures the cursor is visible within the scrollable viewport.
 func (m *launchModel) adjustOffset() {
 	pageSize := m.pageSize()
-	if pageSize <= 0 {
-		m.offset = 0
-		return
-	}
 	if m.cursor < m.offset {
 		m.offset = m.cursor
 	}
@@ -257,9 +253,6 @@ func (m *launchModel) adjustOffset() {
 	maxOffset := max(0, len(m.items)-pageSize)
 	if m.offset > maxOffset {
 		m.offset = maxOffset
-	}
-	if m.offset < 0 {
-		m.offset = 0
 	}
 }
 
@@ -752,7 +745,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "pgdown":
 		m.cursor += m.pageSize()
 		if m.cursor >= len(m.items) {
-			m.cursor = len(m.items) - 1
+			m.cursor = max(0, len(m.items)-1)
 		}
 		m.adjustOffset()
 		return m, nil
