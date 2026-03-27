@@ -86,9 +86,9 @@ type watchModel struct {
 	height       int
 	scrollOff    int // lines scrolled up from bottom (0 = pinned to bottom)
 
-	// Donor relationship cache (both modes, recomputed when instanceIDs change)
-	cachedHiddenIDs   map[int64]bool
-	cachedDonorChains map[int64][]*db.Launch
+	// Replacement chain cache (both modes, recomputed when instanceIDs change)
+	cachedHiddenIDs         map[int64]bool
+	cachedReplacementChains map[int64][]*db.Launch
 }
 
 // Styles for the watch TUI (allocated once, not per-render).
@@ -236,7 +236,7 @@ func newCampaignWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.C
 		initInfo:       initInfo,
 		reconciler:     campaign.NewReconciler(),
 	}
-	m.rebuildDonorCache()
+	m.rebuildReplacementCache()
 	return m
 }
 
@@ -281,7 +281,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		model.instanceIDs[i] = ci.ID
 	}
 
-	model.rebuildDonorCache()
+	model.rebuildReplacementCache()
 
 	// Request initial syncs for on-prem hosts
 	for _, host := range model.onPremHosts {
@@ -769,7 +769,7 @@ func (m watchModel) handleRetryResult(msg retryResultMsg) (tea.Model, tea.Cmd) {
 	}
 	m.partialErrorJobs = nil
 	m.partialErrorsRetried = true
-	m.rebuildDonorCache()
+	m.rebuildReplacementCache()
 	m.scrollOff = 0
 	return m, tea.Batch(cmds...)
 }
@@ -807,7 +807,7 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 	}
 
 	cmds := m.mergeSnapshot(msg.snapshot)
-	m.rebuildDonorCache()
+	m.rebuildReplacementCache()
 
 	for _, host := range m.onPremHosts {
 		m.syncWorker.Request(tui.SyncRequest{
@@ -912,7 +912,7 @@ func (m watchModel) renderCampaignView() (string, int) {
 		if m.cachedHiddenIDs[id] {
 			continue
 		}
-		donors := m.cachedDonorChains[id]
+		donors := m.cachedReplacementChains[id]
 
 		u, ok := m.updates[id]
 		if !ok {
@@ -931,7 +931,7 @@ func (m watchModel) renderCampaignView() (string, int) {
 					showSpinnerIfNonTerminal: true,
 					resolvedJobsOverride:     &resolved,
 					dimJobStatuses:           true,
-					donorInstances:           donors,
+					predecessors:             donors,
 				})
 				if len(lines) > 0 {
 					addSelectable(lines[0])
@@ -947,7 +947,7 @@ func (m watchModel) renderCampaignView() (string, int) {
 		}
 
 		lines := formatWatchInstanceBlockLines(u, m.jobProgressHWM, watchInstanceBlockOptions{
-			donorInstances: donors,
+			predecessors: donors,
 		})
 		if len(lines) > 0 {
 			addSelectable(lines[0])
@@ -1048,9 +1048,9 @@ func (m watchModel) renderSystemView() (string, int) {
 				addPlain("")
 			}
 			update := normalizeWatchInstanceUpdate(m.updates[ci.ID], ci)
-			donors := m.cachedDonorChains[ci.ID]
+			donors := m.cachedReplacementChains[ci.ID]
 			lines := formatWatchInstanceBlockLines(update, m.jobProgressHWM, watchInstanceBlockOptions{
-				donorInstances: donors,
+				predecessors: donors,
 			})
 			if len(lines) == 0 {
 				continue
@@ -1325,12 +1325,12 @@ func (m watchModel) countFailedInstances() int {
 }
 
 // ---------------------------------------------------------------------------
-// Donor cache
+// Replacement chain cache
 // ---------------------------------------------------------------------------
 
-func (m *watchModel) rebuildDonorCache() {
+func (m *watchModel) rebuildReplacementCache() {
 	hiddenIDs := make(map[int64]bool)
-	donorChains := make(map[int64][]*db.Launch)
+	replacementChains := make(map[int64][]*db.Launch)
 
 	getCI := func(id int64) *db.Launch {
 		if u, ok := m.updates[id]; ok && u.Launch != nil {
@@ -1347,20 +1347,20 @@ func (m *watchModel) rebuildDonorCache() {
 
 	for _, id := range m.instanceIDs {
 		ci := getCI(id)
-		if ci == nil || ci.DonorInstanceID == nil {
+		if ci == nil || ci.ReplacedInstanceID == nil {
 			continue
 		}
-		chain := collectDonorChain(ci, getCI)
+		chain := collectReplacementChain(ci, getCI)
 		if len(chain) > 0 {
-			donorChains[id] = chain
-			for _, donor := range chain {
-				hiddenIDs[donor.ID] = true
+			replacementChains[id] = chain
+			for _, predecessor := range chain {
+				hiddenIDs[predecessor.ID] = true
 			}
 		}
 	}
 
 	m.cachedHiddenIDs = hiddenIDs
-	m.cachedDonorChains = donorChains
+	m.cachedReplacementChains = replacementChains
 }
 
 // ---------------------------------------------------------------------------

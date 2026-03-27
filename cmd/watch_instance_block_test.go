@@ -273,11 +273,11 @@ func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
 	donorID := int64(226)
 	update := campaign.InstanceUpdate{
 		Launch: &db.Launch{
-			ID:              228,
-			Status:          db.LaunchStatusRunning,
-			Provider:        "vastai",
-			GPUSpec:         "A100",
-			DonorInstanceID: &donorID,
+			ID:                 228,
+			Status:             db.LaunchStatusRunning,
+			Provider:           "vastai",
+			GPUSpec:            "A100",
+			ReplacedInstanceID: &donorID,
 		},
 		Jobs: []*db.Job{
 			{ID: 419, Status: db.StatusQueued, Project: "llm-performance-models", Description: "EXP-068 batch sweep A100"},
@@ -286,7 +286,7 @@ func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
 
 	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
 		plain: true,
-		donorInstances: []*db.Launch{
+		predecessors: []*db.Launch{
 			{ID: 226, Status: db.LaunchStatusFailed, TerminationReason: "infra_failure"},
 		},
 	})

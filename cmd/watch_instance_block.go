@@ -19,7 +19,7 @@ type watchInstanceBlockOptions struct {
 	resolvedJobsOverride     *int
 	dimJobStatuses           bool
 	now                      time.Time
-	donorInstances           []*db.Launch // predecessor chain, most-recent-first
+	predecessors             []*db.Launch // replacement chain, most-recent-first
 }
 
 func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.Launch) campaign.InstanceUpdate {
@@ -61,7 +61,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	if costLine := formatWatchInstanceCostLine(ci, update.Instance, opts.now); costLine != "" {
 		lines = append(lines, costLine)
 	}
-	if prevLine := formatPreviousInstanceLine(opts.donorInstances, opts.now); prevLine != "" {
+	if prevLine := formatPreviousInstanceLine(opts.predecessors, opts.now); prevLine != "" {
 		lines = append(lines, prevLine)
 	}
 
@@ -337,26 +337,26 @@ func clearWatchJobProgressHWM(hwm map[int64]int, update campaign.InstanceUpdate)
 	}
 }
 
-// collectDonorChain walks DonorInstanceID links from ci using the provided
-// lookup function, returning the predecessor chain (most-recent-first).
-func collectDonorChain(ci *db.Launch, getCI func(int64) *db.Launch) []*db.Launch {
-	if ci == nil || ci.DonorInstanceID == nil {
+// collectReplacementChain walks ReplacedInstanceID links from ci using the
+// provided lookup function, returning the predecessor chain (most-recent-first).
+func collectReplacementChain(ci *db.Launch, getCI func(int64) *db.Launch) []*db.Launch {
+	if ci == nil || ci.ReplacedInstanceID == nil {
 		return nil
 	}
 	var chain []*db.Launch
 	seen := map[int64]bool{ci.ID: true}
-	donorID := ci.DonorInstanceID
-	for donorID != nil {
-		if seen[*donorID] {
+	replacedID := ci.ReplacedInstanceID
+	for replacedID != nil {
+		if seen[*replacedID] {
 			break
 		}
-		seen[*donorID] = true
-		donor := getCI(*donorID)
-		if donor == nil {
+		seen[*replacedID] = true
+		predecessor := getCI(*replacedID)
+		if predecessor == nil {
 			break
 		}
-		chain = append(chain, donor)
-		donorID = donor.DonorInstanceID
+		chain = append(chain, predecessor)
+		replacedID = predecessor.ReplacedInstanceID
 	}
 	return chain
 }

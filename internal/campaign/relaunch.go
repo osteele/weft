@@ -193,8 +193,8 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	}
 
 	// Build a map from group index to the most recent failed instance ID,
-	// so we can record it as donor_instance_id on the new instance.
-	groupDonorIDs := make(map[int]int64)
+	// so we can record it as replaced_instance_id on the new instance.
+	groupPredecessorIDs := make(map[int]int64)
 	for i, group := range launchGroups {
 		for _, j := range group.Jobs {
 			attempts, err := db.GetLaunchAttempts(cfg.Database, j.ID)
@@ -202,7 +202,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				continue
 			}
 			lastAttempt := attempts[len(attempts)-1]
-			groupDonorIDs[i] = lastAttempt.LaunchID
+			groupPredecessorIDs[i] = lastAttempt.LaunchID
 			break
 		}
 	}
@@ -218,9 +218,9 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			continue
 		}
 
-		donorID, hasDonor := groupDonorIDs[i]
+		predecessorID, hasPredecessor := groupPredecessorIDs[i]
 		wg.Add(1)
-		go func(group InstanceGroup, offer cloud.Offer, client cloud.Client, donorID int64, hasDonor bool) {
+		go func(group InstanceGroup, offer cloud.Offer, client cloud.Client, predecessorID int64, hasPredecessor bool) {
 			defer wg.Done()
 			instanceID, err := LaunchInstance(
 				client, cfg.Database, campaignID, group, offer,
@@ -240,9 +240,9 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
 				return
 			}
-			if hasDonor {
-				if setErr := db.SetLaunchDonorID(cfg.Database, instanceID, donorID); setErr != nil {
-					log.Printf("relaunch: failed to set donor_instance_id on instance %d: %v", instanceID, setErr)
+			if hasPredecessor {
+				if setErr := db.SetLaunchReplacedID(cfg.Database, instanceID, predecessorID); setErr != nil {
+					log.Printf("relaunch: failed to set replaced_instance_id on instance %d: %v", instanceID, setErr)
 				}
 			}
 			log.Printf("relaunch: launched instance %d for %d jobs (group %s)", instanceID, len(group.Jobs), group.GPUSpec())
@@ -253,7 +253,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				JobCount:  len(group.Jobs),
 			})
 			result.InstanceIDs = append(result.InstanceIDs, instanceID)
-		}(group, offer, client, donorID, hasDonor)
+		}(group, offer, client, predecessorID, hasPredecessor)
 	}
 	wg.Wait()
 

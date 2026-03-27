@@ -18,7 +18,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		inet_down_mbps, inet_up_mbps, cuda_version,
 		provider_instance_id, data_center,
-		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs,
+		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, replaced_instance_id,
 		grace_period_seconds, grace_started_at, grace_deadline,
 		termination_reason,
 		disk_gb, provisioned_inputs,
@@ -90,9 +90,10 @@ type Launch struct {
 	EndedAt            *int64
 	DataCenter         string // data center / geolocation of the instance
 	InstanceRole       string // "worker" or "donor"
-	DonorInstanceID    *int64 // DB ID of the donor instance that seeded this worker
+	DonorInstanceID    *int64 // DB ID of the donor instance that seeded this worker (data locality)
 	SeedDownloadSecs   *int   // on donor: total download duration (HF + uv)
 	SeedCopySecs       *int   // on worker: copy-from-donor duration
+	ReplacedInstanceID *int64 // DB ID of the failed instance this one replaces (relaunch chain)
 
 	// Grace period (failure-tolerant rental sessions)
 	GracePeriodSeconds int    // configured grace period duration (0 = disabled)
@@ -412,6 +413,12 @@ func SetLaunchRole(db *sql.DB, id int64, role string) error {
 // SetLaunchDonorID sets the DB ID of the donor instance that seeded this worker.
 func SetLaunchDonorID(db *sql.DB, id int64, donorID int64) error {
 	_, err := db.Exec(`UPDATE launches SET donor_instance_id = ? WHERE id = ?`, donorID, id)
+	return err
+}
+
+// SetLaunchReplacedID records the DB ID of the failed instance this one replaces (relaunch chain).
+func SetLaunchReplacedID(db *sql.DB, id int64, replacedID int64) error {
+	_, err := db.Exec(`UPDATE launches SET replaced_instance_id = ? WHERE id = ?`, replacedID, id)
 	return err
 }
 
@@ -873,6 +880,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var instanceRole sql.NullString
 	var donorInstanceID sql.NullInt64
 	var seedDownloadSecs, seedCopySecs sql.NullInt64
+	var replacedInstanceID sql.NullInt64
 	var gracePeriodSeconds sql.NullInt64
 	var graceStartedAt, graceDeadline sql.NullInt64
 	var terminationReason sql.NullString
@@ -890,7 +898,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
 		&inetDown, &inetUp, &cudaVersion,
 		&providerInstanceID, &dataCenter,
-		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs,
+		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs, &replacedInstanceID,
 		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
 		&terminationReason,
 		&diskGB, &provisionedInputsJSON,
@@ -976,6 +984,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	if seedCopySecs.Valid {
 		v := int(seedCopySecs.Int64)
 		c.SeedCopySecs = &v
+	}
+	if replacedInstanceID.Valid {
+		c.ReplacedInstanceID = &replacedInstanceID.Int64
 	}
 	if gracePeriodSeconds.Valid {
 		c.GracePeriodSeconds = int(gracePeriodSeconds.Int64)

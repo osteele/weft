@@ -383,6 +383,7 @@ func createLaunchesTableSQL(table string, ifNotExists bool) string {
 		donor_instance_id INTEGER,
 		seed_download_secs INTEGER,
 		seed_copy_secs INTEGER,
+		replaced_instance_id INTEGER,
 		grace_period_seconds INTEGER,
 		grace_started_at INTEGER,
 		grace_deadline INTEGER,
@@ -1641,6 +1642,19 @@ func initSchema(db *sql.DB) error {
 			created_at INTEGER NOT NULL
 		)
 	`); err != nil {
+		return err
+	}
+
+	// Migration: add replaced_instance_id column (relaunch predecessor, distinct from donor_instance_id which is data-seeding).
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN replaced_instance_id INTEGER`); err != nil {
+		return err
+	}
+	// Migrate: move donor_instance_id → replaced_instance_id where the target is a failed/cancelled instance
+	// (those are relaunch predecessors, not data-seeding donors).
+	if _, err := db.Exec(`UPDATE launches SET replaced_instance_id = donor_instance_id, donor_instance_id = NULL
+		WHERE donor_instance_id IS NOT NULL
+		AND donor_instance_id IN (SELECT id FROM launches WHERE status IN (?, ?))`,
+		LaunchStatusFailed, LaunchStatusCancelled); err != nil {
 		return err
 	}
 

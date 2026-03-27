@@ -375,8 +375,8 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		// Previous instances (donor chain)
-		if donors := walkDonorChain(database, ci); len(donors) > 0 {
+		// Previous instances (replacement chain)
+		if donors := walkReplacementChain(database, ci); len(donors) > 0 {
 			line := formatPreviousInstanceLine(donors, time.Now())
 			if line != "" {
 				fmt.Println(line)
@@ -386,11 +386,11 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// walkDonorChain follows DonorInstanceID links to build a predecessor chain.
-func walkDonorChain(database *sql.DB, ci *db.Launch) []*db.Launch {
-	return collectDonorChain(ci, func(id int64) *db.Launch {
-		donor, _ := db.GetLaunch(database, id)
-		return donor
+// walkReplacementChain follows ReplacedInstanceID links to build a predecessor chain.
+func walkReplacementChain(database *sql.DB, ci *db.Launch) []*db.Launch {
+	return collectReplacementChain(ci, func(id int64) *db.Launch {
+		predecessor, _ := db.GetLaunch(database, id)
+		return predecessor
 	})
 }
 
