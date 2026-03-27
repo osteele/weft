@@ -199,8 +199,6 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		var currentPhase string
 		var phaseChangedAt *time.Time
 		watchReconciler := NewReconciler()
-		completionChecked := make(map[int64]bool) // jobs whose .complete was already checked
-
 		// Staleness guard: track last-written values to skip no-op DB writes
 		var lastWrittenPhase, lastWrittenBootstrap, lastWrittenHBJSON string
 		var lastWrittenProgressPct int = -1
@@ -306,19 +304,15 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
 				}
 
-				// Phase transition: if phase moved away from a running/finalizing job,
-				// check for its .complete marker to sync completion to DB immediately.
-				if currentPhase != "" && instancePhase != currentPhase {
-					if prevVerb, prevJobID, ok := ParsePhaseJobID(currentPhase); ok && prevJobID > 0 {
-						switch prevVerb {
-						case PhaseRunning, PhaseFinalizing:
-							if !completionChecked[prevJobID] {
-								completionChecked[prevJobID] = true
-								if CheckAndSyncJobComplete(ctx, r2c, database, prevJobID) {
-									// Re-read jobs to pick up the completion
-									jobs, _ = db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
-									jobState = ComputeJobState(jobs)
-								}
+				// Sync completion for jobs the DB still thinks are running but
+				// that aren't the current phase job (retried each poll until synced).
+				if _, currentJobID, ok := ParsePhaseJobID(instancePhase); ok && currentJobID > 0 {
+					for _, j := range jobs {
+						if j.ID != currentJobID && j.Status == db.StatusRunning {
+							if CheckAndSyncJobComplete(ctx, r2c, database, j.ID) {
+								jobs, _ = db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
+								jobState = ComputeJobState(jobs)
+								break // re-evaluate on next poll with fresh job list
 							}
 						}
 					}
