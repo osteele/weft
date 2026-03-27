@@ -1296,6 +1296,30 @@ func initSchema(db *sql.DB) error {
 	// Migration: rename cloud_instance_id → launch_id on provider_status_transitions
 	renameColumnIfExists(db, "provider_status_transitions", "cloud_instance_id", "launch_id")
 
+	// Create lifecycle_events table (structured relaunch/reconcile/retry decisions)
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS lifecycle_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			occurred_at INTEGER NOT NULL,
+			event_kind TEXT NOT NULL,
+			launch_id INTEGER,
+			campaign_id INTEGER,
+			job_id INTEGER,
+			gpu_spec TEXT,
+			job_count INTEGER,
+			detail TEXT,
+			error_text TEXT,
+			attempt_number INTEGER,
+			max_attempts INTEGER,
+			disk_gb INTEGER
+		);
+		CREATE INDEX IF NOT EXISTS idx_le_kind ON lifecycle_events(event_kind);
+		CREATE INDEX IF NOT EXISTS idx_le_launch ON lifecycle_events(launch_id);
+		CREATE INDEX IF NOT EXISTS idx_le_occurred ON lifecycle_events(occurred_at);
+	`); err != nil {
+		return err
+	}
+
 	// Create job_phase_timings table
 	jobPhaseTimingsSchema := `
 	CREATE TABLE IF NOT EXISTS job_phase_timings (
@@ -3999,6 +4023,13 @@ func nullIfEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func nullIfZero(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 func nullableInt(v *int) *int {

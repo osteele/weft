@@ -221,6 +221,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			if !m.retrying && m.hasRetryableFailures() {
+				_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+					EventKind:  db.EventRetryManualTriggered,
+					CampaignID: m.campaignID,
+				})
 				m.retryAttempt = 0
 				m.retrying = true
 				m.retryResult = ""
@@ -260,6 +264,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		ci := msg.update.Launch
 		ch := m.channels[msg.instanceID]
 		if ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
+			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+				EventKind:  db.EventRetryAutoTriggered,
+				LaunchID:   ci.ID,
+				CampaignID: m.campaignID,
+				GPUSpec:    ci.GPUSpec,
+				Detail:     ci.TerminationReason,
+			})
 			m.retrying = true
 			m.retryResult = ""
 			return m, tea.Batch(
@@ -360,12 +371,22 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case retryResultMsg:
 		m.retrying = false
 		if msg.err != nil {
+			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+				EventKind:  db.EventRetryError,
+				CampaignID: m.campaignID,
+				ErrorText:  msg.err.Error(),
+			})
 			m.retryResult = fmt.Sprintf("Retry failed: %v", msg.err)
 			return m, m.checkAllDone()
 		}
 		if len(msg.instanceIDs) == 0 {
 			// All remaining jobs exceeded max retry attempts — stop retrying
 			if msg.skipped > 0 {
+				_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+					EventKind:  db.EventRetryMaxAttempts,
+					CampaignID: m.campaignID,
+					JobCount:   msg.skipped,
+				})
 				m.retryExtraAttempts = 0
 				m.retryResult = fmt.Sprintf("Retry: %d job(s) exceeded max cloud attempts, giving up", msg.skipped)
 				return m, m.checkAllDone()
@@ -373,15 +394,33 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.retryAttempt < len(retryBackoffDelays) {
 				delay := retryBackoffDelays[m.retryAttempt]
 				m.retryAttempt++
+				_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+					EventKind:     db.EventRetryNoOffers,
+					CampaignID:    m.campaignID,
+					AttemptNumber: m.retryAttempt,
+					MaxAttempts:   len(retryBackoffDelays) + 1,
+					Detail:        fmt.Sprintf("backoff %s", delay),
+				})
 				m.retryResult = fmt.Sprintf("Retry: no offers available, retrying in %s (attempt %d/%d)",
 					delay, m.retryAttempt+1, len(retryBackoffDelays)+1)
 				return m, tea.Tick(delay, func(time.Time) tea.Msg { return retryBackoffMsg{} })
 			}
+			_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+				EventKind:     db.EventRetryExhausted,
+				CampaignID:    m.campaignID,
+				AttemptNumber: len(retryBackoffDelays) + 1,
+			})
 			m.retryExtraAttempts = 0
 			m.retryResult = fmt.Sprintf("Retry: no instances launched after %d attempts (no offers available)", len(retryBackoffDelays)+1)
 			return m, m.checkAllDone()
 		}
 		// Success — reset retry state
+		_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+			EventKind:  db.EventRetrySuccess,
+			CampaignID: m.campaignID,
+			JobCount:   len(msg.instanceIDs),
+			Detail:     fmt.Sprintf("launched instances %v", msg.instanceIDs),
+		})
 		m.retryAttempt = 0
 		m.retryExtraAttempts = 0
 		// Add new instances to the watch view

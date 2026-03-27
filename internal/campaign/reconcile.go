@@ -215,6 +215,11 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 			}
 			log.Printf("reconcile: safety-net destroying leaked provider instance %s (db instance %d, status %s)",
 				providerID, ci.ID, ci.Status)
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: db.EventReconcileSafetyNetDestroy,
+				LaunchID:  ci.ID,
+				Detail:    fmt.Sprintf("leaked provider %s, db status %s", providerID, ci.Status),
+			})
 			if err := client.DestroyInstance(providerID); err != nil {
 				log.Printf("reconcile: safety-net destroy %s failed: %v", providerID, err)
 			}
@@ -231,6 +236,10 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 		log.Printf("reconcile: orphan sweep error: %v", sweepErr)
 	} else if swept > 0 {
 		log.Printf("reconcile: orphan sweep destroyed %d instances", swept)
+		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+			EventKind: db.EventReconcileOrphanSweep,
+			JobCount:  swept,
+		})
 		result.Reconciled += swept
 	}
 
@@ -484,6 +493,12 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		log.Printf("reconcile: update stale-heartbeat instance %d status: %v", ci.ID, err)
 		return false, false
 	}
+	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+		EventKind: db.EventReconcileStaleHeartbeat,
+		LaunchID:  ci.ID,
+		GPUSpec:   ci.GPUSpec,
+		Detail:    fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason),
+	})
 	if resetCount, err := db.ResetLaunchJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
 		log.Printf("reconcile: reset jobs for stale-heartbeat instance %d: %v", ci.ID, err)
 	} else if resetCount > 0 {

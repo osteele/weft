@@ -49,7 +49,15 @@ Operations Log (forensic debugging):
   weft log --ops --host cool30      # Filter by host
   weft log --ops --op job.start     # Filter by operation type
   weft log --ops --since 1h         # Operations in last hour
-  weft log --ops --errors           # Show only errors`,
+  weft log --ops --errors           # Show only errors
+
+Lifecycle Events (structured relaunch/reconcile/retry decisions):
+  weft log --events                              # Recent lifecycle events
+  weft log --events --kind relaunch              # All relaunch decisions
+  weft log --events --kind reconcile             # Reconciliation actions
+  weft log --events --launch 239                 # Events for instance 239
+  weft log --events --since 6h                    # Events in last 6 hours
+  weft log --events --stats                      # Aggregate statistics`,
 	Args: validateLogArgs,
 	RunE: runLog,
 }
@@ -74,6 +82,12 @@ var (
 	logOpsOp     string
 	logOpsSince  string
 	logOpsErrors bool
+
+	// Lifecycle events flags
+	logEvents       bool
+	logEventsKind   string
+	logEventsLaunch int64
+	logEventsStats  bool
 )
 
 func init() {
@@ -98,14 +112,19 @@ func init() {
 	logCmd.Flags().StringVar(&logOpsOp, "op", "", "Filter by operation type (requires --ops)")
 	logCmd.Flags().StringVar(&logOpsSince, "since", "", "Show operations since duration (e.g., 1h, 30m) (requires --ops)")
 	logCmd.Flags().BoolVar(&logOpsErrors, "errors", false, "Show only operations with errors (requires --ops)")
+
+	// Lifecycle events flags
+	logCmd.Flags().BoolVar(&logEvents, "events", false, "Show lifecycle events (relaunch/reconcile/retry decisions)")
+	logCmd.Flags().StringVar(&logEventsKind, "kind", "", "Filter events by kind or prefix (e.g., relaunch, reconcile.bootstrap_timeout)")
+	logCmd.Flags().Int64Var(&logEventsLaunch, "launch", 0, "Filter events by launch/instance ID")
+	logCmd.Flags().BoolVar(&logEventsStats, "stats", false, "Show aggregate event statistics (requires --events)")
 }
 
 // validateLogArgs validates command arguments based on whether --ops is used
 func validateLogArgs(cmd *cobra.Command, args []string) error {
-	if logOps {
-		// --ops mode doesn't require a job ID argument
+	if logOps || logEvents {
 		if len(args) > 0 {
-			return usageErrorf("--ops does not take a job ID argument")
+			return usageErrorf("--ops/--events does not take a job ID argument")
 		}
 		return nil
 	}
@@ -114,6 +133,10 @@ func validateLogArgs(cmd *cobra.Command, args []string) error {
 }
 
 func runLog(cmd *cobra.Command, args []string) error {
+	// Handle --events mode
+	if logEvents {
+		return runEventsLog(cmd)
+	}
 	// Handle --ops mode
 	if logOps {
 		return runOpsLog(cmd)
@@ -937,4 +960,111 @@ func formatOpsEntry(entry oplog.Entry) {
 	}
 
 	fmt.Println(strings.Join(parts, " "))
+}
+
+// runEventsLog displays lifecycle events from the database.
+func runEventsLog(cmd *cobra.Command) error {
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	filter := db.LifecycleEventFilter{
+		Kind:     logEventsKind,
+		LaunchID: logEventsLaunch,
+	}
+
+	// Use kind as prefix if it doesn't contain a dot (e.g. "relaunch" matches "relaunch.*")
+	if filter.Kind != "" && !strings.Contains(filter.Kind, ".") {
+		filter.KindPrefix = filter.Kind
+		filter.Kind = ""
+	}
+
+	if logOpsSince != "" {
+		duration, err := time.ParseDuration(logOpsSince)
+		if err != nil {
+			return fmt.Errorf("invalid --since duration %q: %w", logOpsSince, err)
+		}
+		filter.Since = time.Now().Add(-duration)
+	}
+
+	if logEventsStats {
+		return runEventsStats(database, filter)
+	}
+
+	events, err := db.ListLifecycleEvents(database, filter)
+	if err != nil {
+		return fmt.Errorf("list lifecycle events: %w", err)
+	}
+
+	if len(events) == 0 {
+		fmt.Println("No lifecycle events found.")
+		return nil
+	}
+
+	// Display in chronological order (ListLifecycleEvents returns DESC)
+	for i := len(events) - 1; i >= 0; i-- {
+		formatLifecycleEvent(events[i])
+	}
+	return nil
+}
+
+func formatLifecycleEvent(e db.LifecycleEvent) {
+	ts := time.Unix(e.OccurredAt, 0).Local().Format("2006-01-02 15:04:05")
+
+	var parts []string
+	parts = append(parts, ts, e.EventKind)
+
+	if e.LaunchID != 0 {
+		parts = append(parts, fmt.Sprintf("instance:%d", e.LaunchID))
+	}
+	if e.JobID != 0 {
+		parts = append(parts, fmt.Sprintf("job:%d", e.JobID))
+	}
+	if e.GPUSpec != "" {
+		parts = append(parts, fmt.Sprintf("gpu:%s", e.GPUSpec))
+	}
+	if e.JobCount > 0 {
+		parts = append(parts, fmt.Sprintf("jobs:%d", e.JobCount))
+	}
+	if e.AttemptNumber > 0 {
+		parts = append(parts, fmt.Sprintf("attempt:%d/%d", e.AttemptNumber, e.MaxAttempts))
+	}
+	if e.DiskGB > 0 {
+		parts = append(parts, fmt.Sprintf("disk:%dGB", e.DiskGB))
+	}
+	if e.Detail != "" {
+		parts = append(parts, e.Detail)
+	}
+	if e.ErrorText != "" {
+		parts = append(parts, fmt.Sprintf("ERROR: %s", e.ErrorText))
+	}
+
+	fmt.Println(strings.Join(parts, " "))
+}
+
+func runEventsStats(database *sql.DB, filter db.LifecycleEventFilter) error {
+	counts, err := db.CountLifecycleEventsByKind(database, filter)
+	if err != nil {
+		return fmt.Errorf("count lifecycle events: %w", err)
+	}
+
+	if len(counts) == 0 {
+		fmt.Println("No lifecycle events found.")
+		return nil
+	}
+
+	total := 0
+	for _, kc := range counts {
+		total += kc.Count
+	}
+
+	fmt.Printf("Lifecycle event statistics (%d events):\n\n", total)
+	fmt.Printf("  %-40s %s\n", "EVENT KIND", "COUNT")
+	fmt.Printf("  %-40s %s\n", strings.Repeat("─", 40), strings.Repeat("─", 6))
+	for _, kc := range counts {
+		fmt.Printf("  %-40s %5d\n", kc.Kind, kc.Count)
+	}
+	return nil
 }

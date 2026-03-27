@@ -66,6 +66,13 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		}
 		if count >= maxAttempts {
 			log.Printf("relaunch: job %d has %d attempts (max %d), skipping", j.ID, count, maxAttempts)
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind:     db.EventRelaunchSkippedMaxAttempts,
+				JobID:         j.ID,
+				GPUSpec:       j.GPUClass,
+				AttemptNumber: count,
+				MaxAttempts:   maxAttempts,
+			})
 			result.Skipped++
 			continue
 		}
@@ -77,6 +84,10 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	}
 
 	log.Printf("relaunch: %d eligible orphaned jobs for relaunch", len(eligible))
+	_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+		EventKind: db.EventRelaunchEligible,
+		JobCount:  len(eligible),
+	})
 
 	// Group by GPU requirements and estimate disk
 	groups := GroupByGPUSupremum(eligible)
@@ -109,6 +120,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			if groups[i].DiskGB < floor {
 				log.Printf("relaunch: group %s: raising disk from %dGB to %dGB (prior disk_full at %dGB)",
 					group.GPUSpec(), groups[i].DiskGB, floor, priorDisk)
+				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+					EventKind: db.EventRelaunchDiskBump,
+					GPUSpec:   group.GPUSpec(),
+					DiskGB:    int(floor),
+					Detail:    fmt.Sprintf("raised from %dGB (prior disk_full at %dGB)", groups[i].DiskGB, priorDisk),
+				})
 				groups[i].DiskGB = floor
 			}
 		}
@@ -127,11 +144,21 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	for _, gOffer := range groupOffers {
 		if gOffer.Offer == nil {
 			log.Printf("relaunch: no offers for group %s, skipping %d jobs", gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs))
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchSkippedNoOffers,
+				GPUSpec:   gOffer.Group.GPUSpec(),
+				JobCount:  len(gOffer.Group.Jobs),
+			})
 			result.Skipped += len(gOffer.Group.Jobs)
 			continue
 		}
 		if gOffer.Err != nil {
 			log.Printf("relaunch: offer error for group %s: %v", gOffer.Group.GPUSpec(), gOffer.Err)
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchSkippedOfferError,
+				GPUSpec:   gOffer.Group.GPUSpec(),
+				ErrorText: gOffer.Err.Error(),
+			})
 			result.Errors = append(result.Errors, gOffer.Err)
 			continue
 		}
@@ -204,6 +231,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			defer mu.Unlock()
 			if err != nil {
 				log.Printf("relaunch: launch failed for group %s: %v", group.GPUSpec(), err)
+				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+					EventKind: db.EventRelaunchLaunchFailed,
+					GPUSpec:   group.GPUSpec(),
+					JobCount:  len(group.Jobs),
+					ErrorText: err.Error(),
+				})
 				result.Errors = append(result.Errors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
 				return
 			}
@@ -213,6 +246,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				}
 			}
 			log.Printf("relaunch: launched instance %d for %d jobs (group %s)", instanceID, len(group.Jobs), group.GPUSpec())
+			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
+				EventKind: db.EventRelaunchLaunchSuccess,
+				LaunchID:  instanceID,
+				GPUSpec:   group.GPUSpec(),
+				JobCount:  len(group.Jobs),
+			})
 			result.InstanceIDs = append(result.InstanceIDs, instanceID)
 		}(group, offer, client, donorID, hasDonor)
 	}

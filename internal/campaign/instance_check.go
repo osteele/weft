@@ -357,6 +357,14 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 			log.Printf("reconcile: update instance %d status to %s: %v", ci.ID, action.TerminalStatus, err)
 			return false, false
 		}
+		if eventKind := actionEventKind(action.Kind); eventKind != "" {
+			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
+				EventKind: eventKind,
+				LaunchID:  ci.ID,
+				GPUSpec:   ci.GPUSpec,
+				Detail:    action.StallMessage,
+			})
+		}
 	}
 
 	if action.ResetJobs {
@@ -372,4 +380,28 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	}
 
 	return true, IsInstanceTerminal(action.TerminalStatus)
+}
+
+// actionEventKind maps an InstanceActionKind to a lifecycle event kind constant.
+func actionEventKind(kind InstanceActionKind) string {
+	switch kind {
+	case ActionBootstrapStalled:
+		return db.EventReconcileBootstrapTimeout
+	case ActionGraceExpired:
+		return db.EventReconcileGraceExpired
+	case ActionProviderDead:
+		return db.EventReconcileProviderDead
+	case ActionSelfDestructFailed:
+		return db.EventReconcileSelfDestructFail
+	case ActionEmptyStatusTimeout:
+		return db.EventReconcileEmptyStatus
+	case ActionDonorComplete:
+		return db.EventReconcileDonorComplete
+	case ActionTerminationIntent:
+		return db.EventReconcileTerminationIntent
+	case ActionBootstrapComplete:
+		return db.EventReconcileBootstrapComplete
+	default:
+		return ""
+	}
 }
