@@ -50,14 +50,16 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		return nil, fmt.Errorf("list unplaced jobs: %w", err)
 	}
 
-	// Single pass: filter to cloud jobs and check attempt count
+	// Single pass: filter to cloud jobs and check attempt count.
+	// Attempts are scoped to the job's current campaign so that prior
+	// campaigns (earlier `launch` commands) don't exhaust the retry budget.
 	result := &RelaunchResult{}
 	var eligible []*db.Job
 	for _, j := range unplaced {
 		if j.HasTag(db.TagInventory) {
 			continue
 		}
-		count, err := db.CountLaunchAttempts(cfg.Database, j.ID)
+		count, err := countAttemptsForRelaunch(cfg.Database, j.ID)
 		if err != nil {
 			continue
 		}
@@ -65,7 +67,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			continue
 		}
 		if count >= maxAttempts {
-			log.Printf("relaunch: job %d has %d attempts (max %d), skipping", j.ID, count, maxAttempts)
+			log.Printf("relaunch: job %d has %d attempts in campaign (max %d), skipping", j.ID, count, maxAttempts)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind:     db.EventRelaunchSkippedMaxAttempts,
 				JobID:         j.ID,
@@ -279,4 +281,20 @@ func mostRecentDiskFullGB(database *sql.DB, group InstanceGroup) int {
 		}
 	}
 	return 0
+}
+
+// countAttemptsForRelaunch returns the number of launch attempts for a job,
+// scoped to the campaign of the job's most recent attempt. This prevents
+// attempts from earlier campaigns from exhausting the retry budget.
+func countAttemptsForRelaunch(database *sql.DB, jobID int64) (int, error) {
+	attempts, err := db.GetLaunchAttempts(database, jobID)
+	if err != nil || len(attempts) == 0 {
+		return 0, err
+	}
+	lastAttempt := attempts[len(attempts)-1]
+	ci, err := db.GetLaunch(database, lastAttempt.LaunchID)
+	if err != nil || ci == nil || ci.CampaignID == nil {
+		return db.CountLaunchAttempts(database, jobID)
+	}
+	return db.CountLaunchAttemptsInCampaign(database, jobID, *ci.CampaignID)
 }

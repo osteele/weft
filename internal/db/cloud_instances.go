@@ -1079,6 +1079,21 @@ func CountLaunchAttempts(database *sql.DB, jobID int64) (int, error) {
 	return count, err
 }
 
+// CountLaunchAttemptsInCampaign returns the number of cloud-associated attempts
+// for a job within a specific campaign. This prevents attempts from earlier
+// campaigns (e.g. a previous `launch` command) from counting against the retry
+// budget of the current campaign.
+func CountLaunchAttemptsInCampaign(database *sql.DB, jobID int64, campaignID int64) (int, error) {
+	var count int
+	err := database.QueryRow(
+		`SELECT COUNT(*) FROM job_attempts ja
+		 JOIN launches l ON l.id = ja.launch_id
+		 WHERE ja.job_id = ? AND ja.launch_id IS NOT NULL AND l.campaign_id = ?`,
+		jobID, campaignID,
+	).Scan(&count)
+	return count, err
+}
+
 // GetLaunchAttempts returns the cloud attempt history for a job, ordered by start time.
 func GetLaunchAttempts(database *sql.DB, jobID int64) ([]LaunchAttempt, error) {
 	rows, err := database.Query(

@@ -620,6 +620,83 @@ func TestIsRetryableTermination(t *testing.T) {
 	}
 }
 
+func TestCountLaunchAttemptsInCampaign(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Create two campaigns (simulating two separate `launch` commands)
+	campaign1ID, err := CreateCampaign(database, &Campaign{Status: CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign 1: %v", err)
+	}
+	campaign2ID, err := CreateCampaign(database, &Campaign{Status: CampaignStatusRunning})
+	if err != nil {
+		t.Fatalf("create campaign 2: %v", err)
+	}
+
+	// Create a job
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "training", "")
+	if err != nil {
+		t.Fatalf("record job: %v", err)
+	}
+
+	// Launch in campaign 1 (completes successfully)
+	inst1ID, err := CreateLaunch(database, &Launch{
+		Status:     LaunchStatusCompleted,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_3090",
+		CampaignID: &campaign1ID,
+	})
+	if err != nil {
+		t.Fatalf("create instance 1: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, inst1ID); err != nil {
+		t.Fatalf("set job launch 1: %v", err)
+	}
+
+	// Launch in campaign 2 (fails, orphaned)
+	inst2ID, err := CreateLaunch(database, &Launch{
+		Status:     LaunchStatusFailed,
+		Provider:   "vastai",
+		GPUSpec:    "RTX_3090",
+		CampaignID: &campaign2ID,
+	})
+	if err != nil {
+		t.Fatalf("create instance 2: %v", err)
+	}
+	if _, err := CreateAttempt(database, jobID, "", nil, StatusQueued); err != nil {
+		t.Fatalf("create attempt 2: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, inst2ID); err != nil {
+		t.Fatalf("set job launch 2: %v", err)
+	}
+
+	// Global count should be 2 (both campaigns)
+	total, err := CountLaunchAttempts(database, jobID)
+	if err != nil {
+		t.Fatalf("count all attempts: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("CountLaunchAttempts = %d, want 2", total)
+	}
+
+	// Campaign-scoped counts should be 1 each
+	count1, err := CountLaunchAttemptsInCampaign(database, jobID, campaign1ID)
+	if err != nil {
+		t.Fatalf("count campaign 1 attempts: %v", err)
+	}
+	if count1 != 1 {
+		t.Errorf("CountLaunchAttemptsInCampaign(campaign1) = %d, want 1", count1)
+	}
+
+	count2, err := CountLaunchAttemptsInCampaign(database, jobID, campaign2ID)
+	if err != nil {
+		t.Fatalf("count campaign 2 attempts: %v", err)
+	}
+	if count2 != 1 {
+		t.Errorf("CountLaunchAttemptsInCampaign(campaign2) = %d, want 1", count2)
+	}
+}
+
 func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
 	database := setupTestDB(t)
 
