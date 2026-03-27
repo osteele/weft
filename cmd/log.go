@@ -63,6 +63,10 @@ var (
 	logFull    bool
 	logTimeout time.Duration
 
+	// Sync flags
+	logSync   bool
+	logNoSync bool
+
 	// Operations log flags
 	logOps       bool
 	logOpsJob    int64
@@ -84,6 +88,8 @@ func init() {
 	logCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
 	logCmd.Flags().BoolVar(&logFull, "full", false, "Show the entire log (alias for --from 1)")
 	logCmd.Flags().DurationVarP(&logTimeout, "timeout", "t", 0, "SSH timeout for slow connections (e.g., 2m, 120s)")
+	logCmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
+	logCmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
 
 	// Operations log flags
 	logCmd.Flags().BoolVar(&logOps, "ops", false, "Show operations log instead of job log")
@@ -142,6 +148,25 @@ func runLog(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	// Quick sync for non-terminal jobs before display
+	if !logNoSync {
+		var jobsToSync []*db.Job
+		for _, jobID := range jobIDs {
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil || job == nil {
+				continue
+			}
+			jobsToSync = append(jobsToSync, job)
+		}
+		if len(jobsToSync) > 0 {
+			timeout := FastSyncTimeout
+			if logSync {
+				timeout = DefaultSyncTimeout
+			}
+			quickSyncJobs(database, jobsToSync, timeout)
+		}
+	}
 
 	var errorsList []string
 	for i, jobID := range jobIDs {

@@ -308,6 +308,12 @@ func init() {
 	jobTagCmd.AddCommand(jobTagAddCmd)
 	jobTagCmd.AddCommand(jobTagRemoveCmd)
 
+	// Sync flags for job info (shared across jobInfoCmd, infoCmd, showCmd)
+	for _, cmd := range []*cobra.Command{jobInfoCmd, infoCmd, showCmd} {
+		cmd.Flags().BoolVar(&jobInfoSync, "sync", false, "Perform full sync (30s timeout)")
+		cmd.Flags().BoolVar(&jobInfoNoSync, "no-sync", false, "Skip syncing job statuses")
+	}
+
 	// Copy flags from run command to job run
 	jobRunCmd.Flags().StringVarP(&runDescription, "message", "m", "", "Job description")
 	jobRunCmd.Flags().StringVarP(&runDescription, "description", "d", "", "[deprecated: use -m] Job description")
@@ -325,6 +331,8 @@ func init() {
 	jobLogCmd.Flags().IntVar(&logFrom, "from", 0, "Show lines starting from line N")
 	jobLogCmd.Flags().IntVar(&logTo, "to", 0, "Show lines up to line N")
 	jobLogCmd.Flags().StringVar(&logGrep, "grep", "", "Filter lines matching pattern")
+	jobLogCmd.Flags().BoolVar(&logSync, "sync", false, "Perform full sync before showing log")
+	jobLogCmd.Flags().BoolVar(&logNoSync, "no-sync", false, "Skip syncing job statuses")
 
 	// Use shared list flags helper (defined in list.go)
 	addListFlags(jobListCmd)
@@ -462,6 +470,11 @@ func runJobStartNow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var (
+	jobInfoSync   bool
+	jobInfoNoSync bool
+)
+
 func runJobInfo(cmd *cobra.Command, args []string) error {
 	jobIDs, err := ParseJobIDs(args)
 	if err != nil {
@@ -473,6 +486,25 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer database.Close()
+
+	// Quick sync for non-terminal jobs before display
+	if !jobInfoNoSync {
+		var jobsToSync []*db.Job
+		for _, jobID := range jobIDs {
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil || job == nil {
+				continue
+			}
+			jobsToSync = append(jobsToSync, job)
+		}
+		if len(jobsToSync) > 0 {
+			timeout := FastSyncTimeout
+			if jobInfoSync {
+				timeout = DefaultSyncTimeout
+			}
+			quickSyncJobs(database, jobsToSync, timeout)
+		}
+	}
 
 	var errorsList []string
 	for i, jobID := range jobIDs {
@@ -493,7 +525,7 @@ func runJobInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Job ID:      %d\n", job.ID)
 		fmt.Printf("Target:      %s\n", job.TargetDisplay())
 		// Show status with waiting info
-		statusStr := job.Status
+		statusStr := job.EffectiveStatus()
 		fmt.Printf("Status:      %s\n", statusStr)
 		fmt.Printf("Description: %s\n", job.Description)
 		fmt.Printf("Directory:   %s\n", job.DisplayWorkingDir())
