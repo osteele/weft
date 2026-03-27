@@ -43,28 +43,42 @@ func setupOverheadTestDB(t *testing.T) *sql.DB {
 			cuda_version REAL,
 			provider_instance_id TEXT
 		)`,
-		`CREATE TABLE jobs (
-			id INTEGER PRIMARY KEY,
-			cloud_instance_id INTEGER,
-			tombstoned INTEGER DEFAULT 0,
-			status TEXT,
-			command TEXT,
+		createJobsTableSQL("jobs", false),
+		`CREATE TABLE job_attempts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			job_id INTEGER NOT NULL,
+			attempt_number INTEGER NOT NULL DEFAULT 1,
 			host TEXT,
-			project TEXT,
-			queue TEXT DEFAULT '',
-			tags TEXT DEFAULT '[]',
+			cloud_instance_id INTEGER,
+			status TEXT DEFAULT 'queued',
+			queued_at INTEGER,
 			start_time INTEGER,
 			end_time INTEGER,
 			exit_code INTEGER,
-			pid INTEGER,
-			created_at INTEGER,
-			gpu_class TEXT,
-			gpu_mem_gb INTEGER,
-			inputs TEXT DEFAULT '[]',
-			produces TEXT DEFAULT '[]',
-			needs TEXT DEFAULT '[]',
-			campaign_job_index INTEGER
+			error_message TEXT,
+			failure_reason TEXT,
+			error_diagnosis TEXT,
+			session_name TEXT,
+			remote_id TEXT,
+			remote_state TEXT,
+			backend TEXT,
+			last_synced_status TEXT,
+			pending_status TEXT,
+			pending_at INTEGER,
+			cost REAL,
+			vastai_instance_id INTEGER,
+			placement_meta TEXT,
+			job_metadata TEXT,
+			observed_inputs TEXT,
+			cloud_outcome TEXT
 		)`,
+		`CREATE TRIGGER jobs_insert_create_attempt
+		AFTER INSERT ON jobs
+		FOR EACH ROW
+		BEGIN
+			INSERT INTO job_attempts (job_id, attempt_number, status, queued_at)
+			VALUES (NEW.id, 1, 'queued', strftime('%s', 'now'));
+		END`,
 		`CREATE TABLE job_phase_timings (
 			job_id INTEGER PRIMARY KEY,
 			wrapper_start INTEGER,
@@ -123,12 +137,7 @@ func TestQueryOverheadObservations_WithData(t *testing.T) {
 	}
 
 	// Insert a job associated with the instance
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, tombstoned, status, command) VALUES (10, 1, 0, 'completed', 'echo test')`,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertTestJob(t, database, 10, "echo test", "/tmp", StatusCompleted, withCloudInstance(1))
 
 	// Insert phase timings
 	_, err = database.Exec(
@@ -197,10 +206,7 @@ func TestQueryOverheadObservations_SkipsNonCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = database.Exec(`INSERT INTO jobs (id, cloud_instance_id, tombstoned, status, command) VALUES (10, 1, 0, 'running', 'echo')`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertTestJob(t, database, 10, "echo", "/tmp", StatusRunning, withCloudInstance(1))
 	startup := 45.0
 	_, err = database.Exec(`INSERT INTO job_phase_timings (job_id, wrapper_start) VALUES (10, 1050)`)
 	if err != nil {
@@ -228,10 +234,7 @@ func TestQueryOverheadObservations_NullTimestamps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = database.Exec(`INSERT INTO jobs (id, cloud_instance_id, tombstoned, status, command) VALUES (10, 1, 0, 'completed', 'echo')`)
-	if err != nil {
-		t.Fatal(err)
-	}
+	insertTestJob(t, database, 10, "echo", "/tmp", StatusCompleted, withCloudInstance(1))
 	_, err = database.Exec(`INSERT INTO job_phase_timings (job_id) VALUES (10)`)
 	if err != nil {
 		t.Fatal(err)

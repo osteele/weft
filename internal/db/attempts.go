@@ -129,49 +129,56 @@ func backfillJobAttempts(db *sql.DB) error {
 	}
 
 	// Step 2: Backfill the current attempt from the jobs table itself.
-	// Use attempt_number = MAX(existing) + 1, or 1 if no prior attempts.
-	if _, err := db.Exec(`
-		INSERT INTO job_attempts (
-			job_id, attempt_number, host, cloud_instance_id, status, queued_at,
-			start_time, end_time, exit_code, error_message, failure_reason,
-			error_diagnosis, session_name, remote_id, remote_state, backend,
-			last_synced_status, pending_status, pending_at,
-			cost, vastai_instance_id, placement_meta, job_metadata, observed_inputs
-		)
-		SELECT
-			j.id,
-			COALESCE((SELECT MAX(ja.attempt_number) FROM job_attempts ja WHERE ja.job_id = j.id), 0) + 1,
-			j.host,
-			j.cloud_instance_id,
-			j.status,
-			j.queued_at,
-			j.start_time,
-			j.end_time,
-			j.exit_code,
-			j.error_message,
-			j.failure_reason,
-			j.error_diagnosis,
-			j.session_name,
-			j.remote_id,
-			j.remote_state,
-			j.backend,
-			j.last_synced_status,
-			j.pending_status,
-			j.pending_at,
-			j.cost,
-			j.vastai_instance_id,
-			j.placement_meta,
-			j.job_metadata,
-			j.observed_inputs
-		FROM jobs j
-		WHERE NOT EXISTS (
-			SELECT 1 FROM job_attempts ja WHERE ja.job_id = j.id
-		)
-		AND (j.status != 'draft'
-		  OR j.start_time IS NOT NULL
-		  OR j.host != '')
-	`); err != nil {
-		return fmt.Errorf("backfill job_attempts from jobs: %w", err)
+	// Only runs on old schemas that still have execution-state columns on jobs.
+	// New schemas store execution state exclusively on job_attempts.
+	hasStatusColumn, err := tableSchemaContains(db, "jobs", "status TEXT NOT NULL")
+	if err != nil {
+		return fmt.Errorf("check jobs schema: %w", err)
+	}
+	if hasStatusColumn {
+		if _, err := db.Exec(`
+			INSERT INTO job_attempts (
+				job_id, attempt_number, host, cloud_instance_id, status, queued_at,
+				start_time, end_time, exit_code, error_message, failure_reason,
+				error_diagnosis, session_name, remote_id, remote_state, backend,
+				last_synced_status, pending_status, pending_at,
+				cost, vastai_instance_id, placement_meta, job_metadata, observed_inputs
+			)
+			SELECT
+				j.id,
+				COALESCE((SELECT MAX(ja.attempt_number) FROM job_attempts ja WHERE ja.job_id = j.id), 0) + 1,
+				j.host,
+				j.cloud_instance_id,
+				j.status,
+				j.queued_at,
+				j.start_time,
+				j.end_time,
+				j.exit_code,
+				j.error_message,
+				j.failure_reason,
+				j.error_diagnosis,
+				j.session_name,
+				j.remote_id,
+				j.remote_state,
+				j.backend,
+				j.last_synced_status,
+				j.pending_status,
+				j.pending_at,
+				j.cost,
+				j.vastai_instance_id,
+				j.placement_meta,
+				j.job_metadata,
+				j.observed_inputs
+			FROM jobs j
+			WHERE NOT EXISTS (
+				SELECT 1 FROM job_attempts ja WHERE ja.job_id = j.id
+			)
+			AND (j.status != 'draft'
+			  OR j.start_time IS NOT NULL
+			  OR j.host != '')
+		`); err != nil {
+			return fmt.Errorf("backfill job_attempts from jobs: %w", err)
+		}
 	}
 
 	return nil
@@ -305,9 +312,9 @@ func createJobStatusView(db *sql.DB) error {
 			j.needs,
 			j.project,
 			j.tombstoned,
-			CASE WHEN la.id IS NOT NULL THEN la.last_synced_status ELSE j.last_synced_status END AS last_synced_status,
-			CASE WHEN la.id IS NOT NULL THEN la.pending_status ELSE j.pending_status END AS pending_status,
-			CASE WHEN la.id IS NOT NULL THEN la.pending_at ELSE j.pending_at END AS pending_at,
+			la.last_synced_status,
+			la.pending_status,
+			la.pending_at,
 			la.job_metadata,
 			la.cost,
 			la.vastai_instance_id,
@@ -348,7 +355,7 @@ func createJobsToAttemptsSyncTrigger(db *sql.DB) error {
 }
 
 // createJobsInsertToAttemptsTrigger creates a trigger that auto-creates an
-// attempt row when a new job is inserted (if the job isn't a draft).
+// attempt row when a new job is inserted.
 func createJobsInsertToAttemptsTrigger(db *sql.DB) error {
 	if _, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_insert_create_attempt`); err != nil {
 		return err
@@ -357,22 +364,14 @@ func createJobsInsertToAttemptsTrigger(db *sql.DB) error {
 		CREATE TRIGGER jobs_insert_create_attempt
 		AFTER INSERT ON jobs
 		FOR EACH ROW
-		WHEN NEW.status != 'draft'
 		BEGIN
 			INSERT INTO job_attempts (
-				job_id, attempt_number, host, cloud_instance_id, status, queued_at,
-				start_time, end_time, exit_code, error_message, failure_reason,
-				error_diagnosis, session_name, remote_id, remote_state, backend,
-				last_synced_status, pending_status, pending_at, cost,
-				vastai_instance_id, placement_meta, job_metadata, observed_inputs
+				job_id, attempt_number, status, queued_at
 			) VALUES (
 				NEW.id,
 				COALESCE((SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = NEW.id), 0) + 1,
-				NEW.host, NEW.cloud_instance_id, NEW.status, NEW.queued_at,
-				NEW.start_time, NEW.end_time, NEW.exit_code, NEW.error_message, NEW.failure_reason,
-				NEW.error_diagnosis, NEW.session_name, NEW.remote_id, NEW.remote_state, NEW.backend,
-				NEW.last_synced_status, NEW.pending_status, NEW.pending_at, NEW.cost,
-				NEW.vastai_instance_id, NEW.placement_meta, NEW.job_metadata, NEW.observed_inputs
+				'queued',
+				strftime('%s', 'now')
 			);
 		END
 	`)

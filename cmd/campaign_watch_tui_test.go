@@ -152,12 +152,12 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	}
 
 	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, description)
-		 VALUES (199, ?, ?, 0, ?, 'uv run llm-perf run exp_035_memory_capacity_cliff', '/workspace/llm-performance-models', 'EXP-035')`,
-		instanceID, "", db.StatusRunning,
+		`INSERT INTO jobs (id, tombstoned, command, working_dir, description) VALUES (199, 0, 'uv run llm-perf run exp_035_memory_capacity_cliff', '/workspace/llm-performance-models', 'EXP-035')`,
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
+	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = 199 AND end_time IS NULL`,
+		db.StatusRunning, instanceID)
 
 	m := watchModel{
 		instanceIDs: []int64{instanceID},

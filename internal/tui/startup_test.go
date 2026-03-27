@@ -15,11 +15,12 @@ func TestLoadInitialSnapshotUsesCachedState(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	if _, err := database.Exec(
-		`INSERT INTO jobs (id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, 'host-alpha', 0, 'running', 'echo hello', '/tmp')`,
+		`INSERT INTO jobs (id, tombstoned, command, working_dir, placement_host) VALUES (1, 0, 'echo hello', '/tmp', 'host-alpha')`,
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
+	database.Exec(`UPDATE job_attempts SET status = ?, host = ? WHERE job_id = 1 AND end_time IS NULL`,
+		db.StatusRunning, "host-alpha")
 
 	lastUpdated := time.Now().Add(-10 * time.Minute).Unix()
 	if err := db.SaveCachedHostInfo(database, &db.CachedHostInfo{

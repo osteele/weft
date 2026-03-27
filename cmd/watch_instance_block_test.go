@@ -58,17 +58,28 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 		t.Fatalf("CreateCloudInstance: %v", err)
 	}
 
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, description, campaign_job_index, project)
-		 VALUES
-		 (203, ?, ?, 0, 'running', 'run 203', '/workspace/markov-attention', 'EXP-110', 0, 'markov-attention'),
-		 (249, NULL, '', 0, 'queued', 'run 249', '/workspace/llm-performance-models', 'EXP-044', 1, 'llm-performance-models'),
-		 (250, NULL, '', 0, 'queued', 'run 250', '/workspace/llm-performance-models', 'EXP-043', 2, 'llm-performance-models'),
-		 (253, NULL, '', 0, 'queued', 'run 253', '/workspace/llm-performance-models', 'EXP-041', 3, 'llm-performance-models'),
-		 (283, NULL, '', 0, 'queued', 'run 283', '/workspace/markov-attention', 'EXP-115', 4, 'markov-attention')`,
-		instanceID, "",
-	); err != nil {
-		t.Fatalf("insert jobs: %v", err)
+	for _, j := range []struct {
+		id      int64
+		cmd     string
+		workDir string
+		desc    string
+		idx     int
+		project string
+		status  string
+	}{
+		{203, "run 203", "/workspace/markov-attention", "EXP-110", 0, "markov-attention", db.StatusRunning},
+		{249, "run 249", "/workspace/llm-performance-models", "EXP-044", 1, "llm-performance-models", db.StatusQueued},
+		{250, "run 250", "/workspace/llm-performance-models", "EXP-043", 2, "llm-performance-models", db.StatusQueued},
+		{253, "run 253", "/workspace/llm-performance-models", "EXP-041", 3, "llm-performance-models", db.StatusQueued},
+		{283, "run 283", "/workspace/markov-attention", "EXP-115", 4, "markov-attention", db.StatusQueued},
+	} {
+		if _, err := database.Exec(
+			`INSERT INTO jobs (id, tombstoned, command, working_dir, description, campaign_job_index, project) VALUES (?, 0, ?, ?, ?, ?, ?)`,
+			j.id, j.cmd, j.workDir, j.desc, j.idx, j.project,
+		); err != nil {
+			t.Fatalf("insert job %d: %v", j.id, err)
+		}
+		database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, j.status, j.id)
 	}
 
 	for _, jobID := range []int64{203, 249, 250, 253, 283} {

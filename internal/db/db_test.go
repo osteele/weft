@@ -1457,6 +1457,8 @@ func TestJobCloudAttemptTriggersSyncJobAssignment(t *testing.T) {
 }
 
 func TestJobStatusChecksRejectInvalidValues(t *testing.T) {
+	// Status and pending_status constraints are now on job_attempts, not jobs.
+	// The jobs table no longer has these columns.
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
@@ -1464,11 +1466,8 @@ func TestJobStatusChecksRejectInvalidValues(t *testing.T) {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
 
-	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, "bogus", jobID); err == nil {
-		t.Fatal("expected invalid jobs.status update to fail")
-	}
-	if _, err := database.Exec(`UPDATE jobs SET pending_status = ? WHERE id = ?`, "bogus", jobID); err == nil {
-		t.Fatal("expected invalid jobs.pending_status update to fail")
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, "bogus", jobID); err == nil {
+		t.Fatal("expected invalid job_attempts.status update to fail")
 	}
 }
 
@@ -1512,24 +1511,9 @@ func TestCampaignStatusChecksRejectInvalidValues(t *testing.T) {
 }
 
 func TestPlacementTriggerRejectsNonEmptyHostForCloudJobs(t *testing.T) {
-	database := SetupTestDB(t)
-
-	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
-	if err != nil {
-		t.Fatalf("RecordQueuedWithGPU: %v", err)
-	}
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
-		Provider: "vastai",
-		GPUSpec:  "A40",
-	})
-	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
-	}
-
-	if _, err := database.Exec(`UPDATE jobs SET cloud_instance_id = ?, host = ? WHERE id = ?`, instanceID, "studio", jobID); err == nil {
-		t.Fatal("expected mixed host/cloud placement update to fail")
-	}
+	// host and cloud_instance_id are no longer on the jobs table — they live
+	// exclusively on job_attempts. The integrity trigger was removed.
+	t.Skip("host/cloud_instance_id columns removed from jobs table")
 }
 
 func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
@@ -1547,8 +1531,23 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 			end_time INTEGER,
 			exit_code INTEGER,
 			status TEXT NOT NULL DEFAULT 'running',
+			error_message TEXT,
+			backend TEXT DEFAULT 'queue-runner',
+			remote_id TEXT,
+			remote_state TEXT,
+			failure_reason TEXT,
 			tombstoned INTEGER NOT NULL DEFAULT 0,
-			cloud_instance_id INTEGER
+			cloud_instance_id INTEGER,
+			queued_at INTEGER,
+			last_synced_status TEXT,
+			pending_status TEXT,
+			pending_at INTEGER,
+			cost REAL,
+			vastai_instance_id INTEGER,
+			placement_meta TEXT,
+			job_metadata TEXT,
+			observed_inputs TEXT,
+			error_diagnosis TEXT
 		);
 		CREATE TABLE cloud_instances (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1595,9 +1594,8 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if job.Host != "" {
-		t.Fatalf("host = %q, want empty after repair", job.Host)
-	}
+	// After migration, cloud_instance_id is backfilled from the legacy
+	// job_cloud_attempts table into job_attempts.
 	if job.CloudInstanceID == nil || *job.CloudInstanceID != 1 {
 		t.Fatalf("cloud_instance_id = %v, want 1 after repair", job.CloudInstanceID)
 	}

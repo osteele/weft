@@ -22,13 +22,9 @@ func TestGetCloudInstanceJobsIncludingAttempts(t *testing.T) {
 	}
 
 	// Insert a job associated with the cloud instance
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, ?, ?, 0, 'queued', 'echo hello', '/tmp')`,
-		instanceID, "",
-	)
-	if err != nil {
-		t.Fatalf("insert job: %v", err)
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
+	if err := SetJobCloudInstanceID(database, 1, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
 	}
 
 	// Verify both functions return the job before reset
@@ -88,12 +84,7 @@ func TestGetCloudInstanceJobsIncludingAttemptsTreatsOpenAttemptsAsCurrent(t *tes
 		t.Fatalf("CreateCloudInstance: %v", err)
 	}
 
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (203, NULL, '', 0, 'queued', 'open attempt current', '/tmp')`,
-	); err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	insertTestJob(t, database, 203, "open attempt current", "/tmp", StatusQueued)
 	if err := SetJobCloudInstanceID(database, 203, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID(203): %v", err)
 	}
@@ -174,16 +165,9 @@ func TestGetCloudInstanceJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T)
 		t.Fatalf("CreateCloudInstance: %v", err)
 	}
 
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES
-		 (249, NULL, '', 0, 'queued', 'historical', '/tmp'),
-		 (203, NULL, '', 0, 'queued', 'open attempt current', '/tmp'),
-		 (199, ?, ?, 0, 'running', 'current earlier campaign slot', '/tmp')`,
-		instanceID, "",
-	); err != nil {
-		t.Fatalf("insert jobs: %v", err)
-	}
+	insertTestJob(t, database, 249, "historical", "/tmp", StatusQueued)
+	insertTestJob(t, database, 203, "open attempt current", "/tmp", StatusQueued)
+	insertTestJob(t, database, 199, "current earlier campaign slot", "/tmp", StatusRunning)
 
 	if err := SetJobCloudInstanceID(database, 249, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID(249): %v", err)
@@ -233,15 +217,8 @@ func TestGetCloudInstanceJobsIncludingAttemptsRetainsOrderAfterFailure(t *testin
 
 	// Job 292 (campaign index 0) failed and was reset — cloud_instance_id cleared.
 	// Job 293 (campaign index 1) is still running.
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES
-		 (292, NULL, '', 0, 'failed',  'echo first',  '/tmp'),
-		 (293, ?,    '',  0, 'running', 'echo second', '/tmp')`,
-		instanceID,
-	); err != nil {
-		t.Fatalf("insert jobs: %v", err)
-	}
+	insertTestJob(t, database, 292, "echo first", "/tmp", StatusFailed)
+	insertTestJob(t, database, 293, "echo second", "/tmp", StatusRunning)
 	if err := SetJobCampaignIndex(database, 292, 0); err != nil {
 		t.Fatalf("SetJobCampaignIndex(292): %v", err)
 	}
@@ -288,13 +265,7 @@ func TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical(t *te
 	}
 
 	// Insert a job, associate it with the instance, then reset (simulating instance failure).
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (317, ?, '', 0, 'running', 'python train.py', '/tmp')`,
-		instanceID,
-	); err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	insertTestJob(t, database, 317, "python train.py", "/tmp", StatusRunning)
 	if err := SetJobCloudInstanceID(database, 317, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}
@@ -334,12 +305,7 @@ func TestGetCloudInstanceJobsIncludingAttemptsOverridesStatusForHistorical(t *te
 func TestResetOrphanedCloudJobsSetsPlacementReasons(t *testing.T) {
 	database := setupTestDB(t)
 
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, 'vastai:77', 0, 'running', 'echo hello', '/tmp')`,
-	); err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusRunning, withHost("vastai:77"))
 
 	n, err := ResetOrphanedCloudJobs(database)
 	if err != nil {
@@ -373,13 +339,9 @@ func TestGetAttemptOutcomesByInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateCloudInstance: %v", err)
 	}
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, ?, ?, 0, 'queued', 'echo hello', '/tmp')`,
-		instanceID, "",
-	)
-	if err != nil {
-		t.Fatalf("insert job: %v", err)
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
+	if err := SetJobCloudInstanceID(database, 1, instanceID); err != nil {
+		t.Fatalf("set cloud instance: %v", err)
 	}
 
 	// Before closing the attempt, outcomes should be empty
@@ -420,20 +382,8 @@ func TestResetCloudInstanceJobs_PreservesCanceledJobs(t *testing.T) {
 		t.Fatalf("CreateCloudInstance: %v", err)
 	}
 
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, ?, ?, 0, ?, 'echo canceled', '/tmp')`,
-		instanceID, "", StatusCanceled,
-	); err != nil {
-		t.Fatalf("insert canceled job: %v", err)
-	}
-	if _, err := database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (2, ?, ?, 0, ?, 'echo running', '/tmp')`,
-		instanceID, "", StatusRunning,
-	); err != nil {
-		t.Fatalf("insert running job: %v", err)
-	}
+	insertTestJob(t, database, 1, "echo canceled", "/tmp", StatusCanceled, withCloudInstance(instanceID))
+	insertTestJob(t, database, 2, "echo running", "/tmp", StatusRunning, withCloudInstance(instanceID))
 
 	n, err := ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned)
 	if err != nil {
@@ -490,13 +440,7 @@ func TestResetCloudInstanceJobs_DoesNotRewriteCompletedAttempts(t *testing.T) {
 		{id: 1, status: StatusCompleted},
 		{id: 2, status: StatusRunning},
 	} {
-		if _, err := database.Exec(
-			`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-			 VALUES (?, ?, ?, 0, ?, 'echo test', '/tmp')`,
-			stmt.id, instanceID, "", stmt.status,
-		); err != nil {
-			t.Fatalf("insert job %d: %v", stmt.id, err)
-		}
+		insertTestJob(t, database, stmt.id, "echo test", "/tmp", stmt.status, withCloudInstance(instanceID))
 	}
 	if err := CloseJobCloudAttempt(database, 1, AttemptOutcomeCompleted); err != nil {
 		t.Fatalf("CloseJobCloudAttempt(completed): %v", err)
@@ -543,13 +487,7 @@ func TestGetActiveCloudInstanceJobCounts_OnlyCountsNonTerminalJobs(t *testing.T)
 		{id: 3, status: StatusCompleted},
 		{id: 4, status: StatusFailed},
 	} {
-		if _, err := database.Exec(
-			`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-			 VALUES (?, ?, ?, 0, ?, 'echo test', '/tmp')`,
-			stmt.id, instanceID, "", stmt.status,
-		); err != nil {
-			t.Fatalf("insert job %d: %v", stmt.id, err)
-		}
+		insertTestJob(t, database, stmt.id, "echo test", "/tmp", stmt.status, withCloudInstance(instanceID))
 	}
 
 	counts, err := GetActiveCloudInstanceJobCounts(database)
@@ -573,14 +511,7 @@ func TestNormalizeTerminalCloudInstanceJobs_FailedInstanceOrphansRunningJobs(t *
 		t.Fatalf("CreateCloudInstance: %v", err)
 	}
 
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, ?, ?, 0, ?, 'echo running', '/tmp')`,
-		instanceID, "", StatusRunning,
-	)
-	if err != nil {
-		t.Fatalf("insert running job: %v", err)
-	}
+	insertTestJob(t, database, 1, "echo running", "/tmp", StatusRunning, withCloudInstance(instanceID))
 
 	n, err := NormalizeTerminalCloudInstanceJobs(database, instanceID)
 	if err != nil {
@@ -634,14 +565,7 @@ func TestResetJobsOnTerminalCloudInstances_SkipsCompletedInstances(t *testing.T)
 		{jobID: 1, instanceID: completedID},
 		{jobID: 2, instanceID: failedID},
 	} {
-		_, err = database.Exec(
-			`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-			 VALUES (?, ?, ?, 0, ?, 'echo test', '/tmp')`,
-			tc.jobID, tc.instanceID, "", StatusRunning,
-		)
-		if err != nil {
-			t.Fatalf("insert job %d: %v", tc.jobID, err)
-		}
+		insertTestJob(t, database, tc.jobID, "echo test", "/tmp", StatusRunning, withCloudInstance(tc.instanceID))
 	}
 
 	n, err := ResetJobsOnTerminalCloudInstances(database)
@@ -711,14 +635,8 @@ func TestRefineInstanceTerminationReason_DiskFull(t *testing.T) {
 		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
 	}
 
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason)
-		 VALUES (1, ?, ?, 0, 'failed', 'python train.py', '/tmp', ?)`,
-		instanceID, "", TerminationReasonDiskFull,
-	)
-	if err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	insertTestJob(t, database, 1, "python train.py", "/tmp", StatusFailed,
+		withCloudInstance(instanceID), withFailureReason(TerminationReasonDiskFull))
 
 	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {
 		t.Fatalf("RefineInstanceTerminationReason: %v", err)
@@ -748,14 +666,8 @@ func TestRefineInstanceTerminationReason_OnlyRefinesJobFailure(t *testing.T) {
 		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
 	}
 
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason)
-		 VALUES (1, ?, ?, 0, 'failed', 'python train.py', '/tmp', ?)`,
-		instanceID, "", TerminationReasonDiskFull,
-	)
-	if err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	insertTestJob(t, database, 1, "python train.py", "/tmp", StatusFailed,
+		withCloudInstance(instanceID), withFailureReason(TerminationReasonDiskFull))
 
 	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {
 		t.Fatalf("RefineInstanceTerminationReason: %v", err)
@@ -785,14 +697,8 @@ func TestRefineInstanceTerminationReason_UsesHistoricalAttempts(t *testing.T) {
 		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
 	}
 
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason)
-		 VALUES (1, NULL, '', 0, 'failed', 'python train.py', '/tmp', ?)`,
-		TerminationReasonDiskFull,
-	)
-	if err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
+	insertTestJob(t, database, 1, "python train.py", "/tmp", StatusFailed,
+		withFailureReason(TerminationReasonDiskFull))
 	if err := SetJobCloudInstanceID(database, 1, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}

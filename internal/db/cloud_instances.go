@@ -641,8 +641,6 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 
 	// Close the old attempt (preserves cloud_instance_id as historical record)
 	// and create a fresh unplaced attempt for each reset job.
-	// Must happen BEFORE updating jobs.cloud_instance_id to NULL, because the
-	// trigger prevents clearing cloud_instance_id while live attempts exist.
 	now := time.Now().Unix()
 	for _, jobID := range jobIDs {
 		if _, err := tx.Exec(`

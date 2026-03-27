@@ -206,14 +206,13 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 		t.Fatalf("UpdateCloudInstanceStatus(preempted): %v", err)
 	}
 
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir)
-		 VALUES (1, ?, ?, 0, ?, 'python train.py', '/tmp')`,
-		preemptedID, "", db.StatusQueued,
-	)
-	if err != nil {
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, tombstoned, command, working_dir) VALUES (1, 0, 'python train.py', '/tmp')`,
+	); err != nil {
 		t.Fatalf("insert orphaned job: %v", err)
 	}
+	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = 1 AND end_time IS NULL`,
+		db.StatusQueued, preemptedID)
 	if err := db.CloseJobCloudAttemptsByInstance(database, preemptedID, db.AttemptOutcomeOrphaned); err != nil {
 		t.Fatalf("CloseJobCloudAttemptsByInstance(orphaned): %v", err)
 	}
@@ -240,14 +239,13 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 		t.Fatalf("MarshalDiagnosis: %v", err)
 	}
 
-	_, err = database.Exec(
-		`INSERT INTO jobs (id, cloud_instance_id, host, tombstoned, status, command, working_dir, failure_reason, error_diagnosis)
-		 VALUES (2, ?, ?, 0, ?, 'python train.py', '/tmp', ?, ?)`,
-		jobFailureID, "", db.StatusFailed, "gpu_oom", diagJSON,
-	)
-	if err != nil {
+	if _, err := database.Exec(
+		`INSERT INTO jobs (id, tombstoned, command, working_dir) VALUES (2, 0, 'python train.py', '/tmp')`,
+	); err != nil {
 		t.Fatalf("insert failed job: %v", err)
 	}
+	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ?, failure_reason = ?, error_diagnosis = ? WHERE job_id = 2 AND end_time IS NULL`,
+		db.StatusFailed, jobFailureID, "gpu_oom", diagJSON)
 
 	report, err := buildCampaignDiagnosisReport(database, campaignID)
 	if err != nil {

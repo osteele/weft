@@ -64,7 +64,8 @@ func QueryOverheadObservations(database *sql.DB) ([]OverheadObservation, error) 
 			jpt.upload_results_bytes,
 			jpt.upload_workspace_bytes
 		FROM cloud_instances ci
-		JOIN jobs j ON j.cloud_instance_id = ci.id AND j.tombstoned = 0
+		JOIN job_attempts ja ON ja.cloud_instance_id = ci.id
+		JOIN jobs j ON j.id = ja.job_id AND j.tombstoned = 0
 		JOIN job_phase_timings jpt ON jpt.job_id = j.id
 		WHERE ci.status = 'completed'
 		GROUP BY ci.id

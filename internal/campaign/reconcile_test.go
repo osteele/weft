@@ -30,10 +30,11 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Create a job associated with this instance
-	_, err = database.Exec(`INSERT INTO jobs (id, host, working_dir, status, command, cloud_instance_id) VALUES (1, '', '/tmp', 'queued', 'python train.py', ?)`, instanceID)
-	if err != nil {
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
+	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = 1 AND end_time IS NULL`,
+		db.StatusQueued, instanceID)
 
 	// Mock client that reports the instance as dead
 	mockClient := &cloud.MockClient{
@@ -64,7 +65,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 
 	// Verify job was reset to queued (unplaced)
 	var jobStatus string
-	if err := database.QueryRow(`SELECT status FROM jobs WHERE id = 1`).Scan(&jobStatus); err != nil {
+	if err := database.QueryRow(`SELECT status FROM job_status WHERE id = 1`).Scan(&jobStatus); err != nil {
 		t.Fatalf("get job status: %v", err)
 	}
 	if jobStatus != db.StatusQueued {
@@ -177,9 +178,11 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 	}
 
 	for _, jobID := range []int64{1, 2} {
-		if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, status, command, cloud_instance_id) VALUES (?, '', '/tmp', 'queued', 'python train.py', ?)`, jobID, instanceID); err != nil {
+		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, jobID); err != nil {
 			t.Fatalf("create job %d: %v", jobID, err)
 		}
+		database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = ? AND end_time IS NULL`,
+			db.StatusQueued, instanceID, jobID)
 	}
 
 	origFetchHeartbeat := fetchReconcileHeartbeat

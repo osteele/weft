@@ -122,9 +122,9 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
 	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
 	if _, err := database.Exec(
-		`INSERT INTO jobs (id, host, working_dir, status, gpu_class, gpu_mem_gb, command, tombstoned)
-		 VALUES (?, '', '/tmp', ?, ?, ?, ?, 0)`,
-		job.ID, db.StatusQueued, group.GPUClass, group.GPUMemGB, job.Command,
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
@@ -156,16 +156,13 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, db.TerminationReasonInfraFailure)
 	}
 
-	var host string
-	var cloudInstanceID sql.NullInt64
-	if err := database.QueryRow(`SELECT host, cloud_instance_id FROM jobs WHERE id = ?`, job.ID).Scan(&host, &cloudInstanceID); err != nil {
-		t.Fatalf("select job: %v", err)
+	// After failed launch, the job should be reset to unplaced (via job_status view)
+	resetJob, err := db.GetJobByID(database, job.ID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
 	}
-	if cloudInstanceID.Valid {
-		t.Fatalf("job cloud_instance_id = %v, want NULL", cloudInstanceID.Int64)
-	}
-	if host != "" {
-		t.Fatalf("job host = %q, want empty", host)
+	if resetJob.CloudInstanceID != nil {
+		t.Fatalf("job cloud_instance_id = %v, want nil", *resetJob.CloudInstanceID)
 	}
 
 	attempts, err := db.GetJobCloudAttempts(database, job.ID)
@@ -208,9 +205,9 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 	r2Cfg := cloud.R2Config{Bucket: "test", AccountID: "test"}
 	createOpts := cloud.CreateOpts{Image: "nvidia/cuda:12.2-devel-ubuntu22.04"}
 	if _, err := database.Exec(
-		`INSERT INTO jobs (id, host, working_dir, status, gpu_class, gpu_mem_gb, command, tombstoned)
-		 VALUES (?, '', '/tmp', ?, ?, ?, ?, 0)`,
-		job.ID, db.StatusQueued, group.GPUClass, group.GPUMemGB, job.Command,
+		`INSERT INTO jobs (id, working_dir, gpu_class, gpu_mem_gb, command, tombstoned)
+		 VALUES (?, '/tmp', ?, ?, ?, 0)`,
+		job.ID, group.GPUClass, group.GPUMemGB, job.Command,
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}

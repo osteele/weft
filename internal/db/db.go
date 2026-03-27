@@ -224,7 +224,7 @@ type PlacementMeta struct {
 
 const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id`
 
-const jobTableColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, vastai_instance_id, error_diagnosis, retry_count, placement_meta, placement_host, placement_reasons, cloud_instance_id, campaign_job_index, latest_run_id, requested_status`
+const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
@@ -332,24 +332,13 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 	}
 	return fmt.Sprintf(`CREATE TABLE %s%s (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		host TEXT NOT NULL,
-		session_name TEXT,
 		working_dir TEXT NOT NULL,
 		command TEXT NOT NULL,
 		description TEXT,
 		generated_description TEXT,
 		generation_hash TEXT,
 		created_at INTEGER,
-		queued_at INTEGER,
-		start_time INTEGER,
-		end_time INTEGER,
-		exit_code INTEGER,
-		status TEXT NOT NULL DEFAULT 'running',
-		error_message TEXT,
 		backend TEXT DEFAULT 'queue-runner',
-		remote_id TEXT,
-		remote_state TEXT,
-		failure_reason TEXT,
 		queue_name TEXT,
 		gpu TEXT,
 		gpu_class TEXT,
@@ -359,34 +348,17 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		tags TEXT,
 		dep_spec TEXT,
 		inputs TEXT,
-		observed_inputs TEXT,
 		outputs TEXT,
 		output_dirs TEXT,
 		produces TEXT,
 		needs TEXT,
 		project TEXT,
 		tombstoned INTEGER NOT NULL DEFAULT 0,
-		last_synced_status TEXT,
-		pending_status TEXT,
-		pending_at INTEGER,
-		job_metadata TEXT,
-		cost REAL,
-		vastai_instance_id INTEGER,
-		error_diagnosis TEXT,
-		retry_count INTEGER DEFAULT 0,
-		placement_meta TEXT,
 		placement_host TEXT,
 		placement_reasons TEXT,
-		cloud_instance_id INTEGER,
 		campaign_job_index INTEGER,
-		latest_run_id INTEGER,
-		requested_status TEXT,
-		CONSTRAINT jobs_status_check CHECK (%s),
-		CONSTRAINT jobs_pending_status_check CHECK (%s)
-	)`, ifClause, table,
-		statusCheckConstraintSQL("status", jobStatusValues(), false),
-		statusCheckConstraintSQL("pending_status", jobStatusValues(), true),
-	)
+		requested_status TEXT
+	)`, ifClause, table)
 }
 
 func createCloudInstancesTableSQL(table string, ifNotExists bool) string {
@@ -561,10 +533,11 @@ func createAllRunsView(db *sql.DB) error {
 
 // dropLegacyRunsTable clears stale references to job_runs IDs, then drops the table.
 func dropLegacyRunsTable(db *sql.DB) error {
-	for _, stmt := range []string{
-		`UPDATE jobs SET latest_run_id = NULL
+	// latest_run_id may already be removed from jobs; ignore errors
+	db.Exec(`UPDATE jobs SET latest_run_id = NULL
 		 WHERE latest_run_id IS NOT NULL
-		   AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = jobs.latest_run_id)`,
+		   AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = jobs.latest_run_id)`)
+	for _, stmt := range []string{
 		`UPDATE job_timeseries SET job_run_id = NULL
 		 WHERE job_run_id IS NOT NULL
 		   AND NOT EXISTS (SELECT 1 FROM job_attempts WHERE id = job_timeseries.job_run_id AND job_id = job_timeseries.job_id)`,
@@ -582,20 +555,6 @@ func dropLegacyRunsTable(db *sql.DB) error {
 
 func createIntegrityTriggers(db *sql.DB) error {
 	stmts := []string{
-		`CREATE TRIGGER jobs_prevent_mixed_cloud_host_on_insert
-		BEFORE INSERT ON jobs
-		FOR EACH ROW
-		WHEN NEW.cloud_instance_id IS NOT NULL AND TRIM(COALESCE(NEW.host, '')) <> ''
-		BEGIN
-			SELECT RAISE(ABORT, 'jobs.host must be empty when cloud_instance_id is set');
-		END`,
-		`CREATE TRIGGER jobs_prevent_mixed_cloud_host_on_update
-		BEFORE UPDATE OF host, cloud_instance_id ON jobs
-		FOR EACH ROW
-		WHEN NEW.cloud_instance_id IS NOT NULL AND TRIM(COALESCE(NEW.host, '')) <> ''
-		BEGIN
-			SELECT RAISE(ABORT, 'jobs.host must be empty when cloud_instance_id is set');
-		END`,
 		`CREATE TRIGGER artifacts_validate_job_run_ownership_on_insert
 		BEFORE INSERT ON artifacts
 		FOR EACH ROW
@@ -693,12 +652,15 @@ func rebuildTable(db *sql.DB, createSQL, copySQL, dropSQL, renameSQL string, pos
 	return tx.Commit()
 }
 
-func ensureJobsTableConstraints(db *sql.DB) error {
-	hasConstraint, err := tableSchemaContains(db, "jobs", "jobs_status_check")
+func ensureJobsTableColumns(db *sql.DB) error {
+	// Check if the old table still has execution-state columns (e.g. status).
+	// If so, rebuild the table to remove them.
+	// Use "status TEXT NOT NULL" to avoid matching "requested_status TEXT".
+	hasStatusColumn, err := tableSchemaContains(db, "jobs", "status TEXT NOT NULL")
 	if err != nil {
 		return err
 	}
-	if hasConstraint {
+	if !hasStatusColumn {
 		return nil
 	}
 	return rebuildTable(
@@ -707,10 +669,6 @@ func ensureJobsTableConstraints(db *sql.DB) error {
 		fmt.Sprintf(`INSERT INTO jobs_new (%s) SELECT %s FROM jobs`, jobTableColumns, jobTableColumns),
 		`DROP TABLE jobs`,
 		`ALTER TABLE jobs_new RENAME TO jobs`,
-		`CREATE INDEX idx_jobs_host ON jobs(host)`,
-		`CREATE INDEX idx_jobs_session ON jobs(session_name)`,
-		`CREATE INDEX idx_jobs_status ON jobs(status)`,
-		`CREATE INDEX idx_jobs_start ON jobs(start_time DESC)`,
 	)
 }
 
@@ -802,7 +760,6 @@ func validateRepresentativeRows(db *sql.DB, query string, format func(*sql.Rows)
 }
 
 func validateEnumAndRelationshipConstraints(db *sql.DB) error {
-	jobStatusSQL := sqlStringList(jobStatusValues())
 	campaignStatusSQL := sqlStringList(campaignStatusValues())
 	cloudStatusSQL := sqlStringList(cloudInstanceStatusValues())
 	terminationReasonSQL := sqlStringList(terminationReasonValues())
@@ -812,30 +769,6 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 		format  func(*sql.Rows) (string, error)
 		message string
 	}{
-		{
-			query: fmt.Sprintf(`SELECT id, status FROM jobs WHERE status NOT IN (%s) ORDER BY id ASC LIMIT 5`, jobStatusSQL),
-			format: func(rows *sql.Rows) (string, error) {
-				var id int64
-				var status string
-				if err := rows.Scan(&id, &status); err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("%d=%q", id, status), nil
-			},
-			message: "invalid jobs.status values",
-		},
-		{
-			query: fmt.Sprintf(`SELECT id, pending_status FROM jobs WHERE pending_status IS NOT NULL AND pending_status NOT IN (%s) ORDER BY id ASC LIMIT 5`, jobStatusSQL),
-			format: func(rows *sql.Rows) (string, error) {
-				var id int64
-				var status string
-				if err := rows.Scan(&id, &status); err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("%d=%q", id, status), nil
-			},
-			message: "invalid jobs.pending_status values",
-		},
 		{
 			query: fmt.Sprintf(`SELECT id, status FROM campaigns WHERE status NOT IN (%s) ORDER BY id ASC LIMIT 5`, campaignStatusSQL),
 			format: func(rows *sql.Rows) (string, error) {
@@ -902,22 +835,6 @@ func validateEnumAndRelationshipConstraints(db *sql.DB) error {
 			},
 			message: "invalid job_timeseries job_run ownership",
 		},
-		{
-			query: `SELECT id, host, cloud_instance_id
-				FROM jobs
-				WHERE cloud_instance_id IS NOT NULL
-				  AND TRIM(COALESCE(host, '')) <> ''
-				ORDER BY id ASC LIMIT 5`,
-			format: func(rows *sql.Rows) (string, error) {
-				var id, cloudInstanceID int64
-				var host string
-				if err := rows.Scan(&id, &host, &cloudInstanceID); err != nil {
-					return "", err
-				}
-				return fmt.Sprintf("%d=(host=%q,cloud_instance_id=%d)", id, host, cloudInstanceID), nil
-			},
-			message: "invalid jobs host/cloud placement conflicts",
-		},
 	}
 
 	for _, validation := range validations {
@@ -961,66 +878,22 @@ func detectMultipleOpenCloudAttempts(db *sql.DB) error {
 }
 
 func repairLiveCloudAssignments(db *sql.DB) error {
-	// Primary: check job_attempts for open attempts on live cloud instances.
+	// Clear placement_reasons for jobs with live cloud attempts, since
+	// execution state (cloud_instance_id, host) is now on job_attempts.
 	if _, err := db.Exec(`
-		WITH latest_live_open_attempt AS (
-			SELECT ja.job_id,
-			       ja.cloud_instance_id
+		UPDATE jobs
+		SET placement_reasons = NULL
+		WHERE EXISTS (
+			SELECT 1
 			FROM job_attempts ja
 			JOIN cloud_instances ci ON ci.id = ja.cloud_instance_id
-			WHERE ja.end_time IS NULL
+			WHERE ja.job_id = jobs.id
+			  AND ja.end_time IS NULL
 			  AND ci.status IN ('running', 'launching', 'grace')
-			  AND NOT EXISTS (
-				SELECT 1
-				FROM job_attempts newer
-				JOIN cloud_instances newer_ci ON newer_ci.id = newer.cloud_instance_id
-				WHERE newer.job_id = ja.job_id
-				  AND newer.end_time IS NULL
-				  AND newer_ci.status IN ('running', 'launching', 'grace')
-				  AND newer.attempt_number > ja.attempt_number
-			  )
 		)
-		UPDATE jobs
-		SET cloud_instance_id = (
-				SELECT latest_live_open_attempt.cloud_instance_id
-				FROM latest_live_open_attempt
-				WHERE latest_live_open_attempt.job_id = jobs.id
-		    ),
-		    host = '',
-		    placement_reasons = NULL
-		WHERE EXISTS (
-				SELECT 1
-				FROM latest_live_open_attempt
-				WHERE latest_live_open_attempt.job_id = jobs.id
-		    )
-		  AND (
-				jobs.cloud_instance_id IS NULL
-				OR jobs.cloud_instance_id != (
-					SELECT latest_live_open_attempt.cloud_instance_id
-					FROM latest_live_open_attempt
-					WHERE latest_live_open_attempt.job_id = jobs.id
-				)
-				OR jobs.host != ''
-		    )`); err != nil {
+		AND placement_reasons IS NOT NULL`); err != nil {
 		return err
 	}
-
-	// Sync cloud_instance_id and host to job_attempts for jobs repaired above.
-	// The sync trigger may not exist yet at this point in init, so do it directly.
-	if _, err := db.Exec(`
-		UPDATE job_attempts
-		SET cloud_instance_id = j.cloud_instance_id,
-		    host = ''
-		FROM jobs j
-		WHERE j.id = job_attempts.job_id
-		  AND job_attempts.end_time IS NULL
-		  AND j.cloud_instance_id IS NOT NULL
-		  AND (job_attempts.cloud_instance_id IS NULL
-		       OR job_attempts.cloud_instance_id != j.cloud_instance_id
-		       OR job_attempts.host != '')`); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -1134,10 +1007,6 @@ func SetDBPath(path string) func() {
 
 func initSchema(db *sql.DB) error {
 	schema := createJobsTableSQL("jobs", true) + `;
-	CREATE INDEX IF NOT EXISTS idx_jobs_host ON jobs(host);
-	CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_name);
-	CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
-	CREATE INDEX IF NOT EXISTS idx_jobs_start ON jobs(start_time DESC);
 
 	CREATE TABLE IF NOT EXISTS processed_relay_requests (
 		request_id TEXT PRIMARY KEY,
@@ -1150,89 +1019,26 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: add error_message column if it doesn't exist
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN error_message TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add queue_name column for queued jobs
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queue_name TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add backend column for execution backend
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN backend TEXT DEFAULT 'queue-runner'`); err != nil {
-		return err
-	}
-
-	// Migration: add remote_id column for backend-specific job IDs
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN remote_id TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add remote_state column for backend-specific states
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN remote_state TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add failure_reason column for normalized failures
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN failure_reason TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add tombstoned column for soft-deleted jobs
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0`); err != nil {
-		return err
-	}
-
-	// Migration: add created_at column to track when jobs were queued
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN created_at INTEGER`); err != nil {
-		return err
-	}
-
-	// Migration: add gpu column for CUDA_VISIBLE_DEVICES
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add gpu_class column for GPU class-based scheduling (e.g., "A100")
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu_class TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add cpu_allotment column for per-job CPU allocation
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN cpu_allotment INTEGER`); err != nil {
-		return err
-	}
-
-	// Migration: add gpu_mem_gb column for per-job GPU memory reservation
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu_mem_gb INTEGER`); err != nil {
-		return err
-	}
-
-	// Migration: add env vars column for storing job environment
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN env_vars TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add tags column for job metadata
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN tags TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add job_metadata column for derived stats
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN job_metadata TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add generated_description column for LLM-generated descriptions
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN generated_description TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add generation_hash column for tracking LLM generation settings
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN generation_hash TEXT`); err != nil {
-		return err
+	// Migration: add spec columns that may be missing on old databases.
+	// Execution-state columns (error_message, remote_id, remote_state, failure_reason,
+	// job_metadata) are no longer on the jobs table; they live on job_attempts.
+	for _, stmt := range []string{
+		`ALTER TABLE jobs ADD COLUMN queue_name TEXT`,
+		`ALTER TABLE jobs ADD COLUMN backend TEXT DEFAULT 'queue-runner'`,
+		`ALTER TABLE jobs ADD COLUMN tombstoned INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE jobs ADD COLUMN created_at INTEGER`,
+		`ALTER TABLE jobs ADD COLUMN gpu TEXT`,
+		`ALTER TABLE jobs ADD COLUMN gpu_class TEXT`,
+		`ALTER TABLE jobs ADD COLUMN cpu_allotment INTEGER`,
+		`ALTER TABLE jobs ADD COLUMN gpu_mem_gb INTEGER`,
+		`ALTER TABLE jobs ADD COLUMN env_vars TEXT`,
+		`ALTER TABLE jobs ADD COLUMN tags TEXT`,
+		`ALTER TABLE jobs ADD COLUMN generated_description TEXT`,
+		`ALTER TABLE jobs ADD COLUMN generation_hash TEXT`,
+	} {
+		if err := addColumnIfMissing(db, stmt); err != nil {
+			return err
+		}
 	}
 
 	// Migration: make start_time nullable for queued jobs
@@ -1241,23 +1047,12 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: add three-way merge columns for reconciliation
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN last_synced_status TEXT`); err != nil {
-		return err
-	}
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN pending_status TEXT`); err != nil {
-		return err
-	}
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN pending_at INTEGER`); err != nil {
-		return err
-	}
-
-	// Migration: add dep_spec column for job dependencies (e.g., "42" or "42+" for after-any)
+	// Migration: add spec columns that may be missing on old databases.
+	// Execution-state columns (status, host, start_time, etc.) are no longer
+	// on the jobs table; they live exclusively on job_attempts.
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN dep_spec TEXT`); err != nil {
 		return err
 	}
-
-	// Migration: add project column for storing derived project name
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN project TEXT`); err != nil {
 		return err
 	}
@@ -1266,16 +1061,9 @@ func initSchema(db *sql.DB) error {
 	if err := backfillRecentProjects(db); err != nil {
 		return err
 	}
-	// Migration: add queued_at column for queue ordering (independent of job ID)
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN queued_at INTEGER`); err != nil {
-		return err
-	}
 
 	// Migration: add inputs/outputs columns for data locality tracking
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN inputs TEXT`); err != nil {
-		return err
-	}
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN observed_inputs TEXT`); err != nil {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN outputs TEXT`); err != nil {
@@ -1290,26 +1078,6 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: add cost column for cloud job cost tracking
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN cost REAL`); err != nil {
-		return err
-	}
-
-	// Migration: add vastai_instance_id column for Vast.ai instance tracking
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN vastai_instance_id INTEGER`); err != nil {
-		return err
-	}
-
-	// Migration: add error_diagnosis column for auto-remediation diagnosis
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN error_diagnosis TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add retry_count column for auto-remediation retry tracking
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN retry_count INTEGER DEFAULT 0`); err != nil {
-		return err
-	}
-
 	// Migration: add output_dirs column for convention-based output collection
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN output_dirs TEXT`); err != nil {
 		return err
@@ -1320,16 +1088,6 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN needs TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: add placement_meta column for placement telemetry
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN placement_meta TEXT`); err != nil {
-		return err
-	}
-
-	// Migration: track the latest execution attempt row for each logical job.
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN latest_run_id INTEGER`); err != nil {
 		return err
 	}
 
@@ -1556,11 +1314,6 @@ func initSchema(db *sql.DB) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_pst_instance ON provider_status_transitions(cloud_instance_id);
 	`); err != nil {
-		return err
-	}
-
-	// Migration: add cloud_instance_id column to jobs
-	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN cloud_instance_id INTEGER`); err != nil {
 		return err
 	}
 
@@ -1797,13 +1550,11 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Migration: convert legacy needs_rental status to queued (host is already empty)
-	if _, err := db.Exec(`UPDATE jobs SET status = ? WHERE status = ?`, StatusQueued, statusNeedsRental); err != nil {
-		return err
-	}
-	if err := repairLegacyCloudPlacementHosts(db); err != nil {
-		return err
-	}
+	// Migration: convert legacy needs_rental status to queued (host is already empty).
+	// These columns may already be removed on newer schemas, so ignore errors.
+	db.Exec(`UPDATE jobs SET status = ? WHERE status = ?`, StatusQueued, statusNeedsRental)
+	// repairLegacyCloudPlacementHosts references host/cloud_instance_id which may be removed
+	repairLegacyCloudPlacementHosts(db)
 	if err := detectMultipleOpenCloudAttempts(db); err != nil {
 		return err
 	}
@@ -1831,7 +1582,7 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(`DROP VIEW IF EXISTS job_status`); err != nil {
 		return err
 	}
-	if err := ensureJobsTableConstraints(db); err != nil {
+	if err := ensureJobsTableColumns(db); err != nil {
 		return err
 	}
 	if err := ensureCampaignsTableConstraints(db); err != nil {
@@ -2043,15 +1794,37 @@ func isDuplicateColumnError(err error) bool {
 // RecordStart records a new job start and returns its ID
 // Deprecated: Use RecordJobStarting + UpdateJobRunning for new jobs
 func RecordStart(db *sql.DB, host, sessionName, workingDir, command string, startTime int64, description string) (int64, error) {
-	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, start_time, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		host, sessionName, workingDir, command, description, startTime, StatusRunning,
-	)
+	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+	result, err := tx.Exec(
+		`INSERT INTO jobs (working_dir, command, description, created_at, placement_host)
+		 VALUES (?, ?, ?, ?, ?)`,
+		workingDir, command, description, startTime, host,
+	)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	jobID, err := result.LastInsertId()
+	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	// Update the auto-created attempt with execution state
+	if _, err := tx.Exec(
+		`UPDATE job_attempts SET host = ?, session_name = ?, start_time = ?, status = ?
+		 WHERE job_id = ? AND end_time IS NULL`,
+		host, sessionName, startTime, StatusRunning, jobID,
+	); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return jobID, nil
 }
 
 // RecordJobStarting creates a new job with status="starting" and returns its ID
@@ -2063,9 +1836,9 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 		return 0, err
 	}
 	result, err := tx.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`,
-		host, workingDir, command, description, now, now, StatusStarting,
+		`INSERT INTO jobs (working_dir, command, description, created_at, placement_host)
+		 VALUES (?, ?, ?, ?, ?)`,
+		workingDir, command, description, now, host,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -2076,7 +1849,15 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 		tx.Rollback()
 		return 0, err
 	}
-	// The INSERT trigger auto-creates an attempt
+	// Update the auto-created attempt with execution state
+	if _, err := tx.Exec(
+		`UPDATE job_attempts SET host = ?, start_time = ?, status = ?
+		 WHERE job_id = ? AND end_time IS NULL`,
+		host, now, StatusStarting, jobID,
+	); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -2144,8 +1925,9 @@ func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
 		return err
 	}
 	_, err = db.Exec(
-		`UPDATE jobs SET working_dir = ? WHERE id = ? AND status = ?`,
-		workingDir, id, StatusQueued,
+		`UPDATE jobs SET working_dir = ? WHERE id = ?
+		 AND EXISTS (SELECT 1 FROM job_status js WHERE js.id = ? AND js.status = ?)`,
+		workingDir, id, id, StatusQueued,
 	)
 	return err
 }
@@ -2153,8 +1935,9 @@ func UpdateJobWorkingDir(db *sql.DB, id int64, workingDir string) error {
 // UpdateJobCommand updates the command for a queued job
 func UpdateJobCommand(db *sql.DB, id int64, command string) error {
 	_, err := db.Exec(
-		`UPDATE jobs SET command = ? WHERE id = ? AND status = ?`,
-		command, id, StatusQueued,
+		`UPDATE jobs SET command = ? WHERE id = ?
+		 AND EXISTS (SELECT 1 FROM job_status js WHERE js.id = ? AND js.status = ?)`,
+		command, id, id, StatusQueued,
 	)
 	return err
 }
@@ -2344,23 +2127,12 @@ func ClearQueueAssignment(db *sql.DB, id int64) error {
 // SetPendingStatus sets the pending (target) status for a job.
 // This represents what the user wants the job state to become.
 func SetPendingStatus(db *sql.DB, jobID int64, status string) error {
-	if err := SetAttemptPendingStatus(db, jobID, status); err != nil {
-		return err
-	}
-	// Also set on jobs for draft jobs that have no attempt
-	now := time.Now().Unix()
-	_, _ = db.Exec(`UPDATE jobs SET pending_status = ?, pending_at = ? WHERE id = ?`, status, now, jobID)
-	return nil
+	return SetAttemptPendingStatus(db, jobID, status)
 }
 
 // ClearPendingStatus clears the pending status after reconciliation succeeds.
 func ClearPendingStatus(db *sql.DB, jobID int64) error {
-	if err := ClearAttemptPendingStatus(db, jobID); err != nil {
-		return err
-	}
-	// Also clear on jobs for draft jobs
-	_, _ = db.Exec(`UPDATE jobs SET pending_status = NULL, pending_at = NULL WHERE id = ?`, jobID)
-	return nil
+	return ClearAttemptPendingStatus(db, jobID)
 }
 
 // UpdateLastSyncedStatus updates the base status (what remote was at last sync).
@@ -2589,37 +2361,40 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 	now := time.Now().Unix()
 	if explicitID {
 		_, err := db.Exec(
-			`INSERT INTO jobs (id, host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
-			 VALUES (?, ?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+			`INSERT INTO jobs (id, working_dir, command, description, created_at, queue_name, gpu, placement_host)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
-			 	host = excluded.host,
 			 	working_dir = excluded.working_dir,
 			 	command = excluded.command,
 			 	description = excluded.description,
-			 	queued_at = excluded.queued_at,
-			 	status = excluded.status,
 			 	queue_name = excluded.queue_name,
-			 	gpu = excluded.gpu`,
-			id, host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu,
+			 	gpu = excluded.gpu,
+			 	placement_host = excluded.placement_host`,
+			id, workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host,
 		)
 		if err != nil {
 			return 0, err
 		}
 		// INSERT trigger auto-creates an attempt on fresh insert.
-		// On upsert (conflict), also sync the attempt's host.
-		db.Exec(`UPDATE job_attempts SET host = ? WHERE job_id = ? AND end_time IS NULL`, host, id)
+		// On upsert (conflict), also sync the attempt's host and queued_at.
+		db.Exec(`UPDATE job_attempts SET host = ?, queued_at = ? WHERE job_id = ? AND end_time IS NULL`, host, now, id)
 		return id, nil
 	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, queued_at, start_time, status, queue_name, gpu)
-		 VALUES (?, NULL, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
-		host, workingDir, command, description, now, now, StatusQueued, queuefile.DefaultQueueName, gpu,
+		`INSERT INTO jobs (working_dir, command, description, created_at, queue_name, gpu, placement_host)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host,
 	)
 	if err != nil {
 		return 0, err
 	}
-	// INSERT trigger auto-creates an attempt
-	return result.LastInsertId()
+	jobID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	// Update the auto-created attempt with host and queued_at
+	db.Exec(`UPDATE job_attempts SET host = ?, queued_at = ? WHERE job_id = ? AND end_time IS NULL`, host, now, jobID)
+	return jobID, nil
 }
 
 // RecordDraftJobWithGPU records a job that should remain in draft locally.
@@ -2639,14 +2414,20 @@ func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, dep
 	}
 	createdAt := time.Now().Unix()
 	result, err := db.Exec(
-		`INSERT INTO jobs (host, session_name, working_dir, command, description, created_at, start_time, status, queue_name, gpu, dep_spec, last_synced_status)
-		 VALUES (?, NULL, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-		host, workingDir, command, description, createdAt, StatusDraft, queuefile.DefaultQueueName, gpu, depSpec, StatusDraft,
+		`INSERT INTO jobs (working_dir, command, description, created_at, queue_name, gpu, dep_spec, placement_host)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, createdAt, queuefile.DefaultQueueName, gpu, depSpec, host,
 	)
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+	jobID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	// Update auto-created attempt to draft status
+	db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, StatusDraft, jobID)
+	return jobID, nil
 }
 
 // SetJobGPU updates the GPU field for a job
@@ -4186,7 +3967,8 @@ func CleanupOld(db *sql.DB, days int) (int64, error) {
 
 // PruneJobs tombstones terminal jobs so they no longer appear in listings.
 func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
-	query := `UPDATE jobs SET tombstoned = 1 WHERE tombstoned = 0`
+	query := `UPDATE jobs SET tombstoned = 1 WHERE tombstoned = 0
+		AND id IN (SELECT id FROM job_status WHERE tombstoned = 0`
 	args := []interface{}{}
 
 	if deadOnly {
@@ -4201,6 +3983,8 @@ func PruneJobs(db *sql.DB, deadOnly bool, olderThan *time.Time) (int64, error) {
 		query += ` AND start_time < ?`
 		args = append(args, olderThan.Unix())
 	}
+
+	query += `)`
 
 	result, err := db.Exec(query, args...)
 	if err != nil {

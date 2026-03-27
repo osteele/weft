@@ -201,9 +201,8 @@ func TestJobEligibleForStartedMarker_SkipsQueuedJobWithoutCloudInstance(t *testi
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
 	if _, err := database.Exec(
-		`UPDATE jobs
-		 SET status = ?, start_time = ?, cloud_instance_id = NULL, host = ''
-		 WHERE id = ?`,
+		`UPDATE job_attempts SET status = ?, start_time = ?, cloud_instance_id = NULL, host = ''
+		 WHERE job_id = ? AND end_time IS NULL`,
 		db.StatusQueued, 123, jobID,
 	); err != nil {
 		t.Fatalf("seed job state: %v", err)
