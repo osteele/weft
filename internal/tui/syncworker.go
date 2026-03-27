@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // SyncRate represents the desired sync frequency for a host
@@ -211,7 +212,8 @@ func (w *SyncWorker) run() {
 }
 
 // checkUnplacedJobs looks for unplaced queued jobs and tries to place them on
-// hosts that have become available since the original placement failed.
+// hosts that have become available since the original placement failed, then
+// tries to submit remaining jobs to running cloud instances.
 func (w *SyncWorker) checkUnplacedJobs() {
 	jobs, err := db.ListUnplacedJobs(w.database)
 	if err != nil {
@@ -219,6 +221,7 @@ func (w *SyncWorker) checkUnplacedJobs() {
 		return
 	}
 
+	var cloudEligible []*db.Job
 	for _, j := range jobs {
 		if j.LaunchID != nil && *j.LaunchID != 0 {
 			continue
@@ -238,6 +241,9 @@ func (w *SyncWorker) checkUnplacedJobs() {
 		predict := placement.BuildJobPredictorFromConfig(w.appConfig, constraints)
 		result, err := placement.PlaceWithFallback(w.database, constraints, predict)
 		if err != nil {
+			if !j.HasTag(db.TagInventory) {
+				cloudEligible = append(cloudEligible, j)
+			}
 			continue
 		}
 
@@ -253,6 +259,76 @@ func (w *SyncWorker) checkUnplacedJobs() {
 			case w.results <- SyncResult{Host: result.Host, Updated: 1}:
 			default:
 			}
+		}
+	}
+
+	if len(cloudEligible) > 0 {
+		w.tryCloudReuseForJobs(cloudEligible)
+	}
+}
+
+// tryCloudReuseForJobs attempts to submit unplaced jobs to compatible running
+// cloud instances, closing the race where jobs are created while instances are
+// launching.
+func (w *SyncWorker) tryCloudReuseForJobs(jobs []*db.Job) {
+	w.mu.Lock()
+	r2Client := w.r2Client
+	w.mu.Unlock()
+
+	if r2Client == nil {
+		return
+	}
+
+	instances, err := campaign.FindReusableInstances(w.database)
+	if err != nil || len(instances) == 0 {
+		return
+	}
+
+	assignments, _ := campaign.PlanReuse(jobs, instances)
+	if len(assignments) == 0 {
+		return
+	}
+
+	// Group assignments by instance ID
+	byInstance := make(map[int64][]*db.Job)
+	for _, a := range assignments {
+		byInstance[a.Instance.Instance.ID] = append(byInstance[a.Instance.Instance.ID], a.Job)
+	}
+
+	totalSubmitted := 0
+	ctx := w.ctx
+	for instanceID, instJobs := range byInstance {
+		if err := campaign.SubmitJobsToInstance(ctx, w.database, r2Client, instanceID, instJobs); err != nil {
+			log.Printf("cloud auto-reuse: submit to instance %d: %v", instanceID, err)
+			continue
+		}
+
+		jobIDs := make([]string, len(instJobs))
+		for i, j := range instJobs {
+			jobIDs[i] = fmt.Sprintf("#%d", j.ID)
+		}
+		log.Printf("cloud auto-reuse: submitted %d job(s) to instance %d: %s", len(instJobs), instanceID, strings.Join(jobIDs, ", "))
+		totalSubmitted += len(instJobs)
+
+		// Auto-extend grace if deadline is close
+		inst, _ := db.GetLaunch(w.database, instanceID)
+		if inst != nil && inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
+			remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
+			if remaining < campaign.MinGraceRemaining {
+				extendDur := 15 * time.Minute
+				extendKey := r2keys.GraceExtend(instanceID)
+				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
+				newDeadline := time.Now().Add(extendDur).Unix()
+				_ = db.ExtendLaunchGrace(w.database, instanceID, newDeadline)
+				log.Printf("cloud auto-reuse: auto-extended grace on instance %d by %s", instanceID, extendDur)
+			}
+		}
+	}
+
+	if totalSubmitted > 0 {
+		select {
+		case w.results <- SyncResult{Updated: totalSubmitted}:
+		default:
 		}
 	}
 }
