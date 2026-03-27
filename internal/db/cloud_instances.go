@@ -1282,3 +1282,80 @@ func ListRunningLaunches(database *sql.DB) ([]*Launch, error) {
 	}
 	return instances, rows.Err()
 }
+
+// LaunchLiveState holds ephemeral R2-sourced state for a running instance,
+// cached in the DB so consumers never need to read R2 directly.
+type LaunchLiveState struct {
+	LaunchID       int64
+	InstancePhase  string // e.g. "running:316"
+	BootstrapStage string // e.g. "deps_installed"
+	HeartbeatJSON  string // raw JSON HeartbeatSample
+	HeartbeatTS    int64  // unix epoch seconds
+	JobProgressPct int    // 0-100, or -1 if unavailable
+	JobProgressID  int64
+	AgentVersion   string
+	UpdatedAt      int64
+}
+
+// UpsertLaunchLiveState writes the latest ephemeral R2 state for an instance.
+func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) error {
+	_, err := database.Exec(`INSERT OR REPLACE INTO launch_live_state
+		(launch_id, instance_phase, bootstrap_stage, heartbeat_json, heartbeat_ts,
+		 job_progress_pct, job_progress_id, agent_version, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		state.LaunchID, state.InstancePhase, state.BootstrapStage,
+		state.HeartbeatJSON, state.HeartbeatTS,
+		nullableProgressPct(state.JobProgressPct), state.JobProgressID,
+		state.AgentVersion, time.Now().Unix(),
+	)
+	return err
+}
+
+// nullableProgressPct returns nil if pct is -1 (unavailable), otherwise the value.
+func nullableProgressPct(pct int) any {
+	if pct < 0 {
+		return nil
+	}
+	return pct
+}
+
+// GetLaunchLiveState returns the cached ephemeral state for an instance, or nil.
+func GetLaunchLiveState(database *sql.DB, launchID int64) (*LaunchLiveState, error) {
+	row := database.QueryRow(`SELECT launch_id, instance_phase, bootstrap_stage,
+		heartbeat_json, heartbeat_ts, job_progress_pct, job_progress_id,
+		agent_version, updated_at
+		FROM launch_live_state WHERE launch_id = ?`, launchID)
+
+	var s LaunchLiveState
+	var phase, bootstrap, hbJSON, agentVer sql.NullString
+	var hbTS, progressID sql.NullInt64
+	var progressPct sql.NullInt64
+
+	err := row.Scan(&s.LaunchID, &phase, &bootstrap, &hbJSON, &hbTS,
+		&progressPct, &progressID, &agentVer, &s.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	s.InstancePhase = phase.String
+	s.BootstrapStage = bootstrap.String
+	s.HeartbeatJSON = hbJSON.String
+	s.HeartbeatTS = hbTS.Int64
+	if progressPct.Valid {
+		s.JobProgressPct = int(progressPct.Int64)
+	} else {
+		s.JobProgressPct = -1
+	}
+	s.JobProgressID = progressID.Int64
+	s.AgentVersion = agentVer.String
+	return &s, nil
+}
+
+// DeleteLaunchLiveState removes the ephemeral state for a terminal instance.
+func DeleteLaunchLiveState(database *sql.DB, launchID int64) error {
+	_, err := database.Exec(`DELETE FROM launch_live_state WHERE launch_id = ?`, launchID)
+	return err
+}

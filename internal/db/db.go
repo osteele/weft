@@ -1413,6 +1413,21 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: create launch_live_state table for ephemeral R2 watch state.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS launch_live_state (
+		launch_id         INTEGER PRIMARY KEY REFERENCES launches(id),
+		instance_phase    TEXT,
+		bootstrap_stage   TEXT,
+		heartbeat_json    TEXT,
+		heartbeat_ts      INTEGER,
+		job_progress_pct  INTEGER,
+		job_progress_id   INTEGER,
+		agent_version     TEXT,
+		updated_at        INTEGER NOT NULL
+	)`); err != nil {
+		return err
+	}
+
 	// Backfill provider_instance_id from vastai_instance_id (legacy column)
 	db.Exec(`UPDATE launches SET provider_instance_id = vastai_instance_id WHERE provider_instance_id IS NULL AND vastai_instance_id IS NOT NULL`)
 

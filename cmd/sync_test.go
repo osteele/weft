@@ -104,9 +104,9 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
-	updatedInstanceID, err := recordCloudJobCompletion(database, jobID, 0, 10, 20, "")
+	updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, "")
 	if err != nil {
-		t.Fatalf("recordCloudJobCompletion: %v", err)
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
 	}
 	if updatedInstanceID != instanceID {
 		t.Fatalf("updatedInstanceID = %d, want %d", updatedInstanceID, instanceID)

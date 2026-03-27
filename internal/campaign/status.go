@@ -198,6 +198,14 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		var currentPhase string
 		var phaseChangedAt *time.Time
 		watchReconciler := NewReconciler()
+		completionChecked := make(map[int64]bool) // jobs whose .complete was already checked
+
+		// Staleness guard: track last-written values to skip no-op DB writes
+		var lastWrittenPhase, lastWrittenBootstrap, lastWrittenHBJSON string
+		var lastWrittenProgressPct int = -1
+		var lastWrittenProgressID int64
+		var agentVersion string
+		agentVersionFetched := false
 
 		var survival *db.BootstrapSurvival
 		survivalComputed := false
@@ -252,11 +260,13 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			jobState := ComputeJobState(jobs)
 
-			// Fetch bootstrap stage or instance phase from R2
+			// Fetch bootstrap stage or instance phase from R2 and sync to DB
 			var bootstrapStage, instancePhase string
 			terminationIntent := ci.TerminationIntent
 			jobProgress := -1
 			var jobProgressID int64
+			var heartbeatAge time.Duration
+			var heartbeat *HeartbeatSample
 			if r2c != nil && (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusGrace) {
 				if fetchedIntent, err := fetchReconcileTerminationIntent(ctx, r2c, cloudInstanceID); err == nil && fetchedIntent != nil {
 					terminationIntent = fetchedIntent
@@ -288,13 +298,64 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				} else if !jobState.HasStartedJob {
 					bootstrapStage = fetchWatchBootstrapStage(ctx, r2c, cloudInstanceID)
 				}
-			}
 
-			// Fetch heartbeat from R2 (only when jobs have started)
-			var heartbeatAge time.Duration
-			var heartbeat *HeartbeatSample
-			if r2c != nil && (jobState.HasStartedJob || instancePhase != "") && (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusGrace) {
-				heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
+				// Fetch heartbeat from R2 (only when jobs have started)
+				if jobState.HasStartedJob || instancePhase != "" {
+					heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
+				}
+
+				// Phase transition: if phase moved away from a running/finalizing job,
+				// check for its .complete marker to sync completion to DB immediately.
+				if currentPhase != "" && instancePhase != currentPhase {
+					if prevVerb, prevJobID, ok := ParsePhaseJobID(currentPhase); ok && prevJobID > 0 {
+						switch prevVerb {
+						case PhaseRunning, PhaseFinalizing:
+							if !completionChecked[prevJobID] {
+								completionChecked[prevJobID] = true
+								if CheckAndSyncJobComplete(ctx, r2c, database, prevJobID) {
+									// Re-read jobs to pick up the completion
+									jobs, _ = db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
+									jobState = ComputeJobState(jobs)
+								}
+							}
+						}
+					}
+				}
+
+				// Fetch agent version once (static per instance)
+				if !agentVersionFetched {
+					agentVersionFetched = true
+					agentVersion = fetchR2Marker(ctx, r2c, r2keys.InstanceAgentVersion(cloudInstanceID))
+				}
+
+				// Write live state to DB (staleness guard: skip if unchanged)
+				var hbJSON string
+				var hbTS int64
+				if heartbeat != nil {
+					if data, err := json.Marshal(heartbeat); err == nil {
+						hbJSON = string(data)
+					}
+					hbTS = heartbeat.Ts
+				}
+				if instancePhase != lastWrittenPhase || bootstrapStage != lastWrittenBootstrap ||
+					hbJSON != lastWrittenHBJSON || jobProgress != lastWrittenProgressPct ||
+					jobProgressID != lastWrittenProgressID {
+					_ = db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+						LaunchID:       cloudInstanceID,
+						InstancePhase:  instancePhase,
+						BootstrapStage: bootstrapStage,
+						HeartbeatJSON:  hbJSON,
+						HeartbeatTS:    hbTS,
+						JobProgressPct: jobProgress,
+						JobProgressID:  jobProgressID,
+						AgentVersion:   agentVersion,
+					})
+					lastWrittenPhase = instancePhase
+					lastWrittenBootstrap = bootstrapStage
+					lastWrittenHBJSON = hbJSON
+					lastWrittenProgressPct = jobProgress
+					lastWrittenProgressID = jobProgressID
+				}
 			}
 
 			// Run shared reconciliation checks
@@ -373,6 +434,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			// Check for terminal state
 			if IsInstanceTerminal(ci.Status) {
+				_ = db.DeleteLaunchLiveState(database, cloudInstanceID)
 				return
 			}
 

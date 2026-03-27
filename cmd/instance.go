@@ -279,23 +279,20 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Location: %s\n", ci.DataCenter)
 		}
 
-		// Agent version and live status from R2 (skip for terminal instances)
+		// Agent version and live status (skip for terminal instances)
 		var liveUpdate *campaign.InstanceUpdate
 		if !campaign.IsInstanceTerminal(ci.Status) {
 			if r2c, r2err := newR2ClientFromConfig(); r2err == nil && r2c != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				versionKey := r2keys.InstanceAgentVersion(ci.ID)
-				if data, err := r2c.GetObject(ctx, versionKey); err == nil && len(data) > 0 {
-					fmt.Printf("  Agent:    %s\n", strings.TrimSpace(string(data)))
-				}
-				cancel()
-
 				watchCtx, watchCancel := context.WithTimeout(context.Background(), 3*time.Second)
 				ch := campaign.WatchInstance(watchCtx, client, database, ci.ID, 100*time.Millisecond, 100*time.Millisecond, r2c)
 				if update, ok := <-ch; ok {
 					liveUpdate = &update
 				}
 				watchCancel()
+			}
+			// Read agent version from DB (populated by WatchInstance)
+			if liveState, err := db.GetLaunchLiveState(database, ci.ID); err == nil && liveState != nil && liveState.AgentVersion != "" {
+				fmt.Printf("  Agent:    %s\n", liveState.AgentVersion)
 			}
 		}
 

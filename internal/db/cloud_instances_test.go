@@ -715,3 +715,83 @@ func TestRefineInstanceTerminationReason_UsesHistoricalAttempts(t *testing.T) {
 		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, TerminationReasonDiskFull)
 	}
 }
+
+func TestLaunchLiveState(t *testing.T) {
+	database := setupTestDB(t)
+
+	// Get returns nil for nonexistent row
+	got, err := GetLaunchLiveState(database, 999)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil, got %+v", got)
+	}
+
+	// Create a launch to reference
+	ci := &Launch{Status: LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX3090"}
+	instanceID, err := CreateLaunch(database, ci)
+	if err != nil {
+		t.Fatalf("InsertLaunch: %v", err)
+	}
+
+	// Upsert and read back
+	state := LaunchLiveState{
+		LaunchID:       instanceID,
+		InstancePhase:  "running:42",
+		HeartbeatJSON:  `{"ts":1234}`,
+		HeartbeatTS:    1234,
+		JobProgressPct: 75,
+		JobProgressID:  42,
+		AgentVersion:   "abc123",
+	}
+	if err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+
+	got, err = GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil")
+	}
+	if got.InstancePhase != "running:42" {
+		t.Errorf("phase = %q, want %q", got.InstancePhase, "running:42")
+	}
+	if got.JobProgressPct != 75 {
+		t.Errorf("progress = %d, want 75", got.JobProgressPct)
+	}
+	if got.AgentVersion != "abc123" {
+		t.Errorf("agent_version = %q, want %q", got.AgentVersion, "abc123")
+	}
+
+	// Upsert overwrites
+	state.InstancePhase = "running:43"
+	state.JobProgressPct = -1
+	if err := UpsertLaunchLiveState(database, state); err != nil {
+		t.Fatalf("UpsertLaunchLiveState: %v", err)
+	}
+	got, err = GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if got.InstancePhase != "running:43" {
+		t.Errorf("phase = %q, want %q", got.InstancePhase, "running:43")
+	}
+	if got.JobProgressPct != -1 {
+		t.Errorf("progress = %d, want -1", got.JobProgressPct)
+	}
+
+	// Delete
+	if err := DeleteLaunchLiveState(database, instanceID); err != nil {
+		t.Fatalf("DeleteLaunchLiveState: %v", err)
+	}
+	got, err = GetLaunchLiveState(database, instanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchLiveState: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil after delete, got %+v", got)
+	}
+}
