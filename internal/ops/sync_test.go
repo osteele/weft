@@ -110,7 +110,7 @@ func TestSyncJobMarksStartingAsRunningWhenTmuxAlive(t *testing.T) {
 	}
 
 	sessionName := "session-running"
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, sessionName, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ? WHERE job_id = ? AND end_time IS NULL`, sessionName, jobID); err != nil {
 		t.Fatalf("update session name: %v", err)
 	}
 
@@ -147,7 +147,7 @@ func TestSyncJobRecordsCompletionFromStatusFile(t *testing.T) {
 
 	sessionName := "session-complete"
 	startTime := int64(1700000000)
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, start_time = ? WHERE id = ?`, sessionName, startTime, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, sessionName, startTime, jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 	if err := db.MarkRunningByID(database, jobID); err != nil {
@@ -194,7 +194,7 @@ func TestSyncJobMarksFailedWhenRunningButSessionGone(t *testing.T) {
 		t.Fatalf("record job: %v", err)
 	}
 	sessionName := "session-quick"
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, status = ? WHERE id = ?`, sessionName, db.StatusRunning, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ?, status = ? WHERE job_id = ? AND end_time IS NULL`, sessionName, db.StatusRunning, jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestSyncJobNoChangeWhenStartingAndSessionGone(t *testing.T) {
 		t.Fatalf("record job: %v", err)
 	}
 	sessionName := "session-quick"
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, status = ? WHERE id = ?`, sessionName, db.StatusStarting, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ?, status = ? WHERE job_id = ? AND end_time IS NULL`, sessionName, db.StatusStarting, jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 
@@ -420,7 +420,7 @@ func TestUpdateTimesFromMetadataSkipsStartTimeIfAlreadySet(t *testing.T) {
 	}
 
 	// Set start_time in DB
-	if _, err := database.Exec(`UPDATE jobs SET start_time = ? WHERE id = ?`, 1700000100, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = ? AND end_time IS NULL`, 1700000100, jobID); err != nil {
 		t.Fatalf("update start_time: %v", err)
 	}
 
@@ -544,7 +544,7 @@ func TestSyncJobRecordsCompletionWithSignalSuffix(t *testing.T) {
 
 	sessionName := "session-signal"
 	startTime := int64(1700000000)
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ?, start_time = ? WHERE id = ?`, sessionName, startTime, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, sessionName, startTime, jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 	if err := db.MarkRunningByID(database, jobID); err != nil {
@@ -723,7 +723,7 @@ func TestSyncDraftJobKillsTmuxSession(t *testing.T) {
 		t.Fatalf("record job: %v", err)
 	}
 
-	if _, err := database.Exec(`UPDATE jobs SET session_name = ? WHERE id = ?`, fmt.Sprintf("draft-%d", jobID), jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET session_name = ? WHERE job_id = ? AND end_time IS NULL`, fmt.Sprintf("draft-%d", jobID), jobID); err != nil {
 		t.Fatalf("update session name: %v", err)
 	}
 

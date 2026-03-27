@@ -167,7 +167,7 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("SetJobCloudInstanceID: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, db.StatusRunning, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, jobID); err != nil {
 		t.Fatalf("set job running: %v", err)
 	}
 

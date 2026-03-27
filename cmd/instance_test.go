@@ -23,7 +23,7 @@ func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, db.StatusRunning, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, jobID); err != nil {
 		t.Fatalf("set job running: %v", err)
 	}
 

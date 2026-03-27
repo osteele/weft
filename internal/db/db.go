@@ -2605,7 +2605,9 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 		if err != nil {
 			return 0, err
 		}
-		// INSERT trigger auto-creates an attempt
+		// INSERT trigger auto-creates an attempt on fresh insert.
+		// On upsert (conflict), also sync the attempt's host.
+		db.Exec(`UPDATE job_attempts SET host = ? WHERE job_id = ? AND end_time IS NULL`, host, id)
 		return id, nil
 	}
 	result, err := db.Exec(

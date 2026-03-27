@@ -49,7 +49,7 @@ func TestRestartCloudJob_RefreshesProjectMetadata(t *testing.T) {
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance id: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, db.StatusFailed, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, jobID); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestRestartJob_RemovesProcessedTag(t *testing.T) {
 	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance id: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, db.StatusFailed, jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, jobID); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
 	if err := db.AddJobTag(database, jobID, db.ProcessedTag); err != nil {

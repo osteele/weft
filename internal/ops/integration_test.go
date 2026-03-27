@@ -1104,7 +1104,7 @@ func TestIntegration_SyncDetectsRunningProcess(t *testing.T) {
 	}
 
 	// Simulate a race condition: reset local status to queued while job is still running
-	_, err = database.Exec("UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?",
+	_, err = database.Exec("UPDATE job_attempts SET status = ?, last_synced_status = ? WHERE job_id = ? AND end_time IS NULL",
 		db.StatusQueued, db.StatusQueued, jobID)
 	if err != nil {
 		t.Fatalf("Failed to reset job status: %v", err)

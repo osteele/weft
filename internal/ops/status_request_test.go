@@ -42,7 +42,7 @@ func TestRequestStatus_ToQueued(t *testing.T) {
 	db.ClearPendingAndUpdateStatus(database, jobID, db.StatusDraft)
 	now := time.Now().Unix()
 	if _, err := database.Exec(
-		`UPDATE jobs SET session_name = ?, start_time = ?, end_time = ?, exit_code = ?, error_message = ? WHERE id = ?`,
+		`UPDATE job_attempts SET session_name = ?, start_time = ?, end_time = ?, exit_code = ?, error_message = ? WHERE job_id = ? AND end_time IS NULL`,
 		fmt.Sprintf("rj-%d", jobID), now-100, now, 1, "boom", jobID,
 	); err != nil {
 		t.Fatalf("seed run metadata: %v", err)

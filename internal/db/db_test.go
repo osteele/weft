@@ -581,7 +581,7 @@ func TestAssignJobHost_FailedJob(t *testing.T) {
 			if err != nil {
 				t.Fatalf("record unplaced: %v", err)
 			}
-			if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, StatusFailed, jobID); err != nil {
+			if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, StatusFailed, jobID); err != nil {
 				t.Fatalf("set failed: %v", err)
 			}
 			if tt.pending != nil {
@@ -905,7 +905,7 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET cloud_instance_id = ?, status = ?, start_time = ? WHERE id = ?`, 42, StatusRunning, time.Now().Unix(), jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET cloud_instance_id = ?, status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, 42, StatusRunning, time.Now().Unix(), jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 
@@ -1033,7 +1033,7 @@ func TestListUnprocessedJobsExcludesProcessedDraftAndTombstoned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record draft job: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ? WHERE id = ?`, StatusDraft, draftID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, StatusDraft, draftID); err != nil {
 		t.Fatalf("mark draft: %v", err)
 	}
 
@@ -1095,7 +1095,7 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 	if err != nil {
 		t.Fatalf("record killed: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, StatusKilled, now-40, killedID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, StatusKilled, now-40, killedID); err != nil {
 		t.Fatalf("mark killed: %v", err)
 	}
 
@@ -1103,7 +1103,7 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 	if err != nil {
 		t.Fatalf("record canceled: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, StatusCanceled, now-50, canceledID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, StatusCanceled, now-50, canceledID); err != nil {
 		t.Fatalf("mark canceled: %v", err)
 	}
 
@@ -1917,7 +1917,7 @@ func TestQueuedTransitionsClearRunMetadata(t *testing.T) {
 			t.Fatalf("record queued: %v", err)
 		}
 		if _, err := database.Exec(
-			`UPDATE jobs SET status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?, error_message = ? WHERE id = ?`,
+			`UPDATE job_attempts SET status = ?, session_name = ?, start_time = ?, end_time = ?, exit_code = ?, error_message = ? WHERE job_id = ? AND end_time IS NULL`,
 			status, fmt.Sprintf("rj-%d", jobID), now-100, now, exitCode, "boom", jobID,
 		); err != nil {
 			t.Fatalf("seed job fields: %v", err)
@@ -2361,7 +2361,7 @@ func TestSyncFunctionsUpdateLastSyncedStatus(t *testing.T) {
 		jobID, _ := RecordQueued(db, "host1", "/tmp", "cmd-dead", "test")
 		MarkQueuedJobRunning(db, jobID)
 		// Simulate marking as dead (using direct SQL since there's no MarkDead function that sets StatusDead)
-		db.Exec("UPDATE jobs SET status = ? WHERE id = ?", StatusDead, jobID)
+		db.Exec("UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL", StatusDead, jobID)
 
 		err := RecordCompletionByID(db, jobID, 0, time.Now().Unix())
 		if err != nil {
@@ -2515,7 +2515,7 @@ func TestUpdateLastSyncedStatusSkipsTerminalJobs(t *testing.T) {
 			}
 
 			// Set job to terminal status (trigger syncs to job_attempts)
-			_, err = database.Exec("UPDATE jobs SET status = ?, last_synced_status = ? WHERE id = ?",
+			_, err = database.Exec("UPDATE job_attempts SET status = ?, last_synced_status = ? WHERE job_id = ? AND end_time IS NULL",
 				terminalStatus, terminalStatus, jobID)
 			if err != nil {
 				t.Fatalf("set terminal status: %v", err)

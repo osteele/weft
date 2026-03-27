@@ -340,66 +340,10 @@ func createJobStatusView(db *sql.DB) error {
 // columns from jobs to job_attempts on every UPDATE. This ensures backward
 // compatibility: code and tests that update jobs directly automatically
 // propagate to attempts, which is where the job_status view reads from.
+// createJobsToAttemptsSyncTrigger drops the legacy sync trigger. Execution-state
+// writes now go directly to job_attempts; no trigger needed.
 func createJobsToAttemptsSyncTrigger(db *sql.DB) error {
-	if _, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_sync_exec_to_attempts`); err != nil {
-		return err
-	}
-	_, err := db.Exec(`
-		CREATE TRIGGER jobs_sync_exec_to_attempts
-		AFTER UPDATE ON jobs
-		FOR EACH ROW
-		WHEN (
-			OLD.status IS NOT NEW.status
-			OR OLD.start_time IS NOT NEW.start_time
-			OR OLD.end_time IS NOT NEW.end_time
-			OR OLD.exit_code IS NOT NEW.exit_code
-			OR OLD.error_message IS NOT NEW.error_message
-			OR OLD.failure_reason IS NOT NEW.failure_reason
-			OR OLD.error_diagnosis IS NOT NEW.error_diagnosis
-			OR OLD.session_name IS NOT NEW.session_name
-			OR OLD.remote_id IS NOT NEW.remote_id
-			OR OLD.remote_state IS NOT NEW.remote_state
-			OR OLD.last_synced_status IS NOT NEW.last_synced_status
-			OR OLD.pending_status IS NOT NEW.pending_status
-			OR OLD.pending_at IS NOT NEW.pending_at
-			OR OLD.host IS NOT NEW.host
-			OR (OLD.cloud_instance_id IS NOT NEW.cloud_instance_id AND NEW.cloud_instance_id IS NOT NULL)
-			OR OLD.cost IS NOT NEW.cost
-			OR OLD.vastai_instance_id IS NOT NEW.vastai_instance_id
-			OR OLD.placement_meta IS NOT NEW.placement_meta
-			OR OLD.job_metadata IS NOT NEW.job_metadata
-			OR OLD.observed_inputs IS NOT NEW.observed_inputs
-		)
-		BEGIN
-			UPDATE job_attempts
-			SET status = NEW.status,
-			    start_time = NEW.start_time,
-			    end_time = NEW.end_time,
-			    exit_code = NEW.exit_code,
-			    error_message = NEW.error_message,
-			    failure_reason = NEW.failure_reason,
-			    error_diagnosis = NEW.error_diagnosis,
-			    session_name = NEW.session_name,
-			    remote_id = NEW.remote_id,
-			    remote_state = NEW.remote_state,
-			    last_synced_status = NEW.last_synced_status,
-			    pending_status = NEW.pending_status,
-			    pending_at = NEW.pending_at,
-			    host = NEW.host,
-			    cloud_instance_id = CASE WHEN NEW.cloud_instance_id IS NULL THEN cloud_instance_id ELSE NEW.cloud_instance_id END,
-			    cost = NEW.cost,
-			    vastai_instance_id = NEW.vastai_instance_id,
-			    placement_meta = NEW.placement_meta,
-			    job_metadata = NEW.job_metadata,
-			    observed_inputs = NEW.observed_inputs
-			WHERE id = (
-				SELECT id FROM job_attempts
-				WHERE job_id = NEW.id
-				ORDER BY attempt_number DESC
-				LIMIT 1
-			);
-		END
-	`)
+	_, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_sync_exec_to_attempts`)
 	return err
 }
 

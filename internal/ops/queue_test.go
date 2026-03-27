@@ -262,7 +262,7 @@ func TestRequeueJob_RefreshesProjectMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE jobs SET status = ?, end_time = ? WHERE id = ?`, db.StatusFailed, time.Now().Unix(), jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, time.Now().Unix(), jobID); err != nil {
 		t.Fatalf("mark failed: %v", err)
 	}
 	job, err := db.GetJobByID(database, jobID)
