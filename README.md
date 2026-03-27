@@ -59,6 +59,9 @@ Remote Hosts (titan, atlas)
   cost, and per-job progress until all instances finish
 - **System watch**: `weft watch` shows all active cloud instances, on-prem jobs,
   and unplaced jobs in a simplified TUI or periodic plain-text summary
+- **Progress tracking**: Automatic parsing of `Progress:` lines, tqdm bars,
+  and epoch counters. Multi-phase jobs (where progress resets between training
+  configs) show Bayesian-estimated overall progress with an `≈` prefix
 - **Web dashboard**: Browser UI at `localhost:8127/cluster` with host cards,
   live GPU utilization bars, coordinator status, and recent placement decisions
 

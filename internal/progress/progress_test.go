@@ -315,6 +315,136 @@ Training loss: 0.234`,
 	}
 }
 
+func TestPhaseTrackerUpdate(t *testing.T) {
+	t.Run("single phase stays at 1", func(t *testing.T) {
+		pt := NewPhaseTracker()
+		for _, raw := range []int{0, 25, 50, 75, 100} {
+			phase, pct := pt.Update(raw)
+			if phase != 1 || pct != raw {
+				t.Errorf("Update(%d) = (%d, %d), want (1, %d)", raw, phase, pct, raw)
+			}
+		}
+	})
+
+	t.Run("negative passthrough", func(t *testing.T) {
+		pt := NewPhaseTracker()
+		phase, pct := pt.Update(-1)
+		if phase != 1 || pct != -1 {
+			t.Errorf("Update(-1) = (%d, %d), want (1, -1)", phase, pct)
+		}
+	})
+
+	t.Run("detects restart", func(t *testing.T) {
+		pt := NewPhaseTracker()
+		pt.Update(100)
+		phase, pct := pt.Update(0) // drop of 100 → restart
+		if phase != 2 || pct != 0 {
+			t.Errorf("after restart: got (%d, %d), want (2, 0)", phase, pct)
+		}
+	})
+
+	t.Run("small drop is not a restart", func(t *testing.T) {
+		pt := NewPhaseTracker()
+		pt.Update(60)
+		phase, pct := pt.Update(55)
+		if phase != 1 || pct != 55 {
+			t.Errorf("small drop: got (%d, %d), want (1, 55)", phase, pct)
+		}
+	})
+
+	t.Run("multiple restarts increment phase", func(t *testing.T) {
+		pt := NewPhaseTracker()
+		pt.Update(100)
+		pt.Update(0) // phase 2
+		pt.Update(100)
+		phase, _ := pt.Update(0) // phase 3
+		if phase != 3 {
+			t.Errorf("after 2 restarts: phase = %d, want 3", phase)
+		}
+	})
+}
+
+func TestEstimateTotalPhases(t *testing.T) {
+	lambda := 2.0
+
+	t.Run("phase 1 returns 1", func(t *testing.T) {
+		got := EstimateTotalPhases(1, lambda)
+		if got != 1 {
+			t.Errorf("EstimateTotalPhases(1, 2) = %f, want 1", got)
+		}
+	})
+
+	t.Run("increases with phase number", func(t *testing.T) {
+		prev := EstimateTotalPhases(1, lambda)
+		for phase := 2; phase <= 5; phase++ {
+			est := EstimateTotalPhases(phase, lambda)
+			if est <= prev {
+				t.Errorf("EstimateTotalPhases(%d) = %f <= %f (phase %d)", phase, est, prev, phase-1)
+			}
+			prev = est
+		}
+	})
+
+	t.Run("always greater than phase", func(t *testing.T) {
+		for phase := 1; phase <= 10; phase++ {
+			est := EstimateTotalPhases(phase, lambda)
+			if est < float64(phase) {
+				t.Errorf("EstimateTotalPhases(%d) = %f < %d", phase, est, phase)
+			}
+		}
+	})
+}
+
+func TestPhaseProgress(t *testing.T) {
+	lambda := 2.0
+
+	t.Run("phase 1 passthrough", func(t *testing.T) {
+		pct, isEst := PhaseProgress(1, 50, lambda)
+		if pct != 50 || isEst {
+			t.Errorf("PhaseProgress(1, 50) = (%d, %v), want (50, false)", pct, isEst)
+		}
+	})
+
+	t.Run("phase 0 passthrough", func(t *testing.T) {
+		pct, isEst := PhaseProgress(0, 75, lambda)
+		if pct != 75 || isEst {
+			t.Errorf("PhaseProgress(0, 75) = (%d, %v), want (75, false)", pct, isEst)
+		}
+	})
+
+	t.Run("phase 2 is estimate", func(t *testing.T) {
+		_, isEst := PhaseProgress(2, 50, lambda)
+		if !isEst {
+			t.Error("PhaseProgress(2, 50) should be an estimate")
+		}
+	})
+
+	t.Run("phase 2 at 0 percent is above 0", func(t *testing.T) {
+		pct, _ := PhaseProgress(2, 0, lambda)
+		if pct <= 0 {
+			t.Errorf("PhaseProgress(2, 0) = %d, want > 0", pct)
+		}
+	})
+
+	t.Run("capped at 99", func(t *testing.T) {
+		pct, _ := PhaseProgress(2, 100, lambda)
+		if pct > 99 {
+			t.Errorf("PhaseProgress(2, 100) = %d, want <= 99", pct)
+		}
+	})
+
+	t.Run("monotonically increases within phase", func(t *testing.T) {
+		prev := 0
+		for rawPct := 0; rawPct <= 100; rawPct += 10 {
+			pct, _ := PhaseProgress(3, rawPct, lambda)
+			if pct < prev {
+				t.Errorf("PhaseProgress(3, %d) = %d < %d (previous)", rawPct, pct, prev)
+			}
+			prev = pct
+		}
+	})
+}
+
 func TestTracker(t *testing.T) {
 	tracker := NewTracker()
 

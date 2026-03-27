@@ -13,7 +13,6 @@ import (
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/progress"
 )
 
 // newTestServer creates a Server with no monitor for testing API endpoints.
@@ -22,7 +21,7 @@ func newTestServer(t *testing.T) *Server {
 	inventory.UseTestHosts(t)
 	return &Server{
 		hostSyncTimes: make(map[string]time.Time),
-		jobProgress:   make(map[int64]*progress.Progress),
+		jobProgress:   make(map[int64]webJobProgress),
 		stopCh:        make(chan struct{}),
 	}
 }

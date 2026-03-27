@@ -316,11 +316,17 @@ the job is still running.
 ### 9. Progress Tracking (`internal/progress/`)
 
 The progress subsystem tracks how much of each log has already been tailed and
-parses the newest `Progress:` line to present inline percentages. Supported
-formats include `Progress: 75%`, `Progress: 9/14`, and `Progress: 9 of 14`. The
-tracker feeds both the job list (status column shows `● 42%`) and the detail
-pane (progress bar plus `step/total`) without constantly re-downloading entire
-logs from the host.
+parses progress lines to present inline percentages. Supported formats include
+`Progress: 75%`, `Progress: 9/14`, tqdm bars (`45%|████▌ |`), and epoch
+counters (`Epoch 3/10`). The tracker feeds both the job list (status column
+shows `● 42%`) and the detail pane (progress bar plus `step/total`) without
+constantly re-downloading entire logs from the host.
+
+For multi-phase jobs (where progress resets from 100% back to 0%), a
+`PhaseTracker` detects restarts and the display layer estimates total phases
+using a truncated Poisson prior. Multi-phase progress is shown with an `≈`
+prefix (e.g., `≈52%`) to indicate the value is estimated. See
+[Logging and Progress](../reference/logging-and-progress.md) for details.
 
 ### 10. AI Descriptions (`internal/llm/`)
 

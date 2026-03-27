@@ -326,6 +326,29 @@ Anomaly detection uses learned GPU/memory baselines, which catches cases where
 the process still writes output but the GPU is idle (e.g., stuck in a data
 loading loop).
 
+## Historical Phase Counts as Priors for Progress Estimation
+
+The multi-phase progress tracker (`internal/progress/`) currently uses a fixed
+Poisson(λ=2) prior to estimate total phases. Once we have enough completed jobs
+with observed phase counts, we can use historical data as an empirical prior.
+
+### Approach
+
+- Record the observed total phase count (from the agent's PhaseTracker) when a
+  job completes, stored in the jobs table or a separate stats table.
+- When a new job starts, derive a prior from the distribution of phase counts
+  of previously completed jobs — optionally filtered by project, command, or
+  host to make the prior more specific.
+- Replace the fixed λ with the empirical distribution's parameters (e.g., fit a
+  Poisson or negative binomial to the histogram of observed phase counts).
+
+### Benefits
+
+- Progress estimates for multi-phase jobs converge faster because the prior
+  already reflects typical workloads.
+- Projects that routinely run 5-phase sweeps get accurate progress from the
+  first restart instead of conservatively estimating 3 phases.
+
 ## Workload Clustering
 
 Cluster historical jobs by resource profile (GPU utilization pattern, duration,

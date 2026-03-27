@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/progress"
 )
 
 type watchInstanceBlockOptions struct {
@@ -107,8 +108,8 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 			displayStatus = activePhaseStatus
 			statusText = activePhaseStatus
 		}
-		if progress := watchJobProgressPercent(update, job, displayStatus, jobProgressHWM); progress > 0 {
-			statusText = fmt.Sprintf("running %3d%%", progress)
+		if progressText := watchJobProgressText(update, job, displayStatus, jobProgressHWM); progressText != "" {
+			statusText = progressText
 		}
 		projectLabel := campaign.JobProjectLabel(job)
 
@@ -230,17 +231,23 @@ func renderWatchJobStatusText(statusText, displayStatus string, opts watchInstan
 	}
 }
 
-func watchJobProgressPercent(update campaign.InstanceUpdate, job *db.Job, displayStatus string, jobProgressHWM map[int64]int) int {
+func watchJobProgressText(update campaign.InstanceUpdate, job *db.Job, displayStatus string, jobProgressHWM map[int64]int) string {
 	if job == nil || displayStatus != db.StatusRunning {
-		return -1
+		return ""
 	}
+	rawPct := -1
+	phase := 0
 	if jobProgressHWM != nil && jobProgressHWM[job.ID] > 0 {
-		return jobProgressHWM[job.ID]
+		rawPct = jobProgressHWM[job.ID]
 	}
 	if update.JobProgressID == job.ID && update.JobProgress > 0 {
-		return update.JobProgress
+		rawPct = update.JobProgress
+		phase = update.JobProgressPhase
 	}
-	return -1
+	if pctText := progress.FormatPhaseProgress(phase, rawPct); pctText != "" {
+		return "running " + pctText
+	}
+	return ""
 }
 
 func formatWatchProviderLine(ci *db.Launch, inst *cloud.Instance) string {
@@ -302,7 +309,7 @@ func updateWatchJobProgressHWM(hwm map[int64]int, prev, curr campaign.InstanceUp
 	if hwm == nil {
 		return
 	}
-	if curr.JobProgress >= 0 && curr.JobProgressID > 0 && curr.JobProgress > hwm[curr.JobProgressID] {
+	if curr.JobProgress >= 0 && curr.JobProgressID > 0 && curr.JobProgress != hwm[curr.JobProgressID] {
 		hwm[curr.JobProgressID] = curr.JobProgress
 	}
 

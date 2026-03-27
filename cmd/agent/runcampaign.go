@@ -504,7 +504,8 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
-		lastPercent := -1
+		tracker := progress.NewPhaseTracker()
+		lastValue := ""
 
 		for {
 			select {
@@ -519,10 +520,18 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 				if prog == nil {
 					continue
 				}
-				pct := prog.DisplayPercent()
-				if pct >= 0 && pct != lastPercent {
-					lastPercent = pct
-					r2Put(r2Bucket, r2keys.JobAttemptProgress(jobID, runID), fmt.Sprintf("%d", pct))
+				phase, pct := tracker.Update(prog.DisplayPercent())
+				if pct < 0 {
+					continue
+				}
+				// Format: "pct" for phase 1, "phase:pct" for subsequent phases
+				value := fmt.Sprintf("%d", pct)
+				if phase > 1 {
+					value = fmt.Sprintf("%d:%d", phase, pct)
+				}
+				if value != lastValue {
+					lastValue = value
+					r2Put(r2Bucket, r2keys.JobAttemptProgress(jobID, runID), value)
 				}
 			}
 		}

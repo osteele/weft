@@ -59,8 +59,9 @@ type InstanceUpdate struct {
 	InstancePhase      string           // current job execution phase from R2 (e.g. "running:123")
 	PhaseChangedAt     *time.Time       // first observed time of the current phase within this watcher
 	StallMessage       string           // non-empty if bootstrap appears stuck
-	JobProgress        int              // -1 = no progress, 0-100 = percent
+	JobProgress        int              // -1 = no progress, 0-100 = raw percent within current phase
 	JobProgressID      int64            // which job the progress is for
+	JobProgressPhase   int              // 1-based phase number (0 = unknown/single-phase)
 	HeartbeatAge       time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
 	Heartbeat          *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
 	TerminationIntent  *instanceintent.Marker
@@ -265,6 +266,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			terminationIntent := ci.TerminationIntent
 			jobProgress := -1
 			var jobProgressID int64
+			var jobProgressPhase int
 			var heartbeatAge time.Duration
 			var heartbeat *HeartbeatSample
 			if r2c != nil && (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusGrace) {
@@ -275,7 +277,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 				instancePhase = fetchWatchInstancePhase(ctx, r2c, cloudInstanceID)
 				if instancePhase != "" {
-					jobProgressID, jobProgress = fetchWatchJobProgress(ctx, r2c, instancePhase, jobs)
+					jobProgressID, jobProgress, jobProgressPhase = fetchWatchJobProgress(ctx, r2c, instancePhase, jobs)
 
 					// Cloud jobs stay queued in the DB (unlike on-prem which uses sync to detect start).
 					if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
@@ -421,6 +423,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				StallMessage:       stallMessage,
 				JobProgress:        jobProgress,
 				JobProgressID:      jobProgressID,
+				JobProgressPhase:   jobProgressPhase,
 				HeartbeatAge:       heartbeatAge,
 				Heartbeat:          heartbeat,
 				TerminationIntent:  terminationIntent,
@@ -450,21 +453,30 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 }
 
 // fetchJobProgress extracts the running job ID from an instance phase string
-// and fetches its progress percentage from R2. Returns (0, -1) if not applicable.
-func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string, jobs []*db.Job) (jobID int64, percent int) {
+// and fetches its progress from R2. The R2 value is either "pct" (single-phase)
+// or "phase:pct" (multi-phase). Returns (0, -1, 0) if not applicable.
+func fetchJobProgress(ctx context.Context, r2c *r2.Client, instancePhase string, jobs []*db.Job) (jobID int64, percent int, phase int) {
 	verb, jid, ok := ParsePhaseJobID(instancePhase)
 	if !ok || verb != PhaseRunning {
-		return 0, -1
+		return 0, -1, 0
 	}
 	pctStr := fetchR2Marker(ctx, r2c, jobAttemptProgressKey(jid, jobs))
 	if pctStr == "" {
-		return jid, -1
+		return jid, -1, 0
+	}
+	// Parse "phase:pct" or "pct"
+	if parts := strings.SplitN(pctStr, ":", 2); len(parts) == 2 {
+		ph, err1 := strconv.Atoi(parts[0])
+		pct, err2 := strconv.Atoi(parts[1])
+		if err1 == nil && err2 == nil {
+			return jid, pct, ph
+		}
 	}
 	pct, err := strconv.Atoi(pctStr)
 	if err != nil {
-		return jid, -1
+		return jid, -1, 0
 	}
-	return jid, pct
+	return jid, pct, 0
 }
 
 func jobAttemptProgressKey(jobID int64, jobs []*db.Job) string {
@@ -699,8 +711,12 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	}
 
 	// Report job progress changes
-	if curr.JobProgress >= 0 && (curr.JobProgress != prev.JobProgress || curr.JobProgressID != prev.JobProgressID) {
-		lines = append(lines, fmt.Sprintf("instance %d: job %d progress: %d%%", id, curr.JobProgressID, curr.JobProgress))
+	if curr.JobProgress >= 0 && (curr.JobProgress != prev.JobProgress || curr.JobProgressID != prev.JobProgressID || curr.JobProgressPhase != prev.JobProgressPhase) {
+		if curr.JobProgressPhase > 1 {
+			lines = append(lines, fmt.Sprintf("instance %d: job %d progress: phase %d %d%%", id, curr.JobProgressID, curr.JobProgressPhase, curr.JobProgress))
+		} else {
+			lines = append(lines, fmt.Sprintf("instance %d: job %d progress: %d%%", id, curr.JobProgressID, curr.JobProgress))
+		}
 	}
 
 	if prev.Launch == nil || prev.Launch.Status != curr.Launch.Status {

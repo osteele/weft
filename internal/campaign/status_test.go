@@ -576,8 +576,8 @@ func TestWatchInstance_UsesLivePhaseBeforeJobLeavesQueued(t *testing.T) {
 	fetchWatchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
 		return nil, 0
 	}
-	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int) {
-		return 0, -1
+	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
+		return 0, -1, 0
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -791,8 +791,8 @@ func TestWatchInstance_TransitionsQueuedJobToRunningFromR2Phase(t *testing.T) {
 	fetchWatchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
 		return nil, 0
 	}
-	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int) {
-		return jobID, 50
+	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
+		return jobID, 50, 0
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

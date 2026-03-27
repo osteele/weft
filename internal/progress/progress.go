@@ -2,6 +2,7 @@ package progress
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -165,4 +166,95 @@ func FindLastProgress(content string) *Progress {
 	}
 
 	return nil
+}
+
+// PhaseTracker detects multi-phase restarts in raw progress output.
+// When progress drops by more than 50 points, it increments the phase counter.
+// The agent uses this to report phase number + raw percent to R2; the display
+// layer is responsible for Bayesian estimation of total phases.
+type PhaseTracker struct {
+	lastRawPct int
+	phase      int // 1-based phase number
+}
+
+// NewPhaseTracker creates a tracker starting at phase 1.
+func NewPhaseTracker() *PhaseTracker {
+	return &PhaseTracker{lastRawPct: -1, phase: 1}
+}
+
+// Update records a new raw progress value and detects phase restarts.
+// Returns the current (phase, rawPct) pair.
+func (pt *PhaseTracker) Update(rawPct int) (phase int, pct int) {
+	if rawPct < 0 {
+		return pt.phase, rawPct
+	}
+	if pt.lastRawPct >= 0 && rawPct < pt.lastRawPct-50 {
+		pt.phase++
+	}
+	pt.lastRawPct = rawPct
+	return pt.phase, rawPct
+}
+
+// EstimateTotalPhases returns E[N | N > k] under a truncated Poisson prior.
+// The prior on total phase count is P(N=n) = e^{-λ} λ^{n-1}/(n-1)! (i.e.,
+// N-1 ~ Poisson(λ)). After observing k completed phases, we condition on
+// N > k and compute the posterior mean from partial sums of the Poisson PMF.
+// Returns 1 when phase == 1 (no restarts observed).
+func EstimateTotalPhases(phase int, lambda float64) float64 {
+	k := phase - 1 // number of completed phases
+	if k <= 0 {
+		return 1
+	}
+	// E[N | N > k] = Σ_{n>k} n·w(n) / Σ_{n>k} w(n)  where w(n) = λ^{n-1}/(n-1)!
+	var sumW, sumNW float64
+	logW := 0.0 // log(w(1)) = 0
+	for n := 1; n <= k+200; n++ {
+		if n > k {
+			w := math.Exp(logW)
+			sumW += w
+			sumNW += float64(n) * w
+		}
+		logW += math.Log(lambda) - math.Log(float64(n))
+		if n > k && math.Exp(logW) < sumW*1e-12 {
+			break
+		}
+	}
+	if sumW == 0 {
+		return float64(k + 1)
+	}
+	return sumNW / sumW
+}
+
+// FormatPhaseProgress returns a display string for progress, using "≈" prefix
+// when the value is a Bayesian estimate across multiple phases.
+// Returns empty string if rawPct <= 0.
+func FormatPhaseProgress(phase, rawPct int) string {
+	if rawPct <= 0 {
+		return ""
+	}
+	adjusted, isEstimate := PhaseProgress(phase, rawPct, DefaultPoissonLambda)
+	if isEstimate {
+		return fmt.Sprintf("≈%d%%", adjusted)
+	}
+	return fmt.Sprintf("%3d%%", adjusted)
+}
+
+// DefaultPoissonLambda is the default Poisson prior parameter for phase count
+// estimation. λ=2 gives a prior mean of ~3 phases (N-1 ~ Poisson(λ)).
+const DefaultPoissonLambda = 2.0
+
+// PhaseProgress computes an adjusted progress percentage from a phase number
+// and raw percentage, using a truncated Poisson prior with the given λ.
+// Returns (adjustedPct, isEstimate). When phase <= 1, returns raw pct unchanged.
+func PhaseProgress(phase, rawPct int, lambda float64) (pct int, isEstimate bool) {
+	if phase <= 1 {
+		return rawPct, false
+	}
+	k := phase - 1 // completed phases
+	estTotal := EstimateTotalPhases(phase, lambda)
+	adjusted := int(math.Round((float64(k)*100 + float64(rawPct)) / estTotal))
+	if adjusted > 99 {
+		adjusted = 99
+	}
+	return adjusted, true
 }

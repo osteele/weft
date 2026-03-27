@@ -25,18 +25,24 @@ type Config struct {
 	Port int
 }
 
+type webJobProgress struct {
+	phase  int // 1-based phase number from PhaseTracker
+	rawPct int // 0-100 raw progress within current phase
+}
+
 type Server struct {
 	monitor *monitor.Monitor
 	addr    string
 	server  *http.Server
 	tmpl    *template.Template
 
-	mu            sync.RWMutex
-	jobs          []*db.Job
-	hosts         []*hostinfo.Host
-	hostSyncTimes map[string]time.Time
-	lastUpdated   time.Time
-	jobProgress   map[int64]*progress.Progress
+	mu               sync.RWMutex
+	jobs             []*db.Job
+	hosts            []*hostinfo.Host
+	hostSyncTimes    map[string]time.Time
+	lastUpdated      time.Time
+	jobProgress      map[int64]webJobProgress         // latest phase+pct per job
+	jobPhaseTrackers map[int64]*progress.PhaseTracker // restart detection per job
 
 	stopCh chan struct{}
 }
@@ -56,12 +62,13 @@ func NewServer(monitor *monitor.Monitor, cfg Config) (*Server, error) {
 	}
 
 	return &Server{
-		monitor:       monitor,
-		addr:          addr,
-		tmpl:          tmpl,
-		hostSyncTimes: make(map[string]time.Time),
-		jobProgress:   make(map[int64]*progress.Progress),
-		stopCh:        make(chan struct{}),
+		monitor:          monitor,
+		addr:             addr,
+		tmpl:             tmpl,
+		hostSyncTimes:    make(map[string]time.Time),
+		jobProgress:      make(map[int64]webJobProgress),
+		jobPhaseTrackers: make(map[int64]*progress.PhaseTracker),
+		stopCh:           make(chan struct{}),
 	}, nil
 }
 
@@ -271,10 +278,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		// Get status with progress if available
 		status := formatJobStatus(job)
 		if job.Status == db.StatusRunning {
-			if prog := s.getJobProgress(job.ID); prog != nil {
-				pct := prog.DisplayPercent()
-				if pct >= 0 {
-					status = fmt.Sprintf("● %d%%", pct)
+			if jp, ok := s.getJobProgress(job.ID); ok {
+				if pctText := progress.FormatPhaseProgress(jp.phase, jp.rawPct); pctText != "" {
+					status = "● " + pctText
 				}
 			}
 		}
@@ -656,12 +662,21 @@ func (s *Server) fetchAllProgress() {
 		newProgress[result.jobID] = result.prog
 	}
 
-	// Update progress map
+	// Update progress map with phase-tracked values
 	s.mu.Lock()
 	for jobID, prog := range newProgress {
-		s.jobProgress[jobID] = prog
+		rawPct := prog.DisplayPercent()
+		if rawPct >= 0 {
+			tracker, ok := s.jobPhaseTrackers[jobID]
+			if !ok {
+				tracker = progress.NewPhaseTracker()
+				s.jobPhaseTrackers[jobID] = tracker
+			}
+			phase, pct := tracker.Update(rawPct)
+			s.jobProgress[jobID] = webJobProgress{phase: phase, rawPct: pct}
+		}
 	}
-	// Clean up progress for non-running jobs
+	// Clean up progress and trackers for non-running jobs
 	runningIDs := make(map[int64]bool)
 	for _, job := range runningJobs {
 		runningIDs[job.ID] = true
@@ -669,6 +684,7 @@ func (s *Server) fetchAllProgress() {
 	for jobID := range s.jobProgress {
 		if !runningIDs[jobID] {
 			delete(s.jobProgress, jobID)
+			delete(s.jobPhaseTrackers, jobID)
 		}
 	}
 	s.mu.Unlock()
@@ -698,9 +714,10 @@ func (s *Server) fetchJobProgress(job *db.Job) *progress.Progress {
 	return progress.ParseProgress(strings.TrimSpace(stdout))
 }
 
-// getJobProgress returns the progress for a job if available
-func (s *Server) getJobProgress(jobID int64) *progress.Progress {
+// getJobProgress returns the progress for a job if available.
+func (s *Server) getJobProgress(jobID int64) (webJobProgress, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.jobProgress[jobID]
+	jp, ok := s.jobProgress[jobID]
+	return jp, ok
 }
