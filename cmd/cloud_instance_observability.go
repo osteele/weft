@@ -18,8 +18,8 @@ type cloudInstanceObservability struct {
 }
 
 type cloudInstanceView struct {
-	CloudInstance *db.CloudInstance
-	Instance      *cloud.Instance
+	Launch   *db.Launch
+	Instance *cloud.Instance
 }
 
 type cloudInstanceAggregate struct {
@@ -28,7 +28,7 @@ type cloudInstanceAggregate struct {
 	CurrentRate *float64
 }
 
-func observeCloudInstance(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) cloudInstanceObservability {
+func observeLaunch(ci *db.Launch, inst *cloud.Instance, now time.Time) cloudInstanceObservability {
 	obs := cloudInstanceObservability{}
 	if ci == nil {
 		return obs
@@ -79,7 +79,7 @@ func (o cloudInstanceObservability) currentRate() float64 {
 	return *o.Rate
 }
 
-func formatCloudInstanceMetricParts(obs cloudInstanceObservability) []string {
+func formatLaunchMetricParts(obs cloudInstanceObservability) []string {
 	parts := make([]string, 0, 3)
 	if obs.Uptime != nil {
 		parts = append(parts, "uptime: "+obs.Uptime.String())
@@ -93,18 +93,18 @@ func formatCloudInstanceMetricParts(obs cloudInstanceObservability) []string {
 	return parts
 }
 
-func formatCloudInstanceMetricsInline(obs cloudInstanceObservability) string {
-	return strings.Join(formatCloudInstanceMetricParts(obs), "  ")
+func formatLaunchMetricsInline(obs cloudInstanceObservability) string {
+	return strings.Join(formatLaunchMetricParts(obs), "  ")
 }
 
-func summarizeCloudInstances(instances []cloudInstanceView, now time.Time) cloudInstanceAggregate {
+func summarizeLaunches(instances []cloudInstanceView, now time.Time) cloudInstanceAggregate {
 	agg := cloudInstanceAggregate{}
 	for _, view := range instances {
-		if view.CloudInstance == nil {
+		if view.Launch == nil {
 			continue
 		}
 		agg.Count++
-		obs := observeCloudInstance(view.CloudInstance, view.Instance, now)
+		obs := observeLaunch(view.Launch, view.Instance, now)
 		if obs.Cost != nil {
 			if agg.TotalCost == nil {
 				agg.TotalCost = new(float64)

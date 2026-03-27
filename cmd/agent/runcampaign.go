@@ -157,10 +157,10 @@ func runCampaign(args []string) {
 			SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
 		})
 	} else {
-		terminalStatus := db.CloudInstanceStatusCompleted
+		terminalStatus := db.LaunchStatusCompleted
 		terminationReason := db.TerminationReasonCompleted
 		if anyFailed {
-			terminalStatus = db.CloudInstanceStatusFailed
+			terminalStatus = db.LaunchStatusFailed
 			terminationReason = db.TerminationReasonJobFailure
 		}
 		cm := collectCompletionManifest(logDir, manifest.Jobs)

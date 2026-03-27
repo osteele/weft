@@ -24,7 +24,7 @@ type onPremHostSummary struct {
 }
 
 type watchSystemSnapshot struct {
-	CloudInstances  []*db.CloudInstance
+	Launches        []*db.Launch
 	InstanceUpdates map[int64]campaign.InstanceUpdate
 	OnPremHosts     []onPremHostSummary
 	UnplacedJobs    []*db.Job
@@ -61,23 +61,23 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 		syncCloudState(cfg, database, reconciler, false)
 	}
 
-	cloudInstances, err := db.ListRunningCloudInstances(database)
+	cloudInstances, err := db.ListRunningLaunches(database)
 	if err != nil {
 		return watchSystemSnapshot{}, fmt.Errorf("list running cloud instances: %w", err)
 	}
 
 	instanceUpdates := make(map[int64]campaign.InstanceUpdate, len(cloudInstances))
 	for _, ci := range cloudInstances {
-		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 		if err != nil {
 			return watchSystemSnapshot{}, fmt.Errorf("list jobs for cloud instance %d: %w", ci.ID, err)
 		}
-		outcomes, err := db.GetAttemptOutcomesByInstance(database, ci.ID)
+		outcomes, err := db.GetAttemptOutcomesByLaunch(database, ci.ID)
 		if err != nil {
 			return watchSystemSnapshot{}, fmt.Errorf("list attempt outcomes for cloud instance %d: %w", ci.ID, err)
 		}
 		instanceUpdates[ci.ID] = campaign.InstanceUpdate{
-			CloudInstance:      ci,
+			Launch:             ci,
 			Jobs:               jobs,
 			JobAttemptOutcomes: outcomes,
 		}
@@ -94,7 +94,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 	}
 
 	return watchSystemSnapshot{
-		CloudInstances:  cloudInstances,
+		Launches:        cloudInstances,
 		InstanceUpdates: instanceUpdates,
 		OnPremHosts:     groupOnPremHosts(onPremJobs),
 		UnplacedJobs:    unplacedJobs,
@@ -102,7 +102,7 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 }
 
 func (s watchSystemSnapshot) IsEmpty() bool {
-	return len(s.CloudInstances) == 0 && len(s.OnPremHosts) == 0 && len(s.UnplacedJobs) == 0
+	return len(s.Launches) == 0 && len(s.OnPremHosts) == 0 && len(s.UnplacedJobs) == 0
 }
 
 func groupOnPremHosts(jobs []*db.Job) []onPremHostSummary {
@@ -152,23 +152,23 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 
 	b.WriteString(fmt.Sprintf("=== System Watch %s ===\n\n", now.Format("2006-01-02 15:04:05")))
 
-	b.WriteString(fmt.Sprintf("RENTAL INSTANCES (%d)\n", len(snapshot.CloudInstances)))
-	if len(snapshot.CloudInstances) == 0 {
+	b.WriteString(fmt.Sprintf("RENTAL INSTANCES (%d)\n", len(snapshot.Launches)))
+	if len(snapshot.Launches) == 0 {
 		b.WriteString("  none\n")
 	} else {
-		views := make([]cloudInstanceView, 0, len(snapshot.CloudInstances))
-		for _, ci := range snapshot.CloudInstances {
+		views := make([]cloudInstanceView, 0, len(snapshot.Launches))
+		for _, ci := range snapshot.Launches {
 			update := normalizeWatchInstanceUpdate(snapshot.InstanceUpdates[ci.ID], ci)
 			views = append(views, cloudInstanceView{
-				CloudInstance: update.CloudInstance,
-				Instance:      update.Instance,
+				Launch:   update.Launch,
+				Instance: update.Instance,
 			})
 		}
-		if summary := formatCloudAggregateSummary("  Summary:", summarizeCloudInstances(views, now)); summary != "" {
+		if summary := formatCloudAggregateSummary("  Summary:", summarizeLaunches(views, now)); summary != "" {
 			b.WriteString(summary)
 			b.WriteString("\n\n")
 		}
-		for i, ci := range snapshot.CloudInstances {
+		for i, ci := range snapshot.Launches {
 			if i > 0 {
 				b.WriteString("\n")
 			}

@@ -754,15 +754,15 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 		}
 
 		// Auto-extend grace if deadline is close
-		inst, _ := db.GetCloudInstance(database, instanceID)
-		if inst != nil && inst.Status == db.CloudInstanceStatusGrace && inst.GraceDeadline != nil {
+		inst, _ := db.GetLaunch(database, instanceID)
+		if inst != nil && inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
 			remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
 			if remaining < campaign.MinGraceRemaining {
 				extendDur := 15 * time.Minute
 				extendKey := r2keys.GraceExtend(instanceID)
 				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
 				newDeadline := time.Now().Add(extendDur).Unix()
-				_ = db.ExtendCloudInstanceGrace(database, instanceID, newDeadline)
+				_ = db.ExtendLaunchGrace(database, instanceID, newDeadline)
 				fmt.Printf("  Auto-extended grace period by %s\n", extendDur)
 			}
 		}
@@ -820,7 +820,7 @@ func buildSurvivalModel(database *sql.DB) *bidding.SurvivalModel {
 
 // campaignActualCost computes the total actual cost for a set of cloud instances
 // based on uptime and cost_per_hour_cents. Returns a formatted string.
-func campaignActualCost(instances []*db.CloudInstance) string {
+func campaignActualCost(instances []*db.Launch) string {
 	var totalCents float64
 	for _, inst := range instances {
 		if inst.CostPerHourCents == 0 || inst.LaunchedAt == nil {

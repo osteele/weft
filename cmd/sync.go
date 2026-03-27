@@ -411,7 +411,7 @@ func hostAgeSummaries(database *sql.DB, hosts []string) []string {
 // are synced even if the instance association was cleared by a concurrent reset.
 func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int {
 	updated := 0
-	if repaired, err := db.ResetJobsOnTerminalCloudInstances(database); err != nil {
+	if repaired, err := db.ResetJobsOnTerminalLaunches(database); err != nil {
 		if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: terminal cloud job repair: %v\n", err)
 		}
@@ -613,10 +613,10 @@ func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, er
 		currentStatus   string
 		latestRunID     sql.NullInt64
 		cloudInstanceID sql.NullInt64
-		cloudInstStatus sql.NullString
+		launchStatus    sql.NullString
 	)
 	if err := database.QueryRow(
-		`SELECT status, latest_run_id, cloud_instance_id
+		`SELECT status, latest_run_id, launch_id
 		 FROM job_status
 		 WHERE id = ? AND tombstoned = 0`,
 		jobID,
@@ -630,15 +630,15 @@ func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, er
 		return 0, false, nil
 	}
 	if err := database.QueryRow(
-		`SELECT status FROM cloud_instances WHERE id = ?`,
+		`SELECT status FROM launches WHERE id = ?`,
 		cloudInstanceID.Int64,
-	).Scan(&cloudInstStatus); err != nil {
+	).Scan(&launchStatus); err != nil {
 		if err == sql.ErrNoRows {
 			return 0, false, nil
 		}
 		return 0, false, err
 	}
-	if campaign.IsInstanceTerminal(cloudInstStatus.String) {
+	if campaign.IsInstanceTerminal(launchStatus.String) {
 		return 0, false, nil
 	}
 
@@ -664,7 +664,7 @@ func recordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	}
 
 	var cloudInstanceID sql.NullInt64
-	if err := database.QueryRow(`SELECT cloud_instance_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
+	if err := database.QueryRow(`SELECT launch_id FROM job_status WHERE id = ? AND tombstoned = 0`, jobID).Scan(&cloudInstanceID); err != nil {
 		return 0, err
 	}
 

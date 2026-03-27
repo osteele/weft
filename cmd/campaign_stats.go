@@ -49,7 +49,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	rows, err := database.Query(`
 		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name,
 		       launched_at, ended_at, actual_spend_cents
-		FROM cloud_instances
+		FROM launches
 		WHERE status IN ('completed', 'failed', 'canceled')
 		  AND termination_reason IS NOT NULL
 		  AND termination_reason != ''

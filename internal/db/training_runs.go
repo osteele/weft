@@ -31,7 +31,7 @@ func ListTrainingJobRuns(db *sql.DB, sinceUnix int64) ([]TrainingJobRun, error) 
 		SELECT run_id, job_id, host, working_dir, command, project, gpu_class, backend, tenant,
 		       start_time, end_time, COALESCE(duration_s, 0), COALESCE(exit_code, 0),
 		       failure_reason, error_diagnosis, job_metadata
-		FROM job_run_training_examples
+		FROM training_examples
 	`
 	var args []any
 	if sinceUnix > 0 {

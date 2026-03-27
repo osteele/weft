@@ -202,7 +202,7 @@ func TestFilterJobsByPlacementScope_RentalMatchesTagOrCloudAssignment(t *testing
 	jobs := []*db.Job{
 		{ID: 1, Tags: []string{db.TagRental}},
 		{ID: 2, Tags: []string{db.TagCloudLegacy}},
-		{ID: 3, Host: db.CloudInstanceHost(cloudInstanceID), CloudInstanceID: &cloudInstanceID},
+		{ID: 3, Host: db.LaunchHost(cloudInstanceID), LaunchID: &cloudInstanceID},
 		{ID: 4, Host: "cool30"},
 		{ID: 5, Tags: []string{db.TagInventory}},
 	}
@@ -220,7 +220,7 @@ func TestFilterJobsByPlacementScope_InventoryMatchesInventoryTagOrInventoryHost(
 		{ID: 2, Host: "cool30"},
 		{ID: 3, Host: "", Tags: []string{db.TagInventory}},
 		{ID: 4, Tags: []string{db.TagRental}},
-		{ID: 5, Host: db.CloudInstanceHost(cloudInstanceID), CloudInstanceID: &cloudInstanceID},
+		{ID: 5, Host: db.LaunchHost(cloudInstanceID), LaunchID: &cloudInstanceID},
 		{ID: 6, Host: ""},
 	}
 

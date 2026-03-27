@@ -131,8 +131,8 @@ func TestRenderProjectWatchPlainShowsSections(t *testing.T) {
 			Queued: []*db.Job{
 				{ID: 2, Status: db.StatusQueued, WorkingDir: "/tmp/project-alpha", Description: "eval", QueuedAt: 120},
 			},
-			CloudInsts: []*db.CloudInstance{
-				{ID: 21, Status: db.CloudInstanceStatusRunning, GPUSpec: "A100", CostPerHourCents: 150, LaunchedAt: &launchedAt},
+			CloudInsts: []*db.Launch{
+				{ID: 21, Status: db.LaunchStatusRunning, GPUSpec: "A100", CostPerHourCents: 150, LaunchedAt: &launchedAt},
 			},
 			Recent: []*db.Job{
 				{ID: 3, Status: db.StatusFailed, Host: "cool30", WorkingDir: "/tmp/project-alpha", Description: "old", EndTime: &end},
@@ -175,32 +175,32 @@ func TestProjectWatchModelViewShowsGroupedContent(t *testing.T) {
 	}
 }
 
-func TestAttachProjectCloudInstancesDedupesWithinProject(t *testing.T) {
+func TestAttachProjectLaunchesDedupesWithinProject(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A100",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
 	groups := []projectGroup{
 		{
 			Label: "ALPHA",
 			Running: []*db.Job{
-				{ID: 1, Project: "ALPHA", CloudInstanceID: &instanceID},
+				{ID: 1, Project: "ALPHA", LaunchID: &instanceID},
 			},
 			Recent: []*db.Job{
-				{ID: 2, Project: "ALPHA", CloudInstanceID: &instanceID},
+				{ID: 2, Project: "ALPHA", LaunchID: &instanceID},
 			},
 		},
 	}
 
-	if err := attachProjectCloudInstances(database, groups); err != nil {
-		t.Fatalf("attachProjectCloudInstances: %v", err)
+	if err := attachProjectLaunches(database, groups); err != nil {
+		t.Fatalf("attachProjectLaunches: %v", err)
 	}
 	if len(groups[0].CloudInsts) != 1 {
 		t.Fatalf("cloud instance count = %d, want 1", len(groups[0].CloudInsts))

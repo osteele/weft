@@ -157,7 +157,7 @@ func TestHostListIncludesActiveOnPremHostsWithoutRecentSyncOrCache(t *testing.T)
 func TestHostListExcludesCloudHosts(t *testing.T) {
 	setTestHostInventory(t, nil)
 	database := db.SetupTestDB(t)
-	cloudHost := db.CloudInstanceHost(17)
+	cloudHost := db.LaunchHost(17)
 	if err := db.RecordHostSync(database, cloudHost, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("RecordHostSync: %v", err)
 	}

@@ -33,15 +33,15 @@ func SendCampaignNotification(database *sql.DB, campaign db.Campaign) {
 }
 
 // FormatCampaignMessage builds the Slack notification text for a completed campaign.
-func FormatCampaignMessage(campaign db.Campaign, instances []*db.CloudInstance) string {
+func FormatCampaignMessage(campaign db.Campaign, instances []*db.Launch) string {
 	var succeeded, failed, cancelled int
 	for _, inst := range instances {
 		switch inst.Status {
-		case db.CloudInstanceStatusCompleted:
+		case db.LaunchStatusCompleted:
 			succeeded++
-		case db.CloudInstanceStatusFailed:
+		case db.LaunchStatusFailed:
 			failed++
-		case db.CloudInstanceStatusCancelled:
+		case db.LaunchStatusCancelled:
 			cancelled++
 		}
 	}
@@ -73,9 +73,9 @@ func FormatCampaignMessage(campaign db.Campaign, instances []*db.CloudInstance) 
 
 	for _, inst := range instances {
 		icon := "✓"
-		if inst.Status == db.CloudInstanceStatusFailed {
+		if inst.Status == db.LaunchStatusFailed {
 			icon = "✗"
-		} else if inst.Status == db.CloudInstanceStatusCancelled {
+		} else if inst.Status == db.LaunchStatusCancelled {
 			icon = "–"
 		}
 
@@ -97,10 +97,10 @@ func FormatCampaignMessage(campaign db.Campaign, instances []*db.CloudInstance) 
 }
 
 // collectJobLogs gathers cached log content for all jobs across the campaign's instances.
-func collectJobLogs(database *sql.DB, instances []*db.CloudInstance) map[int64]string {
+func collectJobLogs(database *sql.DB, instances []*db.Launch) map[int64]string {
 	logs := make(map[int64]string)
 	for _, inst := range instances {
-		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, inst.ID)
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
 		if err != nil {
 			continue
 		}
@@ -126,7 +126,7 @@ func campaignDuration(c db.Campaign) string {
 	return formatDuration(d)
 }
 
-func instanceDuration(inst *db.CloudInstance) string {
+func instanceDuration(inst *db.Launch) string {
 	if inst.EndedAt == nil {
 		return ""
 	}

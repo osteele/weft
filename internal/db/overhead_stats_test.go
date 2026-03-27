@@ -16,9 +16,10 @@ func setupOverheadTestDB(t *testing.T) *sql.DB {
 
 	// Create minimal schema
 	for _, ddl := range []string{
-		`CREATE TABLE cloud_instances (
+		`CREATE TABLE launches (
 			id INTEGER PRIMARY KEY,
 			campaign_id INTEGER,
+			host_id INTEGER,
 			status TEXT NOT NULL,
 			provider TEXT,
 			gpu_class TEXT,
@@ -29,7 +30,6 @@ func setupOverheadTestDB(t *testing.T) *sql.DB {
 			reliability REAL,
 			gpu_spec TEXT,
 			gpu_mem_gb INTEGER,
-			vastai_instance_id TEXT,
 			max_spend_cents INTEGER,
 			max_time_seconds INTEGER,
 			actual_spend_cents INTEGER,
@@ -49,7 +49,7 @@ func setupOverheadTestDB(t *testing.T) *sql.DB {
 			job_id INTEGER NOT NULL,
 			attempt_number INTEGER NOT NULL DEFAULT 1,
 			host TEXT,
-			cloud_instance_id INTEGER,
+			launch_id INTEGER,
 			status TEXT DEFAULT 'queued',
 			queued_at INTEGER,
 			start_time INTEGER,
@@ -66,7 +66,6 @@ func setupOverheadTestDB(t *testing.T) *sql.DB {
 			pending_status TEXT,
 			pending_at INTEGER,
 			cost REAL,
-			vastai_instance_id INTEGER,
 			placement_meta TEXT,
 			job_metadata TEXT,
 			observed_inputs TEXT,
@@ -129,7 +128,7 @@ func TestQueryOverheadObservations_WithData(t *testing.T) {
 
 	// Insert a completed cloud instance
 	_, err := database.Exec(
-		`INSERT INTO cloud_instances (id, status, provider, gpu_class, data_center, dl_perf, inet_down_mbps, inet_up_mbps, reliability, created_at, ready_at)
+		`INSERT INTO launches (id, status, provider, gpu_class, data_center, dl_perf, inet_down_mbps, inet_up_mbps, reliability, created_at, ready_at)
 		 VALUES (1, 'completed', 'vastai', 'A100', 'US-East', 50.0, 800.0, 200.0, 0.99, 1000, 1045)`,
 	)
 	if err != nil {
@@ -137,7 +136,7 @@ func TestQueryOverheadObservations_WithData(t *testing.T) {
 	}
 
 	// Insert a job associated with the instance
-	insertTestJob(t, database, 10, "echo test", "/tmp", StatusCompleted, withCloudInstance(1))
+	insertTestJob(t, database, 10, "echo test", "/tmp", StatusCompleted, withLaunch(1))
 
 	// Insert phase timings
 	_, err = database.Exec(
@@ -201,12 +200,12 @@ func TestQueryOverheadObservations_SkipsNonCompleted(t *testing.T) {
 
 	// Insert a running (not completed) instance
 	_, err := database.Exec(
-		`INSERT INTO cloud_instances (id, status, provider, created_at, ready_at) VALUES (1, 'running', 'vastai', 1000, 1045)`,
+		`INSERT INTO launches (id, status, provider, created_at, ready_at) VALUES (1, 'running', 'vastai', 1000, 1045)`,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertTestJob(t, database, 10, "echo", "/tmp", StatusRunning, withCloudInstance(1))
+	insertTestJob(t, database, 10, "echo", "/tmp", StatusRunning, withLaunch(1))
 	startup := 45.0
 	_, err = database.Exec(`INSERT INTO job_phase_timings (job_id, wrapper_start) VALUES (10, 1050)`)
 	if err != nil {
@@ -229,12 +228,12 @@ func TestQueryOverheadObservations_NullTimestamps(t *testing.T) {
 
 	// Instance without ready_at
 	_, err := database.Exec(
-		`INSERT INTO cloud_instances (id, status, provider, created_at) VALUES (1, 'completed', 'vastai', 1000)`,
+		`INSERT INTO launches (id, status, provider, created_at) VALUES (1, 'completed', 'vastai', 1000)`,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	insertTestJob(t, database, 10, "echo", "/tmp", StatusCompleted, withCloudInstance(1))
+	insertTestJob(t, database, 10, "echo", "/tmp", StatusCompleted, withLaunch(1))
 	_, err = database.Exec(`INSERT INTO job_phase_timings (job_id) VALUES (10)`)
 	if err != nil {
 		t.Fatal(err)

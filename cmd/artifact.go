@@ -280,10 +280,10 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 
 		// For cloud jobs, also list output files from R2 and warn on upload failures.
 		var cloudOutputFiles []runner.OutputFile
-		if job.IsCloudJob() && r2Client != nil {
+		if job.IsLaunchJob() && r2Client != nil {
 			cloudOutputFiles = listCloudJobOutputFiles(r2Client, job)
 		}
-		if job.IsCloudJob() {
+		if job.IsLaunchJob() {
 			warnOnFailedCloudOutputUpload(cmd, job.ID)
 		}
 
@@ -660,7 +660,7 @@ func listJobOutputAssets(database *sql.DB, jobID int64) ([]dataloc.HostDataEntry
 // syncJobOutputs rsyncs convention-based output directories from a remote host to the local working dir.
 // For cloud jobs, it downloads outputs from R2 instead.
 func syncJobOutputs(job *db.Job) error {
-	if job.IsCloudJob() {
+	if job.IsLaunchJob() {
 		return syncCloudJobOutputs(job)
 	}
 

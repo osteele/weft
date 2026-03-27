@@ -19,10 +19,10 @@ func TestFormatCampaignMessage_AllSucceeded(t *testing.T) {
 		EndedAt:   &ended,
 	}
 
-	instances := []*db.CloudInstance{
+	instances := []*db.Launch{
 		{
 			ID:              1,
-			Status:          db.CloudInstanceStatusCompleted,
+			Status:          db.LaunchStatusCompleted,
 			ResolvedGPUName: "RTX 4090",
 			GPUSpec:         "nvidia>=24GB",
 			CreatedAt:       now,
@@ -31,7 +31,7 @@ func TestFormatCampaignMessage_AllSucceeded(t *testing.T) {
 		},
 		{
 			ID:              2,
-			Status:          db.CloudInstanceStatusCompleted,
+			Status:          db.LaunchStatusCompleted,
 			ResolvedGPUName: "A100 80GB",
 			GPUSpec:         "nvidia>=80GB",
 			CreatedAt:       now,
@@ -71,17 +71,17 @@ func TestFormatCampaignMessage_Mixed(t *testing.T) {
 	}
 
 	failEnded := now + 120
-	instances := []*db.CloudInstance{
+	instances := []*db.Launch{
 		{
 			ID:              10,
-			Status:          db.CloudInstanceStatusCompleted,
+			Status:          db.LaunchStatusCompleted,
 			ResolvedGPUName: "RTX 4090",
 			CreatedAt:       now,
 			EndedAt:         &ended,
 		},
 		{
 			ID:              11,
-			Status:          db.CloudInstanceStatusFailed,
+			Status:          db.LaunchStatusFailed,
 			ResolvedGPUName: "RTX 3090",
 			CreatedAt:       now,
 			EndedAt:         &failEnded,
@@ -112,10 +112,10 @@ func TestFormatCampaignMessage_AllFailed(t *testing.T) {
 		EndedAt:   &ended,
 	}
 
-	instances := []*db.CloudInstance{
+	instances := []*db.Launch{
 		{
 			ID:        20,
-			Status:    db.CloudInstanceStatusFailed,
+			Status:    db.LaunchStatusFailed,
 			GPUClass:  "A100",
 			CreatedAt: now,
 			EndedAt:   &ended,

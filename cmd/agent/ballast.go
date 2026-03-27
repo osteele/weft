@@ -252,7 +252,7 @@ func commandOutput(timeout time.Duration, name string, args ...string) (string, 
 
 func terminateInstanceForFailure(bucket string, instanceID int64, selfDestructCmd, phase string, jobID int64) {
 	marker := &instanceintent.Marker{
-		TerminalStatus:    db.CloudInstanceStatusFailed,
+		TerminalStatus:    db.LaunchStatusFailed,
 		TerminationReason: db.TerminationReasonDiskFull,
 		Phase:             phase,
 		JobID:             jobID,

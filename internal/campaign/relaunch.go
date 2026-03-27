@@ -57,7 +57,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		if j.HasTag(db.TagInventory) {
 			continue
 		}
-		count, err := db.CountJobCloudAttempts(cfg.Database, j.ID)
+		count, err := db.CountLaunchAttempts(cfg.Database, j.ID)
 		if err != nil {
 			continue
 		}
@@ -152,12 +152,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	// Determine campaign ID from most recent attempt
 	var campaignID *int64
 	for _, j := range eligible {
-		attempts, err := db.GetJobCloudAttempts(cfg.Database, j.ID)
+		attempts, err := db.GetLaunchAttempts(cfg.Database, j.ID)
 		if err != nil || len(attempts) == 0 {
 			continue
 		}
 		lastAttempt := attempts[len(attempts)-1]
-		ci, err := db.GetCloudInstance(cfg.Database, lastAttempt.CloudInstanceID)
+		ci, err := db.GetLaunch(cfg.Database, lastAttempt.LaunchID)
 		if err != nil || ci == nil || ci.CampaignID == nil {
 			continue
 		}
@@ -170,12 +170,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	groupDonorIDs := make(map[int]int64)
 	for i, group := range launchGroups {
 		for _, j := range group.Jobs {
-			attempts, err := db.GetJobCloudAttempts(cfg.Database, j.ID)
+			attempts, err := db.GetLaunchAttempts(cfg.Database, j.ID)
 			if err != nil || len(attempts) == 0 {
 				continue
 			}
 			lastAttempt := attempts[len(attempts)-1]
-			groupDonorIDs[i] = lastAttempt.CloudInstanceID
+			groupDonorIDs[i] = lastAttempt.LaunchID
 			break
 		}
 	}
@@ -208,7 +208,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 				return
 			}
 			if hasDonor {
-				if setErr := db.SetCloudInstanceDonorID(cfg.Database, instanceID, donorID); setErr != nil {
+				if setErr := db.SetLaunchDonorID(cfg.Database, instanceID, donorID); setErr != nil {
 					log.Printf("relaunch: failed to set donor_instance_id on instance %d: %v", instanceID, setErr)
 				}
 			}
@@ -226,12 +226,12 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 // instance exists.
 func mostRecentDiskFullGB(database *sql.DB, group InstanceGroup) int {
 	for _, j := range group.Jobs {
-		attempts, err := db.GetJobCloudAttempts(database, j.ID)
+		attempts, err := db.GetLaunchAttempts(database, j.ID)
 		if err != nil || len(attempts) == 0 {
 			continue
 		}
 		last := attempts[len(attempts)-1]
-		ci, err := db.GetCloudInstance(database, last.CloudInstanceID)
+		ci, err := db.GetLaunch(database, last.LaunchID)
 		if err != nil || ci == nil {
 			continue
 		}

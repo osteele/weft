@@ -15,7 +15,7 @@ import (
 // max attempt threshold (used for manual retries to allow more tries).
 func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAttempts int) (*campaign.RelaunchResult, error) {
 	// Reset jobs on terminal instances so they become unplaced
-	if _, err := db.ResetJobsOnTerminalCloudInstances(database); err != nil {
+	if _, err := db.ResetJobsOnTerminalLaunches(database); err != nil {
 		log.Printf("auto-relaunch: reset jobs: %v", err)
 	}
 

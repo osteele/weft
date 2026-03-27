@@ -13,19 +13,19 @@ import (
 func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "dead-123"); err != nil {
-		t.Fatalf("SetCloudInstanceProviderID: %v", err)
+	if err := db.SetLaunchProviderID(database, instanceID, "dead-123"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
 	}
 	launchedAt := time.Now().Add(-2 * time.Minute).Unix()
-	if _, err := database.Exec(`UPDATE cloud_instances SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
+	if _, err := database.Exec(`UPDATE launches SET launched_at = ? WHERE id = ?`, launchedAt, instanceID); err != nil {
 		t.Fatalf("set launched_at: %v", err)
 	}
 
@@ -33,8 +33,8 @@ func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	var destroyed string
@@ -61,12 +61,12 @@ func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 		t.Fatalf("destroyed provider ID = %q, want %q", destroyed, "dead-123")
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
-		t.Fatalf("GetCloudInstance: %v", err)
+		t.Fatalf("GetLaunch: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 
 	job, err := db.GetJobByID(database, jobID)
@@ -81,16 +81,16 @@ func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 func TestSyncCloudStateWithClientsTimeout_TimesOut(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "slow-123"); err != nil {
-		t.Fatalf("SetCloudInstanceProviderID: %v", err)
+	if err := db.SetLaunchProviderID(database, instanceID, "slow-123"); err != nil {
+		t.Fatalf("SetLaunchProviderID: %v", err)
 	}
 
 	result, completed := syncCloudStateWithClientsTimeout(&config.Config{}, database, campaign.NewReconciler(), []cloud.Client{&cloud.MockClient{

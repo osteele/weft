@@ -38,15 +38,15 @@ func TestRestartCloudJob_RefreshesProjectMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusFailed,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
 		Provider: "vastai",
 		GPUSpec:  "H200",
 	})
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance id: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, jobID); err != nil {
@@ -67,8 +67,8 @@ func TestRestartCloudJob_RefreshesProjectMetadata(t *testing.T) {
 	if len(job.OutputDirs) != 1 || job.OutputDirs[0] != "results/" {
 		t.Fatalf("job output dirs = %v, want [results/]", job.OutputDirs)
 	}
-	if job.CloudInstanceID != nil {
-		t.Fatalf("cloud instance id = %v, want nil", job.CloudInstanceID)
+	if job.LaunchID != nil {
+		t.Fatalf("cloud instance id = %v, want nil", job.LaunchID)
 	}
 }
 
@@ -80,15 +80,15 @@ func TestRestartJob_RemovesProcessedTag(t *testing.T) {
 		t.Fatalf("record job: %v", err)
 	}
 	// Mark as cloud job so restart uses the ResetJobToUnplaced path (no SSH needed)
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusFailed,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
 		Provider: "vastai",
 		GPUSpec:  "H200",
 	})
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance id: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusFailed, jobID); err != nil {

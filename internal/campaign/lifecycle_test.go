@@ -145,12 +145,12 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 		t.Errorf("error should include create-instance failure, got: %v", err)
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get cloud instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 	if ci.TerminationReason != db.TerminationReasonInfraFailure {
 		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, db.TerminationReasonInfraFailure)
@@ -161,11 +161,11 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetJobByID: %v", err)
 	}
-	if resetJob.CloudInstanceID != nil {
-		t.Fatalf("job cloud_instance_id = %v, want nil", *resetJob.CloudInstanceID)
+	if resetJob.LaunchID != nil {
+		t.Fatalf("job cloud_instance_id = %v, want nil", *resetJob.LaunchID)
 	}
 
-	attempts, err := db.GetJobCloudAttempts(database, job.ID)
+	attempts, err := db.GetLaunchAttempts(database, job.ID)
 	if err != nil {
 		t.Fatalf("get job attempts: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 	}
 
 	var callbackInstanceID int64
-	var callbackJobCloudInstance sql.NullInt64
+	var callbackJobLaunch sql.NullInt64
 	var callbackJobHost string
 	instanceID, err := LaunchInstance(
 		mockClient, database, nil, group, offer,
@@ -225,15 +225,15 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 		func(registeredID int64) {
 			callbackInstanceID = registeredID
 
-			ci, err := db.GetCloudInstance(database, registeredID)
+			ci, err := db.GetLaunch(database, registeredID)
 			if err != nil {
 				t.Fatalf("get registered cloud instance: %v", err)
 			}
-			if ci.Status != db.CloudInstanceStatusLaunching {
-				t.Fatalf("registered instance status = %q, want %q", ci.Status, db.CloudInstanceStatusLaunching)
+			if ci.Status != db.LaunchStatusLaunching {
+				t.Fatalf("registered instance status = %q, want %q", ci.Status, db.LaunchStatusLaunching)
 			}
 
-			if err := database.QueryRow(`SELECT cloud_instance_id, host FROM job_status WHERE id = ?`, job.ID).Scan(&callbackJobCloudInstance, &callbackJobHost); err != nil {
+			if err := database.QueryRow(`SELECT launch_id, host FROM job_status WHERE id = ?`, job.ID).Scan(&callbackJobLaunch, &callbackJobHost); err != nil {
 				t.Fatalf("select job during registration callback: %v", err)
 			}
 		},
@@ -247,8 +247,8 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 	if callbackInstanceID != instanceID {
 		t.Fatalf("callback instance ID = %d, want %d", callbackInstanceID, instanceID)
 	}
-	if !callbackJobCloudInstance.Valid || callbackJobCloudInstance.Int64 != instanceID {
-		t.Fatalf("callback job cloud_instance_id = %+v, want %d", callbackJobCloudInstance, instanceID)
+	if !callbackJobLaunch.Valid || callbackJobLaunch.Int64 != instanceID {
+		t.Fatalf("callback job cloud_instance_id = %+v, want %d", callbackJobLaunch, instanceID)
 	}
 	if callbackJobHost != "" {
 		t.Fatalf("callback job host = %q, want empty string", callbackJobHost)

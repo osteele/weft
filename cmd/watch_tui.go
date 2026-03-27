@@ -23,7 +23,7 @@ import (
 type watchAllModel struct {
 	database        *sql.DB
 	config          *config.Config
-	cloudInstances  []*db.CloudInstance
+	cloudInstances  []*db.Launch
 	instanceUpdates map[int64]campaign.InstanceUpdate
 	watchChannels   map[int64]<-chan campaign.InstanceUpdate
 	clients         map[int64]cloud.Client
@@ -103,7 +103,7 @@ func newWatchAllModel(database *sql.DB, cfg *config.Config, flashMessage string)
 		model.err = err
 		return model
 	}
-	model.cloudInstances = snapshot.CloudInstances
+	model.cloudInstances = snapshot.Launches
 	model.instanceUpdates = snapshot.InstanceUpdates
 	model.onPremHosts = snapshot.OnPremHosts
 	model.unplacedJobs = snapshot.UnplacedJobs
@@ -212,7 +212,7 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = nil
-		m.cloudInstances = msg.snapshot.CloudInstances
+		m.cloudInstances = msg.snapshot.Launches
 		m.onPremHosts = msg.snapshot.OnPremHosts
 		m.unplacedJobs = msg.snapshot.UnplacedJobs
 		cmds := m.mergeSnapshot(msg.snapshot)
@@ -269,14 +269,14 @@ func (m watchAllModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *watchAllModel) mergeSnapshot(snapshot watchSystemSnapshot) []tea.Cmd {
-	active := make(map[int64]bool, len(snapshot.CloudInstances))
+	active := make(map[int64]bool, len(snapshot.Launches))
 	var cmds []tea.Cmd
 
-	for _, ci := range snapshot.CloudInstances {
+	for _, ci := range snapshot.Launches {
 		active[ci.ID] = true
 		snapUpdate := snapshot.InstanceUpdates[ci.ID]
 		if existing, ok := m.instanceUpdates[ci.ID]; ok {
-			existing.CloudInstance = snapUpdate.CloudInstance
+			existing.Launch = snapUpdate.Launch
 			existing.Jobs = snapUpdate.Jobs
 			existing.JobAttemptOutcomes = snapUpdate.JobAttemptOutcomes
 			m.instanceUpdates[ci.ID] = existing
@@ -504,11 +504,11 @@ func (m watchAllModel) renderRows() ([]watchRenderRow, int) {
 		for _, ci := range m.cloudInstances {
 			update := normalizeWatchInstanceUpdate(m.instanceUpdates[ci.ID], ci)
 			views = append(views, cloudInstanceView{
-				CloudInstance: update.CloudInstance,
-				Instance:      update.Instance,
+				Launch:   update.Launch,
+				Instance: update.Instance,
 			})
 		}
-		if summary := formatCloudAggregateSummary("  Summary:", summarizeCloudInstances(views, time.Now())); summary != "" {
+		if summary := formatCloudAggregateSummary("  Summary:", summarizeLaunches(views, time.Now())); summary != "" {
 			addPlain(summary)
 			addPlain("")
 		}

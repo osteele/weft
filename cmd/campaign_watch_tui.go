@@ -24,7 +24,7 @@ import (
 // initialInstanceInfo holds pre-fetched DB data for instances that haven't
 // received a channel update yet, avoiding repeated queries in View().
 type initialInstanceInfo struct {
-	ci       *db.CloudInstance
+	ci       *db.Launch
 	jobs     []*db.Job
 	outcomes map[int64]string
 }
@@ -60,7 +60,7 @@ type watchModel struct {
 
 	// Donor relationship cache (recomputed when instanceIDs change)
 	cachedHiddenIDs   map[int64]bool
-	cachedDonorChains map[int64][]*db.CloudInstance
+	cachedDonorChains map[int64][]*db.Launch
 	donorCacheDirty   bool // true when instanceIDs or donor info has changed
 
 	// Viewport scrolling
@@ -93,7 +93,7 @@ type watchSyncDoneMsg struct{}
 
 // watchJobsRefreshedMsg carries refreshed job lists from a background DB query.
 type watchJobsRefreshedMsg struct {
-	cloudInstances map[int64]*db.CloudInstance
+	cloudInstances map[int64]*db.Launch
 	jobs           map[int64][]*db.Job
 	outcomes       map[int64]map[int64]string // instanceID → (jobID → outcome)
 	quitAfter      bool
@@ -141,9 +141,9 @@ func newWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, c
 	// Pre-fetch DB data for initial display (avoids queries in View)
 	initInfo := make(map[int64]initialInstanceInfo)
 	for _, id := range instanceIDs {
-		ci, _ := db.GetCloudInstance(database, id)
-		jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, id)
-		outcomes, _ := db.GetAttemptOutcomesByInstance(database, id)
+		ci, _ := db.GetLaunch(database, id)
+		jobs, _ := db.GetLaunchJobsIncludingAttempts(database, id)
+		outcomes, _ := db.GetAttemptOutcomesByLaunch(database, id)
 		initInfo[id] = initialInstanceInfo{ci: ci, jobs: jobs, outcomes: outcomes}
 	}
 
@@ -250,14 +250,14 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.checkAllDone()
 		}
 		prev := m.updates[msg.instanceID]
-		if msg.update.CloudInstance != nil && campaign.IsInstanceTerminal(msg.update.CloudInstance.Status) {
-			msg.update.Jobs = preserveWatchCurrentJobs(msg.update.CloudInstance.ID, prev.Jobs, msg.update.Jobs)
+		if msg.update.Launch != nil && campaign.IsInstanceTerminal(msg.update.Launch.Status) {
+			msg.update.Jobs = preserveWatchCurrentJobs(msg.update.Launch.ID, prev.Jobs, msg.update.Jobs)
 		}
 		updateWatchJobProgressHWM(m.jobProgressHWM, prev, msg.update)
 		m.updates[msg.instanceID] = msg.update
 
 		// Auto-relaunch on retryable infrastructure failure (preemption, infra failure, failed to launch)
-		ci := msg.update.CloudInstance
+		ci := msg.update.Launch
 		ch := m.channels[msg.instanceID]
 		if ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
 			m.retrying = true
@@ -277,7 +277,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Lightweight DB-only reconciliation — WatchInstance goroutines handle cloud API calls
 		return m, tea.Batch(
 			func() tea.Msg {
-				if _, err := db.ResetJobsOnTerminalCloudInstances(m.database); err != nil {
+				if _, err := db.ResetJobsOnTerminalLaunches(m.database); err != nil {
 					log.Printf("reset jobs on terminal instances: %v", err)
 				}
 				if _, err := campaign.ReconcileCampaigns(m.database); err != nil {
@@ -294,7 +294,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		terminalIDs := make([]int64, 0)
 		for _, id := range m.instanceIDs {
 			u, ok := m.updates[id]
-			if ok && u.CloudInstance != nil && campaign.IsInstanceTerminal(u.CloudInstance.Status) {
+			if ok && u.Launch != nil && campaign.IsInstanceTerminal(u.Launch.Status) {
 				terminalIDs = append(terminalIDs, id)
 			}
 		}
@@ -306,13 +306,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchJobsRefreshedMsg:
 		for id, ci := range msg.cloudInstances {
 			u := m.updates[id]
-			u.CloudInstance = ci
+			u.Launch = ci
 			m.updates[id] = u
 		}
 		for id, jobs := range msg.jobs {
 			u := m.updates[id]
-			if u.CloudInstance != nil && campaign.IsInstanceTerminal(u.CloudInstance.Status) {
-				u.Jobs = preserveWatchCurrentJobs(u.CloudInstance.ID, u.Jobs, jobs)
+			if u.Launch != nil && campaign.IsInstanceTerminal(u.Launch.Status) {
+				u.Jobs = preserveWatchCurrentJobs(u.Launch.ID, u.Jobs, jobs)
 			} else {
 				u.Jobs = jobs
 			}
@@ -339,7 +339,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Run DB queries in background to avoid blocking the UI
 		return m, func() tea.Msg {
 			for _, id := range m.instanceIDs {
-				ci, err := db.GetCloudInstance(m.database, id)
+				ci, err := db.GetLaunch(m.database, id)
 				if err != nil || ci == nil || !campaign.IsInstanceTerminal(ci.Status) {
 					return watchCheckDoneResultMsg{allTerminal: false}
 				}
@@ -390,9 +390,9 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.instanceIDs = append(m.instanceIDs, id)
 			m.clients[id] = clientForInstance(m.database, id)
 			// Pre-fetch initial info
-			ci, _ := db.GetCloudInstance(m.database, id)
-			jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(m.database, id)
-			outcomes, _ := db.GetAttemptOutcomesByInstance(m.database, id)
+			ci, _ := db.GetLaunch(m.database, id)
+			jobs, _ := db.GetLaunchJobsIncludingAttempts(m.database, id)
+			outcomes, _ := db.GetAttemptOutcomesByLaunch(m.database, id)
 			m.initInfo[id] = initialInstanceInfo{ci: ci, jobs: jobs, outcomes: outcomes}
 			// Start watching
 			client := m.clients[id]
@@ -435,7 +435,7 @@ func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.
 
 	currentJobIDs := make(map[int64]struct{})
 	for _, job := range prevJobs {
-		if job == nil || job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
+		if job == nil || job.LaunchID == nil || *job.LaunchID != instanceID {
 			continue
 		}
 		currentJobIDs[job.ID] = struct{}{}
@@ -454,14 +454,14 @@ func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.
 			preserved = append(preserved, job)
 			continue
 		}
-		if job.CloudInstanceID != nil && *job.CloudInstanceID == instanceID {
+		if job.LaunchID != nil && *job.LaunchID == instanceID {
 			preserved = append(preserved, job)
 			continue
 		}
 
 		jobCopy := *job
 		preservedInstanceID := instanceID
-		jobCopy.CloudInstanceID = &preservedInstanceID
+		jobCopy.LaunchID = &preservedInstanceID
 		preserved = append(preserved, &jobCopy)
 	}
 	return preserved
@@ -470,7 +470,7 @@ func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.
 func (m watchModel) checkAllDone() tea.Cmd {
 	return func() tea.Msg {
 		for _, id := range m.instanceIDs {
-			ci, err := db.GetCloudInstance(m.database, id)
+			ci, err := db.GetLaunch(m.database, id)
 			if err != nil || ci == nil || !campaign.IsInstanceTerminal(ci.Status) {
 				return watchCheckDoneResultMsg{allTerminal: false}
 			}
@@ -491,11 +491,11 @@ func (m watchModel) retryableJobs() []*db.Job {
 		if !ok {
 			continue
 		}
-		if u.CloudInstance == nil || u.CloudInstance.Status != db.CloudInstanceStatusFailed {
+		if u.Launch == nil || u.Launch.Status != db.LaunchStatusFailed {
 			continue
 		}
 		// Get unplaced jobs that were on this instance
-		instanceJobs, err := db.GetCloudInstanceJobsIncludingAttempts(m.database, id)
+		instanceJobs, err := db.GetLaunchJobsIncludingAttempts(m.database, id)
 		if err != nil {
 			continue
 		}
@@ -511,7 +511,7 @@ func (m watchModel) retryableJobs() []*db.Job {
 			if err != nil || fresh == nil {
 				continue
 			}
-			if fresh.Status == db.StatusQueued && (fresh.Host == "" || fresh.CloudInstanceID == nil) {
+			if fresh.Status == db.StatusQueued && (fresh.Host == "" || fresh.LaunchID == nil) {
 				seen[fresh.ID] = struct{}{}
 				jobs = append(jobs, fresh)
 			}
@@ -561,7 +561,7 @@ func (m watchModel) retryFailedInstances(extraAttempts int) tea.Cmd {
 func (m watchModel) hasRetryableFailures() bool {
 	for _, id := range m.instanceIDs {
 		u, ok := m.updates[id]
-		if ok && u.CloudInstance != nil && db.IsRetryableTermination(u.CloudInstance) {
+		if ok && u.Launch != nil && db.IsRetryableTermination(u.Launch) {
 			return true
 		}
 	}
@@ -573,7 +573,7 @@ func (m watchModel) countFailedInstances() int {
 	count := 0
 	for _, id := range m.instanceIDs {
 		u, ok := m.updates[id]
-		if ok && u.CloudInstance != nil && u.CloudInstance.Status == db.CloudInstanceStatusFailed {
+		if ok && u.Launch != nil && u.Launch.Status == db.LaunchStatusFailed {
 			count++
 		}
 	}
@@ -585,17 +585,17 @@ func (m watchModel) countFailedInstances() int {
 
 func refreshWatchInstancesFromDB(database *sql.DB, instanceIDs []int64, quitAfter bool) tea.Cmd {
 	return func() tea.Msg {
-		cloudInstances := make(map[int64]*db.CloudInstance, len(instanceIDs))
+		cloudInstances := make(map[int64]*db.Launch, len(instanceIDs))
 		jobs := make(map[int64][]*db.Job, len(instanceIDs))
 		outcomes := make(map[int64]map[int64]string, len(instanceIDs))
 		for _, id := range instanceIDs {
-			if ci, err := db.GetCloudInstance(database, id); err == nil && ci != nil {
+			if ci, err := db.GetLaunch(database, id); err == nil && ci != nil {
 				cloudInstances[id] = ci
 			}
-			if instanceJobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, id); err == nil && instanceJobs != nil {
+			if instanceJobs, err := db.GetLaunchJobsIncludingAttempts(database, id); err == nil && instanceJobs != nil {
 				jobs[id] = instanceJobs
 			}
-			if instanceOutcomes, err := db.GetAttemptOutcomesByInstance(database, id); err == nil {
+			if instanceOutcomes, err := db.GetAttemptOutcomesByLaunch(database, id); err == nil {
 				outcomes[id] = instanceOutcomes
 			}
 		}
@@ -613,20 +613,20 @@ func (m watchModel) campaignViews() []cloudInstanceView {
 	for _, id := range m.instanceIDs {
 		if update, ok := m.updates[id]; ok {
 			views = append(views, cloudInstanceView{
-				CloudInstance: update.CloudInstance,
-				Instance:      update.Instance,
+				Launch:   update.Launch,
+				Instance: update.Instance,
 			})
 			continue
 		}
 		if info, ok := m.initInfo[id]; ok {
-			views = append(views, cloudInstanceView{CloudInstance: info.ci})
+			views = append(views, cloudInstanceView{Launch: info.ci})
 		}
 	}
 	return views
 }
 
 func formatCampaignWatchSummaryLine(launchedAt time.Time, views []cloudInstanceView, now time.Time) string {
-	agg := summarizeCloudInstances(views, now)
+	agg := summarizeLaunches(views, now)
 	label := "Summary:"
 	if !launchedAt.IsZero() {
 		label = "Summary: uptime: " + now.Sub(launchedAt).Truncate(time.Second).String()
@@ -638,16 +638,16 @@ func formatCampaignWatchSummaryLine(launchedAt time.Time, views []cloudInstanceV
 // predecessor chains. Called from Update() when instance list changes.
 func (m *watchModel) rebuildDonorCache() {
 	hiddenIDs := make(map[int64]bool)
-	donorChains := make(map[int64][]*db.CloudInstance)
+	donorChains := make(map[int64][]*db.Launch)
 
-	getCI := func(id int64) *db.CloudInstance {
-		if u, ok := m.updates[id]; ok && u.CloudInstance != nil {
-			return u.CloudInstance
+	getCI := func(id int64) *db.Launch {
+		if u, ok := m.updates[id]; ok && u.Launch != nil {
+			return u.Launch
 		}
 		if info, ok := m.initInfo[id]; ok && info.ci != nil {
 			return info.ci
 		}
-		ci, _ := db.GetCloudInstance(m.database, id)
+		ci, _ := db.GetLaunch(m.database, id)
 		return ci
 	}
 
@@ -704,7 +704,7 @@ func (m watchModel) View() string {
 			jobs := info.jobs
 			if ci != nil {
 				update := campaign.InstanceUpdate{
-					CloudInstance:      ci,
+					Launch:             ci,
 					Jobs:               jobs,
 					JobAttemptOutcomes: info.outcomes,
 				}

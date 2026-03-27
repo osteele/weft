@@ -450,9 +450,9 @@ func LaunchCampaign(
 				onPhase(InstanceGroup{GPUClass: "donor"}, "launching donor instance")
 			}
 
-			donorInst := &db.CloudInstance{
+			donorInst := &db.Launch{
 				CampaignID:       &campaignID,
-				Status:           db.CloudInstanceStatusPlanned,
+				Status:           db.LaunchStatusPlanned,
 				Provider:         string(donorClient.Provider()),
 				GPUSpec:          "donor",
 				GPUClass:         donorCfg.Offer.GPUName,
@@ -469,12 +469,12 @@ func LaunchCampaign(
 				MachineID:        donorCfg.Offer.MachineID,
 			}
 			var donorErr error
-			donorInstanceID, donorErr = db.CreateCloudInstance(database, donorInst)
+			donorInstanceID, donorErr = db.CreateLaunch(database, donorInst)
 			if donorErr != nil {
 				log.Printf("donor: failed to create DB record: %v", donorErr)
 				donorCfg = nil
 			} else {
-				_ = db.SetCloudInstanceRole(database, donorInstanceID, "donor")
+				_ = db.SetLaunchRole(database, donorInstanceID, "donor")
 
 				// Generate donor bootstrap script
 				if onPhase != nil {
@@ -556,14 +556,14 @@ func LaunchCampaign(
 						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 						if createErr != nil {
 							log.Printf("donor: failed to create instance: %v", createErr)
-							_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+							_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 							donorCfg = nil
 						} else {
 							donorProviderID = inst.ProviderID
-							_ = db.SetCloudInstanceProviderID(database, donorInstanceID, donorProviderID)
-							_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusRunning)
+							_ = db.SetLaunchProviderID(database, donorInstanceID, donorProviderID)
+							_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusRunning)
 							if donorCfg.Offer.DataCenter != "" {
-								_ = db.SetCloudInstanceDataCenter(database, donorInstanceID, donorCfg.Offer.DataCenter)
+								_ = db.SetLaunchDataCenter(database, donorInstanceID, donorCfg.Offer.DataCenter)
 							}
 							log.Printf("donor: launched instance %s (DB ID %d) in %s", donorProviderID, donorInstanceID, donorCfg.DataCenter)
 						}
@@ -676,9 +676,9 @@ func LaunchCampaign(
 			} else {
 				instanceIDs = append(instanceIDs, cID)
 				if donorCfg != nil {
-					_ = db.SetCloudInstanceDonorID(database, cID, donorInstanceID)
+					_ = db.SetLaunchDonorID(database, cID, donorInstanceID)
 					// Retrieve the provider ID for this instance
-					inst, getErr := db.GetCloudInstance(database, cID)
+					inst, getErr := db.GetLaunch(database, cID)
 					if getErr == nil && inst != nil {
 						workerProviderIDs = append(workerProviderIDs, workerInfo{
 							ProviderID: inst.EffectiveProviderID(),
@@ -716,7 +716,7 @@ func LaunchCampaign(
 
 		if donorReady {
 			downloadSecs := int(time.Since(downloadStart).Seconds())
-			_ = db.SetCloudInstanceSeedDownloadSecs(database, donorInstanceID, downloadSecs)
+			_ = db.SetLaunchSeedDownloadSecs(database, donorInstanceID, downloadSecs)
 			log.Printf("donor: ready after %ds, starting fan-out to %d workers", downloadSecs, len(workerProviderIDs))
 
 			if onPhase != nil {
@@ -744,7 +744,7 @@ func LaunchCampaign(
 		if destroyErr := donorClient.DestroyInstance(donorProviderID); destroyErr != nil {
 			log.Printf("donor: failed to destroy: %v", destroyErr)
 		}
-		_ = db.UpdateCloudInstanceStatus(database, donorInstanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted)
+		_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusCompleted, db.TerminationReasonCompleted)
 	}
 
 	// Update campaign status
@@ -831,9 +831,9 @@ func LaunchInstance(
 	ctx := context.Background()
 
 	// Create cloud instance record with offer metadata
-	instance := &db.CloudInstance{
+	instance := &db.Launch{
 		CampaignID:        campaignID,
-		Status:            db.CloudInstanceStatusPlanned,
+		Status:            db.LaunchStatusPlanned,
 		Provider:          string(client.Provider()),
 		GPUSpec:           group.GPUSpec(),
 		GPUClass:          group.GPUClass,
@@ -852,14 +852,14 @@ func LaunchInstance(
 		ProvisionedInputs: group.AllInputs(),
 		MachineID:         offer.MachineID,
 	}
-	instanceID, err := db.CreateCloudInstance(database, instance)
+	instanceID, err := db.CreateLaunch(database, instance)
 	if err != nil {
 		return 0, fmt.Errorf("create cloud instance: %w", err)
 	}
 
 	// Associate jobs with cloud instance and record campaign position
 	for i, job := range group.Jobs {
-		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
+		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
 			oplog.Log(oplog.OpCloudSetJobInstance,
 				oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
 				oplog.WithError(err),
@@ -879,7 +879,7 @@ func LaunchInstance(
 	}
 
 	// Update status to launching
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusLaunching); err != nil {
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusLaunching); err != nil {
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 	if onInstanceRegistered != nil {
@@ -958,8 +958,8 @@ func LaunchInstance(
 
 	// Configure provider-specific bootstrap wiring.
 	if err := configureBootstrapCreateOpts(client, &createOpts, bootstrapKey); err != nil {
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
-		_, _ = db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		return instanceID, fmt.Errorf("configure bootstrap: %w", err)
 	}
 
@@ -976,7 +976,7 @@ func LaunchInstance(
 	for _, job := range group.Jobs {
 		jobIDs = append(jobIDs, fmt.Sprintf("%d", job.ID))
 	}
-	oplog.Log(oplog.OpCloudInstanceLaunchRequested, oplog.WithDetailf(
+	oplog.Log(oplog.OpLaunchLaunchRequested, oplog.WithDetailf(
 		"cloud_instance_id=%d provider=%s campaign_id=%s offer_id=%s jobs=[%s] requested_disk_gb=%d base_disk_gb=%d group_disk_gb=%d offer_disk_gb=%.0f inputs=%d gpu=%s label=%s",
 		instanceID,
 		client.Provider(),
@@ -1000,14 +1000,14 @@ func LaunchInstance(
 		createOpts,
 		progress,
 		func(replacement cloud.Offer) error {
-			return db.UpdateCloudInstanceOfferMetadata(database, instanceID, replacement)
+			return db.UpdateLaunchOfferMetadata(database, instanceID, replacement)
 		},
 		replacementOffer,
 	)
 	if err != nil {
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
-		_, _ = db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-		oplog.Log(oplog.OpCloudInstanceLaunchFailed, oplog.WithDetailf(
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 			"cloud_instance_id=%d provider=%s offer_id=%s error=%s",
 			instanceID, client.Provider(), finalOffer.ProviderID, err,
 		))
@@ -1015,7 +1015,7 @@ func LaunchInstance(
 	}
 
 	providerInstID := inst.ProviderID
-	oplog.Log(oplog.OpCloudInstanceLaunchCreated, oplog.WithDetailf(
+	oplog.Log(oplog.OpLaunchLaunchCreated, oplog.WithDetailf(
 		"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d offer_id=%s status=%s",
 		instanceID,
 		client.Provider(),
@@ -1027,7 +1027,7 @@ func LaunchInstance(
 
 	readback, readbackErr := client.ShowInstance(providerInstID)
 	if readbackErr != nil {
-		oplog.Log(oplog.OpCloudInstanceLaunchReadback,
+		oplog.Log(oplog.OpLaunchLaunchReadback,
 			oplog.WithError(readbackErr),
 			oplog.WithDetailf(
 				"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d",
@@ -1038,7 +1038,7 @@ func LaunchInstance(
 			),
 		)
 	} else {
-		oplog.Log(oplog.OpCloudInstanceLaunchReadback, oplog.WithDetailf(
+		oplog.Log(oplog.OpLaunchLaunchReadback, oplog.WithDetailf(
 			"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f status=%s ssh_host=%s ssh_port=%d",
 			instanceID,
 			client.Provider(),
@@ -1050,7 +1050,7 @@ func LaunchInstance(
 			readback.SSHPort,
 		))
 		if createOpts.DiskGB > 0 && readback.DiskGB > 0 && math.Abs(readback.DiskGB-float64(createOpts.DiskGB)) >= 1 {
-			oplog.Log(oplog.OpCloudInstanceLaunchMismatch, oplog.WithDetailf(
+			oplog.Log(oplog.OpLaunchLaunchMismatch, oplog.WithDetailf(
 				"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f offer_disk_gb=%.0f",
 				instanceID,
 				client.Provider(),
@@ -1063,15 +1063,15 @@ func LaunchInstance(
 	}
 
 	// Record provider instance ID
-	if err := db.SetCloudInstanceProviderID(database, instanceID, providerInstID); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
 
 	// Record data center if available
 	if finalOffer.DataCenter != "" {
-		_ = db.SetCloudInstanceDataCenter(database, instanceID, finalOffer.DataCenter)
+		_ = db.SetLaunchDataCenter(database, instanceID, finalOffer.DataCenter)
 	}
 
 	// Generate and upload bootstrap script (must happen after CreateInstance
@@ -1092,7 +1092,7 @@ func LaunchInstance(
 
 	// Store grace period in DB if configured
 	if opts.GracePeriodSeconds > 0 {
-		_ = db.SetCloudInstanceGracePeriod(database, instanceID, opts.GracePeriodSeconds)
+		_ = db.SetLaunchGracePeriod(database, instanceID, opts.GracePeriodSeconds)
 	}
 
 	// Generate and upload campaign manifest (needs providerInstID for self-destruct)
@@ -1105,14 +1105,14 @@ func LaunchInstance(
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
 	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
 	}
 
@@ -1133,12 +1133,12 @@ func LaunchInstance(
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
 		_ = client.DestroyInstance(providerInstID)
-		_ = db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 
 	// Update status to running — instance is now self-starting
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusRunning); err != nil {
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusRunning); err != nil {
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 

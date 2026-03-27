@@ -26,9 +26,9 @@ func TestFormatUploadSummary_IgnoresLegacyWorkspaceUploadBytes(t *testing.T) {
 
 func TestFormatWatchInstanceBlock_HidesStaleUploadSummaryForQueuedRetry(t *testing.T) {
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:                 106,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			Provider:           "vastai",
 			ProviderInstanceID: "32712486",
 			GPUSpec:            "A100",
@@ -57,15 +57,15 @@ func TestFormatWatchInstanceBlock_HidesStaleUploadSummaryForQueuedRetry(t *testi
 func TestFormatObservedActivityFallsBackToDBRunningJob(t *testing.T) {
 	instanceID := int64(107)
 	activity := formatObservedActivity(campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:                 instanceID,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			Provider:           "vastai",
 			ProviderInstanceID: "32712487",
 			GPUSpec:            "A100",
 		},
 		Jobs: []*db.Job{
-			{ID: 88, Status: db.StatusRunning, CloudInstanceID: &instanceID},
+			{ID: 88, Status: db.StatusRunning, LaunchID: &instanceID},
 		},
 	}, time.Now())
 
@@ -79,9 +79,9 @@ func TestFormatObservedActivityFallsBackToDBRunningJob(t *testing.T) {
 
 func TestFormatObservedActivityShowsProvisioningFallback(t *testing.T) {
 	activity := formatObservedActivity(campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       108,
-			Status:   db.CloudInstanceStatusLaunching,
+			Status:   db.LaunchStatusLaunching,
 			Provider: "vastai",
 			GPUSpec:  "A100",
 		},

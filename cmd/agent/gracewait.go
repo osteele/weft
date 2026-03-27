@@ -134,7 +134,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
 			selfDestruct(selfDestructOpts{
 				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
-				TerminalStatus: db.CloudInstanceStatusFailed, TerminationReason: db.TerminationReasonJobFailure,
+				TerminalStatus: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure,
 				Phase: "destroying",
 			})
 			return
@@ -147,7 +147,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
 			selfDestruct(selfDestructOpts{
 				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
-				TerminalStatus: db.CloudInstanceStatusFailed, TerminationReason: db.TerminationReasonJobFailure,
+				TerminalStatus: db.LaunchStatusFailed, TerminationReason: db.TerminationReasonJobFailure,
 				Phase: "destroying",
 			})
 			return
@@ -214,7 +214,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			cm := collectCompletionManifest(logDir, payload.Jobs)
 			selfDestruct(selfDestructOpts{
 				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
-				TerminalStatus: db.CloudInstanceStatusCompleted, TerminationReason: db.TerminationReasonCompleted,
+				TerminalStatus: db.LaunchStatusCompleted, TerminationReason: db.TerminationReasonCompleted,
 				Phase: "destroying", CompletionManifest: cm,
 			})
 			return

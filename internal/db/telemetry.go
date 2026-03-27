@@ -59,7 +59,7 @@ func InsertTelemetrySamples(database *sql.DB, jobID int64, samples []TelemetrySa
 
 	sampleStmt, err := tx.Prepare(`
 		INSERT OR IGNORE INTO job_telemetry_samples (
-			job_id, job_run_id, ts, elapsed_s, proc_cpu_user_s, proc_cpu_sys_s, proc_rss_kb,
+			job_id, attempt_id, ts, elapsed_s, proc_cpu_user_s, proc_cpu_sys_s, proc_rss_kb,
 			host_cpu_util_pct, proc_disk_read_bps, proc_disk_write_bps, proc_net_rx_bps, proc_net_tx_bps
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
@@ -70,7 +70,7 @@ func InsertTelemetrySamples(database *sql.DB, jobID int64, samples []TelemetrySa
 
 	gpuStmt, err := tx.Prepare(`
 		INSERT OR IGNORE INTO job_telemetry_gpus (
-			job_id, job_run_id, ts, gpu_index, gpu_name, gpu_mem_used_mib, gpu_util_pct,
+			job_id, attempt_id, ts, gpu_index, gpu_name, gpu_mem_used_mib, gpu_util_pct,
 			gpu_mem_util_pct, gpu_power_w, gpu_pcie_tx_mib_s, gpu_pcie_rx_mib_s,
 			gpu_sm_clock_mhz, gpu_mem_clock_mhz
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -107,10 +107,10 @@ func InsertTelemetrySamples(database *sql.DB, jobID int64, samples []TelemetrySa
 // GetTelemetryByRun reads all raw telemetry for a run, ordered by time.
 func GetTelemetryByRun(database *sql.DB, runID int64) ([]TelemetrySample, error) {
 	rows, err := database.Query(`
-		SELECT job_run_id, ts, elapsed_s, proc_cpu_user_s, proc_cpu_sys_s, proc_rss_kb,
+		SELECT attempt_id, ts, elapsed_s, proc_cpu_user_s, proc_cpu_sys_s, proc_rss_kb,
 		       host_cpu_util_pct, proc_disk_read_bps, proc_disk_write_bps, proc_net_rx_bps, proc_net_tx_bps
 		FROM job_telemetry_samples
-		WHERE job_run_id = ?
+		WHERE attempt_id = ?
 		ORDER BY ts ASC
 	`, runID)
 	if err != nil {
@@ -155,7 +155,7 @@ func GetTelemetryByRun(database *sql.DB, runID int64) ([]TelemetrySample, error)
 		SELECT ts, gpu_index, gpu_name, gpu_mem_used_mib, gpu_util_pct, gpu_mem_util_pct,
 		       gpu_power_w, gpu_pcie_tx_mib_s, gpu_pcie_rx_mib_s, gpu_sm_clock_mhz, gpu_mem_clock_mhz
 		FROM job_telemetry_gpus
-		WHERE job_run_id = ?
+		WHERE attempt_id = ?
 		ORDER BY ts ASC, gpu_index ASC
 	`, runID)
 	if err != nil {
@@ -209,7 +209,7 @@ func GetTelemetryLastTS(database *sql.DB, jobID int64) (int64, error) {
 		return 0, nil
 	}
 	var ts sql.NullInt64
-	if err := database.QueryRow(`SELECT MAX(ts) FROM job_telemetry_samples WHERE job_run_id = ?`, *runID).Scan(&ts); err != nil {
+	if err := database.QueryRow(`SELECT MAX(ts) FROM job_telemetry_samples WHERE attempt_id = ?`, *runID).Scan(&ts); err != nil {
 		return 0, fmt.Errorf("query max telemetry ts: %w", err)
 	}
 	if ts.Valid {

@@ -164,7 +164,7 @@ func (c *Coordinator) reconcileAndNotifyCampaigns(r2Client *r2.Client) {
 	if c.reconciler == nil {
 		c.reconciler = campaign.NewReconciler()
 	}
-	if _, err := c.reconciler.ReconcileCloudInstances(c.db, c.CloudClients, r2Client); err != nil {
+	if _, err := c.reconciler.ReconcileLaunches(c.db, c.CloudClients, r2Client); err != nil {
 		c.logger.Printf("reconcile cloud instances: %v", err)
 	}
 

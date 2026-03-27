@@ -21,7 +21,7 @@ func createJobAttemptsTableSQL() string {
 
 		-- Placement
 		host TEXT NOT NULL DEFAULT '',
-		cloud_instance_id INTEGER REFERENCES cloud_instances(id),
+		launch_id INTEGER REFERENCES launches(id),
 
 		-- Execution state
 		status TEXT NOT NULL DEFAULT 'queued',
@@ -46,7 +46,6 @@ func createJobAttemptsTableSQL() string {
 
 		-- Telemetry and cost
 		cost REAL,
-		vastai_instance_id INTEGER,
 		placement_meta TEXT,
 		job_metadata TEXT,
 		observed_inputs TEXT,
@@ -55,7 +54,10 @@ func createJobAttemptsTableSQL() string {
 		cloud_outcome TEXT,
 
 		UNIQUE(job_id, attempt_number),
-		CONSTRAINT job_attempts_status_check CHECK (%s)
+		CONSTRAINT job_attempts_status_check CHECK (%s),
+		CONSTRAINT job_attempts_cloud_outcome_check CHECK (
+			cloud_outcome IS NULL OR cloud_outcome IN ('completed','failed','canceled','orphaned','superseded')
+		)
 	)`, statusCheckConstraintSQL("status", jobStatusValues(), false))
 }
 
@@ -64,19 +66,35 @@ func initJobAttemptsSchema(db *sql.DB) error {
 	if _, err := db.Exec(createJobAttemptsTableSQL()); err != nil {
 		return fmt.Errorf("create job_attempts table: %w", err)
 	}
+	// Migrations: column renames must run before index creation.
+	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN cloud_outcome TEXT`); err != nil {
+		return err
+	}
+	// Drop views and triggers that reference old column names before renaming.
+	// These are recreated later in initSchema.
+	for _, v := range []string{"cloud_instance_job_membership", "job_status", "job_run_training_examples", "training_examples", "job_effective_state", "all_runs"} {
+		db.Exec(`DROP VIEW IF EXISTS ` + v)
+	}
+	for _, t := range []string{
+		"artifacts_validate_job_run_ownership_on_insert", "artifacts_validate_job_run_ownership_on_update",
+		"job_timeseries_validate_job_run_ownership_on_insert", "job_timeseries_validate_job_run_ownership_on_update",
+		"jobs_insert_create_attempt",
+	} {
+		db.Exec(`DROP TRIGGER IF EXISTS ` + t)
+	}
+	renameColumnIfExists(db, "job_attempts", "cloud_instance_id", "launch_id")
+	// Drop old index that references the renamed column.
+	db.Exec(`DROP INDEX IF EXISTS idx_job_attempts_cloud_instance`)
+
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_job_attempts_job ON job_attempts(job_id, attempt_number DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_job_attempts_status ON job_attempts(status)`,
-		`CREATE INDEX IF NOT EXISTS idx_job_attempts_cloud_instance ON job_attempts(cloud_instance_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_job_attempts_launch ON job_attempts(launch_id)`,
 	}
 	for _, idx := range indexes {
 		if _, err := db.Exec(idx); err != nil {
 			return fmt.Errorf("create job_attempts index: %w", err)
 		}
-	}
-	// Migration: add cloud_outcome column
-	if err := addColumnIfMissing(db, `ALTER TABLE job_attempts ADD COLUMN cloud_outcome TEXT`); err != nil {
-		return err
 	}
 	return nil
 }
@@ -89,10 +107,10 @@ func backfillJobAttempts(db *sql.DB) error {
 	// Give each archived run an attempt_number based on archived_at ordering.
 	if _, err := db.Exec(`
 		INSERT INTO job_attempts (
-			job_id, attempt_number, host, cloud_instance_id, status, queued_at,
+			job_id, attempt_number, host, launch_id, status, queued_at,
 			start_time, end_time, exit_code, error_message, failure_reason,
 			error_diagnosis, session_name, remote_id, remote_state, backend,
-			cost, vastai_instance_id, placement_meta, job_metadata, observed_inputs
+			cost, placement_meta, job_metadata, observed_inputs
 		)
 		SELECT
 			jr.job_id,
@@ -112,7 +130,6 @@ func backfillJobAttempts(db *sql.DB) error {
 			jr.remote_state,
 			jr.backend,
 			jr.cost,
-			jr.vastai_instance_id,
 			jr.placement_meta,
 			jr.job_metadata,
 			NULL
@@ -138,11 +155,11 @@ func backfillJobAttempts(db *sql.DB) error {
 	if hasStatusColumn {
 		if _, err := db.Exec(`
 			INSERT INTO job_attempts (
-				job_id, attempt_number, host, cloud_instance_id, status, queued_at,
+				job_id, attempt_number, host, launch_id, status, queued_at,
 				start_time, end_time, exit_code, error_message, failure_reason,
 				error_diagnosis, session_name, remote_id, remote_state, backend,
 				last_synced_status, pending_status, pending_at,
-				cost, vastai_instance_id, placement_meta, job_metadata, observed_inputs
+				cost, placement_meta, job_metadata, observed_inputs
 			)
 			SELECT
 				j.id,
@@ -165,7 +182,6 @@ func backfillJobAttempts(db *sql.DB) error {
 				j.pending_status,
 				j.pending_at,
 				j.cost,
-				j.vastai_instance_id,
 				j.placement_meta,
 				j.job_metadata,
 				j.observed_inputs
@@ -209,7 +225,7 @@ func cleanupStaleAttempts(db *sql.DB) error {
 	rows, err := db.Query(`
 		SELECT ja.job_id, ja.id
 		FROM job_attempts ja
-		JOIN cloud_instances ci ON ci.id = ja.cloud_instance_id
+		JOIN launches ci ON ci.id = ja.launch_id
 		WHERE ja.end_time IS NULL
 		  AND ci.status IN ('failed', 'completed', 'canceled')`)
 	if err != nil {
@@ -246,6 +262,17 @@ func cleanupStaleAttempts(db *sql.DB) error {
 // isNoSuchTable checks if an error is a "no such table" SQLite error.
 func isNoSuchTable(err error) bool {
 	return err != nil && strings.HasPrefix(err.Error(), "no such table: ")
+}
+
+// isLegacyMigrationError returns true for errors expected during legacy table
+// migrations: missing tables or renamed columns.
+func isLegacyMigrationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.HasPrefix(msg, "no such table: ") ||
+		strings.Contains(msg, "no such column:")
 }
 
 // createJobStatusView creates the job_status view that joins jobs with their
@@ -317,18 +344,18 @@ func createJobStatusView(db *sql.DB) error {
 			la.pending_at,
 			la.job_metadata,
 			la.cost,
-			la.vastai_instance_id,
+			NULL AS vastai_instance_id,
 			la.error_diagnosis,
 			-- retry_count = number of prior attempts (attempt_count - 1), or 0
 			COALESCE(la.attempt_number - 1, 0) AS retry_count,
 			la.placement_meta,
 			j.placement_reasons,
-			la.cloud_instance_id,
+			la.launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
 			-- Target kind for placement queries
 			CASE
-				WHEN la.cloud_instance_id IS NOT NULL THEN 'rental_instance'
+				WHEN la.launch_id IS NOT NULL THEN 'rental_instance'
 				WHEN COALESCE(la.host, '') != ''
 				     AND COALESCE(la.host, '') NOT LIKE 'vastai:%%'
 				     AND COALESCE(la.host, '') NOT LIKE 'runpod:%%'
@@ -378,14 +405,17 @@ func createJobsInsertToAttemptsTrigger(db *sql.DB) error {
 	return err
 }
 
-// createTrainingExamplesView creates the job_run_training_examples view using
+// createTrainingExamplesView creates the training_examples view using
 // job_attempts joined with jobs for spec columns.
 func createTrainingExamplesView(db *sql.DB) error {
-	if _, err := db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`); err != nil {
+	if _, err := db.Exec(`DROP VIEW IF EXISTS training_examples`); err != nil {
 		return err
 	}
+	// Also drop old name if present
+	db.Exec(`DROP VIEW IF EXISTS job_run_training_examples`)
+
 	_, err := db.Exec(`
-		CREATE VIEW job_run_training_examples AS
+		CREATE VIEW training_examples AS
 		SELECT
 			ja.id AS run_id,
 			ja.job_id,
@@ -421,9 +451,8 @@ func createTrainingExamplesView(db *sql.DB) error {
 			ja.job_metadata,
 			ja.placement_meta,
 			ja.cost,
-			ja.vastai_instance_id,
 			ja.attempt_number - 1 AS retry_count,
-			ja.cloud_instance_id,
+			ja.launch_id,
 			ja.error_message,
 			ja.failure_reason,
 			ja.error_diagnosis
@@ -464,7 +493,7 @@ func CreateAttempt(db *sql.DB, jobID int64, host string, cloudInstanceID *int64,
 func createAttemptTx(execer dbExecer, jobID int64, host string, cloudInstanceID *int64, status string) (int64, error) {
 	now := time.Now().Unix()
 	result, err := execer.Exec(`
-		INSERT INTO job_attempts (job_id, attempt_number, host, cloud_instance_id, status, queued_at)
+		INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
 		VALUES (?,
 			COALESCE((SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = ?), 0) + 1,
 			?, ?, ?, ?)`,
@@ -563,22 +592,23 @@ func ClearAttemptPendingStatus(db *sql.DB, jobID int64) error {
 	return err
 }
 
-// SetAttemptCloudInstanceID updates the cloud_instance_id on the latest open attempt.
-func SetAttemptCloudInstanceID(execer dbExecer, jobID, instanceID int64) error {
+// SetAttemptLaunchID updates the launch_id on the latest open attempt.
+func SetAttemptLaunchID(execer dbExecer, jobID, instanceID int64) error {
 	_, err := execer.Exec(`
-		UPDATE job_attempts SET cloud_instance_id = ?
+		UPDATE job_attempts SET launch_id = ?
 		WHERE id = `+latestOpenAttemptSubquery,
 		instanceID, jobID,
 	)
 	return err
 }
 
-// SetAttemptVastaiInstance stores the Vast.ai instance ID on the latest open attempt.
+// SetAttemptVastaiInstance stores the backend on the latest open attempt.
+// Deprecated: vastai_instance_id is no longer stored on job_attempts.
 func SetAttemptVastaiInstance(db *sql.DB, jobID int64, instanceID int) error {
 	_, err := db.Exec(`
-		UPDATE job_attempts SET vastai_instance_id = ?, backend = ?
+		UPDATE job_attempts SET backend = ?
 		WHERE id = `+latestOpenAttemptSubquery,
-		instanceID, BackendVastai, jobID,
+		BackendVastai, jobID,
 	)
 	return err
 }

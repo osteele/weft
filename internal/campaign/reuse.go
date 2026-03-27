@@ -27,7 +27,7 @@ const MinGraceRemaining = 5 * time.Minute
 
 // InstanceCapacity describes a reusable cloud instance and its available resources.
 type InstanceCapacity struct {
-	Instance          *db.CloudInstance
+	Instance          *db.Launch
 	DiskFreeGB        int
 	ProvisionedInputs []string
 	RunningJobCount   int
@@ -40,11 +40,11 @@ type ReuseAssignment struct {
 	Instance InstanceCapacity
 }
 
-func instanceAcceptsReuse(inst *db.CloudInstance) (bool, string) {
+func instanceAcceptsReuse(inst *db.Launch) (bool, string) {
 	if inst == nil {
 		return false, "instance not found"
 	}
-	if inst.Status != db.CloudInstanceStatusGrace && inst.Status != db.CloudInstanceStatusRunning {
+	if inst.Status != db.LaunchStatusGrace && inst.Status != db.LaunchStatusRunning {
 		return false, fmt.Sprintf("instance %d is not reusable (status=%s)", inst.ID, inst.Status)
 	}
 	if inst.HasActiveTerminationIntent() {
@@ -56,12 +56,12 @@ func instanceAcceptsReuse(inst *db.CloudInstance) (bool, string) {
 // FindReusableInstances returns non-terminal cloud instances that could accept new jobs.
 // Returns instances with status "grace" or "running".
 func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
-	instances, err := db.ListRunningCloudInstances(database)
+	instances, err := db.ListRunningLaunches(database)
 	if err != nil {
 		return nil, err
 	}
 
-	jobCounts, _ := db.GetActiveCloudInstanceJobCounts(database)
+	jobCounts, _ := db.GetActiveLaunchJobCounts(database)
 
 	var result []InstanceCapacity
 	for _, inst := range instances {
@@ -79,7 +79,7 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 		cap.DiskFreeGB = estimateDiskFree(inst)
 
 		// Compute grace remaining
-		if inst.Status == db.CloudInstanceStatusGrace && inst.GraceDeadline != nil {
+		if inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
 			cap.GraceRemaining = time.Until(time.Unix(*inst.GraceDeadline, 0))
 			if cap.GraceRemaining <= 0 {
 				continue // expired, skip
@@ -93,7 +93,7 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 }
 
 // estimateDiskFree estimates the free disk space on an instance.
-func estimateDiskFree(inst *db.CloudInstance) int {
+func estimateDiskFree(inst *db.Launch) int {
 	if inst.DiskGB == 0 {
 		return 0 // unknown disk size, can't estimate
 	}
@@ -197,8 +197,8 @@ func RankForJob(job *db.Job, instances []InstanceCapacity) []InstanceCapacity {
 
 // rankBetter returns true if a is a better choice than b for the given job.
 func rankBetter(a, b InstanceCapacity, job *db.Job) bool {
-	aGrace := a.Instance.Status == db.CloudInstanceStatusGrace
-	bGrace := b.Instance.Status == db.CloudInstanceStatusGrace
+	aGrace := a.Instance.Status == db.LaunchStatusGrace
+	bGrace := b.Instance.Status == db.LaunchStatusGrace
 
 	// Grace instances first (free)
 	if aGrace && !bGrace {
@@ -289,14 +289,14 @@ func FormatReuseAssignments(assignments []ReuseAssignment) string {
 	for _, a := range assignments {
 		inst := a.Instance.Instance
 		detail := ""
-		if inst.Status == db.CloudInstanceStatusGrace {
+		if inst.Status == db.LaunchStatusGrace {
 			remaining := a.Instance.GraceRemaining.Truncate(time.Second)
 			detail = fmt.Sprintf("grace — %s remaining", remaining)
 		} else {
 			detail = fmt.Sprintf("running — %d job(s) ahead", a.Instance.RunningJobCount-1)
 		}
 		cost := "$0.00"
-		if inst.Status == db.CloudInstanceStatusRunning {
+		if inst.Status == db.LaunchStatusRunning {
 			cost = "$0.00 (shared)"
 		}
 		b.WriteString(fmt.Sprintf("  Job #%d  →  Instance #%d (%s, %s)  %s\n",
@@ -314,7 +314,7 @@ type GracePayload struct {
 // SubmitJobsToInstance submits one or more jobs to an existing cloud instance
 // via R2 grace protocol. Works for both grace and running instances.
 func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Client, instanceID int64, jobs []*db.Job) error {
-	inst, err := db.GetCloudInstance(database, instanceID)
+	inst, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		return fmt.Errorf("get instance %d: %w", instanceID, err)
 	}
@@ -359,7 +359,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	inst, err = db.GetCloudInstance(database, instanceID)
+	inst, err = db.GetLaunch(database, instanceID)
 	if err != nil {
 		return fmt.Errorf("re-check instance %d: %w", instanceID, err)
 	}
@@ -372,7 +372,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("write jobs.json to R2: %w", err)
 	}
 
-	inst, err = db.GetCloudInstance(database, instanceID)
+	inst, err = db.GetLaunch(database, instanceID)
 	if err != nil {
 		return fmt.Errorf("final re-check instance %d: %w", instanceID, err)
 	}
@@ -385,7 +385,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		if err := db.MarkQueuedByID(database, job.ID); err != nil {
 			return fmt.Errorf("reset job %d to queued: %w", job.ID, err)
 		}
-		if err := db.SetJobCloudInstanceID(database, job.ID, instanceID); err != nil {
+		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
 			return fmt.Errorf("associate job %d with instance %d: %w", job.ID, instanceID, err)
 		}
 	}

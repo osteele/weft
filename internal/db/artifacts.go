@@ -35,7 +35,7 @@ func UpsertArtifact(db *sql.DB, art Artifact) error {
 	if art.JobRunID != nil {
 		var existingID int64
 		err := db.QueryRow(
-			`SELECT id FROM artifacts WHERE job_run_id = ? AND name = ? AND path = ?`,
+			`SELECT id FROM artifacts WHERE attempt_id = ? AND name = ? AND path = ?`,
 			*art.JobRunID, art.Name, art.Path,
 		).Scan(&existingID)
 		switch err {
@@ -49,7 +49,7 @@ func UpsertArtifact(db *sql.DB, art Artifact) error {
 			return err
 		case sql.ErrNoRows:
 			_, err = db.Exec(
-				`INSERT INTO artifacts (job_id, job_run_id, name, path, stored_path, size_bytes, sha256, created_at)
+				`INSERT INTO artifacts (job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 				art.JobID, *art.JobRunID, art.Name, art.Path, art.StoredPath, art.SizeBytes, art.SHA256, art.CreatedAt,
 			)
@@ -61,7 +61,7 @@ func UpsertArtifact(db *sql.DB, art Artifact) error {
 
 	var existingID int64
 	err := db.QueryRow(
-		`SELECT id FROM artifacts WHERE job_id = ? AND job_run_id IS NULL AND name = ? AND path = ?`,
+		`SELECT id FROM artifacts WHERE job_id = ? AND attempt_id IS NULL AND name = ? AND path = ?`,
 		art.JobID, art.Name, art.Path,
 	).Scan(&existingID)
 	switch err {
@@ -98,7 +98,7 @@ func ListArtifactsByJob(db *sql.DB, jobID int64) ([]Artifact, error) {
 	}
 
 	rows, err := db.Query(
-		`SELECT id, job_id, job_run_id, name, path, stored_path, size_bytes, sha256, created_at
+		`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
 		FROM artifacts WHERE job_id = ? ORDER BY id ASC`,
 		jobID,
 	)
@@ -125,8 +125,8 @@ func ListArtifactsByJob(db *sql.DB, jobID int64) ([]Artifact, error) {
 // ListArtifactsByRun returns cached artifacts for a specific execution attempt.
 func ListArtifactsByRun(db *sql.DB, runID int64) ([]Artifact, error) {
 	rows, err := db.Query(
-		`SELECT id, job_id, job_run_id, name, path, stored_path, size_bytes, sha256, created_at
-		 FROM artifacts WHERE job_run_id = ? ORDER BY id ASC`,
+		`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
+		 FROM artifacts WHERE attempt_id = ? ORDER BY id ASC`,
 		runID,
 	)
 	if err != nil {
@@ -153,8 +153,8 @@ func ListArtifactsByRun(db *sql.DB, runID int64) ([]Artifact, error) {
 func FindArtifactByNameOrPath(db *sql.DB, jobID int64, token string) (*Artifact, error) {
 	if runID, err := latestRunIDForJob(db, jobID); err == nil && runID != nil {
 		rows, err := db.Query(
-			`SELECT id, job_id, job_run_id, name, path, stored_path, size_bytes, sha256, created_at
-			 FROM artifacts WHERE job_run_id = ? AND (name = ? OR path = ?)
+			`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
+			 FROM artifacts WHERE attempt_id = ? AND (name = ? OR path = ?)
 			 ORDER BY id ASC`,
 			*runID, token, token,
 		)
@@ -177,7 +177,7 @@ func FindArtifactByNameOrPath(db *sql.DB, jobID int64, token string) (*Artifact,
 	}
 
 	rows, err := db.Query(
-		`SELECT id, job_id, job_run_id, name, path, stored_path, size_bytes, sha256, created_at
+		`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
 		FROM artifacts WHERE job_id = ? AND (name = ? OR path = ?)
 		ORDER BY id ASC`,
 		jobID, token, token,

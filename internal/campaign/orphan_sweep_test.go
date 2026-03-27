@@ -77,16 +77,16 @@ func TestSweepOrphanedInstances_SkipsActiveCampaignTrackedInstances(t *testing.T
 	if err != nil {
 		t.Fatalf("create campaign: %v", err)
 	}
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
 		CampaignID: &campaignID,
-		Status:     db.CloudInstanceStatusRunning,
+		Status:     db.LaunchStatusRunning,
 		Provider:   "vastai",
 		GPUSpec:    "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "tracked-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "tracked-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 

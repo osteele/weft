@@ -59,7 +59,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 
 	// Collect instances and jobs from the watched session
 	for _, id := range instanceIDs {
-		ci, err := db.GetCloudInstance(database, id)
+		ci, err := db.GetLaunch(database, id)
 		if err != nil || ci == nil {
 			continue
 		}
@@ -67,7 +67,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		if !campaign.IsInstanceTerminal(ci.Status) {
 			allTerminal = false
 			allCompleted = false
-		} else if ci.Status != db.CloudInstanceStatusCompleted {
+		} else if ci.Status != db.LaunchStatusCompleted {
 			allCompleted = false
 		}
 
@@ -76,11 +76,11 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		instances = append(instances, row)
 
 		// Collect jobs for this instance
-		instanceJobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, id)
+		instanceJobs, err := db.GetLaunchJobsIncludingAttempts(database, id)
 		if err != nil {
 			continue
 		}
-		outcomes, _ := db.GetAttemptOutcomesByInstance(database, id)
+		outcomes, _ := db.GetAttemptOutcomesByLaunch(database, id)
 		for _, j := range instanceJobs {
 			if j == nil || seenJobs[j.ID] {
 				continue
@@ -114,7 +114,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 	}
 	var historicalInstances []exitReportInstanceRow
 	for _, id := range historicalIDs {
-		ci, err := db.GetCloudInstance(database, id)
+		ci, err := db.GetLaunch(database, id)
 		if err != nil || ci == nil {
 			continue
 		}
@@ -207,8 +207,8 @@ type exitReportInstanceRow struct {
 }
 
 // buildInstanceRow creates a formatted instance row for the exit report.
-func buildInstanceRow(ci *db.CloudInstance, now time.Time) exitReportInstanceRow {
-	obs := observeCloudInstance(ci, nil, now)
+func buildInstanceRow(ci *db.Launch, now time.Time) exitReportInstanceRow {
+	obs := observeLaunch(ci, nil, now)
 	uptimeStr := "—"
 	if obs.Uptime != nil {
 		uptimeStr = tui.FormatCompactDuration(*obs.Uptime)
@@ -237,13 +237,13 @@ func buildInstanceRow(ci *db.CloudInstance, now time.Time) exitReportInstanceRow
 func collectHistoricalInstanceIDs(database *sql.DB, jobIDs []int64, watchedSet map[int64]bool) []int64 {
 	seen := make(map[int64]bool)
 	for _, jobID := range jobIDs {
-		attempts, err := db.GetJobCloudAttempts(database, jobID)
+		attempts, err := db.GetLaunchAttempts(database, jobID)
 		if err != nil {
 			continue
 		}
 		for _, a := range attempts {
-			if !watchedSet[a.CloudInstanceID] && !seen[a.CloudInstanceID] {
-				seen[a.CloudInstanceID] = true
+			if !watchedSet[a.LaunchID] && !seen[a.LaunchID] {
+				seen[a.LaunchID] = true
 			}
 		}
 	}

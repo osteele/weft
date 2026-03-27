@@ -17,9 +17,9 @@ import (
 func TestFormatPlainUpdate_Initial(t *testing.T) {
 	prev := InstanceUpdate{}
 	curr := InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:               5,
-			Status:           db.CloudInstanceStatusLaunching,
+			Status:           db.LaunchStatusLaunching,
 			VastaiInstanceID: "12345678",
 		},
 	}
@@ -39,9 +39,9 @@ func TestFormatPlainUpdate_Initial(t *testing.T) {
 func TestFormatPlainUpdate_WithSSH(t *testing.T) {
 	prev := InstanceUpdate{}
 	curr := InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:               5,
-			Status:           db.CloudInstanceStatusRunning,
+			Status:           db.LaunchStatusRunning,
 			VastaiInstanceID: "12345678",
 		},
 		Instance: &cloud.Instance{
@@ -59,12 +59,12 @@ func TestFormatPlainUpdate_WithSSH(t *testing.T) {
 
 func TestFormatPlainUpdate_JobStatusChange(t *testing.T) {
 	prev := InstanceUpdate{
-		CloudInstance: &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning},
-		Jobs:          []*db.Job{{ID: 88, Status: db.StatusQueued}},
+		Launch: &db.Launch{ID: 5, Status: db.LaunchStatusRunning},
+		Jobs:   []*db.Job{{ID: 88, Status: db.StatusQueued}},
 	}
 	curr := InstanceUpdate{
-		CloudInstance: &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning},
-		Jobs:          []*db.Job{{ID: 88, Status: db.StatusRunning, WorkingDir: "/work/alpha"}},
+		Launch: &db.Launch{ID: 5, Status: db.LaunchStatusRunning},
+		Jobs:   []*db.Job{{ID: 88, Status: db.StatusRunning, WorkingDir: "/work/alpha"}},
 	}
 
 	output := FormatPlainUpdate(prev, curr)
@@ -77,11 +77,11 @@ func TestFormatPlainUpdate_JobStatusChange(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_NoChange(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusRunning}
 	jobs := []*db.Job{{ID: 88, Status: db.StatusRunning}}
 
-	prev := InstanceUpdate{CloudInstance: ci, Jobs: jobs}
-	curr := InstanceUpdate{CloudInstance: ci, Jobs: jobs}
+	prev := InstanceUpdate{Launch: ci, Jobs: jobs}
+	curr := InstanceUpdate{Launch: ci, Jobs: jobs}
 
 	output := FormatPlainUpdate(prev, curr)
 	if output != "" {
@@ -162,7 +162,7 @@ func TestInferInitialPhaseChangedAt_UnknownUploadPhaseReturnsNil(t *testing.T) {
 func TestInferInitialPhaseChangedAt_ClampsToLaunchedAt(t *testing.T) {
 	launchedAt := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
 	staleSetupStart := launchedAt.Add(-108 * time.Hour).Unix()
-	ci := &db.CloudInstance{LaunchedAt: phaseTestInt64Ptr(launchedAt.Unix())}
+	ci := &db.Launch{LaunchedAt: phaseTestInt64Ptr(launchedAt.Unix())}
 
 	got := inferInitialPhaseChangedAt(
 		"setup:42",
@@ -183,7 +183,7 @@ func TestInferInitialPhaseChangedAt_ClampsToLaunchedAt(t *testing.T) {
 func TestInferInitialPhaseChangedAt_PreservesCurrentAttemptSetupStart(t *testing.T) {
 	launchedAt := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
 	setupStart := launchedAt.Add(90 * time.Second)
-	ci := &db.CloudInstance{LaunchedAt: phaseTestInt64Ptr(launchedAt.Unix())}
+	ci := &db.Launch{LaunchedAt: phaseTestInt64Ptr(launchedAt.Unix())}
 
 	got := inferInitialPhaseChangedAt(
 		"setup:42",
@@ -206,7 +206,7 @@ func TestInferInitialPhaseChangedAt_FallsBackToReadyAtThenCreatedAt(t *testing.T
 	staleSetupStart := readyAt.Add(-2 * time.Hour).Unix()
 	gotReady := inferInitialPhaseChangedAt(
 		"setup:42",
-		&db.CloudInstance{ReadyAt: phaseTestInt64Ptr(readyAt.Unix())},
+		&db.Launch{ReadyAt: phaseTestInt64Ptr(readyAt.Unix())},
 		[]*db.Job{{ID: 42}},
 		map[int64]*db.JobPhaseTimings{
 			42: {JobID: 42, SetupStart: phaseTestInt64Ptr(staleSetupStart)},
@@ -219,7 +219,7 @@ func TestInferInitialPhaseChangedAt_FallsBackToReadyAtThenCreatedAt(t *testing.T
 	createdAt := time.Now().Add(-4 * time.Minute).Truncate(time.Second)
 	gotCreated := inferInitialPhaseChangedAt(
 		"setup:42",
-		&db.CloudInstance{CreatedAt: createdAt.Unix()},
+		&db.Launch{CreatedAt: createdAt.Unix()},
 		[]*db.Job{{ID: 42}},
 		map[int64]*db.JobPhaseTimings{
 			42: {JobID: 42, SetupStart: phaseTestInt64Ptr(staleSetupStart)},
@@ -244,10 +244,10 @@ func TestFailureTerminationReasonFromPhase(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_PhaseChange(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
-	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "setup:42"}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusRunning}
+	prev := InstanceUpdate{Launch: ci, InstancePhase: "setup:42"}
 	changedAt := time.Now().Add(-5 * time.Second)
-	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", PhaseChangedAt: &changedAt}
+	curr := InstanceUpdate{Launch: ci, InstancePhase: "running:42", PhaseChangedAt: &changedAt}
 
 	output := FormatPlainUpdate(prev, curr)
 	if !strings.Contains(output, "phase: running job 42 (for") {
@@ -256,12 +256,12 @@ func TestFormatPlainUpdate_PhaseChange(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_TerminationDetail(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusFailed}
-	prev := InstanceUpdate{CloudInstance: ci}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusFailed}
+	prev := InstanceUpdate{Launch: ci}
 	curr := InstanceUpdate{
-		CloudInstance: ci,
+		Launch: ci,
 		TerminationIntent: &instanceintent.Marker{
-			TerminalStatus:  db.CloudInstanceStatusFailed,
+			TerminalStatus:  db.LaunchStatusFailed,
 			RequestedAtUnix: time.Now().Add(-3 * time.Second).Unix(),
 			DestroyAttempts: 2,
 			LastError:       "exit status 22",
@@ -279,7 +279,7 @@ func TestFormatPlainUpdate_TerminationDetail(t *testing.T) {
 
 func TestTerminationIntentDetail_HidesCompletedCleanup(t *testing.T) {
 	marker := &instanceintent.Marker{
-		TerminalStatus:         db.CloudInstanceStatusCompleted,
+		TerminalStatus:         db.LaunchStatusCompleted,
 		RequestedAtUnix:        time.Now().Add(-5 * time.Second).Unix(),
 		DestroyStartedAtUnix:   time.Now().Add(-4 * time.Second).Unix(),
 		DestroySucceededAtUnix: time.Now().Add(-3 * time.Second).Unix(),
@@ -293,11 +293,11 @@ func TestTerminationIntentDetail_HidesCompletedCleanup(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_BootstrapStallWarning(t *testing.T) {
-	ci := &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusRunning}
-	prev := InstanceUpdate{CloudInstance: ci}
+	ci := &db.Launch{ID: 7, Status: db.LaunchStatusRunning}
+	prev := InstanceUpdate{Launch: ci}
 	curr := InstanceUpdate{
-		CloudInstance: ci,
-		StallMessage:  "bootstrap stalled — no activity after 15m0s",
+		Launch:       ci,
+		StallMessage: "bootstrap stalled — no activity after 15m0s",
 	}
 
 	output := FormatPlainUpdate(prev, curr)
@@ -310,11 +310,11 @@ func TestFormatPlainUpdate_BootstrapStallWarning(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_BootstrapStallTerminate(t *testing.T) {
-	ci := &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusFailed}
-	prev := InstanceUpdate{CloudInstance: &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusRunning}}
+	ci := &db.Launch{ID: 7, Status: db.LaunchStatusFailed}
+	prev := InstanceUpdate{Launch: &db.Launch{ID: 7, Status: db.LaunchStatusRunning}}
 	curr := InstanceUpdate{
-		CloudInstance: ci,
-		StallMessage:  "bootstrap timeout after 20m0s — terminating instance, jobs reset to queued",
+		Launch:       ci,
+		StallMessage: "bootstrap timeout after 20m0s — terminating instance, jobs reset to queued",
 	}
 
 	output := FormatPlainUpdate(prev, curr)
@@ -327,10 +327,10 @@ func TestFormatPlainUpdate_BootstrapStallTerminate(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_BootstrapStallNoRepeat(t *testing.T) {
-	ci := &db.CloudInstance{ID: 7, Status: db.CloudInstanceStatusRunning}
+	ci := &db.Launch{ID: 7, Status: db.LaunchStatusRunning}
 	msg := "bootstrap stalled — no activity after 15m0s"
-	prev := InstanceUpdate{CloudInstance: ci, StallMessage: msg}
-	curr := InstanceUpdate{CloudInstance: ci, StallMessage: msg}
+	prev := InstanceUpdate{Launch: ci, StallMessage: msg}
+	curr := InstanceUpdate{Launch: ci, StallMessage: msg}
 
 	output := FormatPlainUpdate(prev, curr)
 	if strings.Contains(output, "WARNING") {
@@ -342,9 +342,9 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	// Create a cloud instance, then set launched_at and provider_instance_id
-	// (CreateCloudInstance doesn't persist these fields)
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	// (CreateLaunch doesn't persist these fields)
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "mock",
 	})
 	if err != nil {
@@ -352,7 +352,7 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	}
 	// Set launched_at to 25 minutes ago (beyond terminate threshold) and provider_instance_id
 	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
-	_, err = database.Exec(`UPDATE cloud_instances SET launched_at = ?, provider_instance_id = ? WHERE id = ?`,
+	_, err = database.Exec(`UPDATE launches SET launched_at = ?, provider_instance_id = ? WHERE id = ?`,
 		launchedAt, "test-123", instanceID)
 	if err != nil {
 		t.Fatalf("update launched_at: %v", err)
@@ -363,7 +363,7 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 
@@ -405,12 +405,12 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	}
 
 	// Verify instance was marked as failed in DB
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 }
 
@@ -418,19 +418,19 @@ func TestWatchInstance_GraceExpiration(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	// Create a grace-period instance with an expired deadline
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusGrace,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusGrace,
 		Provider: "mock",
 	})
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "grace-test-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "grace-test-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 	// Set grace deadline in the past
 	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
-	if err := db.SetCloudInstanceGraceStarted(database, instanceID, pastDeadline); err != nil {
+	if err := db.SetLaunchGraceStarted(database, instanceID, pastDeadline); err != nil {
 		t.Fatalf("set grace started: %v", err)
 	}
 
@@ -439,7 +439,7 @@ func TestWatchInstance_GraceExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 
@@ -474,26 +474,26 @@ func TestWatchInstance_GraceExpiration(t *testing.T) {
 	}
 
 	// Verify instance was marked as failed in DB
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 }
 
 func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "mock",
 	})
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	_, err = database.Exec(`UPDATE cloud_instances SET provider_instance_id = ? WHERE id = ?`,
+	_, err = database.Exec(`UPDATE launches SET provider_instance_id = ? WHERE id = ?`,
 		"test-err", instanceID)
 	if err != nil {
 		t.Fatalf("update provider_instance_id: %v", err)
@@ -518,20 +518,20 @@ func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
 		t.Fatal("expected ShowInstance to be called at least once")
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusRunning {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusRunning)
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
 	}
 }
 
 func TestWatchInstance_UsesLivePhaseBeforeJobLeavesQueued(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "mock",
 	})
 	if err != nil {
@@ -542,7 +542,7 @@ func TestWatchInstance_UsesLivePhaseBeforeJobLeavesQueued(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 
@@ -601,9 +601,9 @@ func TestWatchInstance_UsesLivePhaseBeforeJobLeavesQueued(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_ProgressChange(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
-	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: -1}
-	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusRunning}
+	prev := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: -1}
+	curr := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
 
 	output := FormatPlainUpdate(prev, curr)
 	if !strings.Contains(output, "job 42 progress: 50%") {
@@ -612,9 +612,9 @@ func TestFormatPlainUpdate_ProgressChange(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_ProgressNoChange(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
-	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
-	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusRunning}
+	prev := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
+	curr := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: 50, JobProgressID: 42}
 
 	output := FormatPlainUpdate(prev, curr)
 	if strings.Contains(output, "progress") {
@@ -623,9 +623,9 @@ func TestFormatPlainUpdate_ProgressNoChange(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_ProgressNoReport(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning}
-	prev := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: -1}
-	curr := InstanceUpdate{CloudInstance: ci, InstancePhase: "running:42", JobProgress: -1}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusRunning}
+	prev := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: -1}
+	curr := InstanceUpdate{Launch: ci, InstancePhase: "running:42", JobProgress: -1}
 
 	output := FormatPlainUpdate(prev, curr)
 	if strings.Contains(output, "progress") {
@@ -683,13 +683,13 @@ func TestJobDisplayStatus(t *testing.T) {
 }
 
 func TestFormatPlainUpdate_JobDisplayStatusUsed(t *testing.T) {
-	ci := &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusFailed}
+	ci := &db.Launch{ID: 5, Status: db.LaunchStatusFailed}
 	prev := InstanceUpdate{
-		CloudInstance: &db.CloudInstance{ID: 5, Status: db.CloudInstanceStatusRunning},
-		Jobs:          []*db.Job{{ID: 88, Status: db.StatusRunning}},
+		Launch: &db.Launch{ID: 5, Status: db.LaunchStatusRunning},
+		Jobs:   []*db.Job{{ID: 88, Status: db.StatusRunning}},
 	}
 	curr := InstanceUpdate{
-		CloudInstance:      ci,
+		Launch:             ci,
 		Jobs:               []*db.Job{{ID: 88, Status: db.StatusQueued}},
 		JobAttemptOutcomes: map[int64]string{88: db.AttemptOutcomeOrphaned},
 	}
@@ -724,12 +724,12 @@ func TestIsInstanceTerminal(t *testing.T) {
 		status string
 		want   bool
 	}{
-		{db.CloudInstanceStatusCompleted, true},
-		{db.CloudInstanceStatusFailed, true},
-		{db.CloudInstanceStatusCancelled, true},
-		{db.CloudInstanceStatusRunning, false},
-		{db.CloudInstanceStatusLaunching, false},
-		{db.CloudInstanceStatusPlanned, false},
+		{db.LaunchStatusCompleted, true},
+		{db.LaunchStatusFailed, true},
+		{db.LaunchStatusCancelled, true},
+		{db.LaunchStatusRunning, false},
+		{db.LaunchStatusLaunching, false},
+		{db.LaunchStatusPlanned, false},
 	}
 	for _, tt := range tests {
 		if got := IsInstanceTerminal(tt.status); got != tt.want {
@@ -741,8 +741,8 @@ func TestIsInstanceTerminal(t *testing.T) {
 func TestWatchInstance_TransitionsQueuedJobToRunningFromR2Phase(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "mock",
 	})
 	if err != nil {
@@ -753,7 +753,7 @@ func TestWatchInstance_TransitionsQueuedJobToRunningFromR2Phase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 

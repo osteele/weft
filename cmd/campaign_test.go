@@ -193,17 +193,17 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 		t.Fatalf("CreateCampaign: %v", err)
 	}
 
-	preemptedID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+	preemptedID, err := db.CreateLaunch(database, &db.Launch{
 		CampaignID: &campaignID,
-		Status:     db.CloudInstanceStatusFailed,
+		Status:     db.LaunchStatusFailed,
 		Provider:   "vastai",
 		GPUSpec:    "RTX 4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance(preempted): %v", err)
+		t.Fatalf("CreateLaunch(preempted): %v", err)
 	}
-	if err := db.UpdateCloudInstanceStatus(database, preemptedID, db.CloudInstanceStatusFailed, db.TerminationReasonPreempted); err != nil {
-		t.Fatalf("UpdateCloudInstanceStatus(preempted): %v", err)
+	if err := db.UpdateLaunchStatus(database, preemptedID, db.LaunchStatusFailed, db.TerminationReasonPreempted); err != nil {
+		t.Fatalf("UpdateLaunchStatus(preempted): %v", err)
 	}
 
 	if _, err := database.Exec(
@@ -211,23 +211,23 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert orphaned job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = 1 AND end_time IS NULL`,
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
 		db.StatusQueued, preemptedID)
-	if err := db.CloseJobCloudAttemptsByInstance(database, preemptedID, db.AttemptOutcomeOrphaned); err != nil {
-		t.Fatalf("CloseJobCloudAttemptsByInstance(orphaned): %v", err)
+	if err := db.CloseLaunchAttempts(database, preemptedID, db.AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("CloseLaunchAttempts(orphaned): %v", err)
 	}
 
-	jobFailureID, err := db.CreateCloudInstance(database, &db.CloudInstance{
+	jobFailureID, err := db.CreateLaunch(database, &db.Launch{
 		CampaignID: &campaignID,
-		Status:     db.CloudInstanceStatusFailed,
+		Status:     db.LaunchStatusFailed,
 		Provider:   "vastai",
 		GPUSpec:    "A100",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance(job failure): %v", err)
+		t.Fatalf("CreateLaunch(job failure): %v", err)
 	}
-	if err := db.UpdateCloudInstanceStatus(database, jobFailureID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
-		t.Fatalf("UpdateCloudInstanceStatus(job failure): %v", err)
+	if err := db.UpdateLaunchStatus(database, jobFailureID, db.LaunchStatusFailed, db.TerminationReasonJobFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(job failure): %v", err)
 	}
 
 	diagJSON, err := remediation.MarshalDiagnosis(&remediation.ErrorDiagnosis{
@@ -244,7 +244,7 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert failed job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ?, failure_reason = ?, error_diagnosis = ? WHERE job_id = 2 AND end_time IS NULL`,
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ?, failure_reason = ?, error_diagnosis = ? WHERE job_id = 2 AND end_time IS NULL`,
 		db.StatusFailed, jobFailureID, "gpu_oom", diagJSON)
 
 	report, err := buildCampaignDiagnosisReport(database, campaignID)

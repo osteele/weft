@@ -60,7 +60,7 @@ func ProcessDiskFailureReport(r2Client *r2.Client, instanceID int64, database *s
 	}
 
 	// Get jobs associated with this instance
-	jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, instanceID)
+	jobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID)
 	if err != nil {
 		log.Printf("disk-postmortem: get jobs for instance %d: %v", instanceID, err)
 		return

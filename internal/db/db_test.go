@@ -645,21 +645,21 @@ func TestListUnplacedJobs(t *testing.T) {
 func TestListUnplacedJobsExcludesAssignedCloudJobs(t *testing.T) {
 	database := SetupTestDB(t)
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "cloud assigned", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	jobs, err := ListUnplacedJobs(database)
@@ -674,21 +674,21 @@ func TestListUnplacedJobsExcludesAssignedCloudJobs(t *testing.T) {
 func TestListUnplacedJobsExcludesOpenAttemptsOnRunningInstances(t *testing.T) {
 	database := SetupTestDB(t)
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "open attempt", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	jobs, err := ListUnplacedJobs(database)
@@ -703,24 +703,24 @@ func TestListUnplacedJobsExcludesOpenAttemptsOnRunningInstances(t *testing.T) {
 func TestListUnplacedJobsIncludesJobsResetFromTerminalInstances(t *testing.T) {
 	database := SetupTestDB(t)
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusFailed,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "stale open attempt", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	if _, err := NormalizeTerminalCloudInstanceJobs(database, instanceID); err != nil {
-		t.Fatalf("NormalizeTerminalCloudInstanceJobs: %v", err)
+	if _, err := NormalizeTerminalLaunchJobs(database, instanceID); err != nil {
+		t.Fatalf("NormalizeTerminalLaunchJobs: %v", err)
 	}
 
 	jobs, err := ListUnplacedJobs(database)
@@ -738,20 +738,20 @@ func TestListUnplacedJobsIncludesJobsResetFromTerminalInstances(t *testing.T) {
 func TestJobStatusViewTargetKind(t *testing.T) {
 	database := SetupTestDB(t)
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	// Job with cloud instance should be rental_instance
@@ -905,7 +905,7 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE job_attempts SET cloud_instance_id = ?, status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, 42, StatusRunning, time.Now().Unix(), jobID); err != nil {
+	if _, err := database.Exec(`UPDATE job_attempts SET launch_id = ?, status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, 42, StatusRunning, time.Now().Unix(), jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 
@@ -939,15 +939,15 @@ func TestListActiveOnPremJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record cloud job: %v", err)
 	}
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A100",
 	})
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, cloudJobID, instanceID); err != nil {
+	if err := SetJobLaunchID(database, cloudJobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance on job: %v", err)
 	}
 
@@ -970,7 +970,7 @@ func TestListActiveOnPremJobs(t *testing.T) {
 		t.Fatalf("second job ID = %d, want %d", jobs[1].ID, onPremQueuedID)
 	}
 	for _, job := range jobs {
-		if job.CloudInstanceID != nil {
+		if job.LaunchID != nil {
 			t.Fatalf("unexpected cloud job in on-prem list: %+v", job)
 		}
 		if job.Host == "" {
@@ -982,20 +982,20 @@ func TestListActiveOnPremJobs(t *testing.T) {
 func TestListActiveCloudJobsIncludesOpenLiveAttemptJobs(t *testing.T) {
 	database := SetupTestDB(t)
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "cloud", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	jobs, err := ListActiveCloudJobs(database)
@@ -1008,8 +1008,8 @@ func TestListActiveCloudJobsIncludesOpenLiveAttemptJobs(t *testing.T) {
 	if jobs[0].ID != jobID {
 		t.Fatalf("job ID = %d, want %d", jobs[0].ID, jobID)
 	}
-	if jobs[0].CloudInstanceID == nil || *jobs[0].CloudInstanceID != instanceID {
-		t.Fatalf("cloud_instance_id = %v, want %d", jobs[0].CloudInstanceID, instanceID)
+	if jobs[0].LaunchID == nil || *jobs[0].LaunchID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d", jobs[0].LaunchID, instanceID)
 	}
 }
 
@@ -1148,10 +1148,10 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 func TestFilterByFreshStatusPassesNonInventoryJobs(t *testing.T) {
 	cloudInstanceID := int64(17)
 	jobs := []*Job{
-		{ID: 1, Host: "studio", Status: StatusQueued}, // inventory — matches
-		{ID: 2, Host: "", Status: StatusQueued},       // unplaced — always fresh
-		{ID: 3, Host: CloudInstanceHost(cloudInstanceID), Status: StatusQueued, CloudInstanceID: &cloudInstanceID}, // rental — always fresh
-		{ID: 4, Host: "cool30", Status: StatusRunning},                                                             // inventory — no match
+		{ID: 1, Host: "studio", Status: StatusQueued},                                                // inventory — matches
+		{ID: 2, Host: "", Status: StatusQueued},                                                      // unplaced — always fresh
+		{ID: 3, Host: LaunchHost(cloudInstanceID), Status: StatusQueued, LaunchID: &cloudInstanceID}, // rental — always fresh
+		{ID: 4, Host: "cool30", Status: StatusRunning},                                               // inventory — no match
 	}
 
 	filtered := FilterByFreshStatus(jobs, []string{"studio"})
@@ -1171,7 +1171,7 @@ func TestFilterByHostMatchesOnlyRequestedHosts(t *testing.T) {
 	jobs := []*Job{
 		{ID: 1, Host: "studio", Status: StatusQueued},
 		{ID: 2, Host: "", Status: StatusQueued},
-		{ID: 3, Host: CloudInstanceHost(cloudInstanceID), Status: StatusQueued, CloudInstanceID: &cloudInstanceID},
+		{ID: 3, Host: LaunchHost(cloudInstanceID), Status: StatusQueued, LaunchID: &cloudInstanceID},
 		{ID: 4, Host: "cool30", Status: StatusRunning},
 	}
 
@@ -1212,7 +1212,7 @@ func TestJobTargetKindAndDisplay(t *testing.T) {
 		},
 		{
 			name:          "rental instance id is canonical",
-			job:           &Job{CloudInstanceID: &cloudInstanceID, Status: StatusQueued},
+			job:           &Job{LaunchID: &cloudInstanceID, Status: StatusQueued},
 			wantKind:      JobTargetRentalInstance,
 			wantDisplay:   "rental:17",
 			wantRental:    true,
@@ -1220,9 +1220,9 @@ func TestJobTargetKindAndDisplay(t *testing.T) {
 		},
 		{
 			name:          "legacy synthetic rental host still reads as rental",
-			job:           &Job{Host: CloudInstanceHost(cloudInstanceID), Status: StatusQueued},
+			job:           &Job{Host: LaunchHost(cloudInstanceID), Status: StatusQueued},
 			wantKind:      JobTargetRentalInstance,
-			wantDisplay:   CloudInstanceHost(cloudInstanceID),
+			wantDisplay:   LaunchHost(cloudInstanceID),
 			wantRental:    true,
 			wantInventory: false,
 		},
@@ -1261,19 +1261,19 @@ func TestListJobsWithMaxAgeForHostsIncludesNonInventoryJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record unplaced job: %v", err)
 	}
-	cloudJobID, err := RecordQueuedWithGPU(database, CloudInstanceHost(17), "/tmp/project-cloud", "python cloud.py", "cloud", "")
+	cloudJobID, err := RecordQueuedWithGPU(database, LaunchHost(17), "/tmp/project-cloud", "python cloud.py", "cloud", "")
 	if err != nil {
 		t.Fatalf("record cloud job: %v", err)
 	}
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A100",
 	})
 	if err != nil {
 		t.Fatalf("create cloud instance: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, cloudJobID, instanceID); err != nil {
+	if err := SetJobLaunchID(database, cloudJobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance on job: %v", err)
 	}
 
@@ -1322,7 +1322,7 @@ func TestListUniqueActiveHostsIncludesDeferredOpHosts(t *testing.T) {
 	}
 }
 
-func TestJobCloudAttempts(t *testing.T) {
+func TestLaunchAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 
 	// Create an unplaced job and a cloud instance
@@ -1331,8 +1331,8 @@ func TestJobCloudAttempts(t *testing.T) {
 		t.Fatalf("record unplaced: %v", err)
 	}
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
@@ -1341,12 +1341,12 @@ func TestJobCloudAttempts(t *testing.T) {
 	}
 
 	// Associate job with instance (should create attempt)
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set job cloud instance: %v", err)
 	}
 
 	// Verify attempt was created
-	attempts, err := GetJobCloudAttempts(database, jobID)
+	attempts, err := GetLaunchAttempts(database, jobID)
 	if err != nil {
 		t.Fatalf("get attempts: %v", err)
 	}
@@ -1356,15 +1356,15 @@ func TestJobCloudAttempts(t *testing.T) {
 	if attempts[0].JobID != jobID {
 		t.Errorf("attempt JobID = %d, want %d", attempts[0].JobID, jobID)
 	}
-	if attempts[0].CloudInstanceID != instanceID {
-		t.Errorf("attempt CloudInstanceID = %d, want %d", attempts[0].CloudInstanceID, instanceID)
+	if attempts[0].LaunchID != instanceID {
+		t.Errorf("attempt LaunchID = %d, want %d", attempts[0].LaunchID, instanceID)
 	}
 	if attempts[0].EndedAt != nil {
 		t.Error("attempt should not have ended yet")
 	}
 
 	// Close the attempt (both cloud_outcome and end_time)
-	if err := CloseJobCloudAttempt(database, jobID, "failed"); err != nil {
+	if err := CloseLaunchAttempt(database, jobID, "failed"); err != nil {
 		t.Fatalf("close cloud attempt: %v", err)
 	}
 	exitCode := 1
@@ -1372,7 +1372,7 @@ func TestJobCloudAttempts(t *testing.T) {
 		t.Fatalf("close attempt: %v", err)
 	}
 
-	attempts, err = GetJobCloudAttempts(database, jobID)
+	attempts, err = GetLaunchAttempts(database, jobID)
 	if err != nil {
 		t.Fatalf("get attempts after close: %v", err)
 	}
@@ -1384,8 +1384,8 @@ func TestJobCloudAttempts(t *testing.T) {
 	}
 
 	// Create second instance and associate (simulates retry)
-	instanceID2, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID2, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
@@ -1396,12 +1396,12 @@ func TestJobCloudAttempts(t *testing.T) {
 	if _, err := CreateAttempt(database, jobID, "", nil, StatusQueued); err != nil {
 		t.Fatalf("create retry attempt: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID2); err != nil {
+	if err := SetJobLaunchID(database, jobID, instanceID2); err != nil {
 		t.Fatalf("set job cloud instance 2: %v", err)
 	}
 
 	// Should now have 2 attempts
-	attempts, err = GetJobCloudAttempts(database, jobID)
+	attempts, err = GetLaunchAttempts(database, jobID)
 	if err != nil {
 		t.Fatalf("get attempts: %v", err)
 	}
@@ -1410,39 +1410,39 @@ func TestJobCloudAttempts(t *testing.T) {
 	}
 }
 
-func TestJobCloudAttemptTriggersSyncJobAssignment(t *testing.T) {
+func TestLaunchAttemptTriggersSyncJobAssignment(t *testing.T) {
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	job, err := GetJobByID(database, jobID)
 	if err != nil {
 		t.Fatalf("GetJobByID(after assignment): %v", err)
 	}
-	if job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
-		t.Fatalf("cloud_instance_id = %v, want %d", job.CloudInstanceID, instanceID)
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d", job.LaunchID, instanceID)
 	}
 	if job.Host != "" {
 		t.Fatalf("host = %q, want empty", job.Host)
 	}
 
-	if err := CloseJobCloudAttempt(database, jobID, AttemptOutcomeFailed); err != nil {
-		t.Fatalf("CloseJobCloudAttempt: %v", err)
+	if err := CloseLaunchAttempt(database, jobID, AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseLaunchAttempt: %v", err)
 	}
 
 	job, err = GetJobByID(database, jobID)
@@ -1451,8 +1451,8 @@ func TestJobCloudAttemptTriggersSyncJobAssignment(t *testing.T) {
 	}
 	// The view reads cloud_instance_id from the latest attempt. A closed attempt
 	// retains its cloud_instance_id (it ran on that instance).
-	if job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
-		t.Fatalf("cloud_instance_id = %v, want %d (retained from closed attempt)", job.CloudInstanceID, instanceID)
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Fatalf("cloud_instance_id = %v, want %d (retained from closed attempt)", job.LaunchID, instanceID)
 	}
 }
 
@@ -1471,31 +1471,31 @@ func TestJobStatusChecksRejectInvalidValues(t *testing.T) {
 	}
 }
 
-func TestCloudInstanceStatusChecksRejectInvalidValues(t *testing.T) {
+func TestLaunchStatusChecksRejectInvalidValues(t *testing.T) {
 	database := SetupTestDB(t)
 
 	if _, err := database.Exec(
-		`INSERT INTO cloud_instances (status, provider, created_at) VALUES (?, ?, ?)`,
+		`INSERT INTO launches (status, provider, created_at) VALUES (?, ?, ?)`,
 		"bogus", "vastai", time.Now().Unix(),
 	); err == nil {
-		t.Fatal("expected invalid cloud_instances.status insert to fail")
+		t.Fatal("expected invalid launches.status insert to fail")
 	}
 }
 
-func TestCloudInstanceTerminationReasonChecksRejectInvalidValues(t *testing.T) {
+func TestLaunchTerminationReasonChecksRejectInvalidValues(t *testing.T) {
 	database := SetupTestDB(t)
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	if _, err := database.Exec(`UPDATE cloud_instances SET termination_reason = ? WHERE id = ?`, "bogus", instanceID); err == nil {
-		t.Fatal("expected invalid cloud_instances.termination_reason update to fail")
+	if _, err := database.Exec(`UPDATE launches SET termination_reason = ? WHERE id = ?`, "bogus", instanceID); err == nil {
+		t.Fatal("expected invalid launches.termination_reason update to fail")
 	}
 }
 
@@ -1576,10 +1576,10 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 		t.Fatalf("create legacy schema: %v", err)
 	}
 
-	if _, err := database.Exec(`INSERT INTO cloud_instances (id, status, provider, created_at) VALUES (1, ?, 'vastai', ?)`, CloudInstanceStatusRunning, time.Now().Unix()); err != nil {
+	if _, err := database.Exec(`INSERT INTO cloud_instances (id, status, provider, created_at) VALUES (1, ?, 'vastai', ?)`, LaunchStatusRunning, time.Now().Unix()); err != nil {
 		t.Fatalf("insert cloud instance: %v", err)
 	}
-	if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, command, status, tombstoned, cloud_instance_id) VALUES (1, ?, '/tmp/project', 'python train.py', ?, 0, NULL)`, CloudInstanceHost(1), StatusQueued); err != nil {
+	if _, err := database.Exec(`INSERT INTO jobs (id, host, working_dir, command, status, tombstoned, cloud_instance_id) VALUES (1, ?, '/tmp/project', 'python train.py', ?, 0, NULL)`, LaunchHost(1), StatusQueued); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
 	if _, err := database.Exec(`INSERT INTO job_cloud_attempts (job_id, cloud_instance_id, started_at) VALUES (1, 1, ?)`, time.Now().Unix()); err != nil {
@@ -1596,12 +1596,12 @@ func TestInitSchemaRepairsLegacyCloudPlacementAndLiveAttempts(t *testing.T) {
 	}
 	// After migration, cloud_instance_id is backfilled from the legacy
 	// job_cloud_attempts table into job_attempts.
-	if job.CloudInstanceID == nil || *job.CloudInstanceID != 1 {
-		t.Fatalf("cloud_instance_id = %v, want 1 after repair", job.CloudInstanceID)
+	if job.LaunchID == nil || *job.LaunchID != 1 {
+		t.Fatalf("cloud_instance_id = %v, want 1 after repair", job.LaunchID)
 	}
 }
 
-func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
+func TestResetLaunchJobsClosesAttempts(t *testing.T) {
 	database := SetupTestDB(t)
 
 	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
@@ -1609,8 +1609,8 @@ func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
 		t.Fatalf("record unplaced: %v", err)
 	}
 
-	instanceID, err := CreateCloudInstance(database, &CloudInstance{
-		Status:   CloudInstanceStatusRunning,
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
@@ -1622,12 +1622,12 @@ func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
 	if _, err := AssignJobHost(database, jobID, "cloud"); err != nil {
 		t.Fatalf("assign host: %v", err)
 	}
-	if err := SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 
 	// Reset should close attempts with "orphaned"
-	count, err := ResetCloudInstanceJobs(database, instanceID, "orphaned")
+	count, err := ResetLaunchJobs(database, instanceID, "orphaned")
 	if err != nil {
 		t.Fatalf("reset: %v", err)
 	}
@@ -1635,7 +1635,7 @@ func TestResetCloudInstanceJobsClosesAttempts(t *testing.T) {
 		t.Errorf("reset count = %d, want 1", count)
 	}
 
-	attempts, err := GetJobCloudAttempts(database, jobID)
+	attempts, err := GetLaunchAttempts(database, jobID)
 	if err != nil {
 		t.Fatalf("get attempts: %v", err)
 	}

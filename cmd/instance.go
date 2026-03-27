@@ -143,15 +143,15 @@ func newR2ClientFromConfig() (*r2.Client, error) {
 }
 
 // getGraceInstance fetches a cloud instance and verifies it is in grace period.
-func getGraceInstance(database *sql.DB, instanceID int64) (*db.CloudInstance, error) {
-	ci, err := db.GetCloudInstance(database, instanceID)
+func getGraceInstance(database *sql.DB, instanceID int64) (*db.Launch, error) {
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("get instance: %w", err)
 	}
 	if ci == nil {
 		return nil, fmt.Errorf("instance %d not found", instanceID)
 	}
-	if ci.Status != db.CloudInstanceStatusGrace {
+	if ci.Status != db.LaunchStatusGrace {
 		return nil, fmt.Errorf("instance %d is not in grace period (status: %s)", instanceID, ci.Status)
 	}
 	return ci, nil
@@ -164,7 +164,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	instances, err := db.ListCloudInstances(database)
+	instances, err := db.ListLaunches(database)
 	if err != nil {
 		return fmt.Errorf("list instances: %w", err)
 	}
@@ -174,7 +174,7 @@ func runInstanceList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	jobCounts, _ := db.GetCloudInstanceJobCounts(database)
+	jobCounts, _ := db.GetLaunchJobCounts(database)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "ID\tCAMPAIGN\tSTATUS\tPROVIDER\tGPU SPEC\tJOBS\tINSTANCE ID\tDATACENTER\tCREATED\tACTUAL COST\n")
@@ -231,7 +231,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid instance ID %q: %w", arg, err)
 		}
 
-		ci, err := db.GetCloudInstance(database, id)
+		ci, err := db.GetLaunch(database, id)
 		if err != nil {
 			return fmt.Errorf("get instance %d: %w", id, err)
 		}
@@ -248,7 +248,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if ci.TerminationReason != "" {
 			fmt.Printf("  Terminated: %s\n", ci.TerminationReason)
 		}
-		if ci.Status == db.CloudInstanceStatusCompleted {
+		if ci.Status == db.LaunchStatusCompleted {
 			switch {
 			case ci.ResultsVerified != nil && !*ci.ResultsVerified:
 				fmt.Printf("  Results: UNVERIFIED (upload was partial/failed)\n")
@@ -299,7 +299,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		obs := observeCloudInstance(ci, inst, time.Now())
+		obs := observeLaunch(ci, inst, time.Now())
 		if obs.Uptime != nil {
 			fmt.Printf("  Uptime:   %s\n", *obs.Uptime)
 		}
@@ -310,18 +310,18 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Rate:     $%.2f/hr\n", *obs.Rate)
 		}
 		// Jobs
-		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 		if err != nil {
 			return fmt.Errorf("get instance %d jobs: %w", ci.ID, err)
 		}
 		if liveUpdate == nil {
 			liveUpdate = &campaign.InstanceUpdate{
-				CloudInstance: ci,
-				Instance:      inst,
-				Jobs:          jobs,
+				Launch:   ci,
+				Instance: inst,
+				Jobs:     jobs,
 			}
 		} else {
-			liveUpdate.CloudInstance = ci
+			liveUpdate.Launch = ci
 			if liveUpdate.Instance == nil {
 				liveUpdate.Instance = inst
 			}
@@ -346,7 +346,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		outcomes, _ := db.GetAttemptOutcomesByInstance(database, ci.ID)
+		outcomes, _ := db.GetAttemptOutcomesByLaunch(database, ci.ID)
 		if len(jobs) > 0 {
 			fmt.Printf("  Jobs:\n")
 			printInstanceJob := func(j *db.Job) {
@@ -390,9 +390,9 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 }
 
 // walkDonorChain follows DonorInstanceID links to build a predecessor chain.
-func walkDonorChain(database *sql.DB, ci *db.CloudInstance) []*db.CloudInstance {
-	return collectDonorChain(ci, func(id int64) *db.CloudInstance {
-		donor, _ := db.GetCloudInstance(database, id)
+func walkDonorChain(database *sql.DB, ci *db.Launch) []*db.Launch {
+	return collectDonorChain(ci, func(id int64) *db.Launch {
+		donor, _ := db.GetLaunch(database, id)
 		return donor
 	})
 }
@@ -438,7 +438,7 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 		go func(instanceID int64) {
 			defer wg.Done()
 
-			ci, err := db.GetCloudInstance(database, instanceID)
+			ci, err := db.GetLaunch(database, instanceID)
 			if err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("get instance %d: %w", instanceID, err))
@@ -466,14 +466,14 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 				_ = client.DestroyInstance(providerInstID) // best-effort
 			}
 
-			if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCancelled, db.TerminationReasonCancelled); err != nil {
+			if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("update instance %d status: %w", instanceID, err))
 				mu.Unlock()
 				return
 			}
 
-			resetCount, err := db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeCancelled)
+			resetCount, err := db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeCancelled)
 			if err != nil {
 				mu.Lock()
 				errors = append(errors, fmt.Errorf("reset jobs for instance %d: %w", instanceID, err))
@@ -508,7 +508,7 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	ci, err := db.GetCloudInstance(database, id)
+	ci, err := db.GetLaunch(database, id)
 	if err != nil {
 		return fmt.Errorf("get instance: %w", err)
 	}
@@ -530,7 +530,7 @@ func runInstanceSSH(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("timed out waiting for instance")
 			case <-time.After(2 * time.Second):
 			}
-			ci, err = db.GetCloudInstance(database, id)
+			ci, err = db.GetLaunch(database, id)
 			if err != nil {
 				return fmt.Errorf("get instance: %w", err)
 			}
@@ -652,7 +652,7 @@ func runInstanceExtend(cmd *cobra.Command, args []string) error {
 	}
 
 	newDeadline := time.Now().Add(duration).Unix()
-	if err := db.ExtendCloudInstanceGrace(database, instanceID, newDeadline); err != nil {
+	if err := db.ExtendLaunchGrace(database, instanceID, newDeadline); err != nil {
 		return fmt.Errorf("update DB: %w", err)
 	}
 
@@ -696,10 +696,10 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 }
 
 func markReleasedInstanceFailed(database *sql.DB, instanceID int64) error {
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonJobFailure); err != nil {
 		return fmt.Errorf("update DB: %w", err)
 	}
-	if _, err := db.NormalizeTerminalCloudInstanceJobs(database, instanceID); err != nil {
+	if _, err := db.NormalizeTerminalLaunchJobs(database, instanceID); err != nil {
 		return fmt.Errorf("normalize jobs: %w", err)
 	}
 	return nil

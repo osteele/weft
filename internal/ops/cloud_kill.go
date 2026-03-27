@@ -13,8 +13,8 @@ import (
 // KillCloudJob kills a cloud-hosted job by SSHing into the cloud instance.
 // If inst is nil or terminal, it only updates the local DB status.
 // Returns true if the instance was already terminal (for caller messaging).
-func KillCloudJob(database *sql.DB, job *db.Job, inst *db.CloudInstance, cloudClient cloud.Client, timeout time.Duration) (wasTerminal bool, err error) {
-	if !job.IsCloudJob() {
+func KillCloudJob(database *sql.DB, job *db.Job, inst *db.Launch, cloudClient cloud.Client, timeout time.Duration) (wasTerminal bool, err error) {
+	if !job.IsLaunchJob() {
 		return false, fmt.Errorf("job %d is not a cloud job", job.ID)
 	}
 

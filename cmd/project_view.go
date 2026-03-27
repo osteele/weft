@@ -13,7 +13,7 @@ import (
 type projectGroup struct {
 	Label       string
 	Directories []string
-	CloudInsts  []*db.CloudInstance
+	CloudInsts  []*db.Launch
 	Jobs        []*db.Job
 	Running     []*db.Job
 	Queued      []*db.Job
@@ -307,7 +307,7 @@ func renderProjectWatchPlain(groups []projectGroup, width int, now time.Time, re
 		if len(group.CloudInsts) > 0 {
 			b.WriteString("  Rental instances\n")
 			for _, inst := range group.CloudInsts {
-				b.WriteString(truncateDisplayWidth("    "+formatProjectCloudInstanceRow(inst, now), width))
+				b.WriteString(truncateDisplayWidth("    "+formatProjectLaunchRow(inst, now), width))
 				b.WriteString("\n")
 			}
 		}
@@ -334,7 +334,7 @@ func formatProjectWatchRow(job *db.Job, bucket string, now time.Time) string {
 	return fmt.Sprintf("#%-5d %-16s %-12s %-14s %-12s %s", job.ID, status, host, dir, when, desc)
 }
 
-func formatProjectCloudInstanceRow(inst *db.CloudInstance, now time.Time) string {
+func formatProjectLaunchRow(inst *db.Launch, now time.Time) string {
 	if inst == nil {
 		return ""
 	}
@@ -342,7 +342,7 @@ func formatProjectCloudInstanceRow(inst *db.CloudInstance, now time.Time) string
 	if label := inst.GraceStatusLabel(); label != "" {
 		status = label
 	}
-	metrics := formatCloudInstanceMetricsInline(observeCloudInstance(inst, nil, now))
+	metrics := formatLaunchMetricsInline(observeLaunch(inst, nil, now))
 	if metrics == "" {
 		return fmt.Sprintf("instance %-5d %-24s %s", inst.ID, inst.DisplayGPUSpec(), status)
 	}

@@ -67,7 +67,7 @@ func ComputeJobState(jobs []*db.Job) JobState {
 
 // CheckInstanceParams holds all the pre-fetched state needed to evaluate an instance.
 type CheckInstanceParams struct {
-	CI             *db.CloudInstance
+	CI             *db.Launch
 	ProviderInst   *cloud.Instance
 	ProviderErr    error
 	R2Client       *r2.Client
@@ -95,10 +95,10 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 1. Grace expiry: deadline has passed
-	if ci.Status == db.CloudInstanceStatusGrace && ci.GraceDeadline != nil && p.Now.Unix() > *ci.GraceDeadline {
+	if ci.Status == db.LaunchStatusGrace && ci.GraceDeadline != nil && p.Now.Unix() > *ci.GraceDeadline {
 		return InstanceAction{
 			Kind:              ActionGraceExpired,
-			TerminalStatus:    db.CloudInstanceStatusFailed,
+			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: db.TerminationReasonJobFailure,
 			StallMessage:      "grace period expired — terminating instance",
 			DestroyProvider:   true,
@@ -108,14 +108,14 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 2. Donor completion
-	if ci.InstanceRole == "donor" && ci.Status == db.CloudInstanceStatusRunning && p.R2Client != nil {
+	if ci.InstanceRole == "donor" && ci.Status == db.LaunchStatusRunning && p.R2Client != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		exists, _ := p.R2Client.ObjectExists(ctx, r2keys.DonorReady(ci.ID))
 		cancel()
 		if exists {
 			return InstanceAction{
 				Kind:              ActionDonorComplete,
-				TerminalStatus:    db.CloudInstanceStatusCompleted,
+				TerminalStatus:    db.LaunchStatusCompleted,
 				TerminationReason: db.TerminationReasonCompleted,
 				DestroyProvider:   true,
 			}
@@ -135,7 +135,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		if age > maxEmptyStatusTime {
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
-				TerminalStatus:    db.CloudInstanceStatusFailed,
+				TerminalStatus:    db.LaunchStatusFailed,
 				TerminationReason: db.TerminationReasonInfraFailure,
 				StallMessage:      "provider instance has empty status — terminating",
 				DestroyProvider:   true,
@@ -154,7 +154,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		if age > maxPreRunningStatusTime {
 			return InstanceAction{
 				Kind:              ActionEmptyStatusTimeout,
-				TerminalStatus:    db.CloudInstanceStatusFailed,
+				TerminalStatus:    db.LaunchStatusFailed,
 				TerminationReason: db.TerminationReasonInfraFailure,
 				StallMessage:      fmt.Sprintf("provider instance stuck in %q status — terminating", p.ProviderInst.Status),
 				DestroyProvider:   true,
@@ -165,7 +165,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 5. Bootstrap stall: instance running but no job progress after timeout
-	if ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
+	if ci.Status == db.LaunchStatusRunning && ci.LaunchedAt != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
 		elapsed := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
 
 		if elapsed >= bootstrapWarnTimeout {
@@ -174,7 +174,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 			if hasR2CompletionMarker(p.R2Client, ci.ID) {
 				return InstanceAction{
 					Kind:            ActionBootstrapComplete,
-					TerminalStatus:  db.CloudInstanceStatusCompleted,
+					TerminalStatus:  db.LaunchStatusCompleted,
 					StallMessage:    "instance completed but self-destruct failed — cleaning up",
 					DestroyProvider: true,
 				}
@@ -182,7 +182,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 			if elapsed >= bootstrapTerminateTimeout {
 				return InstanceAction{
 					Kind:              ActionBootstrapStalled,
-					TerminalStatus:    db.CloudInstanceStatusFailed,
+					TerminalStatus:    db.LaunchStatusFailed,
 					TerminationReason: db.TerminationReasonBootstrapTimeout,
 					StallMessage:      "bootstrap timeout — terminating instance, jobs reset to queued",
 					DestroyProvider:   true,
@@ -198,7 +198,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 6. Stale heartbeat (display-only warning — the reconciler's probe logic is separate)
-	if p.HeartbeatAge > heartbeatStaleThreshold && ci.Status == db.CloudInstanceStatusRunning {
+	if p.HeartbeatAge > heartbeatStaleThreshold && ci.Status == db.LaunchStatusRunning {
 		return InstanceAction{
 			Kind:         ActionDisplayOnly,
 			StallMessage: "heartbeat stale",
@@ -206,11 +206,11 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 7. Failed self-destruct: all jobs finished but instance still running
-	if ci.Status == db.CloudInstanceStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal && p.JobState.LatestJobEnd > 0 {
+	if ci.Status == db.LaunchStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal && p.JobState.LatestJobEnd > 0 {
 		if p.Now.Sub(time.Unix(p.JobState.LatestJobEnd, 0)) > 2*time.Minute {
 			return InstanceAction{
 				Kind:            ActionSelfDestructFailed,
-				TerminalStatus:  db.CloudInstanceStatusCompleted,
+				TerminalStatus:  db.LaunchStatusCompleted,
 				StallMessage:    "all jobs finished but self-destruct failed — cleaning up",
 				DestroyProvider: true,
 			}
@@ -219,38 +219,38 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 
 	// 8. Provider dead detection (with hysteresis)
 	// Skip grace-period instances — a transient API failure shouldn't kill the session.
-	if p.ProviderErr == nil && isProviderTerminal(p.ProviderInst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.CloudInstanceStatusGrace {
+	if p.ProviderErr == nil && isProviderTerminal(p.ProviderInst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
 		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.Now)
 	}
 
 	return InstanceAction{Kind: ActionNone}
 }
 
-func (r *Reconciler) checkTerminationIntent(ci *db.CloudInstance, inst *cloud.Instance, intent *instanceintent.Marker) InstanceAction {
+func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance, intent *instanceintent.Marker) InstanceAction {
 	if intent == nil {
 		return InstanceAction{Kind: ActionNone}
 	}
 
 	reason := intent.TerminationReason
 	switch intent.TerminalStatus {
-	case db.CloudInstanceStatusCompleted:
+	case db.LaunchStatusCompleted:
 		if reason == "" {
 			reason = db.TerminationReasonCompleted
 		}
 		return InstanceAction{
 			Kind:              ActionTerminationIntent,
-			TerminalStatus:    db.CloudInstanceStatusCompleted,
+			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: reason,
 			DestroyProvider:   !isProviderTerminal(inst),
 			AttemptOutcome:    db.AttemptOutcomeCompleted,
 		}
-	case db.CloudInstanceStatusFailed:
+	case db.LaunchStatusFailed:
 		if reason == "" {
 			reason = db.TerminationReasonJobFailure
 		}
 		return InstanceAction{
 			Kind:              ActionTerminationIntent,
-			TerminalStatus:    db.CloudInstanceStatusFailed,
+			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: reason,
 			DestroyProvider:   !isProviderTerminal(inst),
 			ResetJobs:         true,
@@ -261,7 +261,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.CloudInstance, inst *cloud.In
 	}
 }
 
-func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instance, r2Client *r2.Client, now time.Time) InstanceAction {
+func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Client *r2.Client, now time.Time) InstanceAction {
 	// Check R2 for completion marker before assuming failure.
 	if hasR2CompletionMarker(r2Client, ci.ID) {
 		r.mu.Lock()
@@ -269,7 +269,7 @@ func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instanc
 		r.mu.Unlock()
 		return InstanceAction{
 			Kind:              ActionProviderDead,
-			TerminalStatus:    db.CloudInstanceStatusCompleted,
+			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: db.TerminationReasonCompleted,
 			AttemptOutcome:    db.AttemptOutcomeCompleted,
 		}
@@ -317,7 +317,7 @@ func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instanc
 
 	return InstanceAction{
 		Kind:              ActionProviderDead,
-		TerminalStatus:    db.CloudInstanceStatusFailed,
+		TerminalStatus:    db.LaunchStatusFailed,
 		TerminationReason: reason,
 		ResetJobs:         true,
 		AttemptOutcome:    db.AttemptOutcomeOrphaned,
@@ -327,7 +327,7 @@ func (r *Reconciler) checkProviderDead(ci *db.CloudInstance, inst *cloud.Instanc
 // ExecuteAction performs the side effects described by an InstanceAction: destroying
 // the provider instance, updating DB status, and resetting/closing job attempts.
 // Returns (reconciled, terminated).
-func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.CloudInstance, action InstanceAction) (bool, bool) {
+func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action InstanceAction) (bool, bool) {
 	if action.Kind == ActionNone || action.Kind == ActionDisplayOnly {
 		return false, false
 	}
@@ -341,20 +341,20 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.CloudInstance, 
 	}
 
 	if action.TerminalStatus != "" {
-		if err := db.UpdateCloudInstanceStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason); err != nil {
+		if err := db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason); err != nil {
 			log.Printf("reconcile: update instance %d status to %s: %v", ci.ID, action.TerminalStatus, err)
 			return false, false
 		}
 	}
 
 	if action.ResetJobs {
-		if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, action.AttemptOutcome); err != nil {
+		if resetCount, err := db.ResetLaunchJobs(database, ci.ID, action.AttemptOutcome); err != nil {
 			log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
 		} else if resetCount > 0 {
 			log.Printf("reconcile: reset %d jobs from instance %d to unplaced", resetCount, ci.ID)
 		}
-	} else if action.AttemptOutcome != "" && action.TerminalStatus == db.CloudInstanceStatusCompleted {
-		if err := db.CloseJobCloudAttemptsByInstance(database, ci.ID, action.AttemptOutcome); err != nil {
+	} else if action.AttemptOutcome != "" && action.TerminalStatus == db.LaunchStatusCompleted {
+		if err := db.CloseLaunchAttempts(database, ci.ID, action.AttemptOutcome); err != nil {
 			log.Printf("reconcile: close attempts for instance %d: %v", ci.ID, err)
 		}
 	}

@@ -28,7 +28,7 @@ func TestMatchJobToInstance_GPUClass(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			job := &db.Job{GPUClass: tt.jobClass}
 			cap := InstanceCapacity{
-				Instance: &db.CloudInstance{
+				Instance: &db.Launch{
 					GPUClass:        tt.instClass,
 					ResolvedGPUName: tt.instResolved,
 					GPUMemGB:        80,
@@ -63,7 +63,7 @@ func TestMatchJobToInstance_GPUMemory(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			job := &db.Job{GPUMemGB: tt.jobMemGB}
 			cap := InstanceCapacity{
-				Instance:   &db.CloudInstance{GPUMemGB: tt.instMemGB},
+				Instance:   &db.Launch{GPUMemGB: tt.instMemGB},
 				DiskFreeGB: 100,
 			}
 			got, reason := MatchJobToInstance(job, cap)
@@ -92,7 +92,7 @@ func TestMatchJobToInstance_DiskCompatibility(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			job := &db.Job{Inputs: tt.jobInputs}
 			cap := InstanceCapacity{
-				Instance:          &db.CloudInstance{DiskGB: tt.instDiskGB},
+				Instance:          &db.Launch{DiskGB: tt.instDiskGB},
 				ProvisionedInputs: tt.provisionedInputs,
 				DiskFreeGB:        tt.diskFreeGB,
 			}
@@ -109,7 +109,7 @@ func TestMatchJobToInstance_GraceDeadline(t *testing.T) {
 
 	// Grace with enough time remaining
 	cap := InstanceCapacity{
-		Instance:       &db.CloudInstance{Status: db.CloudInstanceStatusGrace},
+		Instance:       &db.Launch{Status: db.LaunchStatusGrace},
 		GraceRemaining: 10 * time.Minute,
 		DiskFreeGB:     50,
 	}
@@ -139,9 +139,9 @@ func TestRankForJob(t *testing.T) {
 	}
 
 	graceInstance := InstanceCapacity{
-		Instance: &db.CloudInstance{
+		Instance: &db.Launch{
 			ID:       1,
-			Status:   db.CloudInstanceStatusGrace,
+			Status:   db.LaunchStatusGrace,
 			GPUMemGB: 80,
 		},
 		GraceRemaining:    10 * time.Minute,
@@ -150,9 +150,9 @@ func TestRankForJob(t *testing.T) {
 	}
 
 	runningInstance := InstanceCapacity{
-		Instance: &db.CloudInstance{
+		Instance: &db.Launch{
 			ID:       2,
-			Status:   db.CloudInstanceStatusRunning,
+			Status:   db.LaunchStatusRunning,
 			GPUMemGB: 80,
 		},
 		ProvisionedInputs: []string{"hf:model-a", "hf:model-b"},
@@ -197,29 +197,29 @@ func TestSubtractInputs(t *testing.T) {
 func TestFindReusableInstancesExcludesActiveTerminationIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	runningID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	runningID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance(running): %v", err)
+		t.Fatalf("CreateLaunch(running): %v", err)
 	}
-	terminatingID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	terminatingID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_3090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance(terminating): %v", err)
+		t.Fatalf("CreateLaunch(terminating): %v", err)
 	}
-	if err := db.UpdateCloudInstanceTerminationIntent(database, terminatingID, &instanceintent.Marker{
-		TerminalStatus:       db.CloudInstanceStatusCompleted,
+	if err := db.UpdateLaunchTerminationIntent(database, terminatingID, &instanceintent.Marker{
+		TerminalStatus:       db.LaunchStatusCompleted,
 		TerminationReason:    db.TerminationReasonCompleted,
 		RequestedAtUnix:      time.Now().Add(-30 * time.Second).Unix(),
 		DestroyStartedAtUnix: time.Now().Add(-20 * time.Second).Unix(),
 	}); err != nil {
-		t.Fatalf("UpdateCloudInstanceTerminationIntent: %v", err)
+		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
 	}
 
 	instances, err := FindReusableInstances(database)
@@ -238,24 +238,24 @@ func TestFindReusableInstancesExcludesActiveTerminationIntent(t *testing.T) {
 func TestFindReusableInstancesIncludesNormalGraceAndRunningInstances(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	runningID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	runningID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance(running): %v", err)
+		t.Fatalf("CreateLaunch(running): %v", err)
 	}
-	graceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusGrace,
+	graceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusGrace,
 		Provider: "vastai",
 		GPUSpec:  "RTX_3090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance(grace): %v", err)
+		t.Fatalf("CreateLaunch(grace): %v", err)
 	}
-	if err := db.SetCloudInstanceGraceStarted(database, graceID, time.Now().Add(10*time.Minute).Unix()); err != nil {
-		t.Fatalf("SetCloudInstanceGraceStarted: %v", err)
+	if err := db.SetLaunchGraceStarted(database, graceID, time.Now().Add(10*time.Minute).Unix()); err != nil {
+		t.Fatalf("SetLaunchGraceStarted: %v", err)
 	}
 
 	instances, err := FindReusableInstances(database)
@@ -278,9 +278,9 @@ func TestFindReusableInstancesIncludesNormalGraceAndRunningInstances(t *testing.
 func TestPlanReuse_JobIDOrder(t *testing.T) {
 	// Jobs with different GPU classes should still be assigned in ID order.
 	instances := []InstanceCapacity{{
-		Instance: &db.CloudInstance{
+		Instance: &db.Launch{
 			ID:       1,
-			Status:   db.CloudInstanceStatusGrace,
+			Status:   db.LaunchStatusGrace,
 			GPUMemGB: 80,
 		},
 		GraceRemaining: 30 * time.Minute,
@@ -311,21 +311,21 @@ func TestPlanReuse_JobIDOrder(t *testing.T) {
 func TestSubmitJobsToInstanceRejectsActiveTerminationIntent(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_3090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := db.UpdateCloudInstanceTerminationIntent(database, instanceID, &instanceintent.Marker{
-		TerminalStatus:       db.CloudInstanceStatusCompleted,
+	if err := db.UpdateLaunchTerminationIntent(database, instanceID, &instanceintent.Marker{
+		TerminalStatus:       db.LaunchStatusCompleted,
 		TerminationReason:    db.TerminationReasonCompleted,
 		RequestedAtUnix:      time.Now().Add(-35 * time.Second).Unix(),
 		DestroyStartedAtUnix: time.Now().Add(-25 * time.Second).Unix(),
 	}); err != nil {
-		t.Fatalf("UpdateCloudInstanceTerminationIntent: %v", err)
+		t.Fatalf("UpdateLaunchTerminationIntent: %v", err)
 	}
 
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")

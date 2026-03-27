@@ -9,8 +9,8 @@ import (
 func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusGrace,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusGrace,
 		Provider: "vastai",
 	})
 	if err != nil {
@@ -20,7 +20,7 @@ func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, jobID); err != nil {
@@ -31,12 +31,12 @@ func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 		t.Fatalf("markReleasedInstanceFailed: %v", err)
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 	if ci.TerminationReason != db.TerminationReasonJobFailure {
 		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, db.TerminationReasonJobFailure)
@@ -53,7 +53,7 @@ func TestMarkReleasedInstanceFailed_ResetsUnresolvedJobs(t *testing.T) {
 		t.Fatalf("job host = %q, want empty", job.Host)
 	}
 
-	outcomes, err := db.GetAttemptOutcomesByInstance(database, instanceID)
+	outcomes, err := db.GetAttemptOutcomesByLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get outcomes: %v", err)
 	}

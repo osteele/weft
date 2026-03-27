@@ -11,8 +11,8 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 )
 
-// cloudInstanceSelectColumns is the column list for SELECT queries on cloud_instances.
-const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, vastai_instance_id,
+// launchSelectColumns is the column list for SELECT queries on launches.
+const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 		max_spend_cents, max_time_seconds, actual_spend_cents,
 		created_at, ready_at, launched_at, ended_at,
 		resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
@@ -26,18 +26,18 @@ const cloudInstanceSelectColumns = `id, campaign_id, status, provider, gpu_spec,
 		results_verified,
 		machine_id`
 
-// CloudInstance status constants (same values used for both CloudInstance and Campaign).
+// Launch status constants (same values used for both Launch and Campaign).
 const (
-	CloudInstanceStatusPlanned   = "planned"
-	CloudInstanceStatusLaunching = "launching"
-	CloudInstanceStatusRunning   = "running"
-	CloudInstanceStatusGrace     = "grace"
-	CloudInstanceStatusCompleted = "completed"
-	CloudInstanceStatusFailed    = "failed"
-	CloudInstanceStatusCancelled = "canceled"
+	LaunchStatusPlanned   = "planned"
+	LaunchStatusLaunching = "launching"
+	LaunchStatusRunning   = "running"
+	LaunchStatusGrace     = "grace"
+	LaunchStatusCompleted = "completed"
+	LaunchStatusFailed    = "failed"
+	LaunchStatusCancelled = "canceled"
 )
 
-// Termination reason constants for CloudInstance.TerminationReason.
+// Termination reason constants for Launch.TerminationReason.
 const (
 	TerminationReasonCompleted        = "completed"
 	TerminationReasonPreempted        = "preempted"
@@ -54,8 +54,8 @@ const (
 // (preemption, infra failure, failed to launch) where retrying on a different
 // instance is likely to succeed. Returns false for job-level failures, disk
 // full, user cancellations, and completed instances.
-func IsRetryableTermination(ci *CloudInstance) bool {
-	if ci == nil || ci.Status != CloudInstanceStatusFailed {
+func IsRetryableTermination(ci *Launch) bool {
+	if ci == nil || ci.Status != LaunchStatusFailed {
 		return false
 	}
 	switch ci.TerminationReason {
@@ -70,8 +70,8 @@ func IsRetryableTermination(ci *CloudInstance) bool {
 	}
 }
 
-// CloudInstance represents a single cloud GPU deployment (e.g. one Vast.ai instance).
-type CloudInstance struct {
+// Launch represents a single cloud GPU deployment (e.g. one Vast.ai instance).
+type Launch struct {
 	ID                 int64
 	CampaignID         *int64
 	Status             string
@@ -128,7 +128,7 @@ type CloudInstance struct {
 
 // DisplayGPUSpec returns a human-readable GPU spec string, falling back to
 // GPUClass if GPUSpec is empty, and appending the resolved GPU name if known.
-func (c *CloudInstance) DisplayGPUSpec() string {
+func (c *Launch) DisplayGPUSpec() string {
 	spec := c.GPUSpec
 	if spec == "" {
 		spec = c.GPUClass
@@ -141,8 +141,8 @@ func (c *CloudInstance) DisplayGPUSpec() string {
 
 // GraceStatusLabel returns a human-readable label for the grace period status.
 // Returns empty string if the instance is not in grace status.
-func (c *CloudInstance) GraceStatusLabel() string {
-	if c.Status != CloudInstanceStatusGrace {
+func (c *Launch) GraceStatusLabel() string {
+	if c.Status != LaunchStatusGrace {
 		return ""
 	}
 	if c.GraceDeadline != nil {
@@ -156,15 +156,15 @@ func (c *CloudInstance) GraceStatusLabel() string {
 }
 
 // IsTerminal reports whether the instance is in a terminal status.
-func (c *CloudInstance) IsTerminal() bool {
-	return c.Status == CloudInstanceStatusCompleted ||
-		c.Status == CloudInstanceStatusFailed ||
-		c.Status == CloudInstanceStatusCancelled
+func (c *Launch) IsTerminal() bool {
+	return c.Status == LaunchStatusCompleted ||
+		c.Status == LaunchStatusFailed ||
+		c.Status == LaunchStatusCancelled
 }
 
 // HasActiveTerminationIntent reports whether the instance has started a
 // terminal self-destruct flow that has not yet succeeded.
-func (c *CloudInstance) HasActiveTerminationIntent() bool {
+func (c *Launch) HasActiveTerminationIntent() bool {
 	if c == nil || c.TerminationIntent == nil {
 		return false
 	}
@@ -172,7 +172,7 @@ func (c *CloudInstance) HasActiveTerminationIntent() bool {
 }
 
 // EffectiveProviderID returns ProviderInstanceID, falling back to VastaiInstanceID for legacy records.
-func (c *CloudInstance) EffectiveProviderID() string {
+func (c *Launch) EffectiveProviderID() string {
 	if c.ProviderInstanceID != "" {
 		return c.ProviderInstanceID
 	}
@@ -181,15 +181,15 @@ func (c *CloudInstance) EffectiveProviderID() string {
 
 // DisplayTerminationReason returns TerminationReason, falling back to Status
 // when the termination reason is empty.
-func (c *CloudInstance) DisplayTerminationReason() string {
+func (c *Launch) DisplayTerminationReason() string {
 	if c.TerminationReason != "" {
 		return c.TerminationReason
 	}
 	return c.Status
 }
 
-// CreateCloudInstance inserts a new cloud instance record and returns its ID.
-func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
+// CreateLaunch inserts a new cloud instance record and returns its ID.
+func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 	now := time.Now().Unix()
 
 	var provisionedInputsJSON *string
@@ -200,7 +200,7 @@ func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 	}
 
 	result, err := db.Exec(
-		`INSERT INTO cloud_instances (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
+		`INSERT INTO launches (campaign_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb,
 		 max_spend_cents, max_time_seconds, created_at,
 		 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		 inet_down_mbps, inet_up_mbps, cuda_version,
@@ -218,31 +218,31 @@ func CreateCloudInstance(db *sql.DB, c *CloudInstance) (int64, error) {
 	return result.LastInsertId()
 }
 
-// GetCloudInstance retrieves a cloud instance by ID.
-func GetCloudInstance(db *sql.DB, id int64) (*CloudInstance, error) {
+// GetLaunch retrieves a cloud instance by ID.
+func GetLaunch(db *sql.DB, id int64) (*Launch, error) {
 	row := db.QueryRow(
-		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE id = ?`, id,
+		`SELECT `+launchSelectColumns+` FROM launches WHERE id = ?`, id,
 	)
-	c, err := scanCloudInstanceFrom(row)
+	c, err := scanLaunchFrom(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	return c, err
 }
 
-// ListCloudInstances returns all cloud instances ordered by creation time descending.
-func ListCloudInstances(db *sql.DB) ([]*CloudInstance, error) {
+// ListLaunches returns all cloud instances ordered by creation time descending.
+func ListLaunches(db *sql.DB) ([]*Launch, error) {
 	rows, err := db.Query(
-		`SELECT ` + cloudInstanceSelectColumns + ` FROM cloud_instances ORDER BY created_at DESC`,
+		`SELECT ` + launchSelectColumns + ` FROM launches ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var instances []*CloudInstance
+	var instances []*Launch
 	for rows.Next() {
-		c, err := scanCloudInstanceFrom(rows)
+		c, err := scanLaunchFrom(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -251,41 +251,41 @@ func ListCloudInstances(db *sql.DB) ([]*CloudInstance, error) {
 	return instances, rows.Err()
 }
 
-// UpdateCloudInstanceStatus updates a cloud instance's status and optionally sets timestamps.
+// UpdateLaunchStatus updates a cloud instance's status and optionally sets timestamps.
 // For terminal statuses (completed, failed, canceled), an optional terminationReason
 // classifies why the instance ended (e.g. "preempted", "infra_failure").
-func UpdateCloudInstanceStatus(db *sql.DB, id int64, status string, terminationReason ...string) error {
+func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationReason ...string) error {
 	now := time.Now().Unix()
 	reason := ""
 	if len(terminationReason) > 0 {
 		reason = terminationReason[0]
 	}
 	switch status {
-	case CloudInstanceStatusRunning:
-		_, err := db.Exec(`UPDATE cloud_instances SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
+	case LaunchStatusRunning:
+		_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
 		return err
-	case CloudInstanceStatusCompleted, CloudInstanceStatusFailed, CloudInstanceStatusCancelled:
+	case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
 		if reason != "" {
-			_, err := db.Exec(`UPDATE cloud_instances SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
 			return err
 		}
-		_, err := db.Exec(`UPDATE cloud_instances SET status = ?, ended_at = ? WHERE id = ?`, status, now, id)
+		_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ? WHERE id = ?`, status, now, id)
 		return err
 	default:
-		_, err := db.Exec(`UPDATE cloud_instances SET status = ? WHERE id = ?`, status, id)
+		_, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ?`, status, id)
 		return err
 	}
 }
 
-// UpdateCloudInstanceResultsVerified sets the results_verified flag on a cloud instance.
-func UpdateCloudInstanceResultsVerified(db *sql.DB, id int64, verified bool) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET results_verified = ? WHERE id = ?`, verified, id)
+// UpdateLaunchResultsVerified sets the results_verified flag on a cloud instance.
+func UpdateLaunchResultsVerified(db *sql.DB, id int64, verified bool) error {
+	_, err := db.Exec(`UPDATE launches SET results_verified = ? WHERE id = ?`, verified, id)
 	return err
 }
 
-func UpdateCloudInstanceTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
+func UpdateLaunchTerminationIntent(db *sql.DB, id int64, marker *instanceintent.Marker) error {
 	if marker == nil {
-		_, err := db.Exec(`UPDATE cloud_instances SET termination_requested_at = NULL, termination_intent_json = NULL WHERE id = ?`, id)
+		_, err := db.Exec(`UPDATE launches SET termination_requested_at = NULL, termination_intent_json = NULL WHERE id = ?`, id)
 		return err
 	}
 
@@ -297,30 +297,29 @@ func UpdateCloudInstanceTerminationIntent(db *sql.DB, id int64, marker *instance
 	if requestedAt == 0 {
 		requestedAt = time.Now().Unix()
 	}
-	_, err = db.Exec(`UPDATE cloud_instances SET termination_requested_at = ?, termination_intent_json = ? WHERE id = ?`,
+	_, err = db.Exec(`UPDATE launches SET termination_requested_at = ?, termination_intent_json = ? WHERE id = ?`,
 		requestedAt, string(data), id)
 	return err
 }
 
-// SetCloudInstanceReadyAt records when the Vast.ai instance became ready.
-func SetCloudInstanceReadyAt(db *sql.DB, id int64) error {
+// SetLaunchReadyAt records when the Vast.ai instance became ready.
+func SetLaunchReadyAt(db *sql.DB, id int64) error {
 	now := time.Now().Unix()
-	_, err := db.Exec(`UPDATE cloud_instances SET ready_at = ? WHERE id = ?`, now, id)
+	_, err := db.Exec(`UPDATE launches SET ready_at = ? WHERE id = ?`, now, id)
 	return err
 }
 
-// SetCloudInstanceProviderID sets the provider-neutral instance ID for a cloud instance.
-// Also sets vastai_instance_id for backwards compatibility when the provider is vastai.
-func SetCloudInstanceProviderID(db *sql.DB, id int64, providerID string) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET provider_instance_id = ?, vastai_instance_id = ? WHERE id = ?`, providerID, providerID, id)
+// SetLaunchProviderID sets the provider-neutral instance ID for a cloud instance.
+func SetLaunchProviderID(db *sql.DB, id int64, providerID string) error {
+	_, err := db.Exec(`UPDATE launches SET provider_instance_id = ? WHERE id = ?`, providerID, id)
 	return err
 }
 
-// UpdateCloudInstanceOfferMetadata refreshes the offer-derived fields on a cloud
+// UpdateLaunchOfferMetadata refreshes the offer-derived fields on a cloud
 // instance row before a create-instance retry uses a replacement offer.
-func UpdateCloudInstanceOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) error {
+func UpdateLaunchOfferMetadata(database *sql.DB, id int64, offer cloud.Offer) error {
 	_, err := database.Exec(
-		`UPDATE cloud_instances
+		`UPDATE launches
 		 SET resolved_gpu_name = ?, cost_per_hour_cents = ?, num_gpus = ?, dl_perf = ?, reliability = ?,
 		     inet_down_mbps = ?, inet_up_mbps = ?, cuda_version = ?, disk_gb = ?
 		 WHERE id = ?`,
@@ -338,21 +337,21 @@ func UpdateCloudInstanceOfferMetadata(database *sql.DB, id int64, offer cloud.Of
 	return err
 }
 
-// SetCloudInstanceVastaiID sets the Vast.ai instance ID for a cloud instance.
-// Deprecated: use SetCloudInstanceProviderID instead.
-func SetCloudInstanceVastaiID(db *sql.DB, id int64, vastaiID string) error {
-	return SetCloudInstanceProviderID(db, id, vastaiID)
+// SetLaunchVastaiID sets the Vast.ai instance ID for a cloud instance.
+// Deprecated: use SetLaunchProviderID instead.
+func SetLaunchVastaiID(db *sql.DB, id int64, vastaiID string) error {
+	return SetLaunchProviderID(db, id, vastaiID)
 }
 
-// SetCloudInstanceDataCenter sets the data center/geolocation for a cloud instance.
-func SetCloudInstanceDataCenter(db *sql.DB, id int64, dc string) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET data_center = ? WHERE id = ?`, dc, id)
+// SetLaunchDataCenter sets the data center/geolocation for a cloud instance.
+func SetLaunchDataCenter(db *sql.DB, id int64, dc string) error {
+	_, err := db.Exec(`UPDATE launches SET data_center = ? WHERE id = ?`, dc, id)
 	return err
 }
 
-// SetCloudInstanceActualSpend updates the actual spend in cents.
-func SetCloudInstanceActualSpend(db *sql.DB, id int64, cents int) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET actual_spend_cents = ? WHERE id = ?`, cents, id)
+// SetLaunchActualSpend updates the actual spend in cents.
+func SetLaunchActualSpend(db *sql.DB, id int64, cents int) error {
+	_, err := db.Exec(`UPDATE launches SET actual_spend_cents = ? WHERE id = ?`, cents, id)
 	return err
 }
 
@@ -365,7 +364,7 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 	}
 
 	var current sql.NullString
-	err := database.QueryRow(`SELECT termination_reason FROM cloud_instances WHERE id = ?`, instanceID).Scan(&current)
+	err := database.QueryRow(`SELECT termination_reason FROM launches WHERE id = ?`, instanceID).Scan(&current)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -384,7 +383,7 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 			JOIN jobs j ON j.id = ja.job_id
 			WHERE j.tombstoned = 0
 			  AND ja.failure_reason = ?
-			  AND ja.cloud_instance_id = ?
+			  AND ja.launch_id = ?
 		)`,
 		TerminationReasonDiskFull, instanceID,
 	).Scan(&hasDiskFull)
@@ -396,7 +395,7 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 	}
 
 	_, err = database.Exec(
-		`UPDATE cloud_instances
+		`UPDATE launches
 		 SET termination_reason = ?
 		 WHERE id = ? AND termination_reason = ?`,
 		TerminationReasonDiskFull, instanceID, TerminationReasonJobFailure,
@@ -404,53 +403,53 @@ func RefineInstanceTerminationReason(database *sql.DB, instanceID int64) error {
 	return err
 }
 
-// SetCloudInstanceRole sets the instance role ("worker" or "donor").
-func SetCloudInstanceRole(db *sql.DB, id int64, role string) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET instance_role = ? WHERE id = ?`, role, id)
+// SetLaunchRole sets the instance role ("worker" or "donor").
+func SetLaunchRole(db *sql.DB, id int64, role string) error {
+	_, err := db.Exec(`UPDATE launches SET instance_role = ? WHERE id = ?`, role, id)
 	return err
 }
 
-// SetCloudInstanceDonorID sets the DB ID of the donor instance that seeded this worker.
-func SetCloudInstanceDonorID(db *sql.DB, id int64, donorID int64) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET donor_instance_id = ? WHERE id = ?`, donorID, id)
+// SetLaunchDonorID sets the DB ID of the donor instance that seeded this worker.
+func SetLaunchDonorID(db *sql.DB, id int64, donorID int64) error {
+	_, err := db.Exec(`UPDATE launches SET donor_instance_id = ? WHERE id = ?`, donorID, id)
 	return err
 }
 
-// SetCloudInstanceSeedDownloadSecs records the total download duration on a donor instance.
-func SetCloudInstanceSeedDownloadSecs(db *sql.DB, id int64, secs int) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET seed_download_secs = ? WHERE id = ?`, secs, id)
+// SetLaunchSeedDownloadSecs records the total download duration on a donor instance.
+func SetLaunchSeedDownloadSecs(db *sql.DB, id int64, secs int) error {
+	_, err := db.Exec(`UPDATE launches SET seed_download_secs = ? WHERE id = ?`, secs, id)
 	return err
 }
 
-// SetCloudInstanceSeedCopySecs records the copy-from-donor duration on a worker instance.
-func SetCloudInstanceSeedCopySecs(db *sql.DB, id int64, secs int) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET seed_copy_secs = ? WHERE id = ?`, secs, id)
+// SetLaunchSeedCopySecs records the copy-from-donor duration on a worker instance.
+func SetLaunchSeedCopySecs(db *sql.DB, id int64, secs int) error {
+	_, err := db.Exec(`UPDATE launches SET seed_copy_secs = ? WHERE id = ?`, secs, id)
 	return err
 }
 
-// CloudInstanceHost returns the synthetic host name for a cloud instance.
-// CloudInstanceHost returns the legacy synthetic host name used by older
-// records. New code should prefer CloudInstanceID and TargetKind helpers.
-func CloudInstanceHost(instanceID int64) string {
+// LaunchHost returns the synthetic host name for a cloud instance.
+// LaunchHost returns the legacy synthetic host name used by older
+// records. New code should prefer LaunchID and TargetKind helpers.
+func LaunchHost(instanceID int64) string {
 	return fmt.Sprintf("vastai:%d", instanceID)
 }
 
-// IsCloudHost reports whether a host string refers to a legacy synthetic
+// IsLaunchHost reports whether a host string refers to a legacy synthetic
 // rental host name (e.g. "vastai:123" or "runpod:456").
-func IsCloudHost(host string) bool {
+func IsLaunchHost(host string) bool {
 	return strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:")
 }
 
-// SetJobCloudInstanceID associates a job with a cloud instance and records the attempt.
+// SetJobLaunchID associates a job with a cloud instance and records the attempt.
 // New assignments clear jobs.host so cloud_instance_id remains the canonical
 // rental target while preserving legacy synthetic host reads.
-func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
+func SetJobLaunchID(db *sql.DB, jobID, instanceID int64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	// Update attempt's cloud_instance_id
-	if err := SetAttemptCloudInstanceID(tx, jobID, instanceID); err != nil {
+	if err := SetAttemptLaunchID(tx, jobID, instanceID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -461,7 +460,7 @@ func SetJobCloudInstanceID(db *sql.DB, jobID, instanceID int64) error {
 	// Mark any previous cloud attempts as superseded
 	if _, err := tx.Exec(
 		`UPDATE job_attempts SET cloud_outcome = ?
-		 WHERE job_id = ? AND cloud_instance_id IS NOT NULL AND end_time IS NOT NULL AND cloud_outcome IS NULL`,
+		 WHERE job_id = ? AND launch_id IS NOT NULL AND end_time IS NOT NULL AND cloud_outcome IS NULL`,
 		AttemptOutcomeSuperseded, jobID,
 	); err != nil {
 		tx.Rollback()
@@ -476,25 +475,25 @@ func SetJobCampaignIndex(db *sql.DB, jobID int64, index int) error {
 	return err
 }
 
-// GetCloudInstanceJobs returns all jobs associated with a cloud instance.
-func GetCloudInstanceJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
-	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE cloud_instance_id = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
+// GetLaunchJobs returns all jobs associated with a cloud instance.
+func GetLaunchJobs(db *sql.DB, instanceID int64) ([]*Job, error) {
+	query := fmt.Sprintf(`SELECT %s FROM job_status WHERE launch_id = ? AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns)
 	return queryJobs(db, query, instanceID)
 }
 
-// GetCloudInstanceJobsIncludingAttempts returns jobs currently associated with a
+// GetLaunchJobsIncludingAttempts returns jobs currently associated with a
 // cloud instance, jobs with an open cloud attempt on that instance, or jobs
 // that only have historical cloud attempt records for it. This is useful for
-// display purposes: after ResetCloudInstanceJobs clears cloud_instance_id on
+// display purposes: after ResetLaunchJobs clears cloud_instance_id on
 // re-queued jobs, those jobs are still visible via the job_cloud_attempts
 // table.
-func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job, error) {
+func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job, error) {
 	// Jobs with a campaign_job_index (the launched jobs) sort by that index;
 	// historical-only jobs (no index) follow. Within each group, sort by id.
 	// membership_rank is a final tiebreaker so the current row wins over the
 	// historical row for the same job when deduplicating below.
 	query := fmt.Sprintf(`SELECT %s FROM cloud_instance_job_membership
-		WHERE membership_cloud_instance_id = ?
+		WHERE membership_launch_id = ?
 		  AND tombstoned = 0
 		ORDER BY
 			CASE WHEN campaign_job_index IS NOT NULL THEN 0 ELSE 1 END ASC,
@@ -522,12 +521,12 @@ func GetCloudInstanceJobsIncludingAttempts(database *sql.DB, instanceID int64) (
 	// this instance rather than the job's current global status.
 	var historical []*Job
 	for _, job := range result {
-		if job.CloudInstanceID == nil || *job.CloudInstanceID != instanceID {
+		if job.LaunchID == nil || *job.LaunchID != instanceID {
 			historical = append(historical, job)
 		}
 	}
 	if len(historical) > 0 {
-		outcomes, err := GetAttemptOutcomesByInstance(database, instanceID)
+		outcomes, err := GetAttemptOutcomesByLaunch(database, instanceID)
 		if err != nil {
 			return nil, fmt.Errorf("get attempt outcomes: %w", err)
 		}
@@ -600,23 +599,23 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	return true, nil
 }
 
-// ResetCloudInstanceJobs resets non-terminal jobs in a cloud instance back to
+// ResetLaunchJobs resets non-terminal jobs in a cloud instance back to
 // unplaced (queued with empty host) and clears their instance association.
 // Records the attempt outcome before resetting. Returns the number of jobs reset.
-func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) (int64, error) {
+func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64, error) {
 	tx, err := database.Begin()
 	if err != nil {
 		return 0, err
 	}
-	ci, err := scanCloudInstanceFrom(tx.QueryRow(`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE id = ?`, instanceID))
+	ci, err := scanLaunchFrom(tx.QueryRow(`SELECT `+launchSelectColumns+` FROM launches WHERE id = ?`, instanceID))
 	if err != nil && err != sql.ErrNoRows {
 		tx.Rollback()
 		return 0, err
 	}
-	placementReasons := encodeStringSlice(cloudResetPlacementReasons(ci, outcome))
+	placementReasons := encodeStringSlice(launchResetPlacementReasons(ci, outcome))
 
 	jobs, err := queryJobsTx(tx,
-		fmt.Sprintf(`SELECT %s FROM job_status WHERE cloud_instance_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
+		fmt.Sprintf(`SELECT %s FROM job_status WHERE launch_id = ? AND status NOT IN (?, ?, ?, ?, ?, ?) AND tombstoned = 0 ORDER BY id ASC`, jobSelectColumns),
 		instanceID,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
@@ -684,18 +683,18 @@ func ResetCloudInstanceJobs(database *sql.DB, instanceID int64, outcome string) 
 	return n, nil
 }
 
-func cloudResetPlacementReasons(ci *CloudInstance, outcome string) []string {
+func launchResetPlacementReasons(ci *Launch, outcome string) []string {
 	if ci == nil {
 		return []string{"returned from cloud instance to unplaced queue"}
 	}
 
 	switch ci.Status {
-	case CloudInstanceStatusFailed:
+	case LaunchStatusFailed:
 		if ci.TerminationReason != "" {
 			return []string{fmt.Sprintf("cloud instance %d failed (%s)", ci.ID, ci.TerminationReason)}
 		}
 		return []string{fmt.Sprintf("cloud instance %d failed", ci.ID)}
-	case CloudInstanceStatusCancelled:
+	case LaunchStatusCancelled:
 		return []string{fmt.Sprintf("cloud instance %d was canceled", ci.ID)}
 	default:
 		if outcome != "" {
@@ -719,12 +718,12 @@ func ResetOrphanedCloudJobs(database *sql.DB) (int64, error) {
 		SELECT id, host FROM job_status js
 		WHERE status IN (?, ?) AND host LIKE 'vastai:%' AND tombstoned = 0
 		AND NOT EXISTS (
-			SELECT 1 FROM cloud_instances ci
+			SELECT 1 FROM launches ci
 			WHERE ci.id = CAST(SUBSTR(js.host, 8) AS INTEGER)
 			AND ci.status IN (?, ?, ?, ?)
 		)`,
 		StatusQueued, StatusRunning,
-		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace, CloudInstanceStatusCompleted,
+		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusGrace, LaunchStatusCompleted,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -787,9 +786,9 @@ func orphanedCloudPlacementReasons(host string) []string {
 	return []string{"cloud instance no longer active; job returned to unplaced queue"}
 }
 
-// GetCloudInstanceJobCounts returns a map from cloud instance ID to job count.
-func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
-	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM job_status WHERE cloud_instance_id IS NOT NULL AND tombstoned = 0 GROUP BY cloud_instance_id`)
+// GetLaunchJobCounts returns a map from cloud instance ID to job count.
+func GetLaunchJobCounts(db *sql.DB) (map[int64]int, error) {
+	rows, err := db.Query(`SELECT launch_id, COUNT(*) FROM job_status WHERE launch_id IS NOT NULL AND tombstoned = 0 GROUP BY launch_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -806,15 +805,15 @@ func GetCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 	return counts, rows.Err()
 }
 
-// GetActiveCloudInstanceJobCounts returns a map from cloud instance ID to the
+// GetActiveLaunchJobCounts returns a map from cloud instance ID to the
 // number of non-terminal jobs still assigned to that instance.
-func GetActiveCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
-	rows, err := db.Query(`SELECT cloud_instance_id, COUNT(*) FROM job_status
-		WHERE cloud_instance_id IS NOT NULL
+func GetActiveLaunchJobCounts(db *sql.DB) (map[int64]int, error) {
+	rows, err := db.Query(`SELECT launch_id, COUNT(*) FROM job_status
+		WHERE launch_id IS NOT NULL
 		  AND tombstoned = 0
 		  AND effective_target_kind = ?
 		  AND status NOT IN (?, ?, ?, ?, ?, ?)
-		GROUP BY cloud_instance_id`,
+		GROUP BY launch_id`,
 		string(JobTargetRentalInstance),
 		StatusCompleted, StatusDead, StatusFailed, StatusKilled, StatusCanceled, StatusDraft,
 	)
@@ -835,18 +834,18 @@ func GetActiveCloudInstanceJobCounts(db *sql.DB) (map[int64]int, error) {
 }
 
 // GetCampaignInstances returns all cloud instances for a campaign.
-func GetCampaignInstances(db *sql.DB, campaignID int64) ([]*CloudInstance, error) {
+func GetCampaignInstances(db *sql.DB, campaignID int64) ([]*Launch, error) {
 	rows, err := db.Query(
-		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE campaign_id = ? ORDER BY created_at ASC`, campaignID,
+		`SELECT `+launchSelectColumns+` FROM launches WHERE campaign_id = ? ORDER BY created_at ASC`, campaignID,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var instances []*CloudInstance
+	var instances []*Launch
 	for rows.Next() {
-		c, err := scanCloudInstanceFrom(rows)
+		c, err := scanLaunchFrom(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -860,10 +859,11 @@ type cloudInstanceScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
-	var c CloudInstance
+func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
+	var c Launch
 	var campaignID sql.NullInt64
-	var gpuSpec, gpuClass, vastaiInstanceID sql.NullString
+	var hostID sql.NullInt64
+	var gpuSpec, gpuClass sql.NullString
 	var gpuMemGB, maxSpend, maxTime, actualSpend sql.NullInt64
 	var readyAt, launchedAt, endedAt sql.NullInt64
 	var resolvedGPUName sql.NullString
@@ -884,8 +884,8 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	var machineID sql.NullString
 
 	err := s.Scan(
-		&c.ID, &campaignID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
-		&vastaiInstanceID, &maxSpend, &maxTime, &actualSpend,
+		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
+		&maxSpend, &maxTime, &actualSpend,
 		&c.CreatedAt, &readyAt, &launchedAt, &endedAt,
 		&resolvedGPUName, &costPerHourCents, &numGPUs, &dlPerf, &reliability,
 		&inetDown, &inetUp, &cudaVersion,
@@ -898,6 +898,7 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 		&resultsVerified,
 		&machineID,
 	)
+	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
 		return nil, err
 	}
@@ -913,9 +914,6 @@ func scanCloudInstanceFrom(s cloudInstanceScanner) (*CloudInstance, error) {
 	}
 	if gpuMemGB.Valid {
 		c.GPUMemGB = int(gpuMemGB.Int64)
-	}
-	if vastaiInstanceID.Valid {
-		c.VastaiInstanceID = vastaiInstanceID.String
 	}
 	if maxSpend.Valid {
 		c.MaxSpendCents = int(maxSpend.Int64)
@@ -1025,23 +1023,23 @@ const (
 	AttemptOutcomeSuperseded = "superseded"
 )
 
-// JobCloudAttempt records a single association between a job and a cloud instance.
-type JobCloudAttempt struct {
-	ID              int64
-	JobID           int64
-	CloudInstanceID int64
-	StartedAt       int64
-	EndedAt         *int64
-	Outcome         string // "completed", "failed", "canceled", "orphaned"
+// LaunchAttempt records a single association between a job and a cloud instance.
+type LaunchAttempt struct {
+	ID        int64
+	JobID     int64
+	LaunchID  int64
+	StartedAt int64
+	EndedAt   *int64
+	Outcome   string // "completed", "failed", "canceled", "orphaned"
 }
 
-// CloseJobCloudAttempt sets cloud_outcome on the latest cloud-associated attempt for a job.
-func CloseJobCloudAttempt(database *sql.DB, jobID int64, outcome string) error {
+// CloseLaunchAttempt sets cloud_outcome on the latest cloud-associated attempt for a job.
+func CloseLaunchAttempt(database *sql.DB, jobID int64, outcome string) error {
 	_, err := database.Exec(
 		`UPDATE job_attempts SET cloud_outcome = ?
 		 WHERE id = (
 			SELECT id FROM job_attempts
-			WHERE job_id = ? AND cloud_instance_id IS NOT NULL
+			WHERE job_id = ? AND launch_id IS NOT NULL
 			ORDER BY attempt_number DESC LIMIT 1
 		 )`,
 		outcome, jobID,
@@ -1049,33 +1047,33 @@ func CloseJobCloudAttempt(database *sql.DB, jobID int64, outcome string) error {
 	return err
 }
 
-// CloseJobCloudAttemptsByInstance sets cloud_outcome on all open attempts
+// CloseLaunchAttempts sets cloud_outcome on all open attempts
 // associated with the given cloud instance.
-func CloseJobCloudAttemptsByInstance(database *sql.DB, instanceID int64, outcome string) error {
+func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) error {
 	_, err := database.Exec(
 		`UPDATE job_attempts SET cloud_outcome = ?
-		 WHERE cloud_instance_id = ? AND end_time IS NULL`,
+		 WHERE launch_id = ? AND end_time IS NULL`,
 		outcome, instanceID,
 	)
 	return err
 }
 
-// CountJobCloudAttempts returns the number of cloud-associated attempts for a job.
-func CountJobCloudAttempts(database *sql.DB, jobID int64) (int, error) {
+// CountLaunchAttempts returns the number of cloud-associated attempts for a job.
+func CountLaunchAttempts(database *sql.DB, jobID int64) (int, error) {
 	var count int
 	err := database.QueryRow(
-		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND cloud_instance_id IS NOT NULL`,
+		`SELECT COUNT(*) FROM job_attempts WHERE job_id = ? AND launch_id IS NOT NULL`,
 		jobID,
 	).Scan(&count)
 	return count, err
 }
 
-// GetJobCloudAttempts returns the cloud attempt history for a job, ordered by start time.
-func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, error) {
+// GetLaunchAttempts returns the cloud attempt history for a job, ordered by start time.
+func GetLaunchAttempts(database *sql.DB, jobID int64) ([]LaunchAttempt, error) {
 	rows, err := database.Query(
-		`SELECT id, job_id, cloud_instance_id, COALESCE(queued_at, start_time, 0), end_time, cloud_outcome
+		`SELECT id, job_id, launch_id, COALESCE(queued_at, start_time, 0), end_time, cloud_outcome
 		 FROM job_attempts
-		 WHERE job_id = ? AND cloud_instance_id IS NOT NULL
+		 WHERE job_id = ? AND launch_id IS NOT NULL
 		 ORDER BY attempt_number ASC`,
 		jobID,
 	)
@@ -1084,12 +1082,12 @@ func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, erro
 	}
 	defer rows.Close()
 
-	var attempts []JobCloudAttempt
+	var attempts []LaunchAttempt
 	for rows.Next() {
-		var a JobCloudAttempt
+		var a LaunchAttempt
 		var endedAt sql.NullInt64
 		var outcome sql.NullString
-		if err := rows.Scan(&a.ID, &a.JobID, &a.CloudInstanceID, &a.StartedAt, &endedAt, &outcome); err != nil {
+		if err := rows.Scan(&a.ID, &a.JobID, &a.LaunchID, &a.StartedAt, &endedAt, &outcome); err != nil {
 			return nil, err
 		}
 		if endedAt.Valid {
@@ -1103,12 +1101,12 @@ func GetJobCloudAttempts(database *sql.DB, jobID int64) ([]JobCloudAttempt, erro
 	return attempts, rows.Err()
 }
 
-// GetAttemptOutcomesByInstance returns the cloud_outcome for each job attempt
+// GetAttemptOutcomesByLaunch returns the cloud_outcome for each job attempt
 // that ran on the given cloud instance. Returns map[jobID]outcome.
-func GetAttemptOutcomesByInstance(database *sql.DB, cloudInstanceID int64) (map[int64]string, error) {
+func GetAttemptOutcomesByLaunch(database *sql.DB, cloudInstanceID int64) (map[int64]string, error) {
 	rows, err := database.Query(
 		`SELECT job_id, cloud_outcome FROM job_attempts
-		 WHERE cloud_instance_id = ? AND cloud_outcome IS NOT NULL
+		 WHERE launch_id = ? AND cloud_outcome IS NOT NULL
 		 ORDER BY attempt_number ASC`,
 		cloudInstanceID,
 	)
@@ -1145,40 +1143,40 @@ func GetLatestAttemptOutcome(database *sql.DB, jobID int64) string {
 	return outcome.String
 }
 
-// SetCloudInstanceGracePeriod stores the configured grace period for a cloud instance.
-func SetCloudInstanceGracePeriod(db *sql.DB, id int64, seconds int) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET grace_period_seconds = ? WHERE id = ?`, seconds, id)
+// SetLaunchGracePeriod stores the configured grace period for a cloud instance.
+func SetLaunchGracePeriod(db *sql.DB, id int64, seconds int) error {
+	_, err := db.Exec(`UPDATE launches SET grace_period_seconds = ? WHERE id = ?`, seconds, id)
 	return err
 }
 
-// SetCloudInstanceGraceStarted transitions an instance to grace status with a deadline.
-func SetCloudInstanceGraceStarted(db *sql.DB, id int64, deadline int64) error {
+// SetLaunchGraceStarted transitions an instance to grace status with a deadline.
+func SetLaunchGraceStarted(db *sql.DB, id int64, deadline int64) error {
 	now := time.Now().Unix()
 	_, err := db.Exec(
-		`UPDATE cloud_instances SET status = ?, grace_started_at = ?, grace_deadline = ? WHERE id = ?`,
-		CloudInstanceStatusGrace, now, deadline, id,
+		`UPDATE launches SET status = ?, grace_started_at = ?, grace_deadline = ? WHERE id = ?`,
+		LaunchStatusGrace, now, deadline, id,
 	)
 	return err
 }
 
-// ExtendCloudInstanceGrace updates the grace deadline for an instance.
-func ExtendCloudInstanceGrace(db *sql.DB, id int64, newDeadline int64) error {
-	_, err := db.Exec(`UPDATE cloud_instances SET grace_deadline = ? WHERE id = ?`, newDeadline, id)
+// ExtendLaunchGrace updates the grace deadline for an instance.
+func ExtendLaunchGrace(db *sql.DB, id int64, newDeadline int64) error {
+	_, err := db.Exec(`UPDATE launches SET grace_deadline = ? WHERE id = ?`, newDeadline, id)
 	return err
 }
 
-// ListRecentlyTerminalCloudInstances returns cloud instances that reached a terminal status
+// ListRecentlyTerminalLaunches returns cloud instances that reached a terminal status
 // (failed, completed, canceled) within the last `since` duration and have a provider ID.
 // Used as a safety net to destroy leaked provider instances.
-func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) ([]*CloudInstance, error) {
+func ListRecentlyTerminalLaunches(database *sql.DB, since time.Duration) ([]*Launch, error) {
 	cutoff := time.Now().Add(-since).Unix()
 	rows, err := database.Query(
-		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances
+		`SELECT `+launchSelectColumns+` FROM launches
 		 WHERE status IN (?, ?, ?)
 		 AND ended_at >= ?
-		 AND (provider_instance_id != '' OR vastai_instance_id != '')
+		 AND provider_instance_id != ''
 		 ORDER BY ended_at DESC`,
-		CloudInstanceStatusFailed, CloudInstanceStatusCompleted, CloudInstanceStatusCancelled,
+		LaunchStatusFailed, LaunchStatusCompleted, LaunchStatusCancelled,
 		cutoff,
 	)
 	if err != nil {
@@ -1186,9 +1184,9 @@ func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) (
 	}
 	defer rows.Close()
 
-	var instances []*CloudInstance
+	var instances []*Launch
 	for rows.Next() {
-		c, err := scanCloudInstanceFrom(rows)
+		c, err := scanLaunchFrom(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1197,11 +1195,11 @@ func ListRecentlyTerminalCloudInstances(database *sql.DB, since time.Duration) (
 	return instances, rows.Err()
 }
 
-// NormalizeTerminalCloudInstanceJobs repairs unresolved jobs on a terminal cloud
+// NormalizeTerminalLaunchJobs repairs unresolved jobs on a terminal cloud
 // instance. Failed instances orphan active jobs; canceled instances cancel them.
 // Completed instances are left unchanged so result sync can still finalize them.
-func NormalizeTerminalCloudInstanceJobs(database *sql.DB, instanceID int64) (int64, error) {
-	ci, err := GetCloudInstance(database, instanceID)
+func NormalizeTerminalLaunchJobs(database *sql.DB, instanceID int64) (int64, error) {
+	ci, err := GetLaunch(database, instanceID)
 	if err != nil {
 		return 0, err
 	}
@@ -1210,29 +1208,29 @@ func NormalizeTerminalCloudInstanceJobs(database *sql.DB, instanceID int64) (int
 	}
 
 	switch ci.Status {
-	case CloudInstanceStatusFailed:
-		return ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeOrphaned)
-	case CloudInstanceStatusCancelled:
-		return ResetCloudInstanceJobs(database, instanceID, AttemptOutcomeCancelled)
+	case LaunchStatusFailed:
+		return ResetLaunchJobs(database, instanceID, AttemptOutcomeOrphaned)
+	case LaunchStatusCancelled:
+		return ResetLaunchJobs(database, instanceID, AttemptOutcomeCancelled)
 	default:
 		return 0, nil
 	}
 }
 
-// ResetJobsOnTerminalCloudInstances finds non-terminal jobs associated with
+// ResetJobsOnTerminalLaunches finds non-terminal jobs associated with
 // failed or canceled cloud instances and resets them to queued/unplaced.
 // Completed instances are intentionally skipped until result sync finalizes them.
 // This is a DB-only repair pass that doesn't require cloud provider clients.
-func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
+func ResetJobsOnTerminalLaunches(database *sql.DB) (int64, error) {
 	// Find non-success terminal instances that still have non-terminal jobs.
 	rows, err := database.Query(`
 		SELECT DISTINCT ci.id
-		FROM cloud_instances ci
-		JOIN job_status js ON js.cloud_instance_id = ci.id
+		FROM launches ci
+		JOIN job_status js ON js.launch_id = ci.id
 		WHERE ci.status IN (?, ?)
 		AND js.status NOT IN (?, ?, ?, ?, ?, ?)
 		AND js.tombstoned = 0`,
-		CloudInstanceStatusFailed, CloudInstanceStatusCancelled,
+		LaunchStatusFailed, LaunchStatusCancelled,
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {
@@ -1254,7 +1252,7 @@ func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
 
 	var total int64
 	for _, id := range instanceIDs {
-		n, err := NormalizeTerminalCloudInstanceJobs(database, id)
+		n, err := NormalizeTerminalLaunchJobs(database, id)
 		if err != nil {
 			return total, fmt.Errorf("normalize jobs on instance %d: %w", id, err)
 		}
@@ -1263,20 +1261,20 @@ func ResetJobsOnTerminalCloudInstances(database *sql.DB) (int64, error) {
 	return total, nil
 }
 
-// ListRunningCloudInstances returns all cloud instances with "running", "launching", or "grace" status.
-func ListRunningCloudInstances(database *sql.DB) ([]*CloudInstance, error) {
+// ListRunningLaunches returns all cloud instances with "running", "launching", or "grace" status.
+func ListRunningLaunches(database *sql.DB) ([]*Launch, error) {
 	rows, err := database.Query(
-		`SELECT `+cloudInstanceSelectColumns+` FROM cloud_instances WHERE status IN (?, ?, ?) ORDER BY created_at DESC`,
-		CloudInstanceStatusRunning, CloudInstanceStatusLaunching, CloudInstanceStatusGrace,
+		`SELECT `+launchSelectColumns+` FROM launches WHERE status IN (?, ?, ?) ORDER BY created_at DESC`,
+		LaunchStatusRunning, LaunchStatusLaunching, LaunchStatusGrace,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var instances []*CloudInstance
+	var instances []*Launch
 	for rows.Next() {
-		c, err := scanCloudInstanceFrom(rows)
+		c, err := scanLaunchFrom(rows)
 		if err != nil {
 			return nil, err
 		}

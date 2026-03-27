@@ -21,7 +21,7 @@ func SyncState(database *sql.DB, reconciler *campaign.Reconciler, clients []clou
 
 	result := Result{}
 	if len(clients) > 0 {
-		reconcileResult, err := reconciler.ReconcileCloudInstances(database, clients, r2Client)
+		reconcileResult, err := reconciler.ReconcileLaunches(database, clients, r2Client)
 		if err != nil {
 			log.Printf("reconcile: %v", err)
 		} else {

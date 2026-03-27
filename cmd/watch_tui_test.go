@@ -12,9 +12,9 @@ import (
 )
 
 func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
-	cloudInstance := &db.CloudInstance{
+	cloudInstance := &db.Launch{
 		ID:       5,
-		Status:   db.CloudInstanceStatusRunning,
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A100",
 	}
@@ -22,12 +22,12 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 	m := watchAllModel{
 		width:  120,
 		height: 20,
-		cloudInstances: []*db.CloudInstance{
+		cloudInstances: []*db.Launch{
 			cloudInstance,
 		},
 		instanceUpdates: map[int64]campaign.InstanceUpdate{
 			5: {
-				CloudInstance: cloudInstance,
+				Launch: cloudInstance,
 				Jobs: []*db.Job{
 					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
 					{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Project: "EXP-DELTA", Description: "eval model"},
@@ -72,15 +72,15 @@ func TestWatchAllModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 }
 
 func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
-	ci := &db.CloudInstance{
+	ci := &db.Launch{
 		ID:                 5,
-		Status:             db.CloudInstanceStatusRunning,
+		Status:             db.LaunchStatusRunning,
 		Provider:           "vastai",
 		ProviderInstanceID: "32734388",
 		GPUSpec:            "A100",
 	}
 	update := campaign.InstanceUpdate{
-		CloudInstance: ci,
+		Launch: ci,
 		Jobs: []*db.Job{
 			{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
 			{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/project-delta", Project: "EXP-DELTA", Description: "eval model"},
@@ -105,16 +105,16 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 }
 
 func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
-	ci := &db.CloudInstance{
+	ci := &db.Launch{
 		ID:                 111,
-		Status:             db.CloudInstanceStatusRunning,
+		Status:             db.LaunchStatusRunning,
 		Provider:           "vastai",
 		ProviderInstanceID: "32740493",
 		GPUSpec:            "A100",
 	}
 	update := campaign.InstanceUpdate{
-		CloudInstance: ci,
-		Instance:      &cloud.Instance{Status: "loading"},
+		Launch:   ci,
+		Instance: &cloud.Instance{Status: "loading"},
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
@@ -129,15 +129,15 @@ func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
 func TestFormatWatchInstanceBlockShowsObservedDBRunningPhase(t *testing.T) {
 	instanceID := int64(112)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:                 instanceID,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			Provider:           "vastai",
 			ProviderInstanceID: "32740494",
 			GPUSpec:            "A100",
 		},
 		Jobs: []*db.Job{
-			{ID: 203, Status: db.StatusRunning, CloudInstanceID: &instanceID, Description: "current"},
+			{ID: 203, Status: db.StatusRunning, LaunchID: &instanceID, Description: "current"},
 			{ID: 249, Status: db.StatusQueued, Description: "queued"},
 		},
 	}
@@ -150,9 +150,9 @@ func TestFormatWatchInstanceBlockShowsObservedDBRunningPhase(t *testing.T) {
 
 func TestFormatWatchInstanceBlockShowsProvisioningFallbackWithoutProviderID(t *testing.T) {
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       113,
-			Status:   db.CloudInstanceStatusLaunching,
+			Status:   db.LaunchStatusLaunching,
 			Provider: "vastai",
 			GPUSpec:  "A100",
 		},
@@ -169,19 +169,19 @@ func TestFormatWatchInstanceBlockShowsProvisioningFallbackWithoutProviderID(t *t
 
 func TestFormatWatchInstanceBlockShowsObservabilityDetails(t *testing.T) {
 	changedAt := time.Now().Add(-4 * time.Second)
-	ci := &db.CloudInstance{
+	ci := &db.Launch{
 		ID:                 106,
-		Status:             db.CloudInstanceStatusRunning,
+		Status:             db.LaunchStatusRunning,
 		Provider:           "vastai",
 		ProviderInstanceID: "32712486",
 		GPUSpec:            "A100",
 	}
 	update := campaign.InstanceUpdate{
-		CloudInstance:  ci,
+		Launch:         ci,
 		InstancePhase:  "uploading-results:88",
 		PhaseChangedAt: &changedAt,
 		TerminationIntent: &instanceintent.Marker{
-			TerminalStatus:  db.CloudInstanceStatusFailed,
+			TerminalStatus:  db.LaunchStatusFailed,
 			RequestedAtUnix: time.Now().Add(-2 * time.Second).Unix(),
 			DestroyAttempts: 2,
 			LastError:       "exit status 22",
@@ -216,9 +216,9 @@ func TestFormatWatchInstanceBlockShowsObservabilityDetails(t *testing.T) {
 
 func TestFormatWatchInstanceBlockShowsActualSpendWithoutProviderInstance(t *testing.T) {
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:               106,
-			Status:           db.CloudInstanceStatusRunning,
+			Status:           db.LaunchStatusRunning,
 			Provider:         "vastai",
 			ActualSpendCents: 1234,
 			GPUSpec:          "A100",
@@ -235,9 +235,9 @@ func TestFormatWatchInstanceBlockShowsDBHourlyCostFallback(t *testing.T) {
 	now := time.Unix(7200, 0)
 	launchedAt := int64(0)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:               107,
-			Status:           db.CloudInstanceStatusRunning,
+			Status:           db.LaunchStatusRunning,
 			Provider:         "vastai",
 			CostPerHourCents: 150,
 			LaunchedAt:       &launchedAt,
@@ -255,9 +255,9 @@ func TestFormatWatchInstanceBlockClampsPhaseDurationToInstanceUptime(t *testing.
 	now := time.Unix(1_700_000_000, 0)
 	launchedAt := now.Add(-2*time.Minute - 24*time.Second)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:                 142,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			Provider:           "vastai",
 			ProviderInstanceID: "32896734",
 			GPUSpec:            "A100 >=40GB",
@@ -283,9 +283,9 @@ func TestFormatWatchInstanceBlockUsesEndedAtForTerminalUptime(t *testing.T) {
 	launchedAt := int64(0)
 	endedAt := int64(3600)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:               108,
-			Status:           db.CloudInstanceStatusFailed,
+			Status:           db.LaunchStatusFailed,
 			Provider:         "vastai",
 			CostPerHourCents: 150,
 			LaunchedAt:       &launchedAt,
@@ -337,10 +337,10 @@ func TestWatchAllModelViewShowsCloudSummaryRate(t *testing.T) {
 	m := watchAllModel{
 		width:  120,
 		height: 16,
-		cloudInstances: []*db.CloudInstance{
+		cloudInstances: []*db.Launch{
 			{
 				ID:               instanceID,
-				Status:           db.CloudInstanceStatusRunning,
+				Status:           db.LaunchStatusRunning,
 				Provider:         "vastai",
 				GPUSpec:          "A100",
 				CostPerHourCents: 150,
@@ -349,9 +349,9 @@ func TestWatchAllModelViewShowsCloudSummaryRate(t *testing.T) {
 		},
 		instanceUpdates: map[int64]campaign.InstanceUpdate{
 			instanceID: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:               instanceID,
-					Status:           db.CloudInstanceStatusRunning,
+					Status:           db.LaunchStatusRunning,
 					Provider:         "vastai",
 					GPUSpec:          "A100",
 					CostPerHourCents: 150,

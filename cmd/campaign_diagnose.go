@@ -28,7 +28,7 @@ type campaignDiagnosisReport struct {
 }
 
 type instanceDiagnosis struct {
-	Instance    *db.CloudInstance
+	Instance    *db.Launch
 	Summary     string
 	JobFindings []jobFinding
 }
@@ -103,17 +103,17 @@ func buildCampaignDiagnosisReport(database *sql.DB, campaignID int64) (*campaign
 	for _, inst := range instances {
 		if inst.TerminationReason == db.TerminationReasonJobFailure {
 			_ = db.RefineInstanceTerminationReason(database, inst.ID)
-			if refreshed, err := db.GetCloudInstance(database, inst.ID); err == nil && refreshed != nil {
+			if refreshed, err := db.GetLaunch(database, inst.ID); err == nil && refreshed != nil {
 				inst = refreshed
 			}
 		}
 
-		jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, inst.ID)
+		jobs, err := db.GetLaunchJobsIncludingAttempts(database, inst.ID)
 		if err != nil {
 			return nil, fmt.Errorf("get jobs for instance %d: %w", inst.ID, err)
 		}
 
-		outcomes, err := db.GetAttemptOutcomesByInstance(database, inst.ID)
+		outcomes, err := db.GetAttemptOutcomesByLaunch(database, inst.ID)
 		if err != nil {
 			return nil, fmt.Errorf("get attempt outcomes for instance %d: %w", inst.ID, err)
 		}
@@ -125,7 +125,7 @@ func buildCampaignDiagnosisReport(database *sql.DB, campaignID int64) (*campaign
 	return report, nil
 }
 
-func buildInstanceDiagnosis(inst *db.CloudInstance, jobs []*db.Job, outcomes map[int64]string) instanceDiagnosis {
+func buildInstanceDiagnosis(inst *db.Launch, jobs []*db.Job, outcomes map[int64]string) instanceDiagnosis {
 	result := instanceDiagnosis{Instance: inst}
 	undeclaredInputCount := 0
 	for _, job := range jobs {
@@ -150,7 +150,7 @@ func buildInstanceDiagnosis(inst *db.CloudInstance, jobs []*db.Job, outcomes map
 	return result
 }
 
-func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outcomes map[int64]string, undeclaredInputCount int) string {
+func summarizeInstanceCause(inst *db.Launch, findings []jobFinding, outcomes map[int64]string, undeclaredInputCount int) string {
 	switch inst.TerminationReason {
 	case db.TerminationReasonPreempted:
 		return "provider preempted the instance"
@@ -191,20 +191,20 @@ func summarizeInstanceCause(inst *db.CloudInstance, findings []jobFinding, outco
 	}
 
 	switch inst.Status {
-	case db.CloudInstanceStatusCompleted:
+	case db.LaunchStatusCompleted:
 		return "completed successfully"
-	case db.CloudInstanceStatusCancelled:
+	case db.LaunchStatusCancelled:
 		return "terminated by user"
-	case db.CloudInstanceStatusFailed:
+	case db.LaunchStatusFailed:
 		if countOutcome(outcomes, db.AttemptOutcomeOrphaned) > 0 {
 			return "instance failed and orphaned in-flight jobs"
 		}
 		return "instance failed"
-	case db.CloudInstanceStatusGrace:
+	case db.LaunchStatusGrace:
 		return inst.GraceStatusLabel()
-	case db.CloudInstanceStatusRunning:
+	case db.LaunchStatusRunning:
 		return "instance is still running"
-	case db.CloudInstanceStatusLaunching:
+	case db.LaunchStatusLaunching:
 		return "instance is still launching"
 	default:
 		return "instance has not reached a terminal state"
@@ -310,7 +310,7 @@ func formatCampaignDiagnosisReport(report *campaignDiagnosisReport) string {
 	return b.String()
 }
 
-func displayInstanceGPU(inst *db.CloudInstance) string {
+func displayInstanceGPU(inst *db.Launch) string {
 	if inst == nil {
 		return "unknown GPU"
 	}

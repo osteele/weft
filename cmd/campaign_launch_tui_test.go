@@ -127,16 +127,16 @@ func TestLaunchModelView_ErrorHasNoDismissPrompt(t *testing.T) {
 func TestLaunchModelUpdate_SwitchesToInlineWatchWhenAllInstancesRegistered(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	firstID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusLaunching,
+	firstID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusLaunching,
 		Provider: "vastai",
 		GPUSpec:  "RTX 3090",
 	})
 	if err != nil {
 		t.Fatalf("create first instance: %v", err)
 	}
-	secondID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusLaunching,
+	secondID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusLaunching,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
@@ -192,9 +192,9 @@ func TestLaunchModelUpdate_InlineWatchKeepsRunningWithPartialFailures(t *testing
 		instanceIDs: []int64{42},
 		updates: map[int64]campaign.InstanceUpdate{
 			42: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:       42,
-					Status:   db.CloudInstanceStatusLaunching,
+					Status:   db.LaunchStatusLaunching,
 					Provider: "vastai",
 					GPUSpec:  "A40",
 				},

@@ -20,13 +20,13 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		return "", fmt.Errorf("job %d not found", jobID)
 	}
 
-	if !job.IsCloudJob() {
+	if !job.IsLaunchJob() {
 		return "", nil
 	}
 
 	// For queued rental jobs that have not yet been assigned to an instance, just update DB.
 	effectiveStatus := job.EffectiveStatus()
-	if effectiveStatus == db.StatusQueued && job.CloudInstanceID == nil {
+	if effectiveStatus == db.StatusQueued && job.LaunchID == nil {
 		if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 			return "", err
 		}
@@ -34,9 +34,9 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 	}
 
 	// Fetch instance once, share with KillCloudJob
-	var inst *db.CloudInstance
-	if job.CloudInstanceID != nil {
-		inst, _ = db.GetCloudInstance(database, *job.CloudInstanceID)
+	var inst *db.Launch
+	if job.LaunchID != nil {
+		inst, _ = db.GetLaunch(database, *job.LaunchID)
 	}
 
 	client := cloudClientForDBInstance("")
@@ -64,5 +64,5 @@ func isCloudJob(database *sql.DB, jobID int64) (bool, error) {
 	if job == nil {
 		return false, nil // let the caller handle "not found"
 	}
-	return job.IsCloudJob(), nil
+	return job.IsLaunchJob(), nil
 }

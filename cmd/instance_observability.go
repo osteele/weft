@@ -44,7 +44,7 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 		return activity
 	}
 
-	ci := update.CloudInstance
+	ci := update.Launch
 	if ci == nil || campaign.IsInstanceTerminal(ci.Status) {
 		return activity
 	}
@@ -58,8 +58,8 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 
 func observedRunningJob(update campaign.InstanceUpdate) *db.Job {
 	jobs := update.Jobs
-	if update.CloudInstance != nil {
-		jobs = groupCloudInstanceJobs(update.CloudInstance.ID, update.Jobs).current
+	if update.Launch != nil {
+		jobs = groupLaunchJobs(update.Launch.ID, update.Jobs).current
 	}
 	for _, job := range jobs {
 		if job != nil && job.Status == db.StatusRunning {

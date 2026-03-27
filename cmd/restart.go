@@ -90,7 +90,7 @@ func restartJob(database *sql.DB, jobID int64) error {
 	}
 
 	// Cloud jobs: reset to unplaced (the original instance is gone)
-	if job.IsCloudJob() {
+	if job.IsLaunchJob() {
 		if err := ops.RefreshProjectDerivedMetadata(database, job.ID, job.WorkingDir, job.Command, job.Inputs); err != nil {
 			return err
 		}

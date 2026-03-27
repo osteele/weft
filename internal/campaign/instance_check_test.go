@@ -13,9 +13,9 @@ func TestCheckInstance_GraceExpired(t *testing.T) {
 	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:            1,
-			Status:        db.CloudInstanceStatusGrace,
+			Status:        db.LaunchStatusGrace,
 			GraceDeadline: &pastDeadline,
 		},
 		Now: time.Now(),
@@ -23,8 +23,8 @@ func TestCheckInstance_GraceExpired(t *testing.T) {
 	if action.Kind != ActionGraceExpired {
 		t.Fatalf("action.Kind = %d, want ActionGraceExpired (%d)", action.Kind, ActionGraceExpired)
 	}
-	if action.TerminalStatus != db.CloudInstanceStatusFailed {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.CloudInstanceStatusFailed)
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
 	}
 	if !action.DestroyProvider {
 		t.Error("DestroyProvider should be true")
@@ -38,9 +38,9 @@ func TestCheckInstance_GraceNotExpired(t *testing.T) {
 	futureDeadline := time.Now().Add(5 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:            1,
-			Status:        db.CloudInstanceStatusGrace,
+			Status:        db.LaunchStatusGrace,
 			GraceDeadline: &futureDeadline,
 		},
 		Now: time.Now(),
@@ -54,9 +54,9 @@ func TestCheckInstance_BootstrapStalled(t *testing.T) {
 	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:         1,
-			Status:     db.CloudInstanceStatusRunning,
+			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
@@ -65,8 +65,8 @@ func TestCheckInstance_BootstrapStalled(t *testing.T) {
 	if action.Kind != ActionBootstrapStalled {
 		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
 	}
-	if action.TerminalStatus != db.CloudInstanceStatusFailed {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.CloudInstanceStatusFailed)
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
 	}
 }
 
@@ -74,9 +74,9 @@ func TestCheckInstance_BootstrapWarnOnly(t *testing.T) {
 	launchedAt := time.Now().Add(-16 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:         1,
-			Status:     db.CloudInstanceStatusRunning,
+			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
 		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
@@ -94,9 +94,9 @@ func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 	r := NewReconciler()
 	latestEnd := time.Now().Add(-3 * time.Minute).Unix()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:     1,
-			Status: db.CloudInstanceStatusRunning,
+			Status: db.LaunchStatusRunning,
 		},
 		ProviderInst: &cloud.Instance{Status: "running"},
 		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, LatestJobEnd: latestEnd},
@@ -105,8 +105,8 @@ func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 	if action.Kind != ActionSelfDestructFailed {
 		t.Fatalf("action.Kind = %d, want ActionSelfDestructFailed (%d)", action.Kind, ActionSelfDestructFailed)
 	}
-	if action.TerminalStatus != db.CloudInstanceStatusCompleted {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.CloudInstanceStatusCompleted)
+	if action.TerminalStatus != db.LaunchStatusCompleted {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusCompleted)
 	}
 }
 
@@ -114,9 +114,9 @@ func TestCheckInstance_EmptyStatusTimeout(t *testing.T) {
 	launchedAt := time.Now().Add(-5 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
@@ -131,14 +131,14 @@ func TestCheckInstance_EmptyStatusTimeout(t *testing.T) {
 func TestCheckInstance_TerminationIntent_Completed(t *testing.T) {
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "running"},
 		TerminationIntent: &instanceintent.Marker{
-			TerminalStatus:    db.CloudInstanceStatusCompleted,
+			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: db.TerminationReasonCompleted,
 		},
 		Now: time.Now(),
@@ -146,8 +146,8 @@ func TestCheckInstance_TerminationIntent_Completed(t *testing.T) {
 	if action.Kind != ActionTerminationIntent {
 		t.Fatalf("action.Kind = %d, want ActionTerminationIntent (%d)", action.Kind, ActionTerminationIntent)
 	}
-	if action.TerminalStatus != db.CloudInstanceStatusCompleted {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.CloudInstanceStatusCompleted)
+	if action.TerminalStatus != db.LaunchStatusCompleted {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusCompleted)
 	}
 	if !action.DestroyProvider {
 		t.Error("DestroyProvider should be true for running provider")
@@ -157,14 +157,14 @@ func TestCheckInstance_TerminationIntent_Completed(t *testing.T) {
 func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "running"},
 		TerminationIntent: &instanceintent.Marker{
-			TerminalStatus:    db.CloudInstanceStatusFailed,
+			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: db.TerminationReasonDiskFull,
 		},
 		Now: time.Now(),
@@ -172,8 +172,8 @@ func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 	if action.Kind != ActionTerminationIntent {
 		t.Fatalf("action.Kind = %d, want ActionTerminationIntent (%d)", action.Kind, ActionTerminationIntent)
 	}
-	if action.TerminalStatus != db.CloudInstanceStatusFailed {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.CloudInstanceStatusFailed)
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
 	}
 	if !action.ResetJobs {
 		t.Error("ResetJobs should be true for failed termination")
@@ -184,9 +184,9 @@ func TestCheckInstance_ProviderDead_WithHysteresis(t *testing.T) {
 	r := NewReconciler()
 	now := time.Now()
 	params := CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "exited"},
@@ -205,8 +205,8 @@ func TestCheckInstance_ProviderDead_WithHysteresis(t *testing.T) {
 	if action.Kind != ActionProviderDead {
 		t.Fatalf("second check: action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
 	}
-	if action.TerminalStatus != db.CloudInstanceStatusFailed {
-		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.CloudInstanceStatusFailed)
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
 	}
 }
 
@@ -218,9 +218,9 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 		deadConfirmTime:    -1, // disable hysteresis
 	}
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "exited"},
@@ -240,9 +240,9 @@ func TestCheckInstance_ProviderDead_SkipsGraceInstances(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Minute).Unix()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusGrace,
+			Status:             db.LaunchStatusGrace,
 			ProviderInstanceID: "test-123",
 			GraceDeadline:      &deadline,
 		},
@@ -266,9 +266,9 @@ func TestCheckInstance_StaleCreatedStatus(t *testing.T) {
 	launchedAt := time.Now().Add(-6 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
@@ -287,9 +287,9 @@ func TestCheckInstance_CreatedStatusUnderTimeout(t *testing.T) {
 	launchedAt := time.Now().Add(-2 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
@@ -305,9 +305,9 @@ func TestCheckInstance_StaleLoadingStatus(t *testing.T) {
 	launchedAt := time.Now().Add(-6 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
@@ -326,9 +326,9 @@ func TestCheckInstance_LoadingStatusUnderTimeout(t *testing.T) {
 	launchedAt := time.Now().Add(-2 * time.Minute).Unix()
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
@@ -350,9 +350,9 @@ func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 		deadConfirmTime:    -1, // disable hysteresis
 	}
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "created", IntendedStatus: "stopped"},
@@ -371,9 +371,9 @@ func TestCheckInstance_IntendedStatusStoppedButRunning(t *testing.T) {
 	// provider-terminal — the instance is still alive and the stop hasn't taken effect.
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "running", IntendedStatus: "stopped"},
@@ -388,9 +388,9 @@ func TestCheckInstance_IntendedStatusStoppedButRunning(t *testing.T) {
 func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 	r := NewReconciler()
 	action := r.CheckInstance(CheckInstanceParams{
-		CI: &db.CloudInstance{
+		CI: &db.Launch{
 			ID:                 1,
-			Status:             db.CloudInstanceStatusRunning,
+			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
 		ProviderInst: &cloud.Instance{Status: "running"},

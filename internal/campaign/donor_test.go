@@ -155,14 +155,14 @@ func TestSeedWorkers_PhoneTreeFanOut(t *testing.T) {
 	// Create worker instances in DB
 	workers := make([]workerInfo, 3)
 	for i := range workers {
-		id, err := db.CreateCloudInstance(database, &db.CloudInstance{
+		id, err := db.CreateLaunch(database, &db.Launch{
 			Status:   "running",
 			Provider: "mock",
 		})
 		if err != nil {
 			t.Fatalf("create instance: %v", err)
 		}
-		_ = db.SetCloudInstanceProviderID(database, id, "w"+string(rune('1'+i)))
+		_ = db.SetLaunchProviderID(database, id, "w"+string(rune('1'+i)))
 		workers[i] = workerInfo{ProviderID: "w" + string(rune('1'+i)), DBID: id}
 	}
 
@@ -178,7 +178,7 @@ func TestSeedWorkers_PhoneTreeFanOut(t *testing.T) {
 
 	// Verify seed_copy_secs was set on all workers
 	for _, w := range workers {
-		inst, err := db.GetCloudInstance(database, w.DBID)
+		inst, err := db.GetLaunch(database, w.DBID)
 		if err != nil {
 			t.Fatalf("get instance: %v", err)
 		}

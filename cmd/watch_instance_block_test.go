@@ -13,14 +13,14 @@ import (
 func TestFormatWatchInstanceBlockKeepsAttemptsInlineInRunOrder(t *testing.T) {
 	instanceID := int64(124)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       instanceID,
-			Status:   db.CloudInstanceStatusRunning,
+			Status:   db.LaunchStatusRunning,
 			Provider: "vastai",
 			GPUSpec:  "A40",
 		},
 		Jobs: []*db.Job{
-			{ID: 199, Status: db.StatusRunning, CloudInstanceID: &instanceID, Description: "current"},
+			{ID: 199, Status: db.StatusRunning, LaunchID: &instanceID, Description: "current"},
 			{ID: 249, Status: db.StatusQueued, Description: "historical"},
 		},
 		JobAttemptOutcomes: map[int64]string{
@@ -35,7 +35,7 @@ func TestFormatWatchInstanceBlockKeepsAttemptsInlineInRunOrder(t *testing.T) {
 	if currentIdx == -1 || historicalIdx == -1 {
 		t.Fatalf("expected both jobs in output, got:\n%s", out)
 	}
-	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+	if strings.Contains(out, historicalLaunchJobsHeader) {
 		t.Fatalf("expected attempts to remain inline, got:\n%s", out)
 	}
 	if !(currentIdx < historicalIdx) {
@@ -49,13 +49,13 @@ func TestFormatWatchInstanceBlockKeepsAttemptsInlineInRunOrder(t *testing.T) {
 func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
 	for _, j := range []struct {
@@ -83,28 +83,28 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 	}
 
 	for _, jobID := range []int64{203, 249, 250, 253, 283} {
-		if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-			t.Fatalf("SetJobCloudInstanceID(%d): %v", jobID, err)
+		if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+			t.Fatalf("SetJobLaunchID(%d): %v", jobID, err)
 		}
 	}
 	// Mark job 283's attempt as failed (historical)
-	if err := db.CloseJobCloudAttempt(database, 283, db.AttemptOutcomeFailed); err != nil {
-		t.Fatalf("CloseJobCloudAttempt(283): %v", err)
+	if err := db.CloseLaunchAttempt(database, 283, db.AttemptOutcomeFailed); err != nil {
+		t.Fatalf("CloseLaunchAttempt(283): %v", err)
 	}
 
-	jobs, err := db.GetCloudInstanceJobsIncludingAttempts(database, instanceID)
+	jobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID)
 	if err != nil {
-		t.Fatalf("GetCloudInstanceJobsIncludingAttempts: %v", err)
+		t.Fatalf("GetLaunchJobsIncludingAttempts: %v", err)
 	}
-	outcomes, err := db.GetAttemptOutcomesByInstance(database, instanceID)
+	outcomes, err := db.GetAttemptOutcomesByLaunch(database, instanceID)
 	if err != nil {
-		t.Fatalf("GetAttemptOutcomesByInstance: %v", err)
+		t.Fatalf("GetAttemptOutcomesByLaunch: %v", err)
 	}
 
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       instanceID,
-			Status:   db.CloudInstanceStatusRunning,
+			Status:   db.LaunchStatusRunning,
 			Provider: "vastai",
 			GPUSpec:  "A40",
 		},
@@ -131,7 +131,7 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 	if idx253 == -1 || idx283 == -1 {
 		t.Fatalf("expected final current job and failed attempt in output, got:\n%s", out)
 	}
-	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+	if strings.Contains(out, historicalLaunchJobsHeader) {
 		t.Fatalf("expected attempts to remain inline, got:\n%s", out)
 	}
 	if !(idx253 < idx283) {
@@ -143,9 +143,9 @@ func TestFormatWatchInstanceBlockPrefersLiveProviderRate(t *testing.T) {
 	now := time.Unix(7200, 0)
 	launchedAt := int64(0)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:               125,
-			Status:           db.CloudInstanceStatusRunning,
+			Status:           db.LaunchStatusRunning,
 			Provider:         "vastai",
 			CostPerHourCents: 150,
 			LaunchedAt:       &launchedAt,
@@ -163,19 +163,19 @@ func TestFormatWatchInstanceBlockPrefersLiveProviderRate(t *testing.T) {
 func TestFormatWatchInstanceBlockAbbreviatesLongProjectNames(t *testing.T) {
 	instanceID := int64(142)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       instanceID,
-			Status:   db.CloudInstanceStatusRunning,
+			Status:   db.LaunchStatusRunning,
 			Provider: "vastai",
 			GPUSpec:  "A100",
 		},
 		Jobs: []*db.Job{
 			{
-				ID:              175,
-				Status:          db.StatusQueued,
-				CloudInstanceID: &instanceID,
-				Project:         "llm-performance-models",
-				Description:     "EXP-042: vLLM cross-GPU profiles (A100)",
+				ID:          175,
+				Status:      db.StatusQueued,
+				LaunchID:    &instanceID,
+				Project:     "llm-performance-models",
+				Description: "EXP-042: vLLM cross-GPU profiles (A100)",
 			},
 		},
 	}
@@ -189,9 +189,9 @@ func TestFormatWatchInstanceBlockAbbreviatesLongProjectNames(t *testing.T) {
 func TestFormatWatchInstanceBlockUsesLivePhaseForActiveJobStatus(t *testing.T) {
 	instanceID := int64(142)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       instanceID,
-			Status:   db.CloudInstanceStatusRunning,
+			Status:   db.LaunchStatusRunning,
 			Provider: "vastai",
 			GPUSpec:  "A100",
 		},
@@ -218,10 +218,10 @@ func TestFormatWatchInstanceBlockUsesLivePhaseForActiveJobStatus(t *testing.T) {
 func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
 	now := time.Unix(3600, 0)
 	launchedAt := int64(0)
-	donors := []*db.CloudInstance{
+	donors := []*db.Launch{
 		{
 			ID:                226,
-			Status:            db.CloudInstanceStatusFailed,
+			Status:            db.LaunchStatusFailed,
 			TerminationReason: "infra_failure",
 			CostPerHourCents:  30,
 			LaunchedAt:        &launchedAt,
@@ -245,9 +245,9 @@ func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
 
 func TestFormatPreviousInstanceLineChain(t *testing.T) {
 	now := time.Unix(3600, 0)
-	donors := []*db.CloudInstance{
-		{ID: 228, Status: db.CloudInstanceStatusFailed, TerminationReason: "infra_failure"},
-		{ID: 226, Status: db.CloudInstanceStatusFailed, TerminationReason: "bootstrap_timeout"},
+	donors := []*db.Launch{
+		{ID: 228, Status: db.LaunchStatusFailed, TerminationReason: "infra_failure"},
+		{ID: 226, Status: db.LaunchStatusFailed, TerminationReason: "bootstrap_timeout"},
 	}
 
 	line := formatPreviousInstanceLine(donors, now)
@@ -272,9 +272,9 @@ func TestFormatPreviousInstanceLineEmpty(t *testing.T) {
 func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
 	donorID := int64(226)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:              228,
-			Status:          db.CloudInstanceStatusRunning,
+			Status:          db.LaunchStatusRunning,
 			Provider:        "vastai",
 			GPUSpec:         "A100",
 			DonorInstanceID: &donorID,
@@ -286,8 +286,8 @@ func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
 
 	out := formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{
 		plain: true,
-		donorInstances: []*db.CloudInstance{
-			{ID: 226, Status: db.CloudInstanceStatusFailed, TerminationReason: "infra_failure"},
+		donorInstances: []*db.Launch{
+			{ID: 226, Status: db.LaunchStatusFailed, TerminationReason: "infra_failure"},
 		},
 	})
 	if !strings.Contains(out, "Previous: Instance 226") {
@@ -298,9 +298,9 @@ func TestFormatWatchInstanceBlockIncludesPreviousLine(t *testing.T) {
 func TestFormatWatchInstanceBlockUsesRunningPhaseForQueuedActiveJob(t *testing.T) {
 	instanceID := int64(140)
 	update := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:       instanceID,
-			Status:   db.CloudInstanceStatusRunning,
+			Status:   db.LaunchStatusRunning,
 			Provider: "vastai",
 			GPUSpec:  "A40",
 		},

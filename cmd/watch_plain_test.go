@@ -11,9 +11,9 @@ import (
 
 func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 	launchedAt := int64(0)
-	cloudInstance := &db.CloudInstance{
+	cloudInstance := &db.Launch{
 		ID:                 5,
-		Status:             db.CloudInstanceStatusRunning,
+		Status:             db.LaunchStatusRunning,
 		Provider:           "vastai",
 		ProviderInstanceID: "32734388",
 		GPUSpec:            "A100",
@@ -22,10 +22,10 @@ func TestFormatWatchPlainSnapshotShowsDirectoryTails(t *testing.T) {
 	}
 
 	snapshot := watchSystemSnapshot{
-		CloudInstances: []*db.CloudInstance{cloudInstance},
+		Launches: []*db.Launch{cloudInstance},
 		InstanceUpdates: map[int64]campaign.InstanceUpdate{
 			5: {
-				CloudInstance: cloudInstance,
+				Launch: cloudInstance,
 				Jobs: []*db.Job{
 					{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/project-alpha", Project: "EXP-ALPHA", Description: "train model"},
 				},

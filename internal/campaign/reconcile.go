@@ -34,7 +34,7 @@ const minDeadConfirmTime = 30 * time.Second
 // first seen dead, so we can require a sustained dead period before terminating.
 type Reconciler struct {
 	mu                 sync.Mutex
-	firstDeadAt        map[int64]time.Time // keyed by CloudInstance.ID
+	firstDeadAt        map[int64]time.Time // keyed by Launch.ID
 	probeFailures      map[int64]probeFailureState
 	lastProviderStatus map[int64]string // last observed provider status per instance
 	deadConfirmTime    time.Duration    // 0 uses minDeadConfirmTime
@@ -73,11 +73,11 @@ func (r *Reconciler) confirmTime() time.Duration {
 	return r.deadConfirmTime
 }
 
-// ReconcileCloudInstances checks all running/launching instances against the
+// ReconcileLaunches checks all running/launching instances against the
 // cloud provider and marks dead ones as failed (or completed if R2 has
 // a completion marker). r2Client may be nil, in which case completion detection is skipped.
-func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (*ReconcileResult, error) {
-	instances, err := db.ListRunningCloudInstances(database)
+func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client, r2Client *r2.Client) (*ReconcileResult, error) {
+	instances, err := db.ListRunningLaunches(database)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 
 	for _, ci := range instances {
 		wg.Add(1)
-		go func(ci *db.CloudInstance) {
+		go func(ci *db.Launch) {
 			defer wg.Done()
 			reconciled, terminated := r.reconcileOneInstance(database, clients, r2Client, ci, providerInstances)
 			if reconciled {
@@ -148,7 +148,7 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 	// Safety net: check recently-terminal instances to ensure provider instances are destroyed.
 	// Catches cases where self-destruct failed or a code path marked an instance terminal
 	// without calling DestroyInstance.
-	recentlyTerminal, err := db.ListRecentlyTerminalCloudInstances(database, 30*time.Minute)
+	recentlyTerminal, err := db.ListRecentlyTerminalLaunches(database, 30*time.Minute)
 	if err != nil {
 		log.Printf("reconcile: list recently terminal instances: %v", err)
 	}
@@ -161,7 +161,7 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 		}
 
 		wg2.Add(1)
-		go func(ci *db.CloudInstance, providerID string, client cloud.Client) {
+		go func(ci *db.Launch, providerID string, client cloud.Client) {
 			defer wg2.Done()
 			inst, err := client.ShowInstance(providerID)
 			if errors.Is(err, cloud.ErrInstanceNotFound) {
@@ -211,10 +211,10 @@ func (r *Reconciler) ReconcileCloudInstances(database *sql.DB, clients []cloud.C
 // Returns (reconciled, terminated) where reconciled means state changed and
 // terminated means the instance was moved to a terminal state (failed/completed).
 // providerInstances is the batch-fetched map from batchFetchProviderInstances.
-func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.CloudInstance, providerInstances map[string]map[string]*cloud.Instance) (bool, bool) {
+func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Client, r2Client *r2.Client, ci *db.Launch, providerInstances map[string]map[string]*cloud.Instance) (bool, bool) {
 	// Check for grace-wait state for running instances via R2.
 	// This is handled outside CheckInstance because it writes to the DB as a side effect.
-	if ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+	if ci.Status == db.LaunchStatusRunning && r2Client != nil {
 		if graceDetected := checkR2GraceStatus(r2Client, ci, database); graceDetected {
 			return true, false // reconciled but not terminal (grace is not terminal)
 		}
@@ -256,21 +256,21 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		log.Printf("reconcile: fetch termination intent for instance %d: %v", ci.ID, intentErr)
 	}
 	if intent != nil {
-		if err := db.UpdateCloudInstanceTerminationIntent(database, ci.ID, intent); err != nil {
+		if err := db.UpdateLaunchTerminationIntent(database, ci.ID, intent); err != nil {
 			log.Printf("reconcile: persist termination intent for instance %d: %v", ci.ID, err)
 		}
 	} else if ci.TerminationIntent != nil {
 		intent = ci.TerminationIntent
 	}
 
-	jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, ci.ID)
+	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 	jobState := ComputeJobState(jobs)
 
 	// Fetch R2 phase markers so bootstrap-stall check has current data.
 	// Without this, the reconciler sees empty InstancePhase and may kill
 	// instances that are actually running jobs.
 	var instancePhase, bootstrapStage string
-	if r2Client != nil && ci.Status == db.CloudInstanceStatusRunning && ci.LaunchedAt != nil {
+	if r2Client != nil && ci.Status == db.LaunchStatusRunning && ci.LaunchedAt != nil {
 		ctx := context.Background()
 		instancePhase = fetchInstancePhase(ctx, r2Client, ci.ID)
 		if instancePhase != "" {
@@ -313,7 +313,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		reconciled, terminated := ExecuteAction(database, client, ci, action)
 		if terminated && r2Client != nil {
 			// Verify results for completed instances via the R2 completion manifest
-			if action.TerminalStatus == db.CloudInstanceStatusCompleted {
+			if action.TerminalStatus == db.LaunchStatusCompleted {
 				verifyInstanceResults(database, r2Client, ci.ID)
 			}
 			// Extract undeclared HF models from disk-full failures
@@ -325,7 +325,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	// Stale heartbeat with SSH probe — reconciler-specific, not in CheckInstance
-	if client != nil && !isProviderTerminal(inst) && ci.Status == db.CloudInstanceStatusRunning && r2Client != nil {
+	if client != nil && !isProviderTerminal(inst) && ci.Status == db.LaunchStatusRunning && r2Client != nil {
 		if reconciled, terminated := r.reconcileStaleHeartbeat(database, client, r2Client, ci, inst); reconciled {
 			return true, terminated
 		}
@@ -343,7 +343,7 @@ func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int
 		return
 	}
 	verified := manifest.AllUploadsOK()
-	if err := db.UpdateCloudInstanceResultsVerified(database, instanceID, verified); err != nil {
+	if err := db.UpdateLaunchResultsVerified(database, instanceID, verified); err != nil {
 		log.Printf("reconcile: update results_verified for instance %d: %v", instanceID, err)
 		return
 	}
@@ -352,7 +352,7 @@ func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int
 	}
 }
 
-func markTerminationIntentDestroyed(database *sql.DB, ci *db.CloudInstance, confirmedAt time.Time) bool {
+func markTerminationIntentDestroyed(database *sql.DB, ci *db.Launch, confirmedAt time.Time) bool {
 	if ci == nil || !HasActiveTerminationIntent(ci.TerminationIntent) {
 		return false
 	}
@@ -364,7 +364,7 @@ func markTerminationIntentDestroyed(database *sql.DB, ci *db.CloudInstance, conf
 		marker.DestroyStartedAtUnix = confirmedAt.Unix()
 	}
 	marker.DestroySucceededAtUnix = confirmedAt.Unix()
-	if err := db.UpdateCloudInstanceTerminationIntent(database, ci.ID, &marker); err != nil {
+	if err := db.UpdateLaunchTerminationIntent(database, ci.ID, &marker); err != nil {
 		log.Printf("reconcile: persist destroy success for instance %d: %v", ci.ID, err)
 		return false
 	}
@@ -398,7 +398,7 @@ func (r *Reconciler) noteProbeFailure(id int64) probeFailureState {
 	return state
 }
 
-func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Client, r2Client *r2.Client, ci *db.CloudInstance, inst *cloud.Instance) (bool, bool) {
+func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Client, r2Client *r2.Client, ci *db.Launch, inst *cloud.Instance) (bool, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -446,11 +446,11 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		}
 	}
 
-	if err := db.UpdateCloudInstanceStatus(database, ci.ID, db.CloudInstanceStatusFailed, reason); err != nil {
+	if err := db.UpdateLaunchStatus(database, ci.ID, db.LaunchStatusFailed, reason); err != nil {
 		log.Printf("reconcile: update stale-heartbeat instance %d status: %v", ci.ID, err)
 		return false, false
 	}
-	if resetCount, err := db.ResetCloudInstanceJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
+	if resetCount, err := db.ResetLaunchJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
 		log.Printf("reconcile: reset jobs for stale-heartbeat instance %d: %v", ci.ID, err)
 	} else if resetCount > 0 {
 		log.Printf("reconcile: reset %d jobs from stale-heartbeat instance %d to unplaced", resetCount, ci.ID)
@@ -503,7 +503,7 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 		// successful. Any failed/cancelled/mixed terminal outcome is a failure.
 		allCompleted := true
 		for _, inst := range instances {
-			if inst.Status != db.CloudInstanceStatusCompleted {
+			if inst.Status != db.LaunchStatusCompleted {
 				allCompleted = false
 				break
 			}
@@ -558,7 +558,7 @@ func (d *deadlineValue) UnmarshalJSON(data []byte) error {
 
 // checkR2GraceStatus checks R2 for a grace status marker for a running instance.
 // If found, transitions the DB instance to grace state. Returns true if grace was detected.
-func checkR2GraceStatus(r2Client *r2.Client, ci *db.CloudInstance, database *sql.DB) bool {
+func checkR2GraceStatus(r2Client *r2.Client, ci *db.Launch, database *sql.DB) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -579,7 +579,7 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.CloudInstance, database *sql
 	}
 
 	log.Printf("reconcile: instance %d entered grace-wait (deadline %d)", ci.ID, payload.Deadline.Unix)
-	if err := db.SetCloudInstanceGraceStarted(database, ci.ID, payload.Deadline.Unix); err != nil {
+	if err := db.SetLaunchGraceStarted(database, ci.ID, payload.Deadline.Unix); err != nil {
 		log.Printf("reconcile: set grace for instance %d: %v", ci.ID, err)
 		return false
 	}

@@ -68,11 +68,11 @@ const (
 	OpCloudSetJobInstance = "cloud.set_job_instance"
 
 	// Cloud launch telemetry
-	OpCloudInstanceLaunchRequested = "cloud.instance.launch.requested"
-	OpCloudInstanceLaunchCreated   = "cloud.instance.launch.created"
-	OpCloudInstanceLaunchFailed    = "cloud.instance.launch.failed"
-	OpCloudInstanceLaunchReadback  = "cloud.instance.launch.readback"
-	OpCloudInstanceLaunchMismatch  = "cloud.instance.launch.mismatch"
+	OpLaunchLaunchRequested = "cloud.instance.launch.requested"
+	OpLaunchLaunchCreated   = "cloud.instance.launch.created"
+	OpLaunchLaunchFailed    = "cloud.instance.launch.failed"
+	OpLaunchLaunchReadback  = "cloud.instance.launch.readback"
+	OpLaunchLaunchMismatch  = "cloud.instance.launch.mismatch"
 )
 
 // Entry represents a single log entry in JSONL format.

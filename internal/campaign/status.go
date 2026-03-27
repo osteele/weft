@@ -50,7 +50,7 @@ type HeartbeatSample struct {
 
 // InstanceUpdate is a snapshot of cloud instance + job state.
 type InstanceUpdate struct {
-	CloudInstance      *db.CloudInstance
+	Launch             *db.Launch
 	Jobs               []*db.Job
 	JobPhaseTimings    map[int64]*db.JobPhaseTimings
 	JobAttemptOutcomes map[int64]string // job_id → attempt outcome for this instance
@@ -76,7 +76,7 @@ func JobDisplayStatus(j *db.Job, outcomes map[int64]string) string {
 	return j.Status
 }
 
-func cloudInstanceLifecycleStart(ci *db.CloudInstance) *time.Time {
+func cloudInstanceLifecycleStart(ci *db.Launch) *time.Time {
 	if ci == nil {
 		return nil
 	}
@@ -95,7 +95,7 @@ func cloudInstanceLifecycleStart(ci *db.CloudInstance) *time.Time {
 	return nil
 }
 
-func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.CloudInstance) *time.Time {
+func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.Launch) *time.Time {
 	if changedAt == nil {
 		return nil
 	}
@@ -107,7 +107,7 @@ func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.CloudIn
 	return &ts
 }
 
-func inferInitialPhaseChangedAt(phase string, ci *db.CloudInstance, jobs []*db.Job, timings map[int64]*db.JobPhaseTimings) *time.Time {
+func inferInitialPhaseChangedAt(phase string, ci *db.Launch, jobs []*db.Job, timings map[int64]*db.JobPhaseTimings) *time.Time {
 	verb, jobID, ok := ParsePhaseJobID(phase)
 	if !ok {
 		return nil
@@ -207,7 +207,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			default:
 			}
 
-			ci, err := db.GetCloudInstance(database, cloudInstanceID)
+			ci, err := db.GetLaunch(database, cloudInstanceID)
 			if err != nil || ci == nil {
 				select {
 				case <-ctx.Done():
@@ -217,7 +217,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
-			jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+			jobs, _ := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
 			jobPhaseTimings := make(map[int64]*db.JobPhaseTimings, len(jobs))
 			for _, j := range jobs {
 				if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil && timings != nil {
@@ -250,10 +250,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			terminationIntent := ci.TerminationIntent
 			jobProgress := -1
 			var jobProgressID int64
-			if r2c != nil && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
+			if r2c != nil && (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusGrace) {
 				if fetchedIntent, err := fetchReconcileTerminationIntent(ctx, r2c, cloudInstanceID); err == nil && fetchedIntent != nil {
 					terminationIntent = fetchedIntent
-					_ = db.UpdateCloudInstanceTerminationIntent(database, cloudInstanceID, fetchedIntent)
+					_ = db.UpdateLaunchTerminationIntent(database, cloudInstanceID, fetchedIntent)
 					ci.TerminationIntent = fetchedIntent
 				}
 				instancePhase = fetchWatchInstancePhase(ctx, r2c, cloudInstanceID)
@@ -273,9 +273,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					}
 
 					// Detect grace transition: R2 phase says "grace" but DB still says "running"
-					if instancePhase == PhaseGrace && ci.Status == db.CloudInstanceStatusRunning {
+					if instancePhase == PhaseGrace && ci.Status == db.LaunchStatusRunning {
 						if checkR2GraceStatus(r2c, ci, database) {
-							ci.Status = db.CloudInstanceStatusGrace
+							ci.Status = db.LaunchStatusGrace
 						}
 					}
 				} else if !jobState.HasStartedJob {
@@ -286,7 +286,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// Fetch heartbeat from R2 (only when jobs have started)
 			var heartbeatAge time.Duration
 			var heartbeat *HeartbeatSample
-			if r2c != nil && (jobState.HasStartedJob || instancePhase != "") && (ci.Status == db.CloudInstanceStatusRunning || ci.Status == db.CloudInstanceStatusGrace) {
+			if r2c != nil && (jobState.HasStartedJob || instancePhase != "") && (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusGrace) {
 				heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
 			}
 
@@ -311,11 +311,11 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				log.Printf("watch: instance %d action=%d (%s)", cloudInstanceID, action.Kind, action.StallMessage)
 				ExecuteAction(database, client, ci, action)
 				// Refresh state after action
-				ci, _ = db.GetCloudInstance(database, cloudInstanceID)
+				ci, _ = db.GetLaunch(database, cloudInstanceID)
 				if ci == nil {
 					return
 				}
-				jobs, _ = db.GetCloudInstanceJobsIncludingAttempts(database, cloudInstanceID)
+				jobs, _ = db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
 				stallMessage = action.StallMessage
 			} else if action.StallMessage != "" {
 				stallMessage = action.StallMessage
@@ -337,11 +337,11 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// Fetch attempt outcomes only for terminal instances (outcomes are immutable)
 			var attemptOutcomes map[int64]string
 			if IsInstanceTerminal(ci.Status) {
-				attemptOutcomes, _ = db.GetAttemptOutcomesByInstance(database, cloudInstanceID)
+				attemptOutcomes, _ = db.GetAttemptOutcomesByLaunch(database, cloudInstanceID)
 			}
 
 			update := InstanceUpdate{
-				CloudInstance:      ci,
+				Launch:             ci,
 				Jobs:               jobs,
 				JobPhaseTimings:    jobPhaseTimings,
 				JobAttemptOutcomes: attemptOutcomes,
@@ -511,7 +511,7 @@ func TerminationIntentLabel(marker *instanceintent.Marker) string {
 	if reason == "" {
 		reason = marker.TerminalStatus
 	}
-	if reason == db.TerminationReasonCompleted || reason == db.CloudInstanceStatusCompleted {
+	if reason == db.TerminationReasonCompleted || reason == db.LaunchStatusCompleted {
 		reason = "after completion"
 	}
 	switch {
@@ -589,7 +589,7 @@ func BootstrapStageLabel(stage string) string {
 // If prev is nil, all fields are reported.
 func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	var lines []string
-	id := curr.CloudInstance.ID
+	id := curr.Launch.ID
 
 	// Report bootstrap stall warnings
 	if curr.StallMessage != "" && curr.StallMessage != prev.StallMessage {
@@ -633,12 +633,12 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 		lines = append(lines, fmt.Sprintf("instance %d: job %d progress: %d%%", id, curr.JobProgressID, curr.JobProgress))
 	}
 
-	if prev.CloudInstance == nil || prev.CloudInstance.Status != curr.CloudInstance.Status {
-		line := fmt.Sprintf("instance %d: status=%s", id, curr.CloudInstance.Status)
-		if reason := curr.CloudInstance.TerminationReason; reason != "" && reason != db.TerminationReasonCompleted {
+	if prev.Launch == nil || prev.Launch.Status != curr.Launch.Status {
+		line := fmt.Sprintf("instance %d: status=%s", id, curr.Launch.Status)
+		if reason := curr.Launch.TerminationReason; reason != "" && reason != db.TerminationReasonCompleted {
 			line += fmt.Sprintf(" (%s)", reason)
 		}
-		providerInstID := curr.CloudInstance.EffectiveProviderID()
+		providerInstID := curr.Launch.EffectiveProviderID()
 		if providerInstID != "" {
 			line += fmt.Sprintf(" provider_id=%s", providerInstID)
 		}
@@ -648,8 +648,8 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 		lines = append(lines, line)
 
 		// Show grace period help when entering grace status
-		if curr.CloudInstance.Status == db.CloudInstanceStatusGrace {
-			if label := curr.CloudInstance.GraceStatusLabel(); label != "" {
+		if curr.Launch.Status == db.LaunchStatusGrace {
+			if label := curr.Launch.GraceStatusLabel(); label != "" {
 				lines = append(lines, fmt.Sprintf("instance %d: %s", id, label))
 			}
 			// Show actionable commands for failed jobs
@@ -701,9 +701,9 @@ func IsJobTerminal(displayStatus string) bool {
 
 // IsInstanceTerminal returns true if the instance status is a terminal state.
 // Note: "grace" is NOT terminal — the instance is still alive waiting for resubmission.
-// When you have a CloudInstance struct, prefer inst.IsTerminal() instead.
+// When you have a Launch struct, prefer inst.IsTerminal() instead.
 func IsInstanceTerminal(status string) bool {
-	return status == db.CloudInstanceStatusCompleted ||
-		status == db.CloudInstanceStatusFailed ||
-		status == db.CloudInstanceStatusCancelled
+	return status == db.LaunchStatusCompleted ||
+		status == db.LaunchStatusFailed ||
+		status == db.LaunchStatusCancelled
 }

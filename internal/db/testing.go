@@ -78,7 +78,7 @@ func insertTestJob(t *testing.T, db *sql.DB, id int64, command, workingDir, stat
 		args = append(args, o.host)
 	}
 	if o.cloudInstanceID > 0 {
-		setClauses = append(setClauses, "cloud_instance_id = ?")
+		setClauses = append(setClauses, "launch_id = ?")
 		args = append(args, o.cloudInstanceID)
 	}
 	if o.startTime > 0 {
@@ -137,7 +137,7 @@ func withHost(host string) testJobOpt {
 	return func(o *testJobOptions) { o.host = host }
 }
 
-func withCloudInstance(id int64) testJobOpt {
+func withLaunch(id int64) testJobOpt {
 	return func(o *testJobOptions) { o.cloudInstanceID = id }
 }
 

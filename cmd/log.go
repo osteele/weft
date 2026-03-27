@@ -177,7 +177,7 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 	}
 
 	// Cloud jobs: SSH for running, R2 for completed
-	if job.IsCloudJob() {
+	if job.IsLaunchJob() {
 		return runLogForCloudJob(cmd, database, job)
 	}
 
@@ -334,7 +334,7 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 
 	// Follow mode requires a live SSH connection to the instance.
 	if logFollow && !isTerminalStatus(job.Status) {
-		inst, err := resolveCloudInstanceSSH(database, job)
+		inst, err := resolveLaunchSSH(database, job)
 		if err == nil {
 			return runLogViaCloudSSH(cmd, database, job, inst)
 		}
@@ -345,18 +345,18 @@ func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error 
 	return runLogFromR2(cmd, database, job)
 }
 
-// resolveCloudInstanceSSH looks up the cloud instance for a job and returns its SSH details.
-func resolveCloudInstanceSSH(database *sql.DB, job *db.Job) (*cloud.Instance, error) {
-	if job.CloudInstanceID == nil {
+// resolveLaunchSSH looks up the cloud instance for a job and returns its SSH details.
+func resolveLaunchSSH(database *sql.DB, job *db.Job) (*cloud.Instance, error) {
+	if job.LaunchID == nil {
 		return nil, fmt.Errorf("job has no cloud instance ID")
 	}
 
-	ci, err := db.GetCloudInstance(database, *job.CloudInstanceID)
+	ci, err := db.GetLaunch(database, *job.LaunchID)
 	if err != nil {
 		return nil, fmt.Errorf("get cloud instance: %w", err)
 	}
 	if ci == nil {
-		return nil, fmt.Errorf("cloud instance %d not found", *job.CloudInstanceID)
+		return nil, fmt.Errorf("cloud instance %d not found", *job.LaunchID)
 	}
 
 	providerID := ci.EffectiveProviderID()

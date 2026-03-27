@@ -407,7 +407,7 @@ func loadHostListRows(now time.Time) ([]hostListRow, error) {
 
 	specByName := make(map[string]inventory.HostSpec, len(hosts))
 	for _, host := range hosts {
-		if host.Name == "" || db.IsCloudHost(host.Name) {
+		if host.Name == "" || db.IsLaunchHost(host.Name) {
 			continue
 		}
 		specByName[host.Name] = host
@@ -420,7 +420,7 @@ func loadHostListRows(now time.Time) ([]hostListRow, error) {
 		defer database.Close()
 
 		for _, name := range listRecentHostNames(database, now.Add(-defaultHostSyncWindow)) {
-			if name != "" && !db.IsCloudHost(name) {
+			if name != "" && !db.IsLaunchHost(name) {
 				recentHosts[name] = struct{}{}
 			}
 		}
@@ -428,7 +428,7 @@ func loadHostListRows(now time.Time) ([]hostListRow, error) {
 		cachedHosts, cacheErr := db.LoadAllCachedHosts(database)
 		if cacheErr == nil {
 			for _, cached := range cachedHosts {
-				if cached == nil || cached.Name == "" || db.IsCloudHost(cached.Name) {
+				if cached == nil || cached.Name == "" || db.IsLaunchHost(cached.Name) {
 					continue
 				}
 				cachedByName[cached.Name] = cached

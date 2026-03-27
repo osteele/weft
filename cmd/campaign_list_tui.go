@@ -32,7 +32,7 @@ type campaignListItem struct {
 	isHeader   bool
 	headerText string
 	campaign   *db.Campaign
-	instances  []*db.CloudInstance
+	instances  []*db.Launch
 	actualCost string
 }
 

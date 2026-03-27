@@ -313,7 +313,7 @@ func SeedWorkers(
 				mu.Unlock()
 				onProgress(w.DBID, "copy failed, will download independently")
 			} else {
-				_ = db.SetCloudInstanceSeedCopySecs(database, w.DBID, elapsed)
+				_ = db.SetLaunchSeedCopySecs(database, w.DBID, elapsed)
 				onProgress(w.DBID, fmt.Sprintf("copy complete (%ds)", elapsed))
 				// This worker can now be a donor for others
 				donors <- w.ProviderID

@@ -12,20 +12,20 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
-func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
+func TestReconcileLaunches_DeadInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	// Create a running instance with a provider ID
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "12345"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -33,7 +33,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = 1 AND end_time IS NULL`,
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
 		db.StatusQueued, instanceID)
 
 	// Mock client that reports the instance as dead
@@ -46,7 +46,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 
 	// Use zero deadConfirmTime so the instance is terminated immediately (no hysteresis wait).
 	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: -1}
-	result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -55,12 +55,12 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Verify instance is now failed
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 
 	// Verify job was reset to queued (unplaced)
@@ -73,7 +73,7 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 
 	// Verify attempt was closed
-	attempts, err := db.GetJobCloudAttempts(database, 1)
+	attempts, err := db.GetLaunchAttempts(database, 1)
 	if err != nil {
 		t.Fatalf("get attempts: %v", err)
 	}
@@ -82,20 +82,20 @@ func TestReconcileCloudInstances_DeadInstance(t *testing.T) {
 	}
 }
 
-func TestReconcileCloudInstances_GraceDetection(t *testing.T) {
+func TestReconcileLaunches_GraceDetection(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	// Create a running instance with a provider ID
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "12345"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -108,7 +108,7 @@ func TestReconcileCloudInstances_GraceDetection(t *testing.T) {
 	}
 
 	// With nil r2Client, grace detection is skipped — no reconciliation
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -117,29 +117,29 @@ func TestReconcileCloudInstances_GraceDetection(t *testing.T) {
 	}
 
 	// Instance should still be running
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusRunning {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusRunning)
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
 	}
 }
 
-func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
+func TestReconcileLaunches_RunningInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	// Create a running instance
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "12345"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 
 	// Reconcile — nothing should change
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -161,19 +161,19 @@ func TestReconcileCloudInstances_RunningInstance(t *testing.T) {
 	}
 }
 
-func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
+func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "stale-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "stale-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, jobID); err != nil {
 			t.Fatalf("create job %d: %v", jobID, err)
 		}
-		database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = ? AND end_time IS NULL`,
+		database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = ? AND end_time IS NULL`,
 			db.StatusQueued, instanceID, jobID)
 	}
 
@@ -222,7 +222,7 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 		},
 	}
 
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -233,12 +233,12 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 		t.Fatalf("DestroyInstance called with %q, want %q", destroyedID, "stale-123")
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 
 	for _, jobID := range []int64{1, 2} {
@@ -252,19 +252,19 @@ func TestReconcileCloudInstances_StaleHeartbeatWithoutAgentMarksFailed(t *testin
 	}
 }
 
-func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *testing.T) {
+func TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "intent-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "intent-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("assign job: %v", err)
 	}
 
@@ -285,7 +285,7 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 			return nil, nil
 		}
 		return &instanceintent.Marker{
-			TerminalStatus:    db.CloudInstanceStatusFailed,
+			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: db.TerminationReasonDiskFull,
 			Phase:             "disk-full:246",
 			JobID:             246,
@@ -310,7 +310,7 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 		},
 	}
 
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -321,12 +321,12 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 		t.Fatalf("DestroyInstance called with %q, want %q", destroyedID, "intent-123")
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Fatalf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 	if ci.TerminationReason != db.TerminationReasonDiskFull {
 		t.Fatalf("termination reason = %q, want %q", ci.TerminationReason, db.TerminationReasonDiskFull)
@@ -347,26 +347,26 @@ func TestReconcileCloudInstances_TerminationIntent_DestroysAndMarksFailed(t *tes
 	}
 }
 
-func TestReconcileCloudInstances_SafetyNetMarksDestroyConfirmedWhenProviderGone(t *testing.T) {
+func TestReconcileLaunches_SafetyNetMarksDestroyConfirmedWhenProviderGone(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusCompleted, db.TerminationReasonCompleted); err != nil {
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCompleted, db.TerminationReasonCompleted); err != nil {
 		t.Fatalf("mark completed: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "intent-gone-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "intent-gone-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
-	if err := db.UpdateCloudInstanceTerminationIntent(database, instanceID, &instanceintent.Marker{
-		TerminalStatus:       db.CloudInstanceStatusCompleted,
+	if err := db.UpdateLaunchTerminationIntent(database, instanceID, &instanceintent.Marker{
+		TerminalStatus:       db.LaunchStatusCompleted,
 		TerminationReason:    db.TerminationReasonCompleted,
 		RequestedAtUnix:      time.Now().Add(-30 * time.Second).Unix(),
 		DestroyStartedAtUnix: time.Now().Add(-25 * time.Second).Unix(),
@@ -381,7 +381,7 @@ func TestReconcileCloudInstances_SafetyNetMarksDestroyConfirmedWhenProviderGone(
 		},
 	}
 
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestReconcileCloudInstances_SafetyNetMarksDestroyConfirmedWhenProviderGone(
 		t.Fatalf("reconciled = %d, want 1", result.Reconciled)
 	}
 
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
@@ -398,19 +398,19 @@ func TestReconcileCloudInstances_SafetyNetMarksDestroyConfirmedWhenProviderGone(
 	}
 }
 
-func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedFailures(t *testing.T) {
+func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailures(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "probe-err-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "probe-err-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -418,7 +418,7 @@ func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedF
 	if err != nil {
 		t.Fatalf("queue job: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 		t.Fatalf("assign job: %v", err)
 	}
 
@@ -456,7 +456,7 @@ func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedF
 
 	reconciler := NewReconciler()
 	for i := 0; i < minProbeFailureAttempts-1; i++ {
-		result, err := reconciler.ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+		result, err := reconciler.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
 		if err != nil {
 			t.Fatalf("reconcile attempt %d: %v", i+1, err)
 		}
@@ -465,7 +465,7 @@ func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedF
 		}
 	}
 
-	result, err := reconciler.ReconcileCloudInstances(database, []cloud.Client{mockClient}, &r2.Client{})
+	result, err := reconciler.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
 	if err != nil {
 		t.Fatalf("reconcile final attempt: %v", err)
 	}
@@ -477,25 +477,25 @@ func TestReconcileCloudInstances_StaleHeartbeatUnreachableProbeRequiresRepeatedF
 	}
 }
 
-func TestReconcileCloudInstances_GraceExpiry_DestroysProvider(t *testing.T) {
+func TestReconcileLaunches_GraceExpiry_DestroysProvider(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	// Create a grace-period instance with an expired deadline
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusGrace,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusGrace,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "99999"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "99999"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 	// Set grace deadline in the past
 	pastDeadline := time.Now().Add(-5 * time.Minute).Unix()
-	if err := db.SetCloudInstanceGraceStarted(database, instanceID, pastDeadline); err != nil {
+	if err := db.SetLaunchGraceStarted(database, instanceID, pastDeadline); err != nil {
 		t.Fatalf("set grace started: %v", err)
 	}
 
@@ -509,7 +509,7 @@ func TestReconcileCloudInstances_GraceExpiry_DestroysProvider(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -523,33 +523,33 @@ func TestReconcileCloudInstances_GraceExpiry_DestroysProvider(t *testing.T) {
 	}
 
 	// Verify instance is now failed
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusFailed {
-		t.Errorf("instance status = %q, want %q", ci.Status, db.CloudInstanceStatusFailed)
+	if ci.Status != db.LaunchStatusFailed {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusFailed)
 	}
 }
 
-func TestReconcileCloudInstances_SafetyNet_DestroysLeakedInstance(t *testing.T) {
+func TestReconcileLaunches_SafetyNet_DestroysLeakedInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	// Create an instance already marked as failed (recently)
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "leaked-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "leaked-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 	// Mark it as failed (this sets ended_at to now)
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonJobFailure); err != nil {
 		t.Fatalf("update status: %v", err)
 	}
 
@@ -568,7 +568,7 @@ func TestReconcileCloudInstances_SafetyNet_DestroysLeakedInstance(t *testing.T) 
 
 	// Reconcile — the main loop won't see this instance (it's already failed),
 	// but the safety-net pass should catch and destroy it.
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -580,23 +580,23 @@ func TestReconcileCloudInstances_SafetyNet_DestroysLeakedInstance(t *testing.T) 
 	}
 }
 
-func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
+func TestReconcileLaunches_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
 	// Create an instance already marked as failed (recently)
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "dead-456"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "dead-456"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonJobFailure); err != nil {
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonJobFailure); err != nil {
 		t.Fatalf("update status: %v", err)
 	}
 
@@ -613,7 +613,7 @@ func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -625,19 +625,19 @@ func TestReconcileCloudInstances_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 	}
 }
 
-func TestReconcileCloudInstances_DeadInstanceHysteresis(t *testing.T) {
+func TestReconcileLaunches_DeadInstanceHysteresis(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "12345"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -652,15 +652,15 @@ func TestReconcileCloudInstances_DeadInstanceHysteresis(t *testing.T) {
 	r := &Reconciler{firstDeadAt: make(map[int64]time.Time), lastProviderStatus: make(map[int64]string), deadConfirmTime: 10 * time.Millisecond}
 
 	// First call: instance appears dead but hasn't been confirmed yet.
-	result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile (first): %v", err)
 	}
 	if result.Reconciled != 0 {
 		t.Errorf("first pass: reconciled = %d, want 0 (hysteresis pending)", result.Reconciled)
 	}
-	ci, _ := db.GetCloudInstance(database, instanceID)
-	if ci.Status != db.CloudInstanceStatusRunning {
+	ci, _ := db.GetLaunch(database, instanceID)
+	if ci.Status != db.LaunchStatusRunning {
 		t.Errorf("first pass: instance status = %q, want running", ci.Status)
 	}
 
@@ -668,15 +668,15 @@ func TestReconcileCloudInstances_DeadInstanceHysteresis(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	// Second call: now confirmed dead, should terminate.
-	result, err = r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err = r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile (second): %v", err)
 	}
 	if result.Reconciled != 1 {
 		t.Errorf("second pass: reconciled = %d, want 1", result.Reconciled)
 	}
-	ci, _ = db.GetCloudInstance(database, instanceID)
-	if ci.Status != db.CloudInstanceStatusFailed {
+	ci, _ = db.GetLaunch(database, instanceID)
+	if ci.Status != db.LaunchStatusFailed {
 		t.Errorf("second pass: instance status = %q, want failed", ci.Status)
 	}
 }
@@ -719,19 +719,19 @@ func TestReconcileCampaigns_RunningCampaignWithNoInstancesBecomesFailed(t *testi
 	}
 }
 
-func TestReconcileCloudInstances_TransientAPIError_SkipsInstance(t *testing.T) {
+func TestReconcileLaunches_TransientAPIError_SkipsInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "transient-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "transient-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -748,7 +748,7 @@ func TestReconcileCloudInstances_TransientAPIError_SkipsInstance(t *testing.T) {
 
 	// Run multiple reconciliation passes — instance must remain running
 	for i := 0; i < 5; i++ {
-		result, err := r.ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+		result, err := r.ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 		if err != nil {
 			t.Fatalf("reconcile pass %d: %v", i+1, err)
 		}
@@ -758,28 +758,28 @@ func TestReconcileCloudInstances_TransientAPIError_SkipsInstance(t *testing.T) {
 	}
 
 	// Verify instance is still running
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil {
 		t.Fatalf("get instance: %v", err)
 	}
-	if ci.Status != db.CloudInstanceStatusRunning {
-		t.Errorf("instance status = %q, want %q (transient errors must not kill instance)", ci.Status, db.CloudInstanceStatusRunning)
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("instance status = %q, want %q (transient errors must not kill instance)", ci.Status, db.LaunchStatusRunning)
 	}
 }
 
-func TestReconcileCloudInstances_BatchFetch_UsesListAllInstances(t *testing.T) {
+func TestReconcileLaunches_BatchFetch_UsesListAllInstances(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
 		t.Fatalf("create instance: %v", err)
 	}
-	if err := db.SetCloudInstanceProviderID(database, instanceID, "batch-123"); err != nil {
+	if err := db.SetLaunchProviderID(database, instanceID, "batch-123"); err != nil {
 		t.Fatalf("set provider id: %v", err)
 	}
 
@@ -797,7 +797,7 @@ func TestReconcileCloudInstances_BatchFetch_UsesListAllInstances(t *testing.T) {
 		},
 	}
 
-	result, err := NewReconciler().ReconcileCloudInstances(database, []cloud.Client{mockClient}, nil)
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, nil)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
@@ -818,8 +818,8 @@ func TestReconcileCampaigns_MixedTerminalInstancesBecomeFailed(t *testing.T) {
 		t.Fatalf("create campaign: %v", err)
 	}
 
-	for _, status := range []string{db.CloudInstanceStatusCompleted, db.CloudInstanceStatusFailed} {
-		if _, err := db.CreateCloudInstance(database, &db.CloudInstance{
+	for _, status := range []string{db.LaunchStatusCompleted, db.LaunchStatusFailed} {
+		if _, err := db.CreateLaunch(database, &db.Launch{
 			CampaignID: &campaignID,
 			Status:     status,
 			Provider:   "vastai",

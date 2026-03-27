@@ -212,7 +212,7 @@ func resolveMode(mode ops.TimeoutMode) ops.TimeoutMode {
 }
 
 func (s *Service) shouldRelay(job *db.Job) bool {
-	return s != nil && s.relay != nil && job != nil && !job.IsCloudJob()
+	return s != nil && s.relay != nil && job != nil && !job.IsLaunchJob()
 }
 
 func (s *Service) relayQueuedCancel(job *db.Job) (OperationResult, error) {

@@ -92,16 +92,16 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	updatedInstanceID, err := recordCloudJobCompletion(database, jobID, 0, 10, 20, "")
@@ -134,9 +134,9 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 		t.Fatalf("job end_time = %v, want 20", job.EndTime)
 	}
 
-	attempts, err := db.GetJobCloudAttempts(database, jobID)
+	attempts, err := db.GetLaunchAttempts(database, jobID)
 	if err != nil {
-		t.Fatalf("GetJobCloudAttempts: %v", err)
+		t.Fatalf("GetLaunchAttempts: %v", err)
 	}
 	if len(attempts) != 1 {
 		t.Fatalf("attempt count = %d, want 1", len(attempts))
@@ -152,20 +152,20 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusFailed,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, jobID); err != nil {
 		t.Fatalf("set job running: %v", err)
@@ -184,16 +184,16 @@ func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testi
 		t.Fatalf("job status = %q, want %q", job.Status, db.StatusQueued)
 	}
 
-	outcomes, err := db.GetAttemptOutcomesByInstance(database, instanceID)
+	outcomes, err := db.GetAttemptOutcomesByLaunch(database, instanceID)
 	if err != nil {
-		t.Fatalf("GetAttemptOutcomesByInstance: %v", err)
+		t.Fatalf("GetAttemptOutcomesByLaunch: %v", err)
 	}
 	if outcomes[jobID] != db.AttemptOutcomeOrphaned {
 		t.Fatalf("attempt outcome = %q, want %q", outcomes[jobID], db.AttemptOutcomeOrphaned)
 	}
 }
 
-func TestJobEligibleForStartedMarker_SkipsQueuedJobWithoutCloudInstance(t *testing.T) {
+func TestJobEligibleForStartedMarker_SkipsQueuedJobWithoutLaunch(t *testing.T) {
 	database := db.SetupTestDB(t)
 
 	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
@@ -201,7 +201,7 @@ func TestJobEligibleForStartedMarker_SkipsQueuedJobWithoutCloudInstance(t *testi
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
 	if _, err := database.Exec(
-		`UPDATE job_attempts SET status = ?, start_time = ?, cloud_instance_id = NULL, host = ''
+		`UPDATE job_attempts SET status = ?, start_time = ?, launch_id = NULL, host = ''
 		 WHERE job_id = ? AND end_time IS NULL`,
 		db.StatusQueued, 123, jobID,
 	); err != nil {
@@ -224,16 +224,16 @@ func TestJobEligibleForStartedMarker_SkipsQueuedJobOnFailedInstance(t *testing.T
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusFailed,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	runID, ok, err := jobEligibleForStartedMarker(database, jobID)
@@ -252,16 +252,16 @@ func TestJobEligibleForStartedMarker_AllowsQueuedJobOnRunningInstance(t *testing
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "RTX_4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
-	if err := db.SetJobCloudInstanceID(database, jobID, instanceID); err != nil {
-		t.Fatalf("SetJobCloudInstanceID: %v", err)
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
 
 	runID, ok, err := jobEligibleForStartedMarker(database, jobID)

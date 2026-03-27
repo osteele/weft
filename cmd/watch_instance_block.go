@@ -18,12 +18,12 @@ type watchInstanceBlockOptions struct {
 	resolvedJobsOverride     *int
 	dimJobStatuses           bool
 	now                      time.Time
-	donorInstances           []*db.CloudInstance // predecessor chain, most-recent-first
+	donorInstances           []*db.Launch // predecessor chain, most-recent-first
 }
 
-func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.CloudInstance) campaign.InstanceUpdate {
-	if update.CloudInstance == nil {
-		update.CloudInstance = ci
+func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.Launch) campaign.InstanceUpdate {
+	if update.Launch == nil {
+		update.Launch = ci
 	}
 	return update
 }
@@ -33,7 +33,7 @@ func formatWatchInstanceBlock(update campaign.InstanceUpdate, jobProgressHWM map
 }
 
 func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHWM map[int64]int, opts watchInstanceBlockOptions) []string {
-	ci := update.CloudInstance
+	ci := update.Launch
 	if ci == nil {
 		return nil
 	}
@@ -149,7 +149,7 @@ func watchActivePhaseStatus(phase string) (int64, string) {
 	}
 }
 
-func formatWatchInstanceHeaderLine(ci *db.CloudInstance, inst *cloud.Instance, opts watchInstanceBlockOptions) string {
+func formatWatchInstanceHeaderLine(ci *db.Launch, inst *cloud.Instance, opts watchInstanceBlockOptions) string {
 	statusLabel := watchInstanceStatusLabel(ci, inst)
 	if label := ci.GraceStatusLabel(); label != "" {
 		statusLabel = label
@@ -173,7 +173,7 @@ func formatWatchInstanceHeaderLine(ci *db.CloudInstance, inst *cloud.Instance, o
 	return header
 }
 
-func watchInstanceStatusLabel(ci *db.CloudInstance, inst *cloud.Instance) string {
+func watchInstanceStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
 	if ci == nil {
 		return ""
 	}
@@ -181,10 +181,10 @@ func watchInstanceStatusLabel(ci *db.CloudInstance, inst *cloud.Instance) string
 	if inst == nil || inst.Status == "" || campaign.IsInstanceTerminal(ci.Status) {
 		return statusLabel
 	}
-	if ci.Status == db.CloudInstanceStatusRunning && inst.Status != "running" {
+	if ci.Status == db.LaunchStatusRunning && inst.Status != "running" {
 		return inst.Status
 	}
-	if ci.Status == db.CloudInstanceStatusLaunching {
+	if ci.Status == db.LaunchStatusLaunching {
 		return inst.Status
 	}
 	return statusLabel
@@ -194,15 +194,15 @@ func watchStatusBlockStyle(displayStatus, dbStatus string) lipgloss.Style {
 	switch displayStatus {
 	case "loading", "launching", "provisioning":
 		return watchDimStyle
-	case db.CloudInstanceStatusCompleted:
+	case db.LaunchStatusCompleted:
 		return watchCompletedStyle
-	case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
+	case db.LaunchStatusFailed, db.LaunchStatusCancelled:
 		return watchFailedStyle
 	}
 	switch dbStatus {
-	case db.CloudInstanceStatusCompleted:
+	case db.LaunchStatusCompleted:
 		return watchCompletedStyle
-	case db.CloudInstanceStatusFailed, db.CloudInstanceStatusCancelled:
+	case db.LaunchStatusFailed, db.LaunchStatusCancelled:
 		return watchFailedStyle
 	default:
 		return watchStatusStyle
@@ -243,7 +243,7 @@ func watchJobProgressPercent(update campaign.InstanceUpdate, job *db.Job, displa
 	return -1
 }
 
-func formatWatchProviderLine(ci *db.CloudInstance, inst *cloud.Instance) string {
+func formatWatchProviderLine(ci *db.Launch, inst *cloud.Instance) string {
 	if ci == nil {
 		return ""
 	}
@@ -283,8 +283,8 @@ func formatWatchInstanceSpecLine(inst *cloud.Instance) string {
 	return fmt.Sprintf("  Specs: %s", strings.Join(parts, ", "))
 }
 
-func formatWatchInstanceCostLine(ci *db.CloudInstance, inst *cloud.Instance, now time.Time) string {
-	obs := observeCloudInstance(ci, inst, now)
+func formatWatchInstanceCostLine(ci *db.Launch, inst *cloud.Instance, now time.Time) string {
+	obs := observeLaunch(ci, inst, now)
 	if obs.Cost == nil {
 		return ""
 	}
@@ -332,11 +332,11 @@ func clearWatchJobProgressHWM(hwm map[int64]int, update campaign.InstanceUpdate)
 
 // collectDonorChain walks DonorInstanceID links from ci using the provided
 // lookup function, returning the predecessor chain (most-recent-first).
-func collectDonorChain(ci *db.CloudInstance, getCI func(int64) *db.CloudInstance) []*db.CloudInstance {
+func collectDonorChain(ci *db.Launch, getCI func(int64) *db.Launch) []*db.Launch {
 	if ci == nil || ci.DonorInstanceID == nil {
 		return nil
 	}
-	var chain []*db.CloudInstance
+	var chain []*db.Launch
 	seen := map[int64]bool{ci.ID: true}
 	donorID := ci.DonorInstanceID
 	for donorID != nil {
@@ -357,14 +357,14 @@ func collectDonorChain(ci *db.CloudInstance, getCI func(int64) *db.CloudInstance
 // formatPreviousInstanceLine renders a compact summary of predecessor instances.
 // Single predecessor: "  Previous: Instance 226 — infra_failure, $0.01, 1m3s"
 // Chain: "  Previous: Instance 227 (infra_failure) → Instance 226 (infra_failure)"
-func formatPreviousInstanceLine(donors []*db.CloudInstance, now time.Time) string {
+func formatPreviousInstanceLine(donors []*db.Launch, now time.Time) string {
 	if len(donors) == 0 {
 		return ""
 	}
 	if len(donors) == 1 {
 		di := donors[0]
 		parts := []string{di.DisplayTerminationReason()}
-		obs := observeCloudInstance(di, nil, now)
+		obs := observeLaunch(di, nil, now)
 		if obs.Cost != nil {
 			parts = append(parts, fmt.Sprintf("$%.2f", *obs.Cost))
 		}

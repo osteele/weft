@@ -39,11 +39,11 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 
 	updates := make(map[int64]campaign.InstanceUpdate, len(instanceIDs))
 	for _, id := range instanceIDs {
-		ci, _ := db.GetCloudInstance(database, id)
-		jobs, _ := db.GetCloudInstanceJobsIncludingAttempts(database, id)
-		outcomes, _ := db.GetAttemptOutcomesByInstance(database, id)
+		ci, _ := db.GetLaunch(database, id)
+		jobs, _ := db.GetLaunchJobsIncludingAttempts(database, id)
+		outcomes, _ := db.GetAttemptOutcomesByLaunch(database, id)
 		updates[id] = campaign.InstanceUpdate{
-			CloudInstance:      ci,
+			Launch:             ci,
 			Jobs:               jobs,
 			JobAttemptOutcomes: outcomes,
 		}
@@ -108,7 +108,7 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 				if hasStateChange {
 					fmt.Println(output)
 				}
-				updates[instanceID] = normalizeWatchInstanceUpdate(update, updates[instanceID].CloudInstance)
+				updates[instanceID] = normalizeWatchInstanceUpdate(update, updates[instanceID].Launch)
 				now := time.Now()
 				if hasStateChange || now.Sub(lastSummaryTime) >= summaryInterval(now.Sub(launchTime)) {
 					if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now); summary != "" {
@@ -119,7 +119,7 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 				mu.Unlock()
 
 				// Auto-relaunch on retryable infrastructure failure with backoff
-				ci := update.CloudInstance
+				ci := update.Launch
 				if ci != nil && db.IsRetryableTermination(ci) {
 					retryMu.Lock()
 					shouldRetry := !retryDone
@@ -189,8 +189,8 @@ func campaignPlainViews(instanceIDs []int64, updates map[int64]campaign.Instance
 	for _, id := range instanceIDs {
 		update := updates[id]
 		views = append(views, cloudInstanceView{
-			CloudInstance: update.CloudInstance,
-			Instance:      update.Instance,
+			Launch:   update.Launch,
+			Instance: update.Instance,
 		})
 	}
 	return views
@@ -198,7 +198,7 @@ func campaignPlainViews(instanceIDs []int64, updates map[int64]campaign.Instance
 
 // clientForInstance creates a cloud.Client based on the provider stored in the DB.
 func clientForInstance(database *sql.DB, instanceID int64) cloud.Client {
-	ci, err := db.GetCloudInstance(database, instanceID)
+	ci, err := db.GetLaunch(database, instanceID)
 	if err != nil || ci == nil {
 		return cloudClientForDBInstance("vastai") // fallback
 	}
@@ -210,7 +210,7 @@ func campaignInfoFromInstances(database *sql.DB, instanceIDs []int64) (campaignI
 	if len(instanceIDs) == 0 {
 		return 0, time.Time{}
 	}
-	ci, err := db.GetCloudInstance(database, instanceIDs[0])
+	ci, err := db.GetLaunch(database, instanceIDs[0])
 	if err != nil || ci == nil {
 		return 0, time.Time{}
 	}

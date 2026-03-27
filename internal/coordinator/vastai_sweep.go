@@ -147,7 +147,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		return
 	}
 	var cloudInstanceID sql.NullInt64
-	if err := c.db.QueryRow(`SELECT cloud_instance_id FROM job_status WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
+	if err := c.db.QueryRow(`SELECT launch_id FROM job_status WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
 		if err := db.RefineInstanceTerminationReason(c.db, cloudInstanceID.Int64); err != nil {
 			c.logger.Printf("vastai sweep: refine termination reason for instance %d: %v", cloudInstanceID.Int64, err)
 		}
@@ -158,7 +158,7 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	if exitCode != 0 {
 		outcome = db.AttemptOutcomeFailed
 	}
-	if err := db.CloseJobCloudAttempt(c.db, jobID, outcome); err != nil {
+	if err := db.CloseLaunchAttempt(c.db, jobID, outcome); err != nil {
 		c.logger.Printf("vastai sweep: close attempt for job %d: %v", jobID, err)
 	}
 
@@ -565,9 +565,9 @@ func WriteVastaiLogsToCache(jobID int64, tmpDir string) {
 	}
 }
 
-// checkCloudInstanceLimits destroys instances that exceed budget or time limits.
-func (c *Coordinator) checkCloudInstanceLimits(cfg *config.Config) {
-	instances, err := db.ListCloudInstances(c.db)
+// checkLaunchLimits destroys instances that exceed budget or time limits.
+func (c *Coordinator) checkLaunchLimits(cfg *config.Config) {
+	instances, err := db.ListLaunches(c.db)
 	if err != nil {
 		return
 	}
@@ -578,7 +578,7 @@ func (c *Coordinator) checkCloudInstanceLimits(cfg *config.Config) {
 	}
 
 	for _, ci := range instances {
-		if ci.Status != db.CloudInstanceStatusRunning {
+		if ci.Status != db.LaunchStatusRunning {
 			continue
 		}
 
@@ -593,7 +593,7 @@ func (c *Coordinator) checkCloudInstanceLimits(cfg *config.Config) {
 						_ = cl.DestroyInstance(providerInstID)
 					}
 				}
-				_ = db.UpdateCloudInstanceStatus(c.db, ci.ID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure)
+				_ = db.UpdateLaunchStatus(c.db, ci.ID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 			}
 		}
 	}

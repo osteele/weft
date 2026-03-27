@@ -16,20 +16,20 @@ import (
 func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	failedID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusLaunching,
+	failedID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusLaunching,
 		Provider: "vastai",
 		GPUSpec:  "RTX 4090",
 	})
 	if err != nil {
 		t.Fatalf("create failed instance: %v", err)
 	}
-	if err := db.UpdateCloudInstanceStatus(database, failedID, db.CloudInstanceStatusFailed, db.TerminationReasonInfraFailure); err != nil {
+	if err := db.UpdateLaunchStatus(database, failedID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure); err != nil {
 		t.Fatalf("set failed status: %v", err)
 	}
 
-	launchingID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusLaunching,
+	launchingID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusLaunching,
 		Provider: "vastai",
 		GPUSpec:  "A100",
 	})
@@ -85,9 +85,9 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 }
 
 func TestFormatWatchProviderLine(t *testing.T) {
-	ci := &db.CloudInstance{
+	ci := &db.Launch{
 		ID:                 106,
-		Status:             db.CloudInstanceStatusRunning,
+		Status:             db.LaunchStatusRunning,
 		Provider:           "vastai",
 		ProviderInstanceID: "32712486",
 	}
@@ -119,9 +119,9 @@ func TestWatchModelView_ShowsJobDirectoryTail(t *testing.T) {
 		instanceIDs: []int64{5},
 		updates: map[int64]campaign.InstanceUpdate{
 			5: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:       5,
-					Status:   db.CloudInstanceStatusRunning,
+					Status:   db.LaunchStatusRunning,
 					Provider: "vastai",
 					GPUSpec:  "A100",
 				},
@@ -142,13 +142,13 @@ func TestWatchModelView_ShowsJobDirectoryTail(t *testing.T) {
 func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	database := db.SetupTestDB(t)
 
-	instanceID, err := db.CreateCloudInstance(database, &db.CloudInstance{
-		Status:   db.CloudInstanceStatusRunning,
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
 		Provider: "vastai",
 		GPUSpec:  "A40",
 	})
 	if err != nil {
-		t.Fatalf("CreateCloudInstance: %v", err)
+		t.Fatalf("CreateLaunch: %v", err)
 	}
 
 	if _, err := database.Exec(
@@ -156,28 +156,28 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, cloud_instance_id = ? WHERE job_id = 199 AND end_time IS NULL`,
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 199 AND end_time IS NULL`,
 		db.StatusRunning, instanceID)
 
 	m := watchModel{
 		instanceIDs: []int64{instanceID},
 		updates: map[int64]campaign.InstanceUpdate{
 			instanceID: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:       instanceID,
-					Status:   db.CloudInstanceStatusRunning,
+					Status:   db.LaunchStatusRunning,
 					Provider: "vastai",
 					GPUSpec:  "A40",
 				},
 				Instance: &cloud.Instance{Status: "running"},
 				Jobs: []*db.Job{
 					{
-						ID:              199,
-						Status:          db.StatusRunning,
-						CloudInstanceID: &instanceID,
-						Host:            db.CloudInstanceHost(instanceID),
-						WorkingDir:      "/workspace/llm-performance-models",
-						Description:     "EXP-035",
+						ID:          199,
+						Status:      db.StatusRunning,
+						LaunchID:    &instanceID,
+						Host:        db.LaunchHost(instanceID),
+						WorkingDir:  "/workspace/llm-performance-models",
+						Description: "EXP-035",
 					},
 				},
 			},
@@ -186,11 +186,11 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 		jobProgressHWM: map[int64]int{},
 	}
 
-	if err := db.UpdateCloudInstanceStatus(database, instanceID, db.CloudInstanceStatusFailed, db.TerminationReasonDiskFull); err != nil {
-		t.Fatalf("UpdateCloudInstanceStatus: %v", err)
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonDiskFull); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
 	}
-	if _, err := db.ResetCloudInstanceJobs(database, instanceID, db.AttemptOutcomeOrphaned); err != nil {
-		t.Fatalf("ResetCloudInstanceJobs: %v", err)
+	if _, err := db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs: %v", err)
 	}
 
 	nextModel, cmd := m.Update(watchCheckDoneResultMsg{allTerminal: true})
@@ -201,8 +201,8 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	if !got.done {
 		t.Fatalf("expected done=true after final refresh")
 	}
-	if got.updates[instanceID].CloudInstance == nil || got.updates[instanceID].CloudInstance.Status != db.CloudInstanceStatusFailed {
-		t.Fatalf("instance status = %+v, want failed", got.updates[instanceID].CloudInstance)
+	if got.updates[instanceID].Launch == nil || got.updates[instanceID].Launch.Status != db.LaunchStatusFailed {
+		t.Fatalf("instance status = %+v, want failed", got.updates[instanceID].Launch)
 	}
 	if got.updates[instanceID].JobAttemptOutcomes[199] != db.AttemptOutcomeOrphaned {
 		t.Fatalf("job outcome = %q, want %q", got.updates[instanceID].JobAttemptOutcomes[199], db.AttemptOutcomeOrphaned)
@@ -215,7 +215,7 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	if !strings.Contains(out, "orphaned") {
 		t.Fatalf("expected orphaned job in view, got:\n%s", out)
 	}
-	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+	if strings.Contains(out, historicalLaunchJobsHeader) {
 		t.Fatalf("expected failed instance to keep last attached jobs in the main list, got:\n%s", out)
 	}
 }
@@ -226,14 +226,14 @@ func TestWatchModelTerminalUpdateKeepsJobsInlineInRunOrder(t *testing.T) {
 		instanceIDs: []int64{instanceID},
 		updates: map[int64]campaign.InstanceUpdate{
 			instanceID: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:       instanceID,
-					Status:   db.CloudInstanceStatusRunning,
+					Status:   db.LaunchStatusRunning,
 					Provider: "vastai",
 					GPUSpec:  "A40",
 				},
 				Jobs: []*db.Job{
-					{ID: 203, Status: db.StatusRunning, CloudInstanceID: &instanceID, Description: "current"},
+					{ID: 203, Status: db.StatusRunning, LaunchID: &instanceID, Description: "current"},
 					{ID: 249, Status: db.StatusQueued, Description: "historical"},
 				},
 				JobAttemptOutcomes: map[int64]string{
@@ -245,9 +245,9 @@ func TestWatchModelTerminalUpdateKeepsJobsInlineInRunOrder(t *testing.T) {
 	}
 
 	terminalUpdate := campaign.InstanceUpdate{
-		CloudInstance: &db.CloudInstance{
+		Launch: &db.Launch{
 			ID:                instanceID,
-			Status:            db.CloudInstanceStatusFailed,
+			Status:            db.LaunchStatusFailed,
 			Provider:          "vastai",
 			GPUSpec:           "A40",
 			TerminationReason: db.TerminationReasonInfraFailure,
@@ -273,7 +273,7 @@ func TestWatchModelTerminalUpdateKeepsJobsInlineInRunOrder(t *testing.T) {
 	if currentIdx == -1 || historicalIdx == -1 {
 		t.Fatalf("expected both jobs in output, got:\n%s", out)
 	}
-	if strings.Contains(out, historicalCloudInstanceJobsHeader) {
+	if strings.Contains(out, historicalLaunchJobsHeader) {
 		t.Fatalf("expected attempts to remain inline, got:\n%s", out)
 	}
 	if !(currentIdx < historicalIdx) {
@@ -292,9 +292,9 @@ func TestWatchModelViewShowsCampaignSummaryRate(t *testing.T) {
 		instanceIDs: []int64{instanceA, instanceB},
 		updates: map[int64]campaign.InstanceUpdate{
 			instanceA: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:               instanceA,
-					Status:           db.CloudInstanceStatusRunning,
+					Status:           db.LaunchStatusRunning,
 					Provider:         "vastai",
 					GPUSpec:          "A100",
 					CostPerHourCents: 150,
@@ -302,9 +302,9 @@ func TestWatchModelViewShowsCampaignSummaryRate(t *testing.T) {
 				},
 			},
 			instanceB: {
-				CloudInstance: &db.CloudInstance{
+				Launch: &db.Launch{
 					ID:               instanceB,
-					Status:           db.CloudInstanceStatusFailed,
+					Status:           db.LaunchStatusFailed,
 					Provider:         "vastai",
 					GPUSpec:          "A100",
 					CostPerHourCents: 200,

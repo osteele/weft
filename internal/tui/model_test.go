@@ -63,7 +63,7 @@ func TestJobMatchesHostFilterRecentIncludesCloudAndUnplacedJobs(t *testing.T) {
 		},
 		{
 			name: "cloud instance job is visible",
-			job:  &db.Job{Host: "vastai:32708838", CloudInstanceID: &cloudInstanceID},
+			job:  &db.Job{Host: "vastai:32708838", LaunchID: &cloudInstanceID},
 			want: true,
 		},
 		{

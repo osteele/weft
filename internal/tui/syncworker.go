@@ -220,7 +220,7 @@ func (w *SyncWorker) checkUnplacedJobs() {
 	}
 
 	for _, j := range jobs {
-		if j.CloudInstanceID != nil && *j.CloudInstanceID != 0 {
+		if j.LaunchID != nil && *j.LaunchID != 0 {
 			continue
 		}
 
@@ -267,7 +267,7 @@ func (w *SyncWorker) reconcileCloudJobs() {
 
 	if len(cloudClients) == 0 {
 		// No cloud clients — fall back to DB-only reconciliation
-		n, err := db.ResetJobsOnTerminalCloudInstances(w.database)
+		n, err := db.ResetJobsOnTerminalLaunches(w.database)
 		if err != nil {
 			log.Printf("cloud reconcile: %v", err)
 			return
