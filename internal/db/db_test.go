@@ -905,7 +905,15 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record queued: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE job_attempts SET launch_id = ?, status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, 42, StatusRunning, time.Now().Unix(), jobID); err != nil {
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create launch: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE job_attempts SET launch_id = ?, status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, launchID, StatusRunning, time.Now().Unix(), jobID); err != nil {
 		t.Fatalf("update job: %v", err)
 	}
 
@@ -917,7 +925,7 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if got := strings.Join(job.PlacementReasons, "\n"); got != "cloud instance 42 unavailable; job reset to unplaced queue" {
+	if got := strings.Join(job.PlacementReasons, "\n"); got != fmt.Sprintf("cloud instance %d unavailable; job reset to unplaced queue", launchID) {
 		t.Fatalf("PlacementReasons = %v", job.PlacementReasons)
 	}
 }

@@ -966,7 +966,8 @@ func Open() (*sql.DB, error) {
 	// modernc.org/sqlite applies these on every new connection from the pool.
 	// - journal_mode(WAL): better concurrent access (TUI + sync + CLI)
 	// - busy_timeout(30000): wait up to 30s for locks instead of failing immediately
-	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)", dbPath)
+	// - foreign_keys(ON): enforce FK constraints
+	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(ON)", dbPath)
 	db, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
