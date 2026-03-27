@@ -78,11 +78,11 @@ slurmctld ◄────────►│  Node 2 (slurmd)  │◄────
 ### 1. Resource Management
 
 **weft:**
-- Manual host selection (user picks which machine)
+- GPU constraint flags: `--gpu`, `--gpu-class`, `--gpu-mem` for declaring requirements
+- Automatic placement scoring when host is omitted: Monte Carlo simulation over queue wait + runtime prediction, data locality (`--input hf:<model>`), and queue depth
 - Per-job CPU allotments control concurrency (queue runner keeps total CPU under a target cap)
 - `exclusive` tag for jobs needing sole access to a host's resources
 - `benchmark` tag waits for system-wide idle (CPU, RAM, GPU, VRAM below thresholds)
-- No automatic host selection based on resource requirements
 
 **SLURM:**
 ```bash
@@ -321,30 +321,36 @@ weft run titan 'python train.py'
 - Centralized job history
 - No built-in progress parsing or AI features
 
-## Potential Enhancements
+### 10. Cloud GPU Bursting
 
-Features that could further bridge the gap without sacrificing weft' design philosophy:
+**weft:**
+```bash
+# Launch cloud instances for jobs that can't run locally
+weft instance launch
+weft instance watch <id>
+```
+- Provisions Vast.ai/RunPod instances when local capacity is insufficient
+- Cost-aware placement: compares queue wait on local hosts vs. setup + rental cost on cloud
+- Grace period: failed cloud jobs keep the instance alive for resubmission or debugging
+- Disk estimation from declared `--input hf:<model>` dependencies
+- Per-model download time factored into placement scoring
 
-### 1. Resource-Aware Scheduling
+**SLURM:**
+- Manages fixed clusters only; no built-in cloud burst support
+- Third-party integrations (e.g., Elastic SLURM on AWS) exist but are operationally heavy
+
+## Remaining Gaps
+
+Features SLURM has that weft does not yet support:
+
+### Job Arrays
 
 ```bash
-# Automatically picks titan or atlas based on available GPUs
-weft run --require gpu:2,mem:32G 'python train.py'
+# SLURM: Submit 100 jobs for hyperparameter sweep
+sbatch --array=1-100%10 sweep.sh
 ```
 
-### 2. Job Arrays
-
-```bash
-# Submit 100 jobs for hyperparameter sweep
-weft run --array 1-100 titan 'python sweep.py --param $TASK_ID'
-```
-
-### 3. Multi-Host Queue
-
-```bash
-# Pool = [titan, atlas, studio], schedules to first available
-weft queue add --pool ml-cluster 'python train.py'
-```
+weft has no equivalent. Parameter sweeps currently require submitting individual jobs or using YAML plan files with explicit entries.
 
 ## Conclusion
 
