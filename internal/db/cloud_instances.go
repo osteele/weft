@@ -492,14 +492,14 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 	// historical-only jobs (no index) follow. Within each group, sort by id.
 	// membership_rank is a final tiebreaker so the current row wins over the
 	// historical row for the same job when deduplicating below.
-	query := fmt.Sprintf(`SELECT %s FROM cloud_instance_job_membership
+	query := fmt.Sprintf(`SELECT %s FROM launch_job_membership
 		WHERE membership_launch_id = ?
 		  AND tombstoned = 0
 		ORDER BY
 			CASE WHEN campaign_job_index IS NOT NULL THEN 0 ELSE 1 END ASC,
 			campaign_job_index ASC,
 			id ASC,
-			membership_rank ASC`, qualifiedJobSelectColumns("cloud_instance_job_membership"))
+			membership_rank ASC`, qualifiedJobSelectColumns("launch_job_membership"))
 	all, err := queryJobs(database, query, instanceID)
 	if err != nil {
 		return nil, err

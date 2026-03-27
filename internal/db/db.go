@@ -462,20 +462,20 @@ func qualifiedJobSelectColumnsWithOverrides(table string, overrides map[string]s
 }
 
 func createJobStateViews(db *sql.DB) error {
-	for _, name := range []string{"cloud_instance_job_membership", "job_effective_state"} {
+	for _, name := range []string{"launch_job_membership", "job_effective_state"} {
 		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + name); err != nil {
 			return err
 		}
 	}
 
 	// job_effective_state has been removed; job_status replaces it.
-	// Only cloud_instance_job_membership remains.
+	// Only launch_job_membership remains.
 	currentMembershipColumns := qualifiedJobSelectColumnsWithOverrides("js", map[string]string{
 		"launch_id": "current_memberships.membership_launch_id",
 	})
 	historicalMembershipColumns := qualifiedJobSelectColumns("js")
 	if _, err := db.Exec(fmt.Sprintf(`
-		CREATE VIEW cloud_instance_job_membership AS
+		CREATE VIEW launch_job_membership AS
 		WITH current_memberships AS (
 			SELECT DISTINCT
 			       js.id AS job_id,
@@ -592,7 +592,7 @@ func createIntegrityTriggers(db *sql.DB) error {
 }
 
 func dropIntegrityViewsAndTriggers(db *sql.DB) error {
-	for _, name := range []string{"cloud_instance_job_membership", "job_effective_state", "all_runs"} {
+	for _, name := range []string{"launch_job_membership", "job_effective_state", "all_runs"} {
 		if _, err := db.Exec(`DROP VIEW IF EXISTS ` + name); err != nil {
 			return err
 		}

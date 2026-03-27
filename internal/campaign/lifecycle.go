@@ -864,7 +864,7 @@ func LaunchInstance(
 				oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
 				oplog.WithError(err),
 			)
-			return instanceID, fmt.Errorf("set cloud_instance_id for job %d: %w", job.ID, err)
+			return instanceID, fmt.Errorf("set launch_id for job %d: %w", job.ID, err)
 		}
 		updatedJob, err := db.GetJobByID(database, job.ID)
 		if err != nil {
@@ -977,7 +977,7 @@ func LaunchInstance(
 		jobIDs = append(jobIDs, fmt.Sprintf("%d", job.ID))
 	}
 	oplog.Log(oplog.OpLaunchLaunchRequested, oplog.WithDetailf(
-		"cloud_instance_id=%d provider=%s campaign_id=%s offer_id=%s jobs=[%s] requested_disk_gb=%d base_disk_gb=%d group_disk_gb=%d offer_disk_gb=%.0f inputs=%d gpu=%s label=%s",
+		"launch_id=%d provider=%s campaign_id=%s offer_id=%s jobs=[%s] requested_disk_gb=%d base_disk_gb=%d group_disk_gb=%d offer_disk_gb=%.0f inputs=%d gpu=%s label=%s",
 		instanceID,
 		client.Provider(),
 		campaignLogID,
@@ -1008,7 +1008,7 @@ func LaunchInstance(
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
-			"cloud_instance_id=%d provider=%s offer_id=%s error=%s",
+			"launch_id=%d provider=%s offer_id=%s error=%s",
 			instanceID, client.Provider(), finalOffer.ProviderID, err,
 		))
 		return instanceID, err
@@ -1016,7 +1016,7 @@ func LaunchInstance(
 
 	providerInstID := inst.ProviderID
 	oplog.Log(oplog.OpLaunchLaunchCreated, oplog.WithDetailf(
-		"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d offer_id=%s status=%s",
+		"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d offer_id=%s status=%s",
 		instanceID,
 		client.Provider(),
 		providerInstID,
@@ -1030,7 +1030,7 @@ func LaunchInstance(
 		oplog.Log(oplog.OpLaunchLaunchReadback,
 			oplog.WithError(readbackErr),
 			oplog.WithDetailf(
-				"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d",
+				"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d",
 				instanceID,
 				client.Provider(),
 				providerInstID,
@@ -1039,7 +1039,7 @@ func LaunchInstance(
 		)
 	} else {
 		oplog.Log(oplog.OpLaunchLaunchReadback, oplog.WithDetailf(
-			"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f status=%s ssh_host=%s ssh_port=%d",
+			"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f status=%s ssh_host=%s ssh_port=%d",
 			instanceID,
 			client.Provider(),
 			providerInstID,
@@ -1051,7 +1051,7 @@ func LaunchInstance(
 		))
 		if createOpts.DiskGB > 0 && readback.DiskGB > 0 && math.Abs(readback.DiskGB-float64(createOpts.DiskGB)) >= 1 {
 			oplog.Log(oplog.OpLaunchLaunchMismatch, oplog.WithDetailf(
-				"cloud_instance_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f offer_disk_gb=%.0f",
+				"launch_id=%d provider=%s provider_instance_id=%s requested_disk_gb=%d provider_disk_gb=%.0f offer_disk_gb=%.0f",
 				instanceID,
 				client.Provider(),
 				providerInstID,

@@ -72,7 +72,7 @@ func initJobAttemptsSchema(db *sql.DB) error {
 	}
 	// Drop views and triggers that reference old column names before renaming.
 	// These are recreated later in initSchema.
-	for _, v := range []string{"cloud_instance_job_membership", "job_status", "job_run_training_examples", "training_examples", "job_effective_state", "all_runs"} {
+	for _, v := range []string{"launch_job_membership", "job_status", "job_run_training_examples", "training_examples", "job_effective_state", "all_runs"} {
 		db.Exec(`DROP VIEW IF EXISTS ` + v)
 	}
 	for _, t := range []string{
