@@ -297,6 +297,15 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.moveCursor(-3)
+		case tea.MouseButtonWheelDown:
+			m.moveCursor(3)
+		}
+		return m, nil
+
 	case watchUpdateMsg:
 		return m.handleWatchUpdate(msg)
 
@@ -412,7 +421,7 @@ func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estim
 	restore := logging.Suppress()
 	defer restore()
 
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	if err != nil {
 		return instanceIDs, err

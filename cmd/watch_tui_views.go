@@ -150,9 +150,9 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	if !m.done {
-		hint := "j/k scroll  g/G top/bottom  s submit  q quit (instances continue in background)"
+		hint := "j/k scroll  ^u/^d page  g/G top/bottom  s submit  q quit (instances continue in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "j/k scroll  g/G top/bottom  s submit  r retry  q quit (instances continue in background)"
+			hint = "j/k scroll  ^u/^d page  g/G top/bottom  s submit  r retry  q quit (instances continue in background)"
 		}
 		addLine(watchDimStyle.Render(hint))
 	}
@@ -286,9 +286,9 @@ func (m watchModel) renderSystemView() (string, int) {
 		footerParts = append(footerParts, m.retryResult)
 	}
 
-	controls := "[u] unplace  [s] submit  [l] launch  [r] retry  [q] quit"
+	controls := "[^u/^d] page  [u] unplace  [s] submit  [l] launch  [r] retry  [q] quit"
 	if !m.hasRetryableFailures() {
-		controls = "[u] unplace  [s] submit  [l] launch  [q] quit"
+		controls = "[^u/^d] page  [u] unplace  [s] submit  [l] launch  [q] quit"
 	}
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 

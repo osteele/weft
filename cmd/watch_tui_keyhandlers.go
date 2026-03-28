@@ -23,6 +23,12 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.moveCursor(1)
 		return m, nil
+	case "pgup", "ctrl+u":
+		m.moveCursor(-m.pageSize())
+		return m, nil
+	case "pgdown", "ctrl+d":
+		m.moveCursor(m.pageSize())
+		return m, nil
 	case "home", "g":
 		m.cursor = 0
 		return m, nil

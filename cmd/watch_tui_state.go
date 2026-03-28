@@ -25,6 +25,13 @@ func (m *watchModel) moveCursor(delta int) {
 	}
 }
 
+func (m watchModel) pageSize() int {
+	if m.height > 4 {
+		return m.height / 2
+	}
+	return max(1, m.height)
+}
+
 func (m *watchModel) clampCursor() {
 	count := m.selectableRowCount()
 	if count == 0 {

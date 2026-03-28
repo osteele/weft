@@ -91,7 +91,7 @@ func runWatchLoop(database *sql.DB, cfg *config.Config) error {
 	router := newWatchRouterModel(database, cfg, "")
 
 	restore := logging.Suppress()
-	p := tea.NewProgram(router, tea.WithAltScreen())
+	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	restore()
 
@@ -116,7 +116,7 @@ func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
 
 	restore := logging.Suppress()
-	p := tea.NewProgram(model, tea.WithAltScreen())
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	restore()
 	if err != nil {
