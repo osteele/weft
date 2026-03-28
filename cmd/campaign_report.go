@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -126,10 +127,20 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		return int(a.id - b.id)
 	})
 
+	// Check for other running instances not in this watch session
+	var otherRunning []*db.Launch
+	if allRunning, err := db.ListRunningLaunches(database); err == nil {
+		for _, ci := range allRunning {
+			if !watchedSet[ci.ID] {
+				otherRunning = append(otherRunning, ci)
+			}
+		}
+	}
+
 	// Header
 	fmt.Println()
 	switch {
-	case !allTerminal:
+	case !allTerminal || len(otherRunning) > 0:
 		fmt.Println("Rental summary:")
 	case allCompleted:
 		fmt.Println("All rentals completed.")
@@ -159,6 +170,21 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 			fmt.Fprint(hw, inst.line)
 		}
 		hw.Flush()
+	}
+
+	// Other running instances not in this watch session
+	if len(otherRunning) > 0 {
+		fmt.Println()
+		if len(otherRunning) == 1 {
+			ci := otherRunning[0]
+			fmt.Printf("  1 other instance still running (ID %d, %s)\n", ci.ID, ci.DisplayGPUSpec())
+		} else {
+			ids := make([]string, len(otherRunning))
+			for i, ci := range otherRunning {
+				ids[i] = fmt.Sprintf("%d", ci.ID)
+			}
+			fmt.Printf("  %d other instances still running (IDs %s)\n", len(otherRunning), strings.Join(ids, ", "))
+		}
 	}
 
 	// Job table
