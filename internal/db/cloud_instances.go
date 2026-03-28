@@ -46,6 +46,7 @@ const (
 	TerminationReasonInfraFailure     = "infra_failure"
 	TerminationReasonBootstrapTimeout = "bootstrap_timeout"
 	TerminationReasonCancelled        = "canceled"
+	TerminationReasonPhaseStall       = "phase_stall"
 	TerminationReasonUnknown          = "unknown"
 )
 
@@ -59,7 +60,7 @@ func IsRetryableTermination(ci *Launch) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonPreempted, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonUnknown, "":
+	case TerminationReasonPreempted, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonUnknown, "":
 		return true
 	case "destroyed", "error", "dead", "stopped":
 		// Provider-level terminal statuses — worth retrying on a different instance.

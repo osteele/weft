@@ -28,6 +28,7 @@ const (
 	ActionBootstrapComplete                     // bootstrap stalled but R2 completion marker found -> complete
 	ActionProviderDead                          // provider says dead (with hysteresis) -> fail/complete
 	ActionSelfDestructFailed                    // all jobs done, instance lingering -> complete
+	ActionSetupStalled                          // setup phase unchanged too long -> fail
 )
 
 // InstanceAction describes what reconciliation action to take for a cloud instance.
@@ -83,6 +84,14 @@ type CheckInstanceParams struct {
 	// BootstrapSurvival holds adaptive bootstrap thresholds from historical
 	// survival analysis. Nil means use package defaults.
 	BootstrapSurvival *db.BootstrapSurvival
+
+	// PhaseChangedAt is when the current InstancePhase was first observed.
+	// Nil means unknown (phase stall check is skipped).
+	PhaseChangedAt *time.Time
+
+	// SetupSurvival holds adaptive setup-phase thresholds from historical
+	// survival analysis. Nil means use package defaults.
+	SetupSurvival *db.SetupSurvival
 }
 
 // CheckInstance evaluates what reconciliation action should be taken for a
@@ -205,6 +214,40 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 			return InstanceAction{
 				Kind:         ActionDisplayOnly,
 				StallMessage: fmt.Sprintf("bootstrap stalled — no activity (terminating in %s)", remaining.Truncate(time.Second)),
+			}
+		}
+	}
+
+	// 5b. Setup phase stall: instance in setup phase for too long
+	if ci.Status == db.LaunchStatusRunning && p.PhaseChangedAt != nil {
+		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
+		if verb == PhaseSetup {
+			phaseAge := p.Now.Sub(*p.PhaseChangedAt)
+
+			warnTimeout := defaultSetupStallWarn
+			termTimeout := defaultSetupStallTerminate
+			if p.SetupSurvival != nil {
+				warnTimeout = p.SetupSurvival.WarnAfter
+				termTimeout = p.SetupSurvival.TerminateAfter
+			}
+
+			if phaseAge >= termTimeout {
+				return InstanceAction{
+					Kind:              ActionSetupStalled,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonPhaseStall,
+					StallMessage:      fmt.Sprintf("setup phase stalled for %s — terminating instance", phaseAge.Truncate(time.Second)),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
+			}
+			if phaseAge >= warnTimeout {
+				remaining := termTimeout - phaseAge
+				return InstanceAction{
+					Kind:         ActionDisplayOnly,
+					StallMessage: fmt.Sprintf("setup phase stalled for %s (terminating in %s)", phaseAge.Truncate(time.Second), remaining.Truncate(time.Second)),
+				}
 			}
 		}
 	}
@@ -401,6 +444,8 @@ func actionEventKind(kind InstanceActionKind) string {
 		return db.EventReconcileTerminationIntent
 	case ActionBootstrapComplete:
 		return db.EventReconcileBootstrapComplete
+	case ActionSetupStalled:
+		return db.EventReconcileSetupStall
 	default:
 		return ""
 	}

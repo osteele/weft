@@ -31,6 +31,7 @@ const (
 	EventReconcileDonorComplete     = "reconcile.donor_complete"
 	EventReconcileTerminationIntent = "reconcile.termination_intent"
 	EventReconcileBootstrapComplete = "reconcile.bootstrap_complete"
+	EventReconcileSetupStall        = "reconcile.setup_stall"
 
 	// TUI retry outcomes
 	EventRetryAutoTriggered   = "retry.auto_triggered"

@@ -146,7 +146,8 @@ terminated the instance after a timeout.
 **Timeouts:**
 - Empty provider status: 1 minute (`maxEmptyStatusTime`)
 - Stuck in "created" status: 5 minutes (`maxCreatedStatusTime`)
-- Bootstrap stalled (running but no progress): 15 minutes (`bootstrapTerminateTimeout`)
+- Bootstrap stalled (running but no progress): adaptive, default 15 minutes
+- Setup phase stalled (`uv sync`, etc.): adaptive, default 15m warn / 25m terminate
 
 **Action:** These are retried automatically. If retries are exhausted
 (default: 3 attempts per job), try `weft instance launch` again or use
@@ -176,6 +177,23 @@ rclone configuration problems.
 
 **Action:** Check if the agent binary was stale (`just build` rebuilds
 agents). Check R2 for bootstrap script artifacts.
+
+### Setup phase stalled
+
+The agent started the setup phase (e.g., `uv sync`) for a job but
+never transitioned to the running phase. The reconciler detects this
+via the R2 instance phase marker and phase timing data.
+
+Thresholds are **adaptive**: learned from historical setup durations
+for the same command and workspace using survival analysis, with
+fallback to all-jobs statistics when per-command data is insufficient
+(< 20 samples). Default thresholds: warn at 15 minutes, terminate at
+25 minutes.
+
+**Action:** The instance is auto-terminated and jobs are reset to
+queued for retry. If setup stalls recur for a specific project,
+investigate the setup command (e.g., network issues during package
+installation, pip/uv resolution hangs).
 
 ## Debugging with preserved working directories
 

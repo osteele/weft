@@ -277,6 +277,23 @@ This creates a campaign with a single instance for that job.
   unexpectedly) and marks associated jobs as failed.
 - Exit code 137 and dmesg/nvidia-smi analysis detect OOM failures.
 
+### Stall detection
+
+The reconciler monitors instance progress and auto-terminates stuck instances:
+
+- **Bootstrap stall**: Instance is running but the agent never started a job.
+  Uses adaptive thresholds learned from historical bootstrap durations per
+  provider (survival analysis). Default: warn at 15m, terminate at 20m.
+- **Setup phase stall**: Agent started the setup phase (e.g., `uv sync`) but
+  never transitioned to running. Uses adaptive thresholds learned from
+  historical setup durations for the same command and workspace, falling back
+  to workspace-level or all-jobs data when per-command samples are insufficient
+  (< 20). Default: warn at 15m, terminate at 25m.
+- **Heartbeat stale**: Agent heartbeat is older than 3 minutes. Display-only
+  warning; the reconciler's SSH probe logic handles actual termination.
+
+Terminated instances have their jobs reset to queued for automatic retry.
+
 ## Configuration
 
 In `~/.config/weft/config.toml`:

@@ -54,6 +54,9 @@ Remote Hosts (titan, atlas)
 - **Auto-relaunch on preemption**: When a cloud instance is preempted or hits an
   infrastructure failure, `weft campaign watch` automatically relaunches orphaned
   jobs on a new instance (up to 3 attempts per job)
+- **Stall detection**: Adaptive timeouts detect stuck instances (bootstrap stall,
+  setup phase stall) using survival analysis on historical durations — thresholds
+  are learned per command and workspace, with automatic fallback
 - **Campaign management**: Launch, watch, and terminate batches of cloud
   instances from the CLI or TUI. `weft campaign watch` streams live status,
   cost, and per-job progress until all instances finish

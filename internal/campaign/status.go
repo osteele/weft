@@ -24,6 +24,12 @@ const (
 	bootstrapStageReady       = "ready"          // R2 marker value when bootstrap is complete
 )
 
+// Setup phase stall defaults (used when no survival data is available).
+const (
+	defaultSetupStallWarn      = 15 * time.Minute
+	defaultSetupStallTerminate = 25 * time.Minute
+)
+
 // Heartbeat staleness threshold: warn if heartbeat is older than this.
 const heartbeatStaleThreshold = 3 * time.Minute
 
@@ -368,6 +374,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				Now:               now,
 				TerminationIntent: terminationIntent,
 				BootstrapSurvival: survival,
+				PhaseChangedAt:    phaseChangedAt,
 			})
 
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)

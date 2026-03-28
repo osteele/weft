@@ -30,11 +30,11 @@ type ReconcileResult struct {
 // reconciliation (rather than treating as dead), a shorter window is safe.
 const minDeadConfirmTime = 30 * time.Second
 
-// bootstrapTimeoutTTL controls how often adaptive bootstrap thresholds are
-// recomputed from historical data. The underlying survival statistics change
-// slowly (only when instances complete or fail), so recomputing every 5 minutes
-// is sufficient.
-const bootstrapTimeoutTTL = 5 * time.Minute
+// survivalCacheTTL controls how often adaptive survival thresholds (bootstrap,
+// setup phase) are recomputed from historical data. The underlying statistics
+// change slowly (only when instances complete or fail), so recomputing every
+// 5 minutes is sufficient.
+const survivalCacheTTL = 5 * time.Minute
 
 // Reconciler runs reconciliation passes and remembers when each instance was
 // first seen dead, so we can require a sustained dead period before terminating.
@@ -46,9 +46,14 @@ type Reconciler struct {
 	deadConfirmTime    time.Duration    // 0 uses minDeadConfirmTime
 
 	// bootstrapTimeouts caches adaptive bootstrap thresholds per provider,
-	// recomputed at most once per bootstrapTimeoutTTL.
+	// recomputed at most once per survivalCacheTTL.
 	bootstrapTimeouts   map[string]*db.BootstrapSurvival
 	bootstrapTimeoutsAt time.Time // when the cache was last populated
+
+	// setupSurvivalCache caches adaptive setup-phase thresholds keyed by
+	// "command\x00workingDir", recomputed at most once per survivalCacheTTL.
+	setupSurvivalCache   map[string]*db.SetupSurvival
+	setupSurvivalCacheAt time.Time
 }
 
 type probeFailureState struct {
@@ -121,7 +126,7 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	r.mu.Unlock()
 
 	// Recompute adaptive bootstrap timeouts only when the cache has expired.
-	if time.Since(r.bootstrapTimeoutsAt) >= bootstrapTimeoutTTL {
+	if time.Since(r.bootstrapTimeoutsAt) >= survivalCacheTTL {
 		r.bootstrapTimeouts = make(map[string]*db.BootstrapSurvival)
 		providers := make(map[string]bool)
 		for _, ci := range instances {
@@ -330,6 +335,25 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	now := time.Now()
+
+	// Compute PhaseChangedAt for setup stall detection.
+	// Only fetch timings for the single job referenced in the phase string.
+	var phaseChangedAt *time.Time
+	var setupSurvival *db.SetupSurvival
+	if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
+		jobPhaseTimings := make(map[int64]*db.JobPhaseTimings, 1)
+		if t, err := db.GetJobPhaseTimings(database, phaseJobID); err == nil && t != nil {
+			jobPhaseTimings[phaseJobID] = t
+		}
+		phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, ci, jobs, jobPhaseTimings)
+
+		if verb == PhaseSetup {
+			if j := findJobInSlice(jobs, phaseJobID); j != nil {
+				setupSurvival = r.getSetupSurvival(database, j.Command, j.WorkingDir)
+			}
+		}
+	}
+
 	params := CheckInstanceParams{
 		CI:                ci,
 		ProviderInst:      inst,
@@ -340,6 +364,8 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		BootstrapStage:    bootstrapStage,
 		Now:               now,
 		TerminationIntent: intent,
+		PhaseChangedAt:    phaseChangedAt,
+		SetupSurvival:     setupSurvival,
 	}
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival
@@ -375,6 +401,36 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	return false, false
+}
+
+// getSetupSurvival returns cached setup survival thresholds for a command+workdir,
+// recomputing when the cache has expired.
+func (r *Reconciler) getSetupSurvival(database *sql.DB, command, workingDir string) *db.SetupSurvival {
+	key := command + "\x00" + workingDir
+
+	// Check cache under lock.
+	r.mu.Lock()
+	if time.Since(r.setupSurvivalCacheAt) >= survivalCacheTTL {
+		r.setupSurvivalCache = make(map[string]*db.SetupSurvival)
+		r.setupSurvivalCacheAt = time.Now()
+	}
+	if s, ok := r.setupSurvivalCache[key]; ok {
+		r.mu.Unlock()
+		return s
+	}
+	r.mu.Unlock()
+
+	// Compute outside lock to avoid blocking other reconciler operations.
+	s, err := db.ComputeSetupSurvival(database, command, workingDir)
+	if err != nil {
+		log.Printf("reconcile: compute setup survival for %q/%q: %v", command, workingDir, err)
+		return nil
+	}
+
+	r.mu.Lock()
+	r.setupSurvivalCache[key] = s
+	r.mu.Unlock()
+	return s
 }
 
 // verifyInstanceResults reads the R2 completion manifest for a completed instance

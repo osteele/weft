@@ -458,3 +458,174 @@ func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 		t.Error("StallMessage should be non-empty for stale heartbeat")
 	}
 }
+
+func TestCheckInstance_SetupStall_Terminate(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-26 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: "running"},
+		InstancePhase:  "setup:459",
+		PhaseChangedAt: &phaseStart,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind != ActionSetupStalled {
+		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d)", action.Kind, ActionSetupStalled)
+	}
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
+	}
+	if !action.ResetJobs {
+		t.Error("ResetJobs should be true")
+	}
+}
+
+func TestCheckInstance_SetupStall_Warn(t *testing.T) {
+	launchedAt := time.Now().Add(-20 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-16 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: "running"},
+		InstancePhase:  "setup:459",
+		PhaseChangedAt: &phaseStart,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d)", action.Kind, ActionDisplayOnly)
+	}
+	if action.StallMessage == "" {
+		t.Error("StallMessage should be non-empty")
+	}
+}
+
+func TestCheckInstance_SetupStall_UnderThreshold(t *testing.T) {
+	launchedAt := time.Now().Add(-12 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-10 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: "running"},
+		InstancePhase:  "setup:459",
+		PhaseChangedAt: &phaseStart,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind != ActionNone {
+		t.Fatalf("action.Kind = %d, want ActionNone (%d)", action.Kind, ActionNone)
+	}
+}
+
+func TestCheckInstance_SetupStall_NonSetupPhase(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-26 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: "running"},
+		InstancePhase:  "running:459",
+		PhaseChangedAt: &phaseStart,
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	// Running/uploading phases should NOT trigger setup stall
+	if action.Kind == ActionSetupStalled {
+		t.Fatalf("action.Kind = ActionSetupStalled, but non-setup phase should not trigger stall")
+	}
+}
+
+func TestCheckInstance_SetupStall_NilPhaseChangedAt(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:  &cloud.Instance{Status: "running"},
+		InstancePhase: "setup:459",
+		// PhaseChangedAt is nil — should be skipped
+		JobState: JobState{HasStartedJob: true},
+		Now:      time.Now(),
+	})
+	if action.Kind == ActionSetupStalled {
+		t.Fatalf("should not trigger setup stall when PhaseChangedAt is nil")
+	}
+}
+
+func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
+	launchedAt := time.Now().Add(-12 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-8 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	// Custom survival with very short thresholds
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: "running"},
+		InstancePhase:  "setup:459",
+		PhaseChangedAt: &phaseStart,
+		SetupSurvival: &db.SetupSurvival{
+			SampleSize:     50,
+			WarnAfter:      5 * time.Minute,
+			TerminateAfter: 7 * time.Minute,
+		},
+		JobState: JobState{HasStartedJob: true},
+		Now:      time.Now(),
+	})
+	if action.Kind != ActionSetupStalled {
+		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d) with custom survival thresholds", action.Kind, ActionSetupStalled)
+	}
+}
