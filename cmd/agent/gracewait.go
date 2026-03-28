@@ -246,10 +246,9 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 	summary.FileCount, summary.Bytes = measureUploadTree(logDir)
 	// Upload per-job results
 	copyCtx, copyCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", logDir+"/", "r2:"+bucket+"/"+r2keys.JobAttemptResultsPrefix(jobID, runID))
+	rcloneCmd := exec.CommandContext(copyCtx, "rclone", "copy", "--exclude", "*.log", logDir+"/", "r2:"+bucket+"/"+r2keys.JobAttemptResultsPrefix(jobID, runID))
 	rcloneCmd.Stderr = os.Stderr
 	start := time.Now()
-	copyOK := false
 	if err := rcloneCmd.Run(); err != nil {
 		summary.Status = "failed"
 		summary.Error = err.Error()
@@ -257,16 +256,10 @@ func uploadJobResults(bucket string, jobID, runID int64, logDir string) runner.U
 		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
 			oplog.WithDetailf("results dir=%s", logDir), oplog.WithError(err),
 			oplog.WithDuration(time.Since(start)))
-	} else {
-		copyOK = true
 	}
 	summary.DurationMS = time.Since(start).Milliseconds()
 	summary.CompletedAtUnix = time.Now().Unix()
 	copyCancel()
-
-	if copyOK {
-		cleanupLiveLogUpload(bucket, jobID, runID)
-	}
 
 	// The .complete marker is written synchronously in runJobSequence
 	// (before background uploads start) so the coordinator sees jobs

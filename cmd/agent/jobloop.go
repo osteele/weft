@@ -320,8 +320,12 @@ func snapshotLogDir(logDir string, jobID int64) (string, error) {
 		if entry.IsDir() {
 			continue // log dir is flat
 		}
-		src := filepath.Join(logDir, entry.Name())
-		dst := filepath.Join(snapshot, entry.Name())
+		name := entry.Name()
+		if filepath.Ext(name) == ".log" {
+			continue // log content lives in R2 live-log chunks
+		}
+		src := filepath.Join(logDir, name)
+		dst := filepath.Join(snapshot, name)
 		data, err := os.ReadFile(src)
 		if err != nil {
 			continue

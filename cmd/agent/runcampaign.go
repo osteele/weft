@@ -17,7 +17,6 @@ import (
 
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/cloudlog"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
@@ -721,13 +720,4 @@ func readLogTail(path string, maxBytes int64) string {
 		return ""
 	}
 	return string(data[:n])
-}
-
-func cleanupLiveLogUpload(bucket string, jobID, runID int64) {
-	if err := r2Delete(bucket, cloudlog.ManifestKeyForRun(jobID, runID)); err != nil {
-		fmt.Fprintf(os.Stderr, "delete live log manifest for job %d: %v\n", jobID, err)
-	}
-	if err := r2Delete(bucket, cloudlog.PrefixForRun(jobID, runID)); err != nil {
-		fmt.Fprintf(os.Stderr, "delete live log parts for job %d: %v\n", jobID, err)
-	}
 }
