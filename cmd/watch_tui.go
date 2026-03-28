@@ -55,6 +55,7 @@ type watchModel struct {
 	updates        map[int64]campaign.InstanceUpdate
 	channels       map[int64]<-chan campaign.InstanceUpdate
 	clients        map[int64]cloud.Client
+	cloudClients   []cloud.Client // for orphan sweep
 	jobProgressHWM map[int64]int
 	syncWorker     *tui.SyncWorker
 
@@ -217,6 +218,8 @@ func newCampaignWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.C
 		go func() { <-ctx.Done(); sw.Stop() }()
 	}
 
+	allCloudClients, _ := buildCloudClients(cfg)
+
 	m := watchModel{
 		mode:           watchModeCampaign,
 		database:       database,
@@ -229,6 +232,7 @@ func newCampaignWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.C
 		updates:        make(map[int64]campaign.InstanceUpdate),
 		channels:       make(map[int64]<-chan campaign.InstanceUpdate),
 		clients:        clients,
+		cloudClients:   allCloudClients,
 		jobProgressHWM: make(map[int64]int),
 		syncWorker:     sw,
 		campaignID:     campaignID,
@@ -249,6 +253,8 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 	sw := tui.NewSyncWorker(database, nil, r2Client, cfg)
 	sw.Start()
 
+	allCloudClients, _ := buildCloudClients(cfg)
+
 	model := watchModel{
 		mode:           watchModeSystem,
 		database:       database,
@@ -260,6 +266,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		updates:        map[int64]campaign.InstanceUpdate{},
 		channels:       map[int64]<-chan campaign.InstanceUpdate{},
 		clients:        map[int64]cloud.Client{},
+		cloudClients:   allCloudClients,
 		jobProgressHWM: map[int64]int{},
 		syncWorker:     sw,
 		flashMessage:   flashMessage,
@@ -647,6 +654,7 @@ func (m watchModel) handleCampaignSyncTick() (tea.Model, tea.Cmd) {
 			if _, err := campaign.ReconcileCampaigns(m.database); err != nil {
 				// log suppressed in TUI mode
 			}
+			campaign.MaybeSweepOrphanedInstances(m.database, m.cloudClients)
 			return watchSyncDoneMsg{}
 		},
 		scheduleSyncTick(),

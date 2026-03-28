@@ -3,12 +3,14 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
 
+	appconfig "github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/coordinator"
 	"github.com/osteele/weft/internal/db"
 	"github.com/spf13/cobra"
@@ -75,6 +77,15 @@ func runCoordinatorStart(cmd *cobra.Command, args []string) error {
 
 	config := coordinator.DefaultConfig()
 	c := coordinator.New(database, config)
+
+	cfg, cfgErr := appconfig.Load()
+	if cfgErr != nil {
+		log.Printf("coordinator: load config: %v", cfgErr)
+	} else if clients, err := buildCloudClients(cfg); err != nil {
+		log.Printf("coordinator: cloud clients unavailable: %v", err)
+	} else {
+		c.CloudClients = clients
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -147,6 +147,12 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 			reason = "provider returned success=false"
 		}
 		if resp.NewContract != 0 {
+			// Vast.ai sometimes allocates an instance even when reporting failure.
+			// Destroy it to avoid an orphaned billing instance.
+			log.Printf("vastai: create returned success=false with contract %d; destroying orphan", resp.NewContract)
+			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
+				log.Printf("vastai: failed to destroy orphaned instance %d: %v", resp.NewContract, destroyErr)
+			}
 			return nil, fmt.Errorf("create instance failed (contract %d): %s", resp.NewContract, reason)
 		}
 		return nil, fmt.Errorf("create instance failed: %s", reason)
