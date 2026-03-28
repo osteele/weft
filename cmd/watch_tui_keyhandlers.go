@@ -67,15 +67,15 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		capacities := m.buildInstanceCapacities()
 		if len(capacities) == 0 {
-			return m, m.flash.set("No active instances available", true)
+			return m, m.flash.Set("No active instances available", true)
 		}
 		ranked := campaign.RankForJob(job, capacities)
 		if len(ranked) == 0 {
 			_, reason := campaign.MatchJobToInstance(job, capacities[0])
-			return m, m.flash.set(fmt.Sprintf("No compatible instance for job #%d (%s)", job.ID, reason), true)
+			return m, m.flash.Set(fmt.Sprintf("No compatible instance for job #%d (%s)", job.ID, reason), true)
 		}
 		best := ranked[0]
-		flashCmd := m.flash.set(m.spinner.View()+fmt.Sprintf(" Submitting job #%d to instance #%d...", job.ID, best.Instance.ID), false)
+		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Submitting job #%d to instance #%d...", job.ID, best.Instance.ID), false)
 		return m, tea.Batch(flashCmd, requestWatchJobSubmit(m.ctx, m.database, m.r2Client, job.ID, best.Instance.ID))
 	case "l":
 		if m.mode == watchModeSystem {

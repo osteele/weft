@@ -163,8 +163,8 @@ func (m Model) renderInputForm(background string) string {
 	} else {
 		helpText = "Tab: next field • Enter: create job • Esc: cancel"
 	}
-	if m.flashIsError && m.flashMessage != "" {
-		helpText = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.flashMessage)
+	if m.flash.IsError && m.flash.Message != "" {
+		helpText = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(m.flash.Message)
 	}
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(helpText))
 
@@ -1264,29 +1264,6 @@ func (m Model) renderSystemSummaryLines(width int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
-}
-
-func (m Model) renderFlash() string {
-	if m.flashMessage == "" {
-		return ""
-	}
-
-	// Style for flash message box
-	var style lipgloss.Style
-	if m.flashIsError {
-		style = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15")).  // White text
-			Background(lipgloss.Color("124")). // Dark red background
-			Bold(true).
-			Padding(0, 1)
-	} else {
-		style = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15")).  // White text
-			Background(lipgloss.Color("240")). // Dark gray background
-			Padding(0, 1)
-	}
-
-	return " " + style.Render(m.flashMessage)
 }
 
 func (m Model) renderStatusBar() string {

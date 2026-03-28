@@ -175,10 +175,10 @@ func TestHandleSyncResultStoresAndClearsHostWarning(t *testing.T) {
 	}
 	m2, _ := m.handleSyncResult(syncResultMsg{result: result})
 
-	if m2.flashMessage != "Sync warning (studio): agent deploy failed: version mismatch" {
-		t.Fatalf("flashMessage = %q", m2.flashMessage)
+	if m2.flash.Message != "Sync warning (studio): agent deploy failed: version mismatch" {
+		t.Fatalf("flashMessage = %q", m2.flash.Message)
 	}
-	if !m2.flashIsError {
+	if !m2.flash.IsError {
 		t.Fatal("flashIsError = false, want true")
 	}
 	if got := m2.hosts[0].SyncWarning; got != result.HostWarning {
@@ -210,7 +210,7 @@ func TestHandleSyncResultDoesNotOverrideSpecificWarningWithQueueStoppedFlash(t *
 	}
 	m2, _ := m.handleSyncResult(syncResultMsg{result: result})
 
-	if got := m2.flashMessage; !strings.Contains(got, "Sync warning (studio): queue runner start failed: tmux missing") {
+	if got := m2.flash.Message; !strings.Contains(got, "Sync warning (studio): queue runner start failed: tmux missing") {
 		t.Fatalf("flashMessage = %q", got)
 	}
 }

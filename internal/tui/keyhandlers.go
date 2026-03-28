@@ -318,7 +318,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputMode = true
 		m.inputFocus = 0
 		m.inputs[inputHost].Focus()
-		m.flashMessage = ""
+		m.flash.Clear()
 		m.inputs[inputHost].SetValue(job.Host)
 		m.inputs[inputCommand].SetValue(job.Command)
 		m.inputs[inputDescription].SetValue(job.Description)
@@ -386,7 +386,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, keys.Escape):
 		m.clearJobSelection()
-		m.flashMessage = ""
+		m.flash.Clear()
 		return m, nil
 
 	case key.Matches(msg, keys.Kill):
@@ -506,7 +506,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inputMode = true
 		m.inputFocus = 0
 		m.inputs[inputHost].Focus()
-		m.flashMessage = ""
+		m.flash.Clear()
 
 		// Pre-populate from highlighted job if inputs are empty
 		job := m.getTargetJob()
@@ -645,7 +645,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editingJobID = job.ID
 		m.inputFocus = 0
 		m.inputs[inputHost].Focus()
-		m.flashMessage = ""
+		m.flash.Clear()
 		// Pre-populate all fields
 		m.inputs[inputHost].SetValue(job.Host)
 		m.inputs[inputCommand].SetValue(job.Command)
@@ -751,7 +751,7 @@ func (m Model) handleInputKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Exit input mode
 		m.inputMode = false
 		m.inputs[m.inputFocus].Blur()
-		m.flashMessage = ""
+		m.flash.Clear()
 
 		if m.editMode {
 			// Edit existing job

@@ -82,7 +82,7 @@ type watchModel struct {
 
 	// --- Shared display state ---
 	unplacedJobs []*db.Job
-	flash        flashState
+	flash        tui.FlashState
 	cursor       int // selectable row index; -1 when no selectable rows
 	width        int
 	height       int
@@ -195,7 +195,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		cloudClients:   allCloudClients,
 		jobProgressHWM: map[int64]int{},
 		syncWorker:     sw,
-		flash:          flashState{message: flashMessage},
+		flash:          tui.FlashState{Message: flashMessage},
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
@@ -306,8 +306,8 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	// --- Shared ---
-	case flashExpiredMsg:
-		m.flash.handleExpired()
+	case tui.FlashExpiredMsg:
+		m.flash.HandleExpired()
 		return m, nil
 
 	case watchCheckDoneMsg:

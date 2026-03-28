@@ -106,7 +106,7 @@ func (m watchModel) checkAllDone() tea.Cmd {
 
 func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		return m, m.flash.set(msg.err.Error(), true)
+		return m, m.flash.Set(msg.err.Error(), true)
 	}
 	if m.mode == watchModeSystem {
 		if msg.job != nil {
@@ -114,12 +114,12 @@ func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.C
 			m.upsertUnplacedJob(msg.job)
 			m.clampCursor()
 		}
-		flashCmd := m.flash.set(msg.message, false)
+		flashCmd := m.flash.Set(msg.message, false)
 		m.refreshing = true
 		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig))
 	}
 	// Instance-based mode: just refresh unplaced
-	return m, m.flash.set(msg.message, false)
+	return m, m.flash.Set(msg.message, false)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,9 +128,9 @@ func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.C
 
 func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		return m, m.flash.set(fmt.Sprintf("Submit failed: %v", msg.err), true)
+		return m, m.flash.Set(fmt.Sprintf("Submit failed: %v", msg.err), true)
 	}
-	flashCmd := m.flash.set(fmt.Sprintf("Submitted job #%d to instance #%d", msg.jobID, msg.instanceID), false)
+	flashCmd := m.flash.Set(fmt.Sprintf("Submitted job #%d to instance #%d", msg.jobID, msg.instanceID), false)
 	m.removeUnplacedJob(msg.jobID)
 	m.clampCursor()
 	if m.mode == watchModeSystem {

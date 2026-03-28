@@ -268,7 +268,7 @@ func (m watchModel) renderSystemView() (string, int) {
 		errText := fmt.Sprintf("Error: %v", m.err)
 		footerParts = append(footerParts, watchFailedStyle.Render(errText))
 		footerPrefixWidth = lipgloss.Width(errText)
-	} else if rendered := m.flash.render(); rendered != "" {
+	} else if rendered := m.flash.Render(); rendered != "" {
 		footerParts = append(footerParts, rendered)
 		footerPrefixWidth = lipgloss.Width(rendered)
 	}

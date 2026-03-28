@@ -159,7 +159,6 @@ type logTickMsg time.Time
 type createTickMsg time.Time
 type hostRefreshTickMsg time.Time
 type hostSummaryTickMsg time.Time
-type flashExpiredMsg struct{}
 
 // Host-related messages
 type hostsLoadedMsg struct {

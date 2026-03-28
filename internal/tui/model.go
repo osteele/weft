@@ -59,9 +59,7 @@ type Model struct {
 	logViewport             viewport.Model
 	detailViewport          *viewport.Model
 	spinner                 spinner.Model // Loading spinner
-	flashMessage            string
-	flashIsError            bool
-	flashExpiry             time.Time
+	flash                   FlashState
 	hostSummaryTickerOffset int
 
 	// Process stats for running jobs
@@ -960,13 +958,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.startHostSummaryTicker()
 
-	case flashExpiredMsg:
-		// Only clear if the flash has actually expired (not replaced by a newer one)
-		if !m.flashExpiry.IsZero() && time.Now().After(m.flashExpiry) {
-			m.flashMessage = ""
-			m.flashIsError = false
-			m.flashExpiry = time.Time{}
-		}
+	case FlashExpiredMsg:
+		m.flash.HandleExpired()
 		return m, nil
 
 	case cloudOffersLoadedMsg:
@@ -1057,7 +1050,7 @@ func (m Model) View() string {
 		// Hosts view
 		listView := m.renderHostList(listHeight)
 		detailView := m.renderHostDetailPanel(detailHeight)
-		flashView := m.renderFlash()
+		flashView := m.flash.Render()
 		statusView := m.renderHostsStatusBar()
 
 		mainView = lipgloss.JoinVertical(
@@ -1071,7 +1064,7 @@ func (m Model) View() string {
 		// Jobs view (default)
 		listView := m.renderJobList(listHeight)
 		logView := m.renderLogPanel(detailHeight)
-		flashView := m.renderFlash()
+		flashView := m.flash.Render()
 		statusView := m.renderStatusBar()
 
 		mainView = lipgloss.JoinVertical(
@@ -1112,13 +1105,6 @@ func (m Model) View() string {
 	return mainView
 }
 
-const flashDuration = 3 * time.Second
-
 func (m *Model) setFlash(msg string, isError bool) tea.Cmd {
-	m.flashMessage = msg
-	m.flashIsError = isError
-	m.flashExpiry = time.Now().Add(flashDuration)
-	return tea.Tick(flashDuration, func(t time.Time) tea.Msg {
-		return flashExpiredMsg{}
-	})
+	return m.flash.Set(msg, isError)
 }
