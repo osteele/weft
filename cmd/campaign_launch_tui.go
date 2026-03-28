@@ -889,10 +889,22 @@ func (m launchModel) selectedCountByGroup() []int {
 	return counts
 }
 
+// offersLoaded reports whether the async offer fetch has completed.
+// When false, groupHasOffer returns false for all groups (offers not yet known).
+func (m launchModel) offersLoaded() bool {
+	return m.groupOffers != nil
+}
+
+// groupHasOffer reports whether the group at groupIdx has a matching offer.
+// Returns false when offers haven't been fetched yet (nil slice).
+func (m launchModel) groupHasOffer(groupIdx int) bool {
+	return m.offersLoaded() && groupIdx < len(m.groupOffers) && m.groupOffers[groupIdx].Offer != nil
+}
+
 func (m launchModel) selectedLaunchGroupCount() int {
 	count := 0
 	for i, group := range m.groups {
-		if i >= len(m.groupOffers) || m.groupOffers[i].Offer == nil {
+		if !m.groupHasOffer(i) {
 			continue
 		}
 		for _, job := range group.Jobs {
@@ -900,6 +912,17 @@ func (m launchModel) selectedLaunchGroupCount() int {
 				count++
 				break
 			}
+		}
+	}
+	return count
+}
+
+// selectedLaunchableJobCount returns the number of selected jobs in groups that have offers.
+func (m launchModel) selectedLaunchableJobCount() int {
+	count := 0
+	for _, item := range m.items {
+		if !item.isHeader && m.selected[item.jobID] && m.groupHasOffer(item.groupIdx) {
+			count++
 		}
 	}
 	return count
@@ -1169,11 +1192,18 @@ func (m launchModel) View() string {
 			item := m.items[idx]
 			isCursor := idx == m.cursor
 
+			noOffer := m.offersLoaded() && !m.groupHasOffer(item.groupIdx)
+
 			if item.isHeader {
 				checkbox := m.groupCheckState(item.groupIdx)
 				line := fmt.Sprintf("%s %s", checkbox, item.label)
+				if noOffer {
+					line += " (no offers)"
+				}
 				if isCursor {
 					b.WriteString(launchCursorStyle.Render("> " + line))
+				} else if noOffer {
+					b.WriteString(launchDimStyle.Render("  " + line))
 				} else {
 					b.WriteString(launchHeaderStyle.Render("  " + line))
 				}
@@ -1194,6 +1224,8 @@ func (m launchModel) View() string {
 
 			if isCursor {
 				b.WriteString(launchCursorStyle.Render("> " + line))
+			} else if noOffer {
+				b.WriteString(launchDimStyle.Render("  " + line))
 			} else if checked {
 				b.WriteString(launchSelectedStyle.Render("  " + line))
 			} else {
@@ -1237,7 +1269,7 @@ func (m launchModel) View() string {
 		}
 	}
 
-	// Help line
+	// Skipped-job warning
 	b.WriteString("\n")
 	selectedCount := 0
 	for _, v := range m.selected {
@@ -1245,6 +1277,15 @@ func (m launchModel) View() string {
 			selectedCount++
 		}
 	}
+	if m.offersLoaded() && !m.showCostDetail {
+		skippedCount := selectedCount - m.selectedLaunchableJobCount()
+		if skippedCount > 0 {
+			b.WriteString(launchErrStyle.Render(fmt.Sprintf("  %d selected job(s) will be skipped (no offers)", skippedCount)))
+			b.WriteString("\n")
+		}
+	}
+
+	// Help line
 	var help string
 	if m.showCostDetail {
 		help = "d back  q quit"
