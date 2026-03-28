@@ -481,7 +481,7 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 	if m.appConfig != nil {
 		r2Client, _ = buildR2Client(m.appConfig)
 	}
-	inlineWatch := newCampaignWatchModel(m.database, append([]int64(nil), m.registeredInstanceIDs...), r2Client, m.appConfig)
+	inlineWatch := newInstanceWatchModel(m.database, append([]int64(nil), m.registeredInstanceIDs...), r2Client, m.appConfig)
 	m.inlineWatch = &inlineWatch
 	m.inlineWatchUsed = true
 	return m, inlineWatch.Init()

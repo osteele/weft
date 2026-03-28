@@ -28,7 +28,7 @@ func summaryInterval(elapsed time.Duration) time.Duration {
 
 // watchInstancesPlain prints line-oriented status updates for cloud instances.
 // Suitable for non-TTY output and parsing by coding agents.
-func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
+func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -49,9 +49,14 @@ func watchInstancesPlain(database *sql.DB, instanceIDs []int64) error {
 		}
 	}
 
-	// Print campaign header if instances belong to a campaign
+	// Print header
 	if campaignID > 0 {
-		fmt.Printf("Campaign %d — launched %s\n\n", campaignID, launchTime.Format("2006-01-02 15:04"))
+		switch mode {
+		case watchModeCampaign:
+			fmt.Printf("Campaign %d — launched %s\n\n", campaignID, launchTime.Format("2006-01-02 15:04"))
+		case watchModeInstances:
+			fmt.Printf("Launched %s\n\n", launchTime.Format("2006-01-02 15:04"))
+		}
 	}
 	if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now()); summary != "" {
 		fmt.Println(summary)

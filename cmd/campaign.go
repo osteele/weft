@@ -278,7 +278,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Segue into watch mode if instances were launched
 	if len(finalModel.instanceIDs) > 0 && !campaignLaunchNoWatch && !finalModel.inlineWatchUsed {
 		fmt.Println()
-		return watchAndReport(database, useTUI, finalModel.instanceIDs)
+		return watchAndReport(database, useTUI, watchModeInstances, finalModel.instanceIDs)
 	}
 
 	// Inline watch already ran inside the TUI — print the exit report
@@ -413,7 +413,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Segue into watch mode.
 	if !campaignLaunchNoWatch {
 		fmt.Println()
-		return watchAndReport(database, watchTUI, result.InstanceIDs)
+		return watchAndReport(database, watchTUI, watchModeInstances, result.InstanceIDs)
 	}
 
 	return nil
@@ -528,7 +528,7 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	return watchAndReport(database, useTUI, instanceIDs)
+	return watchAndReport(database, useTUI, watchModeCampaign, instanceIDs)
 }
 
 func runCampaignTerminate(cmd *cobra.Command, args []string) error {

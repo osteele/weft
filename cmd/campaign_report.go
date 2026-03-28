@@ -16,13 +16,13 @@ import (
 
 // watchAndReport runs the appropriate watch mode (TUI or plain) and prints
 // an exit report when all instances reach terminal state.
-func watchAndReport(database *sql.DB, useTUI bool, instanceIDs []int64) error {
+func watchAndReport(database *sql.DB, useTUI bool, mode watchMode, instanceIDs []int64) error {
 	var finalIDs []int64
 	var err error
 	if useTUI {
-		finalIDs, err = watchInstances(database, instanceIDs)
+		finalIDs, err = watchInstances(database, mode, instanceIDs)
 	} else {
-		err = watchInstancesPlain(database, instanceIDs)
+		err = watchInstancesPlain(database, mode, instanceIDs)
 		finalIDs = instanceIDs
 	}
 	printWatchExitReport(database, finalIDs)

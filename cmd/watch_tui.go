@@ -26,9 +26,14 @@ import (
 type watchMode int
 
 const (
-	watchModeCampaign watchMode = iota // fixed instance IDs, campaign header, retry
-	watchModeSystem                    // discover from DB, on-prem + unplaced sections
+	watchModeCampaign  watchMode = iota // fixed instance IDs, campaign header, retry
+	watchModeInstances                  // same as campaign but instance-centric header
+	watchModeSystem                     // discover from DB, on-prem + unplaced sections
 )
+
+func (m watchMode) isInstanceBased() bool {
+	return m == watchModeCampaign || m == watchModeInstances
+}
 
 // initialInstanceInfo holds pre-fetched DB data for instances that haven't
 // received a channel update yet, avoiding repeated queries in View().
@@ -191,7 +196,15 @@ type watchRenderRow struct {
 // Constructors
 // ---------------------------------------------------------------------------
 
+func newInstanceWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
+	return newWatchModelWithMode(watchModeInstances, database, instanceIDs, r2Client, cfg)
+}
+
 func newCampaignWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
+	return newWatchModelWithMode(watchModeCampaign, database, instanceIDs, r2Client, cfg)
+}
+
+func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) watchModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
@@ -221,7 +234,7 @@ func newCampaignWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.C
 	allCloudClients, _ := buildCloudClients(cfg)
 
 	m := watchModel{
-		mode:           watchModeCampaign,
+		mode:           mode,
 		database:       database,
 		appConfig:      cfg,
 		r2Client:       r2Client,
@@ -315,8 +328,8 @@ func (m watchModel) Init() tea.Cmd {
 		}
 	}
 
-	switch m.mode {
-	case watchModeCampaign:
+	switch {
+	case m.mode.isInstanceBased():
 		cmds = append(cmds, scheduleSyncTick(), scheduleCheckDone())
 		if m.syncWorker != nil {
 			m.requestOnPremSyncs()
@@ -324,7 +337,7 @@ func (m watchModel) Init() tea.Cmd {
 				return campaignWatchSyncResultMsg{}
 			}))
 		}
-	case watchModeSystem:
+	case m.mode == watchModeSystem:
 		cmds = append(cmds,
 			scheduleWatchAllTick(),
 			scheduleCheckDone(),
@@ -389,15 +402,15 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchUnplaceDoneMsg:
 		return m.handleUnplaceDone(msg)
 
-	// --- Campaign-only messages ---
+	// --- Campaign/instance-only messages ---
 	case watchSyncTickMsg:
-		if m.mode != watchModeCampaign {
+		if !m.mode.isInstanceBased() {
 			return m, nil
 		}
 		return m.handleCampaignSyncTick()
 
 	case watchSyncDoneMsg:
-		if m.mode != watchModeCampaign {
+		if !m.mode.isInstanceBased() {
 			return m, nil
 		}
 		return m.handleCampaignSyncDone()
@@ -406,7 +419,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleJobsRefreshed(msg)
 
 	case campaignWatchSyncResultMsg:
-		if m.mode != watchModeCampaign || m.syncWorker == nil {
+		if !m.mode.isInstanceBased() || m.syncWorker == nil {
 			return m, nil
 		}
 		return m, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
@@ -585,13 +598,13 @@ func (m watchModel) handleCheckDoneResult(msg watchCheckDoneResultMsg) (tea.Mode
 		return m, scheduleCheckDone()
 	}
 
-	switch m.mode {
-	case watchModeCampaign:
+	switch {
+	case m.mode.isInstanceBased():
 		if m.retrying {
 			return m, scheduleCheckDone()
 		}
 		return m, refreshWatchInstancesFromDB(m.database, m.instanceIDs, true)
-	case watchModeSystem:
+	case m.mode == watchModeSystem:
 		// System mode: also check on-prem and unplaced
 		if len(m.onPremHosts) > 0 || len(m.unplacedJobs) > 0 {
 			return m, scheduleCheckDone()
@@ -861,11 +874,11 @@ func (m *watchModel) mergeSnapshot(snapshot watchSystemSnapshot) []tea.Cmd {
 // ---------------------------------------------------------------------------
 
 func (m watchModel) View() string {
-	switch m.mode {
-	case watchModeCampaign:
+	switch {
+	case m.mode.isInstanceBased():
 		content, cursorLine := m.renderCampaignView()
 		return m.applyViewport(content, cursorLine)
-	case watchModeSystem:
+	case m.mode == watchModeSystem:
 		content, cursorLine := m.renderSystemView()
 		return m.applyViewport(content, cursorLine)
 	}
@@ -900,9 +913,15 @@ func (m watchModel) renderCampaignView() (string, int) {
 		selectableIndex++
 	}
 
-	// Campaign header
+	// Header
 	if m.campaignID > 0 {
-		header := fmt.Sprintf("Campaign %d", m.campaignID)
+		var header string
+		switch m.mode {
+		case watchModeCampaign:
+			header = fmt.Sprintf("Campaign %d", m.campaignID)
+		case watchModeInstances:
+			header = "Launched"
+		}
 		if !m.launchedAt.IsZero() {
 			header += fmt.Sprintf(" — launched %s (%s ago)",
 				m.launchedAt.Format("15:04"),
@@ -1402,8 +1421,8 @@ func (m *watchModel) clampCursor() {
 }
 
 func (m watchModel) selectableRowCount() int {
-	switch m.mode {
-	case watchModeCampaign:
+	switch {
+	case m.mode.isInstanceBased():
 		count := 0
 		for _, id := range m.instanceIDs {
 			if !m.cachedHiddenIDs[id] {
@@ -1412,7 +1431,7 @@ func (m watchModel) selectableRowCount() int {
 		}
 		count += len(m.unplacedJobs)
 		return count
-	case watchModeSystem:
+	case m.mode == watchModeSystem:
 		count := len(m.unplacedJobs)
 		for _, ci := range m.cloudInstances {
 			if !m.cachedHiddenIDs[ci.ID] {
@@ -1471,8 +1490,8 @@ func (m watchModel) selectedUnplacedJob() *db.Job {
 			return nil
 		}
 		return m.unplacedJobs[index]
-	case watchModeCampaign:
-		// In campaign mode, selectable rows are: instances, then unplaced jobs
+	default:
+		// In campaign/instance mode, selectable rows are: instances, then unplaced jobs
 		visibleInstances := 0
 		for _, id := range m.instanceIDs {
 			if !m.cachedHiddenIDs[id] {
@@ -1813,10 +1832,10 @@ func padToWidth(s string, width int) string {
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
 // Returns the final list of instance IDs (which may include auto-relaunched instances).
-func watchInstances(database *sql.DB, instanceIDs []int64) ([]int64, error) {
+func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64) ([]int64, error) {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
-	model := newCampaignWatchModel(database, instanceIDs, r2Client, cfg)
+	model := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
