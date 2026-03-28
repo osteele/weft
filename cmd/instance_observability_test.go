@@ -91,3 +91,45 @@ func TestFormatObservedActivityShowsProvisioningFallback(t *testing.T) {
 		t.Fatalf("bootstrap = %q, want provisioning fallback", activity.Bootstrap)
 	}
 }
+
+func TestFormatWatchInstanceBlock_UploadsVisibility(t *testing.T) {
+	tests := []struct {
+		name          string
+		launchStatus  string
+		instancePhase string
+		wantUploads   bool
+	}{
+		{"shown while uploading", db.LaunchStatusRunning, "uploading-results:88", true},
+		{"hidden after completion", db.LaunchStatusCompleted, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			update := campaign.InstanceUpdate{
+				Launch: &db.Launch{
+					ID:       110,
+					Status:   tt.launchStatus,
+					Provider: "vastai",
+					GPUSpec:  "A100",
+				},
+				InstancePhase: tt.instancePhase,
+				Jobs: []*db.Job{
+					{ID: 88, Status: db.StatusCompleted, WorkingDir: "/workspace/project", Description: "train model"},
+				},
+				JobAttemptOutcomes: map[int64]string{88: db.StatusCompleted},
+				JobPhaseTimings: map[int64]*db.JobPhaseTimings{
+					88: {
+						UploadResultsBytes:    watchTestInt64Ptr(8192),
+						ResultsUploadFiles:    watchTestIntPtr(4),
+						ResultsUploadDuration: watchTestInt64Ptr(600),
+					},
+				},
+			}
+
+			out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
+			hasUploads := strings.Contains(out, "uploads:")
+			if hasUploads != tt.wantUploads {
+				t.Fatalf("uploads visible=%v, want %v; output:\n%s", hasUploads, tt.wantUploads, out)
+			}
+		})
+	}
+}

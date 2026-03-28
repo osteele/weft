@@ -119,7 +119,8 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 			projectWidth, projectLabel,
 			desc,
 		))
-		if campaign.IsJobTerminal(displayStatuses[i]) {
+		if campaign.IsJobTerminal(displayStatuses[i]) && activePhaseJobID == job.ID &&
+			(activePhaseStatus == campaign.PhaseUploading || activePhaseStatus == campaign.PhaseFinalizing) {
 			if summary := formatUploadSummary(update.JobPhaseTimings[job.ID]); summary != "" {
 				lines = append(lines, fmt.Sprintf("          uploads: %s", summary))
 			}
