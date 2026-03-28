@@ -448,19 +448,47 @@ func IsLaunchHost(host string) bool {
 	return strings.HasPrefix(host, "vastai:") || strings.HasPrefix(host, "runpod:")
 }
 
-// SetJobLaunchID associates a job with a cloud instance and records the attempt.
-// New assignments clear jobs.host so cloud_instance_id remains the canonical
-// rental target while preserving legacy synthetic host reads.
-func SetJobLaunchID(db *sql.DB, jobID, instanceID int64) error {
-	tx, err := db.Begin()
+// SetJobLaunchID associates a job with a cloud instance by creating a new
+// attempt with launch_id set. The job must have an open queued attempt
+// (integrity violation otherwise). The open attempt is closed and a fresh
+// attempt is created with the instance assignment.
+func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
+	tx, err := database.Begin()
 	if err != nil {
 		return err
 	}
-	// Update attempt's cloud_instance_id
-	if err := SetAttemptLaunchID(tx, jobID, instanceID); err != nil {
+
+	// Verify precondition: job must have an open queued attempt.
+	var status string
+	err = tx.QueryRow(`
+		SELECT status FROM job_attempts
+		WHERE job_id = ? AND end_time IS NULL
+		ORDER BY attempt_number DESC LIMIT 1`, jobID,
+	).Scan(&status)
+	if err == sql.ErrNoRows {
+		tx.Rollback()
+		return fmt.Errorf("job %d has no open attempt", jobID)
+	}
+	if err != nil {
 		tx.Rollback()
 		return err
 	}
+	if status != StatusQueued {
+		tx.Rollback()
+		return fmt.Errorf("job %d has open attempt in status %q, expected %q", jobID, status, StatusQueued)
+	}
+
+	// Close the placeholder attempt and create a new one with launch_id.
+	now := time.Now().Unix()
+	if err := closeOpenAttempts(tx, jobID, now); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := createAttemptTx(tx, jobID, "", &instanceID, StatusQueued); err != nil {
+		tx.Rollback()
+		return err
+	}
+
 	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID); err != nil {
 		tx.Rollback()
 		return err

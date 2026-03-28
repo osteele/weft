@@ -387,11 +387,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
 	}
 
-	// Reset jobs to queued and associate with the cloud instance
 	for _, job := range jobs {
-		if err := db.MarkQueuedByID(database, job.ID); err != nil {
-			return fmt.Errorf("reset job %d to queued: %w", job.ID, err)
-		}
 		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
 			return fmt.Errorf("associate job %d with instance %d: %w", job.ID, instanceID, err)
 		}

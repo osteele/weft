@@ -603,16 +603,6 @@ func ClearAttemptPendingStatus(db *sql.DB, jobID int64) error {
 	return err
 }
 
-// SetAttemptLaunchID updates the launch_id on the latest open attempt.
-func SetAttemptLaunchID(execer dbExecer, jobID, instanceID int64) error {
-	_, err := execer.Exec(`
-		UPDATE job_attempts SET launch_id = ?
-		WHERE id = `+latestOpenAttemptSubquery,
-		instanceID, jobID,
-	)
-	return err
-}
-
 // SetAttemptVastaiInstance sets the backend to 'vastai' on the latest open attempt.
 func SetAttemptVastaiInstance(db *sql.DB, jobID int64, _ int) error {
 	_, err := db.Exec(`
@@ -727,19 +717,58 @@ func ClearAttemptPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) 
 	return err
 }
 
-// MarkAttemptQueuedByID resets the latest open attempt back to queued status
-// (e.g., when sync finds the job is still in queue after it was thought to be running).
-func MarkAttemptQueuedByID(execer dbExecer, jobID int64) error {
-	// Use latestAttemptSubquery (not just open) because the attempt may have
-	// end_time set from a previous status. This resets all execution fields.
-	_, err := execer.Exec(`
-		UPDATE job_attempts
-		SET status = ?, last_synced_status = ?,
-		    start_time = NULL, end_time = NULL, exit_code = NULL,
-		    error_message = NULL, session_name = NULL, failure_reason = NULL,
-		    error_diagnosis = NULL, remote_state = NULL
-		WHERE id = `+latestAttemptSubquery,
-		StatusQueued, StatusQueued, jobID,
-	)
-	return err
+// MarkAttemptQueuedByID closes any open attempt and creates a fresh queued
+// attempt, preserving the historical record of the previous attempt.
+// Carries over host, pending_status, and pending_at from the old attempt so
+// that placement and user intent survive the reset. Sets last_synced_status
+// because this is called from the sync path when the remote reports the job
+// is still queued.
+func MarkAttemptQueuedByID(database *sql.DB, jobID int64) error {
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+
+	// Read placement and intent fields from the current attempt before closing.
+	var host string
+	var pendingStatus sql.NullString
+	var pendingAt sql.NullInt64
+	var launchID sql.NullInt64
+	err = tx.QueryRow(`
+		SELECT host, pending_status, pending_at, launch_id FROM job_attempts
+		WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`, jobID,
+	).Scan(&host, &pendingStatus, &pendingAt, &launchID)
+	if err != nil && err != sql.ErrNoRows {
+		tx.Rollback()
+		return err
+	}
+
+	now := time.Now().Unix()
+	if err := closeOpenAttempts(tx, jobID, now); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	var cloudInstanceID *int64
+	if launchID.Valid {
+		cloudInstanceID = &launchID.Int64
+	}
+	attemptID, err := createAttemptTx(tx, jobID, host, cloudInstanceID, StatusQueued)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if pendingStatus.Valid || pendingAt.Valid {
+		if _, err := tx.Exec(`UPDATE job_attempts SET pending_status = ?, pending_at = ? WHERE id = ?`,
+			pendingStatus, pendingAt, attemptID); err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE job_attempts SET last_synced_status = ? WHERE id = ?`,
+		StatusQueued, attemptID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

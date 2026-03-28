@@ -167,7 +167,7 @@ func TestGetLaunchJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T) {
 
 	insertTestJob(t, database, 249, "historical", "/tmp", StatusQueued)
 	insertTestJob(t, database, 203, "open attempt current", "/tmp", StatusQueued)
-	insertTestJob(t, database, 199, "current earlier campaign slot", "/tmp", StatusRunning)
+	insertTestJob(t, database, 199, "current earlier campaign slot", "/tmp", StatusQueued)
 
 	if err := SetJobLaunchID(database, 249, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID(249): %v", err)
@@ -180,6 +180,10 @@ func TestGetLaunchJobsIncludingAttemptsSortsByCampaignIndex(t *testing.T) {
 	}
 	if err := SetJobLaunchID(database, 199, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID(199): %v", err)
+	}
+	// Mark job 199 as running after placement (simulates agent picking it up)
+	if err := MarkQueuedJobRunning(database, 199); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(199): %v", err)
 	}
 	if err := SetJobCampaignIndex(database, 203, 1); err != nil {
 		t.Fatalf("SetJobCampaignIndex(203): %v", err)
@@ -217,8 +221,8 @@ func TestGetLaunchJobsIncludingAttemptsRetainsOrderAfterFailure(t *testing.T) {
 
 	// Job 292 (campaign index 0) failed and was reset — cloud_instance_id cleared.
 	// Job 293 (campaign index 1) is still running.
-	insertTestJob(t, database, 292, "echo first", "/tmp", StatusFailed)
-	insertTestJob(t, database, 293, "echo second", "/tmp", StatusRunning)
+	insertTestJob(t, database, 292, "echo first", "/tmp", StatusQueued)
+	insertTestJob(t, database, 293, "echo second", "/tmp", StatusQueued)
 	if err := SetJobCampaignIndex(database, 292, 0); err != nil {
 		t.Fatalf("SetJobCampaignIndex(292): %v", err)
 	}
@@ -226,7 +230,7 @@ func TestGetLaunchJobsIncludingAttemptsRetainsOrderAfterFailure(t *testing.T) {
 		t.Fatalf("SetJobCampaignIndex(293): %v", err)
 	}
 
-	// Simulate what ResetLaunchJobs does: assign + close the attempt for 292.
+	// Place both jobs, then mark 292 as failed (simulates run + failure).
 	if err := SetJobLaunchID(database, 292, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID(292): %v", err)
 	}
@@ -235,6 +239,10 @@ func TestGetLaunchJobsIncludingAttemptsRetainsOrderAfterFailure(t *testing.T) {
 	}
 	if err := SetJobLaunchID(database, 293, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID(293): %v", err)
+	}
+	// Mark 293 as running (simulates agent picking it up)
+	if err := MarkQueuedJobRunning(database, 293); err != nil {
+		t.Fatalf("MarkQueuedJobRunning(293): %v", err)
 	}
 
 	jobs, err := GetLaunchJobsIncludingAttempts(database, instanceID)
@@ -264,10 +272,13 @@ func TestGetLaunchJobsIncludingAttemptsOverridesStatusForHistorical(t *testing.T
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	// Insert a job, associate it with the instance, then reset (simulating instance failure).
-	insertTestJob(t, database, 317, "python train.py", "/tmp", StatusRunning)
+	// Insert a job, place it on the instance, mark running, then reset (simulating instance failure).
+	insertTestJob(t, database, 317, "python train.py", "/tmp", StatusQueued)
 	if err := SetJobLaunchID(database, 317, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, 317); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
 
 	// Simulate ResetLaunchJobs: close attempt as orphaned, clear instance assignment, reset to queued.
@@ -779,11 +790,17 @@ func TestRefineInstanceTerminationReason_UsesHistoricalAttempts(t *testing.T) {
 		t.Fatalf("UpdateLaunchStatus: %v", err)
 	}
 
-	insertTestJob(t, database, 1, "python train.py", "/tmp", StatusFailed,
-		withFailureReason(TerminationReasonDiskFull))
+	insertTestJob(t, database, 1, "python train.py", "/tmp", StatusQueued)
 	if err := SetJobLaunchID(database, 1, instanceID); err != nil {
 		t.Fatalf("SetJobLaunchID: %v", err)
 	}
+	// Simulate the job running and failing with disk-full
+	if err := CloseAttempt(database, 1, StatusFailed, nil, 1000); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET failure_reason = ? WHERE id = (
+		SELECT id FROM job_attempts WHERE job_id = 1 ORDER BY attempt_number DESC LIMIT 1
+	)`, TerminationReasonDiskFull)
 
 	if err := RefineInstanceTerminationReason(database, instanceID); err != nil {
 		t.Fatalf("RefineInstanceTerminationReason: %v", err)
@@ -875,5 +892,55 @@ func TestLaunchLiveState(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("expected nil after delete, got %+v", got)
+	}
+}
+
+func TestSetJobLaunchID_NoOpenAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	ci := &Launch{Status: LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX 4090"}
+	instanceID, err := CreateLaunch(database, ci)
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// Insert a job (creates an open attempt via trigger), then close the attempt.
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
+	if err := CloseAttempt(database, 1, StatusFailed, nil, 1000); err != nil {
+		t.Fatalf("CloseAttempt: %v", err)
+	}
+
+	// SetJobLaunchID should fail — no open attempt.
+	err = SetJobLaunchID(database, 1, instanceID)
+	if err == nil {
+		t.Fatal("expected error from SetJobLaunchID with no open attempt, got nil")
+	}
+	if !strings.Contains(err.Error(), "no open attempt") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetJobLaunchID_RunningAttempt(t *testing.T) {
+	database := setupTestDB(t)
+
+	ci := &Launch{Status: LaunchStatusRunning, Provider: "vastai", GPUSpec: "RTX 4090"}
+	instanceID, err := CreateLaunch(database, ci)
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// Insert a job and mark its attempt as running.
+	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
+	if err := MarkQueuedJobRunning(database, 1); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+
+	// SetJobLaunchID should fail — attempt is running, not queued.
+	err = SetJobLaunchID(database, 1, instanceID)
+	if err == nil {
+		t.Fatal("expected error from SetJobLaunchID with running attempt, got nil")
+	}
+	if !strings.Contains(err.Error(), "expected \"queued\"") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

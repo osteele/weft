@@ -79,14 +79,17 @@ func TestFormatWatchInstanceBlockTreatsOpenAttemptJobsAsCurrent(t *testing.T) {
 		); err != nil {
 			t.Fatalf("insert job %d: %v", j.id, err)
 		}
-		database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, j.status, j.id)
 	}
 
+	// Place all jobs on the instance first (requires queued status)
 	for _, jobID := range []int64{203, 249, 250, 253, 283} {
 		if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
 			t.Fatalf("SetJobLaunchID(%d): %v", jobID, err)
 		}
 	}
+
+	// Mark job 203 as running (simulates agent picking it up)
+	database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, db.StatusRunning, 203)
 	// Mark job 283's attempt as failed (historical)
 	if err := db.CloseLaunchAttempt(database, 283, db.AttemptOutcomeFailed); err != nil {
 		t.Fatalf("CloseLaunchAttempt(283): %v", err)
