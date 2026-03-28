@@ -14,8 +14,11 @@ import (
 // launches new instances for orphaned cloud jobs. extraAttempts raises the
 // max attempt threshold (used for manual retries to allow more tries).
 func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAttempts int) (*campaign.RelaunchResult, error) {
-	// Reset jobs on terminal instances so they become unplaced
-	if _, err := db.ResetJobsOnTerminalLaunches(database); err != nil {
+	// Reset jobs on terminal instances so they become unplaced.
+	// The map tells RelaunchOrphanedJobs which jobs were just orphaned
+	// (and from which instance), so it doesn't sweep in unrelated unplaced jobs.
+	resetJobs, err := db.ResetJobsOnTerminalLaunches(database)
+	if err != nil {
 		log.Printf("auto-relaunch: reset jobs: %v", err)
 	}
 
@@ -37,6 +40,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 		SurvivalModel: survivalModel,
 		MinSurvival:   campaignLaunchMinSurvival,
 		Database:      database,
+		ResetJobs:     resetJobs,
 	}
 
 	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)

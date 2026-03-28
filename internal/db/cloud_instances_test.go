@@ -568,12 +568,17 @@ func TestResetJobsOnTerminalLaunches_SkipsCompletedInstances(t *testing.T) {
 		insertTestJob(t, database, tc.jobID, "echo test", "/tmp", StatusRunning, withLaunch(tc.instanceID))
 	}
 
-	n, err := ResetJobsOnTerminalLaunches(database)
+	resetMap, err := ResetJobsOnTerminalLaunches(database)
 	if err != nil {
 		t.Fatalf("ResetJobsOnTerminalLaunches: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("ResetJobsOnTerminalLaunches reset %d jobs, want 1", n)
+	if len(resetMap) != 1 {
+		t.Fatalf("ResetJobsOnTerminalLaunches reset %d jobs, want 1", len(resetMap))
+	}
+	if instID, ok := resetMap[2]; !ok {
+		t.Fatalf("resetMap missing job 2")
+	} else if instID != failedID {
+		t.Fatalf("resetMap[2] = %d, want %d (failedID)", instID, failedID)
 	}
 
 	completedJob, err := GetJobByID(database, 1)

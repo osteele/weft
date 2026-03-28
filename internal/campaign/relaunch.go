@@ -27,6 +27,7 @@ type RelaunchConfig struct {
 	MinSurvival   float64 // 0 to disable survival filtering
 	Strategy      bidding.SelectionStrategy
 	Database      *sql.DB
+	ResetJobs     map[int64]int64 // jobID → failed instanceID; when non-nil, only relaunch these jobs
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
@@ -48,6 +49,18 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	unplaced, err := db.ListUnplacedJobs(cfg.Database)
 	if err != nil {
 		return nil, fmt.Errorf("list unplaced jobs: %w", err)
+	}
+
+	// If we know exactly which jobs were just orphaned, restrict to those.
+	// This prevents user-deselected jobs from being swept into the relaunch.
+	if len(cfg.ResetJobs) > 0 {
+		filtered := make([]*db.Job, 0, len(cfg.ResetJobs))
+		for _, j := range unplaced {
+			if _, ok := cfg.ResetJobs[j.ID]; ok {
+				filtered = append(filtered, j)
+			}
+		}
+		unplaced = filtered
 	}
 
 	// Single pass: filter to cloud jobs and check attempt count.
@@ -198,14 +211,37 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	// so we can record it as replaced_instance_id on the new instance.
 	groupPredecessorIDs := make(map[int]int64)
 	for i, group := range launchGroups {
-		for _, j := range group.Jobs {
-			attempts, err := db.GetLaunchAttempts(cfg.Database, j.ID)
-			if err != nil || len(attempts) == 0 {
-				continue
+		if len(cfg.ResetJobs) > 0 {
+			// Use the known failed instance ID from the reset pass.
+			// Pick the most common instance in the group for mixed groups.
+			counts := make(map[int64]int)
+			for _, j := range group.Jobs {
+				if instID, ok := cfg.ResetJobs[j.ID]; ok {
+					counts[instID]++
+				}
 			}
-			lastAttempt := attempts[len(attempts)-1]
-			groupPredecessorIDs[i] = lastAttempt.LaunchID
-			break
+			var bestID int64
+			var bestCount int
+			for id, c := range counts {
+				if c > bestCount {
+					bestID = id
+					bestCount = c
+				}
+			}
+			if bestCount > 0 {
+				groupPredecessorIDs[i] = bestID
+			}
+		} else {
+			// Fallback for callers that don't provide ResetJobs.
+			for _, j := range group.Jobs {
+				attempts, err := db.GetLaunchAttempts(cfg.Database, j.ID)
+				if err != nil || len(attempts) == 0 {
+					continue
+				}
+				lastAttempt := attempts[len(attempts)-1]
+				groupPredecessorIDs[i] = lastAttempt.LaunchID
+				break
+			}
 		}
 	}
 

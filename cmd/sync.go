@@ -415,10 +415,10 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: terminal cloud job repair: %v\n", err)
 		}
-	} else if repaired > 0 {
-		updated += int(repaired)
+	} else if len(repaired) > 0 {
+		updated += len(repaired)
 		if verbose {
-			fmt.Printf("Repaired %d stale cloud job assignment(s) on terminal instances\n", repaired)
+			fmt.Printf("Repaired %d stale cloud job assignment(s) on terminal instances\n", len(repaired))
 		}
 	}
 

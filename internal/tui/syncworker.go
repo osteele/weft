@@ -343,15 +343,15 @@ func (w *SyncWorker) reconcileCloudJobs() {
 
 	if len(cloudClients) == 0 {
 		// No cloud clients — fall back to DB-only reconciliation
-		n, err := db.ResetJobsOnTerminalLaunches(w.database)
+		resetMap, err := db.ResetJobsOnTerminalLaunches(w.database)
 		if err != nil {
 			log.Printf("cloud reconcile: %v", err)
 			return
 		}
-		if n > 0 {
-			log.Printf("cloud reconcile: reset %d job(s) on terminal instances", n)
+		if len(resetMap) > 0 {
+			log.Printf("cloud reconcile: reset %d job(s) on terminal instances", len(resetMap))
 			select {
-			case w.results <- SyncResult{Updated: int(n)}:
+			case w.results <- SyncResult{Updated: len(resetMap)}:
 			default:
 			}
 		}

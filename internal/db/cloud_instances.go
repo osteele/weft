@@ -1247,10 +1247,13 @@ func NormalizeTerminalLaunchJobs(database *sql.DB, instanceID int64) (int64, err
 // failed or canceled cloud instances and resets them to queued/unplaced.
 // Completed instances are intentionally skipped until result sync finalizes them.
 // This is a DB-only repair pass that doesn't require cloud provider clients.
-func ResetJobsOnTerminalLaunches(database *sql.DB) (int64, error) {
-	// Find non-success terminal instances that still have non-terminal jobs.
+// Returns a map of jobID → instanceID for each reset job, so callers can
+// scope relaunch to only the actually-orphaned jobs and track which instance
+// each job came from.
+func ResetJobsOnTerminalLaunches(database *sql.DB) (map[int64]int64, error) {
+	// Find non-terminal jobs on failed/cancelled instances.
 	rows, err := database.Query(`
-		SELECT DISTINCT ci.id
+		SELECT js.id, ci.id
 		FROM launches ci
 		JOIN job_status js ON js.launch_id = ci.id
 		WHERE ci.status IN (?, ?)
@@ -1260,31 +1263,31 @@ func ResetJobsOnTerminalLaunches(database *sql.DB) (int64, error) {
 		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
 	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer rows.Close()
 
-	var instanceIDs []int64
+	// Collect job→instance mapping before resetting.
+	resetMap := make(map[int64]int64)
+	instanceSet := make(map[int64]bool)
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return 0, err
+		var jobID, instanceID int64
+		if err := rows.Scan(&jobID, &instanceID); err != nil {
+			return nil, err
 		}
-		instanceIDs = append(instanceIDs, id)
+		resetMap[jobID] = instanceID
+		instanceSet[instanceID] = true
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 
-	var total int64
-	for _, id := range instanceIDs {
-		n, err := NormalizeTerminalLaunchJobs(database, id)
-		if err != nil {
-			return total, fmt.Errorf("normalize jobs on instance %d: %w", id, err)
+	for id := range instanceSet {
+		if _, err := NormalizeTerminalLaunchJobs(database, id); err != nil {
+			return resetMap, fmt.Errorf("normalize jobs on instance %d: %w", id, err)
 		}
-		total += n
 	}
-	return total, nil
+	return resetMap, nil
 }
 
 // ListRunningLaunches returns all cloud instances with "running", "launching", or "grace" status.
