@@ -482,6 +482,9 @@ func (m launchModel) maybeStartInlineWatch() (launchModel, tea.Cmd) {
 		r2Client, _ = buildR2Client(m.appConfig)
 	}
 	inlineWatch := newInstanceWatchModel(m.database, append([]int64(nil), m.registeredInstanceIDs...), r2Client, m.appConfig)
+	if summary := campaign.SummarizeEstimates(m.costEstimates); summary != nil {
+		inlineWatch.estimateSummaryLine = summary.FormatLine()
+	}
 	m.inlineWatch = &inlineWatch
 	m.inlineWatchUsed = true
 	return m, inlineWatch.Init()

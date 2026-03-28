@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -263,4 +264,48 @@ func TotalEstimatedCostFromEstimates(estimates []CostEstimate) float64 {
 		total += est.TotalCost
 	}
 	return total
+}
+
+// CostEstimateSummary holds aggregated time and cost ranges from launch estimates,
+// for display in the watch header.
+type CostEstimateSummary struct {
+	TimeMean, TimeLower, TimeUpper time.Duration
+	CostMean, CostLower, CostUpper float64
+}
+
+// FormatLine returns a display line like "Estimate: time: ~45m (30m–1h)  cost: ~$1.50 ($0.80–$2.20)".
+func (s *CostEstimateSummary) FormatLine() string {
+	timeEst := estimate.Estimate{Mean: s.TimeMean, Lower: s.TimeLower, Upper: s.TimeUpper}
+	timePart := formatDurationWithBounds(timeEst)
+
+	costPart := fmt.Sprintf("~$%.2f", s.CostMean)
+	if s.CostUpper-s.CostLower >= 0.01 && s.CostLower != s.CostMean {
+		costPart = fmt.Sprintf("~$%.2f ($%.2f–$%.2f)", s.CostMean, s.CostLower, s.CostUpper)
+	}
+
+	return "Estimate: time: " + timePart + "  cost: " + costPart
+}
+
+// SummarizeEstimates aggregates cost estimates into a summary with time and cost ranges.
+// Returns nil if estimates is empty or has no valid offers.
+func SummarizeEstimates(estimates []CostEstimate) *CostEstimateSummary {
+	var s CostEstimateSummary
+	hasAny := false
+	for _, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+		hasAny = true
+		total := est.Breakdown.Total
+		s.TimeMean += total.Mean
+		s.TimeLower += total.Lower
+		s.TimeUpper += total.Upper
+		s.CostMean += est.TotalCost
+		s.CostLower += total.Lower.Hours() * est.Offer.Offer.CostPerHour
+		s.CostUpper += total.Upper.Hours() * est.Offer.Offer.CostPerHour
+	}
+	if !hasAny {
+		return nil
+	}
+	return &s
 }

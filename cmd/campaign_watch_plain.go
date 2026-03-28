@@ -28,7 +28,7 @@ func summaryInterval(elapsed time.Duration) time.Duration {
 
 // watchInstancesPlain prints line-oriented status updates for cloud instances.
 // Suitable for non-TTY output and parsing by coding agents.
-func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64) error {
+func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -36,6 +36,11 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64) 
 	r2Client, _ := buildR2Client(cfg)
 
 	campaignID, launchTime := campaignInfoFromInstances(database, instanceIDs)
+
+	var estimateLine string
+	if estimateSummary != nil {
+		estimateLine = estimateSummary.FormatLine()
+	}
 
 	updates := make(map[int64]campaign.InstanceUpdate, len(instanceIDs))
 	for _, id := range instanceIDs {
@@ -58,7 +63,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64) 
 			fmt.Printf("Launched %s\n\n", launchTime.Format("2006-01-02 15:04"))
 		}
 	}
-	if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now()); summary != "" {
+	if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now(), estimateLine); summary != "" {
 		fmt.Println(summary)
 		fmt.Println()
 	}
@@ -116,7 +121,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64) 
 				updates[instanceID] = normalizeWatchInstanceUpdate(update, updates[instanceID].Launch)
 				now := time.Now()
 				if hasStateChange || now.Sub(lastSummaryTime) >= summaryInterval(now.Sub(launchTime)) {
-					if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now); summary != "" {
+					if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now, estimateLine); summary != "" {
 						fmt.Println(summary)
 						lastSummaryTime = now
 					}

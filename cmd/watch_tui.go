@@ -65,10 +65,11 @@ type watchModel struct {
 	syncWorker     *tui.SyncWorker
 
 	// --- Campaign-mode fields ---
-	campaignID int64
-	launchedAt time.Time
-	initInfo   map[int64]initialInstanceInfo
-	reconciler *campaign.Reconciler
+	campaignID          int64
+	launchedAt          time.Time
+	estimateSummaryLine string // pre-formatted estimate line from launch; empty if unavailable
+	initInfo            map[int64]initialInstanceInfo
+	reconciler          *campaign.Reconciler
 
 	// Retry state (campaign mode)
 	retrying             bool
@@ -1016,7 +1017,7 @@ func (m watchModel) renderCampaignView() (string, int) {
 		addLine(watchTitleStyle.Render(header))
 		addLine("")
 	}
-	if summary := formatCampaignWatchSummaryLine(m.launchedAt, m.campaignViews(), now); summary != "" {
+	if summary := formatCampaignWatchSummaryLine(m.launchedAt, m.campaignViews(), now, m.estimateSummaryLine); summary != "" {
 		addLine(summary)
 		addLine("")
 	}
@@ -1661,13 +1662,17 @@ func (m watchModel) campaignViews() []cloudInstanceView {
 	return views
 }
 
-func formatCampaignWatchSummaryLine(launchedAt time.Time, views []cloudInstanceView, now time.Time) string {
+func formatCampaignWatchSummaryLine(launchedAt time.Time, views []cloudInstanceView, now time.Time, estimateLine string) string {
 	agg := summarizeLaunches(views, now)
 	label := "Summary:"
 	if !launchedAt.IsZero() {
 		label = "Summary: uptime: " + now.Sub(launchedAt).Truncate(time.Second).String()
 	}
-	return formatCloudAggregateSummary(label, agg)
+	s := formatCloudAggregateSummary(label, agg)
+	if s != "" && estimateLine != "" {
+		s += "\n" + estimateLine
+	}
+	return s
 }
 
 // ---------------------------------------------------------------------------
@@ -1944,10 +1949,13 @@ func padToWidth(s string, width int) string {
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
 // Returns the final list of instance IDs (which may include auto-relaunched instances).
-func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64) ([]int64, error) {
+func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) ([]int64, error) {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
 	model := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
+	if estimateSummary != nil {
+		model.estimateSummaryLine = estimateSummary.FormatLine()
+	}
 
 	origLogOutput := log.Writer()
 	log.SetOutput(io.Discard)
