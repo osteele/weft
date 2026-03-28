@@ -61,6 +61,7 @@ type JobMarkers struct {
 	Started       []string
 	completedKeys map[int64]map[string]struct{}
 	startedKeys   map[int64]map[string]struct{}
+	processedKeys map[int64]map[string]struct{}
 }
 
 // ListJobMarkers scans for both .complete and .started markers in a single pass.
@@ -73,6 +74,7 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 	result := &JobMarkers{
 		completedKeys: make(map[int64]map[string]struct{}),
 		startedKeys:   make(map[int64]map[string]struct{}),
+		processedKeys: make(map[int64]map[string]struct{}),
 	}
 	paginator := s3.NewListObjectsV2Paginator(c.s3, input)
 	for paginator.HasMorePages() {
@@ -93,6 +95,8 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 			case strings.HasSuffix(key, "/.started"):
 				target = &result.Started
 				targetKeys = result.startedKeys
+			case strings.HasSuffix(key, "/.processed"):
+				targetKeys = result.processedKeys
 			default:
 				continue
 			}
@@ -106,7 +110,9 @@ func (c *Client) ListJobMarkers(ctx context.Context, prefix string) (*JobMarkers
 					}
 					if _, ok := targetKeys[jobID]; !ok {
 						targetKeys[jobID] = make(map[string]struct{})
-						*target = append(*target, parts[i+1])
+						if target != nil {
+							*target = append(*target, parts[i+1])
+						}
 					}
 					targetKeys[jobID][key] = struct{}{}
 					break
@@ -144,6 +150,15 @@ func (m *JobMarkers) AnyCompletedKey(jobID int64) (string, bool) {
 	return "", false
 }
 
+// IsProcessed returns true if any .processed marker exists for the given job.
+func (m *JobMarkers) IsProcessed(jobID int64) bool {
+	if m == nil {
+		return false
+	}
+	_, ok := m.processedKeys[jobID]
+	return ok
+}
+
 func (m *JobMarkers) hasMarker(markers map[int64]map[string]struct{}, jobID int64, key string) bool {
 	if m == nil || key == "" {
 		return false
@@ -156,13 +171,25 @@ func (m *JobMarkers) hasMarker(markers map[int64]map[string]struct{}, jobID int6
 	return ok
 }
 
-// ListCompleted returns job IDs that have a .complete marker under the given prefix.
+// ListCompleted returns job IDs that have a .complete marker but no .processed
+// marker under the given prefix. Jobs that have already been processed are
+// excluded so the caller doesn't re-ingest them.
 func (c *Client) ListCompleted(ctx context.Context, prefix string) ([]string, error) {
 	markers, err := c.ListJobMarkers(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	return markers.Completed, nil
+	var unprocessed []string
+	for _, idStr := range markers.Completed {
+		jobID, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		if !markers.IsProcessed(jobID) {
+			unprocessed = append(unprocessed, idStr)
+		}
+	}
+	return unprocessed, nil
 }
 
 // DownloadResults downloads all files under prefix to a local directory.
@@ -208,6 +235,11 @@ func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+// PutMarker writes an empty object as a marker key.
+func (c *Client) PutMarker(ctx context.Context, key string) error {
+	return c.PutObject(ctx, key, strings.NewReader(""), "application/octet-stream")
 }
 
 // DeletePrefix deletes all objects under the given prefix.

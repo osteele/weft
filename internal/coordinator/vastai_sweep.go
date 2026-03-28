@@ -171,9 +171,9 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	// Write logs to log cache
 	WriteVastaiLogsToCache(jobID, tmpDir)
 
-	// Keep R2 data — live-log chunks are the primary log source for `weft log`.
-	// Previously we deleted the entire prefix here, but that destroyed the only
-	// copy of log content after 5d714b3 stopped uploading consolidated .log files.
+	// Keep live-log chunks: they are the primary log source for `weft log`.
+	_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
+	_ = r2Client.DeletePrefix(ctx, resultPrefix)
 
 	c.logger.Info("processed vastai job", "job_id", jobID, "exit_code", exitCode, "status", db.StatusCompleted)
 	if exitCode == 0 {

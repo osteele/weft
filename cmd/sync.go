@@ -463,12 +463,16 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			continue
 		}
 
+		if markers.IsProcessed(jobID) {
+			continue
+		}
+
 		// Check current job status directly — skip if already terminal
 		var currentStatus string
 		var latestRunID sql.NullInt64
 		if err := database.QueryRow("SELECT status, latest_run_id FROM job_status WHERE id = ? AND tombstoned = 0", jobID).Scan(&currentStatus, &latestRunID); err != nil || db.IsTerminalStatus(currentStatus) {
-			// Job not found or already terminal — clean up stale R2 markers
-			_ = r2Client.DeletePrefix(ctx, r2keys.JobPrefix(jobID)+"/")
+			// Keep live-log chunks: they are the primary log source for `weft log`.
+			_ = r2Client.PutMarker(ctx, r2keys.JobProcessed(jobID))
 			continue
 		}
 
@@ -487,7 +491,6 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			}
 		}
 		resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
-		cleanupPrefix := r2keys.JobRunPrefix(jobID, runID)
 
 		// Download results to temp dir
 		tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-cloud-%d-*", jobID))
@@ -549,8 +552,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			fmt.Printf("  cloud job %d: %s (exit %d)\n", jobID, statusLabel, *exitCode)
 		}
 
-		// Cleanup R2
-		_ = r2Client.DeletePrefix(ctx, cleanupPrefix+"/")
+		// Keep live-log chunks: they are the primary log source for `weft log`.
+		_ = r2Client.PutMarker(ctx, r2keys.JobAttemptProcessed(jobID, runID))
+		_ = r2Client.DeletePrefix(ctx, resultPrefix)
 		os.RemoveAll(tmpDir)
 	}
 

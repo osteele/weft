@@ -30,6 +30,10 @@ func JobComplete(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/.complete", jobID)
 }
 
+func JobProcessed(jobID int64) string {
+	return fmt.Sprintf("jobs/%d/.processed", jobID)
+}
+
 func JobResultsPrefix(jobID int64) string {
 	return fmt.Sprintf("jobs/%d/results/", jobID)
 }
@@ -100,6 +104,13 @@ func JobAttemptComplete(jobID, runID int64) string {
 		return JobComplete(jobID)
 	}
 	return fmt.Sprintf("%s/.complete", JobRunPrefix(jobID, runID))
+}
+
+func JobAttemptProcessed(jobID, runID int64) string {
+	if runID <= 0 {
+		return JobProcessed(jobID)
+	}
+	return fmt.Sprintf("%s/.processed", JobRunPrefix(jobID, runID))
 }
 
 // ExtractRunID parses the run_id from a job R2 key such as
