@@ -43,7 +43,7 @@ func TestSyncCloudStateWithClients_ReconcilesProviderState(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
 			if destroyedOnce {
-				return &cloud.Instance{ProviderID: id, Status: "destroyed"}, nil
+				return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusDestroyed}, nil
 			}
 			return &cloud.Instance{ProviderID: id, Status: ""}, nil
 		},
@@ -97,7 +97,7 @@ func TestSyncCloudStateWithClientsTimeout_TimesOut(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
 			time.Sleep(50 * time.Millisecond)
-			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+			return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
 		},
 	}}, nil, 5*time.Millisecond, false)
 

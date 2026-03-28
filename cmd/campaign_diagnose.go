@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logcache"
 	"github.com/osteele/weft/internal/remediation"
@@ -154,11 +155,11 @@ func summarizeInstanceCause(inst *db.Launch, findings []jobFinding, outcomes map
 	switch inst.TerminationReason {
 	case db.TerminationReasonPreempted:
 		return "provider preempted the instance"
-	case "destroyed", "dead", "stopped":
+	case cloud.ProviderStatusDestroyed, cloud.ProviderStatusDead, cloud.ProviderStatusStopped:
 		return fmt.Sprintf("provider reported instance %s", inst.TerminationReason)
-	case "error":
+	case cloud.ProviderStatusError:
 		return "provider reported instance error"
-	case "exited":
+	case cloud.ProviderStatusExited:
 		if len(findings) > 0 {
 			return findings[0].Summary
 		}

@@ -40,7 +40,7 @@ func TestReconcileLaunches_DeadInstance(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{Status: "exited"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusExited}, nil
 		},
 	}
 
@@ -103,7 +103,7 @@ func TestReconcileLaunches_GraceDetection(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{Status: "running"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
 		},
 	}
 
@@ -147,7 +147,7 @@ func TestReconcileLaunches_RunningInstance(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{Status: "running"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
 		},
 	}
 
@@ -204,9 +204,9 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			status := "running"
+			status := cloud.ProviderStatusRunning
 			if destroyed {
-				status = "destroyed"
+				status = cloud.ProviderStatusDestroyed
 			}
 			return &cloud.Instance{
 				ProviderID: id,
@@ -299,9 +299,9 @@ func TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed(t *testing.T
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
 			if destroyed {
-				return &cloud.Instance{ProviderID: id, Status: "destroyed"}, nil
+				return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusDestroyed}, nil
 			}
-			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+			return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
 			destroyedID = id
@@ -441,9 +441,9 @@ func TestReconcileLaunches_StaleHeartbeatUnreachableProbeRequiresRepeatedFailure
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			status := "running"
+			status := cloud.ProviderStatusRunning
 			if destroyed {
-				status = "destroyed"
+				status = cloud.ProviderStatusDestroyed
 			}
 			return &cloud.Instance{ProviderID: id, Status: status}, nil
 		},
@@ -558,7 +558,7 @@ func TestReconcileLaunches_SafetyNet_DestroysLeakedInstance(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{Status: "running"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
 			destroyedID = id
@@ -605,7 +605,7 @@ func TestReconcileLaunches_SafetyNet_SkipsAlreadyDestroyed(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{Status: "destroyed"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusDestroyed}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
 			destroyCalled = true
@@ -644,7 +644,7 @@ func TestReconcileLaunches_DeadInstanceHysteresis(t *testing.T) {
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{Status: "exited"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusExited}, nil
 		},
 	}
 
@@ -788,12 +788,12 @@ func TestReconcileLaunches_BatchFetch_UsesListAllInstances(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "batch-123", Status: "running"},
+				{ProviderID: "batch-123", Status: cloud.ProviderStatusRunning},
 			}, nil
 		},
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
 			showCalls++
-			return &cloud.Instance{Status: "running"}, nil
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
 		},
 	}
 

@@ -28,7 +28,7 @@ func TestLaunchInstanceNilR2Client(t *testing.T) {
 			createdOfferID = offerID
 			return &cloud.Instance{
 				ProviderID:  "12345",
-				Status:      "running",
+				Status:      cloud.ProviderStatusRunning,
 				SSHHost:     "127.0.0.1",
 				SSHPort:     19999,
 				CostPerHour: 0.50,
@@ -297,7 +297,7 @@ func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
 			if len(createCalls) == 1 {
 				return nil, fmt.Errorf("%w: ask 999 no longer exists", cloud.ErrOfferUnavailable)
 			}
-			return &cloud.Instance{ProviderID: "inst-123", Status: "creating"}, nil
+			return &cloud.Instance{ProviderID: "inst-123", Status: cloud.ProviderStatusCreating}, nil
 		},
 	}
 
@@ -351,7 +351,7 @@ func TestCreateInstanceWithReplacementRetriesUnavailableRunpodOffer(t *testing.T
 			if len(createCalls) == 1 {
 				return nil, fmt.Errorf("%w: gpu %s no longer exists", cloud.ErrOfferUnavailable, offerID)
 			}
-			return &cloud.Instance{ProviderID: "pod-123", Status: "creating"}, nil
+			return &cloud.Instance{ProviderID: "pod-123", Status: cloud.ProviderStatusCreating}, nil
 		},
 	}
 

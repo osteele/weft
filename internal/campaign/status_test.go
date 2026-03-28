@@ -370,7 +370,7 @@ func TestWatchInstance_BootstrapTimeout(t *testing.T) {
 	var destroyed bool
 	mockClient := &cloud.MockClient{
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+			return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
 			destroyed = true
@@ -446,7 +446,7 @@ func TestWatchInstance_GraceExpiration(t *testing.T) {
 	var destroyed bool
 	mockClient := &cloud.MockClient{
 		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
-			return &cloud.Instance{ProviderID: id, Status: "running"}, nil
+			return &cloud.Instance{ProviderID: id, Status: cloud.ProviderStatusRunning}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
 			destroyed = true

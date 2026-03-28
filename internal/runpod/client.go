@@ -94,7 +94,7 @@ func (c *CloudClient) CreateInstance(offerID string, opts cloud.CreateOpts) (*cl
 	return &cloud.Instance{
 		ProviderID: podID,
 		Provider:   cloud.ProviderRunpod,
-		Status:     "creating",
+		Status:     cloud.ProviderStatusCreating,
 	}, nil
 }
 
@@ -166,10 +166,10 @@ func (c *CloudClient) WaitReady(instanceID string, timeout time.Duration) (*clou
 			time.Sleep(poll)
 			continue
 		}
-		if inst.Status == "running" {
+		if inst.Status == cloud.ProviderStatusRunning {
 			return inst, nil
 		}
-		if inst.Status == "exited" || inst.Status == "error" {
+		if inst.Status == cloud.ProviderStatusExited || inst.Status == cloud.ProviderStatusError {
 			return inst, fmt.Errorf("pod %s entered state %q", instanceID, inst.Status)
 		}
 		time.Sleep(poll)

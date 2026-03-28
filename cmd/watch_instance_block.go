@@ -182,7 +182,7 @@ func watchInstanceStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
 	if inst == nil || inst.Status == "" || campaign.IsInstanceTerminal(ci.Status) {
 		return statusLabel
 	}
-	if ci.Status == db.LaunchStatusRunning && inst.Status != "running" {
+	if ci.Status == db.LaunchStatusRunning && inst.Status != cloud.ProviderStatusRunning {
 		return inst.Status
 	}
 	if ci.Status == db.LaunchStatusLaunching {
@@ -193,7 +193,7 @@ func watchInstanceStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
 
 func watchStatusBlockStyle(displayStatus, dbStatus string) lipgloss.Style {
 	switch displayStatus {
-	case "loading", "launching", "provisioning":
+	case cloud.ProviderStatusLoading, "launching", "provisioning":
 		return watchDimStyle
 	case db.LaunchStatusCompleted:
 		return watchCompletedStyle

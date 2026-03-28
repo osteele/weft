@@ -169,7 +169,7 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 					Provider: "vastai",
 					GPUSpec:  "A40",
 				},
-				Instance: &cloud.Instance{Status: "running"},
+				Instance: &cloud.Instance{Status: cloud.ProviderStatusRunning},
 				Jobs: []*db.Job{
 					{
 						ID:          199,

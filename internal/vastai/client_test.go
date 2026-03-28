@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/osteele/weft/internal/cloud"
 )
 
 // Captured output from: vastai search offers --raw 'num_gpus=1 verified=true'
@@ -111,8 +113,8 @@ func TestParseShowInstances(t *testing.T) {
 	if inst.ID != 99999 {
 		t.Errorf("instance.ID = %d, want 99999", inst.ID)
 	}
-	if inst.Status != "running" {
-		t.Errorf("instance.Status = %q, want %q", inst.Status, "running")
+	if inst.Status != cloud.ProviderStatusRunning {
+		t.Errorf("instance.Status = %q, want %q", inst.Status, cloud.ProviderStatusRunning)
 	}
 	if inst.SSHHost != "ssh5.vast.ai" {
 		t.Errorf("instance.SSHHost = %q, want %q", inst.SSHHost, "ssh5.vast.ai")

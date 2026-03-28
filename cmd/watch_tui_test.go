@@ -117,7 +117,7 @@ func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
 	}
 	update := campaign.InstanceUpdate{
 		Launch:   ci,
-		Instance: &cloud.Instance{Status: "loading"},
+		Instance: &cloud.Instance{Status: cloud.ProviderStatusLoading},
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))

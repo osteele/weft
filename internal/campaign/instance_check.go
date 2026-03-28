@@ -161,7 +161,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	// 4b. Stale pre-running status: provider allocated but never reached "running".
 	// Covers "created", "loading", and any other non-running, non-terminal status.
 	// Skip when IntendedStatus already signals termination — step 8 catches that faster.
-	if p.ProviderInst != nil && p.ProviderInst.Status != "running" && p.ProviderInst.Status != "" &&
+	if p.ProviderInst != nil && p.ProviderInst.Status != cloud.ProviderStatusRunning && p.ProviderInst.Status != "" &&
 		!isProviderTerminal(p.ProviderInst) && ci.LaunchedAt != nil {
 		age := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
 		if age > maxPreRunningStatusTime {

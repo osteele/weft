@@ -460,7 +460,13 @@ func terminateInstancesParallel(database *sql.DB, ids []int64) (int, []error) {
 			providerInstID := ci.EffectiveProviderID()
 			if providerInstID != "" {
 				client := cloudClientForDBInstance(ci.Provider)
-				_ = client.DestroyInstance(providerInstID) // best-effort
+				if err := client.DestroyInstance(providerInstID); err != nil {
+					mu.Lock()
+					errors = append(errors, fmt.Errorf("destroy %s instance %s: %w", ci.Provider, providerInstID, err))
+					mu.Unlock()
+					// Continue with DB status update — mark as cancelled even if
+					// provider destroy failed, so the orphan sweep can retry.
+				}
 			}
 
 			if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled, db.TerminationReasonCancelled); err != nil {

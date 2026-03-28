@@ -41,6 +41,20 @@ func (o Offer) Key() string {
 	return string(o.Provider) + ":" + o.ProviderID
 }
 
+// ProviderStatus constants represent provider-reported instance states,
+// normalized across providers (Vast.ai, RunPod).
+const (
+	ProviderStatusCreated   = "created"
+	ProviderStatusCreating  = "creating" // RunPod initial state
+	ProviderStatusLoading   = "loading"
+	ProviderStatusRunning   = "running"
+	ProviderStatusExited    = "exited"
+	ProviderStatusStopped   = "stopped"
+	ProviderStatusError     = "error"
+	ProviderStatusDestroyed = "destroyed"
+	ProviderStatusDead      = "dead"
+)
+
 // Instance represents a running cloud instance from any provider.
 type Instance struct {
 	ProviderID     string // provider-specific instance ID

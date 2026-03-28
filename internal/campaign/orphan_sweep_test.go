@@ -46,8 +46,8 @@ func TestSweepOrphanedInstances_DestroysOrphanFromTerminalCampaign(t *testing.T)
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "orphan-1", Status: "running", Label: labelForCampaign(campaignID)},
-				{ProviderID: "other-2", Status: "running", Label: "unrelated"},
+				{ProviderID: "orphan-1", Status: cloud.ProviderStatusRunning, Label: labelForCampaign(campaignID)},
+				{ProviderID: "other-2", Status: cloud.ProviderStatusRunning, Label: "unrelated"},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -95,7 +95,7 @@ func TestSweepOrphanedInstances_SkipsActiveCampaignTrackedInstances(t *testing.T
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "tracked-123", Status: "running", Label: labelForCampaign(campaignID)},
+				{ProviderID: "tracked-123", Status: cloud.ProviderStatusRunning, Label: labelForCampaign(campaignID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -131,7 +131,7 @@ func TestSweepOrphanedInstances_DestroysUntrackedInActiveCampaign(t *testing.T) 
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "ghost-999", Status: "running", Label: labelForCampaign(campaignID)},
+				{ProviderID: "ghost-999", Status: cloud.ProviderStatusRunning, Label: labelForCampaign(campaignID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -161,8 +161,8 @@ func TestSweepOrphanedInstances_SkipsUnlabeledInstances(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "unlabeled-1", Status: "running", Label: ""},
-				{ProviderID: "other-2", Status: "running", Label: "my-personal-instance"},
+				{ProviderID: "unlabeled-1", Status: cloud.ProviderStatusRunning, Label: ""},
+				{ProviderID: "other-2", Status: cloud.ProviderStatusRunning, Label: "my-personal-instance"},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -197,7 +197,7 @@ func TestSweepOrphanedInstances_SkipsDestroyedProviderInstances(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "dead-1", Status: "destroyed", Label: labelForCampaign(campaignID)},
+				{ProviderID: "dead-1", Status: cloud.ProviderStatusDestroyed, Label: labelForCampaign(campaignID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -233,7 +233,7 @@ func TestSweepOrphanedInstances_DestroysStoppedInstances(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "stopped-1", Status: "stopped", Label: labelForCampaign(campaignID)},
+				{ProviderID: "stopped-1", Status: cloud.ProviderStatusStopped, Label: labelForCampaign(campaignID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -264,7 +264,7 @@ func TestSweepOrphanedInstances_NoCampaignInDB(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "stale-1", Status: "running", Label: "weft/c999"},
+				{ProviderID: "stale-1", Status: cloud.ProviderStatusRunning, Label: "weft/c999"},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {

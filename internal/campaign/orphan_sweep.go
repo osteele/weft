@@ -129,7 +129,7 @@ func needsProviderDestroy(inst *cloud.Instance) bool {
 		return false // not found = already gone
 	}
 	switch inst.Status {
-	case "destroyed", "dead":
+	case cloud.ProviderStatusDestroyed, cloud.ProviderStatusDead:
 		return false
 	}
 	return true

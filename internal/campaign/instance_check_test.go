@@ -151,7 +151,7 @@ func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 			ID:     1,
 			Status: db.LaunchStatusRunning,
 		},
-		ProviderInst: &cloud.Instance{Status: "running"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, LatestJobEnd: latestEnd},
 		Now:          time.Now(),
 	})
@@ -189,7 +189,7 @@ func TestCheckInstance_TerminationIntent_Completed(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "running"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		TerminationIntent: &instanceintent.Marker{
 			TerminalStatus:    db.LaunchStatusCompleted,
 			TerminationReason: db.TerminationReasonCompleted,
@@ -215,7 +215,7 @@ func TestCheckInstance_TerminationIntent_Failed(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "running"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		TerminationIntent: &instanceintent.Marker{
 			TerminalStatus:    db.LaunchStatusFailed,
 			TerminationReason: db.TerminationReasonDiskFull,
@@ -242,7 +242,7 @@ func TestCheckInstance_ProviderDead_WithHysteresis(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "exited"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusExited},
 		Now:          now,
 	}
 
@@ -276,7 +276,7 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "exited"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusExited},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionProviderDead {
@@ -299,7 +299,7 @@ func TestCheckInstance_ProviderDead_SkipsGraceInstances(t *testing.T) {
 			ProviderInstanceID: "test-123",
 			GraceDeadline:      &deadline,
 		},
-		ProviderInst: &cloud.Instance{Status: "exited"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusExited},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionNone {
@@ -325,7 +325,7 @@ func TestCheckInstance_StaleCreatedStatus(t *testing.T) {
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "created"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusCreated},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionEmptyStatusTimeout {
@@ -346,7 +346,7 @@ func TestCheckInstance_CreatedStatusUnderTimeout(t *testing.T) {
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "created"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusCreated},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionNone {
@@ -364,7 +364,7 @@ func TestCheckInstance_StaleLoadingStatus(t *testing.T) {
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "loading"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusLoading},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionEmptyStatusTimeout {
@@ -385,7 +385,7 @@ func TestCheckInstance_LoadingStatusUnderTimeout(t *testing.T) {
 			LaunchedAt:         &launchedAt,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "loading"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusLoading},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionNone {
@@ -408,7 +408,7 @@ func TestCheckInstance_IntendedStatusStopped(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "created", IntendedStatus: "stopped"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusCreated, IntendedStatus: cloud.ProviderStatusStopped},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionProviderDead {
@@ -429,7 +429,7 @@ func TestCheckInstance_IntendedStatusStoppedButRunning(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "running", IntendedStatus: "stopped"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning, IntendedStatus: cloud.ProviderStatusStopped},
 		JobState:     JobState{HasStartedJob: true},
 		Now:          time.Now(),
 	})
@@ -446,7 +446,7 @@ func TestCheckInstance_HeartbeatStale_DisplayOnly(t *testing.T) {
 			Status:             db.LaunchStatusRunning,
 			ProviderInstanceID: "test-123",
 		},
-		ProviderInst: &cloud.Instance{Status: "running"},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		HeartbeatAge: 5 * time.Minute,
 		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true},
 		Now:          time.Now(),
@@ -474,7 +474,7 @@ func TestCheckInstance_SetupStall_Terminate(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: "running"},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase:  "setup:459",
 		PhaseChangedAt: &phaseStart,
 		JobState:       JobState{HasStartedJob: true},
@@ -506,7 +506,7 @@ func TestCheckInstance_SetupStall_Warn(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: "running"},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase:  "setup:459",
 		PhaseChangedAt: &phaseStart,
 		JobState:       JobState{HasStartedJob: true},
@@ -535,7 +535,7 @@ func TestCheckInstance_SetupStall_UnderThreshold(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: "running"},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase:  "setup:459",
 		PhaseChangedAt: &phaseStart,
 		JobState:       JobState{HasStartedJob: true},
@@ -561,7 +561,7 @@ func TestCheckInstance_SetupStall_NonSetupPhase(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: "running"},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase:  "running:459",
 		PhaseChangedAt: &phaseStart,
 		JobState:       JobState{HasStartedJob: true},
@@ -587,7 +587,7 @@ func TestCheckInstance_SetupStall_NilPhaseChangedAt(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:  &cloud.Instance{Status: "running"},
+		ProviderInst:  &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase: "setup:459",
 		// PhaseChangedAt is nil — should be skipped
 		JobState: JobState{HasStartedJob: true},
@@ -614,7 +614,7 @@ func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
 			Status:     db.LaunchStatusRunning,
 			LaunchedAt: &launchedAt,
 		},
-		ProviderInst:   &cloud.Instance{Status: "running"},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
 		InstancePhase:  "setup:459",
 		PhaseChangedAt: &phaseStart,
 		SetupSurvival: &db.SetupSurvival{

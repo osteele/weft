@@ -238,10 +238,10 @@ func (c *Client) WaitReady(instanceID int, timeout time.Duration) (*Instance, er
 			log.Printf("vastai: instance %d status: %s", instanceID, inst.Status)
 			lastStatus = inst.Status
 		}
-		if inst.Status == "running" {
+		if inst.Status == cloud.ProviderStatusRunning {
 			return inst, nil
 		}
-		if inst.Status == "exited" || inst.Status == "error" {
+		if inst.Status == cloud.ProviderStatusExited || inst.Status == cloud.ProviderStatusError {
 			return inst, fmt.Errorf("instance %d entered state %q", instanceID, inst.Status)
 		}
 		time.Sleep(poll)

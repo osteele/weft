@@ -814,13 +814,13 @@ func isProviderTerminal(inst *cloud.Instance) bool {
 		return true // instance not found = dead
 	}
 	switch inst.Status {
-	case "exited", "destroyed", "error", "dead", "stopped":
+	case cloud.ProviderStatusExited, cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead, cloud.ProviderStatusStopped:
 		return true
 	}
 	// Provider intended to stop/destroy but Status hasn't caught up yet
 	// (e.g., Status still "created" while IntendedStatus is "stopped")
-	if (inst.IntendedStatus == "stopped" || inst.IntendedStatus == "destroyed") &&
-		inst.Status != "running" {
+	if (inst.IntendedStatus == cloud.ProviderStatusStopped || inst.IntendedStatus == cloud.ProviderStatusDestroyed) &&
+		inst.Status != cloud.ProviderStatusRunning {
 		return true
 	}
 	return false
