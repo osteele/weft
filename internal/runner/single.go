@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // SingleJobConfig configures a single-shot job execution.
 type SingleJobConfig struct {
 	JobID          int64
-	Job            ops.CommandJob
+	Job            opsqueue.CommandJob
 	LogDir         string
 	WorkingDir     string             // Override job.Dir if non-empty
 	SampleInterval time.Duration      // Default 1s

@@ -10,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuefile"
 	"github.com/osteele/weft/internal/session"
 	"github.com/osteele/weft/internal/ssh"
@@ -43,9 +43,9 @@ func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 
 	oplog.LogJob(oplog.OpJobStart, job.ID, job.Host, oplog.WithDetail("starting job immediately"))
 
-	cancelCmd := ops.NewCancelCommand(job.ID)
-	if err := ops.AppendCommand(job.Host, cancelCmd, ops.AppendCommandOptions{Timeout: sshTimeout}); err != nil {
-		var qaErr *ops.QueueAppendError
+	cancelCmd := opsqueue.NewCancelCommand(job.ID)
+	if err := opsqueue.AppendCommand(job.Host, cancelCmd, opsqueue.AppendCommandOptions{Timeout: sshTimeout}); err != nil {
+		var qaErr *opsqueue.QueueAppendError
 		if errors.As(err, &qaErr) && qaErr.IsConnectionError() {
 			oplog.LogJob(oplog.OpDeferred, job.ID, job.Host, oplog.WithDetail("cancel failed, deferring start"))
 			return markStartPending(database, freshJob, false)

@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // TelemetryConfig controls high-resolution job telemetry collection.
@@ -44,7 +44,7 @@ func BenchmarkTelemetryPolicy() JobTelemetryPolicy {
 	}
 }
 
-func TelemetryPolicyForJob(job *ops.CommandJob) JobTelemetryPolicy {
+func TelemetryPolicyForJob(job *opsqueue.CommandJob) JobTelemetryPolicy {
 	if job != nil && HasTag(job, "benchmark") {
 		return BenchmarkTelemetryPolicy()
 	}

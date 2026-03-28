@@ -14,7 +14,7 @@ import (
 
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // Runner is the main queue runner that manages job execution.
@@ -338,7 +338,7 @@ func (r *Runner) tryStartNextJob() {
 
 var errRequeue = fmt.Errorf("requeue")
 
-func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevices []string) error {
+func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUDevices []string) error {
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	command := job.Cmd
 	if command == "" {
@@ -839,7 +839,7 @@ func (r *Runner) warmupActive() bool {
 	return false
 }
 
-func (r *Runner) jobAllotment(job *ops.CommandJob) int {
+func (r *Runner) jobAllotment(job *opsqueue.CommandJob) int {
 	// Check explicit CPU field
 	if job.CPU != nil && *job.CPU > 0 {
 		return *job.CPU

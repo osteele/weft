@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestRunSingleJob_EchoHello(t *testing.T) {
@@ -15,7 +15,7 @@ func TestRunSingleJob_EchoHello(t *testing.T) {
 
 	cfg := SingleJobConfig{
 		JobID:          42,
-		Job:            ops.CommandJob{Cmd: "echo hello"},
+		Job:            opsqueue.CommandJob{Cmd: "echo hello"},
 		LogDir:         logDir,
 		SampleInterval: 100 * time.Millisecond,
 		SkipProbes:     true,
@@ -71,7 +71,7 @@ func TestRunSingleJob_FailingCommand(t *testing.T) {
 
 	cfg := SingleJobConfig{
 		JobID:          99,
-		Job:            ops.CommandJob{Cmd: "exit 42"},
+		Job:            opsqueue.CommandJob{Cmd: "exit 42"},
 		LogDir:         logDir,
 		SampleInterval: 100 * time.Millisecond,
 		SkipProbes:     true,
@@ -102,7 +102,7 @@ func TestRunSingleJob_WorkingDir(t *testing.T) {
 
 	cfg := SingleJobConfig{
 		JobID:          7,
-		Job:            ops.CommandJob{Cmd: "cat marker.txt"},
+		Job:            opsqueue.CommandJob{Cmd: "cat marker.txt"},
 		LogDir:         logDir,
 		WorkingDir:     workDir,
 		SampleInterval: 100 * time.Millisecond,
@@ -129,7 +129,7 @@ func TestRunSingleJob_OnPhase(t *testing.T) {
 	var phases []string
 	cfg := SingleJobConfig{
 		JobID:          50,
-		Job:            ops.CommandJob{Cmd: "echo phase-test"},
+		Job:            opsqueue.CommandJob{Cmd: "echo phase-test"},
 		LogDir:         logDir,
 		SampleInterval: 100 * time.Millisecond,
 		SkipProbes:     true,
@@ -162,7 +162,7 @@ func TestRunSingleJob_EmptyCommand(t *testing.T) {
 
 	cfg := SingleJobConfig{
 		JobID:      1,
-		Job:        ops.CommandJob{},
+		Job:        opsqueue.CommandJob{},
 		LogDir:     logDir,
 		SkipProbes: true,
 	}

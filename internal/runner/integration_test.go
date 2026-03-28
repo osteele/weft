@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -136,7 +136,7 @@ func TestIntegration_GoRunnerStartStop(t *testing.T) {
 	}
 
 	// Send stop command
-	stopCmd := ops.NewStopCommand()
+	stopCmd := opsqueue.NewStopCommand()
 	data, _ := json.Marshal(stopCmd)
 	appendCmd := fmt.Sprintf("printf '%%s\\n' '%s' >> %s/%s.commands", string(data), remoteQueueDir, testQueueName)
 	sshRun(t, host, appendCmd)
@@ -198,10 +198,10 @@ func TestIntegration_GoRunnerJobExecution(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// Submit a test job
-	addCmd := ops.QueueCommand{
+	addCmd := opsqueue.QueueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        ops.OpAdd,
-		Job: &ops.CommandJob{
+		Op:        opsqueue.OpAdd,
+		Job: &opsqueue.CommandJob{
 			ID:  testJobID,
 			Dir: "/tmp",
 			Cmd: "echo 'hello from go runner'; sleep 1; echo 'goodbye'",
@@ -277,7 +277,7 @@ func TestIntegration_GoRunnerJobExecution(t *testing.T) {
 	}
 
 	// Send stop command to clean up
-	stopCmd := ops.NewStopCommand()
+	stopCmd := opsqueue.NewStopCommand()
 	stopData, _ := json.Marshal(stopCmd)
 	sshRun(t, host, fmt.Sprintf("printf '%%s\\n' '%s' >> %s/%s.commands", string(stopData), remoteQueueDir, testQueueName))
 
@@ -302,10 +302,10 @@ func TestIntegration_GoRunnerStateCompatibility(t *testing.T) {
 		t.Skip("No state file from previous test - run TestIntegration_GoRunnerJobExecution first")
 	}
 
-	// Parse as ops.RunnerState (the type used by the sync code)
-	var runnerState ops.RunnerState
+	// Parse as opsqueue.RunnerState (the type used by the sync code)
+	var runnerState opsqueue.RunnerState
 	if err := json.Unmarshal([]byte(stateContent), &runnerState); err != nil {
-		t.Fatalf("State file not parseable as ops.RunnerState: %v\nContent: %s", err, stateContent)
+		t.Fatalf("State file not parseable as opsqueue.RunnerState: %v\nContent: %s", err, stateContent)
 	}
 
 	t.Logf("State file parsed successfully: cursor_line=%d, pending=%v", runnerState.CursorLine, runnerState.Pending)
@@ -335,10 +335,10 @@ func startTestRunner(t *testing.T, host, sessionSuffix string) func() {
 // submitJob submits a job to the test queue and returns the command used.
 func submitJob(t *testing.T, host string, jobID int64, cmd string, tags []string) {
 	t.Helper()
-	addCmd := ops.QueueCommand{
+	addCmd := opsqueue.QueueCommand{
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Op:        ops.OpAdd,
-		Job: &ops.CommandJob{
+		Op:        opsqueue.OpAdd,
+		Job: &opsqueue.CommandJob{
 			ID:   jobID,
 			Dir:  "/tmp",
 			Cmd:  cmd,
@@ -352,7 +352,7 @@ func submitJob(t *testing.T, host string, jobID int64, cmd string, tags []string
 }
 
 // sendCommand sends a queue command (priority, cancel, stop) to the test queue.
-func sendCommand(t *testing.T, host string, cmd ops.QueueCommand) {
+func sendCommand(t *testing.T, host string, cmd opsqueue.QueueCommand) {
 	t.Helper()
 	data, _ := json.Marshal(cmd)
 	escaped := strings.ReplaceAll(string(data), "'", `'\''`)
@@ -406,7 +406,7 @@ func TestIntegration_GoRunnerJobCancel(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Cancel job B before it starts
-	sendCommand(t, host, ops.NewCancelCommand(jobB))
+	sendCommand(t, host, opsqueue.NewCancelCommand(jobB))
 
 	// Wait for job A to complete
 	statusA := waitForJobStatus(t, host, jobA, 30*time.Second)
@@ -429,7 +429,7 @@ func TestIntegration_GoRunnerJobCancel(t *testing.T) {
 		t.Errorf("Job B should have no log file, but got:\n%s", logB)
 	}
 
-	sendCommand(t, host, ops.NewStopCommand())
+	sendCommand(t, host, opsqueue.NewStopCommand())
 	t.Log("Go runner cancel test passed")
 }
 
@@ -452,7 +452,7 @@ func TestIntegration_GoRunnerJobPriority(t *testing.T) {
 	submitJob(t, host, jobC, "sleep 3; echo 'done-c'", nil)
 
 	// Prioritize C before starting runner
-	sendCommand(t, host, ops.NewPriorityCommand(jobC))
+	sendCommand(t, host, opsqueue.NewPriorityCommand(jobC))
 
 	// Now start the runner
 	cleanup := startTestRunner(t, host, "priority")
@@ -483,7 +483,7 @@ func TestIntegration_GoRunnerJobPriority(t *testing.T) {
 		t.Errorf("Job C (priority) should have started before A: C=%s, A=%s", startC, startA)
 	}
 
-	sendCommand(t, host, ops.NewStopCommand())
+	sendCommand(t, host, opsqueue.NewStopCommand())
 	t.Log("Go runner priority test passed")
 }
 
@@ -539,7 +539,7 @@ func TestIntegration_GoRunnerExclusiveTag(t *testing.T) {
 		t.Errorf("Exclusive job should have ended before next job started: excl_end=%s, next_start=%s", endExcl, startNext)
 	}
 
-	sendCommand(t, host, ops.NewStopCommand())
+	sendCommand(t, host, opsqueue.NewStopCommand())
 	t.Log("Go runner exclusive tag test passed")
 }
 
@@ -597,6 +597,6 @@ func TestIntegration_GoRunnerMultipleJobs(t *testing.T) {
 		}
 	}
 
-	sendCommand(t, host, ops.NewStopCommand())
+	sendCommand(t, host, opsqueue.NewStopCommand())
 	t.Log("Go runner multiple jobs test passed")
 }

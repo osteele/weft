@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/osteele/weft/internal/inventory"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // nvidiaSmiTableOutput is the full output from nvidia-smi on a host with
@@ -234,7 +234,7 @@ func TestCanStartGPUJob_CPUOnly(t *testing.T) {
 	state := NewState()
 
 	job := &RunnerJob{
-		Data: &ops.CommandJob{ID: 1, Cmd: "echo hi"},
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "echo hi"},
 		ID:   1,
 	}
 	canStart, devices := inv.CanStartGPUJob(state, job)
@@ -255,7 +255,7 @@ func TestCanStartGPUJob_ExplicitGPU(t *testing.T) {
 	state := NewState()
 
 	job := &RunnerJob{
-		Data: &ops.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
 		ID:   1,
 	}
 	canStart, devices := inv.CanStartGPUJob(state, job)
@@ -350,7 +350,7 @@ func TestCanStartGPUJob_ExplicitGPU_ActualMemory(t *testing.T) {
 	state := NewState()
 
 	job := &RunnerJob{
-		Data: &ops.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
 		ID:   1,
 	}
 	// Default GPU mem is 20GB, device only has 10GB free → rejected
@@ -373,7 +373,7 @@ func TestCanStartGPUJob_ExplicitGPU_ActualMemory_OK(t *testing.T) {
 	state := NewState()
 
 	job := &RunnerJob{
-		Data: &ops.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
+		Data: &opsqueue.CommandJob{ID: 1, Cmd: "train.py", GPU: "0"},
 		ID:   1,
 	}
 	canStart, devices := inv.CanStartGPUJob(state, job)
@@ -425,7 +425,7 @@ func TestCanStartGPUJob_GPUClass_MixedHost_AllClassDevicesBusy(t *testing.T) {
 	state.AddRunning("101", RunningJobState{GPUDevices: []string{"1"}, GPUMemGB: 20})
 
 	job := &RunnerJob{
-		Data: &ops.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"},
+		Data: &opsqueue.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"},
 		ID:   200,
 	}
 
@@ -440,7 +440,7 @@ func TestCanStartGPUJob_GPUClass_MixedHost_SelectsCorrectDevice(t *testing.T) {
 	state := NewState()
 
 	job := &RunnerJob{
-		Data: &ops.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"},
+		Data: &opsqueue.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"},
 		ID:   200,
 	}
 
@@ -491,7 +491,7 @@ func TestGPUClassJob_ResolutionAndEnv_MixedHost(t *testing.T) {
 	inv := newMixedGPUInventory()
 	state := NewState()
 
-	job := &ops.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"}
+	job := &opsqueue.CommandJob{ID: 200, Cmd: "train.py", GPUClass: "a100"}
 	memPerDevice := GetJobGPUMem(job, DefaultGPUMemGB)
 	device, ok := inv.PickBestGPUForClass(state, job.GPUClass, memPerDevice)
 	if !ok {
@@ -508,13 +508,13 @@ func TestGPUClassJob_ResolutionAndEnv_MixedHost(t *testing.T) {
 func TestGetJobGPUDevices(t *testing.T) {
 	tests := []struct {
 		name string
-		job  *ops.CommandJob
+		job  *opsqueue.CommandJob
 		want []string
 	}{
-		{"explicit GPU", &ops.CommandJob{GPU: "0,1"}, []string{"0", "1"}},
-		{"env var", &ops.CommandJob{Env: []string{"CUDA_VISIBLE_DEVICES=2"}}, []string{"2"}},
-		{"no GPU", &ops.CommandJob{}, nil},
-		{"gpu field takes precedence", &ops.CommandJob{GPU: "1", Env: []string{"CUDA_VISIBLE_DEVICES=0"}}, []string{"1"}},
+		{"explicit GPU", &opsqueue.CommandJob{GPU: "0,1"}, []string{"0", "1"}},
+		{"env var", &opsqueue.CommandJob{Env: []string{"CUDA_VISIBLE_DEVICES=2"}}, []string{"2"}},
+		{"no GPU", &opsqueue.CommandJob{}, nil},
+		{"gpu field takes precedence", &opsqueue.CommandJob{GPU: "1", Env: []string{"CUDA_VISIBLE_DEVICES=0"}}, []string{"1"}},
 	}
 
 	for _, tt := range tests {

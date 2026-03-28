@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // CommandProcessor reads the append-only JSONL command log and processes
@@ -60,7 +60,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 			continue
 		}
 
-		var cmd ops.QueueCommand
+		var cmd opsqueue.QueueCommand
 		if err := json.Unmarshal([]byte(line), &cmd); err != nil {
 			// Skip malformed lines
 			state.CursorLine = lineNum
@@ -68,7 +68,7 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 		}
 
 		switch cmd.Op {
-		case ops.OpAdd:
+		case opsqueue.OpAdd:
 			if cmd.Job == nil {
 				break
 			}
@@ -83,18 +83,18 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 				state.StopRequested = false
 			}
 
-		case ops.OpPriority:
+		case opsqueue.OpPriority:
 			state.PriorityPending(cmd.JobID)
 
-		case ops.OpCancel:
+		case opsqueue.OpCancel:
 			state.RemovePending(cmd.JobID)
 			removeJobFile(cp.queueDir, cmd.JobID)
 
-		case ops.OpStop:
+		case opsqueue.OpStop:
 			state.StopRequested = true
 			result.StopRequested = true
 
-		case ops.OpRestart:
+		case opsqueue.OpRestart:
 			// Save state before restart
 			state.Cursor = cmd.Timestamp
 			state.CursorLine = lineNum
@@ -117,12 +117,12 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 // If the file already exists, GPU and other resource fields from the existing
 // file are preserved when the new data is missing them (handles duplicate add
 // commands where a second entry may lack fields present in the first).
-func writeJobFile(queueDir string, job *ops.CommandJob) error {
+func writeJobFile(queueDir string, job *opsqueue.CommandJob) error {
 	path := fmt.Sprintf("%s/job-%d.json", queueDir, job.ID)
 
 	// If file exists, merge resource fields from the existing entry
 	if existingData, err := os.ReadFile(path); err == nil {
-		var existing ops.CommandJob
+		var existing opsqueue.CommandJob
 		if json.Unmarshal(existingData, &existing) == nil {
 			mergeResourceFields(job, &existing)
 		}
@@ -138,7 +138,7 @@ func writeJobFile(queueDir string, job *ops.CommandJob) error {
 // mergeResourceFields preserves resource fields from existing when the new
 // entry is missing them. This handles duplicate add commands where a second
 // entry may lack fields present in the first.
-func mergeResourceFields(job, existing *ops.CommandJob) {
+func mergeResourceFields(job, existing *opsqueue.CommandJob) {
 	if job.CPU == nil && existing.CPU != nil {
 		job.CPU = existing.CPU
 	}
@@ -172,13 +172,13 @@ func removeJobFile(queueDir string, jobID int64) {
 }
 
 // ReadJobFile reads job data from the queue directory.
-func ReadJobFile(queueDir string, jobID int64) (*ops.CommandJob, error) {
+func ReadJobFile(queueDir string, jobID int64) (*opsqueue.CommandJob, error) {
 	path := fmt.Sprintf("%s/job-%d.json", queueDir, jobID)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var job ops.CommandJob
+	var job opsqueue.CommandJob
 	if err := json.Unmarshal(data, &job); err != nil {
 		return nil, err
 	}

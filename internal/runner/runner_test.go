@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/oplog"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func gpuMemPtr(n int) *int { return &n }
@@ -89,7 +89,7 @@ func TestTryStartNextJob_GPUClassBlockedByExternalVRAM_RequeuesWithoutStarting(t
 	}
 
 	jobID := int64(101)
-	job := &ops.CommandJob{
+	job := &opsqueue.CommandJob{
 		ID:       jobID,
 		Dir:      t.TempDir(),
 		Cmd:      "echo should-not-run",
@@ -135,7 +135,7 @@ func TestStartJob_GPUResolutionFailure_DoesNotLogStartOrCreateArtifacts(t *testi
 	}
 
 	jobID := int64(202)
-	err := r.startJob(jobID, &ops.CommandJob{
+	err := r.startJob(jobID, &opsqueue.CommandJob{
 		ID:       jobID,
 		Dir:      t.TempDir(),
 		Cmd:      "echo should-not-run",
@@ -257,7 +257,7 @@ func TestRefreshRunningJobs_DetectsOrphanWhenNoWaiter(t *testing.T) {
 }
 
 func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
-	policy := TelemetryPolicyForJob(&ops.CommandJob{Tags: []string{"benchmark"}})
+	policy := TelemetryPolicyForJob(&opsqueue.CommandJob{Tags: []string{"benchmark"}})
 	if policy.Interval != 5*time.Second {
 		t.Fatalf("benchmark telemetry interval = %v, want %v", policy.Interval, 5*time.Second)
 	}
@@ -265,7 +265,7 @@ func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
 		t.Fatal("benchmark jobs should disable advanced GPU telemetry")
 	}
 
-	normal := TelemetryPolicyForJob(&ops.CommandJob{})
+	normal := TelemetryPolicyForJob(&opsqueue.CommandJob{})
 	if normal.Interval != time.Second {
 		t.Fatalf("normal telemetry interval = %v, want %v", normal.Interval, time.Second)
 	}

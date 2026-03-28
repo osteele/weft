@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 // ExitInfo captures detailed exit information from a process, including signal data.
@@ -621,7 +621,7 @@ func WriteSample(paths JobPaths, epoch int64, cpuPct int, gpuMiB *int) error {
 
 // GetJobGPUDevices extracts GPU device indices from a CommandJob.
 // Checks: 1) "gpu" field, 2) CUDA_VISIBLE_DEVICES in env vars.
-func GetJobGPUDevices(job *ops.CommandJob) []string {
+func GetJobGPUDevices(job *opsqueue.CommandJob) []string {
 	if job.GPU != "" {
 		return splitCSV(job.GPU)
 	}
@@ -637,7 +637,7 @@ func GetJobGPUDevices(job *ops.CommandJob) []string {
 }
 
 // GetJobGPUMem returns the GPU memory reservation in GB per device.
-func GetJobGPUMem(job *ops.CommandJob, defaultGB int) int {
+func GetJobGPUMem(job *opsqueue.CommandJob, defaultGB int) int {
 	if job.GPUMem != nil {
 		return *job.GPUMem
 	}
@@ -649,7 +649,7 @@ func GetJobGPUMem(job *ops.CommandJob, defaultGB int) int {
 }
 
 // HasTag checks if a job has a specific tag.
-func HasTag(job *ops.CommandJob, tag string) bool {
+func HasTag(job *opsqueue.CommandJob, tag string) bool {
 	for _, t := range job.Tags {
 		if t == tag {
 			return true

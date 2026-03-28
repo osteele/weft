@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -26,13 +26,13 @@ func RunnerCommand(envPrefix, r2Bucket string) string {
 	if r2Bucket != "" {
 		cmd += fmt.Sprintf(" --r2-bucket=%s", r2Bucket)
 	}
-	cmd += fmt.Sprintf(" %s", ops.DefaultQueueName)
+	cmd += fmt.Sprintf(" %s", opsqueue.DefaultQueueName)
 	return cmd
 }
 
 // RunnerSessionName returns the tmux session name for the queue runner.
 func RunnerSessionName() string {
-	return fmt.Sprintf("weft-queue-%s", ops.DefaultQueueName)
+	return fmt.Sprintf("weft-queue-%s", opsqueue.DefaultQueueName)
 }
 
 // EnsureRunnerStarted checks whether the runner tmux session exists and starts it if missing.
@@ -84,7 +84,7 @@ func NewRunner(host string) *Runner {
 func (r *Runner) Host() string { return r.host }
 
 // Queue returns the queue name.
-func (r *Runner) Queue() string { return ops.DefaultQueueName }
+func (r *Runner) Queue() string { return opsqueue.DefaultQueueName }
 
 // SessionName returns the tmux session associated with this runner.
 func (r *Runner) SessionName() string { return RunnerSessionName() }
@@ -97,8 +97,8 @@ func (r *Runner) EnsureStarted(envPrefix, r2Bucket string) (bool, error) {
 
 // SendStopSignal signals the runner to stop after the current job.
 func (r *Runner) SendStopSignal() error {
-	cmd := ops.NewStopCommand()
-	return ops.AppendCommand(r.host, cmd, ops.AppendCommandOptions{})
+	cmd := opsqueue.NewStopCommand()
+	return opsqueue.AppendCommand(r.host, cmd, opsqueue.AppendCommandOptions{})
 }
 
 // WaitForStop waits until the runner's tmux session exits or timeout elapses.

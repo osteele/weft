@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 )
 
 func TestProcessCommands_Add(t *testing.T) {
@@ -16,10 +16,10 @@ func TestProcessCommands_Add(t *testing.T) {
 	state := NewState()
 
 	// Write an add command
-	cmd := ops.QueueCommand{
+	cmd := opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:00Z",
-		Op:        ops.OpAdd,
-		Job:       &ops.CommandJob{ID: 42, Cmd: "echo hello", Dir: "/tmp"},
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 42, Cmd: "echo hello", Dir: "/tmp"},
 	}
 	appendCmd(t, cmdFile, cmd)
 
@@ -57,9 +57,9 @@ func TestProcessCommands_Priority(t *testing.T) {
 	state.AddPending(2)
 	state.AddPending(3)
 
-	cmd := ops.QueueCommand{
+	cmd := opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:01Z",
-		Op:        ops.OpPriority,
+		Op:        opsqueue.OpPriority,
 		JobID:     3,
 	}
 	appendCmd(t, cmdFile, cmd)
@@ -82,9 +82,9 @@ func TestProcessCommands_Cancel(t *testing.T) {
 	state.AddPending(1)
 	state.AddPending(2)
 
-	cmd := ops.QueueCommand{
+	cmd := opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:01Z",
-		Op:        ops.OpCancel,
+		Op:        opsqueue.OpCancel,
 		JobID:     1,
 	}
 	appendCmd(t, cmdFile, cmd)
@@ -105,9 +105,9 @@ func TestProcessCommands_Stop(t *testing.T) {
 	cmdFile := filepath.Join(dir, "default.commands")
 	state := NewState()
 
-	cmd := ops.QueueCommand{
+	cmd := opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:01Z",
-		Op:        ops.OpStop,
+		Op:        opsqueue.OpStop,
 	}
 	appendCmd(t, cmdFile, cmd)
 
@@ -131,14 +131,14 @@ func TestProcessCommands_StopCancelledByAdd(t *testing.T) {
 	state := NewState()
 
 	// Stop then add — the add should cancel the stop
-	appendCmd(t, cmdFile, ops.QueueCommand{
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:01Z",
-		Op:        ops.OpStop,
+		Op:        opsqueue.OpStop,
 	})
-	appendCmd(t, cmdFile, ops.QueueCommand{
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:02Z",
-		Op:        ops.OpAdd,
-		Job:       &ops.CommandJob{ID: 99, Cmd: "echo work"},
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 99, Cmd: "echo work"},
 	})
 
 	cp := NewCommandProcessor(cmdFile, dir)
@@ -157,15 +157,15 @@ func TestProcessCommands_SkipsAlreadyProcessed(t *testing.T) {
 	cmdFile := filepath.Join(dir, "default.commands")
 	state := NewState()
 
-	appendCmd(t, cmdFile, ops.QueueCommand{
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:01Z",
-		Op:        ops.OpAdd,
-		Job:       &ops.CommandJob{ID: 1, Cmd: "echo first"},
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 1, Cmd: "echo first"},
 	})
-	appendCmd(t, cmdFile, ops.QueueCommand{
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:02Z",
-		Op:        ops.OpAdd,
-		Job:       &ops.CommandJob{ID: 2, Cmd: "echo second"},
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 2, Cmd: "echo second"},
 	})
 
 	cp := NewCommandProcessor(cmdFile, dir)
@@ -180,10 +180,10 @@ func TestProcessCommands_SkipsAlreadyProcessed(t *testing.T) {
 	}
 
 	// Add a third command
-	appendCmd(t, cmdFile, ops.QueueCommand{
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:03Z",
-		Op:        ops.OpAdd,
-		Job:       &ops.CommandJob{ID: 3, Cmd: "echo third"},
+		Op:        opsqueue.OpAdd,
+		Job:       &opsqueue.CommandJob{ID: 3, Cmd: "echo third"},
 	})
 
 	// Second pass: only processes the new one
@@ -214,7 +214,7 @@ func TestProcessCommands_MissingFile(t *testing.T) {
 func intPtr(n int) *int { return &n }
 
 // assertResourceFields checks all GPU and artifact fields on a CommandJob.
-func assertResourceFields(t *testing.T, got *ops.CommandJob, gpu, gpuClass string, gpuMem int, outputDirs, produces, needs []string) {
+func assertResourceFields(t *testing.T, got *opsqueue.CommandJob, gpu, gpuClass string, gpuMem int, outputDirs, produces, needs []string) {
 	t.Helper()
 	if got.GPU != gpu {
 		t.Errorf("GPU: got %q, want %q", got.GPU, gpu)
@@ -240,7 +240,7 @@ func TestWriteJobFileMergesGPUFields(t *testing.T) {
 	dir := t.TempDir()
 
 	// First write: all GPU fields populated
-	job1 := &ops.CommandJob{
+	job1 := &opsqueue.CommandJob{
 		ID:         50,
 		Cmd:        "python train.py",
 		GPU:        "2",
@@ -255,7 +255,7 @@ func TestWriteJobFileMergesGPUFields(t *testing.T) {
 	}
 
 	// Second write: empty GPU fields (simulating duplicate add without resource data)
-	job2 := &ops.CommandJob{
+	job2 := &opsqueue.CommandJob{
 		ID:  50,
 		Cmd: "python train.py",
 	}
@@ -275,7 +275,7 @@ func TestWriteJobFileNewDataTakesPrecedence(t *testing.T) {
 	dir := t.TempDir()
 
 	// First write
-	job1 := &ops.CommandJob{
+	job1 := &opsqueue.CommandJob{
 		ID:       50,
 		Cmd:      "python train.py",
 		GPU:      "2",
@@ -287,7 +287,7 @@ func TestWriteJobFileNewDataTakesPrecedence(t *testing.T) {
 	}
 
 	// Second write with different GPU fields — new non-empty data wins
-	job2 := &ops.CommandJob{
+	job2 := &opsqueue.CommandJob{
 		ID:       50,
 		Cmd:      "python train.py",
 		GPU:      "3",
@@ -318,10 +318,10 @@ func TestProcessCommands_AddWithGPUFields(t *testing.T) {
 	cmdFile := filepath.Join(dir, "default.commands")
 	state := NewState()
 
-	cmd := ops.QueueCommand{
+	cmd := opsqueue.QueueCommand{
 		Timestamp: "2024-01-01T00:00:00Z",
-		Op:        ops.OpAdd,
-		Job: &ops.CommandJob{
+		Op:        opsqueue.OpAdd,
+		Job: &opsqueue.CommandJob{
 			ID:         50,
 			Cmd:        "python train.py",
 			GPU:        "1",
@@ -347,7 +347,7 @@ func TestProcessCommands_AddWithGPUFields(t *testing.T) {
 	assertResourceFields(t, got, "1", "a100", 80, []string{"out/"}, []string{"model.pt"}, []string{"data.csv:1"})
 }
 
-func appendCmd(t *testing.T, path string, cmd ops.QueueCommand) {
+func appendCmd(t *testing.T, path string, cmd opsqueue.QueueCommand) {
 	t.Helper()
 	data, err := json.Marshal(cmd)
 	if err != nil {

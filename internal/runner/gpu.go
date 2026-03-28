@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/placement"
 )
 
@@ -392,7 +392,7 @@ const DefaultGPUMemGB = 20
 
 // RunnerJob wraps a CommandJob with runtime metadata.
 type RunnerJob struct {
-	Data *ops.CommandJob
+	Data *opsqueue.CommandJob
 	ID   int64
 }
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/ssh"
 )
 
@@ -19,7 +19,7 @@ type StatusInfo struct {
 
 // StatusCommand returns the SSH command that gathers queue runner status.
 func StatusCommand() string {
-	queueName := ops.DefaultQueueName
+	queueName := opsqueue.DefaultQueueName
 	return fmt.Sprintf(
 		`tmux has-session -t 'weft-queue-%s' 2>/dev/null && echo "RUNNER:yes" || echo "RUNNER:no"; `+
 			`PATH="$HOME/.local/bin:$PATH" jq -r '.current // ""' ~/.cache/weft/queue/%s.state.json 2>/dev/null | sed 's/^/CURRENT:/' || echo "CURRENT:"; `+
