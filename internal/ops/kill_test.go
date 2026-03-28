@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -308,8 +309,8 @@ func TestCancelQueuedJob_UsesEffectiveStatus(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for job with EffectiveStatus != queued")
 	}
-	if !strings.Contains(err.Error(), "not queued") {
-		t.Errorf("expected error to mention 'not queued', got: %v", err)
+	if !errors.Is(err, ErrNotQueued) {
+		t.Errorf("expected ErrNotQueued, got: %v", err)
 	}
 }
 

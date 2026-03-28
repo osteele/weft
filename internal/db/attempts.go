@@ -287,11 +287,6 @@ func cleanupStaleAttempts(db *sql.DB) error {
 	return nil
 }
 
-// isNoSuchTable checks if an error is a "no such table" SQLite error.
-func isNoSuchTable(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no such table:")
-}
-
 // createJobStatusView creates the job_status view that joins jobs with their
 // latest attempt to provide backward-compatible columns for the Job struct.
 func createJobStatusView(db *sql.DB) error {

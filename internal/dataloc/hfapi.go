@@ -3,6 +3,7 @@ package dataloc
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,6 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+// ErrHFAuthRequired is returned when the HF API requires authentication.
+var ErrHFAuthRequired = errors.New("HF API auth required")
+
+// ErrHFNoFiles is returned when the HF API returns no files for a model.
+var ErrHFNoFiles = errors.New("HF API returned no files")
 
 // hfModelSizeCache caches model sizes in-process to avoid redundant API calls
 // within a campaign launch (multiple jobs may reference the same model).
@@ -111,7 +118,7 @@ func FetchHFModelSize(modelID string) (int64, error) {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return 0, fmt.Errorf("HF API auth required for %s; set HF_TOKEN", modelID)
+		return 0, fmt.Errorf("%w for %s; set HF_TOKEN", ErrHFAuthRequired, modelID)
 	default:
 		return 0, fmt.Errorf("HF API returned %d for model %s", resp.StatusCode, modelID)
 	}
@@ -128,7 +135,7 @@ func FetchHFModelSize(modelID string) (int64, error) {
 	}
 
 	if len(files) == 0 {
-		return 0, fmt.Errorf("HF API returned no files for model %s", modelID)
+		return 0, fmt.Errorf("%w for model %s", ErrHFNoFiles, modelID)
 	}
 
 	var totalSize int64

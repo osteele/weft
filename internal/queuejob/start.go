@@ -26,7 +26,7 @@ const (
 // Returns (true, nil) if the start was deferred because the host was unreachable.
 func StartNow(database *sql.DB, job *db.Job) (bool, error) {
 	if job == nil {
-		return false, fmt.Errorf("job not found")
+		return false, db.ErrJobNotFound
 	}
 
 	// Re-fetch job from DB to get current status (TUI may have stale data)

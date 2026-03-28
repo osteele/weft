@@ -20,6 +20,9 @@ import (
 // ErrPoolBusy is returned by TryExecute when all pool slots for a host are occupied.
 var ErrPoolBusy = errors.New("all pool slots busy")
 
+// ErrCommandTimeout is returned when a command exceeds its timeout.
+var ErrCommandTimeout = errors.New("command timed out")
+
 var (
 	defaultPoolSize     = 4
 	defaultMaxParallel  = 8
@@ -563,7 +566,7 @@ func (s *Session) execute(command string, timeout time.Duration) (string, string
 			_ = s.cmd.Process.Kill()
 		}
 		s.close()
-		return "", "", fmt.Errorf("command on %s timed out after %v", s.host, timeout)
+		return "", "", fmt.Errorf("command on %s after %v: %w", s.host, timeout, ErrCommandTimeout)
 	}
 }
 

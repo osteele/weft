@@ -234,7 +234,7 @@ func ensureSameHostDependency(database *sql.DB, depID int64, host string) error 
 		return fmt.Errorf("dependency job %d not found", depID)
 	}
 	if job.Host != host {
-		return fmt.Errorf("dependency job %d runs on host %s; cannot depend on it from host %s", depID, job.Host, host)
+		return fmt.Errorf("dependency job %d runs on host %s, target on %s: %w", depID, job.Host, host, errCrossHostDep)
 	}
 	return nil
 }

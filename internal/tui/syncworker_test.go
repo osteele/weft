@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -236,8 +237,8 @@ func TestEnsureQueueRunnerStartedTUISurfacesAgentDeployFailure(t *testing.T) {
 	if started {
 		t.Fatal("started = true, want false")
 	}
-	if !strings.Contains(err.Error(), "agent deploy failed") {
-		t.Fatalf("error = %q, want agent deploy failed prefix", err)
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("expected os.ErrPermission in error chain, got: %v", err)
 	}
 }
 

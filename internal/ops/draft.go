@@ -12,7 +12,7 @@ import (
 // DraftJob marks a job as draft and ensures any remote execution is cleaned up.
 func DraftJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, error) {
 	if job == nil {
-		return Result{}, fmt.Errorf("job not found")
+		return Result{}, db.ErrJobNotFound
 	}
 
 	if job.EffectiveStatus() == db.StatusDraft {

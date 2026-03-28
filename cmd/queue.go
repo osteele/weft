@@ -836,19 +836,19 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		return usageErrorf("no changes specified; use --message/--project/--command/--directory/--env/--tag/--status/--retry/--gpu-class/--input or dependency flags")
 	}
 	if editClearInputs && cmd.Flags().Changed("input") {
-		return fmt.Errorf("cannot combine --input and --clear-inputs")
+		return fmt.Errorf("%w: cannot combine --input and --clear-inputs", errFlagConflict)
 	}
 	if queueEditClearDeps && dependsChanged {
-		return fmt.Errorf("cannot combine --clear-depends with --depends-on flags")
+		return fmt.Errorf("%w: cannot combine --clear-depends with --depends-on flags", errFlagConflict)
 	}
 	if editClearEnv && cmd.Flags().Changed("env") {
-		return fmt.Errorf("cannot combine --env and --clear-env")
+		return fmt.Errorf("%w: cannot combine --env and --clear-env", errFlagConflict)
 	}
 	if editClearTags && cmd.Flags().Changed("tag") {
-		return fmt.Errorf("cannot combine --tag and --clear-tags")
+		return fmt.Errorf("%w: cannot combine --tag and --clear-tags", errFlagConflict)
 	}
 	if editRetry && cmd.Flags().Changed("status") {
-		return fmt.Errorf("cannot combine --retry with --status")
+		return fmt.Errorf("%w: cannot combine --retry with --status", errFlagConflict)
 	}
 
 	// Validate status flag if provided (--retry is equivalent to --status=queued)
@@ -1234,7 +1234,7 @@ func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64
 					case "success", "":
 						allowFailure = false
 					default:
-						return fmt.Errorf("unknown dependency mode %q in %q", mode, part)
+						return fmt.Errorf("%w %q in %q", errUnknownDepMode, mode, part)
 					}
 				}
 
@@ -1243,10 +1243,10 @@ func buildQueueEditDependencies(database *sql.DB, host string, targetJobID int64
 				}
 				depID, err := strconv.ParseInt(value, 10, 64)
 				if err != nil {
-					return fmt.Errorf("invalid dependency job ID: %q", part)
+					return fmt.Errorf("%w: %q", errInvalidDepJobID, part)
 				}
 				if depID == targetJobID {
-					return fmt.Errorf("job %d cannot depend on itself", targetJobID)
+					return fmt.Errorf("job %d: %w", targetJobID, errSelfDependency)
 				}
 				if seen[depID] {
 					continue

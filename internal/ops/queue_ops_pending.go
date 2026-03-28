@@ -187,7 +187,7 @@ func RequestQueueUpdate(database *sql.DB, job *db.Job, opts ExecuteOptions) (Res
 		return Result{}, fmt.Errorf("job is nil")
 	}
 	if job.EffectiveStatus() != db.StatusQueued {
-		return Result{}, fmt.Errorf("job %d is %s, not queued", job.ID, job.EffectiveStatus())
+		return Result{}, fmt.Errorf("job %d (status: %s): %w", job.ID, job.EffectiveStatus(), ErrNotQueued)
 	}
 	if !job.UsesQueueRunner() {
 		return Result{}, fmt.Errorf("queue updates only supported for queue-runner jobs")
@@ -230,7 +230,7 @@ func RequestQueuePriority(database *sql.DB, job *db.Job, opts ExecuteOptions) (Q
 		return QueuePriorityResult{}, fmt.Errorf("job is nil")
 	}
 	if job.EffectiveStatus() != db.StatusQueued {
-		return QueuePriorityResult{}, fmt.Errorf("job %d is %s, not queued", job.ID, job.EffectiveStatus())
+		return QueuePriorityResult{}, fmt.Errorf("job %d (status: %s): %w", job.ID, job.EffectiveStatus(), ErrNotQueued)
 	}
 	if !job.UsesQueueRunner() {
 		return QueuePriorityResult{}, fmt.Errorf("queue priority only supported for queue-runner jobs")

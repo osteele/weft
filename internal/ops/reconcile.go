@@ -271,7 +271,7 @@ func applyKillToRemote(job *db.Job, timeout time.Duration) error {
 
 func applyPauseToRemote(job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {
-		return fmt.Errorf("pause not supported for slurm jobs")
+		return fmt.Errorf("%w for slurm jobs", ErrPauseNotSupported)
 	}
 	// Create .paused marker file so queue runner knows this is intentional
 	pausedFile := session.SimplePausedFile(job.ID)
@@ -287,7 +287,7 @@ func applyPauseToRemote(job *db.Job, timeout time.Duration) error {
 
 func applyResumeToRemote(job *db.Job, timeout time.Duration) error {
 	if job.UsesSlurm() {
-		return fmt.Errorf("resume not supported for slurm jobs")
+		return fmt.Errorf("%w for slurm jobs", ErrResumeNotSupported)
 	}
 	if err := signalJobProcess(job, "CONT", timeout); err != nil {
 		return err

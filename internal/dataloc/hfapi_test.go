@@ -1,9 +1,9 @@
 package dataloc
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -82,8 +82,8 @@ func TestFetchHFModelSize_AuthRequired(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected auth-required error")
 	}
-	if !strings.Contains(err.Error(), "set HF_TOKEN") {
-		t.Fatalf("error = %v, want mention of HF_TOKEN", err)
+	if !errors.Is(err, ErrHFAuthRequired) {
+		t.Fatalf("error = %v, want ErrHFAuthRequired", err)
 	}
 }
 
@@ -132,8 +132,8 @@ func TestFetchHFModelSize_EmptyTree(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty tree response")
 	}
-	if !strings.Contains(err.Error(), "no files") {
-		t.Fatalf("error = %v, want message about missing files", err)
+	if !errors.Is(err, ErrHFNoFiles) {
+		t.Fatalf("error = %v, want ErrHFNoFiles", err)
 	}
 }
 

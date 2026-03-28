@@ -85,8 +85,8 @@ func TestLaunchInstanceNilR2Client(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for nil r2Client, got nil")
 	}
-	if !strings.Contains(err.Error(), "R2Assets.Client is required") {
-		t.Errorf("error should mention R2Assets.Client requirement, got: %v", err)
+	if !errors.Is(err, ErrR2ClientRequired) {
+		t.Errorf("expected ErrR2ClientRequired, got: %v", err)
 	}
 
 	// Verify CreateInstance was NOT called (we fail before that)
@@ -99,10 +99,11 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
+	errInsufficientBalance := errors.New("API error: insufficient balance")
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		CreateInstanceFunc: func(offerID string, opts cloud.CreateOpts) (*cloud.Instance, error) {
-			return nil, errors.New("API error: insufficient balance")
+			return nil, errInsufficientBalance
 		},
 	}
 
@@ -141,8 +142,8 @@ func TestLaunchInstanceCreateFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "API error: insufficient balance") {
-		t.Errorf("error should include create-instance failure, got: %v", err)
+	if !errors.Is(err, errInsufficientBalance) {
+		t.Errorf("expected errInsufficientBalance, got: %v", err)
 	}
 
 	ci, err := db.GetLaunch(database, instanceID)
@@ -184,10 +185,11 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 	database := setupTestDB(t)
 	defer database.Close()
 
+	errStopAfterRegistration := errors.New("stop after registration")
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
-			return nil, errors.New("stop after registration")
+			return nil, errStopAfterRegistration
 		},
 	}
 
@@ -238,7 +240,7 @@ func TestLaunchInstanceRegistersInstanceBeforeProviderCreateCompletes(t *testing
 			}
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "stop after registration") {
+	if err == nil || !errors.Is(err, errStopAfterRegistration) {
 		t.Fatalf("LaunchInstance() error = %v, want stop-after-registration failure", err)
 	}
 	if instanceID == 0 {
@@ -269,8 +271,8 @@ func TestLaunchCampaignRejectsEmptyGroups(t *testing.T) {
 	if result != nil {
 		t.Fatalf("expected nil result on error, got %#v", result)
 	}
-	if !strings.Contains(err.Error(), "no instance groups to launch") {
-		t.Fatalf("error = %v, want message about empty launch groups", err)
+	if !errors.Is(err, ErrNoLaunchGroups) {
+		t.Fatalf("expected ErrNoLaunchGroups, got: %v", err)
 	}
 
 	var campaigns int
@@ -411,8 +413,8 @@ func TestCreateInstanceWithReplacementNoReplacementOffer(t *testing.T) {
 	if !replacementCalled {
 		t.Fatal("replacement callback was not called")
 	}
-	if !strings.Contains(err.Error(), "no replacement offer found") {
-		t.Fatalf("error = %v, want no replacement offer found", err)
+	if !errors.Is(err, ErrNoReplacementOffer) {
+		t.Fatalf("expected ErrNoReplacementOffer, got: %v", err)
 	}
 }
 
@@ -420,11 +422,12 @@ func TestCreateInstanceWithReplacementDoesNotRetryGenericError(t *testing.T) {
 	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
 	initialOffer := cloud.Offer{ProviderID: "999", Provider: cloud.ProviderVastai, CostPerHour: 1.00}
 
+	errInsufficientBalance := errors.New("API error: insufficient balance")
 	replacementCalled := false
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
 		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
-			return nil, errors.New("API error: insufficient balance")
+			return nil, errInsufficientBalance
 		},
 	}
 
@@ -446,8 +449,8 @@ func TestCreateInstanceWithReplacementDoesNotRetryGenericError(t *testing.T) {
 	if replacementCalled {
 		t.Fatal("replacement callback should not be called")
 	}
-	if !strings.Contains(err.Error(), "insufficient balance") {
-		t.Fatalf("error = %v, want insufficient balance", err)
+	if !errors.Is(err, errInsufficientBalance) {
+		t.Fatalf("expected errInsufficientBalance, got: %v", err)
 	}
 }
 

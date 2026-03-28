@@ -3,6 +3,7 @@ package runpod
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,10 @@ import (
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/placement"
 )
+
+// ErrPerPodStartupUnsupported is returned when a per-pod startup command is
+// specified without a template.
+var ErrPerPodStartupUnsupported = errors.New("runpod pods do not support per-pod startup commands")
 
 // cliTimeout is the maximum time to wait for a runpodctl CLI command to complete.
 const cliTimeout = 30 * time.Second
@@ -291,7 +296,7 @@ func buildCreatePodArgs(offerID string, opts cloud.CreateOpts) ([]string, error)
 			return nil, fmt.Errorf("runpod templates manage startup commands; remove OnStartCmd when using template %q", opts.TemplateID)
 		}
 	case opts.OnStartCmd != "":
-		return nil, fmt.Errorf("runpod pods do not support per-pod startup commands; configure runpod.bootstrap_template_id or run `weft runpod setup`")
+		return nil, fmt.Errorf("%w; configure runpod.bootstrap_template_id or run `weft runpod setup`", ErrPerPodStartupUnsupported)
 	case opts.Image != "":
 		args = append(args, "--image", opts.Image)
 	default:

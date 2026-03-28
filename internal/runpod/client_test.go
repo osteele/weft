@@ -2,6 +2,7 @@ package runpod
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -45,8 +46,8 @@ func TestBuildCreatePodArgs_RejectsOnStartWithoutTemplate(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for per-pod startup command")
 	}
-	if !strings.Contains(err.Error(), "do not support per-pod startup commands") {
-		t.Fatalf("error = %v", err)
+	if !errors.Is(err, ErrPerPodStartupUnsupported) {
+		t.Fatalf("error = %v, want ErrPerPodStartupUnsupported", err)
 	}
 }
 

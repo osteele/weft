@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/spf13/cobra"
@@ -64,7 +65,7 @@ func Execute() error {
 	}
 
 	// Log database lock errors to oplog for observability
-	if strings.Contains(err.Error(), "database is locked") {
+	if db.IsDatabaseLocked(err) {
 		cmdName := executedCmd.Name()
 		oplog.Log("db_locked", oplog.WithError(err), oplog.WithDetail(cmdName))
 	}

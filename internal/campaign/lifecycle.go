@@ -346,7 +346,7 @@ func createInstanceWithReplacement(
 	}
 	if nextOffer == nil {
 		progress("offer disappeared; no replacement offer found")
-		return nil, currentOffer, fmt.Errorf("offer %s disappeared and no replacement offer found", currentOffer.ProviderID)
+		return nil, currentOffer, fmt.Errorf("offer %s disappeared: %w", currentOffer.ProviderID, ErrNoReplacementOffer)
 	}
 
 	if updateOfferMetadata != nil {
@@ -385,7 +385,7 @@ func LaunchCampaign(
 	onInstanceRegistered func(group InstanceGroup, instanceID int64),
 ) (*LaunchResult, error) {
 	if len(groups) == 0 {
-		return nil, fmt.Errorf("no instance groups to launch")
+		return nil, ErrNoLaunchGroups
 	}
 	if len(offers) != len(groups) {
 		return nil, fmt.Errorf("offers/groups mismatch: %d offers for %d groups", len(offers), len(groups))
@@ -825,7 +825,7 @@ func LaunchInstance(
 		progress = func(string) {}
 	}
 	if r2Assets.Client == nil {
-		return 0, fmt.Errorf("R2Assets.Client is required for R2-based bootstrap")
+		return 0, ErrR2ClientRequired
 	}
 
 	ctx := context.Background()

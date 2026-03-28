@@ -1,6 +1,7 @@
 package ops
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -110,8 +111,8 @@ func TestApplyPauseToRemote_SlurmNotSupported(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for SLURM job pause")
 	}
-	if err != nil && !strings.Contains(err.Error(), "not supported") {
-		t.Errorf("expected 'not supported' error, got: %v", err)
+	if err != nil && !errors.Is(err, ErrPauseNotSupported) {
+		t.Errorf("expected ErrPauseNotSupported, got: %v", err)
 	}
 }
 
@@ -163,8 +164,8 @@ func TestApplyResumeToRemote_SlurmNotSupported(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for SLURM job resume")
 	}
-	if err != nil && !strings.Contains(err.Error(), "not supported") {
-		t.Errorf("expected 'not supported' error, got: %v", err)
+	if err != nil && !errors.Is(err, ErrResumeNotSupported) {
+		t.Errorf("expected ErrResumeNotSupported, got: %v", err)
 	}
 }
 

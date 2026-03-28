@@ -66,7 +66,7 @@ func restartJob(database *sql.DB, jobID int64) error {
 		return fmt.Errorf("get job: %w", err)
 	}
 	if job == nil {
-		return fmt.Errorf("job not found")
+		return db.ErrJobNotFound
 	}
 
 	// Validate job can be retried

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -56,8 +57,8 @@ func TestBuildQueueEditDependencies(t *testing.T) {
 		t.Fatalf("record other host job: %v", err)
 	}
 	_, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d", otherHostID)}, nil)
-	if err == nil || !strings.Contains(err.Error(), "cannot depend") {
-		t.Fatalf("expected host mismatch error, got %v", err)
+	if err == nil || !errors.Is(err, errCrossHostDep) {
+		t.Fatalf("expected errCrossHostDep, got %v", err)
 	}
 }
 
@@ -128,14 +129,14 @@ func TestBuildQueueEditDependenciesValidation(t *testing.T) {
 
 	// Unknown mode
 	_, err = buildQueueEditDependencies(database, "hostA", targetID, []string{fmt.Sprintf("%d:bogus", jobA)}, nil)
-	if err == nil || !strings.Contains(err.Error(), "unknown dependency mode") {
-		t.Fatalf("expected mode error, got %v", err)
+	if err == nil || !errors.Is(err, errUnknownDepMode) {
+		t.Fatalf("expected errUnknownDepMode, got %v", err)
 	}
 
 	// Non-numeric ID
 	_, err = buildQueueEditDependencies(database, "hostA", targetID, []string{"abc"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "invalid dependency job ID") {
-		t.Fatalf("expected parse error, got %v", err)
+	if err == nil || !errors.Is(err, errInvalidDepJobID) {
+		t.Fatalf("expected errInvalidDepJobID, got %v", err)
 	}
 }
 
@@ -317,8 +318,8 @@ func TestRunEditRejectsTagAndClearTags(t *testing.T) {
 	}
 
 	err = runEdit(cmd, []string{fmt.Sprintf("%d", jobID)})
-	if err == nil || !strings.Contains(err.Error(), "cannot combine --tag and --clear-tags") {
-		t.Fatalf("expected tag/clear-tags validation error, got %v", err)
+	if err == nil || !errors.Is(err, errFlagConflict) {
+		t.Fatalf("expected errFlagConflict, got %v", err)
 	}
 }
 

@@ -1760,13 +1760,6 @@ func renameColumnIfExists(db *sql.DB, table, oldCol, newCol string) {
 	db.Exec(fmt.Sprintf(`ALTER TABLE %s RENAME COLUMN %s TO %s`, table, oldCol, newCol))
 }
 
-func isDuplicateColumnError(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
-}
-
 // RecordStart records a new job start and returns its ID
 // Deprecated: Use RecordJobStarting + UpdateJobRunning for new jobs
 func RecordStart(db *sql.DB, host, sessionName, workingDir, command string, startTime int64, description string) (int64, error) {
@@ -2507,7 +2500,7 @@ func AddJobTag(db *sql.DB, jobID int64, tag string) error {
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %d: %w", jobID, ErrJobNotFound)
 	}
 	for _, existing := range job.Tags {
 		if existing == tag {
@@ -2529,7 +2522,7 @@ func RemoveJobTag(db *sql.DB, jobID int64, tag string) error {
 		return err
 	}
 	if job == nil {
-		return fmt.Errorf("job %d not found", jobID)
+		return fmt.Errorf("job %d: %w", jobID, ErrJobNotFound)
 	}
 	if len(job.Tags) == 0 {
 		return nil

@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -162,8 +163,8 @@ func TestSessionExecuteTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("error = %q, want timeout", err)
+	if !errors.Is(err, ErrCommandTimeout) {
+		t.Errorf("error = %q, want ErrCommandTimeout", err)
 	}
 }
 

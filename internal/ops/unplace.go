@@ -15,7 +15,7 @@ func UnplaceQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Resul
 		return Result{}, fmt.Errorf("job is nil")
 	}
 	if job.EffectiveStatus() != db.StatusQueued {
-		return Result{}, fmt.Errorf("job %d is %s, not queued", job.ID, job.EffectiveStatus())
+		return Result{}, fmt.Errorf("job %d (status: %s): %w", job.ID, job.EffectiveStatus(), ErrNotQueued)
 	}
 	if !job.HasInventoryHost() {
 		return Result{}, fmt.Errorf("job %d is not an inventory queued job", job.ID)
