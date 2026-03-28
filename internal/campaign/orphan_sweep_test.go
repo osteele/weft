@@ -183,7 +183,7 @@ func TestSweepOrphanedInstances_SkipsUnlabeledInstances(t *testing.T) {
 	}
 }
 
-func TestSweepOrphanedInstances_SkipsTerminalProviderInstances(t *testing.T) {
+func TestSweepOrphanedInstances_SkipsDestroyedProviderInstances(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()
 
@@ -197,7 +197,7 @@ func TestSweepOrphanedInstances_SkipsTerminalProviderInstances(t *testing.T) {
 		ProviderVal: cloud.ProviderVastai,
 		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
 			return []cloud.Instance{
-				{ProviderID: "dead-1", Status: "exited", Label: labelForCampaign(campaignID)},
+				{ProviderID: "dead-1", Status: "destroyed", Label: labelForCampaign(campaignID)},
 			}, nil
 		},
 		DestroyInstanceFunc: func(id string) error {
@@ -214,7 +214,43 @@ func TestSweepOrphanedInstances_SkipsTerminalProviderInstances(t *testing.T) {
 		t.Errorf("destroyed = %d, want 0", destroyed)
 	}
 	if destroyCalled {
-		t.Error("DestroyInstance should not be called for already-terminal instances")
+		t.Error("DestroyInstance should not be called for already-destroyed instances")
+	}
+}
+
+func TestSweepOrphanedInstances_DestroysStoppedInstances(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Stopped instances still incur disk charges and must be destroyed
+	campaignID, err := db.CreateCampaign(database, &db.Campaign{Status: db.CampaignStatusCompleted})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+
+	var destroyedID string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ListAllInstancesFunc: func() ([]cloud.Instance, error) {
+			return []cloud.Instance{
+				{ProviderID: "stopped-1", Status: "stopped", Label: labelForCampaign(campaignID)},
+			}, nil
+		},
+		DestroyInstanceFunc: func(id string) error {
+			destroyedID = id
+			return nil
+		},
+	}
+
+	destroyed, err := SweepOrphanedInstances(database, []cloud.Client{mockClient})
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if destroyed != 1 {
+		t.Errorf("destroyed = %d, want 1", destroyed)
+	}
+	if destroyedID != "stopped-1" {
+		t.Errorf("destroyed ID = %q, want stopped-1", destroyedID)
 	}
 }
 

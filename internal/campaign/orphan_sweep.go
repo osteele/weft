@@ -46,7 +46,7 @@ func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed
 				continue
 			}
 
-			if isProviderTerminal(&inst) {
+			if !needsProviderDestroy(&inst) {
 				continue
 			}
 
@@ -118,6 +118,21 @@ func extractCampaignID(label string) (int64, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// needsProviderDestroy returns true if the provider instance is still billable
+// and should be destroyed. Unlike isProviderTerminal (used by the reconciler to
+// mean "no longer active"), this treats "stopped" as needing destruction because
+// providers like Vast.ai continue charging for disk on stopped instances.
+func needsProviderDestroy(inst *cloud.Instance) bool {
+	if inst == nil {
+		return false // not found = already gone
+	}
+	switch inst.Status {
+	case "destroyed", "dead":
+		return false
+	}
+	return true
 }
 
 // MaybeSweepOrphanedInstances runs SweepOrphanedInstances if at least

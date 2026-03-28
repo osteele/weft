@@ -1065,7 +1065,7 @@ func LaunchInstance(
 
 	// Record provider instance ID
 	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
-		_ = client.DestroyInstance(providerInstID)
+		destroyLeakedInstance(client, providerInstID, instanceID)
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
@@ -1105,14 +1105,14 @@ func LaunchInstance(
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
-		_ = client.DestroyInstance(providerInstID)
+		destroyLeakedInstance(client, providerInstID, instanceID)
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
 	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
-		_ = client.DestroyInstance(providerInstID)
+		destroyLeakedInstance(client, providerInstID, instanceID)
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
 	}
@@ -1133,7 +1133,7 @@ func LaunchInstance(
 	})
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
-		_ = client.DestroyInstance(providerInstID)
+		destroyLeakedInstance(client, providerInstID, instanceID)
 		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
@@ -1144,4 +1144,19 @@ func LaunchInstance(
 	}
 
 	return instanceID, nil
+}
+
+// destroyLeakedInstance attempts to destroy a provider instance that was created
+// but couldn't be fully registered. Logs a warning if destruction fails, since a
+// silent failure here causes the instance to leak (incurring ongoing charges).
+func destroyLeakedInstance(client cloud.Client, providerInstID string, launchID int64) {
+	if err := client.DestroyInstance(providerInstID); err != nil {
+		log.Printf("WARNING: failed to destroy leaked %s instance %s (launch_id=%d): %v — manual cleanup required",
+			client.Provider(), providerInstID, launchID, err)
+		oplog.Log(oplog.OpLaunchDestroyFailed,
+			oplog.WithError(err),
+			oplog.WithDetailf("provider=%s provider_instance_id=%s launch_id=%d context=cleanup_after_launch_failure",
+				client.Provider(), providerInstID, launchID),
+		)
+	}
 }
