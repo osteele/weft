@@ -168,6 +168,13 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			uploadStartedUnix: uploadStartedUnix,
 		})
 
+		// Update phase so TUI shows "uploading" during background uploads
+		uploadingPhase := fmt.Sprintf("uploading:%d", job.ID)
+		if cfg.OnPhase != nil {
+			cfg.OnPhase(uploadingPhase)
+		}
+		writePhase(cfg.R2Bucket, cfg.PhaseKey, uploadingPhase)
+
 		// Check for newly submitted jobs via R2 (between-job reuse)
 		if newJobs := checkForNewJobs(cfg.R2Bucket, cfg.InstanceID); len(newJobs) > 0 {
 			fmt.Printf("Picked up %d new job(s) from R2\n", len(newJobs))
