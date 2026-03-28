@@ -909,6 +909,7 @@ func LaunchInstance(
 			Command: job.EffectiveCommand(),
 			Dir:     remoteDir,
 			Tags:    append([]string(nil), job.Tags...),
+			UsesGPU: job.UsesGPU(),
 		})
 	}
 

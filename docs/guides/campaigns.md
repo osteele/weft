@@ -240,10 +240,19 @@ This creates a campaign with a single instance for that job.
 2. **Setup**: Once the instance is running, weft deploys rclone configuration,
    the Go agent binary (`weft-agent`), and rsyncs project sources via SSH.
    Agent deployment and source sync run in parallel for faster setup.
-3. **Execution**: A thin shell wrapper invokes `weft-agent run-job` for each
-   assigned job. The agent runs the job with full telemetry: per-process CPU/RSS,
-   GPU memory, timeseries sampling, structured completion records, and failure
-   detection (OOM, segfault, signals).
+3. **Execution**: The agent runs each assigned job sequentially with full
+   telemetry: per-process CPU/RSS, GPU memory, timeseries sampling, structured
+   completion records, and failure detection (OOM, segfault, signals).
+   - **GPU warmup**: If the first GPU job on an instance is tagged `benchmark`,
+     the agent runs a lightweight CUDA warmup (context init + cuBLAS handle
+     creation) before starting it. This prevents cold-start overhead from
+     inflating benchmark measurements. Non-benchmark GPU jobs warm the context
+     implicitly, so the explicit warmup only triggers when no GPU job has run
+     yet on the instance. Note: CUDA context is per-process, so each job's
+     process still pays its own context init cost. The warmup primes
+     system-level state: GPU driver, kernel JIT cache on disk, and cuBLAS/cuDNN
+     library loading. This reduces — but does not fully eliminate — cold-start
+     overhead for the first benchmark job.
 4. **Result upload**: After each job, the wrapper uploads results (logs,
    completion record, timeseries, phases) to R2 under `jobs/<job-id>/`.
 5. **Sweep**: The coordinator's sweep loop polls R2 for completed markers,

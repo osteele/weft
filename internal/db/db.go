@@ -4192,6 +4192,11 @@ const cudaVisibleDevicesPrefix = "CUDA_VISIBLE_DEVICES="
 
 // GetGPU returns the GPU (CUDA_VISIBLE_DEVICES) value for this job.
 // First checks the database GPU field, then falls back to parsing the command.
+// UsesGPU reports whether the job has any GPU requirement (device, class, or memory).
+func (j *Job) UsesGPU() bool {
+	return j.GPU != "" || j.GPUClass != "" || j.GPUMemGB != nil
+}
+
 func (j *Job) GetGPU() string {
 	// Env vars (set via --env flag) take precedence as the most recent user intent
 	for _, ev := range j.EnvVars {

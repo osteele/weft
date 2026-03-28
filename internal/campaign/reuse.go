@@ -349,6 +349,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 			Command: job.EffectiveCommand(),
 			Dir:     remoteDir,
 			Tags:    append([]string(nil), job.Tags...),
+			UsesGPU: job.UsesGPU(),
 		})
 		payload.Sources[sourceDir] = sourceR2Key
 	}

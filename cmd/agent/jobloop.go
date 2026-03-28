@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"time"
@@ -40,6 +41,7 @@ type jobSequenceResult struct {
 func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceResult {
 	var result jobSequenceResult
 	bgm := newBGWorkManager(jobs, cfg.SkipWorkdirDeletion)
+	gpuWarmedUp := false
 
 	for i := 0; i < len(jobs); i++ {
 		job := jobs[i]
@@ -47,6 +49,14 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		// Benchmark barrier: wait for all background uploads/deletions
 		if slices.Contains(job.Tags, "benchmark") {
 			bgm.Barrier()
+		}
+
+		// GPU warmup: if this is a benchmark job that uses GPU and no prior
+		// GPU job has warmed the CUDA context, run a lightweight warmup to
+		// avoid cold-start bias in benchmark measurements.
+		if job.UsesGPU && slices.Contains(job.Tags, "benchmark") && !gpuWarmedUp {
+			runGPUWarmup(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase)
+			gpuWarmedUp = true
 		}
 
 		// Check time budget
@@ -88,6 +98,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 		}
 
 		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir, jobCfg)
+		if job.UsesGPU {
+			gpuWarmedUp = true
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "run-job %d failed: %v\n", job.ID, err)
 			oplog.LogJob(oplog.OpJobFail, job.ID, "", oplog.WithError(err))
@@ -316,6 +329,29 @@ func snapshotLogDir(logDir string, jobID int64) (string, error) {
 		os.WriteFile(dst, data, 0o644)
 	}
 	return snapshot, nil
+}
+
+// runGPUWarmup runs a lightweight Python command to prime the CUDA context
+// (context init, cuBLAS handle, memory allocator) so that benchmark jobs
+// don't pay cold-start overhead in their first measured config.
+func runGPUWarmup(r2Bucket, phaseKey string, nextJobID int64, onPhase func(string)) {
+	phase := fmt.Sprintf("gpu_warmup:%d", nextJobID)
+	if onPhase != nil {
+		onPhase(phase)
+	}
+	writePhase(r2Bucket, phaseKey, phase)
+	fmt.Println("Running GPU warmup (CUDA context + cuBLAS init)...")
+
+	start := time.Now()
+	cmd := exec.Command("python3", "-c",
+		"import torch; torch.zeros(1, device='cuda'); torch.mm(torch.randn(2,2, device='cuda'), torch.randn(2,2, device='cuda'))")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "GPU warmup failed: %v (benchmark measurements may include cold-start overhead)\n", err)
+	} else {
+		fmt.Printf("GPU warmup completed in %s\n", time.Since(start).Round(time.Millisecond))
+	}
 }
 
 func hasOutputDirs(workDir string) bool {

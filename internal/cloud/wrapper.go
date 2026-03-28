@@ -9,6 +9,7 @@ type AgentJob struct {
 	Command string   `json:"cmd"`
 	Dir     string   `json:"dir,omitempty"`
 	Tags    []string `json:"tags,omitempty"`
+	UsesGPU bool     `json:"uses_gpu,omitempty"`
 }
 
 // CampaignManifest is uploaded to R2 by the coordinator and read by weft-agent run-campaign.
