@@ -229,6 +229,11 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 		return runLogForCloudJob(cmd, database, job)
 	}
 
+	// Queued jobs on inventory hosts haven't run yet.
+	if job.Status == db.StatusQueued && job.Host == "" {
+		return fmt.Errorf("job %d is queued; no log available yet", job.ID)
+	}
+
 	follow := logFollow
 	if follow && isTerminalStatus(job.Status) {
 		fmt.Fprintf(os.Stderr, "Job %d already completed; showing log output without following.\n", jobID)
@@ -364,6 +369,11 @@ func runLogForJob(cmd *cobra.Command, database *sql.DB, jobID int64) error {
 // runLogForCloudJob fetches log output for a cloud-based job.
 // Uses local cache → R2 → SSH (live follow only) in that order.
 func runLogForCloudJob(cmd *cobra.Command, database *sql.DB, job *db.Job) error {
+	// Queued jobs haven't run yet — no log to show.
+	if job.Status == db.StatusQueued {
+		return fmt.Errorf("job %d is queued; no log available yet", job.ID)
+	}
+
 	// Prefer local cache for terminal jobs.
 	if shouldPreferCachedLog(job.Status) {
 		if cached, err := logcache.Read(job.ID); err == nil {
@@ -604,7 +614,7 @@ func fetchCloudLogFromR2(ctx context.Context, r2Client *r2.Client, jobID, runID 
 		}, nil
 	}
 
-	return nil, fmt.Errorf("fetch live log manifest from R2 for job %d: not found", jobID)
+	return nil, fmt.Errorf("log not available in R2 for job %d (may have been purged)", jobID)
 }
 
 func waitForLogFile(database *sql.DB, job *db.Job, logFile string) error {
