@@ -21,14 +21,14 @@ import (
 	"github.com/osteele/weft/internal/r2"
 )
 
-// Styles for the launch TUI (allocated once, not per-render).
+// Aliases for shared TUI styles used in the launch TUI.
 var (
-	launchTitleStyle    = lipgloss.NewStyle().Bold(true)
-	launchHeaderStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	launchSelectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	launchDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	launchCursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	launchErrStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	launchTitleStyle    = tuiTitleStyle
+	launchHeaderStyle   = lipgloss.NewStyle().Bold(true).Foreground(tuiAccentColor)
+	launchSelectedStyle = tuiRunningStyle
+	launchDimStyle      = tuiDimStyle
+	launchCursorStyle   = tuiCursorStyle
+	launchErrStyle      = tuiFailedStyle
 )
 
 // formatPartialErrors renders a list of launch failure messages.

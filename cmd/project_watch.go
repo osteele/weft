@@ -311,7 +311,7 @@ func (m projectWatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-var projectWatchTitleStyle = lipgloss.NewStyle().Bold(true)
+var projectWatchTitleStyle = tuiTitleStyle
 var projectWatchFooterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 var projectWatchSelectedStyle = lipgloss.NewStyle().Reverse(true)
 var projectWatchEmptyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)

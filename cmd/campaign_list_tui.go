@@ -18,12 +18,12 @@ import (
 
 const campaignListSyncInterval = 30 * time.Second
 
-// Styles for the campaign list TUI (allocated once, not per-render).
+// Aliases for shared TUI styles used in the campaign list TUI.
 var (
-	listTitleStyle    = lipgloss.NewStyle().Bold(true)
-	listCursorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true)
-	listActiveStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	listTerminalStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	listTitleStyle    = tuiTitleStyle
+	listCursorStyle   = tuiCursorStyle
+	listActiveStyle   = tuiRunningStyle
+	listTerminalStyle = tuiDimStyle
 )
 
 // campaignListItem is a row in the campaign list: either a date header or a campaign entry.

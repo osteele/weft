@@ -63,7 +63,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 			fmt.Printf("Launched %s\n\n", launchTime.Format("2006-01-02 15:04"))
 		}
 	}
-	if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now(), estimateLine); summary != "" {
+	if summary := formatWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now(), estimateLine); summary != "" {
 		fmt.Println(summary)
 		fmt.Println()
 	}
@@ -121,7 +121,7 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 				updates[instanceID] = normalizeWatchInstanceUpdate(update, updates[instanceID].Launch)
 				now := time.Now()
 				if hasStateChange || now.Sub(lastSummaryTime) >= summaryInterval(now.Sub(launchTime)) {
-					if summary := formatCampaignWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now, estimateLine); summary != "" {
+					if summary := formatWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now, estimateLine); summary != "" {
 						fmt.Println(summary)
 						lastSummaryTime = now
 					}
