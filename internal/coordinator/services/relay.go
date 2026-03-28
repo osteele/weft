@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -23,12 +23,12 @@ import (
 // against the coordinator-local database and LAN-reachable hosts.
 type RelayProcessor struct {
 	db       *sql.DB
-	logger   *log.Logger
+	logger   *slog.Logger
 	r2Client *r2.Client
 	interval time.Duration
 }
 
-func NewRelayProcessor(database *sql.DB, logger *log.Logger, appCfg *config.Config) *RelayProcessor {
+func NewRelayProcessor(database *sql.DB, logger *slog.Logger, appCfg *config.Config) *RelayProcessor {
 	r2Client := buildRelayR2Client(appCfg)
 	return &RelayProcessor{
 		db:       database,
@@ -57,24 +57,24 @@ func (p *RelayProcessor) Start(ctx context.Context) {
 func (p *RelayProcessor) ProcessOnce(ctx context.Context) {
 	objects, err := p.r2Client.ListObjects(ctx, r2keys.CoordinatorRelayInboxPrefix())
 	if err != nil {
-		p.logger.Printf("relay: list inbox: %v", err)
+		p.logger.Warn("failed to list relay inbox", "error", err)
 		return
 	}
 	sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 	for _, obj := range objects {
 		data, err := p.r2Client.GetObject(ctx, obj.Key)
 		if err != nil {
-			p.logger.Printf("relay: fetch %s: %v", obj.Key, err)
+			p.logger.Warn("failed to fetch relay object", "key", obj.Key, "error", err)
 			continue
 		}
 		var req coordinatorrelay.Request
 		if err := json.Unmarshal(data, &req); err != nil {
-			p.logger.Printf("relay: decode %s: %v", obj.Key, err)
+			p.logger.Warn("failed to decode relay object", "key", obj.Key, "error", err)
 			continue
 		}
 		processed, err := db.IsRelayRequestProcessed(p.db, req.RequestID)
 		if err != nil {
-			p.logger.Printf("relay: processed check %s: %v", req.RequestID, err)
+			p.logger.Warn("failed to check relay processed status", "request_id", req.RequestID, "error", err)
 			continue
 		}
 		if processed {
@@ -92,15 +92,15 @@ func (p *RelayProcessor) ProcessOnce(ctx context.Context) {
 		}
 		ackData, err := json.Marshal(ack)
 		if err != nil {
-			p.logger.Printf("relay: marshal ack %s: %v", req.RequestID, err)
+			p.logger.Warn("failed to marshal relay ack", "request_id", req.RequestID, "error", err)
 			continue
 		}
 		if err := p.r2Client.PutObject(ctx, r2keys.CoordinatorRelayAck(req.RequestID), bytes.NewReader(ackData), "application/json"); err != nil {
-			p.logger.Printf("relay: write ack %s: %v", req.RequestID, err)
+			p.logger.Warn("failed to write relay ack", "request_id", req.RequestID, "error", err)
 			continue
 		}
 		if err := db.RecordProcessedRelayRequest(p.db, req.RequestID, req.Op, req.JobID); err != nil {
-			p.logger.Printf("relay: persist processed request %s: %v", req.RequestID, err)
+			p.logger.Warn("failed to persist processed relay request", "request_id", req.RequestID, "error", err)
 		}
 	}
 }

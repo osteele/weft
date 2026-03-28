@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -217,7 +217,7 @@ func (w *SyncWorker) run() {
 func (w *SyncWorker) checkUnplacedJobs() {
 	jobs, err := db.ListUnplacedJobs(w.database)
 	if err != nil {
-		log.Printf("unplaced re-placement: list unplaced: %v", err)
+		slog.Warn("failed to list unplaced jobs", "component", "tui", "error", err)
 		return
 	}
 
@@ -249,11 +249,11 @@ func (w *SyncWorker) checkUnplacedJobs() {
 
 		assigned, err := db.AssignJobHost(w.database, j.ID, result.Host)
 		if err != nil {
-			log.Printf("unplaced re-placement: assign job %d: %v", j.ID, err)
+			slog.Warn("failed to assign unplaced job", "component", "tui", "job_id", j.ID, "error", err)
 			continue
 		}
 		if assigned {
-			log.Printf("unplaced re-placement: assigned job %d to %s", j.ID, result.Host)
+			slog.Info("assigned unplaced job to host", "component", "tui", "job_id", j.ID, "host", result.Host)
 			// Trigger a sync for the target host
 			select {
 			case w.results <- SyncResult{Host: result.Host, Updated: 1}:
@@ -299,7 +299,7 @@ func (w *SyncWorker) tryCloudReuseForJobs(jobs []*db.Job) {
 	ctx := w.ctx
 	for instanceID, instJobs := range byInstance {
 		if err := campaign.SubmitJobsToInstance(ctx, w.database, r2Client, instanceID, instJobs); err != nil {
-			log.Printf("cloud auto-reuse: submit to instance %d: %v", instanceID, err)
+			slog.Warn("cloud auto-reuse submit failed", "component", "tui", "instance", instanceID, "error", err)
 			continue
 		}
 
@@ -307,7 +307,7 @@ func (w *SyncWorker) tryCloudReuseForJobs(jobs []*db.Job) {
 		for i, j := range instJobs {
 			jobIDs[i] = fmt.Sprintf("#%d", j.ID)
 		}
-		log.Printf("cloud auto-reuse: submitted %d job(s) to instance %d: %s", len(instJobs), instanceID, strings.Join(jobIDs, ", "))
+		slog.Info("cloud auto-reuse submitted jobs", "component", "tui", "count", len(instJobs), "instance", instanceID, "jobs", strings.Join(jobIDs, ", "))
 		totalSubmitted += len(instJobs)
 
 		// Auto-extend grace if deadline is close
@@ -320,7 +320,7 @@ func (w *SyncWorker) tryCloudReuseForJobs(jobs []*db.Job) {
 				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
 				newDeadline := time.Now().Add(extendDur).Unix()
 				_ = db.ExtendLaunchGrace(w.database, instanceID, newDeadline)
-				log.Printf("cloud auto-reuse: auto-extended grace on instance %d by %s", instanceID, extendDur)
+				slog.Info("auto-extended grace period", "component", "tui", "instance", instanceID, "duration", extendDur)
 			}
 		}
 	}
@@ -345,11 +345,11 @@ func (w *SyncWorker) reconcileCloudJobs() {
 		// No cloud clients — fall back to DB-only reconciliation
 		resetMap, err := db.ResetJobsOnTerminalLaunches(w.database)
 		if err != nil {
-			log.Printf("cloud reconcile: %v", err)
+			slog.Warn("cloud reconcile failed", "component", "tui", "error", err)
 			return
 		}
 		if len(resetMap) > 0 {
-			log.Printf("cloud reconcile: reset %d job(s) on terminal instances", len(resetMap))
+			slog.Info("cloud reconcile reset jobs on terminal instances", "component", "tui", "count", len(resetMap))
 			select {
 			case w.results <- SyncResult{Updated: len(resetMap)}:
 			default:
@@ -360,7 +360,7 @@ func (w *SyncWorker) reconcileCloudJobs() {
 
 	result := cloudsync.SyncState(w.database, w.reconciler, cloudClients, r2Client, nil)
 	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
-		log.Printf("cloud reconcile: reconciled %d dead instance(s)", result.ReconcileResult.Reconciled)
+		slog.Info("cloud reconcile completed", "component", "tui", "reconciled", result.ReconcileResult.Reconciled)
 		select {
 		case w.results <- SyncResult{Updated: result.ReconcileResult.Reconciled}:
 		default:

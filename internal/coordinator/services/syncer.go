@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/osteele/weft/internal/ops"
@@ -13,13 +13,13 @@ import (
 type HostSyncer struct {
 	db        *sql.DB
 	hostState *HostStateManager
-	logger    *log.Logger
+	logger    *slog.Logger
 	interval  time.Duration
 	timeout   time.Duration
 }
 
 // NewHostSyncer creates a new host syncer service.
-func NewHostSyncer(db *sql.DB, hostState *HostStateManager, logger *log.Logger, interval time.Duration) *HostSyncer {
+func NewHostSyncer(db *sql.DB, hostState *HostStateManager, logger *slog.Logger, interval time.Duration) *HostSyncer {
 	return &HostSyncer{
 		db:        db,
 		hostState: hostState,
@@ -56,7 +56,7 @@ func (s *HostSyncer) SyncAll() {
 			Logger:  ops.NewQuietSyncLogger(),
 		}, nil)
 		if err != nil {
-			s.logger.Printf("sync %s: %v", host, err)
+			s.logger.Warn("sync failed", "host", host, "error", err)
 		}
 	}
 }

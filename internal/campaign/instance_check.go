@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -391,13 +391,13 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 
 	if action.DestroyProvider && providerID != "" && client != nil {
 		if err := client.DestroyInstance(providerID); err != nil {
-			log.Printf("reconcile: failed to destroy instance %d (provider %s): %v", ci.ID, providerID, err)
+			slog.Warn("failed to destroy instance", "component", "reconcile", "instance", ci.ID, "provider", providerID, "error", err)
 		}
 	}
 
 	if action.TerminalStatus != "" {
 		if err := db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason); err != nil {
-			log.Printf("reconcile: update instance %d status to %s: %v", ci.ID, action.TerminalStatus, err)
+			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", action.TerminalStatus, "error", err)
 			return false, false
 		}
 		if eventKind := actionEventKind(action.Kind); eventKind != "" {
@@ -412,13 +412,13 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 
 	if action.ResetJobs {
 		if resetCount, err := db.ResetLaunchJobs(database, ci.ID, action.AttemptOutcome); err != nil {
-			log.Printf("reconcile: reset jobs for instance %d: %v", ci.ID, err)
+			slog.Warn("failed to reset jobs for instance", "component", "reconcile", "instance", ci.ID, "error", err)
 		} else if resetCount > 0 {
-			log.Printf("reconcile: reset %d jobs from instance %d to unplaced", resetCount, ci.ID)
+			slog.Debug("reset jobs from instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
 		}
 	} else if action.AttemptOutcome != "" && action.TerminalStatus == db.LaunchStatusCompleted {
 		if err := db.CloseLaunchAttempts(database, ci.ID, action.AttemptOutcome); err != nil {
-			log.Printf("reconcile: close attempts for instance %d: %v", ci.ID, err)
+			slog.Warn("failed to close attempts for instance", "component", "reconcile", "instance", ci.ID, "error", err)
 		}
 	}
 

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -99,7 +99,7 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	}
 
 	if len(instances) > 0 {
-		log.Printf("reconcile: checking %d running instances...", len(instances))
+		slog.Debug("checking running instances", "component", "reconcile", "count", len(instances))
 	}
 
 	// Collect IDs of instances still running, to prune stale firstDeadAt entries.
@@ -134,11 +134,10 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 		}
 		for provider := range providers {
 			if survival, err := db.ComputeBootstrapSurvival(database, provider); err != nil {
-				log.Printf("reconcile: compute bootstrap survival for %s: %v", provider, err)
+				slog.Warn("failed to compute bootstrap survival", "component", "reconcile", "provider", provider, "error", err)
 			} else {
 				r.bootstrapTimeouts[provider] = survival
-				log.Printf("reconcile: bootstrap thresholds for %s: warn=%s terminate=%s (n=%d)",
-					provider, survival.WarnAfter.Truncate(time.Second), survival.TerminateAfter.Truncate(time.Second), survival.SampleSize)
+				slog.Debug("bootstrap thresholds computed", "component", "reconcile", "provider", provider, "warn_after", survival.WarnAfter.Truncate(time.Second), "terminate_after", survival.TerminateAfter.Truncate(time.Second), "sample_size", survival.SampleSize)
 			}
 		}
 		r.bootstrapTimeoutsAt = time.Now()
@@ -172,9 +171,9 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 
 	// Catch-all: reset jobs stranded on dead cloud instances (stale host field).
 	if orphaned, err := db.ResetOrphanedCloudJobs(database); err != nil {
-		log.Printf("reconcile: reset orphaned cloud jobs: %v", err)
+		slog.Warn("failed to reset orphaned cloud jobs", "component", "reconcile", "error", err)
 	} else if orphaned > 0 {
-		log.Printf("reconcile: reset %d orphaned jobs from dead cloud instances", orphaned)
+		slog.Info("reset orphaned jobs from dead cloud instances", "component", "reconcile", "count", orphaned)
 		mu.Lock()
 		result.Reconciled += int(orphaned)
 		mu.Unlock()
@@ -185,7 +184,7 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	// without calling DestroyInstance.
 	recentlyTerminal, err := db.ListRecentlyTerminalLaunches(database, 30*time.Minute)
 	if err != nil {
-		log.Printf("reconcile: list recently terminal instances: %v", err)
+		slog.Warn("failed to list recently terminal instances", "component", "reconcile", "error", err)
 	}
 	var wg2 sync.WaitGroup
 	for _, ci := range recentlyTerminal {
@@ -218,15 +217,14 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 				}
 				return
 			}
-			log.Printf("reconcile: safety-net destroying leaked provider instance %s (db instance %d, status %s)",
-				providerID, ci.ID, ci.Status)
+			slog.Warn("safety-net destroying leaked provider instance", "component", "reconcile", "provider", providerID, "instance", ci.ID, "status", ci.Status)
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 				EventKind: db.EventReconcileSafetyNetDestroy,
 				LaunchID:  ci.ID,
 				Detail:    fmt.Sprintf("leaked provider %s, db status %s", providerID, ci.Status),
 			})
 			if err := client.DestroyInstance(providerID); err != nil {
-				log.Printf("reconcile: safety-net destroy %s failed: %v", providerID, err)
+				slog.Warn("safety-net destroy failed", "component", "reconcile", "provider", providerID, "error", err)
 			}
 			mu.Lock()
 			result.Reconciled++
@@ -238,9 +236,9 @@ func (r *Reconciler) ReconcileLaunches(database *sql.DB, clients []cloud.Client,
 	// Orphan sweep: destroy weft-labeled instances that belong to non-active campaigns.
 	// Rate-limited to avoid excessive provider API calls.
 	if swept, sweepErr := MaybeSweepOrphanedInstances(database, clients); sweepErr != nil {
-		log.Printf("reconcile: orphan sweep error: %v", sweepErr)
+		slog.Warn("orphan sweep error", "component", "reconcile", "error", sweepErr)
 	} else if swept > 0 {
-		log.Printf("reconcile: orphan sweep destroyed %d instances", swept)
+		slog.Info("orphan sweep destroyed instances", "component", "reconcile", "count", swept)
 		_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
 			EventKind: db.EventReconcileOrphanSweep,
 			JobCount:  swept,
@@ -283,7 +281,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				if errors.Is(providerErr, cloud.ErrInstanceNotFound) {
 					providerErr = nil
 				} else {
-					log.Printf("reconcile: ShowInstance(%s) for instance %d: %v (skipping)", providerID, ci.ID, providerErr)
+					slog.Warn("ShowInstance failed, skipping", "component", "reconcile", "provider", providerID, "instance", ci.ID, "error", providerErr)
 					return false, false
 				}
 			}
@@ -297,11 +295,11 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	// Fetch and persist termination intent from R2
 	intent, intentErr := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID)
 	if intentErr != nil {
-		log.Printf("reconcile: fetch termination intent for instance %d: %v", ci.ID, intentErr)
+		slog.Warn("failed to fetch termination intent", "component", "reconcile", "instance", ci.ID, "error", intentErr)
 	}
 	if intent != nil {
 		if err := db.UpdateLaunchTerminationIntent(database, ci.ID, intent); err != nil {
-			log.Printf("reconcile: persist termination intent for instance %d: %v", ci.ID, err)
+			slog.Warn("failed to persist termination intent", "component", "reconcile", "instance", ci.ID, "error", err)
 		}
 	} else if ci.TerminationIntent != nil {
 		intent = ci.TerminationIntent
@@ -323,7 +321,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 				case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
 					if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
 						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
-							log.Printf("reconcile: mark job %d running from R2 phase: %v", phaseJobID, err)
+							slog.Warn("failed to mark job running from R2 phase", "component", "reconcile", "job_id", phaseJobID, "error", err)
 						}
 						jobState.HasStartedJob = true
 					}
@@ -378,7 +376,7 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
-		log.Printf("reconcile: instance %d action=%d (%s)", ci.ID, action.Kind, action.StallMessage)
+		slog.Info("reconcile action triggered", "component", "reconcile", "instance", ci.ID, "action", action.Kind, "message", action.StallMessage)
 		reconciled, terminated := ExecuteAction(database, client, ci, action)
 		if terminated && r2Client != nil {
 			// Verify results for completed instances via the R2 completion manifest
@@ -423,7 +421,7 @@ func (r *Reconciler) getSetupSurvival(database *sql.DB, command, workingDir stri
 	// Compute outside lock to avoid blocking other reconciler operations.
 	s, err := db.ComputeSetupSurvival(database, command, workingDir)
 	if err != nil {
-		log.Printf("reconcile: compute setup survival for %q/%q: %v", command, workingDir, err)
+		slog.Warn("failed to compute setup survival", "component", "reconcile", "command", command, "working_dir", workingDir, "error", err)
 		return nil
 	}
 
@@ -443,11 +441,11 @@ func verifyInstanceResults(database *sql.DB, r2Client *r2.Client, instanceID int
 	}
 	verified := manifest.AllUploadsOK()
 	if err := db.UpdateLaunchResultsVerified(database, instanceID, verified); err != nil {
-		log.Printf("reconcile: update results_verified for instance %d: %v", instanceID, err)
+		slog.Warn("failed to update results_verified", "component", "reconcile", "instance", instanceID, "error", err)
 		return
 	}
 	if !verified {
-		log.Printf("reconcile: instance %d completed but uploads were partial/failed", instanceID)
+		slog.Warn("instance completed but uploads were partial/failed", "component", "reconcile", "instance", instanceID)
 	}
 }
 
@@ -464,7 +462,7 @@ func markTerminationIntentDestroyed(database *sql.DB, ci *db.Launch, confirmedAt
 	}
 	marker.DestroySucceededAtUnix = confirmedAt.Unix()
 	if err := db.UpdateLaunchTerminationIntent(database, ci.ID, &marker); err != nil {
-		log.Printf("reconcile: persist destroy success for instance %d: %v", ci.ID, err)
+		slog.Warn("failed to persist destroy success", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false
 	}
 	ci.TerminationIntent = &marker
@@ -517,8 +515,7 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		state := r.noteProbeFailure(ci.ID)
 		elapsed := time.Since(state.FirstAt)
 		if state.Count < minProbeFailureAttempts && elapsed < minProbeFailureWindow {
-			log.Printf("reconcile: instance %d heartbeat stale (%s) and agent probe is unreachable (attempt %d/%d over %s); waiting before termination",
-				ci.ID, heartbeatAge.Truncate(time.Second), state.Count, minProbeFailureAttempts, elapsed.Truncate(time.Second))
+			slog.Debug("heartbeat stale and agent probe unreachable, waiting before termination", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "attempt", state.Count, "max_attempts", minProbeFailureAttempts, "elapsed", elapsed.Truncate(time.Second))
 			return false, false
 		}
 	} else {
@@ -535,18 +532,17 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		}
 	}
 
-	log.Printf("reconcile: instance %d heartbeat stale (%s) and agent probe failed/alive=%t err=%v, marking failed (%s)",
-		ci.ID, heartbeatAge.Truncate(time.Second), agentAlive, err, reason)
+	slog.Warn("marking instance failed due to stale heartbeat", "component", "reconcile", "instance", ci.ID, "heartbeat_age", heartbeatAge.Truncate(time.Second), "agent_alive", agentAlive, "probe_error", err, "reason", reason)
 
 	providerID := ci.EffectiveProviderID()
 	if providerID != "" {
 		if destroyErr := client.DestroyInstance(providerID); destroyErr != nil {
-			log.Printf("reconcile: destroy stale-heartbeat instance %d: %v", ci.ID, destroyErr)
+			slog.Warn("failed to destroy stale-heartbeat instance", "component", "reconcile", "instance", ci.ID, "error", destroyErr)
 		}
 	}
 
 	if err := db.UpdateLaunchStatus(database, ci.ID, db.LaunchStatusFailed, reason); err != nil {
-		log.Printf("reconcile: update stale-heartbeat instance %d status: %v", ci.ID, err)
+		slog.Warn("failed to update stale-heartbeat instance status", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false, false
 	}
 	_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{
@@ -556,9 +552,9 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		Detail:    fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason),
 	})
 	if resetCount, err := db.ResetLaunchJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
-		log.Printf("reconcile: reset jobs for stale-heartbeat instance %d: %v", ci.ID, err)
+		slog.Warn("failed to reset jobs for stale-heartbeat instance", "component", "reconcile", "instance", ci.ID, "error", err)
 	} else if resetCount > 0 {
-		log.Printf("reconcile: reset %d jobs from stale-heartbeat instance %d to unplaced", resetCount, ci.ID)
+		slog.Info("reset jobs from stale-heartbeat instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
 	}
 	r.clearProbeFailure(ci.ID)
 	return true, true
@@ -577,15 +573,15 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 	for _, c := range campaigns {
 		instances, err := db.GetCampaignInstances(database, c.ID)
 		if err != nil {
-			log.Printf("reconcile campaigns: get instances for campaign %d: %v", c.ID, err)
+			slog.Warn("failed to get instances for campaign", "component", "reconcile", "campaign", c.ID, "error", err)
 			continue
 		}
 		if len(instances) == 0 {
 			if c.Status == db.CampaignStatusRunning {
 				if err := db.UpdateCampaignStatus(database, c.ID, db.CampaignStatusFailed); err != nil {
-					log.Printf("reconcile campaigns: update campaign %d to %s: %v", c.ID, db.CampaignStatusFailed, err)
+					slog.Warn("failed to update campaign status", "component", "reconcile", "campaign", c.ID, "status", db.CampaignStatusFailed, "error", err)
 				} else {
-					log.Printf("reconcile campaigns: campaign %d had no instances, marking %s", c.ID, db.CampaignStatusFailed)
+					slog.Info("campaign had no instances, marking failed", "component", "reconcile", "campaign", c.ID, "status", db.CampaignStatusFailed)
 					c.Status = db.CampaignStatusFailed
 					completed = append(completed, c)
 				}
@@ -619,9 +615,9 @@ func ReconcileCampaigns(database *sql.DB) ([]*db.Campaign, error) {
 			status = db.CampaignStatusCompleted
 		}
 		if err := db.UpdateCampaignStatus(database, c.ID, status); err != nil {
-			log.Printf("reconcile campaigns: update campaign %d to %s: %v", c.ID, status, err)
+			slog.Warn("failed to update campaign status", "component", "reconcile", "campaign", c.ID, "status", status, "error", err)
 		} else {
-			log.Printf("reconcile campaigns: campaign %d → %s", c.ID, status)
+			slog.Info("campaign transitioned to terminal state", "component", "reconcile", "campaign", c.ID, "status", status)
 			c.Status = status
 			completed = append(completed, c)
 		}
@@ -675,7 +671,7 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.Launch, database *sql.DB) bo
 
 	var payload graceStatusPayload
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
-		log.Printf("reconcile: parse grace status for instance %d: %v", ci.ID, err)
+		slog.Warn("failed to parse grace status", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false
 	}
 
@@ -683,9 +679,9 @@ func checkR2GraceStatus(r2Client *r2.Client, ci *db.Launch, database *sql.DB) bo
 		return false
 	}
 
-	log.Printf("reconcile: instance %d entered grace-wait (deadline %d)", ci.ID, payload.Deadline.Unix)
+	slog.Info("instance entered grace-wait", "component", "reconcile", "instance", ci.ID, "deadline", payload.Deadline.Unix)
 	if err := db.SetLaunchGraceStarted(database, ci.ID, payload.Deadline.Unix); err != nil {
-		log.Printf("reconcile: set grace for instance %d: %v", ci.ID, err)
+		slog.Warn("failed to set grace for instance", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false
 	}
 	return true
@@ -722,7 +718,7 @@ func readR2CompletionManifest(r2Client *r2.Client, instanceID int64) *runner.Ins
 	}
 	m, err := runner.ParseCompletionMarker(data)
 	if err != nil {
-		log.Printf("reconcile: parse completion manifest for instance %d: %v", instanceID, err)
+		slog.Warn("failed to parse completion manifest", "component", "reconcile", "instance", instanceID, "error", err)
 		return nil
 	}
 	return m
@@ -792,7 +788,7 @@ func batchFetchProviderInstances(clients []cloud.Client) map[string]map[string]*
 		}
 		instances, err := client.ListAllInstances()
 		if err != nil {
-			log.Printf("reconcile: batch ListAllInstances(%s) failed: %v (falling back to per-instance calls)", client.Provider(), err)
+			slog.Warn("batch ListAllInstances failed, falling back to per-instance calls", "component", "reconcile", "provider", client.Provider(), "error", err)
 			continue
 		}
 		if instances == nil {

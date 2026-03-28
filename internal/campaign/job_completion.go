@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -63,7 +63,7 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	defer os.RemoveAll(tmpDir)
 
 	if err := r2c.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-		log.Printf("watch: download results for job %d: %v", jobID, err)
+		slog.Warn("failed to download results for job", "component", "watch", "job_id", jobID, "error", err)
 		return false
 	}
 
@@ -81,13 +81,13 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	}
 
 	if _, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason); err != nil {
-		log.Printf("watch: record completion for job %d: %v", jobID, err)
+		slog.Warn("failed to record completion for job", "component", "watch", "job_id", jobID, "error", err)
 		return false
 	}
 
 	// Don't clean up R2 markers here — leave them for the full sync pass
 	// which also imports phase timings and caches logs.
 
-	log.Printf("watch: synced completion for job %d (exit %d)", jobID, *exitCode)
+	slog.Info("synced completion for job", "component", "watch", "job_id", jobID, "exit_code", *exitCode)
 	return true
 }

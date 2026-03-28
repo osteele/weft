@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"log"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,6 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -148,9 +148,8 @@ func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnable
 		cancel:         cancel,
 	}
 
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(origLogOutput)
+	restore := logging.Suppress()
+	defer restore()
 
 	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
 	cancel()

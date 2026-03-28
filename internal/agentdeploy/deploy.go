@@ -3,7 +3,7 @@ package agentdeploy
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/osteele/weft/internal/inventory"
@@ -24,7 +24,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 	remoteVer, err := RemoteAgentVersion(host)
 	if errors.Is(err, ErrAgentIncompatible) {
 		// Binary exists but is broken (e.g. wrong arch). Deploy the correct build.
-		log.Printf("agent on %s is incompatible, redeploying: %v", host, err)
+		slog.Warn("agent incompatible, redeploying", "component", "agentdeploy", "host", host, "error", err)
 	} else if err != nil {
 		return false, fmt.Errorf("remote agent version on %s: %w", host, err)
 	}
@@ -65,7 +65,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 	deployedVer, err := RemoteAgentVersion(host)
 	if errors.Is(err, ErrAgentIncompatible) {
 		// Cross-compiled binary doesn't run (e.g. GLIBC mismatch). Fall back to native build.
-		log.Printf("cross-compiled agent incompatible on %s, building natively: %v", host, err)
+		slog.Warn("cross-compiled agent incompatible, building natively", "component", "agentdeploy", "host", host, "error", err)
 		if err := BuildOnHost(host, localVer); err != nil {
 			return false, fmt.Errorf("native build on %s: %w", host, err)
 		}
@@ -80,7 +80,7 @@ func EnsureAgentUpToDate(host string, spec inventory.HostSpec) (bool, error) {
 
 	// Kill the runner tmux session so EnsureRunnerStarted recreates it with the new binary.
 	if err := ssh.TmuxKillSession(host, queuerunner.RunnerSessionName()); err != nil {
-		log.Printf("warning: failed to kill runner session on %s: %v", host, err)
+		slog.Warn("failed to kill runner session", "component", "agentdeploy", "host", host, "error", err)
 	}
 
 	return true, nil

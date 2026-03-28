@@ -6,7 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -60,7 +60,7 @@ func BuildPlan(db *sql.DB, targetHost string, hfCacheDir string, inputs []string
 
 		entries, err := dataloc.FindAssetHosts(db, asset)
 		if err != nil {
-			log.Printf("prestage: failed to find asset hosts for %v: %v", asset, err)
+			slog.Warn("failed to find asset hosts", "component", "prestage", "asset", asset, "error", err)
 			continue
 		}
 
@@ -156,7 +156,7 @@ func Execute(db *sql.DB, plan *Plan, timeout time.Duration) error {
 			src := transferbw.OnPremEndpoint(t.SourceHost)
 			dst := transferbw.OnPremEndpoint(plan.Host)
 			if err := transferbw.RecordObservation(db, src, dst, t.SizeBytes, elapsed); err != nil {
-				log.Printf("transferbw: record observation: %v", err)
+				slog.Warn("failed to record transfer bandwidth observation", "component", "prestage", "error", err)
 			}
 		}
 	}

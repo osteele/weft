@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -323,7 +323,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 	stdoutReader := bufio.NewReader(stdoutPipe)
 
 	if debugSSH {
-		log.Printf("[SSH Pool] new session to %s (pid=%d), waiting for ready...", hp.host, cmd.Process.Pid)
+		slog.Debug("new SSH session, waiting for ready", "component", "ssh", "host", hp.host, "pid", cmd.Process.Pid)
 	}
 
 	// Wait for the ready marker from the remote shell.
@@ -372,7 +372,7 @@ func (hp *hostPool) newSession() (*Session, error) {
 	}
 
 	if debugSSH {
-		log.Printf("[SSH Pool] session to %s ready (pid=%d)", hp.host, cmd.Process.Pid)
+		slog.Debug("SSH session ready", "component", "ssh", "host", hp.host, "pid", cmd.Process.Pid)
 	}
 
 	return sess, nil

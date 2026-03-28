@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -515,7 +515,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		updatedInstanceID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason)
 		if err != nil {
-			log.Printf("sync: failed to update cloud job %d status: %v", jobID, err)
+			slog.Warn("failed to update cloud job status", "component", "sync", "job_id", jobID, "error", err)
 			continue
 		}
 		if updatedInstanceID > 0 {
@@ -534,7 +534,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		// Extract and store phase timing data
 		if timings := coordinator.ExtractPhaseTimings(jobID, tmpDir); timings != nil {
 			if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
-				log.Printf("sync: failed to store phase timings for job %d: %v", jobID, err)
+				slog.Warn("failed to store phase timings", "component", "sync", "job_id", jobID, "error", err)
 			}
 		}
 
@@ -563,7 +563,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 
 		runID, ok, err := jobEligibleForStartedMarker(database, jobID)
 		if err != nil {
-			log.Printf("sync: failed to check started-marker eligibility for job %d: %v", jobID, err)
+			slog.Warn("failed to check started-marker eligibility", "component", "sync", "job_id", jobID, "error", err)
 			continue
 		}
 		if !ok {
@@ -582,7 +582,7 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1)`,
 			db.StatusRunning, startTimeUnix, jobID,
 		); err != nil {
-			log.Printf("sync: failed to update cloud job %d to running: %v", jobID, err)
+			slog.Warn("failed to update cloud job to running", "component", "sync", "job_id", jobID, "error", err)
 			continue
 		}
 		updated++
@@ -658,7 +658,7 @@ func jobEligibleForStartedMarker(database *sql.DB, jobID int64) (int64, bool, er
 
 func updateInstanceTerminationReason(database *sql.DB, instanceID int64) {
 	if err := db.RefineInstanceTerminationReason(database, instanceID); err != nil {
-		log.Printf("sync: refine termination reason for instance %d: %v", instanceID, err)
+		slog.Warn("failed to refine termination reason", "component", "sync", "instance_id", instanceID, "error", err)
 	}
 }
 

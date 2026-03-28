@@ -3,7 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -597,7 +597,7 @@ func startQueueRunnersForHosts(database *sql.DB, hosts []string) {
 		}
 		_, err = ensureQueueRunnerStarted(host, defaultQueueName)
 		if err != nil {
-			log.Printf("warning: could not start queue runner on %s: %v", host, err)
+			slog.Warn("could not start queue runner", "host", host, "error", err)
 			continue
 		}
 	}

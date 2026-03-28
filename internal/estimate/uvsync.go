@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -104,14 +104,14 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 	data, err := r2Client.GetObject(ctx, r2Key)
 	if err != nil {
 		if !r2.IsNotFound(err) {
-			log.Printf("uv manifest fetch %s: %v", r2Key, err)
+			slog.Warn("uv manifest fetch failed", "component", "estimate", "r2_key", r2Key, "error", err)
 		}
 		return nil
 	}
 
 	var m UVManifestRef
 	if err := json.Unmarshal(data, &m); err != nil {
-		log.Printf("uv manifest parse %s: %v", r2Key, err)
+		slog.Warn("uv manifest parse failed", "component", "estimate", "r2_key", r2Key, "error", err)
 		return nil
 	}
 

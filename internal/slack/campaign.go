@@ -3,7 +3,7 @@ package slack
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,7 +16,7 @@ import (
 func SendCampaignNotification(database *sql.DB, campaign db.Campaign) {
 	instances, err := db.GetCampaignInstances(database, campaign.ID)
 	if err != nil {
-		log.Printf("slack: get campaign %d instances: %v", campaign.ID, err)
+		slog.Warn("failed to get campaign instances", "component", "slack", "campaign_id", campaign.ID, "error", err)
 		return
 	}
 
@@ -28,7 +28,7 @@ func SendCampaignNotification(database *sql.DB, campaign db.Campaign) {
 		msg += "\n\n" + summary
 	}
 	if err := Post(msg); err != nil {
-		log.Printf("slack: send campaign %d notification: %v", campaign.ID, err)
+		slog.Warn("failed to send campaign notification", "component", "slack", "campaign_id", campaign.ID, "error", err)
 	}
 }
 

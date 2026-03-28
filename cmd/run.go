@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -285,7 +285,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Apply PEP 723 [tool.weft] script metadata as defaults (CLI flags take precedence).
 	if meta, err := dataloc.ScanScriptMeta(localDir, command); err != nil {
-		log.Printf("warning: script metadata: %v", err)
+		slog.Warn("script metadata error", "error", err)
 	} else if meta != nil {
 		var applied []string
 		if runGPU == "" && runGPUClass == "" && meta.GPU != "" {
@@ -544,7 +544,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if placementResult != nil {
 			meta := buildPlacementMeta(placementResult, predict)
 			if err := db.SetJobPlacementMeta(database, jobID, meta); err != nil {
-				log.Printf("warning: failed to save placement meta: %v", err)
+				slog.Warn("failed to save placement meta", "error", err)
 			}
 		}
 
@@ -554,9 +554,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return nil
 			}
 			if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
-				log.Printf("warning: failed to explain unplaced job %d: %v", jobID, reasonErr)
+				slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
 			} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
-				log.Printf("warning: failed to save unplaced reasons for job %d: %v", jobID, err)
+				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 			}
 			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
 			return nil
@@ -628,9 +628,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("record unplaced job: %w", err)
 		}
 		if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
-			log.Printf("warning: failed to explain unplaced job %d: %v", jobID, reasonErr)
+			slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
 		} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
-			log.Printf("warning: failed to save unplaced reasons for job %d: %v", jobID, err)
+			slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 		}
 		printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
 		return nil

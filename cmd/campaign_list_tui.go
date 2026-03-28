@@ -3,8 +3,6 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"io"
-	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 )
 
 const campaignListSyncInterval = 30 * time.Second
@@ -448,9 +447,8 @@ func scheduleCampaignListSyncTick() tea.Cmd {
 func runCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
 	router := newCampaignListRouterModel(database, campaigns)
 
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(origLogOutput)
+	restore := logging.Suppress()
+	defer restore()
 
 	p := tea.NewProgram(router, tea.WithAltScreen())
 	finalModel, err := p.Run()

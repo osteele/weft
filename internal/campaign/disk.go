@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -88,7 +88,7 @@ func EstimateGroupDisk(group InstanceGroup, localDB *sql.DB, r2Client *r2.Client
 	var hfBytes int64
 	totalBytes, err := dataloc.ResolveInputSizes(allInputs, localDB)
 	if err != nil {
-		log.Printf("warning: resolving input sizes: %v; continuing without HF input sizes", err)
+		slog.Warn("resolving input sizes failed, continuing without HF input sizes", "component", "disk", "error", err)
 	} else {
 		hfBytes = totalBytes
 	}
@@ -144,7 +144,7 @@ func estimateGroupDiskFromHistory(group InstanceGroup, localDB *sql.DB) (int, bo
 		seenSigs[sig] = true
 		peakBytes, found, err := estimateHistoricalPeakDiskBytes(localDB, job.Project, sig)
 		if err != nil {
-			log.Printf("warning: estimating historical disk for job %d: %v; falling back to input sizes", job.ID, err)
+			slog.Warn("estimating historical disk failed, falling back to input sizes", "component", "disk", "job_id", job.ID, "error", err)
 			return 0, false
 		}
 		if !found {

@@ -3,7 +3,7 @@ package ops
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/osteele/weft/internal/db"
@@ -35,7 +35,7 @@ func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, err
 
 	// Remove old completion files so the runner doesn't skip the requeued job
 	if err := RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
-		log.Printf("requeue: failed to remove remote completion files for job %d: %v", job.ID, err)
+		slog.Warn("failed to remove remote completion files", "component", "ops", "job_id", job.ID, "error", err)
 	}
 
 	if err := AppendJobToQueue(job, timeout); err != nil {
@@ -55,7 +55,7 @@ func RequeueJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Result, err
 		return Result{}, fmt.Errorf("update synced status: %w", err)
 	}
 	if err := db.SetQueuedAtNow(database, job.ID); err != nil {
-		log.Printf("requeue: failed to update queued_at for job %d: %v", job.ID, err)
+		slog.Warn("failed to update queued_at", "component", "ops", "job_id", job.ID, "error", err)
 	}
 
 	return Result{

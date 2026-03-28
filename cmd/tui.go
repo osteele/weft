@@ -3,13 +3,12 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"io"
-	"log"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/monitor"
 	"github.com/osteele/weft/internal/tui"
 	"github.com/osteele/weft/internal/web"
@@ -83,13 +82,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	// Enable embedded remediation so failed jobs get diagnosed
 	// even without the coordinator daemon running.
-	mon.EnableRemediationWithLogger(cfg, log.New(io.Discard, "[remediator] ", log.LstdFlags))
+	mon.EnableRemediationWithLogger(cfg, logging.Discard())
 
-	// Redirect log output away from the terminal while the TUI is running,
-	// since log.Printf writes to stderr and corrupts the alternate screen.
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(origLogOutput)
+	// Suppress log output while the TUI is running to avoid corrupting the alternate screen.
+	restore := logging.Suppress()
+	defer restore()
 	opts.Monitor = mon
 	defer mon.Stop()
 	snapshot := tui.LoadInitialSnapshot(database, opts.HostCacheDuration)

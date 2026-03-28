@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 
 	"github.com/osteele/weft/internal/r2"
@@ -28,7 +28,7 @@ func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, go
 
 	localPath, err := EnsureBuilt(version, goos, goarch, "")
 	if errors.Is(err, ErrAgentNotAvailable) {
-		log.Printf("agent binary not in cache; building via Fly builder...")
+		slog.Info("agent binary not in cache, building via Fly builder", "component", "agentdeploy")
 		localPath, err = BuildViaFly(version, goos, goarch, output)
 		if err != nil {
 			return "", fmt.Errorf("build agent: %w", err)

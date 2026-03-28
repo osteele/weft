@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,7 +16,7 @@ import (
 func fetchDiskFailureReportFromR2(r2Client *r2.Client, instanceID int64) (data []byte, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("disk-postmortem: R2 fetch panicked for instance %d: %v", instanceID, r)
+			slog.Warn("R2 fetch panicked", "component", "disk-postmortem", "instance", instanceID, "panic", r)
 			data = nil
 			err = nil
 		}
@@ -52,7 +52,7 @@ func ProcessDiskFailureReport(r2Client *r2.Client, instanceID int64, database *s
 
 	var report diskFailureReport
 	if err := json.Unmarshal(data, &report); err != nil {
-		log.Printf("disk-postmortem: parse disk failure report for instance %d: %v", instanceID, err)
+		slog.Warn("failed to parse disk failure report", "component", "disk-postmortem", "instance", instanceID, "error", err)
 		return
 	}
 	if len(report.HFCacheModels) == 0 {
@@ -62,7 +62,7 @@ func ProcessDiskFailureReport(r2Client *r2.Client, instanceID int64, database *s
 	// Get jobs associated with this instance
 	jobs, err := db.GetLaunchJobsIncludingAttempts(database, instanceID)
 	if err != nil {
-		log.Printf("disk-postmortem: get jobs for instance %d: %v", instanceID, err)
+		slog.Warn("failed to get jobs for instance", "component", "disk-postmortem", "instance", instanceID, "error", err)
 		return
 	}
 
@@ -93,9 +93,9 @@ func ProcessDiskFailureReport(r2Client *r2.Client, instanceID int64, database *s
 		}
 
 		if err := db.SetJobObservedInputs(database, job.ID, undeclared); err != nil {
-			log.Printf("disk-postmortem: set observed inputs for job %d: %v", job.ID, err)
+			slog.Warn("failed to set observed inputs for job", "component", "disk-postmortem", "job_id", job.ID, "error", err)
 		} else {
-			log.Printf("disk-postmortem: job %d has %d undeclared HF models: %v", job.ID, len(undeclared), undeclared)
+			slog.Info("job has undeclared HF models", "component", "disk-postmortem", "job_id", job.ID, "count", len(undeclared), "models", undeclared)
 		}
 	}
 }

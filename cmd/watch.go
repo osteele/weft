@@ -3,13 +3,12 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"io"
-	"log"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/spf13/cobra"
 )
 
@@ -91,11 +90,10 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 func runWatchLoop(database *sql.DB, cfg *config.Config) error {
 	router := newWatchRouterModel(database, cfg, "")
 
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
+	restore := logging.Suppress()
 	p := tea.NewProgram(router, tea.WithAltScreen())
 	finalModel, err := p.Run()
-	log.SetOutput(origLogOutput)
+	restore()
 
 	// Clean up syncWorker from whichever model was active at exit
 	if r, ok := finalModel.(watchRouterModel); ok {
@@ -117,11 +115,10 @@ func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.In
 	predCfg := buildPredictorConfig(cfg)
 	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
 
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
+	restore := logging.Suppress()
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
-	log.SetOutput(origLogOutput)
+	restore()
 	if err != nil {
 		return launchModel{}, fmt.Errorf("launch TUI error: %w", err)
 	}

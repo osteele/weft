@@ -1,21 +1,20 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 )
 
 type onPremHostSummary struct {
@@ -300,12 +299,10 @@ func syncWatchedJobHostsQuiet(database *sql.DB, jobIDs []int64) []string {
 
 	var warnings []string
 
-	// Suppress log.Printf noise from sync internals. We use a thread-safe
-	// writer so goroutines that outlive the sync timeout don't race on the
-	// buffer or leak messages to stderr.
-	var logBuf safeLogBuffer
-	origOutput := log.Writer()
-	log.SetOutput(&logBuf)
+	// Capture warning-level log messages from sync internals.
+	ch := logging.NewCapturingHandler(slog.LevelWarn)
+	prev := slog.Default()
+	slog.SetDefault(slog.New(ch))
 
 	if len(hosts) > 0 {
 		hostList := make([]string, 0, len(hosts))
@@ -319,48 +316,8 @@ func syncWatchedJobHostsQuiet(database *sql.DB, jobIDs []int64) []string {
 		syncRentalJobsStatus(database)
 	}
 
-	log.SetOutput(origOutput)
-	warnings = append(warnings, extractLogWarnings(logBuf.String())...)
-	return warnings
-}
-
-// safeLogBuffer is a thread-safe bytes.Buffer for capturing log output.
-// Goroutines abandoned after a sync timeout may still write to it.
-type safeLogBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *safeLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *safeLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
-}
-
-// extractLogWarnings parses captured log output for actionable messages,
-// stripping the standard log timestamp prefix.
-func extractLogWarnings(logOutput string) []string {
-	if logOutput == "" {
-		return nil
-	}
-	var warnings []string
-	for _, line := range strings.Split(strings.TrimSpace(logOutput), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Strip standard log timestamp prefix: "2006/01/02 15:04:05 message"
-		if len(line) > 20 && line[4] == '/' && line[7] == '/' && line[10] == ' ' {
-			line = line[20:]
-		}
-		warnings = append(warnings, line)
-	}
+	slog.SetDefault(prev)
+	warnings = append(warnings, ch.Messages()...)
 	return warnings
 }
 

@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -48,7 +48,7 @@ func summarizeJobLogs(jobLogs map[int64]string) string {
 
 	summary, err := callAnthropic(key, prompt.String())
 	if err != nil {
-		log.Printf("slack: summarize job logs: %v", err)
+		slog.Warn("failed to summarize job logs", "component", "slack", "error", err)
 		return ""
 	}
 	return summary

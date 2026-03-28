@@ -2,7 +2,7 @@ package runner
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -148,7 +148,7 @@ func DiscoverGPUs() *GPUInventory {
 
 	rows := inv.queryNvidiaSmiCached("--query-gpu=index,name,memory.used,memory.total", 4)
 	if rows != nil {
-		log.Printf("GPU discovery: nvidia-smi CSV query returned %d device(s)\n", len(rows))
+		slog.Debug("nvidia-smi CSV query returned devices", "component", "gpu", "count", len(rows))
 		inv.DeviceMemSnapshot = make(map[string]DeviceMemInfo, len(rows))
 		for _, parts := range rows {
 			idx := parts[0]
@@ -171,19 +171,19 @@ func DiscoverGPUs() *GPUInventory {
 	// Fallback: CSV query returned no rows. Some old drivers (e.g. 525.x)
 	// silently ignore --query-gpu/--format and return the default table.
 	// Try parsing the table format instead.
-	log.Println("GPU discovery: nvidia-smi CSV query returned 0 rows, trying table format fallback")
+	slog.Debug("nvidia-smi CSV query returned 0 rows, trying table format fallback", "component", "gpu")
 	tableOut, err := execNvidiaSmiRaw()
 	if err != nil {
-		log.Printf("GPU discovery: nvidia-smi raw command failed: %v\n", err)
+		slog.Warn("nvidia-smi raw command failed", "component", "gpu", "error", err)
 		return inv
 	}
 	devices, memSnapshot := parseNvidiaSmiTable(tableOut)
 	if len(devices) == 0 {
-		log.Println("GPU discovery: table format fallback found 0 devices")
+		slog.Debug("table format fallback found 0 devices", "component", "gpu")
 		return inv
 	}
 
-	log.Printf("GPU discovery: table format fallback found %d device(s)\n", len(devices))
+	slog.Debug("table format fallback found devices", "component", "gpu", "count", len(devices))
 	inv.Devices = devices
 	inv.DeviceMemSnapshot = memSnapshot
 	inv.LogInventory()
@@ -233,12 +233,12 @@ func PerDeviceGPUMemUsedMiB() map[string]DeviceMemInfo {
 // LogInventory logs the discovered GPU devices for diagnostics.
 func (inv *GPUInventory) LogInventory() {
 	if len(inv.Devices) == 0 {
-		log.Println("GPU inventory: no devices discovered")
+		slog.Debug("no GPU devices discovered", "component", "gpu")
 		return
 	}
-	log.Printf("GPU inventory: %d devices\n", len(inv.Devices))
+	slog.Debug("GPU inventory discovered", "component", "gpu", "count", len(inv.Devices))
 	for _, d := range inv.Devices {
-		log.Printf("  [%s] %s (%dGB)\n", d.Index, d.Name, d.TotalMemGB)
+		slog.Debug("GPU device", "component", "gpu", "index", d.Index, "name", d.Name, "mem_gb", d.TotalMemGB)
 	}
 }
 
@@ -325,7 +325,7 @@ func (inv *GPUInventory) deviceMemCheck(state *State, device string, memRequired
 func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, memRequired int) (string, bool) {
 	candidates := inv.DevicesByClass(className)
 	if len(candidates) == 0 {
-		log.Printf("  GPU class '%s': no matching devices in inventory (%d total devices)\n", className, len(inv.Devices))
+		slog.Debug("no matching GPU devices for class", "component", "gpu", "class", className, "total_devices", len(inv.Devices))
 		return "", false
 	}
 
@@ -334,12 +334,12 @@ func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, mem
 
 	for _, device := range candidates {
 		if DeviceHasRunningJob(state, device) {
-			log.Printf("  GPU class '%s': device %s busy (running job)\n", className, device)
+			slog.Debug("GPU device busy", "component", "gpu", "class", className, "device", device)
 			continue
 		}
 		freeMiB, ok := inv.deviceMemCheck(state, device, memRequired)
 		if !ok {
-			log.Printf("  GPU class '%s': device %s rejected (need %dGB, free %d MiB)\n", className, device, memRequired, freeMiB)
+			slog.Debug("GPU device rejected for insufficient memory", "component", "gpu", "class", className, "device", device, "need_gb", memRequired, "free_mib", freeMiB)
 			continue
 		}
 		if freeMiB > bestFreeMiB {
@@ -351,7 +351,7 @@ func (inv *GPUInventory) PickBestGPUForClass(state *State, className string, mem
 	if bestDevice == "" {
 		return "", false
 	}
-	log.Printf("  GPU class '%s': selected device %s (%d MiB free)\n", className, bestDevice, bestFreeMiB)
+	slog.Debug("GPU device selected", "component", "gpu", "class", className, "device", bestDevice, "free_mib", bestFreeMiB)
 	return bestDevice, true
 }
 

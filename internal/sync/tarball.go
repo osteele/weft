@@ -7,7 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,7 +51,7 @@ func CreateSourceTarball(localDir string) (tmpPath string, sha256hex string, err
 	err = filepath.Walk(localDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			if os.IsPermission(walkErr) {
-				log.Printf("source tarball: skipping unreadable path %s: %v", path, walkErr)
+				slog.Debug("skipping unreadable path in source tarball", "component", "sync", "path", path, "error", walkErr)
 				if info != nil && info.IsDir() {
 					return filepath.SkipDir
 				}

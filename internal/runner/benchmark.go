@@ -2,7 +2,7 @@ package runner
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -84,7 +84,7 @@ func AnyRunningExclusive(state *State, queueDir string) bool {
 	for _, id := range state.RunningIDs() {
 		job, err := ReadJobFile(queueDir, mustParseInt64(id))
 		if err != nil {
-			log.Printf("benchmark: failed to read job file for %s (treating as non-exclusive): %v", id, err)
+			slog.Warn("failed to read job file, treating as non-exclusive", "component", "benchmark", "job_id", id, "error", err)
 			continue
 		}
 		rj := &RunnerJob{Data: job, ID: mustParseInt64(id)}

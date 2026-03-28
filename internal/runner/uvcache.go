@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -260,15 +260,15 @@ func normalizePackageName(name string) string {
 func collectAndWriteUVManifest(jobID int64, workingDir, logDir string) {
 	manifest, err := CollectUVManifest(workingDir)
 	if err != nil {
-		log.Printf("Job %d: uv manifest collection failed: %v", jobID, err)
+		slog.Warn("uv manifest collection failed", "component", "runner", "job_id", jobID, "error", err)
 		return
 	}
 	if manifest == nil {
 		return
 	}
 	if err := WriteUVManifest(logDir, manifest); err != nil {
-		log.Printf("Job %d: uv manifest write failed: %v", jobID, err)
+		slog.Warn("uv manifest write failed", "component", "runner", "job_id", jobID, "error", err)
 	} else {
-		log.Printf("Job %d: collected uv manifest (%d packages)", jobID, len(manifest.Packages))
+		slog.Debug("collected uv manifest", "component", "runner", "job_id", jobID, "packages", len(manifest.Packages))
 	}
 }

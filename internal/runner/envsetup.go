@@ -2,7 +2,7 @@ package runner
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -46,17 +46,17 @@ func DetectSetupCommand(workingDir string) string {
 // RunSetupCommand runs a detected environment setup command synchronously.
 // Returns ExitInfo and error. On success, ExitInfo.ExitCode is 0 and error is nil.
 func RunSetupCommand(setupCmd string, jobID int64, workingDir string, envVars []string, paths JobPaths) (ExitInfo, error) {
-	log.Printf("Job %d: running setup: %s", jobID, setupCmd)
+	slog.Debug("running setup command", "component", "runner", "job_id", jobID, "cmd", setupCmd)
 	proc, err := StartProcess(setupCmd, workingDir, envVars, paths.Log)
 	if err != nil {
-		log.Printf("Job %d: setup start failed: %v", jobID, err)
+		slog.Warn("setup start failed", "component", "runner", "job_id", jobID, "error", err)
 		ei := ExitInfo{ExitCode: 1}
 		WriteStatusFile(paths, ei)
 		return ei, fmt.Errorf("setup command: %w", err)
 	}
 	if waitErr := proc.Cmd.Wait(); waitErr != nil {
 		ei := ExtractExitInfo(waitErr)
-		log.Printf("Job %d: setup failed (exit=%d): %s", jobID, ei.ExitCode, setupCmd)
+		slog.Warn("setup command failed", "component", "runner", "job_id", jobID, "exit_code", ei.ExitCode, "cmd", setupCmd)
 		WriteStatusFile(paths, ei)
 		return ei, fmt.Errorf("setup command failed: %w", waitErr)
 	}

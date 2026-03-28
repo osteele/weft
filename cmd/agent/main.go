@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/runner"
@@ -61,6 +63,10 @@ func main() {
 		batchStatus(queueName, jobIDs)
 		return
 	}
+
+	// Initialize structured logging (JSON for agent, debug-level for remote diagnostics)
+	logging.Setup(os.Stderr, "json")
+	logging.SetLevel(slog.LevelDebug)
 
 	// Initialize ops logging
 	if err := oplog.Init(agentLogPath(), 0); err != nil {

@@ -3,7 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,7 +36,7 @@ func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed
 	for _, client := range clients {
 		instances, listErr := client.ListAllInstances()
 		if listErr != nil {
-			log.Printf("orphan-sweep: %s ListAllInstances: %v", client.Provider(), listErr)
+			slog.Warn("ListAllInstances failed", "component", "orphan-sweep", "provider", client.Provider(), "error", listErr)
 			continue
 		}
 
@@ -55,10 +55,9 @@ func SweepOrphanedInstances(database *sql.DB, clients []cloud.Client) (destroyed
 				continue
 			}
 
-			log.Printf("orphan-sweep: destroying %s instance %s (label=%q, reason=%s)",
-				client.Provider(), inst.ProviderID, inst.Label, reason)
+			slog.Info("destroying orphaned instance", "component", "orphan-sweep", "provider", client.Provider(), "provider_id", inst.ProviderID, "label", inst.Label, "reason", reason)
 			if destroyErr := client.DestroyInstance(inst.ProviderID); destroyErr != nil {
-				log.Printf("orphan-sweep: failed to destroy %s: %v", inst.ProviderID, destroyErr)
+				slog.Warn("failed to destroy orphaned instance", "component", "orphan-sweep", "provider_id", inst.ProviderID, "error", destroyErr)
 				continue
 			}
 			destroyed++
@@ -73,7 +72,7 @@ func shouldDestroyOrphan(database *sql.DB, campaignID int64, providerID string) 
 	// Check if the campaign exists
 	campaign, err := db.GetCampaign(database, campaignID)
 	if err != nil {
-		log.Printf("orphan-sweep: get campaign %d: %v", campaignID, err)
+		slog.Warn("failed to get campaign", "component", "orphan-sweep", "campaign", campaignID, "error", err)
 		return false, ""
 	}
 	if campaign == nil {
@@ -86,7 +85,7 @@ func shouldDestroyOrphan(database *sql.DB, campaignID int64, providerID string) 
 		// Campaign is active — check if this provider ID is tracked in the DB
 		instances, err := db.GetCampaignInstances(database, campaignID)
 		if err != nil {
-			log.Printf("orphan-sweep: get campaign %d instances: %v", campaignID, err)
+			slog.Warn("failed to get campaign instances", "component", "orphan-sweep", "campaign", campaignID, "error", err)
 			return false, ""
 		}
 		for _, ci := range instances {

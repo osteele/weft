@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -290,7 +290,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
 							if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
 								if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
-									log.Printf("watch: mark job %d running from R2 phase: %v", phaseJobID, err)
+									slog.Warn("failed to mark job running from R2 phase", "component", "watch", "job_id", phaseJobID, "error", err)
 								}
 							}
 						}
@@ -381,7 +381,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)
 			var stallMessage string
 			if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
-				log.Printf("watch: instance %d action=%d (%s)", cloudInstanceID, action.Kind, action.StallMessage)
+				slog.Info("watch action triggered", "component", "watch", "instance", cloudInstanceID, "action", action.Kind, "message", action.StallMessage)
 				ExecuteAction(database, client, ci, action)
 				// Refresh state after action
 				ci, _ = db.GetLaunch(database, cloudInstanceID)

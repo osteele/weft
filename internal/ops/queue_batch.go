@@ -3,7 +3,7 @@ package ops
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -85,7 +85,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 		case queueStateRunning:
 			if job.StartTime == 0 {
 				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
-					log.Printf("sync: failed to update start time for job %d: %v", job.ID, err)
+					slog.Warn("failed to update start time", "component", "sync", "job_id", job.ID, "error", err)
 				}
 			}
 			switch job.Status {
@@ -116,7 +116,7 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 		case queueStatePaused:
 			if job.StartTime == 0 {
 				if _, err := UpdateStartTimeFromMetadata(database, job, timeout); err != nil {
-					log.Printf("sync: failed to update start time for job %d: %v", job.ID, err)
+					slog.Warn("failed to update start time", "component", "sync", "job_id", job.ID, "error", err)
 				}
 			}
 			switch job.Status {
@@ -168,20 +168,20 @@ func applyBatchStatuses(database *sql.DB, jobIDs []int64, jobByID map[int64]*db.
 				// Record failure reason if present
 				if status.FailureReason != "" {
 					if err := db.SetJobRemoteState(database, job.ID, "", status.FailureReason); err != nil {
-						log.Printf("sync: failed to record failure reason for job %d: %v", job.ID, err)
+						slog.Warn("failed to record failure reason", "component", "sync", "job_id", job.ID, "error", err)
 					}
 				}
 				CacheCompletedJobLog(job, timeout)
 				// Fetch resource usage data (best-effort)
 				if _, err := updateJobResourceUsage(database, job, timeout); err != nil {
-					log.Printf("sync: failed to update resource usage for job %d: %v", job.ID, err)
+					slog.Warn("failed to update resource usage", "component", "sync", "job_id", job.ID, "error", err)
 				}
 				// Sync timeseries telemetry (best-effort)
 				if err := syncJobTimeseries(database, job, timeout); err != nil {
-					log.Printf("sync: failed to sync timeseries for job %d: %v", job.ID, err)
+					slog.Warn("failed to sync timeseries", "component", "sync", "job_id", job.ID, "error", err)
 				}
 				if err := syncJobTelemetry(database, job, timeout); err != nil {
-					log.Printf("sync: failed to sync telemetry for job %d: %v", job.ID, err)
+					slog.Warn("failed to sync telemetry", "component", "sync", "job_id", job.ID, "error", err)
 				}
 				updated++
 			}
@@ -279,7 +279,7 @@ func syncGPUDevicesToMetadata(database *sql.DB, job *db.Job, gpuDevices string) 
 	if meta.Resource.GPUDevices != gpuDevices {
 		meta.Resource.GPUDevices = gpuDevices
 		if err := db.SetJobMetadata(database, job.ID, meta); err != nil {
-			log.Printf("sync: failed to update GPU devices metadata for job %d: %v", job.ID, err)
+			slog.Warn("failed to update GPU devices metadata", "component", "sync", "job_id", job.ID, "error", err)
 		}
 		job.Metadata = meta
 	}

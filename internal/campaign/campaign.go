@@ -2,7 +2,7 @@
 package campaign
 
 import (
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -125,7 +125,7 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 			// Warn when an explicit image doesn't include PyTorch but the
 			// project has torch dependencies.
 			if img != "" && hasTorch && !isPyTorchImage(img) {
-				log.Printf("warning: job %d has torch dependencies but image %q does not include PyTorch — consider a pytorch/pytorch image", job.ID, img)
+				slog.Warn("job has torch dependencies but image does not include PyTorch", "component", "campaign", "job_id", job.ID, "image", img)
 			}
 
 			merged := false

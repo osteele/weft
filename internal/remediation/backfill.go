@@ -2,7 +2,7 @@ package remediation
 
 import (
 	"database/sql"
-	"log"
+	"log/slog"
 
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/inventory"
@@ -11,7 +11,7 @@ import (
 // BackfillOOMCapacity enriches existing gpu_oom diagnoses that are missing
 // gpu_capacity_gb by looking up the host's GPU capacity from inventory.
 // Returns the number of diagnoses updated.
-func BackfillOOMCapacity(database *sql.DB, logger *log.Logger) (int, error) {
+func BackfillOOMCapacity(database *sql.DB, logger *slog.Logger) (int, error) {
 	rows, err := database.Query(`
 		SELECT ja.id, ja.host, ja.error_diagnosis
 		FROM job_attempts ja
@@ -46,24 +46,24 @@ func BackfillOOMCapacity(database *sql.DB, logger *log.Logger) (int, error) {
 	for _, r := range records {
 		capGB := inventory.HostMaxGPUMemoryGB(r.host)
 		if capGB == 0 {
-			logger.Printf("backfill: no GPU capacity for host %q (run %d), skipping", r.host, r.runID)
+			logger.Debug("no GPU capacity, skipping", "component", "backfill", "host", r.host, "run_id", r.runID)
 			continue
 		}
 
 		diag, err := UnmarshalDiagnosis(r.diagJSON)
 		if err != nil {
-			logger.Printf("backfill: unmarshal diagnosis for run %d: %v", r.runID, err)
+			logger.Debug("failed to unmarshal diagnosis", "component", "backfill", "run_id", r.runID, "error", err)
 			continue
 		}
 		diag.GPUCapacityGB = capGB
 		newJSON, err := MarshalDiagnosis(diag)
 		if err != nil {
-			logger.Printf("backfill: marshal diagnosis for run %d: %v", r.runID, err)
+			logger.Debug("failed to marshal diagnosis", "component", "backfill", "run_id", r.runID, "error", err)
 			continue
 		}
 
 		if err := db.UpdateRunErrorDiagnosis(database, r.runID, newJSON); err != nil {
-			logger.Printf("backfill: update run %d: %v", r.runID, err)
+			logger.Debug("failed to update run diagnosis", "component", "backfill", "run_id", r.runID, "error", err)
 			continue
 		}
 		updated++

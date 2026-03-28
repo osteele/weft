@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"path"
@@ -176,7 +176,7 @@ func StartR2AssetStaging(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Asset
 			case <-uploadDone:
 				return
 			case <-ticker.C:
-				log.Printf("R2 asset upload still in progress (%s elapsed)...", elapsed.Truncate(time.Second))
+				slog.Debug("R2 asset upload still in progress", "component", "launch", "elapsed", elapsed.Truncate(time.Second))
 				elapsed += 15 * time.Second
 			}
 		}
@@ -337,7 +337,7 @@ func createInstanceWithReplacement(
 		return nil, currentOffer, err
 	}
 
-	log.Printf("launch: offer %s disappeared for %s; searching for replacement", currentOffer.ProviderID, group.GPUSpec())
+	slog.Warn("offer disappeared, searching for replacement", "component", "launch", "offer", currentOffer.ProviderID, "gpu_spec", group.GPUSpec())
 	progress("offer disappeared; searching again")
 
 	nextOffer, retryErr := replacementOffer(currentOffer)
@@ -356,7 +356,7 @@ func createInstanceWithReplacement(
 	}
 
 	currentOffer = *nextOffer
-	log.Printf("launch: retrying %s with replacement offer %s", group.GPUSpec(), currentOffer.ProviderID)
+	slog.Info("retrying with replacement offer", "component", "launch", "gpu_spec", group.GPUSpec(), "offer", currentOffer.ProviderID)
 	progress("retrying with replacement offer")
 
 	inst, err = client.CreateInstance(currentOffer.ProviderID, createOpts)
@@ -434,7 +434,7 @@ func LaunchCampaign(
 			}
 			donorCfg, err = FindDonorOffer(client, offers, estimates, groups)
 			if err != nil {
-				log.Printf("donor: offer search failed, proceeding without donor: %v", err)
+				slog.Warn("donor offer search failed, proceeding without donor", "component", "donor", "error", err)
 			}
 		}
 	}
@@ -471,7 +471,7 @@ func LaunchCampaign(
 			var donorErr error
 			donorInstanceID, donorErr = db.CreateLaunch(database, donorInst)
 			if donorErr != nil {
-				log.Printf("donor: failed to create DB record: %v", donorErr)
+				slog.Warn("failed to create donor DB record", "component", "donor", "error", donorErr)
 				donorCfg = nil
 			} else {
 				_ = db.SetLaunchRole(database, donorInstanceID, "donor")
@@ -482,7 +482,7 @@ func LaunchCampaign(
 				}
 				donorAssets, donorAssetErr := stager.AwaitAssetsForDirs(donorCfg.SourceDirs, nil)
 				if donorAssetErr != nil {
-					log.Printf("donor: staging assets failed: %v", donorAssetErr)
+					slog.Warn("donor staging assets failed", "component", "donor", "error", donorAssetErr)
 					donorCfg = nil
 				}
 				if donorCfg == nil {
@@ -515,7 +515,7 @@ func LaunchCampaign(
 				donorUploadCtx, donorUploadCancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer donorUploadCancel()
 				if uploadErr := donorAssets.Client.PutObject(donorUploadCtx, bootstrapKey, strings.NewReader(donorBootstrap), "text/x-shellscript"); uploadErr != nil {
-					log.Printf("donor: failed to upload bootstrap: %v", uploadErr)
+					slog.Warn("failed to upload donor bootstrap", "component", "donor", "error", uploadErr)
 					donorCfg = nil
 				} else {
 					// Build env vars and create opts for donor
@@ -523,7 +523,7 @@ func LaunchCampaign(
 					if createOptsForProvider != nil {
 						donorCreateOpts, donorErr = createOptsForProvider(donorCfg.Offer.Provider)
 						if donorErr != nil {
-							log.Printf("donor: unsupported provider config: %v", donorErr)
+							slog.Warn("unsupported donor provider config", "component", "donor", "error", donorErr)
 							donorCfg = nil
 						}
 					}
@@ -543,7 +543,7 @@ func LaunchCampaign(
 						}
 						donorCreateOpts.EnvVars = donorEnvVars
 						if err := configureBootstrapCreateOpts(donorClient, &donorCreateOpts, bootstrapKey); err != nil {
-							log.Printf("donor: bootstrap config failed: %v", err)
+							slog.Warn("donor bootstrap config failed", "component", "donor", "error", err)
 							donorCfg = nil
 						}
 					}
@@ -555,7 +555,7 @@ func LaunchCampaign(
 
 						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 						if createErr != nil {
-							log.Printf("donor: failed to create instance: %v", createErr)
+							slog.Warn("failed to create donor instance", "component", "donor", "error", createErr)
 							_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
 							donorCfg = nil
 						} else {
@@ -565,7 +565,7 @@ func LaunchCampaign(
 							if donorCfg.Offer.DataCenter != "" {
 								_ = db.SetLaunchDataCenter(database, donorInstanceID, donorCfg.Offer.DataCenter)
 							}
-							log.Printf("donor: launched instance %s (DB ID %d) in %s", donorProviderID, donorInstanceID, donorCfg.DataCenter)
+							slog.Info("donor instance launched", "component", "donor", "provider_id", donorProviderID, "instance", donorInstanceID, "data_center", donorCfg.DataCenter)
 						}
 					}
 				}
@@ -706,7 +706,7 @@ func LaunchCampaign(
 		for time.Since(downloadStart) < DefaultDonorReadyTimeout {
 			exists, checkErr := stager.Client.ObjectExists(context.Background(), readyKey)
 			if checkErr != nil {
-				log.Printf("donor: R2 readiness check error: %v", checkErr)
+				slog.Warn("donor R2 readiness check error", "component", "donor", "error", checkErr)
 			} else if exists {
 				donorReady = true
 				break
@@ -717,7 +717,7 @@ func LaunchCampaign(
 		if donorReady {
 			downloadSecs := int(time.Since(downloadStart).Seconds())
 			_ = db.SetLaunchSeedDownloadSecs(database, donorInstanceID, downloadSecs)
-			log.Printf("donor: ready after %ds, starting fan-out to %d workers", downloadSecs, len(workerProviderIDs))
+			slog.Info("donor ready, starting fan-out", "component", "donor", "download_secs", downloadSecs, "worker_count", len(workerProviderIDs))
 
 			if onPhase != nil {
 				onPhase(InstanceGroup{GPUClass: "donor"}, "copying caches to workers")
@@ -731,10 +731,10 @@ func LaunchCampaign(
 			}
 
 			if seedErr := SeedWorkers(donorClient, database, donorProviderID, workerProviderIDs, DefaultDonorCachePaths, progressFunc); seedErr != nil {
-				log.Printf("donor: fan-out had errors: %v", seedErr)
+				slog.Warn("donor fan-out had errors", "component", "donor", "error", seedErr)
 			}
 		} else {
-			log.Printf("donor: timed out waiting for readiness, workers will download independently")
+			slog.Warn("donor timed out waiting for readiness, workers will download independently", "component", "donor")
 		}
 
 		// Destroy donor instance
@@ -742,7 +742,7 @@ func LaunchCampaign(
 			onPhase(InstanceGroup{GPUClass: "donor"}, "destroying donor instance")
 		}
 		if destroyErr := donorClient.DestroyInstance(donorProviderID); destroyErr != nil {
-			log.Printf("donor: failed to destroy: %v", destroyErr)
+			slog.Warn("failed to destroy donor instance", "component", "donor", "error", destroyErr)
 		}
 		_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusCompleted, db.TerminationReasonCompleted)
 	}
@@ -1151,8 +1151,7 @@ func LaunchInstance(
 // silent failure here causes the instance to leak (incurring ongoing charges).
 func destroyLeakedInstance(client cloud.Client, providerInstID string, launchID int64) {
 	if err := client.DestroyInstance(providerInstID); err != nil {
-		log.Printf("WARNING: failed to destroy leaked %s instance %s (launch_id=%d): %v — manual cleanup required",
-			client.Provider(), providerInstID, launchID, err)
+		slog.Warn("failed to destroy leaked instance, manual cleanup required", "component", "launch", "provider", client.Provider(), "provider_id", providerInstID, "instance", launchID, "error", err)
 		oplog.Log(oplog.OpLaunchDestroyFailed,
 			oplog.WithError(err),
 			oplog.WithDetailf("provider=%s provider_instance_id=%s launch_id=%d context=cleanup_after_launch_failure",

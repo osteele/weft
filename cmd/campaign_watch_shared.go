@@ -3,7 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
@@ -19,7 +19,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 	// (and from which instance), so it doesn't sweep in unrelated unplaced jobs.
 	resetJobs, err := db.ResetJobsOnTerminalLaunches(database)
 	if err != nil {
-		log.Printf("auto-relaunch: reset jobs: %v", err)
+		slog.Warn("failed to reset jobs on terminal launches", "component", "auto-relaunch", "error", err)
 	}
 
 	if cfg == nil {

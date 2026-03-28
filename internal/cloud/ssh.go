@@ -3,7 +3,7 @@ package cloud
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"time"
 )
@@ -58,15 +58,14 @@ func SSHRunWithRetry(target string, sshOpts []string, command string, timeout ti
 		var exitErr *exec.ExitError
 		isExitErr := errors.As(err, &exitErr)
 		if isExitErr && exitErr.ExitCode() == 255 && time.Now().Before(deadline) {
-			log.Printf("SSH connection failed (exit 255, output=%q), retrying in %v (deadline in %v)",
-				out, poll, time.Until(deadline).Round(time.Second))
+			slog.Debug("SSH connection failed, retrying", "component", "cloud", "output", out, "retry_in", poll, "deadline_in", time.Until(deadline).Round(time.Second))
 			time.Sleep(poll)
 			continue
 		}
 		if isExitErr {
-			log.Printf("SSH failed with exit code %d (not retrying): %s", exitErr.ExitCode(), out)
+			slog.Warn("SSH failed, not retrying", "component", "cloud", "exit_code", exitErr.ExitCode(), "output", out)
 		} else {
-			log.Printf("SSH failed with non-exit error (not retrying): %v", err)
+			slog.Warn("SSH failed with non-exit error, not retrying", "component", "cloud", "error", err)
 		}
 		return out, err
 	}

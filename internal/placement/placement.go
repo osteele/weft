@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"os"
 	"slices"
@@ -445,7 +445,7 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			}
 			entries, err := dataloc.FindAssetHosts(database, asset)
 			if err != nil {
-				log.Printf("placement: failed to find asset hosts for %v: %v", asset, err)
+				slog.Warn("failed to find asset hosts", "component", "placement", "asset", asset, "error", err)
 				continue
 			}
 			isLocal := false

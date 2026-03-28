@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -211,7 +211,7 @@ func runDataFetch(_ *cobra.Command, args []string) error {
 	entry, err := dataloc.DownloadAssetToHost(ctx, dataFetchHost, asset, dataFetchRev)
 	if err != nil {
 		if ferr := dataloc.MarkDataRequestFailed(database, request.ID, err.Error()); ferr != nil {
-			log.Printf("warning: mark data request %d failed: %v", request.ID, ferr)
+			slog.Warn("failed to mark data request as failed", "request_id", request.ID, "error", ferr)
 		}
 		return err
 	}
@@ -219,7 +219,7 @@ func runDataFetch(_ *cobra.Command, args []string) error {
 	entry.LastSeen = time.Now().UTC().Truncate(time.Second)
 	if err := dataloc.RecordAsset(database, entry); err != nil {
 		if ferr := dataloc.MarkDataRequestFailed(database, request.ID, err.Error()); ferr != nil {
-			log.Printf("warning: mark data request %d failed: %v", request.ID, ferr)
+			slog.Warn("failed to mark data request as failed", "request_id", request.ID, "error", ferr)
 		}
 		return fmt.Errorf("record downloaded asset: %w", err)
 	}

@@ -2,7 +2,7 @@ package runner
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -139,10 +139,10 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 	phases.RunStart = time.Now().Unix()
 
-	log.Printf("Job %d: launching process", cfg.JobID)
+	slog.Debug("launching process", "component", "runner", "job_id", cfg.JobID)
 	proc, err := StartProcess(command, workingDir, envVars, paths.Log)
 	if err != nil {
-		log.Printf("Job %d: start failed: %v", cfg.JobID, err)
+		slog.Warn("job start failed", "component", "runner", "job_id", cfg.JobID, "error", err)
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
 		return ExitInfo{ExitCode: 1}, fmt.Errorf("start process: %w", err)
 	}
@@ -154,7 +154,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	if cfg.MaxTime > 0 {
 		timer := time.AfterFunc(cfg.MaxTime, func() {
 			timedOut.Store(true)
-			log.Printf("Job %d: max-time %v reached, sending SIGTERM to process group %d", cfg.JobID, cfg.MaxTime, proc.PGID)
+			slog.Warn("max-time reached, sending SIGTERM", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime, "pgid", proc.PGID)
 			syscall.Kill(-proc.PGID, syscall.SIGTERM)
 			// Give the process a grace period to clean up, then SIGKILL
 			time.AfterFunc(10*time.Second, func() {
@@ -208,7 +208,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		ei.ExitCode = 124
 		ei.Signaled = true
 		ei.Signal = syscall.SIGTERM
-		log.Printf("Job %d: timed out after %v", cfg.JobID, cfg.MaxTime)
+		slog.Warn("job timed out", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime)
 	}
 
 	phases.RunEnd = time.Now().Unix()
@@ -243,7 +243,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		}
 		if discovered, discErr := DiscoverOutputs(workingDir, dirs); discErr == nil && len(discovered) > 0 {
 			outputFiles = discovered
-			log.Printf("Job %d: discovered %d output files", cfg.JobID, len(discovered))
+			slog.Debug("discovered output files", "component", "runner", "job_id", cfg.JobID, "count", len(discovered))
 		}
 	}
 
@@ -260,6 +260,6 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	CleanupPIDFiles(paths)
 
-	log.Printf("Job %d: completed (exit=%d)", cfg.JobID, ei.ExitCode)
+	slog.Info("job completed", "component", "runner", "job_id", cfg.JobID, "exit_code", ei.ExitCode)
 	return ei, nil
 }

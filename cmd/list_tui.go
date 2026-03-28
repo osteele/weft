@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
-	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,6 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/tui"
 )
 
@@ -98,9 +97,8 @@ func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, s
 		cancel:         cancel,
 	}
 
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(origLogOutput)
+	restore := logging.Suppress()
+	defer restore()
 
 	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
 	cancel()

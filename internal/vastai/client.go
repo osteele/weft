@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"maps"
 	"os/exec"
 	"slices"
@@ -149,9 +149,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 		if resp.NewContract != 0 {
 			// Vast.ai sometimes allocates an instance even when reporting failure.
 			// Destroy it to avoid an orphaned billing instance.
-			log.Printf("vastai: create returned success=false with contract %d; destroying orphan", resp.NewContract)
+			slog.Warn("create returned success=false with contract, destroying orphan", "component", "vastai", "contract", resp.NewContract)
 			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
-				log.Printf("vastai: failed to destroy orphaned instance %d: %v", resp.NewContract, destroyErr)
+				slog.Warn("failed to destroy orphaned instance", "component", "vastai", "instance", resp.NewContract, "error", destroyErr)
 			}
 			return nil, fmt.Errorf("create instance failed (contract %d): %s", resp.NewContract, reason)
 		}
@@ -229,13 +229,13 @@ func (c *Client) WaitReady(instanceID int, timeout time.Duration) (*Instance, er
 		if err != nil {
 			// Instance might not be visible immediately after creation
 			if lastStatus == "" {
-				log.Printf("vastai: instance %d not visible yet, retrying...", instanceID)
+				slog.Debug("instance not visible yet, retrying", "component", "vastai", "instance", instanceID)
 			}
 			time.Sleep(poll)
 			continue
 		}
 		if inst.Status != lastStatus {
-			log.Printf("vastai: instance %d status: %s", instanceID, inst.Status)
+			slog.Debug("instance status changed", "component", "vastai", "instance", instanceID, "status", inst.Status)
 			lastStatus = inst.Status
 		}
 		if inst.Status == cloud.ProviderStatusRunning {

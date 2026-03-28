@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html/template"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -97,7 +97,7 @@ func (s *Server) Start() (string, error) {
 
 	go func() {
 		if err := s.server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Printf("web: server error: %v", err)
+			slog.Warn("web server error", "component", "web", "error", err)
 		}
 	}()
 

@@ -2,7 +2,7 @@ package config
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -176,7 +176,7 @@ func loadProjectConfigOrWarn(localDir string) *ProjectConfig {
 	}
 	cfg, err := LoadProjectConfig(localDir)
 	if err != nil {
-		log.Printf("warning: loading project config from %s: %v", localDir, err)
+		slog.Warn("error loading project config", "component", "config", "dir", localDir, "error", err)
 		return nil
 	}
 	return cfg

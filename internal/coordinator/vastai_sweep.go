@@ -39,7 +39,7 @@ func (c *Coordinator) loadR2Client() (*r2.Client, error) {
 func (c *Coordinator) sweepVastaiResults() *r2.Client {
 	r2Client, err := c.loadR2Client()
 	if err != nil {
-		c.logger.Printf("r2 client: %v", err)
+		c.logger.Warn("failed to create r2 client", "error", err)
 		return nil
 	}
 	if r2Client == nil {
@@ -52,7 +52,7 @@ func (c *Coordinator) sweepVastaiResults() *r2.Client {
 	// 1. Check for completed results
 	completedJobIDs, err := r2Client.ListCompleted(ctx, "jobs/")
 	if err != nil {
-		c.logger.Printf("r2 list completed: %v", err)
+		c.logger.Warn("failed to list r2 completed jobs", "error", err)
 		return r2Client
 	}
 
@@ -72,7 +72,7 @@ func (c *Coordinator) sweepVastaiResults() *r2.Client {
 func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r2.Client, jobID int64) {
 	var latestRunID sql.NullInt64
 	if err := c.db.QueryRow(`SELECT latest_run_id FROM job_status WHERE id = ?`, jobID).Scan(&latestRunID); err != nil && err != sql.ErrNoRows {
-		c.logger.Printf("vastai sweep: latest_run_id for job %d: %v", jobID, err)
+		c.logger.Warn("failed to get latest_run_id", "job_id", jobID, "error", err)
 	}
 	runID := int64(0)
 	if latestRunID.Valid {
@@ -84,13 +84,13 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	// Download results to temp dir
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-vastai-%d-*", jobID))
 	if err != nil {
-		c.logger.Printf("vastai sweep: create temp dir for job %d: %v", jobID, err)
+		c.logger.Warn("failed to create temp dir", "job_id", jobID, "error", err)
 		return
 	}
 	defer os.RemoveAll(tmpDir)
 
 	if err := r2Client.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-		c.logger.Printf("vastai sweep: download results for job %d: %v", jobID, err)
+		c.logger.Warn("failed to download results", "job_id", jobID, "error", err)
 		return
 	}
 
@@ -117,14 +117,14 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	if endTimeUnix == 0 {
 		exitCodeBytes, err := os.ReadFile(filepath.Join(tmpDir, "exit_code"))
 		if err != nil {
-			c.logger.Printf("vastai sweep: read exit_code for job %d: %v", jobID, err)
+			c.logger.Warn("failed to read exit_code", "job_id", jobID, "error", err)
 			return
 		}
 		exitCode, _ = strconv.Atoi(strings.TrimSpace(string(exitCodeBytes)))
 
 		endTimeBytes, err := os.ReadFile(filepath.Join(tmpDir, "end_time"))
 		if err != nil {
-			c.logger.Printf("vastai sweep: read end_time for job %d: %v", jobID, err)
+			c.logger.Warn("failed to read end_time", "job_id", jobID, "error", err)
 			return
 		}
 		endTimeUnix, _ = strconv.ParseInt(strings.TrimSpace(string(endTimeBytes)), 10, 64)
@@ -143,13 +143,13 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		db.StatusCompleted, exitCode, endTimeUnix, db.StatusCompleted, failureReason, jobID,
 	)
 	if err != nil {
-		c.logger.Printf("vastai sweep: update job %d: %v", jobID, err)
+		c.logger.Warn("failed to update job", "job_id", jobID, "error", err)
 		return
 	}
 	var cloudInstanceID sql.NullInt64
 	if err := c.db.QueryRow(`SELECT launch_id FROM job_status WHERE id = ?`, jobID).Scan(&cloudInstanceID); err == nil && cloudInstanceID.Valid && cloudInstanceID.Int64 > 0 {
 		if err := db.RefineInstanceTerminationReason(c.db, cloudInstanceID.Int64); err != nil {
-			c.logger.Printf("vastai sweep: refine termination reason for instance %d: %v", cloudInstanceID.Int64, err)
+			c.logger.Warn("failed to refine termination reason", "instance_id", cloudInstanceID.Int64, "error", err)
 		}
 	}
 
@@ -159,13 +159,13 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		outcome = db.AttemptOutcomeFailed
 	}
 	if err := db.CloseLaunchAttempt(c.db, jobID, outcome); err != nil {
-		c.logger.Printf("vastai sweep: close attempt for job %d: %v", jobID, err)
+		c.logger.Warn("failed to close attempt", "job_id", jobID, "error", err)
 	}
 
 	// Extract and store phase timing data
 	if timings := ExtractPhaseTimings(jobID, tmpDir); timings != nil {
 		if err := db.UpsertJobPhaseTimings(c.db, timings); err != nil {
-			c.logger.Printf("vastai sweep: store phase timings for job %d: %v", jobID, err)
+			c.logger.Warn("failed to store phase timings", "job_id", jobID, "error", err)
 		}
 	}
 
@@ -174,10 +174,10 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 
 	// Clean up R2 prefix
 	if err := r2Client.DeletePrefix(ctx, cleanupPrefix+"/"); err != nil {
-		c.logger.Printf("vastai sweep: cleanup R2 for job %d: %v", jobID, err)
+		c.logger.Warn("failed to cleanup R2", "job_id", jobID, "error", err)
 	}
 
-	c.logger.Printf("vastai sweep: processed job %d (exit=%d, status=%s)", jobID, exitCode, db.StatusCompleted)
+	c.logger.Info("processed vastai job", "job_id", jobID, "exit_code", exitCode, "status", db.StatusCompleted)
 	if exitCode == 0 {
 		oplog.LogJob(oplog.OpJobComplete, jobID, "", oplog.WithDetailf("vastai exit=%d", exitCode))
 	} else {
@@ -586,7 +586,7 @@ func (c *Coordinator) checkLaunchLimits(cfg *config.Config) {
 		if ci.MaxTimeSeconds > 0 && ci.LaunchedAt != nil {
 			elapsed := time.Since(time.Unix(*ci.LaunchedAt, 0))
 			if elapsed > time.Duration(ci.MaxTimeSeconds)*time.Second {
-				c.logger.Printf("instance sweep: instance %d exceeded time limit (%v), destroying", ci.ID, elapsed)
+				c.logger.Warn("instance exceeded time limit, destroying", "instance_id", ci.ID, "elapsed", elapsed)
 				providerInstID := ci.EffectiveProviderID()
 				if providerInstID != "" {
 					if cl := c.cloudClient(ci.Provider); cl != nil {

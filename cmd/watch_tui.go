@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"io"
-	"log"
 	"sort"
 	"strings"
 	"time"
@@ -17,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/tui"
@@ -1957,9 +1956,8 @@ func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estim
 		model.estimateSummaryLine = estimateSummary.FormatLine()
 	}
 
-	origLogOutput := log.Writer()
-	log.SetOutput(io.Discard)
-	defer log.SetOutput(origLogOutput)
+	restore := logging.Suppress()
+	defer restore()
 
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()

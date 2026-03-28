@@ -3,7 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -542,7 +542,7 @@ func ensureQueueRunnerStarted(host, queue string) (bool, error) {
 		// Deploy rclone config to inventory host (best-effort)
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 		if err := agentdeploy.EnsureRcloneConfig(host, r2Cfg); err != nil {
-			log.Printf("warning: deploy rclone config to %s: %v", host, err)
+			slog.Warn("failed to deploy rclone config", "host", host, "error", err)
 		}
 	}
 
@@ -1146,7 +1146,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		// Remove old completion files so the runner doesn't skip the requeued job
 		timeout := ops.DefaultOptions().Timeout
 		if err := ops.RemoveRemoteCompletionFiles(job.Host, job.ID, timeout); err != nil {
-			log.Printf("edit: failed to remove remote completion files for job %d: %v", job.ID, err)
+			slog.Warn("failed to remove remote completion files", "component", "edit", "job_id", job.ID, "error", err)
 		}
 		if err := ops.AppendJobToQueue(job, timeout); err != nil {
 			// Best effort - job is queued locally, sync will eventually push it
@@ -1154,10 +1154,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 			deferredUpdate = true
 		} else {
 			if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusQueued); err != nil {
-				log.Printf("queue: failed to clear pending status for job %d: %v", job.ID, err)
+				slog.Warn("failed to clear pending status", "component", "queue", "job_id", job.ID, "error", err)
 			}
 			if err := db.SetQueuedAtNow(database, job.ID); err != nil {
-				log.Printf("queue: failed to update queued_at for job %d: %v", job.ID, err)
+				slog.Warn("failed to update queued_at", "component", "queue", "job_id", job.ID, "error", err)
 			}
 		}
 	} else {

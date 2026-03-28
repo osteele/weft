@@ -3,7 +3,7 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -131,7 +131,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 		groups = campaign.SplitGroupsByImage(groups)
 		r2Client, err := buildR2Client(cfg)
 		if err != nil {
-			log.Printf("warning: build R2 client for disk estimation: %v", err)
+			slog.Warn("failed to build R2 client for disk estimation", "error", err)
 		}
 		for i := range groups {
 			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)

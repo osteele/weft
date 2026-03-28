@@ -2,7 +2,7 @@ package runner
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -323,16 +323,15 @@ func (r *Runner) tryStartNextJob() {
 	}
 
 	// Start the job
-	log.Printf("Job %d: starting (runningCount=%d, gpuClass=%q, resolvedGPU=%v)",
-		jobID, runningCount, job.GPUClass, resolvedGPUDevices)
+	slog.Info("job starting", "component", "runner", "job_id", jobID, "running_count", runningCount, "gpu_class", job.GPUClass, "resolved_gpu", resolvedGPUDevices)
 	err = r.startJob(jobID, job, resolvedGPUDevices)
 	if err == errRequeue {
-		log.Printf("Job %d: requeued", jobID)
+		slog.Debug("job requeued", "component", "runner", "job_id", jobID)
 		r.state.AddPending(jobID)
 	} else if err != nil {
 		fmt.Fprintf(os.Stderr, "Job %d: start failed: %v\n", jobID, err)
 	} else {
-		log.Printf("Job %d: started successfully", jobID)
+		slog.Info("job started successfully", "component", "runner", "job_id", jobID)
 	}
 	r.saveState()
 }
@@ -463,17 +462,17 @@ func (r *Runner) startJob(jobID int64, job *ops.CommandJob, preResolvedGPUDevice
 	}
 
 	// Start the process
-	log.Printf("Job %d: launching process", jobID)
+	slog.Debug("launching process", "component", "runner", "job_id", jobID)
 	proc, err := StartProcess(command, job.Dir, envVars, paths.Log)
 	if err != nil {
 		oplog.LogJob(oplog.OpJobStartFailed, jobID, "", oplog.WithError(err))
-		log.Printf("Job %d: start failed: %v", jobID, err)
+		slog.Warn("job start failed", "component", "runner", "job_id", jobID, "error", err)
 		os.WriteFile(paths.Status, []byte("1\n"), 0644)
 		return fmt.Errorf("start process: %w", err)
 	}
 
 	// Write PID/PGID files
-	log.Printf("Job %d: started PID=%d, writing PID files", jobID, proc.PID)
+	slog.Debug("started process, writing PID files", "component", "runner", "job_id", jobID, "pid", proc.PID)
 	proc.WritePIDFiles(paths)
 
 	// Track the process
@@ -512,7 +511,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 	jobIDStr := strconv.FormatInt(jobID, 10)
 	err := proc.Cmd.Wait()
 	ei := ExtractExitInfo(err)
-	log.Printf("Job %d: process exited (code=%d, signal=%v, err=%v)", jobID, ei.ExitCode, ei.Signaled, err)
+	slog.Info("process exited", "component", "runner", "job_id", jobID, "exit_code", ei.ExitCode, "signaled", ei.Signaled, "error", err)
 
 	endTime := time.Now().Unix()
 	duration := endTime - startTime

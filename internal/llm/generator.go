@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -159,7 +159,7 @@ func (g *DescriptionGenerator) processBatch() {
 
 	jobs, err := db.GetJobsNeedingDescriptions(g.db, g.batchSize)
 	if err != nil {
-		log.Printf("llm: error getting jobs: %v", err)
+		slog.Warn("error getting jobs for description generation", "component", "llm", "error", err)
 		return
 	}
 
@@ -172,12 +172,12 @@ func (g *DescriptionGenerator) processBatch() {
 
 		description, hash, err := g.generateDescription(job.Command)
 		if err != nil {
-			log.Printf("llm: error generating description for job %d: %v", job.ID, err)
+			slog.Warn("error generating description", "component", "llm", "job_id", job.ID, "error", err)
 			return // stop batch — likely all jobs will fail with the same error
 		}
 
 		if err := db.UpdateJobGeneratedDescription(g.db, job.ID, description, hash); err != nil {
-			log.Printf("llm: error updating job %d: %v", job.ID, err)
+			slog.Warn("error updating job description", "component", "llm", "job_id", job.ID, "error", err)
 			continue
 		}
 

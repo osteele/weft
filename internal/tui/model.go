@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -397,7 +397,7 @@ func NewModelWithOptions(database *sql.DB, opts ModelOptions) Model {
 				Bucket:          r2Cfg.Bucket,
 			})
 			if err != nil {
-				log.Printf("r2 client init: %v", err)
+				slog.Warn("R2 client init failed", "component", "tui", "error", err)
 			}
 		}
 	}

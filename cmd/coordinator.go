@@ -3,7 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -80,9 +80,9 @@ func runCoordinatorStart(cmd *cobra.Command, args []string) error {
 
 	cfg, cfgErr := appconfig.Load()
 	if cfgErr != nil {
-		log.Printf("coordinator: load config: %v", cfgErr)
+		slog.Warn("failed to load config", "component", "coordinator", "error", cfgErr)
 	} else if clients, err := buildCloudClients(cfg); err != nil {
-		log.Printf("coordinator: cloud clients unavailable: %v", err)
+		slog.Warn("cloud clients unavailable", "component", "coordinator", "error", err)
 	} else {
 		c.CloudClients = clients
 	}

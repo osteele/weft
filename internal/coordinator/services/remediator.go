@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -19,13 +19,13 @@ import (
 // attempts auto-remediation when possible.
 type Remediator struct {
 	database  *sql.DB
-	logger    *log.Logger
+	logger    *slog.Logger
 	appConfig *config.Config
 	interval  time.Duration
 }
 
 // NewRemediator creates a new remediator service.
-func NewRemediator(database *sql.DB, logger *log.Logger, appConfig *config.Config, interval time.Duration) *Remediator {
+func NewRemediator(database *sql.DB, logger *slog.Logger, appConfig *config.Config, interval time.Duration) *Remediator {
 	return &Remediator{
 		database:  database,
 		logger:    logger,
@@ -52,7 +52,7 @@ func (r *Remediator) Start(ctx context.Context) {
 func (r *Remediator) CheckFailedJobs() {
 	jobs, err := db.ListRecentFailedUndiagnosed(r.database, 10)
 	if err != nil {
-		r.logger.Printf("list failed jobs for remediation: %v", err)
+		r.logger.Warn("failed to list failed jobs for remediation", "error", err)
 		return
 	}
 	if len(jobs) == 0 {
@@ -84,7 +84,7 @@ func (r *Remediator) CheckFailedJobs() {
 
 	for jl := range results {
 		if jl.logContent == "" {
-			r.logger.Printf("no log content for job %d on %s, skipping diagnosis", jl.job.ID, jl.job.Host)
+			r.logger.Debug("no log content, skipping diagnosis", "job_id", jl.job.ID, "host", jl.job.Host)
 			continue
 		}
 
@@ -105,11 +105,11 @@ func (r *Remediator) CheckFailedJobs() {
 			oplog.WithDetailf("pattern=%s category=%s", result.Diagnosis.Pattern, result.Diagnosis.Category))
 
 		if result.Retried {
-			r.logger.Printf("remediated job %d: %s", jl.job.ID, result.Action)
+			r.logger.Info("remediated job", "job_id", jl.job.ID, "action", result.Action)
 			oplog.LogJob(oplog.OpCoordinatorRemediation, jl.job.ID, jl.job.Host,
 				oplog.WithDetailf("action=%s", result.Action))
 		} else {
-			r.logger.Printf("diagnosed job %d: %s (action: %s)", jl.job.ID, result.Diagnosis.Message, result.Action)
+			r.logger.Info("diagnosed job", "job_id", jl.job.ID, "message", result.Diagnosis.Message, "action", result.Action)
 		}
 	}
 }

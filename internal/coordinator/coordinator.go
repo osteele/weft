@@ -6,7 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -49,7 +49,7 @@ type Coordinator struct {
 	config    Config
 	appConfig *config.Config
 	hostState *services.HostStateManager
-	logger    *log.Logger
+	logger    *slog.Logger
 
 	// Composable services
 	prober     *services.HostProber
@@ -94,7 +94,7 @@ func (c *Coordinator) vastaiClient() vastai.VastaiClient {
 // New creates a new Coordinator.
 func New(database *sql.DB, cfg Config) *Coordinator {
 	appCfg, _ := config.Load()
-	logger := log.New(os.Stderr, "[coordinator] ", log.LstdFlags)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("component", "coordinator")
 	hostState := services.NewHostStateManager(logger)
 
 	c := &Coordinator{
@@ -124,12 +124,12 @@ func (c *Coordinator) Run(ctx context.Context) error {
 
 	// Initialize oplog
 	if err := oplog.Init(c.config.LogPath, oplog.DefaultMaxSize); err != nil {
-		c.logger.Printf("oplog init failed (continuing): %v", err)
+		c.logger.Warn("oplog init failed, continuing", "error", err)
 	}
 	defer oplog.Close()
 
 	oplog.Log(oplog.OpCoordinatorStart)
-	c.logger.Println("coordinator started")
+	c.logger.Info("coordinator started")
 
 	// Seed host state from inventory so all known hosts are tracked from the start.
 	// Run in a goroutine so the event loop starts immediately while probes complete.
@@ -149,7 +149,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			oplog.Log(oplog.OpCoordinatorStop)
-			c.logger.Println("coordinator stopped")
+			c.logger.Info("coordinator stopped")
 			return nil
 
 		case <-vastaiSweepTicker.C:
@@ -165,12 +165,12 @@ func (c *Coordinator) reconcileAndNotifyCampaigns(r2Client *r2.Client) {
 		c.reconciler = campaign.NewReconciler()
 	}
 	if _, err := c.reconciler.ReconcileLaunches(c.db, c.CloudClients, r2Client); err != nil {
-		c.logger.Printf("reconcile cloud instances: %v", err)
+		c.logger.Warn("failed to reconcile cloud instances", "error", err)
 	}
 
 	completed, err := campaign.ReconcileCampaigns(c.db)
 	if err != nil {
-		c.logger.Printf("reconcile campaigns: %v", err)
+		c.logger.Warn("failed to reconcile campaigns", "error", err)
 		return
 	}
 	for _, camp := range completed {

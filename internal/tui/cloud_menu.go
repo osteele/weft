@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -308,7 +308,7 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys},
 			nil,
 			func(phase string) {
-				log.Printf("cloud: job %d instance: %s", job.ID, phase)
+				slog.Debug("cloud instance phase", "component", "tui", "job_id", job.ID, "phase", phase)
 			},
 			nil,
 		)

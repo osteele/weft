@@ -3,7 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -100,13 +100,12 @@ func FindDonorOffer(client cloud.Client, workerOffers []cloud.Offer, estimates [
 		}
 		collocated := dcDonorOffers[dc]
 		if len(collocated) == 0 {
-			log.Printf("donor: no collocated offers in data center %q", dc)
+			slog.Debug("no collocated offers in data center", "component", "donor", "data_center", dc)
 			continue
 		}
 		cheapest := collocated[0]
 		savings := donorSavings(cheapest, workers)
-		log.Printf("donor: DC %q (%d workers): savings=$%.4f with donor at $%.2f/hr",
-			dc, len(workers), savings, cheapest.CostPerHour)
+		slog.Debug("donor savings analysis", "component", "donor", "data_center", dc, "workers", len(workers), "savings", savings, "donor_cost_per_hr", cheapest.CostPerHour)
 		if savings > bestSavings {
 			bestSavings = savings
 			bestDC = dc
@@ -115,7 +114,7 @@ func FindDonorOffer(client cloud.Client, workerOffers []cloud.Offer, estimates [
 	}
 
 	if bestDC == "" || bestSavings <= 0 {
-		log.Printf("donor: not cost-effective in any data center")
+		slog.Debug("donor not cost-effective in any data center", "component", "donor")
 		return nil, nil
 	}
 
@@ -183,9 +182,7 @@ func donorSavings(donorOffer cloud.Offer, workers []dcWorker) float64 {
 
 	costWith := donorCost + workerCopyCost
 
-	log.Printf("donor: cost breakdown — without=$%.4f, with=$%.4f (donor=$%.4f + worker_copies=$%.4f), download=%s, copy=%s",
-		costWithout, costWith, donorCost, workerCopyCost,
-		maxDownloadTime.Round(time.Second), copyTime.Round(time.Second))
+	slog.Debug("donor cost breakdown", "component", "donor", "cost_without", costWithout, "cost_with", costWith, "donor_cost", donorCost, "worker_copy_cost", workerCopyCost, "download_time", maxDownloadTime.Round(time.Second), "copy_time", copyTime.Round(time.Second))
 
 	return costWithout - costWith
 }
@@ -294,7 +291,7 @@ func SeedWorkers(
 				for attempt := 0; attempt < 3; attempt++ {
 					if err := client.CopyBetweenInstances(donor, cachePath, w.ProviderID, cachePath); err != nil {
 						copyErr = err
-						log.Printf("donor: copy %s to worker %s attempt %d failed: %v", cachePath, w.ProviderID, attempt+1, err)
+						slog.Warn("donor copy to worker failed", "component", "donor", "cache_path", cachePath, "worker", w.ProviderID, "attempt", attempt+1, "error", err)
 						continue
 					}
 					copyErr = nil
@@ -307,7 +304,7 @@ func SeedWorkers(
 
 			elapsed := int(time.Since(start).Seconds())
 			if copyErr != nil {
-				log.Printf("donor: copy to worker %s failed after retries: %v", w.ProviderID, copyErr)
+				slog.Warn("donor copy to worker failed after retries", "component", "donor", "worker", w.ProviderID, "error", copyErr)
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("worker %d: %w", w.DBID, copyErr))
 				mu.Unlock()

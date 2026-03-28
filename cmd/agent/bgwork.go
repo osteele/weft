@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -114,7 +114,7 @@ func (m *bgWorkManager) Barrier() {
 	m.errors = nil
 	m.mu.Unlock()
 	for _, e := range errs {
-		log.Printf("background work error: job %d op=%s: %v", e.JobID, e.Op, e.Err)
+		slog.Warn("background work error", "job_id", e.JobID, "op", e.Op, "error", e.Err)
 	}
 }
 
@@ -140,7 +140,7 @@ func (m *bgWorkManager) decrementWorkdir(resolved string) {
 		m.wg.Add(1)
 		go func() {
 			defer m.wg.Done()
-			log.Printf("deleting workdir %s", resolved)
+			slog.Debug("deleting workdir", "path", resolved)
 			if err := os.RemoveAll(resolved); err != nil {
 				m.recordError(0, "delete-workdir", err)
 			}

@@ -3,7 +3,7 @@ package campaign
 import (
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -80,7 +80,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			continue
 		}
 		if count >= maxAttempts {
-			log.Printf("relaunch: job %d has %d attempts in campaign (max %d), skipping", j.ID, count, maxAttempts)
+			slog.Debug("job exceeds max attempts, skipping", "component", "relaunch", "job_id", j.ID, "attempts", count, "max_attempts", maxAttempts)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind:     db.EventRelaunchSkippedMaxAttempts,
 				JobID:         j.ID,
@@ -98,7 +98,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		return result, nil
 	}
 
-	log.Printf("relaunch: %d eligible orphaned jobs for relaunch", len(eligible))
+	slog.Info("eligible orphaned jobs for relaunch", "component", "relaunch", "count", len(eligible))
 	_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 		EventKind: db.EventRelaunchEligible,
 		JobCount:  len(eligible),
@@ -117,7 +117,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			Bucket:          cfg.R2Cfg.Bucket,
 		})
 		if err != nil {
-			log.Printf("relaunch: build R2 client for disk estimation: %v", err)
+			slog.Warn("failed to build R2 client for disk estimation", "component", "relaunch", "error", err)
 		}
 	}
 	for i := range groups {
@@ -133,8 +133,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 		if priorDisk > 0 {
 			floor := priorDisk + priorDisk/2 // 1.5x
 			if groups[i].DiskGB < floor {
-				log.Printf("relaunch: group %s: raising disk from %dGB to %dGB (prior disk_full at %dGB)",
-					group.GPUSpec(), groups[i].DiskGB, floor, priorDisk)
+				slog.Info("raising disk allocation due to prior disk_full", "component", "relaunch", "gpu_spec", group.GPUSpec(), "from_gb", groups[i].DiskGB, "to_gb", floor, "prior_disk_full_gb", priorDisk)
 				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 					EventKind: db.EventRelaunchDiskBump,
 					GPUSpec:   group.GPUSpec(),
@@ -158,7 +157,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	var launchOffers []cloud.Offer
 	for _, gOffer := range groupOffers {
 		if gOffer.Offer == nil {
-			log.Printf("relaunch: no offers for group %s, skipping %d jobs", gOffer.Group.GPUSpec(), len(gOffer.Group.Jobs))
+			slog.Warn("no offers for group, skipping", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "job_count", len(gOffer.Group.Jobs))
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchSkippedNoOffers,
 				GPUSpec:   gOffer.Group.GPUSpec(),
@@ -168,7 +167,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			continue
 		}
 		if gOffer.Err != nil {
-			log.Printf("relaunch: offer error for group %s: %v", gOffer.Group.GPUSpec(), gOffer.Err)
+			slog.Warn("offer error for group", "component", "relaunch", "gpu_spec", gOffer.Group.GPUSpec(), "error", gOffer.Err)
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchSkippedOfferError,
 				GPUSpec:   gOffer.Group.GPUSpec(),
@@ -268,7 +267,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				log.Printf("relaunch: launch failed for group %s: %v", group.GPUSpec(), err)
+				slog.Warn("launch failed for group", "component", "relaunch", "gpu_spec", group.GPUSpec(), "error", err)
 				_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 					EventKind: db.EventRelaunchLaunchFailed,
 					GPUSpec:   group.GPUSpec(),
@@ -280,10 +279,10 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 			}
 			if hasPredecessor {
 				if setErr := db.SetLaunchReplacedID(cfg.Database, instanceID, predecessorID); setErr != nil {
-					log.Printf("relaunch: failed to set replaced_instance_id on instance %d: %v", instanceID, setErr)
+					slog.Warn("failed to set replaced_instance_id", "component", "relaunch", "instance", instanceID, "error", setErr)
 				}
 			}
-			log.Printf("relaunch: launched instance %d for %d jobs (group %s)", instanceID, len(group.Jobs), group.GPUSpec())
+			slog.Info("launched instance for relaunch", "component", "relaunch", "instance", instanceID, "job_count", len(group.Jobs), "gpu_spec", group.GPUSpec())
 			_ = db.InsertLifecycleEvent(cfg.Database, &db.LifecycleEvent{
 				EventKind: db.EventRelaunchLaunchSuccess,
 				LaunchID:  instanceID,

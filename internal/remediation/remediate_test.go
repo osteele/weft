@@ -1,7 +1,7 @@
 package remediation
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"testing"
 
@@ -13,7 +13,7 @@ func TestAttemptRemediation_NoMatch(t *testing.T) {
 	ctx := RemediationContext{
 		Job:        &db.Job{ID: 1, Host: "host-beta"},
 		LogContent: "Training complete! Loss: 0.01",
-		Logger:     log.New(os.Stderr, "", 0),
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	result := AttemptRemediation(ctx)
 	if result != nil {
@@ -29,7 +29,7 @@ func TestAttemptRemediation_RetryLimitReached(t *testing.T) {
 			RetryCount: 1, // already retried once
 		},
 		LogContent: "ModuleNotFoundError: No module named 'transformers'",
-		Logger:     log.New(os.Stderr, "", 0),
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 
 	// This will try to diagnose but won't write to DB (no DB provided)
@@ -53,7 +53,7 @@ func TestAttemptRemediation_CodingAgentNotConfigured(t *testing.T) {
 			Host: "host-beta",
 		},
 		LogContent: "ModuleNotFoundError: No module named 'transformers'",
-		Logger:     log.New(os.Stderr, "", 0),
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		Config:     &config.Config{}, // no coding agent configured
 	}
 
@@ -76,7 +76,7 @@ func TestAttemptRemediation_EnvironmentNotRemediable(t *testing.T) {
 			Host: "host-beta",
 		},
 		LogContent: "torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
-		Logger:     log.New(os.Stderr, "", 0),
+		Logger:     slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 
 	result := AttemptRemediation(ctx)

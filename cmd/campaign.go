@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -237,7 +237,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Estimate disk needs from HF model inputs
 	r2Client, err := buildR2Client(cfg)
 	if err != nil {
-		log.Printf("warning: build R2 client for disk estimation: %v", err)
+		slog.Warn("failed to build R2 client for disk estimation", "error", err)
 	}
 	for i := range groups {
 		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
@@ -792,7 +792,7 @@ func reconcileBeforeDisplay(database *sql.DB, timeout time.Duration) []string {
 func buildOverheadModel(database *sql.DB) *estimate.OverheadModel {
 	obs, err := db.QueryOverheadObservations(database)
 	if err != nil {
-		log.Printf("warning: could not query overhead observations: %v", err)
+		slog.Warn("could not query overhead observations", "error", err)
 		return nil
 	}
 	return estimate.BuildOverheadModel(obs)
@@ -812,7 +812,7 @@ func printSurvivalRejections(groupOffers []campaign.GroupOffer, minSurvival floa
 func buildSurvivalModel(database *sql.DB) *bidding.SurvivalModel {
 	outcomes, err := bidding.LoadInstanceOutcomes(database)
 	if err != nil {
-		log.Printf("warning: could not query instance outcomes: %v", err)
+		slog.Warn("could not query instance outcomes", "error", err)
 		return nil
 	}
 	return bidding.BuildSurvivalModel(outcomes)

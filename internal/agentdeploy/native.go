@@ -2,7 +2,7 @@ package agentdeploy
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -22,18 +22,18 @@ func BuildOnHost(host, version string) error {
 		return fmt.Errorf("locate repo root: %w", err)
 	}
 
-	log.Printf("syncing sources to %s:%s...", host, remoteAgentBuildDir)
+	slog.Info("syncing sources to remote", "component", "agentdeploy", "host", host, "dir", remoteAgentBuildDir)
 	if err := rsyncSourcesToHost(root, host); err != nil {
 		return fmt.Errorf("rsync sources: %w", err)
 	}
 
-	log.Printf("ensuring Go is available on %s...", host)
+	slog.Debug("ensuring Go is available", "component", "agentdeploy", "host", host)
 	gobin, err := ensureGoOnHost(host)
 	if err != nil {
 		return fmt.Errorf("ensure Go: %w", err)
 	}
 
-	log.Printf("building agent on %s (version %s)...", host, version)
+	slog.Info("building agent on remote", "component", "agentdeploy", "host", host, "version", version)
 	buildCmd := fmt.Sprintf(
 		`mkdir -p %s && cd %s && %s build -ldflags "-X main.version=%s" -o %s ./cmd/agent`,
 		remoteBinDir, remoteAgentBuildDir, gobin, version, remoteAgentPath,
@@ -93,7 +93,7 @@ func ensureGoOnHost(host string) (string, error) {
 		return "", fmt.Errorf("determine Go version: %w", err)
 	}
 
-	log.Printf("Go not found on %s; installing Go %s...", host, goVersion)
+	slog.Info("Go not found, installing", "component", "agentdeploy", "host", host, "go_version", goVersion)
 	installScript := fmt.Sprintf(`set -euo pipefail
 VERSION=%s
 URL="https://go.dev/dl/go${VERSION}.linux-amd64.tar.gz"

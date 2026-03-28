@@ -1,7 +1,7 @@
 package services
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"sort"
 	"sync"
@@ -9,7 +9,7 @@ import (
 )
 
 func newTestHostStateManager() *HostStateManager {
-	logger := log.New(os.Stderr, "[test] ", 0)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	return NewHostStateManager(logger)
 }
 

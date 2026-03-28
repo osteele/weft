@@ -2,7 +2,7 @@ package campaign
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -135,7 +135,7 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 
 		var downloadBytes int64
 		if totalBytes, err := dataloc.ResolveInputSizes(go_.Group.AllInputs(), nil); err != nil {
-			log.Printf("warning: could not resolve input sizes: %v", err)
+			slog.Warn("could not resolve input sizes", "component", "cost", "error", err)
 		} else {
 			downloadBytes = totalBytes
 		}

@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -166,14 +166,14 @@ func New(database *sql.DB, cfg Config) *Monitor {
 // and attempts auto-remediation. This enables coordinator-level diagnostics
 // without requiring a separate coordinator daemon.
 func (m *Monitor) EnableRemediation(appConfig *config.Config) {
-	logger := log.New(log.Writer(), "[remediator] ", log.LstdFlags)
+	logger := slog.Default().With("component", "remediator")
 	m.EnableRemediationWithLogger(appConfig, logger)
 }
 
 // EnableRemediationWithLogger starts the remediator service with a caller-provided logger.
-func (m *Monitor) EnableRemediationWithLogger(appConfig *config.Config, logger *log.Logger) {
+func (m *Monitor) EnableRemediationWithLogger(appConfig *config.Config, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.New(log.Writer(), "[remediator] ", log.LstdFlags)
+		logger = slog.Default().With("component", "remediator")
 	}
 	m.remediator = services.NewRemediator(m.db, logger, appConfig, 30*time.Second)
 }
@@ -805,7 +805,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 	for _, host := range hosts {
 		jobs, err := db.ListActiveJobs(m.db, host)
 		if err != nil {
-			log.Printf("monitor: failed to list active jobs for %s: %v", host, err)
+			slog.Warn("failed to list active jobs", "component", "monitor", "host", host, "error", err)
 			continue
 		}
 		activeJobsByHost[host] = jobs
@@ -911,7 +911,7 @@ func (m *Monitor) performBackgroundSync(forceAll bool) SyncResult {
 			m.hostSyncTimes[host] = now
 			m.mu.Unlock()
 			if err := db.RecordHostSync(m.db, host, now); err != nil {
-				log.Printf("monitor: failed to record host sync for %s: %v", host, err)
+				slog.Warn("failed to record host sync", "component", "monitor", "host", host, "error", err)
 			}
 		}
 	}
@@ -943,14 +943,14 @@ func killTombstonedJob(database *sql.DB, job *db.Job) bool {
 			return false
 		}
 		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
-			log.Printf("monitor: failed to update tombstoned job %d status: %v", job.ID, err)
+			slog.Warn("failed to update tombstoned job status", "component", "monitor", "job_id", job.ID, "error", err)
 		}
 		return true
 	}
 
 	if err := ops.CancelRemoteJob(job, 5*time.Second); err == nil {
 		if err := db.ClearPendingAndUpdateStatus(database, job.ID, db.StatusDead); err != nil {
-			log.Printf("monitor: failed to update tombstoned job %d status: %v", job.ID, err)
+			slog.Warn("failed to update tombstoned job status", "component", "monitor", "job_id", job.ID, "error", err)
 		}
 		return true
 	}

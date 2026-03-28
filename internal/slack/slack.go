@@ -3,7 +3,7 @@ package slack
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,20 +75,20 @@ func DeployNotifyScript(host, slackWebhook string) {
 
 	tmpFile, err := os.CreateTemp("", "notify-slack-*.sh")
 	if err != nil {
-		log.Printf("slack: failed to create temp file for notify script: %v", err)
+		slog.Warn("failed to create temp file for notify script", "component", "slack", "error", err)
 		return
 	}
 	defer os.Remove(tmpFile.Name())
 
 	if _, err := tmpFile.Write(scripts.NotifySlackScript); err != nil {
-		log.Printf("slack: failed to write notify script: %v", err)
+		slog.Warn("failed to write notify script", "component", "slack", "error", err)
 		tmpFile.Close()
 		return
 	}
 	tmpFile.Close()
 
 	if err := ssh.CopyTo(tmpFile.Name(), host, NotifyScriptPath); err != nil {
-		log.Printf("slack: failed to deploy notify script to %s: %v", host, err)
+		slog.Warn("failed to deploy notify script", "component", "slack", "host", host, "error", err)
 		return
 	}
 	ssh.Run(host, fmt.Sprintf("chmod +x '%s'", NotifyScriptPath))

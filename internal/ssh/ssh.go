@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"regexp"
@@ -274,7 +274,7 @@ func defaultRunWithTimeout(host string, command string, timeout time.Duration) (
 	}
 
 	if debugSSH {
-		log.Printf("[SSH #%d] START host=%s timeout=%v cmd=%q", callNum, host, timeout, cmdPreview)
+		slog.Debug("SSH command start", "component", "ssh", "call_num", callNum, "host", host, "timeout", timeout, "cmd", cmdPreview)
 	}
 
 	stdout, stderr, err := getDefaultPool().Execute(host, command, timeout)
@@ -287,9 +287,9 @@ func defaultRunWithTimeout(host string, command string, timeout time.Duration) (
 		}
 		outPreview = strings.ReplaceAll(outPreview, "\n", "\\n")
 		if err != nil {
-			log.Printf("[SSH #%d] DONE elapsed=%v err=%v out=%q", callNum, elapsed, err, outPreview)
+			slog.Debug("SSH command done", "component", "ssh", "call_num", callNum, "elapsed", elapsed, "error", err, "out", outPreview)
 		} else {
-			log.Printf("[SSH #%d] DONE elapsed=%v out=%q", callNum, elapsed, outPreview)
+			slog.Debug("SSH command done", "component", "ssh", "call_num", callNum, "elapsed", elapsed, "out", outPreview)
 		}
 	}
 

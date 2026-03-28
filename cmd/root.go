@@ -3,14 +3,18 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
+
+var verbose bool
 
 // Version is set at build time via -ldflags
 var Version = "dev"
@@ -36,6 +40,11 @@ func Execute() error {
 			// Insert the default command as the first argument
 			os.Args = append(os.Args, cfg.DefaultCommand)
 		}
+	}
+
+	logging.Setup(os.Stderr, "text")
+	if verbose {
+		logging.SetLevel(slog.LevelDebug)
 	}
 
 	// Initialize operation logger
@@ -82,6 +91,7 @@ var versionCmd = &cobra.Command{
 }
 
 func init() {
+	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable debug-level logging")
 	rootCmd.AddCommand(versionCmd)
 }
 

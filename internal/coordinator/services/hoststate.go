@@ -4,7 +4,7 @@
 package services
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -26,11 +26,11 @@ type HostState struct {
 type HostStateManager struct {
 	mu     sync.Mutex
 	hosts  map[string]*HostState
-	logger *log.Logger
+	logger *slog.Logger
 }
 
 // NewHostStateManager creates a new host state manager.
-func NewHostStateManager(logger *log.Logger) *HostStateManager {
+func NewHostStateManager(logger *slog.Logger) *HostStateManager {
 	return &HostStateManager{
 		hosts:  make(map[string]*HostState),
 		logger: logger,
@@ -57,10 +57,10 @@ func (m *HostStateManager) ProbeHost(host string) bool {
 	m.mu.Unlock()
 
 	if online && !wasOnline {
-		m.logger.Printf("host %s came online", host)
+		m.logger.Info("host came online", "host", host)
 		oplog.Log(oplog.OpHostConnect, oplog.WithHost(host))
 	} else if !online && wasOnline {
-		m.logger.Printf("host %s went offline", host)
+		m.logger.Info("host went offline", "host", host)
 		oplog.Log(oplog.OpHostTimeout, oplog.WithHost(host))
 	}
 
@@ -127,7 +127,7 @@ func (m *HostStateManager) Snapshot() map[string]HostState {
 func (m *HostStateManager) SeedFromInventory() {
 	hosts, err := inventory.LoadHosts()
 	if err != nil {
-		m.logger.Printf("load inventory: %v", err)
+		m.logger.Warn("failed to load inventory", "error", err)
 		return
 	}
 
