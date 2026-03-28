@@ -263,7 +263,7 @@ func (m Model) handleMonitorJobLog(result *monitor.JobLogResult) (Model, tea.Cmd
 
 	// Extract progress info
 	if result.Err == nil {
-		prog := progress.FindLastProgress(result.Content)
+		prog := progress.FindLastProgressPreferExplicit(result.Content)
 		if prog != nil {
 			m.jobProgress[result.JobID] = prog
 		}

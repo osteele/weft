@@ -515,7 +515,7 @@ func startProgressReporter(r2Bucket string, jobID, runID int64, logPath string) 
 				if tail == "" {
 					continue
 				}
-				prog := progress.FindLastProgress(tail)
+				prog := progress.FindLastProgressPreferExplicit(tail)
 				if prog == nil {
 					continue
 				}

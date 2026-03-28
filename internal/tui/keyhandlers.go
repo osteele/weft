@@ -362,7 +362,7 @@ func (m Model) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 							m.logLoading = false
 							m.logStale = false
 							m.logViewport.SetContent(content)
-							prog := progress.FindLastProgress(content)
+							prog := progress.FindLastProgressPreferExplicit(content)
 							if prog != nil {
 								m.jobProgress[m.selectedJob.ID] = prog
 							}

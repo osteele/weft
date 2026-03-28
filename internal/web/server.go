@@ -711,7 +711,7 @@ func (s *Server) fetchJobProgress(job *db.Job) *progress.Progress {
 		return nil
 	}
 
-	return progress.ParseProgress(strings.TrimSpace(stdout))
+	return progress.FindLastProgressPreferExplicit(strings.TrimSpace(stdout))
 }
 
 // getJobProgress returns the progress for a job if available.

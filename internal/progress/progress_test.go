@@ -71,44 +71,44 @@ func TestParseProgress(t *testing.T) {
 		{
 			name: "tqdm basic",
 			line: "  2%|▏         | 50/2500 [00:30<25:00, 1.63it/s]",
-			want: &Progress{Percent: 2, RawLine: "2%|▏         | 50/2500 [00:30<25:00, 1.63it/s]"},
+			want: &Progress{Percent: 2, RawLine: "2%|▏         | 50/2500 [00:30<25:00, 1.63it/s]", Source: SourceTqdm},
 		},
 		{
 			name: "tqdm with epoch prefix",
 			line: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]",
-			want: &Progress{Percent: 45, RawLine: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]"},
+			want: &Progress{Percent: 45, RawLine: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]", Source: SourceTqdm},
 		},
 		{
 			name: "tqdm 100%",
 			line: "100%|██████████| 500/500 [00:45<00:00, 11.11it/s, loss=0.234]",
-			want: &Progress{Percent: 100, RawLine: "100%|██████████| 500/500 [00:45<00:00, 11.11it/s, loss=0.234]"},
+			want: &Progress{Percent: 100, RawLine: "100%|██████████| 500/500 [00:45<00:00, 11.11it/s, loss=0.234]", Source: SourceTqdm},
 		},
 		{
 			name: "tqdm 0%",
 			line: "  0%|          | 0/1000 [00:00<?, ?it/s]",
-			want: &Progress{Percent: 0, RawLine: "0%|          | 0/1000 [00:00<?, ?it/s]"},
+			want: &Progress{Percent: 0, RawLine: "0%|          | 0/1000 [00:00<?, ?it/s]", Source: SourceTqdm},
 		},
 
 		// Epoch patterns
 		{
 			name: "epoch basic",
 			line: "Epoch 3/10",
-			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10"},
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10", Source: SourceEpoch},
 		},
 		{
 			name: "epoch with brackets",
 			line: "Epoch [3/10]",
-			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch [3/10]"},
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch [3/10]", Source: SourceEpoch},
 		},
 		{
 			name: "epoch with trailing colon",
 			line: "Epoch 3/10:",
-			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10:"},
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10:", Source: SourceEpoch},
 		},
 		{
 			name: "epoch case insensitive",
 			line: "epoch 5/20",
-			want: &Progress{Percent: -1, Current: 5, Total: 20, RawLine: "epoch 5/20"},
+			want: &Progress{Percent: -1, Current: 5, Total: 20, RawLine: "epoch 5/20", Source: SourceEpoch},
 		},
 
 		// Priority: Progress: patterns take precedence over tqdm/epoch
@@ -179,6 +179,9 @@ func TestParseProgress(t *testing.T) {
 			if got.RawLine != tt.want.RawLine {
 				t.Errorf("RawLine = %q, want %q", got.RawLine, tt.want.RawLine)
 			}
+			if got.Source != tt.want.Source {
+				t.Errorf("Source = %v, want %v", got.Source, tt.want.Source)
+			}
 		})
 	}
 }
@@ -225,7 +228,7 @@ func TestProgress_DisplayPercent(t *testing.T) {
 	}
 }
 
-func TestFindLastProgress(t *testing.T) {
+func TestFindLastProgressPreferExplicit(t *testing.T) {
 	tests := []struct {
 		name    string
 		content string
@@ -233,33 +236,28 @@ func TestFindLastProgress(t *testing.T) {
 		wantNil bool
 	}{
 		{
-			name: "single progress line",
-			content: `Starting job...
-Progress: 50%
-Still working...`,
-			want: &Progress{Percent: 50, RawLine: "Progress: 50%"},
+			name: "tqdm ignored when Progress: lines present",
+			content: `Generating test split: 100%|██████████| 4358/4358 [00:00<00:00]
+Generating train split: 100%|██████████| 1801350/1801350 [00:00<00:00]
+Generating validation split: 100%|██████████| 3760/3760 [00:00<00:00]
+Progress: 500/35000
+Progress: 1000/35000
+Progress: 1500/35000`,
+			want: &Progress{Percent: -1, Current: 1500, Total: 35000, RawLine: "Progress: 1500/35000", Source: SourceExplicit},
 		},
 		{
-			name: "multiple progress lines - returns last",
-			content: `Starting job...
-Progress: 25%
-Working...
-Progress: 50%
-More work...
-Progress: 75%
-Almost done...`,
-			want: &Progress{Percent: 75, RawLine: "Progress: 75%"},
+			name: "tqdm used when no Progress: lines",
+			content: `Loading model...
+Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42]
+Some other output`,
+			want: &Progress{Percent: 45, RawLine: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42]", Source: SourceTqdm},
 		},
 		{
-			name: "progress at end",
-			content: `Starting job...
-Progress: 100%`,
-			want: &Progress{Percent: 100, RawLine: "Progress: 100%"},
-		},
-		{
-			name:    "no progress lines",
-			content: "Just some output\nNo progress here\n",
-			wantNil: true,
+			name: "epoch used when no Progress: or tqdm lines",
+			content: `Starting training...
+Epoch 3/10
+Training loss: 0.234`,
+			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10", Source: SourceEpoch},
 		},
 		{
 			name:    "empty content",
@@ -267,49 +265,45 @@ Progress: 100%`,
 			wantNil: true,
 		},
 		{
-			name: "mixed formats - returns last",
-			content: `Progress: 1/10
-Progress: 2/10
-Progress: 30%`,
-			want: &Progress{Percent: 30, RawLine: "Progress: 30%"},
+			name: "tqdm at 100% then Progress: at low pct - returns Progress:",
+			content: `100%|██████████| 1000/1000 [00:05<00:00]
+100%|██████████| 2000/2000 [00:03<00:00]
+Progress: 4%`,
+			want: &Progress{Percent: 4, RawLine: "Progress: 4%", Source: SourceExplicit},
 		},
 		{
-			name: "tqdm progress in log output",
-			content: `Loading model...
-Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]
-Some other output`,
-			want: &Progress{Percent: 45, RawLine: "Epoch 1/3:  45%|████▌     | 450/1000 [01:23<01:42, 5.38it/s]"},
-		},
-		{
-			name: "epoch-only progress",
-			content: `Starting training...
-Epoch 3/10
-Training loss: 0.234`,
-			want: &Progress{Percent: -1, Current: 3, Total: 10, RawLine: "Epoch 3/10"},
+			name: "explicit before tqdm - explicit always wins",
+			content: `Progress: 1000/35000
+Progress: 1500/35000
+45%|████▌     | 450/1000 [01:23<01:42]`,
+			want: &Progress{Percent: -1, Current: 1500, Total: 35000, RawLine: "Progress: 1500/35000", Source: SourceExplicit},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FindLastProgress(tt.content)
-
+			got := FindLastProgressPreferExplicit(tt.content)
 			if tt.wantNil {
 				if got != nil {
-					t.Errorf("FindLastProgress() = %+v, want nil", got)
+					t.Errorf("FindLastProgressPreferExplicit() = %+v, want nil", got)
 				}
 				return
 			}
-
 			if got == nil {
-				t.Errorf("FindLastProgress() = nil, want %+v", tt.want)
+				t.Errorf("FindLastProgressPreferExplicit() = nil, want %+v", tt.want)
 				return
 			}
-
 			if got.Percent != tt.want.Percent {
 				t.Errorf("Percent = %d, want %d", got.Percent, tt.want.Percent)
 			}
-			if got.RawLine != tt.want.RawLine {
-				t.Errorf("RawLine = %q, want %q", got.RawLine, tt.want.RawLine)
+			if got.Current != tt.want.Current {
+				t.Errorf("Current = %d, want %d", got.Current, tt.want.Current)
+			}
+			if got.Total != tt.want.Total {
+				t.Errorf("Total = %d, want %d", got.Total, tt.want.Total)
+			}
+			if got.Source != tt.want.Source {
+				t.Errorf("Source = %d, want %d", got.Source, tt.want.Source)
 			}
 		})
 	}

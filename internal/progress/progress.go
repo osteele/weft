@@ -9,12 +9,22 @@ import (
 	"sync"
 )
 
+// ProgressSource indicates how a progress value was detected.
+type ProgressSource int
+
+const (
+	SourceExplicit ProgressSource = iota // "Progress:" prefix
+	SourceTqdm                           // tqdm bar (NN%|)
+	SourceEpoch                          // Epoch N/M fallback
+)
+
 // Progress represents parsed progress information from a job
 type Progress struct {
-	Percent int    // 0-100, -1 if using Current/Total instead
-	Current int    // For "N/M" format (0 if using Percent)
-	Total   int    // For "N/M" format (0 if using Percent)
-	RawLine string // The original progress line
+	Percent int            // 0-100, -1 if using Current/Total instead
+	Current int            // For "N/M" format (0 if using Percent)
+	Total   int            // For "N/M" format (0 if using Percent)
+	RawLine string         // The original progress line
+	Source  ProgressSource // How this progress was detected
 }
 
 // DisplayPercent returns the progress as a percentage (0-100).
@@ -113,17 +123,17 @@ func ParseProgress(line string) *Progress {
 
 		if m := percentPattern.FindStringSubmatch(line); m != nil {
 			percent, _ := strconv.Atoi(m[1])
-			return &Progress{Percent: percent, RawLine: line}
+			return &Progress{Percent: percent, RawLine: line, Source: SourceExplicit}
 		}
 		if m := slashPattern.FindStringSubmatch(line); m != nil {
 			current, _ := strconv.Atoi(m[1])
 			total, _ := strconv.Atoi(m[2])
-			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line}
+			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line, Source: SourceExplicit}
 		}
 		if m := ofPattern.FindStringSubmatch(line); m != nil {
 			current, _ := strconv.Atoi(m[1])
 			total, _ := strconv.Atoi(m[2])
-			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line}
+			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line, Source: SourceExplicit}
 		}
 	}
 
@@ -131,7 +141,7 @@ func ParseProgress(line string) *Progress {
 	if hasTqdm {
 		if m := tqdmPattern.FindStringSubmatch(line); m != nil {
 			percent, _ := strconv.Atoi(m[1])
-			return &Progress{Percent: percent, RawLine: line}
+			return &Progress{Percent: percent, RawLine: line, Source: SourceTqdm}
 		}
 	}
 
@@ -140,7 +150,7 @@ func ParseProgress(line string) *Progress {
 		if m := epochPattern.FindStringSubmatch(line); m != nil {
 			current, _ := strconv.Atoi(m[1])
 			total, _ := strconv.Atoi(m[2])
-			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line}
+			return &Progress{Percent: -1, Current: current, Total: total, RawLine: line, Source: SourceEpoch}
 		}
 	}
 
@@ -148,24 +158,38 @@ func ParseProgress(line string) *Progress {
 }
 
 // GrepCommand returns a shell command that greps for progress lines in logFile.
-// Used by TUI and web server to fetch progress via SSH.
+// Used by TUI and web server to fetch progress via SSH. Returns multiple lines
+// so callers can use FindLastProgressPreferExplicit to pick the right one.
 func GrepCommand(logFile string) string {
-	return fmt.Sprintf("grep -iE 'Progress:|%%\\||Epoch [0-9\\[]' %s 2>/dev/null | tail -1", logFile)
+	return fmt.Sprintf("grep -iE 'Progress:|%%\\||Epoch [0-9\\[]' %s 2>/dev/null | tail -20", logFile)
 }
 
-// FindLastProgress searches content for the last progress line.
-// Scans from end since we want the most recent progress.
-func FindLastProgress(content string) *Progress {
+// FindLastProgressPreferExplicit searches content for the last progress line,
+// preferring explicit "Progress:" lines over tqdm/epoch. If any explicit
+// Progress: line exists in the content, tqdm and epoch lines are ignored.
+// This prevents spurious phase resets from tqdm bars (e.g. dataset loading)
+// when the job also emits explicit Progress: lines for its main work.
+func FindLastProgressPreferExplicit(content string) *Progress {
 	lines := strings.Split(content, "\n")
 
-	// Scan from end to find most recent progress line
+	var lastExplicit, lastAny *Progress
 	for i := len(lines) - 1; i >= 0; i-- {
-		if prog := ParseProgress(lines[i]); prog != nil {
-			return prog
+		prog := ParseProgress(lines[i])
+		if prog == nil {
+			continue
+		}
+		if lastAny == nil {
+			lastAny = prog
+		}
+		if prog.Source == SourceExplicit {
+			lastExplicit = prog
+			break // scanning from end, so this is the most recent explicit line
 		}
 	}
-
-	return nil
+	if lastExplicit != nil {
+		return lastExplicit
+	}
+	return lastAny
 }
 
 // PhaseTracker detects multi-phase restarts in raw progress output.

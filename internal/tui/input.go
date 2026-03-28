@@ -307,7 +307,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 					lines = lines[len(lines)-500:]
 				}
 				content := strings.Join(lines, "\n")
-				prog := progress.FindLastProgress(content)
+				prog := progress.FindLastProgressPreferExplicit(content)
 				return logFetchedMsg{
 					jobID:     job.ID,
 					content:   content,
@@ -375,7 +375,7 @@ func (m Model) fetchJobLog(job *db.Job) tea.Cmd {
 		}
 
 		// Extract progress information from log content
-		prog := progress.FindLastProgress(stdout)
+		prog := progress.FindLastProgressPreferExplicit(stdout)
 
 		return logFetchedMsg{
 			jobID:    job.ID,
@@ -410,7 +410,7 @@ func (m Model) fetchQuickProgress(job *db.Job) tea.Cmd {
 			return quickProgressMsg{jobID: job.ID, progress: nil}
 		}
 
-		prog := progress.ParseProgress(strings.TrimSpace(stdout))
+		prog := progress.FindLastProgressPreferExplicit(strings.TrimSpace(stdout))
 		return quickProgressMsg{jobID: job.ID, progress: prog}
 	}
 }
