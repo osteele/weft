@@ -158,6 +158,9 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 	}
 
 	allCloudClients, _ := buildCloudClients(cfg)
+	if sw != nil && len(allCloudClients) > 0 {
+		sw.SetCloudClients(allCloudClients)
+	}
 
 	m := watchModel{
 		mode:           mode,
