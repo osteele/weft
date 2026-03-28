@@ -24,12 +24,24 @@ import (
 // Aliases for shared TUI styles used in the launch TUI.
 var (
 	launchTitleStyle    = tuiTitleStyle
-	launchHeaderStyle   = lipgloss.NewStyle().Bold(true).Foreground(tuiAccentColor)
-	launchSelectedStyle = tuiRunningStyle
+	launchHeaderStyle   = lipgloss.NewStyle().Bold(true)
+	launchSelectedStyle = lipgloss.NewStyle()
 	launchDimStyle      = tuiDimStyle
-	launchCursorStyle   = tuiCursorStyle
+	launchNoOfferStyle  = lipgloss.NewStyle().Foreground(tuiCompletedColor).Strikethrough(true)
 	launchErrStyle      = tuiFailedStyle
 )
+
+// renderRow writes a styled line with cursor prefix to b.
+func renderRow(b *strings.Builder, style lipgloss.Style, line string, isCursor bool) {
+	if isCursor {
+		style = style.Bold(true)
+	}
+	prefix := "  "
+	if isCursor {
+		prefix = "> "
+	}
+	b.WriteString(style.Render(prefix + line))
+}
 
 // formatPartialErrors renders a list of launch failure messages.
 func formatPartialErrors(errors []string) string {
@@ -1197,16 +1209,14 @@ func (m launchModel) View() string {
 			if item.isHeader {
 				checkbox := m.groupCheckState(item.groupIdx)
 				line := fmt.Sprintf("%s %s", checkbox, item.label)
+				var style lipgloss.Style
 				if noOffer {
 					line += " (no offers)"
-				}
-				if isCursor {
-					b.WriteString(launchCursorStyle.Render("> " + line))
-				} else if noOffer {
-					b.WriteString(launchDimStyle.Render("  " + line))
+					style = launchNoOfferStyle
 				} else {
-					b.WriteString(launchHeaderStyle.Render("  " + line))
+					style = launchHeaderStyle
 				}
+				renderRow(&b, style, line, isCursor)
 				b.WriteString("\n")
 				continue
 			}
@@ -1222,15 +1232,15 @@ func (m launchModel) View() string {
 
 			line := fmt.Sprintf("%s %s", checkbox, item.label)
 
-			if isCursor {
-				b.WriteString(launchCursorStyle.Render("> " + line))
-			} else if noOffer {
-				b.WriteString(launchDimStyle.Render("  " + line))
+			var style lipgloss.Style
+			if noOffer {
+				style = launchNoOfferStyle
 			} else if checked {
-				b.WriteString(launchSelectedStyle.Render("  " + line))
+				style = launchSelectedStyle
 			} else {
-				b.WriteString(launchDimStyle.Render("  " + line))
+				style = launchDimStyle
 			}
+			renderRow(&b, style, line, isCursor)
 			b.WriteString("\n")
 		}
 
