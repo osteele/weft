@@ -79,7 +79,6 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 		runID = latestRunID.Int64
 	}
 	resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
-	cleanupPrefix := r2keys.JobRunPrefix(jobID, runID)
 
 	// Download results to temp dir
 	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-vastai-%d-*", jobID))
@@ -172,10 +171,9 @@ func (c *Coordinator) processCompletedVastaiJob(ctx context.Context, r2Client *r
 	// Write logs to log cache
 	WriteVastaiLogsToCache(jobID, tmpDir)
 
-	// Clean up R2 prefix
-	if err := r2Client.DeletePrefix(ctx, cleanupPrefix+"/"); err != nil {
-		c.logger.Warn("failed to cleanup R2", "job_id", jobID, "error", err)
-	}
+	// Keep R2 data — live-log chunks are the primary log source for `weft log`.
+	// Previously we deleted the entire prefix here, but that destroyed the only
+	// copy of log content after 5d714b3 stopped uploading consolidated .log files.
 
 	c.logger.Info("processed vastai job", "job_id", jobID, "exit_code", exitCode, "status", db.StatusCompleted)
 	if exitCode == 0 {
