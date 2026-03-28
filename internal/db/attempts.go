@@ -246,14 +246,16 @@ func cleanupStaleAttempts(db *sql.DB) error {
 		return fmt.Errorf("close duplicate open attempts: %w", err)
 	}
 
-	// Step 2: For jobs whose latest open attempt references a terminated cloud
-	// instance, close the attempt and create a fresh unplaced one.
+	// Step 2: For jobs whose latest open attempt references a failed or
+	// canceled cloud instance, close the attempt and create a fresh unplaced
+	// one. Completed instances are intentionally skipped — their jobs should
+	// be finalized by the R2 result sync, not reset to queued.
 	rows, err := db.Query(`
 		SELECT ja.job_id, ja.id
 		FROM job_attempts ja
 		JOIN launches ci ON ci.id = ja.launch_id
 		WHERE ja.end_time IS NULL
-		  AND ci.status IN ('failed', 'completed', 'canceled')`)
+		  AND ci.status IN ('failed', 'canceled')`)
 	if err != nil {
 		return fmt.Errorf("find orphaned cloud attempts: %w", err)
 	}

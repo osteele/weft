@@ -289,7 +289,7 @@ func TestGetLaunchJobsIncludingAttemptsOverridesStatusForHistorical(t *testing.T
 	}
 
 	// GetLaunchJobsIncludingAttempts should preserve "queued" status for
-	// orphaned jobs — JobDisplayStatus() maps queued + orphaned outcome to "orphaned".
+	// orphaned jobs — AttemptDisplayStatus() uses the attempt outcome for display.
 	jobs, err := GetLaunchJobsIncludingAttempts(database, instanceID)
 	if err != nil {
 		t.Fatalf("GetLaunchJobsIncludingAttempts: %v", err)

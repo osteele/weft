@@ -477,7 +477,14 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			runID = latestRunID.Int64
 		}
 		if !markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, runID)) {
-			continue
+			// Fallback: the latest attempt may have a different run_id than the
+			// one that actually ran (e.g., after cleanupStaleAttempts replaced
+			// the attempt). Check for any completed marker for this job.
+			if altKey, ok := markers.AnyCompletedKey(jobID); ok {
+				runID = r2keys.ExtractRunID(altKey)
+			} else {
+				continue
+			}
 		}
 		resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
 		cleanupPrefix := r2keys.JobRunPrefix(jobID, runID)
@@ -839,7 +846,7 @@ func quickSyncJobs(database *sql.DB, jobs []*db.Job, sshTimeout time.Duration) [
 		if job.HasInventoryHost() {
 			hostsToSync[job.Host] = struct{}{}
 		}
-		if job.IsRentalJob() {
+		if job.UsesRentalPlacement() {
 			needsRentalSync = true
 		}
 	}

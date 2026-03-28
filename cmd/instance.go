@@ -347,7 +347,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		if len(jobs) > 0 {
 			fmt.Printf("  Jobs:\n")
 			printInstanceJob := func(j *db.Job) {
-				displayStatus := campaign.JobDisplayStatus(j, outcomes)
+				displayStatus := campaign.AttemptDisplayStatus(j, outcomes)
 				desc := j.Description
 				if desc == "" {
 					desc = campaign.TruncateCommand(j.EffectiveCommand(), 50)

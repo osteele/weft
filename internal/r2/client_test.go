@@ -55,3 +55,29 @@ func TestJobMarkers_HasCompletedMarkerMatchesExactCurrentRunKey(t *testing.T) {
 		t.Fatalf("unexpected match for legacy top-level completion marker")
 	}
 }
+
+func TestJobMarkers_AnyCompletedKeyReturnsSomeKey(t *testing.T) {
+	jobID := int64(441)
+	runID := int64(555)
+
+	markers := &JobMarkers{
+		completedKeys: map[int64]map[string]struct{}{
+			jobID: {
+				r2keys.JobAttemptComplete(jobID, runID): {},
+			},
+		},
+	}
+
+	key, ok := markers.AnyCompletedKey(jobID)
+	if !ok {
+		t.Fatal("expected AnyCompletedKey to find a key")
+	}
+	if key != r2keys.JobAttemptComplete(jobID, runID) {
+		t.Fatalf("AnyCompletedKey = %q, want %q", key, r2keys.JobAttemptComplete(jobID, runID))
+	}
+
+	_, ok = markers.AnyCompletedKey(999)
+	if ok {
+		t.Fatal("expected AnyCompletedKey to return false for unknown job")
+	}
+}

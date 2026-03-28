@@ -73,11 +73,12 @@ type InstanceUpdate struct {
 	TerminationIntent  *instanceintent.Marker
 }
 
-// JobDisplayStatus returns the status to display for a job in the context of a
-// specific instance. When a job has been reset to "queued" after an instance
-// failure, this returns the attempt outcome (e.g. "failed") instead.
-func JobDisplayStatus(j *db.Job, outcomes map[int64]string) string {
-	if outcome, ok := outcomes[j.ID]; ok && j.Status == db.StatusQueued {
+// AttemptDisplayStatus returns the status to display for a job in the context
+// of a specific instance. It prefers the attempt outcome (e.g. "orphaned",
+// "completed") from the instance's attempt record over the job's current DB
+// status, since the job may have been re-queued for retry on another instance.
+func AttemptDisplayStatus(j *db.Job, outcomes map[int64]string) string {
+	if outcome, ok := outcomes[j.ID]; ok {
 		return outcome
 	}
 	return j.Status
@@ -759,10 +760,10 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 	// Report job status changes
 	prevJobStatus := make(map[int64]string)
 	for _, j := range prev.Jobs {
-		prevJobStatus[j.ID] = JobDisplayStatus(j, prev.JobAttemptOutcomes)
+		prevJobStatus[j.ID] = AttemptDisplayStatus(j, prev.JobAttemptOutcomes)
 	}
 	for _, j := range curr.Jobs {
-		displayStatus := JobDisplayStatus(j, curr.JobAttemptOutcomes)
+		displayStatus := AttemptDisplayStatus(j, curr.JobAttemptOutcomes)
 		if prevJobStatus[j.ID] != displayStatus {
 			line := fmt.Sprintf("instance %d: job %d status=%s dir=%s", id, j.ID, displayStatus, j.DirectoryTailDisplay())
 			if j.ExitCode != nil {

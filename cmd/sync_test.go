@@ -149,6 +149,64 @@ func TestRecordCloudJobCompletion_ClosesAttempt(t *testing.T) {
 	}
 }
 
+// TestRecordCloudJobCompletion_UpdatesClosedAttempt verifies that
+// RecordCloudJobCompletion updates the latest attempt even when it already has
+// end_time set (e.g., after cleanupStaleAttempts created a replacement).
+func TestRecordCloudJobCompletion_UpdatesClosedAttempt(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	// Simulate cleanupStaleAttempts: close the original attempt and create a
+	// new empty one (losing the launch_id).
+	now := int64(1000)
+	if _, err := database.Exec(
+		`UPDATE job_attempts SET status = 'canceled', end_time = ? WHERE job_id = ? AND end_time IS NULL`,
+		now, jobID,
+	); err != nil {
+		t.Fatalf("close attempt: %v", err)
+	}
+	if _, err := db.CreateAttempt(database, jobID, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("create replacement attempt: %v", err)
+	}
+
+	// Verify the job now shows as queued
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != db.StatusQueued {
+		t.Fatalf("pre-condition: job status = %q, want %q", job.Status, db.StatusQueued)
+	}
+
+	// RecordCloudJobCompletion should update the latest attempt (the new empty one)
+	if _, err := db.RecordCloudJobCompletion(database, jobID, 0, 10, 20, ""); err != nil {
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
+	}
+
+	job, err = db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID after completion: %v", err)
+	}
+	if job.Status != db.StatusCompleted {
+		t.Fatalf("job status = %q, want %q", job.Status, db.StatusCompleted)
+	}
+}
+
 func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testing.T) {
 	database := db.SetupTestDB(t)
 

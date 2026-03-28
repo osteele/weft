@@ -126,6 +126,24 @@ func (m *JobMarkers) HasStartedMarker(jobID int64, key string) bool {
 	return m.hasMarker(m.startedKeys, jobID, key)
 }
 
+// AnyCompletedKey returns an arbitrary completed-marker key for the given job,
+// regardless of run_id. This is a fallback for when the current latest_run_id
+// doesn't match the run that actually wrote the marker (e.g., after
+// cleanupStaleAttempts replaced the attempt).
+func (m *JobMarkers) AnyCompletedKey(jobID int64) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	keys, ok := m.completedKeys[jobID]
+	if !ok || len(keys) == 0 {
+		return "", false
+	}
+	for k := range keys {
+		return k, true
+	}
+	return "", false
+}
+
 func (m *JobMarkers) hasMarker(markers map[int64]map[string]struct{}, jobID int64, key string) bool {
 	if m == nil || key == "" {
 		return false

@@ -2565,3 +2565,69 @@ func TestJobInputsOutputsEmptyByDefault(t *testing.T) {
 		t.Errorf("expected nil outputs for new job, got %v", job.Outputs)
 	}
 }
+
+// TestCleanupStaleAttempts_SkipsCompletedInstances verifies that
+// cleanupStaleAttempts does not create replacement attempts for jobs on
+// completed instances. These jobs should be finalized by R2 result sync.
+func TestCleanupStaleAttempts_SkipsCompletedInstances(t *testing.T) {
+	// Use a file-backed DB so we can close and re-open (triggering cleanup).
+	tmpFile, err := os.CreateTemp("", "weft-cleanup-test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+
+	cleanup := SetDBPath(tmpFile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a completed instance with an open (unfinalized) job attempt.
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Record the original attempt ID.
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origRunID := job.LatestRunID
+
+	database.Close()
+
+	// Re-open the DB, which triggers cleanupStaleAttempts.
+	database, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// The attempt should NOT have been replaced — still the same run ID.
+	job, err = GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.LatestRunID == nil || origRunID == nil || *job.LatestRunID != *origRunID {
+		t.Errorf("expected attempt to be preserved (run_id=%v), got run_id=%v", origRunID, job.LatestRunID)
+	}
+	if job.LaunchID == nil || *job.LaunchID != instanceID {
+		t.Errorf("expected launch_id=%d, got %v", instanceID, job.LaunchID)
+	}
+}

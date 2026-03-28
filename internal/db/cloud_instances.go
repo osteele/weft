@@ -547,8 +547,8 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 			case AttemptOutcomeFailed:
 				job.Status = StatusFailed
 			case AttemptOutcomeOrphaned:
-				// Leave status as-is (queued); JobDisplayStatus() will use
-				// the attempt outcome for display.
+				// Leave status as-is (queued); AttemptDisplayStatus() uses
+				// the attempt outcome for instance-scoped display.
 			case AttemptOutcomeCompleted:
 				job.Status = StatusCompleted
 			case AttemptOutcomeCancelled:

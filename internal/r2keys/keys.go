@@ -2,6 +2,8 @@ package r2keys
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // Campaign keys
@@ -98,6 +100,21 @@ func JobAttemptComplete(jobID, runID int64) string {
 		return JobComplete(jobID)
 	}
 	return fmt.Sprintf("%s/.complete", JobRunPrefix(jobID, runID))
+}
+
+// ExtractRunID parses the run_id from a job R2 key such as
+// "jobs/441/runs/123/.complete" → 123, or "jobs/441/.complete" → 0.
+func ExtractRunID(key string) int64 {
+	parts := strings.Split(key, "/")
+	for i, p := range parts {
+		if p == "runs" && i+1 < len(parts) {
+			id, err := strconv.ParseInt(parts[i+1], 10, 64)
+			if err == nil {
+				return id
+			}
+		}
+	}
+	return 0
 }
 
 func JobAttemptResultsPrefix(jobID, runID int64) string {

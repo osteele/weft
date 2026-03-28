@@ -89,7 +89,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 			seenJobs[j.ID] = true
 			jobs = append(jobs, jobRow{
 				id:              j.ID,
-				status:          campaign.JobDisplayStatus(j, outcomes),
+				status:          campaign.AttemptDisplayStatus(j, outcomes),
 				instanceID:      id,
 				project:         campaign.JobProjectLabel(j),
 				fullDescription: j.EffectiveDescription(),

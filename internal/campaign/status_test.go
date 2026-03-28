@@ -633,7 +633,7 @@ func TestFormatPlainUpdate_ProgressNoReport(t *testing.T) {
 	}
 }
 
-func TestJobDisplayStatus(t *testing.T) {
+func TestAttemptDisplayStatus(t *testing.T) {
 	tests := []struct {
 		name     string
 		status   string
@@ -659,10 +659,10 @@ func TestJobDisplayStatus(t *testing.T) {
 			want:     db.AttemptOutcomeFailed,
 		},
 		{
-			name:     "running with outcome still shows running",
+			name:     "running with outcome shows outcome",
 			status:   db.StatusRunning,
 			outcomes: map[int64]string{1: db.AttemptOutcomeFailed},
-			want:     db.StatusRunning,
+			want:     db.AttemptOutcomeFailed,
 		},
 		{
 			name:     "queued with no matching outcome shows queued",
@@ -674,15 +674,15 @@ func TestJobDisplayStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			j := &db.Job{ID: 1, Status: tt.status}
-			got := JobDisplayStatus(j, tt.outcomes)
+			got := AttemptDisplayStatus(j, tt.outcomes)
 			if got != tt.want {
-				t.Errorf("JobDisplayStatus() = %q, want %q", got, tt.want)
+				t.Errorf("AttemptDisplayStatus() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestFormatPlainUpdate_JobDisplayStatusUsed(t *testing.T) {
+func TestFormatPlainUpdate_AttemptDisplayStatusUsed(t *testing.T) {
 	ci := &db.Launch{ID: 5, Status: db.LaunchStatusFailed}
 	prev := InstanceUpdate{
 		Launch: &db.Launch{ID: 5, Status: db.LaunchStatusRunning},

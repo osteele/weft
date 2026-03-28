@@ -72,7 +72,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	displayStatuses := make([]string, len(update.Jobs))
 	resolved := 0
 	for i, job := range update.Jobs {
-		displayStatuses[i] = campaign.JobDisplayStatus(job, update.JobAttemptOutcomes)
+		displayStatuses[i] = campaign.AttemptDisplayStatus(job, update.JobAttemptOutcomes)
 		if campaign.IsJobTerminal(displayStatuses[i]) {
 			resolved++
 		}
