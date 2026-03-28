@@ -1,11 +1,14 @@
 package cloud
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
 	"time"
+
+	"github.com/osteele/weft/internal/retry"
 )
 
 // SSHRun executes a command on a remote host via SSH.
@@ -46,27 +49,16 @@ func RunOnInstance(inst *Instance, command string, timeout time.Duration) (strin
 // connection failures (exit code 255) until timeout. Useful for freshly
 // provisioned instances where sshd may not be ready immediately.
 func SSHRunWithRetry(target string, sshOpts []string, command string, timeout time.Duration) (string, error) {
-	deadline := time.Now().Add(timeout)
-	poll := 5 * time.Second
-
-	for {
-		out, err := SSHRun(target, sshOpts, command)
-		if err == nil {
-			return out, nil
-		}
-		// Only retry on SSH connection failures (exit code 255)
-		var exitErr *exec.ExitError
-		isExitErr := errors.As(err, &exitErr)
-		if isExitErr && exitErr.ExitCode() == 255 && time.Now().Before(deadline) {
-			slog.Debug("SSH connection failed, retrying", "component", "cloud", "output", out, "retry_in", poll, "deadline_in", time.Until(deadline).Round(time.Second))
-			time.Sleep(poll)
-			continue
-		}
-		if isExitErr {
-			slog.Warn("SSH failed, not retrying", "component", "cloud", "exit_code", exitErr.ExitCode(), "output", out)
-		} else {
-			slog.Warn("SSH failed with non-exit error, not retrying", "component", "cloud", "error", err)
-		}
-		return out, err
-	}
+	return retry.DoVal(context.Background(), retry.ConstantWithDeadline(5*time.Second, timeout),
+		func() (string, error) {
+			return SSHRun(target, sshOpts, command)
+		},
+		retry.WithRetryIf(func(err error) bool {
+			var exitErr *exec.ExitError
+			return errors.As(err, &exitErr) && exitErr.ExitCode() == 255
+		}),
+		retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
+			slog.Debug("SSH connection failed, retrying", "component", "cloud", "retry_in", delay)
+		}),
+	)
 }

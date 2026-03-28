@@ -22,6 +22,7 @@ import (
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/progress"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/retry"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -246,37 +247,21 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		attempted++
 		fileCount, bytes := measureUploadTree(dirPath)
 		start := time.Now()
-		var lastErr error
 		retryCount := 0
-		for attempt := 1; attempt <= 3; attempt++ {
+		lastErr := retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
 			cmd := exec.CommandContext(ctx, "rclone", "copy",
 				dirPath+"/",
 				"r2:"+bucket+"/"+r2keys.JobAttemptOutputDir(jobID, runID, dir),
 			)
 			cmd.Stderr = os.Stderr
-			err := cmd.Run()
-			cancel()
-			if err == nil {
-				duration := time.Since(start)
-				oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
-					oplog.WithDetailf("output dir=%s", dir),
-					oplog.WithDuration(duration))
-				lastErr = nil
-				break
-			}
-			lastErr = err
+			return cmd.Run()
+		}, retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
 			retryCount++
-			if attempt < 3 {
-				backoff := 5 * time.Second
-				if attempt == 2 {
-					backoff = 10 * time.Second
-				}
-				fmt.Fprintf(os.Stderr, "upload outputs %s for job %d (attempt %d/3): %v; retrying in %s\n",
-					dir, jobID, attempt, err, backoff)
-				time.Sleep(backoff)
-			}
-		}
+			fmt.Fprintf(os.Stderr, "upload outputs %s for job %d (attempt %d/3): %v; retrying in %s\n",
+				dir, jobID, attempt, err, delay)
+		}))
 		if lastErr != nil {
 			duration := time.Since(start)
 			totalDuration += duration
@@ -301,6 +286,9 @@ func uploadOutputDirs(bucket string, jobID, runID int64, workDir string) runner.
 		}
 		duration := time.Since(start)
 		totalDuration += duration
+		oplog.Log(oplog.OpR2Copy, oplog.WithJobID(jobID),
+			oplog.WithDetailf("output dir=%s", dir),
+			oplog.WithDuration(duration))
 		result.FileCount += fileCount
 		result.Bytes += bytes
 		result.RetryCount += retryCount
@@ -396,31 +384,18 @@ func uploadArtifactManifestEntries(bucket string, jobID, runID int64, workDir st
 	return result
 }
 
-// rcloneUploadWithRetry runs an rclone command with up to 3 attempts and backoff.
+// rcloneUploadWithRetry runs an rclone command with retries on transient failures.
 func rcloneUploadWithRetry(bucket, src, r2Key, rcloneCmd string, jobID int64, label string) error {
-	for attempt := 1; attempt <= 3; attempt++ {
+	return retry.Do(context.Background(), retry.ExplicitDelays(5*time.Second, 10*time.Second), func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
 		cmd := exec.CommandContext(ctx, "rclone", rcloneCmd, src, "r2:"+bucket+"/"+r2Key)
 		cmd.Stderr = os.Stderr
-		err := cmd.Run()
-		cancel()
-		if err == nil {
-			return nil
-		}
-		if attempt < 3 {
-			backoff := 5 * time.Second
-			if attempt == 2 {
-				backoff = 10 * time.Second
-			}
-			fmt.Fprintf(os.Stderr, "upload %s for job %d (attempt %d/3): %v; retrying in %s\n",
-				label, jobID, attempt, err, backoff)
-			time.Sleep(backoff)
-		} else {
-			fmt.Fprintf(os.Stderr, "upload %s for job %d failed: %v\n", label, jobID, err)
-			return err
-		}
-	}
-	return nil
+		return cmd.Run()
+	}, retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
+		fmt.Fprintf(os.Stderr, "upload %s for job %d (attempt %d/3): %v; retrying in %s\n",
+			label, jobID, attempt, err, delay)
+	}))
 }
 
 // finalizeUploadResult sets status and timing fields on an OutputUploadResult.

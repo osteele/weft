@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/retry"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -319,13 +320,14 @@ func writeTerminationIntent(bucket string, instanceID int64, marker instanceinte
 }
 
 func executeSelfDestruct(bucket string, instanceID int64, selfDestructCmd string, marker *instanceintent.Marker) {
-	// Execute self-destruct with retries
 	fmt.Printf("Executing self-destruct: %s\n", selfDestructCmd)
 	if marker != nil && marker.DestroyStartedAtUnix == 0 {
 		marker.DestroyStartedAtUnix = time.Now().Unix()
 		writeTerminationIntent(bucket, instanceID, *marker)
 	}
-	for attempt := 1; attempt <= 3; attempt++ {
+	attempt := 0
+	err := retry.Do(context.Background(), retry.FixedAttempts(3, 5*time.Second), func() error {
+		attempt++
 		if marker != nil {
 			marker.DestroyAttempts = attempt
 			marker.LastAttemptAtUnix = time.Now().Unix()
@@ -344,17 +346,20 @@ func executeSelfDestruct(bucket string, instanceID int64, selfDestructCmd string
 				}
 				writeTerminationIntent(bucket, instanceID, *marker)
 			}
-			fmt.Fprintf(os.Stderr, "self-destruct attempt %d failed: %v (stderr: %s)\n", attempt, err, stderr.String())
-		} else {
-			if marker != nil {
-				marker.DestroySucceededAtUnix = time.Now().Unix()
-				marker.LastError = ""
-				writeTerminationIntent(bucket, instanceID, *marker)
-			}
-			fmt.Printf("Self-destruct succeeded on attempt %d\n", attempt)
-			return
+			return fmt.Errorf("self-destruct attempt %d failed: %v (stderr: %s)", attempt, err, stderr.String())
 		}
-		time.Sleep(5 * time.Second)
+		return nil
+	}, retry.WithOnRetry(func(n int, err error, delay time.Duration) {
+		fmt.Fprintf(os.Stderr, "%v; retrying in %s\n", err, delay)
+	}))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "WARNING: self-destruct failed after 3 attempts, instance may still be running\n")
+		return
 	}
-	fmt.Fprintf(os.Stderr, "WARNING: self-destruct failed after 3 attempts, instance may still be running\n")
+	if marker != nil {
+		marker.DestroySucceededAtUnix = time.Now().Unix()
+		marker.LastError = ""
+		writeTerminationIntent(bucket, instanceID, *marker)
+	}
+	fmt.Printf("Self-destruct succeeded on attempt %d\n", attempt)
 }

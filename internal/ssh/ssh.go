@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/osteele/weft/internal/retry"
 )
 
 var (
@@ -308,38 +310,13 @@ func RunWithRetryQuiet(host string, command string) (string, string, error) {
 
 // RunWithRetryVerbose executes an SSH command with retry logic for connection failures
 func RunWithRetryVerbose(host string, command string, verbose bool) (string, string, error) {
-	var lastOutput, lastStderr string
-	var lastErr error
-
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
-		stdout, stderr, err := Run(host, command)
-		lastOutput = stdout
-		lastStderr = stderr
-		lastErr = err
-
-		if err == nil {
-			return stdout, stderr, nil
-		}
-
-		// Check if it's a connection error that should be retried
-		combined := stdout + stderr
-		if IsConnectionError(combined) {
-			if attempt < MaxRetries {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "Connection failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(combined))
-					fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
-				}
-				time.Sleep(RetryDelay)
-				continue
-			}
-			return stdout, stderr, fmt.Errorf("connection failed after %d attempts: %s", MaxRetries, strings.TrimSpace(combined))
-		}
-
-		// Non-connection error, don't retry
-		return stdout, stderr, err
-	}
-
-	return lastOutput, lastStderr, lastErr
+	var stdout, stderr string
+	err := connectionRetry(func() error {
+		var e error
+		stdout, stderr, e = Run(host, command)
+		return e
+	}, func() string { return stdout + stderr }, "Connection", verbose)
+	return stdout, stderr, err
 }
 
 // RunInteractive runs an SSH command that may require terminal interaction
@@ -372,38 +349,15 @@ func CopyTo(localPath, host, remotePath string) error {
 
 // CopyToWithRetryVerbose copies a local file to a remote host with retry logic
 func CopyToWithRetryVerbose(localPath, host, remotePath string, verbose bool) error {
-	var lastErr error
-
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
+	var lastStderr string
+	return connectionRetry(func() error {
 		cmd := scpCommand(host, localPath, fmt.Sprintf("%s:%s", host, remotePath))
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
-
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-		output := stderr.String()
-
-		if IsConnectionError(output) {
-			if attempt < MaxRetries {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "SCP failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(output))
-					fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
-				}
-				time.Sleep(RetryDelay)
-				continue
-			}
-			return fmt.Errorf("scp failed after %d attempts: %s", MaxRetries, strings.TrimSpace(output))
-		}
-
-		// Non-connection error, don't retry
+		lastStderr = stderr.String()
 		return err
-	}
-
-	return lastErr
+	}, func() string { return lastStderr }, "SCP", verbose)
 }
 
 // CopyFrom copies a remote file to a local path using scp.
@@ -418,38 +372,36 @@ func CopyFromWithRetry(remotePath, host, localPath string) error {
 
 // CopyFromWithRetryVerbose copies a remote file to a local path with retry logic.
 func CopyFromWithRetryVerbose(remotePath, host, localPath string, verbose bool) error {
-	var lastErr error
-
-	for attempt := 1; attempt <= MaxRetries; attempt++ {
+	var lastStderr string
+	return connectionRetry(func() error {
 		cmd := scpCommand(host, fmt.Sprintf("%s:%s", host, remotePath), localPath)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		err := cmd.Run()
-
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-		output := stderr.String()
-
-		if IsConnectionError(output) {
-			if attempt < MaxRetries {
-				if verbose {
-					fmt.Fprintf(os.Stderr, "SCP failed (attempt %d/%d): %s\n", attempt, MaxRetries, strings.TrimSpace(output))
-					fmt.Fprintf(os.Stderr, "Retrying in %v...\n", RetryDelay)
-				}
-				time.Sleep(RetryDelay)
-				continue
-			}
-			return fmt.Errorf("scp failed after %d attempts: %s", MaxRetries, strings.TrimSpace(output))
-		}
-
-		// Non-connection error, don't retry
+		lastStderr = stderr.String()
 		return err
-	}
+	}, func() string { return lastStderr }, "SCP", verbose)
+}
 
-	return lastErr
+// connectionRetry runs op with retry logic, retrying only on SSH connection errors.
+// getOutput returns the combined output to check for connection errors.
+// label is used in log messages (e.g. "Connection", "SCP").
+func connectionRetry(op func() error, getOutput func() string, label string, verbose bool) error {
+	err := retry.Do(context.Background(), retry.FixedAttempts(MaxRetries, RetryDelay), op,
+		retry.WithRetryIf(func(err error) bool {
+			return IsConnectionError(getOutput())
+		}),
+		retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "%s failed (attempt %d/%d): %s\n", label, attempt, MaxRetries, strings.TrimSpace(getOutput()))
+				fmt.Fprintf(os.Stderr, "Retrying in %v...\n", delay)
+			}
+		}),
+	)
+	if err != nil && IsConnectionError(getOutput()) {
+		return fmt.Errorf("%s failed after %d attempts: %s: %w", strings.ToLower(label), MaxRetries, strings.TrimSpace(getOutput()), err)
+	}
+	return err
 }
 
 // TmuxSessionExists checks if a tmux session exists on the remote host (with retry)

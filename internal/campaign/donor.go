@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/retry"
 )
 
 // DonorConfig holds the selected donor offer and associated metadata.
@@ -288,15 +290,11 @@ func SeedWorkers(
 			var copyErr error
 
 			for _, cachePath := range cachePaths {
-				for attempt := 0; attempt < 3; attempt++ {
-					if err := client.CopyBetweenInstances(donor, cachePath, w.ProviderID, cachePath); err != nil {
-						copyErr = err
-						slog.Warn("donor copy to worker failed", "component", "donor", "cache_path", cachePath, "worker", w.ProviderID, "attempt", attempt+1, "error", err)
-						continue
-					}
-					copyErr = nil
-					break
-				}
+				copyErr = retry.Do(context.Background(), retry.FixedAttempts(3, 0), func() error {
+					return client.CopyBetweenInstances(donor, cachePath, w.ProviderID, cachePath)
+				}, retry.WithOnRetry(func(attempt int, err error, delay time.Duration) {
+					slog.Warn("donor copy to worker failed", "component", "donor", "cache_path", cachePath, "worker", w.ProviderID, "attempt", attempt, "error", err)
+				}))
 				if copyErr != nil {
 					break
 				}
