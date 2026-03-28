@@ -53,6 +53,31 @@ func instanceAcceptsReuse(inst *db.Launch) (bool, string) {
 	return true, ""
 }
 
+// NewInstanceCapacity builds an InstanceCapacity for a single launch.
+// Returns (cap, true) if the instance is reusable, or (zero, false) if it
+// should be skipped (wrong status, self-destructing, expired grace).
+func NewInstanceCapacity(inst *db.Launch, runningJobCount int) (InstanceCapacity, bool) {
+	if ok, _ := instanceAcceptsReuse(inst); !ok {
+		return InstanceCapacity{}, false
+	}
+
+	cap := InstanceCapacity{
+		Instance:          inst,
+		ProvisionedInputs: inst.ProvisionedInputs,
+		RunningJobCount:   runningJobCount,
+		DiskFreeGB:        estimateDiskFree(inst),
+	}
+
+	if inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
+		cap.GraceRemaining = time.Until(time.Unix(*inst.GraceDeadline, 0))
+		if cap.GraceRemaining <= 0 {
+			return InstanceCapacity{}, false
+		}
+	}
+
+	return cap, true
+}
+
 // FindReusableInstances returns non-terminal cloud instances that could accept new jobs.
 // Returns instances with status "grace" or "running".
 func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
@@ -65,28 +90,9 @@ func FindReusableInstances(database *sql.DB) ([]InstanceCapacity, error) {
 
 	var result []InstanceCapacity
 	for _, inst := range instances {
-		if ok, _ := instanceAcceptsReuse(inst); !ok {
-			continue // skip "launching"
+		if cap, ok := NewInstanceCapacity(inst, jobCounts[inst.ID]); ok {
+			result = append(result, cap)
 		}
-
-		cap := InstanceCapacity{
-			Instance:          inst,
-			ProvisionedInputs: inst.ProvisionedInputs,
-			RunningJobCount:   jobCounts[inst.ID],
-		}
-
-		// Estimate free disk
-		cap.DiskFreeGB = estimateDiskFree(inst)
-
-		// Compute grace remaining
-		if inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
-			cap.GraceRemaining = time.Until(time.Unix(*inst.GraceDeadline, 0))
-			if cap.GraceRemaining <= 0 {
-				continue // expired, skip
-			}
-		}
-
-		result = append(result, cap)
 	}
 
 	return result, nil

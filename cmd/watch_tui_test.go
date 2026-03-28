@@ -55,7 +55,7 @@ func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 		"Rental Instances (1)",
 		"Inventory Hosts (1 active)",
 		"Unplaced Jobs (1)",
-		"[u] unplace queued job",
+		"[u] unplace",
 		"Instance 5 — A100 — running",
 		"  vastai:",
 		"  Jobs: 0/2 resolved",
@@ -464,7 +464,7 @@ func TestSystemWatchModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
 	out := stripANSI(m.View())
 	for _, want := range []string{
 		"#189 unplaced: no local host matched gpu-class=L40s, gpu-mem>=20GB | 2 hosts: no L40s GPU",
-		"[u] unplace queued job",
+		"[u] unplace",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)

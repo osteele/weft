@@ -184,6 +184,12 @@ type watchUnplaceDoneMsg struct {
 	err     error
 }
 
+type watchSubmitDoneMsg struct {
+	jobID      int64
+	instanceID int64
+	err        error
+}
+
 // ---------------------------------------------------------------------------
 // Render row types (system mode)
 // ---------------------------------------------------------------------------
@@ -402,6 +408,9 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchUnplaceDoneMsg:
 		return m.handleUnplaceDone(msg)
 
+	case watchSubmitDoneMsg:
+		return m.handleSubmitDone(msg)
+
 	// --- Campaign/instance-only messages ---
 	case watchSyncTickMsg:
 		if !m.mode.isInstanceBased() {
@@ -527,6 +536,25 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job.HasInventoryHost() || job.Host == "" {
 			return m, requestWatchJobUnplace(m.database, job.ID)
 		}
+	case "s":
+		job := m.selectedUnplacedJob()
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			return m, nil
+		}
+		capacities := m.buildInstanceCapacities()
+		if len(capacities) == 0 {
+			m.flashMessage = watchFailedStyle.Render("No active instances available")
+			return m, nil
+		}
+		ranked := campaign.RankForJob(job, capacities)
+		if len(ranked) == 0 {
+			_, reason := campaign.MatchJobToInstance(job, capacities[0])
+			m.flashMessage = watchFailedStyle.Render(fmt.Sprintf("No compatible instance for job #%d (%s)", job.ID, reason))
+			return m, nil
+		}
+		best := ranked[0]
+		m.flashMessage = m.spinner.View() + fmt.Sprintf(" Submitting job #%d to instance #%d...", job.ID, best.Instance.ID)
+		return m, requestWatchJobSubmit(m.ctx, m.database, m.r2Client, job.ID, best.Instance.ID)
 	case "l":
 		if m.mode == watchModeSystem {
 			m.cancel()
@@ -651,6 +679,64 @@ func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.C
 	// Campaign mode: just refresh unplaced
 	m.flashMessage = msg.message
 	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// Update handlers: submit to instance
+// ---------------------------------------------------------------------------
+
+func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.flashMessage = watchFailedStyle.Render(fmt.Sprintf("Submit failed: %v", msg.err))
+		return m, nil
+	}
+	m.flashMessage = fmt.Sprintf("Submitted job #%d to instance #%d", msg.jobID, msg.instanceID)
+	m.removeUnplacedJob(msg.jobID)
+	m.clampCursor()
+	if m.mode == watchModeSystem {
+		m.refreshing = true
+		return m, refreshWatchSystem(m.database, m.appConfig)
+	}
+	return m, nil
+}
+
+func countRunningJobs(jobs []*db.Job) int {
+	n := 0
+	for _, j := range jobs {
+		if j != nil && (j.Status == db.StatusRunning || j.Status == db.StatusStarting) {
+			n++
+		}
+	}
+	return n
+}
+
+func (m watchModel) buildInstanceCapacities() []campaign.InstanceCapacity {
+	var result []campaign.InstanceCapacity
+
+	switch m.mode {
+	case watchModeCampaign:
+		for _, id := range m.instanceIDs {
+			u, ok := m.updates[id]
+			if !ok || u.Launch == nil {
+				continue
+			}
+			if cap, ok := campaign.NewInstanceCapacity(u.Launch, countRunningJobs(u.Jobs)); ok {
+				result = append(result, cap)
+			}
+		}
+	case watchModeSystem:
+		for _, ci := range m.cloudInstances {
+			var jobs []*db.Job
+			if u, ok := m.updates[ci.ID]; ok {
+				jobs = u.Jobs
+			}
+			if cap, ok := campaign.NewInstanceCapacity(ci, countRunningJobs(jobs)); ok {
+				result = append(result, cap)
+			}
+		}
+	}
+
+	return result
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,9 +1095,9 @@ func (m watchModel) renderCampaignView() (string, int) {
 	}
 
 	if !m.done {
-		hint := "j/k scroll  g/G top/bottom  q quit (instances continue in background)"
+		hint := "j/k scroll  g/G top/bottom  s submit  q quit (instances continue in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "j/k scroll  g/G top/bottom  r retry  q quit (instances continue in background)"
+			hint = "j/k scroll  g/G top/bottom  s submit  r retry  q quit (instances continue in background)"
 		}
 		addLine(watchDimStyle.Render(hint))
 	}
@@ -1145,9 +1231,9 @@ func (m watchModel) renderSystemView() (string, int) {
 		footerParts = append(footerParts, m.retryResult)
 	}
 
-	controls := "[u] unplace queued job  [l] launch  [r] retry  [q] quit"
+	controls := "[u] unplace  [s] submit  [l] launch  [r] retry  [q] quit"
 	if !m.hasRetryableFailures() {
-		controls = "[u] unplace queued job  [l] launch  [q] quit"
+		controls = "[u] unplace  [s] submit  [l] launch  [q] quit"
 	}
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 
@@ -1542,6 +1628,16 @@ func (m *watchModel) upsertUnplacedJob(job *db.Job) {
 	})
 }
 
+func (m *watchModel) removeUnplacedJob(jobID int64) {
+	filtered := m.unplacedJobs[:0]
+	for _, job := range m.unplacedJobs {
+		if job != nil && job.ID != jobID {
+			filtered = append(filtered, job)
+		}
+	}
+	m.unplacedJobs = filtered
+}
+
 // ---------------------------------------------------------------------------
 // View helpers: campaign mode
 // ---------------------------------------------------------------------------
@@ -1619,7 +1715,7 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 	if m.width <= 0 {
 		return detail
 	}
-	controlsWidth := lipgloss.Width("[u] unplace queued job  [l] launch  [r] retry  [q] quit")
+	controlsWidth := lipgloss.Width("[u] unplace  [s] submit  [l] launch  [r] retry  [q] quit")
 	available := m.width - controlsWidth
 	if prefixWidth > 0 {
 		available -= prefixWidth + lipgloss.Width("  ")
@@ -1757,6 +1853,22 @@ func requestWatchJobUnplace(database *sql.DB, jobID int64) tea.Cmd {
 			return watchUnplaceDoneMsg{err: fmt.Errorf("reload job %d: %w", jobID, err)}
 		}
 		return watchUnplaceDoneMsg{job: updatedJob, message: result.Message}
+	}
+}
+
+func requestWatchJobSubmit(ctx context.Context, database *sql.DB, r2Client *r2.Client, jobID, instanceID int64) tea.Cmd {
+	return func() tea.Msg {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+		}
+		if job == nil {
+			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("job %d not found", jobID)}
+		}
+		if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
+			return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
+		}
+		return watchSubmitDoneMsg{jobID: jobID, instanceID: instanceID}
 	}
 }
 
