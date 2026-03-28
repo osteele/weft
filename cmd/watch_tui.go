@@ -8,6 +8,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
@@ -24,6 +25,7 @@ const (
 	watchModeCampaign  watchMode = iota // fixed instance IDs, campaign header, retry
 	watchModeInstances                  // same as campaign but instance-centric header
 	watchModeSystem                     // discover from DB, on-prem + unplaced sections
+	watchModeProject                    // discover from DB, grouped by project
 )
 
 func (m watchMode) isInstanceBased() bool {
@@ -79,6 +81,17 @@ type watchModel struct {
 	cloudInstances []*db.Launch
 	onPremHosts    []onPremHostSummary
 	refreshing     bool
+
+	// --- Project-mode fields ---
+	projectGroups    []projectGroup
+	projectRecent    time.Duration
+	projectLines     []string // cached render lines
+	dbWatcher        *fsnotify.Watcher
+	dbWatcherTargets map[string]struct{}
+	debounceActive   bool
+	projectSyncing   bool
+	projectStatus    string
+	projectOffset    int // top visible line (offset-based scroll)
 
 	// --- Shared display state ---
 	unplacedJobs []*db.Job
@@ -227,6 +240,35 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 	return model
 }
 
+func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool) watchModel {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var sw *tui.SyncWorker
+	if syncEnabled && cfg != nil {
+		sw = tui.NewSyncWorker(database, nil, nil, cfg)
+		sw.Start()
+		go func() { <-ctx.Done(); sw.Stop() }()
+	}
+
+	return watchModel{
+		mode:           watchModeProject,
+		database:       database,
+		appConfig:      cfg,
+		ctx:            ctx,
+		cancel:         cancel,
+		spinner:        s,
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+		syncWorker:     sw,
+		projectRecent:  recentWindow,
+		projectSyncing: syncEnabled,
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
@@ -258,6 +300,16 @@ func (m watchModel) Init() tea.Cmd {
 				return watchSyncResultMsg{result: r}
 			}),
 		)
+	case m.mode == watchModeProject:
+		cmds = append(cmds, m.startProjectDBWatcher(), m.reloadProjectGroups(), scheduleProjectSyncTick())
+		if m.syncWorker != nil {
+			m.requestProjectActiveSyncs()
+			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+				return watchProjectSyncResultMsg{result: r}
+			}))
+		} else if m.projectSyncing {
+			cmds = append(cmds, m.runProjectBackgroundSync(false))
+		}
 	}
 
 	return tea.Batch(cmds...)
@@ -292,6 +344,11 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.mode == watchModeProject {
+			m.projectLines = m.computeProjectLines()
+			m.clampCursor()
+			m.adjustProjectOffset()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -399,6 +456,50 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.unplacedJobs = msg.unplacedJobs
 		m.clampCursor()
 		return m, nil
+
+	// --- Project-mode messages ---
+	case watchProjectLoadedMsg:
+		if m.mode != watchModeProject {
+			return m, nil
+		}
+		return m.handleProjectLoaded(msg)
+
+	case watchProjectSyncFinishedMsg:
+		if m.mode != watchModeProject {
+			return m, nil
+		}
+		return m.handleProjectSyncFinished(msg)
+
+	case watchProjectSyncResultMsg:
+		if m.mode != watchModeProject || m.syncWorker == nil {
+			return m, nil
+		}
+		return m.handleProjectSyncWorkerResult(msg)
+
+	case watchProjectDBWatcherReadyMsg:
+		if m.mode != watchModeProject {
+			return m, nil
+		}
+		return m.handleProjectDBWatcherReady(msg)
+
+	case watchProjectDBWatchEventMsg:
+		if m.mode != watchModeProject {
+			return m, nil
+		}
+		return m.handleProjectDBWatchEvent(msg)
+
+	case watchProjectDBRefreshTriggeredMsg:
+		if m.mode != watchModeProject {
+			return m, nil
+		}
+		m.debounceActive = false
+		return m, m.reloadProjectGroups()
+
+	case watchProjectSyncTickMsg:
+		if m.mode != watchModeProject {
+			return m, nil
+		}
+		return m.handleProjectSyncTick()
 	}
 
 	return m, nil

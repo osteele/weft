@@ -34,10 +34,12 @@ type launchPlanReadyMsg struct {
 // tea.Program with tea.WithAltScreen() stays running throughout the session,
 // eliminating the visual flash from alt-screen exit/re-enter on transitions.
 type watchRouterModel struct {
-	active     tea.Model
-	database   *sql.DB
-	config     *config.Config
-	windowSize tea.WindowSizeMsg
+	active        tea.Model
+	database      *sql.DB
+	config        *config.Config
+	windowSize    tea.WindowSizeMsg
+	homeMode      watchMode     // which mode to return to after launch
+	projectRecent time.Duration // recent window for project mode
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) watchRouterModel {
@@ -46,6 +48,18 @@ func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) wat
 		active:   watch,
 		database: database,
 		config:   cfg,
+		homeMode: watchModeSystem,
+	}
+}
+
+func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool) watchRouterModel {
+	watch := newProjectWatchModel(database, cfg, recentWindow, syncEnabled)
+	return watchRouterModel{
+		active:        watch,
+		database:      database,
+		config:        cfg,
+		homeMode:      watchModeProject,
+		projectRecent: recentWindow,
 	}
 }
 
@@ -84,18 +98,15 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchPlanReadyMsg:
 		if msg.err != nil {
-			watch := newSystemWatchModel(m.database, m.config, fmt.Sprintf("Launch error: %v", msg.err))
-			return m.switchTo(watch)
+			return m.switchTo(m.buildHomeWatch(fmt.Sprintf("Launch error: %v", msg.err)))
 		}
 		if msg.model == nil {
-			watch := newSystemWatchModel(m.database, m.config, msg.flash)
-			return m.switchTo(watch)
+			return m.switchTo(m.buildHomeWatch(msg.flash))
 		}
 		return m.switchTo(*msg.model)
 
 	case switchToWatchMsg:
-		watch := newSystemWatchModel(m.database, m.config, msg.flash)
-		return m.switchTo(watch)
+		return m.switchTo(m.buildHomeWatch(msg.flash))
 	}
 
 	// Delegate all other messages to the active model
@@ -106,6 +117,18 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m watchRouterModel) View() string {
 	return m.active.View()
+}
+
+// buildHomeWatch creates a watchModel for the router's home mode.
+func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
+	switch m.homeMode {
+	case watchModeProject:
+		w := newProjectWatchModel(m.database, m.config, m.projectRecent, true)
+		w.projectStatus = flash
+		return w
+	default:
+		return newSystemWatchModel(m.database, m.config, flash)
+	}
 }
 
 // prepareLaunch runs the launch planner logic as a tea.Cmd, building the

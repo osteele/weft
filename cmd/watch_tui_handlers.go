@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -363,6 +364,103 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 		})
 	}
 	m.clampCursor()
+	return m, tea.Batch(cmds...)
+}
+
+// ---------------------------------------------------------------------------
+// Update handlers: project-mode
+// ---------------------------------------------------------------------------
+
+func (m watchModel) handleProjectLoaded(msg watchProjectLoadedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.projectStatus = fmt.Sprintf("Refresh error: %v", msg.err)
+		return m, nil
+	}
+	m.projectGroups = msg.groups
+	m.projectLines = m.computeProjectLines()
+	if len(m.projectGroups) == 0 && m.projectStatus == "" {
+		m.projectStatus = "No project activity."
+	}
+	m.clampCursor()
+	m.adjustProjectOffset()
+	return m, nil
+}
+
+func (m watchModel) handleProjectSyncFinished(msg watchProjectSyncFinishedMsg) (tea.Model, tea.Cmd) {
+	if !msg.full {
+		if len(msg.warnings) > 0 {
+			m.projectStatus = strings.Join(msg.warnings, " | ")
+		} else {
+			m.projectStatus = "Running full sync..."
+		}
+		return m, tea.Batch(m.reloadProjectGroups(), m.runProjectBackgroundSync(true))
+	}
+
+	m.projectSyncing = false
+	if len(msg.warnings) > 0 {
+		m.projectStatus = strings.Join(msg.warnings, " | ")
+	} else {
+		m.projectStatus = "Synced."
+	}
+	return m, m.reloadProjectGroups()
+}
+
+func (m watchModel) handleProjectSyncWorkerResult(msg watchProjectSyncResultMsg) (tea.Model, tea.Cmd) {
+	m.projectSyncing = false
+	cmds := []tea.Cmd{
+		m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			return watchProjectSyncResultMsg{result: r}
+		}),
+	}
+	if msg.result.Error != nil {
+		m.projectStatus = fmt.Sprintf("Sync error (%s): %v", msg.result.Host, msg.result.Error)
+	} else if msg.result.Updated > 0 {
+		m.projectStatus = ""
+		cmds = append(cmds, m.reloadProjectGroups())
+	} else if m.projectStatus == "Refreshing..." {
+		m.projectStatus = ""
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m watchModel) handleProjectDBWatcherReady(msg watchProjectDBWatcherReadyMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.projectStatus = fmt.Sprintf("DB watch error: %v", msg.err)
+		return m, nil
+	}
+	m.dbWatcher = msg.watcher
+	m.dbWatcherTargets = msg.targets
+	return m, m.waitForProjectDBEvent()
+}
+
+func (m watchModel) handleProjectDBWatchEvent(msg watchProjectDBWatchEventMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.projectStatus = fmt.Sprintf("DB watch error: %v", msg.err)
+		return m, nil
+	}
+	var cmds []tea.Cmd
+	if !m.debounceActive {
+		m.debounceActive = true
+		cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
+			return watchProjectDBRefreshTriggeredMsg{}
+		}))
+	}
+	if cmd := m.waitForProjectDBEvent(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return m, tea.Batch(cmds...)
+}
+
+func (m watchModel) handleProjectSyncTick() (tea.Model, tea.Cmd) {
+	cmds := []tea.Cmd{scheduleProjectSyncTick()}
+	if m.syncWorker != nil {
+		m.requestProjectActiveSyncs()
+		cmds = append(cmds, m.reloadProjectGroups())
+	} else if !m.projectSyncing {
+		m.projectSyncing = true
+		m.projectStatus = "Refreshing..."
+		cmds = append(cmds, m.runProjectBackgroundSync(true))
+	}
 	return m, tea.Batch(cmds...)
 }
 

@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/osteele/weft/internal/db"
 )
@@ -65,6 +67,8 @@ func (m watchModel) selectableRowCount() int {
 			count += len(host.Jobs)
 		}
 		return count
+	case m.mode == watchModeProject:
+		return len(m.projectLines)
 	}
 	return 0
 }
@@ -211,4 +215,46 @@ func (m *watchModel) rebuildReplacementCache() {
 
 	m.cachedHiddenIDs = hiddenIDs
 	m.cachedReplacementChains = replacementChains
+}
+
+// ---------------------------------------------------------------------------
+// Project-mode helpers
+// ---------------------------------------------------------------------------
+
+func (m watchModel) computeProjectLines() []string {
+	rendered := strings.TrimRight(renderProjectWatchPlain(m.projectGroups, max(20, m.width-2), time.Now(), m.projectRecent), "\n")
+	if rendered == "" {
+		return nil
+	}
+	return strings.Split(rendered, "\n")
+}
+
+// adjustProjectOffset keeps projectOffset in sync with the cursor so the
+// cursor is always visible within the page.
+func (m *watchModel) adjustProjectOffset() {
+	pageSize := m.projectPageSize()
+	if pageSize <= 0 {
+		m.projectOffset = 0
+		return
+	}
+	if m.cursor < m.projectOffset {
+		m.projectOffset = m.cursor
+	}
+	if m.cursor >= m.projectOffset+pageSize {
+		m.projectOffset = m.cursor - pageSize + 1
+	}
+	maxOffset := max(0, len(m.projectLines)-pageSize)
+	if m.projectOffset > maxOffset {
+		m.projectOffset = maxOffset
+	}
+	if m.projectOffset < 0 {
+		m.projectOffset = 0
+	}
+}
+
+func (m watchModel) projectPageSize() int {
+	if m.height <= 0 {
+		return 10
+	}
+	return max(1, m.height-3) // title + footer + padding
 }

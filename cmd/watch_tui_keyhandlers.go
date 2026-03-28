@@ -13,6 +13,10 @@ import (
 // ---------------------------------------------------------------------------
 
 func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.mode == watchModeProject {
+		return m.handleProjectKey(msg)
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q":
 		m.cancel()
@@ -91,6 +95,64 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg { return switchToLaunchMsg{} }
 		}
+	}
+	return m, nil
+}
+
+func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q", "esc":
+		if m.dbWatcher != nil {
+			_ = m.dbWatcher.Close()
+		}
+		m.cancel()
+		return m, tea.Quit
+	case "up", "k":
+		m.moveCursor(-1)
+		m.adjustProjectOffset()
+		return m, nil
+	case "down", "j":
+		m.moveCursor(1)
+		m.adjustProjectOffset()
+		return m, nil
+	case "g", "home":
+		m.cursor = 0
+		m.adjustProjectOffset()
+		return m, nil
+	case "G", "end":
+		if lines := m.projectLines; len(lines) > 0 {
+			m.cursor = len(lines) - 1
+		}
+		m.adjustProjectOffset()
+		return m, nil
+	case "pgdown", "space":
+		m.moveCursor(m.projectPageSize())
+		m.adjustProjectOffset()
+		return m, nil
+	case "pgup", "b":
+		m.moveCursor(-m.projectPageSize())
+		m.adjustProjectOffset()
+		return m, nil
+	case "r":
+		if m.projectSyncing {
+			return m, nil
+		}
+		m.projectSyncing = true
+		m.projectStatus = "Refreshing..."
+		if m.syncWorker != nil {
+			m.requestProjectActiveSyncs()
+			return m, m.reloadProjectGroups()
+		}
+		return m, m.runProjectBackgroundSync(false)
+	case "l":
+		if m.dbWatcher != nil {
+			_ = m.dbWatcher.Close()
+		}
+		m.cancel()
+		if m.syncWorker != nil {
+			m.syncWorker.Stop()
+		}
+		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	}
 	return m, nil
 }

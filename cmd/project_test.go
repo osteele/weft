@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/spf13/cobra"
 )
@@ -149,23 +151,31 @@ func TestRenderProjectWatchPlainShowsSections(t *testing.T) {
 
 func TestProjectWatchModelViewShowsGroupedContent(t *testing.T) {
 	end := int64(time.Now().Unix())
-	m := projectWatchModel{
-		width:        120,
-		height:       12,
-		recentWindow: 24 * time.Hour,
-		groups: []projectGroup{
-			{
-				Label:       "ALPHA",
-				Directories: []string{"/tmp/project-alpha"},
-				Running: []*db.Job{
-					{ID: 1, Status: db.StatusRunning, Host: "cool30", WorkingDir: "/tmp/project-alpha", Description: "train", StartTime: time.Now().Add(-2 * time.Hour).Unix()},
-				},
-				Recent: []*db.Job{
-					{ID: 2, Status: db.StatusCompleted, Host: "cool30", WorkingDir: "/tmp/project-alpha", Description: "done", EndTime: &end, ExitCode: testIntPtr(0)},
-				},
+	groups := []projectGroup{
+		{
+			Label:       "ALPHA",
+			Directories: []string{"/tmp/project-alpha"},
+			Running: []*db.Job{
+				{ID: 1, Status: db.StatusRunning, Host: "cool30", WorkingDir: "/tmp/project-alpha", Description: "train", StartTime: time.Now().Add(-2 * time.Hour).Unix()},
+			},
+			Recent: []*db.Job{
+				{ID: 2, Status: db.StatusCompleted, Host: "cool30", WorkingDir: "/tmp/project-alpha", Description: "done", EndTime: &end, ExitCode: testIntPtr(0)},
 			},
 		},
 	}
+
+	m := watchModel{
+		mode:           watchModeProject,
+		width:          120,
+		height:         12,
+		projectRecent:  24 * time.Hour,
+		projectGroups:  groups,
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines = m.computeProjectLines()
 
 	out := stripANSI(m.View())
 	for _, want := range []string{"Project Watch (1 projects)", "ALPHA", "Running", "Recent", "r refresh"} {

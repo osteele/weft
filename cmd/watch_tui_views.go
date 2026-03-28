@@ -22,6 +22,8 @@ func (m watchModel) View() string {
 	case m.mode == watchModeSystem:
 		content, cursorLine := m.renderSystemView()
 		return m.applyViewport(content, cursorLine)
+	case m.mode == watchModeProject:
+		return m.renderProjectView()
 	}
 	return ""
 }
@@ -519,4 +521,78 @@ func padToWidth(s string, width int) string {
 		return truncate(s, width)
 	}
 	return s + strings.Repeat(" ", width-current)
+}
+
+// ---------------------------------------------------------------------------
+// View: project mode
+// ---------------------------------------------------------------------------
+
+func (m watchModel) renderProjectView() string {
+	if m.width <= 0 || m.height <= 0 {
+		return "Loading..."
+	}
+
+	lines := m.projectLines
+	rows := m.projectPageSize()
+	var b strings.Builder
+	title := fmt.Sprintf("Project Watch (%d projects)", len(m.projectGroups))
+	b.WriteString(watchTitleStyle.Render(truncateDisplayWidth(title, m.width)))
+	b.WriteString("\n")
+
+	if len(lines) == 0 {
+		empty := m.projectEmptyStateText()
+		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(empty, m.width)))
+		b.WriteString("\n")
+		for i := 1; i < rows; i++ {
+			b.WriteString("\n")
+		}
+	} else {
+		for i := 0; i < rows; i++ {
+			idx := m.projectOffset + i
+			if idx >= len(lines) {
+				b.WriteString("\n")
+				continue
+			}
+			line := truncateDisplayWidth(lines[idx], m.width)
+			if idx == m.cursor {
+				line = watchSelectedRowStyle.Render(line)
+			}
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString(watchDimStyle.Render(truncateDisplayWidth(m.projectFooterText(), m.width)))
+	return b.String()
+}
+
+func (m watchModel) projectFooterText() string {
+	rows := m.projectPageSize()
+	total := len(m.projectLines)
+	start := 0
+	end := 0
+	if total > 0 {
+		start = m.projectOffset + 1
+		end = min(total, m.projectOffset+rows)
+	}
+
+	state := fmt.Sprintf("[%d-%d/%d]", start, end, total)
+	if m.projectSyncing {
+		state += " syncing..."
+	}
+	if m.projectStatus != "" {
+		state += "  " + m.projectStatus
+	}
+	state += "  up/down move  space/b page  g/G top/bottom  r refresh  l launch  q quit"
+	return state
+}
+
+func (m watchModel) projectEmptyStateText() string {
+	if m.projectSyncing {
+		return "No project activity yet. Waiting for startup sync and DB updates..."
+	}
+	if m.projectStatus != "" {
+		return "No project activity. " + m.projectStatus
+	}
+	return "No project activity."
 }

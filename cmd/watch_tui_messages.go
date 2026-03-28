@@ -3,6 +3,7 @@ package cmd
 import (
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/tui"
@@ -88,6 +89,38 @@ type watchSubmitDoneMsg struct {
 	instanceID int64
 	err        error
 }
+
+// ---------------------------------------------------------------------------
+// Project-mode messages
+// ---------------------------------------------------------------------------
+
+type watchProjectLoadedMsg struct {
+	groups []projectGroup
+	err    error
+}
+
+type watchProjectSyncFinishedMsg struct {
+	warnings []string
+	full     bool
+}
+
+type watchProjectSyncResultMsg struct {
+	result tui.SyncResult
+}
+
+type watchProjectDBWatcherReadyMsg struct {
+	watcher *fsnotify.Watcher
+	targets map[string]struct{}
+	err     error
+}
+
+type watchProjectDBWatchEventMsg struct {
+	err error
+}
+
+type watchProjectDBRefreshTriggeredMsg struct{}
+
+type watchProjectSyncTickMsg struct{}
 
 // ---------------------------------------------------------------------------
 // Render row types (system mode)

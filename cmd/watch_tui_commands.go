@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/fsnotify/fsnotify"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -236,5 +238,112 @@ func scheduleCheckDone() tea.Cmd {
 func scheduleWatchAllTick() tea.Cmd {
 	return tea.Tick(15*time.Second, func(time.Time) tea.Msg {
 		return watchAllTickMsg{}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Project-mode commands
+// ---------------------------------------------------------------------------
+
+func (m watchModel) reloadProjectGroups() tea.Cmd {
+	database := m.database
+	recentWindow := m.projectRecent
+	return func() tea.Msg {
+		groups, err := loadProjectWatchGroups(database, recentWindow)
+		return watchProjectLoadedMsg{groups: groups, err: err}
+	}
+}
+
+func (m watchModel) runProjectBackgroundSync(full bool) tea.Cmd {
+	database := m.database
+	return func() tea.Msg {
+		return watchProjectSyncFinishedMsg{warnings: syncProjectWatchTUIData(database, full), full: full}
+	}
+}
+
+func (m watchModel) startProjectDBWatcher() tea.Cmd {
+	dbFile := db.Path()
+	if dbFile == "" {
+		return nil
+	}
+	dir := filepath.Dir(dbFile)
+	targets := map[string]struct{}{}
+	addTarget := func(name string) {
+		if name == "" {
+			return
+		}
+		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
+	}
+	base := filepath.Base(dbFile)
+	addTarget(base)
+	addTarget(base + "-wal")
+	addTarget(base + "-shm")
+
+	return func() tea.Msg {
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			return watchProjectDBWatcherReadyMsg{err: err}
+		}
+		if err := watcher.Add(dir); err != nil {
+			_ = watcher.Close()
+			return watchProjectDBWatcherReadyMsg{err: err}
+		}
+		return watchProjectDBWatcherReadyMsg{watcher: watcher, targets: targets}
+	}
+}
+
+func (m watchModel) waitForProjectDBEvent() tea.Cmd {
+	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
+		return nil
+	}
+	watcher := m.dbWatcher
+	targets := m.dbWatcherTargets
+	return func() tea.Msg {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return watchProjectDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
+				}
+				if !listTUIWatchedDBFile(event.Name, targets) {
+					continue
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
+					continue
+				}
+				return watchProjectDBWatchEventMsg{}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return watchProjectDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
+				}
+				return watchProjectDBWatchEventMsg{err: err}
+			}
+		}
+	}
+}
+
+func (m watchModel) requestProjectActiveSyncs() {
+	if m.syncWorker == nil {
+		return
+	}
+	hosts := make(map[string][]*db.Job)
+	for _, g := range m.projectGroups {
+		for _, job := range append(g.Running, g.Queued...) {
+			if job != nil && job.Host != "" {
+				hosts[job.Host] = append(hosts[job.Host], job)
+			}
+		}
+	}
+	for host, jobs := range hosts {
+		m.syncWorker.Request(tui.SyncRequest{
+			Host: host,
+			Rate: tui.GetHostSyncRate(jobs),
+		})
+	}
+}
+
+func scheduleProjectSyncTick() tea.Cmd {
+	return tea.Tick(projectWatchSyncInterval, func(time.Time) tea.Msg {
+		return watchProjectSyncTickMsg{}
 	})
 }
