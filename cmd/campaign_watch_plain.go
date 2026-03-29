@@ -54,6 +54,13 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 		}
 	}
 
+	// Load initial unplaced jobs
+	unplacedJobs, _ := db.ListUnplacedJobs(database)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var lastSummaryTime time.Time
+
 	// Print header
 	if campaignID > 0 {
 		switch mode {
@@ -65,6 +72,10 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 	}
 	if summary := formatWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), time.Now(), estimateLine); summary != "" {
 		fmt.Println(summary)
+		fmt.Println()
+	}
+	if len(unplacedJobs) > 0 {
+		fmt.Print(formatUnplacedJobsSection(unplacedJobs))
 		fmt.Println()
 	}
 
@@ -89,13 +100,14 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 			case <-ticker.C:
 				cfg, _ := config.Load()
 				syncCloudState(cfg, database, reconciler, false)
+				if refreshed, err := db.ListUnplacedJobs(database); err == nil {
+					mu.Lock()
+					unplacedJobs = refreshed
+					mu.Unlock()
+				}
 			}
 		}
 	}()
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var lastSummaryTime time.Time
 	var retryMu sync.Mutex
 	retryDone := false
 
@@ -124,6 +136,9 @@ func watchInstancesPlain(database *sql.DB, mode watchMode, instanceIDs []int64, 
 					if summary := formatWatchSummaryLine(launchTime, campaignPlainViews(instanceIDs, updates), now, estimateLine); summary != "" {
 						fmt.Println(summary)
 						lastSummaryTime = now
+					}
+					if len(unplacedJobs) > 0 {
+						fmt.Print(formatUnplacedJobsSection(unplacedJobs))
 					}
 				}
 				mu.Unlock()

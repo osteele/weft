@@ -219,6 +219,16 @@ func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 	}
 }
 
+func refreshWatchUnplacedJobs(database *sql.DB) tea.Cmd {
+	return func() tea.Msg {
+		unplacedJobs, err := db.ListUnplacedJobs(database)
+		if err != nil {
+			return watchOnPremRefreshedMsg{err: err}
+		}
+		return watchOnPremRefreshedMsg{unplacedJobs: unplacedJobs}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Tick scheduling
 // ---------------------------------------------------------------------------

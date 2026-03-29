@@ -17,6 +17,7 @@ type projectGroup struct {
 	Jobs        []*db.Job
 	Running     []*db.Job
 	Queued      []*db.Job
+	Unplaced    []*db.Job
 	Recent      []*db.Job
 }
 
@@ -282,8 +283,18 @@ func renderProjectWatchPlain(groups []projectGroup, width int, now time.Time, re
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		header := fmt.Sprintf("%s (%d running, %d queued, %d recent/%s)",
-			group.Label, len(group.Running), len(group.Queued), len(group.Recent), formatProjectRecentWindow(recentWindow))
+		var headerParts []string
+		if len(group.Running) > 0 {
+			headerParts = append(headerParts, fmt.Sprintf("%d running", len(group.Running)))
+		}
+		if len(group.Queued) > 0 {
+			headerParts = append(headerParts, fmt.Sprintf("%d queued", len(group.Queued)))
+		}
+		if len(group.Unplaced) > 0 {
+			headerParts = append(headerParts, fmt.Sprintf("%d unplaced", len(group.Unplaced)))
+		}
+		headerParts = append(headerParts, fmt.Sprintf("%d recent/%s", len(group.Recent), formatProjectRecentWindow(recentWindow)))
+		header := fmt.Sprintf("%s (%s)", group.Label, strings.Join(headerParts, ", "))
 		b.WriteString(truncateDisplayWidth(header, width))
 		b.WriteString("\n")
 		for _, dir := range group.Directories {
@@ -301,6 +312,14 @@ func renderProjectWatchPlain(groups []projectGroup, width int, now time.Time, re
 			b.WriteString("  Queued\n")
 			for _, job := range group.Queued {
 				b.WriteString(truncateDisplayWidth("    "+formatProjectWatchRow(job, "queued", now), width))
+				b.WriteString("\n")
+			}
+		}
+		if len(group.Unplaced) > 0 {
+			b.WriteString("  Unplaced\n")
+			for _, job := range group.Unplaced {
+				row := formatProjectWatchRow(job, "queued", now) + "  " + formatWatchGPUConstraint(job)
+				b.WriteString(truncateDisplayWidth("    "+row, width))
 				b.WriteString("\n")
 			}
 		}

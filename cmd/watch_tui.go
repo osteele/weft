@@ -162,6 +162,8 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		sw.SetCloudClients(allCloudClients)
 	}
 
+	unplaced, _ := db.ListUnplacedJobs(database)
+
 	m := watchModel{
 		mode:           mode,
 		database:       database,
@@ -181,6 +183,7 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 		launchedAt:     launchedAt,
 		initInfo:       initInfo,
 		reconciler:     campaign.NewReconciler(),
+		unplacedJobs:   unplaced,
 	}
 	m.rebuildReplacementCache()
 	return m
@@ -448,16 +451,19 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case watchOnPremRefreshedMsg:
-		if m.mode != watchModeSystem {
-			return m, nil
-		}
 		if msg.err != nil {
-			m.err = msg.err
+			if m.mode == watchModeSystem {
+				m.err = msg.err
+			}
 			return m, nil
 		}
-		m.onPremHosts = msg.onPremHosts
-		m.unplacedJobs = msg.unplacedJobs
-		m.clampCursor()
+		if m.mode == watchModeSystem {
+			m.onPremHosts = msg.onPremHosts
+		}
+		if m.mode == watchModeSystem || m.mode.isInstanceBased() {
+			m.unplacedJobs = msg.unplacedJobs
+			m.clampCursor()
+		}
 		return m, nil
 
 	// --- Project-mode messages ---
@@ -517,26 +523,34 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) ([]int64, error) {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
-	model := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
+	router := newInstanceWatchRouterModel(database, cfg, mode, instanceIDs, r2Client)
 	if estimateSummary != nil {
-		model.estimateSummaryLine = estimateSummary.FormatLine()
+		if w, ok := router.active.(watchModel); ok {
+			w.estimateSummaryLine = estimateSummary.FormatLine()
+			router.active = w
+		}
 	}
 
 	restore := logging.Suppress()
 	defer restore()
 
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := p.Run()
 	if err != nil {
 		return instanceIDs, err
 	}
 
-	if finalView := renderWatchExitSnapshot(finalModel); finalView != "" {
-		fmt.Print(finalView)
-	}
-
-	if m, ok := finalModel.(watchModel); ok {
-		return m.instanceIDs, nil
+	// Extract the final watchModel from the router
+	if r, ok := finalModel.(watchRouterModel); ok {
+		if m, ok := r.active.(watchModel); ok {
+			if m.done {
+				fmt.Print(m.View())
+			}
+			if m.syncWorker != nil {
+				m.syncWorker.Stop()
+			}
+			return m.instanceIDs, nil
+		}
 	}
 	return instanceIDs, nil
 }

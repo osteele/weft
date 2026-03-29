@@ -155,6 +155,8 @@ func (m watchModel) renderInstanceView() (string, int) {
 		hint := "j/k scroll  ^u/^d page  g/G top/bottom  s submit  q quit (instances continue in background)"
 		if !m.retrying && m.hasRetryableFailures() {
 			hint = "j/k scroll  ^u/^d page  g/G top/bottom  s submit  r retry  q quit (instances continue in background)"
+		} else if len(m.unplacedJobs) > 0 {
+			hint = "j/k scroll  ^u/^d page  g/G top/bottom  s submit  l launch  q quit (instances continue in background)"
 		}
 		addLine(watchDimStyle.Render(hint))
 	}

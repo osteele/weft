@@ -12,6 +12,8 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/tui"
 )
 
 // switchToLaunchMsg is emitted by watchModel when the user presses 'l'.
@@ -40,6 +42,8 @@ type watchRouterModel struct {
 	windowSize    tea.WindowSizeMsg
 	homeMode      watchMode     // which mode to return to after launch
 	projectRecent time.Duration // recent window for project mode
+	instanceIDs   []int64       // instance IDs for instance-based modes
+	r2Client      *r2.Client    // R2 client for instance-based modes
 }
 
 func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) watchRouterModel {
@@ -49,6 +53,18 @@ func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) wat
 		database: database,
 		config:   cfg,
 		homeMode: watchModeSystem,
+	}
+}
+
+func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client) watchRouterModel {
+	watch := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
+	return watchRouterModel{
+		active:      watch,
+		database:    database,
+		config:      cfg,
+		homeMode:    mode,
+		instanceIDs: instanceIDs,
+		r2Client:    r2Client,
 	}
 }
 
@@ -90,6 +106,7 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case switchToLaunchMsg:
 		// Clean up watch model
 		if w, ok := m.active.(watchModel); ok {
+			w.cancel()
 			if w.syncWorker != nil {
 				w.syncWorker.Stop()
 			}
@@ -121,8 +138,12 @@ func (m watchRouterModel) View() string {
 
 // buildHomeWatch creates a watchModel for the router's home mode.
 func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
-	switch m.homeMode {
-	case watchModeProject:
+	switch {
+	case m.homeMode.isInstanceBased():
+		w := newWatchModelWithMode(m.homeMode, m.database, m.instanceIDs, m.r2Client, m.config)
+		w.flash = tui.FlashState{Message: flash}
+		return w
+	case m.homeMode == watchModeProject:
 		w := newProjectWatchModel(m.database, m.config, m.projectRecent, true)
 		w.projectStatus = flash
 		return w

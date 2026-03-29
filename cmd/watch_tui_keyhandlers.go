@@ -88,13 +88,10 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Submitting job #%d to instance #%d...", job.ID, best.Instance.ID), false)
 		return m, tea.Batch(flashCmd, requestWatchJobSubmit(m.ctx, m.database, m.r2Client, job.ID, best.Instance.ID))
 	case "l":
-		if m.mode == watchModeSystem {
-			m.cancel()
-			if m.syncWorker != nil {
-				m.syncWorker.Stop()
-			}
-			return m, func() tea.Msg { return switchToLaunchMsg{} }
+		if len(m.unplacedJobs) == 0 {
+			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
+		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	}
 	return m, nil
 }
@@ -145,12 +142,16 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.runProjectBackgroundSync(false)
 	case "l":
-		if m.dbWatcher != nil {
-			_ = m.dbWatcher.Close()
+		// Check if there are any unplaced jobs across all projects
+		hasUnplaced := false
+		for _, g := range m.projectGroups {
+			if len(g.Unplaced) > 0 {
+				hasUnplaced = true
+				break
+			}
 		}
-		m.cancel()
-		if m.syncWorker != nil {
-			m.syncWorker.Stop()
+		if !hasUnplaced {
+			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	}

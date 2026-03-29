@@ -135,11 +135,38 @@ func loadProjectWatchGroups(database *sql.DB, recentWindow time.Duration) ([]pro
 		return nil, fmt.Errorf("list recent terminal jobs: %w", err)
 	}
 
+	// Load unplaced jobs to separate them from the Queued bucket
+	unplacedJobs, err := db.ListUnplacedJobs(database)
+	if err != nil {
+		return nil, fmt.Errorf("list unplaced jobs: %w", err)
+	}
+	unplacedSet := make(map[int64]bool, len(unplacedJobs))
+	for _, job := range unplacedJobs {
+		unplacedSet[job.ID] = true
+	}
+
 	groups := groupProjectActivity(activeJobs, recentJobs)
+	classifyUnplacedJobs(groups, unplacedSet)
 	if err := attachProjectLaunches(database, groups); err != nil {
 		return nil, err
 	}
 	return groups, nil
+}
+
+// classifyUnplacedJobs moves jobs from the Queued bucket to the Unplaced bucket
+// if they are in the unplaced set.
+func classifyUnplacedJobs(groups []projectGroup, unplacedSet map[int64]bool) {
+	for i := range groups {
+		var queued []*db.Job
+		for _, job := range groups[i].Queued {
+			if unplacedSet[job.ID] {
+				groups[i].Unplaced = append(groups[i].Unplaced, job)
+			} else {
+				queued = append(queued, job)
+			}
+		}
+		groups[i].Queued = queued
+	}
 }
 
 func attachProjectLaunches(database *sql.DB, groups []projectGroup) error {

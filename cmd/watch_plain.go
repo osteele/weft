@@ -196,11 +196,20 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 	}
 
 	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("UNPLACED JOBS (%d)\n", len(snapshot.UnplacedJobs)))
-	if len(snapshot.UnplacedJobs) == 0 {
+	b.WriteString(formatUnplacedJobsSection(snapshot.UnplacedJobs))
+
+	b.WriteString("\n")
+	return b.String()
+}
+
+// formatUnplacedJobsSection renders a plain-text "UNPLACED JOBS" block.
+func formatUnplacedJobsSection(jobs []*db.Job) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("UNPLACED JOBS (%d)\n", len(jobs)))
+	if len(jobs) == 0 {
 		b.WriteString("  none\n")
 	} else {
-		for _, job := range snapshot.UnplacedJobs {
+		for _, job := range jobs {
 			b.WriteString(fmt.Sprintf("  #%d  %s  %s  %s\n",
 				job.ID,
 				campaign.JobProjectLabel(job),
@@ -209,8 +218,6 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 			))
 		}
 	}
-
-	b.WriteString("\n")
 	return b.String()
 }
 
