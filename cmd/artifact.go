@@ -155,6 +155,14 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
 			continue
 		}
+		if job.IsLaunchJob() {
+			if syncErr := syncJobOutputs(job); syncErr != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %d: sync cloud outputs: %v", jobID, syncErr))
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced cloud outputs from R2\n", jobID)
+			continue
+		}
 		result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {
@@ -197,6 +205,12 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 	var syncedJobs int
 
 	for _, job := range jobs {
+		if job.IsLaunchJob() {
+			if syncErr := syncJobOutputs(job); syncErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to sync cloud outputs for job %d: %v\n", job.ID, syncErr)
+			}
+			continue
+		}
 		result, err := artifacts.SyncOutstandingJob(database, job, NormalSyncTimeout)
 		if err != nil {
 			if errors.Is(err, artifacts.ErrManifestMissing) {

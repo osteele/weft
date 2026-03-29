@@ -27,6 +27,37 @@ func TestParseManifestFallbackJobID(t *testing.T) {
 	}
 }
 
+func TestParseManifestPlainText(t *testing.T) {
+	content := "data/exports/calibration_20260328.json\ndata/exports/summary.csv\n"
+	manifest, err := ParseManifest(content, 42)
+	if err != nil {
+		t.Fatalf("ParseManifest plain text: %v", err)
+	}
+	if manifest.JobID != 42 {
+		t.Fatalf("expected job id 42, got %d", manifest.JobID)
+	}
+	if len(manifest.Artifacts) != 2 {
+		t.Fatalf("expected 2 artifacts, got %d: %+v", len(manifest.Artifacts), manifest.Artifacts)
+	}
+	if manifest.Artifacts[0].Path != "data/exports/calibration_20260328.json" {
+		t.Fatalf("unexpected first artifact: %+v", manifest.Artifacts[0])
+	}
+	if manifest.Artifacts[1].Path != "data/exports/summary.csv" {
+		t.Fatalf("unexpected second artifact: %+v", manifest.Artifacts[1])
+	}
+}
+
+func TestParseManifestPlainTextBlankLines(t *testing.T) {
+	content := "\n  output/results.json  \n\n"
+	manifest, err := ParseManifest(content, 10)
+	if err != nil {
+		t.Fatalf("ParseManifest: %v", err)
+	}
+	if len(manifest.Artifacts) != 1 || manifest.Artifacts[0].Path != "output/results.json" {
+		t.Fatalf("unexpected artifacts: %+v", manifest.Artifacts)
+	}
+}
+
 func TestLocalRelativePath(t *testing.T) {
 	cases := map[string]string{
 		"output/results.json":   "output/results.json",

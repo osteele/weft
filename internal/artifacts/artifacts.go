@@ -66,17 +66,36 @@ type ArtifactSpec struct {
 // ErrManifestMissing is returned when no manifest is found.
 var ErrManifestMissing = errors.New("artifact manifest not found")
 
-// ParseManifest parses JSON manifest content.
+// ParseManifest parses manifest content. It accepts JSON format or plain-text
+// (one file path per line) for scripts that append paths to $WEFT_ARTIFACT_MANIFEST.
 func ParseManifest(content string, fallbackJobID int64) (Manifest, error) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return Manifest{}, ErrManifestMissing
+	}
+
 	var manifest Manifest
-	if strings.TrimSpace(content) == "" {
-		return manifest, ErrManifestMissing
+	if trimmed[0] == '{' {
+		if err := json.Unmarshal([]byte(content), &manifest); err != nil {
+			return Manifest{}, err
+		}
+		if manifest.JobID == 0 {
+			manifest.JobID = fallbackJobID
+		}
+		return manifest, nil
 	}
-	if err := json.Unmarshal([]byte(content), &manifest); err != nil {
-		return manifest, err
+
+	// Plain-text format: one path per line
+	manifest = Manifest{JobID: fallbackJobID}
+	for _, line := range strings.Split(trimmed, "\n") {
+		p := strings.TrimSpace(line)
+		if p == "" {
+			continue
+		}
+		manifest.Artifacts = append(manifest.Artifacts, ArtifactSpec{Path: p})
 	}
-	if manifest.JobID == 0 {
-		manifest.JobID = fallbackJobID
+	if len(manifest.Artifacts) == 0 {
+		return Manifest{}, ErrManifestMissing
 	}
 	return manifest, nil
 }
