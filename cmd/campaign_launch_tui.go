@@ -79,7 +79,8 @@ type launchModel struct {
 	offset   int
 	selected map[int64]bool // job ID -> checked
 
-	showCostDetail bool
+	showCostDetail    bool
+	strategyDisclosed bool // true = show detail rows for active strategy inline
 
 	campaignID       int64
 	reconciling      bool // true while background reconciliation is in progress
@@ -377,6 +378,16 @@ func (m launchModel) rankCachedOffers() []campaign.GroupOffer {
 	return m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
 }
 
+// activeStrategyEstimates returns the cached cost estimates for the active strategy, or nil.
+func (m launchModel) activeStrategyEstimates() []campaign.CostEstimate {
+	if m.cachedRawOffers == nil {
+		return nil
+	}
+	offers := m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
+	key := offerIdentity(offers)
+	return m.estimateCache[key]
+}
+
 // allStrategies returns the three bidding strategies in cycle order.
 var allStrategies = []bidding.SelectionStrategy{
 	bidding.StrategyCheap,
@@ -400,6 +411,47 @@ func (m launchModel) preflightOtherStrategies() []tea.Cmd {
 		cmds = append(cmds, m.fetchEstimatesForOffers(offers, key, false))
 	}
 	return cmds
+}
+
+// gatherStrategyRows builds a StrategySummaryRow for each strategy using cached estimates.
+// Strategies that resolve to the same offers are merged into a single row (e.g. "fast/fastest").
+func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.StrategySummaryRow {
+	var rows []campaign.StrategySummaryRow
+	keyToIdx := make(map[string]int) // offerIdentity → index into rows
+
+	for _, strat := range allStrategies {
+		isActive := strat == m.launchOpts.Strategy
+		offers := m.rankCachedOffersForStrategy(strat)
+		key := offerIdentity(offers)
+
+		// Check if we already have a row for the same offer set
+		if idx, ok := keyToIdx[key]; ok {
+			rows[idx].Label += "/" + string(strat)
+			if isActive {
+				rows[idx].Active = true
+				rows[idx].Disclosed = m.strategyDisclosed
+			}
+			continue
+		}
+
+		row := campaign.StrategySummaryRow{
+			Label:     string(strat),
+			Active:    isActive,
+			Disclosed: isActive && m.strategyDisclosed,
+			Loading:   true,
+		}
+		if cached, ok := m.estimateCache[key]; ok {
+			if summary := campaign.SummarizeForComparison(cached, selectedPerGroup); summary != nil {
+				row = *summary
+				row.Label = string(strat)
+				row.Active = isActive
+				row.Disclosed = isActive && m.strategyDisclosed
+			}
+		}
+		keyToIdx[key] = len(rows)
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cacheKey string, reportProgress bool) tea.Cmd {
@@ -783,6 +835,14 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showCostDetail = !m.showCostDetail
 		return m, nil
 
+	case "right":
+		m.strategyDisclosed = true
+		return m, nil
+
+	case "left":
+		m.strategyDisclosed = false
+		return m, nil
+
 	case "a":
 		for id := range m.selected {
 			m.selected[id] = true
@@ -870,10 +930,10 @@ func (m launchModel) groupCheckState(groupIdx int) string {
 }
 
 // costEstimateHeader renders the section header for the cost estimate table.
-func costEstimateHeader(strategy bidding.SelectionStrategy, rough bool) string {
-	s := fmt.Sprintf("── Cost Estimate (%s)", strategy)
+func costEstimateHeader(rough bool) string {
+	s := "── Cost Estimate"
 	if rough {
-		s += " · rough"
+		s += " (calculating)"
 	}
 	s += " ─────────────────────────────"
 	return launchDimStyle.Render(s)
@@ -1254,20 +1314,59 @@ func (m launchModel) View() string {
 		// Cost estimate table
 		if m.costEstimates != nil {
 			b.WriteString("\n")
-			b.WriteString(costEstimateHeader(m.launchOpts.Strategy, false))
-			b.WriteString("\n")
-			costTable := campaign.FormatCostTableSelected(m.costEstimates, selected)
-			renderCostTable(&b, costTable)
+			if m.cachedRawOffers != nil {
+				// Strategy comparison view
+				b.WriteString(launchDimStyle.Render("── Cost Estimate (s strategy  ←/→ details) ────────────"))
+				b.WriteString("\n")
+				rows := m.gatherStrategyRows(selected)
+				summaryTable := campaign.FormatStrategySummary(rows)
+
+				if m.strategyDisclosed {
+					// Splice detail rows after the disclosed (active) strategy row
+					activeEstimates := m.activeStrategyEstimates()
+					indent := strings.Repeat(" ", summaryTable.TimeColOffset)
+					var combined campaign.CostTable
+					for i, line := range summaryTable.Lines {
+						combined.Lines = append(combined.Lines, line)
+						if i < len(rows) && rows[i].Active && rows[i].Disclosed && activeEstimates != nil {
+							detailTable := campaign.FormatCostTableSelected(activeEstimates, selected)
+							// Skip the Total line (last line) — it duplicates the summary row above
+							detailLines := detailTable.Lines
+							if len(detailLines) > 1 {
+								detailLines = detailLines[:len(detailLines)-1]
+							}
+							for _, dl := range detailLines {
+								dl.Text = indent + dl.Text
+								combined.Lines = append(combined.Lines, dl)
+							}
+						}
+					}
+					renderCostTable(&b, combined)
+				} else {
+					renderCostTable(&b, summaryTable)
+				}
+
+				if sparkTable := campaign.FormatParetoSparkline(rows); sparkTable != nil {
+					b.WriteString("\n")
+					renderCostTable(&b, *sparkTable)
+				}
+			} else {
+				// Fallback: single-strategy table
+				b.WriteString(costEstimateHeader(false))
+				b.WriteString("\n")
+				costTable := campaign.FormatCostTableSelected(m.costEstimates, selected)
+				renderCostTable(&b, costTable)
+			}
 		} else if m.loading && m.groupOffers == nil {
 			b.WriteString("\n")
-			b.WriteString(costEstimateHeader(m.launchOpts.Strategy, false))
+			b.WriteString(costEstimateHeader(false))
 			b.WriteString("\n")
 			b.WriteString(m.spinner.View())
 			b.WriteString(launchDimStyle.Render(" Awaiting offers..."))
 			b.WriteString("\n")
 		} else if m.groupOffers != nil {
 			b.WriteString("\n")
-			b.WriteString(costEstimateHeader(m.launchOpts.Strategy, true))
+			b.WriteString(costEstimateHeader(true))
 			b.WriteString("\n")
 			costTable := campaign.FormatCostTable(m.groupOffers, selected)
 			renderCostTable(&b, costTable)
@@ -1302,9 +1401,9 @@ func (m launchModel) View() string {
 	if m.showCostDetail {
 		help = "d back  q quit"
 	} else if selectedCount == 0 {
-		help = "↑/↓ navigate  space toggle  a all  n none  s strategy  d details  enter quit  q quit"
+		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter quit  q quit"
 	} else {
-		help = "↑/↓ navigate  space toggle  a all  n none  s strategy  d details  enter launch  q quit"
+		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit"
 	}
 	b.WriteString(launchDimStyle.Render(help))
 	b.WriteString("\n")

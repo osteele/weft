@@ -232,7 +232,8 @@ type CostLine struct {
 
 // CostTable is the result of FormatCostTableSelected.
 type CostTable struct {
-	Lines []CostLine
+	Lines         []CostLine
+	TimeColOffset int // character offset where the time column starts (for aligning sub-tables)
 }
 
 // selectionScale computes the fraction of selected jobs and the count for a group.
@@ -303,10 +304,10 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 		}
 	}
 
+	// Columns: dur rate cost gpu jobs — time/cost first to align with summary table above
 	var lines []CostLine
-	fmtStr := fmt.Sprintf("%%-%ds  %%%ds  %%%ds  %%%ds  %%s", wGPU, wJobs, wRate, wDur)
 	for _, r := range rows {
-		line := fmt.Sprintf(fmtStr, r.gpu, r.jobs, r.rate, r.dur, r.cost)
+		line := fmt.Sprintf("%-*s  %-*s  %s  %-*s  %s", wDur, r.dur, wRate, r.rate, r.cost, wGPU, r.gpu, r.jobs)
 		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
 	}
 
@@ -316,7 +317,7 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 	} else {
 		totalStr = fmt.Sprintf("Total: ~$%.2f ($%.2f–$%.2f)", totalCost, totalLower, totalUpper)
 	}
-	totalLine := fmt.Sprintf(fmtStr, "", "", "", "", totalStr)
+	totalLine := fmt.Sprintf("%-*s  %-*s  %s", wDur, "", wRate, "", totalStr)
 	lines = append(lines, CostLine{Text: totalLine})
 	return CostTable{Lines: lines}
 }
@@ -445,8 +446,8 @@ func TruncateCommand(cmd string, max int) string {
 // Active row gets a "►" prefix; others are dimmed.
 func FormatStrategySummary(rows []StrategySummaryRow) CostTable {
 	type fmtRow struct {
-		prefix, strategy, gpus, time, cost string
-		dimmed                             bool
+		prefix, strategy, time, rate, cost, instances string
+		dimmed                                        bool
 	}
 
 	var fRows []fmtRow
@@ -454,53 +455,66 @@ func FormatStrategySummary(rows []StrategySummaryRow) CostTable {
 		prefix := "  "
 		dimmed := true
 		if r.Active {
-			prefix = "► "
+			if r.Disclosed {
+				prefix = "▾ "
+			} else {
+				prefix = "▸ "
+			}
 			dimmed = false
 		}
 		if r.Loading {
 			fRows = append(fRows, fmtRow{
 				prefix:   prefix,
 				strategy: r.Label,
-				gpus:     "",
 				time:     "estimating...",
-				cost:     "",
 				dimmed:   dimmed,
 			})
 			continue
 		}
 		timeStr := formatDurationWithBounds(r.MaxTime)
+		rateStr := fmt.Sprintf("$%.2f/hr", r.TotalRate)
 		costStr := formatCostBounds(r.TotalCost, r.CostLower, r.CostUpper)
 
+		instanceStr := fmt.Sprintf("%d instance", r.NumGPUs)
+		if r.NumGPUs != 1 {
+			instanceStr += "s"
+		}
+
 		fRows = append(fRows, fmtRow{
-			prefix:   prefix,
-			strategy: r.Label,
-			gpus:     fmt.Sprintf("%d", r.NumGPUs),
-			time:     timeStr,
-			cost:     costStr,
-			dimmed:   dimmed,
+			prefix:    prefix,
+			strategy:  r.Label,
+			time:      timeStr,
+			rate:      rateStr,
+			cost:      costStr,
+			instances: instanceStr,
+			dimmed:    dimmed,
 		})
 	}
 
-	var wStrat, wGPUs, wTime int
+	var wStrat, wTime, wRate int
 	for _, r := range fRows {
 		if len(r.strategy) > wStrat {
 			wStrat = len(r.strategy)
 		}
-		if len(r.gpus) > wGPUs {
-			wGPUs = len(r.gpus)
-		}
 		if len(r.time) > wTime {
 			wTime = len(r.time)
 		}
+		if len(r.rate) > wRate {
+			wRate = len(r.rate)
+		}
 	}
 
+	timeColOffset := 2 + wStrat + 2 // prefix(2) + strategy + gap(2)
 	var lines []CostLine
 	for _, r := range fRows {
-		line := fmt.Sprintf("%s%-*s  %*s  %-*s  %s",
-			r.prefix, wStrat, r.strategy, wGPUs, r.gpus, wTime, r.time, r.cost)
+		line := fmt.Sprintf("%s%-*s  %-*s  %-*s  %s",
+			r.prefix, wStrat, r.strategy, wTime, r.time, wRate, r.rate, r.cost)
+		if r.instances != "" {
+			line += "  " + r.instances
+		}
 		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
 	}
-	return CostTable{Lines: lines}
+	return CostTable{Lines: lines, TimeColOffset: timeColOffset}
 }
 
 // formatCostBounds formats "$X.XX ($L–$U)" or just "$X.XX" if bounds are tight.
@@ -700,9 +714,24 @@ func FormatParetoSparkline(rows []StrategySummaryRow) *CostTable {
 		if len(costs) > 0 && uniqueCostCount(costs) == 1 {
 			yLabels[r] = formatDollarLabel(costs[0])
 		} else {
-			// Empty row or multiple distinct costs: interpolate
+			// Empty row: round the interpolated value so its label doesn't
+			// collide with labels on adjacent occupied rows.
 			frac := float64(r) / float64(chartRows-1)
-			yLabels[r] = formatDollarLabel(maxC - frac*(maxC-minC))
+			v := maxC - frac*(maxC-minC)
+
+			// Collect formatted labels already assigned to other rows
+			usedLabels := make(map[string]bool)
+			for rr := 0; rr < chartRows; rr++ {
+				if rr != r && yLabels[rr] != "" {
+					usedLabels[yLabels[rr]] = true
+				}
+				if rr != r {
+					if c := rowCosts[rr]; len(c) > 0 && uniqueCostCount(c) == 1 {
+						usedLabels[formatDollarLabel(c[0])] = true
+					}
+				}
+			}
+			yLabels[r] = formatDollarLabel(roundBetweenAvoidLabels(v, minC, maxC, usedLabels))
 		}
 	}
 
@@ -754,6 +783,18 @@ func uniqueCostCount(costs []float64) int {
 		seen[c] = true
 	}
 	return len(seen)
+}
+
+// roundBetweenAvoidLabels rounds v to a clean value that stays strictly between
+// lo and hi, and whose formatted label doesn't collide with usedLabels.
+func roundBetweenAvoidLabels(v, lo, hi float64, usedLabels map[string]bool) float64 {
+	for _, unit := range []float64{1.0, 0.5, 0.25, 0.1, 0.05} {
+		rounded := math.Round(v/unit) * unit
+		if rounded > lo && rounded < hi && !usedLabels[formatDollarLabel(rounded)] {
+			return rounded
+		}
+	}
+	return v
 }
 
 // formatDollarLabel formats a dollar amount for sparkline Y-axis.

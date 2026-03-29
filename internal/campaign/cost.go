@@ -303,8 +303,10 @@ func (s *CostEstimateSummary) FormatLine() string {
 type StrategySummaryRow struct {
 	Label     string            // display label, e.g. "cheap" or "fast/fastest"
 	Active    bool              // true if the active strategy is in this row
+	Disclosed bool              // true if detail rows should be shown below this row
 	NumGPUs   int               // GPU groups with valid offers
 	MaxTime   estimate.Estimate // max across groups (wall-clock parallel)
+	TotalRate float64           // sum of $/hr across groups
 	TotalCost float64           // sum of mean costs across groups
 	CostLower float64           // sum of lower cost bounds
 	CostUpper float64           // sum of upper cost bounds
@@ -344,7 +346,8 @@ func SummarizeForComparison(estimates []CostEstimate, selectedPerGroup []int) *S
 			row.MaxTime.Upper = scaledTime.Upper
 		}
 
-		// Sum cost
+		// Sum cost and rate
+		row.TotalRate += est.Offer.Offer.CostPerHour
 		row.TotalCost += scaledCost
 		row.CostLower += lowerCost
 		row.CostUpper += upperCost

@@ -403,9 +403,9 @@ func TestFormatStrategySummary(t *testing.T) {
 	if !strings.Contains(text, "fastest") {
 		t.Error("should contain 'fastest'")
 	}
-	// Should have active marker
-	if !strings.Contains(text, "►") {
-		t.Error("should contain active marker ►")
+	// Should have active marker (▸ when not disclosed)
+	if !strings.Contains(text, "▸") {
+		t.Error("should contain active marker ▸")
 	}
 	// Should have 3 lines
 	if len(table.Lines) != 3 {

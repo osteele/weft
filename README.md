@@ -82,12 +82,12 @@ Rental GPU jobs (12 jobs, 3 GPU groups)
   [-] RTX 4090 (5 jobs)
   ...
 
-── Cost Estimate (cheap) ──────────────────────────────────────────
-A100 → A100 PCIE    2/3 jobs  80GB  $0.52/hr  ~2h (1h–4h)   ~$1.04±0.52
-RTX 4090             5/5 jobs  24GB  $0.24/hr  ~5h (2h–10h)  ~$1.20±0.96
-                                                   Total: ~$2.24
+── Cost Estimate (s to cycle strategy) ────────────────────────────
+  cheap      2  ~5h (2h–10h)    ~$2.24 ($1.04–$4.48)
+► fast       2  ~1h30 (30m–4h)  ~$5.60 ($2.10–$11.20)
+  fastest    2  ~45m (15m–2h)   ~$8.40 ($3.15–$16.80)
 
-↑/↓ navigate  space toggle  a all  n none  s strategy  d details  enter launch  q quit
+↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit
 ```
 
 #### Campaign Watch
