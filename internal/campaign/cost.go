@@ -40,7 +40,9 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 // If predCfg is nil or not configured, falls back to 1hr/job estimates.
 // If r2Client is non-nil, UV manifests are fetched to estimate cold uv sync costs.
 // If survivalModel is non-nil, computes survival probability and risk-adjusted cost.
-func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, onProgress EstimateProgressFunc) []CostEstimate {
+// If referenceDLPerf > 0, run durations are scaled by referenceDLPerf/offerDLPerf
+// to account for GPU performance differences across strategies.
+func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, referenceDLPerf float64, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Collect inputs for all three estimation steps (fast, in-memory)
@@ -175,6 +177,17 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			}
 		}
 
+		// Scale run durations by GPU performance when a reference is available.
+		// The predictor returns similar estimates regardless of GPU class, so
+		// we scale by DLPerf ratio to differentiate cheap vs fast GPUs.
+		if referenceDLPerf > 0 && go_.Offer.DLPerf > 0 {
+			ratio := referenceDLPerf / go_.Offer.DLPerf
+			runEst = runEst.Scale(ratio)
+			for id, dur := range est.JobDurations {
+				est.JobDurations[id] = time.Duration(float64(dur) * ratio)
+			}
+		}
+
 		upload := estimate.EstimateUpload(overheadModel, ctx)
 
 		total := startup.Add(sshSetup).Add(provision).Add(jobSetup).Add(runEst).Add(upload)
@@ -284,6 +297,62 @@ func (s *CostEstimateSummary) FormatLine() string {
 	}
 
 	return "Estimate: time: " + timePart + "  cost: " + costPart
+}
+
+// StrategySummaryRow holds aggregated cost/time for one strategy, for comparison display.
+type StrategySummaryRow struct {
+	Label     string            // display label, e.g. "cheap" or "fast/fastest"
+	Active    bool              // true if the active strategy is in this row
+	NumGPUs   int               // GPU groups with valid offers
+	MaxTime   estimate.Estimate // max across groups (wall-clock parallel)
+	TotalCost float64           // sum of mean costs across groups
+	CostLower float64           // sum of lower cost bounds
+	CostUpper float64           // sum of upper cost bounds
+	Loading   bool              // estimates not yet available
+}
+
+// SummarizeForComparison aggregates estimates into a StrategySummaryRow using
+// max-time semantics (groups run in parallel) and sum-cost (total spend).
+// Selection-aware: scales per group using selectedPerGroup.
+// Returns nil if no valid offers.
+func SummarizeForComparison(estimates []CostEstimate, selectedPerGroup []int) *StrategySummaryRow {
+	row := &StrategySummaryRow{}
+	hasAny := false
+	for i, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+		hasAny = true
+		row.NumGPUs++
+
+		totalJobs := len(est.Group.Jobs)
+		_, scale := selectionScale(i, totalJobs, selectedPerGroup)
+
+		scaledTime := est.Breakdown.Total.Scale(scale)
+		scaledCost := est.TotalCost * scale
+		lowerCost := scaledTime.Lower.Hours() * est.Offer.Offer.CostPerHour
+		upperCost := scaledTime.Upper.Hours() * est.Offer.Offer.CostPerHour
+
+		// Max time (wall-clock — groups run in parallel)
+		if scaledTime.Mean > row.MaxTime.Mean {
+			row.MaxTime.Mean = scaledTime.Mean
+		}
+		if scaledTime.Lower > row.MaxTime.Lower {
+			row.MaxTime.Lower = scaledTime.Lower
+		}
+		if scaledTime.Upper > row.MaxTime.Upper {
+			row.MaxTime.Upper = scaledTime.Upper
+		}
+
+		// Sum cost
+		row.TotalCost += scaledCost
+		row.CostLower += lowerCost
+		row.CostUpper += upperCost
+	}
+	if !hasAny {
+		return nil
+	}
+	return row
 }
 
 // SummarizeEstimates aggregates cost estimates into a summary with time and cost ranges.

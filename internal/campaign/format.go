@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -438,4 +439,330 @@ func TruncateCommand(cmd string, max int) string {
 		return cmd
 	}
 	return cmd[:max-1] + "…"
+}
+
+// FormatStrategySummary returns a comparison table showing all strategies.
+// Active row gets a "►" prefix; others are dimmed.
+func FormatStrategySummary(rows []StrategySummaryRow) CostTable {
+	type fmtRow struct {
+		prefix, strategy, gpus, time, cost string
+		dimmed                             bool
+	}
+
+	var fRows []fmtRow
+	for _, r := range rows {
+		prefix := "  "
+		dimmed := true
+		if r.Active {
+			prefix = "► "
+			dimmed = false
+		}
+		if r.Loading {
+			fRows = append(fRows, fmtRow{
+				prefix:   prefix,
+				strategy: r.Label,
+				gpus:     "",
+				time:     "estimating...",
+				cost:     "",
+				dimmed:   dimmed,
+			})
+			continue
+		}
+		timeStr := formatDurationWithBounds(r.MaxTime)
+		costStr := formatCostBounds(r.TotalCost, r.CostLower, r.CostUpper)
+
+		fRows = append(fRows, fmtRow{
+			prefix:   prefix,
+			strategy: r.Label,
+			gpus:     fmt.Sprintf("%d", r.NumGPUs),
+			time:     timeStr,
+			cost:     costStr,
+			dimmed:   dimmed,
+		})
+	}
+
+	var wStrat, wGPUs, wTime int
+	for _, r := range fRows {
+		if len(r.strategy) > wStrat {
+			wStrat = len(r.strategy)
+		}
+		if len(r.gpus) > wGPUs {
+			wGPUs = len(r.gpus)
+		}
+		if len(r.time) > wTime {
+			wTime = len(r.time)
+		}
+	}
+
+	var lines []CostLine
+	for _, r := range fRows {
+		line := fmt.Sprintf("%s%-*s  %*s  %-*s  %s",
+			r.prefix, wStrat, r.strategy, wGPUs, r.gpus, wTime, r.time, r.cost)
+		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
+	}
+	return CostTable{Lines: lines}
+}
+
+// formatCostBounds formats "$X.XX ($L–$U)" or just "$X.XX" if bounds are tight.
+func formatCostBounds(mean, lower, upper float64) string {
+	if mean == 0 {
+		return "—"
+	}
+	if upper-lower < 0.01 || lower == mean {
+		return fmt.Sprintf("~$%.2f", mean)
+	}
+	return fmt.Sprintf("~$%.2f ($%.2f–$%.2f)", mean, lower, upper)
+}
+
+// FormatParetoSparkline renders a small ASCII chart of cost (Y) vs time (X)
+// with points for each strategy and horizontal error bars for time bounds.
+// Returns nil if fewer than 2 data points. Lines containing the active
+// strategy's point are not dimmed; all others are dimmed.
+func FormatParetoSparkline(rows []StrategySummaryRow) *CostTable {
+	// Collect plottable points
+	type point struct {
+		timeMean  float64 // hours
+		timeLower float64
+		timeUpper float64
+		costMean  float64
+		label     string
+		active    bool
+	}
+	var pts []point
+	for _, r := range rows {
+		if r.Loading || r.MaxTime.Mean == 0 {
+			continue
+		}
+		pts = append(pts, point{
+			timeMean:  r.MaxTime.Mean.Hours(),
+			timeLower: r.MaxTime.Lower.Hours(),
+			timeUpper: r.MaxTime.Upper.Hours(),
+			costMean:  r.TotalCost,
+			label:     r.Label,
+			active:    r.Active,
+		})
+	}
+	if len(pts) < 2 {
+		return nil
+	}
+
+	// Find axis ranges — include error bar extents and mean values
+	minT, maxT := pts[0].timeLower, pts[0].timeUpper
+	minC, maxC := pts[0].costMean, pts[0].costMean
+	for _, p := range pts {
+		if p.timeLower < minT {
+			minT = p.timeLower
+		}
+		if p.timeMean < minT {
+			minT = p.timeMean
+		}
+		if p.timeUpper > maxT {
+			maxT = p.timeUpper
+		}
+		if p.timeMean > maxT {
+			maxT = p.timeMean
+		}
+		if p.costMean < minC {
+			minC = p.costMean
+		}
+		if p.costMean > maxC {
+			maxC = p.costMean
+		}
+	}
+
+	// Add padding so points don't land on edges
+	rangeT := maxT - minT
+	rangeC := maxC - minC
+	if rangeT < 0.01 {
+		rangeT = 1.0
+		minT -= 0.5
+		maxT += 0.5
+	} else {
+		pad := rangeT * 0.15
+		minT -= pad
+		maxT += pad
+		rangeT = maxT - minT
+	}
+	if rangeC < 0.01 {
+		rangeC = 1.0
+		minC -= 0.5
+		maxC += 0.5
+	} else {
+		pad := rangeC * 0.15
+		minC -= pad
+		maxC += pad
+		rangeC = maxC - minC
+	}
+	if minT < 0 {
+		minT = 0
+	}
+	if minC < 0 {
+		minC = 0
+	}
+
+	// Chart dimensions
+	const chartRows = 3
+	const chartCols = 28
+	const yLabelW = 8 // e.g. "  $12.34 "
+
+	// Helper to map a time value to a column
+	timeToCol := func(t float64) int {
+		col := int(math.Round(float64(chartCols-1) * (t - minT) / rangeT))
+		if col < 0 {
+			col = 0
+		}
+		if col >= chartCols {
+			col = chartCols - 1
+		}
+		return col
+	}
+
+	// Map points to grid positions
+	type placed struct {
+		col      int
+		row      int
+		colLower int // error bar left
+		colUpper int // error bar right
+		label    string
+		active   bool
+	}
+	var placements []placed
+	rowCosts := make(map[int][]float64)
+	for _, p := range pts {
+		col := timeToCol(p.timeMean)
+		row := chartRows - 1 - int(math.Round(float64(chartRows-1)*(p.costMean-minC)/rangeC))
+		if row < 0 {
+			row = 0
+		}
+		if row >= chartRows {
+			row = chartRows - 1
+		}
+		colLower := timeToCol(p.timeLower)
+		colUpper := timeToCol(p.timeUpper)
+		placements = append(placements, placed{col: col, row: row, colLower: colLower, colUpper: colUpper, label: p.label, active: p.active})
+		rowCosts[row] = append(rowCosts[row], p.costMean)
+	}
+
+	// Build grid (rows × cols of runes)
+	grid := make([][]rune, chartRows)
+	for r := range grid {
+		grid[r] = make([]rune, chartCols)
+		for c := range grid[r] {
+			grid[r][c] = ' '
+		}
+	}
+
+	// Draw error bars first (so point markers overwrite them)
+	for _, p := range placements {
+		if p.colUpper > p.colLower {
+			// Left cap
+			if grid[p.row][p.colLower] == ' ' {
+				grid[p.row][p.colLower] = '├'
+			}
+			// Horizontal bar
+			for c := p.colLower + 1; c < p.colUpper; c++ {
+				if grid[p.row][c] == ' ' {
+					grid[p.row][c] = '─'
+				}
+			}
+			// Right cap
+			if grid[p.row][p.colUpper] == ' ' {
+				grid[p.row][p.colUpper] = '┤'
+			}
+		}
+	}
+
+	// Draw active-strategy points last so they overwrite inactive ones on collision
+	type rowLabel struct {
+		label string
+	}
+	rowLabels := make(map[int][]rowLabel)
+	activeRows := make(map[int]bool)
+
+	// Inactive points first, then active (so active overwrites on collision)
+	for pass := 0; pass < 2; pass++ {
+		for _, p := range placements {
+			if (pass == 0 && p.active) || (pass == 1 && !p.active) {
+				continue
+			}
+			grid[p.row][p.col] = '●'
+			rowLabels[p.row] = append(rowLabels[p.row], rowLabel{label: p.label})
+			if p.active {
+				activeRows[p.row] = true
+			}
+		}
+	}
+
+	// Y-axis labels: use actual cost values for rows with points, interpolated for empty rows
+	var yLabels [chartRows]string
+	for r := 0; r < chartRows; r++ {
+		costs := rowCosts[r]
+		if len(costs) > 0 && uniqueCostCount(costs) == 1 {
+			yLabels[r] = formatDollarLabel(costs[0])
+		} else {
+			// Empty row or multiple distinct costs: interpolate
+			frac := float64(r) / float64(chartRows-1)
+			yLabels[r] = formatDollarLabel(maxC - frac*(maxC-minC))
+		}
+	}
+
+	// Build CostTable lines — active-point rows are not dimmed (rendered in highlight color)
+	var lines []CostLine
+	for r := 0; r < chartRows; r++ {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("%*s┤", yLabelW, yLabels[r]))
+		b.WriteString(string(grid[r][:]))
+		for _, rl := range rowLabels[r] {
+			b.WriteString(" " + rl.label)
+		}
+		lines = append(lines, CostLine{Text: b.String(), Dimmed: !activeRows[r]})
+	}
+
+	// X-axis line
+	xAxis := strings.Repeat(" ", yLabelW) + "└" + strings.Repeat("─", chartCols)
+	lines = append(lines, CostLine{Text: xAxis, Dimmed: true})
+
+	// X-axis labels
+	leftLabel := formatDurationShort(time.Duration(minT * float64(time.Hour)))
+	midLabel := formatDurationShort(time.Duration((minT + maxT) / 2 * float64(time.Hour)))
+	rightLabel := formatDurationShort(time.Duration(maxT * float64(time.Hour)))
+
+	xLine := make([]byte, yLabelW+1+chartCols)
+	for i := range xLine {
+		xLine[i] = ' '
+	}
+	leftPos := yLabelW + 1
+	copy(xLine[leftPos:], []byte(leftLabel))
+	rightPos := yLabelW + 1 + chartCols - len(rightLabel)
+	if rightPos < leftPos+len(leftLabel)+1 {
+		rightPos = leftPos + len(leftLabel) + 1
+	}
+	copy(xLine[rightPos:], []byte(rightLabel))
+	midPos := yLabelW + 1 + chartCols/2 - len(midLabel)/2
+	if midPos > leftPos+len(leftLabel)+1 && midPos+len(midLabel) < rightPos-1 {
+		copy(xLine[midPos:], []byte(midLabel))
+	}
+	lines = append(lines, CostLine{Text: string(xLine), Dimmed: true})
+
+	return &CostTable{Lines: lines}
+}
+
+// uniqueCostCount returns the number of distinct values in costs.
+func uniqueCostCount(costs []float64) int {
+	seen := make(map[float64]bool)
+	for _, c := range costs {
+		seen[c] = true
+	}
+	return len(seen)
+}
+
+// formatDollarLabel formats a dollar amount for sparkline Y-axis.
+func formatDollarLabel(v float64) string {
+	if v >= 100 {
+		return fmt.Sprintf("$%.0f", v)
+	}
+	if v >= 10 {
+		return fmt.Sprintf("$%.1f", v)
+	}
+	return fmt.Sprintf("$%.2f", v)
 }

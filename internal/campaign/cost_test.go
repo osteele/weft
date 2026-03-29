@@ -18,7 +18,7 @@ func TestEstimateCosts_NoPredictions(t *testing.T) {
 		},
 	}
 
-	estimates := EstimateCosts(groupOffers, nil, nil, nil, nil, nil)
+	estimates := EstimateCosts(groupOffers, nil, nil, nil, nil, 0, nil)
 
 	if len(estimates) != 1 {
 		t.Fatalf("expected 1 estimate, got %d", len(estimates))
@@ -48,7 +48,7 @@ func TestEstimateCosts_NilOffer(t *testing.T) {
 		},
 	}
 
-	estimates := EstimateCosts(groupOffers, nil, nil, nil, nil, nil)
+	estimates := EstimateCosts(groupOffers, nil, nil, nil, nil, 0, nil)
 	if estimates[0].TotalCost != 0 {
 		t.Errorf("nil offer should have 0 cost, got %f", estimates[0].TotalCost)
 	}

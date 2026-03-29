@@ -130,6 +130,26 @@ func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel,
 	return results
 }
 
+// MedianDLPerf computes the median DLPerf across all raw offers.
+// Returns 0 if no offers have DLPerf data.
+func MedianDLPerf(rawOffers []GroupRawOffers) float64 {
+	var all []cloud.Offer
+	for _, r := range rawOffers {
+		all = append(all, r.Offers...)
+	}
+	hasPerf := false
+	for _, o := range all {
+		if o.DLPerf > 0 {
+			hasPerf = true
+			break
+		}
+	}
+	if !hasPerf {
+		return 0
+	}
+	return bidding.MedianOfferDLPerf(all)
+}
+
 // FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
 // retry risk from preemption). Otherwise falls back to cheapest offer.

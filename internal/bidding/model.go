@@ -193,7 +193,7 @@ func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs, setup
 
 	var medianDLPerf float64
 	if strategy == StrategyFast {
-		medianDLPerf = medianOfferDLPerf(offers)
+		medianDLPerf = MedianOfferDLPerf(offers)
 	}
 
 	return bestOfferByScore(offers, func(o cloud.Offer) float64 {
@@ -219,8 +219,9 @@ func bestOfferByScore(offers []cloud.Offer, score func(cloud.Offer) float64) (in
 	return bestIdx, offers[bestIdx]
 }
 
-// medianOfferDLPerf returns the median DLPerf across offers.
-func medianOfferDLPerf(offers []cloud.Offer) float64 {
+// MedianOfferDLPerf returns the median DLPerf across offers.
+// Returns 1.0 if no offers have DLPerf data.
+func MedianOfferDLPerf(offers []cloud.Offer) float64 {
 	perfs := make([]float64, 0, len(offers))
 	for _, o := range offers {
 		if o.DLPerf > 0 {
