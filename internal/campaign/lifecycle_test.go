@@ -313,9 +313,9 @@ func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
 			updatedOffer = offer
 			return nil
 		},
-		func(failedOffer cloud.Offer) (*cloud.Offer, error) {
-			if failedOffer.ProviderID != initialOffer.ProviderID {
-				t.Fatalf("failed offer ID = %s, want %s", failedOffer.ProviderID, initialOffer.ProviderID)
+		func(excludeKeys map[string]struct{}) (*cloud.Offer, error) {
+			if _, ok := excludeKeys[initialOffer.Key()]; !ok {
+				t.Fatalf("exclude set should contain initial offer key %s", initialOffer.Key())
 			}
 			return &replacement, nil
 		},
@@ -335,7 +335,7 @@ func TestCreateInstanceWithReplacementRetriesUnavailableOffer(t *testing.T) {
 	if got := strings.Join(createCalls, ","); got != "999,1001" {
 		t.Fatalf("create calls = %q, want %q", got, "999,1001")
 	}
-	if got := strings.Join(progress, " | "); got != "creating instance | offer disappeared; searching again | retrying with replacement offer" {
+	if got := strings.Join(progress, " | "); !strings.Contains(got, "creating instance") || !strings.Contains(got, "failed; searching again") {
 		t.Fatalf("progress = %q", got)
 	}
 }
@@ -364,7 +364,7 @@ func TestCreateInstanceWithReplacementRetriesUnavailableRunpodOffer(t *testing.T
 		cloud.CreateOpts{},
 		func(string) {},
 		nil,
-		func(cloud.Offer) (*cloud.Offer, error) { return &replacement, nil },
+		func(map[string]struct{}) (*cloud.Offer, error) { return &replacement, nil },
 	)
 	if err != nil {
 		t.Fatalf("createInstanceWithReplacement: %v", err)
@@ -402,7 +402,7 @@ func TestCreateInstanceWithReplacementNoReplacementOffer(t *testing.T) {
 			t.Fatal("metadata update should not be called")
 			return nil
 		},
-		func(cloud.Offer) (*cloud.Offer, error) {
+		func(map[string]struct{}) (*cloud.Offer, error) {
 			replacementCalled = true
 			return nil, nil
 		},
@@ -438,7 +438,7 @@ func TestCreateInstanceWithReplacementDoesNotRetryGenericError(t *testing.T) {
 		cloud.CreateOpts{},
 		func(string) {},
 		nil,
-		func(cloud.Offer) (*cloud.Offer, error) {
+		func(map[string]struct{}) (*cloud.Offer, error) {
 			replacementCalled = true
 			return nil, nil
 		},
@@ -454,12 +454,99 @@ func TestCreateInstanceWithReplacementDoesNotRetryGenericError(t *testing.T) {
 	}
 }
 
-func TestReplacementOfferAllowed(t *testing.T) {
-	failed := cloud.Offer{CostPerHour: 1.00}
-	if !replacementOfferAllowed(failed, cloud.Offer{CostPerHour: 1.25}) {
+func TestCreateInstanceWithReplacementRetriesProviderRejected(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	offers := []cloud.Offer{
+		{ProviderID: "offer-1", Provider: cloud.ProviderVastai, CostPerHour: 1.00},
+		{ProviderID: "offer-2", Provider: cloud.ProviderVastai, CostPerHour: 1.10},
+		{ProviderID: "offer-3", Provider: cloud.ProviderVastai, CostPerHour: 1.15},
+	}
+
+	var createCalls []string
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(offerID string, _ cloud.CreateOpts) (*cloud.Instance, error) {
+			createCalls = append(createCalls, offerID)
+			if len(createCalls) <= 2 {
+				return nil, fmt.Errorf("create instance failed: %w: provider returned success=false", cloud.ErrProviderRejected)
+			}
+			return &cloud.Instance{ProviderID: "inst-ok", Status: cloud.ProviderStatusCreating}, nil
+		},
+	}
+
+	replacementIdx := 0
+	inst, finalOffer, err := createInstanceWithReplacement(
+		mockClient,
+		group,
+		offers[0],
+		cloud.CreateOpts{},
+		func(string) {},
+		nil,
+		func(excludeKeys map[string]struct{}) (*cloud.Offer, error) {
+			replacementIdx++
+			if replacementIdx >= len(offers) {
+				return nil, nil
+			}
+			return &offers[replacementIdx], nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("expected success after retries, got: %v", err)
+	}
+	if inst == nil || inst.ProviderID != "inst-ok" {
+		t.Fatalf("instance = %+v, want inst-ok", inst)
+	}
+	if finalOffer.ProviderID != "offer-3" {
+		t.Fatalf("final offer = %s, want offer-3", finalOffer.ProviderID)
+	}
+	if got := strings.Join(createCalls, ","); got != "offer-1,offer-2,offer-3" {
+		t.Fatalf("create calls = %q, want %q", got, "offer-1,offer-2,offer-3")
+	}
+}
+
+func TestCreateInstanceWithReplacementExhaustsAttempts(t *testing.T) {
+	group := InstanceGroup{GPUClass: "RTX_4090", GPUMemGB: 24}
+	initialOffer := cloud.Offer{ProviderID: "offer-1", Provider: cloud.ProviderVastai, CostPerHour: 1.00}
+
+	offerIdx := 1
+	var createCalls int
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		CreateInstanceFunc: func(string, cloud.CreateOpts) (*cloud.Instance, error) {
+			createCalls++
+			return nil, fmt.Errorf("create instance failed: %w: provider returned success=false", cloud.ErrProviderRejected)
+		},
+	}
+
+	_, _, err := createInstanceWithReplacement(
+		mockClient,
+		group,
+		initialOffer,
+		cloud.CreateOpts{},
+		func(string) {},
+		nil,
+		func(map[string]struct{}) (*cloud.Offer, error) {
+			offerIdx++
+			return &cloud.Offer{
+				ProviderID:  fmt.Sprintf("offer-%d", offerIdx),
+				Provider:    cloud.ProviderVastai,
+				CostPerHour: 1.00,
+			}, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts")
+	}
+	if createCalls != maxCreateAttempts {
+		t.Fatalf("create calls = %d, want %d", createCalls, maxCreateAttempts)
+	}
+}
+
+func TestReplacementPriceAllowed(t *testing.T) {
+	if !replacementPriceAllowed(1.00, 1.25) {
 		t.Fatal("expected replacement at 25% premium to be allowed")
 	}
-	if replacementOfferAllowed(failed, cloud.Offer{CostPerHour: 1.26}) {
+	if replacementPriceAllowed(1.00, 1.26) {
 		t.Fatal("expected replacement above 25% premium to be rejected")
 	}
 }

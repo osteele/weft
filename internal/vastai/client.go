@@ -153,9 +153,9 @@ func (c *Client) CreateInstance(offerID int, opts CreateOpts) (*Instance, error)
 			if destroyErr := c.DestroyInstance(resp.NewContract); destroyErr != nil {
 				slog.Warn("failed to destroy orphaned instance", "component", "vastai", "instance", resp.NewContract, "error", destroyErr)
 			}
-			return nil, fmt.Errorf("create instance failed (contract %d): %s", resp.NewContract, reason)
+			return nil, fmt.Errorf("create instance failed (contract %d): %w: %s", resp.NewContract, cloud.ErrProviderRejected, reason)
 		}
-		return nil, fmt.Errorf("create instance failed: %s", reason)
+		return nil, fmt.Errorf("create instance failed: %w: %s", cloud.ErrProviderRejected, reason)
 	}
 
 	return &Instance{ID: resp.NewContract}, nil

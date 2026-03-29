@@ -292,7 +292,7 @@ func PrepareR2Assets(r2Cfg cloud.R2Config, groups []InstanceGroup) (*R2Assets, e
 	return stager.AwaitAll()
 }
 
-type replacementOfferFunc func(failedOffer cloud.Offer) (*cloud.Offer, error)
+type replacementOfferFunc func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error)
 
 const replacementOfferMaxPriceMultiplier = 1.25
 
@@ -311,11 +311,19 @@ func launchCostInputs(estimates []CostEstimate, idx int) (jobDurationHrs, setupO
 	return jobDurationHrs, setupOverheadHrs
 }
 
-func replacementOfferAllowed(failedOffer, replacementOffer cloud.Offer) bool {
-	if failedOffer.CostPerHour <= 0 || replacementOffer.CostPerHour <= 0 {
+func replacementPriceAllowed(originalPricePerHour, replacementPricePerHour float64) bool {
+	if originalPricePerHour <= 0 || replacementPricePerHour <= 0 {
 		return true
 	}
-	return replacementOffer.CostPerHour <= failedOffer.CostPerHour*replacementOfferMaxPriceMultiplier
+	return replacementPricePerHour <= originalPricePerHour*replacementOfferMaxPriceMultiplier
+}
+
+// maxCreateAttempts is the maximum number of offers to try before giving up.
+const maxCreateAttempts = 4
+
+// isRetryableCreateError returns true if the error warrants trying a different offer.
+func isRetryableCreateError(err error) bool {
+	return errors.Is(err, cloud.ErrOfferUnavailable) || errors.Is(err, cloud.ErrProviderRejected)
 }
 
 func createInstanceWithReplacement(
@@ -328,43 +336,61 @@ func createInstanceWithReplacement(
 	replacementOffer replacementOfferFunc,
 ) (*cloud.Instance, cloud.Offer, error) {
 	currentOffer := offer
+	excludedOffers := make(map[string]struct{})
+	var lastErr error
 
-	progress("creating instance")
-	inst, err := client.CreateInstance(currentOffer.ProviderID, createOpts)
-	if err == nil {
-		return inst, currentOffer, nil
-	}
-	if replacementOffer == nil || !errors.Is(err, cloud.ErrOfferUnavailable) {
-		return nil, currentOffer, err
-	}
-
-	slog.Warn("offer disappeared, searching for replacement", "component", "launch", "offer", currentOffer.ProviderID, "gpu_spec", group.GPUSpec())
-	progress("offer disappeared; searching again")
-
-	nextOffer, retryErr := replacementOffer(currentOffer)
-	if retryErr != nil {
-		return nil, currentOffer, fmt.Errorf("search replacement offer: %w", retryErr)
-	}
-	if nextOffer == nil {
-		progress("offer disappeared; no replacement offer found")
-		return nil, currentOffer, fmt.Errorf("offer %s disappeared: %w", currentOffer.ProviderID, ErrNoReplacementOffer)
-	}
-
-	if updateOfferMetadata != nil {
-		if err := updateOfferMetadata(*nextOffer); err != nil {
-			return nil, currentOffer, fmt.Errorf("update replacement offer metadata: %w", err)
+	for attempt := 1; attempt <= maxCreateAttempts; attempt++ {
+		if attempt == 1 {
+			progress("creating instance")
+		} else {
+			progress(fmt.Sprintf("retrying with replacement offer (attempt %d/%d)", attempt, maxCreateAttempts))
 		}
+
+		inst, err := client.CreateInstance(currentOffer.ProviderID, createOpts)
+		if err == nil {
+			return inst, currentOffer, nil
+		}
+		lastErr = err
+
+		if replacementOffer == nil || !isRetryableCreateError(err) || attempt == maxCreateAttempts {
+			break
+		}
+
+		excludedOffers[currentOffer.Key()] = struct{}{}
+
+		slog.Warn("instance creation failed, searching for replacement",
+			"component", "launch",
+			"attempt", attempt,
+			"offer", currentOffer.ProviderID,
+			"gpu_spec", group.GPUSpec(),
+			"error", err,
+		)
+		progress(fmt.Sprintf("offer %s failed; searching again", currentOffer.ProviderID))
+
+		nextOffer, retryErr := replacementOffer(excludedOffers)
+		if retryErr != nil {
+			return nil, currentOffer, fmt.Errorf("search replacement offer: %w", retryErr)
+		}
+		if nextOffer == nil {
+			return nil, currentOffer, fmt.Errorf("offer %s failed, no replacement found: %w", currentOffer.ProviderID, ErrNoReplacementOffer)
+		}
+
+		if updateOfferMetadata != nil {
+			if err := updateOfferMetadata(*nextOffer); err != nil {
+				return nil, currentOffer, fmt.Errorf("update replacement offer metadata: %w", err)
+			}
+		}
+
+		currentOffer = *nextOffer
+		slog.Info("retrying with replacement offer",
+			"component", "launch",
+			"attempt", attempt+1,
+			"gpu_spec", group.GPUSpec(),
+			"offer", currentOffer.ProviderID,
+		)
 	}
 
-	currentOffer = *nextOffer
-	slog.Info("retrying with replacement offer", "component", "launch", "gpu_spec", group.GPUSpec(), "offer", currentOffer.ProviderID)
-	progress("retrying with replacement offer")
-
-	inst, err = client.CreateInstance(currentOffer.ProviderID, createOpts)
-	if err != nil {
-		return nil, currentOffer, err
-	}
-	return inst, currentOffer, nil
+	return nil, currentOffer, lastErr
 }
 
 // LaunchCampaign creates a campaign record and launches instances for each group
@@ -642,26 +668,27 @@ func LaunchCampaign(
 				return
 			}
 
-			replacementOffer := replacementOfferFunc(func(failedOffer cloud.Offer) (*cloud.Offer, error) {
+			originalPrice := ofr.CostPerHour
+			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
 				replacement := SearchBestOfferForGroup(
 					[]cloud.Client{client},
 					group,
 					survivalModel,
 					jobDurationHrs,
 					setupOverheadHrs,
-					map[string]struct{}{failedOffer.Key(): {}},
+					excludeOfferKeys,
 					opts.Strategy,
 					opts.MinSurvival,
 				)
 				if replacement.Err != nil {
 					return nil, replacement.Err
 				}
-				if replacement.Offer != nil && !replacementOfferAllowed(failedOffer, *replacement.Offer) {
+				if replacement.Offer != nil && !replacementPriceAllowed(originalPrice, replacement.Offer.CostPerHour) {
 					return nil, fmt.Errorf(
-						"replacement offer price $%.2f/hr exceeds %.0f%% cap over expired offer $%.2f/hr",
+						"replacement offer price $%.2f/hr exceeds %.0f%% cap over original offer $%.2f/hr",
 						replacement.Offer.CostPerHour,
 						(replacementOfferMaxPriceMultiplier-1)*100,
-						failedOffer.CostPerHour,
+						originalPrice,
 					)
 				}
 				return replacement.Offer, nil

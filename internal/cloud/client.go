@@ -13,6 +13,11 @@ var ErrInstanceNotFound = errors.New("instance not found")
 // disappears before instance creation succeeds.
 var ErrOfferUnavailable = errors.New("offer unavailable")
 
+// ErrProviderRejected is returned when the provider accepts the create request
+// but responds with success=false (e.g. machine busy, provider-side failure).
+// Like ErrOfferUnavailable, the remedy is to try a different offer.
+var ErrProviderRejected = errors.New("provider rejected instance creation")
+
 // ProjectRootDir is the default root directory used for synced project trees on
 // cloud instances.
 const ProjectRootDir = "/workspace"
