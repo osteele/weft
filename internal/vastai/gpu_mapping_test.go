@@ -81,6 +81,54 @@ func TestResolveGPUFilter(t *testing.T) {
 			name:     "nvidia family",
 			gpuClass: "nvidia",
 		},
+		{
+			name:      "a100sxm variant",
+			gpuClass:  "A100 SXM",
+			wantNames: []string{"A100 SXM4"},
+		},
+		{
+			name:      "a100pcie variant",
+			gpuClass:  "A100 PCIE",
+			wantNames: []string{"A100 PCIE"},
+		},
+		{
+			name:      "h100nvl variant",
+			gpuClass:  "H100 NVL",
+			wantNames: []string{"H100 NVL"},
+		},
+		{
+			name:      "h100sxm variant",
+			gpuClass:  "H100 SXM",
+			wantNames: []string{"H100 SXM"},
+		},
+		{
+			name:      "prefix a100sxm4",
+			gpuClass:  "A100 SXM4",
+			wantNames: []string{"A100 SXM4"},
+		},
+		{
+			name:      "prefix b200nvl",
+			gpuClass:  "B200 NVL",
+			wantNames: []string{"B200 NVL"},
+		},
+		{
+			name:      "prefix h200nvl",
+			gpuClass:  "H200 NVL",
+			wantNames: []string{"H200 NVL"},
+		},
+		{
+			name:          "prefix a100sxm+ min-mode",
+			gpuClass:      "A100 SXM+",
+			wantNames:     nil,
+			wantPostFilt:  true,
+			acceptGPUName: "RTX 4090",
+			rejectGPUName: "RTX 2080 Ti",
+		},
+		{
+			name:      "unknown gpu passthrough",
+			gpuClass:  "xyz999",
+			wantNames: []string{"xyz999"},
+		},
 	}
 
 	for _, tt := range tests {
