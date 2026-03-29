@@ -150,38 +150,74 @@ func ListArtifactsByRun(db *sql.DB, runID int64) ([]Artifact, error) {
 }
 
 // FindArtifactByNameOrPath locates a cached artifact by name or path.
+// It tries progressively looser matching:
+//  1. Exact match on name or full path
+//  2. Basename match (e.g. "calibration_53bb.jsonl" matches "/workspace/.../calibration_53bb.jsonl")
+//  3. Path suffix match (e.g. "data/exports/foo.jsonl" matches "/workspace/data/exports/foo.jsonl")
 func FindArtifactByNameOrPath(db *sql.DB, jobID int64, token string) (*Artifact, error) {
-	if runID, err := latestRunIDForJob(db, jobID); err == nil && runID != nil {
-		rows, err := db.Query(
-			`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
-			 FROM artifacts WHERE attempt_id = ? AND (name = ? OR path = ?)
-			 ORDER BY id ASC`,
-			*runID, token, token,
-		)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
+	// Try exact match first, then basename, then suffix.
+	// The suffix pattern uses '/' + token to avoid partial-name matches.
+	basenamePattern := "%/" + token
+	suffixPattern := "%/" + token
 
-		if rows.Next() {
-			var art Artifact
-			var jobRunID sql.NullInt64
-			if err := rows.Scan(&art.ID, &art.JobID, &jobRunID, &art.Name, &art.Path, &art.StoredPath, &art.SizeBytes, &art.SHA256, &art.CreatedAt); err != nil {
-				return nil, err
-			}
-			if jobRunID.Valid {
-				art.JobRunID = &jobRunID.Int64
-			}
-			return &art, nil
+	if runID, err := latestRunIDForJob(db, jobID); err == nil && runID != nil {
+		art, err := findArtifactWithPatterns(db,
+			`attempt_id = ?`, *runID, token, basenamePattern, suffixPattern)
+		if err == nil {
+			return art, nil
+		}
+		if err != sql.ErrNoRows {
+			return nil, err
 		}
 	}
 
-	rows, err := db.Query(
+	return findArtifactWithPatterns(db,
+		`job_id = ?`, jobID, token, basenamePattern, suffixPattern)
+}
+
+// findArtifactWithPatterns searches for an artifact using exact match, then
+// basename match, then suffix match. The scopeClause should be "attempt_id = ?"
+// or "job_id = ?", with scopeVal being the corresponding ID.
+func findArtifactWithPatterns(db *sql.DB, scopeClause string, scopeVal int64, token, basenamePattern, suffixPattern string) (*Artifact, error) {
+	// 1. Exact match on name or path
+	art, err := scanOneArtifact(db,
 		`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
-		FROM artifacts WHERE job_id = ? AND (name = ? OR path = ?)
-		ORDER BY id ASC`,
-		jobID, token, token,
+		 FROM artifacts WHERE `+scopeClause+` AND (name = ? OR path = ?)
+		 ORDER BY id ASC LIMIT 1`,
+		scopeVal, token, token,
 	)
+	if err == nil {
+		return art, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	// 2. Basename match: token matches the filename portion of path
+	art, err = scanOneArtifact(db,
+		`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
+		 FROM artifacts WHERE `+scopeClause+` AND path LIKE ?
+		 ORDER BY id ASC LIMIT 1`,
+		scopeVal, basenamePattern,
+	)
+	if err == nil {
+		return art, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	// 3. Suffix match: token matches the end of the path (with / boundary)
+	return scanOneArtifact(db,
+		`SELECT id, job_id, attempt_id, name, path, stored_path, size_bytes, sha256, created_at
+		 FROM artifacts WHERE `+scopeClause+` AND path LIKE ?
+		 ORDER BY id ASC LIMIT 1`,
+		scopeVal, suffixPattern,
+	)
+}
+
+func scanOneArtifact(db *sql.DB, query string, args ...any) (*Artifact, error) {
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

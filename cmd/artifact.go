@@ -56,8 +56,18 @@ var artifactGetCmd = &cobra.Command{
 	Short: "Retrieve a cached artifact",
 	Long: `Retrieve an artifact from the local cache.
 
+Use --all to download all artifacts for a job.
 Use --tag with --latest to resolve the job ID from tags.`,
 	Args: usageArgs(func(cmd *cobra.Command, args []string) error {
+		if artifactAll {
+			if len(artifactTag) > 0 {
+				if !artifactLatest {
+					return usageErrorf("use --latest when resolving by tag")
+				}
+				return cobra.ExactArgs(0)(cmd, args)
+			}
+			return cobra.MinimumNArgs(1)(cmd, args)
+		}
 		if len(artifactTag) > 0 {
 			if !artifactLatest {
 				return usageErrorf("use --latest when resolving by tag")
@@ -106,6 +116,7 @@ var (
 	artifactName     string
 	artifactTag      []string
 	artifactLatest   bool
+	artifactAll      bool
 )
 
 func init() {
@@ -118,6 +129,7 @@ func init() {
 
 	addArtifactListFlags(artifactListCmd)
 	artifactGetCmd.Flags().StringVarP(&artifactOutput, "output", "o", "", "Output path (default: current directory, use '-' for stdout)")
+	artifactGetCmd.Flags().BoolVar(&artifactAll, "all", false, "Download all artifacts for the job")
 	artifactGetCmd.Flags().StringSliceVar(&artifactTag, "tag", nil, "Resolve job ID by tag (can be repeated)")
 	artifactGetCmd.Flags().BoolVar(&artifactLatest, "latest", false, "Use the latest job when resolving by tag")
 	artifactAddCmd.Flags().StringVar(&artifactName, "name", "", "Optional artifact name")
@@ -378,6 +390,24 @@ func warnOnFailedCloudOutputUpload(cmd *cobra.Command, jobID int64) {
 }
 
 func runArtifactGet(cmd *cobra.Command, args []string) error {
+	if artifactAll {
+		var jobIDs []int64
+		if len(artifactTag) > 0 {
+			jobID, err := resolveArtifactJobID(args)
+			if err != nil {
+				return err
+			}
+			jobIDs = []int64{jobID}
+		} else {
+			var err error
+			jobIDs, err = ParseJobIDs(args)
+			if err != nil {
+				return err
+			}
+		}
+		return fetchAllArtifactsForJobs(cmd, jobIDs)
+	}
+
 	var token string
 	if len(artifactTag) > 0 {
 		jobID, err := resolveArtifactJobID(args)
@@ -404,12 +434,24 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 	}
 	defer database.Close()
 
+	var r2Client *r2.Client
+	if cfg, err := config.Load(); err == nil {
+		r2Client, _ = buildR2Client(cfg)
+	}
+
 	multiple := len(jobIDs) > 1
 	var errorsList []string
 	for _, jobID := range jobIDs {
 		entry, err := db.FindArtifactByNameOrPath(database, jobID, token)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, sql.ErrNoRows) {
+				// Fall back to R2 download for cloud jobs
+				job, jobErr := db.GetJobByID(database, jobID)
+				if jobErr == nil && job != nil && job.IsLaunchJob() && r2Client != nil {
+					if dlErr := fetchCloudArtifactByToken(cmd, r2Client, job, token, multiple); dlErr == nil {
+						continue
+					}
+				}
 				errorsList = append(errorsList, fmt.Sprintf("artifact %q not found for job %d", token, jobID))
 				continue
 			}
@@ -437,6 +479,137 @@ func fetchArtifactForJobs(cmd *cobra.Command, jobIDs []int64, token string) erro
 			continue
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+	}
+
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
+	return nil
+}
+
+// fetchCloudArtifactByToken searches R2 cloud outputs for a file matching token
+// (by basename or path suffix) and downloads it.
+func fetchCloudArtifactByToken(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, token string, multiple bool) error {
+	cloudFiles := listCloudJobOutputFiles(r2Client, job)
+	for _, f := range cloudFiles {
+		basename := filepath.Base(f.RelPath)
+		if basename == token || f.RelPath == token || strings.HasSuffix(f.RelPath, "/"+token) {
+			return downloadSingleCloudFile(cmd, r2Client, job, f, multiple)
+		}
+	}
+	return fmt.Errorf("not found in cloud outputs")
+}
+
+// downloadSingleCloudFile downloads one cloud output file to the output destination.
+func downloadSingleCloudFile(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, f runner.OutputFile, multiple bool) error {
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+
+	// Determine the R2 key based on whether this is an artifact or convention output
+	var r2Key string
+	if strings.HasPrefix(f.RelPath, "artifacts/") {
+		trimmed := strings.TrimPrefix(f.RelPath, "artifacts/")
+		r2Key = r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID) + trimmed
+	} else {
+		r2Key = r2keys.JobAttemptOutputsPrefix(job.ID, runID) + f.RelPath
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	data, err := r2Client.GetObject(ctx, r2Key)
+	if err != nil {
+		return fmt.Errorf("download from R2: %w", err)
+	}
+
+	dest, err := resolveArtifactOutputPathForJob(f.RelPath, artifactOutput, job.ID, multiple)
+	if err != nil {
+		return err
+	}
+	if dest == "-" {
+		_, err := cmd.OutOrStdout().Write(data)
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(dest, data, 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+	return nil
+}
+
+// downloadCloudOutputFiles downloads all cloud output files for a job.
+func downloadCloudOutputFiles(cmd *cobra.Command, r2Client *r2.Client, job *db.Job, files []runner.OutputFile) (int, error) {
+	multiple := len(files) > 1
+	downloaded := 0
+	for _, f := range files {
+		if err := downloadSingleCloudFile(cmd, r2Client, job, f, multiple); err != nil {
+			return downloaded, fmt.Errorf("download %s: %w", f.RelPath, err)
+		}
+		downloaded++
+	}
+	return downloaded, nil
+}
+
+func fetchAllArtifactsForJobs(cmd *cobra.Command, jobIDs []int64) error {
+	database, err := db.Open()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	var r2Client *r2.Client
+	if cfg, err := config.Load(); err == nil {
+		r2Client, _ = buildR2Client(cfg)
+	}
+
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		entries, err := db.ListArtifactsByJob(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+
+		if len(entries) == 0 {
+			// Try cloud outputs for launch jobs
+			job, jobErr := db.GetJobByID(database, jobID)
+			if jobErr == nil && job != nil && job.IsLaunchJob() && r2Client != nil {
+				cloudFiles := listCloudJobOutputFiles(r2Client, job)
+				if len(cloudFiles) > 0 {
+					downloaded, dlErr := downloadCloudOutputFiles(cmd, r2Client, job, cloudFiles)
+					if dlErr != nil {
+						errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, dlErr))
+					}
+					if downloaded == 0 && dlErr == nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %d: no artifacts found\n", jobID)
+					}
+					continue
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: no artifacts found\n", jobID)
+			continue
+		}
+
+		for _, entry := range entries {
+			localPath, err := artifacts.LocalPathFromStored(entry.StoredPath)
+			if err != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %d artifact %q: %v", jobID, entry.Path, err))
+				continue
+			}
+			dest, err := resolveArtifactOutputPathForJob(localPath, artifactOutput, jobID, len(jobIDs) > 1)
+			if err != nil {
+				return err
+			}
+			if err := copyFile(localPath, dest); err != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %d artifact %q: %v", jobID, entry.Path, err))
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", dest)
+		}
 	}
 
 	if len(errorsList) > 0 {

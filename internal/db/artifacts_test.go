@@ -66,6 +66,55 @@ func TestFindArtifactByNameOrPath(t *testing.T) {
 	}
 }
 
+func TestFindArtifactByBasename(t *testing.T) {
+	database := setupTestDB(t)
+
+	art := Artifact{
+		JobID:      3,
+		Name:       "",
+		Path:       "/workspace/llm-performance-models/data/exports/calibration_53bbfeb29e50.jsonl",
+		StoredPath: "3/workspace/llm-performance-models/data/exports/calibration_53bbfeb29e50.jsonl",
+		SizeBytes:  27049,
+		SHA256:     "dc63abc",
+	}
+	if err := UpsertArtifact(database, art); err != nil {
+		t.Fatalf("UpsertArtifact: %v", err)
+	}
+
+	// Basename match
+	found, err := FindArtifactByNameOrPath(database, 3, "calibration_53bbfeb29e50.jsonl")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath by basename: %v", err)
+	}
+	if found.Path != art.Path {
+		t.Fatalf("expected path %q, got %q", art.Path, found.Path)
+	}
+
+	// Suffix match
+	found, err = FindArtifactByNameOrPath(database, 3, "data/exports/calibration_53bbfeb29e50.jsonl")
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath by suffix: %v", err)
+	}
+	if found.Path != art.Path {
+		t.Fatalf("expected path %q, got %q", art.Path, found.Path)
+	}
+
+	// Exact full path still works
+	found, err = FindArtifactByNameOrPath(database, 3, art.Path)
+	if err != nil {
+		t.Fatalf("FindArtifactByNameOrPath by full path: %v", err)
+	}
+	if found.Path != art.Path {
+		t.Fatalf("expected path %q, got %q", art.Path, found.Path)
+	}
+
+	// Non-matching token
+	_, err = FindArtifactByNameOrPath(database, 3, "nonexistent.jsonl")
+	if err == nil {
+		t.Fatal("expected error for non-matching token, got nil")
+	}
+}
+
 func TestArtifactsPreferLatestRun(t *testing.T) {
 	database := setupTestDB(t)
 
