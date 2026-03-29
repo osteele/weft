@@ -261,8 +261,8 @@ func TestTelemetryPolicyForBenchmarkJobs(t *testing.T) {
 	if policy.Interval != 5*time.Second {
 		t.Fatalf("benchmark telemetry interval = %v, want %v", policy.Interval, 5*time.Second)
 	}
-	if policy.CollectAdvancedGPU {
-		t.Fatal("benchmark jobs should disable advanced GPU telemetry")
+	if !policy.CollectAdvancedGPU {
+		t.Fatal("benchmark jobs should enable advanced GPU telemetry")
 	}
 
 	normal := TelemetryPolicyForJob(&opsqueue.CommandJob{})

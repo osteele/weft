@@ -755,7 +755,12 @@ weft sync inspect --json          # Machine-readable output
 ```
 
 Cloud instances automatically sync your project sources and collect detailed
-telemetry (CPU, memory, GPU usage, failure detection).
+telemetry (CPU, memory, GPU usage, failure detection). Benchmark jobs
+(`--tag benchmark`) get additional telemetry controls: a benchmark barrier
+waits for background uploads to finish before the job starts (preventing I/O
+interference), and an optional GPU warmup pass initializes CUDA contexts
+before measurement begins. See [Campaigns](docs/guides/campaigns.md) for
+telemetry details and configuration.
 
 Requires the `vastai` CLI: `pip install vastai && vastai set api-key YOUR_KEY`.
 
@@ -820,7 +825,7 @@ The database is automatically created on first use and updated when checking job
 **Reserved placement tags:**
 - `rental`: Skip local placement and push the job toward rental GPU workflows
 - `inventory`: Keep the job on inventory hosts only; do not launch on rental GPUs. Inventory-tagged benchmark jobs may still use hosts marked `shared = true`.
-- `benchmark`: Require an idle host for placement and runtime checks. Auto-placement skips hosts marked `shared = true`, but `weft run <host> --tag benchmark ...` still targets that host directly.
+- `benchmark`: Require an idle host for placement and runtime checks. Auto-placement skips hosts marked `shared = true`, but `weft run <host> --tag benchmark ...` still targets that host directly. On cloud instances, benchmark jobs also enable a benchmark barrier (waits for prior uploads to complete) and advanced GPU telemetry; see the telemetry section above.
 - Legacy aliases `cloud` and `on-prem` are still accepted on input for compatibility
 
 ## Manual Monitoring

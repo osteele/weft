@@ -40,7 +40,7 @@ func DefaultJobTelemetryPolicy() JobTelemetryPolicy {
 func BenchmarkTelemetryPolicy() JobTelemetryPolicy {
 	return JobTelemetryPolicy{
 		Interval:           5 * time.Second,
-		CollectAdvancedGPU: false,
+		CollectAdvancedGPU: true,
 	}
 }
 
