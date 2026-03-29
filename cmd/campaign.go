@@ -88,8 +88,10 @@ var (
 	campaignLaunchSkipWorkdirDelete bool
 	campaignLaunchTUI               bool
 	campaignLaunchPlain             bool
+	campaignLaunchAuto              bool
 	campaignWatchTUI                bool
 	campaignWatchPlain              bool
+	campaignWatchAuto               bool
 	campaignListTUI                 bool
 	campaignListPlain               bool
 )
@@ -125,6 +127,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&campaignLaunchSkipWorkdirDelete, "skip-workdir-deletion", false, "Don't delete working directories after job completion (for debugging)")
 	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
+	cmd.Flags().BoolVar(&campaignLaunchAuto, "auto", false, "Start watch with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 	cmd.MarkFlagsMutuallyExclusive("tui", "yes")
 }
@@ -132,6 +135,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 func addCampaignWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&campaignWatchTUI, "tui", false, "Force interactive TUI display")
 	cmd.Flags().BoolVar(&campaignWatchPlain, "plain", false, "Force plain text output")
+	cmd.Flags().BoolVar(&campaignWatchAuto, "auto", false, "Start with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
@@ -278,7 +282,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// Segue into watch mode if instances were launched
 	if len(finalModel.instanceIDs) > 0 && !campaignLaunchNoWatch && !finalModel.inlineWatchUsed {
 		fmt.Println()
-		return watchAndReport(database, useTUI, watchModeInstances, finalModel.instanceIDs, campaign.SummarizeEstimates(finalModel.costEstimates))
+		return watchAndReport(database, useTUI, watchModeInstances, finalModel.instanceIDs, campaign.SummarizeEstimates(finalModel.costEstimates), campaignLaunchAuto)
 	}
 
 	// Inline watch already ran inside the TUI — print the exit report
@@ -413,7 +417,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Segue into watch mode.
 	if !campaignLaunchNoWatch {
 		fmt.Println()
-		return watchAndReport(database, watchTUI, watchModeInstances, result.InstanceIDs, campaign.SummarizeEstimates(estimates))
+		return watchAndReport(database, watchTUI, watchModeInstances, result.InstanceIDs, campaign.SummarizeEstimates(estimates), campaignLaunchAuto)
 	}
 
 	return nil
@@ -528,7 +532,7 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	return watchAndReport(database, useTUI, watchModeCampaign, instanceIDs, nil)
+	return watchAndReport(database, useTUI, watchModeCampaign, instanceIDs, nil, campaignWatchAuto)
 }
 
 func runCampaignTerminate(cmd *cobra.Command, args []string) error {

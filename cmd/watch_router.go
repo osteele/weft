@@ -44,20 +44,24 @@ type watchRouterModel struct {
 	projectRecent time.Duration // recent window for project mode
 	instanceIDs   []int64       // instance IDs for instance-based modes
 	r2Client      *r2.Client    // R2 client for instance-based modes
+	autoMode      bool          // initial auto-pilot state for new watch models
 }
 
-func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string) watchRouterModel {
+func newWatchRouterModel(database *sql.DB, cfg *config.Config, flash string, autoMode bool) watchRouterModel {
 	watch := newSystemWatchModel(database, cfg, flash)
+	watch.autoMode = autoMode
 	return watchRouterModel{
 		active:   watch,
 		database: database,
 		config:   cfg,
 		homeMode: watchModeSystem,
+		autoMode: autoMode,
 	}
 }
 
-func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client) watchRouterModel {
+func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watchMode, instanceIDs []int64, r2Client *r2.Client, autoMode bool) watchRouterModel {
 	watch := newWatchModelWithMode(mode, database, instanceIDs, r2Client, cfg)
+	watch.autoMode = autoMode
 	return watchRouterModel{
 		active:      watch,
 		database:    database,
@@ -65,17 +69,20 @@ func newInstanceWatchRouterModel(database *sql.DB, cfg *config.Config, mode watc
 		homeMode:    mode,
 		instanceIDs: instanceIDs,
 		r2Client:    r2Client,
+		autoMode:    autoMode,
 	}
 }
 
-func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool) watchRouterModel {
+func newProjectWatchRouterModel(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, autoMode bool) watchRouterModel {
 	watch := newProjectWatchModel(database, cfg, recentWindow, syncEnabled)
+	watch.autoMode = autoMode
 	return watchRouterModel{
 		active:        watch,
 		database:      database,
 		config:        cfg,
 		homeMode:      watchModeProject,
 		projectRecent: recentWindow,
+		autoMode:      autoMode,
 	}
 }
 
@@ -104,8 +111,9 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case switchToLaunchMsg:
-		// Clean up watch model
+		// Clean up watch model and sync auto-pilot state
 		if w, ok := m.active.(watchModel); ok {
+			m.autoMode = w.autoMode
 			w.cancel()
 			if w.syncWorker != nil {
 				w.syncWorker.Stop()
@@ -123,6 +131,9 @@ func (m watchRouterModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.switchTo(*msg.model)
 
 	case switchToWatchMsg:
+		if w, ok := m.active.(watchModel); ok {
+			m.autoMode = w.autoMode
+		}
 		return m.switchTo(m.buildHomeWatch(msg.flash))
 	}
 
@@ -142,13 +153,17 @@ func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
 	case m.homeMode.isInstanceBased():
 		w := newWatchModelWithMode(m.homeMode, m.database, m.instanceIDs, m.r2Client, m.config)
 		w.flash = tui.FlashState{Message: flash}
+		w.autoMode = m.autoMode
 		return w
 	case m.homeMode == watchModeProject:
 		w := newProjectWatchModel(m.database, m.config, m.projectRecent, true)
 		w.projectStatus = flash
+		w.autoMode = m.autoMode
 		return w
 	default:
-		return newSystemWatchModel(m.database, m.config, flash)
+		w := newSystemWatchModel(m.database, m.config, flash)
+		w.autoMode = m.autoMode
+		return w
 	}
 }
 

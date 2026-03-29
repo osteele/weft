@@ -123,6 +123,24 @@ type watchProjectDBRefreshTriggeredMsg struct{}
 type watchProjectSyncTickMsg struct{}
 
 // ---------------------------------------------------------------------------
+// Auto-pilot messages
+// ---------------------------------------------------------------------------
+
+// autoPlaceDoneMsg carries the result of auto-placing a single job.
+type autoPlaceDoneMsg struct {
+	jobID      int64
+	instanceID int64
+	err        error
+}
+
+// autoLaunchDoneMsg carries the result of an auto-launch attempt.
+type autoLaunchDoneMsg struct {
+	instanceIDs []int64
+	skipped     int
+	err         error
+}
+
+// ---------------------------------------------------------------------------
 // Render row types (system mode)
 // ---------------------------------------------------------------------------
 

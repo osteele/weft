@@ -77,7 +77,7 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 
 func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnabled bool) error {
 	cfg, _ := config.Load()
-	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled)
+	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled, watchAuto)
 
 	restore := logging.Suppress()
 	defer restore()

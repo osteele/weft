@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 	// Auto-relaunch on retryable infrastructure failure (instance-based modes)
 	ci := msg.update.Launch
 	ch := m.channels[msg.instanceID]
-	if ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
+	if m.autoMode && ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
 		_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
 			EventKind:  db.EventRetryAutoTriggered,
 			LaunchID:   ci.ID,
@@ -139,6 +140,66 @@ func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd
 		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig))
 	}
 	return m, flashCmd
+}
+
+// ---------------------------------------------------------------------------
+// Update handlers: auto-pilot
+// ---------------------------------------------------------------------------
+
+func (m watchModel) handleAutoPlaceDone(msg autoPlaceDoneMsg) (tea.Model, tea.Cmd) {
+	m.autoPlacing = false
+	if msg.err != nil {
+		return m, m.flash.Set(fmt.Sprintf("Auto-place failed: %v", msg.err), true)
+	}
+	if msg.jobID > 0 {
+		flashCmd := m.flash.Set(fmt.Sprintf("Auto-placed job #%d → instance #%d", msg.jobID, msg.instanceID), false)
+		m.removeUnplacedJob(msg.jobID)
+		m.clampCursor()
+
+		// Continue placing remaining jobs
+		var cmds []tea.Cmd
+		cmds = append(cmds, flashCmd)
+		if m.autoMode && len(m.unplacedJobs) > 0 {
+			m.autoPlacing = true
+			cmds = append(cmds, m.autoPlaceUnplacedJobs())
+		}
+		if m.mode == watchModeSystem {
+			m.refreshing = true
+			cmds = append(cmds, refreshWatchSystem(m.database, m.appConfig))
+		}
+		return m, tea.Batch(cmds...)
+	}
+	return m, nil
+}
+
+func (m watchModel) handleAutoLaunchDone(msg autoLaunchDoneMsg) (tea.Model, tea.Cmd) {
+	m.autoLaunching = false
+	if msg.err != nil {
+		return m, m.flash.Set(fmt.Sprintf("Auto-launch failed: %v", msg.err), true)
+	}
+	if len(msg.instanceIDs) > 0 {
+		// Add new instance IDs and start watching them
+		var cmds []tea.Cmd
+		for _, id := range msg.instanceIDs {
+			if !slices.Contains(m.instanceIDs, id) {
+				m.instanceIDs = append(m.instanceIDs, id)
+				if cmd := m.startWatchingInstance(id); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+		}
+		m.rebuildReplacementCache()
+		flashMsg := fmt.Sprintf("Auto-launched %d instance(s)", len(msg.instanceIDs))
+		if msg.skipped > 0 {
+			flashMsg += fmt.Sprintf(" (%d skipped)", msg.skipped)
+		}
+		cmds = append(cmds, m.flash.Set(flashMsg, false))
+		return m, tea.Batch(cmds...)
+	}
+	if msg.skipped > 0 {
+		return m, m.flash.Set(fmt.Sprintf("Auto-launch: %d job(s) exceeded max attempts", msg.skipped), true)
+	}
+	return m, nil
 }
 
 func countRunningJobs(jobs []*db.Job) int {
@@ -365,6 +426,14 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 		})
 	}
 	m.clampCursor()
+
+	// Trigger auto-pilot if enabled
+	if m.autoMode {
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
 	return m, tea.Batch(cmds...)
 }
 

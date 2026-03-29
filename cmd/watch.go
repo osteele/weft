@@ -35,6 +35,7 @@ var (
 	watchTUI    bool
 	watchPlain  bool
 	watchFollow bool
+	watchAuto   bool
 )
 
 func init() {
@@ -46,6 +47,7 @@ func configureWatchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&watchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&watchPlain, "plain", false, "Force plain text mode")
 	cmd.Flags().BoolVarP(&watchFollow, "follow", "f", false, "Keep printing summaries even when nothing is active")
+	cmd.Flags().BoolVar(&watchAuto, "auto", false, "Start with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
@@ -82,13 +84,13 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	if useTUI {
-		return runWatchLoop(database, cfg)
+		return runWatchLoop(database, cfg, watchAuto)
 	}
 	return watchAllPlain(database, cfg, watchFollow)
 }
 
-func runWatchLoop(database *sql.DB, cfg *config.Config) error {
-	router := newWatchRouterModel(database, cfg, "")
+func runWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
+	router := newWatchRouterModel(database, cfg, "", autoMode)
 
 	restore := logging.Suppress()
 	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())

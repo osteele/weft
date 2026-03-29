@@ -61,6 +61,113 @@ func (m watchModel) countFailedInstances() int {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-pilot commands
+// ---------------------------------------------------------------------------
+
+// runAutoPilot fires auto-placement and auto-launch commands if applicable.
+// It sets autoPlacing/autoLaunching flags on m (caller must use the returned
+// model state, as in Bubble Tea's value-receiver pattern).
+func (m *watchModel) runAutoPilot() tea.Cmd {
+	var cmds []tea.Cmd
+	if len(m.unplacedJobs) > 0 && !m.autoPlacing {
+		if cmd := m.autoPlaceUnplacedJobs(); cmd != nil {
+			m.autoPlacing = true
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(m.unplacedJobs) > 0 && !m.autoLaunching {
+		if cmd := m.autoLaunchForUnplacedJobs(); cmd != nil {
+			m.autoLaunching = true
+			cmds = append(cmds, cmd)
+		}
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// autoPlaceUnplacedJobs tries to submit unplaced jobs to compatible active instances.
+func (m watchModel) autoPlaceUnplacedJobs() tea.Cmd {
+	capacities := m.buildInstanceCapacities()
+	if len(capacities) == 0 {
+		return nil
+	}
+
+	// Find the first unplaced job that can be placed
+	for _, job := range m.unplacedJobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		ranked := campaign.RankForJob(job, capacities)
+		if len(ranked) == 0 {
+			continue
+		}
+		best := ranked[0]
+		jobID := job.ID
+		instanceID := best.Instance.ID
+		ctx := m.ctx
+		database := m.database
+		r2Client := m.r2Client
+		return func() tea.Msg {
+			job, err := db.GetJobByID(database, jobID)
+			if err != nil || job == nil {
+				return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+			}
+			if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, instanceID, []*db.Job{job}); err != nil {
+				return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID, err: err}
+			}
+			return autoPlaceDoneMsg{jobID: jobID, instanceID: instanceID}
+		}
+	}
+	return nil
+}
+
+// autoLaunchForUnplacedJobs launches new instances for unplaced rental jobs.
+func (m watchModel) autoLaunchForUnplacedJobs() tea.Cmd {
+	// Only launch if no placement was possible
+	capacities := m.buildInstanceCapacities()
+	hasPlaceable := false
+	for _, job := range m.unplacedJobs {
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			continue
+		}
+		if ranked := campaign.RankForJob(job, capacities); len(ranked) > 0 {
+			hasPlaceable = true
+			break
+		}
+	}
+	if hasPlaceable {
+		return nil // auto-place will handle these
+	}
+
+	// Check if any unplaced jobs are rental-eligible
+	hasRental := false
+	for _, job := range m.unplacedJobs {
+		if job != nil && !job.HasTag(db.TagInventory) {
+			hasRental = true
+			break
+		}
+	}
+	if !hasRental {
+		return nil
+	}
+
+	database := m.database
+	cfg := m.appConfig
+	return func() tea.Msg {
+		result, err := attemptRelaunchOrphanedJobs(database, cfg, 0)
+		if err != nil {
+			return autoLaunchDoneMsg{err: err}
+		}
+		if result == nil {
+			return autoLaunchDoneMsg{}
+		}
+		return autoLaunchDoneMsg{instanceIDs: result.InstanceIDs, skipped: result.Skipped}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // On-prem sync helpers
 // ---------------------------------------------------------------------------
 

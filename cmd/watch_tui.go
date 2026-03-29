@@ -93,6 +93,11 @@ type watchModel struct {
 	projectStatus    string
 	projectOffset    int // top visible line (offset-based scroll)
 
+	// --- Auto-pilot mode ---
+	autoMode      bool // when true, auto-relaunch, auto-place, and auto-launch are active
+	autoLaunching bool // true while an auto-launch is in progress
+	autoPlacing   bool // true while an auto-place is in progress
+
 	// --- Shared display state ---
 	unplacedJobs []*db.Job
 	flash        tui.FlashState
@@ -318,6 +323,13 @@ func (m watchModel) Init() tea.Cmd {
 		}
 	}
 
+	// Schedule auto-pilot on startup if --auto was passed
+	if m.autoMode && len(m.unplacedJobs) > 0 {
+		if cmd := m.runAutoPilot(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
 	return tea.Batch(cmds...)
 }
 
@@ -394,6 +406,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchSubmitDoneMsg:
 		return m.handleSubmitDone(msg)
 
+	// --- Auto-pilot messages ---
+	case autoPlaceDoneMsg:
+		return m.handleAutoPlaceDone(msg)
+
+	case autoLaunchDoneMsg:
+		return m.handleAutoLaunchDone(msg)
+
 	// --- Campaign/instance-only messages ---
 	case watchSyncTickMsg:
 		if !m.mode.isInstanceBased() {
@@ -464,6 +483,9 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.unplacedJobs = msg.unplacedJobs
 			m.clampCursor()
 		}
+		if m.autoMode && m.mode.isInstanceBased() {
+			return m, m.runAutoPilot()
+		}
 		return m, nil
 
 	// --- Project-mode messages ---
@@ -520,10 +542,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // watchInstances runs the interactive TUI watch for one or more cloud instances.
 // Returns the final list of instance IDs (which may include auto-relaunched instances).
-func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) ([]int64, error) {
+func watchInstances(database *sql.DB, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool) ([]int64, error) {
 	cfg, _ := config.Load()
 	r2Client, _ := buildR2Client(cfg)
-	router := newInstanceWatchRouterModel(database, cfg, mode, instanceIDs, r2Client)
+	router := newInstanceWatchRouterModel(database, cfg, mode, instanceIDs, r2Client, autoMode)
 	if estimateSummary != nil {
 		if w, ok := router.active.(watchModel); ok {
 			w.estimateSummaryLine = estimateSummary.FormatLine()

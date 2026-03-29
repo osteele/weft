@@ -158,6 +158,7 @@ func (m watchModel) renderInstanceView() (string, int) {
 		} else if len(m.unplacedJobs) > 0 {
 			hint = "j/k scroll  ^u/^d page  g/G top/bottom  s submit  l launch  q quit (instances continue in background)"
 		}
+		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))
 	}
 
@@ -294,6 +295,7 @@ func (m watchModel) renderSystemView() (string, int) {
 	if !m.hasRetryableFailures() {
 		controls = "[^u/^d] page  [u] unplace  [s] submit  [l] launch  [q] quit"
 	}
+	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
 
 	// Render rows into content string
@@ -498,6 +500,14 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 	return truncate(detail, available)
 }
 
+// autoModeHint returns a short hint for the current auto-pilot state.
+func (m watchModel) autoModeHint() string {
+	if m.autoMode {
+		return "[a] auto: ON"
+	}
+	return "[a] auto: OFF"
+}
+
 // ---------------------------------------------------------------------------
 // Scroll helpers
 // ---------------------------------------------------------------------------
@@ -585,7 +595,7 @@ func (m watchModel) projectFooterText() string {
 	if m.projectStatus != "" {
 		state += "  " + m.projectStatus
 	}
-	state += "  up/down move  space/b page  g/G top/bottom  r refresh  l launch  q quit"
+	state += "  up/down move  space/b page  g/G top/bottom  r refresh  l launch  q quit  " + m.autoModeHint()
 	return state
 }
 

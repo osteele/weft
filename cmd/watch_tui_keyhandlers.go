@@ -12,6 +12,14 @@ import (
 // Key handling
 // ---------------------------------------------------------------------------
 
+func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
+	m.autoMode = !m.autoMode
+	if m.autoMode {
+		return m, tea.Batch(m.flash.Set("Auto-pilot ON", false), m.runAutoPilot())
+	}
+	return m, m.flash.Set("Auto-pilot OFF", false)
+}
+
 func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == watchModeProject {
 		return m.handleProjectKey(msg)
@@ -92,6 +100,8 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
+	case "a":
+		return m.handleToggleAutoPilot()
 	}
 	return m, nil
 }
@@ -154,6 +164,8 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
+	case "a":
+		return m.handleToggleAutoPilot()
 	}
 	return m, nil
 }
