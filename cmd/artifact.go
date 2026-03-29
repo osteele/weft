@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -144,6 +145,12 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Build R2 client once for cloud job artifact sync (best-effort, nil if unconfigured)
+	var r2Client *r2.Client
+	if cfg, err := config.Load(); err == nil {
+		r2Client, _ = buildR2Client(cfg)
+	}
+
 	var errorsList []string
 	for _, jobID := range jobIDs {
 		job, err := db.GetJobByID(database, jobID)
@@ -156,11 +163,21 @@ func runArtifactSync(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		if job.IsLaunchJob() {
-			if syncErr := syncJobOutputs(job); syncErr != nil {
-				errorsList = append(errorsList, fmt.Sprintf("job %d: sync cloud outputs: %v", jobID, syncErr))
+			result, syncErr := syncCloudJobArtifacts(database, r2Client, job)
+			if syncErr != nil {
+				if errors.Is(syncErr, artifacts.ErrManifestMissing) {
+					// No manifest in R2; try convention-based output sync
+					if outErr := syncJobOutputs(job); outErr == nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced convention-based outputs\n", jobID)
+						continue
+					}
+					errorsList = append(errorsList, fmt.Sprintf("artifact manifest not found for job %d", jobID))
+					continue
+				}
+				errorsList = append(errorsList, fmt.Sprintf("job %d: sync cloud artifacts: %v", jobID, syncErr))
 				continue
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced cloud outputs from R2\n", jobID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Job %d: synced %d artifacts from R2 (skipped %d)\n", jobID, result.Added, result.Skipped)
 			continue
 		}
 		result, err := artifacts.SyncJob(database, job, NormalSyncTimeout)
@@ -200,14 +217,26 @@ func runArtifactSyncOutstanding(cmd *cobra.Command, database *sql.DB) error {
 		return err
 	}
 
+	// Build R2 client once for cloud job artifact sync
+	var r2Client *r2.Client
+	if cfg, err := config.Load(); err == nil {
+		r2Client, _ = buildR2Client(cfg)
+	}
+
 	var totalAdded int
 	var totalSkipped int
 	var syncedJobs int
 
 	for _, job := range jobs {
 		if job.IsLaunchJob() {
-			if syncErr := syncJobOutputs(job); syncErr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to sync cloud outputs for job %d: %v\n", job.ID, syncErr)
+			cloudResult, syncErr := syncCloudJobArtifacts(database, r2Client, job)
+			if syncErr != nil && !errors.Is(syncErr, artifacts.ErrManifestMissing) {
+				fmt.Fprintf(os.Stderr, "Warning: failed to sync cloud artifacts for job %d: %v\n", job.ID, syncErr)
+			}
+			if cloudResult.Added > 0 {
+				syncedJobs++
+				totalAdded += cloudResult.Added
+				totalSkipped += cloudResult.Skipped
 			}
 			continue
 		}
@@ -756,6 +785,85 @@ func syncCloudJobOutputs(job *db.Job) error {
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel2()
 	return r2Client.DownloadResults(ctx2, artifactsPrefix, localDir)
+}
+
+// syncCloudJobArtifacts fetches the artifact manifest from R2, downloads each
+// declared artifact into the local artifact store, and registers them in the DB.
+func syncCloudJobArtifacts(database *sql.DB, r2Client *r2.Client, job *db.Job) (artifacts.SyncResult, error) {
+	if r2Client == nil {
+		return artifacts.SyncResult{}, fmt.Errorf("R2 not configured; cannot fetch cloud job artifacts")
+	}
+
+	runID := int64(0)
+	if job.LatestRunID != nil {
+		runID = *job.LatestRunID
+	}
+
+	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, runID)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	manifestData, err := r2Client.GetObject(ctx, manifestKey)
+	if err != nil {
+		if r2.IsNotFound(err) {
+			return artifacts.SyncResult{}, artifacts.ErrManifestMissing
+		}
+		return artifacts.SyncResult{}, fmt.Errorf("fetch manifest from R2: %w", err)
+	}
+
+	manifest, err := artifacts.ParseManifest(string(manifestData), job.ID)
+	if err != nil {
+		return artifacts.SyncResult{}, err
+	}
+
+	localRoot, err := artifacts.LocalArtifactsDir()
+	if err != nil {
+		return artifacts.SyncResult{}, err
+	}
+
+	filesPrefix := r2keys.JobAttemptArtifactFilesPrefix(job.ID, runID)
+	result := artifacts.SyncResult{}
+	for _, spec := range manifest.Artifacts {
+		if strings.TrimSpace(spec.Path) == "" {
+			result.Skipped++
+			continue
+		}
+
+		relPath := artifacts.LocalRelativePath(spec.Path)
+		storedPath := artifacts.LocalStoredPath(job.ID, spec.Path)
+		localPath := filepath.Join(localRoot, storedPath)
+
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return result, err
+		}
+
+		r2Key := filesPrefix + relPath
+		dlCtx, dlCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		data, dlErr := r2Client.GetObject(dlCtx, r2Key)
+		dlCancel()
+		if dlErr != nil {
+			return result, fmt.Errorf("download artifact %s: %w", spec.Path, dlErr)
+		}
+
+		if err := os.WriteFile(localPath, data, 0o644); err != nil {
+			return result, err
+		}
+
+		size := int64(len(data))
+		sha := fmt.Sprintf("%x", sha256.Sum256(data))
+
+		if err := db.UpsertArtifact(database, db.Artifact{
+			JobID:      job.ID,
+			Name:       spec.Name,
+			Path:       spec.Path,
+			StoredPath: storedPath,
+			SizeBytes:  size,
+			SHA256:     sha,
+		}); err != nil {
+			return result, err
+		}
+		result.Added++
+	}
+	return result, nil
 }
 
 // listCloudJobOutputFiles lists output files for a cloud job by checking R2 for

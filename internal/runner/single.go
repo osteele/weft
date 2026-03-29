@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/opsqueue"
 )
@@ -84,6 +85,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		envVars = append(envVars, dotenvVars...)
 	}
 	envVars = append(envVars, job.Env...)
+	envVars = artifacts.MergeEnvVars(envVars, cfg.JobID)
 
 	// Cache probe (pre-job) should use the same HF env the job will run with.
 	if !cfg.SkipProbes {
