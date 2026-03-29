@@ -198,7 +198,13 @@ func (m watchModel) requestOnPremSyncs() {
 // ---------------------------------------------------------------------------
 
 func preserveWatchCurrentJobs(instanceID int64, prevJobs, jobs []*db.Job) []*db.Job {
-	if instanceID == 0 || len(jobs) == 0 {
+	if instanceID == 0 {
+		return jobs
+	}
+	if len(jobs) == 0 && len(prevJobs) > 0 {
+		return prevJobs
+	}
+	if len(jobs) == 0 {
 		return jobs
 	}
 

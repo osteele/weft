@@ -211,6 +211,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		var lastProviderPoll time.Time
 		var cachedInstance *cloud.Instance
 		var lastProviderStatus string
+		var lastJobs []*db.Job
 		var currentPhase string
 		var phaseChangedAt *time.Time
 		watchReconciler := NewReconciler()
@@ -246,7 +247,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				survival, _ = db.ComputeBootstrapSurvival(database, ci.Provider)
 			}
 
-			jobs, _ := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
+			if fetched, err := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID); err == nil {
+				lastJobs = fetched
+			}
+			jobs := lastJobs
 			jobPhaseTimings := make(map[int64]*db.JobPhaseTimings, len(jobs))
 			for _, j := range jobs {
 				if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil && timings != nil {
@@ -325,7 +329,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 					for _, j := range jobs {
 						if j.ID != currentJobID && j.Status == db.StatusRunning {
 							if CheckAndSyncJobComplete(ctx, r2c, database, j.ID) {
-								jobs, _ = db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
+								if fetched, err := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID); err == nil {
+									lastJobs = fetched
+								}
+								jobs = lastJobs
 								jobState = ComputeJobState(jobs)
 								break // re-evaluate on next poll with fresh job list
 							}
@@ -396,7 +403,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				if ci == nil {
 					return
 				}
-				jobs, _ = db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
+				if fetched, err := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID); err == nil {
+					lastJobs = fetched
+				}
+				jobs = lastJobs
 				stallMessage = action.StallMessage
 			} else if action.StallMessage != "" {
 				stallMessage = action.StallMessage
