@@ -675,6 +675,11 @@ func LaunchCampaign(
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
+				// Clean up any jobs assigned to the failed launch so they
+				// become eligible for re-launch.
+				if cID != 0 {
+					_, _ = db.ResetLaunchJobs(database, cID, db.AttemptOutcomeOrphaned)
+				}
 				launchErrors = append(launchErrors, fmt.Errorf("%s: %w", group.GPUSpec(), err))
 			} else {
 				instanceIDs = append(instanceIDs, cID)
@@ -860,29 +865,50 @@ func LaunchInstance(
 		return 0, fmt.Errorf("create cloud instance: %w", err)
 	}
 
-	// Associate jobs with cloud instance and record campaign position
+	// Associate jobs with cloud instance and record campaign position.
+	// Jobs that were claimed by another launch between ListUnplacedJobs and
+	// now are skipped rather than causing a hard failure.
+	var claimedJobs []*db.Job
 	for i, job := range group.Jobs {
 		if err := db.SetJobLaunchID(database, job.ID, instanceID); err != nil {
+			if errors.Is(err, db.ErrJobAlreadyClaimed) {
+				slog.Info("job claimed by another launch, skipping",
+					"component", "launch", "job_id", job.ID, "launch_id", instanceID)
+				continue
+			}
 			oplog.Log(oplog.OpCloudSetJobInstance,
 				oplog.WithDetailf("job_id: %d, instance_id: %d", job.ID, instanceID),
 				oplog.WithError(err),
 			)
+			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 			return instanceID, fmt.Errorf("set launch_id for job %d: %w", job.ID, err)
 		}
 		updatedJob, err := db.GetJobByID(database, job.ID)
 		if err != nil {
+			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 			return instanceID, fmt.Errorf("refresh job %d after cloud assignment: %w", job.ID, err)
 		}
 		if updatedJob != nil {
 			group.Jobs[i] = updatedJob
 		}
 		if err := db.SetJobCampaignIndex(database, job.ID, i); err != nil {
+			_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 			return instanceID, fmt.Errorf("set campaign_job_index for job %d: %w", job.ID, err)
 		}
+		claimedJobs = append(claimedJobs, group.Jobs[i])
 	}
+
+	// If all jobs were claimed by other launches, clean up the empty launch.
+	if len(claimedJobs) == 0 {
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusCancelled,
+			db.TerminationReasonCancelled, "all jobs claimed by other launches")
+		return instanceID, fmt.Errorf("launch %d: all %d jobs claimed by other launches", instanceID, len(group.Jobs))
+	}
+	group.Jobs = claimedJobs
 
 	// Update status to launching
 	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusLaunching); err != nil {
+		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		return instanceID, fmt.Errorf("update instance status: %w", err)
 	}
 	if onInstanceRegistered != nil {

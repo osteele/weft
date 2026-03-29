@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -775,6 +776,165 @@ func TestJobStatusViewTargetKind(t *testing.T) {
 	}
 	if targetKind != string(JobTargetUnplaced) {
 		t.Fatalf("effective_target_kind = %q, want %q", targetKind, JobTargetUnplaced)
+	}
+}
+
+func TestJobStatusViewTargetKind_PlannedLaunchIsUnplaced(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// A launch that never progressed past "planned" should not claim jobs.
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	var targetKind string
+	err = database.QueryRow(`SELECT effective_target_kind FROM job_status WHERE id = ?`, jobID).Scan(&targetKind)
+	if err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if targetKind != string(JobTargetUnplaced) {
+		t.Fatalf("effective_target_kind = %q, want %q (planned launch should not claim jobs)", targetKind, JobTargetUnplaced)
+	}
+
+	// The job should appear in ListUnplacedJobs.
+	jobs, err := ListUnplacedJobs(database)
+	if err != nil {
+		t.Fatalf("ListUnplacedJobs: %v", err)
+	}
+	found := false
+	for _, j := range jobs {
+		if j.ID == jobID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("job %d not found in ListUnplacedJobs (launch is planned)", jobID)
+	}
+}
+
+func TestJobStatusViewTargetKind_FailedLaunchIsUnplaced(t *testing.T) {
+	database := SetupTestDB(t)
+
+	instanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	// Transition launch to failed — job should become unplaced in the view.
+	if err := UpdateLaunchStatus(database, instanceID, LaunchStatusFailed, TerminationReasonInfraFailure, "test failure"); err != nil {
+		t.Fatalf("UpdateLaunchStatus: %v", err)
+	}
+
+	var targetKind string
+	err = database.QueryRow(`SELECT effective_target_kind FROM job_status WHERE id = ?`, jobID).Scan(&targetKind)
+	if err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if targetKind != string(JobTargetUnplaced) {
+		t.Fatalf("effective_target_kind = %q, want %q (failed launch should not claim jobs)", targetKind, JobTargetUnplaced)
+	}
+}
+
+func TestSetJobLaunchID_RejectsActiveClaimReturnsError(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Create a running launch and assign a job to it.
+	instanceA, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch A: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceA); err != nil {
+		t.Fatalf("SetJobLaunchID (first claim): %v", err)
+	}
+
+	// A second launch trying to claim the same job should get ErrJobAlreadyClaimed.
+	instanceB, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch B: %v", err)
+	}
+	err = SetJobLaunchID(database, jobID, instanceB)
+	if !errors.Is(err, ErrJobAlreadyClaimed) {
+		t.Fatalf("expected ErrJobAlreadyClaimed, got: %v", err)
+	}
+}
+
+func TestSetJobLaunchID_AllowsReclaimFromStaleLaunch(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Create a planned (stale) launch and assign a job to it.
+	instanceA, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch A: %v", err)
+	}
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceA); err != nil {
+		t.Fatalf("SetJobLaunchID (first): %v", err)
+	}
+
+	// A second launch should be able to reclaim since instanceA is planned (not active).
+	instanceB, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusPlanned,
+		Provider: "vastai",
+		GPUSpec:  "A40",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch B: %v", err)
+	}
+	if err := SetJobLaunchID(database, jobID, instanceB); err != nil {
+		t.Fatalf("SetJobLaunchID (reclaim from stale): %v", err)
+	}
+
+	// Verify the job is now assigned to instanceB.
+	var launchID sql.NullInt64
+	err = database.QueryRow(`SELECT launch_id FROM job_attempts WHERE job_id = ? AND end_time IS NULL ORDER BY attempt_number DESC LIMIT 1`, jobID).Scan(&launchID)
+	if err != nil {
+		t.Fatalf("QueryRow: %v", err)
+	}
+	if !launchID.Valid || launchID.Int64 != instanceB {
+		t.Fatalf("launch_id = %v, want %d", launchID, instanceB)
 	}
 }
 

@@ -165,6 +165,17 @@ func (c *Launch) IsTerminal() bool {
 		c.Status == LaunchStatusCancelled
 }
 
+// isActiveLaunchStatus reports whether a launch status represents an
+// actively-progressing instance that should claim its jobs.
+func isActiveLaunchStatus(status string) bool {
+	switch status {
+	case LaunchStatusLaunching, LaunchStatusRunning, LaunchStatusGrace, LaunchStatusCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
 // HasActiveTerminationIntent reports whether the instance has started a
 // terminal self-destruct flow that has not yet succeeded.
 func (c *Launch) HasActiveTerminationIntent() bool {
@@ -499,13 +510,15 @@ func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 		return err
 	}
 
-	// Verify precondition: job must have an open queued attempt.
+	// Verify precondition: job must have an open queued attempt that is not
+	// already claimed by an active launch.
 	var status string
+	var currentLaunchID sql.NullInt64
 	err = tx.QueryRow(`
-		SELECT status FROM job_attempts
+		SELECT status, launch_id FROM job_attempts
 		WHERE job_id = ? AND end_time IS NULL
 		ORDER BY attempt_number DESC LIMIT 1`, jobID,
-	).Scan(&status)
+	).Scan(&status, &currentLaunchID)
 	if err == sql.ErrNoRows {
 		tx.Rollback()
 		return fmt.Errorf("job %d has no open attempt", jobID)
@@ -517,6 +530,16 @@ func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 	if status != StatusQueued {
 		tx.Rollback()
 		return fmt.Errorf("job %d has open attempt in status %q, expected %q", jobID, status, StatusQueued)
+	}
+	// Reject if another active launch already claims this job.
+	if currentLaunchID.Valid {
+		var launchStatus string
+		err = tx.QueryRow(`SELECT status FROM launches WHERE id = ?`, currentLaunchID.Int64).Scan(&launchStatus)
+		if err == nil && isActiveLaunchStatus(launchStatus) {
+			tx.Rollback()
+			return fmt.Errorf("job %d: %w", jobID, ErrJobAlreadyClaimed)
+		}
+		// Stale/terminal/missing launch — proceed to reclaim.
 	}
 
 	// Close the placeholder attempt and create a new one with launch_id.

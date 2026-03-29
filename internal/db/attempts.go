@@ -364,9 +364,13 @@ func createJobStatusView(db *sql.DB) error {
 			la.launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
-			-- Target kind for placement queries
+			-- Target kind for placement queries.
+			-- Only count a launch as claiming if it is actively progressing;
+			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
-				WHEN la.launch_id IS NOT NULL THEN 'rental_instance'
+				WHEN la.launch_id IS NOT NULL
+				     AND l.status IN ('launching', 'running', 'grace', 'completed')
+				THEN 'rental_instance'
 				WHEN COALESCE(la.host, '') != ''
 				     AND COALESCE(la.host, '') NOT LIKE 'vastai:%%'
 				     AND COALESCE(la.host, '') NOT LIKE 'runpod:%%'
@@ -377,6 +381,7 @@ func createJobStatusView(db *sql.DB) error {
 			END AS effective_target_kind
 		FROM jobs j
 		LEFT JOIN latest_attempt la ON la.job_id = j.id AND la.rn = 1
+		LEFT JOIN launches l ON l.id = la.launch_id
 	`)
 	return err
 }

@@ -11,6 +11,10 @@ import (
 // ErrJobNotFound is returned when a job ID does not exist in the database.
 var ErrJobNotFound = errors.New("job not found")
 
+// ErrJobAlreadyClaimed is returned by SetJobLaunchID when the job is already
+// assigned to an active launch (launching/running/grace/completed).
+var ErrJobAlreadyClaimed = errors.New("job already claimed by another launch")
+
 // IsDatabaseLocked reports whether err is a SQLite SQLITE_BUSY error.
 func IsDatabaseLocked(err error) bool {
 	var sqliteErr *sqlite.Error
