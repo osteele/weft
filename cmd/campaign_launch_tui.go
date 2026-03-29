@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
@@ -129,6 +130,8 @@ type rawOffersLoadedMsg struct {
 	err        error
 	background bool // true if this is a background refresh (don't show loading state)
 }
+
+type hfPrefetchDoneMsg struct{} // no-op; side effect is warming the HF size cache
 
 type estimatesLoadedMsg struct {
 	estimates []campaign.CostEstimate
@@ -308,6 +311,7 @@ func (m launchModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.spinner.Tick,
 		m.fetchRawOffers(false),
+		m.prefetchHFSizes(),
 	}
 	if m.reconciling {
 		cmds = append(cmds, m.runReconciliation())
@@ -365,6 +369,16 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 		}
 		raw := campaign.FetchGroupRawOffers(clients, groups)
 		return rawOffersLoadedMsg{raw: raw, background: background}
+	}
+}
+
+// prefetchHFSizes warms the HF model size cache in parallel with offer fetching.
+func (m launchModel) prefetchHFSizes() tea.Cmd {
+	groups := m.groups
+	return func() tea.Msg {
+		inputs := campaign.CollectGroupInputs(groups)
+		dataloc.PrefetchInputSizes(inputs, nil)
+		return hfPrefetchDoneMsg{}
 	}
 }
 
@@ -590,6 +604,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.adjustOffset()
 		return m, nil
+
+	case hfPrefetchDoneMsg:
+		return m, nil // cache is warmed; EstimateCosts will benefit
 
 	case reconcileDoneMsg:
 		m.reconciling = false

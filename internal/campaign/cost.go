@@ -286,15 +286,13 @@ func effectiveDownloadBandwidth(database *sql.DB, offer *cloud.Offer, staticBW f
 	return transferbw.EffectiveBandwidth(database, src.Key(), dst.Key(), staticBW)
 }
 
-// collectAllInputs gathers all unique inputs across all groups.
-func collectAllInputs(groupOffers []GroupOffer) []string {
+// CollectGroupInputs gathers all unique HF inputs across groups.
+// Used to pre-warm the HF model size cache before offers are available.
+func CollectGroupInputs(groups []InstanceGroup) []string {
 	seen := make(map[string]bool)
 	var inputs []string
-	for _, go_ := range groupOffers {
-		if go_.Offer == nil {
-			continue
-		}
-		for _, input := range go_.Group.AllInputs() {
+	for _, g := range groups {
+		for _, input := range g.AllInputs() {
 			if !seen[input] {
 				seen[input] = true
 				inputs = append(inputs, input)
@@ -302,6 +300,17 @@ func collectAllInputs(groupOffers []GroupOffer) []string {
 		}
 	}
 	return inputs
+}
+
+// collectAllInputs gathers unique inputs from groups that have a selected offer.
+func collectAllInputs(groupOffers []GroupOffer) []string {
+	var groups []InstanceGroup
+	for _, go_ := range groupOffers {
+		if go_.Offer != nil {
+			groups = append(groups, go_.Group)
+		}
+	}
+	return CollectGroupInputs(groups)
 }
 
 // BudgetMultiplier is the safety factor applied to estimates for budget limits.
