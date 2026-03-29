@@ -126,7 +126,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	// Print reasons in a stable order
 	reasonKeys := []string{
 		db.TerminationReasonCompleted,
-		db.TerminationReasonPreempted,
+		db.TerminationReasonProviderFailure,
 		db.TerminationReasonInfraFailure,
 		db.TerminationReasonJobFailure,
 		db.TerminationReasonCancelled,

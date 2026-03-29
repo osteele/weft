@@ -59,7 +59,7 @@ don't benefit from SkyPilot's cloud provider integrations.
 | **Heterogeneous GPU support** | Per-host GPU specs + roofline performance scaling | Instance type selection |
 | **Cold-start handling** | Roofline estimates from hardware specs | — |
 | **Data pre-staging** | Donor/seed O(log N) fan-out (cloud) + host-to-host rsync (on-prem) | Per-instance download from source |
-| **Spot/preemption** | Grace period with R2-based control messages | Managed spot with auto-recovery |
+| **Instance failure recovery** | Grace period with R2-based control messages | Managed spot with auto-recovery |
 | **Multi-cloud providers** | Vast.ai, RunPod (direct API) | 20+ providers |
 
 ## Key Architectural Differences

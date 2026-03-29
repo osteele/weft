@@ -288,11 +288,12 @@ func campaignStatusValues() []string {
 func terminationReasonValues() []string {
 	return []string{
 		TerminationReasonCompleted,
-		TerminationReasonPreempted,
+		TerminationReasonProviderFailure,
 		TerminationReasonJobFailure,
 		TerminationReasonDiskFull,
 		TerminationReasonInfraFailure,
 		TerminationReasonBootstrapTimeout,
+		TerminationReasonPhaseStall,
 		TerminationReasonCancelled,
 		TerminationReasonUnknown,
 	}
@@ -589,6 +590,13 @@ func tableSchemaContains(db *sql.DB, tableName, needle string) (bool, error) {
 }
 
 func rebuildTable(db *sql.DB, createSQL, copySQL, dropSQL, renameSQL string, postStatements ...string) error {
+	// Disable FK checks during table rebuild to avoid constraint violations
+	// when dropping/recreating tables referenced by other tables.
+	if _, err := db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer db.Exec(`PRAGMA foreign_keys = ON`) //nolint:errcheck
+
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -632,18 +640,28 @@ func ensureLaunchesTableConstraints(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	// Also check that the constraint includes bootstrap_timeout (added later).
+	// Also check that the constraint includes values added after initial schema.
 	hasBootstrapTimeout, err := tableSchemaContains(db, "launches", TerminationReasonBootstrapTimeout)
 	if err != nil {
 		return err
 	}
-	if hasStatusConstraint && hasTerminationReasonConstraint && hasBootstrapTimeout {
+	hasProviderFailure, err := tableSchemaContains(db, "launches", TerminationReasonProviderFailure)
+	if err != nil {
+		return err
+	}
+	if hasStatusConstraint && hasTerminationReasonConstraint && hasBootstrapTimeout && hasProviderFailure {
 		return nil
 	}
+	// Migrate "preempted" → "provider_failure" during the copy (the old CHECK
+	// constraint blocks UPDATE, so we transform during INSERT).
+	selectCols := strings.Replace(launchTableColumns,
+		"termination_reason",
+		`CASE WHEN termination_reason = 'preempted' THEN 'provider_failure' ELSE termination_reason END`,
+		1)
 	return rebuildTable(
 		db,
 		createLaunchesTableSQL("launches_new", false),
-		fmt.Sprintf(`INSERT INTO launches_new (%s) SELECT %s FROM launches`, launchTableColumns, launchTableColumns),
+		fmt.Sprintf(`INSERT INTO launches_new (%s) SELECT %s FROM launches`, launchTableColumns, selectCols),
 		`DROP TABLE launches`,
 		`ALTER TABLE launches_new RENAME TO launches`,
 	)
@@ -1589,9 +1607,6 @@ func initSchema(db *sql.DB) error {
 	if err := dropLegacyRunsTable(db); err != nil {
 		return err
 	}
-	if err := validateEnumAndRelationshipConstraints(db); err != nil {
-		return err
-	}
 	// Drop views that reference jobs before table rebuild
 	if _, err := db.Exec(`DROP VIEW IF EXISTS training_examples`); err != nil {
 		return err
@@ -1608,6 +1623,10 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 	if err := ensureLaunchesTableConstraints(db); err != nil {
+		return err
+	}
+	// Validate enum values after all migrations and constraint rebuilds.
+	if err := validateEnumAndRelationshipConstraints(db); err != nil {
 		return err
 	}
 	// Drop legacy table if it still exists.

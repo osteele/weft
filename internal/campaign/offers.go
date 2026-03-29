@@ -152,7 +152,7 @@ func MedianDLPerf(rawOffers []GroupRawOffers) float64 {
 
 // FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
-// retry risk from preemption). Otherwise falls back to cheapest offer.
+// retry risk from instance failure). Otherwise falls back to cheapest offer.
 // jobDurationHrs and setupOverheadHrs are used for expected cost computation.
 func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs, setupOverheadHrs float64, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	raw := FetchGroupRawOffers(clients, groups)

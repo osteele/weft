@@ -70,7 +70,7 @@ local SQLite job tracking remain unchanged. SkyPilot provisions the instance;
 weft deploys its agent and manages the job.
 
 ### Survival modeling and risk-adjusted cost
-Weft's Beta-Binomial survival model estimates preemption risk per GPU
+Weft's Beta-Binomial survival model estimates instance failure risk per GPU
 family/price bucket. SkyPilot handles spot failover operationally but doesn't
 expose survival probabilities for cost optimization.
 

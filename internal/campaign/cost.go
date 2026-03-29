@@ -28,7 +28,7 @@ type CostEstimate struct {
 	TotalCost     float64
 
 	// Survival model fields (zero values if no model available)
-	SurvivalProb     float64 // 0-1, probability of completing without preemption
+	SurvivalProb     float64 // 0-1, probability of completing without provider-side failure
 	RiskAdjustedCost float64 // expected cost including retry overhead
 }
 

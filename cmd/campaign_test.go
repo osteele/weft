@@ -193,17 +193,17 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 		t.Fatalf("CreateCampaign: %v", err)
 	}
 
-	preemptedID, err := db.CreateLaunch(database, &db.Launch{
+	providerFailedID, err := db.CreateLaunch(database, &db.Launch{
 		CampaignID: &campaignID,
 		Status:     db.LaunchStatusFailed,
 		Provider:   "vastai",
 		GPUSpec:    "RTX 4090",
 	})
 	if err != nil {
-		t.Fatalf("CreateLaunch(preempted): %v", err)
+		t.Fatalf("CreateLaunch(provider_failure): %v", err)
 	}
-	if err := db.UpdateLaunchStatus(database, preemptedID, db.LaunchStatusFailed, db.TerminationReasonPreempted); err != nil {
-		t.Fatalf("UpdateLaunchStatus(preempted): %v", err)
+	if err := db.UpdateLaunchStatus(database, providerFailedID, db.LaunchStatusFailed, db.TerminationReasonProviderFailure); err != nil {
+		t.Fatalf("UpdateLaunchStatus(provider_failure): %v", err)
 	}
 
 	if _, err := database.Exec(
@@ -212,8 +212,8 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 		t.Fatalf("insert orphaned job: %v", err)
 	}
 	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusQueued, preemptedID)
-	if err := db.CloseLaunchAttempts(database, preemptedID, db.AttemptOutcomeOrphaned); err != nil {
+		db.StatusQueued, providerFailedID)
+	if err := db.CloseLaunchAttempts(database, providerFailedID, db.AttemptOutcomeOrphaned); err != nil {
 		t.Fatalf("CloseLaunchAttempts(orphaned): %v", err)
 	}
 
@@ -253,8 +253,8 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	}
 
 	out := formatCampaignDiagnosisReport(report)
-	if !strings.Contains(out, "provider preempted the instance") {
-		t.Fatalf("diagnosis output missing preemption summary:\n%s", out)
+	if !strings.Contains(out, "provider terminated the instance") {
+		t.Fatalf("diagnosis output missing provider failure summary:\n%s", out)
 	}
 	if !strings.Contains(out, "Job #1: orphaned after the instance terminated") {
 		t.Fatalf("diagnosis output missing orphaned job detail:\n%s", out)

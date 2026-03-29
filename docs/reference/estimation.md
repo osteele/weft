@@ -361,10 +361,10 @@ restart.
 ## Automatic Relaunch On Infrastructure Failure
 
 When `weft campaign watch` (TUI or plain mode) detects a retryable
-infrastructure failure — preemption, provider infra failure, or failed-to-launch
+infrastructure failure — provider-side termination, infra failure, or failed-to-launch
 — it automatically relaunches orphaned jobs on a new cloud instance.
 
-Retryable failures are defined in `db.IsRetryableTermination`: preempted, infra
+Retryable failures are defined in `db.IsRetryableTermination`: provider failure, infra
 failure, or empty termination reason. Job-level failures (non-zero exit code),
 disk-full, and user cancellations are not retried.
 

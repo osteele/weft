@@ -40,7 +40,7 @@ const (
 // Termination reason constants for Launch.TerminationReason.
 const (
 	TerminationReasonCompleted        = "completed"
-	TerminationReasonPreempted        = "preempted"
+	TerminationReasonProviderFailure  = "provider_failure"
 	TerminationReasonJobFailure       = "job_failure"
 	TerminationReasonDiskFull         = "disk_full"
 	TerminationReasonInfraFailure     = "infra_failure"
@@ -52,7 +52,7 @@ const (
 
 // IsRetryableTermination reports whether a failed cloud instance should be
 // automatically relaunched. Returns true for infrastructure-level failures
-// (preemption, infra failure, failed to launch) where retrying on a different
+// (provider failure, infra failure, failed to launch) where retrying on a different
 // instance is likely to succeed. Returns false for job-level failures, disk
 // full, user cancellations, and completed instances.
 func IsRetryableTermination(ci *Launch) bool {
@@ -60,7 +60,7 @@ func IsRetryableTermination(ci *Launch) bool {
 		return false
 	}
 	switch ci.TerminationReason {
-	case TerminationReasonPreempted, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonUnknown, "":
+	case TerminationReasonProviderFailure, TerminationReasonInfraFailure, TerminationReasonBootstrapTimeout, TerminationReasonPhaseStall, TerminationReasonUnknown, "":
 		return true
 	case cloud.ProviderStatusDestroyed, cloud.ProviderStatusError, cloud.ProviderStatusDead, cloud.ProviderStatusStopped:
 		// Provider-level terminal statuses — worth retrying on a different instance.
@@ -102,7 +102,7 @@ type Launch struct {
 	GraceDeadline      *int64 // when the grace period expires
 
 	// Termination classification
-	TerminationReason      string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "canceled"
+	TerminationReason      string // "completed", "provider_failure", "job_failure", "disk_full", "infra_failure", "canceled"
 	TerminationDetail      string // human-readable detail for the termination reason
 	TerminationRequestedAt *int64
 	TerminationIntent      *instanceintent.Marker
@@ -201,8 +201,8 @@ func HumanizeTerminationReason(reason string) string {
 	switch reason {
 	case TerminationReasonCompleted:
 		return "completed"
-	case TerminationReasonPreempted:
-		return "preempted by provider"
+	case TerminationReasonProviderFailure:
+		return "provider-side failure"
 	case TerminationReasonJobFailure:
 		return "job failure"
 	case TerminationReasonDiskFull:
@@ -287,7 +287,7 @@ func ListLaunches(db *sql.DB) ([]*Launch, error) {
 
 // UpdateLaunchStatus updates a cloud instance's status and optionally sets timestamps.
 // For terminal statuses (completed, failed, canceled), an optional terminationReason
-// classifies why the instance ended (e.g. "preempted", "infra_failure"), and an
+// classifies why the instance ended (e.g. "provider_failure", "infra_failure"), and an
 // optional terminationDetail provides a human-readable explanation.
 func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...string) error {
 	now := time.Now().Unix()

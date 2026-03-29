@@ -36,12 +36,12 @@ func TestBuildSurvivalModel_AllSurvived(t *testing.T) {
 	}
 }
 
-func TestBuildSurvivalModel_HalfPreempted(t *testing.T) {
+func TestBuildSurvivalModel_HalfFailed(t *testing.T) {
 	var outcomes []InstanceOutcome
 	for i := range 20 {
 		reason := "completed"
 		if i%2 == 0 {
-			reason = "preempted"
+			reason = "provider_failure"
 		}
 		outcomes = append(outcomes, InstanceOutcome{
 			TerminationReason: reason,
@@ -55,7 +55,7 @@ func TestBuildSurvivalModel_HalfPreempted(t *testing.T) {
 	surv := model.SurvivalProbability("RTX_4090", PriceBucketMedium, 0.99)
 	// With 50% observed survival and a 0.99 prior, posterior should be between 0.4 and 0.8
 	if surv < 0.4 || surv > 0.8 {
-		t.Errorf("expected moderate survival for 50%% preempted data, got %.3f", surv)
+		t.Errorf("expected moderate survival for 50%% failed data, got %.3f", surv)
 	}
 }
 
@@ -145,11 +145,11 @@ func TestBestOffer_NilModel_FallsBackToCheapest(t *testing.T) {
 }
 
 func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
-	// Build a model where cheap offers have high preemption
+	// Build a model where cheap offers have high failure rate
 	var outcomes []InstanceOutcome
-	// 20 cheap instances: mostly preempted
+	// 20 cheap instances: mostly failed
 	for i := range 20 {
-		reason := "preempted"
+		reason := "provider_failure"
 		if i < 2 {
 			reason = "completed"
 		}
@@ -164,7 +164,7 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 	for i := range 20 {
 		reason := "completed"
 		if i < 2 {
-			reason = "preempted"
+			reason = "provider_failure"
 		}
 		outcomes = append(outcomes, InstanceOutcome{
 			TerminationReason: reason,
@@ -210,7 +210,7 @@ func TestColdStart_ReliabilityPrior(t *testing.T) {
 }
 
 func TestHierarchicalShrinkage(t *testing.T) {
-	// Sparse group with 1 preemption should not completely override global rate
+	// Sparse group with 1 failure should not completely override global rate
 	model := &SurvivalModel{
 		GlobalSurvived: 18,
 		GlobalTotal:    20,
@@ -222,7 +222,7 @@ func TestHierarchicalShrinkage(t *testing.T) {
 	}
 
 	surv := model.SurvivalProbability("RTX_4090", PriceBucketLow, 0.95)
-	// With 1 observation (preempted) but strong global rate (90%), should shrink toward global
+	// With 1 observation (failed) but strong global rate (90%), should shrink toward global
 	if surv < 0.5 {
 		t.Errorf("expected shrinkage toward global rate, but survival was too low: %.3f", surv)
 	}

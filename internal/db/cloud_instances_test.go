@@ -619,7 +619,7 @@ func TestIsRetryableTermination(t *testing.T) {
 		{"running instance", &Launch{Status: LaunchStatusRunning}, false},
 		{"completed", &Launch{Status: LaunchStatusCompleted}, false},
 		{"canceled", &Launch{Status: LaunchStatusCancelled}, false},
-		{"preempted", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonPreempted}, true},
+		{"provider failure", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonProviderFailure}, true},
 		{"infra failure", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonInfraFailure}, true},
 		{"failed to launch (empty reason)", &Launch{Status: LaunchStatusFailed, TerminationReason: ""}, true},
 		{"job failure", &Launch{Status: LaunchStatusFailed, TerminationReason: TerminationReasonJobFailure}, false},

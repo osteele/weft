@@ -266,22 +266,52 @@ query for `status='queued' AND host=''` jobs and claim them.
 - Should the coordinator become optional, or remain as an optimization layer
   that agents consult for placement hints?
 
-## Interruptible (Bid) Instance Support
+## Interruptible / Spot Instance Support
 
-Allow campaigns to opt into interruptible (bid-priced) instances via
-`--rental-type bid --bid-price <$/hr>`. Currently all instances are on-demand
-(direct) since `CreateInstance` never passes `--bid_price` to the Vast.ai CLI.
+Allow campaigns to opt into interruptible instances for 50-70% cost savings.
+Currently all instances are on-demand since `CreateInstance` never passes
+`--bid_price` to the Vast.ai CLI.
 
-Evaluate when interruptible instances are cost-effective — e.g., for short jobs
-where retry overhead is low, or when the bid price discount is large enough to
-offset expected preemption costs. The existing survival model in
-`internal/bidding/` could be extended to compare expected cost across rental
-types.
+### Provider Behavior
 
-Vast.ai CLI reference:
-- `vastai search offers --type bid` returns bid pricing in `dph_total`
-- `vastai create instance <id> --bid_price <$/hr>` creates an interruptible instance
-- `min_bid` field in search results shows minimum bid price per offer
+**Vast.ai (interruptible / bid)**:
+- Bidding system: highest bid runs, lower bids are **paused** (not destroyed)
+- On-demand rentals always preempt interruptible ones
+- When interrupted: processes stop, but disk state persists — data can still be
+  transferred off a paused instance
+- Typical savings: 50-80% vs on-demand
+- CLI: `vastai search offers --type bid` (pricing in `dph_total`),
+  `vastai create instance <id> --bid_price <$/hr>`, `min_bid` field in results
+
+**RunPod (spot)**:
+- Up to 60-70% cheaper than on-demand
+- When interrupted: 5-second warning (SIGTERM → SIGKILL), then terminated
+- Volume disk is retained across interruptions
+- No bidding — spot pricing is set by RunPod
+
+### When to Use
+
+Good fit:
+- Jobs with **checkpointing** — resume from last checkpoint on interruption
+- **Longer training runs** where the savings compound (A100 80GB drops from
+  ~$0.67/hr to ~$0.20-0.35/hr)
+- Jobs where retry overhead is low relative to total runtime
+
+Poor fit:
+- Short jobs (< 30 min) where restart overhead dominates
+- Jobs without checkpointing that lose all progress on interruption
+- Latency-sensitive work that can't tolerate pauses
+
+### Implementation Sketch
+
+- Add `--interruptible` / `--spot` flag to `weft campaign launch`
+- Pass rental type through to Vast.ai API (`--bid_price` param)
+- For Vast.ai: detect pause events and auto-resume when bid wins back
+- For RunPod: handle SIGTERM in agent wrapper to flush state before 5s kill
+- Let jobs declare checkpoint capability (in `.weft.toml` or
+  `--checkpoint-capable`) to gate interruptible eligibility
+- Extend the survival model in `internal/bidding/` to compare expected cost
+  across rental types, factoring in preemption probability
 
 ## Better Log Management
 

@@ -235,11 +235,11 @@ func phaseTestInt64Ptr(v int64) *int64 {
 }
 
 func TestFailureTerminationReasonFromPhase(t *testing.T) {
-	if got := failureTerminationReasonFromPhase("disk-full:42", db.TerminationReasonPreempted); got != db.TerminationReasonDiskFull {
+	if got := failureTerminationReasonFromPhase("disk-full:42", db.TerminationReasonProviderFailure); got != db.TerminationReasonDiskFull {
 		t.Fatalf("failureTerminationReasonFromPhase(disk-full:42) = %q, want %q", got, db.TerminationReasonDiskFull)
 	}
-	if got := failureTerminationReasonFromPhase("running:42", db.TerminationReasonPreempted); got != db.TerminationReasonPreempted {
-		t.Fatalf("failureTerminationReasonFromPhase(running:42) = %q, want %q", got, db.TerminationReasonPreempted)
+	if got := failureTerminationReasonFromPhase("running:42", db.TerminationReasonProviderFailure); got != db.TerminationReasonProviderFailure {
+		t.Fatalf("failureTerminationReasonFromPhase(running:42) = %q, want %q", got, db.TerminationReasonProviderFailure)
 	}
 }
 

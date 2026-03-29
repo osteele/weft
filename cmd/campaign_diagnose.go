@@ -153,8 +153,8 @@ func buildInstanceDiagnosis(inst *db.Launch, jobs []*db.Job, outcomes map[int64]
 
 func summarizeInstanceCause(inst *db.Launch, findings []jobFinding, outcomes map[int64]string, undeclaredInputCount int) string {
 	switch inst.TerminationReason {
-	case db.TerminationReasonPreempted:
-		return "provider preempted the instance"
+	case db.TerminationReasonProviderFailure:
+		return "provider terminated the instance"
 	case cloud.ProviderStatusDestroyed, cloud.ProviderStatusDead, cloud.ProviderStatusStopped:
 		return fmt.Sprintf("provider reported instance %s", inst.TerminationReason)
 	case cloud.ProviderStatusError:

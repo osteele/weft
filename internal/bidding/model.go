@@ -1,7 +1,7 @@
 // Package bidding implements cost-optimal cloud instance selection using a
 // Beta-Binomial survival model. It learns price-reliability curves from
 // historical campaign data and selects offers that minimize expected cost
-// including retry risk from preemption.
+// including retry risk from instance failure.
 package bidding
 
 import (
@@ -109,7 +109,7 @@ func (m *SurvivalModel) SurvivalProbability(gpuFamily string, bucket PriceBucket
 const minGroupObs = 5
 
 // ExpectedCost computes the expected cost of running a job accounting for
-// preemption retries. Uses a geometric retry model:
+// instance failure retries. Uses a geometric retry model:
 //
 //	E[cost] = (job_hrs * $/hr) / p + (1-p)/p * setup_hrs * $/hr
 //
@@ -151,7 +151,7 @@ func (m *SurvivalModel) PriceBucketFor(gpuFamily string, pricePerHour float64) P
 
 // ExpectedWallclockTime computes the expected wall-clock time for a job,
 // scaling duration by DLPerf relative to the median, and accounting for
-// preemption retries using a geometric retry model:
+// instance failure retries using a geometric retry model:
 //
 //	scaledJobHrs = jobDurationHrs × (medianDLPerf / dlPerf)
 //	E[wallclock] = scaledJobHrs / p + (1-p)/p × setupOverheadHrs

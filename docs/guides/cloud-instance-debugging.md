@@ -52,7 +52,7 @@ were omitted.
 | Reason | Meaning | Retryable? |
 |--------|---------|------------|
 | `completed` | All jobs finished successfully | No |
-| `preempted` | Provider reclaimed the instance | Yes |
+| `provider_failure` | Provider-side instance termination | Yes |
 | `infra_failure` | Instance never became ready, bootstrap stalled, or provider died | Yes |
 | `job_failure` | A job exited with a non-zero code | No |
 | `disk_full` | Ran out of disk space during execution | No |
