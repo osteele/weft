@@ -32,8 +32,11 @@ type OverheadObservation struct {
 }
 
 // QueryOverheadObservations returns phase-timing observations for all completed
-// cloud instances that have associated job phase data. Each row joins a
-// cloud_instances record with its first job's phase timings.
+// cloud instances. Each row is one job on a completed instance, so a launch
+// with N jobs produces N observations — each with its own setup/upload timing
+// and cache state, giving the Bayesian model more data and correctly
+// distinguishing cold-cache (first job) from warm-cache (subsequent jobs).
+// Instance-level fields (startup, SSH setup) are repeated across rows.
 func QueryOverheadObservations(database *sql.DB) ([]OverheadObservation, error) {
 	query := `
 		SELECT
@@ -73,8 +76,7 @@ func QueryOverheadObservations(database *sql.DB) ([]OverheadObservation, error) 
 		JOIN jobs j ON j.id = ja.job_id AND j.tombstoned = 0
 		JOIN job_phase_timings jpt ON jpt.job_id = j.id
 		WHERE ci.status = 'completed'
-		GROUP BY ci.id
-		ORDER BY ci.created_at ASC
+		ORDER BY ci.created_at ASC, j.id ASC
 	`
 	rows, err := database.Query(query)
 	if err != nil {
