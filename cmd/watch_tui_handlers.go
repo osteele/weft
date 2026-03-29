@@ -474,8 +474,12 @@ func (m *watchModel) mergeSnapshot(snapshot watchSystemSnapshot) []tea.Cmd {
 		snapUpdate := snapshot.InstanceUpdates[ci.ID]
 		if existing, ok := m.updates[ci.ID]; ok {
 			existing.Launch = snapUpdate.Launch
-			existing.Jobs = snapUpdate.Jobs
-			existing.JobAttemptOutcomes = snapUpdate.JobAttemptOutcomes
+			// Don't overwrite jobs from an active streaming channel with
+			// potentially stale snapshot data — the stream is authoritative.
+			if _, streaming := m.channels[ci.ID]; !streaming {
+				existing.Jobs = snapUpdate.Jobs
+				existing.JobAttemptOutcomes = snapUpdate.JobAttemptOutcomes
+			}
 			m.updates[ci.ID] = existing
 		} else {
 			m.updates[ci.ID] = snapUpdate
