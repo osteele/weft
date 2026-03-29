@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
@@ -43,18 +44,38 @@ func runRestart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Sync non-terminal jobs before restarting to get latest cloud status
+	var jobsToSync []*db.Job
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil || job == nil {
+			continue
+		}
+		jobsToSync = append(jobsToSync, job)
+	}
+	if len(jobsToSync) > 0 {
+		quickSyncJobs(database, jobsToSync, FastSyncTimeout)
+	}
+
 	var errors []string
-	for i, jobID := range jobIDs {
-		if i > 0 {
+	printed := false
+	for _, jobID := range jobIDs {
+		err := restartJob(database, jobID)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		if printed {
 			fmt.Println("---")
 		}
-		if err := restartJob(database, jobID); err != nil {
-			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
-		}
+		printed = true
 	}
 
 	if len(errors) > 0 {
-		return fmt.Errorf("errors: %s", strings.Join(errors, "; "))
+		for _, e := range errors {
+			fmt.Fprintln(os.Stderr, e)
+		}
+		return fmt.Errorf("%d job(s) could not be restarted", len(errors))
 	}
 	return nil
 }

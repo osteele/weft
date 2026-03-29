@@ -168,7 +168,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			startQueueRunnersForHosts(database, hosts)
 		}
 		if needsRentalSync {
-			syncRentalJobsStatus(database)
+			if !syncRentalJobsStatus(database) {
+				fmt.Fprintln(os.Stderr, "Note: cloud sync timed out; status may be stale. Use --sync for a full sync.")
+			}
 		}
 	}
 
@@ -197,7 +199,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		printSingleJobStatus(database, jobID, job, singleJob)
+		printSingleJobStatus(database, jobID, job, singleJob, needsSync)
 	}
 
 	if statusWait {
@@ -225,7 +227,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComplete bool) {
+func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComplete bool, alreadySynced bool) {
 	if job == nil {
 		fmt.Printf("Job %d not found\n", jobID)
 		if exitOnComplete {
@@ -244,20 +246,24 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 	}
 
 	// Sync host to update job status from remote when a host exists.
-	if job.HasInventoryHost() {
-		syncTimeout := 15 * time.Second
-		if statusSSHTimeout > syncTimeout {
-			syncTimeout = statusSSHTimeout
+	if !alreadySynced {
+		if job.HasInventoryHost() {
+			syncTimeout := 15 * time.Second
+			if statusSSHTimeout > syncTimeout {
+				syncTimeout = statusSSHTimeout
+			}
+			_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
+				Timeout: syncTimeout,
+				Logger:  ops.NewQuietSyncLogger(),
+			}, nil)
+			if syncErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
+			}
+		} else if job.IsRentalJob() {
+			if !syncRentalJobsStatus(database) {
+				fmt.Fprintln(os.Stderr, "Note: cloud sync timed out; status may be stale. Use --sync for a full sync.")
+			}
 		}
-		_, syncErr := ops.SyncHost(database, job.Host, ops.HostSyncOptions{
-			Timeout: syncTimeout,
-			Logger:  ops.NewQuietSyncLogger(),
-		}, nil)
-		if syncErr != nil {
-			fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
-		}
-	} else if job.IsRentalJob() {
-		syncRentalJobsStatus(database)
 	}
 
 	// Re-read job from DB after sync
@@ -532,12 +538,15 @@ func shouldAttemptSync(status string) bool {
 	}
 }
 
-func syncRentalJobsStatus(database *sql.DB) {
+// syncRentalJobsStatus runs a bounded cloud sync for rental jobs.
+// Returns true if the sync completed within the timeout.
+func syncRentalJobsStatus(database *sql.DB) bool {
 	cfg, err := config.Load()
 	if err != nil {
-		return
+		return true
 	}
-	_ = syncCloudState(cfg, database, campaign.NewReconciler(), false)
+	_, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), FastCloudSyncTimeout, false)
+	return completed
 }
 
 func printJobStatusLine(job *db.Job) {
