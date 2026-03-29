@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/opsqueue"
@@ -442,6 +443,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 
 	// Apply job env vars (override dotenv)
 	envVars = append(envVars, job.Env...)
+	envVars = artifacts.MergeEnvVars(envVars, jobID)
 
 	// Inject resolved GPU device
 	if len(gpuDevices) > 0 && job.GPUClass != "" {

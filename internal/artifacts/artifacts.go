@@ -168,6 +168,23 @@ func LocalStoredPath(jobID int64, artifactPath string) string {
 	return filepath.Join(fmt.Sprintf("%d", jobID), LocalRelativePath(artifactPath))
 }
 
+// expandTildeWithEnv expands a leading ~ in a path using HOME from the env vars
+// or os.UserHomeDir(). Returns empty string if expansion fails.
+func expandTildeWithEnv(p string, envVars []string) string {
+	if !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	for _, ev := range envVars {
+		if strings.HasPrefix(ev, "HOME=") {
+			return strings.Replace(p, "~", ev[5:], 1)
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return strings.Replace(p, "~", home, 1)
+	}
+	return ""
+}
+
 // LocalPathFromStored returns the absolute local path for a stored artifact.
 func LocalPathFromStored(storedPath string) (string, error) {
 	root, err := LocalArtifactsDir()
@@ -193,5 +210,13 @@ func MergeEnvVars(envVars []string, jobID int64) []string {
 		}
 		envVars = append(envVars, ev)
 	}
+
+	// Ensure the artifact manifest directory exists so job scripts can write
+	// to $WEFT_ARTIFACT_MANIFEST without creating the directory themselves.
+	manifestPath := RemoteManifestPath(jobID)
+	if expanded := expandTildeWithEnv(manifestPath, envVars); expanded != "" {
+		os.MkdirAll(filepath.Dir(expanded), 0o755)
+	}
+
 	return envVars
 }

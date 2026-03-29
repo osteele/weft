@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ssh"
 )
@@ -42,7 +41,7 @@ func queueEnvVarsForJob(job *db.Job, envVars []string) []string {
 	if job.GPU != "" && job.GPUClass == "" && !hasCUDAEnvVar(merged) {
 		merged = append(merged, "CUDA_VISIBLE_DEVICES="+job.GPU)
 	}
-	return artifacts.MergeEnvVars(merged, job.ID)
+	return merged
 }
 
 func hasCUDAEnvVar(envVars []string) bool {

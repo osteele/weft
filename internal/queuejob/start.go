@@ -117,7 +117,6 @@ func startJobDirectly(database *sql.DB, job *db.Job, entry *queuefile.Entry) (bo
 		envVars = job.EnvVars
 	}
 
-	envVars = artifacts.MergeEnvVars(envVars, job.ID)
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
 		JobID:      job.ID,
 		WorkingDir: job.WorkingDir,

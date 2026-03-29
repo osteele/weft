@@ -435,7 +435,6 @@ func startJobFromRecord(job *db.Job, envVars []string, timeout time.Duration) er
 	metadataCmd := fmt.Sprintf("cat > %s << 'METADATA_EOF'\n%s\nMETADATA_EOF", metadataFile, metadata)
 	_, _, _ = ssh.RunWithTimeout(job.Host, metadataCmd, timeout)
 
-	envVars = artifacts.MergeEnvVars(envVars, job.ID)
 	wrappedCommand := session.BuildWrapperCommand(session.WrapperCommandParams{
 		JobID:      job.ID,
 		WorkingDir: job.WorkingDir,

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/opsqueue"
 	"github.com/osteele/weft/internal/queuefile"
@@ -28,15 +27,14 @@ func AppendQueueEntry(host string, entry QueueEntry, opts AppendQueueEntryOption
 	return opsqueue.AppendQueueEntry(host, entry, opts)
 }
 
-// AppendJobToQueue adds an existing job to the remote queue,
-// ensuring artifact env vars are properly merged.
+// AppendJobToQueue adds an existing job to the remote queue.
 func AppendJobToQueue(job *db.Job, timeout time.Duration) error {
 	entry := QueueEntry{
 		JobID:        job.ID,
 		WorkingDir:   job.WorkingDir,
 		Command:      job.Command,
 		Description:  job.Description,
-		EnvVars:      artifacts.MergeEnvVars(job.EnvVars, job.ID),
+		EnvVars:      job.EnvVars,
 		DepSpec:      job.DepSpec,
 		CPUAllotment: job.CPUAllotment,
 		GPU:          job.GPU,
