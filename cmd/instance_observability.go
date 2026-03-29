@@ -52,8 +52,36 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 		activity.Bootstrap = "provisioning instance"
 		return activity
 	}
-	activity.Bootstrap = "waiting for bootstrap activity"
+	activity.Bootstrap = formatBootstrapWaiting(update, now)
 	return activity
+}
+
+func formatBootstrapWaiting(update campaign.InstanceUpdate, now time.Time) string {
+	const base = "waiting for bootstrap activity"
+	ci := update.Launch
+	var start time.Time
+	if ci.LaunchedAt != nil && *ci.LaunchedAt > 0 {
+		start = time.Unix(*ci.LaunchedAt, 0)
+	} else if ci.CreatedAt > 0 {
+		start = time.Unix(ci.CreatedAt, 0)
+	}
+	if start.IsZero() {
+		return base
+	}
+	if now.IsZero() {
+		now = time.Now() // some TUI callers don't set opts.now
+	}
+
+	elapsed := now.Sub(start).Truncate(time.Second)
+	if elapsed < time.Second {
+		return base
+	}
+
+	remaining, ok := update.BootstrapDurations.ConditionalMedian(elapsed)
+	if !ok {
+		return fmt.Sprintf("%s (%s elapsed)", base, elapsed)
+	}
+	return fmt.Sprintf("%s (%s elapsed, est ~%s remaining)", base, elapsed, remaining.Truncate(time.Second))
 }
 
 func observedRunningJob(update campaign.InstanceUpdate) *db.Job {

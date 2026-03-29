@@ -71,6 +71,7 @@ type InstanceUpdate struct {
 	HeartbeatAge       time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
 	Heartbeat          *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
 	TerminationIntent  *instanceintent.Marker
+	BootstrapDurations db.BootstrapDurations // sorted historical bootstrap durations for conditional estimates
 }
 
 // AttemptDisplayStatus returns the status to display for a job in the context
@@ -101,6 +102,13 @@ func cloudInstanceLifecycleStart(ci *db.Launch) *time.Time {
 		return &ts
 	}
 	return nil
+}
+
+func survivalDurations(s *db.BootstrapSurvival) db.BootstrapDurations {
+	if s == nil {
+		return nil
+	}
+	return s.Durations
 }
 
 func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.Launch) *time.Time {
@@ -429,6 +437,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				HeartbeatAge:       heartbeatAge,
 				Heartbeat:          heartbeat,
 				TerminationIntent:  terminationIntent,
+				BootstrapDurations: survivalDurations(survival),
 			}
 
 			select {

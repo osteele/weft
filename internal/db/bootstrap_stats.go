@@ -6,6 +6,36 @@ import (
 	"time"
 )
 
+// BootstrapDurations is a sorted (ascending) slice of successful bootstrap
+// durations from historical instances. It supports conditional median queries
+// for estimating remaining time given that a bootstrap has already taken some
+// known elapsed time.
+type BootstrapDurations []time.Duration
+
+// ConditionalMedian returns the estimated remaining bootstrap time given that
+// the bootstrap has already taken `elapsed`. It filters to instances that took
+// at least `elapsed`, computes their median total duration, and subtracts
+// elapsed. Returns (0, false) if fewer than 3 tail entries remain.
+func (d BootstrapDurations) ConditionalMedian(elapsed time.Duration) (remaining time.Duration, ok bool) {
+	if len(d) == 0 {
+		return 0, false
+	}
+	// Binary search for first duration >= elapsed
+	i := sort.Search(len(d), func(j int) bool {
+		return d[j] >= elapsed
+	})
+	tail := d[i:]
+	if len(tail) < 3 {
+		return 0, false
+	}
+	median := tail[len(tail)/2]
+	rem := median - elapsed
+	if rem <= 0 {
+		return 0, false
+	}
+	return rem, true
+}
+
 // BootstrapSurvival holds learned bootstrap timeout thresholds derived from
 // historical instance data using survival analysis. At each time T, it
 // computes the fraction of instances that were alive at T (without having
@@ -15,8 +45,9 @@ import (
 type BootstrapSurvival struct {
 	Provider       string
 	SampleSize     int
-	WarnAfter      time.Duration // time at which P(success) < warnCutoff
-	TerminateAfter time.Duration // time at which P(success) < terminateCutoff
+	WarnAfter      time.Duration      // time at which P(success) < warnCutoff
+	TerminateAfter time.Duration      // time at which P(success) < terminateCutoff
+	Durations      BootstrapDurations // sorted successful bootstrap durations for conditional estimates
 }
 
 // survivalConfig holds tunable parameters for a survival analysis.
@@ -83,6 +114,17 @@ func ComputeBootstrapSurvival(database *sql.DB, provider string) (*BootstrapSurv
 	if termSecs > 0 {
 		result.TerminateAfter = time.Duration(termSecs) * time.Second
 	}
+
+	// Extract successful durations for conditional median estimates.
+	// obs is already sorted by eventTime after computeSurvivalThresholds,
+	// so the filtered subset preserves sort order.
+	var durations BootstrapDurations
+	for _, o := range obs {
+		if o.succeeded {
+			durations = append(durations, time.Duration(o.eventTime)*time.Second)
+		}
+	}
+	result.Durations = durations
 
 	return result, nil
 }

@@ -77,6 +77,76 @@ func TestFormatObservedActivityFallsBackToDBRunningJob(t *testing.T) {
 	}
 }
 
+func TestFormatBootstrapWaitingShowsElapsedTime(t *testing.T) {
+	launchedAt := time.Now().Add(-45 * time.Second).Unix()
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                 109,
+			Status:             db.LaunchStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "12345",
+			GPUSpec:            "A100",
+			LaunchedAt:         &launchedAt,
+		},
+	}, time.Now())
+
+	if !strings.Contains(activity.Bootstrap, "waiting for bootstrap activity") {
+		t.Fatalf("bootstrap = %q, want base message", activity.Bootstrap)
+	}
+	if !strings.Contains(activity.Bootstrap, "elapsed") {
+		t.Fatalf("bootstrap = %q, want elapsed time", activity.Bootstrap)
+	}
+}
+
+func TestFormatBootstrapWaitingShowsConditionalEstimate(t *testing.T) {
+	launchedAt := time.Now().Add(-45 * time.Second).Unix()
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                 110,
+			Status:             db.LaunchStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "12345",
+			GPUSpec:            "A100",
+			LaunchedAt:         &launchedAt,
+		},
+		BootstrapDurations: db.BootstrapDurations{
+			30 * time.Second, 60 * time.Second, 90 * time.Second,
+			120 * time.Second, 150 * time.Second,
+		},
+	}, time.Now())
+
+	if !strings.Contains(activity.Bootstrap, "elapsed") {
+		t.Fatalf("bootstrap = %q, want elapsed time", activity.Bootstrap)
+	}
+	if !strings.Contains(activity.Bootstrap, "remaining") {
+		t.Fatalf("bootstrap = %q, want remaining estimate", activity.Bootstrap)
+	}
+}
+
+func TestFormatBootstrapWaitingNoEstimateWhenPastAllDurations(t *testing.T) {
+	launchedAt := time.Now().Add(-200 * time.Second).Unix()
+	activity := formatObservedActivity(campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                 111,
+			Status:             db.LaunchStatusRunning,
+			Provider:           "vastai",
+			ProviderInstanceID: "12345",
+			GPUSpec:            "A100",
+			LaunchedAt:         &launchedAt,
+		},
+		BootstrapDurations: db.BootstrapDurations{
+			30 * time.Second, 60 * time.Second, 90 * time.Second,
+		},
+	}, time.Now())
+
+	if !strings.Contains(activity.Bootstrap, "elapsed") {
+		t.Fatalf("bootstrap = %q, want elapsed time", activity.Bootstrap)
+	}
+	if strings.Contains(activity.Bootstrap, "remaining") {
+		t.Fatalf("bootstrap = %q, should not show remaining when past all durations", activity.Bootstrap)
+	}
+}
+
 func TestFormatObservedActivityShowsProvisioningFallback(t *testing.T) {
 	activity := formatObservedActivity(campaign.InstanceUpdate{
 		Launch: &db.Launch{

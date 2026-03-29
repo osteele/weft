@@ -236,3 +236,69 @@ func TestComputeBootstrapSurvival_FloorEnforced(t *testing.T) {
 		t.Errorf("terminate = %v, should not be below 5m floor", s.TerminateAfter)
 	}
 }
+
+func TestBootstrapDurations_ConditionalMedian(t *testing.T) {
+	tests := []struct {
+		name      string
+		durations BootstrapDurations
+		elapsed   time.Duration
+		wantRem   time.Duration
+		wantOK    bool
+	}{
+		{
+			name:      "empty",
+			durations: nil,
+			elapsed:   10 * time.Second,
+			wantOK:    false,
+		},
+		{
+			name:      "insufficient tail",
+			durations: BootstrapDurations{30 * time.Second, 60 * time.Second},
+			elapsed:   25 * time.Second,
+			wantOK:    false,
+		},
+		{
+			name: "early elapsed, full distribution",
+			// 5 durations: 30s, 60s, 90s, 120s, 150s
+			// elapsed=5s → tail is all 5 → median = 90s → remaining = 85s
+			durations: BootstrapDurations{
+				30 * time.Second, 60 * time.Second, 90 * time.Second,
+				120 * time.Second, 150 * time.Second,
+			},
+			elapsed: 5 * time.Second,
+			wantRem: 85 * time.Second,
+			wantOK:  true,
+		},
+		{
+			name: "mid elapsed, trimmed tail",
+			// elapsed=65s → tail is [90s, 120s, 150s] → median = 120s → remaining = 55s
+			durations: BootstrapDurations{
+				30 * time.Second, 60 * time.Second, 90 * time.Second,
+				120 * time.Second, 150 * time.Second,
+			},
+			elapsed: 65 * time.Second,
+			wantRem: 55 * time.Second,
+			wantOK:  true,
+		},
+		{
+			name: "past all durations",
+			durations: BootstrapDurations{
+				30 * time.Second, 60 * time.Second, 90 * time.Second,
+			},
+			elapsed: 100 * time.Second,
+			wantOK:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rem, ok := tt.durations.ConditionalMedian(tt.elapsed)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && rem != tt.wantRem {
+				t.Fatalf("remaining = %v, want %v", rem, tt.wantRem)
+			}
+		})
+	}
+}
