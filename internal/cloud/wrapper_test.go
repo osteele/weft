@@ -5,67 +5,73 @@ import (
 	"testing"
 )
 
-func TestGenerateCampaignManifest_Basic(t *testing.T) {
-	jobs := []AgentJob{
-		{ID: 42, Command: "python train.py"},
-		{ID: 43, Command: "python eval.py", Dir: "/custom/dir"},
+func TestCampaignManifest_RoundTrip(t *testing.T) {
+	m := CampaignManifest{
+		Jobs: []AgentJob{
+			{ID: 42, Command: "python train.py"},
+			{ID: 43, Command: "python eval.py", Dir: "/custom/dir"},
+		},
+		SelfDestructCmd: `vastai destroy instance "123"`,
 	}
-	data, err := GenerateCampaignManifest(jobs, `vastai destroy instance "123"`, nil)
+	data, err := json.Marshal(m)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
 
-	var m CampaignManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
+	var got CampaignManifest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if len(m.Jobs) != 2 {
-		t.Errorf("expected 2 jobs, got %d", len(m.Jobs))
+	if len(got.Jobs) != 2 {
+		t.Errorf("expected 2 jobs, got %d", len(got.Jobs))
 	}
-	if m.Jobs[0].ID != 42 {
-		t.Errorf("expected job ID 42, got %d", m.Jobs[0].ID)
+	if got.Jobs[0].ID != 42 {
+		t.Errorf("expected job ID 42, got %d", got.Jobs[0].ID)
 	}
-	if m.Jobs[1].Dir != "/custom/dir" {
-		t.Errorf("expected job dir /custom/dir, got %s", m.Jobs[1].Dir)
+	if got.Jobs[1].Dir != "/custom/dir" {
+		t.Errorf("expected job dir /custom/dir, got %s", got.Jobs[1].Dir)
 	}
-	if m.SelfDestructCmd != `vastai destroy instance "123"` {
-		t.Errorf("unexpected self-destruct cmd: %s", m.SelfDestructCmd)
+	if got.SelfDestructCmd != `vastai destroy instance "123"` {
+		t.Errorf("unexpected self-destruct cmd: %s", got.SelfDestructCmd)
 	}
 }
 
-func TestGenerateCampaignManifest_WithEnv(t *testing.T) {
-	jobs := []AgentJob{{ID: 1, Command: "echo hi"}}
-	env := map[string]string{
-		"HF_TOKEN": "hf_test123",
+func TestCampaignManifest_Env(t *testing.T) {
+	m := CampaignManifest{
+		Jobs: []AgentJob{{ID: 1, Command: "echo hi"}},
+		Env:  map[string]string{"HF_TOKEN": "hf_test123"},
 	}
-	data, err := GenerateCampaignManifest(jobs, "true", env)
+	data, err := json.Marshal(m)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
 
-	var m CampaignManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
+	var got CampaignManifest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if m.Env["HF_TOKEN"] != "hf_test123" {
-		t.Errorf("expected HF_TOKEN=hf_test123, got %s", m.Env["HF_TOKEN"])
+	if got.Env["HF_TOKEN"] != "hf_test123" {
+		t.Errorf("expected HF_TOKEN=hf_test123, got %s", got.Env["HF_TOKEN"])
 	}
 }
 
-func TestGenerateCampaignManifest_NilEnv(t *testing.T) {
-	data, err := GenerateCampaignManifest([]AgentJob{{ID: 1, Command: "echo hi"}}, "true", nil)
+func TestCampaignManifest_NilEnvOmitted(t *testing.T) {
+	m := CampaignManifest{
+		Jobs: []AgentJob{{ID: 1, Command: "echo hi"}},
+	}
+	data, err := json.Marshal(m)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("marshal: %v", err)
 	}
 
-	var m CampaignManifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
+	var got CampaignManifest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if m.Env != nil {
-		t.Errorf("expected nil env, got %v", m.Env)
+	if got.Env != nil {
+		t.Errorf("expected nil env, got %v", got.Env)
 	}
 }

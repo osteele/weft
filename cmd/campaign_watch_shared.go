@@ -35,7 +35,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 	relaunchCfg := campaign.RelaunchConfig{
 		Clients:       clients,
 		R2Cfg:         r2Cfg,
-		LaunchOpts:    campaign.LaunchOpts{GracePeriodSeconds: 15 * 60},
+		LaunchOpts:    campaign.LaunchOpts{GracePeriodSeconds: 15 * 60, GPUWarmup: cfg.Campaign.GPUWarmup},
 		MaxAttempts:   campaign.DefaultMaxCloudAttempts + extraAttempts,
 		SurvivalModel: survivalModel,
 		MinSurvival:   campaignLaunchMinSurvival,

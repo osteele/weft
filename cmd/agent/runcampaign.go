@@ -143,6 +143,7 @@ func runCampaign(args []string) {
 		StartTime:           startTime,
 		OnPhase:             currentPhase.Set,
 		SkipWorkdirDeletion: manifest.SkipWorkdirDeletion || skipWorkdirDeletion,
+		GPUWarmup:           manifest.GPUWarmup,
 	})
 	anyFailed = seqResult.AnyFailed
 

@@ -716,13 +716,17 @@ func parseLaunchOpts() campaign.LaunchOpts {
 			opts.MaxTimeSeconds = int(d.Seconds())
 		}
 	}
+	cfg, cfgErr := config.Load()
 	gracePeriod := campaignLaunchGracePeriod
 	if gracePeriod == "" {
-		if cfg, err := config.Load(); err == nil {
+		if cfgErr == nil {
 			gracePeriod = cfg.DefaultGracePeriod()
 		} else {
 			gracePeriod = "5m"
 		}
+	}
+	if cfgErr == nil {
+		opts.GPUWarmup = cfg.Campaign.GPUWarmup
 	}
 	if gracePeriod != "0" {
 		if d, err := time.ParseDuration(gracePeriod); err == nil {

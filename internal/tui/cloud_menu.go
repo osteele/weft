@@ -303,8 +303,9 @@ func (m *Model) launchCloudJob(job *db.Job, offering placement.CloudOffering) te
 			sourceR2Keys[d] = key
 		}
 
+		launchOpts := campaign.LaunchOpts{GPUWarmup: m.appConfig.Campaign.GPUWarmup}
 		campaignID, err := campaign.LaunchInstance(
-			client, m.database, nil, group, offer, campaign.LaunchOpts{}, cloudR2, createOpts,
+			client, m.database, nil, group, offer, launchOpts, cloudR2, createOpts,
 			campaign.R2Assets{Client: r2Client, AgentR2Key: agentR2Key, SourceR2Keys: sourceR2Keys},
 			nil,
 			func(phase string) {

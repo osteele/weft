@@ -243,16 +243,16 @@ This creates a campaign with a single instance for that job.
 3. **Execution**: The agent runs each assigned job sequentially with full
    telemetry: per-process CPU/RSS, GPU memory, timeseries sampling, structured
    completion records, and failure detection (OOM, segfault, signals).
-   - **GPU warmup**: If the first GPU job on an instance is tagged `benchmark`,
-     the agent runs a lightweight CUDA warmup (context init + cuBLAS handle
-     creation) before starting it. This prevents cold-start overhead from
-     inflating benchmark measurements. Non-benchmark GPU jobs warm the context
-     implicitly, so the explicit warmup only triggers when no GPU job has run
-     yet on the instance. Note: CUDA context is per-process, so each job's
-     process still pays its own context init cost. The warmup primes
-     system-level state: GPU driver, kernel JIT cache on disk, and cuBLAS/cuDNN
-     library loading. This reduces — but does not fully eliminate — cold-start
-     overhead for the first benchmark job.
+   - **GPU warmup** (opt-in): The agent can run a lightweight CUDA warmup
+     (context init + cuBLAS handle creation) before the first GPU benchmark job.
+     This is disabled by default. Enable in `~/.config/weft/config.toml`:
+     ```toml
+     [campaign]
+     gpu_warmup = true
+     ```
+   - **Benchmark barrier**: Benchmark jobs (tagged `benchmark`) wait for all
+     background uploads from prior jobs to complete before starting, preventing
+     I/O interference with measurements.
 4. **Result upload**: After each job, the wrapper uploads results (logs,
    completion record, timeseries, phases) to R2 under `jobs/<job-id>/`.
 5. **Sweep**: The coordinator's sweep loop polls R2 for completed markers,

@@ -160,7 +160,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
 		}
 
-		opts := campaign.LaunchOpts{Strategy: bidding.StrategyCheap}
+		opts := campaign.LaunchOpts{Strategy: bidding.StrategyCheap, GPUWarmup: cfg.Campaign.GPUWarmup}
 		if gracePeriod := cfg.DefaultGracePeriod(); gracePeriod != "0" {
 			if d, err := time.ParseDuration(gracePeriod); err == nil {
 				opts.GracePeriodSeconds = int(d.Seconds())

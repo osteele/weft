@@ -1,7 +1,5 @@
 package cloud
 
-import "encoding/json"
-
 // AgentJob describes a job for the campaign manifest, used by weft-agent run-campaign.
 type AgentJob struct {
 	ID      int64    `json:"id"`
@@ -18,15 +16,5 @@ type CampaignManifest struct {
 	SelfDestructCmd     string            `json:"self_destruct_cmd"`
 	Env                 map[string]string `json:"env,omitempty"`
 	SkipWorkdirDeletion bool              `json:"skip_workdir_deletion,omitempty"`
-}
-
-// GenerateCampaignManifest produces JSON bytes for the campaign manifest
-// that the agent fetches from R2 at startup.
-func GenerateCampaignManifest(jobs []AgentJob, selfDestructCmd string, env map[string]string) ([]byte, error) {
-	m := CampaignManifest{
-		Jobs:            jobs,
-		SelfDestructCmd: selfDestructCmd,
-		Env:             env,
-	}
-	return json.Marshal(m)
+	GPUWarmup           bool              `json:"gpu_warmup,omitempty"`
 }

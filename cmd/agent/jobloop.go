@@ -27,6 +27,7 @@ type jobSequenceConfig struct {
 	StartTime           time.Time     // for time budget accounting
 	OnPhase             func(string)  // update current phase string (for heartbeat)
 	SkipWorkdirDeletion bool          // disable background workdir cleanup (for debugging)
+	GPUWarmup           bool          // run CUDA warmup before first benchmark job
 }
 
 // jobSequenceResult holds the outcome of running a sequence of jobs.
@@ -51,10 +52,9 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			bgm.Barrier()
 		}
 
-		// GPU warmup: if this is a benchmark job that uses GPU and no prior
-		// GPU job has warmed the CUDA context, run a lightweight warmup to
-		// avoid cold-start bias in benchmark measurements.
-		if job.UsesGPU && slices.Contains(job.Tags, "benchmark") && !gpuWarmedUp {
+		// GPU warmup (opt-in via config): prime system-level CUDA caches
+		// before the first benchmark job to avoid cold-start bias.
+		if cfg.GPUWarmup && job.UsesGPU && slices.Contains(job.Tags, "benchmark") && !gpuWarmedUp {
 			runGPUWarmup(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase)
 			gpuWarmedUp = true
 		}

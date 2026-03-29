@@ -44,6 +44,7 @@ type LaunchOpts struct {
 	Strategy            bidding.SelectionStrategy // "cheap" (default), "fast", or "fastest"
 	MinSurvival         float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
 	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
+	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -1102,6 +1103,7 @@ func LaunchInstance(
 		Jobs:                agentJobs,
 		SelfDestructCmd:     selfDestructCmd,
 		SkipWorkdirDeletion: opts.SkipWorkdirDeletion,
+		GPUWarmup:           opts.GPUWarmup,
 	}
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {

@@ -121,6 +121,10 @@ type CampaignConfig struct {
 	// GracePeriod is the default grace period after job failure (e.g., "5m", "15m").
 	// Default: "5m"
 	GracePeriod string `yaml:"grace_period" toml:"grace_period"`
+
+	// GPUWarmup enables a lightweight CUDA warmup before the first GPU benchmark
+	// job on a cloud instance. Default: false (disabled).
+	GPUWarmup bool `yaml:"gpu_warmup" toml:"gpu_warmup"`
 }
 
 // VastaiConfig holds Vast.ai cloud GPU settings.
