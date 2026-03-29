@@ -22,7 +22,11 @@ func TestGroupKey(t *testing.T) {
 		{PhaseSSHSetup, InstanceContext{InetDownMbps: 2000}, "very_fast"},
 		{PhaseSSHSetup, InstanceContext{InetDownMbps: 0}, "_unknown"},
 		{PhaseJobSetup, InstanceContext{CacheWarm: true}, "warm"},
-		{PhaseJobSetup, InstanceContext{CacheWarm: false}, "cold"},
+		{PhaseJobSetup, InstanceContext{CacheWarm: false}, "cold:none"},
+		{PhaseJobSetup, InstanceContext{CacheWarm: false, DownloadedBytes: 500 * 1024 * 1024}, "cold:small"},
+		{PhaseJobSetup, InstanceContext{CacheWarm: false, DownloadedBytes: 5 * 1024 * 1024 * 1024}, "cold:medium"},
+		{PhaseJobSetup, InstanceContext{CacheWarm: false, DownloadedBytes: 20 * 1024 * 1024 * 1024}, "cold:large"},
+		{PhaseJobSetup, InstanceContext{CacheWarm: false, DownloadedBytes: 60 * 1024 * 1024 * 1024}, "cold:xlarge"},
 		{PhaseUpload, InstanceContext{InetUpMbps: 300}, "medium"},
 	}
 
@@ -205,9 +209,10 @@ func TestBuildOverheadModel_CacheWarmColdGrouping(t *testing.T) {
 		t.Fatal("job setup model should exist")
 	}
 
-	// Should have both "cold" and "warm" groups
-	if _, ok := hm.Groups["cold"]; !ok {
-		t.Error("missing 'cold' group")
+	// Should have both cold and warm groups.
+	// Cold observations with no download data get key "cold:none".
+	if _, ok := hm.Groups["cold:none"]; !ok {
+		t.Error("missing 'cold:none' group")
 	}
 	if _, ok := hm.Groups["warm"]; !ok {
 		t.Error("missing 'warm' group")

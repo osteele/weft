@@ -18,11 +18,12 @@ type OverheadModel struct {
 
 // InstanceContext captures covariates needed for group key computation.
 type InstanceContext struct {
-	DataCenter   string
-	DLPerf       float64
-	InetDownMbps float64
-	InetUpMbps   float64
-	CacheWarm    bool // HF cache populated before job
+	DataCenter      string
+	DLPerf          float64
+	InetDownMbps    float64
+	InetUpMbps      float64
+	CacheWarm       bool  // HF cache populated before job
+	DownloadedBytes int64 // bytes downloaded during setup (post - pre HF cache)
 }
 
 // EstimatePhase returns the posterior predictive estimate for a phase+group.
@@ -53,11 +54,29 @@ func GroupKey(phase PhaseID, ctx InstanceContext) string {
 		if ctx.CacheWarm {
 			return "warm"
 		}
-		return "cold"
+		return "cold:" + downloadSizeBucket(ctx.DownloadedBytes)
 	case PhaseUpload:
 		return bandwidthBucket(ctx.InetUpMbps)
 	default:
 		return "_global"
+	}
+}
+
+// downloadSizeBucket returns a coarse bucket label for the amount of data
+// downloaded during job setup (primarily HF model downloads).
+func downloadSizeBucket(bytes int64) string {
+	const gb = 1024 * 1024 * 1024
+	switch {
+	case bytes <= 0:
+		return "none"
+	case bytes < 1*gb:
+		return "small"
+	case bytes < 10*gb:
+		return "medium"
+	case bytes < 50*gb:
+		return "large"
+	default:
+		return "xlarge"
 	}
 }
 

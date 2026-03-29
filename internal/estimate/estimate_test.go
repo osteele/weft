@@ -34,11 +34,13 @@ func TestAdd(t *testing.T) {
 	if sum.Mean != 40*time.Second {
 		t.Errorf("Add Mean = %v, want 40s", sum.Mean)
 	}
-	if sum.Lower != 20*time.Second {
-		t.Errorf("Add Lower = %v, want 20s", sum.Lower)
+	// Quadrature: lower dev = sqrt(5^2 + 15^2) ≈ 15.81, so lower ≈ 24.19s
+	if sum.Lower < 24*time.Second || sum.Lower > 25*time.Second {
+		t.Errorf("Add Lower = %v, want ~24.2s (quadrature)", sum.Lower)
 	}
-	if sum.Upper != 80*time.Second {
-		t.Errorf("Add Upper = %v, want 80s", sum.Upper)
+	// Quadrature: upper dev = sqrt(10^2 + 30^2) ≈ 31.62, so upper ≈ 71.62s
+	if sum.Upper < 71*time.Second || sum.Upper > 72*time.Second {
+		t.Errorf("Add Upper = %v, want ~71.6s (quadrature)", sum.Upper)
 	}
 }
 

@@ -47,7 +47,14 @@ func BuildOverheadModel(obs []db.OverheadObservation) *OverheadModel {
 			phase:  PhaseJobSetup,
 			getDur: func(o *db.OverheadObservation) *float64 { return o.JobSetupSec },
 			getCtx: func(o *db.OverheadObservation) InstanceContext {
-				return InstanceContext{CacheWarm: o.CacheHFBytes != nil && *o.CacheHFBytes > 0}
+				warm := o.CacheHFBytes != nil && *o.CacheHFBytes > 0
+				var downloaded int64
+				if o.CacheHFPostBytes != nil && o.CacheHFBytes != nil {
+					downloaded = *o.CacheHFPostBytes - *o.CacheHFBytes
+				}
+				// When CacheHFBytes is nil we don't know the pre-cache size,
+				// so downloaded stays 0 (unknown) → groups into "cold:none".
+				return InstanceContext{CacheWarm: warm, DownloadedBytes: downloaded}
 			},
 		},
 		{

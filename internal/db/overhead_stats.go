@@ -45,8 +45,13 @@ func QueryOverheadObservations(database *sql.DB) ([]OverheadObservation, error) 
 			ci.inet_up_mbps,
 			ci.reliability,
 			-- Phase durations (seconds)
+			-- Startup: fall back to wrapper_start when ready_at is not yet
+			-- populated, which overestimates startup (includes SSH setup) but
+			-- is better than no data for the Bayesian model.
 			CASE WHEN ci.ready_at IS NOT NULL
 				THEN CAST(ci.ready_at - ci.created_at AS REAL)
+				WHEN jpt.wrapper_start IS NOT NULL AND jpt.wrapper_start > ci.created_at
+				THEN CAST(jpt.wrapper_start - ci.created_at AS REAL)
 				ELSE NULL END,
 			CASE WHEN ci.ready_at IS NOT NULL AND jpt.wrapper_start IS NOT NULL
 				THEN CAST(jpt.wrapper_start - ci.ready_at AS REAL)

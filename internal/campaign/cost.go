@@ -161,6 +161,7 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			BandwidthBytesPerSec: bytesPerSec,
 		})
 
+		ctx.DownloadedBytes = downloadBytes
 		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
 
 		var runEst estimate.Estimate
