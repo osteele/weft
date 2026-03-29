@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/predictor"
 	"github.com/osteele/weft/internal/r2"
+	"github.com/osteele/weft/internal/transferbw"
 )
 
 // CostEstimate holds the cost projection for one instance group.
@@ -42,7 +44,7 @@ type EstimateProgressFunc func(phase string, resolved, total int)
 // If survivalModel is non-nil, computes survival probability and risk-adjusted cost.
 // If referenceDLPerf > 0, run durations are scaled by referenceDLPerf/offerDLPerf
 // to account for GPU performance differences across strategies.
-func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, referenceDLPerf float64, onProgress EstimateProgressFunc) []CostEstimate {
+func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, r2Client *r2.Client, survivalModel *bidding.SurvivalModel, referenceDLPerf float64, onProgress EstimateProgressFunc) []CostEstimate {
 	estimates := make([]CostEstimate, len(groupOffers))
 
 	// Collect inputs for all three estimation steps (fast, in-memory)
@@ -154,7 +156,8 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 			uvSyncBytes = estimate.EstimateUVSyncBytes(groupManifests)
 		}
 
-		bytesPerSec := cloud.MbpsToBytesPerSec(go_.Offer.DownloadBandwidth)
+		staticBW := cloud.MbpsToBytesPerSec(go_.Offer.DownloadBandwidth)
+		bytesPerSec := effectiveDownloadBandwidth(database, go_.Offer, staticBW)
 		provision := estimate.EstimateProvision(estimate.ProvisionInput{
 			ModelDownloadBytes:   downloadBytes,
 			UVSyncBytes:          uvSyncBytes,
@@ -227,6 +230,18 @@ func EstimateCosts(groupOffers []GroupOffer, predCfg *predictor.Config, overhead
 	}
 
 	return estimates
+}
+
+// effectiveDownloadBandwidth returns the learned HF download bandwidth for the
+// offer's datacenter if available (≥2 observations), otherwise the static
+// offer bandwidth.
+func effectiveDownloadBandwidth(database *sql.DB, offer *cloud.Offer, staticBW float64) float64 {
+	if database == nil || offer == nil || offer.DataCenter == "" {
+		return staticBW
+	}
+	src := transferbw.HFEndpoint()
+	dst := transferbw.CloudEndpoint(string(offer.Provider), offer.DataCenter, "")
+	return transferbw.EffectiveBandwidth(database, src.Key(), dst.Key(), staticBW)
 }
 
 // collectAllInputs gathers all unique inputs across all groups.

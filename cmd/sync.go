@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/agentdeploy"
@@ -25,6 +26,7 @@ import (
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/transferbw"
 	"github.com/spf13/cobra"
 )
 
@@ -539,6 +541,9 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 			if err := db.UpsertJobPhaseTimings(database, timings); err != nil {
 				slog.Warn("failed to store phase timings", "component", "sync", "job_id", jobID, "error", err)
 			}
+			if launch, err := db.GetLaunch(database, updatedInstanceID); err == nil && launch != nil {
+				recordCloudDownloadObservation(database, launch.Provider, launch.DataCenter, timings)
+			}
 		}
 
 		// Cache logs locally before cleaning up
@@ -625,7 +630,78 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		updated += len(repaired)
 	}
 
+	// Backfill HF download bandwidth observations from historical phase timings.
+	// Idempotent — skips datacenters that already have observations.
+	backfillHFDownloadObservations(database)
+
 	return updated
+}
+
+// recordCloudDownloadObservation derives effective HF download bandwidth from
+// phase timings and records it as a transfer observation. Only records for cold
+// starts where significant data was downloaded during setup.
+func recordCloudDownloadObservation(database *sql.DB, provider, datacenter string, timings *db.JobPhaseTimings) {
+	if timings.CacheHFPostBytes == nil || timings.SetupStart == nil || timings.SetupEnd == nil || datacenter == "" {
+		return
+	}
+	preBytes := int64(0)
+	if timings.CacheHFBytes != nil {
+		preBytes = *timings.CacheHFBytes
+	}
+	downloaded := *timings.CacheHFPostBytes - preBytes
+	setupDuration := *timings.SetupEnd - *timings.SetupStart
+	if downloaded <= 0 || setupDuration <= 0 {
+		return
+	}
+	src := transferbw.HFEndpoint()
+	dst := transferbw.CloudEndpoint(provider, datacenter, "")
+	_ = transferbw.RecordObservation(database, src, dst, downloaded,
+		time.Duration(setupDuration)*time.Second)
+}
+
+var backfillOnce sync.Once
+
+// backfillHFDownloadObservations populates transfer_observations from historical
+// job_phase_timings for cold-start jobs. Runs at most once per process.
+func backfillHFDownloadObservations(database *sql.DB) {
+	backfillOnce.Do(func() {
+		rows, err := database.Query(`
+			SELECT l.provider, l.data_center,
+			       (jpt.cache_hf_post_bytes - COALESCE(jpt.cache_hf_bytes, 0)) AS downloaded,
+			       (jpt.setup_end - jpt.setup_start) AS setup_sec
+			FROM job_phase_timings jpt
+			JOIN job_attempts ja ON ja.job_id = jpt.job_id
+			JOIN launches l ON ja.launch_id = l.id
+			WHERE jpt.setup_start > 0 AND jpt.setup_end > 0
+			AND jpt.cache_hf_post_bytes > COALESCE(jpt.cache_hf_bytes, 0)
+			AND (jpt.setup_end - jpt.setup_start) > 0
+			AND l.data_center != ''
+			AND l.provider != ''
+			AND ('cloud:' || l.provider || ':' || l.data_center) NOT IN (
+				SELECT dest_key FROM transfer_observations WHERE source_key = 'hf'
+			)`)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+
+		recorded := 0
+		for rows.Next() {
+			var provider, datacenter string
+			var downloaded, setupSec int64
+			if err := rows.Scan(&provider, &datacenter, &downloaded, &setupSec); err != nil {
+				continue
+			}
+			src := transferbw.HFEndpoint()
+			dst := transferbw.CloudEndpoint(provider, datacenter, "")
+			_ = transferbw.RecordObservation(database, src, dst, downloaded,
+				time.Duration(setupSec)*time.Second)
+			recorded++
+		}
+		if recorded > 0 {
+			slog.Info("backfilled HF download observations", "component", "sync", "count", recorded)
+		}
+	})
 }
 
 // jobEligibleForStartedMarker returns the current run ID for a queued job that

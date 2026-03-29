@@ -339,7 +339,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
+	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Auto-derive budget limits from estimates if not set by CLI
@@ -445,7 +445,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 
 	predCfg := buildPredictorConfig(cfg)
 	overheadModel := buildOverheadModel(database)
-	estimates := campaign.EstimateCosts(groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
+	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")

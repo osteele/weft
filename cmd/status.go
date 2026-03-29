@@ -543,7 +543,7 @@ func shouldAttemptSync(status string) bool {
 // Also runs a fast DB-only repair for jobs stuck on completed launches.
 // Returns true if the cloud sync completed within the timeout.
 func syncRentalJobsStatus(database *sql.DB) bool {
-	// DB-only repair before cloud sync. Also called from syncCloudJobResults,
+	// DB-only repairs before cloud sync. Also called from syncCloudJobResults,
 	// but that only runs if the cloud sync completes within timeout — this
 	// call ensures immediate repair even when the cloud sync is slow.
 	if repaired, err := db.FinalizeStuckJobsOnCompletedLaunches(database); err != nil {
@@ -553,6 +553,7 @@ func syncRentalJobsStatus(database *sql.DB) bool {
 			slog.Info("finalized stuck job on completed launch", "component", "sync", "job_id", jobID)
 		}
 	}
+	backfillHFDownloadObservations(database)
 
 	cfg, err := config.Load()
 	if err != nil {

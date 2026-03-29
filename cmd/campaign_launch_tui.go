@@ -470,7 +470,7 @@ func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cache
 				}
 			}
 		}
-		estimates := campaign.EstimateCosts(offers, predConfig, overheadModel, nil, survivalModel, referenceDLPerf, onProgress)
+		estimates := campaign.EstimateCosts(m.database, offers, predConfig, overheadModel, nil, survivalModel, referenceDLPerf, onProgress)
 		return estimatesLoadedMsg{estimates: estimates, cacheKey: cacheKey}
 	}
 }
@@ -1117,7 +1117,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 		// If async estimation has not finished yet, compute estimates now so
 		// launched campaigns still persist estimated_cost_cents.
 		if len(selectedEstimates) == 0 {
-			selectedEstimates = campaign.EstimateCosts(launchGroupOffers, predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
+			selectedEstimates = campaign.EstimateCosts(m.database, launchGroupOffers, predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
 		}
 
 		r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
