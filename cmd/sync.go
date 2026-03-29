@@ -613,6 +613,18 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 		updateInstanceTerminationReason(database, instanceID)
 	}
 
+	// Safety net: finalize jobs stuck "running" on completed launches.
+	// Also called from syncRentalJobsStatus for immediate repair when cloud sync
+	// times out; this call handles the case where cloud sync completes normally.
+	if repaired, err := db.FinalizeStuckJobsOnCompletedLaunches(database); err != nil {
+		slog.Warn("failed to finalize stuck jobs", "component", "sync", "error", err)
+	} else {
+		for _, jobID := range repaired {
+			slog.Info("finalized stuck job on completed launch", "component", "sync", "job_id", jobID)
+		}
+		updated += len(repaired)
+	}
+
 	return updated
 }
 

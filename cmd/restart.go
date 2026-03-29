@@ -58,17 +58,10 @@ func runRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	var errors []string
-	printed := false
 	for _, jobID := range jobIDs {
-		err := restartJob(database, jobID)
-		if err != nil {
+		if err := restartJob(database, jobID); err != nil {
 			errors = append(errors, fmt.Sprintf("job %d: %v", jobID, err))
-			continue
 		}
-		if printed {
-			fmt.Println("---")
-		}
-		printed = true
 	}
 
 	if len(errors) > 0 {

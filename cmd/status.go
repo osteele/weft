@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strconv"
@@ -539,8 +540,20 @@ func shouldAttemptSync(status string) bool {
 }
 
 // syncRentalJobsStatus runs a bounded cloud sync for rental jobs.
-// Returns true if the sync completed within the timeout.
+// Also runs a fast DB-only repair for jobs stuck on completed launches.
+// Returns true if the cloud sync completed within the timeout.
 func syncRentalJobsStatus(database *sql.DB) bool {
+	// DB-only repair before cloud sync. Also called from syncCloudJobResults,
+	// but that only runs if the cloud sync completes within timeout — this
+	// call ensures immediate repair even when the cloud sync is slow.
+	if repaired, err := db.FinalizeStuckJobsOnCompletedLaunches(database); err != nil {
+		slog.Warn("failed to finalize stuck jobs", "component", "sync", "error", err)
+	} else {
+		for _, jobID := range repaired {
+			slog.Info("finalized stuck job on completed launch", "component", "sync", "job_id", jobID)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return true

@@ -1,6 +1,9 @@
 package db
 
-import "database/sql"
+import (
+	"database/sql"
+	"time"
+)
 
 // RecordCloudJobCompletion updates the job attempt in the DB with the given
 // exit code, times, and failure reason. Returns the cloud instance ID if the
@@ -36,4 +39,58 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		return cloudInstanceID.Int64, nil
 	}
 	return 0, nil
+}
+
+// FinalizeStuckJobsOnCompletedLaunches finds jobs with non-terminal status
+// whose launch has already completed. These jobs missed R2 result sync
+// (markers missing or unprocessable). Marks them as "dead" since we can't
+// recover the exit code. Returns the IDs of finalized jobs.
+func FinalizeStuckJobsOnCompletedLaunches(database *sql.DB) ([]int64, error) {
+	rows, err := database.Query(`
+		SELECT ja.job_id, ja.id
+		FROM job_attempts ja
+		JOIN launches l ON ja.launch_id = l.id
+		WHERE l.status = ?
+		AND ja.status NOT IN (?, ?, ?, ?, ?, ?)
+		AND ja.id = (SELECT MAX(ja2.id) FROM job_attempts ja2 WHERE ja2.job_id = ja.job_id)`,
+		LaunchStatusCompleted,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled, StatusCanceled, StatusDraft,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type stuckJob struct {
+		jobID     int64
+		attemptID int64
+	}
+	var stuck []stuckJob
+	for rows.Next() {
+		var s stuckJob
+		if err := rows.Scan(&s.jobID, &s.attemptID); err != nil {
+			return nil, err
+		}
+		stuck = append(stuck, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now().Unix()
+	var finalized []int64
+	for _, s := range stuck {
+		if _, err := database.Exec(
+			`UPDATE job_attempts
+			 SET status = ?, end_time = COALESCE(end_time, ?),
+			     failure_reason = 'launch completed but job results were not synced from R2',
+			     cloud_outcome = ?
+			 WHERE id = ?`,
+			StatusDead, now, AttemptOutcomeOrphaned, s.attemptID,
+		); err != nil {
+			return finalized, err
+		}
+		finalized = append(finalized, s.jobID)
+	}
+	return finalized, nil
 }
