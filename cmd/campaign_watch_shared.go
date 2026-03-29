@@ -42,7 +42,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 		MinSurvival:   campaignLaunchMinSurvival,
 		Database:      database,
 		ResetJobs:     resetJobs,
-		SetupOverhead: campaign.OfferSetupOverhead(database, overheadModel),
+		SetupFactory:  campaign.OfferSetupOverheadFactory(database, overheadModel),
 	}
 
 	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)

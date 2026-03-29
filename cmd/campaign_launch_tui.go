@@ -370,8 +370,8 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 
 // rankCachedOffersForStrategy ranks cached raw offers with a specific strategy.
 func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
-	setupOverhead := campaign.OfferSetupOverhead(m.database, m.overheadModel)
-	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, setupOverhead, strategy, m.launchOpts.MinSurvival)
+	setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
+	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, setupFactory, strategy, m.launchOpts.MinSurvival)
 }
 
 // rankCachedOffers ranks cached raw offers with the current strategy.

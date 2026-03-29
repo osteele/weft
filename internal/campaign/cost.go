@@ -232,13 +232,28 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	return estimates
 }
 
-// OfferSetupOverhead builds an OfferSetupFunc that computes per-offer setup
-// overhead using the overhead model and learned download bandwidth. If database
-// or overheadModel is nil, returns a constant 0.5h fallback.
-func OfferSetupOverhead(database *sql.DB, overheadModel *estimate.OverheadModel) bidding.OfferSetupFunc {
+// OfferSetupOverheadFactory builds a SetupOverheadFactory that creates per-offer
+// setup functions using the overhead model, learned download bandwidth, and
+// per-group download sizes (resolved from declared inputs). Returns nil if
+// overheadModel is nil (callers fall back to a constant 0.5h).
+func OfferSetupOverheadFactory(database *sql.DB, overheadModel *estimate.OverheadModel) SetupOverheadFactory {
 	if overheadModel == nil {
-		return bidding.ConstantSetup(0.5)
+		return nil
 	}
+	return func(group InstanceGroup) bidding.OfferSetupFunc {
+		var downloadBytes int64
+		if totalBytes, err := dataloc.ResolveInputSizes(group.AllInputs(), nil); err != nil {
+			slog.Warn("could not resolve input sizes for setup estimate", "component", "cost", "error", err)
+		} else {
+			downloadBytes = totalBytes
+		}
+		return offerSetupFunc(database, overheadModel, downloadBytes)
+	}
+}
+
+// offerSetupFunc builds an OfferSetupFunc that estimates total setup overhead
+// (startup + SSH + job setup + provision) in hours for a given offer.
+func offerSetupFunc(database *sql.DB, overheadModel *estimate.OverheadModel, downloadBytes int64) bidding.OfferSetupFunc {
 	return func(o cloud.Offer) float64 {
 		ctx := estimate.InstanceContext{
 			DataCenter:   o.DataCenter,
@@ -249,7 +264,13 @@ func OfferSetupOverhead(database *sql.DB, overheadModel *estimate.OverheadModel)
 		startup := estimate.EstimateStartupWithModel(string(o.Provider), overheadModel, ctx)
 		sshSetup := estimate.EstimateSSHSetup(overheadModel, ctx)
 		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
-		return (startup.Mean + sshSetup.Mean + jobSetup.Mean).Hours()
+		total := startup.Mean + sshSetup.Mean + jobSetup.Mean
+		if downloadBytes > 0 {
+			bw := effectiveDownloadBandwidth(database, &o, cloud.MbpsToBytesPerSec(o.DownloadBandwidth))
+			provision := estimate.TransferTime(downloadBytes, bw)
+			total += provision.Mean
+		}
+		return total.Hours()
 	}
 }
 

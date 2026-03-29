@@ -117,14 +117,24 @@ func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup) []Group
 	return results
 }
 
+// SetupOverheadFactory builds per-group OfferSetupFuncs. If nil, a constant
+// 0.5h fallback is used for all groups.
+type SetupOverheadFactory func(group InstanceGroup) bidding.OfferSetupFunc
+
 // RankGroupOffers selects the best offer per group from cached raw offers using
-// the given strategy. This is a pure computation with no API calls.
-func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
+// the given strategy. The setupFactory creates per-group setup overhead
+// functions that account for datacenter download speed and group-specific
+// download sizes. If nil, a constant 0.5h fallback is used.
+func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	results := make([]GroupOffer, len(raw))
 	for i, r := range raw {
 		if r.Err != nil {
 			results[i] = GroupOffer{Group: r.Group, Err: r.Err}
 			continue
+		}
+		setupOverhead := bidding.ConstantSetup(0.5)
+		if setupFactory != nil {
+			setupOverhead = setupFactory(r.Group)
 		}
 		results[i] = rankOffer(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverhead, strategy, minSurvival)
 	}
@@ -154,7 +164,7 @@ func MedianDLPerf(rawOffers []GroupRawOffers) float64 {
 // FetchGroupOffers searches cloud providers for the best offer per group, in parallel.
 // When survivalModel is non-nil, selects the offer with lowest expected cost (including
 // retry risk from instance failure). Otherwise falls back to cheapest offer.
-func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
+func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	raw := FetchGroupRawOffers(clients, groups)
-	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupOverhead, strategy, minSurvival)
+	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
 }

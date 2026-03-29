@@ -331,7 +331,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Println("Searching for GPU offers...")
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
-	setupOverhead := campaign.OfferSetupOverhead(database, overheadModel)
+	setupOverhead := campaign.OfferSetupOverheadFactory(database, overheadModel)
 	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, setupOverhead, opts.Strategy, opts.MinSurvival)
 
 	printSurvivalRejections(groupOffers, opts.MinSurvival)
@@ -445,7 +445,7 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 	}
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
-	setupOverhead := campaign.OfferSetupOverhead(database, overheadModel)
+	setupOverhead := campaign.OfferSetupOverheadFactory(database, overheadModel)
 	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, setupOverhead, strategy, minSurvival)
 
 	printSurvivalRejections(groupOffers, minSurvival)
