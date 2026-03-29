@@ -541,7 +541,8 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		}
 	}
 
-	if err := db.UpdateLaunchStatus(database, ci.ID, db.LaunchStatusFailed, reason); err != nil {
+	detail := fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason)
+	if err := db.UpdateLaunchStatus(database, ci.ID, db.LaunchStatusFailed, reason, detail); err != nil {
 		slog.Warn("failed to update stale-heartbeat instance status", "component", "reconcile", "instance", ci.ID, "error", err)
 		return false, false
 	}
@@ -549,7 +550,7 @@ func (r *Reconciler) reconcileStaleHeartbeat(database *sql.DB, client cloud.Clie
 		EventKind: db.EventReconcileStaleHeartbeat,
 		LaunchID:  ci.ID,
 		GPUSpec:   ci.GPUSpec,
-		Detail:    fmt.Sprintf("heartbeat stale %s, reason=%s", heartbeatAge.Truncate(time.Second), reason),
+		Detail:    detail,
 	})
 	if resetCount, err := db.ResetLaunchJobs(database, ci.ID, db.AttemptOutcomeOrphaned); err != nil {
 		slog.Warn("failed to reset jobs for stale-heartbeat instance", "component", "reconcile", "instance", ci.ID, "error", err)

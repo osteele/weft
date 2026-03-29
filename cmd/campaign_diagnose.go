@@ -165,6 +165,9 @@ func summarizeInstanceCause(inst *db.Launch, findings []jobFinding, outcomes map
 		}
 		return "container process exited"
 	case db.TerminationReasonInfraFailure:
+		if inst.TerminationDetail != "" {
+			return inst.TerminationDetail
+		}
 		if countOutcome(outcomes, db.AttemptOutcomeOrphaned) > 0 {
 			return "instance became unreachable or was terminated before jobs finished"
 		}
@@ -293,8 +296,8 @@ func formatCampaignDiagnosisReport(report *campaignDiagnosisReport) string {
 
 	for _, inst := range report.Instances {
 		statusLabel := inst.Instance.Status
-		if reason := inst.Instance.TerminationReason; reason != "" && reason != db.TerminationReasonCompleted {
-			statusLabel += " (" + reason + ")"
+		if inst.Instance.TerminationReason != "" && inst.Instance.TerminationReason != db.TerminationReasonCompleted {
+			statusLabel += " (" + inst.Instance.DisplayTerminationReason() + ")"
 		}
 
 		fmt.Fprintf(&b, "\nInstance %d — %s — %s\n", inst.Instance.ID, displayInstanceGPU(inst.Instance), statusLabel)

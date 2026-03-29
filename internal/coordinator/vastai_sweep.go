@@ -591,7 +591,10 @@ func (c *Coordinator) checkLaunchLimits(cfg *config.Config) {
 						_ = cl.DestroyInstance(providerInstID)
 					}
 				}
-				_ = db.UpdateLaunchStatus(c.db, ci.ID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+				detail := fmt.Sprintf("exceeded time limit (%s elapsed, %ds max)", elapsed.Truncate(time.Second), ci.MaxTimeSeconds)
+				_ = db.UpdateLaunchStatus(c.db, ci.ID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail)
+				oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+					"launch_id=%d reason=%s detail=%s", ci.ID, db.TerminationReasonInfraFailure, detail))
 			}
 		}
 	}

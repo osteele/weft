@@ -247,7 +247,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("Instance %d — %s — %s\n", ci.ID, ci.DisplayGPUSpec(), statusLabel)
 		if ci.TerminationReason != "" {
-			fmt.Printf("  Terminated: %s\n", ci.TerminationReason)
+			fmt.Printf("  Terminated: %s\n", ci.DisplayTerminationReason())
 		}
 		if ci.Status == db.LaunchStatusCompleted {
 			switch {

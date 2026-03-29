@@ -49,7 +49,7 @@ func TestWatchModelView_PreUpdateUsesDBStatusAndTerminalSpinnerBehavior(t *testi
 	cleanOut := stripANSI(out)
 	cleanSpinner := stripANSI(spinnerMarker)
 
-	if !strings.Contains(cleanOut, "failed (infra_failure)") {
+	if !strings.Contains(cleanOut, "failed (infrastructure failure)") {
 		t.Fatalf("output missing failed status label, got:\n%s", out)
 	}
 	if !strings.Contains(cleanOut, fmt.Sprintf("Instance %d — A100 — launching", launchingID)) {
@@ -209,7 +209,7 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	}
 
 	out := stripANSI(got.View())
-	if !strings.Contains(out, "failed (disk_full)") {
+	if !strings.Contains(out, "failed (disk full)") {
 		t.Fatalf("expected failed instance in view, got:\n%s", out)
 	}
 	if !strings.Contains(out, "orphaned") {

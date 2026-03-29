@@ -124,21 +124,19 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	fmt.Println("Overall:")
 
 	// Print reasons in a stable order
-	reasonOrder := []struct {
-		key   string
-		label string
-	}{
-		{db.TerminationReasonCompleted, "Completed"},
-		{db.TerminationReasonPreempted, "Preempted"},
-		{db.TerminationReasonInfraFailure, "Infra failure"},
-		{db.TerminationReasonJobFailure, "Job failure"},
-		{db.TerminationReasonCancelled, "Canceled"},
+	reasonKeys := []string{
+		db.TerminationReasonCompleted,
+		db.TerminationReasonPreempted,
+		db.TerminationReasonInfraFailure,
+		db.TerminationReasonJobFailure,
+		db.TerminationReasonCancelled,
 	}
-	for _, r := range reasonOrder {
-		if count, ok := reasonCounts[r.key]; ok {
+	for _, key := range reasonKeys {
+		if count, ok := reasonCounts[key]; ok {
 			pct := 100.0 * float64(count) / float64(total)
-			fmt.Printf("  %-16s %3d (%5.1f%%)\n", r.label+":", count, pct)
-			delete(reasonCounts, r.key)
+			label := capitalizeFirst(db.HumanizeTerminationReason(key))
+			fmt.Printf("  %-24s %3d (%5.1f%%)\n", label+":", count, pct)
+			delete(reasonCounts, key)
 		}
 	}
 	// Print any remaining reasons not in the known list
@@ -150,9 +148,8 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	for _, k := range remaining {
 		count := reasonCounts[k]
 		pct := 100.0 * float64(count) / float64(total)
-		label := strings.ReplaceAll(k, "_", " ")
-		label = strings.ToUpper(label[:1]) + label[1:]
-		fmt.Printf("  %-16s %3d (%5.1f%%)\n", label+":", count, pct)
+		label := capitalizeFirst(db.HumanizeTerminationReason(k))
+		fmt.Printf("  %-24s %3d (%5.1f%%)\n", label+":", count, pct)
 	}
 
 	fmt.Println()
@@ -186,4 +183,11 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }

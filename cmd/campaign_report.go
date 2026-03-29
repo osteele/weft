@@ -245,7 +245,7 @@ func buildInstanceRow(ci *db.Launch, now time.Time) exitReportInstanceRow {
 		costStr = fmt.Sprintf("$%.2f", *obs.Cost)
 		cost = *obs.Cost
 	}
-	reason := ci.TerminationReason
+	reason := ci.DisplayTerminationReason()
 	if reason == "" {
 		reason = "—"
 	}

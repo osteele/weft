@@ -41,7 +41,7 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 			LaunchID:   ci.ID,
 			CampaignID: m.campaignID,
 			GPUSpec:    ci.GPUSpec,
-			Detail:     ci.TerminationReason,
+			Detail:     ci.DisplayTerminationReason(),
 		})
 		m.retrying = true
 		m.retryResult = ""

@@ -190,7 +190,7 @@ func buildTimeline(inst *db.Launch, jobs []*db.Job, timings map[int64]*db.JobPha
 
 func terminationLabel(inst *db.Launch) string {
 	if inst.TerminationReason != "" && inst.TerminationReason != db.TerminationReasonCompleted {
-		return "ended (" + inst.TerminationReason + ")"
+		return "ended (" + inst.DisplayTerminationReason() + ")"
 	}
 	return "ended"
 }
@@ -253,8 +253,8 @@ func formatInstanceDiagnoseReport(report *instanceDiagnoseReport) string {
 
 	// Section 1: Header
 	statusLabel := inst.Status
-	if reason := inst.TerminationReason; reason != "" && reason != db.TerminationReasonCompleted {
-		statusLabel += " (" + reason + ")"
+	if inst.TerminationReason != "" && inst.TerminationReason != db.TerminationReasonCompleted {
+		statusLabel += " (" + inst.DisplayTerminationReason() + ")"
 	}
 	fmt.Fprintf(&b, "Instance %d — %s — %s\n", inst.ID, displayInstanceGPU(inst), statusLabel)
 	fmt.Fprintf(&b, "  Provider:  %s", inst.Provider)

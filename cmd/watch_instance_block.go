@@ -157,7 +157,7 @@ func formatWatchInstanceHeaderLine(ci *db.Launch, inst *cloud.Instance, opts wat
 		statusLabel = label
 	}
 	if ci.TerminationReason != "" && ci.TerminationReason != db.TerminationReasonCompleted {
-		statusLabel += " (" + ci.TerminationReason + ")"
+		statusLabel += " (" + ci.DisplayTerminationReason() + ")"
 	}
 
 	statusText := statusLabel

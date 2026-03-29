@@ -10,6 +10,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -396,9 +397,13 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 	}
 
 	if action.TerminalStatus != "" {
-		if err := db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason); err != nil {
+		if err := db.UpdateLaunchStatus(database, ci.ID, action.TerminalStatus, action.TerminationReason, action.StallMessage); err != nil {
 			slog.Warn("failed to update instance status", "component", "reconcile", "instance", ci.ID, "status", action.TerminalStatus, "error", err)
 			return false, false
+		}
+		if action.TerminalStatus == db.LaunchStatusFailed {
+			oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+				"launch_id=%d reason=%s detail=%s", ci.ID, action.TerminationReason, action.StallMessage))
 		}
 		if eventKind := actionEventKind(action.Kind); eventKind != "" {
 			_ = db.InsertLifecycleEvent(database, &db.LifecycleEvent{

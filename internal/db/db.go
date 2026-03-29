@@ -26,6 +26,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -388,6 +389,7 @@ func createLaunchesTableSQL(table string, ifNotExists bool) string {
 		grace_started_at INTEGER,
 		grace_deadline INTEGER,
 		termination_reason TEXT,
+		termination_detail TEXT,
 		disk_gb INTEGER,
 		provisioned_inputs TEXT,
 		termination_requested_at INTEGER,
@@ -1436,6 +1438,25 @@ func initSchema(db *sql.DB) error {
 	}
 	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN results_verified INTEGER`); err != nil {
 		return err
+	}
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN termination_detail TEXT`); err != nil {
+		return err
+	}
+
+	// Backfill termination_detail from lifecycle_events for existing instances.
+	if _, err := db.Exec(`
+		UPDATE launches SET termination_detail = (
+			SELECT COALESCE(NULLIF(detail, ''), error_text)
+			FROM lifecycle_events
+			WHERE lifecycle_events.launch_id = launches.id
+			ORDER BY lifecycle_events.id DESC LIMIT 1
+		)
+		WHERE termination_detail IS NULL
+		  AND termination_reason IS NOT NULL
+		  AND termination_reason NOT IN ('completed', 'canceled')
+		  AND EXISTS (SELECT 1 FROM lifecycle_events WHERE launch_id = launches.id)
+	`); err != nil {
+		slog.Warn("backfill termination_detail from lifecycle_events failed (non-fatal)", "error", err)
 	}
 
 	// Migration: create launch_live_state table for ephemeral R2 watch state.

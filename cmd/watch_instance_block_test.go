@@ -235,8 +235,8 @@ func TestFormatPreviousInstanceLineSingleDonor(t *testing.T) {
 	if !strings.Contains(line, "Instance 226") {
 		t.Fatalf("expected Instance 226, got: %s", line)
 	}
-	if !strings.Contains(line, "infra_failure") {
-		t.Fatalf("expected infra_failure, got: %s", line)
+	if !strings.Contains(line, "infrastructure failure") {
+		t.Fatalf("expected 'infrastructure failure', got: %s", line)
 	}
 	if !strings.Contains(line, "$0.30") {
 		t.Fatalf("expected cost, got: %s", line)
@@ -254,11 +254,11 @@ func TestFormatPreviousInstanceLineChain(t *testing.T) {
 	}
 
 	line := formatPreviousInstanceLine(donors, now)
-	if !strings.Contains(line, "Instance 228 (infra_failure)") {
-		t.Fatalf("expected Instance 228 (infra_failure), got: %s", line)
+	if !strings.Contains(line, "Instance 228 (infrastructure failure)") {
+		t.Fatalf("expected Instance 228 (infrastructure failure), got: %s", line)
 	}
-	if !strings.Contains(line, "Instance 226 (bootstrap_timeout)") {
-		t.Fatalf("expected Instance 226 (bootstrap_timeout), got: %s", line)
+	if !strings.Contains(line, "Instance 226 (bootstrap timeout)") {
+		t.Fatalf("expected Instance 226 (bootstrap timeout), got: %s", line)
 	}
 	if !strings.Contains(line, " → ") {
 		t.Fatalf("expected arrow separator, got: %s", line)

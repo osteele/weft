@@ -20,7 +20,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		provider_instance_id, data_center,
 		instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, replaced_instance_id,
 		grace_period_seconds, grace_started_at, grace_deadline,
-		termination_reason,
+		termination_reason, termination_detail,
 		disk_gb, provisioned_inputs,
 		termination_requested_at, termination_intent_json,
 		results_verified,
@@ -103,6 +103,7 @@ type Launch struct {
 
 	// Termination classification
 	TerminationReason      string // "completed", "preempted", "job_failure", "disk_full", "infra_failure", "canceled"
+	TerminationDetail      string // human-readable detail for the termination reason
 	TerminationRequestedAt *int64
 	TerminationIntent      *instanceintent.Marker
 
@@ -181,13 +182,44 @@ func (c *Launch) EffectiveProviderID() string {
 	return c.VastaiInstanceID
 }
 
-// DisplayTerminationReason returns TerminationReason, falling back to Status
-// when the termination reason is empty.
+// DisplayTerminationReason returns a human-readable termination description.
+// Prefers TerminationDetail (specific context), falls back to a humanized
+// version of TerminationReason, then to Status.
 func (c *Launch) DisplayTerminationReason() string {
+	if c.TerminationDetail != "" {
+		return c.TerminationDetail
+	}
 	if c.TerminationReason != "" {
-		return c.TerminationReason
+		return HumanizeTerminationReason(c.TerminationReason)
 	}
 	return c.Status
+}
+
+// HumanizeTerminationReason converts a snake_case termination reason enum
+// to a human-readable string.
+func HumanizeTerminationReason(reason string) string {
+	switch reason {
+	case TerminationReasonCompleted:
+		return "completed"
+	case TerminationReasonPreempted:
+		return "preempted by provider"
+	case TerminationReasonJobFailure:
+		return "job failure"
+	case TerminationReasonDiskFull:
+		return "disk full"
+	case TerminationReasonInfraFailure:
+		return "infrastructure failure"
+	case TerminationReasonBootstrapTimeout:
+		return "bootstrap timeout"
+	case TerminationReasonPhaseStall:
+		return "setup phase stalled"
+	case TerminationReasonCancelled:
+		return "cancelled by user"
+	case TerminationReasonUnknown:
+		return "unknown failure"
+	default:
+		return reason
+	}
 }
 
 // CreateLaunch inserts a new cloud instance record and returns its ID.
@@ -255,18 +287,27 @@ func ListLaunches(db *sql.DB) ([]*Launch, error) {
 
 // UpdateLaunchStatus updates a cloud instance's status and optionally sets timestamps.
 // For terminal statuses (completed, failed, canceled), an optional terminationReason
-// classifies why the instance ended (e.g. "preempted", "infra_failure").
-func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationReason ...string) error {
+// classifies why the instance ended (e.g. "preempted", "infra_failure"), and an
+// optional terminationDetail provides a human-readable explanation.
+func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...string) error {
 	now := time.Now().Unix()
 	reason := ""
-	if len(terminationReason) > 0 {
-		reason = terminationReason[0]
+	detail := ""
+	if len(terminationInfo) > 0 {
+		reason = terminationInfo[0]
+	}
+	if len(terminationInfo) > 1 {
+		detail = terminationInfo[1]
 	}
 	switch status {
 	case LaunchStatusRunning:
 		_, err := db.Exec(`UPDATE launches SET status = ?, launched_at = ? WHERE id = ?`, status, now, id)
 		return err
 	case LaunchStatusCompleted, LaunchStatusFailed, LaunchStatusCancelled:
+		if reason != "" && detail != "" {
+			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ?, termination_detail = ? WHERE id = ?`, status, now, reason, detail, id)
+			return err
+		}
 		if reason != "" {
 			_, err := db.Exec(`UPDATE launches SET status = ?, ended_at = ?, termination_reason = ? WHERE id = ?`, status, now, reason, id)
 			return err
@@ -913,6 +954,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var gracePeriodSeconds sql.NullInt64
 	var graceStartedAt, graceDeadline sql.NullInt64
 	var terminationReason sql.NullString
+	var terminationDetail sql.NullString
 	var diskGB sql.NullInt64
 	var provisionedInputsJSON sql.NullString
 	var terminationRequestedAt sql.NullInt64
@@ -929,7 +971,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&providerInstanceID, &dataCenter,
 		&instanceRole, &donorInstanceID, &seedDownloadSecs, &seedCopySecs, &replacedInstanceID,
 		&gracePeriodSeconds, &graceStartedAt, &graceDeadline,
-		&terminationReason,
+		&terminationReason, &terminationDetail,
 		&diskGB, &provisionedInputsJSON,
 		&terminationRequestedAt, &terminationIntentJSON,
 		&resultsVerified,
@@ -1028,6 +1070,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if terminationReason.Valid {
 		c.TerminationReason = terminationReason.String
+	}
+	if terminationDetail.Valid {
+		c.TerminationDetail = terminationDetail.String
 	}
 	if terminationRequestedAt.Valid {
 		c.TerminationRequestedAt = &terminationRequestedAt.Int64

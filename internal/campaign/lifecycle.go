@@ -557,7 +557,9 @@ func LaunchCampaign(
 						inst, createErr := donorClient.CreateInstance(donorCfg.Offer.ProviderID, donorCreateOpts)
 						if createErr != nil {
 							slog.Warn("failed to create donor instance", "component", "donor", "error", createErr)
-							_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+							_ = db.UpdateLaunchStatus(database, donorInstanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "donor instance creation failed: "+createErr.Error())
+							oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+								"launch_id=%d reason=infra_failure detail=donor instance creation failed: %s", donorInstanceID, createErr))
 							donorCfg = nil
 						} else {
 							donorProviderID = inst.ProviderID
@@ -960,8 +962,10 @@ func LaunchInstance(
 
 	// Configure provider-specific bootstrap wiring.
 	if err := configureBootstrapCreateOpts(client, &createOpts, bootstrapKey); err != nil {
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "bootstrap config failed: "+err.Error())
 		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=bootstrap config failed: %s", instanceID, err))
 		return instanceID, fmt.Errorf("configure bootstrap: %w", err)
 	}
 
@@ -1007,7 +1011,8 @@ func LaunchInstance(
 		replacementOffer,
 	)
 	if err != nil {
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		detail := "instance creation failed: " + err.Error()
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, detail)
 		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
 		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
 			"launch_id=%d provider=%s offer_id=%s error=%s",
@@ -1067,7 +1072,9 @@ func LaunchInstance(
 	// Record provider instance ID
 	if err := db.SetLaunchProviderID(database, instanceID, providerInstID); err != nil {
 		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "failed to record provider ID: "+err.Error())
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=failed to record provider ID: %s", instanceID, err))
 		return instanceID, fmt.Errorf("record provider instance ID: %w", err)
 	}
 
@@ -1108,14 +1115,18 @@ func LaunchInstance(
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "manifest generation failed: "+err.Error())
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=manifest generation failed: %s", instanceID, err))
 		return instanceID, fmt.Errorf("generate campaign manifest: %w", err)
 	}
 
 	manifestKey := r2keys.CampaignManifest(instanceID)
 	if err := r2Assets.Client.PutObject(ctx, manifestKey, bytes.NewReader(manifestJSON), "application/json"); err != nil {
 		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "manifest upload failed: "+err.Error())
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=manifest upload failed: %s", instanceID, err))
 		return instanceID, fmt.Errorf("upload campaign manifest: %w", err)
 	}
 
@@ -1136,7 +1147,9 @@ func LaunchInstance(
 
 	if err := r2Assets.Client.PutObject(ctx, bootstrapKey, strings.NewReader(bootstrapScript), "text/x-shellscript"); err != nil {
 		destroyLeakedInstance(client, providerInstID, instanceID)
-		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure)
+		_ = db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusFailed, db.TerminationReasonInfraFailure, "bootstrap upload failed: "+err.Error())
+		oplog.Log(oplog.OpLaunchLaunchFailed, oplog.WithDetailf(
+			"launch_id=%d reason=infra_failure detail=bootstrap upload failed: %s", instanceID, err))
 		return instanceID, fmt.Errorf("upload bootstrap script: %w", err)
 	}
 
