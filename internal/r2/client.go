@@ -26,6 +26,11 @@ type Client struct {
 	endpoint string
 }
 
+// IsConfigured returns true if the client has a usable S3 connection.
+func (c *Client) IsConfigured() bool {
+	return c != nil && c.s3 != nil
+}
+
 // Config holds R2 connection settings.
 type Config struct {
 	AccountID       string

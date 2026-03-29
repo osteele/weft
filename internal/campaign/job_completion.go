@@ -25,7 +25,7 @@ import (
 //
 // Returns true if completion was recorded.
 func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.DB, jobID int64) bool {
-	if r2c == nil {
+	if !r2c.IsConfigured() {
 		return false
 	}
 

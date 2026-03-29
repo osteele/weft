@@ -2,6 +2,7 @@ package campaign
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
@@ -123,6 +124,144 @@ func TestReconcileLaunches_GraceDetection(t *testing.T) {
 	}
 	if ci.Status != db.LaunchStatusRunning {
 		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+}
+
+func TestReconcileLaunches_GraceSyncsJobCompletions(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a running instance with a provider ID
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	// Create a job in "running" status associated with this instance
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
+		db.StatusRunning, instanceID)
+
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: cloud.ProviderStatusRunning}, nil
+		},
+	}
+
+	// Override grace check to simulate R2 grace marker detection
+	origGrace := reconcileCheckR2GraceStatus
+	t.Cleanup(func() { reconcileCheckR2GraceStatus = origGrace })
+	reconcileCheckR2GraceStatus = func(_ *r2.Client, ci *db.Launch, dbConn *sql.DB) bool {
+		_ = db.SetLaunchGraceStarted(dbConn, ci.ID, time.Now().Add(5*time.Minute).Unix())
+		return true
+	}
+
+	// Override job completion sync to track which jobs were synced
+	var syncedJobIDs []int64
+	origSync := reconcileCheckAndSyncJobComplete
+	t.Cleanup(func() { reconcileCheckAndSyncJobComplete = origSync })
+	reconcileCheckAndSyncJobComplete = func(_ context.Context, _ *r2.Client, _ *sql.DB, jobID int64) bool {
+		syncedJobIDs = append(syncedJobIDs, jobID)
+		return true
+	}
+
+	result, err := NewReconciler().ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Errorf("reconciled = %d, want 1", result.Reconciled)
+	}
+
+	// Verify instance transitioned to grace
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if ci.Status != db.LaunchStatusGrace {
+		t.Errorf("instance status = %q, want %q", ci.Status, db.LaunchStatusGrace)
+	}
+
+	// Verify job completion sync was called for the running job
+	if len(syncedJobIDs) != 1 || syncedJobIDs[0] != 1 {
+		t.Errorf("synced job IDs = %v, want [1]", syncedJobIDs)
+	}
+}
+
+func TestReconcileLaunches_TerminalTransitionSyncsJobCompletions(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a running instance with a provider ID
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "12345"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	// Create a job in "running" status associated with this instance
+	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
+		db.StatusRunning, instanceID)
+
+	// Provider reports instance as exited (dead)
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: cloud.ProviderStatusExited}, nil
+		},
+	}
+
+	// Override job completion sync to track calls and mark job completed in DB
+	var syncedJobIDs []int64
+	origSync := reconcileCheckAndSyncJobComplete
+	t.Cleanup(func() { reconcileCheckAndSyncJobComplete = origSync })
+	reconcileCheckAndSyncJobComplete = func(_ context.Context, _ *r2.Client, dbConn *sql.DB, jobID int64) bool {
+		syncedJobIDs = append(syncedJobIDs, jobID)
+		// Simulate recording the completion so ExecuteAction's ResetLaunchJobs skips it
+		dbConn.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`,
+			db.StatusCompleted, time.Now().Unix(), jobID)
+		return true
+	}
+
+	rec := NewReconciler()
+	rec.deadConfirmTime = -1 // skip hysteresis
+	result, err := rec.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if result.Reconciled != 1 {
+		t.Errorf("reconciled = %d, want 1", result.Reconciled)
+	}
+
+	// Verify job completion sync was called for the running job
+	if len(syncedJobIDs) != 1 || syncedJobIDs[0] != 1 {
+		t.Errorf("synced job IDs = %v, want [1]", syncedJobIDs)
+	}
+
+	// Verify the job was NOT re-queued (it was marked completed by the mock sync)
+	var jobStatus string
+	database.QueryRow(`SELECT status FROM job_attempts WHERE job_id = 1 ORDER BY id DESC LIMIT 1`).Scan(&jobStatus)
+	if jobStatus != string(db.StatusCompleted) {
+		t.Errorf("job status = %q, want %q (should not be re-queued)", jobStatus, db.StatusCompleted)
 	}
 }
 

@@ -79,7 +79,9 @@ var (
 		}
 		return strings.TrimSpace(out) != "", nil
 	}
-	fetchReconcileTerminationIntent = fetchTerminationIntentFromR2
+	fetchReconcileTerminationIntent  = fetchTerminationIntentFromR2
+	reconcileCheckR2GraceStatus      = checkR2GraceStatus
+	reconcileCheckAndSyncJobComplete = CheckAndSyncJobComplete
 )
 
 func (r *Reconciler) confirmTime() time.Duration {
@@ -257,7 +259,8 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	// Check for grace-wait state for running instances via R2.
 	// This is handled outside CheckInstance because it writes to the DB as a side effect.
 	if ci.Status == db.LaunchStatusRunning && r2Client != nil {
-		if graceDetected := checkR2GraceStatus(r2Client, ci, database); graceDetected {
+		if graceDetected := reconcileCheckR2GraceStatus(r2Client, ci, database); graceDetected {
+			syncJobCompletionsFromR2(database, r2Client, ci.ID)
 			return true, false // reconciled but not terminal (grace is not terminal)
 		}
 	}
@@ -377,6 +380,14 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 
 	if action.Kind != ActionNone && action.Kind != ActionDisplayOnly {
 		slog.Info("reconcile action triggered", "component", "reconcile", "instance", ci.ID, "action", action.Kind, "message", action.StallMessage)
+
+		// Before executing a terminal action, sync per-job completions from R2.
+		// The agent writes .complete markers for each job; without this sync,
+		// jobs that completed successfully may be marked "dead" or re-queued.
+		if IsInstanceTerminal(action.TerminalStatus) && r2Client != nil {
+			syncJobCompletionsFromR2(database, r2Client, ci.ID)
+		}
+
 		reconciled, terminated := ExecuteAction(database, client, ci, action)
 		if terminated && r2Client != nil {
 			// Verify results for completed instances via the R2 completion manifest
@@ -399,6 +410,19 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	return false, false
+}
+
+// syncJobCompletionsFromR2 checks R2 for per-job .complete markers and records
+// any completions in the DB. This ensures that jobs which finished successfully
+// are in terminal status before ExecuteAction resets or closes attempts.
+func syncJobCompletionsFromR2(database *sql.DB, r2Client *r2.Client, instanceID int64) {
+	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, instanceID)
+	ctx := context.Background()
+	for _, j := range jobs {
+		if !db.IsTerminalStatus(j.Status) {
+			reconcileCheckAndSyncJobComplete(ctx, r2Client, database, j.ID)
+		}
+	}
 }
 
 // getSetupSurvival returns cached setup survival thresholds for a command+workdir,
