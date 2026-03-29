@@ -753,7 +753,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.done {
 			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
 		}
-		if m.loading {
+		if m.loading || m.reconciling {
 			return m, nil
 		}
 		// Count selected

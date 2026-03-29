@@ -465,12 +465,16 @@ func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 }
 
 func (m watchModel) formatUnplacedJobRow(job *db.Job) string {
-	return fmt.Sprintf("#%-4d %-12s %-28s %s",
+	row := fmt.Sprintf("#%-4d %-12s %-28s %s",
 		job.ID,
 		campaign.JobProjectLabel(job),
 		truncate(job.EffectiveDescription(), 28),
 		formatWatchGPUConstraint(job),
 	)
+	if len(job.PlacementReasons) > 0 {
+		row += "  " + watchDimStyle.Render(job.PlacementReasons[0])
+	}
+	return row
 }
 
 func (m watchModel) selectedStatusDetail() string {
