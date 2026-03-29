@@ -32,6 +32,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 	survivalModel := buildSurvivalModel(database)
+	overheadModel := buildOverheadModel(database)
 	relaunchCfg := campaign.RelaunchConfig{
 		Clients:       clients,
 		R2Cfg:         r2Cfg,
@@ -41,6 +42,7 @@ func attemptRelaunchOrphanedJobs(database *sql.DB, cfg *config.Config, extraAtte
 		MinSurvival:   campaignLaunchMinSurvival,
 		Database:      database,
 		ResetJobs:     resetJobs,
+		SetupOverhead: campaign.OfferSetupOverhead(database, overheadModel),
 	}
 
 	result, err := campaign.RelaunchOrphanedJobs(relaunchCfg)

@@ -27,7 +27,8 @@ type RelaunchConfig struct {
 	MinSurvival   float64 // 0 to disable survival filtering
 	Strategy      bidding.SelectionStrategy
 	Database      *sql.DB
-	ResetJobs     map[int64]int64 // jobID → failed instanceID; when non-nil, only relaunch these jobs
+	ResetJobs     map[int64]int64        // jobID → failed instanceID; when non-nil, only relaunch these jobs
+	SetupOverhead bidding.OfferSetupFunc // per-offer setup time estimator; use OfferSetupOverhead to build
 }
 
 // RelaunchResult holds the outcome of a relaunch pass.
@@ -150,7 +151,7 @@ func RelaunchOrphanedJobs(cfg RelaunchConfig) (*RelaunchResult, error) {
 	if strategy == "" {
 		strategy = bidding.StrategyCheap
 	}
-	groupOffers := FetchGroupOffers(cfg.Clients, groups, cfg.SurvivalModel, 1.0, bidding.ConstantSetup(0.5), strategy, cfg.MinSurvival)
+	groupOffers := FetchGroupOffers(cfg.Clients, groups, cfg.SurvivalModel, 1.0, cfg.SetupOverhead, strategy, cfg.MinSurvival)
 
 	// Filter to groups with valid offers
 	var launchGroups []InstanceGroup
