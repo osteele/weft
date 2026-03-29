@@ -232,6 +232,27 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	return estimates
 }
 
+// OfferSetupOverhead builds an OfferSetupFunc that computes per-offer setup
+// overhead using the overhead model and learned download bandwidth. If database
+// or overheadModel is nil, returns a constant 0.5h fallback.
+func OfferSetupOverhead(database *sql.DB, overheadModel *estimate.OverheadModel) bidding.OfferSetupFunc {
+	if overheadModel == nil {
+		return bidding.ConstantSetup(0.5)
+	}
+	return func(o cloud.Offer) float64 {
+		ctx := estimate.InstanceContext{
+			DataCenter:   o.DataCenter,
+			DLPerf:       o.DLPerf,
+			InetDownMbps: o.DownloadBandwidth,
+			InetUpMbps:   o.UploadBandwidth,
+		}
+		startup := estimate.EstimateStartupWithModel(string(o.Provider), overheadModel, ctx)
+		sshSetup := estimate.EstimateSSHSetup(overheadModel, ctx)
+		jobSetup := estimate.EstimateJobSetup(overheadModel, ctx)
+		return (startup.Mean + sshSetup.Mean + jobSetup.Mean).Hours()
+	}
+}
+
 // effectiveDownloadBandwidth returns the learned HF download bandwidth for the
 // offer's datacenter if available (≥2 observations), otherwise the static
 // offer bandwidth.

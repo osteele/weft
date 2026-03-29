@@ -150,58 +150,76 @@ func (m *SurvivalModel) PriceBucketFor(gpuFamily string, pricePerHour float64) P
 }
 
 // ExpectedWallclockTime computes the expected wall-clock time for a job,
-// scaling duration by DLPerf relative to the median, and accounting for
-// instance failure retries using a geometric retry model:
+// accounting for instance failure retries using a geometric retry model:
 //
-//	scaledJobHrs = jobDurationHrs × (medianDLPerf / dlPerf)
-//	E[wallclock] = scaledJobHrs / p + (1-p)/p × setupOverheadHrs
-func ExpectedWallclockTime(dlPerf, medianDLPerf, jobDurationHrs, setupOverheadHrs, survivalProb float64) float64 {
-	if dlPerf <= 0 || medianDLPerf <= 0 {
-		return math.Inf(1)
-	}
-	scaledHrs := jobDurationHrs * (medianDLPerf / dlPerf)
+//	E[wallclock] = (jobDurationHrs + setupOverheadHrs) / p
+//
+// Each attempt costs setup + run time. With survival probability p, the
+// expected number of attempts is 1/p. The caller is responsible for any
+// DLPerf scaling of jobDurationHrs.
+func ExpectedWallclockTime(jobDurationHrs, setupOverheadHrs, survivalProb float64) float64 {
 	if survivalProb <= 0 {
 		return math.Inf(1)
 	}
 	if survivalProb >= 1 {
-		return scaledHrs
+		return jobDurationHrs + setupOverheadHrs
 	}
-	return scaledHrs/survivalProb + (1-survivalProb)/survivalProb*setupOverheadHrs
+	return (jobDurationHrs + setupOverheadHrs) / survivalProb
+}
+
+// OfferSetupFunc returns the estimated setup overhead in hours for a given offer.
+// This includes startup, SSH setup, provision (model downloads), and job setup.
+type OfferSetupFunc func(cloud.Offer) float64
+
+// ConstantSetup returns an OfferSetupFunc that returns the same value for all offers.
+func ConstantSetup(hrs float64) OfferSetupFunc {
+	return func(_ cloud.Offer) float64 { return hrs }
 }
 
 // BestOffer selects the best offer according to the given strategy.
-// StrategyCheap minimizes expected dollar cost. StrategyFast minimizes expected
-// wall-clock time (survival-weighted). StrategyFastest picks the highest raw
-// DLPerf, ignoring the survival model entirely.
+//
+// All strategies compute a per-offer end-to-end time estimate using the setup
+// overhead function, job duration scaled by GPU performance (DLPerf), and
+// expected restarts from survival probability:
+//
+//   - StrategyCheap: minimize expected cost (E[total_time] * $/hr)
+//   - StrategyFast: minimize expected wall-clock time (survival-adjusted)
+//   - StrategyFastest: minimize happy-path wall-clock time (no survival adjustment)
+//
 // If the model is nil, cheap falls back to lowest price and fast/fastest to highest DLPerf.
-func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs, setupOverheadHrs float64, strategy SelectionStrategy) (int, cloud.Offer) {
+func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float64, setupOverhead OfferSetupFunc, strategy SelectionStrategy) (int, cloud.Offer) {
 	if len(offers) == 0 {
 		return -1, cloud.Offer{}
 	}
 
-	// Fastest always ignores the survival model.
-	if strategy == StrategyFastest {
+	if model == nil {
+		if strategy == StrategyCheap {
+			return bestOfferByScore(offers, func(o cloud.Offer) float64 { return o.CostPerHour })
+		}
 		return bestOfferByScore(offers, func(o cloud.Offer) float64 { return -o.DLPerf })
 	}
 
-	if model == nil {
-		if strategy == StrategyFast {
-			return bestOfferByScore(offers, func(o cloud.Offer) float64 { return -o.DLPerf })
-		}
-		return bestOfferByScore(offers, func(o cloud.Offer) float64 { return o.CostPerHour })
-	}
-
-	var medianDLPerf float64
-	if strategy == StrategyFast {
-		medianDLPerf = MedianOfferDLPerf(offers)
-	}
+	medianDLPerf := MedianOfferDLPerf(offers)
 
 	return bestOfferByScore(offers, func(o cloud.Offer) float64 {
+		setup := setupOverhead(o)
 		surv := model.OfferSurvival(o)
-		if strategy == StrategyFast {
-			return ExpectedWallclockTime(o.DLPerf, medianDLPerf, jobDurationHrs, setupOverheadHrs, surv)
+
+		// Scale run duration by GPU performance relative to median
+		runHrs := jobDurationHrs
+		if o.DLPerf > 0 && medianDLPerf > 0 {
+			runHrs = jobDurationHrs * (medianDLPerf / o.DLPerf)
 		}
-		return ExpectedCost(o.CostPerHour, jobDurationHrs, setupOverheadHrs, surv)
+
+		switch strategy {
+		case StrategyFastest:
+			// Happy-path time only — no survival adjustment
+			return runHrs + setup
+		case StrategyFast:
+			return ExpectedWallclockTime(runHrs, setup, surv)
+		default: // StrategyCheap
+			return ExpectedCost(o.CostPerHour, runHrs, setup, surv)
+		}
 	})
 }
 

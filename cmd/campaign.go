@@ -330,7 +330,9 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Fetch offers in parallel (with survival model for cost-optimal bidding)
 	fmt.Println("Searching for GPU offers...")
 	survivalModel := buildSurvivalModel(database)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, opts.Strategy, opts.MinSurvival)
+	overheadModel := buildOverheadModel(database)
+	setupOverhead := campaign.OfferSetupOverhead(database, overheadModel)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, setupOverhead, opts.Strategy, opts.MinSurvival)
 
 	printSurvivalRejections(groupOffers, opts.MinSurvival)
 
@@ -342,7 +344,6 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groups))
 
 	predCfg := buildPredictorConfig(cfg)
-	overheadModel := buildOverheadModel(database)
 	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
@@ -443,12 +444,13 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 		return err
 	}
 	survivalModel := buildSurvivalModel(database)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, 0.5, strategy, minSurvival)
+	overheadModel := buildOverheadModel(database)
+	setupOverhead := campaign.OfferSetupOverhead(database, overheadModel)
+	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, setupOverhead, strategy, minSurvival)
 
 	printSurvivalRejections(groupOffers, minSurvival)
 
 	predCfg := buildPredictorConfig(cfg)
-	overheadModel := buildOverheadModel(database)
 	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)

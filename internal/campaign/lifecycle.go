@@ -675,7 +675,7 @@ func LaunchCampaign(
 					group,
 					survivalModel,
 					jobDurationHrs,
-					setupOverheadHrs,
+					bidding.ConstantSetup(setupOverheadHrs),
 					excludeOfferKeys,
 					opts.Strategy,
 					opts.MinSurvival,

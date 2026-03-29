@@ -138,7 +138,7 @@ func TestBestOffer_NilModel_FallsBackToCheapest(t *testing.T) {
 		{ProviderID: "b", GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.80},
 	}
 
-	idx, best := BestOffer(nil, offers, 1.0, 0.5, StrategyCheap)
+	idx, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyCheap)
 	if idx != 1 || best.ProviderID != "b" {
 		t.Errorf("nil model should pick cheapest, got idx=%d id=%s", idx, best.ProviderID)
 	}
@@ -181,7 +181,7 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 		{ProviderID: "moderate", GPUName: "RTX 4090", CostPerHour: 0.80, Reliability: 0.99},
 	}
 
-	_, best := BestOffer(model, offers, 2.0, 0.5, StrategyCheap)
+	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap)
 	if best.ProviderID != "moderate" {
 		t.Errorf("expected moderate offer (higher reliability) to win, got %s", best.ProviderID)
 	}
@@ -229,28 +229,22 @@ func TestHierarchicalShrinkage(t *testing.T) {
 }
 
 func TestExpectedWallclockTime(t *testing.T) {
-	// Same DLPerf as median, perfect survival: wallclock = job duration
-	wt := ExpectedWallclockTime(10.0, 10.0, 2.0, 0.5, 1.0)
-	if math.Abs(wt-2.0) > 1e-9 {
-		t.Errorf("expected 2.0 for same DLPerf and perfect survival, got %.3f", wt)
-	}
-
-	// Double DLPerf: wallclock halved
-	wt = ExpectedWallclockTime(20.0, 10.0, 2.0, 0.5, 1.0)
-	if math.Abs(wt-1.0) > 1e-9 {
-		t.Errorf("expected 1.0 for 2× DLPerf, got %.3f", wt)
-	}
-
-	// Zero DLPerf: infinite
-	wt = ExpectedWallclockTime(0.0, 10.0, 2.0, 0.5, 1.0)
-	if !math.IsInf(wt, 1) {
-		t.Errorf("expected +Inf for zero DLPerf, got %.3f", wt)
+	// Perfect survival: wallclock = job + setup
+	wt := ExpectedWallclockTime(2.0, 0.5, 1.0)
+	if math.Abs(wt-2.5) > 1e-9 {
+		t.Errorf("expected 2.5 for perfect survival, got %.3f", wt)
 	}
 
 	// Zero survival: infinite
-	wt = ExpectedWallclockTime(10.0, 10.0, 2.0, 0.5, 0.0)
+	wt = ExpectedWallclockTime(2.0, 0.5, 0.0)
 	if !math.IsInf(wt, 1) {
 		t.Errorf("expected +Inf for zero survival, got %.3f", wt)
+	}
+
+	// 50% survival: E[total] = (2+0.5)/0.5 = 5.0
+	wt = ExpectedWallclockTime(2.0, 0.5, 0.5)
+	if math.Abs(wt-5.0) > 1e-9 {
+		t.Errorf("expected 5.0 for 50%% survival, got %.3f", wt)
 	}
 }
 
@@ -268,13 +262,13 @@ func TestBestOffer_FastStrategy_PrefersHighDLPerf(t *testing.T) {
 		{ProviderID: "expensive-fast", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0, Reliability: 0.95},
 	}
 
-	_, best := BestOffer(model, offers, 2.0, 0.5, StrategyFast)
+	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast)
 	if best.ProviderID != "expensive-fast" {
 		t.Errorf("fast strategy should prefer high DLPerf, got %s", best.ProviderID)
 	}
 
 	// Cost strategy should prefer the cheap one
-	_, bestCost := BestOffer(model, offers, 2.0, 0.5, StrategyCheap)
+	_, bestCost := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap)
 	if bestCost.ProviderID != "cheap-slow" {
 		t.Errorf("cost strategy should prefer cheap offer, got %s", bestCost.ProviderID)
 	}
@@ -286,7 +280,7 @@ func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
 	}
 
-	_, best := BestOffer(nil, offers, 1.0, 0.5, StrategyFast)
+	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFast)
 	if best.ProviderID != "high-perf" {
 		t.Errorf("fast strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
 	}
@@ -306,14 +300,14 @@ func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 		{ProviderID: "risky-fast", GPUName: "A100", CostPerHour: 0.30, DLPerf: 20.0, Reliability: 0.50},
 	}
 
-	// Fastest should pick highest DLPerf regardless of survival model
-	_, best := BestOffer(model, offers, 2.0, 0.5, StrategyFastest)
+	// Fastest should pick highest DLPerf (happy-path time, no survival adjustment)
+	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFastest)
 	if best.ProviderID != "risky-fast" {
-		t.Errorf("fastest strategy should pick highest DLPerf ignoring survival, got %s", best.ProviderID)
+		t.Errorf("fastest strategy should pick highest DLPerf, got %s", best.ProviderID)
 	}
 
 	// Fast strategy with same model might prefer the reliable one
-	_, bestFast := BestOffer(model, offers, 2.0, 0.5, StrategyFast)
+	_, bestFast := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast)
 	// Just verify fastest and fast can differ (fastest ignores survival)
 	_ = bestFast
 }
@@ -383,7 +377,7 @@ func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
 	}
 
-	_, best := BestOffer(nil, offers, 1.0, 0.5, StrategyFastest)
+	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest)
 	if best.ProviderID != "high-perf" {
 		t.Errorf("fastest strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
 	}
