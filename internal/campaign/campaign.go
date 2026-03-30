@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/workdir"
 )
 
@@ -38,31 +39,34 @@ func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 	return GroupByAffinity(jobs, nil)
 }
 
-// GroupByAffinity groups unplaced jobs in two phases:
+// GroupByAffinity groups unplaced jobs in three buckets:
 //
-//  1. Constrained jobs (non-empty GPUClass) are merged by GPU compatibility,
-//     identical to the legacy [GroupByGPUSupremum] behavior.
-//  2. Unconstrained jobs (empty GPUClass) are grouped by shared data affinity
-//     using a greedy algorithm. Jobs sharing HF model inputs are co-located to
-//     amortize downloads. If sizeFunc is nil, affinity is based on ref-count
-//     overlap only.
+//  1. Pinned jobs (exact GPU model like "3090", "h100") are merged by GPU
+//     compatibility, identical to the legacy [GroupByGPUSupremum] behavior.
+//  2. Floatable jobs (family/generation like "nvidia", "ampere", "ampere+")
+//     and unconstrained jobs (empty GPUClass) are grouped by shared data
+//     affinity. Jobs sharing HF model inputs are co-located to amortize
+//     downloads. Floatable constraints are preserved on the group for offer
+//     filtering but allow the strategy engine to select the best GPU.
+//     If sizeFunc is nil, affinity is based on ref-count overlap only.
 //
 // Returns groups sorted by descending GPU memory.
 func GroupByAffinity(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
-	var constrained, unconstrained []*db.Job
+	var pinned, floatable []*db.Job
 	for _, job := range jobs {
 		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasAssignedHost() {
 			continue
 		}
-		if strings.TrimSpace(job.GPUClass) == "" {
-			unconstrained = append(unconstrained, job)
+		gpuClass := strings.TrimSpace(job.GPUClass)
+		if gpuClass != "" && !placement.ParseGPUConstraint(gpuClass).IsFloatable() {
+			pinned = append(pinned, job)
 		} else {
-			constrained = append(constrained, job)
+			floatable = append(floatable, job)
 		}
 	}
 
-	groups := groupConstrained(constrained)
-	affinityGroups := affinityGroupUnconstrained(unconstrained, sizeFunc)
+	groups := groupConstrained(pinned)
+	affinityGroups := affinityGroupUnconstrained(floatable, sizeFunc)
 	groups = append(groups, affinityGroups...)
 
 	sortGroups(groups)
@@ -103,10 +107,12 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 	return groups
 }
 
-// affinityGroupUnconstrained groups unconstrained jobs by shared HF model
-// inputs using a greedy algorithm. Jobs are processed in order of descending
-// total input size (so large-model jobs anchor groups), falling back to job ID
-// for determinism.
+// affinityGroupUnconstrained groups unconstrained and floatable jobs by shared
+// HF model inputs using a greedy algorithm. Jobs are processed in order of
+// descending total input size (so large-model jobs anchor groups), falling back
+// to job ID for determinism. When merging, GPU constraints must be compatible
+// (via [gpuClassSupremum]); the group's GPUClass is set to the narrowest
+// compatible constraint so offer filtering still applies.
 func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
 	if len(jobs) == 0 {
 		return nil
@@ -154,9 +160,15 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			mem = *info.job.GPUMemGB
 		}
 
+		jobGPU := strings.TrimSpace(info.job.GPUClass)
+
 		bestIdx := -1
 		var bestScore float64
 		for i, g := range groups {
+			// Skip groups with incompatible GPU constraints (e.g. ampere vs hopper).
+			if _, gpuOK := gpuClassSupremum(g.group.GPUClass, jobGPU); !gpuOK {
+				continue
+			}
 			score := sharedInputScore(g.hfUnion, info.hfInputs, sizeFunc, refCountWeight)
 			if score > bestScore {
 				bestScore = score
@@ -167,6 +179,8 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 		if bestIdx >= 0 && bestScore > 0 {
 			g := &groups[bestIdx]
 			g.group.Jobs = append(g.group.Jobs, info.job)
+			supremum, _ := gpuClassSupremum(g.group.GPUClass, jobGPU)
+			g.group.GPUClass = supremum
 			if mem > g.group.GPUMemGB {
 				g.group.GPUMemGB = mem
 			}
@@ -180,7 +194,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			}
 			groups = append(groups, groupState{
 				group: InstanceGroup{
-					GPUClass: "", // unconstrained
+					GPUClass: strings.ToUpper(jobGPU),
 					GPUMemGB: mem,
 					Jobs:     []*db.Job{info.job},
 				},

@@ -57,7 +57,7 @@ func TestGroupByGPUSupremum(t *testing.T) {
 	}
 }
 
-func TestGroupByGPUSupremum_NvidiaAndEmptyMerge(t *testing.T) {
+func TestGroupByGPUSupremum_FloatableGoToAffinityPath(t *testing.T) {
 	jobs := []*db.Job{
 		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20)},
 		{ID: 2, Status: db.StatusQueued, GPUClass: "", GPUMemGB: intPtr(20)},
@@ -66,25 +66,89 @@ func TestGroupByGPUSupremum_NvidiaAndEmptyMerge(t *testing.T) {
 
 	groups := GroupByGPUSupremum(jobs)
 
-	// "nvidia" subsumes "ampere" → they merge. Empty-class job is separate.
-	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups, got %d: %v", len(groups), groups)
+	// All three are floatable/unconstrained and have no shared inputs,
+	// so they form 3 separate groups (no affinity to merge on).
+	if len(groups) != 3 {
+		t.Fatalf("expected 3 groups, got %d: %v", len(groups), groups)
 	}
-	if groups[0].GPUClass != "AMPERE" {
-		t.Errorf("constrained group should use most specific class AMPERE, got %s", groups[0].GPUClass)
+}
+
+func TestGroupByAffinity_NvidiaFloatsWithSharedInputs(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(24),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+	}
+
+	groups := GroupByAffinity(jobs, nil)
+
+	// Both nvidia jobs share a model → co-located in one group with GPUClass "NVIDIA"
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].GPUClass != "NVIDIA" {
+		t.Errorf("group should have GPUClass NVIDIA, got %s", groups[0].GPUClass)
+	}
+	if groups[0].GPUMemGB != 24 {
+		t.Errorf("group should have 24GB (supremum), got %d", groups[0].GPUMemGB)
 	}
 	if len(groups[0].Jobs) != 2 {
-		t.Errorf("constrained group should have 2 jobs, got %d", len(groups[0].Jobs))
+		t.Errorf("group should have 2 jobs, got %d", len(groups[0].Jobs))
 	}
-	if groups[0].GPUMemGB != 40 {
-		t.Errorf("constrained group should have 40GB (supremum), got %d", groups[0].GPUMemGB)
+}
+
+func TestGroupByAffinity_NvidiaNotMergedWithPinnedModel(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "3090", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
 	}
-	// Unconstrained group
-	if groups[1].GPUClass != "" {
-		t.Errorf("second group should be unconstrained, got %s", groups[1].GPUClass)
+
+	groups := GroupByAffinity(jobs, nil)
+
+	// nvidia (floatable) and 3090 (pinned) go through different paths and
+	// should NOT be merged, even though they share inputs.
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
-	if len(groups[1].Jobs) != 1 {
-		t.Errorf("unconstrained group should have 1 job, got %d", len(groups[1].Jobs))
+}
+
+func TestGroupByAffinity_NvidiaAndEmptyMergeWithSharedInputs(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+	}
+
+	groups := GroupByAffinity(jobs, nil)
+
+	// nvidia and empty are both floatable and share a model → merged.
+	// Group gets GPUClass "NVIDIA" (the narrower constraint).
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	if groups[0].GPUClass != "NVIDIA" {
+		t.Errorf("group should have GPUClass NVIDIA, got %s", groups[0].GPUClass)
+	}
+}
+
+func TestGroupByAffinity_IncompatibleFloatableConstraints(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "ampere", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "hopper", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:meta-llama/Llama-3-8B"}},
+	}
+
+	groups := GroupByAffinity(jobs, nil)
+
+	// ampere and hopper are incompatible generations → separate groups
+	// despite sharing inputs.
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
 	}
 }
 

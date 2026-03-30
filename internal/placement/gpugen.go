@@ -208,6 +208,14 @@ func (c GPUConstraint) MatchesGPU(inventoryClass string) bool {
 	return false
 }
 
+// IsFloatable returns true if the constraint does not pin to a specific GPU
+// model — i.e., it is a family constraint ("nvidia"), an exact generation
+// ("ampere"), or a minimum generation ("ampere+"). Floatable constraints
+// allow the strategy engine to select the best GPU within the constraint.
+func (c GPUConstraint) IsFloatable() bool {
+	return c.mode == constraintFamily || c.mode == constraintExactGen || c.mode == constraintMinGen
+}
+
 // Subsumes returns true if every GPU that satisfies other also satisfies c.
 // In other words, c is a broader (or equal) constraint than other.
 //
