@@ -27,6 +27,9 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+c", "q":
+		if m.dbWatcher != nil {
+			_ = m.dbWatcher.Close()
+		}
 		m.cancel()
 		return m, tea.Quit
 	case "up", "k":

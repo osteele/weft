@@ -892,6 +892,12 @@ func LaunchInstance(
 		return 0, fmt.Errorf("create cloud instance: %w", err)
 	}
 
+	// Transition to launching before assigning jobs so that the job_status
+	// view immediately considers assigned jobs as placed.
+	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusLaunching); err != nil {
+		return instanceID, fmt.Errorf("update instance status to launching: %w", err)
+	}
+
 	// Associate jobs with cloud instance and record campaign position.
 	// Jobs that were claimed by another launch between ListUnplacedJobs and
 	// now are skipped rather than causing a hard failure.
@@ -933,11 +939,6 @@ func LaunchInstance(
 	}
 	group.Jobs = claimedJobs
 
-	// Update status to launching
-	if err := db.UpdateLaunchStatus(database, instanceID, db.LaunchStatusLaunching); err != nil {
-		_, _ = db.ResetLaunchJobs(database, instanceID, db.AttemptOutcomeOrphaned)
-		return instanceID, fmt.Errorf("update instance status: %w", err)
-	}
 	if onInstanceRegistered != nil {
 		onInstanceRegistered(instanceID)
 	}

@@ -120,17 +120,19 @@ type watchProjectSyncResultMsg struct {
 	result tui.SyncResult
 }
 
-type watchProjectDBWatcherReadyMsg struct {
+type watchDBWatcherReadyMsg struct {
 	watcher *fsnotify.Watcher
 	targets map[string]struct{}
 	err     error
 }
 
-type watchProjectDBWatchEventMsg struct {
+type watchDBWatchEventMsg struct {
 	err error
 }
 
 type watchProjectDBRefreshTriggeredMsg struct{}
+
+type watchInstanceDBRefreshTriggeredMsg struct{}
 
 type watchProjectSyncTickMsg struct{}
 

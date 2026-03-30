@@ -82,16 +82,18 @@ type watchModel struct {
 	onPremHosts    []onPremHostSummary
 	refreshing     bool
 
-	// --- Project-mode fields ---
-	projectGroups    []projectGroup
-	projectRecent    time.Duration
-	projectLines     []string // cached render lines
+	// --- DB watcher (project + instance modes) ---
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
-	projectSyncing   bool
-	projectStatus    string
-	projectOffset    int // top visible line (offset-based scroll)
+
+	// --- Project-mode fields ---
+	projectGroups  []projectGroup
+	projectRecent  time.Duration
+	projectLines   []string // cached render lines
+	projectSyncing bool
+	projectStatus  string
+	projectOffset  int // top visible line (offset-based scroll)
 
 	// --- Auto-pilot mode ---
 	autoMode      bool // when true, auto-relaunch, auto-place, and auto-launch are active
@@ -296,7 +298,7 @@ func (m watchModel) Init() tea.Cmd {
 
 	switch {
 	case m.mode.isInstanceBased():
-		cmds = append(cmds, scheduleSyncTick(), scheduleCheckDone())
+		cmds = append(cmds, m.startDBWatcher(), scheduleSyncTick(), scheduleCheckDone())
 		if m.syncWorker != nil {
 			m.requestOnPremSyncs()
 			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
@@ -312,7 +314,7 @@ func (m watchModel) Init() tea.Cmd {
 			}),
 		)
 	case m.mode == watchModeProject:
-		cmds = append(cmds, m.startProjectDBWatcher(), m.reloadProjectGroups(), scheduleProjectSyncTick())
+		cmds = append(cmds, m.startDBWatcher(), m.reloadProjectGroups(), scheduleProjectSyncTick())
 		if m.syncWorker != nil {
 			m.requestProjectActiveSyncs()
 			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
@@ -513,17 +515,20 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleProjectSyncWorkerResult(msg)
 
-	case watchProjectDBWatcherReadyMsg:
-		if m.mode != watchModeProject {
-			return m, nil
+	case watchDBWatcherReadyMsg:
+		if m.mode == watchModeProject || m.mode.isInstanceBased() {
+			return m.handleDBWatcherReady(msg)
 		}
-		return m.handleProjectDBWatcherReady(msg)
+		return m, nil
 
-	case watchProjectDBWatchEventMsg:
-		if m.mode != watchModeProject {
-			return m, nil
+	case watchDBWatchEventMsg:
+		switch {
+		case m.mode == watchModeProject:
+			return m.handleDBWatchEvent(msg, watchProjectDBRefreshTriggeredMsg{})
+		case m.mode.isInstanceBased():
+			return m.handleDBWatchEvent(msg, watchInstanceDBRefreshTriggeredMsg{})
 		}
-		return m.handleProjectDBWatchEvent(msg)
+		return m, nil
 
 	case watchProjectDBRefreshTriggeredMsg:
 		if m.mode != watchModeProject {
@@ -531,6 +536,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.debounceActive = false
 		return m, m.reloadProjectGroups()
+
+	case watchInstanceDBRefreshTriggeredMsg:
+		if !m.mode.isInstanceBased() {
+			return m, nil
+		}
+		m.debounceActive = false
+		return m.handleInstanceSyncTick()
 
 	case watchProjectSyncTickMsg:
 		if m.mode != watchModeProject {

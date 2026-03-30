@@ -419,7 +419,7 @@ func (m watchModel) runProjectBackgroundSync(full bool) tea.Cmd {
 	}
 }
 
-func (m watchModel) startProjectDBWatcher() tea.Cmd {
+func (m watchModel) startDBWatcher() tea.Cmd {
 	dbFile := db.Path()
 	if dbFile == "" {
 		return nil
@@ -440,17 +440,17 @@ func (m watchModel) startProjectDBWatcher() tea.Cmd {
 	return func() tea.Msg {
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
-			return watchProjectDBWatcherReadyMsg{err: err}
+			return watchDBWatcherReadyMsg{err: err}
 		}
 		if err := watcher.Add(dir); err != nil {
 			_ = watcher.Close()
-			return watchProjectDBWatcherReadyMsg{err: err}
+			return watchDBWatcherReadyMsg{err: err}
 		}
-		return watchProjectDBWatcherReadyMsg{watcher: watcher, targets: targets}
+		return watchDBWatcherReadyMsg{watcher: watcher, targets: targets}
 	}
 }
 
-func (m watchModel) waitForProjectDBEvent() tea.Cmd {
+func (m watchModel) waitForDBEvent() tea.Cmd {
 	if m.dbWatcher == nil || len(m.dbWatcherTargets) == 0 {
 		return nil
 	}
@@ -461,7 +461,7 @@ func (m watchModel) waitForProjectDBEvent() tea.Cmd {
 			select {
 			case event, ok := <-watcher.Events:
 				if !ok {
-					return watchProjectDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
+					return watchDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
 				}
 				if !listTUIWatchedDBFile(event.Name, targets) {
 					continue
@@ -469,12 +469,12 @@ func (m watchModel) waitForProjectDBEvent() tea.Cmd {
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
 					continue
 				}
-				return watchProjectDBWatchEventMsg{}
+				return watchDBWatchEventMsg{}
 			case err, ok := <-watcher.Errors:
 				if !ok {
-					return watchProjectDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
+					return watchDBWatchEventMsg{err: fmt.Errorf("db watcher error channel closed")}
 				}
-				return watchProjectDBWatchEventMsg{err: err}
+				return watchDBWatchEventMsg{err: err}
 			}
 		}
 	}

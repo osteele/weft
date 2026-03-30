@@ -531,29 +531,33 @@ func (m watchModel) handleProjectSyncWorkerResult(msg watchProjectSyncResultMsg)
 	return m, tea.Batch(cmds...)
 }
 
-func (m watchModel) handleProjectDBWatcherReady(msg watchProjectDBWatcherReadyMsg) (tea.Model, tea.Cmd) {
+func (m watchModel) handleDBWatcherReady(msg watchDBWatcherReadyMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		m.projectStatus = fmt.Sprintf("DB watch error: %v", msg.err)
+		if m.mode == watchModeProject {
+			m.projectStatus = fmt.Sprintf("DB watch error: %v", msg.err)
+		}
 		return m, nil
 	}
 	m.dbWatcher = msg.watcher
 	m.dbWatcherTargets = msg.targets
-	return m, m.waitForProjectDBEvent()
+	return m, m.waitForDBEvent()
 }
 
-func (m watchModel) handleProjectDBWatchEvent(msg watchProjectDBWatchEventMsg) (tea.Model, tea.Cmd) {
+func (m watchModel) handleDBWatchEvent(msg watchDBWatchEventMsg, triggerMsg tea.Msg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
-		m.projectStatus = fmt.Sprintf("DB watch error: %v", msg.err)
+		if m.mode == watchModeProject {
+			m.projectStatus = fmt.Sprintf("DB watch error: %v", msg.err)
+		}
 		return m, nil
 	}
 	var cmds []tea.Cmd
 	if !m.debounceActive {
 		m.debounceActive = true
 		cmds = append(cmds, tea.Tick(listDBChangeDebounce, func(time.Time) tea.Msg {
-			return watchProjectDBRefreshTriggeredMsg{}
+			return triggerMsg
 		}))
 	}
-	if cmd := m.waitForProjectDBEvent(); cmd != nil {
+	if cmd := m.waitForDBEvent(); cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 	return m, tea.Batch(cmds...)
