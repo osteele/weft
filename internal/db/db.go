@@ -2481,34 +2481,29 @@ func SetJobRemoteState(db *sql.DB, jobID int64, remoteState, failureReason strin
 	return err
 }
 
+// setJobNullableInt updates a nullable integer column on the jobs table.
+func setJobNullableInt(db *sql.DB, jobID int64, column string, value *int) error {
+	var v interface{}
+	if value != nil {
+		v = *value
+	}
+	_, err := db.Exec(`UPDATE jobs SET `+column+` = ? WHERE id = ?`, v, jobID)
+	return err
+}
+
 // SetJobCPUAllotment updates the CPU allotment percent for a job (nil clears it).
 func SetJobCPUAllotment(db *sql.DB, jobID int64, allotment *int) error {
-	var value interface{}
-	if allotment != nil {
-		value = *allotment
-	}
-	_, err := db.Exec(`UPDATE jobs SET cpu_allotment = ? WHERE id = ?`, value, jobID)
-	return err
+	return setJobNullableInt(db, jobID, "cpu_allotment", allotment)
 }
 
 // SetJobGPUMemGB updates the GPU memory reservation in GB per device (nil clears it).
 func SetJobGPUMemGB(db *sql.DB, jobID int64, gpuMemGB *int) error {
-	var value interface{}
-	if gpuMemGB != nil {
-		value = *gpuMemGB
-	}
-	_, err := db.Exec(`UPDATE jobs SET gpu_mem_gb = ? WHERE id = ?`, value, jobID)
-	return err
+	return setJobNullableInt(db, jobID, "gpu_mem_gb", gpuMemGB)
 }
 
 // SetJobGPUMemMaxGB updates the GPU memory ceiling in GB (nil clears it).
 func SetJobGPUMemMaxGB(db *sql.DB, jobID int64, gpuMemMaxGB *int) error {
-	var value interface{}
-	if gpuMemMaxGB != nil {
-		value = *gpuMemMaxGB
-	}
-	_, err := db.Exec(`UPDATE jobs SET gpu_mem_max_gb = ? WHERE id = ?`, value, jobID)
-	return err
+	return setJobNullableInt(db, jobID, "gpu_mem_max_gb", gpuMemMaxGB)
 }
 
 // SetJobEnvVars updates the stored environment variables for a job.
@@ -2996,176 +2991,206 @@ func GetJobsByHost(db *sql.DB, host string) ([]*Job, error) {
 	return scanJobs(rows)
 }
 
+// jobScanFields holds nullable scan targets for job queries. Both scanJob and
+// scanJobs use this struct so that column additions only need one set of
+// variable declarations and one populateJob implementation.
+type jobScanFields struct {
+	sessionName      sql.NullString
+	desc             sql.NullString
+	generatedDesc    sql.NullString
+	generationHash   sql.NullString
+	errorMsg         sql.NullString
+	backend          sql.NullString
+	remoteID         sql.NullString
+	remoteState      sql.NullString
+	failureReason    sql.NullString
+	queueName        sql.NullString
+	gpu              sql.NullString
+	gpuClass         sql.NullString
+	cpuAllotment     sql.NullInt64
+	gpuMemGB         sql.NullInt64
+	gpuMemMaxGB      sql.NullInt64
+	envVars          sql.NullString
+	tags             sql.NullString
+	depSpec          sql.NullString
+	inputs           sql.NullString
+	observedInputs   sql.NullString
+	outputs          sql.NullString
+	outputDirs       sql.NullString
+	produces         sql.NullString
+	needs            sql.NullString
+	project          sql.NullString
+	createdAt        sql.NullInt64
+	queuedAt         sql.NullInt64
+	startTime        sql.NullInt64
+	endTime          sql.NullInt64
+	exitCode         sql.NullInt64
+	tombstoned       sql.NullInt64
+	lastSyncedStatus sql.NullString
+	pendingStatus    sql.NullString
+	pendingAt        sql.NullInt64
+	jobMetadata      sql.NullString
+	cost             sql.NullFloat64
+	errorDiagnosis   sql.NullString
+	retryCount       sql.NullInt64
+	placementMeta    sql.NullString
+	placementReasons sql.NullString
+	cloudInstanceID  sql.NullInt64
+	campaignJobIndex sql.NullInt64
+	latestRunID      sql.NullInt64
+}
+
+// scanDests returns pointers to all scan targets in jobSelectColumns order.
+// The caller must also pass &j.ID, &j.Host, &j.WorkingDir, &j.Command, &j.Status
+// which are scanned directly into Job fields.
+func (f *jobScanFields) scanDests(j *Job) []any {
+	return []any{
+		&j.ID, &j.Host, &f.sessionName, &j.WorkingDir, &j.Command,
+		&f.desc, &f.generatedDesc, &f.generationHash,
+		&f.createdAt, &f.queuedAt, &f.startTime, &f.endTime, &f.exitCode,
+		&j.Status, &f.errorMsg, &f.backend, &f.remoteID, &f.remoteState,
+		&f.failureReason, &f.queueName, &f.gpu, &f.gpuClass,
+		&f.cpuAllotment, &f.gpuMemGB, &f.gpuMemMaxGB,
+		&f.envVars, &f.tags, &f.depSpec,
+		&f.inputs, &f.observedInputs, &f.outputs, &f.outputDirs,
+		&f.produces, &f.needs, &f.project, &f.tombstoned,
+		&f.lastSyncedStatus, &f.pendingStatus, &f.pendingAt,
+		&f.jobMetadata, &f.cost, &f.errorDiagnosis, &f.retryCount,
+		&f.placementMeta, &f.placementReasons,
+		&f.cloudInstanceID, &f.campaignJobIndex, &f.latestRunID,
+	}
+}
+
+// populateJob copies nullable scan fields into the Job struct.
+func (f *jobScanFields) populateJob(j *Job) {
+	if f.sessionName.Valid {
+		j.SessionName = f.sessionName.String
+	}
+	if f.desc.Valid {
+		j.Description = f.desc.String
+	}
+	if f.generatedDesc.Valid {
+		j.GeneratedDescription = f.generatedDesc.String
+	}
+	if f.generationHash.Valid {
+		j.GenerationHash = f.generationHash.String
+	}
+	if f.errorMsg.Valid {
+		j.ErrorMessage = f.errorMsg.String
+	}
+	if f.backend.Valid {
+		j.Backend = f.backend.String
+	}
+	if f.remoteID.Valid {
+		j.RemoteID = f.remoteID.String
+	}
+	if f.remoteState.Valid {
+		j.RemoteState = f.remoteState.String
+	}
+	if f.failureReason.Valid {
+		j.FailureReason = f.failureReason.String
+	}
+	if f.queueName.Valid {
+		j.QueueName = f.queueName.String
+	}
+	if f.gpu.Valid {
+		j.GPU = f.gpu.String
+	}
+	if f.gpuClass.Valid {
+		j.GPUClass = f.gpuClass.String
+	}
+	if f.cpuAllotment.Valid {
+		val := int(f.cpuAllotment.Int64)
+		j.CPUAllotment = &val
+	}
+	if f.gpuMemGB.Valid {
+		val := int(f.gpuMemGB.Int64)
+		j.GPUMemGB = &val
+	}
+	if f.gpuMemMaxGB.Valid {
+		val := int(f.gpuMemMaxGB.Int64)
+		j.GPUMemMaxGB = &val
+	}
+	j.EnvVars = decodeEnvVars(f.envVars)
+	j.Tags = decodeTags(f.tags)
+	if f.depSpec.Valid {
+		j.DepSpec = f.depSpec.String
+	}
+	j.Inputs = decodeStringSlice(f.inputs)
+	j.ObservedInputs = decodeStringSlice(f.observedInputs)
+	j.Outputs = decodeStringSlice(f.outputs)
+	j.OutputDirs = decodeStringSlice(f.outputDirs)
+	j.Produces = decodeStringSlice(f.produces)
+	j.Needs = decodeStringSlice(f.needs)
+	if f.project.Valid {
+		j.Project = f.project.String
+	}
+	if f.createdAt.Valid {
+		j.CreatedAt = f.createdAt.Int64
+	}
+	if f.queuedAt.Valid {
+		j.QueuedAt = f.queuedAt.Int64
+	}
+	if f.startTime.Valid {
+		j.StartTime = f.startTime.Int64
+	}
+	if f.endTime.Valid {
+		j.EndTime = &f.endTime.Int64
+	}
+	if f.exitCode.Valid {
+		code := int(f.exitCode.Int64)
+		j.ExitCode = &code
+	}
+	if f.tombstoned.Valid {
+		j.Tombstoned = f.tombstoned.Int64 != 0
+	}
+	if f.lastSyncedStatus.Valid {
+		j.LastSyncedStatus = f.lastSyncedStatus.String
+	}
+	if f.pendingStatus.Valid {
+		j.PendingStatus = &f.pendingStatus.String
+	}
+	if f.pendingAt.Valid {
+		j.PendingAt = &f.pendingAt.Int64
+	}
+	j.Metadata = decodeJobMetadata(f.jobMetadata)
+	if f.cost.Valid {
+		j.Cost = &f.cost.Float64
+	}
+	if f.errorDiagnosis.Valid {
+		j.ErrorDiagnosis = f.errorDiagnosis.String
+	}
+	if f.retryCount.Valid {
+		j.RetryCount = int(f.retryCount.Int64)
+	}
+	j.PlacementMeta = decodePlacementMeta(f.placementMeta)
+	j.PlacementReasons = decodeStringSlice(f.placementReasons)
+	if f.cloudInstanceID.Valid {
+		j.LaunchID = &f.cloudInstanceID.Int64
+	}
+	if f.campaignJobIndex.Valid {
+		v := int(f.campaignJobIndex.Int64)
+		j.CampaignJobIndex = &v
+	}
+	if f.latestRunID.Valid {
+		j.LatestRunID = &f.latestRunID.Int64
+	}
+	if j.Backend == "" {
+		j.Backend = BackendQueueRunner
+	}
+}
+
 func scanJob(row *sql.Row) (*Job, error) {
 	var j Job
-	var sessionName sql.NullString
-	var desc sql.NullString
-	var generatedDesc sql.NullString
-	var generationHash sql.NullString
-	var errorMsg sql.NullString
-	var backend sql.NullString
-	var remoteID sql.NullString
-	var remoteState sql.NullString
-	var failureReason sql.NullString
-	var queueName sql.NullString
-	var gpu sql.NullString
-	var gpuClass sql.NullString
-	var cpuAllotment sql.NullInt64
-	var gpuMemGB sql.NullInt64
-	var gpuMemMaxGB sql.NullInt64
-	var envVars sql.NullString
-	var tags sql.NullString
-	var depSpec sql.NullString
-	var inputs sql.NullString
-	var observedInputs sql.NullString
-	var outputs sql.NullString
-	var outputDirs sql.NullString
-	var produces sql.NullString
-	var needs sql.NullString
-	var project sql.NullString
-	var createdAt sql.NullInt64
-	var queuedAt sql.NullInt64
-	var startTime sql.NullInt64
-	var endTime sql.NullInt64
-	var exitCode sql.NullInt64
-	var tombstoned sql.NullInt64
-	var lastSyncedStatus sql.NullString
-	var pendingStatus sql.NullString
-	var pendingAt sql.NullInt64
-	var jobMetadata sql.NullString
-	var cost sql.NullFloat64
-	var errorDiagnosis sql.NullString
-	var retryCount sql.NullInt64
-	var placementMeta sql.NullString
-	var placementReasons sql.NullString
-	var cloudInstanceID sql.NullInt64
-	var campaignJobIndex sql.NullInt64
-	var latestRunID sql.NullInt64
-
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &gpuMemMaxGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+	var f jobScanFields
+	err := row.Scan(f.scanDests(&j)...)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	if sessionName.Valid {
-		j.SessionName = sessionName.String
-	}
-	if desc.Valid {
-		j.Description = desc.String
-	}
-	if generatedDesc.Valid {
-		j.GeneratedDescription = generatedDesc.String
-	}
-	if generationHash.Valid {
-		j.GenerationHash = generationHash.String
-	}
-	if errorMsg.Valid {
-		j.ErrorMessage = errorMsg.String
-	}
-	if backend.Valid {
-		j.Backend = backend.String
-	}
-	if remoteID.Valid {
-		j.RemoteID = remoteID.String
-	}
-	if remoteState.Valid {
-		j.RemoteState = remoteState.String
-	}
-	if failureReason.Valid {
-		j.FailureReason = failureReason.String
-	}
-	if queueName.Valid {
-		j.QueueName = queueName.String
-	}
-	if gpu.Valid {
-		j.GPU = gpu.String
-	}
-	if gpuClass.Valid {
-		j.GPUClass = gpuClass.String
-	}
-	if cpuAllotment.Valid {
-		val := int(cpuAllotment.Int64)
-		j.CPUAllotment = &val
-	}
-	if gpuMemGB.Valid {
-		val := int(gpuMemGB.Int64)
-		j.GPUMemGB = &val
-	}
-	if gpuMemMaxGB.Valid {
-		val := int(gpuMemMaxGB.Int64)
-		j.GPUMemMaxGB = &val
-	}
-	j.EnvVars = decodeEnvVars(envVars)
-	j.Tags = decodeTags(tags)
-	if depSpec.Valid {
-		j.DepSpec = depSpec.String
-	}
-	j.Inputs = decodeStringSlice(inputs)
-	j.ObservedInputs = decodeStringSlice(observedInputs)
-	j.Outputs = decodeStringSlice(outputs)
-	j.OutputDirs = decodeStringSlice(outputDirs)
-	j.Produces = decodeStringSlice(produces)
-	j.Needs = decodeStringSlice(needs)
-	if project.Valid {
-		j.Project = project.String
-	}
-	if createdAt.Valid {
-		j.CreatedAt = createdAt.Int64
-	}
-	if queuedAt.Valid {
-		j.QueuedAt = queuedAt.Int64
-	}
-	if startTime.Valid {
-		j.StartTime = startTime.Int64
-	}
-	if endTime.Valid {
-		j.EndTime = &endTime.Int64
-	}
-	if exitCode.Valid {
-		code := int(exitCode.Int64)
-		j.ExitCode = &code
-	}
-	if tombstoned.Valid {
-		j.Tombstoned = tombstoned.Int64 != 0
-	}
-	if lastSyncedStatus.Valid {
-		j.LastSyncedStatus = lastSyncedStatus.String
-	}
-	if pendingStatus.Valid {
-		j.PendingStatus = &pendingStatus.String
-	}
-	if pendingAt.Valid {
-		j.PendingAt = &pendingAt.Int64
-	}
-	j.Metadata = decodeJobMetadata(jobMetadata)
-	if cost.Valid {
-		j.Cost = &cost.Float64
-	}
-	if errorDiagnosis.Valid {
-		j.ErrorDiagnosis = errorDiagnosis.String
-	}
-	if retryCount.Valid {
-		j.RetryCount = int(retryCount.Int64)
-	}
-	j.PlacementMeta = decodePlacementMeta(placementMeta)
-	j.PlacementReasons = decodeStringSlice(placementReasons)
-	if cloudInstanceID.Valid {
-		j.LaunchID = &cloudInstanceID.Int64
-	}
-	if campaignJobIndex.Valid {
-		v := int(campaignJobIndex.Int64)
-		j.CampaignJobIndex = &v
-	}
-	if latestRunID.Valid {
-		j.LatestRunID = &latestRunID.Int64
-	}
-	if j.Backend == "" {
-		j.Backend = BackendQueueRunner
-	}
-
+	f.populateJob(&j)
 	return &j, nil
 }
 
@@ -3436,174 +3461,13 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 	var jobs []*Job
 	for rows.Next() {
 		var j Job
-		var sessionName sql.NullString
-		var desc sql.NullString
-		var generatedDesc sql.NullString
-		var generationHash sql.NullString
-		var errorMsg sql.NullString
-		var backend sql.NullString
-		var remoteID sql.NullString
-		var remoteState sql.NullString
-		var failureReason sql.NullString
-		var queueName sql.NullString
-		var gpu sql.NullString
-		var gpuClass sql.NullString
-		var cpuAllotment sql.NullInt64
-		var gpuMemGB sql.NullInt64
-		var gpuMemMaxGB sql.NullInt64
-		var envVars sql.NullString
-		var tags sql.NullString
-		var depSpec sql.NullString
-		var inputs sql.NullString
-		var observedInputs sql.NullString
-		var outputs sql.NullString
-		var outputDirs sql.NullString
-		var produces sql.NullString
-		var needs sql.NullString
-		var project sql.NullString
-		var createdAt sql.NullInt64
-		var queuedAt sql.NullInt64
-		var startTime sql.NullInt64
-		var endTime sql.NullInt64
-		var exitCode sql.NullInt64
-		var tombstoned sql.NullInt64
-		var lastSyncedStatus sql.NullString
-		var pendingStatus sql.NullString
-		var pendingAt sql.NullInt64
-		var jobMetadata sql.NullString
-		var cost sql.NullFloat64
-		var errorDiagnosis sql.NullString
-		var retryCount sql.NullInt64
-		var placementMeta sql.NullString
-		var placementReasons sql.NullString
-		var cloudInstanceID sql.NullInt64
-		var campaignJobIndex sql.NullInt64
-		var latestRunID sql.NullInt64
-
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &gpuMemMaxGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
-		if err != nil {
+		var f jobScanFields
+		if err := rows.Scan(f.scanDests(&j)...); err != nil {
 			return nil, err
 		}
-
-		if sessionName.Valid {
-			j.SessionName = sessionName.String
-		}
-		if desc.Valid {
-			j.Description = desc.String
-		}
-		if generatedDesc.Valid {
-			j.GeneratedDescription = generatedDesc.String
-		}
-		if generationHash.Valid {
-			j.GenerationHash = generationHash.String
-		}
-		if errorMsg.Valid {
-			j.ErrorMessage = errorMsg.String
-		}
-		if backend.Valid {
-			j.Backend = backend.String
-		}
-		if remoteID.Valid {
-			j.RemoteID = remoteID.String
-		}
-		if remoteState.Valid {
-			j.RemoteState = remoteState.String
-		}
-		if failureReason.Valid {
-			j.FailureReason = failureReason.String
-		}
-		if queueName.Valid {
-			j.QueueName = queueName.String
-		}
-		if gpu.Valid {
-			j.GPU = gpu.String
-		}
-		if gpuClass.Valid {
-			j.GPUClass = gpuClass.String
-		}
-		if cpuAllotment.Valid {
-			val := int(cpuAllotment.Int64)
-			j.CPUAllotment = &val
-		}
-		if gpuMemGB.Valid {
-			val := int(gpuMemGB.Int64)
-			j.GPUMemGB = &val
-		}
-		if gpuMemMaxGB.Valid {
-			val := int(gpuMemMaxGB.Int64)
-			j.GPUMemMaxGB = &val
-		}
-		j.EnvVars = decodeEnvVars(envVars)
-		j.Tags = decodeTags(tags)
-		if depSpec.Valid {
-			j.DepSpec = depSpec.String
-		}
-		j.Inputs = decodeStringSlice(inputs)
-		j.ObservedInputs = decodeStringSlice(observedInputs)
-		j.Outputs = decodeStringSlice(outputs)
-		j.OutputDirs = decodeStringSlice(outputDirs)
-		j.Produces = decodeStringSlice(produces)
-		j.Needs = decodeStringSlice(needs)
-		if project.Valid {
-			j.Project = project.String
-		}
-		if createdAt.Valid {
-			j.CreatedAt = createdAt.Int64
-		}
-		if queuedAt.Valid {
-			j.QueuedAt = queuedAt.Int64
-		}
-		if startTime.Valid {
-			j.StartTime = startTime.Int64
-		}
-		if endTime.Valid {
-			j.EndTime = &endTime.Int64
-		}
-		if exitCode.Valid {
-			code := int(exitCode.Int64)
-			j.ExitCode = &code
-		}
-		if tombstoned.Valid {
-			j.Tombstoned = tombstoned.Int64 != 0
-		}
-		if lastSyncedStatus.Valid {
-			j.LastSyncedStatus = lastSyncedStatus.String
-		}
-		if pendingStatus.Valid {
-			j.PendingStatus = &pendingStatus.String
-		}
-		if pendingAt.Valid {
-			j.PendingAt = &pendingAt.Int64
-		}
-		j.Metadata = decodeJobMetadata(jobMetadata)
-		if cost.Valid {
-			j.Cost = &cost.Float64
-		}
-		if errorDiagnosis.Valid {
-			j.ErrorDiagnosis = errorDiagnosis.String
-		}
-		if retryCount.Valid {
-			j.RetryCount = int(retryCount.Int64)
-		}
-		j.PlacementMeta = decodePlacementMeta(placementMeta)
-		j.PlacementReasons = decodeStringSlice(placementReasons)
-		if cloudInstanceID.Valid {
-			j.LaunchID = &cloudInstanceID.Int64
-		}
-		if campaignJobIndex.Valid {
-			v := int(campaignJobIndex.Int64)
-			j.CampaignJobIndex = &v
-		}
-		if latestRunID.Valid {
-			j.LatestRunID = &latestRunID.Int64
-		}
-		if j.Backend == "" {
-			j.Backend = BackendQueueRunner
-		}
-
+		f.populateJob(&j)
 		jobs = append(jobs, &j)
 	}
-
 	return jobs, rows.Err()
 }
 
