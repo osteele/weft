@@ -167,7 +167,7 @@ func TestFormatCostTableSelected(t *testing.T) {
 	}
 
 	t.Run("all selected", func(t *testing.T) {
-		table := FormatCostTableSelected(estimates, []int{4, 5})
+		table := FormatCostTableSelected(estimates, []int{4, 5}, 0, 0)
 		text := costTableText(table)
 		if !strings.Contains(text, "A100") {
 			t.Errorf("should show GPU name, got %q", text)
@@ -183,7 +183,7 @@ func TestFormatCostTableSelected(t *testing.T) {
 	})
 
 	t.Run("partial selection omits unselected", func(t *testing.T) {
-		table := FormatCostTableSelected(estimates, []int{2, 0})
+		table := FormatCostTableSelected(estimates, []int{2, 0}, 0, 0)
 		text := costTableText(table)
 		// Group 2 has 0 selected — should not appear in output
 		if strings.Contains(text, "0 jobs") {
@@ -193,7 +193,7 @@ func TestFormatCostTableSelected(t *testing.T) {
 
 	t.Run("proportional cost scaling", func(t *testing.T) {
 		// 2 of 4 jobs = 50% → cost should be ~0.52
-		table := FormatCostTableSelected(estimates, []int{2, 0})
+		table := FormatCostTableSelected(estimates, []int{2, 0}, 0, 0)
 		text := costTableText(table)
 		if !strings.Contains(text, "0.52") {
 			t.Errorf("should show scaled cost for half-selected group, got %q", text)

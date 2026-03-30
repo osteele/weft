@@ -235,6 +235,8 @@ type CostLine struct {
 type CostTable struct {
 	Lines         []CostLine
 	TimeColOffset int // character offset where the time column starts (for aligning sub-tables)
+	TimeWidth     int // width of the time/duration column (for aligning detail rows)
+	RateWidth     int // width of the rate column (for aligning detail rows)
 }
 
 // selectionScale computes the fraction of selected jobs and the count for a group.
@@ -251,7 +253,7 @@ func selectionScale(groupIdx int, totalJobs int, selectedPerGroup []int) (select
 // FormatCostTableSelected returns a selection-aware cost estimate table.
 // Each group line shows "selected/total jobs" and scales cost/time proportionally.
 // Groups with 0 selected jobs are omitted.
-func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) CostTable {
+func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int, minDurWidth, minRateWidth int) CostTable {
 	type row struct {
 		gpu, jobs, rate, dur, cost string
 	}
@@ -278,7 +280,7 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 		totalUpper += scaledTime.Upper.Hours() * est.Offer.Offer.CostPerHour
 
 		rows = append(rows, row{
-			gpu:  FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName),
+			gpu:  est.Offer.Offer.GPUName,
 			jobs: PluralJobs(selected),
 			rate: fmt.Sprintf("$%.2f/hr", est.Offer.Offer.CostPerHour),
 			dur:  formatDurationWithBounds(scaledTime),
@@ -305,6 +307,8 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 			wDur = len(r.dur)
 		}
 	}
+	wDur = max(wDur, minDurWidth)
+	wRate = max(wRate, minRateWidth)
 
 	// Columns: dur rate cost gpu jobs — time/cost first to align with summary table above
 	var lines []CostLine
@@ -516,7 +520,7 @@ func FormatStrategySummary(rows []StrategySummaryRow) CostTable {
 		}
 		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
 	}
-	return CostTable{Lines: lines, TimeColOffset: timeColOffset}
+	return CostTable{Lines: lines, TimeColOffset: timeColOffset, TimeWidth: wTime, RateWidth: wRate}
 }
 
 // formatCostBounds formats "$X.XX ($L–$U)" or just "$X.XX" if bounds are tight.

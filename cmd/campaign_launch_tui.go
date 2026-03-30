@@ -1371,7 +1371,7 @@ func (m launchModel) View() string {
 					for i, line := range summaryTable.Lines {
 						combined.Lines = append(combined.Lines, line)
 						if i < len(rows) && rows[i].Active && rows[i].Disclosed && activeEstimates != nil {
-							detailTable := campaign.FormatCostTableSelected(activeEstimates, selected)
+							detailTable := campaign.FormatCostTableSelected(activeEstimates, selected, summaryTable.TimeWidth, summaryTable.RateWidth)
 							// Skip the Total line (last line) — it duplicates the summary row above
 							detailLines := detailTable.Lines
 							if len(detailLines) > 1 {
@@ -1396,7 +1396,7 @@ func (m launchModel) View() string {
 				// Fallback: single-strategy table
 				b.WriteString(costEstimateHeader(false))
 				b.WriteString("\n")
-				costTable := campaign.FormatCostTableSelected(m.costEstimates, selected)
+				costTable := campaign.FormatCostTableSelected(m.costEstimates, selected, 0, 0)
 				renderCostTable(&b, costTable)
 			}
 		} else if m.loading && m.groupOffers == nil {
