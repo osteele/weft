@@ -255,7 +255,16 @@ func cleanupStaleAttempts(db *sql.DB) error {
 		FROM job_attempts ja
 		JOIN launches ci ON ci.id = ja.launch_id
 		WHERE ja.end_time IS NULL
-		  AND ci.status IN ('failed', 'canceled')`)
+		  AND ci.status IN (?, ?)
+		  AND NOT EXISTS (
+			SELECT 1 FROM job_attempts ja2
+			WHERE ja2.job_id = ja.job_id
+			  AND ja2.id != ja.id
+			  AND ja2.status IN (?, ?, ?, ?)
+		  )`,
+		LaunchStatusFailed, LaunchStatusCancelled,
+		StatusCompleted, StatusFailed, StatusDead, StatusKilled,
+	)
 	if err != nil {
 		return fmt.Errorf("find orphaned cloud attempts: %w", err)
 	}
@@ -286,6 +295,85 @@ func cleanupStaleAttempts(db *sql.DB) error {
 
 	return nil
 }
+
+// repairOrphanedCompletedAttempts fixes completed attempts that lost their
+// launch association. This happens when cleanupStaleAttempts creates a blank
+// replacement attempt (no host, no launch_id) and R2 sync later completes it
+// without propagating the launch_id.
+func repairOrphanedCompletedAttempts(database *sql.DB) error {
+	rows, err := database.Query(`
+		SELECT job_id, id FROM job_attempts
+		WHERE status IN (?, ?)
+		  AND (host = '' OR host IS NULL)
+		  AND launch_id IS NULL
+		  AND id = (SELECT MAX(ja3.id) FROM job_attempts ja3 WHERE ja3.job_id = job_attempts.job_id)`,
+		StatusCompleted, StatusFailed,
+	)
+	if err != nil {
+		return fmt.Errorf("find orphaned attempts: %w", err)
+	}
+	type orphan struct{ jobID, attemptID int64 }
+	var orphans []orphan
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.jobID, &o.attemptID); err != nil {
+			rows.Close()
+			return err
+		}
+		orphans = append(orphans, o)
+	}
+	rows.Close()
+
+	for _, o := range orphans {
+		launchID, err := inferSiblingLaunch(database, o.jobID)
+		if err != nil || launchID == 0 {
+			continue
+		}
+		host := LaunchHost(launchID)
+		database.Exec(
+			`UPDATE job_attempts SET launch_id = ?, host = ? WHERE id = ? AND launch_id IS NULL`,
+			launchID, host, o.attemptID,
+		)
+	}
+
+	return nil
+}
+
+// inferSiblingLaunch finds the replacement launch for an orphaned job by
+// looking at the job's prior attempt that had a launch_id, then finding a
+// sibling launch (same GPU class, completed status) that ran other jobs from
+// that same original failed launch. Returns 0 if no match found.
+func inferSiblingLaunch(db *sql.DB, jobID int64) (int64, error) {
+	var launchID sql.NullInt64
+	err := db.QueryRow(inferSiblingLaunchSQL, jobID).Scan(&launchID)
+	if err == sql.ErrNoRows || !launchID.Valid {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return launchID.Int64, nil
+}
+
+// inferSiblingLaunchSQL is used both as a standalone query (via inferSiblingLaunch)
+// and as a correlated subquery (in repairOrphanedCompletedAttempts, where ? is
+// bound to job_attempts.job_id from the outer UPDATE).
+const inferSiblingLaunchSQL = `
+	SELECT DISTINCT ja_sibling.launch_id
+	FROM job_attempts ja_prior
+	JOIN job_attempts ja_sibling ON ja_sibling.launch_id != ja_prior.launch_id
+	  AND ja_sibling.status IN ('completed', 'dead')
+	  AND ja_sibling.job_id IN (
+		SELECT ja_peer.job_id FROM job_attempts ja_peer
+		WHERE ja_peer.launch_id = ja_prior.launch_id
+	  )
+	JOIN launches l_sibling ON l_sibling.id = ja_sibling.launch_id
+	  AND l_sibling.status = 'completed'
+	JOIN launches l_prior ON l_prior.id = ja_prior.launch_id
+	  AND UPPER(l_sibling.gpu_class) = UPPER(l_prior.gpu_class)
+	WHERE ja_prior.job_id = ?
+	  AND ja_prior.launch_id IS NOT NULL
+	ORDER BY ja_sibling.launch_id DESC LIMIT 1`
 
 // createJobStatusView creates the job_status view that joins jobs with their
 // latest attempt to provide backward-compatible columns for the Job struct.

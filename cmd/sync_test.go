@@ -207,6 +207,92 @@ func TestRecordCloudJobCompletion_UpdatesClosedAttempt(t *testing.T) {
 	}
 }
 
+// TestRecordCloudJobCompletion_InfersLaunchID verifies that when the latest
+// attempt has no launch_id (blank replacement from cleanupStaleAttempts), the
+// completion function infers the correct launch by finding a sibling launch
+// that ran other jobs from the same original (failed) launch.
+func TestRecordCloudJobCompletion_InfersLaunchID(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Create a failed launch (original assignment).
+	failedLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+		GPUClass: "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch (failed): %v", err)
+	}
+
+	// Create a completed replacement launch with same GPU class.
+	goodLaunchID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+		GPUClass: "A100",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch (good): %v", err)
+	}
+
+	// Create two jobs, both originally assigned to the failed launch.
+	jobA, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo A", "test", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	jobB, err := db.RecordQueuedWithGPU(database, "", "/tmp", "echo B", "test", "A100")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+
+	// Assign both to failed launch.
+	if err := db.SetJobLaunchID(database, jobA, failedLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobB, failedLaunchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	// Simulate cleanup for jobA: cancel the failed-launch attempt, create blank replacement.
+	database.Exec(
+		`UPDATE job_attempts SET status = 'canceled', end_time = 1000 WHERE job_id = ? AND launch_id = ?`,
+		jobA, failedLaunchID,
+	)
+	if _, err := db.CreateAttempt(database, jobA, "", nil, db.StatusQueued); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	// JobB was properly reassigned to the good launch and completed.
+	if _, err := db.CreateAttempt(database, jobB, "", &goodLaunchID, db.StatusCompleted); err != nil {
+		t.Fatalf("CreateAttempt: %v", err)
+	}
+
+	// Complete jobA — should infer launch from jobB's sibling relationship.
+	returnedID, err := db.RecordCloudJobCompletion(database, jobA, 0, 200, 300, "")
+	if err != nil {
+		t.Fatalf("RecordCloudJobCompletion: %v", err)
+	}
+	if returnedID != goodLaunchID {
+		t.Errorf("returned launch_id = %d, want %d", returnedID, goodLaunchID)
+	}
+
+	job, err := db.GetJobByID(database, jobA)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.LaunchID == nil || *job.LaunchID != goodLaunchID {
+		t.Errorf("job launch_id = %v, want %d", job.LaunchID, goodLaunchID)
+	}
+	expectedHost := db.LaunchHost(goodLaunchID)
+	if job.Host != expectedHost {
+		t.Errorf("job host = %q, want %q", job.Host, expectedHost)
+	}
+	if !job.IsLaunchJob() {
+		t.Error("expected IsLaunchJob() = true after launch inference")
+	}
+}
+
 func TestSyncCloudJobResults_RepairsFailedTerminalInstanceJobsWithoutR2(t *testing.T) {
 	database := db.SetupTestDB(t)
 

@@ -2726,6 +2726,191 @@ func TestJobInputsOutputsEmptyByDefault(t *testing.T) {
 	}
 }
 
+// TestCleanupStaleAttempts_SkipsJobsWithCompletedAttempt verifies that
+// cleanupStaleAttempts does not create replacement attempts for jobs that
+// already have a completed attempt, even if another attempt is open on a
+// failed launch. This prevents the bug where a blank replacement attempt
+// loses the launch association.
+func TestCleanupStaleAttempts_SkipsJobsWithCompletedAttempt(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "weft-cleanup-terminal-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+
+	cleanup := SetDBPath(tmpFile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a failed launch.
+	launchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a job and assign it to the failed launch.
+	jobID, err := RecordQueuedWithGPU(database, "", "/tmp", "echo hi", "test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate: a different mechanism already completed this job (e.g., R2 sync
+	// from a different launch). Create a second completed attempt.
+	if _, err := CreateAttempt(database, jobID, "vastai:12345", nil, StatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	// Count attempts before re-open.
+	var countBefore int
+	database.QueryRow("SELECT COUNT(*) FROM job_attempts WHERE job_id = ?", jobID).Scan(&countBefore)
+
+	database.Close()
+
+	// Re-open triggers cleanupStaleAttempts.
+	database, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	// Should NOT have created a new blank attempt.
+	var countAfter int
+	database.QueryRow("SELECT COUNT(*) FROM job_attempts WHERE job_id = ?", jobID).Scan(&countAfter)
+
+	if countAfter != countBefore {
+		t.Errorf("expected %d attempts (unchanged), got %d — cleanupStaleAttempts should skip jobs with a completed attempt", countBefore, countAfter)
+	}
+
+	// The job should still show as completed.
+	job, err := GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Status != StatusCompleted {
+		t.Errorf("expected status=completed, got %q", job.Status)
+	}
+}
+
+// TestRepairOrphanedCompletedAttempts verifies that the repair migration
+// correctly associates orphaned completed attempts with the correct launch
+// by finding a sibling launch that ran other jobs from the same original launch.
+func TestRepairOrphanedCompletedAttempts(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "weft-repair-test-*.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+
+	cleanup := SetDBPath(tmpFile.Name())
+	defer cleanup()
+
+	database, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a failed launch (the original assignment that triggered cleanup).
+	failedLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusFailed,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+		GPUClass: "A100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a completed replacement launch with same GPU class.
+	goodLaunchID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusCompleted,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+		GPUClass: "A100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create two jobs: jobA (orphaned) and jobB (properly completed on goodLaunch).
+	// Both were originally assigned to failedLaunch.
+	jobA, err := RecordQueuedWithGPU(database, "", "/tmp", "echo A", "test", "A100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobB, err := RecordQueuedWithGPU(database, "", "/tmp", "echo B", "test", "A100")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Assign both jobs to the failed launch (creating attempt 2 on each).
+	if err := SetJobLaunchID(database, jobA, failedLaunchID); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetJobLaunchID(database, jobB, failedLaunchID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate cleanup: cancel the failed-launch attempts for jobA, create blank attempt 3.
+	database.Exec(
+		`UPDATE job_attempts SET status = 'canceled', end_time = 1000 WHERE job_id = ? AND launch_id = ?`,
+		jobA, failedLaunchID,
+	)
+	if _, err := CreateAttempt(database, jobA, "", nil, StatusQueued); err != nil {
+		t.Fatal(err)
+	}
+	// Mark jobA's blank attempt as completed (simulating R2 sync without launch_id).
+	database.Exec(
+		`UPDATE job_attempts SET status = 'completed', start_time = 200, end_time = 300, exit_code = 0
+		 WHERE job_id = ? AND id = (SELECT MAX(id) FROM job_attempts WHERE job_id = ?)`,
+		jobA, jobA,
+	)
+
+	// Simulate cleanup for jobB: cancel the failed-launch attempt, then properly
+	// reassign to the good launch and complete.
+	database.Exec(
+		`UPDATE job_attempts SET status = 'canceled', end_time = 1000 WHERE job_id = ? AND launch_id = ?`,
+		jobB, failedLaunchID,
+	)
+	if _, err := CreateAttempt(database, jobB, "", &goodLaunchID, StatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	database.Close()
+
+	// Re-open triggers repairOrphanedCompletedAttempts.
+	database, err = Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	job, err := GetJobByID(database, jobA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if job.LaunchID == nil || *job.LaunchID != goodLaunchID {
+		t.Errorf("expected launch_id=%d (good launch), got %v", goodLaunchID, job.LaunchID)
+	}
+	expectedHost := LaunchHost(goodLaunchID)
+	if job.Host != expectedHost {
+		t.Errorf("expected host=%s, got %q", expectedHost, job.Host)
+	}
+}
+
 // TestCleanupStaleAttempts_SkipsCompletedInstances verifies that
 // cleanupStaleAttempts does not create replacement attempts for jobs on
 // completed instances. These jobs should be finalized by R2 result sync.

@@ -1658,6 +1658,13 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Repair completed attempts that lost their launch association (e.g.,
+	// after cleanupStaleAttempts created a blank replacement that was later
+	// completed by R2 sync without propagating launch_id).
+	if err := repairOrphanedCompletedAttempts(db); err != nil {
+		return err
+	}
+
 	// Create the job_status view (joins jobs with latest attempt)
 	if err := createJobStatusView(db); err != nil {
 		return err

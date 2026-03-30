@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -35,6 +36,28 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	); err != nil {
 		return 0, err
 	}
+
+	// If the latest attempt has no launch_id (e.g., a blank replacement from
+	// cleanupStaleAttempts), infer it by finding a sibling launch that ran
+	// other jobs from the same original launch.
+	if !cloudInstanceID.Valid {
+		inferredID, err := inferSiblingLaunch(database, jobID)
+		if err == nil && inferredID > 0 {
+			host := LaunchHost(inferredID)
+			if _, err := database.Exec(`
+				UPDATE job_attempts
+				SET launch_id = ?,
+				    host = CASE WHEN (host = '' OR host IS NULL) THEN ? ELSE host END
+				WHERE id = `+latestAttemptSubquery+`
+				  AND launch_id IS NULL`,
+				inferredID, host, jobID,
+			); err != nil {
+				return 0, fmt.Errorf("set inferred launch_id for job %d: %w", jobID, err)
+			}
+			return inferredID, nil
+		}
+	}
+
 	if cloudInstanceID.Valid {
 		return cloudInstanceID.Int64, nil
 	}
