@@ -2,6 +2,7 @@ package runner
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/osteele/weft/internal/artifacts"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/opsqueue"
+	"github.com/osteele/weft/internal/remediation"
 )
 
 // SingleJobConfig configures a single-shot job execution.
@@ -201,6 +203,48 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		}
 	}()
 
+	// Fatal log scanner: periodically check log tail for unrecoverable errors
+	// (e.g., CUDA device lost) and kill the job early to avoid wasting rental time.
+	var fatalError atomic.Bool
+	fatalScanDone := make(chan struct{})
+	if job.GPUClass != "" || len(gpuDevices) > 0 {
+		go func() {
+			defer close(fatalScanDone)
+			scanTicker := time.NewTicker(30 * time.Second)
+			defer scanTicker.Stop()
+
+			var lastSize int64
+			for range scanTicker.C {
+				if !CheckPIDAlive(proc.PID) {
+					return
+				}
+				info, err := os.Stat(paths.Log)
+				if err != nil || info.Size() == lastSize {
+					continue
+				}
+				lastSize = info.Size()
+				tail := readLogTail(paths.Log, 16384)
+				if tail == "" {
+					continue
+				}
+				if d := remediation.CheckFatalAtRuntime(tail); d != nil {
+					fatalError.Store(true)
+					slog.Warn("fatal error detected in job logs, sending SIGTERM",
+						"component", "runner", "job_id", cfg.JobID,
+						"pattern", d.Pattern, "message", d.Message)
+					WriteKillReasonFile(paths, d.Pattern)
+					syscall.Kill(-proc.PGID, syscall.SIGTERM)
+					time.AfterFunc(10*time.Second, func() {
+						syscall.Kill(-proc.PGID, syscall.SIGKILL)
+					})
+					return
+				}
+			}
+		}()
+	} else {
+		close(fatalScanDone)
+	}
+
 	// Wait for process
 	waitErr := proc.Cmd.Wait()
 	ei := ExtractExitInfo(waitErr)
@@ -213,11 +257,21 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		slog.Warn("job timed out", "component", "runner", "job_id", cfg.JobID, "max_time", cfg.MaxTime)
 	}
 
+	// Override exit info if killed due to fatal log error
+	if fatalError.Load() {
+		if ei.ExitCode == 0 {
+			ei.ExitCode = 1
+		}
+		ei.Signaled = true
+		ei.Signal = syscall.SIGTERM
+	}
+
 	phases.RunEnd = time.Now().Unix()
 	endTime := time.Now().Unix()
 
-	// Stop sampling
+	// Stop sampling and fatal scanner
 	<-samplingDone
+	<-fatalScanDone
 
 	// Write status and log footer
 	WriteStatusFile(paths, ei)
@@ -250,8 +304,9 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 
 	// Write rusage and completion record
+	killReason := ReadKillReasonFile(paths.KillReason)
 	WriteRusageFile(paths, rs)
-	WriteCompletionRecord(paths, ei, rs, "", failureReason, phases.RunStart, endTime, outputFiles)
+	WriteCompletionRecord(paths, ei, rs, killReason, failureReason, phases.RunStart, endTime, outputFiles)
 
 	// Cache probe (post-job) and write phases
 	if !cfg.SkipProbes {
@@ -264,4 +319,40 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 
 	slog.Info("job completed", "component", "runner", "job_id", cfg.JobID, "exit_code", ei.ExitCode)
 	return ei, nil
+}
+
+// readLogTail reads the last maxBytes of a log file. Returns empty string on error.
+func readLogTail(path string, maxBytes int64) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+
+	size := info.Size()
+	if size == 0 {
+		return ""
+	}
+
+	readSize := maxBytes
+	offset := size - maxBytes
+	if offset < 0 {
+		offset = 0
+		readSize = size
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return ""
+	}
+
+	data := make([]byte, readSize)
+	n, err := f.Read(data)
+	if n == 0 || err != nil {
+		return ""
+	}
+	return string(data[:n])
 }

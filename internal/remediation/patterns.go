@@ -7,11 +7,12 @@ import (
 
 // pattern is a compiled error pattern matcher.
 type pattern struct {
-	re         *regexp.Regexp
-	patternID  string // e.g., "missing_hf_model"
-	category   string // "data", "code", "environment"
-	message    string // human-readable template
-	remediable bool
+	re             *regexp.Regexp
+	patternID      string // e.g., "missing_hf_model"
+	category       string // "data", "code", "environment"
+	message        string // human-readable template
+	remediable     bool
+	fatalAtRuntime bool // if true, kill the job immediately when detected in live logs
 	// extractAssets extracts data asset refs from regex match groups.
 	// Only used for data patterns.
 	extractAssets func(match []string) []string
@@ -123,10 +124,18 @@ var envPatterns = []*pattern{
 		message:   "GPU out of memory",
 	},
 	{
-		re:        regexp.MustCompile(`RuntimeError: CUDA error`),
-		patternID: "cuda_error",
-		category:  "environment",
-		message:   "CUDA runtime error",
+		re:             regexp.MustCompile(`RuntimeError: CUDA error`),
+		patternID:      "cuda_error",
+		category:       "environment",
+		message:        "CUDA runtime error",
+		fatalAtRuntime: true,
+	},
+	{
+		re:             regexp.MustCompile(`(?:CUDA unknown error|CUDA error: unknown error|cannot re-initialize CUDA|all CUDA-capable devices are busy or unavailable)`),
+		patternID:      "cuda_fatal",
+		category:       "environment",
+		message:        "CUDA device unrecoverable — GPU state corrupted or device lost",
+		fatalAtRuntime: true,
 	},
 	{
 		re:        regexp.MustCompile(`(?:ENOSPC|No space left on device)`),
@@ -134,4 +143,18 @@ var envPatterns = []*pattern{
 		category:  "environment",
 		message:   "Disk full — if HF models were downloaded at runtime, declare them with --input hf:<model-id> so the disk estimator accounts for their size",
 	},
+}
+
+// CheckFatalAtRuntime scans log content for patterns that indicate the job
+// should be killed immediately (e.g., unrecoverable CUDA errors that make
+// the GPU unusable). Returns the first matching diagnosis, or nil.
+func CheckFatalAtRuntime(logContent string) *ErrorDiagnosis {
+	for _, p := range envPatterns {
+		if p.fatalAtRuntime {
+			if d := p.Match(logContent); d != nil {
+				return d
+			}
+		}
+	}
+	return nil
 }

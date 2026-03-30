@@ -143,7 +143,7 @@ func TestEnvPatterns_CUDAError(t *testing.T) {
 func TestEnvPatterns_DiskFull_ENOSPC(t *testing.T) {
 	log := `write /tmp/output/model.bin: ENOSPC`
 
-	d := envPatterns[2].Match(log)
+	d := envPatterns[3].Match(log)
 	if d == nil {
 		t.Fatal("expected match for ENOSPC")
 	}
@@ -158,7 +158,7 @@ func TestEnvPatterns_DiskFull_ENOSPC(t *testing.T) {
 func TestEnvPatterns_DiskFull_NoSpaceLeft(t *testing.T) {
 	log := `OSError: [Errno 28] No space left on device: '/tmp/model/config.json'`
 
-	d := envPatterns[2].Match(log)
+	d := envPatterns[3].Match(log)
 	if d == nil {
 		t.Fatal("expected match for No space left on device")
 	}
