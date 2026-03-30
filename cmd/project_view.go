@@ -251,7 +251,7 @@ func renderProjectJobsPlain(groups []projectGroup, width int) string {
 	for _, group := range groups {
 		allJobs = append(allJobs, group.Jobs...)
 	}
-	layout := newJobListLayout(width, allJobs)
+	layout := newJobListLayout(width, allJobs, nil, false)
 	var b strings.Builder
 	for i, group := range groups {
 		if i > 0 {

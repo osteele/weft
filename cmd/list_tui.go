@@ -336,7 +336,7 @@ func (m listTUIModel) emptyStateText() string {
 }
 
 func (m *listTUIModel) rebuildLayout() {
-	m.layout = newJobListLayout(max(20, m.width-2), m.jobs)
+	m.layout = newJobListLayout(max(20, m.width-2), m.jobs, nil, false)
 }
 
 func (m *listTUIModel) clampCursor() {

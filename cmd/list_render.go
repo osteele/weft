@@ -16,28 +16,32 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
-type jobListColumn struct {
-	title      string
-	width      int
-	alignRight bool
-	value      func(*db.Job) string
-}
-
 type jobListLayout struct {
 	width   int
-	columns []jobListColumn
+	columns []columnDef
 }
 
 func renderJobListPlain(jobs []*db.Job, width int) string {
+	return renderJobListPlainWithOptions(jobs, width, nil, false)
+}
+
+func renderJobListPlainWithOptions(jobs []*db.Job, width int, columnKeys []string, noTruncate bool) string {
 	if len(jobs) == 0 {
 		return "No jobs found\n"
 	}
 
-	layout := newJobListLayout(width, jobs)
+	layout := newJobListLayout(width, jobs, columnKeys, noTruncate)
 	lines := make([]string, 0, len(jobs)+1)
-	lines = append(lines, truncateDisplayWidth(formatJobListHeader(layout), layout.width))
-	for _, job := range jobs {
-		lines = append(lines, truncateDisplayWidth(formatJobListRow(layout, job), layout.width))
+	if noTruncate {
+		lines = append(lines, formatJobListHeader(layout))
+		for _, job := range jobs {
+			lines = append(lines, formatJobListRow(layout, job))
+		}
+	} else {
+		lines = append(lines, truncateDisplayWidth(formatJobListHeader(layout), layout.width))
+		for _, job := range jobs {
+			lines = append(lines, truncateDisplayWidth(formatJobListRow(layout, job), layout.width))
+		}
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
@@ -123,59 +127,84 @@ func ignorePagerPipeError(err error) bool {
 	return errors.Is(err, syscall.EPIPE)
 }
 
-func newJobListLayout(width int, jobs []*db.Job) jobListLayout {
+// responsiveColumnKeys returns the column keys for the default responsive
+// layout based on terminal width.
+func responsiveColumnKeys(width int) []string {
+	switch {
+	case width >= 96:
+		return []string{"check", "id", "host", "status", "started", "project", "dir", "description"}
+	case width >= 80:
+		return []string{"check", "id", "host", "status", "started", "project", "description"}
+	case width >= 64:
+		return []string{"check", "id", "host", "status", "project", "description"}
+	default:
+		return []string{"check", "id", "project", "status", "description"}
+	}
+}
+
+func newJobListLayout(width int, jobs []*db.Job, columnKeys []string, noTruncate bool) jobListLayout {
 	if width <= 0 {
 		width = 120
 	}
 
-	// Compute project column width from actual data
-	projectWidth := len("PROJECT")
+	if len(columnKeys) == 0 {
+		columnKeys = responsiveColumnKeys(width)
+	}
+
+	projectWidth := computeProjectWidth(jobs)
+	defs := columnDefMap()
+	columns := make([]columnDef, 0, len(columnKeys))
+	hasDescription := false
+
+	for _, key := range columnKeys {
+		cd, ok := defs[key]
+		if !ok {
+			continue
+		}
+		if key == "project" && cd.width == 0 {
+			cd.width = projectWidth
+		}
+		if key == "description" {
+			hasDescription = true
+			continue
+		}
+		columns = append(columns, cd)
+	}
+
+	if hasDescription {
+		descWidth := computeDescriptionWidth(width, columns, noTruncate, jobs)
+		descDef := defs["description"]
+		descDef.width = descWidth
+		columns = append(columns, descDef)
+	}
+
+	return jobListLayout{width: width, columns: columns}
+}
+
+// computeProjectWidth calculates the project column width from actual data.
+func computeProjectWidth(jobs []*db.Job) int {
+	w := len("PROJECT")
 	for _, job := range jobs {
-		if w := lipgloss.Width(campaign.JobProjectLabel(job)); w > projectWidth {
-			projectWidth = w
+		if pw := len(campaign.JobProjectLabel(job)); pw > w {
+			w = pw
 		}
 	}
-	if projectWidth > 30 {
-		projectWidth = 30
+	if w > 30 {
+		w = 30
 	}
+	return w
+}
 
-	columns := []jobListColumn{
-		{title: "", width: 2, value: func(job *db.Job) string {
-			if job.HasTag(db.ProcessedTag) {
-				return "✓"
+// computeDescriptionWidth calculates the width for the description column.
+func computeDescriptionWidth(width int, columns []columnDef, noTruncate bool, jobs []*db.Job) int {
+	if noTruncate {
+		maxDesc := len("DESCRIPTION")
+		for _, job := range jobs {
+			if w := lipgloss.Width(job.EffectiveDescription()); w > maxDesc {
+				maxDesc = w
 			}
-			return " "
-		}},
-		{title: "ID", width: 6, alignRight: true, value: func(job *db.Job) string { return fmt.Sprintf("%d", job.ID) }},
-	}
-
-	switch {
-	case width >= 96:
-		columns = append(columns,
-			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
-			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
-			jobListColumn{title: "STARTED", width: 11, value: func(job *db.Job) string { return formatJobListStarted(job) }},
-			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
-			jobListColumn{title: "DIR", width: 14, value: func(job *db.Job) string { return job.DirectoryTailDisplay() }},
-		)
-	case width >= 80:
-		columns = append(columns,
-			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
-			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
-			jobListColumn{title: "STARTED", width: 11, value: func(job *db.Job) string { return formatJobListStarted(job) }},
-			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
-		)
-	case width >= 64:
-		columns = append(columns,
-			jobListColumn{title: "HOST", width: 12, value: func(job *db.Job) string { return formatJobListHost(job) }},
-			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
-			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
-		)
-	default:
-		columns = append(columns,
-			jobListColumn{title: "PROJECT", width: projectWidth, value: func(job *db.Job) string { return formatJobListProject(job) }},
-			jobListColumn{title: "STATUS", width: 14, value: func(job *db.Job) string { return formatJobListStatus(job) }},
-		)
+		}
+		return maxDesc
 	}
 
 	fixedWidth := 0
@@ -187,15 +216,7 @@ func newJobListLayout(width int, jobs []*db.Job) jobListLayout {
 	if descWidth < 12 {
 		descWidth = 12
 	}
-	columns = append(columns, jobListColumn{
-		title: "DESCRIPTION",
-		width: descWidth,
-		value: func(job *db.Job) string {
-			return job.EffectiveDescription()
-		},
-	})
-
-	return jobListLayout{width: width, columns: columns}
+	return descWidth
 }
 
 func formatJobListHeader(layout jobListLayout) string {

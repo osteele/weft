@@ -65,6 +65,9 @@ var (
 	listInventory   bool
 	listCloud       bool
 	listWatch       bool
+	listFormat      string
+	listNoTruncate  bool
+	listColumns     []string
 )
 
 const defaultHostSyncWindow = 48 * time.Hour
@@ -95,6 +98,9 @@ func addListQueryFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&listSync, "sync", false, "Perform full sync (default is fast sync with timeout)")
 	cmd.Flags().BoolVar(&listNoSync, "no-sync", false, "Skip syncing job statuses before listing")
 	cmd.Flags().BoolVarP(&listAll, "all", "a", false, "Include jobs older than 7 days")
+	cmd.Flags().StringVar(&listFormat, "format", "table", `Output format: "table", "json", "tsv" (alias: "tab")`)
+	cmd.Flags().BoolVar(&listNoTruncate, "no-truncate", false, "Disable column truncation in table mode")
+	cmd.Flags().StringSliceVar(&listColumns, "columns", nil, "Columns to display (comma-separated: id, host, status, started, project, dir, description, command, exit_code, duration, tags, gpu)")
 }
 
 // addListFlags registers all list-related flags on a command.
@@ -455,7 +461,25 @@ func showJob(database *sql.DB, id int64) error {
 
 func printJobs(database *sql.DB, jobs []*db.Job) error {
 	applyAttemptOutcomeOverrides(database, jobs)
-	return writeListPlainOutput(renderJobListPlain(jobs, listOutputWidth()))
+
+	switch listFormat {
+	case "json":
+		cols, err := resolveColumns(listColumns, defaultJSONColumnKeys)
+		if err != nil {
+			return err
+		}
+		return printJobsJSON(os.Stdout, jobs, cols)
+	case "tsv", "tab":
+		cols, err := resolveColumns(listColumns, defaultTSVColumnKeys)
+		if err != nil {
+			return err
+		}
+		return printJobsTSV(os.Stdout, jobs, cols)
+	case "table", "":
+		return writeListPlainOutput(renderJobListPlainWithOptions(jobs, listOutputWidth(), listColumns, listNoTruncate))
+	default:
+		return fmt.Errorf("unknown format %q (use table, json, or tsv)", listFormat)
+	}
 }
 
 // applyAttemptOutcomeOverrides overrides the display status for queued jobs

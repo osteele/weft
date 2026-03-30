@@ -379,6 +379,23 @@ with observed phase counts, we can use historical data as an empirical prior.
 - Projects that routinely run 5-phase sweeps get accurate progress from the
   first restart instead of conservatively estimating 3 phases.
 
+## Auto-Retry Orphaned Jobs
+
+When a cloud instance fails and jobs are orphaned, consider automatically
+re-queuing them if they also had their own execution failures. Currently, if
+reconciliation discovers both an instance failure AND a per-job failure (from R2
+completion markers), the job ends up in `failed` status and requires explicit
+`weft retry`. The user sees "orphaned" in the watch TUI and expects the job to
+be re-queued, but it isn't because the job itself also failed.
+
+### Questions
+
+- Should auto-retry only apply when the job failure is likely caused by the
+  instance failure (e.g., killed signal, short runtime)?
+- How many auto-retries before giving up? (Avoid infinite retry loops for
+  genuinely broken scripts.)
+- Should this respect a per-job or per-project retry limit?
+
 ## Workload Clustering
 
 Cluster historical jobs by resource profile (GPU utilization pattern, duration,
