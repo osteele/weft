@@ -418,10 +418,20 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 func syncJobCompletionsFromR2(database *sql.DB, r2Client *r2.Client, instanceID int64) {
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, instanceID)
 	ctx := context.Background()
+	var synced, remaining int
 	for _, j := range jobs {
 		if !db.IsTerminalStatus(j.Status) {
-			reconcileCheckAndSyncJobComplete(ctx, r2Client, database, j.ID)
+			if reconcileCheckAndSyncJobComplete(ctx, r2Client, database, j.ID) {
+				synced++
+			} else {
+				remaining++
+			}
 		}
+	}
+	if synced > 0 || remaining > 0 {
+		slog.Info("synced job completions from R2",
+			"component", "reconcile", "instance", instanceID,
+			"synced", synced, "remaining_non_terminal", remaining)
 	}
 }
 

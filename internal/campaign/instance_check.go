@@ -320,6 +320,8 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Client *r2.Client, now time.Time) InstanceAction {
 	// Check R2 for completion marker before assuming failure.
 	if hasR2CompletionMarker(r2Client, ci.ID) {
+		slog.Debug("provider dead: found R2 completion marker",
+			"component", "reconcile", "instance", ci.ID)
 		r.mu.Lock()
 		delete(r.firstDeadAt, ci.ID)
 		r.mu.Unlock()
@@ -336,6 +338,9 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	// and the provider shows "exited" before the reconciler's step 3 picks it up.
 	if intent, err := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID); err == nil && intent != nil {
 		if action := r.checkTerminationIntent(ci, inst, intent); action.Kind != ActionNone {
+			slog.Debug("provider dead: found termination intent",
+				"component", "reconcile", "instance", ci.ID,
+				"intent_status", intent.TerminalStatus, "intent_reason", intent.TerminationReason)
 			r.mu.Lock()
 			delete(r.firstDeadAt, ci.ID)
 			r.mu.Unlock()
@@ -371,6 +376,8 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	}
 	reason = failureTerminationReasonFromR2(context.Background(), r2Client, ci.ID, reason)
 
+	slog.Warn("provider dead: no completion marker or termination intent found, orphaning jobs",
+		"component", "reconcile", "instance", ci.ID, "reason", reason)
 	return InstanceAction{
 		Kind:              ActionProviderDead,
 		TerminalStatus:    db.LaunchStatusFailed,

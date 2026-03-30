@@ -265,6 +265,76 @@ func TestReconcileLaunches_TerminalTransitionSyncsJobCompletions(t *testing.T) {
 	}
 }
 
+func TestReconcileLaunches_SyncFailureOrphansJob(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create a running instance with a provider ID
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "H100_SXM",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	if err := db.SetLaunchProviderID(database, instanceID, "33840670"); err != nil {
+		t.Fatalf("set provider id: %v", err)
+	}
+
+	// Create two jobs: one completed, one still running
+	for _, id := range []int{1, 2} {
+		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, id); err != nil {
+			t.Fatalf("create job %d: %v", id, err)
+		}
+	}
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ?, end_time = ? WHERE job_id = 1 AND end_time IS NULL`,
+		db.StatusCompleted, instanceID, time.Now().Unix())
+	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 2 AND end_time IS NULL`,
+		db.StatusRunning, instanceID)
+
+	// Provider reports instance as exited (dead)
+	mockClient := &cloud.MockClient{
+		ProviderVal: cloud.ProviderVastai,
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return &cloud.Instance{Status: cloud.ProviderStatusExited}, nil
+		},
+	}
+
+	// Sync fails for job 2 (simulates the race: results not uploaded yet)
+	origSync := reconcileCheckAndSyncJobComplete
+	t.Cleanup(func() { reconcileCheckAndSyncJobComplete = origSync })
+	reconcileCheckAndSyncJobComplete = func(_ context.Context, _ *r2.Client, _ *sql.DB, jobID int64) bool {
+		return false // results not available
+	}
+
+	rec := NewReconciler()
+	rec.deadConfirmTime = -1 // skip hysteresis
+	_, err = rec.ReconcileLaunches(database, []cloud.Client{mockClient}, &r2.Client{})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// Job 2 should be orphaned (reset to queued with orphaned outcome)
+	var jobStatus string
+	database.QueryRow(`SELECT status FROM job_attempts WHERE job_id = 2 ORDER BY id DESC LIMIT 1`).Scan(&jobStatus)
+	if jobStatus != string(db.StatusQueued) {
+		t.Errorf("job 2 status = %q, want %q (should be re-queued after orphaning)", jobStatus, db.StatusQueued)
+	}
+
+	// Check the orphaned attempt outcome
+	attempts, _ := db.GetLaunchAttempts(database, 2)
+	var hasOrphaned bool
+	for _, a := range attempts {
+		if a.Outcome == db.AttemptOutcomeOrphaned {
+			hasOrphaned = true
+		}
+	}
+	if !hasOrphaned {
+		t.Errorf("expected an attempt with orphaned outcome for job 2")
+	}
+}
+
 func TestReconcileLaunches_RunningInstance(t *testing.T) {
 	database := setupTestDB(t)
 	defer database.Close()

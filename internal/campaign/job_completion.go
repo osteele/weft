@@ -49,28 +49,42 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 
 	// Check for .complete marker
 	completeKey := r2keys.JobAttemptComplete(jobID, runID)
-	exists, err := r2c.ObjectExists(ctx, completeKey)
-	if err != nil || !exists {
+	markerData, markerErr := r2c.GetObject(ctx, completeKey)
+	if markerErr != nil || len(markerData) == 0 {
 		return false
 	}
 
 	// Download results to parse exit code and times
 	resultPrefix := r2keys.JobAttemptResultsPrefix(jobID, runID)
-	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-complete-%d-*", jobID))
-	if err != nil {
-		return false
-	}
-	defer os.RemoveAll(tmpDir)
+	var exitCode *int
+	var startTimeUnix, endTimeUnix int64
+	var failureReason string
+	source := "results"
 
-	if err := r2c.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
-		slog.Warn("failed to download results for job", "component", "watch", "job_id", jobID, "error", err)
-		return false
+	if tmpDir, err := os.MkdirTemp("", fmt.Sprintf("weft-complete-%d-*", jobID)); err == nil {
+		defer os.RemoveAll(tmpDir)
+		if err := r2c.DownloadResults(ctx, resultPrefix, tmpDir); err != nil {
+			slog.Warn("results download failed, trying .complete marker fallback",
+				"component", "reconcile", "job_id", jobID, "run_id", runID, "error", err)
+		} else {
+			jobIDStr := strconv.FormatInt(jobID, 10)
+			exitCode, startTimeUnix, endTimeUnix, failureReason = db.ParseCloudJobResult(tmpDir, jobIDStr)
+		}
 	}
 
-	jobIDStr := strconv.FormatInt(jobID, 10)
-	exitCode, startTimeUnix, endTimeUnix, failureReason := db.ParseCloudJobResult(tmpDir, jobIDStr)
+	// Fallback to .complete marker content if results haven't been uploaded yet
 	if exitCode == nil {
-		return false
+		if code, parseErr := strconv.Atoi(strings.TrimSpace(string(markerData))); parseErr == nil {
+			exitCode = &code
+			source = "marker-fallback"
+			slog.Debug("using exit code from .complete marker (results not yet available)",
+				"component", "reconcile", "job_id", jobID, "run_id", runID, "exit_code", code)
+		} else {
+			slog.Warn("failed to parse exit code from .complete marker",
+				"component", "reconcile", "job_id", jobID, "run_id", runID,
+				"marker_content", string(markerData), "error", parseErr)
+			return false
+		}
 	}
 
 	// If no start_time from completion record, try .started marker
@@ -81,13 +95,15 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 	}
 
 	if _, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason); err != nil {
-		slog.Warn("failed to record completion for job", "component", "watch", "job_id", jobID, "error", err)
+		slog.Warn("failed to record completion for job",
+			"component", "reconcile", "job_id", jobID, "source", source, "error", err)
 		return false
 	}
 
 	// Don't clean up R2 markers here — leave them for the full sync pass
 	// which also imports phase timings and caches logs.
 
-	slog.Info("synced completion for job", "component", "watch", "job_id", jobID, "exit_code", *exitCode)
+	slog.Info("synced job completion", "component", "reconcile", "job_id", jobID,
+		"exit_code", *exitCode, "source", source)
 	return true
 }
