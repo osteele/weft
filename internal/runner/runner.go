@@ -134,7 +134,7 @@ func (r *Runner) Run() error {
 		for _, jobIDStr := range ids {
 			jobID := mustParseInt64(jobIDStr)
 			paths := NewJobPaths(r.logDir, jobID)
-			WriteKillReasonFile(paths, "runner_shutdown")
+			WriteKillReasonFile(paths, KillReasonRunnerShutdown)
 		}
 		close(r.stopCh)
 	}()
@@ -650,7 +650,7 @@ func (r *Runner) refreshRunningJobs() {
 			fmt.Printf("Job %d process %d is stopped (state T) - marking as failed\n", jobID, checkPID)
 			oplog.LogJob("job.stopped_detected", jobID, "", oplog.WithDetailf("pid=%d state=T", checkPID))
 
-			WriteKillReasonFile(paths, "stopped_detected")
+			WriteKillReasonFile(paths, KillReasonStoppedDetected)
 
 			if hasPGID {
 				KillProcessGroup(pgid)
@@ -665,7 +665,7 @@ func (r *Runner) refreshRunningJobs() {
 			rs := r.state.Running[jobIDStr]
 			WriteRusageFile(paths, rs)
 			endTime := time.Now().Unix()
-			WriteCompletionRecord(paths, stoppedEI, rs, "stopped_detected", "stopped", rs.StartedAt, endTime, nil)
+			WriteCompletionRecord(paths, stoppedEI, rs, KillReasonStoppedDetected, "stopped", rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 			r.state.RemoveRunning(jobIDStr)
 			CleanupPIDFiles(paths)
@@ -691,7 +691,7 @@ func (r *Runner) refreshRunningJobs() {
 
 		// Wrapper gone — kill orphaned process group
 		if hasPGID && CheckPIDAlive(pgid) {
-			WriteKillReasonFile(paths, "orphan")
+			WriteKillReasonFile(paths, KillReasonOrphan)
 			fmt.Printf("Killing orphaned process group %d for job %d\n", pgid, jobID)
 			KillProcessGroup(pgid)
 			oplog.LogJob("job.orphan_killed", jobID, "", oplog.WithDetailf("pgid=%d", pgid))
@@ -704,7 +704,7 @@ func (r *Runner) refreshRunningJobs() {
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
 			endTime := time.Now().Unix()
 			rs := r.state.Running[jobIDStr]
-			WriteCompletionRecord(paths, orphanEI, rs, "orphan", "orphan", rs.StartedAt, endTime, nil)
+			WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, KillReasonOrphan, rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 		}
 		rs := r.state.Running[jobIDStr]

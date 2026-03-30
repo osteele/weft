@@ -287,6 +287,14 @@ func ReadFailureReasonFile(path string) string {
 	return readReasonFile(path)
 }
 
+// Kill reason constants written to the kill_reason file before sending signals.
+const (
+	KillReasonUserKill        = "user_kill"
+	KillReasonRunnerShutdown  = "runner_shutdown"
+	KillReasonStoppedDetected = "stopped_detected"
+	KillReasonOrphan          = "orphan"
+)
+
 // WriteKillReasonFile writes the reason a job was killed, before sending the kill signal.
 func WriteKillReasonFile(paths JobPaths, reason string) error {
 	return writeReasonFile(paths.KillReason, reason)

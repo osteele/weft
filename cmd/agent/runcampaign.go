@@ -502,7 +502,7 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 
 				pgidPath := filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID))
 				if pgid, ok := runner.ReadPIDFile(pgidPath); ok {
-					runner.WriteKillReasonFile(runner.NewJobPaths(logDir, jobID), "user_kill")
+					runner.WriteKillReasonFile(runner.NewJobPaths(logDir, jobID), runner.KillReasonUserKill)
 					runner.KillProcessGroup(pgid)
 				}
 
