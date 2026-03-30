@@ -304,7 +304,22 @@ func runHostData(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("record asset: %w", err)
 			}
 		}
-		fmt.Printf("Found %d asset(s)\n", len(entries))
+		fmt.Printf("Found %d HF asset(s)\n", len(entries))
+
+		fmt.Printf("Scanning corpus directory on %s...\n", host)
+		corpusEntries, err := dataloc.ScanCorpusDir(host)
+		if err != nil {
+			return fmt.Errorf("scan corpus dir: %w", err)
+		}
+		for _, entry := range corpusEntries {
+			entry.LastSeen = now
+			if err := dataloc.RecordAsset(database, entry); err != nil {
+				return fmt.Errorf("record asset: %w", err)
+			}
+		}
+		if len(corpusEntries) > 0 {
+			fmt.Printf("Found %d corpus asset(s)\n", len(corpusEntries))
+		}
 	}
 
 	entries, err := dataloc.ListHostAssets(database, host)

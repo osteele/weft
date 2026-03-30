@@ -214,46 +214,63 @@ func PrefetchInputSizes(inputs []string, onProgress func(resolved, total int)) {
 	saveDiskCache()
 }
 
-// ResolveInputSizes computes the total size in bytes of all hf:* model refs
-// in the given input list. It first checks the local host_data DB for known sizes,
-// falling back to the HF API for unknown models.
-// Non-HF inputs are ignored.
+// ResolveInputSizes computes the total size in bytes of all sized asset refs
+// in the given input list. HF models are resolved via the HF API (with local
+// DB fallback). Corpus assets are resolved from the host_data DB only.
+// Other input types are ignored.
 func ResolveInputSizes(inputs []string, localDB *sql.DB) (int64, error) {
 	seen := make(map[string]bool)
 	var totalBytes int64
 
 	for _, input := range inputs {
 		asset, ok := ParseAssetRef(input)
-		if !ok || asset.Kind != AssetHFModel {
+		if !ok {
 			continue
 		}
-		if seen[asset.ID] {
+		key := asset.Ref()
+		if seen[key] {
 			continue
 		}
-		seen[asset.ID] = true
+		seen[key] = true
 
-		size, err := resolveModelSize(asset, localDB)
-		if err != nil {
-			return totalBytes, err
+		switch asset.Kind {
+		case AssetHFModel:
+			size, err := resolveModelSize(asset, localDB)
+			if err != nil {
+				return totalBytes, err
+			}
+			totalBytes += size
+		case AssetCorpus:
+			totalBytes += resolveAssetSizeFromDB(asset, localDB)
 		}
-		totalBytes += size
 	}
 
 	return totalBytes, nil
 }
 
+// resolveAssetSizeFromDB looks up the size of an asset from the host_data table.
+// Returns 0 if the asset is not found or has no recorded size.
+func resolveAssetSizeFromDB(asset DataAsset, localDB *sql.DB) int64 {
+	if localDB == nil {
+		return 0
+	}
+	entries, err := FindAssetHosts(localDB, asset)
+	if err != nil {
+		return 0
+	}
+	for _, e := range entries {
+		if e.SizeBytes > 0 {
+			return e.SizeBytes
+		}
+	}
+	return 0
+}
+
 // resolveModelSize returns the size of a single model, checking the local DB
 // first and falling back to the HF API.
 func resolveModelSize(asset DataAsset, localDB *sql.DB) (int64, error) {
-	if localDB != nil {
-		entries, err := FindAssetHosts(localDB, asset)
-		if err == nil {
-			for _, e := range entries {
-				if e.SizeBytes > 0 {
-					return e.SizeBytes, nil
-				}
-			}
-		}
+	if size := resolveAssetSizeFromDB(asset, localDB); size > 0 {
+		return size, nil
 	}
 	return FetchHFModelSize(asset.ID)
 }

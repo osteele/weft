@@ -85,6 +85,19 @@ import torch
 			},
 		},
 		{
+			name: "corpus input",
+			content: `# /// script
+# [tool.weft]
+# gpu-mem = 24
+# inputs = ["hf:bert-base-uncased", "corpus:penn-treebank/conllu"]
+# ///
+`,
+			want: &ScriptMeta{
+				GPUMemGB: 24,
+				Inputs:   []string{"hf:bert-base-uncased", "corpus:penn-treebank/conllu"},
+			},
+		},
+		{
 			name: "mixed with uv dependencies",
 			content: `# /// script
 # requires-python = ">=3.10"

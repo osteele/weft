@@ -15,6 +15,7 @@ const (
 	AssetHFDataset  AssetKind = "hf-dataset"
 	AssetCheckpoint AssetKind = "checkpoint"
 	AssetJobOutput  AssetKind = "job-output"
+	AssetCorpus     AssetKind = "corpus"
 )
 
 // DataAsset represents a data asset that exists on one or more hosts.
@@ -43,6 +44,8 @@ func ParseAssetRef(ref string) (DataAsset, bool) {
 				return DataAsset{Kind: AssetCheckpoint, ID: id}, true
 			case "job-output":
 				return DataAsset{Kind: AssetJobOutput, ID: id}, true
+			case "corpus":
+				return DataAsset{Kind: AssetCorpus, ID: id}, true
 			default:
 				return DataAsset{}, false
 			}
@@ -62,6 +65,8 @@ func (a DataAsset) Ref() string {
 		return "checkpoint:" + a.ID
 	case AssetJobOutput:
 		return "job-output:" + a.ID
+	case AssetCorpus:
+		return "corpus:" + a.ID
 	default:
 		return string(a.Kind) + ":" + a.ID
 	}
@@ -113,20 +118,7 @@ func ClassifyInputs(inputs []string) (assetRefs []string, filePaths []string) {
 }
 
 // String returns the canonical ref string for a DataAsset.
-func (a DataAsset) String() string {
-	switch a.Kind {
-	case AssetHFModel:
-		return "hf:" + a.ID
-	case AssetHFDataset:
-		return "hf-dataset:" + a.ID
-	case AssetCheckpoint:
-		return "checkpoint:" + a.ID
-	case AssetJobOutput:
-		return "job-output:" + a.ID
-	default:
-		return string(a.Kind) + ":" + a.ID
-	}
-}
+func (a DataAsset) String() string { return a.Ref() }
 
 // HostDataEntry records that a specific asset exists on a specific host.
 type HostDataEntry struct {

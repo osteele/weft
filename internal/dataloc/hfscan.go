@@ -61,18 +61,7 @@ func parseHFCacheDetailedOutput(output string, host string) []HostDataEntry {
 			continue
 		}
 
-		var path string
-		var sizeBytes int64
-
-		// Try du -sb format: "<bytes>\t<path>"
-		if idx := strings.IndexByte(line, '\t'); idx > 0 {
-			sizeStr := line[:idx]
-			path = strings.TrimSpace(line[idx+1:])
-			sizeBytes, _ = strconv.ParseInt(sizeStr, 10, 64)
-		} else {
-			// Fallback: plain path from ls -1d
-			path = line
-		}
+		path, sizeBytes := parseDuLine(line)
 
 		// Extract directory name from path
 		parts := strings.Split(path, "/")
@@ -91,6 +80,18 @@ func parseHFCacheDetailedOutput(output string, host string) []HostDataEntry {
 		})
 	}
 	return entries
+}
+
+// parseDuLine parses a line of du output in "<bytes>\t<path>" format.
+// Falls back to treating the whole line as a plain path with size 0.
+func parseDuLine(line string) (path string, sizeBytes int64) {
+	if idx := strings.IndexByte(line, '\t'); idx > 0 {
+		sizeBytes, _ = strconv.ParseInt(line[:idx], 10, 64)
+		path = strings.TrimSpace(line[idx+1:])
+	} else {
+		path = line
+	}
+	return
 }
 
 // parseHFCacheOutput parses `ls` output of HF cache directories into DataAssets.

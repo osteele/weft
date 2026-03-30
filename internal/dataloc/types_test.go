@@ -14,6 +14,8 @@ func TestParseAssetRef(t *testing.T) {
 		{"hf-dataset:allenai/c4", DataAsset{AssetHFDataset, "allenai/c4"}, true},
 		{"checkpoint:llama-ft-v1", DataAsset{AssetCheckpoint, "llama-ft-v1"}, true},
 		{"checkpoint:run-42/best", DataAsset{AssetCheckpoint, "run-42/best"}, true},
+		{"corpus:penn-treebank/conllu", DataAsset{AssetCorpus, "penn-treebank/conllu"}, true},
+		{"corpus:universal-dependencies/en_ewt", DataAsset{AssetCorpus, "universal-dependencies/en_ewt"}, true},
 		// Invalid cases
 		{"", DataAsset{}, false},
 		{"hf:", DataAsset{}, false},
@@ -43,6 +45,7 @@ func TestDataAsset_String(t *testing.T) {
 		{DataAsset{AssetHFModel, "meta-llama/Llama-3-8B"}, "hf:meta-llama/Llama-3-8B"},
 		{DataAsset{AssetHFDataset, "wikitext"}, "hf-dataset:wikitext"},
 		{DataAsset{AssetCheckpoint, "llama-ft-v1"}, "checkpoint:llama-ft-v1"},
+		{DataAsset{AssetCorpus, "penn-treebank/conllu"}, "corpus:penn-treebank/conllu"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
@@ -64,6 +67,7 @@ func TestParseInputRef(t *testing.T) {
 		{"hf:meta-llama/Llama-3-8B", true, ""},
 		{"hf-dataset:wikitext", true, ""},
 		{"checkpoint:llama-ft-v1", true, ""},
+		{"corpus:penn-treebank/conllu", true, ""},
 		// File paths
 		{"~/sources/vidur/data/", false, "~/sources/vidur/data/"},
 		{"/absolute/path/to/data", false, "/absolute/path/to/data"},
@@ -150,6 +154,7 @@ func TestParseAssetRef_Roundtrip(t *testing.T) {
 		"hf:meta-llama/Llama-3-8B",
 		"hf-dataset:wikitext",
 		"checkpoint:llama-ft-v1",
+		"corpus:penn-treebank/conllu",
 	}
 	for _, ref := range refs {
 		asset, ok := ParseAssetRef(ref)
