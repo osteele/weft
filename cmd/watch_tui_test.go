@@ -475,7 +475,7 @@ func TestSystemWatchModelViewShowsSelectedUnplacedReasonInFooter(t *testing.T) {
 func TestSystemWatchModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.T) {
 	m := watchModel{
 		mode:   watchModeSystem,
-		width:  90,
+		width:  120,
 		height: 12,
 		cursor: 0,
 		unplacedJobs: []*db.Job{
@@ -501,6 +501,92 @@ func TestSystemWatchModelViewTruncatesSelectedUnplacedReasonInFooter(t *testing.
 	}
 	if strings.Contains(out, "another long reason") {
 		t.Fatalf("footer should omit overflowing detail, got:\n%s", out)
+	}
+}
+
+func TestSystemWatchModelSelectedCloudJob(t *testing.T) {
+	cloudInstance := &db.Launch{
+		ID:       5,
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	}
+	job88 := &db.Job{ID: 88, Status: db.StatusRunning, WorkingDir: "/workspace/proj", Description: "train"}
+	job89 := &db.Job{ID: 89, Status: db.StatusQueued, WorkingDir: "/workspace/proj", Description: "eval"}
+
+	m := watchModel{
+		mode:           watchModeSystem,
+		width:          120,
+		height:         20,
+		cloudInstances: []*db.Launch{cloudInstance},
+		instanceIDs:    []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
+			5: {
+				Launch: cloudInstance,
+				Jobs:   []*db.Job{job88, job89},
+			},
+		},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	// cursor 0 = instance header → no cloud job selected
+	m.cursor = 0
+	if got := m.selectedCloudJob(); got != nil {
+		t.Errorf("cursor 0: expected nil (instance header), got job %d", got.ID)
+	}
+
+	// cursor 1 = first job row (job 88)
+	m.cursor = 1
+	if got := m.selectedCloudJob(); got == nil || got.ID != 88 {
+		t.Errorf("cursor 1: expected job 88, got %v", got)
+	}
+
+	// cursor 2 = second job row (job 89)
+	m.cursor = 2
+	if got := m.selectedCloudJob(); got == nil || got.ID != 89 {
+		t.Errorf("cursor 2: expected job 89, got %v", got)
+	}
+
+	// cursor 3 = past cloud section → nil
+	m.cursor = 3
+	if got := m.selectedCloudJob(); got != nil {
+		t.Errorf("cursor 3: expected nil, got job %d", got.ID)
+	}
+}
+
+func TestSystemWatchModelSelectableRowCountIncludesCloudJobs(t *testing.T) {
+	cloudInstance := &db.Launch{
+		ID:       5,
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "A100",
+	}
+
+	m := watchModel{
+		mode:           watchModeSystem,
+		width:          120,
+		height:         20,
+		cloudInstances: []*db.Launch{cloudInstance},
+		instanceIDs:    []int64{5},
+		updates: map[int64]campaign.InstanceUpdate{
+			5: {
+				Launch: cloudInstance,
+				Jobs: []*db.Job{
+					{ID: 88, Status: db.StatusRunning},
+					{ID: 89, Status: db.StatusQueued},
+				},
+			},
+		},
+		onPremHosts: []onPremHostSummary{
+			{Name: "cool30", Jobs: []*db.Job{{ID: 41, Status: db.StatusRunning, Host: "cool30"}}},
+		},
+		unplacedJobs:   []*db.Job{{ID: 123, Status: db.StatusQueued}},
+		jobProgressHWM: map[int64]int{},
+	}
+
+	// 1 instance header + 2 job rows + 1 on-prem job + 1 unplaced = 5
+	if got := m.selectableRowCount(); got != 5 {
+		t.Errorf("selectableRowCount() = %d, want 5", got)
 	}
 }
 

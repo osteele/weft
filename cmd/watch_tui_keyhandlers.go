@@ -65,6 +65,10 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.retryFailedInstances(m.retryExtraAttempts)
 		}
 	case "u":
+		// Try cloud job row first
+		if job := m.selectedCloudJob(); job != nil && job.EffectiveStatus() == db.StatusQueued {
+			return m, requestWatchJobUnplace(m.database, job.ID)
+		}
 		job := m.selectedUnplacedJob()
 		if job == nil {
 			// Try on-prem job (system mode)
@@ -75,8 +79,30 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if job == nil || job.EffectiveStatus() != db.StatusQueued {
 			return m, nil
 		}
-		if job.HasInventoryHost() || job.Host == "" {
-			return m, requestWatchJobUnplace(m.database, job.ID)
+		return m, requestWatchJobUnplace(m.database, job.ID)
+	case "x":
+		var job *db.Job
+		if j := m.selectedCloudJob(); j != nil && j.EffectiveStatus() == db.StatusRunning {
+			job = j
+		} else if m.mode == watchModeSystem {
+			if j := m.selectedOnPremJob(); j != nil && j.EffectiveStatus() == db.StatusRunning {
+				job = j
+			}
+		}
+		if job == nil {
+			if j := m.selectedUnplacedJob(); j != nil && j.EffectiveStatus() == db.StatusQueued {
+				job = j
+			}
+		}
+		if job != nil {
+			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Killing job #%d...", job.ID), false)
+			return m, tea.Batch(flashCmd, requestWatchJobKill(m.database, job.ID))
+		}
+	case "t":
+		// Terminate a cloud instance
+		if instID := m.selectedCloudInstanceID(); instID != 0 {
+			flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Terminating instance #%d...", instID), false)
+			return m, tea.Batch(flashCmd, requestWatchInstanceTerminate(m.database, instID))
 		}
 	case "s":
 		job := m.selectedUnplacedJob()

@@ -10,6 +10,22 @@ import (
 	"github.com/osteele/weft/internal/db"
 )
 
+// renderStructuredBlock renders an instance block's structured lines, making
+// the instance header and job rows selectable while other lines are plain.
+func renderStructuredBlock(lines []watchInstanceLine, addSelectable, addPlain func(string)) {
+	if len(lines) == 0 {
+		return
+	}
+	addSelectable(lines[0].text)
+	for _, sl := range lines[1:] {
+		if sl.jobID != 0 {
+			addSelectable(sl.text)
+		} else {
+			addPlain(sl.text)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
@@ -96,19 +112,14 @@ func (m watchModel) renderInstanceView() (string, int) {
 					JobAttemptOutcomes: info.outcomes,
 				}
 				resolved := 0
-				lines := formatWatchInstanceBlockLines(update, nil, watchInstanceBlockOptions{
+				structured := formatWatchInstanceBlockStructured(update, nil, watchInstanceBlockOptions{
 					spinner:                  m.spinner.View(),
 					showSpinnerIfNonTerminal: true,
 					resolvedJobsOverride:     &resolved,
 					dimJobStatuses:           true,
 					predecessors:             donors,
 				})
-				if len(lines) > 0 {
-					addSelectable(lines[0])
-					for _, line := range lines[1:] {
-						addLine(line)
-					}
-				}
+				renderStructuredBlock(structured, addSelectable, addLine)
 			} else {
 				addLine(m.spinner.View() + fmt.Sprintf(" Instance %d — waiting for data...", id))
 			}
@@ -116,15 +127,10 @@ func (m watchModel) renderInstanceView() (string, int) {
 			continue
 		}
 
-		lines := formatWatchInstanceBlockLines(u, m.jobProgressHWM, watchInstanceBlockOptions{
+		structured := formatWatchInstanceBlockStructured(u, m.jobProgressHWM, watchInstanceBlockOptions{
 			predecessors: donors,
 		})
-		if len(lines) > 0 {
-			addSelectable(lines[0])
-			for _, line := range lines[1:] {
-				addLine(line)
-			}
-		}
+		renderStructuredBlock(structured, addSelectable, addLine)
 		addLine("")
 	}
 
@@ -152,11 +158,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	if !m.done {
-		hint := "j/k scroll  ^u/^d page  g/G top/bottom  s submit  q quit (instances continue in background)"
+		hint := "u unplace  x kill  t terminate  s submit  q quit (instances run in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "j/k scroll  ^u/^d page  g/G top/bottom  s submit  r retry  q quit (instances continue in background)"
+			hint = "u unplace  x kill  t terminate  s submit  r retry  q quit (instances run in background)"
 		} else if len(m.unplacedJobs) > 0 {
-			hint = "j/k scroll  ^u/^d page  g/G top/bottom  s submit  l launch  q quit (instances continue in background)"
+			hint = "u unplace  x kill  t terminate  s submit  l launch  q quit (instances run in background)"
 		}
 		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))
@@ -222,16 +228,15 @@ func (m watchModel) renderSystemView() (string, int) {
 			}
 			update := normalizeWatchInstanceUpdate(m.updates[ci.ID], ci)
 			donors := m.cachedReplacementChains[ci.ID]
-			lines := formatWatchInstanceBlockLines(update, m.jobProgressHWM, watchInstanceBlockOptions{
+			structured := formatWatchInstanceBlockStructured(update, m.jobProgressHWM, watchInstanceBlockOptions{
 				predecessors: donors,
 			})
-			if len(lines) == 0 {
+			if len(structured) == 0 {
 				continue
 			}
-			addSelectable(truncate(lines[0], width))
-			for _, line := range lines[1:] {
-				addPlain(truncate(line, width))
-			}
+			truncSelect := func(s string) { addSelectable(truncate(s, width)) }
+			truncPlain := func(s string) { addPlain(truncate(s, width)) }
+			renderStructuredBlock(structured, truncSelect, truncPlain)
 		}
 	}
 	addPlain("")
@@ -291,9 +296,9 @@ func (m watchModel) renderSystemView() (string, int) {
 		footerParts = append(footerParts, m.retryResult)
 	}
 
-	controls := "[^u/^d] page  [u] unplace  [s] submit  [l] launch  [r] retry  [q] quit"
+	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [r] retry  [q] quit"
 	if !m.hasRetryableFailures() {
-		controls = "[^u/^d] page  [u] unplace  [s] submit  [l] launch  [q] quit"
+		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [q] quit"
 	}
 	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))
@@ -489,7 +494,7 @@ func (m watchModel) truncateFooterDetail(detail string, prefixWidth int) string 
 	if m.width <= 0 {
 		return detail
 	}
-	controlsWidth := lipgloss.Width("[u] unplace  [s] submit  [l] launch  [r] retry  [q] quit")
+	controlsWidth := lipgloss.Width("[u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [r] retry  [q] quit")
 	available := m.width - controlsWidth
 	if prefixWidth > 0 {
 		available -= prefixWidth + lipgloss.Width("  ")

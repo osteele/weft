@@ -17,8 +17,21 @@ func UnplaceQueuedJob(database *sql.DB, job *db.Job, opts ExecuteOptions) (Resul
 	if job.EffectiveStatus() != db.StatusQueued {
 		return Result{}, fmt.Errorf("job %d (status: %s): %w", job.ID, job.EffectiveStatus(), ErrNotQueued)
 	}
+
+	// Cloud jobs: close the attempt and create a fresh unplaced one.
+	if job.IsRentalJob() {
+		if err := db.ResetJobToUnplaced(database, job.ID); err != nil {
+			return Result{}, fmt.Errorf("unplace cloud job %d: %w", job.ID, err)
+		}
+		return Result{
+			Success: true,
+			JobID:   job.ID,
+			Message: fmt.Sprintf("Job %d moved from cloud instance back to unplaced jobs", job.ID),
+		}, nil
+	}
+
 	if !job.HasInventoryHost() {
-		return Result{}, fmt.Errorf("job %d is not an inventory queued job", job.ID)
+		return Result{}, fmt.Errorf("job %d is not a placed queued job", job.ID)
 	}
 	if job.UsesSlurm() {
 		return Result{}, fmt.Errorf("job %d is not managed by an on-prem local queue", job.ID)

@@ -48,24 +48,15 @@ func (m *watchModel) clampCursor() {
 func (m watchModel) selectableRowCount() int {
 	switch {
 	case m.mode.isInstanceBased():
-		count := 0
-		for _, id := range m.instanceIDs {
-			if !m.cachedHiddenIDs[id] {
-				count++
-			}
-		}
+		count := m.selectableCloudRowCount()
 		count += len(m.unplacedJobs)
 		return count
 	case m.mode == watchModeSystem:
-		count := len(m.unplacedJobs)
-		for _, ci := range m.cloudInstances {
-			if !m.cachedHiddenIDs[ci.ID] {
-				count++
-			}
-		}
+		count := m.selectableCloudRowCount()
 		for _, host := range m.onPremHosts {
 			count += len(host.Jobs)
 		}
+		count += len(m.unplacedJobs)
 		return count
 	case m.mode == watchModeProject:
 		return len(m.projectLines)
@@ -83,11 +74,132 @@ func (m watchModel) visibleCloudInstanceCount() int {
 	return count
 }
 
+// selectableCloudRowCount returns the total number of selectable rows in the
+// cloud instances section: one header per visible instance plus one per job.
+func (m watchModel) selectableCloudRowCount() int {
+	count := 0
+	switch {
+	case m.mode == watchModeSystem:
+		for _, ci := range m.cloudInstances {
+			if m.cachedHiddenIDs[ci.ID] {
+				continue
+			}
+			count++ // instance header
+			if u, ok := m.updates[ci.ID]; ok {
+				count += len(u.Jobs)
+			}
+		}
+	case m.mode.isInstanceBased():
+		for _, id := range m.instanceIDs {
+			if m.cachedHiddenIDs[id] {
+				continue
+			}
+			count++ // instance header
+			if u, ok := m.updates[id]; ok {
+				count += len(u.Jobs)
+			} else if info, ok := m.initInfo[id]; ok {
+				count += len(info.jobs)
+			}
+		}
+	}
+	return count
+}
+
+// selectedCloudInstanceID returns the cloud instance ID when the cursor is
+// on an instance header row, or 0 if the cursor is elsewhere.
+func (m watchModel) selectedCloudInstanceID() int64 {
+	index := m.cursor
+	switch {
+	case m.mode == watchModeSystem:
+		for _, ci := range m.cloudInstances {
+			if m.cachedHiddenIDs[ci.ID] {
+				continue
+			}
+			if index == 0 {
+				return ci.ID
+			}
+			index--
+			if u, ok := m.updates[ci.ID]; ok {
+				index -= len(u.Jobs)
+			}
+			if index < 0 {
+				return 0
+			}
+		}
+	case m.mode.isInstanceBased():
+		for _, id := range m.instanceIDs {
+			if m.cachedHiddenIDs[id] {
+				continue
+			}
+			if index == 0 {
+				return id
+			}
+			index--
+			if u, ok := m.updates[id]; ok {
+				index -= len(u.Jobs)
+			} else if info, ok := m.initInfo[id]; ok {
+				index -= len(info.jobs)
+			}
+			if index < 0 {
+				return 0
+			}
+		}
+	}
+	return 0
+}
+
+// selectedCloudJob returns the cloud instance job at the cursor position,
+// or nil if the cursor is not on a cloud job row.
+func (m watchModel) selectedCloudJob() *db.Job {
+	index := m.cursor
+	switch {
+	case m.mode == watchModeSystem:
+		for _, ci := range m.cloudInstances {
+			if m.cachedHiddenIDs[ci.ID] {
+				continue
+			}
+			if index == 0 {
+				return nil // cursor on instance header
+			}
+			index--
+			u, ok := m.updates[ci.ID]
+			if !ok {
+				continue
+			}
+			if index < len(u.Jobs) {
+				return u.Jobs[index]
+			}
+			index -= len(u.Jobs)
+		}
+	case m.mode.isInstanceBased():
+		for _, id := range m.instanceIDs {
+			if m.cachedHiddenIDs[id] {
+				continue
+			}
+			if index == 0 {
+				return nil // cursor on instance header
+			}
+			index--
+			var jobs []*db.Job
+			if u, ok := m.updates[id]; ok {
+				jobs = u.Jobs
+			} else if info, ok := m.initInfo[id]; ok {
+				jobs = info.jobs
+			}
+			if index < len(jobs) {
+				return jobs[index]
+			}
+			index -= len(jobs)
+		}
+	}
+	return nil
+}
+
 func (m watchModel) selectedOnPremJob() *db.Job {
 	if m.mode != watchModeSystem {
 		return nil
 	}
-	index := m.cursor - m.visibleCloudInstanceCount()
+	index := m.cursor - m.selectableCloudRowCount()
 	if index < 0 {
 		return nil
 	}
@@ -103,7 +215,7 @@ func (m watchModel) selectedOnPremJob() *db.Job {
 func (m watchModel) selectedUnplacedJob() *db.Job {
 	switch m.mode {
 	case watchModeSystem:
-		index := m.cursor - m.visibleCloudInstanceCount()
+		index := m.cursor - m.selectableCloudRowCount()
 		if index < 0 {
 			return nil
 		}
@@ -118,14 +230,8 @@ func (m watchModel) selectedUnplacedJob() *db.Job {
 		}
 		return m.unplacedJobs[index]
 	default:
-		// In campaign/instance mode, selectable rows are: instances, then unplaced jobs
-		visibleInstances := 0
-		for _, id := range m.instanceIDs {
-			if !m.cachedHiddenIDs[id] {
-				visibleInstances++
-			}
-		}
-		index := m.cursor - visibleInstances
+		// In campaign/instance mode, selectable rows are: instance headers + jobs, then unplaced jobs
+		index := m.cursor - m.selectableCloudRowCount()
 		if index < 0 || index >= len(m.unplacedJobs) {
 			return nil
 		}

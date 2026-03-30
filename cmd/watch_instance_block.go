@@ -29,40 +29,60 @@ func normalizeWatchInstanceUpdate(update campaign.InstanceUpdate, ci *db.Launch)
 	return update
 }
 
-func formatWatchInstanceBlock(update campaign.InstanceUpdate, jobProgressHWM map[int64]int, opts watchInstanceBlockOptions) string {
-	return strings.Join(formatWatchInstanceBlockLines(update, jobProgressHWM, opts), "\n")
+// watchInstanceLine is a single line in a rendered instance block.
+// jobID is non-zero for lines that represent a job row.
+type watchInstanceLine struct {
+	text  string
+	jobID int64
 }
 
-func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHWM map[int64]int, opts watchInstanceBlockOptions) []string {
+func watchInstanceLineTexts(lines []watchInstanceLine) []string {
+	texts := make([]string, len(lines))
+	for i, l := range lines {
+		texts[i] = l.text
+	}
+	return texts
+}
+
+func formatWatchInstanceBlock(update campaign.InstanceUpdate, jobProgressHWM map[int64]int, opts watchInstanceBlockOptions) string {
+	return strings.Join(watchInstanceLineTexts(formatWatchInstanceBlockStructured(update, jobProgressHWM, opts)), "\n")
+}
+
+func formatWatchInstanceBlockStructured(update campaign.InstanceUpdate, jobProgressHWM map[int64]int, opts watchInstanceBlockOptions) []watchInstanceLine {
 	ci := update.Launch
 	if ci == nil {
 		return nil
 	}
 
-	lines := []string{formatWatchInstanceHeaderLine(ci, update.Instance, opts)}
-	lines = append(lines, formatWatchProviderLine(ci, update.Instance))
+	lines := []watchInstanceLine{{text: formatWatchInstanceHeaderLine(ci, update.Instance, opts)}}
+	addLine := func(text string) { lines = append(lines, watchInstanceLine{text: text}) }
+	addJobLine := func(text string, jobID int64) {
+		lines = append(lines, watchInstanceLine{text: text, jobID: jobID})
+	}
+
+	addLine(formatWatchProviderLine(ci, update.Instance))
 	if specLine := formatWatchInstanceSpecLine(update.Instance); specLine != "" {
-		lines = append(lines, specLine)
+		addLine(specLine)
 	}
 
 	activity := formatObservedActivity(update, opts.now)
 	if activity.Bootstrap != "" {
-		lines = append(lines, fmt.Sprintf("  Bootstrap: %s", activity.Bootstrap))
+		addLine(fmt.Sprintf("  Bootstrap: %s", activity.Bootstrap))
 	}
 	if activity.Phase != "" {
-		lines = append(lines, fmt.Sprintf("  Phase: %s", activity.Phase))
+		addLine(fmt.Sprintf("  Phase: %s", activity.Phase))
 	}
 	if label := campaign.TerminationIntentLabel(update.TerminationIntent); label != "" {
-		lines = append(lines, fmt.Sprintf("  Cleanup: %s", label))
+		addLine(fmt.Sprintf("  Cleanup: %s", label))
 		if detail := campaign.TerminationIntentDetail(update.TerminationIntent); detail != "" {
-			lines = append(lines, fmt.Sprintf("  Status: %s", detail))
+			addLine(fmt.Sprintf("  Status: %s", detail))
 		}
 	}
 	if costLine := formatWatchInstanceCostLine(ci, update.Instance, opts.now); costLine != "" {
-		lines = append(lines, costLine)
+		addLine(costLine)
 	}
 	if prevLine := formatPreviousInstanceLine(opts.predecessors, opts.now); prevLine != "" {
-		lines = append(lines, prevLine)
+		addLine(prevLine)
 	}
 
 	if len(update.Jobs) == 0 {
@@ -80,7 +100,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 	if opts.resolvedJobsOverride != nil {
 		resolved = *opts.resolvedJobsOverride
 	}
-	lines = append(lines, fmt.Sprintf("  Jobs: %d/%d resolved", resolved, len(update.Jobs)))
+	addLine(fmt.Sprintf("  Jobs: %d/%d resolved", resolved, len(update.Jobs)))
 
 	projectWidth := len("PROJECT")
 	for _, job := range update.Jobs {
@@ -113,16 +133,16 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 		}
 		projectLabel := campaign.JobProjectLabel(job)
 
-		lines = append(lines, fmt.Sprintf("    %4d  %s  %-*s  %s",
+		addJobLine(fmt.Sprintf("    %4d  %s  %-*s  %s",
 			job.ID,
 			renderWatchJobStatusText(statusText, displayStatus, opts),
 			projectWidth, projectLabel,
 			desc,
-		))
+		), job.ID)
 		if campaign.IsJobTerminal(displayStatuses[i]) && activePhaseJobID == job.ID &&
 			(activePhaseStatus == campaign.PhaseUploading || activePhaseStatus == campaign.PhaseFinalizing) {
 			if summary := formatUploadSummary(update.JobPhaseTimings[job.ID]); summary != "" {
-				lines = append(lines, fmt.Sprintf("          uploads: %s", summary))
+				addLine(fmt.Sprintf("          uploads: %s", summary))
 			}
 		}
 	}

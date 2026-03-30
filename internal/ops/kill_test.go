@@ -264,6 +264,49 @@ func TestUnplaceQueuedJob_DeferredWhenHostOffline(t *testing.T) {
 	}
 }
 
+func TestUnplaceQueuedJob_CloudJob(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	// Create a cloud instance
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	// Create an unplaced job, then assign it to the cloud instance
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "test", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobLaunchID(database, jobID, instanceID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+
+	job, _ := db.GetJobByID(database, jobID)
+	if !job.IsRentalJob() {
+		t.Fatalf("expected job to be rental, got target kind %s", job.TargetKind())
+	}
+
+	result, err := UnplaceQueuedJob(database, job, DefaultOptions())
+	if err != nil {
+		t.Fatalf("UnplaceQueuedJob failed: %v", err)
+	}
+	if !result.Success {
+		t.Error("expected Success to be true")
+	}
+
+	updatedJob, _ := db.GetJobByID(database, jobID)
+	if updatedJob.TargetKind() != db.JobTargetUnplaced {
+		t.Errorf("expected job target kind unplaced, got %s", updatedJob.TargetKind())
+	}
+	if updatedJob.EffectiveStatus() != db.StatusQueued {
+		t.Errorf("expected job status queued, got %s", updatedJob.EffectiveStatus())
+	}
+}
+
 // Note: CancelQueuedJob only makes a single SSH call (removeFromQueueFile),
 // so there's no separate "SyncError" case distinct from QuickTimeout.
 // The connection error case is already covered by TestCancelQueuedJob_QuickTimeout.

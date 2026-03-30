@@ -406,6 +406,12 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case watchSubmitDoneMsg:
 		return m.handleSubmitDone(msg)
 
+	case watchKillDoneMsg:
+		return m.handleActionDone("Kill", msg.message, msg.err)
+
+	case watchTerminateDoneMsg:
+		return m.handleActionDone("Terminate", msg.message, msg.err)
+
 	// --- Auto-pilot messages ---
 	case autoPlaceDoneMsg:
 		return m.handleAutoPlaceDone(msg)

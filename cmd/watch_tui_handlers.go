@@ -130,6 +130,20 @@ func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.C
 }
 
 // ---------------------------------------------------------------------------
+// Update handlers: generic action done (kill, terminate)
+// ---------------------------------------------------------------------------
+
+func (m watchModel) handleActionDone(verb, message string, err error) (tea.Model, tea.Cmd) {
+	if err != nil {
+		return m, m.flash.Set(fmt.Sprintf("%s failed: %v", verb, err), true)
+	}
+	return m, tea.Batch(
+		m.flash.Set(message, false),
+		refreshWatchOnPrem(m.database),
+	)
+}
+
+// ---------------------------------------------------------------------------
 // Update handlers: submit to instance
 // ---------------------------------------------------------------------------
 

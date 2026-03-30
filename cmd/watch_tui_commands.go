@@ -315,6 +315,41 @@ func requestWatchJobSubmit(ctx context.Context, database *sql.DB, r2Client *r2.C
 	}
 }
 
+func requestWatchJobKill(database *sql.DB, jobID int64) tea.Cmd {
+	return func() tea.Msg {
+		msg, err := killOrCancelCloudJob(database, jobID, db.StatusKilled)
+		if err != nil {
+			return watchKillDoneMsg{jobID: jobID, err: err}
+		}
+		if msg != "" {
+			return watchKillDoneMsg{jobID: jobID, message: msg}
+		}
+		// Non-cloud job: use ops.KillJob
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			return watchKillDoneMsg{jobID: jobID, err: fmt.Errorf("get job %d: %w", jobID, err)}
+		}
+		if job == nil {
+			return watchKillDoneMsg{jobID: jobID, err: fmt.Errorf("job %d not found", jobID)}
+		}
+		result, err := ops.KillJob(database, job, ops.OptionsForMode(ops.TimeoutFast))
+		if err != nil {
+			return watchKillDoneMsg{jobID: jobID, err: err}
+		}
+		return watchKillDoneMsg{jobID: jobID, message: result.Message}
+	}
+}
+
+func requestWatchInstanceTerminate(database *sql.DB, instanceID int64) tea.Cmd {
+	return func() tea.Msg {
+		_, errs := terminateInstancesParallel(database, []int64{instanceID})
+		if len(errs) > 0 {
+			return watchTerminateDoneMsg{instanceID: instanceID, err: errs[0]}
+		}
+		return watchTerminateDoneMsg{instanceID: instanceID, message: fmt.Sprintf("Instance %d terminated", instanceID)}
+	}
+}
+
 func refreshWatchOnPrem(database *sql.DB) tea.Cmd {
 	return func() tea.Msg {
 		onPremJobs, err := db.ListActiveOnPremJobs(database)

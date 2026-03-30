@@ -90,6 +90,18 @@ type watchSubmitDoneMsg struct {
 	err        error
 }
 
+type watchKillDoneMsg struct {
+	jobID   int64
+	message string
+	err     error
+}
+
+type watchTerminateDoneMsg struct {
+	instanceID int64
+	message    string
+	err        error
+}
+
 // ---------------------------------------------------------------------------
 // Project-mode messages
 // ---------------------------------------------------------------------------

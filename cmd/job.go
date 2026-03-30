@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/queuejob"
 	"github.com/spf13/cobra"
 )
@@ -32,7 +33,8 @@ Available subcommands:
   retry     Alias for restart
   list      List and search job history
   watch     Watch job status changes
-  move      Move a queued job to a different host`,
+  move      Move a queued job to a different host
+  unplace   Move a queued job back to the unplaced pool`,
 }
 
 // Job run subcommand - delegates to main run command
@@ -251,6 +253,23 @@ var jobPredictCmd = &cobra.Command{
 	RunE:  runPredict,
 }
 
+var jobUnplaceCmd = &cobra.Command{
+	Use:   "unplace <job-id>...",
+	Short: "Move a queued job back to the unplaced pool",
+	Long: `Remove the host or instance assignment from a queued job, returning it
+to the unplaced pool where it can be re-placed on a different host or instance.
+
+Works for both on-prem (inventory host) and cloud (rental instance) jobs.
+Only queued jobs can be unplaced — running jobs must be killed first.
+
+Examples:
+  weft job unplace 42
+  weft job unplace 42 43 44
+  weft job unplace 42...44`,
+	Args: usageArgs(cobra.MinimumNArgs(1)),
+	RunE: runJobUnplace,
+}
+
 var jobTagCmd = &cobra.Command{
 	Use:   "tag",
 	Short: tagCmd.Short,
@@ -303,6 +322,7 @@ func init() {
 	jobCmd.AddCommand(jobMarkProcessedCmd)
 	jobCmd.AddCommand(jobPruneCmd)
 	jobCmd.AddCommand(jobPredictCmd)
+	jobCmd.AddCommand(jobUnplaceCmd)
 	jobCmd.AddCommand(jobTagCmd)
 	jobTagCmd.AddCommand(jobTagAddCmd)
 	jobTagCmd.AddCommand(jobTagRemoveCmd)
@@ -417,6 +437,43 @@ func runJobMove(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Description: %s\n", job.Description)
 	}
 
+	return nil
+}
+
+func runJobUnplace(cmd *cobra.Command, args []string) error {
+	jobIDs, err := ParseJobIDs(args)
+	if err != nil {
+		return err
+	}
+
+	database, err := db.Open()
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer database.Close()
+
+	var errorsList []string
+	for _, jobID := range jobIDs {
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		if job == nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d not found", jobID))
+			continue
+		}
+		result, err := ops.UnplaceQueuedJob(database, job, ops.OptionsForMode(ops.TimeoutNormal))
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
+			continue
+		}
+		fmt.Println(result.Message)
+	}
+
+	if len(errorsList) > 0 {
+		return fmt.Errorf("errors: %s", strings.Join(errorsList, "; "))
+	}
 	return nil
 }
 
