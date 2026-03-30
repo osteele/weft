@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -16,7 +15,6 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
-	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/r2"
@@ -203,9 +201,12 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	groups := campaign.GroupByAffinity(jobs, dataloc.LookupCachedModelSize)
-	groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
-	groups = campaign.SplitGroupsByImage(groups)
+	r2Client, err := buildR2Client(cfg)
+	if err != nil {
+		slog.Warn("failed to build R2 client for disk estimation", "error", err)
+	}
+
+	groups := campaign.PrepareGroups(jobs, database, campaignLaunchGPU, r2Client)
 
 	if len(groups) == 0 {
 		if campaignLaunchGPU != "" {
@@ -220,32 +221,13 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	reusable, _ := campaign.FindReusableInstances(database)
 	var reuseAssignments []campaign.ReuseAssignment
 	if len(reusable) > 0 {
-		// Flatten all jobs for reuse matching
-		var allJobs []*db.Job
-		for _, g := range groups {
-			allJobs = append(allJobs, g.Jobs...)
-		}
-		sort.Slice(allJobs, func(i, j int) bool {
-			return allJobs[i].ID < allJobs[j].ID
-		})
+		allJobs := campaign.FlattenGroupJobs(groups)
 		var remainingJobs []*db.Job
 		reuseAssignments, remainingJobs = campaign.PlanReuse(allJobs, reusable)
 
 		if len(reuseAssignments) > 0 {
-			// Re-group remaining jobs for provisioning
-			groups = campaign.GroupByAffinity(remainingJobs, dataloc.LookupCachedModelSize)
-			groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
-			groups = campaign.SplitGroupsByImage(groups)
+			groups = campaign.PrepareGroups(remainingJobs, database, campaignLaunchGPU, r2Client)
 		}
-	}
-
-	// Estimate disk needs from HF model inputs
-	r2Client, err := buildR2Client(cfg)
-	if err != nil {
-		slog.Warn("failed to build R2 client for disk estimation", "error", err)
-	}
-	for i := range groups {
-		groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
 	}
 
 	// Parse budget limits
@@ -345,7 +327,8 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groups))
 
 	predCfg := buildPredictorConfig(cfg)
-	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
+	referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(groupOffers)
+	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
 	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
 
 	// Auto-derive budget limits from estimates if not set by CLI
@@ -452,7 +435,8 @@ func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.Insta
 	printSurvivalRejections(groupOffers, minSurvival)
 
 	predCfg := buildPredictorConfig(cfg)
-	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, 0, nil)
+	referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(groupOffers)
+	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")

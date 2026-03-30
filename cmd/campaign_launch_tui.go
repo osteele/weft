@@ -3,7 +3,6 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -347,18 +346,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		}
 		jobs = filterRentalLaunchJobs(jobs)
 
-		groups := campaign.GroupByAffinity(jobs, dataloc.LookupCachedModelSize)
-		groups = campaign.FilterByGPUClass(groups, gpuFilter)
-		groups = campaign.SplitGroupsByImage(groups)
-
-		// Re-estimate disk needs
-		r2Client, err = buildR2Client(cfg)
-		if err != nil {
-			slog.Warn("failed to build R2 client for disk estimation", "error", err)
-		}
-		for i := range groups {
-			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
-		}
+		groups := campaign.PrepareGroups(jobs, database, gpuFilter, r2Client)
 
 		return reconcileDoneMsg{groups: groups}
 	}
@@ -483,7 +471,7 @@ func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cache
 	ch := m.progressCh
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
-	referenceDLPerf := campaign.MedianDLPerf(m.cachedRawOffers)
+	referenceDLPerf := campaign.MedianDLPerfFromRawOffers(m.cachedRawOffers)
 	return func() tea.Msg {
 		var onProgress func(string, int, int)
 		if reportProgress {
@@ -1091,7 +1079,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
-	referenceDLPerf := campaign.MedianDLPerf(m.cachedRawOffers)
+	referenceDLPerf := campaign.MedianDLPerfFromRawOffers(m.cachedRawOffers)
 
 	// Filter cached estimates to selected groups
 	var selectedEstimates []campaign.CostEstimate

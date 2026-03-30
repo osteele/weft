@@ -186,15 +186,11 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 			return launchPlanReadyMsg{err: fmt.Errorf("R2 not configured in ~/.config/weft/config.toml (vastai.r2)")}
 		}
 
-		groups := campaign.GroupByGPUSupremum(jobs)
-		groups = campaign.SplitGroupsByImage(groups)
 		r2Client, err := buildR2Client(cfg)
 		if err != nil {
 			slog.Warn("failed to build R2 client for disk estimation", "error", err)
 		}
-		for i := range groups {
-			groups[i].DiskGB = campaign.EstimateGroupDisk(groups[i], database, r2Client)
-		}
+		groups := campaign.PrepareGroups(jobs, database, "", r2Client)
 
 		opts := campaign.LaunchOpts{Strategy: bidding.StrategyCheap, GPUWarmup: cfg.Campaign.GPUWarmup}
 		if gracePeriod := cfg.DefaultGracePeriod(); gracePeriod != "0" {
