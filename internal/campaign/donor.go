@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/retry"
 )
@@ -206,13 +206,14 @@ func collectHFModels(groups []InstanceGroup) []string {
 	seen := make(map[string]bool)
 	var models []string
 	for _, g := range groups {
-		for _, input := range g.AllInputs() {
-			if strings.HasPrefix(input, "hf:") {
-				model := strings.TrimPrefix(input, "hf:")
-				if !seen[model] {
-					seen[model] = true
-					models = append(models, model)
-				}
+		for _, ref := range g.AllInputs() {
+			asset, ok := dataloc.ParseAssetRef(ref)
+			if !ok || asset.Kind != dataloc.AssetHFModel {
+				continue
+			}
+			if !seen[asset.ID] {
+				seen[asset.ID] = true
+				models = append(models, asset.ID)
 			}
 		}
 	}

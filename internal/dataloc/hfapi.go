@@ -38,31 +38,29 @@ func diskCachePath() string {
 	return filepath.Join(home, ".cache", "weft", "hf-model-sizes.json")
 }
 
-// diskCacheLoaded tracks whether we've loaded from disk this process.
-var diskCacheLoaded bool
+// diskCacheOnce ensures the persistent cache is loaded exactly once per process.
+var diskCacheOnce sync.Once
 
 // loadDiskCache loads the persistent cache into the in-memory sync.Map.
+// It is safe to call from multiple goroutines.
 func loadDiskCache() {
-	if diskCacheLoaded {
-		return
-	}
-	diskCacheLoaded = true
-
-	path := diskCachePath()
-	if path == "" {
-		return
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var entries map[string]int64
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return
-	}
-	for k, v := range entries {
-		hfModelSizeCache.LoadOrStore(k, v)
-	}
+	diskCacheOnce.Do(func() {
+		path := diskCachePath()
+		if path == "" {
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		var entries map[string]int64
+		if err := json.Unmarshal(data, &entries); err != nil {
+			return
+		}
+		for k, v := range entries {
+			hfModelSizeCache.LoadOrStore(k, v)
+		}
+	})
 }
 
 // saveDiskCache writes the in-memory cache to disk.
@@ -89,6 +87,17 @@ func saveDiskCache() {
 		return
 	}
 	_ = os.WriteFile(path, data, 0o644)
+}
+
+// LookupCachedModelSize returns the cached size for a model without making API
+// calls. It checks the in-memory cache and disk cache only. Returns (0, false)
+// if the model size is not cached.
+func LookupCachedModelSize(modelID string) (int64, bool) {
+	loadDiskCache()
+	if v, ok := hfModelSizeCache.Load(modelID); ok {
+		return v.(int64), true
+	}
+	return 0, false
 }
 
 // FetchHFModelSize queries the HuggingFace tree API and sums file sizes.
@@ -252,5 +261,5 @@ func resolveModelSize(asset DataAsset, localDB *sql.DB) (int64, error) {
 // ClearHFModelSizeCache clears the in-process model size cache (for testing).
 func ClearHFModelSizeCache() {
 	hfModelSizeCache = sync.Map{}
-	diskCacheLoaded = false
+	diskCacheOnce = sync.Once{}
 }

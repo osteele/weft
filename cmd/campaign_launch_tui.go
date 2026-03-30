@@ -338,7 +338,7 @@ func (m launchModel) runReconciliation() tea.Cmd {
 		}
 		jobs = filterRentalLaunchJobs(jobs)
 
-		groups := campaign.GroupByGPUSupremum(jobs)
+		groups := campaign.GroupByAffinity(jobs, dataloc.LookupCachedModelSize)
 		groups = campaign.FilterByGPUClass(groups, gpuFilter)
 		groups = campaign.SplitGroupsByImage(groups)
 

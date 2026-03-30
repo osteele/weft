@@ -16,6 +16,7 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/r2"
@@ -202,7 +203,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	groups := campaign.GroupByGPUSupremum(jobs)
+	groups := campaign.GroupByAffinity(jobs, dataloc.LookupCachedModelSize)
 	groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
 	groups = campaign.SplitGroupsByImage(groups)
 
@@ -232,7 +233,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 		if len(reuseAssignments) > 0 {
 			// Re-group remaining jobs for provisioning
-			groups = campaign.GroupByGPUSupremum(remainingJobs)
+			groups = campaign.GroupByAffinity(remainingJobs, dataloc.LookupCachedModelSize)
 			groups = campaign.FilterByGPUClass(groups, campaignLaunchGPU)
 			groups = campaign.SplitGroupsByImage(groups)
 		}

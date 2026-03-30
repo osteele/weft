@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/workdir"
 )
@@ -23,20 +24,55 @@ type InstanceGroup struct {
 	Jobs     []*db.Job
 }
 
+// ModelSizeFunc returns the cached size in bytes for a model ID (without the
+// "hf:" prefix). It must not make network calls. Returns (0, false) if unknown.
+type ModelSizeFunc func(modelID string) (sizeBytes int64, ok bool)
+
 // GroupByGPUSupremum groups unplaced jobs by compatible GPU class, using the
-// maximum memory requirement across the group as the supremum. Jobs with
-// compatible GPU constraints (e.g., "" and "nvidia", or "nvidia" and "ampere")
-// are merged into the same group using the most specific constraint.
+// maximum memory requirement across the group as the supremum. It delegates
+// to [GroupByAffinity] with no size function, so unconstrained jobs are grouped
+// by ref-count overlap only.
 //
 // Returns groups sorted by descending GPU memory.
 func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
-	var groups []InstanceGroup
+	return GroupByAffinity(jobs, nil)
+}
 
+// GroupByAffinity groups unplaced jobs in two phases:
+//
+//  1. Constrained jobs (non-empty GPUClass) are merged by GPU compatibility,
+//     identical to the legacy [GroupByGPUSupremum] behavior.
+//  2. Unconstrained jobs (empty GPUClass) are grouped by shared data affinity
+//     using a greedy algorithm. Jobs sharing HF model inputs are co-located to
+//     amortize downloads. If sizeFunc is nil, affinity is based on ref-count
+//     overlap only.
+//
+// Returns groups sorted by descending GPU memory.
+func GroupByAffinity(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
+	var constrained, unconstrained []*db.Job
 	for _, job := range jobs {
 		if job == nil || job.EffectiveStatus() != db.StatusQueued || job.HasAssignedHost() {
 			continue
 		}
+		if strings.TrimSpace(job.GPUClass) == "" {
+			unconstrained = append(unconstrained, job)
+		} else {
+			constrained = append(constrained, job)
+		}
+	}
 
+	groups := groupConstrained(constrained)
+	affinityGroups := affinityGroupUnconstrained(unconstrained, sizeFunc)
+	groups = append(groups, affinityGroups...)
+
+	sortGroups(groups)
+	return groups
+}
+
+// groupConstrained merges constrained jobs by GPU class compatibility.
+func groupConstrained(jobs []*db.Job) []InstanceGroup {
+	var groups []InstanceGroup
+	for _, job := range jobs {
 		mem := 0
 		if job.GPUMemGB != nil {
 			mem = *job.GPUMemGB
@@ -64,15 +100,147 @@ func GroupByGPUSupremum(jobs []*db.Job) []InstanceGroup {
 			})
 		}
 	}
+	return groups
+}
 
+// affinityGroupUnconstrained groups unconstrained jobs by shared HF model
+// inputs using a greedy algorithm. Jobs are processed in order of descending
+// total input size (so large-model jobs anchor groups), falling back to job ID
+// for determinism.
+func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []InstanceGroup {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	// Pre-compute per-job HF input sets and total sizes for sorting.
+	type jobInfo struct {
+		job       *db.Job
+		hfInputs  map[string]struct{}
+		totalSize int64
+	}
+	infos := make([]jobInfo, 0, len(jobs))
+	for _, job := range jobs {
+		hfInputs := jobHFModelIDs(job)
+		var totalSize int64
+		if sizeFunc != nil {
+			for id := range hfInputs {
+				if sz, ok := sizeFunc(id); ok {
+					totalSize += sz
+				}
+			}
+		}
+		infos = append(infos, jobInfo{job: job, hfInputs: hfInputs, totalSize: totalSize})
+	}
+
+	// Sort by descending total input size, then by job ID for determinism.
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].totalSize != infos[j].totalSize {
+			return infos[i].totalSize > infos[j].totalSize
+		}
+		return infos[i].job.ID < infos[j].job.ID
+	})
+
+	type groupState struct {
+		group   InstanceGroup
+		hfUnion map[string]struct{} // union of HF model IDs across all jobs
+	}
+	var groups []groupState
+
+	const refCountWeight = 10e9 // 10 GB — fallback weight per shared ref when size unknown
+
+	for _, info := range infos {
+		mem := 0
+		if info.job.GPUMemGB != nil {
+			mem = *info.job.GPUMemGB
+		}
+
+		bestIdx := -1
+		var bestScore float64
+		for i, g := range groups {
+			score := sharedInputScore(g.hfUnion, info.hfInputs, sizeFunc, refCountWeight)
+			if score > bestScore {
+				bestScore = score
+				bestIdx = i
+			}
+		}
+
+		if bestIdx >= 0 && bestScore > 0 {
+			g := &groups[bestIdx]
+			g.group.Jobs = append(g.group.Jobs, info.job)
+			if mem > g.group.GPUMemGB {
+				g.group.GPUMemGB = mem
+			}
+			for id := range info.hfInputs {
+				g.hfUnion[id] = struct{}{}
+			}
+		} else {
+			hfUnion := make(map[string]struct{}, len(info.hfInputs))
+			for id := range info.hfInputs {
+				hfUnion[id] = struct{}{}
+			}
+			groups = append(groups, groupState{
+				group: InstanceGroup{
+					GPUClass: "", // unconstrained
+					GPUMemGB: mem,
+					Jobs:     []*db.Job{info.job},
+				},
+				hfUnion: hfUnion,
+			})
+		}
+	}
+
+	result := make([]InstanceGroup, len(groups))
+	for i, g := range groups {
+		result[i] = g.group
+	}
+	return result
+}
+
+// jobHFModelIDs extracts the HF model IDs (without "hf:" prefix) from a job's
+// declared and observed inputs.
+func jobHFModelIDs(job *db.Job) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, ref := range job.Inputs {
+		if asset, ok := dataloc.ParseAssetRef(ref); ok && asset.Kind == dataloc.AssetHFModel {
+			ids[asset.ID] = struct{}{}
+		}
+	}
+	for _, ref := range job.ObservedInputs {
+		if asset, ok := dataloc.ParseAssetRef(ref); ok && asset.Kind == dataloc.AssetHFModel {
+			ids[asset.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// sharedInputScore computes an affinity score between a group's HF model set
+// and a job's HF model set. When sizeFunc provides sizes, the score is the sum
+// of shared model sizes plus a per-ref fallback for unsized models. When
+// sizeFunc is nil, the score is purely count-based.
+func sharedInputScore(groupIDs, jobIDs map[string]struct{}, sizeFunc ModelSizeFunc, refWeight float64) float64 {
+	var score float64
+	for id := range jobIDs {
+		if _, shared := groupIDs[id]; !shared {
+			continue
+		}
+		if sizeFunc != nil {
+			if sz, ok := sizeFunc(id); ok && sz > 0 {
+				score += float64(sz)
+				continue
+			}
+		}
+		score += refWeight
+	}
+	return score
+}
+
+func sortGroups(groups []InstanceGroup) {
 	sort.Slice(groups, func(i, j int) bool {
 		if groups[i].GPUMemGB != groups[j].GPUMemGB {
 			return groups[i].GPUMemGB > groups[j].GPUMemGB
 		}
 		return groups[i].GPUClass < groups[j].GPUClass
 	})
-
-	return groups
 }
 
 // FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).
