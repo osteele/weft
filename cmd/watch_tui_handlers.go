@@ -37,13 +37,7 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 	ci := msg.update.Launch
 	ch := m.channels[msg.instanceID]
 	if m.autoMode && ci != nil && db.IsRetryableTermination(ci) && !m.retrying && m.database != nil {
-		_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
-			EventKind:  db.EventRetryAutoTriggered,
-			LaunchID:   ci.ID,
-			CampaignID: m.campaignID,
-			GPUSpec:    ci.GPUSpec,
-			Detail:     ci.DisplayTerminationReason(),
-		})
+		m.logRetryAutoTriggered(ci)
 		m.retrying = true
 		m.retryResult = ""
 		return m, tea.Batch(
@@ -58,6 +52,17 @@ func (m watchModel) handleWatchUpdate(msg watchUpdateMsg) (tea.Model, tea.Cmd) {
 // ---------------------------------------------------------------------------
 // Update handlers: check-done
 // ---------------------------------------------------------------------------
+
+// logRetryAutoTriggered records a lifecycle event for an auto-relaunch trigger.
+func (m watchModel) logRetryAutoTriggered(ci *db.Launch) {
+	_ = db.InsertLifecycleEvent(m.database, &db.LifecycleEvent{
+		EventKind:  db.EventRetryAutoTriggered,
+		LaunchID:   ci.ID,
+		CampaignID: m.campaignID,
+		GPUSpec:    ci.GPUSpec,
+		Detail:     ci.DisplayTerminationReason(),
+	})
+}
 
 func (m watchModel) handleCheckDone() (tea.Model, tea.Cmd) {
 	if m.done {
@@ -278,8 +283,18 @@ func (m watchModel) handleInstanceSyncDone() (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) handleJobsRefreshed(msg watchJobsRefreshedMsg) (tea.Model, tea.Cmd) {
+	// Track instances that transitioned to retryable-failed via reconciliation,
+	// so we can trigger auto-relaunch (handleWatchUpdate handles the watch-channel path).
+	var newlyFailed *db.Launch
 	for id, ci := range msg.cloudInstances {
 		u := m.updates[id]
+		if m.autoMode && !m.retrying {
+			prev := u.Launch
+			wasTerminal := prev != nil && campaign.IsInstanceTerminal(prev.Status)
+			if !wasTerminal && db.IsRetryableTermination(ci) {
+				newlyFailed = ci
+			}
+		}
 		u.Launch = ci
 		m.updates[id] = u
 	}
@@ -304,6 +319,15 @@ func (m watchModel) handleJobsRefreshed(msg watchJobsRefreshedMsg) (tea.Model, t
 			return tea.QuitMsg{}
 		})
 	}
+
+	// Auto-relaunch if reconciliation detected a retryable failure
+	if newlyFailed != nil && m.database != nil {
+		m.logRetryAutoTriggered(newlyFailed)
+		m.retrying = true
+		m.retryResult = ""
+		return m, m.retryFailedInstances(0)
+	}
+
 	return m, nil
 }
 
