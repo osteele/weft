@@ -42,9 +42,7 @@ func runCampaignStats(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	for _, warning := range reconcileBeforeDisplay(database, FastCloudSyncTimeout) {
-		fmt.Fprintln(cmd.ErrOrStderr(), warning)
-	}
+	reconcileBeforeDisplay(database, FastCloudSyncTimeout)
 
 	rows, err := database.Query(`
 		SELECT termination_reason, cost_per_hour_cents, resolved_gpu_name,

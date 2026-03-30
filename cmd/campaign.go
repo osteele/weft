@@ -168,9 +168,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	// For TUI mode, reconciliation runs in the background (see below).
 	needsSyncReconcile := !launchInteractive || campaignLaunchDryRun
 	if needsSyncReconcile {
-		for _, warning := range reconcileBeforeDisplay(database, FastCloudSyncTimeout) {
-			fmt.Fprintln(cmd.ErrOrStderr(), warning)
-		}
+		reconcileBeforeDisplay(database, FastCloudSyncTimeout)
 	}
 
 	jobs, err := db.ListUnplacedJobs(database)
@@ -585,9 +583,7 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	if !useTUI {
-		for _, warning := range reconcileBeforeDisplay(database, FastCloudSyncTimeout) {
-			fmt.Fprintln(cmd.ErrOrStderr(), warning)
-		}
+		reconcileBeforeDisplay(database, FastCloudSyncTimeout)
 	}
 
 	campaigns, err := db.ListCampaigns(database)
@@ -629,9 +625,7 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 	}
 	defer database.Close()
 
-	for _, warning := range reconcileBeforeDisplay(database, FastCloudSyncTimeout) {
-		fmt.Fprintln(cmd.ErrOrStderr(), warning)
-	}
+	reconcileBeforeDisplay(database, FastCloudSyncTimeout)
 
 	id, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
@@ -779,16 +773,12 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 // reconcileBeforeDisplay checks running cloud instances against the provider
 // and marks dead ones as failed, then auto-closes campaigns where all instances
 // are terminal. Called before displaying campaign data.
-func reconcileBeforeDisplay(database *sql.DB, timeout time.Duration) []string {
+func reconcileBeforeDisplay(database *sql.DB, timeout time.Duration) {
 	cfg, _ := config.Load()
-	result, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false)
-	if !completed {
-		return []string{fmt.Sprintf("Warning: cloud sync timed out after %s; campaign data may be stale.", timeout)}
-	}
+	result, _ := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), timeout, false)
 	if result.ReconcileResult != nil && result.ReconcileResult.Reconciled > 0 {
 		fmt.Printf("Reconciled %d dead instance(s)\n", result.ReconcileResult.Reconciled)
 	}
-	return nil
 }
 
 // buildOverheadModel queries historical cloud instance data and builds a

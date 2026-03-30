@@ -169,9 +169,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			startQueueRunnersForHosts(database, hosts)
 		}
 		if needsRentalSync {
-			if !syncRentalJobsStatus(database) {
-				fmt.Fprintln(os.Stderr, "Note: cloud sync timed out; status may be stale. Use --sync for a full sync.")
-			}
+			syncRentalJobsStatus(database)
 		}
 	}
 
@@ -261,9 +259,7 @@ func printSingleJobStatus(database *sql.DB, jobID int64, job *db.Job, exitOnComp
 				fmt.Fprintf(os.Stderr, "Warning: sync failed for %s: %v\n", job.Host, syncErr)
 			}
 		} else if job.IsRentalJob() {
-			if !syncRentalJobsStatus(database) {
-				fmt.Fprintln(os.Stderr, "Note: cloud sync timed out; status may be stale. Use --sync for a full sync.")
-			}
+			syncRentalJobsStatus(database)
 		}
 	}
 
