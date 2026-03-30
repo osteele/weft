@@ -44,6 +44,9 @@ type Config struct {
 	// ShowUsageHints toggles whether CLI commands print follow-up suggestions
 	ShowUsageHints bool `yaml:"show_usage_hints" toml:"show_usage_hints"`
 
+	// ShowRentalHints toggles whether unplaced-job warnings about rental GPUs are printed
+	ShowRentalHints bool `yaml:"show_rental_hints" toml:"show_rental_hints"`
+
 	// AI/LLM configuration for automatic job description generation
 	AI AIConfig `yaml:"ai" toml:"ai"`
 

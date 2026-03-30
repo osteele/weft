@@ -558,7 +558,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 			} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
 				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 			}
-			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+			if cfg.ShowRentalHints {
+				printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+			}
 			return nil
 		}
 
@@ -632,7 +634,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		} else if err := db.SetJobPlacementReasons(database, jobID, reasons); err != nil {
 			slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 		}
-		printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+		if cfg.ShowRentalHints {
+			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+		}
 		return nil
 	}
 
