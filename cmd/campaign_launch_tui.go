@@ -605,6 +605,13 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hfPrefetchDoneMsg:
 		return m, nil // cache is warmed; EstimateCosts will benefit
 
+	case switchToLaunchMsg:
+		// Return from inline watch to launch selection with refreshed jobs
+		m.inlineWatch = nil
+		m.inlineWatchUsed = false
+		m.reconciling = true
+		return m, m.runReconciliation()
+
 	case reconcileDoneMsg:
 		m.reconciling = false
 		if msg.groups == nil {
