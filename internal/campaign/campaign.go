@@ -18,11 +18,12 @@ import (
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
-	GPUClass string // Normalized GPU class (uppercase), e.g. "H100"
-	GPUMemGB int    // Supremum of GPU memory across all jobs in the group
-	DiskGB   int    // Estimated disk space needed (0 = use default)
-	Image    string // Per-project Docker image override ("" = use global default)
-	Jobs     []*db.Job
+	GPUClass    string // Normalized GPU class (uppercase), e.g. "H100"
+	GPUMemGB    int    // Supremum of GPU memory across all jobs in the group
+	MaxGPUMemGB int    // Maximum GPU memory ceiling (0 = no ceiling); minimum across jobs
+	DiskGB      int    // Estimated disk space needed (0 = use default)
+	Image       string // Per-project Docker image override ("" = use global default)
+	Jobs        []*db.Job
 }
 
 // ModelSizeFunc returns the cached size in bytes for a model ID (without the
@@ -81,6 +82,7 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 		if job.GPUMemGB != nil {
 			mem = *job.GPUMemGB
 		}
+		memMax := jobGPUMemMaxGB(job)
 
 		merged := false
 		for i := range groups {
@@ -91,6 +93,7 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 				if mem > groups[i].GPUMemGB {
 					groups[i].GPUMemGB = mem
 				}
+				groups[i].MaxGPUMemGB = mergeGPUMemCeiling(groups[i].MaxGPUMemGB, memMax)
 				merged = true
 				break
 			}
@@ -98,13 +101,36 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 
 		if !merged {
 			groups = append(groups, InstanceGroup{
-				GPUClass: strings.ToUpper(job.GPUClass),
-				GPUMemGB: mem,
-				Jobs:     []*db.Job{job},
+				GPUClass:    strings.ToUpper(job.GPUClass),
+				GPUMemGB:    mem,
+				MaxGPUMemGB: memMax,
+				Jobs:        []*db.Job{job},
 			})
 		}
 	}
 	return groups
+}
+
+// jobGPUMemMaxGB returns the job's GPU memory ceiling, or 0 if unconstrained.
+func jobGPUMemMaxGB(job *db.Job) int {
+	if job.GPUMemMaxGB != nil {
+		return *job.GPUMemMaxGB
+	}
+	return 0
+}
+
+// mergeGPUMemCeiling computes the group ceiling from two job ceilings.
+// 0 means "no ceiling". If either is 0, the group has no ceiling (can't
+// constrain the group tighter than any unconstrained job). Otherwise,
+// the group ceiling is the maximum (to fit all jobs).
+func mergeGPUMemCeiling(a, b int) int {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // affinityGroupUnconstrained groups unconstrained and floatable jobs by shared
@@ -176,6 +202,8 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			}
 		}
 
+		memMax := jobGPUMemMaxGB(info.job)
+
 		if bestIdx >= 0 && bestScore > 0 {
 			g := &groups[bestIdx]
 			g.group.Jobs = append(g.group.Jobs, info.job)
@@ -184,6 +212,7 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			if mem > g.group.GPUMemGB {
 				g.group.GPUMemGB = mem
 			}
+			g.group.MaxGPUMemGB = mergeGPUMemCeiling(g.group.MaxGPUMemGB, memMax)
 			for id := range info.hfInputs {
 				g.hfUnion[id] = struct{}{}
 			}
@@ -194,9 +223,10 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 			}
 			groups = append(groups, groupState{
 				group: InstanceGroup{
-					GPUClass: strings.ToUpper(jobGPU),
-					GPUMemGB: mem,
-					Jobs:     []*db.Job{info.job},
+					GPUClass:    strings.ToUpper(jobGPU),
+					GPUMemGB:    mem,
+					MaxGPUMemGB: memMax,
+					Jobs:        []*db.Job{info.job},
 				},
 				hfUnion: hfUnion,
 			})
@@ -327,11 +357,12 @@ func SplitGroupsByImage(groups []InstanceGroup) []InstanceGroup {
 
 		for _, sub := range subs {
 			result = append(result, InstanceGroup{
-				GPUClass: g.GPUClass,
-				GPUMemGB: g.GPUMemGB,
-				DiskGB:   g.DiskGB,
-				Image:    sub.image,
-				Jobs:     sub.jobs,
+				GPUClass:    g.GPUClass,
+				GPUMemGB:    g.GPUMemGB,
+				MaxGPUMemGB: g.MaxGPUMemGB,
+				DiskGB:      g.DiskGB,
+				Image:       sub.image,
+				Jobs:        sub.jobs,
 			})
 		}
 	}
@@ -381,14 +412,19 @@ func (g InstanceGroup) HasComputeIntensiveJob() bool {
 
 // GPUSpec returns a human-readable GPU spec string for the group.
 func (g InstanceGroup) GPUSpec() string {
+	var spec string
 	switch {
 	case g.GPUClass != "" && g.GPUMemGB > 0:
-		return g.GPUClass + " ≥" + strconv.Itoa(g.GPUMemGB) + "GB"
+		spec = g.GPUClass + " ≥" + strconv.Itoa(g.GPUMemGB) + "GB"
 	case g.GPUClass != "":
-		return g.GPUClass
+		spec = g.GPUClass
 	case g.GPUMemGB > 0:
-		return "≥" + strconv.Itoa(g.GPUMemGB) + "GB"
+		spec = "≥" + strconv.Itoa(g.GPUMemGB) + "GB"
 	default:
-		return "GPU"
+		spec = "GPU"
 	}
+	if g.MaxGPUMemGB > 0 {
+		spec += " ≤" + strconv.Itoa(g.MaxGPUMemGB) + "GB"
+	}
+	return spec
 }

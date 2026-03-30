@@ -246,6 +246,88 @@ func TestPredictedGPUMemGB(t *testing.T) {
 	}
 }
 
+func TestPredictedGPUMemCeilingGB(t *testing.T) {
+	tests := []struct {
+		name   string
+		upper  float64 // MiB
+		wantGB int
+		wantOK bool
+	}{
+		{"nil prediction", 0, 0, false},
+		{"20GB upper snaps to 24", 20 * 1024, 24, true},
+		{"23.5GB upper snaps to 24", 23.5 * 1024, 24, true},
+		{"24GB upper snaps to 24", 24 * 1024, 24, true},
+		{"25GB upper snaps to 48", 25 * 1024, 48, true},
+		{"45GB upper snaps to 48", 45 * 1024, 48, true},
+		{"50GB upper snaps to 80", 50 * 1024, 80, true},
+		{"10GB upper snaps to 12", 10 * 1024, 12, true},
+		{"150GB upper has no ceiling", 150 * 1024, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var p *Prediction
+			if tt.upper > 0 {
+				p = &Prediction{Upper: tt.upper}
+			}
+			got, ok := PredictedGPUMemCeilingGB(p)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if got != tt.wantGB {
+				t.Fatalf("ceiling = %d, want %d", got, tt.wantGB)
+			}
+		})
+	}
+}
+
+func TestResolveGPUMem_ReturnsCeiling(t *testing.T) {
+	original := predictFunc
+	t.Cleanup(func() { predictFunc = original })
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator"}
+
+	t.Run("prediction yields ceiling", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: 20 * 1024}}, nil // 20GB
+		}
+		floor, ceiling, _ := ResolveGPUMem(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 16, 0)
+		if floor == nil || *floor < 20 {
+			t.Fatalf("floor = %v, want >= 20", floor)
+		}
+		if ceiling == nil {
+			t.Fatal("ceiling should not be nil for 20GB prediction")
+		}
+		if *ceiling != 24 {
+			t.Fatalf("ceiling = %d, want 24", *ceiling)
+		}
+	})
+
+	t.Run("explicit value disables ceiling", func(t *testing.T) {
+		explicit := 48
+		_, ceiling, _ := ResolveGPUMem(cfg, &explicit, true, "host-a", "proj", "a100", "python train.py", 20, 0)
+		if ceiling != nil {
+			t.Fatalf("ceiling should be nil with explicit value, got %d", *ceiling)
+		}
+	})
+
+	t.Run("ceiling at least as large as floor", func(t *testing.T) {
+		predictFunc = func(Config, string, string, string, string) (*Result, error) {
+			return &Result{MaxGPUMemMiB: &Prediction{Upper: 10 * 1024}}, nil // 10GB
+		}
+		// fallbackGB=16 is larger than prediction, so floor=16, ceiling should be >= 16
+		floor, ceiling, _ := ResolveGPUMem(cfg, nil, true, "host-a", "proj", "a100", "python train.py", 16, 0)
+		if floor == nil || *floor != 16 {
+			t.Fatalf("floor = %v, want 16", floor)
+		}
+		if ceiling == nil {
+			t.Fatal("ceiling should not be nil")
+		}
+		if *ceiling < *floor {
+			t.Fatalf("ceiling %d < floor %d", *ceiling, *floor)
+		}
+	})
+}
+
 func TestResolveGPUMemGB(t *testing.T) {
 	original := predictFunc
 	t.Cleanup(func() { predictFunc = original })

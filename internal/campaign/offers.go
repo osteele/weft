@@ -22,6 +22,7 @@ func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
 	c := cloud.OfferConstraints{
 		GPUClass:       group.GPUClass,
 		MinGPUMemGB:    group.GPUMemGB,
+		MaxGPUMemGB:    group.MaxGPUMemGB,
 		MinDiskGB:      group.DiskGB,
 		MinReliability: cloud.DefaultMinReliability,
 	}

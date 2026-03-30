@@ -358,6 +358,9 @@ func parseSearchOutput(data []byte, constraints cloud.OfferConstraints) ([]cloud
 		if constraints.MinGPUMemGB > 0 && memGB < constraints.MinGPUMemGB {
 			continue
 		}
+		if constraints.MaxGPUMemGB > 0 && memGB > constraints.MaxGPUMemGB {
+			continue
+		}
 
 		maxGPUs := firstInt(row, "maxGpuCount", "gpuCount", "availableGpuCount")
 		numGPUs := constraints.NumGPUs

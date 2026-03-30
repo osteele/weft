@@ -340,6 +340,7 @@ func createJobStatusView(db *sql.DB) error {
 			j.gpu_class,
 			j.cpu_allotment,
 			j.gpu_mem_gb,
+			j.gpu_mem_max_gb,
 			j.env_vars,
 			j.tags,
 			j.dep_spec,

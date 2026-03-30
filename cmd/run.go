@@ -383,7 +383,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	if oomFloor > 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "OOM history: requiring >=%dGB GPU memory (prior failure on %dGB GPU)\n", oomFloor, oomFloor-1)
 	}
-	resolvedGPUMemGB, _ := resolveEffectiveGPUMemWithConfig(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, host, projectName, command, oomFloor)
+	resolvedGPUMemGB, resolvedGPUMemMaxGB, _ := resolveEffectiveGPUMemAndCeiling(cfg, intPtrOrNil(runGPUMem), gpu, gpuClass, host, projectName, command, oomFloor)
 
 	// Placement scoring (used for auto-placement and dry-run)
 	placementConstraints := placement.Constraints{
@@ -665,6 +665,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if resolvedGPUMemGB != nil {
 			if err := db.SetJobGPUMemGB(database, jobID, resolvedGPUMemGB); err != nil {
 				return fmt.Errorf("set GPU memory: %w", err)
+			}
+		}
+		if resolvedGPUMemMaxGB != nil {
+			if err := db.SetJobGPUMemMaxGB(database, jobID, resolvedGPUMemMaxGB); err != nil {
+				return fmt.Errorf("set GPU memory ceiling: %w", err)
 			}
 		}
 		if projectName != "" {

@@ -327,11 +327,69 @@ func TestInstanceGroupGPUSpec(t *testing.T) {
 		{InstanceGroup{GPUClass: "A100"}, "A100"},
 		{InstanceGroup{GPUMemGB: 24}, "≥24GB"},
 		{InstanceGroup{}, "GPU"},
+		{InstanceGroup{GPUClass: "A100", GPUMemGB: 24, MaxGPUMemGB: 48}, "A100 ≥24GB ≤48GB"},
+		{InstanceGroup{GPUMemGB: 24, MaxGPUMemGB: 24}, "≥24GB ≤24GB"},
 	}
 	for _, tt := range tests {
 		got := tt.group.GPUSpec()
 		if got != tt.want {
 			t.Errorf("GPUSpec() = %q, want %q", got, tt.want)
+		}
+	}
+}
+
+func TestGroupByAffinityPropagatesMaxGPUMemGB(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			GPUMemMaxGB: intPtr(24),
+			Inputs:      []string{"hf:model-a"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			GPUMemMaxGB: intPtr(48),
+			Inputs:      []string{"hf:model-a"}},
+	}
+	groups := GroupByAffinity(jobs, nil)
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	// Both jobs have ceilings: group ceiling = max(24, 48) = 48
+	if groups[0].MaxGPUMemGB != 48 {
+		t.Errorf("MaxGPUMemGB = %d, want 48", groups[0].MaxGPUMemGB)
+	}
+}
+
+func TestGroupCeilingDropsWhenAnyJobUncapped(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			GPUMemMaxGB: intPtr(24),
+			Inputs:      []string{"hf:model-a"}},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:model-a"}}, // no ceiling
+	}
+	groups := GroupByAffinity(jobs, nil)
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	// Job 2 has no ceiling → group has no ceiling
+	if groups[0].MaxGPUMemGB != 0 {
+		t.Errorf("MaxGPUMemGB = %d, want 0 (no ceiling)", groups[0].MaxGPUMemGB)
+	}
+}
+
+func TestMergeGPUMemCeiling(t *testing.T) {
+	tests := []struct {
+		a, b, want int
+	}{
+		{0, 0, 0},    // both uncapped → uncapped
+		{24, 0, 0},   // one uncapped → uncapped
+		{0, 48, 0},   // one uncapped → uncapped
+		{24, 48, 48}, // both capped → max
+		{48, 24, 48}, // both capped → max
+		{24, 24, 24}, // same → same
+	}
+	for _, tt := range tests {
+		got := mergeGPUMemCeiling(tt.a, tt.b)
+		if got != tt.want {
+			t.Errorf("mergeGPUMemCeiling(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
 		}
 	}
 }

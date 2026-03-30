@@ -263,20 +263,44 @@ func PredictedGPUMemGB(p *Prediction) (int, bool) {
 	return int(math.Ceil(p.Upper / 1024.0)), true
 }
 
-// ResolveGPUMemGB returns the effective GPU memory reservation for a job.
-// Explicit reservations win. Otherwise, the OOM floor (from prior failures),
-// predictor output, and fallbackGB are considered — the maximum wins.
-func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (*int, bool) {
+// standardVRAMTiers lists common GPU VRAM sizes in GB, ordered ascending.
+// Used to snap predicted memory to the next available tier for ceiling caps.
+var standardVRAMTiers = []int{12, 16, 24, 48, 80, 141}
+
+// PredictedGPUMemCeilingGB snaps a GPU memory prediction's upper bound to the
+// next standard VRAM tier. This provides a ceiling that prevents over-provisioning
+// — e.g., a job predicted to need 20GB gets capped at the 24GB tier, avoiding
+// placement on 80GB+ GPUs that provide no benefit.
+//
+// Returns (0, false) if the prediction is nil or has no upper bound.
+func PredictedGPUMemCeilingGB(p *Prediction) (int, bool) {
+	if p == nil || p.Upper <= 0 {
+		return 0, false
+	}
+	upperGB := p.Upper / 1024.0
+	for _, tier := range standardVRAMTiers {
+		if float64(tier) >= upperGB {
+			return tier, true
+		}
+	}
+	// Above all known tiers — no ceiling
+	return 0, false
+}
+
+// ResolveGPUMem returns the effective GPU memory floor and ceiling for a job.
+// The floor uses the maximum of explicit, OOM floor, predictor, and fallback.
+// The ceiling snaps the predictor's upper bound to the next standard VRAM tier.
+// Returns (floor, ceiling, predicted) where ceiling is nil if no prediction available.
+func ResolveGPUMem(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (floor *int, ceiling *int, predicted bool) {
 	if explicit != nil {
-		return explicit, false
+		return explicit, nil, false
 	}
 	if !needsGPU {
-		return nil, false
+		return nil, nil, false
 	}
 
-	// Gather candidates: predictor, OOM floor, fallback
 	var predictedGB int
-	predicted := false
+	var ceilingGB int
 	if cfg.Configured() && command != "" {
 		result, err := predictFunc(cfg, host, project, gpuClass, command)
 		if err == nil && result != nil {
@@ -284,16 +308,36 @@ func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gp
 				predictedGB = memGB
 				predicted = true
 			}
+			if capGB, ok := PredictedGPUMemCeilingGB(result.MaxGPUMemMiB); ok {
+				ceilingGB = capGB
+			}
 		}
 	}
 
-	// Take the maximum of all sources
 	memGB := max(predictedGB, oomFloorGB, fallbackGB)
 	if memGB <= 0 {
-		return nil, false
+		return nil, nil, false
 	}
-	// Report as "predicted" if the predictor was the winning source
-	return &memGB, predicted && predictedGB == memGB
+
+	floorPtr := &memGB
+	var ceilingPtr *int
+	if ceilingGB > 0 {
+		// Ensure ceiling is at least as large as the floor
+		if ceilingGB < memGB {
+			ceilingGB = memGB
+		}
+		ceilingPtr = &ceilingGB
+	}
+
+	return floorPtr, ceilingPtr, predicted && predictedGB == memGB
+}
+
+// ResolveGPUMemGB returns the effective GPU memory reservation for a job.
+// Explicit reservations win. Otherwise, the OOM floor (from prior failures),
+// predictor output, and fallbackGB are considered — the maximum wins.
+func ResolveGPUMemGB(cfg Config, explicit *int, needsGPU bool, host, project, gpuClass, command string, fallbackGB int, oomFloorGB int) (*int, bool) {
+	floor, _, predicted := ResolveGPUMem(cfg, explicit, needsGPU, host, project, gpuClass, command, fallbackGB, oomFloorGB)
+	return floor, predicted
 }
 
 // FormatDuration formats a duration prediction as a human-readable string.

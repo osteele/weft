@@ -77,6 +77,7 @@ type Instance struct {
 type OfferConstraints struct {
 	GPUClass             string   // e.g., "RTX_4090", "A100"
 	MinGPUMemGB          int      // minimum per-GPU memory
+	MaxGPUMemGB          int      // maximum per-GPU memory (0 = no ceiling)
 	MinDiskGB            int      // minimum disk space
 	MinReliability       float64  // minimum reliability score (0-1)
 	NumGPUs              int      // number of GPUs needed (default 1)

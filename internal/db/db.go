@@ -59,6 +59,7 @@ type Job struct {
 	GPUClass             string // GPU class name (e.g., "A100") — resolved to device at runtime
 	CPUAllotment         *int   // Requested CPU allotment percent (nil = default)
 	GPUMemGB             *int   // GPU memory reservation in GB per device (nil = use default)
+	GPUMemMaxGB          *int   // GPU memory ceiling in GB (nil = no ceiling); prevents over-provisioning
 	Metadata             *JobMetadata
 	EnvVars              []string
 	Tags                 []string
@@ -222,9 +223,9 @@ type PlacementMeta struct {
 	RunnerUpScore      float64  `json:"runner_up_score,omitempty"`
 }
 
-const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, launch_id, campaign_job_index, latest_run_id`
+const jobSelectColumns = `id, host, session_name, working_dir, command, description, generated_description, generation_hash, created_at, queued_at, start_time, end_time, exit_code, status, error_message, backend, remote_id, remote_state, failure_reason, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, observed_inputs, outputs, output_dirs, produces, needs, project, tombstoned, last_synced_status, pending_status, pending_at, job_metadata, cost, error_diagnosis, retry_count, placement_meta, placement_reasons, launch_id, campaign_job_index, latest_run_id`
 
-const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
+const jobTableColumns = `id, working_dir, command, description, generated_description, generation_hash, created_at, backend, queue_name, gpu, gpu_class, cpu_allotment, gpu_mem_gb, gpu_mem_max_gb, env_vars, tags, dep_spec, inputs, outputs, output_dirs, produces, needs, project, tombstoned, placement_host, placement_reasons, campaign_job_index, requested_status`
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
@@ -333,6 +334,7 @@ func createJobsTableSQL(table string, ifNotExists bool) string {
 		gpu_class TEXT,
 		cpu_allotment INTEGER,
 		gpu_mem_gb INTEGER,
+		gpu_mem_max_gb INTEGER,
 		env_vars TEXT,
 		tags TEXT,
 		dep_spec TEXT,
@@ -1505,6 +1507,11 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: add GPU memory ceiling for over-provisioning prevention
+	if err := addColumnIfMissing(db, `ALTER TABLE jobs ADD COLUMN gpu_mem_max_gb INTEGER`); err != nil {
+		return err
+	}
+
 	// Create job_runs table (archives overwritten execution state when a logical
 	// job row is reused for another attempt).
 	jobRunsSchema := `
@@ -1527,6 +1534,7 @@ func initSchema(db *sql.DB) error {
 		gpu_class TEXT,
 		cpu_allotment INTEGER,
 		gpu_mem_gb INTEGER,
+		gpu_mem_max_gb INTEGER,
 		env_vars TEXT,
 		tags TEXT,
 		dep_spec TEXT,
@@ -1575,6 +1583,7 @@ func initSchema(db *sql.DB) error {
 		`ALTER TABLE job_runs ADD COLUMN cost REAL`,
 		`ALTER TABLE job_runs ADD COLUMN vastai_instance_id INTEGER`,
 		`ALTER TABLE job_runs ADD COLUMN retry_count INTEGER DEFAULT 0`,
+		`ALTER TABLE job_runs ADD COLUMN gpu_mem_max_gb INTEGER`,
 	} {
 		if err := addColumnIfMissing(db, stmt); err != nil {
 			return err
@@ -2492,6 +2501,16 @@ func SetJobGPUMemGB(db *sql.DB, jobID int64, gpuMemGB *int) error {
 	return err
 }
 
+// SetJobGPUMemMaxGB updates the GPU memory ceiling in GB (nil clears it).
+func SetJobGPUMemMaxGB(db *sql.DB, jobID int64, gpuMemMaxGB *int) error {
+	var value interface{}
+	if gpuMemMaxGB != nil {
+		value = *gpuMemMaxGB
+	}
+	_, err := db.Exec(`UPDATE jobs SET gpu_mem_max_gb = ? WHERE id = ?`, value, jobID)
+	return err
+}
+
 // SetJobEnvVars updates the stored environment variables for a job.
 // The values are stored as a JSON array; passing nil or an empty slice clears the field.
 func SetJobEnvVars(db *sql.DB, jobID int64, envVars []string) error {
@@ -2993,6 +3012,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var gpuClass sql.NullString
 	var cpuAllotment sql.NullInt64
 	var gpuMemGB sql.NullInt64
+	var gpuMemMaxGB sql.NullInt64
 	var envVars sql.NullString
 	var tags sql.NullString
 	var depSpec sql.NullString
@@ -3022,7 +3042,7 @@ func scanJob(row *sql.Row) (*Job, error) {
 	var campaignJobIndex sql.NullInt64
 	var latestRunID sql.NullInt64
 
-	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+	err := row.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &gpuMemMaxGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -3073,6 +3093,10 @@ func scanJob(row *sql.Row) (*Job, error) {
 	if gpuMemGB.Valid {
 		val := int(gpuMemGB.Int64)
 		j.GPUMemGB = &val
+	}
+	if gpuMemMaxGB.Valid {
+		val := int(gpuMemMaxGB.Int64)
+		j.GPUMemMaxGB = &val
 	}
 	j.EnvVars = decodeEnvVars(envVars)
 	j.Tags = decodeTags(tags)
@@ -3426,6 +3450,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var gpuClass sql.NullString
 		var cpuAllotment sql.NullInt64
 		var gpuMemGB sql.NullInt64
+		var gpuMemMaxGB sql.NullInt64
 		var envVars sql.NullString
 		var tags sql.NullString
 		var depSpec sql.NullString
@@ -3455,7 +3480,7 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		var campaignJobIndex sql.NullInt64
 		var latestRunID sql.NullInt64
 
-		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
+		err := rows.Scan(&j.ID, &j.Host, &sessionName, &j.WorkingDir, &j.Command, &desc, &generatedDesc, &generationHash, &createdAt, &queuedAt, &startTime, &endTime, &exitCode, &j.Status, &errorMsg, &backend, &remoteID, &remoteState, &failureReason, &queueName, &gpu, &gpuClass, &cpuAllotment, &gpuMemGB, &gpuMemMaxGB, &envVars, &tags, &depSpec, &inputs, &observedInputs, &outputs, &outputDirs, &produces, &needs, &project, &tombstoned, &lastSyncedStatus, &pendingStatus, &pendingAt, &jobMetadata, &cost, &errorDiagnosis, &retryCount, &placementMeta, &placementReasons, &cloudInstanceID, &campaignJobIndex, &latestRunID)
 		if err != nil {
 			return nil, err
 		}
@@ -3503,6 +3528,10 @@ func scanJobs(rows *sql.Rows) ([]*Job, error) {
 		if gpuMemGB.Valid {
 			val := int(gpuMemGB.Int64)
 			j.GPUMemGB = &val
+		}
+		if gpuMemMaxGB.Valid {
+			val := int(gpuMemMaxGB.Int64)
+			j.GPUMemMaxGB = &val
 		}
 		j.EnvVars = decodeEnvVars(envVars)
 		j.Tags = decodeTags(tags)

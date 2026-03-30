@@ -82,6 +82,7 @@ var (
 	campaignLaunchYes               bool
 	campaignLaunchJobs              string
 	campaignLaunchGPU               string
+	campaignLaunchMaxGPUMem         int
 	campaignLaunchStrategy          string
 	campaignLaunchMinSurvival       float64
 	campaignLaunchSkipWorkdirDelete bool
@@ -120,6 +121,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
 	cmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
 	cmd.Flags().StringVar(&campaignLaunchGPU, "gpu", "", "Filter by GPU class (e.g., 'RTX_4090', 'A100')")
+	cmd.Flags().IntVar(&campaignLaunchMaxGPUMem, "max-gpu-mem", 0, "Maximum GPU memory in GB (overrides auto-derived ceiling from predictor; 0 = auto)")
 	cmd.Flags().StringVar(&campaignLaunchGracePeriod, "grace-period", "", "Keep instance alive after job failure (default from config, e.g., '5m', '1h'; '0' to disable)")
 	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize wall-clock time), or 'fastest' (highest raw DLPerf)")
 	cmd.Flags().Float64Var(&campaignLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
@@ -227,6 +229,13 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 		if len(reuseAssignments) > 0 {
 			groups = campaign.PrepareGroups(remainingJobs, database, campaignLaunchGPU, r2Client)
+		}
+	}
+
+	// Apply --max-gpu-mem override to all groups
+	if campaignLaunchMaxGPUMem > 0 {
+		for i := range groups {
+			groups[i].MaxGPUMemGB = campaignLaunchMaxGPUMem
 		}
 	}
 

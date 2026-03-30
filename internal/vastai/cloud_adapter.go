@@ -35,6 +35,7 @@ func (c *CloudClient) SearchOffers(constraints cloud.OfferConstraints) ([]cloud.
 	vc := OfferConstraints{
 		GPUClass:             constraints.GPUClass,
 		MinGPUMemGB:          constraints.MinGPUMemGB,
+		MaxGPUMemGB:          constraints.MaxGPUMemGB,
 		MinDiskGB:            constraints.MinDiskGB,
 		MinReliability:       constraints.MinReliability,
 		NumGPUs:              constraints.NumGPUs,
