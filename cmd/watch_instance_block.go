@@ -104,7 +104,7 @@ func formatWatchInstanceBlockLines(update campaign.InstanceUpdate, jobProgressHW
 
 		displayStatus := displayStatuses[i]
 		statusText := displayStatus
-		if activePhaseJobID != 0 && job.ID == activePhaseJobID && activePhaseStatus != "" {
+		if activePhaseJobID != 0 && job.ID == activePhaseJobID && activePhaseStatus != "" && !campaign.IsJobTerminal(displayStatus) {
 			displayStatus = activePhaseStatus
 			statusText = activePhaseStatus
 		}

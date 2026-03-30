@@ -457,16 +457,62 @@ func cleanLogDir(logDir string) {
 // runJobWithProgress runs a single job with progress reporting to R2.
 // Starts a background goroutine that tails the log for progress lines,
 // cleans up the R2 progress key when done.
-func runJobWithProgress(r2Bucket string, jobID, runID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
+func runJobWithProgress(r2Bucket string, jobID, runID, instanceID int64, logDir string, cfg runner.SingleJobConfig) (runner.ExitInfo, error) {
 	logPath := filepath.Join(logDir, fmt.Sprintf("%d.log", jobID))
 	stopProgress := startProgressReporter(r2Bucket, jobID, runID, logPath)
 	stopLogs := startLogUploader(r2Bucket, jobID, runID, logPath)
+	stopKillPoller := startKillPoller(r2Bucket, instanceID, jobID, logDir)
 	defer func() {
+		stopKillPoller()
 		stopProgress()
 		stopLogs()
 		r2Delete(r2Bucket, r2keys.JobAttemptProgress(jobID, runID))
 	}()
 	return runner.RunSingleJob(cfg)
+}
+
+// startKillPoller polls R2 for a kill signal targeting the current job.
+// When the CLI writes the job ID to instance/<id>/kill-job, the poller
+// reads the pgid file from logDir and sends SIGTERM/SIGKILL to the process group.
+func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) func() {
+	var once sync.Once
+	done := make(chan struct{})
+	stop := func() { once.Do(func() { close(done) }) }
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				val, err := r2Get(r2Bucket, r2keys.InstanceKillJob(instanceID))
+				if err != nil || val == "" {
+					continue
+				}
+				targetJobID, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)
+				if err != nil || targetJobID != jobID {
+					continue
+				}
+
+				fmt.Printf("Kill signal received for job %d via R2\n", jobID)
+				oplog.Log(oplog.OpJobKill, oplog.WithJobID(jobID), oplog.WithDetail("kill signal from R2"))
+
+				pgidPath := filepath.Join(logDir, fmt.Sprintf("%d.pgid", jobID))
+				if pgid, ok := runner.ReadPIDFile(pgidPath); ok {
+					runner.WriteKillReasonFile(runner.NewJobPaths(logDir, jobID), "user_kill")
+					runner.KillProcessGroup(pgid)
+				}
+
+				r2Delete(r2Bucket, r2keys.InstanceKillJob(instanceID))
+				return
+			}
+		}
+	}()
+
+	return stop
 }
 
 // startProgressReporter starts a goroutine that periodically reads the job log,

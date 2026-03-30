@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
+	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/r2keys"
 )
 
 // killOrCancelCloudJob handles kill/cancel for cloud jobs at the command layer.
@@ -33,26 +36,42 @@ func killOrCancelCloudJob(database *sql.DB, jobID int64, targetStatus string) (s
 		return fmt.Sprintf("Job %d %s (was awaiting rental instance)", jobID, targetStatus), nil
 	}
 
-	// Fetch instance once, share with KillCloudJob
+	// Fetch instance
 	var inst *db.Launch
 	if job.LaunchID != nil {
 		inst, _ = db.GetLaunch(database, *job.LaunchID)
 	}
 
-	client := cloudClientForDBInstance("")
-	if inst != nil {
-		client = cloudClientForDBInstance(inst.Provider)
+	// Instance missing or terminal — just update DB
+	if inst == nil || campaign.IsInstanceTerminal(inst.Status) {
+		if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
+			return "", err
+		}
+		suffix := ""
+		if inst != nil {
+			suffix = " (cloud instance already terminated)"
+		}
+		return fmt.Sprintf("Job %d %s%s", jobID, targetStatus, suffix), nil
 	}
 
-	wasTerminal, err := ops.KillCloudJob(database, job, inst, client, ops.DefaultOptions().Timeout)
-	if err != nil {
+	// Update DB first, then write kill signal to R2 for the agent to pick up.
+	// This ordering ensures DB is always consistent — if R2 write fails, the
+	// agent will still see the job as killed on next DB-based reconciliation.
+	if err := db.UpdateStatusAndLastSynced(database, jobID, targetStatus); err != nil {
 		return "", err
 	}
 
-	if wasTerminal {
-		return fmt.Sprintf("Job %d %s (cloud instance already terminated)", jobID, targetStatus), nil
+	r2Client, err := newR2ClientFromConfig()
+	if err != nil {
+		return "", fmt.Errorf("R2 client: %w", err)
 	}
-	return fmt.Sprintf("Job %d %s on rental instance", jobID, targetStatus), nil
+
+	killKey := r2keys.InstanceKillJob(inst.ID)
+	if err := r2Client.PutObject(context.Background(), killKey, strings.NewReader(fmt.Sprintf("%d", jobID)), "text/plain"); err != nil {
+		return "", fmt.Errorf("write kill signal to R2: %w", err)
+	}
+
+	return fmt.Sprintf("Job %d %s on rental instance (kill signal sent)", jobID, targetStatus), nil
 }
 
 // isCloudJob checks if a job is a cloud job using an existing database connection.

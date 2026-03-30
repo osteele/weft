@@ -97,7 +97,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			OnPhase:    phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
 		}
 
-		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.LogDir, jobCfg)
+		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.InstanceID, cfg.LogDir, jobCfg)
 		if job.UsesGPU {
 			gpuWarmedUp = true
 		}

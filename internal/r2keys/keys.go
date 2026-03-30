@@ -262,6 +262,12 @@ func InstanceTerminationIntent(instanceID int64) string {
 	return fmt.Sprintf("instance/%d/termination-intent.json", instanceID)
 }
 
+// InstanceKillJob is the R2 key the CLI writes to request the agent kill a
+// running job. The value is the job ID as a decimal string.
+func InstanceKillJob(instanceID int64) string {
+	return fmt.Sprintf("instance/%d/kill-job", instanceID)
+}
+
 // Bootstrap keys
 
 func BootstrapScript(instanceID int64) string {
