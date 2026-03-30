@@ -114,6 +114,7 @@ type launchModel struct {
 	launchOpts              campaign.LaunchOpts
 	gpuFilter               string // --gpu filter to reapply after reconciliation
 	reconciler              *campaign.Reconciler
+	reconcileDropped        int
 
 	spinner spinner.Model
 	width   int
@@ -245,6 +246,14 @@ func buildItemsFromGroups(groups []campaign.InstanceGroup) ([]listItem, map[int6
 		}
 	}
 	return items, selected, cursor
+}
+
+func countGroupJobs(groups []campaign.InstanceGroup) int {
+	n := 0
+	for _, g := range groups {
+		n += len(g.Jobs)
+	}
+	return n
 }
 
 // pageSize returns the number of item rows visible in the job list area.
@@ -620,6 +629,13 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Only re-fetch offers if groups actually changed
 		if groupsChanged(m.groups, msg.groups) {
+			oldCount := countGroupJobs(m.groups)
+			newCount := countGroupJobs(msg.groups)
+			if newCount < oldCount {
+				m.reconcileDropped = oldCount - newCount
+			} else {
+				m.reconcileDropped = 0
+			}
 			m.groups = msg.groups
 			m.items, m.selected, m.cursor = buildItemsFromGroups(m.groups)
 			m.loading = true
@@ -791,6 +807,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inlineWatchUsed = false
 		m.partialErrors = nil
 		m.err = nil
+		m.reconcileDropped = 0
 		m.instanceIDs = nil
 		m.campaignPhase = ""
 		m.groupPhases = make(map[int]string)
@@ -1240,11 +1257,7 @@ func (m launchModel) View() string {
 		return b.String()
 	}
 
-	// Count totals
-	totalJobs := 0
-	for _, g := range m.groups {
-		totalJobs += len(g.Jobs)
-	}
+	totalJobs := countGroupJobs(m.groups)
 
 	b.WriteString(launchTitleStyle.Render(fmt.Sprintf("Rental GPU jobs (%d jobs, %d GPU groups)", totalJobs, len(m.groups))))
 	// Show loading/reconciling status inline after the title
@@ -1260,7 +1273,12 @@ func (m launchModel) View() string {
 		b.WriteString(m.spinner.View())
 		b.WriteString(launchDimStyle.Render(strings.Join(status, ", ") + "..."))
 	}
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+	if m.reconcileDropped > 0 {
+		b.WriteString(launchDimStyle.Render(fmt.Sprintf("  %s resolved during sync (completed or failed on previous instance)", campaign.PluralJobs(m.reconcileDropped))))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	selected := m.selectedCountByGroup()
 
