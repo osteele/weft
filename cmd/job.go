@@ -276,11 +276,10 @@ func init() {
 	// Register job command with root
 	rootCmd.AddCommand(jobCmd)
 
-	// Register top-level aliases (deprecated)
-	infoCmd.Deprecated = "use 'weft job info' instead"
+	// Register top-level aliases
+	rootCmd.AddCommand(infoCmd)
 	showCmd.Deprecated = "use 'weft job info' instead"
 	startCmd.Deprecated = "use 'weft job start' instead"
-	rootCmd.AddCommand(infoCmd)
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(startCmd)
 
