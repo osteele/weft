@@ -391,11 +391,15 @@ func SummarizeForComparison(estimates []CostEstimate, selectedPerGroup []int) *S
 		if est.Offer.Offer == nil {
 			continue
 		}
-		hasAny = true
-		row.NumGPUs++
 
 		totalJobs := len(est.Group.Jobs)
-		_, scale := selectionScale(i, totalJobs, selectedPerGroup)
+		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+		if selected == 0 {
+			continue
+		}
+
+		hasAny = true
+		row.NumGPUs++
 
 		scaledTime := est.Breakdown.Total.Scale(scale)
 		scaledCost := est.TotalCost * scale

@@ -182,17 +182,12 @@ func TestFormatCostTableSelected(t *testing.T) {
 		}
 	})
 
-	t.Run("partial selection dims unselected", func(t *testing.T) {
+	t.Run("partial selection omits unselected", func(t *testing.T) {
 		table := FormatCostTableSelected(estimates, []int{2, 0})
-		hasDimmed := false
-		for _, cl := range table.Lines {
-			if cl.Dimmed {
-				hasDimmed = true
-				break
-			}
-		}
-		if !hasDimmed {
-			t.Error("should dim group with 0 selected")
+		text := costTableText(table)
+		// Group 2 has 0 selected — should not appear in output
+		if strings.Contains(text, "0 jobs") {
+			t.Error("deselected group should be omitted, not shown with 0 jobs")
 		}
 	})
 

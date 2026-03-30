@@ -62,7 +62,6 @@ func JobProjectLabel(job *db.Job) string {
 func FormatCostTable(groupOffers []GroupOffer, selectedPerGroup []int) CostTable {
 	type row struct {
 		gpu, jobs, mem, rate, cost string
-		dimmed                     bool
 	}
 	var rows []row
 	var totalCost float64
@@ -72,20 +71,22 @@ func FormatCostTable(groupOffers []GroupOffer, selectedPerGroup []int) CostTable
 		if go_.Offer == nil {
 			continue
 		}
-		hasAny = true
 		totalJobs := len(go_.Group.Jobs)
 		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+		if selected == 0 {
+			continue
+		}
+		hasAny = true
 
 		estCost := float64(totalJobs) * go_.Offer.CostPerHour * scale
 		totalCost += estCost
 
 		rows = append(rows, row{
-			gpu:    FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName),
-			jobs:   PluralJobs(selected),
-			mem:    fmt.Sprintf("%dGB", int(go_.Offer.GPUMemGB)),
-			rate:   fmt.Sprintf("$%.2f/hr", go_.Offer.CostPerHour),
-			cost:   fmt.Sprintf("~$%.2f", estCost),
-			dimmed: selected == 0,
+			gpu:  FormatResolvedGPU(go_.Group.GPUSpec(), go_.Offer.GPUName),
+			jobs: PluralJobs(selected),
+			mem:  fmt.Sprintf("%dGB", int(go_.Offer.GPUMemGB)),
+			rate: fmt.Sprintf("$%.2f/hr", go_.Offer.CostPerHour),
+			cost: fmt.Sprintf("~$%.2f", estCost),
 		})
 	}
 
@@ -113,7 +114,7 @@ func FormatCostTable(groupOffers []GroupOffer, selectedPerGroup []int) CostTable
 	fmtStr := fmt.Sprintf("%%-%ds  %%%ds  %%%ds  %%%ds  %%s", wGPU, wJobs, wMem, wRate)
 	for _, r := range rows {
 		line := fmt.Sprintf(fmtStr, r.gpu, r.jobs, r.mem, r.rate, r.cost)
-		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
+		lines = append(lines, CostLine{Text: line})
 	}
 
 	totalLine := fmt.Sprintf(fmtStr, "", "", "", "", fmt.Sprintf("Total: ~$%.2f", totalCost))
@@ -249,11 +250,10 @@ func selectionScale(groupIdx int, totalJobs int, selectedPerGroup []int) (select
 
 // FormatCostTableSelected returns a selection-aware cost estimate table.
 // Each group line shows "selected/total jobs" and scales cost/time proportionally.
-// Lines for groups with 0 selected are marked as Dimmed.
+// Groups with 0 selected jobs are omitted.
 func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) CostTable {
 	type row struct {
 		gpu, jobs, rate, dur, cost string
-		dimmed                     bool
 	}
 	var rows []row
 	var totalCost, totalLower, totalUpper float64
@@ -263,10 +263,13 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 		if est.Offer.Offer == nil {
 			continue
 		}
-		hasAny = true
 
 		totalJobs := len(est.Group.Jobs)
 		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+		if selected == 0 {
+			continue
+		}
+		hasAny = true
 
 		scaledTime := est.Breakdown.Total.Scale(scale)
 		scaledCost := est.TotalCost * scale
@@ -275,12 +278,11 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 		totalUpper += scaledTime.Upper.Hours() * est.Offer.Offer.CostPerHour
 
 		rows = append(rows, row{
-			gpu:    FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName),
-			jobs:   PluralJobs(selected),
-			rate:   fmt.Sprintf("$%.2f/hr", est.Offer.Offer.CostPerHour),
-			dur:    formatDurationWithBounds(scaledTime),
-			cost:   formatCostWithBounds(scaledCost, scaledTime, est.Offer.Offer.CostPerHour),
-			dimmed: scale == 0,
+			gpu:  FormatResolvedGPU(est.Group.GPUSpec(), est.Offer.Offer.GPUName),
+			jobs: PluralJobs(selected),
+			rate: fmt.Sprintf("$%.2f/hr", est.Offer.Offer.CostPerHour),
+			dur:  formatDurationWithBounds(scaledTime),
+			cost: formatCostWithBounds(scaledCost, scaledTime, est.Offer.Offer.CostPerHour),
 		})
 	}
 
@@ -308,7 +310,7 @@ func FormatCostTableSelected(estimates []CostEstimate, selectedPerGroup []int) C
 	var lines []CostLine
 	for _, r := range rows {
 		line := fmt.Sprintf("%-*s  %-*s  %s  %-*s  %s", wDur, r.dur, wRate, r.rate, r.cost, wGPU, r.gpu, r.jobs)
-		lines = append(lines, CostLine{Text: line, Dimmed: r.dimmed})
+		lines = append(lines, CostLine{Text: line})
 	}
 
 	var totalStr string
