@@ -88,6 +88,7 @@ type launchModel struct {
 	launching        bool
 	done             bool
 	err              error
+	statusHint       string // transient hint shown below the cost table (cleared on next action)
 	partialErrors    []string
 	fromWatch        bool
 	campaignPhase    string              // campaign-level phase text
@@ -782,8 +783,14 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
 		}
 		if m.loading || m.reconciling {
+			status := "Loading offers"
+			if m.reconciling {
+				status = "Reconciling"
+			}
+			m.statusHint = status + "… press Enter again when ready"
 			return m, nil
 		}
+		m.statusHint = ""
 		// Count selected
 		count := 0
 		for _, v := range m.selected {
@@ -1193,6 +1200,10 @@ func (m launchModel) View() string {
 		b.WriteString(launchErrStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n")
 		return b.String()
+	}
+	if m.statusHint != "" && m.inlineWatch == nil {
+		b.WriteString(launchDimStyle.Render(m.statusHint))
+		b.WriteString("\n")
 	}
 	if m.inlineWatch != nil {
 		if m.err != nil {
