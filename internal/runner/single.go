@@ -125,7 +125,16 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
 		ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths)
 		if setupErr != nil {
-			phases.SetupEnd = time.Now().Unix()
+			now := time.Now().Unix()
+			phases.SetupEnd = now
+
+			// Early return skips the normal completion writes below;
+			// without these the reconciler has no timestamps or logs.
+			failureReason := DetectFailureReasonFromExitInfo(ei)
+			WriteFailureReasonFile(paths, failureReason)
+			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
+			WritePhasesFile(paths, phases)
+
 			return ei, setupErr
 		}
 		if setupCmd == "uv sync" {
