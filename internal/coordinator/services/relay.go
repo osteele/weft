@@ -179,31 +179,25 @@ func (p *RelayProcessor) handleSubmit(ctx context.Context, req *coordinatorrelay
 
 	host := job.Host
 	if host == "" {
-		placementResult, placeErr := placement.PlaceWithFallback(p.db, placement.Constraints{
-			GPUClass: req.Submit.GPUClass,
-			GPUMemGB: intValue(req.Submit.GPUMemGB),
-			Inputs:   req.Submit.Inputs,
-			Command:  req.Submit.Command,
-			Project:  req.Submit.Project,
-			Tags:     req.Submit.Tags,
-		}, nil)
-		if placeErr == nil && placementResult != nil {
-			host = placementResult.Host
+		constraints := placement.ConstraintsFromJob(job)
+		plan, planErr := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: constraints,
+			Sources:     []placement.CandidateSource{&placement.OnPremSource{}},
+			Database:    p.db,
+		})
+		if planErr != nil {
+			slog.Warn("placement evaluation failed", "component", "relay", "job_id", req.JobID, "error", planErr)
+		}
+		if planErr == nil && !plan.Unplaced && plan.Cheap != nil && plan.Cheap.OnPrem != nil {
+			host = plan.Cheap.OnPrem.Host
 			if err := db.UpdateJobHost(p.db, req.JobID, host); err != nil {
 				return err
 			}
 			ack.Host = host
-			meta := &db.PlacementMeta{SelectedScore: placementResult.Scores[0].Total}
+			meta := &db.PlacementMeta{SelectedScore: plan.Cheap.OnPrem.Scores[0].Total}
 			_ = db.SetJobPlacementMeta(p.db, req.JobID, meta)
 		} else {
-			reasons, explainErr := placement.ExplainUnplaced(p.db, placement.Constraints{
-				GPUClass: req.Submit.GPUClass,
-				GPUMemGB: intValue(req.Submit.GPUMemGB),
-				Inputs:   req.Submit.Inputs,
-				Command:  req.Submit.Command,
-				Project:  req.Submit.Project,
-				Tags:     req.Submit.Tags,
-			})
+			reasons, explainErr := placement.ExplainUnplaced(p.db, constraints)
 			if explainErr == nil {
 				_ = db.SetJobPlacementReasons(p.db, req.JobID, reasons)
 			}

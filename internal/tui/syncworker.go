@@ -211,9 +211,9 @@ func (w *SyncWorker) run() {
 	}
 }
 
-// checkUnplacedJobs looks for unplaced queued jobs and tries to place them on
-// hosts that have become available since the original placement failed, then
-// tries to submit remaining jobs to running cloud instances.
+// checkUnplacedJobs looks for unplaced queued jobs and tries to place them via
+// the unified Evaluate function, which considers both on-prem hosts and reusable
+// cloud instances.
 func (w *SyncWorker) checkUnplacedJobs() {
 	jobs, err := db.ListUnplacedJobs(w.database)
 	if err != nil {
@@ -221,106 +221,88 @@ func (w *SyncWorker) checkUnplacedJobs() {
 		return
 	}
 
-	var cloudEligible []*db.Job
+	// Build sources: always try on-prem; try cloud reuse if R2 is available
+	sources := []placement.CandidateSource{&placement.OnPremSource{}}
+	w.mu.Lock()
+	r2Client := w.r2Client
+	w.mu.Unlock()
+	if r2Client != nil {
+		sources = append(sources, &campaign.ReuseSource{})
+	}
+
+	totalSubmitted := 0
 	for _, j := range jobs {
 		if j.LaunchID != nil && *j.LaunchID != 0 {
 			continue
 		}
-
-		constraints := placement.Constraints{
-			GPUClass: j.GPUClass,
-			Inputs:   j.Inputs,
-			Command:  j.Command,
-			Project:  j.Project,
-			Tags:     j.Tags,
-		}
-		if j.GPUMemGB != nil {
-			constraints.GPUMemGB = *j.GPUMemGB
+		if j.HasTag(db.TagInventory) {
+			// Inventory jobs can only go on-prem
+			sources = []placement.CandidateSource{&placement.OnPremSource{}}
 		}
 
+		constraints := placement.ConstraintsFromJob(j)
 		predict := placement.BuildJobPredictorFromConfig(w.appConfig, constraints)
-		result, err := placement.PlaceWithFallback(w.database, constraints, predict)
-		if err != nil {
-			if !j.HasTag(db.TagInventory) {
-				cloudEligible = append(cloudEligible, j)
+		plan, err := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: constraints,
+			Predictor:   predict,
+			Sources:     sources,
+			Database:    w.database,
+		})
+		if err != nil || plan.Unplaced {
+			continue
+		}
+
+		// Pick the "fast" strategy (survival-adjusted wallclock)
+		pick := plan.Fast
+		if pick == nil {
+			pick = plan.Cheap
+		}
+		if pick == nil {
+			continue
+		}
+
+		switch pick.Kind {
+		case placement.CandidateOnPrem:
+			if pick.OnPrem == nil {
+				continue
 			}
-			continue
-		}
-
-		assigned, err := db.AssignJobHost(w.database, j.ID, result.Host)
-		if err != nil {
-			slog.Warn("failed to assign unplaced job", "component", "tui", "job_id", j.ID, "error", err)
-			continue
-		}
-		if assigned {
-			slog.Info("assigned unplaced job to host", "component", "tui", "job_id", j.ID, "host", result.Host)
-			// Trigger a sync for the target host
-			select {
-			case w.results <- SyncResult{Host: result.Host, Updated: 1}:
-			default:
+			assigned, err := db.AssignJobHost(w.database, j.ID, pick.OnPrem.Host)
+			if err != nil {
+				slog.Warn("failed to assign unplaced job", "component", "tui", "job_id", j.ID, "error", err)
+				continue
 			}
-		}
-	}
+			if assigned {
+				slog.Info("assigned unplaced job to host", "component", "tui", "job_id", j.ID, "host", pick.OnPrem.Host)
+				select {
+				case w.results <- SyncResult{Host: pick.OnPrem.Host, Updated: 1}:
+				default:
+				}
+			}
 
-	if len(cloudEligible) > 0 {
-		w.tryCloudReuseForJobs(cloudEligible)
-	}
-}
+		case placement.CandidateCloudReuse:
+			if pick.Reuse == nil || r2Client == nil {
+				continue
+			}
+			instanceID := pick.Reuse.InstanceID
+			if err := campaign.SubmitJobsToInstance(w.ctx, w.database, r2Client, instanceID, []*db.Job{j}); err != nil {
+				slog.Warn("cloud auto-reuse submit failed", "component", "tui", "instance", instanceID, "error", err)
+				continue
+			}
+			slog.Info("cloud auto-reuse submitted job", "component", "tui", "job_id", j.ID, "instance", instanceID)
+			totalSubmitted++
 
-// tryCloudReuseForJobs attempts to submit unplaced jobs to compatible running
-// cloud instances, closing the race where jobs are created while instances are
-// launching.
-func (w *SyncWorker) tryCloudReuseForJobs(jobs []*db.Job) {
-	w.mu.Lock()
-	r2Client := w.r2Client
-	w.mu.Unlock()
-
-	if r2Client == nil {
-		return
-	}
-
-	instances, err := campaign.FindReusableInstances(w.database)
-	if err != nil || len(instances) == 0 {
-		return
-	}
-
-	assignments, _ := campaign.PlanReuse(jobs, instances)
-	if len(assignments) == 0 {
-		return
-	}
-
-	// Group assignments by instance ID
-	byInstance := make(map[int64][]*db.Job)
-	for _, a := range assignments {
-		byInstance[a.Instance.Instance.ID] = append(byInstance[a.Instance.Instance.ID], a.Job)
-	}
-
-	totalSubmitted := 0
-	ctx := w.ctx
-	for instanceID, instJobs := range byInstance {
-		if err := campaign.SubmitJobsToInstance(ctx, w.database, r2Client, instanceID, instJobs); err != nil {
-			slog.Warn("cloud auto-reuse submit failed", "component", "tui", "instance", instanceID, "error", err)
-			continue
-		}
-
-		jobIDs := make([]string, len(instJobs))
-		for i, j := range instJobs {
-			jobIDs[i] = fmt.Sprintf("#%d", j.ID)
-		}
-		slog.Info("cloud auto-reuse submitted jobs", "component", "tui", "count", len(instJobs), "instance", instanceID, "jobs", strings.Join(jobIDs, ", "))
-		totalSubmitted += len(instJobs)
-
-		// Auto-extend grace if deadline is close
-		inst, _ := db.GetLaunch(w.database, instanceID)
-		if inst != nil && inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
-			remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
-			if remaining < campaign.MinGraceRemaining {
-				extendDur := 15 * time.Minute
-				extendKey := r2keys.GraceExtend(instanceID)
-				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
-				newDeadline := time.Now().Add(extendDur).Unix()
-				_ = db.ExtendLaunchGrace(w.database, instanceID, newDeadline)
-				slog.Info("auto-extended grace period", "component", "tui", "instance", instanceID, "duration", extendDur)
+			// Auto-extend grace if deadline is close
+			inst, _ := db.GetLaunch(w.database, instanceID)
+			if inst != nil && inst.Status == db.LaunchStatusGrace && inst.GraceDeadline != nil {
+				remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
+				if remaining < campaign.MinGraceRemaining {
+					extendDur := 15 * time.Minute
+					extendKey := r2keys.GraceExtend(instanceID)
+					_ = r2Client.PutObject(w.ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
+					newDeadline := time.Now().Add(extendDur).Unix()
+					_ = db.ExtendLaunchGrace(w.database, instanceID, newDeadline)
+					slog.Info("auto-extended grace period", "component", "tui", "instance", instanceID, "duration", extendDur)
+				}
 			}
 		}
 	}

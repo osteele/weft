@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -499,24 +498,38 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Route through local placement for non-draft, non-dependency submissions
 	if !runDraft && runAfter == 0 && runAfterAny == 0 {
 		var placementResult *placement.PlacementResult
+		var placementPlan *placement.PlacementPlan
 
 		if host == "" {
-			result, err := placement.PlaceWithFallback(database, placementConstraints, predict)
+			// Build sources: on-prem + cloud reuse
+			sources := []placement.CandidateSource{&placement.OnPremSource{}, &campaign.ReuseSource{}}
+			plan, err := placement.Evaluate(placement.EvaluateRequest{
+				Constraints: placementConstraints,
+				Predictor:   predict,
+				Sources:     sources,
+				Database:    database,
+			})
 			if err != nil {
-				if !errors.Is(err, placement.ErrNoEligibleHost) {
-					return err
-				}
-				// No eligible host — job will be created as unplaced (host="").
-				// result may be non-nil with spill info if rental was faster.
-				placementResult = result
-			} else {
-				placementResult = result
-				host = result.Host
+				return err
+			}
 
+			// Pick the "fast" strategy (survival-adjusted wallclock)
+			pick := plan.Fast
+			if pick == nil {
+				pick = plan.Cheap
+			}
+
+			if pick != nil && pick.Kind == placement.CandidateOnPrem && pick.OnPrem != nil {
+				placementResult = pick.OnPrem
+				host = pick.OnPrem.Host
 				oplog.Log(oplog.OpPlacementDecided,
 					oplog.WithHost(host),
-					oplog.WithDetail(placement.FormatPlacementDetail(result)))
+					oplog.WithDetail(placement.FormatPlacementDetail(pick.OnPrem)))
+			} else if pick != nil && pick.Kind == placement.CandidateCloudReuse && pick.Reuse != nil {
+				// Cloud reuse selected — will handle after job creation
+				placementPlan = plan
 			}
+			// else: unplaced
 		}
 
 		// Build queue params
@@ -551,9 +564,19 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 
 		if host == "" {
-			// Try cloud instance reuse before declaring unplaced
-			if submitted := tryCloudReuse(database, jobID); submitted {
-				return nil
+			// If Evaluate selected cloud reuse, submit the job now
+			if placementPlan != nil && placementPlan.Fast != nil && placementPlan.Fast.Reuse != nil {
+				r2Client, err := newR2ClientFromConfig()
+				if err == nil {
+					job, _ := db.GetJobByID(database, jobID)
+					if job != nil {
+						if err := campaign.SubmitJobsToInstance(context.Background(), database, r2Client, placementPlan.Fast.Reuse.InstanceID, []*db.Job{job}); err == nil {
+							fmt.Printf("Job #%d submitted to rental instance #%d (%s)\n",
+								jobID, placementPlan.Fast.Reuse.InstanceID, placementPlan.Fast.Reuse.DisplayName)
+							return nil
+						}
+					}
+				}
 			}
 			if reasons, reasonErr := placement.ExplainUnplaced(database, placementConstraints); reasonErr != nil {
 				slog.Warn("failed to explain unplaced job", "job_id", jobID, "error", reasonErr)
@@ -622,20 +645,21 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Placement for non-scheduler paths (--draft, --after)
 	var placementResult *placement.PlacementResult
 	if host == "" {
-		result, err := placement.PlaceWithFallback(database, placementConstraints, predict)
+		plan, err := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: placementConstraints,
+			Predictor:   predict,
+			Sources:     []placement.CandidateSource{&placement.OnPremSource{}},
+			Database:    database,
+		})
 		if err != nil {
-			if !errors.Is(err, placement.ErrNoEligibleHost) {
-				return fmt.Errorf("auto-placement failed: %w", err)
-			}
-			// No eligible host — will create unplaced job (host="")
-			placementResult = result // may have spill info
-		} else {
-			placementResult = result
-			host = result.Host
-
+			return fmt.Errorf("auto-placement failed: %w", err)
+		}
+		if !plan.Unplaced && plan.Cheap != nil && plan.Cheap.OnPrem != nil {
+			placementResult = plan.Cheap.OnPrem
+			host = plan.Cheap.OnPrem.Host
 			oplog.Log(oplog.OpPlacementDecided,
 				oplog.WithHost(host),
-				oplog.WithDetail(placement.FormatPlacementDetail(result)))
+				oplog.WithDetail(placement.FormatPlacementDetail(plan.Cheap.OnPrem)))
 		}
 	}
 
@@ -1054,44 +1078,6 @@ func syncHostQuietly(database *sql.DB, host string, noSync bool) bool {
 		return ensureQueueRunnerStarted(h, defaultQueueName)
 	})
 	return syncResult.HostContacted
-}
-
-// tryCloudReuse attempts to submit an unplaced job to a compatible cloud
-// instance (grace or running). Returns true if the job was submitted.
-// Silently returns false on any error (falls through to normal unplaced flow).
-func tryCloudReuse(database *sql.DB, jobID int64) bool {
-	instances, err := campaign.FindReusableInstances(database)
-	if err != nil || len(instances) == 0 {
-		return false
-	}
-
-	job, err := db.GetJobByID(database, jobID)
-	if err != nil || job == nil {
-		return false
-	}
-	if job.HasTag(db.TagInventory) {
-		return false
-	}
-
-	ranked := campaign.RankForJob(job, instances)
-	if len(ranked) == 0 {
-		return false
-	}
-
-	r2Client, err := newR2ClientFromConfig()
-	if err != nil {
-		return false
-	}
-
-	best := ranked[0]
-	ctx := context.Background()
-	if err := campaign.SubmitJobsToInstance(ctx, database, r2Client, best.Instance.ID, []*db.Job{job}); err != nil {
-		return false
-	}
-
-	fmt.Printf("Job #%d submitted to rental instance #%d (%s, %s)\n",
-		jobID, best.Instance.ID, best.Instance.DisplayGPUSpec(), best.Instance.Status)
-	return true
 }
 
 // syncAndReportOffline syncs a host and prints an offline message if unreachable.

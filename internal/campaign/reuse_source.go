@@ -1,10 +1,9 @@
-package cmd
+package campaign
 
 import (
 	"database/sql"
 	"fmt"
 
-	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/placement"
@@ -15,12 +14,11 @@ import (
 type ReuseSource struct{}
 
 func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraints, _ placement.JobPredictor) ([]placement.Candidate, error) {
-	instances, err := campaign.FindReusableInstances(database)
+	instances, err := FindReusableInstances(database)
 	if err != nil || len(instances) == 0 {
 		return nil, nil
 	}
 
-	// Build a synthetic job for matching
 	job := &db.Job{
 		GPUClass: constraints.GPUClass,
 		Inputs:   constraints.Inputs,
@@ -30,7 +28,7 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 		job.GPUMemGB = &v
 	}
 
-	ranked := campaign.RankForJob(job, instances)
+	ranked := RankForJob(job, instances)
 	if len(ranked) == 0 {
 		return nil, nil
 	}
@@ -42,19 +40,17 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 		// Estimate queue wait on this instance
 		var waitMin float64
 		if cap.RunningJobCount > 0 {
-			waitMin = float64(cap.RunningJobCount) * 30 // 30 min per queued job default
+			waitMin = float64(cap.RunningJobCount) * 30
 		}
 		waitEst := estimate.FromSeconds(waitMin*60, waitMin*60*0.5, waitMin*60*1.5)
 
-		// Default run estimate (1hr) — no host-specific prediction for cloud reuse
 		runEst := estimate.FromSeconds(3600, 900, 14400)
-
 		totalEst := waitEst.Add(runEst)
 
 		costPerHour := float64(inst.CostPerHourCents) / 100.0
-
 		status := string(inst.Status)
-		reuseOpt := placement.ReuseOption{
+
+		opt := placement.ReuseOption{
 			InstanceID:  inst.ID,
 			DisplayName: fmt.Sprintf("#%d (%s)", inst.ID, inst.DisplayGPUSpec()),
 			GPUClass:    inst.GPUClass,
@@ -72,11 +68,11 @@ func (s *ReuseSource) Collect(database *sql.DB, constraints placement.Constraint
 		candidates = append(candidates, placement.Candidate{
 			Kind:        placement.CandidateCloudReuse,
 			ID:          fmt.Sprintf("instance:%d", inst.ID),
-			DisplayName: reuseOpt.DisplayName,
+			DisplayName: opt.DisplayName,
 			EstTime:     totalEst,
 			EstCost:     estCost,
 			Survival:    placement.DefaultReuseSurvival,
-			Reuse:       &reuseOpt,
+			Reuse:       &opt,
 		})
 	}
 

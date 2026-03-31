@@ -43,6 +43,21 @@ type Constraints struct {
 	Tags     []string // Job tags; "benchmark" triggers idle-host requirement
 }
 
+// ConstraintsFromJob builds Constraints from a db.Job's fields.
+func ConstraintsFromJob(j *db.Job) Constraints {
+	c := Constraints{
+		GPUClass: j.GPUClass,
+		Inputs:   j.Inputs,
+		Command:  j.Command,
+		Project:  j.Project,
+		Tags:     j.Tags,
+	}
+	if j.GPUMemGB != nil {
+		c.GPUMemGB = *j.GPUMemGB
+	}
+	return c
+}
+
 // NeedsGPU returns true if the constraints require GPU resources.
 func (c Constraints) NeedsGPU() bool {
 	return c.GPUClass != "" || c.GPUMemGB > 0

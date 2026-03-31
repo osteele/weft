@@ -17,6 +17,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 	"github.com/spf13/cobra"
@@ -203,6 +204,10 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	jobs = filterLaunchJobsByProject(jobs)
 
+	// Pre-filter: try on-prem placement for unplaced jobs.
+	// Jobs that can now be placed on-prem are assigned and removed from the rental list.
+	jobs = prefilterOnPrem(database, jobs, cfg)
+
 	if len(jobs) == 0 {
 		fmt.Println("No jobs need rental GPUs.")
 		return nil
@@ -298,6 +303,35 @@ func filterRentalLaunchJobs(jobs []*db.Job) []*db.Job {
 		}
 	}
 	return filtered
+}
+
+// prefilterOnPrem tries to place unplaced jobs on on-prem hosts before launching
+// rental instances. Returns the subset of jobs that still need rental.
+func prefilterOnPrem(database *sql.DB, jobs []*db.Job, cfg *config.Config) []*db.Job {
+	var remaining []*db.Job
+	for _, j := range jobs {
+		constraints := placement.ConstraintsFromJob(j)
+		predict := placement.BuildJobPredictorFromConfig(cfg, constraints)
+		plan, err := placement.Evaluate(placement.EvaluateRequest{
+			Constraints: constraints,
+			Predictor:   predict,
+			Sources:     []placement.CandidateSource{&placement.OnPremSource{}},
+			Database:    database,
+		})
+		if err != nil || plan.Unplaced || plan.Cheap == nil || plan.Cheap.OnPrem == nil {
+			remaining = append(remaining, j)
+			continue
+		}
+		host := plan.Cheap.OnPrem.Host
+		assigned, err := db.AssignJobHost(database, j.ID, host)
+		if err != nil || !assigned {
+			remaining = append(remaining, j)
+			continue
+		}
+		slog.Info("placed job on-prem during launch pre-filter", "job_id", j.ID, "host", host)
+		fmt.Printf("Job #%d → %s (on-prem, skipping rental)\n", j.ID, host)
+	}
+	return remaining
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
