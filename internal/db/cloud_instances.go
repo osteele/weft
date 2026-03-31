@@ -24,7 +24,7 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		disk_gb, provisioned_inputs,
 		termination_requested_at, termination_intent_json,
 		results_verified,
-		machine_id,
+		machine_id, docker_image,
 		provider_running_at`
 
 // Launch status constants (same values used for both Launch and Campaign).
@@ -128,6 +128,9 @@ type Launch struct {
 
 	// Provider machine identifier (for reliability tracking)
 	MachineID string
+
+	// DockerImage is the Docker image used for this instance (e.g. "nvidia/cuda:12.4.1-runtime-ubuntu22.04").
+	DockerImage string
 
 	// ProviderRunningAt is when the cloud provider first reported the instance
 	// as "running" (Docker container started, onstart can execute). Bootstrap
@@ -265,13 +268,13 @@ func CreateLaunch(db *sql.DB, c *Launch) (int64, error) {
 		 max_spend_cents, max_time_seconds, created_at,
 		 resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability,
 		 inet_down_mbps, inet_up_mbps, cuda_version,
-		 disk_gb, provisioned_inputs, machine_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 disk_gb, provisioned_inputs, machine_id, docker_image)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.CampaignID, c.Status, c.Provider, c.GPUSpec, c.GPUClass, c.GPUMemGB,
 		c.MaxSpendCents, c.MaxTimeSeconds, now,
 		c.ResolvedGPUName, c.CostPerHourCents, c.NumGPUs, c.DLPerf, c.Reliability,
 		c.InetDownMbps, c.InetUpMbps, c.CUDAVersion,
-		c.DiskGB, provisionedInputsJSON, c.MachineID,
+		c.DiskGB, provisionedInputsJSON, c.MachineID, c.DockerImage,
 	)
 	if err != nil {
 		return 0, err
@@ -345,6 +348,12 @@ func UpdateLaunchStatus(db *sql.DB, id int64, status string, terminationInfo ...
 		_, err := db.Exec(`UPDATE launches SET status = ? WHERE id = ?`, status, id)
 		return err
 	}
+}
+
+// UpdateLaunchDockerImage sets the Docker image used for a launch.
+func UpdateLaunchDockerImage(db *sql.DB, id int64, image string) error {
+	_, err := db.Exec(`UPDATE launches SET docker_image = ? WHERE id = ?`, image, id)
+	return err
 }
 
 // UpdateLaunchResultsVerified sets the results_verified flag on a cloud instance.
@@ -1009,6 +1018,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var terminationIntentJSON sql.NullString
 	var resultsVerified sql.NullBool
 	var machineID sql.NullString
+	var dockerImage sql.NullString
 	var providerRunningAt sql.NullInt64
 
 	err := s.Scan(
@@ -1024,7 +1034,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&diskGB, &provisionedInputsJSON,
 		&terminationRequestedAt, &terminationIntentJSON,
 		&resultsVerified,
-		&machineID,
+		&machineID, &dockerImage,
 		&providerRunningAt,
 	)
 	_ = hostID // TODO: populate Launch.HostID when field is added
@@ -1145,6 +1155,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if machineID.Valid {
 		c.MachineID = machineID.String
+	}
+	if dockerImage.Valid {
+		c.DockerImage = dockerImage.String
 	}
 	if providerRunningAt.Valid {
 		c.ProviderRunningAt = &providerRunningAt.Int64

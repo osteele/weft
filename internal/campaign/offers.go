@@ -1,13 +1,25 @@
 package campaign
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
 	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/placement"
 )
+
+// parseCUDAVersionFloat converts a CUDA major.minor string (e.g. "12.4") to
+// float64 for comparison with placement.MinCUDAForGPU values.
+func parseCUDAVersionFloat(s string) float64 {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
 
 // GroupOffer pairs an instance group with its best cloud offer.
 type GroupOffer struct {
@@ -41,9 +53,46 @@ func intFromEnvOrDefault(key string, defaultVal int) int {
 	return defaultVal
 }
 
+// filterOffersByCUDACompat removes offers whose GPU requires a newer CUDA
+// toolkit than the Docker image provides. Returns the compatible offers and
+// the count of filtered offers (for logging).
+func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer, int) {
+	if image == "" {
+		image = cloud.DefaultImage
+	}
+	cudaVer, _, ok := parseCUDAImage(image)
+	if !ok {
+		return offers, 0
+	}
+	imageCUDA := parseCUDAVersionFloat(cudaVer)
+	if imageCUDA == 0 {
+		return offers, 0
+	}
+
+	compatible := make([]cloud.Offer, 0, len(offers))
+	filtered := 0
+	for _, o := range offers {
+		minCUDA := placement.MinCUDAForGPU(o.GPUName)
+		if minCUDA > 0 && minCUDA > imageCUDA {
+			filtered++
+			continue
+		}
+		compatible = append(compatible, o)
+	}
+	if filtered > 0 {
+		slog.Debug("filtered offers by CUDA compatibility",
+			"image_cuda", imageCUDA, "filtered", filtered, "remaining", len(compatible))
+	}
+	return compatible, filtered
+}
+
 // rankOffer selects the best offer from a slice and returns a GroupOffer.
 func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
+	if len(offers) == 0 {
+		return result
+	}
+	offers, _ = filterOffersByCUDACompat(offers, group.Image)
 	if len(offers) == 0 {
 		return result
 	}

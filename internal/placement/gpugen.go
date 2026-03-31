@@ -1,6 +1,10 @@
 package placement
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/osteele/weft/internal/inventory"
+)
 
 // GPUGeneration represents an ordered GPU generation/architecture.
 // Higher values are newer. NVIDIA and Apple are separate families
@@ -66,10 +70,13 @@ var gpuClassToGeneration = map[string]GPUGeneration{
 	"h100sxm": GenHopper,
 	"h200":    GenHopper,
 
-	// Blackwell (B100, B200, GB200)
-	"b100":  GenBlackwell,
-	"b200":  GenBlackwell,
-	"gb200": GenBlackwell,
+	// Blackwell (B100, B200, GB200, RTX 50-series)
+	"b100":    GenBlackwell,
+	"b200":    GenBlackwell,
+	"gb200":   GenBlackwell,
+	"rtx5090": GenBlackwell,
+	"rtx5080": GenBlackwell,
+	"rtx5070": GenBlackwell,
 
 	// Apple Silicon
 	"m1":      GenAppleM1,
@@ -101,6 +108,28 @@ var generationNames = map[string]GPUGeneration{
 	"applem2":     GenAppleM2,
 	"applem3":     GenAppleM3,
 	"applem4":     GenAppleM4,
+}
+
+// generationMinCUDA maps GPU generations to the minimum CUDA toolkit version
+// required to compile kernels for that architecture.
+var generationMinCUDA = map[GPUGeneration]float64{
+	GenTuring:      10.0,
+	GenAmpere:      11.0,
+	GenAdaLovelace: 11.8,
+	GenHopper:      12.0,
+	GenBlackwell:   12.8,
+}
+
+// MinCUDAForGPU returns the minimum CUDA toolkit version needed for a GPU,
+// identified by its name as it appears in cloud offers (e.g., "RTX 5090").
+// Returns 0 if the GPU is unknown or doesn't require a specific CUDA version.
+func MinCUDAForGPU(gpuName string) float64 {
+	normalized := inventory.NormalizeGPUClass(gpuName)
+	gen := generationOf(normalized)
+	if gen == GenUnknown {
+		return 0
+	}
+	return generationMinCUDA[gen]
 }
 
 // generationOf returns the generation for a normalized GPU class name.

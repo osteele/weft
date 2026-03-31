@@ -198,7 +198,8 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			num_gpus INTEGER,
 			cuda_version REAL,
 			provider_instance_id TEXT,
-			provider_running_at INTEGER
+			provider_running_at INTEGER,
+			docker_image TEXT
 		)`,
 		createJobsTableSQL("jobs", false),
 		`CREATE TABLE job_attempts (

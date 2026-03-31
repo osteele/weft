@@ -358,6 +358,29 @@ When a campaign contains jobs from multiple projects with different images, weft
 automatically splits instance groups so each instance uses the correct image.
 Jobs with no `[cloud] image` setting share the global default.
 
+### CUDA toolkit compatibility
+
+Weft automatically filters out GPU offers that require a newer CUDA toolkit than
+the Docker image provides. Each GPU generation has a minimum CUDA version needed
+for kernel compilation:
+
+| Generation | GPUs | Min CUDA Toolkit |
+|---|---|---|
+| Turing | RTX 2080 Ti, T4 | 10.0 |
+| Ampere | RTX 3090, A100, A10 | 11.0 |
+| Ada Lovelace | RTX 4090, L40S, L4 | 11.8 |
+| Hopper | H100, H200 | 12.0 |
+| Blackwell | B200, RTX 5090 | 12.8 |
+
+With the default image (`nvidia/cuda:12.4.1-runtime`), Blackwell GPUs (RTX 5090,
+B200) are automatically excluded since they need CUDA 12.8+. To use newer GPUs,
+set a compatible image in `.weft.toml`:
+
+```toml
+[cloud]
+image = "nvidia/cuda:12.8.0-runtime-ubuntu22.04"
+```
+
 ## Cost estimation
 
 When launching a campaign, weft estimates the total cost per GPU group. If the

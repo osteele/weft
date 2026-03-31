@@ -302,3 +302,25 @@ func TestSubsumes(t *testing.T) {
 		}
 	}
 }
+
+func TestMinCUDAForGPU(t *testing.T) {
+	tests := []struct {
+		gpuName string
+		want    float64
+	}{
+		{"RTX 5090", 12.8},
+		{"RTX 4090", 11.8},
+		{"RTX 3090", 11.0},
+		{"A100 SXM4", 11.0},
+		{"H100", 12.0},
+		{"H200", 12.0},
+		{"B200", 12.8},
+		{"Unknown GPU", 0},
+	}
+	for _, tt := range tests {
+		got := MinCUDAForGPU(tt.gpuName)
+		if got != tt.want {
+			t.Errorf("MinCUDAForGPU(%q) = %v, want %v", tt.gpuName, got, tt.want)
+		}
+	}
+}

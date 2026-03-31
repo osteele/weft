@@ -569,6 +569,11 @@ func LaunchCampaign(
 							donorEnvVars["HUGGING_FACE_HUB_TOKEN"] = token
 						}
 						donorCreateOpts.EnvVars = donorEnvVars
+						if donorCreateOpts.Image != "" {
+							if err := db.UpdateLaunchDockerImage(database, donorInstanceID, donorCreateOpts.Image); err != nil {
+								slog.Warn("failed to persist donor docker image", "launch_id", donorInstanceID, "error", err)
+							}
+						}
 						if err := configureBootstrapCreateOpts(donorClient, &donorCreateOpts, bootstrapKey); err != nil {
 							slog.Warn("donor bootstrap config failed", "component", "donor", "error", err)
 							donorCfg = nil
@@ -983,6 +988,13 @@ func LaunchInstance(
 	// Override image if the group has a per-project image
 	if group.Image != "" {
 		createOpts.Image = group.Image
+	}
+
+	// Persist the final Docker image for analytics (correlate loading duration vs image type)
+	if createOpts.Image != "" {
+		if err := db.UpdateLaunchDockerImage(database, instanceID, createOpts.Image); err != nil {
+			slog.Warn("failed to persist docker image", "launch_id", instanceID, "error", err)
+		}
 	}
 
 	// Build the bootstrap key using the DB instance ID (known before CreateInstance)
