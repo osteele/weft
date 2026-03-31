@@ -155,6 +155,24 @@ type autoLaunchDoneMsg struct {
 }
 
 // ---------------------------------------------------------------------------
+// Move picker messages
+// ---------------------------------------------------------------------------
+
+// moveOptionsReadyMsg carries computed move destinations for the inline picker.
+type moveOptionsReadyMsg struct {
+	jobID   int64
+	options []moveOption
+	err     error
+}
+
+// moveExecuteDoneMsg carries the result of a move-to-existing or move-to-new execution.
+type moveExecuteDoneMsg struct {
+	jobID      int64
+	targetDesc string // e.g. "instance #17" or "new RTX 4090 instance"
+	err        error
+}
+
+// ---------------------------------------------------------------------------
 // Render row types (system mode)
 // ---------------------------------------------------------------------------
 

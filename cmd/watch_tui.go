@@ -100,6 +100,9 @@ type watchModel struct {
 	autoLaunching bool // true while an auto-launch is in progress
 	autoPlacing   bool // true while an auto-place is in progress
 
+	// --- Move picker overlay ---
+	movePicker movePickerModel
+
 	// --- Shared display state ---
 	unplacedJobs []*db.Job
 	flash        tui.FlashState
@@ -413,6 +416,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case watchTerminateDoneMsg:
 		return m.handleActionDone("Terminate", msg.message, msg.err)
+
+	// --- Move picker messages ---
+	case moveOptionsReadyMsg:
+		return m.handleMoveOptionsReady(msg)
+
+	case moveExecuteDoneMsg:
+		return m.handleMoveExecuteDone(msg)
 
 	// --- Auto-pilot messages ---
 	case autoPlaceDoneMsg:

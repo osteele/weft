@@ -31,6 +31,10 @@ func renderStructuredBlock(lines []watchInstanceLine, addSelectable, addPlain fu
 // ---------------------------------------------------------------------------
 
 func (m watchModel) View() string {
+	if m.movePicker.active {
+		return m.movePicker.View(m.width, m.height)
+	}
+
 	switch {
 	case m.mode.isInstanceBased():
 		content, cursorLine := m.renderInstanceView()
@@ -158,11 +162,11 @@ func (m watchModel) renderInstanceView() (string, int) {
 	}
 
 	if !m.done {
-		hint := "u unplace  x kill  t terminate  s submit  q quit (instances run in background)"
+		hint := "u unplace  x kill  t terminate  s submit  m move  q quit (instances run in background)"
 		if !m.retrying && m.hasRetryableFailures() {
-			hint = "u unplace  x kill  t terminate  s submit  r retry  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  r retry  q quit (instances run in background)"
 		} else if len(m.unplacedJobs) > 0 {
-			hint = "u unplace  x kill  t terminate  s submit  l launch  q quit (instances run in background)"
+			hint = "u unplace  x kill  t terminate  s submit  m move  l launch  q quit (instances run in background)"
 		}
 		hint += "  " + m.autoModeHint()
 		addLine(watchDimStyle.Render(hint))
@@ -296,9 +300,9 @@ func (m watchModel) renderSystemView() (string, int) {
 		footerParts = append(footerParts, m.retryResult)
 	}
 
-	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [r] retry  [q] quit"
+	controls := "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [r] retry  [q] quit"
 	if !m.hasRetryableFailures() {
-		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [l] launch  [q] quit"
+		controls = "[^u/^d] page  [u] unplace  [x] kill  [t] terminate  [s] submit  [m] move  [l] launch  [q] quit"
 	}
 	controls += "  " + m.autoModeHint()
 	footerParts = append(footerParts, watchDimStyle.Render(controls))

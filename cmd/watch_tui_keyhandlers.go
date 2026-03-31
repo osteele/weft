@@ -21,6 +21,11 @@ func (m watchModel) handleToggleAutoPilot() (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Delegate to move picker overlay when active
+	if m.movePicker.active {
+		return m.handleMovePickerKey(msg)
+	}
+
 	if m.mode == watchModeProject {
 		return m.handleProjectKey(msg)
 	}
@@ -129,8 +134,66 @@ func (m watchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.flash.Set("No unplaced jobs to launch", true)
 		}
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
+	case "m":
+		job := m.selectedCloudJob()
+		if job == nil || job.EffectiveStatus() != db.StatusQueued {
+			return m, nil
+		}
+		sourceInstanceID := int64(0)
+		if job.LaunchID != nil {
+			sourceInstanceID = *job.LaunchID
+		}
+		capacities := m.buildInstanceCapacities()
+		// Snapshot queued-job counts on the main goroutine to avoid a data
+		// race — the updates map must not be read from a background goroutine.
+		queuedCounts := make(map[int64]int)
+		for id, u := range m.updates {
+			for _, j := range u.Jobs {
+				if j != nil && j.EffectiveStatus() == db.StatusQueued {
+					queuedCounts[id]++
+				}
+			}
+		}
+		flashCmd := m.flash.Set(m.spinner.View()+" Searching for destinations...", false)
+		return m, tea.Batch(flashCmd, requestMoveOptions(
+			m.database, m.appConfig, m.cloudClients,
+			job, capacities, queuedCounts, sourceInstanceID,
+		))
 	case "a":
 		return m.handleToggleAutoPilot()
+	}
+	return m, nil
+}
+
+// handleMovePickerKey handles keys when the move picker overlay is active.
+func (m watchModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.movePicker.reset()
+		return m, nil
+	case "up", "k":
+		m.movePicker.moveCursor(-1)
+		return m, nil
+	case "down", "j":
+		m.movePicker.moveCursor(1)
+		return m, nil
+	case "enter":
+		opt := m.movePicker.selectedOption()
+		if opt == nil {
+			return m, nil
+		}
+		jobID := m.movePicker.jobID
+		selected := *opt
+		m.movePicker.reset()
+		targetDesc := fmt.Sprintf("instance #%d", selected.instanceID)
+		if selected.isNew {
+			targetDesc = fmt.Sprintf("new %s instance", selected.gpuName)
+		}
+		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Moving job #%d to %s...", jobID, targetDesc), false)
+		return m, tea.Batch(flashCmd, requestMoveExecute(
+			m.ctx, m.database, m.r2Client, m.appConfig, m.cloudClients,
+			jobID, selected,
+		))
 	}
 	return m, nil
 }

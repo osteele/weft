@@ -162,6 +162,35 @@ func (m watchModel) handleSubmitDone(msg watchSubmitDoneMsg) (tea.Model, tea.Cmd
 }
 
 // ---------------------------------------------------------------------------
+// Update handlers: move picker
+// ---------------------------------------------------------------------------
+
+func (m watchModel) handleMoveOptionsReady(msg moveOptionsReadyMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.flash.Set(fmt.Sprintf("Move: %v", msg.err), true)
+	}
+	m.movePicker = movePickerModel{
+		active:  true,
+		jobID:   msg.jobID,
+		options: msg.options,
+		cursor:  0,
+	}
+	return m, nil
+}
+
+func (m watchModel) handleMoveExecuteDone(msg moveExecuteDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		return m, m.flash.Set(fmt.Sprintf("Move failed: %v", msg.err), true)
+	}
+	flashCmd := m.flash.Set(fmt.Sprintf("Moved job #%d to %s", msg.jobID, msg.targetDesc), false)
+	if m.mode == watchModeSystem {
+		m.refreshing = true
+		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig))
+	}
+	return m, flashCmd
+}
+
+// ---------------------------------------------------------------------------
 // Update handlers: auto-pilot
 // ---------------------------------------------------------------------------
 
