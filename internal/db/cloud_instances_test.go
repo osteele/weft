@@ -844,7 +844,7 @@ func TestLaunchLiveState(t *testing.T) {
 		JobProgressID:  42,
 		AgentVersion:   "abc123",
 	}
-	if err := UpsertLaunchLiveState(database, state); err != nil {
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
 		t.Fatalf("UpsertLaunchLiveState: %v", err)
 	}
 
@@ -868,7 +868,7 @@ func TestLaunchLiveState(t *testing.T) {
 	// Upsert overwrites
 	state.InstancePhase = "running:43"
 	state.JobProgressPct = -1
-	if err := UpsertLaunchLiveState(database, state); err != nil {
+	if _, err := UpsertLaunchLiveState(database, state); err != nil {
 		t.Fatalf("UpsertLaunchLiveState: %v", err)
 	}
 	got, err = GetLaunchLiveState(database, instanceID)

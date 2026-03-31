@@ -73,7 +73,6 @@ func SyncInstanceState(
 
 	instanceID := ci.ID
 
-	// 1. Termination intent
 	if fetchedIntent, err := syncFetchTermIntent(ctx, r2Client, instanceID); err == nil && fetchedIntent != nil {
 		s.TerminationIntent = fetchedIntent
 		_ = db.UpdateLaunchTerminationIntent(database, instanceID, fetchedIntent)
@@ -82,7 +81,6 @@ func SyncInstanceState(
 		s.TerminationIntent = ci.TerminationIntent
 	}
 
-	// 2. Instance phase
 	s.InstancePhase = syncFetchInstancePhase(ctx, r2Client, instanceID)
 	if s.InstancePhase != "" {
 		// Job progress (only meaningful when a phase is active)
@@ -108,16 +106,13 @@ func SyncInstanceState(
 			}
 		}
 	} else if !jobState.HasStartedJob {
-		// 3. Bootstrap stage (only when no phase and no jobs started)
 		s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
 	}
 
-	// 4. Heartbeat (when jobs have started or a phase is active)
 	if jobState.HasStartedJob || s.InstancePhase != "" {
 		s.Heartbeat, s.HeartbeatAge = syncFetchHeartbeat(ctx, r2Client, instanceID)
 	}
 
-	// 5. Sync completion for jobs that aren't the current phase job
 	if _, currentJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && currentJobID > 0 {
 		for _, j := range jobs {
 			if j.ID != currentJobID && j.Status == db.StatusRunning {
@@ -127,14 +122,13 @@ func SyncInstanceState(
 		}
 	}
 
-	// 6. Agent version
 	if opts.AgentVersionFetched {
 		s.AgentVersion = opts.AgentVersion
 	} else {
 		s.AgentVersion = fetchR2Marker(ctx, r2Client, r2keys.InstanceAgentVersion(instanceID))
 	}
 
-	// 7. Persist to launch_live_state
+	// Persist to launch_live_state and get resolved PhaseChangedAt.
 	var hbJSON string
 	var hbTS int64
 	if s.Heartbeat != nil {
@@ -143,7 +137,7 @@ func SyncInstanceState(
 		}
 		hbTS = s.Heartbeat.Ts
 	}
-	_ = db.UpsertLaunchLiveState(database, db.LaunchLiveState{
+	phaseChangedAt, _ := db.UpsertLaunchLiveState(database, db.LaunchLiveState{
 		LaunchID:       instanceID,
 		InstancePhase:  s.InstancePhase,
 		BootstrapStage: s.BootstrapStage,
@@ -153,10 +147,8 @@ func SyncInstanceState(
 		JobProgressID:  s.JobProgressID,
 		AgentVersion:   s.AgentVersion,
 	})
-
-	// 8. Read back PhaseChangedAt from the DB (set by UpsertLaunchLiveState)
-	if liveState, err := db.GetLaunchLiveState(database, instanceID); err == nil && liveState != nil && liveState.PhaseChangedAt != nil {
-		t := time.Unix(*liveState.PhaseChangedAt, 0)
+	if phaseChangedAt != nil {
+		t := time.Unix(*phaseChangedAt, 0)
 		s.PhaseChangedAt = &t
 	}
 

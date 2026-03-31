@@ -1456,8 +1456,9 @@ type LaunchLiveState struct {
 
 // UpsertLaunchLiveState writes the latest ephemeral R2 state for an instance.
 // PhaseChangedAt is auto-managed: set to now when InstancePhase changes from
-// the previously stored value, preserved otherwise.
-func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) error {
+// the previously stored value, preserved otherwise. Returns the resolved
+// PhaseChangedAt so callers don't need a separate read.
+func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) (*int64, error) {
 	now := time.Now().Unix()
 
 	// Detect phase change to auto-set PhaseChangedAt.
@@ -1485,7 +1486,7 @@ func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) error {
 		nullableProgressPct(state.JobProgressPct), state.JobProgressID,
 		state.AgentVersion, state.PhaseChangedAt, now,
 	)
-	return err
+	return state.PhaseChangedAt, err
 }
 
 // nullableProgressPct returns nil if pct is -1 (unavailable), otherwise the value.
