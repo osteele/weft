@@ -67,9 +67,9 @@ func TestContentionFactor_IdleHost(t *testing.T) {
 	db := setupContentionDB(t)
 	m := &HostMetrics{GPUPercent: 0}
 	cf := ContentionFactor(db, "host1", m)
-	// 0% GPU → falls through to historical, then to default
-	if cf != DefaultContentionFactor {
-		t.Errorf("ContentionFactor with 0%% GPU = %f, want default %f", cf, DefaultContentionFactor)
+	// Live metrics present with 0% GPU → factor 1.0 (no contention), no DB query
+	if cf != 1.0 {
+		t.Errorf("ContentionFactor with 0%% GPU = %f, want 1.0", cf)
 	}
 }
 

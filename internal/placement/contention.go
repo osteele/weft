@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// DefaultContentionFactor is used when no historical data is available.
-// Represents a 50% runtime overhead from contention.
+// DefaultContentionFactor assumes 50% runtime overhead when no live
+// metrics or historical contention data are available.
 const DefaultContentionFactor = 1.5
 
 // RecordContentionObs saves a host contention snapshot to the database.
@@ -54,8 +54,8 @@ func RecentContentionStats(db *sql.DB, host string, hours int) *ContentionStats 
 // Uses live metrics if available, otherwise falls back to historical stats,
 // otherwise returns DefaultContentionFactor.
 func ContentionFactor(db *sql.DB, host string, metrics *HostMetrics) float64 {
-	if metrics != nil && metrics.GPUPercent > 0 {
-		// Live data: scale linearly from 1.0 (idle) to 2.0 (fully loaded)
+	if metrics != nil {
+		// Live data available: scale linearly from 1.0 (idle) to 2.0 (fully loaded)
 		return 1.0 + float64(metrics.GPUPercent)/100.0
 	}
 	if stats := RecentContentionStats(db, host, 24); stats != nil {

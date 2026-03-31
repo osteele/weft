@@ -375,40 +375,49 @@ func BestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTi
 	return nil, ErrNoReachableHost
 }
 
-// PlaceWithFallback tries live placement first, falls back to static scoring,
-// and returns ErrNoEligibleHost if no host matches at all.
-// This encapsulates the common BestReachableHost → BestHostWithPredictor fallback chain.
-func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
-	// Rental-tagged jobs skip local placement entirely.
+// PlaceOnPrem tries live on-prem placement first, falls back to static scoring.
+// Returns ErrNoEligibleHost if no inventory host matches.
+// Does not compare against rental — use Evaluate for cross-strategy comparison.
+func PlaceOnPrem(database *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
 	if db.HasRentalTag(constraints.Tags) {
 		return nil, ErrNoEligibleHost
 	}
 
 	result, err := BestReachableHostWithPredictor(database, constraints, 5*time.Second, predict)
 	if err == nil {
-		// Compare on-prem completion time against rental estimate.
-		// If rental is faster, spill to rental (unless inventory-tagged).
-		if result.CompletionEst.Mean > 0 && !db.HasInventoryTag(constraints.Tags) {
-			rentalEst := EstimateRentalCompletion(database, constraints, predict)
-			if rentalEst != nil && rentalEst.Total.Mean > 0 && rentalEst.Total.Mean < result.CompletionEst.Mean {
-				slog.Info("rental faster than on-prem, spilling to rental",
-					"host", result.Host,
-					"onprem_min", fmt.Sprintf("%.0f", result.CompletionEst.Mean.Minutes()),
-					"rental_min", fmt.Sprintf("%.0f", rentalEst.Total.Mean.Minutes()))
-				result.SpilledToRental = true
-				totalEst := rentalEst.Total
-				result.RentalEst = &totalEst
-				// Return the result (with spill info) alongside the error,
-				// so callers can display the on-prem vs rental comparison.
-				return result, ErrNoEligibleHost
-			}
-		}
 		return result, nil
 	}
 	if errors.Is(err, ErrNoReachableHost) {
 		return BestHostWithPredictor(database, constraints, nil, predict)
 	}
 	return nil, err
+}
+
+// PlaceWithFallback tries on-prem placement, then compares against rental
+// completion time. If rental is faster, returns spill info alongside ErrNoEligibleHost.
+//
+// Deprecated: callers should migrate to Evaluate for unified cross-strategy placement.
+func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPredictor) (*PlacementResult, error) {
+	result, err := PlaceOnPrem(database, constraints, predict)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compare on-prem completion time against rental estimate.
+	if result.CompletionEst.Mean > 0 && !db.HasInventoryTag(constraints.Tags) {
+		rentalEst := EstimateRentalCompletion(database, constraints, predict)
+		if rentalEst != nil && rentalEst.Total.Mean > 0 && rentalEst.Total.Mean < result.CompletionEst.Mean {
+			slog.Info("rental faster than on-prem, spilling to rental",
+				"host", result.Host,
+				"onprem_min", fmt.Sprintf("%.0f", result.CompletionEst.Mean.Minutes()),
+				"rental_min", fmt.Sprintf("%.0f", rentalEst.Total.Mean.Minutes()))
+			result.SpilledToRental = true
+			totalEst := rentalEst.Total
+			result.RentalEst = &totalEst
+			return result, ErrNoEligibleHost
+		}
+	}
+	return result, nil
 }
 
 func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics *HostMetrics, cfg *config.Config) Score {
@@ -559,25 +568,25 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		s.Reasons = append(s.Reasons, fmt.Sprintf("%.0f%% contention overhead", (s.ContentionFactor-1.0)*100))
 	}
 
-	// Performance factor: scale run time by GPU/CPU performance
-	// (will be overridden when predictor provides host-specific duration)
-	if hasComputeIntensiveTag(c.Tags) {
-		// Compute-intensive jobs get a capacity-based bonus applied after time scoring
-	} else if c.NeedsGPU() {
-		perfFactor := host.GPUPerformance()
-		if perfFactor > 0 && perfFactor != 1.0 {
-			s.RunEst = s.RunEst.Scale(1.0 / perfFactor)
-			s.staticPerfDelta = perfFactor // store for MC reversal
-			s.staticPerfReason = fmt.Sprintf("GPU perf %.1fx", perfFactor)
-			s.Reasons = append(s.Reasons, s.staticPerfReason)
-		}
-	} else {
-		perfFactor := host.CPUPerformance()
-		if perfFactor > 0 && perfFactor != 1.0 {
-			s.RunEst = s.RunEst.Scale(1.0 / perfFactor)
-			s.staticPerfDelta = perfFactor
-			s.staticPerfReason = fmt.Sprintf("CPU perf %.1fx", perfFactor)
-			s.Reasons = append(s.Reasons, s.staticPerfReason)
+	// Performance factor: scale run time by GPU/CPU performance.
+	// Compute-intensive jobs skip this — they get capacity-based scoring later.
+	if !hasComputeIntensiveTag(c.Tags) {
+		if c.NeedsGPU() {
+			perfFactor := host.GPUPerformance()
+			if perfFactor > 0 && perfFactor != 1.0 {
+				s.RunEst = s.RunEst.Scale(1.0 / perfFactor)
+				s.staticPerfDelta = perfFactor
+				s.staticPerfReason = fmt.Sprintf("GPU perf %.1fx", perfFactor)
+				s.Reasons = append(s.Reasons, s.staticPerfReason)
+			}
+		} else {
+			perfFactor := host.CPUPerformance()
+			if perfFactor > 0 && perfFactor != 1.0 {
+				s.RunEst = s.RunEst.Scale(1.0 / perfFactor)
+				s.staticPerfDelta = perfFactor
+				s.staticPerfReason = fmt.Sprintf("CPU perf %.1fx", perfFactor)
+				s.Reasons = append(s.Reasons, s.staticPerfReason)
+			}
 		}
 	}
 

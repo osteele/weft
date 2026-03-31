@@ -396,6 +396,30 @@ be re-queued, but it isn't because the job itself also failed.
   genuinely broken scripts.)
 - Should this respect a per-job or per-project retry limit?
 
+## Advanced Placement Optimization
+
+The unified `Evaluate` function (Collect → Solve architecture) separates
+candidate collection from objective optimization. The current solver is three
+simple `min()` calls (cheap/fast/fastest). Future work:
+
+- **Mixed-integer programming**: Minimize cost subject to a deadline constraint,
+  or minimize time subject to a budget. Useful when the user says "I need this
+  done by 5pm" or "spend at most $10."
+- **Pareto frontier**: Enumerate non-dominated solutions across (cost, time).
+  The TUI could display the frontier and let users pick a point on the
+  tradeoff curve.
+- **Stochastic optimization**: Monte Carlo over survival probability and
+  contention uncertainty. Instead of point estimates, simulate thousands of
+  scenarios to find the option with best expected value under uncertainty.
+- **Multi-job scheduling**: Batch-optimize across multiple pending jobs
+  simultaneously. Today each job is placed independently; joint optimization
+  could avoid overloading a single host when 10 jobs arrive at once.
+
+The `Candidate` struct's attributes (EstTime, EstCost, Survival) are the
+decision variables. Adding new attributes (e.g., data locality score, carbon
+footprint, queue displacement cost) extends the optimization without changing
+the collection or execution layers.
+
 ## Workload Clustering
 
 Cluster historical jobs by resource profile (GPU utilization pattern, duration,
