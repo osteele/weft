@@ -146,3 +146,68 @@ func TestUpdateFrom_NilSafety(t *testing.T) {
 	h2 := &Host{Name: "test"}
 	h2.UpdateFrom(nil) // should not panic
 }
+
+func TestParseGPUListLine(t *testing.T) {
+	tests := []struct {
+		line     string
+		wantIdx  int
+		wantName string
+	}{
+		{"GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-abcdef12-3456-7890)", 0, "NVIDIA GeForce RTX 3090"},
+		{"GPU 1: NVIDIA A100-PCIE-80GB (UUID: GPU-12345678-abcd-efgh)", 1, "NVIDIA A100-PCIE-80GB"},
+		{"GPU 2: NVIDIA GeForce RTX 2080 Ti (UUID: GPU-deadbeef)", 2, "NVIDIA GeForce RTX 2080 Ti"},
+		{"not a gpu line", -1, ""},
+		{"GPU x: bad index", -1, ""},
+	}
+	for _, tt := range tests {
+		idx, name := parseGPUListLine(tt.line)
+		if idx != tt.wantIdx || name != tt.wantName {
+			t.Errorf("parseGPUListLine(%q) = (%d, %q), want (%d, %q)",
+				tt.line, idx, name, tt.wantIdx, tt.wantName)
+		}
+	}
+}
+
+func TestParseHostInfo_GPUListBackfillsTruncatedNames(t *testing.T) {
+	// Simulate old driver (525.x) that truncates names in table output
+	// but nvidia-smi -L gives full names
+	output := `ARCH:Linux x86_64
+OS:5.4.0
+CPUS:96
+MEM:503Gi:120Gi
+GPUNAME:|   0  NVIDIA GeForce ...  On   | 00000000:01:00.0 Off |                  N/A |
+GPUSTAT:| 51%   45C    P8    22W / 350W |      6MiB / 24576MiB |      0%      Default |
+GPUNAME:|   1  NVIDIA GeForce ...  On   | 00000000:41:00.0 Off |                  N/A |
+GPUSTAT:| 51%   45C    P8    19W / 350W |      6MiB / 24576MiB |      0%      Default |
+GPULIST:GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-aaaa-bbbb)
+GPULIST:GPU 1: NVIDIA GeForce RTX 3090 (UUID: GPU-cccc-dddd)`
+
+	host := ParseHostInfo(output)
+
+	if len(host.GPUs) != 2 {
+		t.Fatalf("got %d GPUs, want 2", len(host.GPUs))
+	}
+	for i, gpu := range host.GPUs {
+		if gpu.Name != "NVIDIA GeForce RTX 3090" {
+			t.Errorf("GPU[%d].Name = %q, want %q", i, gpu.Name, "NVIDIA GeForce RTX 3090")
+		}
+	}
+}
+
+func TestParseHostInfo_GPUListNoBackfillWhenNotTruncated(t *testing.T) {
+	// When table output already has full names, GPULIST should not overwrite
+	output := `ARCH:Linux x86_64
+CPUS:8
+GPUNAME:|   0  NVIDIA A100-PCIE-80GB  On   | 00000000:01:00.0 Off |                  N/A |
+GPUSTAT:| 30%   45C    P8    20W / 300W |    123MiB / 81920MiB |      0%      Default |
+GPULIST:GPU 0: NVIDIA A100-PCIE-80GB (UUID: GPU-1234)`
+
+	host := ParseHostInfo(output)
+
+	if len(host.GPUs) != 1 {
+		t.Fatalf("got %d GPUs, want 1", len(host.GPUs))
+	}
+	if host.GPUs[0].Name != "NVIDIA A100-PCIE-80GB" {
+		t.Errorf("GPU[0].Name = %q, want %q", host.GPUs[0].Name, "NVIDIA A100-PCIE-80GB")
+	}
+}

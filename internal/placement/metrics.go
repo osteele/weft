@@ -36,6 +36,9 @@ func CollectMetrics(db *sql.DB, hosts []string, timeout time.Duration) map[strin
 
 			m := HostMetricsFromHostInfo(status.Host, queueStatus)
 
+			// Record contention observation for future estimation
+			RecordContentionObs(db, h, m)
+
 			mu.Lock()
 			result[h] = m
 			mu.Unlock()

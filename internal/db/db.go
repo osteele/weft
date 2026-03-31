@@ -1714,6 +1714,23 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Host contention observations for placement estimation.
+	// Recorded during host probes and used to estimate queue drain / contention factors.
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS host_contention_obs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			host TEXT NOT NULL,
+			gpu_pct INTEGER,
+			cpu_pct INTEGER,
+			queue_depth INTEGER,
+			gpu_jobs_queued INTEGER,
+			observed_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_host_contention_host ON host_contention_obs(host, observed_at);
+	`); err != nil {
+		return err
+	}
+
 	return nil
 }
 

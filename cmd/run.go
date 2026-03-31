@@ -506,7 +506,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				if !errors.Is(err, placement.ErrNoEligibleHost) {
 					return err
 				}
-				// No eligible host — job will be created as unplaced (host="")
+				// No eligible host — job will be created as unplaced (host="").
+				// result may be non-nil with spill info if rental was faster.
+				placementResult = result
 			} else {
 				placementResult = result
 				host = result.Host
@@ -559,13 +561,38 @@ func runRun(cmd *cobra.Command, args []string) error {
 				slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 			}
 			if cfg.ShowRentalHints {
-				printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+				printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints, placementResult)
 			}
 			return nil
 		}
 
 		w := cmd.OutOrStdout()
-		fmt.Fprintf(w, "Job #%d queued on %s\n\n", jobID, host)
+		fmt.Fprintf(w, "Job #%d queued on %s\n", jobID, host)
+		if placementResult != nil && placementResult.CompletionEst.Mean > 0 {
+			est := placementResult.CompletionEst
+			fmt.Fprintf(w, "  Est. completion: ~%.0fm", est.Mean.Minutes())
+			// Show breakdown if any component is significant
+			parts := []string{}
+			if placementResult.Scores != nil {
+				for _, s := range placementResult.Scores {
+					if s.Host == host {
+						if s.QueueDrainEst.Mean > 0 {
+							parts = append(parts, fmt.Sprintf("%.0fm queue", s.QueueDrainEst.Mean.Minutes()))
+						}
+						if s.TransferEst.Mean > 0 {
+							parts = append(parts, fmt.Sprintf("%.0fm transfer", s.TransferEst.Mean.Minutes()))
+						}
+						parts = append(parts, fmt.Sprintf("%.0fm run", s.RunEst.Mean.Minutes()))
+						break
+					}
+				}
+			}
+			if len(parts) > 0 {
+				fmt.Fprintf(w, " (%s)", strings.Join(parts, " + "))
+			}
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w)
 		fmt.Fprintf(w, "  Working dir: %s\n", workingDir)
 		fmt.Fprintf(w, "  Command: %s\n", command)
 		if runDescription != "" {
@@ -593,6 +620,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Below: --draft or dependency modes only
 
 	// Placement for non-scheduler paths (--draft, --after)
+	var placementResult *placement.PlacementResult
 	if host == "" {
 		result, err := placement.PlaceWithFallback(database, placementConstraints, predict)
 		if err != nil {
@@ -600,7 +628,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("auto-placement failed: %w", err)
 			}
 			// No eligible host — will create unplaced job (host="")
+			placementResult = result // may have spill info
 		} else {
+			placementResult = result
 			host = result.Host
 
 			oplog.Log(oplog.OpPlacementDecided,
@@ -635,7 +665,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 			slog.Warn("failed to save unplaced reasons", "job_id", jobID, "error", err)
 		}
 		if cfg.ShowRentalHints {
-			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints)
+			printUnplacedJobMessage(cmd.OutOrStdout(), jobID, placementConstraints, placementResult)
 		}
 		return nil
 	}
@@ -746,15 +776,25 @@ func runRun(cmd *cobra.Command, args []string) error {
 }
 
 // printUnplacedJobMessage prints user-facing output when a job has no eligible local host.
-func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Constraints) {
-	constraintDesc := placement.DescribeConstraints(constraints)
-	fmt.Fprintf(w, "No local host matches constraints: %s\n", constraintDesc)
-	if db.HasInventoryTag(constraints.Tags) {
-		fmt.Fprintf(w, "Job #%d accepted (waiting for inventory capacity)\n", jobID)
-		fmt.Fprintf(w, "This job is inventory-only and will not launch on rental GPUs.\n")
-		return
+func printUnplacedJobMessage(w io.Writer, jobID int64, constraints placement.Constraints, result *placement.PlacementResult) {
+	if result != nil && result.SpilledToRental {
+		// Auto-spill: on-prem was eligible but rental is faster
+		fmt.Fprintf(w, "Job #%d needs rental (on-prem est. ~%.0fm",
+			jobID, result.CompletionEst.Mean.Minutes())
+		if result.RentalEst != nil {
+			fmt.Fprintf(w, " vs rental ~%.0fm", result.RentalEst.Mean.Minutes())
+		}
+		fmt.Fprintln(w, ")")
+	} else {
+		constraintDesc := placement.DescribeConstraints(constraints)
+		fmt.Fprintf(w, "No local host matches constraints: %s\n", constraintDesc)
+		if db.HasInventoryTag(constraints.Tags) {
+			fmt.Fprintf(w, "Job #%d accepted (waiting for inventory capacity)\n", jobID)
+			fmt.Fprintf(w, "This job is inventory-only and will not launch on rental GPUs.\n")
+			return
+		}
+		fmt.Fprintf(w, "Job #%d accepted (needs rental host)\n", jobID)
 	}
-	fmt.Fprintf(w, "Job #%d accepted (needs rental host)\n", jobID)
 	fmt.Fprintf(w, "Use 'weft instance launch' to launch on a rental GPU.\n")
 }
 

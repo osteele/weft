@@ -122,8 +122,10 @@ const HostInfoCommand = `echo "ARCH:$(uname -sm)"; ` +
 	`(sysctl -n machdep.cpu.brand_string 2>/dev/null || grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2) | sed 's/^[[:space:]]*//' | sed 's/^/CPUMODEL:/' || true; ` +
 	// macOS GPU: system_profiler (brief format)
 	`system_profiler SPDisplaysDataType 2>/dev/null | grep -E '(Chipset Model|VRAM|Total Number of Cores|Metal)' | sed 's/^[[:space:]]*/MACGPU:/' || true; ` +
-	// Linux GPU: nvidia-smi
-	`nvidia-smi 2>/dev/null | awk '/^\|[[:space:]]+[0-9]+[[:space:]]+[A-Z]/ { print "GPUNAME:" $0; getline; print "GPUSTAT:" $0 }'`
+	// Linux GPU: nvidia-smi table output (name + stats lines)
+	`nvidia-smi 2>/dev/null | awk '/^\|[[:space:]]+[0-9]+[[:space:]]+[A-Z]/ { print "GPUNAME:" $0; getline; print "GPUSTAT:" $0 }'; ` +
+	// Linux GPU: nvidia-smi -L for untruncated names (old drivers truncate table output)
+	`nvidia-smi -L 2>/dev/null | sed 's/^/GPULIST:/'`
 
 // ParseHostInfo parses the output of HostInfoCommand into a Host struct
 func ParseHostInfo(output string) *Host {
@@ -134,6 +136,8 @@ func ParseHostInfo(output string) *Host {
 
 	// Track pending GPU info (name parsed, waiting for stats)
 	var pendingGPU *GPUInfo
+	// Untruncated GPU names from nvidia-smi -L, keyed by index
+	gpuListNames := map[int]string{}
 
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -208,6 +212,11 @@ func ParseHostInfo(output string) *Host {
 				if gpu != nil {
 					host.GPUs = append(host.GPUs, *gpu)
 				}
+			case "GPULIST":
+				// nvidia-smi -L output: "GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-...)"
+				if gpuIdx, name := parseGPUListLine(value); name != "" {
+					gpuListNames[gpuIdx] = name
+				}
 			}
 		}
 	}
@@ -215,6 +224,19 @@ func ParseHostInfo(output string) *Host {
 	// Don't forget any pending GPU
 	if pendingGPU != nil {
 		host.GPUs = append(host.GPUs, *pendingGPU)
+	}
+
+	// Backfill truncated GPU names from nvidia-smi -L output.
+	// Old drivers (e.g. 525.x) truncate names in the table to "NVIDIA GeForce ..."
+	// but -L always outputs the full name.
+	if len(gpuListNames) > 0 {
+		for i := range host.GPUs {
+			if fullName, ok := gpuListNames[host.GPUs[i].Index]; ok {
+				if len(fullName) > len(host.GPUs[i].Name) {
+					host.GPUs[i].Name = fullName
+				}
+			}
+		}
 	}
 
 	return host
@@ -258,6 +280,31 @@ func parseNvidiaSmiNameLine(line string) *GPUInfo {
 	gpu.Name = strings.TrimSuffix(gpu.Name, "...")
 
 	return gpu
+}
+
+// parseGPUListLine parses a line from nvidia-smi -L output.
+// Format: "GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-abcdef12-...)"
+// Returns the GPU index and untruncated name, or (-1, "") on parse failure.
+func parseGPUListLine(line string) (int, string) {
+	// Expect "GPU <idx>: <name> (UUID: ...)"
+	if !strings.HasPrefix(line, "GPU ") {
+		return -1, ""
+	}
+	rest := line[4:] // after "GPU "
+	colonIdx := strings.Index(rest, ":")
+	if colonIdx < 0 {
+		return -1, ""
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(rest[:colonIdx]))
+	if err != nil {
+		return -1, ""
+	}
+	nameAndUUID := strings.TrimSpace(rest[colonIdx+1:])
+	// Strip "(UUID: ...)" suffix
+	if parenIdx := strings.Index(nameAndUUID, " (UUID:"); parenIdx > 0 {
+		nameAndUUID = nameAndUUID[:parenIdx]
+	}
+	return idx, strings.TrimSpace(nameAndUUID)
 }
 
 // parseNvidiaSmiStatsLine parses the GPU stats line from standard nvidia-smi output

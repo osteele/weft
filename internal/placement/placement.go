@@ -18,6 +18,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/inventory"
 	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/transferbw"
@@ -136,6 +137,13 @@ type PlacementResult struct {
 	Reasons []string
 	Scores  []Score
 	Metrics map[string]*HostMetrics // nil when no live metrics were collected
+
+	// Completion estimate for the placed host (zero if unavailable).
+	CompletionEst estimate.Estimate
+
+	// Spill info: set when on-prem was rejected in favor of rental.
+	SpilledToRental bool
+	RentalEst       *estimate.Estimate // estimated rental completion time
 }
 
 // Score represents the placement score for a single host.
@@ -148,6 +156,14 @@ type Score struct {
 	staticPerfReason string  // the exact reason string added with the delta
 	queuePenalty     float64 // score delta from queue depth, tracked for MC reversal
 	queueReason      string  // the exact reason string added with the penalty
+
+	// Completion time estimates (zero means unavailable).
+	// These decompose estimated time-to-completion into phases.
+	QueueDrainEst    estimate.Estimate // time for queued jobs ahead to finish
+	TransferEst      estimate.Estimate // data transfer time for missing inputs
+	RunEst           estimate.Estimate // job execution time on this host
+	CompletionEst    estimate.Estimate // total: queue + transfer + run
+	ContentionFactor float64           // multiplier applied to run time (1.0 = no contention)
 }
 
 // ScoreHosts evaluates all inventory hosts against the given constraints
@@ -279,10 +295,11 @@ func bestFromScores(scores []Score, constraints Constraints, metrics map[string]
 	for _, s := range scores {
 		if s.Eligible {
 			return &PlacementResult{
-				Host:    s.Host,
-				Reasons: s.Reasons,
-				Scores:  scores,
-				Metrics: metrics,
+				Host:          s.Host,
+				Reasons:       s.Reasons,
+				Scores:        scores,
+				Metrics:       metrics,
+				CompletionEst: s.CompletionEst,
 			}, nil
 		}
 	}
@@ -346,10 +363,11 @@ func BestReachableHostWithPredictor(db *sql.DB, constraints Constraints, probeTi
 	for _, s := range scores {
 		if s.Eligible && metrics[s.Host] != nil {
 			return &PlacementResult{
-				Host:    s.Host,
-				Reasons: s.Reasons,
-				Scores:  scores,
-				Metrics: metrics,
+				Host:          s.Host,
+				Reasons:       s.Reasons,
+				Scores:        scores,
+				Metrics:       metrics,
+				CompletionEst: s.CompletionEst,
 			}, nil
 		}
 	}
@@ -368,6 +386,23 @@ func PlaceWithFallback(database *sql.DB, constraints Constraints, predict JobPre
 
 	result, err := BestReachableHostWithPredictor(database, constraints, 5*time.Second, predict)
 	if err == nil {
+		// Compare on-prem completion time against rental estimate.
+		// If rental is faster, spill to rental (unless inventory-tagged).
+		if result.CompletionEst.Mean > 0 && !db.HasInventoryTag(constraints.Tags) {
+			rentalEst := EstimateRentalCompletion(database, constraints, predict)
+			if rentalEst != nil && rentalEst.Total.Mean > 0 && rentalEst.Total.Mean < result.CompletionEst.Mean {
+				slog.Info("rental faster than on-prem, spilling to rental",
+					"host", result.Host,
+					"onprem_min", fmt.Sprintf("%.0f", result.CompletionEst.Mean.Minutes()),
+					"rental_min", fmt.Sprintf("%.0f", rentalEst.Total.Mean.Minutes()))
+				result.SpilledToRental = true
+				totalEst := rentalEst.Total
+				result.RentalEst = &totalEst
+				// Return the result (with spill info) alongside the error,
+				// so callers can display the on-prem vs rental comparison.
+				return result, ErrNoEligibleHost
+			}
+		}
 		return result, nil
 	}
 	if errors.Is(err, ErrNoReachableHost) {
@@ -395,7 +430,6 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			s.Reasons = append(s.Reasons, fmt.Sprintf("no %s GPU", c.GPUClass))
 			return s
 		}
-		s.Total += 10
 		s.Reasons = append(s.Reasons, fmt.Sprintf("has %s GPU", matchedName))
 	}
 
@@ -433,7 +467,11 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 		s.Reasons = append(s.Reasons, "host idle (benchmark)")
 	}
 
-	// Soft factor: data locality + transfer cost
+	// --- Time-based scoring ---
+	// Compute estimated completion time as: queue drain + data transfer + job run.
+	// Score = -completion_time_minutes (lower time = higher score).
+
+	// Transfer time estimate: how long to download missing inputs
 	if database != nil && len(c.Inputs) > 0 {
 		localCount := 0
 		var totalMissingBytes int64
@@ -457,7 +495,6 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 				}
 			}
 			if !isLocal && len(entries) > 0 {
-				// Use the largest known size across hosts
 				var maxSize int64
 				for _, e := range entries {
 					if e.SizeBytes > maxSize {
@@ -469,82 +506,103 @@ func scoreHost(database *sql.DB, host inventory.HostSpec, c Constraints, metrics
 			}
 		}
 		if localCount > 0 {
-			localityScore := float64(localCount) / float64(len(c.Inputs)) * 5.0
-			s.Total += localityScore
 			s.Reasons = append(s.Reasons, fmt.Sprintf("%d/%d inputs local", localCount, len(c.Inputs)))
 		}
 
-		// Transfer cost penalty for non-local inputs
-		if missingCount > 0 && totalMissingBytes > 0 {
+		if totalMissingBytes > 0 {
 			staticBW := host.NetworkBWBytesPerSec()
 			destKey := transferbw.OnPremEndpoint(host.Name).Key()
 			effectiveBW, nObs := transferbw.EffectiveBandwidthToDest(database, destKey, staticBW)
 			if effectiveBW > 0 {
-				transferTimeSec := float64(totalMissingBytes) / effectiveBW
-				penalty := math.Min(transferTimeSec/60.0, 5.0)
-				s.Total -= penalty
+				s.TransferEst = estimate.TransferTime(totalMissingBytes, effectiveBW)
 				bwSource := "static"
 				if nObs >= transferbw.MinObservations {
 					bwSource = fmt.Sprintf("learned, n=%d", nObs)
 				}
-				s.Reasons = append(s.Reasons, fmt.Sprintf("~%.1fmin transfer for %d missing inputs (%s)", transferTimeSec/60.0, missingCount, bwSource))
+				s.Reasons = append(s.Reasons, fmt.Sprintf("~%.0fm transfer for %d missing inputs (%s)",
+					s.TransferEst.Mean.Minutes(), missingCount, bwSource))
 			}
 		}
 	}
 
-	// Soft factor: current utilization (prefer less-loaded hosts)
+	// Queue drain estimate: how long until queued jobs finish
 	if metrics != nil {
-		// GPU utilization: up to -3 penalty for fully loaded GPUs
-		if metrics.GPUPercent > 0 {
-			gpuPenalty := float64(metrics.GPUPercent) / 100.0 * 3.0
-			s.Total -= gpuPenalty
-			s.Reasons = append(s.Reasons, fmt.Sprintf("GPU %d%% loaded", metrics.GPUPercent))
+		queuedJobs := metrics.GPUJobsQueued
+		if queuedJobs == 0 {
+			queuedJobs = metrics.QueueDepth
 		}
-
-		// CPU utilization: up to -1 penalty
-		if metrics.CPUPercent > 0 {
-			cpuPenalty := float64(metrics.CPUPercent) / 100.0 * 1.0
-			s.Total -= cpuPenalty
-			s.Reasons = append(s.Reasons, fmt.Sprintf("CPU %d%% loaded", metrics.CPUPercent))
-		}
-
-		// Queue depth: -0.5 per queued job (up to -3)
-		if metrics.QueueDepth > 0 {
-			queuePenalty := math.Min(float64(metrics.QueueDepth)*0.5, 3.0)
-			s.Total -= queuePenalty
-			s.queuePenalty = queuePenalty
-			reason := fmt.Sprintf("%d jobs queued", metrics.QueueDepth)
+		if queuedJobs > 0 {
+			// Default: 30 min per queued job (same as MC default)
+			const defaultJobDurationMin = 30.0
+			meanMin := float64(queuedJobs) * defaultJobDurationMin
+			// Bounds: 0.5x to 1.5x per-job uncertainty compounded across queue
+			s.QueueDrainEst = estimate.FromSeconds(
+				meanMin*60,
+				meanMin*60*0.5,
+				meanMin*60*1.5,
+			)
+			s.queuePenalty = s.QueueDrainEst.Mean.Minutes()
+			reason := fmt.Sprintf("%d jobs queued (~%.0fm drain)", queuedJobs, s.QueueDrainEst.Mean.Minutes())
 			s.queueReason = reason
 			s.Reasons = append(s.Reasons, reason)
 		}
-
-		// GPU jobs queued: -0.5 per queued GPU job (up to -2)
-		if metrics.GPUJobsQueued > 0 {
-			gpuQueuePenalty := math.Min(float64(metrics.GPUJobsQueued)*0.5, 2.0)
-			s.Total -= gpuQueuePenalty
-			s.Reasons = append(s.Reasons, fmt.Sprintf("%d GPU jobs queued", metrics.GPUJobsQueued))
-		}
-
-		// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
-		if c.NeedsGPU() && len(metrics.GPUDeviceFreeMemMiB) > 0 {
-			s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB, gc)
-		}
 	}
 
-	// Soft factor: performance / capacity scoring
+	// Run time estimate: default 1hr, refined later by predictor/MC
+	const defaultRunMin = 60.0
+	s.RunEst = estimate.FromSeconds(defaultRunMin*60, defaultRunMin*60*0.25, defaultRunMin*60*4.0)
+
+	// Contention factor: inflate run time by GPU occupancy
+	s.ContentionFactor = ContentionFactor(database, host.Name, metrics)
+	if s.ContentionFactor > 1.0 {
+		s.RunEst = s.RunEst.Scale(s.ContentionFactor)
+		s.Reasons = append(s.Reasons, fmt.Sprintf("%.0f%% contention overhead", (s.ContentionFactor-1.0)*100))
+	}
+
+	// Performance factor: scale run time by GPU/CPU performance
+	// (will be overridden when predictor provides host-specific duration)
 	if hasComputeIntensiveTag(c.Tags) {
-		// Compute-intensive: score by total free compute capacity (cores × factor × idle),
-		// replacing per-core CPU perf scoring since capacity already incorporates cpu_factor.
-		applyComputeIntensiveScoring(&s, host, metrics)
+		// Compute-intensive jobs get a capacity-based bonus applied after time scoring
 	} else if c.NeedsGPU() {
-		applyPerfScoring(&s, "GPU", host.GPUPerformance(), 5.0)
+		perfFactor := host.GPUPerformance()
+		if perfFactor > 0 && perfFactor != 1.0 {
+			s.RunEst = s.RunEst.Scale(1.0 / perfFactor)
+			s.staticPerfDelta = perfFactor // store for MC reversal
+			s.staticPerfReason = fmt.Sprintf("GPU perf %.1fx", perfFactor)
+			s.Reasons = append(s.Reasons, s.staticPerfReason)
+		}
 	} else {
-		applyPerfScoring(&s, "CPU", host.CPUPerformance(), 3.0)
+		perfFactor := host.CPUPerformance()
+		if perfFactor > 0 && perfFactor != 1.0 {
+			s.RunEst = s.RunEst.Scale(1.0 / perfFactor)
+			s.staticPerfDelta = perfFactor
+			s.staticPerfReason = fmt.Sprintf("CPU perf %.1fx", perfFactor)
+			s.Reasons = append(s.Reasons, s.staticPerfReason)
+		}
 	}
 
-	// Base score for eligible hosts (ensures non-zero)
+	// Assemble completion estimate and set Total score
+	s.CompletionEst = s.QueueDrainEst.Add(s.TransferEst).Add(s.RunEst)
 	if s.Eligible {
-		s.Total += 1
+		s.Total = -s.CompletionEst.Mean.Minutes()
+		s.Reasons = append(s.Reasons,
+			fmt.Sprintf("est. ~%.0fm total (%.0fm queue + %.0fm transfer + %.0fm run)",
+				s.CompletionEst.Mean.Minutes(),
+				s.QueueDrainEst.Mean.Minutes(),
+				s.TransferEst.Mean.Minutes(),
+				s.RunEst.Mean.Minutes()))
+	}
+
+	// Additive adjustments applied AFTER time-based Total:
+
+	// Per-device GPU memory: penalize hosts where matching GPUs lack free VRAM
+	if metrics != nil && c.NeedsGPU() && len(metrics.GPUDeviceFreeMemMiB) > 0 {
+		s.applyPerDeviceGPUMemScoring(host, c, metrics.GPUDeviceFreeMemMiB, gc)
+	}
+
+	// Compute-intensive: capacity-based bonus
+	if hasComputeIntensiveTag(c.Tags) {
+		applyComputeIntensiveScoring(&s, host, metrics)
 	}
 
 	return s
