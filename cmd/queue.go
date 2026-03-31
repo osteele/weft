@@ -993,14 +993,23 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		if err := db.SetJobTags(database, jobID, newTags); err != nil {
 			return fmt.Errorf("update tags: %w", err)
 		}
-		updatedJob, err := db.GetJobByID(database, jobID)
+		// Re-read to pick up normalized tags (deduped, trimmed, canonicalized)
+		updated, err := db.GetJobByID(database, jobID)
 		if err != nil {
 			return fmt.Errorf("reload tags: %w", err)
 		}
-		if updatedJob == nil {
+		if updated == nil {
 			return fmt.Errorf("job %d not found after updating tags", jobID)
 		}
-		job.Tags = updatedJob.Tags
+		job.Tags = updated.Tags
+		if job.HasTagHostConflict() {
+			oldHost := job.Host
+			if result, err := ops.UnplaceQueuedJob(database, job, ops.DefaultOptions()); err != nil {
+				return fmt.Errorf("unplace after tag change: %w", err)
+			} else if result.Success {
+				updates = append(updates, fmt.Sprintf("unplaced from %s (rental tag)", oldHost))
+			}
+		}
 		if len(job.Tags) == 0 {
 			updates = append(updates, "tags cleared")
 		} else {

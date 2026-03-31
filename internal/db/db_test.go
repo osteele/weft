@@ -1058,6 +1058,46 @@ func TestMoveQueuedJobToUnplacedKeepsInventoryTag(t *testing.T) {
 	}
 }
 
+func TestHasTagHostConflict(t *testing.T) {
+	database := SetupTestDB(t)
+
+	// Queued on inventory host with rental tag → conflict
+	jobID, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := SetJobTags(database, jobID, []string{TagRental}); err != nil {
+		t.Fatalf("set tags: %v", err)
+	}
+	job, _ := GetJobByID(database, jobID)
+	if !job.HasTagHostConflict() {
+		t.Error("expected HasTagHostConflict=true for rental-tagged job on inventory host")
+	}
+
+	// Queued on inventory host without rental tag → no conflict
+	jobID2, err := RecordQueuedWithGPU(database, "host-beta", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	job2, _ := GetJobByID(database, jobID2)
+	if job2.HasTagHostConflict() {
+		t.Error("expected HasTagHostConflict=false for job without rental tag")
+	}
+
+	// Unplaced job with rental tag → no conflict (already unplaced)
+	jobID3, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("record queued: %v", err)
+	}
+	if err := SetJobTags(database, jobID3, []string{TagRental}); err != nil {
+		t.Fatalf("set tags: %v", err)
+	}
+	job3, _ := GetJobByID(database, jobID3)
+	if job3.HasTagHostConflict() {
+		t.Error("expected HasTagHostConflict=false for unplaced job")
+	}
+}
+
 func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	database := SetupTestDB(t)
 

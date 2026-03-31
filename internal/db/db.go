@@ -2273,6 +2273,15 @@ func MoveQueuedJobToUnplaced(db *sql.DB, id int64) error {
 	return err
 }
 
+// HasTagHostConflict reports whether a queued job's tags conflict with its
+// current host placement (e.g. rental tag on an inventory host).
+func (j *Job) HasTagHostConflict() bool {
+	return j != nil &&
+		j.EffectiveStatus() == StatusQueued &&
+		j.HasInventoryHost() &&
+		HasRentalTag(j.Tags)
+}
+
 // ResetJobToUnplaced resets a single job to unplaced state (queued with empty host),
 // clearing cloud instance association and run metadata. Used when restarting cloud
 // jobs whose original instance is no longer available.

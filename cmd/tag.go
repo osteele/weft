@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
 	"github.com/spf13/cobra"
 )
 
@@ -59,6 +60,19 @@ func runTagAdd(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		fmt.Printf("Added tag %q to job %d\n", displayTag, jobID)
+		job, err := db.GetJobByID(database, jobID)
+		if err != nil {
+			errorsList = append(errorsList, fmt.Sprintf("job %d: reload: %v", jobID, err))
+			continue
+		}
+		if job != nil && job.HasTagHostConflict() {
+			oldHost := job.Host
+			if result, err := ops.UnplaceQueuedJob(database, job, ops.DefaultOptions()); err != nil {
+				errorsList = append(errorsList, fmt.Sprintf("job %d: unplace: %v", jobID, err))
+			} else if result.Success {
+				fmt.Printf("  Unplaced job %d from %s (rental tag conflicts with inventory host)\n", jobID, oldHost)
+			}
+		}
 	}
 
 	if len(errorsList) > 0 {
