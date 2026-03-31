@@ -527,6 +527,49 @@ func TestWatchInstance_ShowInstanceErrorDoesNotMarkFailed(t *testing.T) {
 	}
 }
 
+func TestWatchInstance_InstanceNotFoundMarksTerminal(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping: requires 30s dead-confirmation hysteresis")
+	}
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "mock",
+	})
+	if err != nil {
+		t.Fatalf("create cloud instance: %v", err)
+	}
+	_, err = database.Exec(`UPDATE launches SET provider_instance_id = ? WHERE id = ?`,
+		"test-gone", instanceID)
+	if err != nil {
+		t.Fatalf("update provider_instance_id: %v", err)
+	}
+
+	mockClient := &cloud.MockClient{
+		ShowInstanceFunc: func(id string) (*cloud.Instance, error) {
+			return nil, cloud.ErrInstanceNotFound
+		},
+	}
+
+	// Run long enough for the dead-confirmation hysteresis (minDeadConfirmTime = 30s)
+	// to elapse. The provider poll interval is short so we get many observations.
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+
+	ch := WatchInstance(ctx, mockClient, database, instanceID, 100*time.Millisecond, 100*time.Millisecond)
+	for range ch {
+	}
+
+	ci, err := db.GetLaunch(database, instanceID)
+	if err != nil {
+		t.Fatalf("get instance: %v", err)
+	}
+	if !IsInstanceTerminal(ci.Status) {
+		t.Errorf("instance status = %q, want terminal (failed or completed); ErrInstanceNotFound should trigger provider-dead detection", ci.Status)
+	}
+}
+
 func TestWatchInstance_UsesLivePhaseBeforeJobLeavesQueued(t *testing.T) {
 	database := db.SetupTestDB(t)
 

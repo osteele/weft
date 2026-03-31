@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -265,8 +266,14 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 						_ = db.RecordProviderStatus(database, cloudInstanceID, time.Now(), lastProviderStatus, inst.Status)
 						lastProviderStatus = inst.Status
 					}
+				} else if errors.Is(showErr, cloud.ErrInstanceNotFound) {
+					// Instance gone from provider — clear cached state so
+					// CheckInstance sees nil (isProviderTerminal(nil) == true),
+					// matching the batch reconciler's behavior.
+					cachedInstance = nil
+				} else {
+					providerErr = showErr
 				}
-				providerErr = showErr
 				lastProviderPoll = time.Now()
 			}
 
