@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 )
 
@@ -201,5 +202,28 @@ func TestFormatWatchInstanceBlock_UploadsVisibility(t *testing.T) {
 				t.Fatalf("uploads visible=%v, want %v; output:\n%s", hasUploads, tt.wantUploads, out)
 			}
 		})
+	}
+}
+
+func TestFormatObservedActivity_ProviderExited_StopsTimer(t *testing.T) {
+	launchedAt := time.Now().Add(-3 * time.Minute).Unix()
+	update := campaign.InstanceUpdate{
+		Launch: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "12345",
+			LaunchedAt:         &launchedAt,
+		},
+		Instance: &cloud.Instance{Status: cloud.ProviderStatusExited},
+	}
+	activity := formatObservedActivity(update, time.Now())
+	if activity.Bootstrap == "" {
+		t.Fatal("expected bootstrap message, got empty")
+	}
+	if strings.Contains(activity.Bootstrap, "elapsed") {
+		t.Errorf("expected no ticking timer when provider exited, got: %s", activity.Bootstrap)
+	}
+	if !strings.Contains(activity.Bootstrap, "provider exited") {
+		t.Errorf("expected provider status in message, got: %s", activity.Bootstrap)
 	}
 }

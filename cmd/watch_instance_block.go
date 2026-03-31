@@ -199,17 +199,28 @@ func watchInstanceStatusLabel(ci *db.Launch, inst *cloud.Instance) string {
 	if ci == nil {
 		return ""
 	}
-	statusLabel := ci.Status
 	if inst == nil || inst.Status == "" || campaign.IsInstanceTerminal(ci.Status) {
-		return statusLabel
+		return ci.Status
 	}
-	if ci.Status == db.LaunchStatusRunning && inst.Status != cloud.ProviderStatusRunning {
-		return inst.Status
+	// When DB says "running" but provider died, annotate so the user sees it
+	// before the reconciler catches up.
+	if ci.Status == db.LaunchStatusRunning && isWatchProviderTerminal(inst.Status) {
+		return ci.Status + " (" + inst.Status + ")"
 	}
 	if ci.Status == db.LaunchStatusLaunching {
 		return inst.Status
 	}
-	return statusLabel
+	return ci.Status
+}
+
+func isWatchProviderTerminal(status string) bool {
+	switch status {
+	case cloud.ProviderStatusExited, cloud.ProviderStatusStopped,
+		cloud.ProviderStatusError, cloud.ProviderStatusDestroyed,
+		cloud.ProviderStatusDead:
+		return true
+	}
+	return false
 }
 
 func watchStatusBlockStyle(displayStatus, dbStatus string) lipgloss.Style {

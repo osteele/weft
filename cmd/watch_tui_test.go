@@ -107,7 +107,7 @@ func TestFormatWatchInstanceBlockShowsCampaignStyleLayout(t *testing.T) {
 	}
 }
 
-func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
+func TestFormatWatchInstanceBlockUsesDBStatusWhenProviderLoading(t *testing.T) {
 	ci := &db.Launch{
 		ID:                 111,
 		Status:             db.LaunchStatusRunning,
@@ -121,8 +121,8 @@ func TestFormatWatchInstanceBlockPrefersProviderLoadingStatus(t *testing.T) {
 	}
 
 	out := stripANSI(formatWatchInstanceBlock(update, nil, watchInstanceBlockOptions{}))
-	if !strings.Contains(out, "Instance 111 — A100 — loading") {
-		t.Fatalf("expected provider loading status in header, got:\n%s", out)
+	if !strings.Contains(out, "Instance 111 — A100 — running") {
+		t.Fatalf("expected DB running status in header (not raw provider loading), got:\n%s", out)
 	}
 	if !strings.Contains(out, "Bootstrap: waiting for bootstrap activity") {
 		t.Fatalf("expected bootstrap fallback in output, got:\n%s", out)

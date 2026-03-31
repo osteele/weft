@@ -325,3 +325,34 @@ func TestFormatWatchInstanceBlockUsesRunningPhaseForQueuedActiveJob(t *testing.T
 		t.Fatalf("did not expect active job to stay queued, got:\n%s", out)
 	}
 }
+
+func TestWatchInstanceStatusLabel(t *testing.T) {
+	tests := []struct {
+		name           string
+		dbStatus       string
+		providerStatus string
+		want           string
+	}{
+		{"running+running", db.LaunchStatusRunning, cloud.ProviderStatusRunning, "running"},
+		{"running+loading", db.LaunchStatusRunning, cloud.ProviderStatusLoading, "running"},
+		{"running+created", db.LaunchStatusRunning, cloud.ProviderStatusCreated, "running"},
+		{"running+exited", db.LaunchStatusRunning, cloud.ProviderStatusExited, "running (exited)"},
+		{"running+destroyed", db.LaunchStatusRunning, cloud.ProviderStatusDestroyed, "running (destroyed)"},
+		{"running+error", db.LaunchStatusRunning, cloud.ProviderStatusError, "running (error)"},
+		{"launching+loading", db.LaunchStatusLaunching, cloud.ProviderStatusLoading, "loading"},
+		{"launching+running", db.LaunchStatusLaunching, cloud.ProviderStatusRunning, "running"},
+		{"completed+exited", db.LaunchStatusCompleted, cloud.ProviderStatusExited, "completed"},
+		{"failed+destroyed", db.LaunchStatusFailed, cloud.ProviderStatusDestroyed, "failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ci := &db.Launch{Status: tt.dbStatus}
+			inst := &cloud.Instance{Status: tt.providerStatus}
+			got := watchInstanceStatusLabel(ci, inst)
+			if got != tt.want {
+				t.Errorf("watchInstanceStatusLabel(db=%q, provider=%q) = %q, want %q",
+					tt.dbStatus, tt.providerStatus, got, tt.want)
+			}
+		})
+	}
+}

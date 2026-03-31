@@ -52,6 +52,10 @@ func formatObservedActivity(update campaign.InstanceUpdate, now time.Time) obser
 		activity.Bootstrap = "provisioning instance"
 		return activity
 	}
+	if update.Instance != nil && isWatchProviderTerminal(update.Instance.Status) {
+		activity.Bootstrap = "waiting for bootstrap activity (provider " + update.Instance.Status + ")"
+		return activity
+	}
 	activity.Bootstrap = formatBootstrapWaiting(update, now)
 	return activity
 }
