@@ -4,17 +4,22 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/osteele/weft/internal/status"
 )
 
 // RecordCloudJobCompletion updates the job attempt in the DB with the given
 // exit code, times, and failure reason. Returns the cloud instance ID if the
 // job was assigned to one.
 func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, startTimeUnix, endTimeUnix int64, failureReason string) (int64, error) {
-	status := StatusCompleted
+	targetStatus := StatusCompleted
 	outcome := AttemptOutcomeCompleted
 	if exitCode != 0 {
-		status = StatusFailed
+		targetStatus = StatusFailed
 		outcome = AttemptOutcomeFailed
+	}
+	if err := checkTransition(database, jobID, targetStatus, true, status.SourceR2Completion); err != nil {
+		return 0, err
 	}
 
 	var cloudInstanceID sql.NullInt64
@@ -32,7 +37,7 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 		     failure_reason = COALESCE(NULLIF(?, ''), failure_reason),
 		     cloud_outcome = ?
 		 WHERE id = (SELECT id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1)`,
-		status, exitCode, startTimeUnix, endTimeUnix, status, failureReason, outcome, jobID,
+		targetStatus, exitCode, startTimeUnix, endTimeUnix, targetStatus, failureReason, outcome, jobID,
 	); err != nil {
 		return 0, err
 	}

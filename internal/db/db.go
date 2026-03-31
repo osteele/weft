@@ -35,6 +35,7 @@ import (
 
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/queuefile"
+	"github.com/osteele/weft/internal/status"
 	"github.com/osteele/weft/internal/workdir"
 	_ "modernc.org/sqlite"
 )
@@ -877,38 +878,20 @@ const BackendQueueRunner = "queue-runner"
 const BackendSlurm = "slurm"
 const BackendVastai = "vastai"
 
-// StatusStarting indicates a job is being set up
-const StatusStarting = "starting"
-
-// StatusRunning indicates a job is currently running
-const StatusRunning = "running"
-
-// StatusCompleted indicates a job finished (check exit code)
-const StatusCompleted = "completed"
-
-// StatusDead indicates a job failed to start
-const StatusDead = "dead"
-
-// StatusQueued indicates a job queued for sequential execution
-const StatusQueued = "queued"
-
-// StatusFailed indicates a job terminated unexpectedly after starting
-const StatusFailed = "failed"
-
-// StatusKilled indicates a job was terminated by an explicit user action
-const StatusKilled = "killed"
-
-// StatusCanceled indicates a queued job was explicitly removed from the queue
-const StatusCanceled = "canceled"
-
-// StatusPaused indicates a job that has been paused (SIGSTOP)
-const StatusPaused = "paused"
-
-// StatusDraft indicates a job that exists locally but should not run remotely
-const StatusDraft = "draft"
-
-// StatusPendingPlacement indicates a job submitted to the coordinator but not yet placed on a host
-const StatusPendingPlacement = "pending_placement"
+// Status constants re-exported from internal/status (canonical source of truth).
+const (
+	StatusStarting         = status.Starting
+	StatusRunning          = status.Running
+	StatusCompleted        = status.Completed
+	StatusDead             = status.Dead
+	StatusQueued           = status.Queued
+	StatusFailed           = status.Failed
+	StatusKilled           = status.Killed
+	StatusCanceled         = status.Canceled
+	StatusPaused           = status.Paused
+	StatusDraft            = status.Draft
+	StatusPendingPlacement = status.PendingPlacement
+)
 
 // statusNeedsRental is the legacy DB value for unplaced jobs. Migrated to StatusQueued with host="".
 const statusNeedsRental = "needs_rental"
@@ -1996,6 +1979,9 @@ func UpdateJobHost(db *sql.DB, id int64, newHost string) error {
 // Note: Also accepts failed/dead status because a status file appearing is authoritative
 // evidence of completion, even if the job was previously marked as failed due to race conditions.
 func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) error {
+	if err := checkTransition(db, id, StatusCompleted, true, status.SourceSSHSync); err != nil {
+		return err
+	}
 	return UpdateAttemptCompletion(db, id, exitCode, endTime)
 }
 
@@ -2003,6 +1989,9 @@ func RecordCompletionByID(db *sql.DB, id int64, exitCode int, endTime int64) err
 // Clears session_name per spec: SessionImpliesRunning (session => status = running).
 // Also updates last_synced_status since this is detecting remote state.
 func MarkDeadByID(db *sql.DB, id int64) error {
+	if err := checkOpenTransition(db, id, StatusFailed, false, status.SourceSSHSync); err != nil {
+		return err
+	}
 	return UpdateAttemptDead(db, id)
 }
 
@@ -2092,6 +2081,7 @@ func MarkJobDraftPending(db *sql.DB, id int64) error {
 
 // MarkRunningByID transitions a job from starting to running
 func MarkRunningByID(db *sql.DB, id int64) error {
+	warnOpenTransition(db, id, StatusRunning, false, status.SourceSSHSync)
 	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusRunning, id, StatusStarting)
 	return err
@@ -2099,6 +2089,7 @@ func MarkRunningByID(db *sql.DB, id int64) error {
 
 // MarkPausedByID transitions a job to paused from queued/starting/running.
 func MarkPausedByID(db *sql.DB, id int64) error {
+	warnOpenTransition(db, id, StatusPaused, false, status.SourceSSHSync)
 	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status IN (?, ?, ?)`,
 		StatusPaused, id, StatusQueued, StatusStarting, StatusRunning)
 	return err
@@ -2106,6 +2097,7 @@ func MarkPausedByID(db *sql.DB, id int64) error {
 
 // MarkPausedFromTerminal transitions a job from a terminal status back to paused.
 func MarkPausedFromTerminal(db *sql.DB, id int64) error {
+	warnTransition(db, id, StatusPaused, false, status.SourceSSHSync)
 	_, err := db.Exec(`UPDATE job_attempts SET status = ?, end_time = NULL, exit_code = NULL, error_message = NULL WHERE job_id = ? AND status IN (?, ?, ?, ?)`,
 		StatusPaused, id, StatusFailed, StatusDead, StatusKilled, StatusCanceled)
 	return err
@@ -2113,6 +2105,7 @@ func MarkPausedFromTerminal(db *sql.DB, id int64) error {
 
 // MarkRunningFromPaused transitions a job from paused back to running.
 func MarkRunningFromPaused(db *sql.DB, id int64) error {
+	warnOpenTransition(db, id, StatusRunning, false, status.SourceSSHSync)
 	_, err := db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL AND status = ?`,
 		StatusRunning, id, StatusPaused)
 	return err
@@ -2121,6 +2114,7 @@ func MarkRunningFromPaused(db *sql.DB, id int64) error {
 // MarkRunningFromTerminal transitions a job from a terminal status (failed, dead, etc.) back to running.
 // This handles jobs that were restarted by the queue runner after previously failing.
 func MarkRunningFromTerminal(db *sql.DB, id int64) error {
+	warnTransition(db, id, StatusRunning, false, status.SourceQueueRunner)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -2147,12 +2141,14 @@ func MarkRunningFromTerminal(db *sql.DB, id int64) error {
 // Called from sync when detecting a job has started running remotely.
 // Updates last_synced_status since this is a sync operation.
 func MarkQueuedJobRunning(db *sql.DB, id int64) error {
+	warnOpenTransition(db, id, StatusRunning, false, status.SourceR2Phase)
 	return UpdateAttemptRunning(db, id)
 }
 
 // MarkQueuedByID resets a job back to queued status (e.g., when sync finds it's still in queue)
 // Updates last_synced_status since this is a sync operation.
 func MarkQueuedByID(db *sql.DB, id int64) error {
+	warnTransition(db, id, StatusQueued, false, status.SourceSSHSync)
 	return MarkAttemptQueuedByID(db, id)
 }
 
@@ -2197,15 +2193,21 @@ func ResetLastSyncedStatus(db *sql.DB, jobID int64) error {
 
 // UpdateStatusAndLastSynced updates both the current status and last synced status together.
 // Used when sync confirms the remote state.
-func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, status string) error {
-	return UpdateAttemptStatusAndLastSynced(db, jobID, status)
+func UpdateStatusAndLastSynced(db *sql.DB, jobID int64, newStatus string) error {
+	if err := checkOpenTransition(db, jobID, newStatus, false, status.SourceReconcile); err != nil {
+		return err
+	}
+	return UpdateAttemptStatusAndLastSynced(db, jobID, newStatus)
 }
 
 // ClearPendingAndUpdateStatus clears pending status and updates both status fields.
 // Used when reconciliation succeeds or when accepting remote state.
 // Clears session_name for non-running states per spec: SessionImpliesRunning.
-func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
-	return ClearAttemptPendingAndUpdateStatus(db, jobID, status)
+func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, newStatus string) error {
+	if err := checkTransition(db, jobID, newStatus, false, status.SourceReconcile); err != nil {
+		return err
+	}
+	return ClearAttemptPendingAndUpdateStatus(db, jobID, newStatus)
 }
 
 // RequeueByID resets a job back to queued status for user-initiated requeue.
@@ -2213,6 +2215,7 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, status string) error {
 // so the sync path will re-append the job to the remote queue if the immediate
 // append fails.
 func RequeueByID(db *sql.DB, id int64) error {
+	warnTransition(db, id, StatusQueued, false, status.SourceUserAction)
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -2346,8 +2349,8 @@ func SetQueuedAtBefore(db *sql.DB, jobID int64, host string) error {
 }
 
 // IsTerminalStatus returns true if the status represents a terminal state.
-func IsTerminalStatus(status string) bool {
-	return status == StatusCompleted || status == StatusDead || status == StatusFailed || status == StatusKilled || status == StatusCanceled || status == StatusDraft
+func IsTerminalStatus(s string) bool {
+	return status.IsTerminal(s)
 }
 
 // CountQueuedByHost returns the number of queued jobs for a host
