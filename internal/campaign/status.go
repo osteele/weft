@@ -33,13 +33,6 @@ const (
 // Heartbeat staleness threshold: warn if heartbeat is older than this.
 const heartbeatStaleThreshold = 3 * time.Minute
 
-var (
-	fetchWatchBootstrapStage = fetchBootstrapStage
-	fetchWatchHeartbeat      = fetchHeartbeat
-	fetchWatchInstancePhase  = fetchInstancePhase
-	fetchWatchJobProgress    = fetchJobProgress
-)
-
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.
 type HeartbeatSample struct {
 	Ts             int64  `json:"ts"`
@@ -212,13 +205,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 		var cachedInstance *cloud.Instance
 		var lastProviderStatus string
 		var lastJobs []*db.Job
-		var currentPhase string
-		var phaseChangedAt *time.Time
 		watchReconciler := NewReconciler()
-		// Staleness guard: track last-written values to skip no-op DB writes
-		var lastWrittenPhase, lastWrittenBootstrap, lastWrittenHBJSON string
-		var lastWrittenProgressPct int = -1
-		var lastWrittenProgressID int64
 		var agentVersion string
 		agentVersionFetched := false
 
@@ -276,120 +263,21 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 
 			jobState := ComputeJobState(jobs)
 
-			// Fetch bootstrap stage or instance phase from R2 and sync to DB
-			var bootstrapStage, instancePhase string
-			terminationIntent := ci.TerminationIntent
-			jobProgress := -1
-			var jobProgressID int64
-			var jobProgressPhase int
-			var heartbeatAge time.Duration
-			var heartbeat *HeartbeatSample
-			if r2c != nil && (ci.Status == db.LaunchStatusRunning || ci.Status == db.LaunchStatusGrace) {
-				if fetchedIntent, err := fetchReconcileTerminationIntent(ctx, r2c, cloudInstanceID); err == nil && fetchedIntent != nil {
-					terminationIntent = fetchedIntent
-					_ = db.UpdateLaunchTerminationIntent(database, cloudInstanceID, fetchedIntent)
-					ci.TerminationIntent = fetchedIntent
-				}
-				instancePhase = fetchWatchInstancePhase(ctx, r2c, cloudInstanceID)
-				if instancePhase != "" {
-					jobProgressID, jobProgress, jobProgressPhase = fetchWatchJobProgress(ctx, r2c, instancePhase, jobs)
-
-					// Cloud jobs stay queued in the DB (unlike on-prem which uses sync to detect start).
-					if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
-						switch verb {
-						case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
-							if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
-								if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
-									slog.Warn("failed to mark job running from R2 phase", "component", "watch", "job_id", phaseJobID, "error", err)
-								}
-							}
-						}
-					}
-
-					// Detect grace transition: R2 phase says "grace" but DB still says "running"
-					if instancePhase == PhaseGrace && ci.Status == db.LaunchStatusRunning {
-						if checkR2GraceStatus(r2c, ci, database) {
-							ci.Status = db.LaunchStatusGrace
-						}
-					}
-				} else if !jobState.HasStartedJob {
-					bootstrapStage = fetchWatchBootstrapStage(ctx, r2c, cloudInstanceID)
-				}
-
-				// Fetch heartbeat from R2 (only when jobs have started)
-				if jobState.HasStartedJob || instancePhase != "" {
-					heartbeat, heartbeatAge = fetchWatchHeartbeat(ctx, r2c, cloudInstanceID)
-				}
-
-				// Sync completion for jobs the DB still thinks are running but
-				// that aren't the current phase job (retried each poll until synced).
-				if _, currentJobID, ok := ParsePhaseJobID(instancePhase); ok && currentJobID > 0 {
-					for _, j := range jobs {
-						if j.ID != currentJobID && j.Status == db.StatusRunning {
-							if CheckAndSyncJobComplete(ctx, r2c, database, j.ID) {
-								if fetched, err := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID); err == nil {
-									lastJobs = fetched
-								}
-								jobs = lastJobs
-								jobState = ComputeJobState(jobs)
-								break // re-evaluate on next poll with fresh job list
-							}
-						}
-					}
-				}
-
-				// Fetch agent version once (static per instance)
-				if !agentVersionFetched {
-					agentVersionFetched = true
-					agentVersion = fetchR2Marker(ctx, r2c, r2keys.InstanceAgentVersion(cloudInstanceID))
-				}
-
-				// Write live state to DB (staleness guard: skip if unchanged)
-				var hbJSON string
-				var hbTS int64
-				if heartbeat != nil {
-					if data, err := json.Marshal(heartbeat); err == nil {
-						hbJSON = string(data)
-					}
-					hbTS = heartbeat.Ts
-				}
-				if instancePhase != lastWrittenPhase || bootstrapStage != lastWrittenBootstrap ||
-					hbJSON != lastWrittenHBJSON || jobProgress != lastWrittenProgressPct ||
-					jobProgressID != lastWrittenProgressID {
-					_ = db.UpsertLaunchLiveState(database, db.LaunchLiveState{
-						LaunchID:       cloudInstanceID,
-						InstancePhase:  instancePhase,
-						BootstrapStage: bootstrapStage,
-						HeartbeatJSON:  hbJSON,
-						HeartbeatTS:    hbTS,
-						JobProgressPct: jobProgress,
-						JobProgressID:  jobProgressID,
-						AgentVersion:   agentVersion,
-					})
-					lastWrittenPhase = instancePhase
-					lastWrittenBootstrap = bootstrapStage
-					lastWrittenHBJSON = hbJSON
-					lastWrittenProgressPct = jobProgress
-					lastWrittenProgressID = jobProgressID
-				}
-			}
+			// Sync external state (R2 markers, termination intent) to launch_live_state.
+			synced := SyncInstanceState(ctx, database, ci, r2c, jobs, jobState, SyncInstanceStateOpts{
+				AgentVersion:        agentVersion,
+				AgentVersionFetched: agentVersionFetched,
+			})
+			agentVersion = synced.AgentVersion
+			agentVersionFetched = true
 
 			// Run shared reconciliation checks
 			now := time.Now()
-			action := watchReconciler.CheckInstance(CheckInstanceParams{
-				CI:                ci,
-				ProviderInst:      cachedInstance,
-				ProviderErr:       providerErr,
-				R2Client:          r2c,
-				JobState:          jobState,
-				InstancePhase:     instancePhase,
-				BootstrapStage:    bootstrapStage,
-				HeartbeatAge:      heartbeatAge,
-				Now:               now,
-				TerminationIntent: terminationIntent,
-				BootstrapSurvival: survival,
-				PhaseChangedAt:    phaseChangedAt,
-			})
+			params := synced.CheckParams(ci, r2c, jobState, now)
+			params.ProviderInst = cachedInstance
+			params.ProviderErr = providerErr
+			params.BootstrapSurvival = survival
+			action := watchReconciler.CheckInstance(params)
 
 			// Execute non-display actions (destroy, mark failed/completed, reset jobs)
 			var stallMessage string
@@ -410,19 +298,6 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				stallMessage = action.StallMessage
 			}
 
-			if instancePhase == "" {
-				currentPhase = ""
-				phaseChangedAt = nil
-			} else if instancePhase != currentPhase {
-				prevPhase := currentPhase
-				currentPhase = instancePhase
-				if prevPhase == "" {
-					phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, ci, jobs, jobPhaseTimings)
-				} else {
-					phaseChangedAt = &now
-				}
-			}
-
 			// Fetch attempt outcomes only for terminal instances (outcomes are immutable)
 			var attemptOutcomes map[int64]string
 			if IsInstanceTerminal(ci.Status) {
@@ -435,16 +310,16 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				JobPhaseTimings:    jobPhaseTimings,
 				JobAttemptOutcomes: attemptOutcomes,
 				Instance:           cachedInstance,
-				BootstrapStage:     bootstrapStage,
-				InstancePhase:      instancePhase,
-				PhaseChangedAt:     phaseChangedAt,
+				BootstrapStage:     synced.BootstrapStage,
+				InstancePhase:      synced.InstancePhase,
+				PhaseChangedAt:     synced.PhaseChangedAt,
 				StallMessage:       stallMessage,
-				JobProgress:        jobProgress,
-				JobProgressID:      jobProgressID,
-				JobProgressPhase:   jobProgressPhase,
-				HeartbeatAge:       heartbeatAge,
-				Heartbeat:          heartbeat,
-				TerminationIntent:  terminationIntent,
+				JobProgress:        synced.JobProgress,
+				JobProgressID:      synced.JobProgressID,
+				JobProgressPhase:   synced.JobProgressPhase,
+				HeartbeatAge:       synced.HeartbeatAge,
+				Heartbeat:          synced.Heartbeat,
+				TerminationIntent:  synced.TerminationIntent,
 				BootstrapDurations: survivalDurations(survival),
 			}
 

@@ -546,37 +546,37 @@ func TestWatchInstance_UsesLivePhaseBeforeJobLeavesQueued(t *testing.T) {
 		t.Fatalf("set cloud instance: %v", err)
 	}
 
-	prevFetchIntent := fetchReconcileTerminationIntent
-	prevFetchPhase := fetchWatchInstancePhase
-	prevFetchBootstrap := fetchWatchBootstrapStage
-	prevFetchHeartbeat := fetchWatchHeartbeat
-	prevFetchProgress := fetchWatchJobProgress
+	prevFetchIntent := syncFetchTermIntent
+	prevFetchPhase := syncFetchInstancePhase
+	prevFetchBootstrap := syncFetchBootstrapStage
+	prevFetchHeartbeat := syncFetchHeartbeat
+	prevFetchProgress := syncFetchJobProgress
 	t.Cleanup(func() {
-		fetchReconcileTerminationIntent = prevFetchIntent
-		fetchWatchInstancePhase = prevFetchPhase
-		fetchWatchBootstrapStage = prevFetchBootstrap
-		fetchWatchHeartbeat = prevFetchHeartbeat
-		fetchWatchJobProgress = prevFetchProgress
+		syncFetchTermIntent = prevFetchIntent
+		syncFetchInstancePhase = prevFetchPhase
+		syncFetchBootstrapStage = prevFetchBootstrap
+		syncFetchHeartbeat = prevFetchHeartbeat
+		syncFetchJobProgress = prevFetchProgress
 	})
 
-	fetchReconcileTerminationIntent = func(context.Context, *r2.Client, int64) (*instanceintent.Marker, error) {
+	syncFetchTermIntent = func(context.Context, *r2.Client, int64) (*instanceintent.Marker, error) {
 		return nil, nil
 	}
 
 	phaseCalls := 0
 	bootstrapCalls := 0
-	fetchWatchInstancePhase = func(context.Context, *r2.Client, int64) string {
+	syncFetchInstancePhase = func(context.Context, *r2.Client, int64) string {
 		phaseCalls++
 		return "setup:1"
 	}
-	fetchWatchBootstrapStage = func(context.Context, *r2.Client, int64) string {
+	syncFetchBootstrapStage = func(context.Context, *r2.Client, int64) string {
 		bootstrapCalls++
 		return "starting_jobs"
 	}
-	fetchWatchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+	syncFetchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
 		return nil, 0
 	}
-	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
+	syncFetchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
 		return 0, -1, 0
 	}
 
@@ -766,32 +766,32 @@ func TestWatchInstance_TransitionsQueuedJobToRunningFromR2Phase(t *testing.T) {
 		t.Fatalf("initial status = %q, want %q", job.Status, db.StatusQueued)
 	}
 
-	prevFetchIntent := fetchReconcileTerminationIntent
-	prevFetchPhase := fetchWatchInstancePhase
-	prevFetchBootstrap := fetchWatchBootstrapStage
-	prevFetchHeartbeat := fetchWatchHeartbeat
-	prevFetchProgress := fetchWatchJobProgress
+	prevFetchIntent := syncFetchTermIntent
+	prevFetchPhase := syncFetchInstancePhase
+	prevFetchBootstrap := syncFetchBootstrapStage
+	prevFetchHeartbeat := syncFetchHeartbeat
+	prevFetchProgress := syncFetchJobProgress
 	t.Cleanup(func() {
-		fetchReconcileTerminationIntent = prevFetchIntent
-		fetchWatchInstancePhase = prevFetchPhase
-		fetchWatchBootstrapStage = prevFetchBootstrap
-		fetchWatchHeartbeat = prevFetchHeartbeat
-		fetchWatchJobProgress = prevFetchProgress
+		syncFetchTermIntent = prevFetchIntent
+		syncFetchInstancePhase = prevFetchPhase
+		syncFetchBootstrapStage = prevFetchBootstrap
+		syncFetchHeartbeat = prevFetchHeartbeat
+		syncFetchJobProgress = prevFetchProgress
 	})
 
-	fetchReconcileTerminationIntent = func(context.Context, *r2.Client, int64) (*instanceintent.Marker, error) {
+	syncFetchTermIntent = func(context.Context, *r2.Client, int64) (*instanceintent.Marker, error) {
 		return nil, nil
 	}
-	fetchWatchInstancePhase = func(context.Context, *r2.Client, int64) string {
+	syncFetchInstancePhase = func(context.Context, *r2.Client, int64) string {
 		return fmt.Sprintf("running:%d", jobID)
 	}
-	fetchWatchBootstrapStage = func(context.Context, *r2.Client, int64) string {
+	syncFetchBootstrapStage = func(context.Context, *r2.Client, int64) string {
 		return ""
 	}
-	fetchWatchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
+	syncFetchHeartbeat = func(context.Context, *r2.Client, int64) (*HeartbeatSample, time.Duration) {
 		return nil, 0
 	}
-	fetchWatchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
+	syncFetchJobProgress = func(context.Context, *r2.Client, string, []*db.Job) (int64, int, int) {
 		return jobID, 50, 0
 	}
 

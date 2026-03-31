@@ -485,11 +485,11 @@ func TestReconcileLaunches_TerminationIntent_DestroysAndMarksFailed(t *testing.T
 		t.Fatalf("assign job: %v", err)
 	}
 
-	origFetchIntent := fetchReconcileTerminationIntent
+	origFetchIntent := syncFetchTermIntent
 	t.Cleanup(func() {
-		fetchReconcileTerminationIntent = origFetchIntent
+		syncFetchTermIntent = origFetchIntent
 	})
-	fetchReconcileTerminationIntent = func(_ context.Context, _ *r2.Client, id int64) (*instanceintent.Marker, error) {
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, id int64) (*instanceintent.Marker, error) {
 		if id != instanceID {
 			return nil, nil
 		}

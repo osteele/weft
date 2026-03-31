@@ -295,79 +295,26 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 		r.recordProviderStatusTransition(database, ci.ID, inst.Status)
 	}
 
-	// Fetch and persist termination intent from R2
-	intent, intentErr := fetchReconcileTerminationIntent(context.Background(), r2Client, ci.ID)
-	if intentErr != nil {
-		slog.Warn("failed to fetch termination intent", "component", "reconcile", "instance", ci.ID, "error", intentErr)
-	}
-	if intent != nil {
-		if err := db.UpdateLaunchTerminationIntent(database, ci.ID, intent); err != nil {
-			slog.Warn("failed to persist termination intent", "component", "reconcile", "instance", ci.ID, "error", err)
-		}
-	} else if ci.TerminationIntent != nil {
-		intent = ci.TerminationIntent
-	}
-
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
 	jobState := ComputeJobState(jobs)
 
-	// Fetch R2 phase markers so bootstrap-stall check has current data.
-	// Without this, the reconciler sees empty InstancePhase and may kill
-	// instances that are actually running jobs.
-	var instancePhase, bootstrapStage string
-	if r2Client != nil && ci.Status == db.LaunchStatusRunning && ci.LaunchedAt != nil {
-		ctx := context.Background()
-		instancePhase = fetchInstancePhase(ctx, r2Client, ci.ID)
-		if instancePhase != "" {
-			if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
-				switch verb {
-				case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
-					if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
-						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
-							slog.Warn("failed to mark job running from R2 phase", "component", "reconcile", "job_id", phaseJobID, "error", err)
-						}
-						jobState.HasStartedJob = true
-					}
-				}
-			}
-		} else if !jobState.HasStartedJob {
-			bootstrapStage = fetchBootstrapStage(ctx, r2Client, ci.ID)
-		}
-	}
+	// Sync external state (R2 markers, termination intent) to launch_live_state.
+	synced := SyncInstanceState(context.Background(), database, ci, r2Client, jobs, jobState, SyncInstanceStateOpts{})
 
 	now := time.Now()
 
-	// Compute PhaseChangedAt for setup stall detection.
-	// Only fetch timings for the single job referenced in the phase string.
-	var phaseChangedAt *time.Time
+	// Setup survival: reconciler-specific caching of per-command thresholds.
 	var setupSurvival *db.SetupSurvival
-	if verb, phaseJobID, ok := ParsePhaseJobID(instancePhase); ok && phaseJobID > 0 {
-		jobPhaseTimings := make(map[int64]*db.JobPhaseTimings, 1)
-		if t, err := db.GetJobPhaseTimings(database, phaseJobID); err == nil && t != nil {
-			jobPhaseTimings[phaseJobID] = t
-		}
-		phaseChangedAt = inferInitialPhaseChangedAt(instancePhase, ci, jobs, jobPhaseTimings)
-
-		if verb == PhaseSetup {
-			if j := findJobInSlice(jobs, phaseJobID); j != nil {
-				setupSurvival = r.getSetupSurvival(database, j.Command, j.WorkingDir)
-			}
+	if verb, phaseJobID, ok := ParsePhaseJobID(synced.InstancePhase); ok && verb == PhaseSetup {
+		if j := findJobInSlice(jobs, phaseJobID); j != nil {
+			setupSurvival = r.getSetupSurvival(database, j.Command, j.WorkingDir)
 		}
 	}
 
-	params := CheckInstanceParams{
-		CI:                ci,
-		ProviderInst:      inst,
-		ProviderErr:       providerErr,
-		R2Client:          r2Client,
-		JobState:          jobState,
-		InstancePhase:     instancePhase,
-		BootstrapStage:    bootstrapStage,
-		Now:               now,
-		TerminationIntent: intent,
-		PhaseChangedAt:    phaseChangedAt,
-		SetupSurvival:     setupSurvival,
-	}
+	params := synced.CheckParams(ci, r2Client, jobState, now)
+	params.ProviderInst = inst
+	params.ProviderErr = providerErr
+	params.SetupSurvival = setupSurvival
 	if survival, ok := r.bootstrapTimeouts[ci.Provider]; ok {
 		params.BootstrapSurvival = survival
 	}

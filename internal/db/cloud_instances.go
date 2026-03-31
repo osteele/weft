@@ -1450,19 +1450,40 @@ type LaunchLiveState struct {
 	JobProgressPct int    // 0-100, or -1 if unavailable
 	JobProgressID  int64
 	AgentVersion   string
+	PhaseChangedAt *int64 // unix epoch when InstancePhase last changed
 	UpdatedAt      int64
 }
 
 // UpsertLaunchLiveState writes the latest ephemeral R2 state for an instance.
+// PhaseChangedAt is auto-managed: set to now when InstancePhase changes from
+// the previously stored value, preserved otherwise.
 func UpsertLaunchLiveState(database *sql.DB, state LaunchLiveState) error {
-	_, err := database.Exec(`INSERT OR REPLACE INTO launch_live_state
+	now := time.Now().Unix()
+
+	// Detect phase change to auto-set PhaseChangedAt.
+	if state.PhaseChangedAt == nil {
+		var oldPhase sql.NullString
+		_ = database.QueryRow(`SELECT instance_phase FROM launch_live_state WHERE launch_id = ?`, state.LaunchID).Scan(&oldPhase)
+		if state.InstancePhase != oldPhase.String {
+			state.PhaseChangedAt = &now
+		}
+	}
+
+	_, err := database.Exec(`INSERT INTO launch_live_state
 		(launch_id, instance_phase, bootstrap_stage, heartbeat_json, heartbeat_ts,
-		 job_progress_pct, job_progress_id, agent_version, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 job_progress_pct, job_progress_id, agent_version, phase_changed_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(launch_id) DO UPDATE SET
+		 instance_phase=excluded.instance_phase, bootstrap_stage=excluded.bootstrap_stage,
+		 heartbeat_json=excluded.heartbeat_json, heartbeat_ts=excluded.heartbeat_ts,
+		 job_progress_pct=excluded.job_progress_pct, job_progress_id=excluded.job_progress_id,
+		 agent_version=excluded.agent_version,
+		 phase_changed_at=excluded.phase_changed_at,
+		 updated_at=excluded.updated_at`,
 		state.LaunchID, state.InstancePhase, state.BootstrapStage,
 		state.HeartbeatJSON, state.HeartbeatTS,
 		nullableProgressPct(state.JobProgressPct), state.JobProgressID,
-		state.AgentVersion, time.Now().Unix(),
+		state.AgentVersion, state.PhaseChangedAt, now,
 	)
 	return err
 }
@@ -1479,16 +1500,17 @@ func nullableProgressPct(pct int) any {
 func GetLaunchLiveState(database *sql.DB, launchID int64) (*LaunchLiveState, error) {
 	row := database.QueryRow(`SELECT launch_id, instance_phase, bootstrap_stage,
 		heartbeat_json, heartbeat_ts, job_progress_pct, job_progress_id,
-		agent_version, updated_at
+		agent_version, phase_changed_at, updated_at
 		FROM launch_live_state WHERE launch_id = ?`, launchID)
 
 	var s LaunchLiveState
 	var phase, bootstrap, hbJSON, agentVer sql.NullString
 	var hbTS, progressID sql.NullInt64
 	var progressPct sql.NullInt64
+	var phaseChangedAt sql.NullInt64
 
 	err := row.Scan(&s.LaunchID, &phase, &bootstrap, &hbJSON, &hbTS,
-		&progressPct, &progressID, &agentVer, &s.UpdatedAt)
+		&progressPct, &progressID, &agentVer, &phaseChangedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1507,6 +1529,9 @@ func GetLaunchLiveState(database *sql.DB, launchID int64) (*LaunchLiveState, err
 	}
 	s.JobProgressID = progressID.Int64
 	s.AgentVersion = agentVer.String
+	if phaseChangedAt.Valid {
+		s.PhaseChangedAt = &phaseChangedAt.Int64
+	}
 	return &s, nil
 }
 
