@@ -327,6 +327,22 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				liveUpdate.Jobs = jobs
 			}
 		}
+		// Backfill phase/bootstrap from DB-cached live state when the
+		// one-shot WatchInstance call didn't return R2 data in time.
+		if liveUpdate.InstancePhase == "" || liveUpdate.BootstrapStage == "" {
+			if ls, err := db.GetLaunchLiveState(database, ci.ID); err == nil && ls != nil {
+				if liveUpdate.InstancePhase == "" {
+					liveUpdate.InstancePhase = ls.InstancePhase
+				}
+				if liveUpdate.BootstrapStage == "" {
+					liveUpdate.BootstrapStage = ls.BootstrapStage
+				}
+				if liveUpdate.PhaseChangedAt == nil && ls.PhaseChangedAt != nil {
+					t := time.Unix(*ls.PhaseChangedAt, 0)
+					liveUpdate.PhaseChangedAt = &t
+				}
+			}
+		}
 		activity := formatObservedActivity(*liveUpdate, time.Now())
 		if activity.Bootstrap != "" {
 			fmt.Printf("  Bootstrap: %s\n", activity.Bootstrap)

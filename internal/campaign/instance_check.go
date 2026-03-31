@@ -30,6 +30,7 @@ const (
 	ActionProviderDead                          // provider says dead (with hysteresis) -> fail/complete
 	ActionSelfDestructFailed                    // all jobs done, instance lingering -> complete
 	ActionSetupStalled                          // setup phase unchanged too long -> fail
+	ActionRunningStalled                        // running phase + stale heartbeat too long -> fail
 )
 
 // InstanceAction describes what reconciliation action to take for a cloud instance.
@@ -255,6 +256,34 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
+	// 5c. Running phase stall: heartbeat stale while in running phase.
+	// A running job with a dead agent (stale heartbeat) should be terminated.
+	// This does NOT check GPU utilization — jobs may legitimately not use the GPU.
+	if ci.Status == db.LaunchStatusRunning && p.PhaseChangedAt != nil && p.HeartbeatAge > heartbeatStaleThreshold {
+		verb, _, _ := ParsePhaseJobID(p.InstancePhase)
+		if verb == PhaseRunning {
+			phaseAge := p.Now.Sub(*p.PhaseChangedAt)
+			if phaseAge >= runningStaleTerminate {
+				return InstanceAction{
+					Kind:              ActionRunningStalled,
+					TerminalStatus:    db.LaunchStatusFailed,
+					TerminationReason: db.TerminationReasonPhaseStall,
+					StallMessage:      fmt.Sprintf("running phase stalled for %s with stale heartbeat — terminating instance", phaseAge.Truncate(time.Second)),
+					DestroyProvider:   true,
+					ResetJobs:         true,
+					AttemptOutcome:    db.AttemptOutcomeOrphaned,
+				}
+			}
+			if phaseAge >= runningStaleWarn {
+				remaining := runningStaleTerminate - phaseAge
+				return InstanceAction{
+					Kind:         ActionDisplayOnly,
+					StallMessage: fmt.Sprintf("running phase stalled for %s with stale heartbeat (terminating in %s)", phaseAge.Truncate(time.Second), remaining.Truncate(time.Second)),
+				}
+			}
+		}
+	}
+
 	// 6. Stale heartbeat (display-only warning — the reconciler's probe logic is separate)
 	if p.HeartbeatAge > heartbeatStaleThreshold && ci.Status == db.LaunchStatusRunning {
 		return InstanceAction{
@@ -460,6 +489,8 @@ func actionEventKind(kind InstanceActionKind) string {
 		return db.EventReconcileBootstrapComplete
 	case ActionSetupStalled:
 		return db.EventReconcileSetupStall
+	case ActionRunningStalled:
+		return db.EventReconcileRunningStall
 	default:
 		return ""
 	}

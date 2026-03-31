@@ -33,6 +33,15 @@ const (
 // Heartbeat staleness threshold: warn if heartbeat is older than this.
 const heartbeatStaleThreshold = 3 * time.Minute
 
+// Running-phase stall thresholds: trigger when heartbeat is stale AND
+// the running phase has been unchanged for this long. This catches hung
+// jobs where the agent has died but the provider still reports "running".
+// NOT based on GPU utilization — jobs may legitimately not use the GPU.
+const (
+	runningStaleWarn      = 10 * time.Minute
+	runningStaleTerminate = 30 * time.Minute
+)
+
 // HeartbeatSample mirrors the agent's heartbeat JSON payload.
 type HeartbeatSample struct {
 	Ts             int64  `json:"ts"`
@@ -298,9 +307,10 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				stallMessage = action.StallMessage
 			}
 
-			// Fetch attempt outcomes only for terminal instances (outcomes are immutable)
+			// Fetch attempt outcomes for all instances so that orphaned/completed
+			// attempts display correctly even while the instance is running.
 			var attemptOutcomes map[int64]string
-			if IsInstanceTerminal(ci.Status) {
+			{
 				attemptOutcomes, _ = db.GetAttemptOutcomesByLaunch(database, cloudInstanceID)
 			}
 

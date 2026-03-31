@@ -669,3 +669,124 @@ func TestCheckInstance_SetupStall_CustomSurvival(t *testing.T) {
 		t.Fatalf("action.Kind = %d, want ActionSetupStalled (%d) with custom survival thresholds", action.Kind, ActionSetupStalled)
 	}
 }
+
+func TestCheckInstance_RunningStall_Terminates(t *testing.T) {
+	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-35 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "running:531",
+		PhaseChangedAt: &phaseStart,
+		HeartbeatAge:   10 * time.Minute, // stale
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind != ActionRunningStalled {
+		t.Fatalf("action.Kind = %d, want ActionRunningStalled (%d)", action.Kind, ActionRunningStalled)
+	}
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Fatalf("terminal status = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
+	}
+	if !action.DestroyProvider {
+		t.Fatal("expected DestroyProvider = true")
+	}
+	if !action.ResetJobs {
+		t.Fatal("expected ResetJobs = true")
+	}
+}
+
+func TestCheckInstance_RunningStall_WarnsBeforeTermination(t *testing.T) {
+	launchedAt := time.Now().Add(-30 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-15 * time.Minute) // past warn threshold, before terminate
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "running:531",
+		PhaseChangedAt: &phaseStart,
+		HeartbeatAge:   10 * time.Minute, // stale
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind != ActionDisplayOnly {
+		t.Fatalf("action.Kind = %d, want ActionDisplayOnly (%d) for warn phase", action.Kind, ActionDisplayOnly)
+	}
+	if action.StallMessage == "" {
+		t.Fatal("expected non-empty stall message")
+	}
+}
+
+func TestCheckInstance_RunningStall_FreshHeartbeatNoAction(t *testing.T) {
+	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-35 * time.Minute) // past terminate threshold
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "running:531",
+		PhaseChangedAt: &phaseStart,
+		HeartbeatAge:   30 * time.Second, // fresh — agent is alive
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	// Fresh heartbeat means the agent is alive — do NOT terminate even with old phase
+	if action.Kind == ActionRunningStalled {
+		t.Fatal("should not trigger running stall when heartbeat is fresh")
+	}
+}
+
+func TestCheckInstance_RunningStall_ZeroHeartbeatAgeNoAction(t *testing.T) {
+	launchedAt := time.Now().Add(-60 * time.Minute).Unix()
+	phaseStart := time.Now().Add(-35 * time.Minute)
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		ProviderInst:   &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		InstancePhase:  "running:531",
+		PhaseChangedAt: &phaseStart,
+		HeartbeatAge:   0, // no heartbeat data yet
+		JobState:       JobState{HasStartedJob: true},
+		Now:            time.Now(),
+	})
+	if action.Kind == ActionRunningStalled {
+		t.Fatal("should not trigger running stall when heartbeat age is 0 (unknown)")
+	}
+}

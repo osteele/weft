@@ -647,6 +647,19 @@ func UpdateAttemptRunning(execer dbExecer, jobID int64) error {
 	return err
 }
 
+// SetAttemptLaunch associates the latest open attempt for a job with a launch.
+// This re-links an orphaned job (whose attempt was reset without a launch_id)
+// back to the launch that is actually running it, as observed from R2 phase.
+func SetAttemptLaunch(database *sql.DB, jobID int64, launchID int64) error {
+	_, err := database.Exec(`
+		UPDATE job_attempts
+		SET launch_id = ?, host = ?
+		WHERE id = `+latestOpenAttemptSubquery,
+		launchID, LaunchHost(launchID), jobID,
+	)
+	return err
+}
+
 // UpdateAttemptCompletion marks the latest attempt as completed.
 // Uses latestAttemptSubquery (not just open attempts) because completion is
 // authoritative — it can override a previous "failed" status from a race

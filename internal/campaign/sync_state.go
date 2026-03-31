@@ -86,13 +86,23 @@ func SyncInstanceState(
 		// Job progress (only meaningful when a phase is active)
 		s.JobProgressID, s.JobProgress, s.JobProgressPhase = syncFetchJobProgress(ctx, r2Client, s.InstancePhase, jobs)
 
-		// Mark queued jobs as running if the R2 phase says they are
+		// Mark queued jobs as running if the R2 phase says they are,
+		// and re-associate orphaned jobs with this launch.
 		if verb, phaseJobID, ok := ParsePhaseJobID(s.InstancePhase); ok && phaseJobID > 0 {
 			switch verb {
 			case PhaseRunning, PhaseUploading, PhaseUploadingResults, PhaseFinalizing:
-				if j := findJobInSlice(jobs, phaseJobID); j != nil && j.Status == db.StatusQueued {
-					if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
-						slog.Warn("failed to mark job running from R2 phase", "component", "sync", "job_id", phaseJobID, "error", err)
+				if j := findJobInSlice(jobs, phaseJobID); j != nil {
+					if j.Status == db.StatusQueued {
+						if err := db.MarkQueuedJobRunning(database, phaseJobID); err != nil {
+							slog.Warn("failed to mark job running from R2 phase", "component", "sync", "job_id", phaseJobID, "error", err)
+						}
+					}
+					// Re-link orphaned job to this launch if its attempt
+					// was reset (no launch_id) but the agent is still running it.
+					if j.LaunchID == nil || *j.LaunchID != instanceID {
+						if err := db.SetAttemptLaunch(database, phaseJobID, instanceID); err != nil {
+							slog.Warn("failed to re-associate job with launch", "component", "sync", "job_id", phaseJobID, "launch_id", instanceID, "error", err)
+						}
 					}
 					jobState.HasStartedJob = true
 				}
