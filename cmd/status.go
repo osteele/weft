@@ -15,6 +15,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
 	"github.com/spf13/cobra"
@@ -539,10 +540,21 @@ func shouldAttemptSync(status string) bool {
 // Also runs a fast DB-only repair for jobs stuck on completed launches.
 // Returns true if the cloud sync completed within the timeout.
 func syncRentalJobsStatus(database *sql.DB) bool {
-	// DB-only repairs before cloud sync. Also called from syncCloudJobResults,
-	// but that only runs if the cloud sync completes within timeout — this
-	// call ensures immediate repair even when the cloud sync is slow.
-	if repaired, err := db.FinalizeStuckJobsOnCompletedLaunches(database); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
+		return true
+	}
+
+	// Try to create R2 client for stuck-job recovery. Falls back to DB-only
+	// if R2 is not configured.
+	var r2Client *r2.Client
+	if cfg.Vastai.R2.Bucket != "" && cfg.Vastai.R2.AccessKeyID != "" {
+		r2Client, _ = r2.New(r2Config(cfg))
+	}
+
+	// Finalize stuck jobs, checking R2 for late-arriving .complete markers.
+	// Also called from syncCloudJobResults after full cloud sync completes.
+	if repaired, err := campaign.FinalizeStuckJobsWithR2Check(database, r2Client); err != nil {
 		slog.Warn("failed to finalize stuck jobs", "component", "sync", "error", err)
 	} else {
 		for _, jobID := range repaired {
@@ -551,10 +563,6 @@ func syncRentalJobsStatus(database *sql.DB) bool {
 	}
 	backfillHFDownloadObservations(database)
 
-	cfg, err := config.Load()
-	if err != nil {
-		return true
-	}
 	_, completed := syncCloudStateWithTimeout(cfg, database, campaign.NewReconciler(), FastCloudSyncTimeout, false)
 	return completed
 }

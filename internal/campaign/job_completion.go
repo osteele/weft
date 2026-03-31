@@ -107,3 +107,34 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 		"exit_code", *exitCode, "source", source)
 	return true
 }
+
+// FinalizeStuckJobsWithR2Check finds non-terminal jobs on completed launches
+// and attempts R2 sync before marking them dead. This prevents incorrectly
+// marking jobs as dead when the agent uploaded results after the reconciler's
+// initial R2 sync but before this safety-net runs.
+func FinalizeStuckJobsWithR2Check(database *sql.DB, r2Client *r2.Client) ([]int64, error) {
+	stuck, err := db.FindStuckJobsOnCompletedLaunches(database)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	var finalized []int64
+	for _, s := range stuck {
+		// Try R2 sync first — the .complete marker may have arrived since
+		// the reconciler last checked.
+		if r2Client != nil && reconcileCheckAndSyncJobComplete(ctx, r2Client, database, s.JobID) {
+			slog.Info("recovered stuck job from R2 (would have been marked dead)",
+				"component", "sync", "job_id", s.JobID)
+			finalized = append(finalized, s.JobID)
+			continue
+		}
+
+		// R2 sync failed — mark as dead
+		if err := db.MarkStuckJobDead(database, s.AttemptID); err != nil {
+			return finalized, err
+		}
+		finalized = append(finalized, s.JobID)
+	}
+	return finalized, nil
+}

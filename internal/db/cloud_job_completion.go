@@ -64,11 +64,15 @@ func RecordCloudJobCompletion(database *sql.DB, jobID int64, exitCode int, start
 	return 0, nil
 }
 
-// FinalizeStuckJobsOnCompletedLaunches finds jobs with non-terminal status
-// whose launch has already completed. These jobs missed R2 result sync
-// (markers missing or unprocessable). Marks them as "dead" since we can't
-// recover the exit code. Returns the IDs of finalized jobs.
-func FinalizeStuckJobsOnCompletedLaunches(database *sql.DB) ([]int64, error) {
+// StuckJob represents a job with non-terminal status on a completed launch.
+type StuckJob struct {
+	JobID     int64
+	AttemptID int64
+}
+
+// FindStuckJobsOnCompletedLaunches returns jobs with non-terminal status whose
+// launch has already completed. These jobs missed R2 result sync.
+func FindStuckJobsOnCompletedLaunches(database *sql.DB) ([]StuckJob, error) {
 	rows, err := database.Query(`
 		SELECT ja.job_id, ja.id
 		FROM job_attempts ja
@@ -84,14 +88,10 @@ func FinalizeStuckJobsOnCompletedLaunches(database *sql.DB) ([]int64, error) {
 	}
 	defer rows.Close()
 
-	type stuckJob struct {
-		jobID     int64
-		attemptID int64
-	}
-	var stuck []stuckJob
+	var stuck []StuckJob
 	for rows.Next() {
-		var s stuckJob
-		if err := rows.Scan(&s.jobID, &s.attemptID); err != nil {
+		var s StuckJob
+		if err := rows.Scan(&s.JobID, &s.AttemptID); err != nil {
 			return nil, err
 		}
 		stuck = append(stuck, s)
@@ -99,21 +99,39 @@ func FinalizeStuckJobsOnCompletedLaunches(database *sql.DB) ([]int64, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return stuck, nil
+}
 
-	now := time.Now().Unix()
+// MarkStuckJobDead marks a stuck job attempt as dead. Called when R2 sync
+// has been attempted and failed — no completion data is recoverable.
+func MarkStuckJobDead(database *sql.DB, attemptID int64) error {
+	_, err := database.Exec(
+		`UPDATE job_attempts
+		 SET status = ?, end_time = COALESCE(end_time, ?),
+		     failure_reason = 'launch completed but job results were not synced from R2',
+		     cloud_outcome = ?
+		 WHERE id = ?`,
+		StatusDead, time.Now().Unix(), AttemptOutcomeOrphaned, attemptID,
+	)
+	return err
+}
+
+// FinalizeStuckJobsOnCompletedLaunches finds jobs with non-terminal status
+// whose launch has already completed and marks them as "dead". This is the
+// DB-only fallback — callers with R2 access should use
+// campaign.FinalizeStuckJobsWithR2Check instead.
+func FinalizeStuckJobsOnCompletedLaunches(database *sql.DB) ([]int64, error) {
+	stuck, err := FindStuckJobsOnCompletedLaunches(database)
+	if err != nil {
+		return nil, err
+	}
+
 	var finalized []int64
 	for _, s := range stuck {
-		if _, err := database.Exec(
-			`UPDATE job_attempts
-			 SET status = ?, end_time = COALESCE(end_time, ?),
-			     failure_reason = 'launch completed but job results were not synced from R2',
-			     cloud_outcome = ?
-			 WHERE id = ?`,
-			StatusDead, now, AttemptOutcomeOrphaned, s.attemptID,
-		); err != nil {
+		if err := MarkStuckJobDead(database, s.AttemptID); err != nil {
 			return finalized, err
 		}
-		finalized = append(finalized, s.jobID)
+		finalized = append(finalized, s.JobID)
 	}
 	return finalized, nil
 }

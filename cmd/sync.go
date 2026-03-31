@@ -619,9 +619,10 @@ func syncCloudJobResults(cfg *config.Config, database *sql.DB, verbose bool) int
 	}
 
 	// Safety net: finalize jobs stuck "running" on completed launches.
-	// Also called from syncRentalJobsStatus for immediate repair when cloud sync
-	// times out; this call handles the case where cloud sync completes normally.
-	if repaired, err := db.FinalizeStuckJobsOnCompletedLaunches(database); err != nil {
+	// Checks R2 for late-arriving .complete markers before marking dead.
+	// Also called (DB-only) from syncRentalJobsStatus for immediate repair
+	// when cloud sync times out; this call uses R2 for better accuracy.
+	if repaired, err := campaign.FinalizeStuckJobsWithR2Check(database, r2Client); err != nil {
 		slog.Warn("failed to finalize stuck jobs", "component", "sync", "error", err)
 	} else {
 		for _, jobID := range repaired {
