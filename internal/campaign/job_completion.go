@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/oplog"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
 )
@@ -94,10 +95,22 @@ func CheckAndSyncJobComplete(ctx context.Context, r2c *r2.Client, database *sql.
 		}
 	}
 
-	if _, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason); err != nil {
+	launchID, err := db.RecordCloudJobCompletion(database, jobID, *exitCode, startTimeUnix, endTimeUnix, failureReason)
+	if err != nil {
 		slog.Warn("failed to record completion for job",
 			"component", "reconcile", "job_id", jobID, "source", source, "error", err)
 		return false
+	}
+
+	// Log cloud job completion/failure to local ops log
+	host := ""
+	if launchID > 0 {
+		host = db.LaunchHost(launchID)
+	}
+	if *exitCode == 0 {
+		oplog.LogJob(oplog.OpJobComplete, jobID, host, oplog.WithDetailf("cloud exit=0 source=%s", source))
+	} else {
+		oplog.LogJob(oplog.OpJobFail, jobID, host, oplog.WithDetailf("cloud exit=%d source=%s", *exitCode, source))
 	}
 
 	// Don't clean up R2 markers here — leave them for the full sync pass
