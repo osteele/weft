@@ -1318,6 +1318,17 @@ func ExtendLaunchGrace(db *sql.DB, id int64, newDeadline int64) error {
 	return err
 }
 
+// ClearLaunchGrace transitions an instance from grace back to running,
+// clearing the grace fields. This is used when the agent picks up
+// resubmitted jobs during grace period.
+func ClearLaunchGrace(db *sql.DB, id int64) error {
+	_, err := db.Exec(
+		`UPDATE launches SET status = ?, grace_started_at = NULL, grace_deadline = NULL WHERE id = ? AND status = ?`,
+		LaunchStatusRunning, id, LaunchStatusGrace,
+	)
+	return err
+}
+
 // ListRecentlyTerminalLaunches returns cloud instances that reached a terminal status
 // (failed, completed, canceled) within the last `since` duration and have a provider ID.
 // Used as a safety net to destroy leaked provider instances.

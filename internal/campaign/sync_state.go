@@ -115,6 +115,16 @@ func SyncInstanceState(
 				ci.Status = db.LaunchStatusGrace
 			}
 		}
+
+		// Detect grace→running transition (agent picked up resubmitted jobs)
+		if ci.Status == db.LaunchStatusGrace && s.InstancePhase != PhaseGrace {
+			if err := db.ClearLaunchGrace(database, ci.ID); err != nil {
+				slog.Warn("failed to clear grace for instance", "component", "sync", "instance", ci.ID, "error", err)
+			} else {
+				slog.Info("instance exited grace — agent running resubmitted jobs", "component", "sync", "instance", ci.ID, "phase", s.InstancePhase)
+				ci.Status = db.LaunchStatusRunning
+			}
+		}
 	} else if !jobState.HasStartedJob {
 		s.BootstrapStage = syncFetchBootstrapStage(ctx, r2Client, instanceID)
 	}

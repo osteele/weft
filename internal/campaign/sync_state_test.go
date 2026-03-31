@@ -1,0 +1,140 @@
+package campaign
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/instanceintent"
+	"github.com/osteele/weft/internal/r2"
+)
+
+func TestSyncInstanceState_GraceToRunning(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	// Create instance in grace status with an expired deadline
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	pastDeadline := time.Now().Add(-1 * time.Minute).Unix()
+	if err := db.SetLaunchGraceStarted(database, instanceID, pastDeadline); err != nil {
+		t.Fatalf("set grace: %v", err)
+	}
+
+	// Verify it's in grace
+	ci, _ := db.GetLaunch(database, instanceID)
+	if ci.Status != db.LaunchStatusGrace {
+		t.Fatalf("status = %q, want grace", ci.Status)
+	}
+
+	// Mock R2 fetches: phase is "running:544" (agent picked up a resubmitted job)
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return "running:544"
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return ""
+	}
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	synced := SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+
+	// Instance should have exited grace
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("ci.Status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+	if synced.InstancePhase != "running:544" {
+		t.Errorf("InstancePhase = %q, want %q", synced.InstancePhase, "running:544")
+	}
+
+	// Verify DB was updated
+	ci, _ = db.GetLaunch(database, instanceID)
+	if ci.Status != db.LaunchStatusRunning {
+		t.Errorf("DB status = %q, want %q", ci.Status, db.LaunchStatusRunning)
+	}
+	if ci.GraceDeadline != nil {
+		t.Errorf("GraceDeadline should be nil, got %v", *ci.GraceDeadline)
+	}
+}
+
+func TestSyncInstanceState_GraceStaysWhenPhaseIsGrace(t *testing.T) {
+	database := setupTestDB(t)
+	defer database.Close()
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:  db.LaunchStatusRunning,
+		GPUSpec: "RTX_4090",
+	})
+	if err != nil {
+		t.Fatalf("create instance: %v", err)
+	}
+	futureDeadline := time.Now().Add(5 * time.Minute).Unix()
+	if err := db.SetLaunchGraceStarted(database, instanceID, futureDeadline); err != nil {
+		t.Fatalf("set grace: %v", err)
+	}
+
+	ci, _ := db.GetLaunch(database, instanceID)
+
+	origPhase := syncFetchInstancePhase
+	origBootstrap := syncFetchBootstrapStage
+	origHB := syncFetchHeartbeat
+	origProgress := syncFetchJobProgress
+	origIntent := syncFetchTermIntent
+	t.Cleanup(func() {
+		syncFetchInstancePhase = origPhase
+		syncFetchBootstrapStage = origBootstrap
+		syncFetchHeartbeat = origHB
+		syncFetchJobProgress = origProgress
+		syncFetchTermIntent = origIntent
+	})
+
+	// Phase is still "grace" — agent is waiting, not running a job
+	syncFetchInstancePhase = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return "grace"
+	}
+	syncFetchBootstrapStage = func(_ context.Context, _ *r2.Client, _ int64) string {
+		return ""
+	}
+	syncFetchHeartbeat = func(_ context.Context, _ *r2.Client, _ int64) (*HeartbeatSample, time.Duration) {
+		return nil, 0
+	}
+	syncFetchJobProgress = func(_ context.Context, _ *r2.Client, _ string, _ []*db.Job) (int64, int, int) {
+		return 0, -1, 0
+	}
+	syncFetchTermIntent = func(_ context.Context, _ *r2.Client, _ int64) (*instanceintent.Marker, error) {
+		return nil, nil
+	}
+
+	SyncInstanceState(context.Background(), database, ci, &r2.Client{}, nil, JobState{}, SyncInstanceStateOpts{})
+
+	// Should remain in grace
+	if ci.Status != db.LaunchStatusGrace {
+		t.Errorf("ci.Status = %q, want %q", ci.Status, db.LaunchStatusGrace)
+	}
+}
