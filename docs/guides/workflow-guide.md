@@ -474,7 +474,16 @@ parallel**, then segues into watch mode.
 
 ```
 laptop$ weft campaign launch --dry-run    # Preview without launching
+laptop$ weft campaign launch --watch      # Explicitly enter watch mode after launch
 laptop$ weft campaign launch --no-watch   # Launch and exit immediately
+laptop$ weft campaign launch --project X  # Only jobs from project X
+```
+
+To launch only jobs for the current directory's project:
+
+```
+laptop$ weft project launch --yes --watch # Non-interactive, watch progress
+laptop$ weft project launch --dry-run     # Preview for this project only
 ```
 
 After launch, monitor and manage:

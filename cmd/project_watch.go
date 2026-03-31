@@ -15,12 +15,15 @@ import (
 )
 
 var projectWatchCmd = &cobra.Command{
-	Use:   "watch",
+	Use:   "watch [project-name]",
 	Short: "Watch active and recent jobs grouped by project",
 	Long: `Watch active and recent jobs grouped by project.
 
+Defaults to the current directory's project. Pass a project name to override.
+
 In an interactive terminal this defaults to a read-only TUI. Otherwise it
 prints a grouped plain-text snapshot.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runProjectWatch,
 }
 
@@ -48,7 +51,15 @@ func addProjectWatchFlags(cmd *cobra.Command) {
 	cmd.MarkFlagsMutuallyExclusive("tui", "plain")
 }
 
+var projectWatchFilter string
+
 func runProjectWatch(cmd *cobra.Command, args []string) error {
+	project, err := resolveProjectArg(args)
+	if err != nil {
+		return err
+	}
+	projectWatchFilter = project
+
 	useTUI, err := resolveCampaignTUI(projectWatchTUI, projectWatchPlain)
 	if err != nil {
 		return err
@@ -71,8 +82,24 @@ func runProjectWatch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	groups = filterProjectGroups(groups, projectWatchFilter)
+	if len(groups) == 0 && projectWatchFilter != "" {
+		return errNoJobsForProject(projectWatchFilter)
+	}
 	_, err = io.WriteString(cmd.OutOrStdout(), renderProjectWatchPlain(groups, listOutputWidth(), time.Now(), projectWatchRecent))
 	return err
+}
+
+func filterProjectGroups(groups []projectGroup, project string) []projectGroup {
+	if project == "" {
+		return groups
+	}
+	for _, g := range groups {
+		if g.Label == project {
+			return []projectGroup{g}
+		}
+	}
+	return nil
 }
 
 func runProjectWatchTUI(database *sql.DB, recentWindow time.Duration, syncEnabled bool) error {

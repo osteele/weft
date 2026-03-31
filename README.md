@@ -143,11 +143,23 @@ to the watch view when the planner exits.
 Current campaign subcommands are:
 
 ```bash
-weft campaign launch [--dry-run|--yes|--plain|--tui]
+weft campaign launch [--dry-run|--yes|--watch|--no-watch|--project|--plain|--tui]
 weft campaign watch [campaign-id] [--plain|--tui]
 weft campaign list [--plain|--tui]
 weft campaign show <campaign-id>
 weft campaign terminate <campaign-id>
+```
+
+#### Project Commands
+
+Project commands default to the current directory's project. Pass a project
+name as the first argument to override.
+
+```bash
+weft project launch [project-name] [--yes|--watch|--dry-run]
+weft project jobs [project-name] [--running|--failed|--completed]
+weft project watch [project-name] [--plain|--tui]
+weft project list [project-name]
 ```
 
 ### Designed for unreliable networks

@@ -74,7 +74,7 @@ parallel, and presents an interactive selector:
 For scripted or agent-driven workflows, use `--yes` to skip the TUI:
 
 ```bash
-weft campaign launch --yes              # Launch all unplaced jobs
+weft campaign launch --yes --watch      # Launch all unplaced jobs, then watch
 weft campaign launch --yes --jobs 42,43 # Launch specific jobs only
 weft campaign launch --yes --no-watch   # Launch and exit (print IDs)
 ```
@@ -82,11 +82,20 @@ weft campaign launch --yes --no-watch   # Launch and exit (print IDs)
 This fetches offers, prints a cost summary, creates a campaign, launches
 instances in parallel, and (unless `--no-watch`) transitions to watch mode.
 
+To launch only jobs from a specific project:
+
+```bash
+weft project launch --yes --watch       # Launch unplaced jobs for cwd's project
+weft campaign launch --project myproj   # Explicit project filter
+```
+
 ### Options
 
 ```bash
 weft campaign launch --dry-run          # Preview plan without launching
+weft campaign launch --watch            # Enter watch mode after launch
 weft campaign launch --no-watch         # Launch and exit (print IDs only)
+weft campaign launch --project myproj   # Filter to a specific project's jobs
 weft campaign launch --max-spend '$10'  # Budget limit per instance
 weft campaign launch --max-time 2h      # Time limit per instance
 weft campaign launch --yes              # Skip TUI, launch all groups

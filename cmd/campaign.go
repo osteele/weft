@@ -77,6 +77,7 @@ var (
 	campaignLaunchMaxTime           string
 	campaignLaunchGracePeriod       string
 	campaignLaunchDryRun            bool
+	campaignLaunchWatch             bool
 	campaignLaunchNoWatch           bool
 	campaignLaunchNoDonor           bool
 	campaignLaunchYes               bool
@@ -86,6 +87,7 @@ var (
 	campaignLaunchStrategy          string
 	campaignLaunchMinSurvival       float64
 	campaignLaunchSkipWorkdirDelete bool
+	campaignLaunchProject           string
 	campaignLaunchTUI               bool
 	campaignLaunchPlain             bool
 	campaignLaunchAuto              bool
@@ -116,7 +118,9 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchMaxSpend, "max-spend", "", "Maximum spend per instance (e.g., '$5.00')")
 	cmd.Flags().StringVar(&campaignLaunchMaxTime, "max-time", "", "Maximum time per instance (e.g., '2h')")
 	cmd.Flags().BoolVar(&campaignLaunchDryRun, "dry-run", false, "Print plan table and exit without launching")
+	cmd.Flags().BoolVarP(&campaignLaunchWatch, "watch", "w", false, "Enter watch mode after launch (default in interactive terminals)")
 	cmd.Flags().BoolVar(&campaignLaunchNoWatch, "no-watch", false, "Launch and exit immediately (print instance IDs only)")
+	cmd.MarkFlagsMutuallyExclusive("watch", "no-watch")
 	cmd.Flags().BoolVar(&campaignLaunchNoDonor, "no-donor", false, "Skip donor instance strategy (each instance downloads independently)")
 	cmd.Flags().BoolVarP(&campaignLaunchYes, "yes", "y", false, "Non-interactive: launch all groups without TUI confirmation")
 	cmd.Flags().StringVar(&campaignLaunchJobs, "jobs", "", "Comma-separated job IDs to include (default: all unplaced jobs)")
@@ -126,6 +130,7 @@ func addCampaignLaunchFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&campaignLaunchStrategy, "strategy", "cheap", "Offer selection strategy: 'cheap' (minimize expected cost), 'fast' (minimize wall-clock time), or 'fastest' (highest raw DLPerf)")
 	cmd.Flags().Float64Var(&campaignLaunchMinSurvival, "min-survival", 0.4, "Minimum survival probability (0-1); offers below this are skipped (0 to disable)")
 	cmd.Flags().BoolVar(&campaignLaunchSkipWorkdirDelete, "skip-workdir-deletion", false, "Don't delete working directories after job completion (for debugging)")
+	cmd.Flags().StringVar(&campaignLaunchProject, "project", "", "Filter unplaced jobs by project name")
 	cmd.Flags().BoolVar(&campaignLaunchTUI, "tui", false, "Force interactive TUI mode")
 	cmd.Flags().BoolVar(&campaignLaunchPlain, "plain", false, "Force plain non-interactive mode")
 	cmd.Flags().BoolVar(&campaignLaunchAuto, "auto", false, "Start watch with auto-pilot enabled (auto-relaunch, auto-place, auto-launch)")
@@ -196,6 +201,8 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		jobs = filtered
 	}
 
+	jobs = filterLaunchJobsByProject(jobs)
+
 	if len(jobs) == 0 {
 		fmt.Println("No jobs need rental GPUs.")
 		return nil
@@ -260,7 +267,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments, useTUI)
 	}
 
-	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false, !campaignLaunchNoWatch)
+	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false, shouldWatch())
 	if err != nil {
 		return err
 	}
@@ -270,7 +277,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Segue into watch mode if instances were launched
-	if len(finalModel.instanceIDs) > 0 && !campaignLaunchNoWatch && !finalModel.inlineWatchUsed {
+	if len(finalModel.instanceIDs) > 0 && shouldWatch() && !finalModel.inlineWatchUsed {
 		fmt.Println()
 		return watchAndReport(database, useTUI, watchModeInstances, finalModel.instanceIDs, campaign.SummarizeEstimates(finalModel.costEstimates), campaignLaunchAuto)
 	}
@@ -407,7 +414,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	fmt.Printf("  weft campaign watch %d\n", result.CampaignID)
 
 	// Segue into watch mode.
-	if !campaignLaunchNoWatch {
+	if shouldWatch() {
 		fmt.Println()
 		return watchAndReport(database, watchTUI, watchModeInstances, result.InstanceIDs, campaign.SummarizeEstimates(estimates), campaignLaunchAuto)
 	}
@@ -682,6 +689,15 @@ func runCampaignShow(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// shouldWatch returns true if the launch should segue into watch mode.
+// --watch forces it on, --no-watch forces it off, default is on.
+func shouldWatch() bool {
+	if campaignLaunchWatch {
+		return true
+	}
+	return !campaignLaunchNoWatch
 }
 
 func parseLaunchOpts() campaign.LaunchOpts {

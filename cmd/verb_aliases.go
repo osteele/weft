@@ -38,8 +38,8 @@ func withPluralAlias(cmd *cobra.Command) *cobra.Command {
 // --- launch ---
 
 var launchCmd = &cobra.Command{
-	Use:   "launch <campaign|instance>",
-	Short: "Launch campaigns or instances",
+	Use:   "launch <campaign|instance|project>",
+	Short: "Launch campaigns, instances, or project jobs",
 }
 
 // --- terminate ---
@@ -53,11 +53,14 @@ func init() {
 	// launch
 	launchCampaignCmd := withPluralAlias(verbAlias("campaign", campaignLaunchCmd))
 	launchInstanceCmd := withPluralAlias(verbAlias("instance", instanceLaunchCmd))
+	launchProjectCmd := withPluralAlias(verbAlias("project", projectLaunchCmd))
 	rootCmd.AddCommand(launchCmd)
 	launchCmd.AddCommand(launchCampaignCmd)
 	launchCmd.AddCommand(launchInstanceCmd)
+	launchCmd.AddCommand(launchProjectCmd)
 	addCampaignLaunchFlags(launchCampaignCmd)
 	addCampaignLaunchFlags(launchInstanceCmd)
+	addCampaignLaunchFlags(launchProjectCmd)
 
 	// list (add noun subcommands to existing listCmd)
 	listJobsCmd := verbAlias("jobs [job-id]...", jobListCmd)
@@ -99,13 +102,16 @@ func init() {
 		}
 	}
 
-	// "start instances" / "start campaign" aliases (route to launch)
+	// "start instances" / "start campaign" / "start project" aliases (route to launch)
 	startInstanceCmd := withPluralAlias(verbAlias("instance", instanceLaunchCmd))
 	startCampaignCmd := withPluralAlias(verbAlias("campaign", campaignLaunchCmd))
+	startProjectCmd := withPluralAlias(verbAlias("project", projectLaunchCmd))
 	startCmd.AddCommand(startInstanceCmd)
 	startCmd.AddCommand(startCampaignCmd)
+	startCmd.AddCommand(startProjectCmd)
 	addCampaignLaunchFlags(startInstanceCmd)
 	addCampaignLaunchFlags(startCampaignCmd)
+	addCampaignLaunchFlags(startProjectCmd)
 
 	// "system watch" top-level alias
 	systemCmd := &cobra.Command{

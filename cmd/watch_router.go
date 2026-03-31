@@ -178,6 +178,7 @@ func (m watchRouterModel) prepareLaunch() tea.Cmd {
 			return launchPlanReadyMsg{err: fmt.Errorf("list unplaced jobs: %w", err)}
 		}
 		jobs = filterRentalLaunchJobs(jobs)
+		jobs = filterLaunchJobsByProject(jobs)
 		if len(jobs) == 0 {
 			return launchPlanReadyMsg{flash: "No jobs need rental GPUs."}
 		}

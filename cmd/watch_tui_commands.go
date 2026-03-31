@@ -408,6 +408,9 @@ func (m watchModel) reloadProjectGroups() tea.Cmd {
 	recentWindow := m.projectRecent
 	return func() tea.Msg {
 		groups, err := loadProjectWatchGroups(database, recentWindow)
+		if err == nil {
+			groups = filterProjectGroups(groups, projectWatchFilter)
+		}
 		return watchProjectLoadedMsg{groups: groups, err: err}
 	}
 }
