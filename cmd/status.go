@@ -25,7 +25,6 @@ import (
 const (
 	ExitSuccess  = 0
 	ExitFailed   = 1
-	ExitRunning  = 2
 	ExitNotFound = 3
 )
 
@@ -636,23 +635,6 @@ func printJobStatus(job *db.Job, exitOnComplete bool) {
 		}
 	}
 
-	// Set exit code based on status (only for single job)
-	if exitOnComplete {
-		switch effectiveStatus {
-		case db.StatusCompleted:
-			if job.ExitCode != nil && *job.ExitCode == 0 {
-				os.Exit(ExitSuccess)
-			} else {
-				os.Exit(ExitFailed)
-			}
-		case db.StatusDead, db.StatusFailed, db.StatusKilled, db.StatusCanceled:
-			os.Exit(ExitFailed)
-		case db.StatusRunning, db.StatusQueued, db.StatusStarting:
-			os.Exit(ExitRunning)
-		default:
-			os.Exit(ExitNotFound)
-		}
-	}
 }
 
 // showActiveJobs displays all active jobs (running, starting, queued) and recent failures
