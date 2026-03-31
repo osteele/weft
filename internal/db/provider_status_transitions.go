@@ -16,11 +16,16 @@ type ProviderStatusTransition struct {
 }
 
 // InsertProviderStatusTransition records a provider status change for a cloud instance.
+// When the new status is "running", also records provider_running_at on the launch
+// (first-write-wins, so only the initial transition is captured).
 func InsertProviderStatusTransition(database *sql.DB, cloudInstanceID int64, observedAt time.Time, oldStatus, newStatus string) error {
 	_, err := database.Exec(
 		`INSERT INTO provider_status_transitions (launch_id, observed_at, old_status, new_status) VALUES (?, ?, ?, ?)`,
 		cloudInstanceID, observedAt.Unix(), oldStatus, newStatus,
 	)
+	if err == nil && newStatus == "running" {
+		_ = SetLaunchProviderRunningAt(database, cloudInstanceID, observedAt)
+	}
 	return err
 }
 

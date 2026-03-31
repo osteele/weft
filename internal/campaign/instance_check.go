@@ -178,9 +178,11 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
-	// 5. Bootstrap stall: instance running but no job progress after timeout
-	if ci.Status == db.LaunchStatusRunning && ci.LaunchedAt != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
-		elapsed := p.Now.Sub(time.Unix(*ci.LaunchedAt, 0))
+	// 5. Bootstrap stall: instance running but no job progress after timeout.
+	// BootstrapOrigin prefers provider "running" time over LaunchedAt so time
+	// spent in provider "loading" state doesn't count against the timeout.
+	if bootstrapOrigin := ci.BootstrapOrigin(); ci.Status == db.LaunchStatusRunning && bootstrapOrigin != nil && !p.JobState.HasStartedJob && p.InstancePhase == "" && p.BootstrapStage != bootstrapStageReady {
+		elapsed := p.Now.Sub(time.Unix(*bootstrapOrigin, 0))
 
 		warnTimeout := bootstrapWarnTimeout
 		termTimeout := bootstrapTerminateTimeout

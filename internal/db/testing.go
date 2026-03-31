@@ -197,7 +197,8 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			cost_per_hour_cents INTEGER,
 			num_gpus INTEGER,
 			cuda_version REAL,
-			provider_instance_id TEXT
+			provider_instance_id TEXT,
+			provider_running_at INTEGER
 		)`,
 		createJobsTableSQL("jobs", false),
 		`CREATE TABLE job_attempts (

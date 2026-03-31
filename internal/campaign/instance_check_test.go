@@ -143,6 +143,46 @@ func TestCheckInstance_AdaptiveBootstrapWarn(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_BootstrapUsesProviderRunningAt(t *testing.T) {
+	// LaunchedAt is 25 minutes ago (would trigger timeout), but
+	// ProviderRunningAt is only 2 minutes ago (within threshold).
+	// Should NOT trigger bootstrap stall.
+	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
+	providerRunningAt := time.Now().Add(-2 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                1,
+			Status:            db.LaunchStatusRunning,
+			LaunchedAt:        &launchedAt,
+			ProviderRunningAt: &providerRunningAt,
+		},
+		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:      time.Now(),
+	})
+	if action.Kind == ActionBootstrapStalled {
+		t.Fatalf("should not trigger bootstrap stall when ProviderRunningAt is recent")
+	}
+}
+
+func TestCheckInstance_BootstrapFallsBackToLaunchedAt(t *testing.T) {
+	// When ProviderRunningAt is nil, should fall back to LaunchedAt.
+	launchedAt := time.Now().Add(-25 * time.Minute).Unix()
+	r := NewReconciler()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:         1,
+			Status:     db.LaunchStatusRunning,
+			LaunchedAt: &launchedAt,
+		},
+		JobState: JobState{HasStartedJob: false, AllJobsTerminal: true},
+		Now:      time.Now(),
+	})
+	if action.Kind != ActionBootstrapStalled {
+		t.Fatalf("action.Kind = %d, want ActionBootstrapStalled (%d)", action.Kind, ActionBootstrapStalled)
+	}
+}
+
 func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 	r := NewReconciler()
 	latestEnd := time.Now().Add(-3 * time.Minute).Unix()

@@ -132,13 +132,13 @@ func ComputeBootstrapSurvival(database *sql.DB, provider string) (*BootstrapSurv
 // queryBootstrapObservations fetches all terminal launches for the given
 // provider and classifies each as a bootstrap success or failure.
 //
-// Success: the instance eventually started a job (wrapper_start is set).
+// Success: the instance eventually started a job (any attempt's wrapper_start is set).
 //
-//	event_time = wrapper_start - launched_at
+//	event_time = wrapper_start - COALESCE(provider_running_at, launched_at)
 //
 // Failure: the instance died without starting a job.
 //
-//	event_time = ended_at - launched_at
+//	event_time = ended_at - COALESCE(provider_running_at, launched_at)
 func queryBootstrapObservations(database *sql.DB, provider string) ([]survivalObservation, error) {
 	query := `
 		WITH first_attempt AS (
@@ -146,15 +146,14 @@ func queryBootstrapObservations(database *sql.DB, provider string) ([]survivalOb
 			FROM job_attempts ja
 			JOIN job_phase_timings jpt ON jpt.job_id = ja.job_id
 			WHERE ja.launch_id IS NOT NULL
-			  AND ja.attempt_number = 1
 			  AND jpt.wrapper_start IS NOT NULL
 			GROUP BY ja.launch_id
 		)
 		SELECT
 			CASE
 				WHEN fa.wrapper_start IS NOT NULL
-				THEN fa.wrapper_start - l.launched_at
-				ELSE l.ended_at - l.launched_at
+				THEN fa.wrapper_start - COALESCE(l.provider_running_at, l.launched_at)
+				ELSE l.ended_at - COALESCE(l.provider_running_at, l.launched_at)
 			END AS event_time,
 			CASE WHEN fa.wrapper_start IS NOT NULL THEN 1 ELSE 0 END AS succeeded
 		FROM launches l
@@ -164,8 +163,8 @@ func queryBootstrapObservations(database *sql.DB, provider string) ([]survivalOb
 		  AND l.provider = ?
 		  AND CASE
 			WHEN fa.wrapper_start IS NOT NULL
-			THEN (fa.wrapper_start - l.launched_at) BETWEEN 1 AND ?
-			ELSE (l.ended_at - l.launched_at) > 0
+			THEN (fa.wrapper_start - COALESCE(l.provider_running_at, l.launched_at)) BETWEEN 1 AND ?
+			ELSE (l.ended_at - COALESCE(l.provider_running_at, l.launched_at)) > 0
 		  END
 	`
 

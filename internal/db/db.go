@@ -230,7 +230,7 @@ const jobTableColumns = `id, working_dir, command, description, generated_descri
 
 const campaignTableColumns = `id, status, created_at, ended_at, estimated_cost_cents`
 
-const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id`
+const launchTableColumns = `id, campaign_id, host_id, status, provider, gpu_spec, gpu_class, gpu_mem_gb, max_spend_cents, max_time_seconds, actual_spend_cents, created_at, ready_at, launched_at, ended_at, resolved_gpu_name, cost_per_hour_cents, num_gpus, dl_perf, reliability, inet_down_mbps, inet_up_mbps, cuda_version, provider_instance_id, data_center, instance_role, donor_instance_id, seed_download_secs, seed_copy_secs, grace_period_seconds, grace_started_at, grace_deadline, termination_reason, disk_gb, provisioned_inputs, termination_requested_at, termination_intent_json, results_verified, machine_id, provider_running_at`
 
 func sqlStringList(values []string) string {
 	quoted := make([]string, len(values))
@@ -1695,6 +1695,19 @@ func initSchema(db *sql.DB) error {
 		AND donor_instance_id IN (SELECT id FROM launches WHERE status IN (?, ?))`,
 		LaunchStatusFailed, LaunchStatusCancelled); err != nil {
 		return err
+	}
+
+	// Migration: add provider_running_at to launches (bootstrap timeout measured from provider "running", not launch creation).
+	if err := addColumnIfMissing(db, `ALTER TABLE launches ADD COLUMN provider_running_at INTEGER`); err != nil {
+		return err
+	}
+	// Backfill provider_running_at from provider_status_transitions for existing launches.
+	if _, err := db.Exec(`
+		UPDATE launches SET provider_running_at = (
+			SELECT MIN(observed_at) FROM provider_status_transitions
+			WHERE launch_id = launches.id AND new_status = 'running'
+		) WHERE provider_running_at IS NULL AND launched_at IS NOT NULL`); err != nil {
+		slog.Warn("failed to backfill provider_running_at", "error", err)
 	}
 
 	// Host contention observations for placement estimation.

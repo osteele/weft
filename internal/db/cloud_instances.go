@@ -24,7 +24,8 @@ const launchSelectColumns = `id, campaign_id, host_id, status, provider, gpu_spe
 		disk_gb, provisioned_inputs,
 		termination_requested_at, termination_intent_json,
 		results_verified,
-		machine_id`
+		machine_id,
+		provider_running_at`
 
 // Launch status constants (same values used for both Launch and Campaign).
 const (
@@ -127,6 +128,21 @@ type Launch struct {
 
 	// Provider machine identifier (for reliability tracking)
 	MachineID string
+
+	// ProviderRunningAt is when the cloud provider first reported the instance
+	// as "running" (Docker container started, onstart can execute). Bootstrap
+	// timeout is measured from this timestamp, not LaunchedAt.
+	ProviderRunningAt *int64
+}
+
+// BootstrapOrigin returns the best timestamp to measure bootstrap elapsed time
+// from: ProviderRunningAt if known (when the container started), otherwise
+// LaunchedAt (when the instance was created).
+func (c *Launch) BootstrapOrigin() *int64 {
+	if c.ProviderRunningAt != nil {
+		return c.ProviderRunningAt
+	}
+	return c.LaunchedAt
 }
 
 // DisplayGPUSpec returns a human-readable GPU spec string, falling back to
@@ -360,6 +376,15 @@ func UpdateLaunchTerminationIntent(db *sql.DB, id int64, marker *instanceintent.
 func SetLaunchReadyAt(db *sql.DB, id int64) error {
 	now := time.Now().Unix()
 	_, err := db.Exec(`UPDATE launches SET ready_at = ? WHERE id = ?`, now, id)
+	return err
+}
+
+// SetLaunchProviderRunningAt records when the cloud provider first reported the
+// instance as "running". Only writes if not already set (first transition wins).
+func SetLaunchProviderRunningAt(db *sql.DB, id int64, t time.Time) error {
+	_, err := db.Exec(
+		`UPDATE launches SET provider_running_at = ? WHERE id = ? AND provider_running_at IS NULL`,
+		t.Unix(), id)
 	return err
 }
 
@@ -984,6 +1009,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	var terminationIntentJSON sql.NullString
 	var resultsVerified sql.NullBool
 	var machineID sql.NullString
+	var providerRunningAt sql.NullInt64
 
 	err := s.Scan(
 		&c.ID, &campaignID, &hostID, &c.Status, &c.Provider, &gpuSpec, &gpuClass, &gpuMemGB,
@@ -999,6 +1025,7 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 		&terminationRequestedAt, &terminationIntentJSON,
 		&resultsVerified,
 		&machineID,
+		&providerRunningAt,
 	)
 	_ = hostID // TODO: populate Launch.HostID when field is added
 	if err != nil {
@@ -1118,6 +1145,9 @@ func scanLaunchFrom(s cloudInstanceScanner) (*Launch, error) {
 	}
 	if machineID.Valid {
 		c.MachineID = machineID.String
+	}
+	if providerRunningAt.Valid {
+		c.ProviderRunningAt = &providerRunningAt.Int64
 	}
 	return &c, nil
 }
