@@ -806,17 +806,8 @@ func (r *Reconciler) recordProviderStatusTransition(database *sql.DB, instanceID
 	}
 	r.mu.Unlock()
 
-	if !changed {
-		return
-	}
-	now := time.Now()
-	if oldStatus != "" {
-		_ = db.InsertProviderStatusTransition(database, instanceID, now, oldStatus, newStatus)
-	}
-	// Record provider_running_at even on first observation (oldStatus == ""),
-	// since the reconciler may first see the instance already "running".
-	if newStatus == cloud.ProviderStatusRunning {
-		_ = db.SetLaunchProviderRunningAt(database, instanceID, now)
+	if changed {
+		_ = db.RecordProviderStatus(database, instanceID, time.Now(), oldStatus, newStatus)
 	}
 }
 

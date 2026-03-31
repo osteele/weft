@@ -15,18 +15,28 @@ type ProviderStatusTransition struct {
 	NewStatus  string
 }
 
-// InsertProviderStatusTransition records a provider status change for a cloud instance.
-// When the new status is "running", also records provider_running_at on the launch
-// (first-write-wins, so only the initial transition is captured).
-func InsertProviderStatusTransition(database *sql.DB, cloudInstanceID int64, observedAt time.Time, oldStatus, newStatus string) error {
-	_, err := database.Exec(
-		`INSERT INTO provider_status_transitions (launch_id, observed_at, old_status, new_status) VALUES (?, ?, ?, ?)`,
-		cloudInstanceID, observedAt.Unix(), oldStatus, newStatus,
-	)
-	if err == nil && newStatus == "running" {
+// RecordProviderStatus handles a provider status observation for a cloud instance.
+// If oldStatus is non-empty (not the first observation), a transition row is inserted.
+// If newStatus is "running", provider_running_at is set (first-write-wins).
+func RecordProviderStatus(database *sql.DB, cloudInstanceID int64, observedAt time.Time, oldStatus, newStatus string) error {
+	if oldStatus != "" {
+		if _, err := database.Exec(
+			`INSERT INTO provider_status_transitions (launch_id, observed_at, old_status, new_status) VALUES (?, ?, ?, ?)`,
+			cloudInstanceID, observedAt.Unix(), oldStatus, newStatus,
+		); err != nil {
+			return err
+		}
+	}
+	if newStatus == "running" {
 		_ = SetLaunchProviderRunningAt(database, cloudInstanceID, observedAt)
 	}
-	return err
+	return nil
+}
+
+// InsertProviderStatusTransition records a provider status change for a cloud instance.
+// Deprecated: use RecordProviderStatus which also handles first-observation cases.
+func InsertProviderStatusTransition(database *sql.DB, cloudInstanceID int64, observedAt time.Time, oldStatus, newStatus string) error {
+	return RecordProviderStatus(database, cloudInstanceID, observedAt, oldStatus, newStatus)
 }
 
 // GetProviderStatusTransitions returns all recorded transitions for a cloud instance, ordered by time.

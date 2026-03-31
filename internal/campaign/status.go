@@ -266,13 +266,7 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				if showErr == nil {
 					cachedInstance = inst
 					if inst.Status != lastProviderStatus {
-						now := time.Now()
-						if lastProviderStatus != "" {
-							_ = db.InsertProviderStatusTransition(database, cloudInstanceID, now, lastProviderStatus, inst.Status)
-						}
-						if inst.Status == cloud.ProviderStatusRunning {
-							_ = db.SetLaunchProviderRunningAt(database, cloudInstanceID, now)
-						}
+						_ = db.RecordProviderStatus(database, cloudInstanceID, time.Now(), lastProviderStatus, inst.Status)
 						lastProviderStatus = inst.Status
 					}
 				}
