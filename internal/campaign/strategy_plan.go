@@ -110,32 +110,30 @@ func BuildProfilePlans(
 	for i, g := range splitGroups {
 		splitRaw[i] = GroupRawOffers{Group: g}
 	}
+	var offerSession *offerSearchSession
 	if len(clients) > 0 {
-		splitRaw = FetchGroupRawOffers(clients, splitGroups)
+		offerSession = newOfferSearchSession(clients)
+		splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
 	}
 
-	for _, profile := range profiles {
-		if !profile.Valid() {
-			continue
-		}
-		plans[profile.ID] = buildStrategyPlanForSplitRaw(
-			database,
-			clients,
-			splitGroups,
-			splitRaw,
-			reusable,
-			predCfg,
-			overheadModel,
-			survivalModel,
-			profile,
-			minSurvival,
-		)
-	}
-
-	return plans, splitRaw
+	return buildProfilePlansFromSplitRawWithSession(
+		database,
+		splitGroups,
+		splitRaw,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		offerSession,
+		profiles,
+		minSurvival,
+	), splitRaw
 }
 
-func buildStrategyPlanForSplitRaw(
+// BuildProfilePlansFromSplitRaw builds reusable/new-instance launch plans from
+// pre-fetched split-group raw offers. This lets callers stage the initial
+// offer search separately from the more expensive plan construction work.
+func BuildProfilePlansFromSplitRaw(
 	database *sql.DB,
 	clients []cloud.Client,
 	splitGroups []InstanceGroup,
@@ -144,6 +142,86 @@ func buildStrategyPlanForSplitRaw(
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
+	profiles []bidding.ScoreProfile,
+	minSurvival float64,
+) map[string]StrategyPlan {
+	var offerSession *offerSearchSession
+	switch {
+	case len(clients) > 0:
+		offerSession = newOfferSearchSession(clients)
+		if len(splitRaw) == len(splitGroups) {
+			offerSession.SeedRawOffers(splitRaw)
+		} else {
+			splitRaw = offerSession.fetchGroupRawOffers(splitGroups)
+		}
+	case len(splitRaw) != len(splitGroups):
+		splitRaw = make([]GroupRawOffers, len(splitGroups))
+		for i, g := range splitGroups {
+			splitRaw[i] = GroupRawOffers{Group: g}
+		}
+	}
+
+	return buildProfilePlansFromSplitRawWithSession(
+		database,
+		splitGroups,
+		splitRaw,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		offerSession,
+		profiles,
+		minSurvival,
+	)
+}
+
+func buildProfilePlansFromSplitRawWithSession(
+	database *sql.DB,
+	splitGroups []InstanceGroup,
+	splitRaw []GroupRawOffers,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	offerSession *offerSearchSession,
+	profiles []bidding.ScoreProfile,
+	minSurvival float64,
+) map[string]StrategyPlan {
+	plans := make(map[string]StrategyPlan, len(profiles))
+	if len(splitGroups) == 0 {
+		return plans
+	}
+
+	for _, profile := range profiles {
+		if !profile.Valid() {
+			continue
+		}
+		plans[profile.ID] = buildStrategyPlanForSplitRaw(
+			database,
+			splitGroups,
+			splitRaw,
+			reusable,
+			predCfg,
+			overheadModel,
+			survivalModel,
+			offerSession,
+			profile,
+			minSurvival,
+		)
+	}
+
+	return plans
+}
+
+func buildStrategyPlanForSplitRaw(
+	database *sql.DB,
+	splitGroups []InstanceGroup,
+	splitRaw []GroupRawOffers,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	offerSession *offerSearchSession,
 	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) StrategyPlan {
@@ -197,11 +275,11 @@ func buildStrategyPlanForSplitRaw(
 		remainingIdx = append(remainingIdx, idx)
 	}
 
-	if len(remainingGroups) == 0 || len(clients) == 0 {
+	if len(remainingGroups) == 0 || offerSession == nil {
 		return plan
 	}
 
-	candidates := FetchCandidateGroupings(clients, remainingGroups)
+	candidates := fetchCandidateGroupingsWithSession(offerSession, remainingGroups)
 	result := BestCandidateForProfile(database, candidates, predCfg, overheadModel, survivalModel, profile, minSurvival)
 	if len(result.Groups) == 0 {
 		return plan

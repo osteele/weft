@@ -1,9 +1,11 @@
 package runpod
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -138,4 +140,78 @@ func TestParseGPUTypeOutput(t *testing.T) {
 			t.Errorf("expected A100, got %s", offers[0].GPUName)
 		}
 	})
+}
+
+func TestSearchOffersCachesCapabilities(t *testing.T) {
+	const path = "/opt/homebrew/bin/runpodctl"
+
+	var (
+		mu     sync.Mutex
+		counts = make(map[string]int)
+	)
+	record := func(key string) {
+		mu.Lock()
+		counts[key]++
+		mu.Unlock()
+	}
+
+	runner := &cliRunner{
+		cliPath:  "runpodctl",
+		lookPath: func(string) (string, error) { return path, nil },
+		runCombined: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runCombined path = %q, want %q", gotPath, path)
+			}
+			key := strings.Join(args, " ")
+			record(key)
+			switch key {
+			case "version":
+				return []byte("runpodctl 2.1.6"), nil
+			case "get --help":
+				return []byte("Available Commands:\n  cloud\n  pod\n"), nil
+			case "pod --help":
+				return []byte("Available Commands:\n  create\n  delete\n  get\n  list\n"), nil
+			case "template --help":
+				return []byte("Available Commands:\n  create\n  get\n  list\n"), nil
+			default:
+				t.Fatalf("unexpected combined command %q", key)
+				return nil, nil
+			}
+		},
+		runOutput: func(_ context.Context, gotPath string, args ...string) ([]byte, error) {
+			if gotPath != path {
+				t.Fatalf("runOutput path = %q, want %q", gotPath, path)
+			}
+			key := strings.Join(args, " ")
+			record(key)
+			if key != "get cloud" {
+				t.Fatalf("unexpected output command %q", key)
+			}
+			return []byte(`[
+				{"id":"offer-4090","displayName":"RTX 4090","memoryInGb":24,"communityPrice":0.44,"maxGpuCount":1}
+			]`), nil
+		},
+	}
+
+	client := newCloudClientForTests(runner)
+	for range 2 {
+		offers, err := client.SearchOffers(cloud.OfferConstraints{})
+		if err != nil {
+			t.Fatalf("SearchOffers: %v", err)
+		}
+		if len(offers) != 1 || offers[0].ProviderID != "offer-4090" {
+			t.Fatalf("offers = %+v", offers)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, key := range []string{"version", "get --help", "pod --help", "template --help"} {
+		if counts[key] != 1 {
+			t.Fatalf("%s count = %d, want 1", key, counts[key])
+		}
+	}
+	if counts["get cloud"] != 2 {
+		t.Fatalf("get cloud count = %d, want 2", counts["get cloud"])
+	}
 }

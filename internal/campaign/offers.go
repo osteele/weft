@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
@@ -171,6 +172,105 @@ type GroupRawOffers struct {
 	Err    error
 }
 
+type offerSearchResult struct {
+	offers []cloud.Offer
+	err    error
+}
+
+type offerSearchFuture struct {
+	done   chan struct{}
+	result offerSearchResult
+}
+
+// offerSearchSession caches cloud searches by normalized constraints for the
+// lifetime of one planning pass.
+type offerSearchSession struct {
+	clients []cloud.Client
+
+	mu      sync.Mutex
+	results map[string]*offerSearchFuture
+}
+
+func newOfferSearchSession(clients []cloud.Client) *offerSearchSession {
+	return &offerSearchSession{
+		clients: clients,
+		results: make(map[string]*offerSearchFuture),
+	}
+}
+
+func (s *offerSearchSession) SeedRawOffers(raw []GroupRawOffers) {
+	if s == nil {
+		return
+	}
+	for _, groupRaw := range raw {
+		key := constraintKey(offerConstraintsForGroup(groupRaw.Group))
+		future := &offerSearchFuture{
+			done: make(chan struct{}),
+			result: offerSearchResult{
+				offers: append([]cloud.Offer(nil), groupRaw.Offers...),
+				err:    groupRaw.Err,
+			},
+		}
+		close(future.done)
+
+		s.mu.Lock()
+		if _, ok := s.results[key]; !ok {
+			s.results[key] = future
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *offerSearchSession) fetchGroupRawOffers(groups []InstanceGroup) []GroupRawOffers {
+	if len(groups) == 0 {
+		return nil
+	}
+	if len(s.clients) == 0 {
+		results := make([]GroupRawOffers, len(groups))
+		for i, group := range groups {
+			results[i] = GroupRawOffers{Group: group}
+		}
+		return results
+	}
+
+	keys := make([]string, len(groups))
+	futures := make(map[string]*offerSearchFuture, len(groups))
+	for i, group := range groups {
+		constraints := offerConstraintsForGroup(group)
+		key := constraintKey(constraints)
+		keys[i] = key
+		futures[key] = s.getOrStart(key, constraints)
+	}
+
+	for _, future := range futures {
+		<-future.done
+	}
+
+	results := make([]GroupRawOffers, len(groups))
+	for i, group := range groups {
+		result := futures[keys[i]].result
+		results[i] = GroupRawOffers{Group: group, Offers: result.offers, Err: result.err}
+	}
+	return results
+}
+
+func (s *offerSearchSession) getOrStart(key string, constraints cloud.OfferConstraints) *offerSearchFuture {
+	s.mu.Lock()
+	if future, ok := s.results[key]; ok {
+		s.mu.Unlock()
+		return future
+	}
+	future := &offerSearchFuture{done: make(chan struct{})}
+	s.results[key] = future
+	s.mu.Unlock()
+
+	go func() {
+		future.result.offers, future.result.err = cloud.SearchAllProviders(s.clients, constraints)
+		close(future.done)
+	}()
+	return future
+}
+
 // constraintKey returns a string key for deduplicating cloud searches.
 // Groups with identical constraints produce identical offers.
 func constraintKey(c cloud.OfferConstraints) string {
@@ -183,43 +283,7 @@ func constraintKey(c cloud.OfferConstraints) string {
 // Groups with identical constraints share a single search to avoid redundant API calls.
 // Returns unranked offers suitable for caching and later ranking by strategy.
 func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup) []GroupRawOffers {
-	// Build constraint keys and identify unique searches
-	keys := make([]string, len(groups))
-	uniqueConstraints := make(map[string]cloud.OfferConstraints)
-	for i, g := range groups {
-		c := offerConstraintsForGroup(g)
-		k := constraintKey(c)
-		keys[i] = k
-		uniqueConstraints[k] = c
-	}
-
-	// Search unique constraints in parallel
-	type searchResult struct {
-		key    string
-		offers []cloud.Offer
-		err    error
-	}
-	ch := make(chan searchResult, len(uniqueConstraints))
-	for k, c := range uniqueConstraints {
-		go func(key string, constraints cloud.OfferConstraints) {
-			offers, err := cloud.SearchAllProviders(clients, constraints)
-			ch <- searchResult{key, offers, err}
-		}(k, c)
-	}
-
-	offersByKey := make(map[string]searchResult, len(uniqueConstraints))
-	for range uniqueConstraints {
-		r := <-ch
-		offersByKey[r.key] = r
-	}
-
-	// Map results back to groups
-	results := make([]GroupRawOffers, len(groups))
-	for i, g := range groups {
-		r := offersByKey[keys[i]]
-		results[i] = GroupRawOffers{Group: g, Offers: r.offers, Err: r.err}
-	}
-	return results
+	return newOfferSearchSession(clients).fetchGroupRawOffers(groups)
 }
 
 // SetupOverheadFactory builds per-group OfferSetupFuncs. If nil, a constant
@@ -312,6 +376,10 @@ type GroupingCandidate struct {
 // function to evaluate running jobs concurrently on separate instances, each
 // sized to the individual job's needs.
 func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup) []GroupingCandidate {
+	return fetchCandidateGroupingsWithSession(newOfferSearchSession(clients), splitGroups)
+}
+
+func fetchCandidateGroupingsWithSession(session *offerSearchSession, splitGroups []InstanceGroup) []GroupingCandidate {
 	mergedGroups := MergeCompatibleGroups(splitGroups)
 	parallelGroups := SplitToParallel(splitGroups)
 
@@ -320,7 +388,7 @@ func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup
 	hasParallel := len(parallelGroups) != len(splitGroups)
 
 	if !hasMerged && !hasParallel {
-		raw := FetchGroupRawOffers(clients, splitGroups)
+		raw := session.fetchGroupRawOffers(splitGroups)
 		return []GroupingCandidate{
 			{Label: "split", Groups: splitGroups, Raw: raw},
 		}
@@ -344,7 +412,7 @@ func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup
 	ch := make(chan result, len(candidates))
 	for i, cand := range candidates {
 		go func(idx int, groups []InstanceGroup) {
-			ch <- result{idx, FetchGroupRawOffers(clients, groups)}
+			ch <- result{idx, session.fetchGroupRawOffers(groups)}
 		}(i, cand.Groups)
 	}
 	for range candidates {

@@ -8,8 +8,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 func TestLaunchModelView_ShowsPartialFailures(t *testing.T) {
@@ -57,8 +59,52 @@ func TestLaunchModelView_ShowsCostPlaceholderWhileLoadingOffers(t *testing.T) {
 	out := stripANSI(m.View())
 	for _, want := range []string{
 		"── Cost Estimate",
-		"Awaiting offers...",
+		"Searching providers for direct offers...",
 		"exp-042",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestLaunchModelView_ShowsRawOfferSummaryWhilePlanning(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{
+			GPUClass: "A100",
+			GPUMemGB: 80,
+			Jobs: []*db.Job{
+				{ID: 7, Description: "train", WorkingDir: "/tmp/project-alpha", Project: "exp-042"},
+			},
+		},
+		{
+			GPUClass: "H100",
+			GPUMemGB: 80,
+			Jobs: []*db.Job{
+				{ID: 8, Description: "eval", WorkingDir: "/tmp/project-beta", Project: "exp-043"},
+			},
+		},
+	}
+	items, selected, cursor := buildItemsFromGroups(groups)
+	m := launchModel{
+		groups:      groups,
+		items:       items,
+		selected:    selected,
+		cursor:      cursor,
+		loading:     true,
+		instanceIDs: nil,
+		cachedRawOffers: []campaign.GroupRawOffers{
+			{Group: groups[0], Offers: []cloud.Offer{{ProviderID: "a", Provider: cloud.ProviderVastai}}},
+			{Group: groups[1]},
+		},
+	}
+
+	out := stripANSI(m.View())
+	for _, want := range []string{
+		"Direct offers found for 1/2 GPU groups.",
+		"A100 ≥80GB: 1 direct offer",
+		"H100 ≥80GB: 0 direct offers",
+		"Building launch plan from raw offers...",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q, got:\n%s", want, out)
@@ -73,6 +119,40 @@ func TestLaunchModelUpdate_OffersErrorQuits(t *testing.T) {
 		t.Fatalf("expected stored error, got %v", got.err)
 	}
 	assertQuitCmd(t, cmd)
+}
+
+func TestLaunchModelUpdate_RawOffersKickOffPlanBuild(t *testing.T) {
+	groups := []campaign.InstanceGroup{
+		{
+			GPUClass: "A100",
+			GPUMemGB: 80,
+			Jobs: []*db.Job{
+				{ID: 7, Description: "train"},
+			},
+		},
+	}
+	raw := []campaign.GroupRawOffers{{Group: groups[0]}}
+	reusable := []campaign.InstanceCapacity{{}}
+	model, cmd := launchModel{
+		groups:        groups,
+		database:      db.SetupTestDB(t),
+		predConfig:    &predictor.Config{},
+		loading:       true,
+		estimateCache: make(map[string][]campaign.CostEstimate),
+	}.Update(rawOffersLoadedMsg{raw: raw, reusable: reusable})
+	got := model.(launchModel)
+	if got.cachedRawOffers == nil || len(got.cachedRawOffers) != 1 {
+		t.Fatalf("expected cached raw offers, got %#v", got.cachedRawOffers)
+	}
+	if len(got.reusable) != 1 {
+		t.Fatalf("expected reusable instances cached, got %d", len(got.reusable))
+	}
+	if !got.loading {
+		t.Fatal("expected loading to remain true while plans build")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up plan-build command")
+	}
 }
 
 func TestLaunchModelUpdate_ReconcileNoJobsQuits(t *testing.T) {
@@ -245,8 +325,8 @@ func TestLaunchModelAdoptTradeoffOptions_PrefersMiddleForFast(t *testing.T) {
 	if m.activeTradeoff != "middle" {
 		t.Fatalf("activeTradeoff = %q, want middle", m.activeTradeoff)
 	}
-	if m.strategyCursor != 1 {
-		t.Fatalf("strategyCursor = %d, want 1", m.strategyCursor)
+	if m.tradeoffCursor != 1 {
+		t.Fatalf("tradeoffCursor = %d, want 1", m.tradeoffCursor)
 	}
 }
 

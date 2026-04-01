@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
@@ -24,6 +25,9 @@ const cliTimeout = 30 * time.Second
 type CloudClient struct {
 	cliPath string
 	runner  *cliRunner
+
+	capsMu sync.Mutex
+	caps   *cliCapabilities
 }
 
 var _ cloud.Client = (*CloudClient)(nil)
@@ -206,7 +210,26 @@ func (c *CloudClient) SelfDestructCmd(providerInstanceID string) string {
 }
 
 func (c *CloudClient) capabilities(ctx context.Context) (*cliCapabilities, error) {
-	return c.runner.detectCapabilities(ctx)
+	c.capsMu.Lock()
+	if c.caps != nil {
+		caps := c.caps
+		c.capsMu.Unlock()
+		return caps, nil
+	}
+	c.capsMu.Unlock()
+
+	caps, err := c.runner.detectCapabilities(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	c.capsMu.Lock()
+	if c.caps == nil {
+		c.caps = caps
+	}
+	caps = c.caps
+	c.capsMu.Unlock()
+	return caps, nil
 }
 
 func (c *CloudClient) checkAuth(ctx context.Context, caps *cliCapabilities) error {

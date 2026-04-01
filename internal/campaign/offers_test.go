@@ -1,7 +1,9 @@
 package campaign
 
 import (
+	"fmt"
 	"math"
+	"sync"
 	"testing"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -80,6 +82,80 @@ func TestFetchGroupOffersMock(t *testing.T) {
 	// H100 should have no offers
 	if results[2].Offer != nil {
 		t.Errorf("group 2: expected no offer, got %v", results[2].Offer)
+	}
+}
+
+func TestBuildProfilePlansFromSplitRaw_ReusesCandidateOfferSearchesAcrossProfiles(t *testing.T) {
+	splitGroup := InstanceGroup{
+		GPUClass: "nvidia",
+		GPUMemGB: 80,
+		Jobs: []*db.Job{
+			{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(24)},
+			{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(48)},
+		},
+	}
+	splitRaw := []GroupRawOffers{{
+		Group: splitGroup,
+		Offers: []cloud.Offer{
+			{ProviderID: "split-h100", GPUName: "H100", GPUMemGB: 80, CostPerHour: 2.00, DLPerf: 40},
+		},
+	}}
+
+	var (
+		mu           sync.Mutex
+		searchCounts = make(map[string]int)
+	)
+	client := &cloud.MockClient{
+		SearchOffersFunc: func(constraints cloud.OfferConstraints) ([]cloud.Offer, error) {
+			key := constraintKey(constraints)
+			mu.Lock()
+			searchCounts[key]++
+			mu.Unlock()
+
+			memGB := float64(constraints.MinGPUMemGB)
+			if memGB == 0 {
+				memGB = 24
+			}
+			return []cloud.Offer{
+				{
+					ProviderID:  fmt.Sprintf("offer-%s", key),
+					GPUName:     fmt.Sprintf("GPU-%dGB", constraints.MinGPUMemGB),
+					GPUMemGB:    memGB,
+					CostPerHour: 1.00,
+					DLPerf:      memGB,
+				},
+			}, nil
+		},
+	}
+
+	plans := BuildProfilePlansFromSplitRaw(
+		nil,
+		[]cloud.Client{client},
+		[]InstanceGroup{splitGroup},
+		splitRaw,
+		nil,
+		nil,
+		nil,
+		nil,
+		[]bidding.ScoreProfile{
+			bidding.StrategyCheap.Profile(),
+			bidding.StrategyFastest.Profile(),
+		},
+		0,
+	)
+	if len(plans) != 2 {
+		t.Fatalf("expected 2 profile plans, got %d", len(plans))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(searchCounts) != 2 {
+		t.Fatalf("expected 2 unique candidate searches, got %d (%v)", len(searchCounts), searchCounts)
+	}
+	for key, count := range searchCounts {
+		if count != 1 {
+			t.Fatalf("search %q ran %d times, want 1", key, count)
+		}
 	}
 }
 
