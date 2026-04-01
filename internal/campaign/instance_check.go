@@ -189,7 +189,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		elapsed := p.Now.Sub(time.Unix(*bootstrapOrigin, 0))
 
 		warnTimeout := bootstrapWarnTimeout
-		termTimeout := bootstrapTerminateTimeout
+		termTimeout := BootstrapTerminateTimeout
 		if p.BootstrapSurvival != nil {
 			warnTimeout = p.BootstrapSurvival.WarnAfter
 			termTimeout = p.BootstrapSurvival.TerminateAfter

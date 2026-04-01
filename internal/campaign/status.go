@@ -21,7 +21,7 @@ import (
 // Bootstrap timeout thresholds.
 const (
 	bootstrapWarnTimeout      = 15 * time.Minute // warn after this long with no progress
-	bootstrapTerminateTimeout = 20 * time.Minute // auto-terminate after this long
+	BootstrapTerminateTimeout = 20 * time.Minute // auto-terminate after this long
 	bootstrapStageReady       = "ready"          // R2 marker value when bootstrap is complete
 )
 
@@ -59,22 +59,23 @@ type HeartbeatSample struct {
 
 // InstanceUpdate is a snapshot of cloud instance + job state.
 type InstanceUpdate struct {
-	Launch             *db.Launch
-	Jobs               []*db.Job
-	JobPhaseTimings    map[int64]*db.JobPhaseTimings
-	JobAttemptOutcomes map[int64]string // job_id → attempt outcome for this instance
-	Instance           *cloud.Instance  // nil if not yet provisioned
-	BootstrapStage     string           // current bootstrap stage from R2 (e.g. "agent_installed")
-	InstancePhase      string           // current job execution phase from R2 (e.g. "running:123")
-	PhaseChangedAt     *time.Time       // first observed time of the current phase within this watcher
-	StallMessage       string           // non-empty if bootstrap appears stuck
-	JobProgress        int              // -1 = no progress, 0-100 = raw percent within current phase
-	JobProgressID      int64            // which job the progress is for
-	JobProgressPhase   int              // 1-based phase number (0 = unknown/single-phase)
-	HeartbeatAge       time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
-	Heartbeat          *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
-	TerminationIntent  *instanceintent.Marker
-	BootstrapDurations db.BootstrapDurations // sorted historical bootstrap durations for conditional estimates
+	Launch                  *db.Launch
+	Jobs                    []*db.Job
+	JobPhaseTimings         map[int64]*db.JobPhaseTimings
+	JobAttemptOutcomes      map[int64]string // job_id → attempt outcome for this instance
+	Instance                *cloud.Instance  // nil if not yet provisioned
+	BootstrapStage          string           // current bootstrap stage from R2 (e.g. "agent_installed")
+	InstancePhase           string           // current job execution phase from R2 (e.g. "running:123")
+	PhaseChangedAt          *time.Time       // first observed time of the current phase within this watcher
+	StallMessage            string           // non-empty if bootstrap appears stuck
+	JobProgress             int              // -1 = no progress, 0-100 = raw percent within current phase
+	JobProgressID           int64            // which job the progress is for
+	JobProgressPhase        int              // 1-based phase number (0 = unknown/single-phase)
+	HeartbeatAge            time.Duration    // time since last heartbeat (0 = no heartbeat fetched)
+	Heartbeat               *HeartbeatSample // latest heartbeat metrics (nil if unavailable)
+	TerminationIntent       *instanceintent.Marker
+	BootstrapDurations      db.BootstrapDurations // sorted historical bootstrap durations for conditional estimates
+	BootstrapTerminateAfter time.Duration         // learned termination deadline; 0 = use BootstrapTerminateTimeout
 }
 
 // AttemptDisplayStatus returns the status to display for a job in the context
@@ -112,6 +113,13 @@ func survivalDurations(s *db.BootstrapSurvival) db.BootstrapDurations {
 		return nil
 	}
 	return s.Durations
+}
+
+func survivalTerminateAfter(s *db.BootstrapSurvival) time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.TerminateAfter
 }
 
 func clampPhaseChangedAtToInstanceLifecycle(changedAt *time.Time, ci *db.Launch) *time.Time {
@@ -343,22 +351,23 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 			}
 
 			update := InstanceUpdate{
-				Launch:             ci,
-				Jobs:               jobs,
-				JobPhaseTimings:    jobPhaseTimings,
-				JobAttemptOutcomes: attemptOutcomes,
-				Instance:           cachedInstance,
-				BootstrapStage:     synced.BootstrapStage,
-				InstancePhase:      synced.InstancePhase,
-				PhaseChangedAt:     synced.PhaseChangedAt,
-				StallMessage:       stallMessage,
-				JobProgress:        synced.JobProgress,
-				JobProgressID:      synced.JobProgressID,
-				JobProgressPhase:   synced.JobProgressPhase,
-				HeartbeatAge:       synced.HeartbeatAge,
-				Heartbeat:          synced.Heartbeat,
-				TerminationIntent:  synced.TerminationIntent,
-				BootstrapDurations: survivalDurations(survival),
+				Launch:                  ci,
+				Jobs:                    jobs,
+				JobPhaseTimings:         jobPhaseTimings,
+				JobAttemptOutcomes:      attemptOutcomes,
+				Instance:                cachedInstance,
+				BootstrapStage:          synced.BootstrapStage,
+				InstancePhase:           synced.InstancePhase,
+				PhaseChangedAt:          synced.PhaseChangedAt,
+				StallMessage:            stallMessage,
+				JobProgress:             synced.JobProgress,
+				JobProgressID:           synced.JobProgressID,
+				JobProgressPhase:        synced.JobProgressPhase,
+				HeartbeatAge:            synced.HeartbeatAge,
+				Heartbeat:               synced.Heartbeat,
+				TerminationIntent:       synced.TerminationIntent,
+				BootstrapDurations:      survivalDurations(survival),
+				BootstrapTerminateAfter: survivalTerminateAfter(survival),
 			}
 
 			select {

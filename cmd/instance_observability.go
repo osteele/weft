@@ -85,6 +85,16 @@ func formatBootstrapWaiting(update campaign.InstanceUpdate, now time.Time) strin
 	if !ok {
 		return fmt.Sprintf("%s (%s elapsed)", base, elapsed)
 	}
+
+	// Cap estimate at termination deadline
+	termAfter := update.BootstrapTerminateAfter
+	if termAfter == 0 {
+		termAfter = campaign.BootstrapTerminateTimeout
+	}
+	if deadlineRemaining := termAfter - elapsed; deadlineRemaining > 0 && remaining > deadlineRemaining {
+		remaining = deadlineRemaining
+	}
+
 	return fmt.Sprintf("%s (%s elapsed, est ~%s remaining)", base, elapsed, remaining.Truncate(time.Second))
 }
 
