@@ -64,6 +64,14 @@ type listItem struct {
 	jobID    int64  // only for job rows
 }
 
+// launchFocusArea tracks which section of the TUI has cursor focus.
+type launchFocusArea int
+
+const (
+	focusJobs       launchFocusArea = iota // cursor is in the job list
+	focusStrategies                        // cursor is in the strategy comparison
+)
+
 type launchModel struct {
 	groups           []campaign.InstanceGroup
 	groupOffers      []campaign.GroupOffer
@@ -82,6 +90,10 @@ type launchModel struct {
 
 	showCostDetail    bool
 	strategyDisclosed bool // true = show detail rows for active strategy inline
+
+	// Focus state for unified jobs+strategies navigation.
+	focusArea      launchFocusArea // which area has cursor focus
+	strategyCursor int             // index into dedupedStrategies (persists when in job area)
 
 	// dedupedStrategies is the list of visually distinct strategies (after
 	// merging those with identical offer sets). The 's' key cycles through
@@ -489,6 +501,38 @@ func (m *launchModel) rebuildDedupedStrategies() {
 		}
 		seen[key] = true
 		m.dedupedStrategies = append(m.dedupedStrategies, strat)
+	}
+}
+
+// visibleStrategies returns the list of strategies that are currently displayed.
+// This is the deduped list when available, otherwise the full list.
+func (m launchModel) visibleStrategies() []bidding.SelectionStrategy {
+	if len(m.dedupedStrategies) > 0 {
+		return m.dedupedStrategies
+	}
+	return allStrategies
+}
+
+// activateStrategyIfFocused sets the active strategy to the one under the
+// strategy cursor and re-ranks offers. No-op if focus is on jobs.
+func (m *launchModel) activateStrategyIfFocused() {
+	if m.focusArea != focusStrategies {
+		return
+	}
+	strategies := m.visibleStrategies()
+	if m.strategyCursor >= len(strategies) {
+		m.strategyCursor = len(strategies) - 1
+	}
+	if m.strategyCursor < 0 {
+		return
+	}
+	newStrategy := strategies[m.strategyCursor]
+	if newStrategy == m.launchOpts.Strategy {
+		return
+	}
+	m.launchOpts.Strategy = newStrategy
+	if m.cachedRawOffers != nil {
+		m.groupOffers = m.rankCachedOffers()
 	}
 }
 
