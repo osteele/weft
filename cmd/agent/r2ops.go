@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -85,6 +86,40 @@ func r2Delete(bucket, key string) error {
 		return err
 	}
 	return nil
+}
+
+// r2List returns file names under a prefix via rclone lsf. Missing prefixes are empty.
+func r2List(bucket, prefix string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), r2Timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "rclone", "lsf", "--files-only", fmt.Sprintf("r2:%s/%s", bucket, prefix))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		errText := strings.TrimSpace(stderr.String())
+		if isR2MissingKey(errText) {
+			return nil, nil
+		}
+		if errText != "" {
+			return nil, fmt.Errorf("r2 list %s: %w: %s", prefix, err, errText)
+		}
+		return nil, fmt.Errorf("r2 list %s: %w", prefix, err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var names []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		names = append(names, line)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 func isR2MissingKey(stderr string) bool {

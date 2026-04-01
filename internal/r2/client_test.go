@@ -1,10 +1,29 @@
 package r2
 
 import (
+	"fmt"
 	"testing"
-
-	"github.com/osteele/weft/internal/r2keys"
 )
+
+func jobStartedKey(jobID int64) string {
+	return "jobs/" + itoa(jobID) + "/.started"
+}
+
+func jobCompleteKey(jobID int64) string {
+	return "jobs/" + itoa(jobID) + "/.complete"
+}
+
+func jobAttemptStartedKey(jobID, runID int64) string {
+	return "jobs/" + itoa(jobID) + "/runs/" + itoa(runID) + "/.started"
+}
+
+func jobAttemptCompleteKey(jobID, runID int64) string {
+	return "jobs/" + itoa(jobID) + "/runs/" + itoa(runID) + "/.complete"
+}
+
+func itoa(n int64) string {
+	return fmt.Sprintf("%d", n)
+}
 
 func TestJobMarkers_HasStartedMarkerMatchesExactCurrentRunKey(t *testing.T) {
 	jobID := int64(222)
@@ -14,19 +33,19 @@ func TestJobMarkers_HasStartedMarkerMatchesExactCurrentRunKey(t *testing.T) {
 	markers := &JobMarkers{
 		startedKeys: map[int64]map[string]struct{}{
 			jobID: {
-				r2keys.JobAttemptStarted(jobID, staleRunID):   {},
-				r2keys.JobAttemptStarted(jobID, currentRunID): {},
+				jobAttemptStartedKey(jobID, staleRunID):   {},
+				jobAttemptStartedKey(jobID, currentRunID): {},
 			},
 		},
 	}
 
-	if !markers.HasStartedMarker(jobID, r2keys.JobAttemptStarted(jobID, currentRunID)) {
+	if !markers.HasStartedMarker(jobID, jobAttemptStartedKey(jobID, currentRunID)) {
 		t.Fatalf("expected current run marker to match")
 	}
-	if markers.HasStartedMarker(jobID, r2keys.JobAttemptStarted(jobID, currentRunID+1)) {
+	if markers.HasStartedMarker(jobID, jobAttemptStartedKey(jobID, currentRunID+1)) {
 		t.Fatalf("unexpected match for missing run marker")
 	}
-	if markers.HasStartedMarker(jobID, r2keys.JobStarted(jobID)) {
+	if markers.HasStartedMarker(jobID, jobStartedKey(jobID)) {
 		t.Fatalf("unexpected match for legacy top-level marker")
 	}
 }
@@ -39,19 +58,19 @@ func TestJobMarkers_HasCompletedMarkerMatchesExactCurrentRunKey(t *testing.T) {
 	markers := &JobMarkers{
 		completedKeys: map[int64]map[string]struct{}{
 			jobID: {
-				r2keys.JobAttemptComplete(jobID, staleRunID):   {},
-				r2keys.JobAttemptComplete(jobID, currentRunID): {},
+				jobAttemptCompleteKey(jobID, staleRunID):   {},
+				jobAttemptCompleteKey(jobID, currentRunID): {},
 			},
 		},
 	}
 
-	if !markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, currentRunID)) {
+	if !markers.HasCompletedMarker(jobID, jobAttemptCompleteKey(jobID, currentRunID)) {
 		t.Fatalf("expected current run completion marker to match")
 	}
-	if markers.HasCompletedMarker(jobID, r2keys.JobAttemptComplete(jobID, currentRunID+1)) {
+	if markers.HasCompletedMarker(jobID, jobAttemptCompleteKey(jobID, currentRunID+1)) {
 		t.Fatalf("unexpected match for missing completion marker")
 	}
-	if markers.HasCompletedMarker(jobID, r2keys.JobComplete(jobID)) {
+	if markers.HasCompletedMarker(jobID, jobCompleteKey(jobID)) {
 		t.Fatalf("unexpected match for legacy top-level completion marker")
 	}
 }
@@ -63,7 +82,7 @@ func TestJobMarkers_AnyCompletedKeyReturnsSomeKey(t *testing.T) {
 	markers := &JobMarkers{
 		completedKeys: map[int64]map[string]struct{}{
 			jobID: {
-				r2keys.JobAttemptComplete(jobID, runID): {},
+				jobAttemptCompleteKey(jobID, runID): {},
 			},
 		},
 	}
@@ -72,8 +91,8 @@ func TestJobMarkers_AnyCompletedKeyReturnsSomeKey(t *testing.T) {
 	if !ok {
 		t.Fatal("expected AnyCompletedKey to find a key")
 	}
-	if key != r2keys.JobAttemptComplete(jobID, runID) {
-		t.Fatalf("AnyCompletedKey = %q, want %q", key, r2keys.JobAttemptComplete(jobID, runID))
+	if key != jobAttemptCompleteKey(jobID, runID) {
+		t.Fatalf("AnyCompletedKey = %q, want %q", key, jobAttemptCompleteKey(jobID, runID))
 	}
 
 	_, ok = markers.AnyCompletedKey(999)

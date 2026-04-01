@@ -13,13 +13,13 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/cloudsync"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/queuerunner"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 )
 
 // SyncRate describes how aggressively a host should be refreshed.
@@ -309,8 +309,7 @@ func (w *Worker) checkUnplacedJobs() {
 				remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
 				if remaining < campaign.MinGraceRemaining {
 					extendDur := 15 * time.Minute
-					extendKey := r2keys.GraceExtend(instanceID)
-					_ = r2Client.PutObject(w.ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
+					_, _ = controlplane.SendGraceExtend(w.ctx, r2Client, instanceID, extendDur)
 					newDeadline := time.Now().Add(extendDur).Unix()
 					_ = db.ExtendLaunchGrace(w.database, instanceID, newDeadline)
 					slog.Info("auto-extended grace period", "component", "hostsync", "instance", instanceID, "duration", extendDur)

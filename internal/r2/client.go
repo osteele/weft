@@ -229,8 +229,8 @@ func (c *Client) DownloadResults(ctx context.Context, prefix string, localDir st
 	return nil
 }
 
-// GetObject retrieves the contents of a single object by key.
-func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
+// GetObjectReader retrieves a single object body by key. The caller must close it.
+func (c *Client) GetObjectReader(ctx context.Context, key string) (io.ReadCloser, error) {
 	resp, err := c.s3.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
 		Key:    aws.String(key),
@@ -238,13 +238,34 @@ func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get object %s: %w", key, err)
 	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	return resp.Body, nil
+}
+
+// GetObject retrieves the contents of a single object by key.
+func (c *Client) GetObject(ctx context.Context, key string) ([]byte, error) {
+	resp, err := c.GetObjectReader(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Close()
+	return io.ReadAll(resp)
 }
 
 // PutMarker writes an empty object as a marker key.
 func (c *Client) PutMarker(ctx context.Context, key string) error {
 	return c.PutObject(ctx, key, strings.NewReader(""), "application/octet-stream")
+}
+
+// DeleteObject deletes a single object by key.
+func (c *Client) DeleteObject(ctx context.Context, key string) error {
+	_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	return nil
 }
 
 // DeletePrefix deletes all objects under the given prefix.
@@ -262,12 +283,8 @@ func (c *Client) DeletePrefix(ctx context.Context, prefix string) error {
 		}
 
 		for _, obj := range page.Contents {
-			_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
-				Bucket: aws.String(c.bucket),
-				Key:    obj.Key,
-			})
-			if err != nil {
-				return fmt.Errorf("delete %s: %w", aws.ToString(obj.Key), err)
+			if err := c.DeleteObject(ctx, aws.ToString(obj.Key)); err != nil {
+				return err
 			}
 		}
 	}

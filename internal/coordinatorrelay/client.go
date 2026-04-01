@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -16,6 +17,11 @@ import (
 
 type Client struct {
 	r2 *r2.Client
+}
+
+type ackStore interface {
+	GetObject(ctx context.Context, key string) ([]byte, error)
+	DeleteObject(ctx context.Context, key string) error
 }
 
 func NewClient(r2c *r2.Client) *Client {
@@ -84,6 +90,13 @@ func (c *Client) Submit(ctx context.Context, req *Request) (*Ack, error) {
 }
 
 func (c *Client) WaitForAck(ctx context.Context, requestID string) (*Ack, error) {
+	return waitForAck(ctx, c.r2, requestID)
+}
+
+func waitForAck(ctx context.Context, store ackStore, requestID string) (*Ack, error) {
+	if store == nil {
+		return nil, fmt.Errorf("relay ack store is required")
+	}
 	if requestID == "" {
 		return nil, fmt.Errorf("request ID is required")
 	}
@@ -91,13 +104,19 @@ func (c *Client) WaitForAck(ctx context.Context, requestID string) (*Ack, error)
 	defer ticker.Stop()
 	key := controlplane.CoordinatorRelayAck(requestID)
 	for {
-		data, err := c.r2.GetObject(ctx, key)
+		data, err := store.GetObject(ctx, key)
 		if err == nil {
 			var ack Ack
 			if err := json.Unmarshal(data, &ack); err != nil {
 				return nil, fmt.Errorf("decode ack: %w", err)
 			}
+			if store != nil {
+				_ = store.DeleteObject(context.Background(), key)
+			}
 			return &ack, nil
+		}
+		if !isMissingAck(err) {
+			return nil, err
 		}
 		select {
 		case <-ctx.Done():
@@ -110,3 +129,9 @@ func (c *Client) WaitForAck(ctx context.Context, requestID string) (*Ack, error)
 func NewRequestID(jobID int64) string {
 	return fmt.Sprintf("%d-%d-%06d", time.Now().UTC().UnixNano(), jobID, rand.Intn(1000000))
 }
+
+func isMissingAck(err error) bool {
+	return err != nil && (r2.IsNotFound(err) || errors.Is(err, ErrAckNotFound))
+}
+
+var ErrAckNotFound = errors.New("ack not found")

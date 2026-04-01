@@ -188,31 +188,16 @@ func campaignDiskPath(jobs []cloud.AgentJob) string {
 	return "/"
 }
 
-// checkForNewJobs reads the grace/jobs.json R2 key and returns any newly
-// submitted jobs. Deletes the key after reading (acknowledge receipt).
-// This enables running instances to pick up jobs submitted via campaign reuse.
+// checkForNewJobs drains any queued grace-job requests and returns the jobs.
+// This enables running instances to pick up jobs submitted via campaign reuse
+// without losing requests that arrive before the next poll.
 func checkForNewJobs(r2Bucket string, instanceID int64) []cloud.AgentJob {
-	jobsJSON, err := r2Get(r2Bucket, r2keys.GraceJobs(instanceID))
+	jobs, err := drainGraceJobRequests(r2Bucket, instanceID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "check for new jobs: %v\n", err)
 		return nil
 	}
-	if jobsJSON == "" {
-		return nil
-	}
-
-	var payload graceJobsPayload
-	if err := json.Unmarshal([]byte(jobsJSON), &payload); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to parse between-job jobs.json: %v\n", err)
-		r2Delete(r2Bucket, r2keys.GraceJobs(instanceID))
-		return nil
-	}
-
-	// Acknowledge and delete
-	r2Delete(r2Bucket, r2keys.GraceJobs(instanceID))
-	r2Put(r2Bucket, r2keys.GraceAck(instanceID), fmt.Sprintf("%d", time.Now().Unix()))
-
-	return payload.Jobs
+	return jobs
 }
 
 // writePhase writes a phase marker to R2 in a background goroutine.

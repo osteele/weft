@@ -78,6 +78,9 @@ func (p *RelayProcessor) ProcessOnce(ctx context.Context) {
 			continue
 		}
 		if processed {
+			if err := p.r2Client.DeleteObject(ctx, obj.Key); err != nil {
+				p.logger.Warn("failed to delete stale relay request", "key", obj.Key, "error", err)
+			}
 			continue
 		}
 		ack := p.handleRequest(ctx, &req)
@@ -101,6 +104,10 @@ func (p *RelayProcessor) ProcessOnce(ctx context.Context) {
 		}
 		if err := db.RecordProcessedRelayRequest(p.db, req.RequestID, req.Op, req.JobID); err != nil {
 			p.logger.Warn("failed to persist processed relay request", "request_id", req.RequestID, "error", err)
+			continue
+		}
+		if err := p.r2Client.DeleteObject(ctx, obj.Key); err != nil {
+			p.logger.Warn("failed to delete processed relay request", "key", obj.Key, "error", err)
 		}
 	}
 }

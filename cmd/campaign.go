@@ -831,8 +831,7 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 			remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
 			if remaining < campaign.MinGraceRemaining {
 				extendDur := 15 * time.Minute
-				extendKey := controlplane.GraceExtend(instanceID)
-				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
+				_, _ = controlplane.SendGraceExtend(ctx, r2Client, instanceID, extendDur)
 				newDeadline := time.Now().Add(extendDur).Unix()
 				_ = db.ExtendLaunchGrace(database, instanceID, newDeadline)
 				fmt.Printf("  Auto-extended grace period by %s\n", extendDur)

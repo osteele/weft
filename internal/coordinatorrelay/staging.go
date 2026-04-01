@@ -1,7 +1,6 @@
 package coordinatorrelay
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -223,15 +222,16 @@ func resolveBundleRoot(ctx context.Context, r2Client *r2.Client, ref *SourceBund
 		if r2Client == nil {
 			return "", nil, fmt.Errorf("R2 client is required to hydrate %s bundles", ref.Kind)
 		}
-		data, err := r2Client.GetObject(ctx, ref.Path)
+		body, err := r2Client.GetObjectReader(ctx, ref.Path)
 		if err != nil {
 			return "", nil, fmt.Errorf("download staged bundle: %w", err)
 		}
+		defer body.Close()
 		root, err := os.MkdirTemp("", "weft-coordinator-bundle-*")
 		if err != nil {
 			return "", nil, err
 		}
-		if err := weftsync.ExtractTarballReader(bytes.NewReader(data), root); err != nil {
+		if err := weftsync.ExtractTarballReader(body, root); err != nil {
 			_ = os.RemoveAll(root)
 			return "", nil, err
 		}

@@ -21,6 +21,11 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
+var (
+	sendGraceJobPayload = controlplane.SendGraceJobPayload
+	uploadSourceToR2    = weftsync.UploadSourceToR2
+)
+
 // MinGraceRemaining is the minimum grace period remaining to consider an
 // instance for reuse. Instances with less time are auto-extended.
 const MinGraceRemaining = 5 * time.Minute
@@ -369,7 +374,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		sourceDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
 
 		// Upload fresh sources (content-addressed, so deduped)
-		sourceR2Key, err := weftsync.UploadSourceToR2(ctx, r2Client, sourceDir)
+		sourceR2Key, err := uploadSourceToR2(ctx, r2Client, sourceDir)
 		if err != nil {
 			return fmt.Errorf("upload source for job %d: %w", job.ID, err)
 		}
@@ -401,9 +406,8 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
 	}
 
-	graceKey := controlplane.GraceJobs(instanceID)
-	if err := r2Client.PutObject(ctx, graceKey, strings.NewReader(string(payloadJSON)), "application/json"); err != nil {
-		return fmt.Errorf("write jobs.json to R2: %w", err)
+	if _, err := sendGraceJobPayload(ctx, r2Client, instanceID, payloadJSON); err != nil {
+		return fmt.Errorf("submit jobs to instance control plane: %w", err)
 	}
 
 	inst, err = db.GetLaunch(database, instanceID)

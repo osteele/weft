@@ -2,11 +2,14 @@ package campaign
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
+	"github.com/osteele/weft/internal/r2"
 )
 
 func TestMatchJobToInstance_GPUClass(t *testing.T) {
@@ -340,5 +343,54 @@ func TestSubmitJobsToInstanceRejectsActiveTerminationIntent(t *testing.T) {
 	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
 	if err == nil {
 		t.Fatal("expected SubmitJobsToInstance to reject self-destructing instance")
+	}
+}
+
+func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSend := sendGraceJobPayload
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayload = prevSend
+	})
+
+	uploadSourceToR2 = func(context.Context, *r2.Client, string) (string, error) {
+		return "sources/test.tar.gz", nil
+	}
+	sendGraceJobPayload = func(context.Context, controlplane.GraceStore, int64, []byte) (*controlplane.GraceCommandAck, error) {
+		return nil, errors.New("ack timeout")
+	}
+
+	err = SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job})
+	if err == nil {
+		t.Fatal("expected SubmitJobsToInstance to fail when the control plane does not ack")
+	}
+
+	reloaded, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID reload: %v", err)
+	}
+	if reloaded.LaunchID != nil {
+		t.Fatalf("LaunchID = %v, want nil after failed submission", *reloaded.LaunchID)
 	}
 }

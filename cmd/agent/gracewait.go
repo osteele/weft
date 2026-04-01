@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/instanceintent"
 	"github.com/osteele/weft/internal/oplog"
@@ -108,8 +109,8 @@ func graceWaitLoop(cfg graceWaitConfig) {
 	oplog.Log(oplog.OpAgentStart, oplog.WithDetailf("grace-wait instance=%s", instanceID))
 
 	deadline := time.Now().Add(cfg.Timeout)
-	prefix := r2keys.GracePrefix(instanceIDInt)
-	phaseKey := r2keys.InstancePhase(instanceIDInt)
+	prefix := controlplane.GracePrefix(instanceIDInt)
+	phaseKey := controlplane.InstancePhase(instanceIDInt)
 
 	writePhase(r2Bucket, phaseKey, "grace")
 
@@ -141,13 +142,12 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			return
 		}
 
-		// Check for release signal
-		releaseVal, err := r2Get(r2Bucket, prefix+"/release")
+		// Check for release requests.
+		releaseRequested, err := hasGraceReleaseRequest(r2Bucket, instanceIDInt)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "poll grace release: %v\n", err)
-		} else if releaseVal != "" {
+		} else if releaseRequested {
 			fmt.Println("Release signal received. Self-destructing.")
-			r2Delete(r2Bucket, prefix+"/release")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
 			selfDestruct(selfDestructOpts{
 				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
@@ -157,48 +157,28 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			return
 		}
 
-		// Check for extend signal
-		extendVal, err := r2Get(r2Bucket, prefix+"/extend")
+		// Apply any queued extend requests.
+		updatedDeadline, err := applyGraceExtendRequests(r2Bucket, instanceIDInt, deadline)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "poll grace extend: %v\n", err)
-		} else if extendVal != "" {
-			dur, err := time.ParseDuration(extendVal)
-			if err == nil {
-				deadline = time.Now().Add(dur)
-				fmt.Printf("Grace period extended. New deadline: %s\n", deadline.Format(time.RFC3339))
-				writeGraceStatus(r2Bucket, prefix, graceStatus{
-					State:    "waiting",
-					Deadline: deadline.Format(time.RFC3339),
-				})
-			}
-			r2Delete(r2Bucket, prefix+"/extend")
+		} else if !updatedDeadline.Equal(deadline) {
+			deadline = updatedDeadline
+			fmt.Printf("Grace period extended. New deadline: %s\n", deadline.Format(time.RFC3339))
+			writeGraceStatus(r2Bucket, prefix, graceStatus{
+				State:    "waiting",
+				Deadline: deadline.Format(time.RFC3339),
+			})
 		}
 
-		// Check for resubmitted jobs
-		jobsJSON, err := r2Get(r2Bucket, prefix+"/jobs.json")
+		// Check for resubmitted jobs.
+		jobs, err := drainGraceJobRequests(r2Bucket, instanceIDInt)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "poll grace jobs: %v\n", err)
 			continue
 		}
-		if jobsJSON == "" {
+		if len(jobs) == 0 {
 			continue
 		}
-
-		var payload graceJobsPayload
-		if err := json.Unmarshal([]byte(jobsJSON), &payload); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to parse jobs.json: %v\n", err)
-			r2Delete(r2Bucket, prefix+"/jobs.json")
-			continue
-		}
-
-		if len(payload.Jobs) == 0 {
-			r2Delete(r2Bucket, prefix+"/jobs.json")
-			continue
-		}
-
-		// Acknowledge receipt
-		r2Delete(r2Bucket, prefix+"/jobs.json")
-		r2Put(r2Bucket, prefix+"/ack", fmt.Sprintf("%d", time.Now().Unix()))
 
 		// Update status to running
 		writeGraceStatus(r2Bucket, prefix, graceStatus{
@@ -207,7 +187,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		})
 
 		// Run resubmitted jobs using the shared job loop
-		seqResult := runJobSequence(payload.Jobs, jobSequenceConfig{
+		seqResult := runJobSequence(jobs, jobSequenceConfig{
 			R2Bucket:            r2Bucket,
 			InstanceID:          instanceIDInt,
 			PhaseKey:            phaseKey,
@@ -221,7 +201,7 @@ func graceWaitLoop(cfg graceWaitConfig) {
 			// All jobs succeeded — self-destruct
 			fmt.Println("All resubmitted jobs succeeded. Self-destructing.")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
-			cm := collectCompletionManifest(logDir, payload.Jobs)
+			cm := collectCompletionManifest(logDir, jobs)
 			selfDestruct(selfDestructOpts{
 				Bucket: r2Bucket, InstanceID: instanceID, SelfDestructCmd: selfDestructCmd,
 				TerminalStatus: db.LaunchStatusCompleted, TerminationReason: db.TerminationReasonCompleted,
@@ -290,7 +270,7 @@ type selfDestructOpts struct {
 
 func selfDestruct(opts selfDestructOpts) {
 	instanceIDInt, _ := strconv.ParseInt(opts.InstanceID, 10, 64)
-	phaseKey := r2keys.InstancePhase(instanceIDInt)
+	phaseKey := controlplane.InstancePhase(instanceIDInt)
 	marker := &instanceintent.Marker{
 		TerminalStatus:    opts.TerminalStatus,
 		TerminationReason: opts.TerminationReason,
@@ -306,12 +286,12 @@ func selfDestruct(opts selfDestructOpts) {
 			completionPayload = string(data)
 		}
 	}
-	r2Put(opts.Bucket, r2keys.CampaignComplete(instanceIDInt), completionPayload)
+	r2Put(opts.Bucket, controlplane.CampaignComplete(instanceIDInt), completionPayload)
 	writePhase(opts.Bucket, phaseKey, "destroying")
 	writeTerminationIntent(opts.Bucket, instanceIDInt, *marker)
 
 	// Clean up grace keys
-	prefix := r2keys.GracePrefix(instanceIDInt)
+	prefix := controlplane.GracePrefix(instanceIDInt)
 	r2Delete(opts.Bucket, prefix+"/status")
 
 	executeSelfDestruct(opts.Bucket, instanceIDInt, opts.SelfDestructCmd, marker)
@@ -323,7 +303,7 @@ func writeTerminationIntent(bucket string, instanceID int64, marker instanceinte
 		fmt.Fprintf(os.Stderr, "marshal termination intent: %v\n", err)
 		return
 	}
-	if err := r2Put(bucket, r2keys.InstanceTerminationIntent(instanceID), string(data)); err != nil {
+	if err := r2Put(bucket, controlplane.InstanceTerminationIntent(instanceID), string(data)); err != nil {
 		fmt.Fprintf(os.Stderr, "write termination intent: %v\n", err)
 	}
 }
