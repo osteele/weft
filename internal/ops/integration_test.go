@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package ops_test
 
 import (
@@ -17,13 +20,13 @@ import (
 )
 
 // Integration tests for job lifecycle against a real SSH server.
-// These tests run when SSH_TEST_HOST is set, otherwise they skip.
 //
 // Requirements:
 //   - SSH_TEST_HOST environment variable set to user@hostname
 //   - SSH_AUTH_SOCK environment variable set to the SSH agent socket
 //
-// Example: SSH_TEST_HOST=root@37.16.31.67 go test -v ./internal/ops/... -run "Integration"
+// Example:
+//   SSH_TEST_HOST=user@host go test -tags integration -v ./internal/ops -run "Integration"
 
 func getTestHost(t *testing.T) string {
 	host := os.Getenv("SSH_TEST_HOST")

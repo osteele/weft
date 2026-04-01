@@ -1,3 +1,6 @@
+//go:build multihost
+// +build multihost
+
 package ops_test
 
 import (
@@ -29,7 +32,7 @@ import (
 //
 // Example:
 //   export $(cat .env | grep -v '^#' | xargs)
-//   go test -v ./internal/ops/... -run "Integration_MultiHost" -timeout 300s
+//   go test -tags multihost -v ./internal/ops -run "Integration_MultiHost" -timeout 300s
 
 const (
 	multihostQueueDir  = "~/.cache/weft/queue"

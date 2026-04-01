@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package remote
 
 import (
@@ -8,13 +11,12 @@ import (
 )
 
 // Integration tests for SSHHost against a real SSH server.
-// These tests run by default when SSH_TEST_HOST is set, otherwise they skip.
 //
 // Requirements:
 //   - SSH_TEST_HOST environment variable set to user@hostname
 //   - SSH_AUTH_SOCK environment variable set to the SSH agent socket
 //
-// See .env.example for test server configuration and connection details.
+// Run with: go test -tags integration ./internal/remote
 
 func getTestHost(t *testing.T) string {
 	host := os.Getenv("SSH_TEST_HOST")

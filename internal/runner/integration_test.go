@@ -1,3 +1,6 @@
+//go:build integration
+// +build integration
+
 package runner_test
 
 import (
@@ -13,7 +16,6 @@ import (
 )
 
 // Integration tests for the Go queue runner.
-// These tests run when SSH_TEST_HOST is set, targeting a fly.io test server.
 //
 // The tests deploy the Go runner binary, start it, submit jobs, and verify
 // that the runner produces correct state files, log files, and status files.
@@ -23,7 +25,8 @@ import (
 //   - SSH_AUTH_SOCK environment variable set
 //   - Go cross-compilation available for linux/amd64
 //
-// Example: SSH_TEST_HOST=root@37.16.31.67 go test -v ./internal/runner/... -run "Integration" -timeout 120s
+// Example:
+//   SSH_TEST_HOST=user@host go test -tags integration -v ./internal/runner -run "Integration" -timeout 120s
 
 const (
 	remoteQueueDir = "~/.cache/weft/queue"
