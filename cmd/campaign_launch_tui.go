@@ -533,7 +533,28 @@ func (m *launchModel) activateStrategyIfFocused() {
 	m.launchOpts.Strategy = newStrategy
 	if m.cachedRawOffers != nil {
 		m.groupOffers = m.rankCachedOffers()
+		// Update cost estimates from cache if available
+		key := offerIdentity(m.groupOffers)
+		if cached, ok := m.estimateCache[key]; ok {
+			m.costEstimates = cached
+		} else {
+			m.costEstimates = nil
+		}
 	}
+}
+
+// fetchEstimatesIfNeeded returns a tea.Cmd that fetches cost estimates if the
+// current strategy's estimates aren't cached yet. Returns nil if estimates are
+// already available or offers haven't loaded.
+func (m launchModel) fetchEstimatesIfNeeded() tea.Cmd {
+	if m.cachedRawOffers == nil {
+		return nil
+	}
+	key := offerIdentity(m.groupOffers)
+	if _, ok := m.estimateCache[key]; ok {
+		return nil
+	}
+	return tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh))
 }
 
 // gatherStrategyRows builds a StrategySummaryRow for each strategy using cached estimates.
@@ -940,24 +961,77 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.quitOrSwitchToWatch("Launch canceled.")
 
 	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
+		if m.focusArea == focusJobs {
+			if m.cursor > 0 {
+				m.cursor--
+			} else {
+				// Wrap to bottom of strategies
+				strats := m.visibleStrategies()
+				if len(strats) > 0 {
+					m.focusArea = focusStrategies
+					m.strategyCursor = len(strats) - 1
+					m.activateStrategyIfFocused()
+				}
+			}
+		} else {
+			if m.strategyCursor > 0 {
+				m.strategyCursor--
+				m.activateStrategyIfFocused()
+			} else {
+				// Move to bottom of jobs
+				m.focusArea = focusJobs
+				m.cursor = max(0, len(m.items)-1)
+			}
 		}
 		m.adjustOffset()
-		return m, nil
+		return m, m.fetchEstimatesIfNeeded()
 
-	case "down", "j":
-		if m.cursor < len(m.items)-1 {
-			m.cursor++
+	case "down":
+		if m.focusArea == focusJobs {
+			if m.cursor < len(m.items)-1 {
+				m.cursor++
+			} else {
+				// Move to top of strategies
+				strats := m.visibleStrategies()
+				if len(strats) > 0 {
+					m.focusArea = focusStrategies
+					m.strategyCursor = 0
+					m.activateStrategyIfFocused()
+				}
+			}
+		} else {
+			strats := m.visibleStrategies()
+			if m.strategyCursor < len(strats)-1 {
+				m.strategyCursor++
+				m.activateStrategyIfFocused()
+			} else {
+				// Wrap to top of jobs
+				m.focusArea = focusJobs
+				m.cursor = 0
+			}
 		}
 		m.adjustOffset()
-		return m, nil
+		return m, m.fetchEstimatesIfNeeded()
+
+	case "j":
+		// Jump between jobs and strategies
+		if m.focusArea == focusJobs {
+			strats := m.visibleStrategies()
+			if len(strats) > 0 {
+				m.focusArea = focusStrategies
+				m.activateStrategyIfFocused()
+			}
+		} else {
+			m.focusArea = focusJobs
+		}
+		return m, m.fetchEstimatesIfNeeded()
 
 	case "pgup":
 		m.cursor -= m.pageSize()
 		if m.cursor < 0 {
 			m.cursor = 0
 		}
+		m.focusArea = focusJobs
 		m.adjustOffset()
 		return m, nil
 
@@ -966,20 +1040,21 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cursor >= len(m.items) {
 			m.cursor = max(0, len(m.items)-1)
 		}
+		m.focusArea = focusJobs
 		m.adjustOffset()
 		return m, nil
 
 	case " ":
-		if m.cursor < len(m.items) {
+		if m.focusArea == focusJobs && m.cursor < len(m.items) {
 			item := m.items[m.cursor]
 			if item.isHeader {
-				// Toggle all jobs in this group
 				m.toggleGroup(item.groupIdx)
 			} else {
 				id := item.jobID
 				m.selected[id] = !m.selected[id]
 			}
 		}
+		// Space in strategies area is a no-op (strategy is already active)
 		return m, nil
 
 	case "d":
@@ -987,11 +1062,15 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "right":
-		m.strategyDisclosed = true
+		if m.focusArea == focusStrategies {
+			m.strategyDisclosed = true
+		}
 		return m, nil
 
 	case "left":
-		m.strategyDisclosed = false
+		if m.focusArea == focusStrategies {
+			m.strategyDisclosed = false
+		}
 		return m, nil
 
 	case "a":
@@ -1007,48 +1086,25 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Cycle through deduplicated strategies (skips those with identical offers)
-		strategies := m.dedupedStrategies
+		// Switch to strategies area and cycle among them
+		strategies := m.visibleStrategies()
 		if len(strategies) == 0 {
-			strategies = allStrategies
+			return m, nil
 		}
-		found := false
-		for i, s := range strategies {
-			if s == m.launchOpts.Strategy {
-				m.launchOpts.Strategy = strategies[(i+1)%len(strategies)]
-				found = true
-				break
-			}
-		}
-		if !found && len(strategies) > 0 {
-			// Current strategy was deduped away (e.g. "fastest" merged into
-			// "fast"); find which deduped entry it maps to and cycle from there.
-			currentKey := offerIdentity(m.rankCachedOffersForStrategy(m.launchOpts.Strategy))
+		if m.focusArea != focusStrategies {
+			// Enter strategies area at the current active strategy
+			m.focusArea = focusStrategies
 			for i, s := range strategies {
-				key := offerIdentity(m.rankCachedOffersForStrategy(s))
-				if key == currentKey {
-					m.launchOpts.Strategy = strategies[(i+1)%len(strategies)]
+				if s == m.launchOpts.Strategy {
+					m.strategyCursor = i
 					break
 				}
 			}
 		}
-		if m.cachedRawOffers != nil {
-			// Re-rank cached offers instantly
-			m.groupOffers = m.rankCachedOffers()
-			key := offerIdentity(m.groupOffers)
-			if cached, ok := m.estimateCache[key]; ok {
-				m.costEstimates = cached
-				return m, nil
-			}
-			// Cache miss — compute estimates, refresh offers in background
-			m.costEstimates = nil
-			return m, tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh), m.fetchRawOffers(true))
-		}
-		// No cache yet — full loading
-		m.loading = true
-		m.groupOffers = nil
-		m.costEstimates = nil
-		return m, tea.Batch(m.spinner.Tick, m.fetchRawOffers(false))
+		// Cycle to next strategy (with wrap)
+		m.strategyCursor = (m.strategyCursor + 1) % len(strategies)
+		m.activateStrategyIfFocused()
+		return m, m.fetchEstimatesIfNeeded()
 
 	}
 
@@ -1504,29 +1560,46 @@ func (m launchModel) View() string {
 				rows := m.gatherStrategyRows(selected)
 				summaryTable := campaign.FormatStrategySummary(rows)
 
-				if m.strategyDisclosed {
-					// Splice detail rows after the disclosed (active) strategy row
-					activeEstimates := m.activeStrategyEstimates()
-					indent := strings.Repeat(" ", summaryTable.TimeColOffset)
-					var combined campaign.CostTable
-					for i, line := range summaryTable.Lines {
-						combined.Lines = append(combined.Lines, line)
-						if i < len(rows) && rows[i].Active && rows[i].Disclosed && activeEstimates != nil {
+				// Build final lines, splicing detail rows if disclosed
+				var finalLines []campaign.CostLine
+				for i, line := range summaryTable.Lines {
+					finalLines = append(finalLines, line)
+					if m.strategyDisclosed && i < len(rows) && rows[i].Active && rows[i].Disclosed {
+						activeEstimates := m.activeStrategyEstimates()
+						if activeEstimates != nil {
+							indent := strings.Repeat(" ", summaryTable.TimeColOffset)
 							detailTable := campaign.FormatCostTableSelected(activeEstimates, selected, summaryTable.TimeWidth, summaryTable.RateWidth)
-							// Skip the Total line (last line) — it duplicates the summary row above
 							detailLines := detailTable.Lines
 							if len(detailLines) > 1 {
 								detailLines = detailLines[:len(detailLines)-1]
 							}
 							for _, dl := range detailLines {
 								dl.Text = indent + dl.Text
-								combined.Lines = append(combined.Lines, dl)
+								finalLines = append(finalLines, dl)
 							}
 						}
 					}
-					renderCostTable(&b, combined)
-				} else {
-					renderCostTable(&b, summaryTable)
+				}
+
+				// Render strategy lines with cursor awareness
+				for i, cl := range finalLines {
+					isCursor := m.focusArea == focusStrategies && i < len(rows) && i == m.strategyCursor
+					text := cl.Text
+					if isCursor {
+						// Replace 2-rune prefix (▸ /▾ /  ) with cursor indicator
+						runes := []rune(text)
+						if len(runes) >= 2 {
+							text = "> " + string(runes[2:])
+						}
+					}
+					style := launchDimStyle
+					if isCursor {
+						style = launchSelectedStyle.Bold(true)
+					} else if !cl.Dimmed {
+						style = launchSelectedStyle
+					}
+					b.WriteString(style.Render(text))
+					b.WriteString("\n")
 				}
 
 				if sparkTable := campaign.FormatParetoSparkline(rows); sparkTable != nil {
@@ -1584,9 +1657,9 @@ func (m launchModel) View() string {
 	if m.showCostDetail {
 		help = "d back  q quit"
 	} else if selectedCount == 0 {
-		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter quit  q quit"
+		help = "↑/↓ navigate  space toggle  s strategy  j jump  ←/→ expand  d details  enter quit  q quit"
 	} else {
-		help = "↑/↓ navigate  space toggle  a all  n none  d details  enter launch  q quit"
+		help = "↑/↓ navigate  space toggle  s strategy  j jump  ←/→ expand  d details  enter launch  q quit"
 	}
 	b.WriteString(launchDimStyle.Render(help))
 	b.WriteString("\n")
