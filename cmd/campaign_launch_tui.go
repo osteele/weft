@@ -139,6 +139,11 @@ type launchModel struct {
 	reconciler              *campaign.Reconciler
 	reconcileDropped        int
 
+	// Cached strategy display data — recomputed only when strategyRowsDirty.
+	cachedStrategyRows    []campaign.StrategySummaryRow
+	cachedActiveEstimates []campaign.CostEstimate
+	strategyRowsDirty     bool
+
 	spinner spinner.Model
 	width   int
 	height  int
@@ -546,6 +551,7 @@ func (m *launchModel) activateStrategyIfFocused() {
 		return
 	}
 	m.launchOpts.Strategy = newStrategy
+	m.strategyRowsDirty = true
 	if m.cachedRawOffers != nil {
 		m.groupOffers = m.rankCachedOffers()
 		// Update cost estimates from cache if available
@@ -637,6 +643,18 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// refreshStrategyRowsIfNeeded recomputes cached strategy display data
+// when the underlying data has changed. Call from Update(), not View().
+func (m *launchModel) refreshStrategyRowsIfNeeded() {
+	if !m.strategyRowsDirty && m.cachedStrategyRows != nil {
+		return
+	}
+	selected := m.selectedCountByGroup()
+	m.cachedStrategyRows = m.gatherStrategyRows(selected)
+	m.cachedActiveEstimates = m.activeStrategyEstimates()
+	m.strategyRowsDirty = false
 }
 
 func (m launchModel) fetchEstimatesForOffers(offers []campaign.GroupOffer, cacheKey string, reportProgress bool) tea.Cmd {
@@ -767,7 +785,12 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			next, cmd, _ := m.updateInlineWatch(msg)
 			return next, cmd
 		}
-		return m.handleKey(msg)
+		result, cmd := m.handleKey(msg)
+		if lm, ok := result.(launchModel); ok {
+			lm.refreshStrategyRowsIfNeeded()
+			return lm, cmd
+		}
+		return result, cmd
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -813,6 +836,8 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dedupedStrategies = nil
 			m.costEstimates = nil
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
+			m.strategyRowsDirty = true
+			m.cachedStrategyRows = nil
 			return m, m.fetchRawOffers(false)
 		}
 		return m, nil
@@ -825,6 +850,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cachedRawOffers = msg.raw
 		m.cachedCandidates = msg.candidates
+		m.strategyRowsDirty = true
 		m.rebuildDedupedStrategies()
 		oldOffers := m.groupOffers
 		m.groupOffers = m.rankCachedOffers()
@@ -832,12 +858,14 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = false
 		}
 		if offersMatch(oldOffers, m.groupOffers) && m.costEstimates != nil {
+			m.refreshStrategyRowsIfNeeded()
 			return m, nil // offers unchanged, keep cached estimates
 		}
 		// Check estimate cache for current strategy's offers
 		key := offerIdentity(m.groupOffers)
 		if cached, ok := m.estimateCache[key]; ok {
 			m.costEstimates = cached
+			m.refreshStrategyRowsIfNeeded()
 			// Still pre-flight other strategies
 			cmds := m.preflightOtherStrategies()
 			if len(cmds) > 0 {
@@ -846,6 +874,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.costEstimates = nil
+		m.refreshStrategyRowsIfNeeded()
 		cmds := []tea.Cmd{m.fetchEstimates(), waitForProgress(m.progressCh)}
 		cmds = append(cmds, m.preflightOtherStrategies()...)
 		return m, tea.Batch(cmds...)
@@ -859,10 +888,12 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case estimatesLoadedMsg:
 		m.estimateCache[msg.cacheKey] = msg.estimates
+		m.strategyRowsDirty = true
 		// Only update display if this is for the current strategy's offers
 		if msg.cacheKey == offerIdentity(m.groupOffers) {
 			m.costEstimates = msg.estimates
 		}
+		m.refreshStrategyRowsIfNeeded()
 		return m, nil
 
 	case campaignCreatedMsg:
@@ -1094,6 +1125,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				id := item.jobID
 				m.selected[id] = !m.selected[id]
 			}
+			m.strategyRowsDirty = true
 		}
 		// Space in strategies area is a no-op (strategy is already active)
 		return m, nil
@@ -1105,12 +1137,14 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "right":
 		if m.focusArea == focusStrategies {
 			m.strategyDisclosed = true
+			m.strategyRowsDirty = true
 		}
 		return m, nil
 
 	case "left":
 		if m.focusArea == focusStrategies {
 			m.strategyDisclosed = false
+			m.strategyRowsDirty = true
 		}
 		return m, nil
 
@@ -1118,12 +1152,14 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		for id := range m.selected {
 			m.selected[id] = true
 		}
+		m.strategyRowsDirty = true
 		return m, nil
 
 	case "n":
 		for id := range m.selected {
 			m.selected[id] = false
 		}
+		m.strategyRowsDirty = true
 		return m, nil
 
 	case "s":
@@ -1594,11 +1630,11 @@ func (m launchModel) View() string {
 		// Cost estimate table
 		if m.costEstimates != nil {
 			b.WriteString("\n")
-			if m.cachedRawOffers != nil {
+			if m.cachedRawOffers != nil && m.cachedStrategyRows != nil {
 				// Strategy comparison view
 				b.WriteString(launchDimStyle.Render("── Cost Estimate (s strategy  ←/→ details) ────────────"))
 				b.WriteString("\n")
-				rows := m.gatherStrategyRows(selected)
+				rows := m.cachedStrategyRows
 				summaryTable := campaign.FormatStrategySummary(rows)
 
 				// Build final lines, splicing detail rows if disclosed
@@ -1606,7 +1642,7 @@ func (m launchModel) View() string {
 				for i, line := range summaryTable.Lines {
 					finalLines = append(finalLines, line)
 					if m.strategyDisclosed && i < len(rows) && rows[i].Active && rows[i].Disclosed {
-						activeEstimates := m.activeStrategyEstimates()
+						activeEstimates := m.cachedActiveEstimates
 						if activeEstimates != nil {
 							indent := strings.Repeat(" ", summaryTable.TimeColOffset)
 							// When the winning candidate differs from split groups,
