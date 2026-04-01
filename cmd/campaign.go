@@ -325,84 +325,70 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
-	reusable, _ := campaign.FindReusableInstances(database)
-	if providerErr != nil && len(reusable) == 0 {
-		return providerErr
-	}
 	fmt.Println("Searching for GPU offers...")
-	plans, _ := campaign.BuildStrategyPlans(
+	prep, err := prepareLaunchExecutionPlan(
 		database,
 		clients,
+		providerErr,
 		groups,
-		reusable,
+		nil,
+		opts.Strategy,
+		opts.MinSurvival,
 		&predCfg,
 		overheadModel,
 		survivalModel,
-		[]bidding.SelectionStrategy{opts.Strategy},
-		opts.MinSurvival,
 	)
-	plan, ok := plans[opts.Strategy]
-	if !ok {
-		return fmt.Errorf("could not build launch plan for strategy %s", opts.Strategy)
-	}
-	requestedJobs := 0
-	for _, group := range groups {
-		requestedJobs += len(group.Jobs)
+	if err != nil {
+		return err
 	}
 
-	if len(plan.ReuseAssignments) > 0 {
-		fmt.Print(campaign.FormatReuseAssignments(plan.ReuseAssignments))
+	if len(prep.StrategyPlan.ReuseAssignments) > 0 {
+		fmt.Print(campaign.FormatReuseAssignments(prep.StrategyPlan.ReuseAssignments))
 		r2Client, err := newR2ClientFromConfig()
 		if err != nil {
 			return fmt.Errorf("R2 client for reuse: %w", err)
 		}
-		if err := executeReuseAssignments(database, r2Client, plan.ReuseAssignments); err != nil {
+		if err := executeReuseAssignments(database, r2Client, prep.StrategyPlan.ReuseAssignments); err != nil {
 			return err
 		}
 		fmt.Println()
 	}
 
-	var groupsToLaunch []campaign.InstanceGroup
-	var offers []cloud.Offer
-	var estimates []campaign.CostEstimate
-	if plan.NewCandidate != nil {
-		for i, go_ := range plan.NewCandidate.Offers {
+	if prep.StrategyPlan.NewCandidate != nil {
+		for _, go_ := range prep.StrategyPlan.NewCandidate.Offers {
 			if go_.Err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: offer search failed for %s: %v\n", go_.Group.GPUSpec(), go_.Err)
 				continue
 			}
 			if go_.Offer == nil {
 				fmt.Fprintf(os.Stderr, "Warning: no offers found for %s — skipping %d job(s)\n", go_.Group.GPUSpec(), len(go_.Group.Jobs))
-				continue
-			}
-			groupsToLaunch = append(groupsToLaunch, go_.Group)
-			offers = append(offers, *go_.Offer)
-			if i < len(plan.NewCandidate.Estimates) {
-				estimates = append(estimates, plan.NewCandidate.Estimates[i])
 			}
 		}
 	}
 
+	groupsToLaunch := prep.LaunchGroups
+	offers := prep.Offers
+	estimates := prep.Estimates
 	totalJobs := 0
 	for _, g := range groupsToLaunch {
 		totalJobs += len(g.Jobs)
 	}
-	coveredJobs := len(plan.ReuseAssignments) + totalJobs
+	coveredJobs := len(prep.StrategyPlan.ReuseAssignments) + totalJobs
 	if len(groupsToLaunch) == 0 {
-		if len(plan.ReuseAssignments) == requestedJobs {
+		if len(prep.StrategyPlan.ReuseAssignments) == prep.RequestedJobs {
 			fmt.Println("All selected jobs assigned to existing instances.")
 			return nil
 		}
-		if len(plan.ReuseAssignments) > 0 {
-			return fmt.Errorf("%d selected job(s) assigned to existing instances, but %d job(s) still need new instances", len(plan.ReuseAssignments), requestedJobs-len(plan.ReuseAssignments))
+		if len(prep.StrategyPlan.ReuseAssignments) > 0 {
+			return fmt.Errorf("%d selected job(s) assigned to existing instances, but %d job(s) still need new instances", len(prep.StrategyPlan.ReuseAssignments), prep.RequestedJobs-len(prep.StrategyPlan.ReuseAssignments))
 		}
 		if providerErr != nil {
 			return providerErr
 		}
 		return fmt.Errorf("no offers found for any GPU group")
 	}
-	if coveredJobs < requestedJobs {
-		fmt.Fprintf(os.Stderr, "Warning: %d selected job(s) will be skipped (no reusable instance or cloud offer)\n", requestedJobs-coveredJobs)
+	if coveredJobs < prep.RequestedJobs {
+		fmt.Fprintf(os.Stderr, "Warning: %d selected job(s) will be skipped (no reusable instance or cloud offer)\n", prep.RequestedJobs-coveredJobs)
 	}
 
 	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groupsToLaunch))

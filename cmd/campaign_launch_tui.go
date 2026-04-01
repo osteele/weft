@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -101,8 +100,7 @@ type launchModel struct {
 	dedupedStrategies []bidding.SelectionStrategy
 
 	// winningCandidate caches the best candidate result for the active strategy.
-	// Used by launchInstances to get the actual groups/offers for launch
-	// (which may differ from m.groups when the merged candidate wins).
+	// It drives the display; launchInstances recomputes a fresh execution plan.
 	winningCandidate *campaign.CandidateResult
 	reuseAssignments []campaign.ReuseAssignment
 
@@ -121,6 +119,7 @@ type launchModel struct {
 	estimateProgress estimateProgressMsg // latest estimation progress
 	progressCh       chan estimateProgressMsg
 	campaignCh       chan int64
+	planCh           chan launchExecutionPlanMsg
 	phaseCh          chan launchPhaseMsg
 	instanceCh       chan launchInstanceRegisteredMsg
 
@@ -187,6 +186,10 @@ type campaignCreatedMsg struct {
 type launchPhaseMsg struct {
 	groupIndex int // -1 for campaign-level phases
 	phase      string
+}
+
+type launchExecutionPlanMsg struct {
+	expectedInstanceCount int
 }
 
 type launchInstanceRegisteredMsg struct {
@@ -334,6 +337,7 @@ func newLaunchModel(database *sql.DB, clients []cloud.Client, providerErr error,
 		survivalModel:           buildSurvivalModel(database),
 		progressCh:              make(chan estimateProgressMsg, 1),
 		campaignCh:              make(chan int64, 1),
+		planCh:                  make(chan launchExecutionPlanMsg, 1),
 		phaseCh:                 make(chan launchPhaseMsg, 16),
 		instanceCh:              make(chan launchInstanceRegisteredMsg, len(groups)),
 		gpuFilter:               gpuFilter,
@@ -699,6 +703,16 @@ func waitForLaunchPhase(ch chan launchPhaseMsg) tea.Cmd {
 	}
 }
 
+func waitForLaunchPlanReady(ch chan launchExecutionPlanMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
 func waitForLaunchInstanceRegistered(ch chan launchInstanceRegisteredMsg) tea.Cmd {
 	return func() tea.Msg {
 		msg, ok := <-ch
@@ -895,6 +909,12 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case launchExecutionPlanMsg:
+		m.expectedInstanceCount = msg.expectedInstanceCount
+		next, watchCmd := m.maybeStartInlineWatch()
+		m = next
+		return m, watchCmd
+
 	case launchInstanceRegisteredMsg:
 		if _, ok := m.registeredInstanceIDSet[msg.instanceID]; !ok {
 			m.registeredInstanceIDSet[msg.instanceID] = struct{}{}
@@ -947,7 +967,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.partialErrors) == 0 {
-			if m.campaignID == 0 && m.winningCandidate == nil && len(m.instanceIDs) > 0 {
+			if m.campaignID == 0 && m.expectedInstanceCount == 0 && len(m.instanceIDs) > 0 {
 				return m, m.quitOrSwitchToWatch("Submitted jobs to existing instances.")
 			}
 			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
@@ -993,7 +1013,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.quitOrSwitchToWatch("Launch canceled.")
 		}
 		m.launching = true
-		m.expectedInstanceCount = m.selectedNewLaunchGroupCount()
+		m.expectedInstanceCount = 0
 		m.registeredInstanceIDs = nil
 		m.registeredInstanceIDSet = make(map[int64]struct{})
 		m.inlineWatch = nil
@@ -1009,6 +1029,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.spinner.Tick,
 			m.launchInstances(),
 			m.waitForCampaignCreated(),
+			waitForLaunchPlanReady(m.planCh),
 			waitForLaunchPhase(m.phaseCh),
 			waitForLaunchInstanceRegistered(m.instanceCh),
 		)
@@ -1307,109 +1328,31 @@ func (m launchModel) selectedLaunchableJobCount() int {
 }
 
 func (m launchModel) launchInstances() tea.Cmd {
-	// Separate selected reuse assignments from new-instance launches.
-	var selectedReuse []campaign.ReuseAssignment
-	for _, assignment := range m.reuseAssignments {
-		if m.selected[assignment.Job.ID] {
-			selectedReuse = append(selectedReuse, assignment)
-		}
-	}
-
-	sourceGroups := []campaign.InstanceGroup(nil)
-	sourceOffers := []campaign.GroupOffer(nil)
-	sourceEstimates := []campaign.CostEstimate(nil)
-	if m.winningCandidate != nil && len(m.winningCandidate.Groups) > 0 {
-		sourceGroups = m.winningCandidate.Groups
-		sourceOffers = m.winningCandidate.Offers
-		sourceEstimates = m.winningCandidate.Estimates
-	}
-
-	var filteredGroups []campaign.InstanceGroup
-	var filteredOffers []campaign.GroupOffer
-	var filteredEstimates []campaign.CostEstimate
-	for i, g := range sourceGroups {
-		var selectedJobs []*db.Job
-		for _, job := range g.Jobs {
-			if m.selected[job.ID] {
-				selectedJobs = append(selectedJobs, job)
-			}
-		}
-		if len(selectedJobs) == 0 {
-			continue
-		}
-		fg := campaign.InstanceGroup{
-			GPUClass:    g.GPUClass,
-			GPUMemGB:    g.GPUMemGB,
-			MaxGPUMemGB: g.MaxGPUMemGB,
-			DiskGB:      g.DiskGB,
-			Image:       g.Image,
-			Jobs:        selectedJobs,
-		}
-		filteredGroups = append(filteredGroups, fg)
-		if i < len(sourceOffers) {
-			filteredOffers = append(filteredOffers, sourceOffers[i])
-		}
-		if i < len(sourceEstimates) {
-			scale := 1.0
-			if totalJobs := len(g.Jobs); totalJobs > 0 {
-				scale = float64(len(selectedJobs)) / float64(totalJobs)
-			}
-			scaled := sourceEstimates[i]
-			scaled.Group = fg
-			scaled.TotalTime = time.Duration(float64(sourceEstimates[i].TotalTime) * scale)
-			scaled.TotalCost = sourceEstimates[i].TotalCost * scale
-			scaled.Breakdown.Total = sourceEstimates[i].Breakdown.Total.Scale(scale)
-			if i < len(sourceOffers) {
-				scaled.Offer = sourceOffers[i]
-				scaled.Offer.Group = fg
-			}
-			filteredEstimates = append(filteredEstimates, scaled)
-		}
-	}
-
-	var launchGroups []campaign.InstanceGroup
-	var offers []cloud.Offer
-	var launchGroupOffers []campaign.GroupOffer
-	var selectedEstimates []campaign.CostEstimate
-	for i, fg := range filteredGroups {
-		if i < len(filteredOffers) && filteredOffers[i].Offer != nil {
-			offerCopy := *filteredOffers[i].Offer
-			launchGroups = append(launchGroups, fg)
-			offers = append(offers, offerCopy)
-			launchGroupOffers = append(launchGroupOffers, campaign.GroupOffer{
-				Group:        fg,
-				Offer:        &offerCopy,
-				SurvivalProb: filteredOffers[i].SurvivalProb,
-			})
-			if i < len(filteredEstimates) {
-				scaled := filteredEstimates[i]
-				scaled.Offer = launchGroupOffers[len(launchGroupOffers)-1]
-				selectedEstimates = append(selectedEstimates, scaled)
-			}
-		}
-	}
-
 	database := m.database
 	clients := m.clients
+	providerErr := m.providerErr
 	cfg := m.appConfig
 	opts := m.launchOpts
 	campaignCh := m.campaignCh
+	planCh := m.planCh
 	phaseCh := m.phaseCh
 	instanceCh := m.instanceCh
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
-	referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(launchGroupOffers)
-
-	// Auto-derive budget limits from cached estimates if not set by CLI
-	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(selectedEstimates) > 0 {
-		opts.ApplyAutoBudget(selectedEstimates)
-	}
 
 	return func() tea.Msg {
+		defer close(planCh)
 		defer close(campaignCh)
 		defer close(phaseCh)
 		defer close(instanceCh)
+		var launchGroups []campaign.InstanceGroup
+		sendLaunchPlanReady := func(expectedInstanceCount int) {
+			select {
+			case planCh <- launchExecutionPlanMsg{expectedInstanceCount: expectedInstanceCount}:
+			default:
+			}
+		}
 		sendCampaignPhase := func(phase string) {
 			select {
 			case phaseCh <- launchPhaseMsg{groupIndex: -1, phase: phase}:
@@ -1436,6 +1379,35 @@ func (m launchModel) launchInstances() tea.Cmd {
 			}
 			return -1
 		}
+
+		prep, err := prepareLaunchExecutionPlan(
+			database,
+			clients,
+			providerErr,
+			m.groups,
+			m.selected,
+			opts.Strategy,
+			opts.MinSurvival,
+			predCfg,
+			overheadModel,
+			survivalModel,
+		)
+		if err != nil {
+			sendLaunchPlanReady(0)
+			return instancesLaunchedMsg{err: err}
+		}
+
+		launchGroups = prep.LaunchGroups
+		offers := prep.Offers
+		launchGroupOffers := prep.LaunchGroupOffers
+		selectedEstimates := prep.Estimates
+		selectedReuse := prep.StrategyPlan.ReuseAssignments
+		referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(launchGroupOffers)
+		if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(selectedEstimates) > 0 {
+			opts.ApplyAutoBudget(selectedEstimates)
+		}
+		sendLaunchPlanReady(len(launchGroups))
+
 		if len(selectedReuse) > 0 {
 			r2Client, err := newR2ClientFromConfig()
 			if err != nil {
@@ -1530,7 +1502,7 @@ func (m launchModel) View() string {
 	}
 
 	if m.done {
-		if m.campaignID == 0 && m.winningCandidate == nil && len(m.instanceIDs) > 0 {
+		if m.campaignID == 0 && m.expectedInstanceCount == 0 && len(m.instanceIDs) > 0 {
 			b.WriteString("Submitted jobs to existing instances: ")
 		} else if m.campaignID != 0 {
 			b.WriteString(fmt.Sprintf("Campaign %d: launched instances: ", m.campaignID))
