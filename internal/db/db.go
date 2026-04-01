@@ -897,6 +897,11 @@ const (
 // statusNeedsRental is the legacy DB value for unplaced jobs. Migrated to StatusQueued with host="".
 const statusNeedsRental = "needs_rental"
 
+// currentSchemaVersion is bumped whenever initSchema changes.
+// If the DB already has this version (via PRAGMA user_version), initSchema
+// is skipped entirely — no write lock needed.
+const currentSchemaVersion = 1
+
 var dbPath string
 
 func init() {
@@ -934,6 +939,23 @@ func Open() (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenReadOnly opens the database in read-only mode without running schema
+// migrations. Use this as a fallback when Open() fails with SQLITE_BUSY, so
+// read-only commands can still display data.
+func OpenReadOnly() (*sql.DB, error) {
+	connStr := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&mode=ro", dbPath)
+	database, err := sql.Open("sqlite", connStr)
+	if err != nil {
+		return nil, fmt.Errorf("open database read-only: %w", err)
+	}
+	// sql.Open is lazy; verify the connection works.
+	if err := database.Ping(); err != nil {
+		database.Close()
+		return nil, fmt.Errorf("open database read-only: %w", err)
+	}
+	return database, nil
+}
+
 // Path returns the location of the database file on disk.
 func Path() string {
 	return dbPath
@@ -948,6 +970,12 @@ func SetDBPath(path string) func() {
 }
 
 func initSchema(db *sql.DB) error {
+	// Fast path: skip migrations if schema is already at the current version.
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err == nil && version >= currentSchemaVersion {
+		return nil
+	}
+
 	schema := createJobsTableSQL("jobs", true) + `;
 
 	CREATE TABLE IF NOT EXISTS processed_relay_requests (
@@ -1736,6 +1764,10 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Mark schema as current so subsequent opens skip migrations.
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
+		return fmt.Errorf("set schema version: %w", err)
+	}
 	return nil
 }
 
