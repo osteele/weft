@@ -109,7 +109,9 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		return InstanceAction{Kind: ActionNone}
 	}
 
-	// 1. Grace expiry: deadline has passed
+	// 1. Grace expiry: deadline has passed.
+	// The instance entered grace because a job failed; use "failed" not "orphaned"
+	// since the job did run (orphaned means the instance died before execution).
 	if ci.Status == db.LaunchStatusGrace && ci.GraceDeadline != nil && p.Now.Unix() > *ci.GraceDeadline {
 		return InstanceAction{
 			Kind:              ActionGraceExpired,
@@ -118,7 +120,7 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 			StallMessage:      "grace period expired — terminating instance",
 			DestroyProvider:   true,
 			ResetJobs:         true,
-			AttemptOutcome:    db.AttemptOutcomeOrphaned,
+			AttemptOutcome:    db.AttemptOutcomeFailed,
 		}
 	}
 
