@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 )
 
 // UploadSourceToR2 creates a content-addressed tarball of localDir and uploads
@@ -18,7 +18,7 @@ func UploadSourceToR2(ctx context.Context, r2Client *r2.Client, localDir string)
 	}
 	defer os.Remove(tmpPath)
 
-	key := r2keys.SourceTarball(hash)
+	key := dataplane.SourceTarball(hash)
 
 	exists, err := r2Client.ObjectExists(ctx, key)
 	if err != nil {

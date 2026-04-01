@@ -1,321 +1,124 @@
 package r2keys
 
 import (
-	"fmt"
-	"strconv"
-	"strings"
+	"github.com/osteele/weft/internal/controlplane"
+	"github.com/osteele/weft/internal/dataplane"
 )
 
-// Campaign keys
+// Package r2keys is a compatibility shim while call sites migrate toward
+// explicit data-plane and control-plane packages.
 
-func CampaignManifest(instanceID int64) string {
-	return fmt.Sprintf("campaigns/%d/manifest.json", instanceID)
-}
+func CampaignManifest(instanceID int64) string { return dataplane.CampaignManifest(instanceID) }
+func CampaignComplete(instanceID int64) string { return controlplane.CampaignComplete(instanceID) }
+func CampaignPrefix(instanceID int64) string   { return dataplane.CampaignPrefix(instanceID) }
 
-func CampaignComplete(instanceID int64) string {
-	return fmt.Sprintf("campaigns/%d/.complete", instanceID)
-}
+func JobStarted(jobID int64) string   { return controlplane.JobStarted(jobID) }
+func JobComplete(jobID int64) string  { return controlplane.JobComplete(jobID) }
+func JobProcessed(jobID int64) string { return controlplane.JobProcessed(jobID) }
 
-func CampaignPrefix(instanceID int64) string {
-	return fmt.Sprintf("campaigns/%d/", instanceID)
-}
+func JobResultsPrefix(jobID int64) string { return dataplane.JobResultsPrefix(jobID) }
+func JobResultLog(jobID int64) string     { return dataplane.JobResultLog(jobID) }
 
-// Job keys
-
-func JobStarted(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/.started", jobID)
-}
-
-func JobComplete(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/.complete", jobID)
-}
-
-func JobProcessed(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/.processed", jobID)
-}
-
-func JobResultsPrefix(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/results/", jobID)
-}
-
-func JobResultLog(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/results/%d.log", jobID, jobID)
-}
-
-func JobLiveLogsPrefix(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/live-log/", jobID)
-}
-
-func JobLiveLogManifest(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/live-log/manifest.json", jobID)
-}
-
-func JobLiveLogPart(jobID int64, part int) string {
-	return fmt.Sprintf("jobs/%d/live-log/part-%06d.log", jobID, part)
-}
-
-func JobOutputsPrefix(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/outputs/", jobID)
-}
-
-func JobOutputDir(jobID int64, dir string) string {
-	return fmt.Sprintf("jobs/%d/outputs/%s/", jobID, dir)
-}
-
-func JobProgress(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/progress", jobID)
-}
-
+func JobLiveLogsPrefix(jobID int64) string        { return dataplane.JobLiveLogsPrefix(jobID) }
+func JobLiveLogManifest(jobID int64) string       { return dataplane.JobLiveLogManifest(jobID) }
+func JobLiveLogPart(jobID int64, part int) string { return dataplane.JobLiveLogPart(jobID, part) }
+func JobOutputsPrefix(jobID int64) string         { return dataplane.JobOutputsPrefix(jobID) }
+func JobOutputDir(jobID int64, dir string) string { return dataplane.JobOutputDir(jobID, dir) }
+func JobProgress(jobID int64) string              { return controlplane.JobProgress(jobID) }
 func JobAttemptProgress(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobProgress(jobID)
-	}
-	return fmt.Sprintf("%s/progress", JobRunPrefix(jobID, runID))
+	return controlplane.JobAttemptProgress(jobID, runID)
 }
-
-func JobLiveTimeseries(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/timeseries.jsonl", jobID)
-}
-
-func JobLiveTelemetry(jobID int64) string {
-	return fmt.Sprintf("jobs/%d/telemetry.jsonl", jobID)
-}
-
-func JobPrefix(jobID int64) string {
-	return fmt.Sprintf("jobs/%d", jobID)
-}
-
-func JobRunPrefix(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobPrefix(jobID)
-	}
-	return fmt.Sprintf("jobs/%d/runs/%d", jobID, runID)
-}
-
+func JobLiveTimeseries(jobID int64) string   { return dataplane.JobLiveTimeseries(jobID) }
+func JobLiveTelemetry(jobID int64) string    { return dataplane.JobLiveTelemetry(jobID) }
+func JobPrefix(jobID int64) string           { return dataplane.JobPrefix(jobID) }
+func JobRunPrefix(jobID, runID int64) string { return dataplane.JobRunPrefix(jobID, runID) }
 func JobAttemptStarted(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobStarted(jobID)
-	}
-	return fmt.Sprintf("%s/.started", JobRunPrefix(jobID, runID))
+	return controlplane.JobAttemptStarted(jobID, runID)
 }
-
 func JobAttemptComplete(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobComplete(jobID)
-	}
-	return fmt.Sprintf("%s/.complete", JobRunPrefix(jobID, runID))
+	return controlplane.JobAttemptComplete(jobID, runID)
 }
-
 func JobAttemptProcessed(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobProcessed(jobID)
-	}
-	return fmt.Sprintf("%s/.processed", JobRunPrefix(jobID, runID))
+	return controlplane.JobAttemptProcessed(jobID, runID)
 }
-
-// ExtractRunID parses the run_id from a job R2 key such as
-// "jobs/441/runs/123/.complete" → 123, or "jobs/441/.complete" → 0.
-func ExtractRunID(key string) int64 {
-	parts := strings.Split(key, "/")
-	for i, p := range parts {
-		if p == "runs" && i+1 < len(parts) {
-			id, err := strconv.ParseInt(parts[i+1], 10, 64)
-			if err == nil {
-				return id
-			}
-		}
-	}
-	return 0
-}
+func ExtractRunID(key string) int64 { return controlplane.ExtractRunID(key) }
 
 func JobAttemptResultsPrefix(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobResultsPrefix(jobID)
-	}
-	return fmt.Sprintf("%s/results/", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptResultsPrefix(jobID, runID)
 }
-
 func JobAttemptResultLog(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobResultLog(jobID)
-	}
-	return fmt.Sprintf("%s/results/%d.log", JobRunPrefix(jobID, runID), jobID)
+	return dataplane.JobAttemptResultLog(jobID, runID)
 }
-
 func JobAttemptLiveLogsPrefix(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobLiveLogsPrefix(jobID)
-	}
-	return fmt.Sprintf("%s/live-log/", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptLiveLogsPrefix(jobID, runID)
 }
-
 func JobAttemptLiveLogManifest(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobLiveLogManifest(jobID)
-	}
-	return fmt.Sprintf("%s/live-log/manifest.json", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptLiveLogManifest(jobID, runID)
 }
-
 func JobAttemptLiveLogPart(jobID, runID int64, part int) string {
-	if runID <= 0 {
-		return JobLiveLogPart(jobID, part)
-	}
-	return fmt.Sprintf("%s/live-log/part-%06d.log", JobRunPrefix(jobID, runID), part)
+	return dataplane.JobAttemptLiveLogPart(jobID, runID, part)
 }
-
 func JobAttemptOutputsPrefix(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobOutputsPrefix(jobID)
-	}
-	return fmt.Sprintf("%s/outputs/", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptOutputsPrefix(jobID, runID)
 }
-
 func JobAttemptOutputDir(jobID, runID int64, dir string) string {
-	if runID <= 0 {
-		return JobOutputDir(jobID, dir)
-	}
-	return fmt.Sprintf("%s/outputs/%s/", JobRunPrefix(jobID, runID), dir)
+	return dataplane.JobAttemptOutputDir(jobID, runID, dir)
 }
-
 func JobAttemptArtifactsPrefix(jobID, runID int64) string {
-	if runID <= 0 {
-		return fmt.Sprintf("jobs/%d/artifacts/", jobID)
-	}
-	return fmt.Sprintf("%s/artifacts/", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptArtifactsPrefix(jobID, runID)
 }
-
 func JobAttemptArtifactFilesPrefix(jobID, runID int64) string {
-	return JobAttemptArtifactsPrefix(jobID, runID) + "files/"
+	return dataplane.JobAttemptArtifactFilesPrefix(jobID, runID)
 }
-
 func JobAttemptArtifactManifest(jobID, runID int64) string {
-	return JobAttemptArtifactsPrefix(jobID, runID) + "manifest.json"
+	return dataplane.JobAttemptArtifactManifest(jobID, runID)
 }
-
 func JobAttemptLiveTimeseries(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobLiveTimeseries(jobID)
-	}
-	return fmt.Sprintf("%s/timeseries.jsonl", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptLiveTimeseries(jobID, runID)
 }
-
 func JobAttemptLiveTelemetry(jobID, runID int64) string {
-	if runID <= 0 {
-		return JobLiveTelemetry(jobID)
-	}
-	return fmt.Sprintf("%s/telemetry.jsonl", JobRunPrefix(jobID, runID))
+	return dataplane.JobAttemptLiveTelemetry(jobID, runID)
 }
 
-// Grace period keys
-
-func GracePrefix(instanceID int64) string {
-	return fmt.Sprintf("grace/%d", instanceID)
-}
-
-func GraceStatus(instanceID int64) string {
-	return fmt.Sprintf("grace/%d/status", instanceID)
-}
-
-func GraceJobs(instanceID int64) string {
-	return fmt.Sprintf("grace/%d/jobs.json", instanceID)
-}
-
-func GraceRelease(instanceID int64) string {
-	return fmt.Sprintf("grace/%d/release", instanceID)
-}
-
-func GraceExtend(instanceID int64) string {
-	return fmt.Sprintf("grace/%d/extend", instanceID)
-}
-
-func GraceAck(instanceID int64) string {
-	return fmt.Sprintf("grace/%d/ack", instanceID)
-}
-
-// Instance keys
+func GracePrefix(instanceID int64) string  { return controlplane.GracePrefix(instanceID) }
+func GraceStatus(instanceID int64) string  { return controlplane.GraceStatus(instanceID) }
+func GraceJobs(instanceID int64) string    { return controlplane.GraceJobs(instanceID) }
+func GraceRelease(instanceID int64) string { return controlplane.GraceRelease(instanceID) }
+func GraceExtend(instanceID int64) string  { return controlplane.GraceExtend(instanceID) }
+func GraceAck(instanceID int64) string     { return controlplane.GraceAck(instanceID) }
 
 func InstanceAgentVersion(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/agent-version", instanceID)
+	return controlplane.InstanceAgentVersion(instanceID)
 }
-
-func InstancePhase(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/phase", instanceID)
-}
-
-func InstanceHeartbeat(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/heartbeat", instanceID)
-}
-
+func InstancePhase(instanceID int64) string     { return controlplane.InstancePhase(instanceID) }
+func InstanceHeartbeat(instanceID int64) string { return controlplane.InstanceHeartbeat(instanceID) }
 func InstanceAgentStartup(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/agent-startup.json", instanceID)
+	return controlplane.InstanceAgentStartup(instanceID)
 }
-
-func InstanceOpslog(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/opslog.jsonl", instanceID)
-}
-
+func InstanceOpslog(instanceID int64) string { return dataplane.InstanceOpslog(instanceID) }
 func InstanceDiskFailure(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/disk-failure.json", instanceID)
+	return controlplane.InstanceDiskFailure(instanceID)
 }
 
 func InstanceTerminationIntent(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/termination-intent.json", instanceID)
+	return controlplane.InstanceTerminationIntent(instanceID)
 }
 
-// InstanceKillJob is the R2 key the CLI writes to request the agent kill a
-// running job. The value is the job ID as a decimal string.
-func InstanceKillJob(instanceID int64) string {
-	return fmt.Sprintf("instance/%d/kill-job", instanceID)
-}
-
-// Bootstrap keys
-
-func BootstrapScript(instanceID int64) string {
-	return fmt.Sprintf("bootstrap/%d.sh", instanceID)
-}
-
-func BootstrapStage(instanceID int64) string {
-	return fmt.Sprintf("bootstrap/%d/stage", instanceID)
-}
-
-// Donor keys
-
-func DonorReady(instanceID int64) string {
-	return fmt.Sprintf("donor/%d/.ready", instanceID)
-}
-
-// UV manifest keys
-
+func InstanceKillJob(instanceID int64) string { return controlplane.InstanceKillJob(instanceID) }
+func BootstrapScript(instanceID int64) string { return dataplane.BootstrapScript(instanceID) }
+func BootstrapStage(instanceID int64) string  { return controlplane.BootstrapStage(instanceID) }
+func DonorReady(instanceID int64) string      { return controlplane.DonorReady(instanceID) }
 func UVManifest(lockHash, platform string) string {
-	return fmt.Sprintf("uv-manifests/%s/%s.json", lockHash, platform)
+	return dataplane.UVManifest(lockHash, platform)
 }
-
-// Agent binary keys
-
 func AgentBinary(version, goos, goarch string) string {
-	return fmt.Sprintf("agents/%s/%s-%s", version, goos, goarch)
+	return dataplane.AgentBinary(version, goos, goarch)
 }
-
-// Source tarball keys
-
-func SourceTarball(hash string) string {
-	return fmt.Sprintf("sources/%s.tar.gz", hash)
-}
-
-// Coordinator relay keys
+func SourceTarball(hash string) string { return dataplane.SourceTarball(hash) }
 
 func CoordinatorRelayRequest(requestID string) string {
-	return fmt.Sprintf("coordinator/v1/inbox/%s.json", requestID)
+	return controlplane.CoordinatorRelayRequest(requestID)
 }
-
-func CoordinatorRelayAck(requestID string) string {
-	return fmt.Sprintf("coordinator/v1/acks/%s.json", requestID)
-}
-
-func CoordinatorRelayInboxPrefix() string {
-	return "coordinator/v1/inbox/"
-}
-
-func CoordinatorRelayAckPrefix() string {
-	return "coordinator/v1/acks/"
-}
+func CoordinatorRelayAck(requestID string) string { return controlplane.CoordinatorRelayAck(requestID) }
+func CoordinatorRelayInboxPrefix() string         { return controlplane.CoordinatorRelayInboxPrefix() }
+func CoordinatorRelayAckPrefix() string           { return controlplane.CoordinatorRelayAckPrefix() }

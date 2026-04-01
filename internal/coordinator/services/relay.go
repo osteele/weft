@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/coordinatorrelay"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 )
 
 // RelayProcessor consumes coordinator relay requests from R2 and applies them
@@ -55,7 +55,7 @@ func (p *RelayProcessor) Start(ctx context.Context) {
 }
 
 func (p *RelayProcessor) ProcessOnce(ctx context.Context) {
-	objects, err := p.r2Client.ListObjects(ctx, r2keys.CoordinatorRelayInboxPrefix())
+	objects, err := p.r2Client.ListObjects(ctx, controlplane.CoordinatorRelayInboxPrefix())
 	if err != nil {
 		p.logger.Warn("failed to list relay inbox", "error", err)
 		return
@@ -95,7 +95,7 @@ func (p *RelayProcessor) ProcessOnce(ctx context.Context) {
 			p.logger.Warn("failed to marshal relay ack", "request_id", req.RequestID, "error", err)
 			continue
 		}
-		if err := p.r2Client.PutObject(ctx, r2keys.CoordinatorRelayAck(req.RequestID), bytes.NewReader(ackData), "application/json"); err != nil {
+		if err := p.r2Client.PutObject(ctx, controlplane.CoordinatorRelayAck(req.RequestID), bytes.NewReader(ackData), "application/json"); err != nil {
 			p.logger.Warn("failed to write relay ack", "request_id", req.RequestID, "error", err)
 			continue
 		}

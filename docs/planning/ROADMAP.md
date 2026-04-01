@@ -52,6 +52,31 @@ instead of maintaining its own provisioning infrastructure.
 | Multi-phase workflows | Low | Run multiple phases per instance (e.g., power calibration, then timing calibration). Currently: single wrapper script. | Two-phase calibration per GPU |
 | vLLM-only mode | Low | Run subset of calibration (~20min vs 2+ hours). Would need weft to understand calibration phases. | `--only-vllm` flag |
 
+## Control Plane Evolution
+
+The current implementation uses R2 for both artifact storage and parts of the
+control plane. Keep the artifact path on R2, but treat command/state transport
+as a separate subsystem with explicit package boundaries:
+
+- `internal/dataplane` owns immutable or append-only artifacts: source bundles,
+  bootstrap scripts, agent binaries, logs, outputs, telemetry, manifests.
+- `internal/controlplane` owns mutable coordination state: relay inbox/acks,
+  grace-period commands, phase markers, heartbeats, termination intent.
+
+### Recommended backend replacements
+
+1. Keep R2 as the data plane for artifacts and caches.
+2. Replace the coordinator relay inbox with Cloudflare Queues pull consumers so
+   the coordinator can consume commands without polling object prefixes.
+3. Replace per-instance control mailboxes with Durable Objects keyed by
+   instance ID so extend/release/resubmit commands become ordered, strongly
+   consistent state transitions instead of overwriting objects.
+4. Feed R2 object creation into Queues via R2 event notifications so result
+   ingestion can react to uploads instead of sweeping prefixes.
+
+This keeps the system Cloudflare-native and removes the need to adopt SQS just
+to get queue semantics.
+
 ## Integration Strategy
 
 Even without filling all gaps, llm-performance-models could use weft for the

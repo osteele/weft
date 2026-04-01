@@ -15,11 +15,11 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -831,7 +831,7 @@ func executeReuseAssignments(database *sql.DB, r2Client *r2.Client, assignments 
 			remaining := time.Until(time.Unix(*inst.GraceDeadline, 0))
 			if remaining < campaign.MinGraceRemaining {
 				extendDur := 15 * time.Minute
-				extendKey := r2keys.GraceExtend(instanceID)
+				extendKey := controlplane.GraceExtend(instanceID)
 				_ = r2Client.PutObject(ctx, extendKey, strings.NewReader(extendDur.String()), "text/plain")
 				newDeadline := time.Now().Add(extendDur).Unix()
 				_ = db.ExtendLaunchGrace(database, instanceID, newDeadline)

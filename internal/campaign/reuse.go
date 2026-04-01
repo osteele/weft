@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/dataloc"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/workdir"
 )
@@ -401,7 +401,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		return fmt.Errorf("instance %d cannot accept reused jobs: %s", instanceID, reason)
 	}
 
-	graceKey := r2keys.GraceJobs(instanceID)
+	graceKey := controlplane.GraceJobs(instanceID)
 	if err := r2Client.PutObject(ctx, graceKey, strings.NewReader(string(payloadJSON)), "application/json"); err != nil {
 		return fmt.Errorf("write jobs.json to R2: %w", err)
 	}

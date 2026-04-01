@@ -16,9 +16,9 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
@@ -667,7 +667,7 @@ func runInstanceExtend(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	extendKey := r2keys.GraceExtend(instanceID)
+	extendKey := controlplane.GraceExtend(instanceID)
 	if err := r2Client.PutObject(ctx, extendKey, strings.NewReader(duration.String()), "text/plain"); err != nil {
 		return fmt.Errorf("write extend signal: %w", err)
 	}
@@ -703,7 +703,7 @@ func runInstanceRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx := context.Background()
-	releaseKey := r2keys.GraceRelease(instanceID)
+	releaseKey := controlplane.GraceRelease(instanceID)
 	if err := r2Client.PutObject(ctx, releaseKey, strings.NewReader("release"), "text/plain"); err != nil {
 		return fmt.Errorf("write release signal: %w", err)
 	}

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 )
 
 // UVManifestRef is a minimal copy of runner.UVManifest for deserialization.
@@ -97,7 +97,7 @@ func fetchOneManifest(r2Client *r2.Client, lockHash, platform, cacheBase string)
 	}
 
 	// Fetch from R2
-	r2Key := r2keys.UVManifest(lockHash, platform)
+	r2Key := dataplane.UVManifest(lockHash, platform)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

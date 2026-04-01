@@ -8,15 +8,15 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/osteele/weft/internal/dataplane"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 )
 
 // EnsureAgentInR2 uploads the agent binary for the given version to R2.
 // If the object is already present, it skips build and upload.
 // If the binary is not in the local cache, it attempts to build via the Fly builder.
 func EnsureAgentInR2(ctx context.Context, r2Client *r2.Client, version, goos, goarch string, output io.Writer) (string, error) {
-	key := r2keys.AgentBinary(version, goos, goarch)
+	key := dataplane.AgentBinary(version, goos, goarch)
 
 	exists, err := r2Client.ObjectExists(ctx, key)
 	if err != nil {

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/controlplane"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/r2keys"
 )
 
 type Client struct {
@@ -77,7 +77,7 @@ func (c *Client) Submit(ctx context.Context, req *Request) (*Ack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
-	if err := c.r2.PutObject(ctx, r2keys.CoordinatorRelayRequest(req.RequestID), bytes.NewReader(data), "application/json"); err != nil {
+	if err := c.r2.PutObject(ctx, controlplane.CoordinatorRelayRequest(req.RequestID), bytes.NewReader(data), "application/json"); err != nil {
 		return nil, fmt.Errorf("upload relay request: %w", err)
 	}
 	return c.WaitForAck(ctx, req.RequestID)
@@ -89,7 +89,7 @@ func (c *Client) WaitForAck(ctx context.Context, requestID string) (*Ack, error)
 	}
 	ticker := time.NewTicker(DefaultPollDelay)
 	defer ticker.Stop()
-	key := r2keys.CoordinatorRelayAck(requestID)
+	key := controlplane.CoordinatorRelayAck(requestID)
 	for {
 		data, err := c.r2.GetObject(ctx, key)
 		if err == nil {
