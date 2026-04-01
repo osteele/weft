@@ -435,6 +435,7 @@ func SummarizeForComparison(estimates []CostEstimate, selectedPerGroup []int) *S
 // predictor-based estimates aren't available.
 func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
 	estimates := make([]CostEstimate, 0, len(offers))
+	referenceDLPerf := MedianDLPerfFromGroupOffers(offers)
 	for _, o := range offers {
 		if o.Offer == nil {
 			continue
@@ -445,22 +446,36 @@ func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
 		}
 		setupHrs := 0.5
 		runHrs := float64(numJobs)
+		if referenceDLPerf > 0 && o.Offer.DLPerf > 0 {
+			runHrs *= referenceDLPerf / o.Offer.DLPerf
+		}
 		totalHrs := runHrs + setupHrs
 		totalTime := time.Duration(totalHrs * float64(time.Hour))
 		totalCost := totalHrs * o.Offer.CostPerHour
+		riskAdjustedCost := totalCost
+		if o.SurvivalProb > 0 {
+			riskAdjustedCost = bidding.ExpectedCost(o.Offer.CostPerHour, runHrs, setupHrs, o.SurvivalProb)
+		}
 
 		estimates = append(estimates, CostEstimate{
 			Group: o.Group,
 			Offer: o,
 			Breakdown: estimate.Breakdown{
+				Run: estimate.Estimate{
+					Mean:  time.Duration(runHrs * float64(time.Hour)),
+					Lower: time.Duration(runHrs * float64(time.Hour) * 0.5),
+					Upper: time.Duration(runHrs * float64(time.Hour) * 2.0),
+				},
 				Total: estimate.Estimate{
 					Mean:  totalTime,
 					Lower: time.Duration(float64(totalTime) * 0.5),
 					Upper: time.Duration(float64(totalTime) * 2.0),
 				},
 			},
-			TotalTime: totalTime,
-			TotalCost: totalCost,
+			TotalTime:        totalTime,
+			TotalCost:        totalCost,
+			SurvivalProb:     o.SurvivalProb,
+			RiskAdjustedCost: riskAdjustedCost,
 		})
 	}
 	return estimates
@@ -472,34 +487,36 @@ func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
 // and its groups differ from the split groups). Uses 1hr per job + 0.5hr setup
 // as baseline estimates.
 func SummarizeGroupOffers(offers []GroupOffer) *StrategySummaryRow {
+	return SummarizeExecutionEstimates(ApproximateEstimates(offers))
+}
+
+// SummarizeExecutionEstimates aggregates execution-unit estimates using
+// max-time semantics (parallel groups) and sum-cost semantics.
+func SummarizeExecutionEstimates(estimates []CostEstimate) *StrategySummaryRow {
 	row := &StrategySummaryRow{}
 	hasAny := false
-	for _, o := range offers {
-		if o.Offer == nil {
+	for _, est := range estimates {
+		if est.Offer.Offer == nil {
 			continue
 		}
 		hasAny = true
 		row.NumGPUs++
 
-		numJobs := float64(len(o.Group.Jobs))
-		if numJobs < 1 {
-			numJobs = 1
+		total := est.Breakdown.Total
+		if total.Mean > row.MaxTime.Mean {
+			row.MaxTime.Mean = total.Mean
 		}
-		setupHrs := 0.5
-		runHrs := numJobs
-		totalHrs := runHrs + setupHrs
-		groupTime := time.Duration(totalHrs * float64(time.Hour))
-		groupCost := totalHrs * o.Offer.CostPerHour
+		if total.Lower > row.MaxTime.Lower {
+			row.MaxTime.Lower = total.Lower
+		}
+		if total.Upper > row.MaxTime.Upper {
+			row.MaxTime.Upper = total.Upper
+		}
 
-		if groupTime > row.MaxTime.Mean {
-			row.MaxTime.Mean = groupTime
-			row.MaxTime.Lower = time.Duration(float64(groupTime) * 0.5)
-			row.MaxTime.Upper = time.Duration(float64(groupTime) * 2.0)
-		}
-		row.TotalRate += o.Offer.CostPerHour
-		row.TotalCost += groupCost
-		row.CostLower += groupCost * 0.5
-		row.CostUpper += groupCost * 2.0
+		row.TotalRate += est.Offer.Offer.CostPerHour
+		row.TotalCost += est.TotalCost
+		row.CostLower += total.Lower.Hours() * est.Offer.Offer.CostPerHour
+		row.CostUpper += total.Upper.Hours() * est.Offer.Offer.CostPerHour
 	}
 	if !hasAny {
 		return nil

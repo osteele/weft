@@ -281,28 +281,34 @@ func PlanReuse(jobs []*db.Job, instances []InstanceCapacity) ([]ReuseAssignment,
 		best := ranked[0]
 		assignments = append(assignments, ReuseAssignment{Job: job, Instance: best})
 
-		// Mark instance as consumed: update provisioned inputs and job count
 		for i := range instances {
 			if instances[i].Instance.ID == best.Instance.ID {
-				// Add job's inputs to provisioned
-				for _, input := range job.Inputs {
-					if !slices.Contains(instances[i].ProvisionedInputs, input) {
-						instances[i].ProvisionedInputs = append(instances[i].ProvisionedInputs, input)
-					}
-				}
-				// Reduce free disk by incremental inputs
-				incremental := subtractInputs(job.Inputs, best.ProvisionedInputs)
-				instances[i].DiskFreeGB -= estimateInputsDisk(incremental)
-				if instances[i].DiskFreeGB < 0 {
-					instances[i].DiskFreeGB = 0
-				}
-				instances[i].RunningJobCount++
+				consumeReuseJob(&instances[i], job)
 				break
 			}
 		}
 	}
 
 	return assignments, remaining
+}
+
+func consumeReuseJob(cap *InstanceCapacity, job *db.Job) {
+	if cap == nil || job == nil {
+		return
+	}
+
+	incremental := subtractInputs(job.Inputs, cap.ProvisionedInputs)
+	for _, input := range incremental {
+		if !slices.Contains(cap.ProvisionedInputs, input) {
+			cap.ProvisionedInputs = append(cap.ProvisionedInputs, input)
+		}
+	}
+
+	cap.DiskFreeGB -= estimateInputsDisk(incremental)
+	if cap.DiskFreeGB < 0 {
+		cap.DiskFreeGB = 0
+	}
+	cap.RunningJobCount++
 }
 
 // FormatReuseAssignments returns a human-readable summary of reuse assignments.

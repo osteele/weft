@@ -199,25 +199,39 @@ func ConstantSetup(hrs float64) OfferSetupFunc {
 	return func(_ cloud.Offer) float64 { return hrs }
 }
 
-// BestOffer selects the best offer according to the given strategy.
+func aggregateJobCompletionTimeHrs(totalRunHrs, setupOverheadHrs float64, jobCount int) float64 {
+	if jobCount <= 1 {
+		return totalRunHrs + setupOverheadHrs
+	}
+	return float64(jobCount)*setupOverheadHrs + totalRunHrs*float64(jobCount+1)/2
+}
+
+// BestOffer selects the best offer for a single job according to the given strategy.
+func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float64, setupOverhead OfferSetupFunc, strategy SelectionStrategy, maxGPUMemGB int) (int, cloud.Offer) {
+	return BestOfferForJobGroup(model, offers, jobDurationHrs, 1, setupOverhead, strategy, maxGPUMemGB)
+}
+
+// BestOfferForJobGroup selects the best offer for a sequential group of jobs.
 //
 // All strategies use a unified weighted score combining expected cost and
-// expected wall-clock time, with strategy-specific weights controlling the
-// tradeoff. This ensures strategies differ only in emphasis, not in kind,
-// preventing pathological selections (e.g. a $1000/hr instance that's
-// marginally faster).
+// aggregate job completion time, with strategy-specific weights controlling the
+// tradeoff. The time term is the sum of each placed job's completion time from
+// group start, so it includes shared setup plus waiting for earlier jobs on the
+// same instance to finish.
 //
 // If the model is nil, survival probability defaults to 1.0 (no retry risk).
-// BestOffer selects the offer with the best score for the given strategy.
 //
 // maxGPUMemGB signals "no performance advantage above this VRAM tier." When
 // set, offers with GPUMemGB above the ceiling have their effective DLPerf
 // capped to the median DLPerf of offers at or below the ceiling. This ensures
 // oversized GPUs get no speed advantage, so the cost weight in any strategy
 // naturally prefers cheaper options.
-func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float64, setupOverhead OfferSetupFunc, strategy SelectionStrategy, maxGPUMemGB int) (int, cloud.Offer) {
+func BestOfferForJobGroup(model *SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead OfferSetupFunc, strategy SelectionStrategy, maxGPUMemGB int) (int, cloud.Offer) {
 	if len(offers) == 0 {
 		return -1, cloud.Offer{}
+	}
+	if jobCount < 1 {
+		jobCount = 1
 	}
 
 	w := strategy.Weights()
@@ -248,22 +262,23 @@ func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float6
 			effectiveDLPerf = ceilingDLPerf
 		}
 
-		runHrs := jobDurationHrs
+		runHrs := totalRunHrs
 		if effectiveDLPerf > 0 && medianDLPerf > 0 {
-			runHrs = jobDurationHrs * (medianDLPerf / effectiveDLPerf)
+			runHrs = totalRunHrs * (medianDLPerf / effectiveDLPerf)
 		}
 
 		cost := ExpectedCost(o.CostPerHour, runHrs, setup, surv)
+		completionHrs := aggregateJobCompletionTimeHrs(runHrs, setup, jobCount)
 
-		var wallclock float64
+		var completionScore float64
 		if strategy == StrategyFastest {
-			// Happy-path time only — no survival adjustment
-			wallclock = runHrs + setup
+			// Happy-path completion only — no survival adjustment.
+			completionScore = completionHrs
 		} else {
-			wallclock = ExpectedWallclockTime(runHrs, setup, surv)
+			completionScore = completionHrs / surv
 		}
 
-		return w.Cost*cost + w.Time*wallclock
+		return w.Cost*cost + w.Time*completionScore
 	})
 }
 

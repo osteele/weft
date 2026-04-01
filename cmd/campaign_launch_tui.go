@@ -73,15 +73,15 @@ const (
 )
 
 type launchModel struct {
-	groups           []campaign.InstanceGroup
-	groupOffers      []campaign.GroupOffer
-	cachedRawOffers  []campaign.GroupRawOffers    // cached raw offers for the split (base) groups
-	cachedCandidates []campaign.GroupingCandidate // all candidate groupings (split, merged)
-	costEstimates    []campaign.CostEstimate
-	estimateCache    map[string][]campaign.CostEstimate // offerIdentity → estimates
-	predConfig       *predictor.Config
-	overheadModel    *estimate.OverheadModel
-	survivalModel    *bidding.SurvivalModel
+	groups          []campaign.InstanceGroup
+	groupOffers     []campaign.GroupOffer
+	cachedRawOffers []campaign.GroupRawOffers // cached raw offers for the split (base) groups
+	strategyPlans   map[bidding.SelectionStrategy]campaign.StrategyPlan
+	costEstimates   []campaign.CostEstimate
+	estimateCache   map[string][]campaign.CostEstimate // offerIdentity → estimates
+	predConfig      *predictor.Config
+	overheadModel   *estimate.OverheadModel
+	survivalModel   *bidding.SurvivalModel
 
 	items    []listItem
 	cursor   int
@@ -104,6 +104,7 @@ type launchModel struct {
 	// Used by launchInstances to get the actual groups/offers for launch
 	// (which may differ from m.groups when the merged candidate wins).
 	winningCandidate *campaign.CandidateResult
+	reuseAssignments []campaign.ReuseAssignment
 
 	campaignID       int64
 	reconciling      bool // true while background reconciliation is in progress
@@ -156,7 +157,7 @@ type reconcileDoneMsg struct {
 
 type rawOffersLoadedMsg struct {
 	raw        []campaign.GroupRawOffers
-	candidates []campaign.GroupingCandidate // when set, overrides raw
+	plans      map[bidding.SelectionStrategy]campaign.StrategyPlan
 	err        error
 	background bool // true if this is a background refresh (don't show loading state)
 }
@@ -387,28 +388,31 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 	groups := m.groups
 	clients := m.clients
 	providerErr := m.providerErr
+	database := m.database
+	predCfg := m.predConfig
+	overheadModel := m.overheadModel
+	survivalModel := m.survivalModel
 	return func() tea.Msg {
-		if len(clients) == 0 {
+		reusable, _ := campaign.FindReusableInstances(database)
+		if len(clients) == 0 && len(reusable) == 0 {
 			err := providerErr
 			if err == nil {
 				err = fmt.Errorf("no rental providers available")
 			}
 			return rawOffersLoadedMsg{err: err}
 		}
-		candidates := campaign.FetchCandidateGroupings(clients, groups)
-		// Use the split candidate's raw offers as the default (for display
-		// groups which match m.groups).
-		var splitRaw []campaign.GroupRawOffers
-		for _, c := range candidates {
-			if c.Label == "split" {
-				splitRaw = c.Raw
-				break
-			}
-		}
-		if splitRaw == nil && len(candidates) > 0 {
-			splitRaw = candidates[0].Raw
-		}
-		return rawOffersLoadedMsg{raw: splitRaw, candidates: candidates, background: background}
+		plans, splitRaw := campaign.BuildStrategyPlans(
+			database,
+			clients,
+			groups,
+			reusable,
+			predCfg,
+			overheadModel,
+			survivalModel,
+			allStrategies,
+			m.launchOpts.MinSurvival,
+		)
+		return rawOffersLoadedMsg{raw: splitRaw, plans: plans, background: background}
 	}
 }
 
@@ -426,31 +430,29 @@ func (m launchModel) prefetchHFSizes() tea.Cmd {
 // When candidate groupings are available, selects the best candidate and maps
 // its offers back to m.groups for display alignment.
 func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
-	setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
-	if len(m.cachedCandidates) > 1 {
-		result := campaign.BestCandidateForStrategy(
-			m.cachedCandidates, m.survivalModel, 1.0, setupFactory, strategy, m.launchOpts.MinSurvival,
-		)
-		return campaign.MapOffersToSplitGroups(m.groups, result)
+	if plan, ok := m.strategyPlanFor(strategy); ok {
+		return plan.DisplayOffers
 	}
-	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, setupFactory, strategy, m.launchOpts.MinSurvival)
+	return nil
 }
 
 // rankCachedOffers ranks cached raw offers with the current strategy and
 // caches the winning candidate result for launch.
 func (m *launchModel) rankCachedOffers() []campaign.GroupOffer {
-	offers := m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
-	// Cache the winning candidate for launch
-	if len(m.cachedCandidates) > 1 {
-		setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
-		result := campaign.BestCandidateForStrategy(
-			m.cachedCandidates, m.survivalModel, 1.0, setupFactory, m.launchOpts.Strategy, m.launchOpts.MinSurvival,
-		)
+	plan, ok := m.strategyPlanFor(m.launchOpts.Strategy)
+	if !ok {
+		m.winningCandidate = nil
+		m.reuseAssignments = nil
+		return nil
+	}
+	m.reuseAssignments = plan.ReuseAssignments
+	if plan.NewCandidate != nil {
+		result := *plan.NewCandidate
 		m.winningCandidate = &result
 	} else {
 		m.winningCandidate = nil
 	}
-	return offers
+	return plan.DisplayOffers
 }
 
 // activeStrategyEstimates returns the cost estimates for the active strategy.
@@ -458,24 +460,22 @@ func (m *launchModel) rankCachedOffers() []campaign.GroupOffer {
 // estimates built from the candidate's actual group offers, so the detail
 // rows reflect the winning grouping (per-instance breakdown).
 func (m launchModel) activeStrategyEstimates() []campaign.CostEstimate {
-	if m.cachedRawOffers == nil {
+	plan, ok := m.strategyPlanFor(m.launchOpts.Strategy)
+	if !ok {
 		return nil
 	}
-
-	// When a non-split candidate wins, use its offers directly
-	if len(m.cachedCandidates) > 1 {
-		setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
-		result := campaign.BestCandidateForStrategy(
-			m.cachedCandidates, m.survivalModel, 1.0, setupFactory, m.launchOpts.Strategy, m.launchOpts.MinSurvival,
-		)
-		if result.Label != "split" {
-			return campaign.ApproximateEstimates(result.Offers)
-		}
+	if plan.HasComplexExecution() {
+		return plan.ActualEstimates
 	}
+	return plan.DisplayEstimates
+}
 
-	offers := m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
-	key := offerIdentity(offers)
-	return m.estimateCache[key]
+func (m launchModel) strategyPlanFor(strategy bidding.SelectionStrategy) (campaign.StrategyPlan, bool) {
+	if m.strategyPlans == nil {
+		return campaign.StrategyPlan{}, false
+	}
+	plan, ok := m.strategyPlans[strategy]
+	return plan, ok
 }
 
 // allStrategies returns the three bidding strategies in cycle order.
@@ -488,19 +488,7 @@ var allStrategies = []bidding.SelectionStrategy{
 // preflightOtherStrategies launches background estimate fetches for strategies
 // whose offer sets are not already in the cache.
 func (m launchModel) preflightOtherStrategies() []tea.Cmd {
-	var cmds []tea.Cmd
-	for _, strat := range allStrategies {
-		if strat == m.launchOpts.Strategy {
-			continue
-		}
-		offers := m.rankCachedOffersForStrategy(strat)
-		key := offerIdentity(offers)
-		if _, ok := m.estimateCache[key]; ok {
-			continue
-		}
-		cmds = append(cmds, m.fetchEstimatesForOffers(offers, key, false))
-	}
-	return cmds
+	return nil
 }
 
 // rebuildDedupedStrategies computes the list of visually distinct strategies by
@@ -554,12 +542,9 @@ func (m *launchModel) activateStrategyIfFocused() {
 	m.strategyRowsDirty = true
 	if m.cachedRawOffers != nil {
 		m.groupOffers = m.rankCachedOffers()
-		// Update cost estimates from cache if available
-		key := offerIdentity(m.groupOffers)
-		if cached, ok := m.estimateCache[key]; ok {
-			m.costEstimates = cached
-		} else {
-			m.costEstimates = nil
+		m.costEstimates = m.activeStrategyEstimates()
+		if m.costEstimates == nil {
+			m.costEstimates = m.estimateCache[offerIdentity(m.groupOffers)]
 		}
 	}
 }
@@ -568,7 +553,7 @@ func (m *launchModel) activateStrategyIfFocused() {
 // current strategy's estimates aren't cached yet. Returns nil if estimates are
 // already available or offers haven't loaded.
 func (m launchModel) fetchEstimatesIfNeeded() tea.Cmd {
-	if m.cachedRawOffers == nil {
+	if m.costEstimates != nil || m.groupOffers == nil {
 		return nil
 	}
 	key := offerIdentity(m.groupOffers)
@@ -587,12 +572,12 @@ func (m launchModel) fetchEstimatesIfNeeded() tea.Cmd {
 func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.StrategySummaryRow {
 	var rows []campaign.StrategySummaryRow
 	keyToIdx := make(map[string]int) // offerIdentity → index into rows
-	setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
 
 	for _, strat := range allStrategies {
 		isActive := strat == m.launchOpts.Strategy
 		offers := m.rankCachedOffersForStrategy(strat)
 		key := offerIdentity(offers)
+		plan, havePlan := m.strategyPlanFor(strat)
 
 		// Check if we already have a row for the same offer set
 		if idx, ok := keyToIdx[key]; ok {
@@ -611,8 +596,15 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 			Loading:   true,
 		}
 
-		// Try detailed estimates first (from split-mapped offers)
-		if cached, ok := m.estimateCache[key]; ok {
+		// Try detailed estimates first when the plan aligns with split groups.
+		if havePlan && !plan.HasComplexExecution() {
+			if summary := campaign.SummarizeForComparison(plan.DisplayEstimates, selectedPerGroup); summary != nil {
+				row = *summary
+				row.Label = string(strat)
+				row.Active = isActive
+				row.Disclosed = isActive && m.strategyDisclosed
+			}
+		} else if cached, ok := m.estimateCache[key]; ok {
 			if summary := campaign.SummarizeForComparison(cached, selectedPerGroup); summary != nil {
 				row = *summary
 				row.Label = string(strat)
@@ -621,21 +613,12 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 			}
 		}
 
-		// When a non-split candidate wins, override with the candidate's actual
-		// group offers. The split-mapped estimates have incorrect instance counts
-		// and time/cost because they reflect the original grouping, not the
-		// winning candidate's grouping.
-		if len(m.cachedCandidates) > 1 {
-			result := campaign.BestCandidateForStrategy(
-				m.cachedCandidates, m.survivalModel, 1.0, setupFactory, strat, m.launchOpts.MinSurvival,
-			)
-			if result.Label != "split" {
-				if summary := campaign.SummarizeGroupOffers(result.Offers); summary != nil {
-					summary.Label = row.Label
-					summary.Active = row.Active
-					summary.Disclosed = row.Disclosed
-					row = *summary
-				}
+		if havePlan && plan.HasComplexExecution() {
+			if summary := campaign.SummarizeExecutionEstimates(plan.ActualEstimates); summary != nil {
+				summary.Label = row.Label
+				summary.Active = row.Active
+				summary.Disclosed = row.Disclosed
+				row = *summary
 			}
 		}
 
@@ -832,7 +815,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.groupOffers = nil
 			m.cachedRawOffers = nil
-			m.cachedCandidates = nil
+			m.strategyPlans = nil
+			m.reuseAssignments = nil
+			m.winningCandidate = nil
 			m.dedupedStrategies = nil
 			m.costEstimates = nil
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
@@ -849,7 +834,13 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.quitOrSwitchToWatch(fmt.Sprintf("Launch error: %v", msg.err))
 		}
 		m.cachedRawOffers = msg.raw
-		m.cachedCandidates = msg.candidates
+		m.strategyPlans = msg.plans
+		for _, plan := range msg.plans {
+			if len(plan.DisplayOffers) == 0 {
+				continue
+			}
+			m.estimateCache[offerIdentity(plan.DisplayOffers)] = plan.DisplayEstimates
+		}
 		m.strategyRowsDirty = true
 		m.rebuildDedupedStrategies()
 		oldOffers := m.groupOffers
@@ -857,27 +848,17 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.background {
 			m.loading = false
 		}
+		key := offerIdentity(m.groupOffers)
 		if offersMatch(oldOffers, m.groupOffers) && m.costEstimates != nil {
 			m.refreshStrategyRowsIfNeeded()
-			return m, nil // offers unchanged, keep cached estimates
-		}
-		// Check estimate cache for current strategy's offers
-		key := offerIdentity(m.groupOffers)
-		if cached, ok := m.estimateCache[key]; ok {
-			m.costEstimates = cached
-			m.refreshStrategyRowsIfNeeded()
-			// Still pre-flight other strategies
-			cmds := m.preflightOtherStrategies()
-			if len(cmds) > 0 {
-				return m, tea.Batch(cmds...)
-			}
 			return m, nil
 		}
-		m.costEstimates = nil
+		m.costEstimates = m.activeStrategyEstimates()
+		if m.costEstimates == nil {
+			m.costEstimates = m.estimateCache[key]
+		}
 		m.refreshStrategyRowsIfNeeded()
-		cmds := []tea.Cmd{m.fetchEstimates(), waitForProgress(m.progressCh)}
-		cmds = append(cmds, m.preflightOtherStrategies()...)
-		return m, tea.Batch(cmds...)
+		return m, nil
 
 	case estimateProgressMsg:
 		m.estimateProgress = msg
@@ -966,6 +947,9 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if len(m.partialErrors) == 0 {
+			if m.campaignID == 0 && m.winningCandidate == nil && len(m.instanceIDs) > 0 {
+				return m, m.quitOrSwitchToWatch("Submitted jobs to existing instances.")
+			}
 			return m, m.quitOrSwitchToWatch(formatLaunchResultFlash(m.instanceIDs, m.partialErrors))
 		}
 		return m, nil
@@ -1009,7 +993,7 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.quitOrSwitchToWatch("Launch canceled.")
 		}
 		m.launching = true
-		m.expectedInstanceCount = m.selectedLaunchGroupCount()
+		m.expectedInstanceCount = m.selectedNewLaunchGroupCount()
 		m.registeredInstanceIDs = nil
 		m.registeredInstanceIDSet = make(map[int64]struct{})
 		m.inlineWatch = nil
@@ -1292,6 +1276,25 @@ func (m launchModel) selectedLaunchGroupCount() int {
 	return count
 }
 
+func (m launchModel) selectedNewLaunchGroupCount() int {
+	if m.winningCandidate == nil {
+		return 0
+	}
+	count := 0
+	for i, group := range m.winningCandidate.Groups {
+		if i >= len(m.winningCandidate.Offers) || m.winningCandidate.Offers[i].Offer == nil {
+			continue
+		}
+		for _, job := range group.Jobs {
+			if m.selected[job.ID] {
+				count++
+				break
+			}
+		}
+	}
+	return count
+}
+
 // selectedLaunchableJobCount returns the number of selected jobs in groups that have offers.
 func (m launchModel) selectedLaunchableJobCount() int {
 	count := 0
@@ -1304,19 +1307,26 @@ func (m launchModel) selectedLaunchableJobCount() int {
 }
 
 func (m launchModel) launchInstances() tea.Cmd {
-	// Build filtered groups with only selected jobs.
-	// When the winning candidate has merged groups, use those for launch
-	// (fewer instances, shared offers). Otherwise use split groups.
-	var filteredGroups []campaign.InstanceGroup
-	var filteredOffers []campaign.GroupOffer
+	// Separate selected reuse assignments from new-instance launches.
+	var selectedReuse []campaign.ReuseAssignment
+	for _, assignment := range m.reuseAssignments {
+		if m.selected[assignment.Job.ID] {
+			selectedReuse = append(selectedReuse, assignment)
+		}
+	}
 
-	sourceGroups := m.groups
-	sourceOffers := m.groupOffers
+	sourceGroups := []campaign.InstanceGroup(nil)
+	sourceOffers := []campaign.GroupOffer(nil)
+	sourceEstimates := []campaign.CostEstimate(nil)
 	if m.winningCandidate != nil && len(m.winningCandidate.Groups) > 0 {
 		sourceGroups = m.winningCandidate.Groups
 		sourceOffers = m.winningCandidate.Offers
+		sourceEstimates = m.winningCandidate.Estimates
 	}
 
+	var filteredGroups []campaign.InstanceGroup
+	var filteredOffers []campaign.GroupOffer
+	var filteredEstimates []campaign.CostEstimate
 	for i, g := range sourceGroups {
 		var selectedJobs []*db.Job
 		for _, job := range g.Jobs {
@@ -1328,22 +1338,39 @@ func (m launchModel) launchInstances() tea.Cmd {
 			continue
 		}
 		fg := campaign.InstanceGroup{
-			GPUClass: g.GPUClass,
-			GPUMemGB: g.GPUMemGB,
-			DiskGB:   g.DiskGB,
-			Image:    g.Image,
-			Jobs:     selectedJobs,
+			GPUClass:    g.GPUClass,
+			GPUMemGB:    g.GPUMemGB,
+			MaxGPUMemGB: g.MaxGPUMemGB,
+			DiskGB:      g.DiskGB,
+			Image:       g.Image,
+			Jobs:        selectedJobs,
 		}
 		filteredGroups = append(filteredGroups, fg)
-		if sourceOffers != nil && i < len(sourceOffers) {
+		if i < len(sourceOffers) {
 			filteredOffers = append(filteredOffers, sourceOffers[i])
+		}
+		if i < len(sourceEstimates) {
+			scale := 1.0
+			if totalJobs := len(g.Jobs); totalJobs > 0 {
+				scale = float64(len(selectedJobs)) / float64(totalJobs)
+			}
+			scaled := sourceEstimates[i]
+			scaled.Group = fg
+			scaled.TotalTime = time.Duration(float64(sourceEstimates[i].TotalTime) * scale)
+			scaled.TotalCost = sourceEstimates[i].TotalCost * scale
+			scaled.Breakdown.Total = sourceEstimates[i].Breakdown.Total.Scale(scale)
+			if i < len(sourceOffers) {
+				scaled.Offer = sourceOffers[i]
+				scaled.Offer.Group = fg
+			}
+			filteredEstimates = append(filteredEstimates, scaled)
 		}
 	}
 
-	// Build offers slice, filtering out groups without offers
 	var launchGroups []campaign.InstanceGroup
 	var offers []cloud.Offer
 	var launchGroupOffers []campaign.GroupOffer
+	var selectedEstimates []campaign.CostEstimate
 	for i, fg := range filteredGroups {
 		if i < len(filteredOffers) && filteredOffers[i].Offer != nil {
 			offerCopy := *filteredOffers[i].Offer
@@ -1354,6 +1381,11 @@ func (m launchModel) launchInstances() tea.Cmd {
 				Offer:        &offerCopy,
 				SurvivalProb: filteredOffers[i].SurvivalProb,
 			})
+			if i < len(filteredEstimates) {
+				scaled := filteredEstimates[i]
+				scaled.Offer = launchGroupOffers[len(launchGroupOffers)-1]
+				selectedEstimates = append(selectedEstimates, scaled)
+			}
 		}
 	}
 
@@ -1367,25 +1399,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 	predCfg := m.predConfig
 	overheadModel := m.overheadModel
 	survivalModel := m.survivalModel
-	referenceDLPerf := campaign.MedianDLPerfFromRawOffers(m.cachedRawOffers)
-
-	// Filter cached estimates to selected groups
-	var selectedEstimates []campaign.CostEstimate
-	if m.costEstimates != nil {
-		for i, est := range m.costEstimates {
-			for _, fg := range filteredGroups {
-				if i < len(m.groups) && m.groups[i].GPUClass == fg.GPUClass && m.groups[i].GPUMemGB == fg.GPUMemGB {
-					// Scale estimate proportionally to selected job count
-					scale := float64(len(fg.Jobs)) / float64(len(m.groups[i].Jobs))
-					scaled := est
-					scaled.TotalTime = time.Duration(float64(est.TotalTime) * scale)
-					scaled.TotalCost = est.TotalCost * scale
-					selectedEstimates = append(selectedEstimates, scaled)
-					break
-				}
-			}
-		}
-	}
+	referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(launchGroupOffers)
 
 	// Auto-derive budget limits from cached estimates if not set by CLI
 	if (opts.MaxSpendCents == 0 || opts.MaxTimeSeconds == 0) && len(selectedEstimates) > 0 {
@@ -1422,8 +1436,20 @@ func (m launchModel) launchInstances() tea.Cmd {
 			}
 			return -1
 		}
+		if len(selectedReuse) > 0 {
+			r2Client, err := newR2ClientFromConfig()
+			if err != nil {
+				return instancesLaunchedMsg{err: fmt.Errorf("R2 client for reuse: %w", err)}
+			}
+			if err := executeReuseAssignments(database, r2Client, selectedReuse); err != nil {
+				return instancesLaunchedMsg{err: err}
+			}
+		}
 		if len(launchGroups) == 0 {
-			return instancesLaunchedMsg{err: fmt.Errorf("no selected groups have available offers")}
+			if len(selectedReuse) == 0 {
+				return instancesLaunchedMsg{err: fmt.Errorf("no selected groups have available offers")}
+			}
+			return instancesLaunchedMsg{instanceIDs: uniqueReuseInstanceIDs(selectedReuse)}
 		}
 		// If async estimation has not finished yet, compute estimates now so
 		// launched campaigns still persist estimated_cost_cents.
@@ -1467,6 +1493,21 @@ func (m launchModel) launchInstances() tea.Cmd {
 	}
 }
 
+func uniqueReuseInstanceIDs(assignments []campaign.ReuseAssignment) []int64 {
+	seen := make(map[int64]struct{})
+	var ids []int64
+	for _, assignment := range assignments {
+		id := assignment.Instance.Instance.ID
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
 func (m launchModel) View() string {
 	var b strings.Builder
 
@@ -1489,7 +1530,9 @@ func (m launchModel) View() string {
 	}
 
 	if m.done {
-		if m.campaignID != 0 {
+		if m.campaignID == 0 && m.winningCandidate == nil && len(m.instanceIDs) > 0 {
+			b.WriteString("Submitted jobs to existing instances: ")
+		} else if m.campaignID != 0 {
 			b.WriteString(fmt.Sprintf("Campaign %d: launched instances: ", m.campaignID))
 		} else {
 			b.WriteString("Launched instances: ")
@@ -1649,7 +1692,7 @@ func (m launchModel) View() string {
 							// pass nil for selection (all jobs selected) since the
 							// estimates use the candidate's group indices.
 							detailSelected := selected
-							if m.winningCandidate != nil && m.winningCandidate.Label != "split" {
+							if plan, ok := m.strategyPlanFor(m.launchOpts.Strategy); ok && plan.HasComplexExecution() {
 								detailSelected = nil
 							}
 							detailTable := campaign.FormatCostTableSelected(activeEstimates, detailSelected, summaryTable.TimeWidth, summaryTable.RateWidth)

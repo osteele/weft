@@ -229,19 +229,6 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Check for reusable cloud instances (grace or running)
-	reusable, _ := campaign.FindReusableInstances(database)
-	var reuseAssignments []campaign.ReuseAssignment
-	if len(reusable) > 0 {
-		allJobs := campaign.FlattenGroupJobs(groups)
-		var remainingJobs []*db.Job
-		reuseAssignments, remainingJobs = campaign.PlanReuse(allJobs, reusable)
-
-		if len(reuseAssignments) > 0 {
-			groups = campaign.PrepareGroups(remainingJobs, database, campaignLaunchGPU, r2Client)
-		}
-	}
-
 	// Apply --max-gpu-mem override to all groups
 	if campaignLaunchMaxGPUMem > 0 {
 		for i := range groups {
@@ -254,12 +241,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Dry run: print plan table
 	if campaignLaunchDryRun {
-		return runDryRunPlanWithReuse(database, cfg, groups, reuseAssignments, opts.Strategy)
-	}
-
-	if len(groups) == 0 && len(reuseAssignments) == 0 {
-		fmt.Println("No jobs need rental GPUs.")
-		return nil
+		return runDryRunPlan(database, cfg, groups, opts.Strategy, opts.MinSurvival)
 	}
 
 	// Check R2 config before entering interactive mode
@@ -269,7 +251,7 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 
 	// Non-interactive mode (explicit via --yes/--plain or automatic).
 	if !launchInteractive {
-		return runNonInteractiveLaunch(database, cfg, groups, opts, reuseAssignments, useTUI)
+		return runNonInteractiveLaunch(database, cfg, groups, opts, useTUI)
 	}
 
 	finalModel, err := runLaunchProgram(database, cfg, groups, opts, campaignLaunchGPU, !needsSyncReconcile, false, shouldWatch())
@@ -335,82 +317,107 @@ func prefilterOnPrem(database *sql.DB, jobs []*db.Job, cfg *config.Config) []*db
 }
 
 // runNonInteractiveLaunch launches all groups without TUI interaction.
-func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, reuseAssignments []campaign.ReuseAssignment, watchTUI bool) error {
-	// Submit reuse assignments first
-	if len(reuseAssignments) > 0 {
-		fmt.Print(campaign.FormatReuseAssignments(reuseAssignments))
+func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, watchTUI bool) error {
+	clients, providerErr := buildCloudClients(cfg)
+	if providerErr != nil {
+		clients = nil
+	}
+	survivalModel := buildSurvivalModel(database)
+	overheadModel := buildOverheadModel(database)
+	predCfg := buildPredictorConfig(cfg)
+	reusable, _ := campaign.FindReusableInstances(database)
+	if providerErr != nil && len(reusable) == 0 {
+		return providerErr
+	}
+	fmt.Println("Searching for GPU offers...")
+	plans, _ := campaign.BuildStrategyPlans(
+		database,
+		clients,
+		groups,
+		reusable,
+		&predCfg,
+		overheadModel,
+		survivalModel,
+		[]bidding.SelectionStrategy{opts.Strategy},
+		opts.MinSurvival,
+	)
+	plan, ok := plans[opts.Strategy]
+	if !ok {
+		return fmt.Errorf("could not build launch plan for strategy %s", opts.Strategy)
+	}
+	requestedJobs := 0
+	for _, group := range groups {
+		requestedJobs += len(group.Jobs)
+	}
+
+	if len(plan.ReuseAssignments) > 0 {
+		fmt.Print(campaign.FormatReuseAssignments(plan.ReuseAssignments))
 		r2Client, err := newR2ClientFromConfig()
 		if err != nil {
 			return fmt.Errorf("R2 client for reuse: %w", err)
 		}
-		if err := executeReuseAssignments(database, r2Client, reuseAssignments); err != nil {
+		if err := executeReuseAssignments(database, r2Client, plan.ReuseAssignments); err != nil {
 			return err
+		}
+		fmt.Println()
+	}
+
+	var groupsToLaunch []campaign.InstanceGroup
+	var offers []cloud.Offer
+	var estimates []campaign.CostEstimate
+	if plan.NewCandidate != nil {
+		for i, go_ := range plan.NewCandidate.Offers {
+			if go_.Err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: offer search failed for %s: %v\n", go_.Group.GPUSpec(), go_.Err)
+				continue
+			}
+			if go_.Offer == nil {
+				fmt.Fprintf(os.Stderr, "Warning: no offers found for %s — skipping %d job(s)\n", go_.Group.GPUSpec(), len(go_.Group.Jobs))
+				continue
+			}
+			groupsToLaunch = append(groupsToLaunch, go_.Group)
+			offers = append(offers, *go_.Offer)
+			if i < len(plan.NewCandidate.Estimates) {
+				estimates = append(estimates, plan.NewCandidate.Estimates[i])
+			}
 		}
 	}
 
-	if len(groups) == 0 {
-		fmt.Println("All jobs assigned to existing instances.")
-		return nil
-	}
-
-	clients, err := buildCloudClients(cfg)
-	if err != nil {
-		return err
-	}
-
-	// Fetch offers in parallel (with survival model for cost-optimal bidding)
-	fmt.Println("Searching for GPU offers...")
-	survivalModel := buildSurvivalModel(database)
-	overheadModel := buildOverheadModel(database)
-	setupOverhead := campaign.OfferSetupOverheadFactory(database, overheadModel)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, setupOverhead, opts.Strategy, opts.MinSurvival)
-
-	printSurvivalRejections(groupOffers, opts.MinSurvival)
-
-	// Print plan summary with cost estimates
 	totalJobs := 0
-	for _, g := range groups {
+	for _, g := range groupsToLaunch {
 		totalJobs += len(g.Jobs)
 	}
-	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groups))
+	coveredJobs := len(plan.ReuseAssignments) + totalJobs
+	if len(groupsToLaunch) == 0 {
+		if len(plan.ReuseAssignments) == requestedJobs {
+			fmt.Println("All selected jobs assigned to existing instances.")
+			return nil
+		}
+		if len(plan.ReuseAssignments) > 0 {
+			return fmt.Errorf("%d selected job(s) assigned to existing instances, but %d job(s) still need new instances", len(plan.ReuseAssignments), requestedJobs-len(plan.ReuseAssignments))
+		}
+		if providerErr != nil {
+			return providerErr
+		}
+		return fmt.Errorf("no offers found for any GPU group")
+	}
+	if coveredJobs < requestedJobs {
+		fmt.Fprintf(os.Stderr, "Warning: %d selected job(s) will be skipped (no reusable instance or cloud offer)\n", requestedJobs-coveredJobs)
+	}
 
-	predCfg := buildPredictorConfig(cfg)
-	referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(groupOffers)
-	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
-	fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
+	fmt.Printf("%d jobs in %d GPU groups\n", totalJobs, len(groupsToLaunch))
+	if len(estimates) > 0 {
+		fmt.Println(campaign.FormatCostTableWithEstimates(estimates))
+	}
 
-	// Auto-derive budget limits from estimates if not set by CLI
 	if opts.ApplyAutoBudget(estimates) {
 		printAutoBudget(opts)
 	}
 
-	// Filter groups to those with valid offers, warning about failures
-	var filteredGroups []campaign.InstanceGroup
-	var offers []cloud.Offer
-	var filteredEstimates []campaign.CostEstimate
-	for i, go_ := range groupOffers {
-		if go_.Err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: offer search failed for %s: %v\n", go_.Group.GPUSpec(), go_.Err)
-			continue
-		}
-		if go_.Offer == nil {
-			fmt.Fprintf(os.Stderr, "Warning: no offers found for %s — skipping %d job(s)\n", go_.Group.GPUSpec(), len(go_.Group.Jobs))
-			continue
-		}
-		filteredGroups = append(filteredGroups, go_.Group)
-		offers = append(offers, *go_.Offer)
-		filteredEstimates = append(filteredEstimates, estimates[i])
-	}
-	if len(filteredGroups) == 0 {
-		return fmt.Errorf("no offers found for any GPU group")
-	}
-	groups = filteredGroups
-	estimates = filteredEstimates
-
 	r2Cfg := cfg.Vastai.R2.ToCloudR2Config()
 
 	result, err := campaign.LaunchCampaign(
-		clients, database, groups, offers, estimates, survivalModel, opts, r2Cfg,
+		clients, database, groupsToLaunch, offers, estimates, survivalModel, opts, r2Cfg,
 		func(provider cloud.Provider) (cloud.CreateOpts, error) {
 			return createOptsForProvider(cfg, provider)
 		},
@@ -422,7 +429,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 			fmt.Printf("  %s: %s\n", group.GPUSpec(), phase)
 		},
 		func(id int64) {
-			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(groups))
+			fmt.Printf("Campaign %d: launching %d instance(s)...\n", id, len(groupsToLaunch))
 		},
 		nil,
 	)
@@ -456,35 +463,65 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	return nil
 }
 
-func runDryRunPlanWithReuse(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, reuseAssignments []campaign.ReuseAssignment, strategy bidding.SelectionStrategy) error {
-	if len(reuseAssignments) > 0 {
-		fmt.Print(campaign.FormatReuseAssignments(reuseAssignments))
-		fmt.Println()
-	}
-
-	if len(groups) == 0 {
-		fmt.Println("All jobs can be assigned to existing instances. No new instances needed.")
-		return nil
-	}
-
-	return runDryRunPlan(database, cfg, groups, strategy, campaignLaunchMinSurvival)
-}
-
 func runDryRunPlan(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, strategy bidding.SelectionStrategy, minSurvival float64) error {
-	clients, err := buildCloudClients(cfg)
-	if err != nil {
-		return err
+	clients, providerErr := buildCloudClients(cfg)
+	if providerErr != nil {
+		clients = nil
 	}
 	survivalModel := buildSurvivalModel(database)
 	overheadModel := buildOverheadModel(database)
-	setupOverhead := campaign.OfferSetupOverheadFactory(database, overheadModel)
-	groupOffers := campaign.FetchGroupOffers(clients, groups, survivalModel, 1.0, setupOverhead, strategy, minSurvival)
+	predCfg := buildPredictorConfig(cfg)
+	reusable, _ := campaign.FindReusableInstances(database)
+	if providerErr != nil && len(reusable) == 0 {
+		return providerErr
+	}
+	plans, _ := campaign.BuildStrategyPlans(
+		database,
+		clients,
+		groups,
+		reusable,
+		&predCfg,
+		overheadModel,
+		survivalModel,
+		[]bidding.SelectionStrategy{strategy},
+		minSurvival,
+	)
+	plan, ok := plans[strategy]
+	if !ok {
+		return fmt.Errorf("could not build dry-run plan for strategy %s", strategy)
+	}
+	requestedJobs := 0
+	for _, group := range groups {
+		requestedJobs += len(group.Jobs)
+	}
+	if len(plan.ReuseAssignments) > 0 {
+		fmt.Print(campaign.FormatReuseAssignments(plan.ReuseAssignments))
+		fmt.Println()
+	}
+
+	var groupOffers []campaign.GroupOffer
+	var estimates []campaign.CostEstimate
+	if plan.NewCandidate != nil {
+		groupOffers = plan.NewCandidate.Offers
+		estimates = plan.NewCandidate.Estimates
+	}
 
 	printSurvivalRejections(groupOffers, minSurvival)
-
-	predCfg := buildPredictorConfig(cfg)
-	referenceDLPerf := campaign.MedianDLPerfFromGroupOffers(groupOffers)
-	estimates := campaign.EstimateCosts(database, groupOffers, &predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
+	if len(groupOffers) == 0 {
+		if len(plan.ReuseAssignments) == requestedJobs {
+			fmt.Println("All jobs can be assigned to existing instances. No new instances needed.")
+			return nil
+		}
+		if len(plan.ReuseAssignments) > 0 {
+			fmt.Printf("%d job(s) can be assigned to existing instances, but %d job(s) still need new instances.\n", len(plan.ReuseAssignments), requestedJobs-len(plan.ReuseAssignments))
+			return nil
+		}
+		if providerErr != nil {
+			return providerErr
+		}
+		fmt.Println("No new-instance offers found.")
+		return nil
+	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintf(w, "GROUP\tGPU\tJOBS\tJOB IDS\tMEM\tDISK\tCOST/HR\tEST TIME\tEST COST\n")

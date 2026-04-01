@@ -3,7 +3,6 @@ package campaign
 import (
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"strconv"
 
@@ -105,7 +104,11 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 	if len(filtered) == 0 {
 		return result
 	}
-	_, best := bidding.BestOffer(survivalModel, filtered, jobDurationHrs, setupOverhead, strategy, group.MaxGPUMemGB)
+	totalJobDurationHrs := jobDurationHrs
+	if len(group.Jobs) > 1 {
+		totalJobDurationHrs *= float64(len(group.Jobs))
+	}
+	_, best := bidding.BestOfferForJobGroup(survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, strategy, group.MaxGPUMemGB)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
@@ -331,47 +334,11 @@ func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup
 }
 
 // ScoreGrouping evaluates a candidate grouping for a strategy using the unified
-// weighted metric. Groups run in parallel, so time = max(per-group time) and
-// cost = sum(per-group cost). Returns +Inf if any group has no valid offer.
+// weighted metric. The cost term sums across groups, while the time term sums
+// placed-job completion times, including shared setup and waiting behind
+// earlier jobs on the same instance. Returns +Inf if any group has no valid offer.
 func ScoreGrouping(groupOffers []GroupOffer, strategy bidding.SelectionStrategy) float64 {
-	w := strategy.Weights()
-	var totalCost float64
-	var maxTime float64
-
-	for _, go_ := range groupOffers {
-		if go_.Offer == nil {
-			return math.Inf(1)
-		}
-		// Use per-job cost as cost factor, wallclock as time factor.
-		// For groups with multiple jobs, both cost and time scale with job count
-		// (jobs run sequentially on one instance).
-		numJobs := float64(len(go_.Group.Jobs))
-		if numJobs < 1 {
-			numJobs = 1
-		}
-
-		surv := go_.SurvivalProb
-		if surv <= 0 {
-			surv = 1.0 // no survival model
-		}
-
-		// Approximate: 1 hr per job, 0.5 hr setup
-		setupHrs := 0.5
-		runHrs := numJobs // 1 hr per job as baseline
-
-		cost := bidding.ExpectedCost(go_.Offer.CostPerHour, runHrs, setupHrs, surv)
-		wallclock := bidding.ExpectedWallclockTime(runHrs, setupHrs, surv)
-		if strategy == bidding.StrategyFastest {
-			wallclock = runHrs + setupHrs
-		}
-
-		totalCost += cost
-		if wallclock > maxTime {
-			maxTime = wallclock
-		}
-	}
-
-	return w.Cost*totalCost + w.Time*maxTime
+	return ScoreEstimates(ApproximateEstimates(groupOffers), strategy)
 }
 
 // BuildReuseCandidate constructs a candidate grouping that assigns jobs to
@@ -465,35 +432,7 @@ type CandidateResult struct {
 	Label        string
 	Groups       []InstanceGroup
 	Offers       []GroupOffer
-}
-
-// BestCandidateForStrategy selects the candidate grouping with the lowest score
-// for the given strategy from pre-ranked offers.
-func BestCandidateForStrategy(
-	candidates []GroupingCandidate,
-	survivalModel *bidding.SurvivalModel,
-	jobDurationHrs float64,
-	setupFactory SetupOverheadFactory,
-	strategy bidding.SelectionStrategy,
-	minSurvival float64,
-) CandidateResult {
-	bestScore := math.Inf(1)
-	var best CandidateResult
-
-	for i, cand := range candidates {
-		offers := RankGroupOffers(cand.Raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
-		score := ScoreGrouping(offers, strategy)
-		if score < bestScore {
-			bestScore = score
-			best = CandidateResult{
-				CandidateIdx: i,
-				Label:        cand.Label,
-				Groups:       cand.Groups,
-				Offers:       offers,
-			}
-		}
-	}
-	return best
+	Estimates    []CostEstimate
 }
 
 // MapOffersToSplitGroups maps a winning candidate's offers back to the original
@@ -523,6 +462,36 @@ func MapOffersToSplitGroups(splitGroups []InstanceGroup, result CandidateResult)
 			mapped[si].SurvivalProb = result.Offers[ci].SurvivalProb
 			mapped[si].RejectedGroups = result.Offers[ci].RejectedGroups
 			mapped[si].Err = result.Offers[ci].Err
+		}
+	}
+	return mapped
+}
+
+// MapEstimatesToSplitGroups maps a winning candidate's estimates back to the
+// original split groups using the same job-ID tracing as MapOffersToSplitGroups.
+func MapEstimatesToSplitGroups(splitGroups []InstanceGroup, result CandidateResult) []CostEstimate {
+	jobToCandidate := make(map[int64]int)
+	for ci, cg := range result.Groups {
+		for _, job := range cg.Jobs {
+			jobToCandidate[job.ID] = ci
+		}
+	}
+
+	mapped := make([]CostEstimate, len(splitGroups))
+	for si, sg := range splitGroups {
+		mapped[si] = CostEstimate{Group: sg, Offer: GroupOffer{Group: sg}}
+		if len(sg.Jobs) == 0 {
+			continue
+		}
+		ci, ok := jobToCandidate[sg.Jobs[0].ID]
+		if !ok || ci >= len(result.Estimates) {
+			continue
+		}
+		mapped[si] = result.Estimates[ci]
+		mapped[si].Group = sg
+		if ci < len(result.Offers) {
+			mapped[si].Offer = result.Offers[ci]
+			mapped[si].Offer.Group = sg
 		}
 	}
 	return mapped
