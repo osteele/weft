@@ -141,8 +141,9 @@ func (m watchModel) renderInstanceView() (string, int) {
 	// Unplaced jobs section (instance-based modes)
 	if len(m.unplacedJobs) > 0 {
 		addLine(watchTitleStyle.Render(fmt.Sprintf("Unplaced Jobs (%d)", len(m.unplacedJobs))))
-		for _, job := range m.unplacedJobs {
-			addSelectable("  " + truncate(m.formatUnplacedJobRow(job), max(width-2, 40)))
+		formattedRows := m.formatUnplacedJobRows(m.unplacedJobs, max(width-4, 40))
+		for i := range m.unplacedJobs {
+			addSelectable("  " + truncate(formattedRows[i], max(width-2, 40)))
 		}
 		addLine("")
 	}
@@ -270,8 +271,9 @@ func (m watchModel) renderSystemView() (string, int) {
 	if len(m.unplacedJobs) == 0 {
 		addPlain(watchDimStyle.Render("  no unplaced jobs"))
 	} else {
-		for _, job := range m.unplacedJobs {
-			addSelectable("  " + truncate(m.formatUnplacedJobRow(job), width-2))
+		formattedRows := m.formatUnplacedJobRows(m.unplacedJobs, max(width-4, 40))
+		for i := range m.unplacedJobs {
+			addSelectable("  " + truncate(formattedRows[i], width-2))
 		}
 	}
 
@@ -473,17 +475,55 @@ func (m watchModel) formatOnPremJobRow(job *db.Job, projectWidth int) string {
 	)
 }
 
-func (m watchModel) formatUnplacedJobRow(job *db.Job) string {
-	row := fmt.Sprintf("#%-4d %-12s %-28s %s",
-		job.ID,
-		campaign.JobProjectLabel(job),
-		truncate(job.EffectiveDescription(), 28),
-		formatWatchGPUConstraint(job),
-	)
-	if len(job.PlacementReasons) > 0 {
-		row += "  " + watchDimStyle.Render(job.PlacementReasons[0])
+// formatUnplacedJobRows formats all unplaced jobs as a table with dynamically
+// sized columns that adapt to content and fill the available terminal width.
+func (m watchModel) formatUnplacedJobRows(jobs []*db.Job, availWidth int) []string {
+	if len(jobs) == 0 {
+		return nil
 	}
-	return row
+
+	// Measure column widths from actual data
+	idWidth := 4 // "#NNN" minimum
+	projWidth := 7
+	gpuWidth := 5
+	for _, job := range jobs {
+		if w := len(fmt.Sprintf("%d", job.ID)); w > idWidth {
+			idWidth = w
+		}
+		if w := len(campaign.JobProjectLabel(job)); w > projWidth {
+			projWidth = w
+		}
+		if w := len(formatWatchGPUConstraint(job)); w > gpuWidth {
+			gpuWidth = w
+		}
+	}
+
+	// Fixed overhead: "#" + spaces between columns
+	// Layout: #ID  PROJECT  DESCRIPTION  GPU  REASON
+	fixedCols := 1 + idWidth + 1 + projWidth + 1 + gpuWidth // #id proj gpu + separators
+	descWidth := availWidth - fixedCols - 4                 // 4 = spaces between remaining cols
+	if descWidth < 12 {
+		descWidth = 12
+	}
+	// Cap description width to leave room for placement reason
+	if descWidth > 32 {
+		descWidth = 32
+	}
+
+	rows := make([]string, len(jobs))
+	for i, job := range jobs {
+		row := fmt.Sprintf("#%-*d %-*s %-*s %-*s",
+			idWidth, job.ID,
+			projWidth, campaign.JobProjectLabel(job),
+			descWidth, truncate(job.EffectiveDescription(), descWidth),
+			gpuWidth, formatWatchGPUConstraint(job),
+		)
+		if len(job.PlacementReasons) > 0 {
+			row += "  " + watchDimStyle.Render(job.PlacementReasons[0])
+		}
+		rows[i] = row
+	}
+	return rows
 }
 
 func (m watchModel) selectedStatusDetail() string {
