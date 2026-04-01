@@ -21,6 +21,7 @@ func BuildViaFly(version, goos, goarch string, output io.Writer) (string, error)
 
 	cmd := exec.Command(script, version, outputPath)
 	cmd.Dir = root
+	cmd.Env = mergeEnvVars(loadRepoEnvVars(root))
 	cmd.Stdout = output
 	cmd.Stderr = output
 	if err := cmd.Run(); err != nil {
