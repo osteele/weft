@@ -239,6 +239,27 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				}
 			}
 
+			// Fast path: if DB shows terminal, send final update and exit
+			// immediately. Skip provider poll, R2 sync, and reconciliation —
+			// they're unnecessary and can block for 30s+ each (vastai CLI
+			// timeout, semaphore contention).
+			if IsInstanceTerminal(ci.Status) {
+				jobs, _ := db.GetLaunchJobsIncludingAttempts(database, cloudInstanceID)
+				outcomes, _ := db.GetAttemptOutcomesByLaunch(database, cloudInstanceID)
+				update := InstanceUpdate{
+					Launch:             ci,
+					Jobs:               jobs,
+					JobAttemptOutcomes: outcomes,
+					Instance:           cachedInstance,
+				}
+				select {
+				case ch <- update:
+				case <-ctx.Done():
+				}
+				_ = db.DeleteLaunchLiveState(database, cloudInstanceID)
+				return
+			}
+
 			if !survivalComputed {
 				survivalComputed = true
 				survival, _ = db.ComputeBootstrapSurvival(database, ci.Provider)
