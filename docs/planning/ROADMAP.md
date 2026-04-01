@@ -130,9 +130,38 @@ WHERE intent = 'run' AND host = ''
 3. Audit and update all queries
 4. Drop old columns
 
-### Why defer this
+### Stronger variant: derive status entirely from attempts + intent
 
-The behavioral fix (retry without losing failure info) is already achieved by
-making placement queries use `COALESCE(pending_status, status)`. The rename
-improves clarity but touches every file that references status — significant
-migration work for self-documenting column names.
+Instead of renaming columns, make `job_status` a pure view with no mutable
+status column. The view computes display status from:
+
+1. **User intent** (`requested_status`): `queued`, `canceled`, `killed`, `draft`
+2. **Latest attempt** (if any): `start_time`, `end_time`, `exit_code`, `launch_id`
+3. **Instance status** (via `launches.status`): whether the instance is still alive
+
+```
+IF requested_status IN ('canceled','killed','draft') → show that
+IF no attempts → 'queued'
+IF latest attempt has end_time:
+  exit_code = 0 → 'completed'
+  exit_code != 0 → 'failed'
+  exit_code IS NULL AND launch terminal → 'orphaned'
+IF latest attempt has start_time but no end_time:
+  launch terminal → 'orphaned'
+  ELSE → 'running'
+IF latest attempt has no start_time → 'queued'
+```
+
+**Key design choice**: attempts only exist once a host/instance is assigned.
+No phantom "queued" attempts. Retry = set `requested_status = 'queued'` (a
+new attempt is created only when the scheduler places the job). This makes
+`attempt_number` count real execution attempts.
+
+This eliminates `ResetLaunchJobs`, `CloseLaunchAttempts`, `cloud_outcome`,
+and the many code paths that mutate job status during instance lifecycle
+events. The instance lifecycle only writes to `launches`; the job view
+automatically reflects the correct state.
+
+**Motivation**: repeated bugs where grace expiry, bootstrap timeout, and
+resubmit code paths each need to set the right combination of attempt
+status, cloud_outcome, and job status. Each new edge case is whack-a-mole.
