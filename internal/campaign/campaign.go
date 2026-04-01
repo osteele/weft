@@ -15,6 +15,21 @@ import (
 	"github.com/osteele/weft/internal/workdir"
 )
 
+// vramTiers lists standard GPU VRAM sizes in GB, used to determine whether two
+// jobs' memory requirements are in the same tier for grouping purposes.
+var vramTiers = []int{12, 16, 24, 48, 80, 141}
+
+// vramTierOf returns the VRAM tier for a given memory requirement in GB.
+// Jobs in the same tier can share an instance without waste.
+func vramTierOf(memGB int) int {
+	for _, tier := range vramTiers {
+		if memGB <= tier {
+			return tier
+		}
+	}
+	return memGB // above all tiers
+}
+
 // InstanceGroup represents a group of jobs that share compatible GPU requirements
 // and can run sequentially on a single cloud instance.
 type InstanceGroup struct {
@@ -87,16 +102,17 @@ func groupConstrained(jobs []*db.Job) []InstanceGroup {
 		merged := false
 		for i := range groups {
 			supremum, ok := gpuClassSupremum(groups[i].GPUClass, job.GPUClass)
-			if ok {
-				groups[i].GPUClass = supremum
-				groups[i].Jobs = append(groups[i].Jobs, job)
-				if mem > groups[i].GPUMemGB {
-					groups[i].GPUMemGB = mem
-				}
-				groups[i].MaxGPUMemGB = mergeGPUMemCeiling(groups[i].MaxGPUMemGB, memMax)
-				merged = true
-				break
+			if !ok {
+				continue
 			}
+			groups[i].GPUClass = supremum
+			groups[i].Jobs = append(groups[i].Jobs, job)
+			if mem > groups[i].GPUMemGB {
+				groups[i].GPUMemGB = mem
+			}
+			groups[i].MaxGPUMemGB = mergeGPUMemCeiling(groups[i].MaxGPUMemGB, memMax)
+			merged = true
+			break
 		}
 
 		if !merged {
@@ -190,9 +206,16 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 
 		bestIdx := -1
 		var bestScore float64
+		jobTier := vramTierOf(mem)
 		for i, g := range groups {
 			// Skip groups with incompatible GPU constraints (e.g. ampere vs hopper).
 			if _, gpuOK := gpuClassSupremum(g.group.GPUClass, jobGPU); !gpuOK {
+				continue
+			}
+			// Skip groups in a different VRAM tier to avoid over-provisioning.
+			// An 8GB job grouped with a 20GB job forces the whole group to ≥20GB,
+			// routing cheap jobs to expensive GPUs.
+			if vramTierOf(g.group.GPUMemGB) != jobTier {
 				continue
 			}
 			score := sharedInputScore(g.hfUnion, info.hfInputs, sizeFunc, refCountWeight)
@@ -203,6 +226,12 @@ func affinityGroupUnconstrained(jobs []*db.Job, sizeFunc ModelSizeFunc) []Instan
 		}
 
 		memMax := jobGPUMemMaxGB(info.job)
+		// When a floatable job has no explicit memory ceiling, default to the
+		// VRAM tier. This signals "no performance advantage above this tier"
+		// to the bidding system, preventing oversized GPU selection.
+		if memMax == 0 && mem > 0 {
+			memMax = vramTierOf(mem)
+		}
 
 		if bestIdx >= 0 && bestScore > 0 {
 			g := &groups[bestIdx]
@@ -304,6 +333,9 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 			if !gpuOK {
 				continue
 			}
+			if vramTierOf(merged[i].GPUMemGB) != vramTierOf(g.GPUMemGB) {
+				continue
+			}
 			imgSup, imgOK := imageSupremum(merged[i].Image, g.Image)
 			if !imgOK {
 				continue
@@ -336,6 +368,47 @@ func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
 
 	sortGroups(merged)
 	return merged
+}
+
+// SplitToParallel expands multi-job groups into one-job-per-group, using each
+// job's individual GPU memory requirements instead of the group supremum. This
+// allows the scoring function to evaluate running jobs in parallel across
+// separate instances, each sized to the individual job's needs.
+func SplitToParallel(groups []InstanceGroup) []InstanceGroup {
+	var result []InstanceGroup
+	for _, g := range groups {
+		if len(g.Jobs) <= 1 {
+			result = append(result, InstanceGroup{
+				GPUClass:    g.GPUClass,
+				GPUMemGB:    g.GPUMemGB,
+				MaxGPUMemGB: g.MaxGPUMemGB,
+				DiskGB:      g.DiskGB,
+				Image:       g.Image,
+				Jobs:        append([]*db.Job(nil), g.Jobs...),
+			})
+			continue
+		}
+		for _, job := range g.Jobs {
+			mem := 0
+			if job.GPUMemGB != nil {
+				mem = *job.GPUMemGB
+			}
+			memMax := jobGPUMemMaxGB(job)
+			if memMax == 0 && mem > 0 {
+				memMax = vramTierOf(mem)
+			}
+			result = append(result, InstanceGroup{
+				GPUClass:    g.GPUClass,
+				GPUMemGB:    mem,
+				MaxGPUMemGB: memMax,
+				DiskGB:      g.DiskGB,
+				Image:       g.Image,
+				Jobs:        []*db.Job{job},
+			})
+		}
+	}
+	sortGroups(result)
+	return result
 }
 
 // FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).

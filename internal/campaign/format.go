@@ -240,7 +240,11 @@ type CostTable struct {
 }
 
 // selectionScale computes the fraction of selected jobs and the count for a group.
+// When selectedPerGroup is nil, all jobs are treated as selected.
 func selectionScale(groupIdx int, totalJobs int, selectedPerGroup []int) (selected int, scale float64) {
+	if selectedPerGroup == nil {
+		return totalJobs, 1.0
+	}
 	if groupIdx < len(selectedPerGroup) {
 		selected = selectedPerGroup[groupIdx]
 	}

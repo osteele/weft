@@ -429,6 +429,84 @@ func SummarizeForComparison(estimates []CostEstimate, selectedPerGroup []int) *S
 	return row
 }
 
+// ApproximateEstimates builds lightweight CostEstimate entries from ranked
+// group offers, using 1hr per job + 0.5hr setup as baseline. Used for display
+// when the winning candidate differs from the split groups and detailed
+// predictor-based estimates aren't available.
+func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
+	estimates := make([]CostEstimate, 0, len(offers))
+	for _, o := range offers {
+		if o.Offer == nil {
+			continue
+		}
+		numJobs := len(o.Group.Jobs)
+		if numJobs < 1 {
+			numJobs = 1
+		}
+		setupHrs := 0.5
+		runHrs := float64(numJobs)
+		totalHrs := runHrs + setupHrs
+		totalTime := time.Duration(totalHrs * float64(time.Hour))
+		totalCost := totalHrs * o.Offer.CostPerHour
+
+		estimates = append(estimates, CostEstimate{
+			Group: o.Group,
+			Offer: o,
+			Breakdown: estimate.Breakdown{
+				Total: estimate.Estimate{
+					Mean:  totalTime,
+					Lower: time.Duration(float64(totalTime) * 0.5),
+					Upper: time.Duration(float64(totalTime) * 2.0),
+				},
+			},
+			TotalTime: totalTime,
+			TotalCost: totalCost,
+		})
+	}
+	return estimates
+}
+
+// SummarizeGroupOffers builds an approximate StrategySummaryRow directly from
+// ranked group offers. This is used when detailed estimates aren't available
+// for the winning candidate's groups (e.g., when the parallel candidate wins
+// and its groups differ from the split groups). Uses 1hr per job + 0.5hr setup
+// as baseline estimates.
+func SummarizeGroupOffers(offers []GroupOffer) *StrategySummaryRow {
+	row := &StrategySummaryRow{}
+	hasAny := false
+	for _, o := range offers {
+		if o.Offer == nil {
+			continue
+		}
+		hasAny = true
+		row.NumGPUs++
+
+		numJobs := float64(len(o.Group.Jobs))
+		if numJobs < 1 {
+			numJobs = 1
+		}
+		setupHrs := 0.5
+		runHrs := numJobs
+		totalHrs := runHrs + setupHrs
+		groupTime := time.Duration(totalHrs * float64(time.Hour))
+		groupCost := totalHrs * o.Offer.CostPerHour
+
+		if groupTime > row.MaxTime.Mean {
+			row.MaxTime.Mean = groupTime
+			row.MaxTime.Lower = time.Duration(float64(groupTime) * 0.5)
+			row.MaxTime.Upper = time.Duration(float64(groupTime) * 2.0)
+		}
+		row.TotalRate += o.Offer.CostPerHour
+		row.TotalCost += groupCost
+		row.CostLower += groupCost * 0.5
+		row.CostUpper += groupCost * 2.0
+	}
+	if !hasAny {
+		return nil
+	}
+	return row
+}
+
 // SummarizeEstimates aggregates cost estimates into a summary with time and cost ranges.
 // Returns nil if estimates is empty or has no valid offers.
 func SummarizeEstimates(estimates []CostEstimate) *CostEstimateSummary {

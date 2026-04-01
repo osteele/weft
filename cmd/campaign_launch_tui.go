@@ -448,11 +448,26 @@ func (m *launchModel) rankCachedOffers() []campaign.GroupOffer {
 	return offers
 }
 
-// activeStrategyEstimates returns the cached cost estimates for the active strategy, or nil.
+// activeStrategyEstimates returns the cost estimates for the active strategy.
+// When a non-split candidate wins (e.g. "parallel"), returns approximate
+// estimates built from the candidate's actual group offers, so the detail
+// rows reflect the winning grouping (per-instance breakdown).
 func (m launchModel) activeStrategyEstimates() []campaign.CostEstimate {
 	if m.cachedRawOffers == nil {
 		return nil
 	}
+
+	// When a non-split candidate wins, use its offers directly
+	if len(m.cachedCandidates) > 1 {
+		setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
+		result := campaign.BestCandidateForStrategy(
+			m.cachedCandidates, m.survivalModel, 1.0, setupFactory, m.launchOpts.Strategy, m.launchOpts.MinSurvival,
+		)
+		if result.Label != "split" {
+			return campaign.ApproximateEstimates(result.Offers)
+		}
+	}
+
 	offers := m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
 	key := offerIdentity(offers)
 	return m.estimateCache[key]
@@ -559,9 +574,14 @@ func (m launchModel) fetchEstimatesIfNeeded() tea.Cmd {
 
 // gatherStrategyRows builds a StrategySummaryRow for each strategy using cached estimates.
 // Strategies that resolve to the same offers are merged into a single row (e.g. "fast/fastest").
+//
+// When a non-split candidate wins (e.g. "parallel" or "merged"), the summary
+// is built from the candidate's actual group offers rather than the split-mapped
+// estimates, so instance counts and time/cost reflect the winning grouping.
 func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.StrategySummaryRow {
 	var rows []campaign.StrategySummaryRow
 	keyToIdx := make(map[string]int) // offerIdentity → index into rows
+	setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
 
 	for _, strat := range allStrategies {
 		isActive := strat == m.launchOpts.Strategy
@@ -584,6 +604,8 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 			Disclosed: isActive && m.strategyDisclosed,
 			Loading:   true,
 		}
+
+		// Try detailed estimates first (from split-mapped offers)
 		if cached, ok := m.estimateCache[key]; ok {
 			if summary := campaign.SummarizeForComparison(cached, selectedPerGroup); summary != nil {
 				row = *summary
@@ -592,6 +614,25 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 				row.Disclosed = isActive && m.strategyDisclosed
 			}
 		}
+
+		// When a non-split candidate wins, override with the candidate's actual
+		// group offers. The split-mapped estimates have incorrect instance counts
+		// and time/cost because they reflect the original grouping, not the
+		// winning candidate's grouping.
+		if len(m.cachedCandidates) > 1 {
+			result := campaign.BestCandidateForStrategy(
+				m.cachedCandidates, m.survivalModel, 1.0, setupFactory, strat, m.launchOpts.MinSurvival,
+			)
+			if result.Label != "split" {
+				if summary := campaign.SummarizeGroupOffers(result.Offers); summary != nil {
+					summary.Label = row.Label
+					summary.Active = row.Active
+					summary.Disclosed = row.Disclosed
+					row = *summary
+				}
+			}
+		}
+
 		keyToIdx[key] = len(rows)
 		rows = append(rows, row)
 	}
@@ -1568,7 +1609,14 @@ func (m launchModel) View() string {
 						activeEstimates := m.activeStrategyEstimates()
 						if activeEstimates != nil {
 							indent := strings.Repeat(" ", summaryTable.TimeColOffset)
-							detailTable := campaign.FormatCostTableSelected(activeEstimates, selected, summaryTable.TimeWidth, summaryTable.RateWidth)
+							// When the winning candidate differs from split groups,
+							// pass nil for selection (all jobs selected) since the
+							// estimates use the candidate's group indices.
+							detailSelected := selected
+							if m.winningCandidate != nil && m.winningCandidate.Label != "split" {
+								detailSelected = nil
+							}
+							detailTable := campaign.FormatCostTableSelected(activeEstimates, detailSelected, summaryTable.TimeWidth, summaryTable.RateWidth)
 							detailLines := detailTable.Lines
 							if len(detailLines) > 1 {
 								detailLines = detailLines[:len(detailLines)-1]

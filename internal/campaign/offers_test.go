@@ -16,7 +16,7 @@ func TestCheapestOffer(t *testing.T) {
 		{ProviderID: "3", CostPerHour: 1.20, GPUName: "RTX_4090"},
 	}
 	// nil model falls back to cheapest
-	_, best := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap)
+	_, best := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5), bidding.StrategyCheap, 0)
 	if best.ProviderID != "2" {
 		t.Errorf("BestOffer(nil) returned id=%s, want 2", best.ProviderID)
 	}
@@ -364,5 +364,278 @@ func TestScoreGrouping_NoOfferReturnsInf(t *testing.T) {
 	score := ScoreGrouping(offers, bidding.StrategyCheap)
 	if score != math.Inf(1) {
 		t.Errorf("expected +Inf for nil offer, got %.3f", score)
+	}
+}
+
+// TestScoreGrouping_FastestPrefersParallel verifies that the fastest strategy
+// prefers running N jobs on N instances in parallel over running them
+// sequentially on one instance.
+func TestScoreGrouping_FastestPrefersParallel(t *testing.T) {
+	h200Offer := &cloud.Offer{ProviderID: "h200", CostPerHour: 2.50, GPUName: "H200", DLPerf: 40.0}
+	rtx3090Offer := &cloud.Offer{ProviderID: "rtx3090", CostPerHour: 0.15, GPUName: "RTX 3090", DLPerf: 15.0}
+
+	// Grouped: 5 jobs on one H200 instance (sequential)
+	grouped := []GroupOffer{
+		{
+			Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{
+				{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 5},
+			}},
+			Offer: h200Offer,
+		},
+	}
+
+	// Parallel: 5 jobs on 5 separate cheap instances
+	parallel := []GroupOffer{
+		{Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 8, Jobs: []*db.Job{{ID: 1}}}, Offer: rtx3090Offer},
+		{Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 8, Jobs: []*db.Job{{ID: 2}}}, Offer: rtx3090Offer},
+		{Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 8, Jobs: []*db.Job{{ID: 3}}}, Offer: rtx3090Offer},
+		{Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 8, Jobs: []*db.Job{{ID: 4}}}, Offer: rtx3090Offer},
+		{Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 8, Jobs: []*db.Job{{ID: 5}}}, Offer: rtx3090Offer},
+	}
+
+	groupedScore := ScoreGrouping(grouped, bidding.StrategyFastest)
+	parallelScore := ScoreGrouping(parallel, bidding.StrategyFastest)
+
+	if parallelScore >= groupedScore {
+		t.Errorf("fastest should prefer parallel (score=%.3f) over grouped (score=%.3f)",
+			parallelScore, groupedScore)
+	}
+
+	// Grouped: time = 5 jobs * 1hr + 0.5hr setup = 5.5hr
+	// Parallel: time = max(1hr + 0.5hr) = 1.5hr
+	// Fastest weights: Cost=0.01, Time=1.0
+	// So parallel should win by a large margin
+	t.Logf("grouped score=%.3f, parallel score=%.3f (ratio=%.1fx)",
+		groupedScore, parallelScore, groupedScore/parallelScore)
+}
+
+// TestSummarizeGroupOffers_ParallelInstanceCount verifies that SummarizeGroupOffers
+// correctly counts instances when each job is on its own instance.
+func TestSummarizeGroupOffers_ParallelInstanceCount(t *testing.T) {
+	offer := &cloud.Offer{ProviderID: "1", CostPerHour: 0.15, GPUName: "RTX 3090"}
+	offers := []GroupOffer{
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}}, Offer: offer},
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 2}}}, Offer: offer},
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 3}}}, Offer: offer},
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 4}}}, Offer: offer},
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 5}}}, Offer: offer},
+	}
+	summary := SummarizeGroupOffers(offers)
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.NumGPUs != 5 {
+		t.Errorf("NumGPUs = %d, want 5", summary.NumGPUs)
+	}
+}
+
+// TestJob545Through549_FullPipeline exercises the full pipeline for the actual
+// job scenario: grouping → offer ranking → strategy selection. Verifies:
+// 1. 8GB jobs (546-549) are in a separate group from 20GB jobs
+// 2. MaxGPUMemGB is set (caps DLPerf for oversized GPUs)
+// 3. Fastest strategy doesn't pick H200 for 8GB jobs
+// 4. Parallel candidate splits the 4-job group for parallel execution
+func TestJob545Through549_FullPipeline(t *testing.T) {
+	// Step 1: Group the jobs
+	jobs := []*db.Job{
+		{ID: 542, Status: db.StatusQueued, GPUClass: "3090", GPUMemGB: intPtr(20)},
+		{ID: 545, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:gpt2", "hf-dataset:wikitext"}},
+		{ID: 546, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(8),
+			Inputs: []string{"hf:gpt2", "hf-dataset:wikitext"}},
+		{ID: 547, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(8),
+			Inputs: []string{"hf:gpt2", "hf-dataset:wikitext"}},
+		{ID: 548, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(8),
+			Inputs: []string{"hf:gpt2", "hf-dataset:wikitext"}},
+		{ID: 549, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(8),
+			Inputs: []string{"hf:gpt2", "hf-dataset:wikitext"}},
+		{ID: 550, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20),
+			Inputs: []string{"hf:EleutherAI/pythia-1.4b"}},
+	}
+
+	groups := GroupByAffinity(jobs, nil)
+	t.Logf("Groups: %d", len(groups))
+	for i, g := range groups {
+		t.Logf("  group %d: %s ≥%dGB (max=%d), %d jobs", i, g.GPUClass, g.GPUMemGB, g.MaxGPUMemGB, len(g.Jobs))
+	}
+
+	// Find the 8GB group
+	var group8GB *InstanceGroup
+	for i := range groups {
+		if groups[i].GPUMemGB == 8 {
+			group8GB = &groups[i]
+			break
+		}
+	}
+	if group8GB == nil {
+		t.Fatal("no group with GPUMemGB=8 found — tier separation failed")
+	}
+	if len(group8GB.Jobs) != 4 {
+		t.Errorf("8GB group has %d jobs, want 4", len(group8GB.Jobs))
+	}
+	if group8GB.MaxGPUMemGB == 0 {
+		t.Error("8GB group MaxGPUMemGB=0 — should be set to VRAM tier (12)")
+	}
+
+	// Step 2: Verify MaxGPUMemGB caps DLPerf in offer selection.
+	// With MaxGPUMemGB=12, the fastest strategy should prefer a cheap GPU
+	// over an H200 because H200's DLPerf advantage is nullified.
+	offers := []cloud.Offer{
+		{ProviderID: "rtx3090", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+		{ProviderID: "rtx4090", GPUName: "RTX 4090", GPUMemGB: 24, CostPerHour: 0.33, DLPerf: 25.0},
+		{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+	}
+	_, best := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5),
+		bidding.StrategyFastest, group8GB.MaxGPUMemGB)
+	if best.ProviderID == "h200" {
+		t.Errorf("fastest strategy picked H200 for 8GB group with MaxGPUMemGB=%d — DLPerf capping failed",
+			group8GB.MaxGPUMemGB)
+	}
+	t.Logf("fastest strategy picked %s ($%.2f/hr) for 8GB group", best.GPUName, best.CostPerHour)
+
+	// Step 3: Verify parallel candidate splits the 4-job group
+	parallelGroups := SplitToParallel(groups)
+	if len(parallelGroups) <= len(groups) {
+		t.Errorf("parallel candidate has %d groups (same as split %d) — splitting failed",
+			len(parallelGroups), len(groups))
+	}
+	// Count 1-job groups that came from the 8GB group and verify MaxGPUMemGB
+	var singleJob8GB int
+	for _, g := range parallelGroups {
+		if g.GPUMemGB == 8 && len(g.Jobs) == 1 {
+			singleJob8GB++
+			if g.MaxGPUMemGB == 0 {
+				t.Errorf("parallel 8GB group (job %d) has MaxGPUMemGB=0 — should be 12 (VRAM tier)",
+					g.Jobs[0].ID)
+			}
+		}
+	}
+	if singleJob8GB != 4 {
+		t.Errorf("expected 4 single-job 8GB groups, got %d — parallel split failed", singleJob8GB)
+	}
+
+	// Step 3b: Verify offer selection on parallel candidate's 8GB groups
+	// avoids H200. This is the end-to-end check: parallel group → BestOffer.
+	for _, g := range parallelGroups {
+		if g.GPUMemGB != 8 {
+			continue
+		}
+		_, pick := bidding.BestOffer(nil, offers, 1.0, bidding.ConstantSetup(0.5),
+			bidding.StrategyFastest, g.MaxGPUMemGB)
+		if pick.ProviderID == "h200" {
+			t.Errorf("parallel 8GB group (job %d, MaxGPUMemGB=%d): fastest picked H200 — should pick cheaper GPU",
+				g.Jobs[0].ID, g.MaxGPUMemGB)
+		}
+	}
+
+	// Step 4: Verify parallel scores better than grouped for fastest
+	cheapOffer := &cloud.Offer{ProviderID: "rtx3090", CostPerHour: 0.15, GPUName: "RTX 3090"}
+	grouped := []GroupOffer{
+		{Group: *group8GB, Offer: cheapOffer},
+	}
+	parallel := make([]GroupOffer, 4)
+	for i := 0; i < 4; i++ {
+		parallel[i] = GroupOffer{
+			Group: InstanceGroup{GPUMemGB: 8, Jobs: []*db.Job{{ID: int64(546 + i)}}},
+			Offer: cheapOffer,
+		}
+	}
+	groupedScore := ScoreGrouping(grouped, bidding.StrategyFastest)
+	parallelScore := ScoreGrouping(parallel, bidding.StrategyFastest)
+	if parallelScore >= groupedScore {
+		t.Errorf("fastest should prefer parallel (%.3f) over grouped (%.3f)", parallelScore, groupedScore)
+	}
+	t.Logf("grouped score=%.3f, parallel score=%.3f (%.1fx improvement)", groupedScore, parallelScore, groupedScore/parallelScore)
+}
+
+// TestOfferConstraints_MaxGPUMemGB_NotHardFilter verifies that MaxGPUMemGB
+// is NOT passed as a hard filter to the cloud search. It's a soft signal
+// for DLPerf capping only.
+func TestOfferConstraints_MaxGPUMemGB_NotHardFilter(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:    "NVIDIA",
+		GPUMemGB:    8,
+		MaxGPUMemGB: 12,
+	}
+	c := offerConstraintsForGroup(group)
+	if c.MaxGPUMemGB != 0 {
+		t.Errorf("MaxGPUMemGB should not be passed to search constraints (got %d); "+
+			"it's a soft signal for DLPerf capping, not a hard offer filter", c.MaxGPUMemGB)
+	}
+	if c.MinGPUMemGB != 8 {
+		t.Errorf("MinGPUMemGB = %d, want 8", c.MinGPUMemGB)
+	}
+}
+
+// TestSplitToParallel_PreservesMaxGPUMemGB verifies that SplitToParallel
+// applies the VRAM tier ceiling to individual groups, matching the behavior
+// of affinityGroupUnconstrained.
+func TestSplitToParallel_PreservesMaxGPUMemGB(t *testing.T) {
+	group := InstanceGroup{
+		GPUClass:    "NVIDIA",
+		GPUMemGB:    20, // supremum
+		MaxGPUMemGB: 24, // group ceiling
+		Jobs: []*db.Job{
+			{ID: 1, GPUMemGB: intPtr(20)},                         // no explicit ceiling
+			{ID: 2, GPUMemGB: intPtr(8)},                          // no explicit ceiling
+			{ID: 3, GPUMemGB: intPtr(8), GPUMemMaxGB: intPtr(16)}, // explicit ceiling
+		},
+	}
+	result := SplitToParallel([]InstanceGroup{group})
+	if len(result) != 3 {
+		t.Fatalf("expected 3 groups, got %d", len(result))
+	}
+
+	for _, g := range result {
+		if g.MaxGPUMemGB == 0 {
+			t.Errorf("group with GPUMemGB=%d has MaxGPUMemGB=0; "+
+				"should be VRAM tier default or explicit ceiling", g.GPUMemGB)
+		}
+		job := g.Jobs[0]
+		if job.GPUMemGB != nil && *job.GPUMemGB == 8 && job.GPUMemMaxGB == nil {
+			// 8GB job without explicit ceiling → should get tier 12
+			if g.MaxGPUMemGB != 12 {
+				t.Errorf("8GB job without ceiling: MaxGPUMemGB=%d, want 12 (VRAM tier)",
+					g.MaxGPUMemGB)
+			}
+		}
+		if job.GPUMemGB != nil && *job.GPUMemGB == 8 && job.GPUMemMaxGB != nil {
+			// 8GB job with explicit ceiling of 16
+			if g.MaxGPUMemGB != 16 {
+				t.Errorf("8GB job with ceiling=16: MaxGPUMemGB=%d, want 16",
+					g.MaxGPUMemGB)
+			}
+		}
+		if job.GPUMemGB != nil && *job.GPUMemGB == 20 {
+			// 20GB job without explicit ceiling → should get tier 24
+			if g.MaxGPUMemGB != 24 {
+				t.Errorf("20GB job without ceiling: MaxGPUMemGB=%d, want 24 (VRAM tier)",
+					g.MaxGPUMemGB)
+			}
+		}
+	}
+}
+
+// TestApproximateEstimates_MatchesGroupOfferCount verifies that
+// ApproximateEstimates produces one estimate per group with a valid offer.
+func TestApproximateEstimates_MatchesGroupOfferCount(t *testing.T) {
+	offer := &cloud.Offer{ProviderID: "1", CostPerHour: 0.15, GPUName: "RTX 3090"}
+	offers := []GroupOffer{
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}}, Offer: offer},
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 2}}}, Offer: offer},
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 3}}}, Offer: nil}, // no offer
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 4}}}, Offer: offer},
+	}
+	estimates := ApproximateEstimates(offers)
+	if len(estimates) != 3 {
+		t.Errorf("expected 3 estimates (groups with offers), got %d", len(estimates))
+	}
+	for _, est := range estimates {
+		if est.Offer.Offer == nil {
+			t.Error("estimate has nil offer — should be filtered")
+		}
+		if est.TotalCost <= 0 {
+			t.Error("estimate TotalCost should be positive")
+		}
 	}
 }

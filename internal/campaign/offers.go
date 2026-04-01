@@ -1,11 +1,11 @@
 package campaign
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
 	"strconv"
-	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
@@ -36,9 +36,11 @@ func offerConstraintsForGroup(group InstanceGroup) cloud.OfferConstraints {
 	c := cloud.OfferConstraints{
 		GPUClass:       group.GPUClass,
 		MinGPUMemGB:    group.GPUMemGB,
-		MaxGPUMemGB:    group.MaxGPUMemGB,
 		MinDiskGB:      group.DiskGB,
 		MinReliability: cloud.DefaultMinReliability,
+		// MaxGPUMemGB is intentionally NOT passed to the search filter.
+		// It signals "no performance advantage above this tier" and is used
+		// by BestOffer to cap effective DLPerf, not to exclude offers.
 	}
 	if group.HasComputeIntensiveJob() {
 		c.MinCPUCoresEffective = intFromEnvOrDefault("WEFT_COMPUTE_CPU_CORES", 16)
@@ -103,7 +105,7 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 	if len(filtered) == 0 {
 		return result
 	}
-	_, best := bidding.BestOffer(survivalModel, filtered, jobDurationHrs, setupOverhead, strategy)
+	_, best := bidding.BestOffer(survivalModel, filtered, jobDurationHrs, setupOverhead, strategy, group.MaxGPUMemGB)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
@@ -149,23 +151,54 @@ type GroupRawOffers struct {
 	Err    error
 }
 
+// constraintKey returns a string key for deduplicating cloud searches.
+// Groups with identical constraints produce identical offers.
+func constraintKey(c cloud.OfferConstraints) string {
+	return fmt.Sprintf("%s/%d/%d/%d/%.2f/%d",
+		c.GPUClass, c.MinGPUMemGB, c.MaxGPUMemGB, c.MinDiskGB,
+		c.MinReliability, c.MinCPUCoresEffective)
+}
+
 // FetchGroupRawOffers searches cloud providers for all offers per group, in parallel.
+// Groups with identical constraints share a single search to avoid redundant API calls.
 // Returns unranked offers suitable for caching and later ranking by strategy.
 func FetchGroupRawOffers(clients []cloud.Client, groups []InstanceGroup) []GroupRawOffers {
-	results := make([]GroupRawOffers, len(groups))
-	var wg sync.WaitGroup
-
+	// Build constraint keys and identify unique searches
+	keys := make([]string, len(groups))
+	uniqueConstraints := make(map[string]cloud.OfferConstraints)
 	for i, g := range groups {
-		results[i].Group = g
-		wg.Add(1)
-		go func(idx int, group InstanceGroup) {
-			defer wg.Done()
-			offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
-			results[idx] = GroupRawOffers{Group: group, Offers: offers, Err: err}
-		}(i, g)
+		c := offerConstraintsForGroup(g)
+		k := constraintKey(c)
+		keys[i] = k
+		uniqueConstraints[k] = c
 	}
 
-	wg.Wait()
+	// Search unique constraints in parallel
+	type searchResult struct {
+		key    string
+		offers []cloud.Offer
+		err    error
+	}
+	ch := make(chan searchResult, len(uniqueConstraints))
+	for k, c := range uniqueConstraints {
+		go func(key string, constraints cloud.OfferConstraints) {
+			offers, err := cloud.SearchAllProviders(clients, constraints)
+			ch <- searchResult{key, offers, err}
+		}(k, c)
+	}
+
+	offersByKey := make(map[string]searchResult, len(uniqueConstraints))
+	for range uniqueConstraints {
+		r := <-ch
+		offersByKey[r.key] = r
+	}
+
+	// Map results back to groups
+	results := make([]GroupRawOffers, len(groups))
+	for i, g := range groups {
+		r := offersByKey[keys[i]]
+		results[i] = GroupRawOffers{Group: g, Offers: r.offers, Err: r.err}
+	}
 	return results
 }
 
@@ -246,33 +279,51 @@ type GroupingCandidate struct {
 	Raw    []GroupRawOffers
 }
 
-// FetchCandidateGroupings generates split and merged candidate groupings and
-// fetches raw offers for both in parallel. The split groups are the input;
-// merged groups are derived by combining GPU-compatible groups.
+// FetchCandidateGroupings generates candidate groupings (split, merged,
+// parallel) and fetches raw offers for all in parallel. The split groups are
+// the input; merged and parallel groups are derived variants.
+//
+// The "parallel" candidate splits multi-job groups into one-job-per-group,
+// using each job's individual GPU memory requirements. This allows the scoring
+// function to evaluate running jobs concurrently on separate instances, each
+// sized to the individual job's needs.
 func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup) []GroupingCandidate {
 	mergedGroups := MergeCompatibleGroups(splitGroups)
+	parallelGroups := SplitToParallel(splitGroups)
 
-	// If merging didn't reduce the number of groups, skip the duplicate search
-	if len(mergedGroups) == len(splitGroups) {
+	// Determine which candidates are distinct
+	hasMerged := len(mergedGroups) != len(splitGroups)
+	hasParallel := len(parallelGroups) != len(splitGroups)
+
+	if !hasMerged && !hasParallel {
 		raw := FetchGroupRawOffers(clients, splitGroups)
 		return []GroupingCandidate{
 			{Label: "split", Groups: splitGroups, Raw: raw},
 		}
 	}
 
-	// Fetch offers for both candidates in parallel
+	// Build candidate list and fetch offers in parallel
 	type result struct {
 		idx int
 		raw []GroupRawOffers
 	}
-	ch := make(chan result, 2)
-	go func() { ch <- result{0, FetchGroupRawOffers(clients, splitGroups)} }()
-	go func() { ch <- result{1, FetchGroupRawOffers(clients, mergedGroups)} }()
 
-	candidates := make([]GroupingCandidate, 2)
-	candidates[0] = GroupingCandidate{Label: "split", Groups: splitGroups}
-	candidates[1] = GroupingCandidate{Label: "merged", Groups: mergedGroups}
-	for range 2 {
+	var candidates []GroupingCandidate
+	candidates = append(candidates, GroupingCandidate{Label: "split", Groups: splitGroups})
+	if hasMerged {
+		candidates = append(candidates, GroupingCandidate{Label: "merged", Groups: mergedGroups})
+	}
+	if hasParallel {
+		candidates = append(candidates, GroupingCandidate{Label: "parallel", Groups: parallelGroups})
+	}
+
+	ch := make(chan result, len(candidates))
+	for i, cand := range candidates {
+		go func(idx int, groups []InstanceGroup) {
+			ch <- result{idx, FetchGroupRawOffers(clients, groups)}
+		}(i, cand.Groups)
+	}
+	for range candidates {
 		r := <-ch
 		candidates[r.idx].Raw = r.raw
 	}

@@ -138,7 +138,7 @@ func TestBestOffer_NilModel_FallsBackToCheapest(t *testing.T) {
 		{ProviderID: "b", GPUName: "RTX 4090", CostPerHour: 0.50, Reliability: 0.80},
 	}
 
-	idx, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyCheap)
+	idx, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyCheap, 0)
 	if idx != 1 || best.ProviderID != "b" {
 		t.Errorf("nil model should pick cheapest, got idx=%d id=%s", idx, best.ProviderID)
 	}
@@ -181,7 +181,7 @@ func TestBestOffer_PrefersReliableOverCheap(t *testing.T) {
 		{ProviderID: "moderate", GPUName: "RTX 4090", CostPerHour: 0.80, Reliability: 0.99},
 	}
 
-	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap)
+	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap, 0)
 	if best.ProviderID != "moderate" {
 		t.Errorf("expected moderate offer (higher reliability) to win, got %s", best.ProviderID)
 	}
@@ -262,13 +262,13 @@ func TestBestOffer_FastStrategy_PrefersHighDLPerf(t *testing.T) {
 		{ProviderID: "expensive-fast", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0, Reliability: 0.95},
 	}
 
-	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast)
+	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast, 0)
 	if best.ProviderID != "expensive-fast" {
 		t.Errorf("fast strategy should prefer high DLPerf, got %s", best.ProviderID)
 	}
 
 	// Cost strategy should prefer the cheap one
-	_, bestCost := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap)
+	_, bestCost := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyCheap, 0)
 	if bestCost.ProviderID != "cheap-slow" {
 		t.Errorf("cost strategy should prefer cheap offer, got %s", bestCost.ProviderID)
 	}
@@ -280,7 +280,7 @@ func TestBestOffer_FastStrategy_NilModel(t *testing.T) {
 		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
 	}
 
-	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFast)
+	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFast, 0)
 	if best.ProviderID != "high-perf" {
 		t.Errorf("fast strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
 	}
@@ -301,13 +301,13 @@ func TestBestOffer_FastestStrategy_IgnoresSurvivalModel(t *testing.T) {
 	}
 
 	// Fastest should pick highest DLPerf (happy-path time, no survival adjustment)
-	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFastest)
+	_, best := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFastest, 0)
 	if best.ProviderID != "risky-fast" {
 		t.Errorf("fastest strategy should pick highest DLPerf, got %s", best.ProviderID)
 	}
 
 	// Fast strategy with same model might prefer the reliable one
-	_, bestFast := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast)
+	_, bestFast := BestOffer(model, offers, 2.0, ConstantSetup(0.5), StrategyFast, 0)
 	// Just verify fastest and fast can differ (fastest ignores survival)
 	_ = bestFast
 }
@@ -377,7 +377,7 @@ func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 		{ProviderID: "high-perf", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
 	}
 
-	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest)
+	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
 	if best.ProviderID != "high-perf" {
 		t.Errorf("fastest strategy with nil model should pick highest DLPerf, got %s", best.ProviderID)
 	}
@@ -391,7 +391,7 @@ func TestBestOffer_FastestRejectsPathologicallyExpensive(t *testing.T) {
 		{ProviderID: "pathological", GPUName: "H100", CostPerHour: 1000.0, DLPerf: 21.0},
 	}
 
-	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyFastest)
+	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyFastest, 0)
 	if best.ProviderID != "reasonable" {
 		t.Errorf("fastest should reject pathologically expensive offer, got %s (cost=$%.0f/hr)", best.ProviderID, best.CostPerHour)
 	}
@@ -405,7 +405,7 @@ func TestBestOffer_CheapBreaksTiesByTime(t *testing.T) {
 		{ProviderID: "fast", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 20.0},
 	}
 
-	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyCheap)
+	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyCheap, 0)
 	if best.ProviderID != "fast" {
 		t.Errorf("cheap should break ties by time, got %s", best.ProviderID)
 	}
@@ -538,5 +538,42 @@ func TestFilterOffersBySurvival_EmptyOffers(t *testing.T) {
 	passed, rejected := FilterOffersBySurvival(model, nil, 0.5)
 	if len(passed) != 0 || len(rejected) != 0 {
 		t.Errorf("empty offers should return empty results")
+	}
+}
+
+// TestBestOffer_MaxGPUMemGB_CapsEffectiveDLPerf verifies that when maxGPUMemGB
+// is set, the fastest strategy prefers a cheaper GPU over an expensive one
+// with higher DLPerf, because the oversized GPU's DLPerf is capped.
+func TestBestOffer_MaxGPUMemGB_CapsEffectiveDLPerf(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "rtx3090", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+		{ProviderID: "h200", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+	}
+
+	// Without ceiling: fastest picks H200 (higher DLPerf)
+	_, bestNoCeiling := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
+	if bestNoCeiling.ProviderID != "h200" {
+		t.Errorf("without ceiling, fastest should pick H200, got %s", bestNoCeiling.ProviderID)
+	}
+
+	// With ceiling at 12GB: fastest picks RTX 3090 because H200's DLPerf is
+	// capped (no speed advantage), and the cost weight breaks the tie.
+	_, bestWithCeiling := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 12)
+	if bestWithCeiling.ProviderID != "rtx3090" {
+		t.Errorf("with maxGPUMemGB=12, fastest should pick RTX 3090 (cheaper, same effective speed), got %s",
+			bestWithCeiling.ProviderID)
+	}
+}
+
+// TestBestOffer_MaxGPUMemGB_Zero_NoEffect verifies that maxGPUMemGB=0 has no
+// effect on scoring (backward compatible).
+func TestBestOffer_MaxGPUMemGB_Zero_NoEffect(t *testing.T) {
+	offers := []cloud.Offer{
+		{ProviderID: "cheap", GPUName: "RTX 3090", GPUMemGB: 24, CostPerHour: 0.15, DLPerf: 15.0},
+		{ProviderID: "fast", GPUName: "H200", GPUMemGB: 141, CostPerHour: 3.23, DLPerf: 40.0},
+	}
+	_, best := BestOffer(nil, offers, 1.0, ConstantSetup(0.5), StrategyFastest, 0)
+	if best.ProviderID != "fast" {
+		t.Errorf("maxGPUMemGB=0 should not affect scoring, expected fast, got %s", best.ProviderID)
 	}
 }
