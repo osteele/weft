@@ -383,6 +383,54 @@ func TestBestOffer_FastestStrategy_NilModel(t *testing.T) {
 	}
 }
 
+func TestBestOffer_FastestRejectsPathologicallyExpensive(t *testing.T) {
+	// A $1000/hr offer that's marginally faster should lose to a $1.50/hr
+	// offer, because the tiny cost weight still penalizes extreme prices.
+	offers := []cloud.Offer{
+		{ProviderID: "reasonable", GPUName: "A100", CostPerHour: 1.50, DLPerf: 20.0},
+		{ProviderID: "pathological", GPUName: "H100", CostPerHour: 1000.0, DLPerf: 21.0},
+	}
+
+	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyFastest)
+	if best.ProviderID != "reasonable" {
+		t.Errorf("fastest should reject pathologically expensive offer, got %s (cost=$%.0f/hr)", best.ProviderID, best.CostPerHour)
+	}
+}
+
+func TestBestOffer_CheapBreaksTiesByTime(t *testing.T) {
+	// Two offers at the same price: cheap strategy should prefer the faster one
+	// due to the small time weight.
+	offers := []cloud.Offer{
+		{ProviderID: "slow", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 5.0},
+		{ProviderID: "fast", GPUName: "RTX 4090", CostPerHour: 0.50, DLPerf: 20.0},
+	}
+
+	_, best := BestOffer(nil, offers, 2.0, ConstantSetup(0.5), StrategyCheap)
+	if best.ProviderID != "fast" {
+		t.Errorf("cheap should break ties by time, got %s", best.ProviderID)
+	}
+}
+
+func TestStrategyWeights(t *testing.T) {
+	// Verify weights are accessible and have expected properties
+	cheap := StrategyCheap.Weights()
+	fast := StrategyFast.Weights()
+	fastest := StrategyFastest.Weights()
+
+	if cheap.Cost <= cheap.Time {
+		t.Error("cheap should weight cost more than time")
+	}
+	if fast.Time <= fast.Cost {
+		t.Error("fast should weight time more than cost")
+	}
+	if fastest.Time <= fastest.Cost {
+		t.Error("fastest should weight time more than cost")
+	}
+	if fastest.Cost >= fast.Cost {
+		t.Error("fastest should have less cost sensitivity than fast")
+	}
+}
+
 func TestFilterOffersBySurvival_NilModel(t *testing.T) {
 	offers := []cloud.Offer{{ProviderID: "a", GPUName: "RTX 4090"}}
 	passed, rejected := FilterOffersBySurvival(nil, offers, 0.5)

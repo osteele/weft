@@ -65,14 +65,15 @@ type listItem struct {
 }
 
 type launchModel struct {
-	groups          []campaign.InstanceGroup
-	groupOffers     []campaign.GroupOffer
-	cachedRawOffers []campaign.GroupRawOffers // cached raw offers from providers
-	costEstimates   []campaign.CostEstimate
-	estimateCache   map[string][]campaign.CostEstimate // offerIdentity → estimates
-	predConfig      *predictor.Config
-	overheadModel   *estimate.OverheadModel
-	survivalModel   *bidding.SurvivalModel
+	groups           []campaign.InstanceGroup
+	groupOffers      []campaign.GroupOffer
+	cachedRawOffers  []campaign.GroupRawOffers    // cached raw offers for the split (base) groups
+	cachedCandidates []campaign.GroupingCandidate // all candidate groupings (split, merged)
+	costEstimates    []campaign.CostEstimate
+	estimateCache    map[string][]campaign.CostEstimate // offerIdentity → estimates
+	predConfig       *predictor.Config
+	overheadModel    *estimate.OverheadModel
+	survivalModel    *bidding.SurvivalModel
 
 	items    []listItem
 	cursor   int
@@ -81,6 +82,11 @@ type launchModel struct {
 
 	showCostDetail    bool
 	strategyDisclosed bool // true = show detail rows for active strategy inline
+
+	// dedupedStrategies is the list of visually distinct strategies (after
+	// merging those with identical offer sets). The 's' key cycles through
+	// this list. Rebuilt whenever offers are re-ranked.
+	dedupedStrategies []bidding.SelectionStrategy
 
 	campaignID       int64
 	reconciling      bool // true while background reconciliation is in progress
@@ -128,6 +134,7 @@ type reconcileDoneMsg struct {
 
 type rawOffersLoadedMsg struct {
 	raw        []campaign.GroupRawOffers
+	candidates []campaign.GroupingCandidate // when set, overrides raw
 	err        error
 	background bool // true if this is a background refresh (don't show loading state)
 }
@@ -366,8 +373,20 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 			}
 			return rawOffersLoadedMsg{err: err}
 		}
-		raw := campaign.FetchGroupRawOffers(clients, groups)
-		return rawOffersLoadedMsg{raw: raw, background: background}
+		candidates := campaign.FetchCandidateGroupings(clients, groups)
+		// Use the split candidate's raw offers as the default (for display
+		// groups which match m.groups).
+		var splitRaw []campaign.GroupRawOffers
+		for _, c := range candidates {
+			if c.Label == "split" {
+				splitRaw = c.Raw
+				break
+			}
+		}
+		if splitRaw == nil && len(candidates) > 0 {
+			splitRaw = candidates[0].Raw
+		}
+		return rawOffersLoadedMsg{raw: splitRaw, candidates: candidates, background: background}
 	}
 }
 
@@ -382,6 +401,11 @@ func (m launchModel) prefetchHFSizes() tea.Cmd {
 }
 
 // rankCachedOffersForStrategy ranks cached raw offers with a specific strategy.
+//
+// TODO: When candidate groupings are available, use BestCandidateForStrategy
+// to select the best grouping per strategy. Currently always uses split groups
+// (m.cachedRawOffers) to maintain 1:1 alignment with m.groups for the job
+// selector and launch logic.
 func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
 	setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
 	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, setupFactory, strategy, m.launchOpts.MinSurvival)
@@ -425,6 +449,27 @@ func (m launchModel) preflightOtherStrategies() []tea.Cmd {
 		cmds = append(cmds, m.fetchEstimatesForOffers(offers, key, false))
 	}
 	return cmds
+}
+
+// rebuildDedupedStrategies computes the list of visually distinct strategies by
+// deduplicating those that produce identical offer sets. The first strategy in
+// each group of duplicates is kept; later ones are dropped.
+func (m *launchModel) rebuildDedupedStrategies() {
+	if m.cachedRawOffers == nil {
+		m.dedupedStrategies = append([]bidding.SelectionStrategy(nil), allStrategies...)
+		return
+	}
+	seen := make(map[string]bool)
+	m.dedupedStrategies = m.dedupedStrategies[:0]
+	for _, strat := range allStrategies {
+		offers := m.rankCachedOffersForStrategy(strat)
+		key := offerIdentity(offers)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		m.dedupedStrategies = append(m.dedupedStrategies, strat)
+	}
 }
 
 // gatherStrategyRows builds a StrategySummaryRow for each strategy using cached estimates.
@@ -638,6 +683,8 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.groupOffers = nil
 			m.cachedRawOffers = nil
+			m.cachedCandidates = nil
+			m.dedupedStrategies = nil
 			m.costEstimates = nil
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
 			return m, m.fetchRawOffers(false)
@@ -651,6 +698,8 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.quitOrSwitchToWatch(fmt.Sprintf("Launch error: %v", msg.err))
 		}
 		m.cachedRawOffers = msg.raw
+		m.cachedCandidates = msg.candidates
+		m.rebuildDedupedStrategies()
 		oldOffers := m.groupOffers
 		m.groupOffers = m.rankCachedOffers()
 		if !msg.background {
@@ -894,11 +943,29 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Cycle strategy: cheap → fast → fastest → cheap
-		for i, s := range allStrategies {
+		// Cycle through deduplicated strategies (skips those with identical offers)
+		strategies := m.dedupedStrategies
+		if len(strategies) == 0 {
+			strategies = allStrategies
+		}
+		found := false
+		for i, s := range strategies {
 			if s == m.launchOpts.Strategy {
-				m.launchOpts.Strategy = allStrategies[(i+1)%len(allStrategies)]
+				m.launchOpts.Strategy = strategies[(i+1)%len(strategies)]
+				found = true
 				break
+			}
+		}
+		if !found && len(strategies) > 0 {
+			// Current strategy was deduped away (e.g. "fastest" merged into
+			// "fast"); find which deduped entry it maps to and cycle from there.
+			currentKey := offerIdentity(m.rankCachedOffersForStrategy(m.launchOpts.Strategy))
+			for i, s := range strategies {
+				key := offerIdentity(m.rankCachedOffersForStrategy(s))
+				if key == currentKey {
+					m.launchOpts.Strategy = strategies[(i+1)%len(strategies)]
+					break
+				}
 			}
 		}
 		if m.cachedRawOffers != nil {

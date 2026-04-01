@@ -1,6 +1,7 @@
 package campaign
 
 import (
+	"math"
 	"testing"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -142,5 +143,139 @@ func TestOfferConstraintsForGroup_NoComputeIntensive(t *testing.T) {
 	c := offerConstraintsForGroup(group)
 	if c.MinCPUCoresEffective != 0 {
 		t.Errorf("MinCPUCoresEffective = %d, want 0", c.MinCPUCoresEffective)
+	}
+}
+
+func TestScoreGrouping_CheapPrefersMerged(t *testing.T) {
+	// With survival < 1, merging saves retry overhead (fewer instances to fail).
+	// Merged: 1 group with 2 jobs, pays setup once per retry
+	mergedOffers := []GroupOffer{
+		{
+			Group:        InstanceGroup{Jobs: []*db.Job{{ID: 1}, {ID: 2}}},
+			Offer:        &cloud.Offer{CostPerHour: 0.50},
+			SurvivalProb: 0.8,
+		},
+	}
+	// Split: 2 groups, each pays setup independently, each can fail
+	splitOffers := []GroupOffer{
+		{
+			Group:        InstanceGroup{Jobs: []*db.Job{{ID: 1}}},
+			Offer:        &cloud.Offer{CostPerHour: 0.50},
+			SurvivalProb: 0.8,
+		},
+		{
+			Group:        InstanceGroup{Jobs: []*db.Job{{ID: 2}}},
+			Offer:        &cloud.Offer{CostPerHour: 0.50},
+			SurvivalProb: 0.8,
+		},
+	}
+
+	mergedScore := ScoreGrouping(mergedOffers, bidding.StrategyCheap)
+	splitScore := ScoreGrouping(splitOffers, bidding.StrategyCheap)
+
+	if mergedScore >= splitScore {
+		t.Errorf("cheap strategy should prefer merged (score=%.3f) over split (score=%.3f)", mergedScore, splitScore)
+	}
+}
+
+func TestScoreGrouping_FastestPrefersSplit(t *testing.T) {
+	// Split: 2 groups run in parallel, max time = 1 job
+	splitOffers := []GroupOffer{
+		{
+			Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}},
+			Offer: &cloud.Offer{CostPerHour: 0.50},
+		},
+		{
+			Group: InstanceGroup{Jobs: []*db.Job{{ID: 2}}},
+			Offer: &cloud.Offer{CostPerHour: 0.50},
+		},
+	}
+	// Merged: 1 group with 2 jobs sequential, time = 2 jobs
+	mergedOffers := []GroupOffer{
+		{
+			Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}, {ID: 2}}},
+			Offer: &cloud.Offer{CostPerHour: 0.50},
+		},
+	}
+
+	splitScore := ScoreGrouping(splitOffers, bidding.StrategyFastest)
+	mergedScore := ScoreGrouping(mergedOffers, bidding.StrategyFastest)
+
+	if splitScore >= mergedScore {
+		t.Errorf("fastest strategy should prefer split (score=%.3f) over merged (score=%.3f)", splitScore, mergedScore)
+	}
+}
+
+func TestBuildReuseCandidate_MatchesCompatibleJobs(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(20)},
+		{ID: 2, Status: db.StatusQueued, GPUClass: "nvidia", GPUMemGB: intPtr(80)},
+	}
+	instances := []InstanceCapacity{
+		{
+			Instance: &db.Launch{
+				ID: 100, Status: db.LaunchStatusGrace,
+				GPUClass: "nvidia", GPUMemGB: 24,
+				ResolvedGPUName: "RTX 4090",
+				Provider:        "vastai", ProviderInstanceID: "v100",
+			},
+		},
+	}
+
+	cand := BuildReuseCandidate(jobs, instances)
+	if cand == nil {
+		t.Fatal("expected reuse candidate, got nil")
+	}
+	if cand.Label != "reuse" {
+		t.Errorf("expected label 'reuse', got %q", cand.Label)
+	}
+	// Only job 1 (20GB) fits on 24GB instance; job 2 (80GB) doesn't
+	if len(cand.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(cand.Groups))
+	}
+	if len(cand.Groups[0].Jobs) != 1 || cand.Groups[0].Jobs[0].ID != 1 {
+		t.Errorf("expected job 1 in reuse group, got %v", cand.Groups[0].Jobs)
+	}
+	// Synthetic offer should have zero cost
+	if cand.Raw[0].Offers[0].CostPerHour != 0 {
+		t.Errorf("expected zero cost for reuse offer, got %f", cand.Raw[0].Offers[0].CostPerHour)
+	}
+}
+
+func TestBuildReuseCandidate_NilWhenNoMatch(t *testing.T) {
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusQueued, GPUClass: "h100", GPUMemGB: intPtr(80)},
+	}
+	instances := []InstanceCapacity{
+		{
+			Instance: &db.Launch{
+				ID: 100, Status: db.LaunchStatusGrace,
+				GPUClass: "nvidia", GPUMemGB: 24,
+				ResolvedGPUName: "RTX 4090",
+			},
+		},
+	}
+
+	cand := BuildReuseCandidate(jobs, instances)
+	if cand != nil {
+		t.Errorf("expected nil when no jobs match, got %v", cand)
+	}
+}
+
+func TestBuildReuseCandidate_NilWhenNoInstances(t *testing.T) {
+	jobs := []*db.Job{{ID: 1, Status: db.StatusQueued}}
+	cand := BuildReuseCandidate(jobs, nil)
+	if cand != nil {
+		t.Errorf("expected nil for empty instances, got %v", cand)
+	}
+}
+
+func TestScoreGrouping_NoOfferReturnsInf(t *testing.T) {
+	offers := []GroupOffer{
+		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}}, Offer: nil},
+	}
+	score := ScoreGrouping(offers, bidding.StrategyCheap)
+	if score != math.Inf(1) {
+		t.Errorf("expected +Inf for nil offer, got %.3f", score)
 	}
 }

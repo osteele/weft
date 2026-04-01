@@ -375,6 +375,74 @@ func TestGroupCeilingDropsWhenAnyJobUncapped(t *testing.T) {
 	}
 }
 
+func TestMergeCompatibleGroups_MergesCompatible(t *testing.T) {
+	// Two groups with same GPU class and no image → merged into one
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged group, got %d", len(merged))
+	}
+	if len(merged[0].Jobs) != 2 {
+		t.Errorf("expected 2 jobs in merged group, got %d", len(merged[0].Jobs))
+	}
+}
+
+func TestMergeCompatibleGroups_PreservesIncompatible(t *testing.T) {
+	// H100 and A100 are incompatible pinned models → stay separate
+	groups := []InstanceGroup{
+		{GPUClass: "H100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "A100", GPUMemGB: 40, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 groups (incompatible GPUs), got %d", len(merged))
+	}
+}
+
+func TestMergeCompatibleGroups_TakesMemorySupremum(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, MaxGPUMemGB: 48, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 40, MaxGPUMemGB: 0, Jobs: []*db.Job{{ID: 2}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged group, got %d", len(merged))
+	}
+	if merged[0].GPUMemGB != 40 {
+		t.Errorf("expected GPUMemGB=40 (supremum), got %d", merged[0].GPUMemGB)
+	}
+	if merged[0].MaxGPUMemGB != 0 {
+		t.Errorf("expected MaxGPUMemGB=0 (one uncapped), got %d", merged[0].MaxGPUMemGB)
+	}
+}
+
+func TestMergeCompatibleGroups_SingleGroup(t *testing.T) {
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+	}
+	merged := MergeCompatibleGroups(groups)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(merged))
+	}
+}
+
+func TestMergeCompatibleGroups_DoesNotMutateOriginal(t *testing.T) {
+	job1 := &db.Job{ID: 1}
+	job2 := &db.Job{ID: 2}
+	groups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{job1}},
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{job2}},
+	}
+	_ = MergeCompatibleGroups(groups)
+	// Original groups should still have 1 job each
+	if len(groups[0].Jobs) != 1 || len(groups[1].Jobs) != 1 {
+		t.Error("MergeCompatibleGroups mutated the original groups")
+	}
+}
+
 func TestMergeGPUMemCeiling(t *testing.T) {
 	tests := []struct {
 		a, b, want int

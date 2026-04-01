@@ -287,6 +287,57 @@ func sortGroups(groups []InstanceGroup) {
 	})
 }
 
+// MergeCompatibleGroups combines instance groups that have compatible GPU
+// constraints and Docker images into fewer, larger groups. This amortizes
+// instance launch overhead and rental minimums when jobs have no data affinity.
+// Groups are merged greedily: each group joins the first compatible group found.
+func MergeCompatibleGroups(groups []InstanceGroup) []InstanceGroup {
+	if len(groups) <= 1 {
+		return groups
+	}
+
+	var merged []InstanceGroup
+	for _, g := range groups {
+		found := false
+		for i := range merged {
+			gpuSup, gpuOK := gpuClassSupremum(merged[i].GPUClass, g.GPUClass)
+			if !gpuOK {
+				continue
+			}
+			imgSup, imgOK := imageSupremum(merged[i].Image, g.Image)
+			if !imgOK {
+				continue
+			}
+			merged[i].GPUClass = gpuSup
+			merged[i].Image = imgSup
+			merged[i].Jobs = append(merged[i].Jobs, g.Jobs...)
+			if g.GPUMemGB > merged[i].GPUMemGB {
+				merged[i].GPUMemGB = g.GPUMemGB
+			}
+			merged[i].MaxGPUMemGB = mergeGPUMemCeiling(merged[i].MaxGPUMemGB, g.MaxGPUMemGB)
+			if g.DiskGB > merged[i].DiskGB {
+				merged[i].DiskGB = g.DiskGB
+			}
+			found = true
+			break
+		}
+		if !found {
+			// Copy the group to avoid mutating the original
+			merged = append(merged, InstanceGroup{
+				GPUClass:    g.GPUClass,
+				GPUMemGB:    g.GPUMemGB,
+				MaxGPUMemGB: g.MaxGPUMemGB,
+				DiskGB:      g.DiskGB,
+				Image:       g.Image,
+				Jobs:        append([]*db.Job(nil), g.Jobs...),
+			})
+		}
+	}
+
+	sortGroups(merged)
+	return merged
+}
+
 // FilterByGPUClass returns only the groups whose GPUClass matches filter (case-insensitive).
 // Returns all groups if filter is empty.
 func FilterByGPUClass(groups []InstanceGroup, filter string) []InstanceGroup {

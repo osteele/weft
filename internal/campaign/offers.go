@@ -2,12 +2,14 @@ package campaign
 
 import (
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"sync"
 
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/placement"
 )
 
@@ -233,4 +235,200 @@ func medianDLPerf(offers []cloud.Offer) float64 {
 func FetchGroupOffers(clients []cloud.Client, groups []InstanceGroup, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
 	raw := FetchGroupRawOffers(clients, groups)
 	return RankGroupOffers(raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
+}
+
+// GroupingCandidate holds a candidate grouping of jobs with its raw offers.
+// The outer search generates multiple candidates (split, merged, reuse) and
+// scores each per strategy to find the best grouping.
+type GroupingCandidate struct {
+	Label  string // e.g. "split", "merged", "reuse"
+	Groups []InstanceGroup
+	Raw    []GroupRawOffers
+}
+
+// FetchCandidateGroupings generates split and merged candidate groupings and
+// fetches raw offers for both in parallel. The split groups are the input;
+// merged groups are derived by combining GPU-compatible groups.
+func FetchCandidateGroupings(clients []cloud.Client, splitGroups []InstanceGroup) []GroupingCandidate {
+	mergedGroups := MergeCompatibleGroups(splitGroups)
+
+	// If merging didn't reduce the number of groups, skip the duplicate search
+	if len(mergedGroups) == len(splitGroups) {
+		raw := FetchGroupRawOffers(clients, splitGroups)
+		return []GroupingCandidate{
+			{Label: "split", Groups: splitGroups, Raw: raw},
+		}
+	}
+
+	// Fetch offers for both candidates in parallel
+	type result struct {
+		idx int
+		raw []GroupRawOffers
+	}
+	ch := make(chan result, 2)
+	go func() { ch <- result{0, FetchGroupRawOffers(clients, splitGroups)} }()
+	go func() { ch <- result{1, FetchGroupRawOffers(clients, mergedGroups)} }()
+
+	candidates := make([]GroupingCandidate, 2)
+	candidates[0] = GroupingCandidate{Label: "split", Groups: splitGroups}
+	candidates[1] = GroupingCandidate{Label: "merged", Groups: mergedGroups}
+	for range 2 {
+		r := <-ch
+		candidates[r.idx].Raw = r.raw
+	}
+	return candidates
+}
+
+// ScoreGrouping evaluates a candidate grouping for a strategy using the unified
+// weighted metric. Groups run in parallel, so time = max(per-group time) and
+// cost = sum(per-group cost). Returns +Inf if any group has no valid offer.
+func ScoreGrouping(groupOffers []GroupOffer, strategy bidding.SelectionStrategy) float64 {
+	w := strategy.Weights()
+	var totalCost float64
+	var maxTime float64
+
+	for _, go_ := range groupOffers {
+		if go_.Offer == nil {
+			return math.Inf(1)
+		}
+		// Use per-job cost as cost factor, wallclock as time factor.
+		// For groups with multiple jobs, both cost and time scale with job count
+		// (jobs run sequentially on one instance).
+		numJobs := float64(len(go_.Group.Jobs))
+		if numJobs < 1 {
+			numJobs = 1
+		}
+
+		surv := go_.SurvivalProb
+		if surv <= 0 {
+			surv = 1.0 // no survival model
+		}
+
+		// Approximate: 1 hr per job, 0.5 hr setup
+		setupHrs := 0.5
+		runHrs := numJobs // 1 hr per job as baseline
+
+		cost := bidding.ExpectedCost(go_.Offer.CostPerHour, runHrs, setupHrs, surv)
+		wallclock := bidding.ExpectedWallclockTime(runHrs, setupHrs, surv)
+		if strategy == bidding.StrategyFastest {
+			wallclock = runHrs + setupHrs
+		}
+
+		totalCost += cost
+		if wallclock > maxTime {
+			maxTime = wallclock
+		}
+	}
+
+	return w.Cost*totalCost + w.Time*maxTime
+}
+
+// BuildReuseCandidate constructs a candidate grouping that assigns jobs to
+// existing reusable instances. Each compatible job is matched to the first
+// reusable instance that can accept it (GPU, memory, disk). Unmatched jobs
+// are excluded (they'll need new instances from other candidates).
+//
+// The returned candidate has synthetic GroupRawOffers with a single offer per
+// group — the existing instance's specs at zero incremental cost (already rented).
+func BuildReuseCandidate(jobs []*db.Job, instances []InstanceCapacity) *GroupingCandidate {
+	if len(instances) == 0 || len(jobs) == 0 {
+		return nil
+	}
+
+	// Map instance → assigned jobs
+	type assignment struct {
+		cap  InstanceCapacity
+		jobs []*db.Job
+	}
+	assignments := make(map[int64]*assignment)
+	for _, cap := range instances {
+		assignments[cap.Instance.ID] = &assignment{cap: cap}
+	}
+
+	// Greedily assign jobs to first compatible instance
+	var unmatched int
+	for _, job := range jobs {
+		matched := false
+		for _, cap := range instances {
+			if ok, _ := MatchJobToInstance(job, cap); ok {
+				assignments[cap.Instance.ID].jobs = append(assignments[cap.Instance.ID].jobs, job)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			unmatched++
+		}
+	}
+
+	// If no jobs matched any instance, no reuse candidate
+	if unmatched == len(jobs) {
+		return nil
+	}
+
+	// Build groups and synthetic offers from matched assignments
+	var groups []InstanceGroup
+	var raw []GroupRawOffers
+	for _, a := range assignments {
+		if len(a.jobs) == 0 {
+			continue
+		}
+		inst := a.cap.Instance
+		group := InstanceGroup{
+			GPUClass: inst.GPUClass,
+			GPUMemGB: inst.GPUMemGB,
+			DiskGB:   inst.DiskGB,
+			Jobs:     a.jobs,
+		}
+		// Zero cost: instance is already rented
+		syntheticOffer := cloud.Offer{
+			ProviderID:  inst.ProviderInstanceID,
+			Provider:    cloud.Provider(inst.Provider),
+			GPUName:     inst.ResolvedGPUName,
+			GPUMemGB:    float64(inst.GPUMemGB),
+			CostPerHour: 0, // already paying for it
+			DLPerf:      inst.DLPerf,
+			Reliability: inst.Reliability,
+		}
+		groups = append(groups, group)
+		raw = append(raw, GroupRawOffers{
+			Group:  group,
+			Offers: []cloud.Offer{syntheticOffer},
+		})
+	}
+
+	if len(groups) == 0 {
+		return nil
+	}
+
+	return &GroupingCandidate{
+		Label:  "reuse",
+		Groups: groups,
+		Raw:    raw,
+	}
+}
+
+// BestCandidateForStrategy selects the candidate grouping with the lowest score
+// for the given strategy from pre-ranked offers.
+func BestCandidateForStrategy(
+	candidates []GroupingCandidate,
+	survivalModel *bidding.SurvivalModel,
+	jobDurationHrs float64,
+	setupFactory SetupOverheadFactory,
+	strategy bidding.SelectionStrategy,
+	minSurvival float64,
+) (bestIdx int, bestOffers []GroupOffer) {
+	bestScore := math.Inf(1)
+	bestIdx = 0
+
+	for i, cand := range candidates {
+		offers := RankGroupOffers(cand.Raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
+		score := ScoreGrouping(offers, strategy)
+		if score < bestScore {
+			bestScore = score
+			bestIdx = i
+			bestOffers = offers
+		}
+	}
+	return bestIdx, bestOffers
 }

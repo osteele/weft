@@ -129,6 +129,17 @@ func estimateInputsDisk(inputs []string) int {
 // MatchJobToInstance checks whether a job is compatible with an instance.
 // Returns (compatible, reason) where reason explains why it's not compatible.
 func MatchJobToInstance(job *db.Job, cap InstanceCapacity) (bool, string) {
+	return matchJobToInstance(job, cap, nil)
+}
+
+// MatchJobToInstanceWithUV checks compatibility including UV sync disk needs.
+// When r2Client is non-nil, estimates the incremental UV sync download size
+// and includes it in the disk check.
+func MatchJobToInstanceWithUV(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
+	return matchJobToInstance(job, cap, r2Client)
+}
+
+func matchJobToInstance(job *db.Job, cap InstanceCapacity, r2Client *r2.Client) (bool, string) {
 	inst := cap.Instance
 
 	// GPU class check (case-insensitive)
@@ -148,10 +159,20 @@ func MatchJobToInstance(job *db.Job, cap InstanceCapacity) (bool, string) {
 		return false, fmt.Sprintf("GPU memory insufficient: job=%dGB instance=%dGB", jobMemGB, inst.GPUMemGB)
 	}
 
-	// Disk check: compute incremental inputs needed
+	// Disk check: compute incremental inputs (HF models) + UV sync
 	if cap.DiskFreeGB > 0 || inst.DiskGB > 0 {
 		incrementalInputs := subtractInputs(job.Inputs, cap.ProvisionedInputs)
 		incrementalDiskGB := estimateInputsDisk(incrementalInputs)
+
+		// Add UV sync disk if r2 client is available
+		if r2Client != nil {
+			localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
+			if localDir != "" {
+				uvBytes := estimateGroupUVBytes([]string{localDir}, r2Client)
+				incrementalDiskGB += int(math.Ceil(float64(uvBytes) / 1e9))
+			}
+		}
+
 		if incrementalDiskGB > 0 && incrementalDiskGB > cap.DiskFreeGB {
 			return false, fmt.Sprintf("disk insufficient: need=%dGB free=%dGB", incrementalDiskGB, cap.DiskFreeGB)
 		}

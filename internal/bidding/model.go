@@ -21,9 +21,32 @@ const (
 	// StrategyFast minimizes expected wall-clock time (prefers higher DLPerf,
 	// weighted by survival probability).
 	StrategyFast SelectionStrategy = "fast"
-	// StrategyFastest picks the highest raw DLPerf, ignoring the survival model.
+	// StrategyFastest minimizes happy-path wall-clock time with minimal cost
+	// sensitivity (enough to avoid pathologically expensive offers).
 	StrategyFastest SelectionStrategy = "fastest"
 )
+
+// StrategyWeights defines the cost/time tradeoff for a strategy.
+// Both factors use per-hour units (dollars/hr for cost, hours for time)
+// so the weights are directly interpretable as exchange rates.
+type StrategyWeights struct {
+	Cost float64 // weight for expected cost (dollars)
+	Time float64 // weight for expected wall-clock time (hours)
+}
+
+// Weights returns the scoring weights for this strategy.
+func (s SelectionStrategy) Weights() StrategyWeights {
+	if w, ok := strategyWeights[s]; ok {
+		return w
+	}
+	return strategyWeights[StrategyCheap]
+}
+
+var strategyWeights = map[SelectionStrategy]StrategyWeights{
+	StrategyCheap:   {Cost: 1.0, Time: 0.01},
+	StrategyFast:    {Cost: 0.1, Time: 1.0},
+	StrategyFastest: {Cost: 0.01, Time: 1.0},
+}
 
 // PriceBucket classifies an offer's price relative to its GPU family.
 type PriceBucket string
@@ -178,32 +201,28 @@ func ConstantSetup(hrs float64) OfferSetupFunc {
 
 // BestOffer selects the best offer according to the given strategy.
 //
-// All strategies compute a per-offer end-to-end time estimate using the setup
-// overhead function, job duration scaled by GPU performance (DLPerf), and
-// expected restarts from survival probability:
+// All strategies use a unified weighted score combining expected cost and
+// expected wall-clock time, with strategy-specific weights controlling the
+// tradeoff. This ensures strategies differ only in emphasis, not in kind,
+// preventing pathological selections (e.g. a $1000/hr instance that's
+// marginally faster).
 //
-//   - StrategyCheap: minimize expected cost (E[total_time] * $/hr)
-//   - StrategyFast: minimize expected wall-clock time (survival-adjusted)
-//   - StrategyFastest: minimize happy-path wall-clock time (no survival adjustment)
-//
-// If the model is nil, cheap falls back to lowest price and fast/fastest to highest DLPerf.
+// If the model is nil, survival probability defaults to 1.0 (no retry risk).
 func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float64, setupOverhead OfferSetupFunc, strategy SelectionStrategy) (int, cloud.Offer) {
 	if len(offers) == 0 {
 		return -1, cloud.Offer{}
 	}
 
-	if model == nil {
-		if strategy == StrategyCheap {
-			return bestOfferByScore(offers, func(o cloud.Offer) float64 { return o.CostPerHour })
-		}
-		return bestOfferByScore(offers, func(o cloud.Offer) float64 { return -o.DLPerf })
-	}
-
+	w := strategy.Weights()
 	medianDLPerf := MedianOfferDLPerf(offers)
 
 	return bestOfferByScore(offers, func(o cloud.Offer) float64 {
 		setup := setupOverhead(o)
-		surv := model.OfferSurvival(o)
+
+		surv := 1.0
+		if model != nil {
+			surv = model.OfferSurvival(o)
+		}
 
 		// Scale run duration by GPU performance relative to median
 		runHrs := jobDurationHrs
@@ -211,15 +230,17 @@ func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float6
 			runHrs = jobDurationHrs * (medianDLPerf / o.DLPerf)
 		}
 
-		switch strategy {
-		case StrategyFastest:
+		cost := ExpectedCost(o.CostPerHour, runHrs, setup, surv)
+
+		var wallclock float64
+		if strategy == StrategyFastest {
 			// Happy-path time only — no survival adjustment
-			return runHrs + setup
-		case StrategyFast:
-			return ExpectedWallclockTime(runHrs, setup, surv)
-		default: // StrategyCheap
-			return ExpectedCost(o.CostPerHour, runHrs, setup, surv)
+			wallclock = runHrs + setup
+		} else {
+			wallclock = ExpectedWallclockTime(runHrs, setup, surv)
 		}
+
+		return w.Cost*cost + w.Time*wallclock
 	})
 }
 
