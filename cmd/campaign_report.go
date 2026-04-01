@@ -12,17 +12,18 @@ import (
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
 	dashboard "github.com/osteele/weft/internal/ui/dashboard"
+	"github.com/osteele/weft/internal/ui/terminal"
 )
 
 // watchAndReport runs the appropriate watch mode (TUI or plain) and prints
 // an exit report when all instances reach terminal state.
-func watchAndReport(database *sql.DB, useTUI bool, mode watchMode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool) error {
+func watchAndReport(database *sql.DB, useTUI bool, mode terminal.Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool) error {
 	var finalIDs []int64
 	var err error
 	if useTUI {
-		finalIDs, err = watchInstances(database, mode, instanceIDs, estimateSummary, autoMode)
+		finalIDs, err = terminal.WatchInstances(database, mode, instanceIDs, estimateSummary, autoMode)
 	} else {
-		err = watchInstancesPlain(database, mode, instanceIDs, estimateSummary)
+		err = terminal.WatchInstancesPlain(database, mode, instanceIDs, estimateSummary)
 		finalIDs = instanceIDs
 	}
 	printWatchExitReport(database, finalIDs)
@@ -203,7 +204,7 @@ func printWatchExitReport(database *sql.DB, instanceIDs []int64) {
 		// Calculate description width from terminal width
 		// Fixed columns: indent(2) + JOB(~5) + STATUS(~10) + INSTANCE(~5) + PROJECT(projectWidth)
 		// Plus tab separators (4 gaps × ~4 chars each ≈ 16)
-		termWidth := listOutputWidth()
+		termWidth := terminal.ListOutputWidth()
 		fixedWidth := 2 + 5 + 10 + 5 + projectWidth + 20 // columns + padding
 		descWidth := termWidth - fixedWidth
 		if descWidth < 30 {
@@ -234,7 +235,7 @@ type exitReportInstanceRow struct {
 
 // buildInstanceRow creates a formatted instance row for the exit report.
 func buildInstanceRow(ci *db.Launch, now time.Time) exitReportInstanceRow {
-	obs := observeLaunch(ci, nil, now)
+	obs := terminal.ObserveLaunch(ci, nil, now)
 	uptimeStr := "—"
 	if obs.Uptime != nil {
 		uptimeStr = dashboard.FormatCompactDuration(*obs.Uptime)

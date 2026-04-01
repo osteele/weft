@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/osteele/weft/internal/workdir"
 	"github.com/spf13/cobra"
 )
@@ -143,7 +144,7 @@ func runProjectList(cmd *cobra.Command, args []string) error {
 	if len(jobs) == 0 && listProject != "" {
 		return errNoJobsForProject(listProject)
 	}
-	return writeListPlainOutput(renderProjectListPlain(groupJobsByProject(jobs), listOutputWidth()))
+	return terminal.WriteListPlainOutput(terminal.RenderProjectListPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
 }
 
 func runProjectJobs(cmd *cobra.Command, args []string) error {
@@ -175,5 +176,5 @@ func runProjectJobs(cmd *cobra.Command, args []string) error {
 	if len(jobs) == 0 && listProject != "" {
 		return errNoJobsForProject(listProject)
 	}
-	return writeListPlainOutput(renderProjectJobsPlain(groupJobsByProject(jobs), listOutputWidth()))
+	return terminal.WriteListPlainOutput(terminal.RenderProjectJobsPlain(terminal.GroupJobsByProject(jobs), terminal.ListOutputWidth()))
 }

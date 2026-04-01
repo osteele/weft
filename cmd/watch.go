@@ -4,11 +4,10 @@ import (
 	"database/sql"
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -64,7 +63,7 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer database.Close()
-		return watchJobsPlain(database, jobIDs, watchFollow)
+		return terminal.WatchJobsPlain(database, jobIDs, watchFollow)
 	}
 
 	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
@@ -86,48 +85,13 @@ func runWatchCommand(cmd *cobra.Command, args []string) error {
 	if useTUI {
 		return runWatchLoop(database, cfg, watchAuto)
 	}
-	return watchAllPlain(database, cfg, watchFollow)
+	return terminal.WatchAllPlain(database, cfg, watchFollow)
 }
 
 func runWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
-	router := newWatchRouterModel(database, cfg, "", autoMode)
-
-	restore := logging.Suppress()
-	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	finalModel, err := p.Run()
-	restore()
-
-	// Clean up syncWorker from whichever model was active at exit
-	if r, ok := finalModel.(watchRouterModel); ok {
-		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
-			w.syncWorker.Stop()
-		}
-	}
-	if err != nil {
-		return fmt.Errorf("watch TUI error: %w", err)
-	}
-	return nil
+	return terminal.RunWatchLoop(database, cfg, autoMode)
 }
 
-func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (launchModel, error) {
-	clients, providerErr := buildCloudClients(cfg)
-	if providerErr != nil {
-		return launchModel{err: providerErr}, nil
-	}
-	predCfg := buildPredictorConfig(cfg)
-	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
-
-	restore := logging.Suppress()
-	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	finalModel, err := p.Run()
-	restore()
-	if err != nil {
-		return launchModel{}, fmt.Errorf("launch TUI error: %w", err)
-	}
-
-	m, ok := finalModel.(launchModel)
-	if !ok {
-		return launchModel{}, nil
-	}
-	return m, nil
+func runLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (terminal.LaunchResult, error) {
+	return terminal.RunLaunchProgram(database, cfg, groups, opts, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
 }

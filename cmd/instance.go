@@ -19,6 +19,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -297,7 +298,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		obs := observeLaunch(ci, inst, time.Now())
+		obs := terminal.ObserveLaunch(ci, inst, time.Now())
 		if obs.Uptime != nil {
 			fmt.Printf("  Uptime:   %s\n", *obs.Uptime)
 		}
@@ -343,7 +344,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-		activity := formatObservedActivity(*liveUpdate, time.Now())
+		activity := terminal.FormatObservedActivity(*liveUpdate, time.Now())
 		if activity.Bootstrap != "" {
 			fmt.Printf("  Bootstrap: %s\n", activity.Bootstrap)
 		}
@@ -372,13 +373,13 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("    %-6d %-12s %s\n", j.ID, displayStatus, desc)
 				if campaign.IsJobTerminal(displayStatus) {
 					if timings, err := db.GetJobPhaseTimings(database, j.ID); err == nil {
-						if summary := formatUploadSummary(timings); summary != "" {
+						if summary := terminal.FormatUploadSummary(timings); summary != "" {
 							fmt.Printf("             uploads: %s\n", summary)
 						}
 					}
 				}
 				if displayStatus == db.StatusFailed || displayStatus == db.AttemptOutcomeFailed || displayStatus == db.AttemptOutcomeOrphaned {
-					excerpt := readCachedJobFailureExcerpt(j.ID)
+					excerpt := terminal.ReadCachedJobFailureExcerpt(j.ID)
 					if excerpt == "" {
 						excerpt = truncate(strings.TrimSpace(strings.Join([]string{j.FailureReason, j.ErrorMessage, j.ErrorDiagnosis}, " | ")), 180)
 					}
@@ -394,7 +395,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 
 		// Previous instances (replacement chain)
 		if donors := walkReplacementChain(database, ci); len(donors) > 0 {
-			line := formatPreviousInstanceLine(donors, time.Now())
+			line := terminal.FormatPreviousInstanceLine(donors, time.Now())
 			if line != "" {
 				fmt.Println(line)
 			}
@@ -405,7 +406,7 @@ func runInstanceStatus(cmd *cobra.Command, args []string) error {
 
 // walkReplacementChain follows ReplacedInstanceID links to build a predecessor chain.
 func walkReplacementChain(database *sql.DB, ci *db.Launch) []*db.Launch {
-	return collectReplacementChain(ci, func(id int64) *db.Launch {
+	return terminal.CollectReplacementChain(ci, func(id int64) *db.Launch {
 		predecessor, _ := db.GetLaunch(database, id)
 		return predecessor
 	})

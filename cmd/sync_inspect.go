@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/r2keys"
 	srcsync "github.com/osteele/weft/internal/sync"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -81,11 +82,11 @@ func runSyncInspect(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "Source snapshot: %s\n", inspection.LocalDir)
 	fmt.Fprintf(out, "Included files: %d\n", inspection.FileCount)
 	fmt.Fprintf(out, "Included directories: %d\n", inspection.DirectoryCount)
-	fmt.Fprintf(out, "Included size: %s\n", formatBytesIEC(inspection.TotalBytes))
+	fmt.Fprintf(out, "Included size: %s\n", terminal.FormatBytesIEC(inspection.TotalBytes))
 	if inspection.CompressedBytes != nil {
-		fmt.Fprintf(out, "Compressed tarball: %s\n", formatBytesIEC(*inspection.CompressedBytes))
+		fmt.Fprintf(out, "Compressed tarball: %s\n", terminal.FormatBytesIEC(*inspection.CompressedBytes))
 	} else {
-		fmt.Fprintf(out, "Compressed tarball: skipped (included size exceeds %s limit)\n", formatBytesIEC(inspection.LimitBytes))
+		fmt.Fprintf(out, "Compressed tarball: skipped (included size exceeds %s limit)\n", terminal.FormatBytesIEC(inspection.LimitBytes))
 	}
 	switch {
 	case inspection.OverLimit:
@@ -98,9 +99,9 @@ func runSyncInspect(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "R2 upload: no\n")
 	}
 	if inspection.OverLimit {
-		fmt.Fprintf(out, "Snapshot limit: exceeded by %s\n", formatBytesIEC(report.TotalBytes-report.LimitBytes))
+		fmt.Fprintf(out, "Snapshot limit: exceeded by %s\n", terminal.FormatBytesIEC(report.TotalBytes-report.LimitBytes))
 	} else {
-		fmt.Fprintf(out, "Snapshot limit: within %s\n", formatBytesIEC(report.LimitBytes))
+		fmt.Fprintf(out, "Snapshot limit: within %s\n", terminal.FormatBytesIEC(report.LimitBytes))
 	}
 
 	printSnapshotItems(out, "Largest included files", report.LargestFiles)
@@ -126,13 +127,13 @@ func printSnapshotItems(out io.Writer, heading string, items []srcsync.SnapshotI
 	sizeWidth := 0
 	approxWidth := 0
 	for _, item := range items {
-		sizeWidth = max(sizeWidth, len(formatBytesIEC(item.Bytes)))
-		approxWidth = max(approxWidth, len("~"+formatBytesIEC(item.ApproxCompressedBytes)))
+		sizeWidth = max(sizeWidth, len(terminal.FormatBytesIEC(item.Bytes)))
+		approxWidth = max(approxWidth, len("~"+terminal.FormatBytesIEC(item.ApproxCompressedBytes)))
 	}
 	for _, item := range items {
 		fmt.Fprintf(out, "  %*s  %*s  %s\n",
-			sizeWidth, formatBytesIEC(item.Bytes),
-			approxWidth, "~"+formatBytesIEC(item.ApproxCompressedBytes),
+			sizeWidth, terminal.FormatBytesIEC(item.Bytes),
+			approxWidth, "~"+terminal.FormatBytesIEC(item.ApproxCompressedBytes),
 			item.Path,
 		)
 	}

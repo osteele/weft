@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +43,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("open database: %w", err)
 		}
 		defer database.Close()
-		return watchJobsPlain(database, jobIDs, watchFollow)
+		return terminal.WatchJobsPlain(database, jobIDs, watchFollow)
 	}
 
 	useTUI, err := resolveCampaignTUIMode(watchTUI, watchPlain, hasCampaignTerminalIO(), inCampaignAgentContext())
@@ -61,7 +62,7 @@ func runJobWatch(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		return runListTUI(database, nil, jobs, buildListTitle(nil), !listNoSync)
+		return terminal.RunListTUI(database, nil, jobs, buildListTitle(nil), !listNoSync)
 	}
 	return watchJobsPlainAll(database, watchFollow)
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -33,7 +34,7 @@ type instanceDiagnoseReport struct {
 	LifecycleEvents   []db.LifecycleEvent
 	BootstrapSurvival *db.BootstrapSurvival
 	SetupSurvival     *db.SetupSurvival
-	Obs               cloudInstanceObservability
+	Obs               terminal.CloudInstanceObservability
 	Diagnosis         instanceDiagnosis
 	Timeline          []timelineEntry
 }
@@ -116,7 +117,7 @@ func runInstanceDiagnose(_ *cobra.Command, args []string) error {
 		}
 	}
 
-	obs := observeLaunch(inst, nil, time.Now())
+	obs := terminal.ObserveLaunch(inst, nil, time.Now())
 	diagnosis := buildInstanceDiagnosis(inst, jobs, outcomes)
 	timeline := buildTimeline(inst, jobs, timings, events)
 

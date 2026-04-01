@@ -20,6 +20,7 @@ import (
 	"github.com/osteele/weft/internal/placement"
 	"github.com/osteele/weft/internal/r2"
 	"github.com/osteele/weft/internal/r2keys"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -259,19 +260,19 @@ func runCampaignLaunch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if finalModel.err != nil {
-		return finalModel.err
+	if finalModel.Err != nil {
+		return finalModel.Err
 	}
 
 	// Segue into watch mode if instances were launched
-	if len(finalModel.instanceIDs) > 0 && shouldWatch() && !finalModel.inlineWatchUsed {
+	if len(finalModel.InstanceIDs) > 0 && shouldWatch() && !finalModel.InlineWatchUsed {
 		fmt.Println()
-		return watchAndReport(database, useTUI, watchModeInstances, finalModel.instanceIDs, campaign.SummarizeEstimates(finalModel.costEstimates), campaignLaunchAuto)
+		return watchAndReport(database, useTUI, terminal.ModeInstances, finalModel.InstanceIDs, campaign.SummarizeEstimates(finalModel.CostEstimates), campaignLaunchAuto)
 	}
 
 	// Inline watch already ran inside the TUI — print the exit report
-	if len(finalModel.instanceIDs) > 0 && finalModel.inlineWatchUsed {
-		printWatchExitReport(database, finalModel.instanceIDs)
+	if len(finalModel.InstanceIDs) > 0 && finalModel.InlineWatchUsed {
+		printWatchExitReport(database, finalModel.InstanceIDs)
 	}
 
 	return nil
@@ -326,7 +327,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	overheadModel := buildOverheadModel(database)
 	predCfg := buildPredictorConfig(cfg)
 	fmt.Println("Searching for GPU offers...")
-	prep, err := prepareLaunchExecutionPlan(
+	prep, err := terminal.PrepareLaunchExecutionPlan(
 		database,
 		clients,
 		providerErr,
@@ -443,7 +444,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 	// Segue into watch mode.
 	if shouldWatch() {
 		fmt.Println()
-		return watchAndReport(database, watchTUI, watchModeInstances, result.InstanceIDs, campaign.SummarizeEstimates(estimates), campaignLaunchAuto)
+		return watchAndReport(database, watchTUI, terminal.ModeInstances, result.InstanceIDs, campaign.SummarizeEstimates(estimates), campaignLaunchAuto)
 	}
 
 	return nil
@@ -590,7 +591,7 @@ func runCampaignWatch(cmd *cobra.Command, args []string) error {
 		instanceIDs = append(instanceIDs, inst.ID)
 	}
 
-	return watchAndReport(database, useTUI, watchModeCampaign, instanceIDs, nil, campaignWatchAuto)
+	return watchAndReport(database, useTUI, terminal.ModeCampaign, instanceIDs, nil, campaignWatchAuto)
 }
 
 func runCampaignTerminate(cmd *cobra.Command, args []string) error {
@@ -656,7 +657,7 @@ func runCampaignList(cmd *cobra.Command, args []string) error {
 	}
 
 	if useTUI {
-		return runCampaignListTUI(database, campaigns)
+		return terminal.RunCampaignListTUI(database, campaigns)
 	}
 
 	if len(campaigns) == 0 {

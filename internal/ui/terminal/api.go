@@ -1,0 +1,213 @@
+package terminal
+
+import (
+	"database/sql"
+	"fmt"
+	"io"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/bidding"
+	"github.com/osteele/weft/internal/campaign"
+	"github.com/osteele/weft/internal/cloud"
+	"github.com/osteele/weft/internal/config"
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/logging"
+	"github.com/osteele/weft/internal/predictor"
+	"github.com/osteele/weft/internal/r2"
+)
+
+type Mode = watchMode
+
+const (
+	ModeCampaign  = watchModeCampaign
+	ModeInstances = watchModeInstances
+	ModeSystem    = watchModeSystem
+	ModeProject   = watchModeProject
+)
+
+type ProjectGroup = projectGroup
+type LaunchExecutionPlan = launchExecutionPlan
+type CloudInstanceObservability = cloudInstanceObservability
+type ObservedActivity = observedActivity
+type ColumnDef = columnDef
+
+var DefaultJSONColumnKeys = append([]string(nil), defaultJSONColumnKeys...)
+var DefaultTSVColumnKeys = append([]string(nil), defaultTSVColumnKeys...)
+
+type LaunchResult struct {
+	Err             error
+	InstanceIDs     []int64
+	CostEstimates   []campaign.CostEstimate
+	InlineWatchUsed bool
+}
+
+func RunWatchLoop(database *sql.DB, cfg *config.Config, autoMode bool) error {
+	router := newWatchRouterModel(database, cfg, "", autoMode)
+
+	restore := logging.Suppress()
+	p := tea.NewProgram(router, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	finalModel, err := p.Run()
+	restore()
+
+	if r, ok := finalModel.(watchRouterModel); ok {
+		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
+			w.syncWorker.Stop()
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("watch TUI error: %w", err)
+	}
+	return nil
+}
+
+func RunLaunchProgram(database *sql.DB, cfg *config.Config, groups []campaign.InstanceGroup, opts campaign.LaunchOpts, gpuFilter string, reconciling bool, fromWatch bool, inlineWatchEnabled bool) (LaunchResult, error) {
+	clients, providerErr := buildCloudClients(cfg)
+	if providerErr != nil {
+		return LaunchResult{Err: providerErr}, nil
+	}
+	predCfg := buildPredictorConfig(cfg)
+	model := newLaunchModel(database, clients, nil, cfg, groups, opts, &predCfg, gpuFilter, reconciling, fromWatch, inlineWatchEnabled)
+
+	restore := logging.Suppress()
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	finalModel, err := p.Run()
+	restore()
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("launch TUI error: %w", err)
+	}
+
+	m, ok := finalModel.(launchModel)
+	if !ok {
+		return LaunchResult{}, nil
+	}
+	return LaunchResult{
+		Err:             m.err,
+		InstanceIDs:     append([]int64(nil), m.instanceIDs...),
+		CostEstimates:   append([]campaign.CostEstimate(nil), m.costEstimates...),
+		InlineWatchUsed: m.inlineWatchUsed,
+	}, nil
+}
+
+func WatchInstances(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary, autoMode bool) ([]int64, error) {
+	return watchInstances(database, mode, instanceIDs, estimateSummary, autoMode)
+}
+
+func WatchInstancesPlain(database *sql.DB, mode Mode, instanceIDs []int64, estimateSummary *campaign.CostEstimateSummary) error {
+	return watchInstancesPlain(database, mode, instanceIDs, estimateSummary)
+}
+
+func WatchJobsPlain(database *sql.DB, jobIDs []int64, follow bool) error {
+	return watchJobsPlain(database, jobIDs, follow)
+}
+
+func WatchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
+	return watchAllPlain(database, cfg, follow)
+}
+
+func RunCampaignListTUI(database *sql.DB, campaigns []*db.Campaign) error {
+	return runCampaignListTUI(database, campaigns)
+}
+
+func RunProjectWatchTUI(database *sql.DB, cfg *config.Config, recentWindow time.Duration, syncEnabled bool, projectFilter string, autoMode bool) error {
+	router := newProjectWatchRouterModel(database, cfg, recentWindow, syncEnabled, projectFilter, autoMode)
+
+	restore := logging.Suppress()
+	defer restore()
+
+	finalModel, err := tea.NewProgram(router, tea.WithAltScreen()).Run()
+	if r, ok := finalModel.(watchRouterModel); ok {
+		if w, ok := r.active.(watchModel); ok && w.syncWorker != nil {
+			w.syncWorker.Stop()
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("run project watch TUI: %w", err)
+	}
+	return nil
+}
+
+func RunListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool) error {
+	return runListTUI(database, args, jobs, title, syncEnabled)
+}
+
+func ListOutputWidth() int {
+	return listOutputWidth()
+}
+
+func WriteListPlainOutput(output string) error {
+	return writeListPlainOutput(output)
+}
+
+func RenderJobListPlain(jobs []*db.Job, width int) string {
+	return renderJobListPlain(jobs, width)
+}
+
+func RenderJobListPlainWithOptions(jobs []*db.Job, width int, columnKeys []string, noTruncate bool) string {
+	return renderJobListPlainWithOptions(jobs, width, columnKeys, noTruncate)
+}
+
+func ResolveColumns(keys []string, defaultKeys []string) ([]ColumnDef, error) {
+	return resolveColumns(keys, defaultKeys)
+}
+
+func PrintJobsJSON(w io.Writer, jobs []*db.Job, cols []ColumnDef) error {
+	return printJobsJSON(w, jobs, cols)
+}
+
+func PrintJobsTSV(w io.Writer, jobs []*db.Job, cols []ColumnDef) error {
+	return printJobsTSV(w, jobs, cols)
+}
+
+func GroupJobsByProject(jobs []*db.Job) []ProjectGroup {
+	return groupJobsByProject(jobs)
+}
+
+func RenderProjectListPlain(groups []ProjectGroup, width int) string {
+	return renderProjectListPlain(groups, width)
+}
+
+func RenderProjectJobsPlain(groups []ProjectGroup, width int) string {
+	return renderProjectJobsPlain(groups, width)
+}
+
+func RenderProjectWatchPlain(groups []ProjectGroup, width int, now time.Time, recentWindow time.Duration) string {
+	return renderProjectWatchPlain(groups, width, now, recentWindow)
+}
+
+func PrepareLaunchExecutionPlan(database *sql.DB, clients []cloud.Client, providerErr error, groups []campaign.InstanceGroup, selected map[int64]bool, profile bidding.ScoreProfile, minSurvival float64, predCfg *predictor.Config, overheadModel *estimate.OverheadModel, survivalModel *bidding.SurvivalModel) (LaunchExecutionPlan, error) {
+	return prepareLaunchExecutionPlan(database, clients, providerErr, groups, selected, profile, minSurvival, predCfg, overheadModel, survivalModel)
+}
+
+func ObserveLaunch(ci *db.Launch, inst *cloud.Instance, now time.Time) CloudInstanceObservability {
+	return observeLaunch(ci, inst, now)
+}
+
+func FormatObservedActivity(update campaign.InstanceUpdate, now time.Time) ObservedActivity {
+	return formatObservedActivity(update, now)
+}
+
+func FormatUploadSummary(timings *db.JobPhaseTimings) string {
+	return formatUploadSummary(timings)
+}
+
+func ReadCachedJobFailureExcerpt(jobID int64) string {
+	return readCachedJobFailureExcerpt(jobID)
+}
+
+func CollectReplacementChain(ci *db.Launch, getCI func(int64) *db.Launch) []*db.Launch {
+	return collectReplacementChain(ci, getCI)
+}
+
+func FormatPreviousInstanceLine(donors []*db.Launch, now time.Time) string {
+	return formatPreviousInstanceLine(donors, now)
+}
+
+func FormatBytesIEC(n int64) string {
+	return formatBytesIEC(n)
+}
+
+func BuildCampaignWatchModel(database *sql.DB, instanceIDs []int64, r2Client *r2.Client, cfg *config.Config) tea.Model {
+	return newCampaignWatchModel(database, instanceIDs, r2Client, cfg)
+}

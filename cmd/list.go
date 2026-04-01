@@ -11,6 +11,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/remediation"
 	"github.com/osteele/weft/internal/ssh"
+	"github.com/osteele/weft/internal/ui/terminal"
 	"github.com/spf13/cobra"
 )
 
@@ -464,19 +465,19 @@ func printJobs(database *sql.DB, jobs []*db.Job) error {
 
 	switch listFormat {
 	case "json":
-		cols, err := resolveColumns(listColumns, defaultJSONColumnKeys)
+		cols, err := terminal.ResolveColumns(listColumns, terminal.DefaultJSONColumnKeys)
 		if err != nil {
 			return err
 		}
-		return printJobsJSON(os.Stdout, jobs, cols)
+		return terminal.PrintJobsJSON(os.Stdout, jobs, cols)
 	case "tsv", "tab":
-		cols, err := resolveColumns(listColumns, defaultTSVColumnKeys)
+		cols, err := terminal.ResolveColumns(listColumns, terminal.DefaultTSVColumnKeys)
 		if err != nil {
 			return err
 		}
-		return printJobsTSV(os.Stdout, jobs, cols)
+		return terminal.PrintJobsTSV(os.Stdout, jobs, cols)
 	case "table", "":
-		return writeListPlainOutput(renderJobListPlainWithOptions(jobs, listOutputWidth(), listColumns, listNoTruncate))
+		return terminal.WriteListPlainOutput(terminal.RenderJobListPlainWithOptions(jobs, terminal.ListOutputWidth(), listColumns, listNoTruncate))
 	default:
 		return fmt.Errorf("unknown format %q (use table, json, or tsv)", listFormat)
 	}
