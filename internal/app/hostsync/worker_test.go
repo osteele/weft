@@ -1,0 +1,97 @@
+package hostsync
+
+import (
+	"testing"
+	"time"
+
+	"github.com/osteele/weft/internal/db"
+	"github.com/osteele/weft/internal/ops"
+)
+
+func TestWorkerNoJobsNoSyncTime(t *testing.T) {
+	database := db.SetupTestDB(t)
+	testHost := "test-host-no-jobs"
+
+	_, _ = database.Exec(`DELETE FROM host_syncs WHERE name = ?`, testHost)
+
+	worker := New(database, nil, nil, nil)
+	worker.Start()
+	defer worker.Stop()
+
+	worker.Request(Request{Host: testHost, Rate: RateRunning, Priority: true})
+
+	time.Sleep(1 * time.Second)
+
+	times, err := db.LoadHostSyncTimes(database)
+	if err != nil {
+		t.Fatalf("LoadHostSyncTimes: %v", err)
+	}
+	if _, ok := times[testHost]; ok {
+		t.Errorf("sync time should not be recorded when there are no jobs to sync")
+	}
+}
+
+func TestGetHostSyncRateUsesEffectiveStatus(t *testing.T) {
+	queuedRunning := db.StatusRunning
+	jobs := []*db.Job{
+		{Status: db.StatusQueued, PendingStatus: &queuedRunning, Host: "test-host"},
+	}
+
+	if got := GetHostSyncRate(jobs); got != RateRunning {
+		t.Fatalf("GetHostSyncRate() = %v, want %v", got, RateRunning)
+	}
+}
+
+func TestBuildWarning(t *testing.T) {
+	tests := []struct {
+		name   string
+		result Result
+		want   string
+	}{
+		{
+			name: "agent deploy failure",
+			result: Result{
+				QueueRunnerError: "agent deploy failed: version mismatch",
+			},
+			want: "agent deploy failed: version mismatch",
+		},
+		{
+			name: "queue runner start failure",
+			result: Result{
+				QueueRunnerError: "queue runner start failed: tmux missing",
+			},
+			want: "queue runner start failed: tmux missing",
+		},
+		{
+			name: "queue dispatch failure",
+			result: Result{
+				QueueDispatchError: "job 289 source sync failed",
+			},
+			want: "queue dispatch failed: job 289 source sync failed",
+		},
+		{
+			name: "multiple failures collapse into one warning",
+			result: Result{
+				QueueRunnerError:   "agent deploy failed: version mismatch",
+				QueueDispatchError: "job 289 source sync failed",
+			},
+			want: "agent deploy failed: version mismatch; queue dispatch failed: job 289 source sync failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildWarning(toHostSyncResult(tt.result))
+			if got != tt.want {
+				t.Fatalf("BuildWarning() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func toHostSyncResult(result Result) ops.HostSyncResult {
+	return ops.HostSyncResult{
+		QueueDispatchError: result.QueueDispatchError,
+		QueueRunnerError:   result.QueueRunnerError,
+	}
+}

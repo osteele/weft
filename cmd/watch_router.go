@@ -8,12 +8,12 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	flashmsg "github.com/osteele/weft/internal/app/flash"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/tui"
 )
 
 // switchToLaunchMsg is emitted by watchModel when the user presses 'l'.
@@ -152,7 +152,7 @@ func (m watchRouterModel) buildHomeWatch(flash string) watchModel {
 	switch {
 	case m.homeMode.isInstanceBased():
 		w := newWatchModelWithMode(m.homeMode, m.database, m.instanceIDs, m.r2Client, m.config)
-		w.flash = tui.FlashState{Message: flash}
+		w.flash = flashmsg.State{Message: flash}
 		w.autoMode = m.autoMode
 		return w
 	case m.homeMode == watchModeProject:

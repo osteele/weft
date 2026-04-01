@@ -11,7 +11,7 @@ import (
 
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/tui"
+	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 )
 
 // watchAndReport runs the appropriate watch mode (TUI or plain) and prints
@@ -237,7 +237,7 @@ func buildInstanceRow(ci *db.Launch, now time.Time) exitReportInstanceRow {
 	obs := observeLaunch(ci, nil, now)
 	uptimeStr := "—"
 	if obs.Uptime != nil {
-		uptimeStr = tui.FormatCompactDuration(*obs.Uptime)
+		uptimeStr = dashboard.FormatCompactDuration(*obs.Uptime)
 	}
 	costStr := "—"
 	var cost float64

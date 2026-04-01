@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/dbwatch"
+	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
@@ -16,7 +17,6 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/tui"
 )
 
 // ---------------------------------------------------------------------------
@@ -188,9 +188,9 @@ func (m watchModel) requestOnPremSyncs() {
 		}
 	}
 	for host, hostJobs := range byHost {
-		m.syncWorker.Request(tui.SyncRequest{
+		m.syncWorker.Request(hostsync.Request{
 			Host: host,
-			Rate: tui.GetHostSyncRate(hostJobs),
+			Rate: hostsync.GetHostSyncRate(hostJobs),
 		})
 	}
 }
@@ -425,31 +425,13 @@ func (m watchModel) runProjectBackgroundSync(full bool) tea.Cmd {
 }
 
 func (m watchModel) startDBWatcher() tea.Cmd {
-	dbFile := db.Path()
-	if dbFile == "" {
-		return nil
-	}
-	dir := filepath.Dir(dbFile)
-	targets := map[string]struct{}{}
-	addTarget := func(name string) {
-		if name == "" {
-			return
-		}
-		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
-	}
-	base := filepath.Base(dbFile)
-	addTarget(base)
-	addTarget(base + "-wal")
-	addTarget(base + "-shm")
-
 	return func() tea.Msg {
-		watcher, err := fsnotify.NewWatcher()
+		watcher, targets, err := dbwatch.OpenJobsDBWatcher()
 		if err != nil {
 			return watchDBWatcherReadyMsg{err: err}
 		}
-		if err := watcher.Add(dir); err != nil {
-			_ = watcher.Close()
-			return watchDBWatcherReadyMsg{err: err}
+		if watcher == nil {
+			return nil
 		}
 		return watchDBWatcherReadyMsg{watcher: watcher, targets: targets}
 	}
@@ -468,7 +450,7 @@ func (m watchModel) waitForDBEvent() tea.Cmd {
 				if !ok {
 					return watchDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
 				}
-				if !listTUIWatchedDBFile(event.Name, targets) {
+				if !dbwatch.IsWatchedFile(event.Name, targets) {
 					continue
 				}
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
@@ -498,9 +480,9 @@ func (m watchModel) requestProjectActiveSyncs() {
 		}
 	}
 	for host, jobs := range hosts {
-		m.syncWorker.Request(tui.SyncRequest{
+		m.syncWorker.Request(hostsync.Request{
 			Host: host,
-			Rate: tui.GetHostSyncRate(jobs),
+			Rate: hostsync.GetHostSyncRate(jobs),
 		})
 	}
 }

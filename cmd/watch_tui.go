@@ -9,13 +9,14 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/flash"
+	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/r2"
-	"github.com/osteele/weft/internal/tui"
 )
 
 // watchMode selects which watch variant is active.
@@ -59,7 +60,7 @@ type watchModel struct {
 	clients        map[int64]cloud.Client
 	cloudClients   []cloud.Client // for orphan sweep
 	jobProgressHWM map[int64]int
-	syncWorker     *tui.SyncWorker
+	syncWorker     *hostsync.Worker
 
 	// --- Instance-based mode fields ---
 	campaignID          int64
@@ -105,7 +106,7 @@ type watchModel struct {
 
 	// --- Shared display state ---
 	unplacedJobs []*db.Job
-	flash        tui.FlashState
+	flash        flash.State
 	cursor       int // selectable row index; -1 when no selectable rows
 	width        int
 	height       int
@@ -160,9 +161,9 @@ func newWatchModelWithMode(mode watchMode, database *sql.DB, instanceIDs []int64
 
 	campaignID, launchedAt := campaignInfoFromInstances(database, instanceIDs)
 
-	var sw *tui.SyncWorker
+	var sw *hostsync.Worker
 	if cfg != nil {
-		sw = tui.NewSyncWorker(database, nil, nil, cfg)
+		sw = hostsync.New(database, nil, nil, cfg)
 		sw.Start()
 		go func() { <-ctx.Done(); sw.Stop() }()
 	}
@@ -205,7 +206,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 	ctx, cancel := context.WithCancel(context.Background())
 	r2Client, _ := buildR2Client(cfg)
 
-	sw := tui.NewSyncWorker(database, nil, r2Client, cfg)
+	sw := hostsync.New(database, nil, r2Client, cfg)
 	sw.Start()
 
 	allCloudClients, _ := buildCloudClients(cfg)
@@ -224,7 +225,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 		cloudClients:   allCloudClients,
 		jobProgressHWM: map[int64]int{},
 		syncWorker:     sw,
-		flash:          tui.FlashState{Message: flashMessage},
+		flash:          flash.State{Message: flashMessage},
 	}
 
 	snapshot, err := loadWatchSystemSnapshot(database, cfg, nil, false)
@@ -247,9 +248,9 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 
 	// Request initial syncs for on-prem hosts
 	for _, host := range model.onPremHosts {
-		sw.Request(tui.SyncRequest{
+		sw.Request(hostsync.Request{
 			Host: host.Name,
-			Rate: tui.GetHostSyncRate(host.Jobs),
+			Rate: hostsync.GetHostSyncRate(host.Jobs),
 		})
 	}
 
@@ -261,9 +262,9 @@ func newProjectWatchModel(database *sql.DB, cfg *config.Config, recentWindow tim
 	s.Spinner = spinner.Dot
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var sw *tui.SyncWorker
+	var sw *hostsync.Worker
 	if syncEnabled && cfg != nil {
-		sw = tui.NewSyncWorker(database, nil, nil, cfg)
+		sw = hostsync.New(database, nil, nil, cfg)
 		sw.Start()
 		go func() { <-ctx.Done(); sw.Stop() }()
 	}
@@ -304,7 +305,7 @@ func (m watchModel) Init() tea.Cmd {
 		cmds = append(cmds, m.startDBWatcher(), scheduleSyncTick(), scheduleCheckDone())
 		if m.syncWorker != nil {
 			m.requestOnPremSyncs()
-			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
+			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(hostsync.Result) tea.Msg {
 				return watchInstanceSyncResultMsg{}
 			}))
 		}
@@ -312,7 +313,7 @@ func (m watchModel) Init() tea.Cmd {
 		cmds = append(cmds,
 			scheduleWatchAllTick(),
 			scheduleCheckDone(),
-			m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return watchSyncResultMsg{result: r}
 			}),
 		)
@@ -320,7 +321,7 @@ func (m watchModel) Init() tea.Cmd {
 		cmds = append(cmds, m.startDBWatcher(), m.reloadProjectGroups(), scheduleProjectSyncTick())
 		if m.syncWorker != nil {
 			m.requestProjectActiveSyncs()
-			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return watchProjectSyncResultMsg{result: r}
 			}))
 		} else if m.projectSyncing {
@@ -395,7 +396,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	// --- Shared ---
-	case tui.FlashExpiredMsg:
+	case flash.ExpiredMsg:
 		m.flash.HandleExpired()
 		return m, nil
 
@@ -451,7 +452,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.mode.isInstanceBased() || m.syncWorker == nil {
 			return m, nil
 		}
-		return m, m.syncWorker.WaitForResult(m.ctx, func(tui.SyncResult) tea.Msg {
+		return m, m.syncWorker.WaitForResult(m.ctx, func(hostsync.Result) tea.Msg {
 			return watchInstanceSyncResultMsg{}
 		})
 
@@ -482,7 +483,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(
 			refreshWatchOnPrem(m.database),
-			m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return watchSyncResultMsg{result: r}
 			}),
 		)

@@ -10,7 +10,7 @@ import (
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
 	"github.com/osteele/weft/internal/monitor"
-	"github.com/osteele/weft/internal/tui"
+	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 	"github.com/osteele/weft/internal/web"
 	"github.com/spf13/cobra"
 )
@@ -57,7 +57,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	defer database.Close()
 
 	// Build TUI options from config
-	opts := tui.DefaultModelOptions()
+	opts := dashboard.DefaultModelOptions()
 	if cfg.SyncActiveInterval > 0 {
 		opts.SyncActiveInterval = time.Duration(cfg.SyncActiveInterval) * time.Second
 	} else if cfg.SyncInterval > 0 {
@@ -89,10 +89,10 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	defer restore()
 	opts.Monitor = mon
 	defer mon.Stop()
-	snapshot := tui.LoadInitialSnapshot(database, opts.HostCacheDuration)
+	snapshot := dashboard.LoadInitialSnapshot(database, opts.HostCacheDuration)
 	opts.InitialSnapshot = &snapshot
 
-	model := tui.NewModelWithOptions(database, opts)
+	model := dashboard.NewModelWithOptions(database, opts)
 
 	// Default to mouse enabled; flag can override
 	useMouse := true

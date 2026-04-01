@@ -3,13 +3,13 @@ package cmd
 import (
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/dbwatch"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -374,31 +374,13 @@ func syncCampaignListTUIData(database *sql.DB, full bool) []string {
 }
 
 func (m campaignListModel) startDBWatcher() tea.Cmd {
-	dbFile := db.Path()
-	if dbFile == "" {
-		return nil
-	}
-	dir := filepath.Dir(dbFile)
-	targets := map[string]struct{}{}
-	addTarget := func(name string) {
-		if name == "" {
-			return
-		}
-		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
-	}
-	base := filepath.Base(dbFile)
-	addTarget(base)
-	addTarget(base + "-wal")
-	addTarget(base + "-shm")
-
 	return func() tea.Msg {
-		watcher, err := fsnotify.NewWatcher()
+		watcher, targets, err := dbwatch.OpenJobsDBWatcher()
 		if err != nil {
 			return campaignListDBWatcherReadyMsg{err: err}
 		}
-		if err := watcher.Add(dir); err != nil {
-			_ = watcher.Close()
-			return campaignListDBWatcherReadyMsg{err: err}
+		if watcher == nil {
+			return nil
 		}
 		return campaignListDBWatcherReadyMsg{watcher: watcher, targets: targets}
 	}
@@ -418,7 +400,7 @@ func (m campaignListModel) waitForDBEvent() tea.Cmd {
 				if !ok {
 					return campaignListDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
 				}
-				if !listTUIWatchedDBFile(event.Name, targets) {
+				if !dbwatch.IsWatchedFile(event.Name, targets) {
 					continue
 				}
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {

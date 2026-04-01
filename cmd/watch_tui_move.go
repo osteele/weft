@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/cloud"
-	"github.com/osteele/weft/internal/tui"
+	dashboard "github.com/osteele/weft/internal/ui/dashboard"
 )
 
 // moveOption represents a destination for moving a queued job.
@@ -140,8 +140,8 @@ func (p *movePickerModel) View(width, height int) string {
 func formatMoveOptionLine(o moveOption) string {
 	if o.isNew {
 		return fmt.Sprintf("  %-10s %-14s ~%s setup  $%.2f/hr",
-			string(o.strategy)+":", o.gpuName, tui.FormatCompactDuration(o.waitTime), o.costPerHour)
+			string(o.strategy)+":", o.gpuName, dashboard.FormatCompactDuration(o.waitTime), o.costPerHour)
 	}
 	return fmt.Sprintf("  Instance #%-4d %-14s ~%s wait  $%.2f/hr",
-		o.instanceID, o.gpuName, tui.FormatCompactDuration(o.waitTime), o.costPerHour)
+		o.instanceID, o.gpuName, dashboard.FormatCompactDuration(o.waitTime), o.costPerHour)
 }

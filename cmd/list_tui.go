@@ -4,17 +4,17 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/dbwatch"
+	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/logging"
-	"github.com/osteele/weft/internal/tui"
 )
 
 const listDBChangeDebounce = 200 * time.Millisecond
@@ -36,7 +36,7 @@ type listTUIModel struct {
 	dbWatcher        *fsnotify.Watcher
 	dbWatcherTargets map[string]struct{}
 	debounceActive   bool
-	syncWorker       *tui.SyncWorker
+	syncWorker       *hostsync.Worker
 	ctx              context.Context
 	cancel           context.CancelFunc
 }
@@ -64,7 +64,7 @@ type listDBWatchEventMsg struct {
 type listDBRefreshTriggeredMsg struct{}
 type listSyncTickMsg struct{}
 type listSyncWorkerResultMsg struct {
-	result tui.SyncResult
+	result hostsync.Result
 }
 
 var (
@@ -78,10 +78,10 @@ var (
 func runListTUI(database *sql.DB, args []string, jobs []*db.Job, title string, syncEnabled bool) error {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var sw *tui.SyncWorker
+	var sw *hostsync.Worker
 	if syncEnabled {
 		cfg, _ := config.Load()
-		sw = tui.NewSyncWorker(database, nil, nil, cfg)
+		sw = hostsync.New(database, nil, nil, cfg)
 		sw.Start()
 	}
 
@@ -115,7 +115,7 @@ func (m listTUIModel) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.startDBWatcher(), m.reloadJobs(), scheduleListSyncTick()}
 	if m.syncWorker != nil {
 		m.requestActiveSyncs()
-		cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+		cmds = append(cmds, m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 			return listSyncWorkerResultMsg{result: r}
 		}))
 	} else if m.syncEnabled {
@@ -244,7 +244,7 @@ func (m listTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(
 			m.reloadJobs(),
-			m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+			m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 				return listSyncWorkerResultMsg{result: r}
 			}),
 		)
@@ -431,9 +431,9 @@ func (m listTUIModel) requestActiveSyncs() {
 		}
 	}
 	for host, jobs := range hosts {
-		m.syncWorker.Request(tui.SyncRequest{
+		m.syncWorker.Request(hostsync.Request{
 			Host: host,
-			Rate: tui.GetHostSyncRate(jobs),
+			Rate: hostsync.GetHostSyncRate(jobs),
 		})
 	}
 }
@@ -445,31 +445,13 @@ func scheduleListSyncTick() tea.Cmd {
 }
 
 func (m listTUIModel) startDBWatcher() tea.Cmd {
-	dbFile := db.Path()
-	if dbFile == "" {
-		return nil
-	}
-	dir := filepath.Dir(dbFile)
-	targets := map[string]struct{}{}
-	addTarget := func(name string) {
-		if name == "" {
-			return
-		}
-		targets[filepath.Clean(filepath.Join(dir, name))] = struct{}{}
-	}
-	base := filepath.Base(dbFile)
-	addTarget(base)
-	addTarget(base + "-wal")
-	addTarget(base + "-shm")
-
 	return func() tea.Msg {
-		watcher, err := fsnotify.NewWatcher()
+		watcher, targets, err := dbwatch.OpenJobsDBWatcher()
 		if err != nil {
 			return listDBWatcherReadyMsg{err: err}
 		}
-		if err := watcher.Add(dir); err != nil {
-			_ = watcher.Close()
-			return listDBWatcherReadyMsg{err: err}
+		if watcher == nil {
+			return nil
 		}
 		return listDBWatcherReadyMsg{watcher: watcher, targets: targets}
 	}
@@ -489,7 +471,7 @@ func (m listTUIModel) waitForDBEvent() tea.Cmd {
 				if !ok {
 					return listDBWatchEventMsg{err: fmt.Errorf("db watcher closed")}
 				}
-				if !listTUIWatchedDBFile(event.Name, targets) {
+				if !dbwatch.IsWatchedFile(event.Name, targets) {
 					continue
 				}
 				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
@@ -504,12 +486,4 @@ func (m listTUIModel) waitForDBEvent() tea.Cmd {
 			}
 		}
 	}
-}
-
-func listTUIWatchedDBFile(name string, targets map[string]struct{}) bool {
-	if name == "" {
-		return false
-	}
-	_, ok := targets[filepath.Clean(name)]
-	return ok
 }

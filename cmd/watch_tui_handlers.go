@@ -7,9 +7,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/tui"
 )
 
 // ---------------------------------------------------------------------------
@@ -487,9 +487,9 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 	m.rebuildReplacementCache()
 
 	for _, host := range m.onPremHosts {
-		m.syncWorker.Request(tui.SyncRequest{
+		m.syncWorker.Request(hostsync.Request{
 			Host: host.Name,
-			Rate: tui.GetHostSyncRate(host.Jobs),
+			Rate: hostsync.GetHostSyncRate(host.Jobs),
 		})
 	}
 	m.clampCursor()
@@ -545,7 +545,7 @@ func (m watchModel) handleProjectSyncFinished(msg watchProjectSyncFinishedMsg) (
 func (m watchModel) handleProjectSyncWorkerResult(msg watchProjectSyncResultMsg) (tea.Model, tea.Cmd) {
 	m.projectSyncing = false
 	cmds := []tea.Cmd{
-		m.syncWorker.WaitForResult(m.ctx, func(r tui.SyncResult) tea.Msg {
+		m.syncWorker.WaitForResult(m.ctx, func(r hostsync.Result) tea.Msg {
 			return watchProjectSyncResultMsg{result: r}
 		}),
 	}

@@ -1,0 +1,134 @@
+package dashboard
+
+import "github.com/charmbracelet/lipgloss"
+
+var (
+	// Colors
+	runningColor   = lipgloss.Color("#1F8F4D") // Darker green for better contrast
+	completedColor = lipgloss.Color("8")       // Gray
+	failedColor    = lipgloss.Color("9")       // Red
+	deadColor      = lipgloss.Color("9")       // Red
+	pendingColor   = lipgloss.Color("11")      // Yellow
+	queuedColor    = lipgloss.Color("6")       // Cyan
+	selectedBg     = lipgloss.Color("#E0E0E0") // Light gray highlight
+	borderColor    = lipgloss.Color("8")       // Gray
+
+	// Panel styles
+	listPanelStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Padding(0, 1)
+
+	logPanelStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(borderColor).
+			Padding(0, 1)
+
+	// Selection style - only changes background, preserves status colors
+	selectedStyle = lipgloss.NewStyle().
+			Background(selectedBg)
+
+	// Status-based styles
+	runningStyle = lipgloss.NewStyle().
+			Foreground(runningColor)
+
+	completedStyle = lipgloss.NewStyle().
+			Foreground(completedColor)
+
+	failedStyle = lipgloss.NewStyle().
+			Foreground(failedColor)
+
+	deadStyle = lipgloss.NewStyle().
+			Foreground(deadColor)
+
+	pendingStyle = lipgloss.NewStyle().
+			Foreground(pendingColor)
+
+	queuedStyle = lipgloss.NewStyle().
+			Foreground(queuedColor)
+
+	// Text styles
+	headerStyle = lipgloss.NewStyle().
+			Bold(true)
+
+	labelStyle = lipgloss.NewStyle().
+			Bold(true)
+
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Padding(0, 1)
+
+	dimStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240")). // Darker gray
+			Faint(true)
+
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("9")).
+			Bold(true)
+
+	statusMsgStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8"))
+
+	helpStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8"))
+
+	// Host status styles
+	hostOnlineStyle = lipgloss.NewStyle().
+			Foreground(runningColor) // Green
+
+	hostOfflineStyle = lipgloss.NewStyle().
+				Foreground(completedColor) // Gray (offline is normal, not an error)
+
+	hostCheckingStyle = lipgloss.NewStyle().
+				Foreground(pendingColor) // Yellow
+
+	hostSummaryNameStyle = lipgloss.NewStyle().
+				Bold(true)
+
+	hostSummaryNormalStyle = lipgloss.NewStyle().
+				Foreground(runningColor)
+
+	hostSummaryWarningStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#B58900"))
+
+	hostSummaryCriticalStyle = lipgloss.NewStyle().
+					Foreground(failedColor)
+
+	hostSummaryOfflineStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240")).
+				Faint(true)
+
+	// Tab styles for Details/Logs panel
+	activeTabStyle = lipgloss.NewStyle().
+			Bold(true).
+			Background(lipgloss.Color("4")).
+			Foreground(lipgloss.Color("15")).
+			Padding(0, 2)
+
+	inactiveTabStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")).
+				Padding(0, 2)
+
+	tabGapStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("8"))
+
+	// GPU tab styles based on job status (inactive state)
+	gpuTabRunningStyle = lipgloss.NewStyle().
+				Foreground(runningColor). // Green - has running jobs
+				Padding(0, 2)
+
+	gpuTabQueuedStyle = lipgloss.NewStyle().
+				Foreground(queuedColor). // Cyan - has queued jobs only
+				Padding(0, 2)
+
+	gpuTabEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")). // Gray - no jobs
+				Padding(0, 2)
+
+	// Progress bar styles
+	progressBarFilledStyle = lipgloss.NewStyle().
+				Foreground(runningColor) // Match running color
+
+	progressBarEmptyStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("8")) // Gray
+)

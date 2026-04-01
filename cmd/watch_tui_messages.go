@@ -4,9 +4,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/osteele/weft/internal/app/hostsync"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/db"
-	"github.com/osteele/weft/internal/tui"
 )
 
 // ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ type watchAllRefreshedMsg struct {
 }
 
 type watchSyncResultMsg struct {
-	result tui.SyncResult
+	result hostsync.Result
 }
 
 type watchOnPremRefreshedMsg struct {
@@ -117,7 +117,7 @@ type watchProjectSyncFinishedMsg struct {
 }
 
 type watchProjectSyncResultMsg struct {
-	result tui.SyncResult
+	result hostsync.Result
 }
 
 type watchDBWatcherReadyMsg struct {
