@@ -123,6 +123,38 @@ sources). This format is compatible with `uv`'s own PEP 723 support — you can
 declare both Python dependencies and weft resource requirements in the same
 block.
 
+### Avoiding GPU over-provisioning
+
+The `gpu-mem` value sets a **floor** — the minimum VRAM required. The default
+floor is 20GB when any GPU flag is used. For lightweight workloads, this default
+causes the bidding system to consider all GPU tiers including expensive H100 and
+H200 instances that provide no speedup.
+
+Set `gpu-mem` to actual peak VRAM usage (with headroom) to keep the floor low.
+A lower floor means the bidding system can select cheaper, smaller GPUs that are
+just as fast for the workload:
+
+```python
+# /// script
+# [tool.weft]
+# gpu = "nvidia"
+# gpu-mem = 8
+# inputs = ["hf:gpt2", "hf-dataset:wikitext"]
+# ///
+```
+
+For example, GPT-2 small (124M params) training uses ~3GB of VRAM. Declaring
+`gpu-mem = 8` allows placement on any GPU with 8+ GB, while the default 20GB
+floor would exclude cheaper options like the T4 (16GB).
+
+**Predictor-derived ceilings**: After a job completes, weft records peak GPU
+memory usage via telemetry. On subsequent submissions of the same command, the
+predictor sets a **ceiling** by snapping the p90 upper bound to the next
+standard VRAM tier (12, 16, 24, 48, 80, 141 GB). This ceiling filters out GPUs
+larger than needed, preventing the "fastest" strategy from selecting high-end
+GPUs for lightweight workloads. First runs have no ceiling — the predictor needs
+at least one completed run to derive it.
+
 ### Project-relative data inputs
 
 Use the `local:` prefix to declare project-relative directories that should be
