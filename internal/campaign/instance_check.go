@@ -110,8 +110,10 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 	}
 
 	// 1. Grace expiry: deadline has passed.
-	// The instance entered grace because a job failed; use "failed" not "orphaned"
-	// since the job did run (orphaned means the instance died before execution).
+	// The instance entered grace because a job failed. Don't reset jobs to
+	// queued (ResetJobs: false) — the job already ran and errored, so
+	// re-queuing would cause an infinite retry loop. Close the attempts as
+	// "failed" instead.
 	if ci.Status == db.LaunchStatusGrace && ci.GraceDeadline != nil && p.Now.Unix() > *ci.GraceDeadline {
 		return InstanceAction{
 			Kind:              ActionGraceExpired,
@@ -119,7 +121,6 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 			TerminationReason: db.TerminationReasonJobFailure,
 			StallMessage:      "grace period expired — terminating instance",
 			DestroyProvider:   true,
-			ResetJobs:         true,
 			AttemptOutcome:    db.AttemptOutcomeFailed,
 		}
 	}
@@ -461,7 +462,7 @@ func ExecuteAction(database *sql.DB, client cloud.Client, ci *db.Launch, action 
 		} else if resetCount > 0 {
 			slog.Debug("reset jobs from instance to unplaced", "component", "reconcile", "count", resetCount, "instance", ci.ID)
 		}
-	} else if action.AttemptOutcome != "" && action.TerminalStatus == db.LaunchStatusCompleted {
+	} else if action.AttemptOutcome != "" {
 		if err := db.CloseLaunchAttempts(database, ci.ID, action.AttemptOutcome); err != nil {
 			slog.Warn("failed to close attempts for instance", "component", "reconcile", "instance", ci.ID, "error", err)
 		}

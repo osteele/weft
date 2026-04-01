@@ -30,8 +30,11 @@ func TestCheckInstance_GraceExpired(t *testing.T) {
 	if !action.DestroyProvider {
 		t.Error("DestroyProvider should be true")
 	}
-	if !action.ResetJobs {
-		t.Error("ResetJobs should be true")
+	if action.ResetJobs {
+		t.Error("ResetJobs should be false for grace expiry (job already ran and failed)")
+	}
+	if action.AttemptOutcome != db.AttemptOutcomeFailed {
+		t.Errorf("AttemptOutcome = %q, want %q", action.AttemptOutcome, db.AttemptOutcomeFailed)
 	}
 }
 

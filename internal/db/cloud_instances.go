@@ -1201,10 +1201,19 @@ func CloseLaunchAttempt(database *sql.DB, jobID int64, outcome string) error {
 // CloseLaunchAttempts sets cloud_outcome on all open attempts
 // associated with the given cloud instance.
 func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) error {
+	// Map cloud outcome to attempt status: "failed" → failed, "completed" → completed,
+	// everything else (orphaned, superseded) → canceled.
+	attemptStatus := StatusCanceled
+	switch outcome {
+	case AttemptOutcomeFailed:
+		attemptStatus = StatusFailed
+	case AttemptOutcomeCompleted:
+		attemptStatus = StatusCompleted
+	}
 	_, err := database.Exec(
-		`UPDATE job_attempts SET cloud_outcome = ?
+		`UPDATE job_attempts SET status = ?, cloud_outcome = ?
 		 WHERE launch_id = ? AND end_time IS NULL`,
-		outcome, instanceID,
+		attemptStatus, outcome, instanceID,
 	)
 	return err
 }
