@@ -88,6 +88,11 @@ type launchModel struct {
 	// this list. Rebuilt whenever offers are re-ranked.
 	dedupedStrategies []bidding.SelectionStrategy
 
+	// winningCandidate caches the best candidate result for the active strategy.
+	// Used by launchInstances to get the actual groups/offers for launch
+	// (which may differ from m.groups when the merged candidate wins).
+	winningCandidate *campaign.CandidateResult
+
 	campaignID       int64
 	reconciling      bool // true while background reconciliation is in progress
 	loading          bool
@@ -401,19 +406,34 @@ func (m launchModel) prefetchHFSizes() tea.Cmd {
 }
 
 // rankCachedOffersForStrategy ranks cached raw offers with a specific strategy.
-//
-// TODO: When candidate groupings are available, use BestCandidateForStrategy
-// to select the best grouping per strategy. Currently always uses split groups
-// (m.cachedRawOffers) to maintain 1:1 alignment with m.groups for the job
-// selector and launch logic.
+// When candidate groupings are available, selects the best candidate and maps
+// its offers back to m.groups for display alignment.
 func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
 	setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
+	if len(m.cachedCandidates) > 1 {
+		result := campaign.BestCandidateForStrategy(
+			m.cachedCandidates, m.survivalModel, 1.0, setupFactory, strategy, m.launchOpts.MinSurvival,
+		)
+		return campaign.MapOffersToSplitGroups(m.groups, result)
+	}
 	return campaign.RankGroupOffers(m.cachedRawOffers, m.survivalModel, 1.0, setupFactory, strategy, m.launchOpts.MinSurvival)
 }
 
-// rankCachedOffers ranks cached raw offers with the current strategy.
-func (m launchModel) rankCachedOffers() []campaign.GroupOffer {
-	return m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
+// rankCachedOffers ranks cached raw offers with the current strategy and
+// caches the winning candidate result for launch.
+func (m *launchModel) rankCachedOffers() []campaign.GroupOffer {
+	offers := m.rankCachedOffersForStrategy(m.launchOpts.Strategy)
+	// Cache the winning candidate for launch
+	if len(m.cachedCandidates) > 1 {
+		setupFactory := campaign.OfferSetupOverheadFactory(m.database, m.overheadModel)
+		result := campaign.BestCandidateForStrategy(
+			m.cachedCandidates, m.survivalModel, 1.0, setupFactory, m.launchOpts.Strategy, m.launchOpts.MinSurvival,
+		)
+		m.winningCandidate = &result
+	} else {
+		m.winningCandidate = nil
+	}
+	return offers
 }
 
 // activeStrategyEstimates returns the cached cost estimates for the active strategy, or nil.
@@ -1107,11 +1127,20 @@ func (m launchModel) selectedLaunchableJobCount() int {
 }
 
 func (m launchModel) launchInstances() tea.Cmd {
-	// Build filtered groups with only selected jobs
+	// Build filtered groups with only selected jobs.
+	// When the winning candidate has merged groups, use those for launch
+	// (fewer instances, shared offers). Otherwise use split groups.
 	var filteredGroups []campaign.InstanceGroup
 	var filteredOffers []campaign.GroupOffer
 
-	for i, g := range m.groups {
+	sourceGroups := m.groups
+	sourceOffers := m.groupOffers
+	if m.winningCandidate != nil && len(m.winningCandidate.Groups) > 0 {
+		sourceGroups = m.winningCandidate.Groups
+		sourceOffers = m.winningCandidate.Offers
+	}
+
+	for i, g := range sourceGroups {
 		var selectedJobs []*db.Job
 		for _, job := range g.Jobs {
 			if m.selected[job.ID] {
@@ -1129,8 +1158,8 @@ func (m launchModel) launchInstances() tea.Cmd {
 			Jobs:     selectedJobs,
 		}
 		filteredGroups = append(filteredGroups, fg)
-		if m.groupOffers != nil && i < len(m.groupOffers) {
-			filteredOffers = append(filteredOffers, m.groupOffers[i])
+		if sourceOffers != nil && i < len(sourceOffers) {
+			filteredOffers = append(filteredOffers, sourceOffers[i])
 		}
 	}
 

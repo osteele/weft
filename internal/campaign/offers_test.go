@@ -270,6 +270,93 @@ func TestBuildReuseCandidate_NilWhenNoInstances(t *testing.T) {
 	}
 }
 
+func TestMapOffersToSplitGroups_MergedCandidate(t *testing.T) {
+	// 2 split groups merged into 1 candidate group
+	splitGroups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 2}}},
+	}
+	mergedOffer := &cloud.Offer{ProviderID: "merged-offer", CostPerHour: 0.50}
+	result := CandidateResult{
+		Label: "merged",
+		Groups: []InstanceGroup{
+			{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}, {ID: 2}}},
+		},
+		Offers: []GroupOffer{
+			{
+				Group: InstanceGroup{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}, {ID: 2}}},
+				Offer: mergedOffer,
+			},
+		},
+	}
+
+	mapped := MapOffersToSplitGroups(splitGroups, result)
+	if len(mapped) != 2 {
+		t.Fatalf("expected 2 mapped offers, got %d", len(mapped))
+	}
+	// Both split groups should get the merged offer
+	if mapped[0].Offer == nil || mapped[0].Offer.ProviderID != "merged-offer" {
+		t.Errorf("split group 0: expected merged-offer, got %v", mapped[0].Offer)
+	}
+	if mapped[1].Offer == nil || mapped[1].Offer.ProviderID != "merged-offer" {
+		t.Errorf("split group 1: expected merged-offer, got %v", mapped[1].Offer)
+	}
+}
+
+func TestMapOffersToSplitGroups_SplitCandidate(t *testing.T) {
+	// Split candidate = same grouping, 1:1 mapping
+	splitGroups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "H100", GPUMemGB: 80, Jobs: []*db.Job{{ID: 2}}},
+	}
+	offer1 := &cloud.Offer{ProviderID: "offer-1"}
+	offer2 := &cloud.Offer{ProviderID: "offer-2"}
+	result := CandidateResult{
+		Label:  "split",
+		Groups: splitGroups,
+		Offers: []GroupOffer{
+			{Group: splitGroups[0], Offer: offer1},
+			{Group: splitGroups[1], Offer: offer2},
+		},
+	}
+
+	mapped := MapOffersToSplitGroups(splitGroups, result)
+	if len(mapped) != 2 {
+		t.Fatalf("expected 2 mapped offers, got %d", len(mapped))
+	}
+	if mapped[0].Offer.ProviderID != "offer-1" {
+		t.Errorf("group 0: expected offer-1, got %s", mapped[0].Offer.ProviderID)
+	}
+	if mapped[1].Offer.ProviderID != "offer-2" {
+		t.Errorf("group 1: expected offer-2, got %s", mapped[1].Offer.ProviderID)
+	}
+}
+
+func TestMapOffersToSplitGroups_UnmatchedGroupGetsNilOffer(t *testing.T) {
+	// Split group with a job not in any candidate group
+	splitGroups := []InstanceGroup{
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 99}}}, // not in candidate
+	}
+	result := CandidateResult{
+		Label: "merged",
+		Groups: []InstanceGroup{
+			{GPUClass: "NVIDIA", GPUMemGB: 20, Jobs: []*db.Job{{ID: 1}}},
+		},
+		Offers: []GroupOffer{
+			{Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}}, Offer: &cloud.Offer{ProviderID: "o1"}},
+		},
+	}
+
+	mapped := MapOffersToSplitGroups(splitGroups, result)
+	if mapped[0].Offer == nil {
+		t.Error("group 0 should have an offer")
+	}
+	if mapped[1].Offer != nil {
+		t.Error("group 1 (unmatched) should have nil offer")
+	}
+}
+
 func TestScoreGrouping_NoOfferReturnsInf(t *testing.T) {
 	offers := []GroupOffer{
 		{Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}}}, Offer: nil},

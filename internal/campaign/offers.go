@@ -408,6 +408,14 @@ func BuildReuseCandidate(jobs []*db.Job, instances []InstanceCapacity) *Grouping
 	}
 }
 
+// CandidateResult holds the winning candidate's grouping and offers for a strategy.
+type CandidateResult struct {
+	CandidateIdx int
+	Label        string
+	Groups       []InstanceGroup
+	Offers       []GroupOffer
+}
+
 // BestCandidateForStrategy selects the candidate grouping with the lowest score
 // for the given strategy from pre-ranked offers.
 func BestCandidateForStrategy(
@@ -417,18 +425,54 @@ func BestCandidateForStrategy(
 	setupFactory SetupOverheadFactory,
 	strategy bidding.SelectionStrategy,
 	minSurvival float64,
-) (bestIdx int, bestOffers []GroupOffer) {
+) CandidateResult {
 	bestScore := math.Inf(1)
-	bestIdx = 0
+	var best CandidateResult
 
 	for i, cand := range candidates {
 		offers := RankGroupOffers(cand.Raw, survivalModel, jobDurationHrs, setupFactory, strategy, minSurvival)
 		score := ScoreGrouping(offers, strategy)
 		if score < bestScore {
 			bestScore = score
-			bestIdx = i
-			bestOffers = offers
+			best = CandidateResult{
+				CandidateIdx: i,
+				Label:        cand.Label,
+				Groups:       cand.Groups,
+				Offers:       offers,
+			}
 		}
 	}
-	return bestIdx, bestOffers
+	return best
+}
+
+// MapOffersToSplitGroups maps a winning candidate's offers back to the original
+// split groups for display. Each split group is assigned the offer from the
+// candidate group that contains its jobs. Split groups with no matching
+// candidate group get a nil-offer GroupOffer.
+func MapOffersToSplitGroups(splitGroups []InstanceGroup, result CandidateResult) []GroupOffer {
+	// Build job ID → candidate group index mapping
+	jobToCandidate := make(map[int64]int)
+	for ci, cg := range result.Groups {
+		for _, job := range cg.Jobs {
+			jobToCandidate[job.ID] = ci
+		}
+	}
+
+	mapped := make([]GroupOffer, len(splitGroups))
+	for si, sg := range splitGroups {
+		mapped[si] = GroupOffer{Group: sg}
+		if len(sg.Jobs) == 0 {
+			continue
+		}
+		// Use the first job's candidate group (all jobs in a split group
+		// should map to the same candidate group, since merging only
+		// combines whole groups)
+		if ci, ok := jobToCandidate[sg.Jobs[0].ID]; ok && ci < len(result.Offers) {
+			mapped[si].Offer = result.Offers[ci].Offer
+			mapped[si].SurvivalProb = result.Offers[ci].SurvivalProb
+			mapped[si].RejectedGroups = result.Offers[ci].RejectedGroups
+			mapped[si].Err = result.Offers[ci].Err
+		}
+	}
+	return mapped
 }
