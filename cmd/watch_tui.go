@@ -552,7 +552,22 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.debounceActive = false
-		return m.handleInstanceSyncTick()
+		// Lightweight refresh: sync on-prem hosts and refresh unplaced jobs,
+		// but do NOT call handleInstanceSyncTick() which schedules another
+		// scheduleSyncTick(). Doing so from the DB watcher (which fires every
+		// ~200ms) causes exponential timer accumulation and 300%+ CPU.
+		// The full sweep (reconcile campaigns, orphan sweep) already runs on
+		// independent schedules via SyncWorker (10s) and the periodic tick (15s).
+		m.requestOnPremSyncs()
+		return m, tea.Batch(
+			refreshWatchUnplacedJobs(m.database),
+			func() tea.Msg {
+				if _, err := db.ResetJobsOnTerminalLaunches(m.database); err != nil {
+					// log suppressed in TUI mode
+				}
+				return watchSyncDoneMsg{}
+			},
+		)
 
 	case watchProjectSyncTickMsg:
 		if m.mode != watchModeProject {
