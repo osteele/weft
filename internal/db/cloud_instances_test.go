@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
@@ -310,6 +311,67 @@ func TestGetLaunchJobsIncludingAttemptsOverridesStatusForHistorical(t *testing.T
 	}
 	if jobs[0].Status != StatusQueued {
 		t.Fatalf("display status = %q, want %q", jobs[0].Status, StatusQueued)
+	}
+}
+
+func TestGetLaunchJobsIncludingAttemptsUsesHistoricalAttemptTiming(t *testing.T) {
+	database := setupTestDB(t)
+
+	firstInstanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(first): %v", err)
+	}
+	secondInstanceID, err := CreateLaunch(database, &Launch{
+		Status:   LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX 4090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch(second): %v", err)
+	}
+
+	insertTestJob(t, database, 401, "python train.py", "/tmp", StatusQueued)
+	if err := SetJobLaunchID(database, 401, firstInstanceID); err != nil {
+		t.Fatalf("SetJobLaunchID(first): %v", err)
+	}
+	if err := MarkQueuedJobRunning(database, 401); err != nil {
+		t.Fatalf("MarkQueuedJobRunning: %v", err)
+	}
+
+	var historicalEnd sql.NullInt64
+	if _, err := ResetLaunchJobs(database, firstInstanceID, AttemptOutcomeOrphaned); err != nil {
+		t.Fatalf("ResetLaunchJobs(first): %v", err)
+	}
+	if err := database.QueryRow(
+		`SELECT end_time FROM job_attempts WHERE job_id = ? AND launch_id = ? ORDER BY attempt_number DESC LIMIT 1`,
+		401, firstInstanceID,
+	).Scan(&historicalEnd); err != nil {
+		t.Fatalf("query historical end_time: %v", err)
+	}
+	if !historicalEnd.Valid || historicalEnd.Int64 == 0 {
+		t.Fatalf("historical end_time = %v, want non-zero", historicalEnd)
+	}
+
+	if err := SetJobLaunchID(database, 401, secondInstanceID); err != nil {
+		t.Fatalf("SetJobLaunchID(second): %v", err)
+	}
+
+	jobs, err := GetLaunchJobsIncludingAttempts(database, firstInstanceID)
+	if err != nil {
+		t.Fatalf("GetLaunchJobsIncludingAttempts: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+	if jobs[0].EndTime == nil {
+		t.Fatal("EndTime = nil, want historical attempt end time")
+	}
+	if *jobs[0].EndTime != historicalEnd.Int64 {
+		t.Fatalf("EndTime = %d, want %d", *jobs[0].EndTime, historicalEnd.Int64)
 	}
 }
 

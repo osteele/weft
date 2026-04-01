@@ -195,7 +195,7 @@ func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 			Status: db.LaunchStatusRunning,
 		},
 		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
-		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, LatestJobEnd: latestEnd},
+		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, AllJobsCompleted: true, LatestJobEnd: latestEnd},
 		Now:          time.Now(),
 	})
 	if action.Kind != ActionSelfDestructFailed {
@@ -203,6 +203,51 @@ func TestCheckInstance_SelfDestructFailed(t *testing.T) {
 	}
 	if action.TerminalStatus != db.LaunchStatusCompleted {
 		t.Errorf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusCompleted)
+	}
+}
+
+func TestCheckInstance_SelfDestructFailed_FailedJobsMarksLaunchFailed(t *testing.T) {
+	r := NewReconciler()
+	latestEnd := time.Now().Add(-3 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:     1,
+			Status: db.LaunchStatusRunning,
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		JobState: JobState{
+			HasStartedJob:   true,
+			AllJobsTerminal: true,
+			LatestJobEnd:    latestEnd,
+		},
+		Now: time.Now(),
+	})
+	if action.Kind != ActionSelfDestructFailed {
+		t.Fatalf("action.Kind = %d, want ActionSelfDestructFailed (%d)", action.Kind, ActionSelfDestructFailed)
+	}
+	if action.TerminalStatus != db.LaunchStatusFailed {
+		t.Fatalf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusFailed)
+	}
+	if action.TerminationReason != db.TerminationReasonJobFailure {
+		t.Fatalf("TerminationReason = %q, want %q", action.TerminationReason, db.TerminationReasonJobFailure)
+	}
+}
+
+func TestCheckInstance_SelfDestructFailed_BeatsStaleHeartbeatWarning(t *testing.T) {
+	r := NewReconciler()
+	latestEnd := time.Now().Add(-3 * time.Minute).Unix()
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:     1,
+			Status: db.LaunchStatusRunning,
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusRunning},
+		HeartbeatAge: 5 * time.Minute,
+		JobState:     JobState{HasStartedJob: true, AllJobsTerminal: true, AllJobsCompleted: true, LatestJobEnd: latestEnd},
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionSelfDestructFailed {
+		t.Fatalf("action.Kind = %d, want ActionSelfDestructFailed (%d)", action.Kind, ActionSelfDestructFailed)
 	}
 }
 
@@ -327,6 +372,55 @@ func TestCheckInstance_ProviderDead_NoHysteresis(t *testing.T) {
 	}
 }
 
+func TestCheckInstance_ProviderDead_BeatsStaleHeartbeatWarning(t *testing.T) {
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusExited},
+		HeartbeatAge: 5 * time.Minute,
+		Now:          time.Now(),
+	})
+	if action.Kind != ActionProviderDead {
+		t.Fatalf("action.Kind = %d, want ActionProviderDead (%d)", action.Kind, ActionProviderDead)
+	}
+}
+
+func TestCheckInstance_ProviderDead_UsesTerminalJobsForCompletedLaunch(t *testing.T) {
+	r := &Reconciler{
+		firstDeadAt:        make(map[int64]time.Time),
+		probeFailures:      make(map[int64]probeFailureState),
+		lastProviderStatus: make(map[int64]string),
+		deadConfirmTime:    -1,
+	}
+	action := r.CheckInstance(CheckInstanceParams{
+		CI: &db.Launch{
+			ID:                 1,
+			Status:             db.LaunchStatusRunning,
+			ProviderInstanceID: "test-123",
+		},
+		ProviderInst: &cloud.Instance{Status: cloud.ProviderStatusExited},
+		JobState: JobState{
+			HasStartedJob:    true,
+			AllJobsTerminal:  true,
+			AllJobsCompleted: true,
+			LatestJobEnd:     time.Now().Add(-2 * time.Minute).Unix(),
+		},
+		Now: time.Now(),
+	})
+	if action.TerminalStatus != db.LaunchStatusCompleted {
+		t.Fatalf("TerminalStatus = %q, want %q", action.TerminalStatus, db.LaunchStatusCompleted)
+	}
+}
+
 func TestCheckInstance_ProviderDead_SkipsGraceInstances(t *testing.T) {
 	r := &Reconciler{
 		firstDeadAt:        make(map[int64]time.Time),
@@ -347,6 +441,44 @@ func TestCheckInstance_ProviderDead_SkipsGraceInstances(t *testing.T) {
 	})
 	if action.Kind != ActionNone {
 		t.Fatalf("action.Kind = %d, want ActionNone (grace instances should skip dead detection)", action.Kind)
+	}
+}
+
+func TestComputeJobState_HistoricalOrphanedAttemptCountsAsStartedAndTerminal(t *testing.T) {
+	end := time.Now().Add(-2 * time.Minute).Unix()
+	jobs := []*db.Job{{
+		ID:      88,
+		Status:  db.StatusQueued,
+		EndTime: &end,
+	}}
+	state := ComputeJobState(jobs, map[int64]string{88: db.AttemptOutcomeOrphaned})
+	if !state.HasStartedJob {
+		t.Fatal("HasStartedJob = false, want true")
+	}
+	if !state.AllJobsTerminal {
+		t.Fatal("AllJobsTerminal = false, want true")
+	}
+	if state.LatestJobEnd != end {
+		t.Fatalf("LatestJobEnd = %d, want %d", state.LatestJobEnd, end)
+	}
+	if got, reason, ok := state.TerminalLaunchStatus(); !ok || got != db.LaunchStatusFailed || reason != db.TerminationReasonJobFailure {
+		t.Fatalf("TerminalLaunchStatus() = (%q, %q, %v), want (%q, %q, true)", got, reason, ok, db.LaunchStatusFailed, db.TerminationReasonJobFailure)
+	}
+}
+
+func TestComputeJobState_DeadAndKilledAreTerminal(t *testing.T) {
+	deadEnd := time.Now().Add(-3 * time.Minute).Unix()
+	killedEnd := time.Now().Add(-1 * time.Minute).Unix()
+	jobs := []*db.Job{
+		{ID: 1, Status: db.StatusDead, EndTime: &deadEnd},
+		{ID: 2, Status: db.StatusKilled, EndTime: &killedEnd},
+	}
+	state := ComputeJobState(jobs, nil)
+	if !state.AllJobsTerminal {
+		t.Fatal("AllJobsTerminal = false, want true")
+	}
+	if state.LatestJobEnd != killedEnd {
+		t.Fatalf("LatestJobEnd = %d, want %d", state.LatestJobEnd, killedEnd)
 	}
 }
 

@@ -750,6 +750,8 @@ func TestIsJobTerminal(t *testing.T) {
 	}{
 		{db.StatusCompleted, true},
 		{db.StatusFailed, true},
+		{db.StatusDead, true},
+		{db.StatusKilled, true},
 		{db.AttemptOutcomeOrphaned, true},
 		{db.AttemptOutcomeCancelled, true},
 		{db.StatusQueued, false},

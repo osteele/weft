@@ -639,6 +639,29 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 		result = append(result, job)
 	}
 
+	attemptFacts, err := GetLaunchAttemptFacts(database, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("get launch attempt facts: %w", err)
+	}
+
+	// Patch rows with the timing and exit facts from the attempt that actually
+	// ran on this instance. Historical rows otherwise inherit fields from the
+	// latest global attempt, which can be a later retry on another instance.
+	for _, job := range result {
+		fact, ok := attemptFacts[job.ID]
+		if !ok {
+			continue
+		}
+		job.StartTime = fact.StartTime
+		job.EndTime = fact.EndTime
+		job.ExitCode = fact.ExitCode
+		attemptID := fact.AttemptID
+		job.LatestRunID = &attemptID
+		if job.Host == "" && fact.Host != "" {
+			job.Host = fact.Host
+		}
+	}
+
 	// For historical jobs (no longer assigned to this instance), override the
 	// display status with the attempt outcome so the UI shows what happened on
 	// this instance rather than the job's current global status.
@@ -668,6 +691,10 @@ func GetLaunchJobsIncludingAttempts(database *sql.DB, instanceID int64) ([]*Job,
 				job.Status = StatusCompleted
 			case AttemptOutcomeCancelled:
 				job.Status = StatusCanceled
+			default:
+				if fact, ok := attemptFacts[job.ID]; ok {
+					job.Status = fact.Status
+				}
 				// AttemptOutcomeSuperseded: keep current status (moved to another instance)
 			}
 		}
@@ -1180,6 +1207,18 @@ type LaunchAttempt struct {
 	Outcome   string // "completed", "failed", "canceled", "orphaned"
 }
 
+// LaunchAttemptFact captures the latest attempt facts for a job on a specific
+// cloud instance, even if the job has since been retried elsewhere.
+type LaunchAttemptFact struct {
+	AttemptID    int64
+	Status       string
+	StartTime    int64
+	EndTime      *int64
+	ExitCode     *int
+	CloudOutcome string
+	Host         string
+}
+
 // CloseLaunchAttempt sets cloud_outcome on the latest cloud-associated attempt for a job.
 func CloseLaunchAttempt(database *sql.DB, jobID int64, outcome string) error {
 	_, err := database.Exec(
@@ -1297,6 +1336,70 @@ func GetAttemptOutcomesByLaunch(database *sql.DB, cloudInstanceID int64) (map[in
 		outcomes[jobID] = outcome
 	}
 	return outcomes, rows.Err()
+}
+
+// GetLaunchAttemptFacts returns the latest attempt facts for each job that ran
+// on the given cloud instance.
+func GetLaunchAttemptFacts(database *sql.DB, cloudInstanceID int64) (map[int64]LaunchAttemptFact, error) {
+	rows, err := database.Query(
+		`WITH ranked_attempts AS (
+			SELECT
+				ja.job_id,
+				ja.id,
+				ja.status,
+				ja.host,
+				ja.start_time,
+				ja.end_time,
+				ja.exit_code,
+				COALESCE(ja.cloud_outcome, '') AS cloud_outcome,
+				ROW_NUMBER() OVER (PARTITION BY ja.job_id ORDER BY ja.attempt_number DESC, ja.id DESC) AS rn
+			FROM job_attempts ja
+			WHERE ja.launch_id = ?
+		)
+		SELECT job_id, id, status, host, start_time, end_time, exit_code, cloud_outcome
+		FROM ranked_attempts
+		WHERE rn = 1`,
+		cloudInstanceID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	facts := make(map[int64]LaunchAttemptFact)
+	for rows.Next() {
+		var (
+			jobID        int64
+			fact         LaunchAttemptFact
+			host         sql.NullString
+			startTime    sql.NullInt64
+			endTime      sql.NullInt64
+			exitCode     sql.NullInt64
+			cloudOutcome sql.NullString
+		)
+		if err := rows.Scan(&jobID, &fact.AttemptID, &fact.Status, &host, &startTime, &endTime, &exitCode, &cloudOutcome); err != nil {
+			return nil, err
+		}
+		if host.Valid {
+			fact.Host = host.String
+		}
+		if startTime.Valid {
+			fact.StartTime = startTime.Int64
+		}
+		if endTime.Valid {
+			end := endTime.Int64
+			fact.EndTime = &end
+		}
+		if exitCode.Valid {
+			code := int(exitCode.Int64)
+			fact.ExitCode = &code
+		}
+		if cloudOutcome.Valid {
+			fact.CloudOutcome = cloudOutcome.String
+		}
+		facts[jobID] = fact
+	}
+	return facts, rows.Err()
 }
 
 // GetLatestAttemptOutcome returns the most recent cloud_outcome for a job.

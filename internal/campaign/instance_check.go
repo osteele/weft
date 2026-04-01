@@ -28,7 +28,7 @@ const (
 	ActionBootstrapStalled                      // no bootstrap progress -> fail
 	ActionBootstrapComplete                     // bootstrap stalled but R2 completion marker found -> complete
 	ActionProviderDead                          // provider says dead (with hysteresis) -> fail/complete
-	ActionSelfDestructFailed                    // all jobs done, instance lingering -> complete
+	ActionSelfDestructFailed                    // jobs terminal, instance lingering -> finalize launch + destroy
 	ActionSetupStalled                          // setup phase unchanged too long -> fail
 	ActionRunningStalled                        // running phase + stale heartbeat too long -> fail
 )
@@ -46,26 +46,74 @@ type InstanceAction struct {
 
 // JobState summarizes the aggregate state of jobs associated with a cloud instance.
 type JobState struct {
-	HasStartedJob   bool
-	AllJobsTerminal bool
-	LatestJobEnd    int64 // unix timestamp of latest job end, 0 if none
+	HasStartedJob    bool
+	AllJobsTerminal  bool
+	AllJobsCompleted bool
+	AllJobsCanceled  bool
+	LatestJobEnd     int64 // unix timestamp of latest job end, 0 if none
 }
 
 // ComputeJobState computes aggregate job state from a list of jobs.
-func ComputeJobState(jobs []*db.Job) JobState {
-	s := JobState{AllJobsTerminal: true}
+func ComputeJobState(jobs []*db.Job, outcomes map[int64]string) JobState {
+	s := JobState{
+		AllJobsTerminal:  true,
+		AllJobsCompleted: len(jobs) > 0,
+		AllJobsCanceled:  len(jobs) > 0,
+	}
 	for _, j := range jobs {
-		if j.Status != db.StatusQueued {
+		displayStatus := AttemptDisplayStatus(j, outcomes)
+		if jobStartedOnInstance(j, displayStatus) {
 			s.HasStartedJob = true
 		}
-		if !IsJobTerminal(j.Status) {
+		if !IsJobTerminal(displayStatus) {
 			s.AllJobsTerminal = false
+			s.AllJobsCompleted = false
+			s.AllJobsCanceled = false
+		} else {
+			if displayStatus != db.StatusCompleted {
+				s.AllJobsCompleted = false
+			}
+			if displayStatus != db.StatusCanceled {
+				s.AllJobsCanceled = false
+			}
 		}
 		if j.EndTime != nil && *j.EndTime > s.LatestJobEnd {
 			s.LatestJobEnd = *j.EndTime
 		}
 	}
 	return s
+}
+
+func jobStartedOnInstance(j *db.Job, displayStatus string) bool {
+	if j == nil {
+		return false
+	}
+	if j.StartTime > 0 {
+		return true
+	}
+	if j.EndTime != nil && *j.EndTime > 0 {
+		return true
+	}
+	switch displayStatus {
+	case db.StatusQueued, db.StatusDraft:
+		return false
+	default:
+		return true
+	}
+}
+
+func (s JobState) TerminalLaunchStatus() (status string, reason string, ok bool) {
+	if !s.HasStartedJob || !s.AllJobsTerminal {
+		return "", "", false
+	}
+	switch {
+	case s.AllJobsCompleted:
+		return db.LaunchStatusCompleted, db.TerminationReasonCompleted, true
+	case s.AllJobsCanceled:
+		return db.LaunchStatusCancelled, db.TerminationReasonCancelled, true
+	default:
+		return db.LaunchStatusFailed, db.TerminationReasonJobFailure, true
+	}
 }
 
 // CheckInstanceParams holds all the pre-fetched state needed to evaluate an instance.
@@ -287,30 +335,32 @@ func (r *Reconciler) CheckInstance(p CheckInstanceParams) InstanceAction {
 		}
 	}
 
-	// 6. Stale heartbeat (display-only warning — the reconciler's probe logic is separate)
+	// 6. Failed self-destruct: jobs reached a terminal state but the instance is lingering.
+	if ci.Status == db.LaunchStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal && p.JobState.LatestJobEnd > 0 {
+		if terminalStatus, reason, ok := p.JobState.TerminalLaunchStatus(); ok &&
+			p.Now.Sub(time.Unix(p.JobState.LatestJobEnd, 0)) > 2*time.Minute {
+			return InstanceAction{
+				Kind:              ActionSelfDestructFailed,
+				TerminalStatus:    terminalStatus,
+				TerminationReason: reason,
+				StallMessage:      "jobs reached terminal state but self-destruct failed — cleaning up",
+				DestroyProvider:   true,
+			}
+		}
+	}
+
+	// 7. Provider dead detection (with hysteresis)
+	// Skip grace-period instances — a transient API failure shouldn't kill the session.
+	if p.ProviderErr == nil && isProviderTerminal(p.ProviderInst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
+		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.JobState, p.Now)
+	}
+
+	// 8. Stale heartbeat (display-only warning — the reconciler's probe logic is separate)
 	if p.HeartbeatAge > heartbeatStaleThreshold && ci.Status == db.LaunchStatusRunning {
 		return InstanceAction{
 			Kind:         ActionDisplayOnly,
 			StallMessage: "heartbeat stale",
 		}
-	}
-
-	// 7. Failed self-destruct: all jobs finished but instance still running
-	if ci.Status == db.LaunchStatusRunning && p.JobState.HasStartedJob && p.JobState.AllJobsTerminal && p.JobState.LatestJobEnd > 0 {
-		if p.Now.Sub(time.Unix(p.JobState.LatestJobEnd, 0)) > 2*time.Minute {
-			return InstanceAction{
-				Kind:            ActionSelfDestructFailed,
-				TerminalStatus:  db.LaunchStatusCompleted,
-				StallMessage:    "all jobs finished but self-destruct failed — cleaning up",
-				DestroyProvider: true,
-			}
-		}
-	}
-
-	// 8. Provider dead detection (with hysteresis)
-	// Skip grace-period instances — a transient API failure shouldn't kill the session.
-	if p.ProviderErr == nil && isProviderTerminal(p.ProviderInst) && !IsInstanceTerminal(ci.Status) && ci.Status != db.LaunchStatusGrace {
-		return r.checkProviderDead(ci, p.ProviderInst, p.R2Client, p.Now)
 	}
 
 	return InstanceAction{Kind: ActionNone}
@@ -351,7 +401,7 @@ func (r *Reconciler) checkTerminationIntent(ci *db.Launch, inst *cloud.Instance,
 	}
 }
 
-func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Client *r2.Client, now time.Time) InstanceAction {
+func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Client *r2.Client, jobState JobState, now time.Time) InstanceAction {
 	// Check R2 for completion marker before assuming failure.
 	if hasR2CompletionMarker(r2Client, ci.ID) {
 		slog.Debug("provider dead: found R2 completion marker",
@@ -401,6 +451,14 @@ func (r *Reconciler) checkProviderDead(ci *db.Launch, inst *cloud.Instance, r2Cl
 	r.mu.Lock()
 	delete(r.firstDeadAt, ci.ID)
 	r.mu.Unlock()
+
+	if terminalStatus, reason, ok := jobState.TerminalLaunchStatus(); ok {
+		return InstanceAction{
+			Kind:              ActionProviderDead,
+			TerminalStatus:    terminalStatus,
+			TerminationReason: reason,
+		}
+	}
 
 	// Use "unknown" as the default reason — we can't determine what happened.
 	// R2 markers may override below with a more specific reason.

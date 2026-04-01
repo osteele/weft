@@ -306,7 +306,8 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				lastProviderPoll = time.Now()
 			}
 
-			jobState := ComputeJobState(jobs)
+			attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, cloudInstanceID)
+			jobState := ComputeJobState(jobs, attemptOutcomes)
 
 			// Sync external state (R2 markers, termination intent) to launch_live_state.
 			synced := SyncInstanceState(ctx, database, ci, r2c, jobs, jobState, SyncInstanceStateOpts{
@@ -343,12 +344,9 @@ func WatchInstance(ctx context.Context, client cloud.Client, database *sql.DB, c
 				stallMessage = action.StallMessage
 			}
 
-			// Fetch attempt outcomes for all instances so that orphaned/completed
-			// attempts display correctly even while the instance is running.
-			var attemptOutcomes map[int64]string
-			{
-				attemptOutcomes, _ = db.GetAttemptOutcomesByLaunch(database, cloudInstanceID)
-			}
+			// Refresh attempt outcomes so instance-scoped display tracks resets and
+			// completions that may have happened during reconciliation.
+			attemptOutcomes, _ = db.GetAttemptOutcomesByLaunch(database, cloudInstanceID)
 
 			update := InstanceUpdate{
 				Launch:                  ci,
@@ -719,7 +717,7 @@ func FormatPlainUpdate(prev, curr InstanceUpdate) string {
 // This covers both job statuses (completed, failed) and attempt outcomes (orphaned, canceled).
 func IsJobTerminal(displayStatus string) bool {
 	switch displayStatus {
-	case db.StatusCompleted, db.StatusFailed,
+	case db.StatusCompleted, db.StatusFailed, db.StatusDead, db.StatusKilled,
 		db.AttemptOutcomeOrphaned, db.AttemptOutcomeCancelled:
 		return true
 	}

@@ -296,7 +296,8 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 	}
 
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, ci.ID)
-	jobState := ComputeJobState(jobs)
+	attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, ci.ID)
+	jobState := ComputeJobState(jobs, attemptOutcomes)
 
 	// Sync external state (R2 markers, termination intent) to launch_live_state.
 	synced := SyncInstanceState(context.Background(), database, ci, r2Client, jobs, jobState, SyncInstanceStateOpts{})
@@ -364,10 +365,11 @@ func (r *Reconciler) reconcileOneInstance(database *sql.DB, clients []cloud.Clie
 // are in terminal status before ExecuteAction resets or closes attempts.
 func syncJobCompletionsFromR2(database *sql.DB, r2Client *r2.Client, instanceID int64) {
 	jobs, _ := db.GetLaunchJobsIncludingAttempts(database, instanceID)
+	attemptOutcomes, _ := db.GetAttemptOutcomesByLaunch(database, instanceID)
 	ctx := context.Background()
 	var synced, remaining int
 	for _, j := range jobs {
-		if !db.IsTerminalStatus(j.Status) {
+		if !IsJobTerminal(AttemptDisplayStatus(j, attemptOutcomes)) {
 			if reconcileCheckAndSyncJobComplete(ctx, r2Client, database, j.ID) {
 				synced++
 			} else {
