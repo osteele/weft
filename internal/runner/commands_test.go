@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/osteele/weft/internal/opsqueue"
@@ -345,6 +346,40 @@ func TestProcessCommands_AddWithGPUFields(t *testing.T) {
 		t.Fatalf("ReadJobFile: %v", err)
 	}
 	assertResourceFields(t, got, "1", "a100", 80, []string{"out/"}, []string{"model.pt"}, []string{"data.csv:1"})
+}
+
+func TestProcessCommands_AddHandlesLongJSONLine(t *testing.T) {
+	dir := t.TempDir()
+	cmdFile := filepath.Join(dir, "default.commands")
+	state := NewState()
+
+	largeDesc := strings.Repeat("x", 256*1024)
+	appendCmd(t, cmdFile, opsqueue.QueueCommand{
+		Timestamp: "2024-01-01T00:00:00Z",
+		Op:        opsqueue.OpAdd,
+		Job: &opsqueue.CommandJob{
+			ID:   77,
+			Cmd:  "echo huge",
+			Desc: largeDesc,
+		},
+	})
+
+	cp := NewCommandProcessor(cmdFile, dir)
+	if _, err := cp.ProcessCommands(state); err != nil {
+		t.Fatalf("ProcessCommands: %v", err)
+	}
+
+	if len(state.Pending) != 1 || state.Pending[0] != 77 {
+		t.Fatalf("pending = %v, want [77]", state.Pending)
+	}
+
+	jobData, err := ReadJobFile(dir, 77)
+	if err != nil {
+		t.Fatalf("ReadJobFile: %v", err)
+	}
+	if jobData.Desc != largeDesc {
+		t.Fatalf("job description length = %d, want %d", len(jobData.Desc), len(largeDesc))
+	}
 }
 
 func appendCmd(t *testing.T, path string, cmd opsqueue.QueueCommand) {

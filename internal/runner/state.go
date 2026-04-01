@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sync"
 	"time"
 )
 
 // State tracks the runner's persistent state, saved to {queue}.state.json.
 // Compatible with the bash runner's state format.
 type State struct {
+	mu         sync.RWMutex
 	Cursor     string                      `json:"cursor"`
 	CursorLine int                         `json:"cursor_line"`
 	Pending    []int64                     `json:"pending"`
@@ -105,6 +107,9 @@ func LoadState(path string) (*State, error) {
 
 // Save writes state to a JSON file, pruning finished entries older than 24h.
 func (s *State) Save(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.pruneFinished()
 
 	data, err := json.Marshal(s)
@@ -125,27 +130,59 @@ func (s *State) pruneFinished() {
 	}
 }
 
+// CursorLineValue returns the last processed line from the command log.
+func (s *State) CursorLineValue() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.CursorLine
+}
+
+// SetCursorLine updates the command-log cursor line without changing the timestamp.
+func (s *State) SetCursorLine(line int) {
+	s.mu.Lock()
+	s.CursorLine = line
+	s.mu.Unlock()
+}
+
+// SetCursor updates the command-log cursor timestamp and line number together.
+func (s *State) SetCursor(cursor string, line int) {
+	s.mu.Lock()
+	s.Cursor = cursor
+	s.CursorLine = line
+	s.mu.Unlock()
+}
+
 // AddPending adds a job ID to the end of the pending list.
 // Removes any existing entry first to prevent duplicates.
 func (s *State) AddPending(jobID int64) {
-	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
-	s.Pending = append(s.Pending, jobID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.addPendingLocked(jobID)
 }
 
 // PriorityPending moves a job to the front of the pending list.
 func (s *State) PriorityPending(jobID int64) {
-	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
-	s.Pending = slices.Insert(s.Pending, 0, jobID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.priorityPendingLocked(jobID)
 }
 
 // RemovePending removes a job from the pending list.
 func (s *State) RemovePending(jobID int64) {
-	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removePendingLocked(jobID)
 }
 
 // PopPending removes and returns the first job from the pending list.
 // Returns 0, false if the list is empty.
 func (s *State) PopPending() (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.popPendingLocked()
+}
+
+func (s *State) popPendingLocked() (int64, bool) {
 	if len(s.Pending) == 0 {
 		return 0, false
 	}
@@ -156,16 +193,26 @@ func (s *State) PopPending() (int64, bool) {
 
 // PendingEmpty returns true if there are no pending jobs.
 func (s *State) PendingEmpty() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return len(s.Pending) == 0
 }
 
 // RunningCount returns the number of running jobs.
 func (s *State) RunningCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return len(s.Running)
 }
 
 // RunningIDs returns the IDs of all running jobs.
 func (s *State) RunningIDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.runningIDsLocked()
+}
+
+func (s *State) runningIDsLocked() []string {
 	ids := make([]string, 0, len(s.Running))
 	for id := range s.Running {
 		ids = append(ids, id)
@@ -173,20 +220,100 @@ func (s *State) RunningIDs() []string {
 	return ids
 }
 
+// RunningSnapshot returns a copy of the running jobs map for safe iteration.
+func (s *State) RunningSnapshot() map[string]RunningJobState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	snapshot := make(map[string]RunningJobState, len(s.Running))
+	for id, rs := range s.Running {
+		snapshot[id] = rs
+	}
+	return snapshot
+}
+
+// GetRunning returns the running-state entry for a job.
+func (s *State) GetRunning(jobID string) (RunningJobState, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rs, ok := s.Running[jobID]
+	return rs, ok
+}
+
+// SetRunning updates the running-state entry for a job.
+func (s *State) SetRunning(jobID string, state RunningJobState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Running[jobID] = state
+	s.updateCurrentLocked()
+}
+
 // AddRunning adds a job to the running set.
 func (s *State) AddRunning(jobID string, state RunningJobState) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.Running[jobID] = state
-	s.updateCurrent()
+	s.updateCurrentLocked()
 }
 
 // RemoveRunning removes a job from the running set.
 func (s *State) RemoveRunning(jobID string) {
-	delete(s.Running, jobID)
-	s.updateCurrent()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removeRunningLocked(jobID)
 }
 
 // RecordFinished records a job's terminal state.
 func (s *State) RecordFinished(jobID string, exitCode int, finishedAt int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordFinishedLocked(jobID, exitCode, finishedAt)
+}
+
+// IsStopRequested reports whether the runner should stop after draining work.
+func (s *State) IsStopRequested() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.StopRequested
+}
+
+// SetStopRequested updates the stop-requested flag.
+func (s *State) SetStopRequested(requested bool) {
+	s.mu.Lock()
+	s.StopRequested = requested
+	s.mu.Unlock()
+}
+
+// CurrentJobID returns the current job marker, if any.
+func (s *State) CurrentJobID() (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Current == nil {
+		return 0, false
+	}
+	return *s.Current, true
+}
+
+func (s *State) addPendingLocked(jobID int64) {
+	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
+	s.Pending = append(s.Pending, jobID)
+}
+
+func (s *State) priorityPendingLocked(jobID int64) {
+	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
+	s.Pending = slices.Insert(s.Pending, 0, jobID)
+}
+
+func (s *State) removePendingLocked(jobID int64) {
+	s.Pending = slices.DeleteFunc(s.Pending, func(id int64) bool { return id == jobID })
+}
+
+func (s *State) removeRunningLocked(jobID string) {
+	delete(s.Running, jobID)
+	s.updateCurrentLocked()
+}
+
+func (s *State) recordFinishedLocked(jobID string, exitCode int, finishedAt int64) {
 	s.Finished[jobID] = FinishedJobState{
 		ExitCode:   exitCode,
 		FinishedAt: finishedAt,
@@ -195,6 +322,8 @@ func (s *State) RecordFinished(jobID string, exitCode int, finishedAt int64) {
 
 // TotalAllotment returns the sum of all running jobs' local_allotment values.
 func (s *State) TotalAllotment() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	total := 0
 	for _, rs := range s.Running {
 		total += rs.LocalAllotment
@@ -203,7 +332,7 @@ func (s *State) TotalAllotment() int {
 }
 
 // updateCurrent sets Current to the most recently started running job.
-func (s *State) updateCurrent() {
+func (s *State) updateCurrentLocked() {
 	if len(s.Running) == 0 {
 		s.Current = nil
 		return

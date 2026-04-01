@@ -10,6 +10,38 @@ import (
 	"github.com/osteele/weft/internal/opsqueue"
 )
 
+func writeFakeDirenv(t *testing.T, dir, value string) string {
+	t.Helper()
+
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake direnv bin dir: %v", err)
+	}
+
+	script := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  allow)\n" +
+		"    exit 0\n" +
+		"    ;;\n" +
+		"  exec)\n" +
+		"    shift 2\n" +
+		"    if [ \"$1\" = \"env\" ] && [ \"$2\" = \"-0\" ]; then\n" +
+		"      printf 'FOO=" + value + "\\0'\n" +
+		"      exit 0\n" +
+		"    fi\n" +
+		"    echo \"unexpected exec args: $*\" >&2\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"echo \"unexpected args: $*\" >&2\n" +
+		"exit 1\n"
+	path := filepath.Join(binDir, "direnv")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake direnv: %v", err)
+	}
+	return binDir
+}
+
 func TestRunSingleJob_EchoHello(t *testing.T) {
 	logDir := t.TempDir()
 
@@ -154,6 +186,42 @@ func TestRunSingleJob_OnPhase(t *testing.T) {
 	}
 	if phases[1] != "running" {
 		t.Errorf("second phase = %q, want %q", phases[1], "running")
+	}
+}
+
+func TestRunSingleJob_DirenvEnvAppliedAndJobEnvOverrides(t *testing.T) {
+	logDir := t.TempDir()
+	workDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(workDir, ".envrc"), []byte("export FOO=from_direnv\n"), 0o644); err != nil {
+		t.Fatalf("write .envrc: %v", err)
+	}
+	fakeBinDir := writeFakeDirenv(t, t.TempDir(), "from_direnv")
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := SingleJobConfig{
+		JobID:          51,
+		Job:            opsqueue.CommandJob{Cmd: `printf '%s\n' "$FOO"`, Env: []string{"FOO=from_job"}},
+		LogDir:         logDir,
+		WorkingDir:     workDir,
+		SampleInterval: 100 * time.Millisecond,
+		SkipProbes:     true,
+	}
+
+	ei, err := RunSingleJob(cfg)
+	if err != nil {
+		t.Fatalf("RunSingleJob: %v", err)
+	}
+	if ei.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", ei.ExitCode)
+	}
+
+	logData, err := os.ReadFile(NewJobPaths(logDir, 51).Log)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	if !strings.Contains(string(logData), "from_job") {
+		t.Fatalf("expected log to contain overridden direnv value, got %s", logData)
 	}
 }
 

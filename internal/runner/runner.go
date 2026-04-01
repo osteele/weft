@@ -212,7 +212,7 @@ func (r *Runner) tick() error {
 	r.saveState()
 
 	// Check stop condition
-	if r.state.StopRequested && r.state.PendingEmpty() && r.state.RunningCount() == 0 {
+	if r.state.IsStopRequested() && r.state.PendingEmpty() && r.state.RunningCount() == 0 {
 		oplog.Log(oplog.OpQueueStop, oplog.WithDetail("stop command received"))
 		fmt.Println("Stop command received, exiting...")
 		close(r.stopCh)
@@ -238,7 +238,7 @@ func (r *Runner) tryStartNextJob() {
 		return
 	}
 
-	if r.state.StopRequested {
+	if r.state.IsStopRequested() {
 		return
 	}
 
@@ -441,6 +441,17 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		envVars = append(envVars, dotenvVars...)
 	}
 
+	setupCmd := DetectSetupCommand(expandedDir)
+	if setupCmd == direnvSetupCommand {
+		resolvedEnv, ei, err := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
+		if err != nil {
+			WriteStatusFile(paths, ei)
+			return fmt.Errorf("prepare .envrc environment: %w", err)
+		}
+		envVars = resolvedEnv
+		setupCmd = ""
+	}
+
 	// Apply job env vars (override dotenv)
 	envVars = append(envVars, job.Env...)
 	envVars = artifacts.MergeEnvVars(envVars, jobID)
@@ -452,7 +463,7 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 	}
 
 	// Run environment setup as a separate phase
-	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
+	if setupCmd != "" {
 		ei, setupErr := RunSetupCommand(setupCmd, jobID, job.Dir, envVars, paths)
 		if setupErr != nil {
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetailf("setup failed exit=%d", ei.ExitCode))
@@ -501,9 +512,9 @@ func (r *Runner) startJob(jobID int64, job *opsqueue.CommandJob, preResolvedGPUD
 		TelemetryAdvancedGPU:     telemetryPolicy.CollectAdvancedGPU,
 	})
 	if r.telemetryConfig.Enabled {
-		rs := r.state.Running[jobIDStr]
+		rs, _ := r.state.GetRunning(jobIDStr)
 		SampleJob(proc.PID, proc.PGID, r.cpuCount, paths, &rs, "multi")
-		r.state.Running[jobIDStr] = rs
+		r.state.SetRunning(jobIDStr, rs)
 	}
 
 	return nil
@@ -574,7 +585,7 @@ func (r *Runner) waitForJob(jobID int64, proc *Process, paths JobPaths, startTim
 
 	// Write rusage and completion record
 	r.processesMu.Lock()
-	rs := r.state.Running[jobIDStr]
+	rs, _ := r.state.GetRunning(jobIDStr)
 	stopFn := r.hookStopFuncs[jobIDStr]
 	delete(r.hookStopFuncs, jobIDStr)
 	r.processesMu.Unlock()
@@ -622,7 +633,7 @@ func (r *Runner) refreshRunningJobs() {
 			if !hasProc {
 				// No active wait goroutine — handle completion here
 				exitCode, _ := ReadStatusFile(paths.Status)
-				rs := r.state.Running[jobIDStr]
+				rs, _ := r.state.GetRunning(jobIDStr)
 				WriteRusageFile(paths, rs)
 				finishedAt := time.Now().Unix()
 				r.state.RecordFinished(jobIDStr, exitCode, finishedAt)
@@ -662,7 +673,7 @@ func (r *Runner) refreshRunningJobs() {
 			stoppedEI := ExitInfo{ExitCode: 1}
 			WriteStatusFile(paths, stoppedEI)
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 reason=stopped"))
-			rs := r.state.Running[jobIDStr]
+			rs, _ := r.state.GetRunning(jobIDStr)
 			WriteRusageFile(paths, rs)
 			endTime := time.Now().Unix()
 			WriteCompletionRecord(paths, stoppedEI, rs, KillReasonStoppedDetected, "stopped", rs.StartedAt, endTime, nil)
@@ -703,11 +714,11 @@ func (r *Runner) refreshRunningJobs() {
 			WriteStatusFile(paths, orphanEI)
 			oplog.LogJob(oplog.OpJobFail, jobID, "", oplog.WithDetail("exit=1 duration=0"))
 			endTime := time.Now().Unix()
-			rs := r.state.Running[jobIDStr]
+			rs, _ := r.state.GetRunning(jobIDStr)
 			WriteCompletionRecord(paths, orphanEI, rs, KillReasonOrphan, KillReasonOrphan, rs.StartedAt, endTime, nil)
 			r.state.RecordFinished(jobIDStr, 1, endTime)
 		}
-		rs := r.state.Running[jobIDStr]
+		rs, _ := r.state.GetRunning(jobIDStr)
 		WriteRusageFile(paths, rs)
 		r.state.RemoveRunning(jobIDStr)
 		CleanupPIDFiles(paths)
@@ -727,7 +738,7 @@ func (r *Runner) sampleRunningJobs() {
 		jobID := mustParseInt64(jobIDStr)
 		paths := NewJobPaths(r.logDir, jobID)
 
-		rs, ok := r.state.Running[jobIDStr]
+		rs, ok := r.state.GetRunning(jobIDStr)
 		if !ok {
 			continue
 		}
@@ -761,7 +772,7 @@ func (r *Runner) sampleRunningJobs() {
 			}
 		}
 
-		r.state.Running[jobIDStr] = rs
+		r.state.SetRunning(jobIDStr, rs)
 		updated = true
 	}
 
@@ -778,7 +789,7 @@ func (r *Runner) adjustRunningJobAllotments() {
 		jobID := mustParseInt64(jobIDStr)
 		paths := NewJobPaths(r.logDir, jobID)
 
-		rs, ok := r.state.Running[jobIDStr]
+		rs, ok := r.state.GetRunning(jobIDStr)
 		if !ok || rs.WarmupUntil > now.Unix() {
 			continue
 		}
@@ -805,7 +816,7 @@ func (r *Runner) adjustRunningJobAllotments() {
 		rs.OverHist = newOverHist
 		rs.UnderHist = newUnderHist
 
-		r.state.Running[jobIDStr] = rs
+		r.state.SetRunning(jobIDStr, rs)
 		updated = true
 	}
 
@@ -833,7 +844,7 @@ func tickerChan(ticker *time.Ticker) <-chan time.Time {
 
 func (r *Runner) warmupActive() bool {
 	now := time.Now().Unix()
-	for _, rs := range r.state.Running {
+	for _, rs := range r.state.RunningSnapshot() {
 		if rs.WarmupUntil > now {
 			return true
 		}
@@ -854,9 +865,10 @@ func (r *Runner) jobAllotment(job *opsqueue.CommandJob) int {
 }
 
 func (r *Runner) updateCurrentFile() {
-	if r.state.Current == nil {
+	current, ok := r.state.CurrentJobID()
+	if !ok {
 		os.Remove(r.currentFile)
 	} else {
-		os.WriteFile(r.currentFile, []byte(fmt.Sprintf("%d\n", *r.state.Current)), 0644)
+		os.WriteFile(r.currentFile, []byte(fmt.Sprintf("%d\n", current)), 0644)
 	}
 }

@@ -86,6 +86,25 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 		dotenvVars, _ := LoadDotenvFiles(expandedDir)
 		envVars = append(envVars, dotenvVars...)
 	}
+
+	setupCmd := DetectSetupCommand(expandedDir)
+	if setupCmd == direnvSetupCommand {
+		resolvedEnv, ei, resolveErr := ResolveDirenvEnv(expandedDir, envVars, paths.Log)
+		if resolveErr != nil {
+			now := time.Now().Unix()
+			phases.SetupEnd = now
+			WriteStatusFile(paths, ei)
+
+			failureReason := DetectFailureReasonFromExitInfo(ei)
+			WriteFailureReasonFile(paths, failureReason)
+			WriteCompletionRecord(paths, ei, RunningJobState{}, "", failureReason, phases.SetupStart, now, nil)
+			WritePhasesFile(paths, phases)
+
+			return ei, resolveErr
+		}
+		envVars = resolvedEnv
+		setupCmd = ""
+	}
 	envVars = append(envVars, job.Env...)
 	envVars = artifacts.MergeEnvVars(envVars, cfg.JobID)
 
@@ -122,7 +141,7 @@ func RunSingleJob(cfg SingleJobConfig) (ExitInfo, error) {
 	}
 
 	// Run setup command as a separate phase
-	if setupCmd := DetectSetupCommand(expandedDir); setupCmd != "" {
+	if setupCmd != "" {
 		ei, setupErr := RunSetupCommand(setupCmd, cfg.JobID, workingDir, envVars, paths)
 		if setupErr != nil {
 			now := time.Now().Unix()

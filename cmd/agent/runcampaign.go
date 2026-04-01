@@ -192,7 +192,11 @@ func campaignDiskPath(jobs []cloud.AgentJob) string {
 // submitted jobs. Deletes the key after reading (acknowledge receipt).
 // This enables running instances to pick up jobs submitted via campaign reuse.
 func checkForNewJobs(r2Bucket string, instanceID int64) []cloud.AgentJob {
-	jobsJSON, _ := r2Get(r2Bucket, r2keys.GraceJobs(instanceID))
+	jobsJSON, err := r2Get(r2Bucket, r2keys.GraceJobs(instanceID))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "check for new jobs: %v\n", err)
+		return nil
+	}
 	if jobsJSON == "" {
 		return nil
 	}
@@ -489,7 +493,11 @@ func startKillPoller(r2Bucket string, instanceID, jobID int64, logDir string) fu
 				return
 			case <-ticker.C:
 				val, err := r2Get(r2Bucket, r2keys.InstanceKillJob(instanceID))
-				if err != nil || val == "" {
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "poll kill signal for job %d: %v\n", jobID, err)
+					continue
+				}
+				if val == "" {
 					continue
 				}
 				targetJobID, err := strconv.ParseInt(strings.TrimSpace(val), 10, 64)

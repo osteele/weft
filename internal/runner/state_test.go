@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestState_PendingOperations(t *testing.T) {
@@ -231,4 +234,50 @@ func TestState_PruneFinished(t *testing.T) {
 		t.Error("expected recent finished entry to survive")
 	}
 	_ = loaded
+}
+
+func TestState_SaveConcurrentWithMutations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	state := NewState()
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			jobID := strconv.Itoa(i % 8)
+			state.AddRunning(jobID, RunningJobState{
+				StartedAt:      time.Now().Unix(),
+				LocalAllotment: (i % 50) + 1,
+			})
+			state.RecordFinished(jobID, 0, time.Now().Unix())
+			state.RemoveRunning(jobID)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			state.AddPending(int64(i))
+			if i > 0 {
+				state.RemovePending(int64(i - 1))
+			}
+			_ = state.TotalAllotment()
+			_, _ = state.CurrentJobID()
+			_ = state.RunningIDs()
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			if err := state.Save(path); err != nil {
+				t.Errorf("Save: %v", err)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
 }

@@ -142,7 +142,10 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		}
 
 		// Check for release signal
-		if releaseVal, _ := r2Get(r2Bucket, prefix+"/release"); releaseVal != "" {
+		releaseVal, err := r2Get(r2Bucket, prefix+"/release")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "poll grace release: %v\n", err)
+		} else if releaseVal != "" {
 			fmt.Println("Release signal received. Self-destructing.")
 			r2Delete(r2Bucket, prefix+"/release")
 			uploadOpslog(r2Bucket, instanceIDInt, logDir)
@@ -155,8 +158,10 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		}
 
 		// Check for extend signal
-		extendVal, _ := r2Get(r2Bucket, prefix+"/extend")
-		if extendVal != "" {
+		extendVal, err := r2Get(r2Bucket, prefix+"/extend")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "poll grace extend: %v\n", err)
+		} else if extendVal != "" {
 			dur, err := time.ParseDuration(extendVal)
 			if err == nil {
 				deadline = time.Now().Add(dur)
@@ -170,7 +175,11 @@ func graceWaitLoop(cfg graceWaitConfig) {
 		}
 
 		// Check for resubmitted jobs
-		jobsJSON, _ := r2Get(r2Bucket, prefix+"/jobs.json")
+		jobsJSON, err := r2Get(r2Bucket, prefix+"/jobs.json")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "poll grace jobs: %v\n", err)
+			continue
+		}
 		if jobsJSON == "" {
 			continue
 		}

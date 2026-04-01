@@ -2,8 +2,11 @@ package runner
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/osteele/weft/internal/opsqueue"
@@ -44,50 +47,64 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
 	lineNum := 0
+	reader := bufio.NewReader(f)
 
-	for scanner.Scan() {
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return result, fmt.Errorf("read commands: %w", readErr)
+		}
+		if len(line) == 0 && errors.Is(readErr, io.EOF) {
+			break
+		}
 		lineNum++
 
 		// Skip already-processed lines
-		if lineNum <= state.CursorLine {
+		if lineNum <= state.CursorLineValue() {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 			continue
 		}
 
-		line := scanner.Text()
-		if line == "" {
+		line = bytes.TrimRight(line, "\r\n")
+		if len(line) == 0 {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 			continue
 		}
 
 		var cmd opsqueue.QueueCommand
-		if err := json.Unmarshal([]byte(line), &cmd); err != nil {
+		if err := json.Unmarshal(line, &cmd); err != nil {
 			// Skip malformed lines
-			state.CursorLine = lineNum
+			state.SetCursorLine(lineNum)
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
 			continue
 		}
 
+		state.mu.Lock()
 		switch cmd.Op {
 		case opsqueue.OpAdd:
-			if cmd.Job == nil {
-				break
-			}
-			state.AddPending(cmd.Job.ID)
-			// Write job data file for later use
-			if err := writeJobFile(cp.queueDir, cmd.Job); err != nil {
-				// Log but don't fail
-				fmt.Fprintf(os.Stderr, "warning: write job file: %v\n", err)
-			}
-			// Cancel any pending stop — new work arrived
-			if state.StopRequested {
+			if cmd.Job != nil {
+				state.addPendingLocked(cmd.Job.ID)
+				// Write job data file for later use.
+				if err := writeJobFile(cp.queueDir, cmd.Job); err != nil {
+					// Log but don't fail.
+					fmt.Fprintf(os.Stderr, "warning: write job file: %v\n", err)
+				}
+				// Cancel any pending stop — new work arrived.
 				state.StopRequested = false
 			}
 
 		case opsqueue.OpPriority:
-			state.PriorityPending(cmd.JobID)
+			state.priorityPendingLocked(cmd.JobID)
 
 		case opsqueue.OpCancel:
-			state.RemovePending(cmd.JobID)
+			state.removePendingLocked(cmd.JobID)
 			removeJobFile(cp.queueDir, cmd.JobID)
 
 		case opsqueue.OpStop:
@@ -95,19 +112,20 @@ func (cp *CommandProcessor) ProcessCommands(state *State) (CommandResult, error)
 			result.StopRequested = true
 
 		case opsqueue.OpRestart:
-			// Save state before restart
 			state.Cursor = cmd.Timestamp
 			state.CursorLine = lineNum
+			state.mu.Unlock()
 			result.RestartRequested = true
 			return result, nil
 		}
 
 		state.Cursor = cmd.Timestamp
 		state.CursorLine = lineNum
-	}
+		state.mu.Unlock()
 
-	if err := scanner.Err(); err != nil {
-		return result, fmt.Errorf("read commands: %w", err)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
 	}
 
 	return result, nil

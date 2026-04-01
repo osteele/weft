@@ -268,7 +268,7 @@ func (inv *GPUInventory) TotalMemGB(deviceIdx string) int {
 
 // DeviceHasRunningJob checks if any running job is using a specific GPU device.
 func DeviceHasRunningJob(state *State, device string) bool {
-	for _, rs := range state.Running {
+	for _, rs := range state.RunningSnapshot() {
 		for _, d := range rs.GPUDevices {
 			if d == device {
 				return true
@@ -281,7 +281,7 @@ func DeviceHasRunningJob(state *State, device string) bool {
 // TotalGPUMemReserved returns the total GPU memory reserved by running jobs on a device.
 func TotalGPUMemReserved(state *State, device string) int {
 	total := 0
-	for _, rs := range state.Running {
+	for _, rs := range state.RunningSnapshot() {
 		for _, d := range rs.GPUDevices {
 			if d == device {
 				total += rs.GPUMemGB
