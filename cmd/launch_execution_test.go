@@ -85,7 +85,7 @@ func TestPrepareLaunchExecutionPlan_RevalidatesReusableInstances(t *testing.T) {
 			Jobs:     []*db.Job{{ID: 17}},
 		}},
 		map[int64]bool{17: true},
-		bidding.StrategyCheap,
+		bidding.StrategyCheap.Profile(),
 		0,
 		nil,
 		nil,

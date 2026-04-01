@@ -332,7 +332,7 @@ func runNonInteractiveLaunch(database *sql.DB, cfg *config.Config, groups []camp
 		providerErr,
 		groups,
 		nil,
-		opts.Strategy,
+		opts.ScoringProfile(),
 		opts.MinSurvival,
 		&predCfg,
 		overheadModel,

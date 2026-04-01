@@ -34,12 +34,83 @@ type StrategyWeights struct {
 	Time float64 // weight for expected wall-clock time (hours)
 }
 
+// ScoreProfile defines a concrete cost/time tradeoff for ranking offers or plans.
+// Profiles with UseHappyPathTime=false treat time as survival-adjusted expected
+// completion time; happy-path profiles ignore retry effects in the time term.
+type ScoreProfile struct {
+	ID               string
+	Weights_         StrategyWeights
+	UseHappyPathTime bool
+}
+
+func (p ScoreProfile) Weights() StrategyWeights {
+	return p.Weights_
+}
+
+func (p ScoreProfile) Valid() bool {
+	return p.ID != "" && (p.Weights_.Cost > 0 || p.Weights_.Time > 0)
+}
+
 // Weights returns the scoring weights for this strategy.
 func (s SelectionStrategy) Weights() StrategyWeights {
 	if w, ok := strategyWeights[s]; ok {
 		return w
 	}
 	return strategyWeights[StrategyCheap]
+}
+
+// Profile returns the concrete score profile for this strategy.
+func (s SelectionStrategy) Profile() ScoreProfile {
+	switch s {
+	case StrategyFastest:
+		return ScoreProfile{
+			ID:               string(s),
+			Weights_:         strategyWeights[s],
+			UseHappyPathTime: true,
+		}
+	case StrategyFast:
+		return ScoreProfile{
+			ID:               string(s),
+			Weights_:         strategyWeights[s],
+			UseHappyPathTime: false,
+		}
+	case StrategyCheap:
+		fallthrough
+	default:
+		return ScoreProfile{
+			ID:               string(StrategyCheap),
+			Weights_:         strategyWeights[StrategyCheap],
+			UseHappyPathTime: false,
+		}
+	}
+}
+
+// ParetoSamplingProfiles returns an ordered set of score profiles used to
+// approximate the cost/time Pareto frontier in the launch TUI.
+func ParetoSamplingProfiles() []ScoreProfile {
+	cheap := StrategyCheap.Profile()
+	fast := StrategyFast.Profile()
+	fastest := StrategyFastest.Profile()
+
+	makeExpected := func(id string, timeWeight float64) ScoreProfile {
+		return ScoreProfile{
+			ID:               id,
+			Weights_:         StrategyWeights{Cost: 1.0, Time: timeWeight},
+			UseHappyPathTime: false,
+		}
+	}
+
+	return []ScoreProfile{
+		cheap,
+		makeExpected("tradeoff-003", 0.03),
+		makeExpected("tradeoff-01", 0.1),
+		makeExpected("tradeoff-03", 0.3),
+		makeExpected("tradeoff-1", 1.0),
+		makeExpected("tradeoff-3", 3.0),
+		fast,
+		makeExpected("tradeoff-30", 30.0),
+		fastest,
+	}
 }
 
 var strategyWeights = map[SelectionStrategy]StrategyWeights{
@@ -208,7 +279,7 @@ func aggregateJobCompletionTimeHrs(totalRunHrs, setupOverheadHrs float64, jobCou
 
 // BestOffer selects the best offer for a single job according to the given strategy.
 func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float64, setupOverhead OfferSetupFunc, strategy SelectionStrategy, maxGPUMemGB int) (int, cloud.Offer) {
-	return BestOfferForJobGroup(model, offers, jobDurationHrs, 1, setupOverhead, strategy, maxGPUMemGB)
+	return BestOfferForJobGroupWithProfile(model, offers, jobDurationHrs, 1, setupOverhead, strategy.Profile(), maxGPUMemGB)
 }
 
 // BestOfferForJobGroup selects the best offer for a sequential group of jobs.
@@ -227,6 +298,12 @@ func BestOffer(model *SurvivalModel, offers []cloud.Offer, jobDurationHrs float6
 // oversized GPUs get no speed advantage, so the cost weight in any strategy
 // naturally prefers cheaper options.
 func BestOfferForJobGroup(model *SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead OfferSetupFunc, strategy SelectionStrategy, maxGPUMemGB int) (int, cloud.Offer) {
+	return BestOfferForJobGroupWithProfile(model, offers, totalRunHrs, jobCount, setupOverhead, strategy.Profile(), maxGPUMemGB)
+}
+
+// BestOfferForJobGroupWithProfile selects the best offer for a sequential group
+// of jobs using an explicit score profile.
+func BestOfferForJobGroupWithProfile(model *SurvivalModel, offers []cloud.Offer, totalRunHrs float64, jobCount int, setupOverhead OfferSetupFunc, profile ScoreProfile, maxGPUMemGB int) (int, cloud.Offer) {
 	if len(offers) == 0 {
 		return -1, cloud.Offer{}
 	}
@@ -234,7 +311,7 @@ func BestOfferForJobGroup(model *SurvivalModel, offers []cloud.Offer, totalRunHr
 		jobCount = 1
 	}
 
-	w := strategy.Weights()
+	w := profile.Weights()
 	medianDLPerf := MedianOfferDLPerf(offers)
 
 	// When maxGPUMemGB is set, compute a reference DLPerf from the cheapest
@@ -271,7 +348,7 @@ func BestOfferForJobGroup(model *SurvivalModel, offers []cloud.Offer, totalRunHr
 		completionHrs := aggregateJobCompletionTimeHrs(runHrs, setup, jobCount)
 
 		var completionScore float64
-		if strategy == StrategyFastest {
+		if profile.UseHappyPathTime {
 			// Happy-path completion only — no survival adjustment.
 			completionScore = completionHrs
 		} else {

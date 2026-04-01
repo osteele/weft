@@ -20,6 +20,7 @@ import (
 // actually run (reuse groups + winning new candidate groups).
 type StrategyPlan struct {
 	Strategy         bidding.SelectionStrategy
+	Profile          bidding.ScoreProfile
 	DisplayOffers    []GroupOffer
 	DisplayEstimates []CostEstimate
 	ActualEstimates  []CostEstimate
@@ -54,7 +55,47 @@ func BuildStrategyPlans(
 	strategies []bidding.SelectionStrategy,
 	minSurvival float64,
 ) (map[bidding.SelectionStrategy]StrategyPlan, []GroupRawOffers) {
+	profiles := make([]bidding.ScoreProfile, 0, len(strategies))
+	for _, strategy := range strategies {
+		profiles = append(profiles, strategy.Profile())
+	}
+	profilePlans, splitRaw := BuildProfilePlans(
+		database,
+		clients,
+		splitGroups,
+		reusable,
+		predCfg,
+		overheadModel,
+		survivalModel,
+		profiles,
+		minSurvival,
+	)
 	plans := make(map[bidding.SelectionStrategy]StrategyPlan, len(strategies))
+	for _, strategy := range strategies {
+		plan, ok := profilePlans[strategy.Profile().ID]
+		if !ok {
+			continue
+		}
+		plan.Strategy = strategy
+		plans[strategy] = plan
+	}
+	return plans, splitRaw
+}
+
+// BuildProfilePlans builds reusable/new-instance launch plans for arbitrary
+// score profiles, keyed by profile ID.
+func BuildProfilePlans(
+	database *sql.DB,
+	clients []cloud.Client,
+	splitGroups []InstanceGroup,
+	reusable []InstanceCapacity,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	profiles []bidding.ScoreProfile,
+	minSurvival float64,
+) (map[string]StrategyPlan, []GroupRawOffers) {
+	plans := make(map[string]StrategyPlan, len(profiles))
 	if len(splitGroups) == 0 {
 		return plans, nil
 	}
@@ -73,8 +114,11 @@ func BuildStrategyPlans(
 		splitRaw = FetchGroupRawOffers(clients, splitGroups)
 	}
 
-	for _, strategy := range strategies {
-		plans[strategy] = buildStrategyPlanForSplitRaw(
+	for _, profile := range profiles {
+		if !profile.Valid() {
+			continue
+		}
+		plans[profile.ID] = buildStrategyPlanForSplitRaw(
 			database,
 			clients,
 			splitGroups,
@@ -83,7 +127,7 @@ func BuildStrategyPlans(
 			predCfg,
 			overheadModel,
 			survivalModel,
-			strategy,
+			profile,
 			minSurvival,
 		)
 	}
@@ -100,11 +144,11 @@ func buildStrategyPlanForSplitRaw(
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
 	survivalModel *bidding.SurvivalModel,
-	strategy bidding.SelectionStrategy,
+	profile bidding.ScoreProfile,
 	minSurvival float64,
 ) StrategyPlan {
 	plan := StrategyPlan{
-		Strategy:         strategy,
+		Profile:          profile,
 		DisplayOffers:    make([]GroupOffer, len(splitGroups)),
 		DisplayEstimates: make([]CostEstimate, len(splitGroups)),
 	}
@@ -114,7 +158,7 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
-	splitOffers := RankGroupOffers(splitRaw, survivalModel, 1.0, setupFactory, strategy, minSurvival)
+	splitOffers := RankGroupOffersWithProfile(splitRaw, survivalModel, 1.0, setupFactory, profile, minSurvival)
 	splitReferenceDLPerf := MedianDLPerfFromRawOffers(splitRaw)
 	splitEstimates := EstimateCosts(database, splitOffers, predCfg, overheadModel, nil, survivalModel, splitReferenceDLPerf, nil)
 
@@ -125,7 +169,7 @@ func buildStrategyPlanForSplitRaw(
 		reusable,
 		predCfg,
 		overheadModel,
-		strategy,
+		profile,
 		splitReferenceDLPerf,
 	)
 
@@ -158,7 +202,7 @@ func buildStrategyPlanForSplitRaw(
 	}
 
 	candidates := FetchCandidateGroupings(clients, remainingGroups)
-	result := BestCandidateForStrategy(database, candidates, predCfg, overheadModel, survivalModel, strategy, minSurvival)
+	result := BestCandidateForProfile(database, candidates, predCfg, overheadModel, survivalModel, profile, minSurvival)
 	if len(result.Groups) == 0 {
 		return plan
 	}
@@ -186,7 +230,7 @@ func chooseReuseGroups(
 	reusable []InstanceCapacity,
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
-	strategy bidding.SelectionStrategy,
+	profile bidding.ScoreProfile,
 	referenceDLPerf float64,
 ) []reuseGroupDecision {
 	if len(reusable) == 0 || len(splitGroups) == 0 {
@@ -198,7 +242,7 @@ func chooseReuseGroups(
 	for idx, group := range splitGroups {
 		newScore := math.Inf(1)
 		if idx < len(splitEstimates) {
-			newScore = ScoreEstimates([]CostEstimate{splitEstimates[idx]}, strategy)
+			newScore = ScoreEstimatesWithProfile([]CostEstimate{splitEstimates[idx]}, profile)
 		}
 
 		bestScore := math.Inf(1)
@@ -209,7 +253,7 @@ func chooseReuseGroups(
 			if !ok {
 				continue
 			}
-			score := ScoreEstimates([]CostEstimate{est}, strategy)
+			score := ScoreEstimatesWithProfile([]CostEstimate{est}, profile)
 			if score < bestScore {
 				bestScore = score
 				bestIdx = i
@@ -390,7 +434,11 @@ func reuseSyntheticOffer(cap InstanceCapacity) cloud.Offer {
 }
 
 func estimateCommonCompletionTime(est CostEstimate) time.Duration {
-	common := est.TotalTime - est.Breakdown.Run.Mean - est.Breakdown.Upload.Mean
+	total := est.TotalTime
+	if total == 0 {
+		total = est.Breakdown.Total.Mean
+	}
+	common := total - est.Breakdown.Run.Mean - est.Breakdown.Upload.Mean
 	if common < 0 {
 		return 0
 	}
@@ -432,7 +480,11 @@ func estimateTotalJobCompletionHours(est CostEstimate) float64 {
 // jobs, including shared setup and waiting behind earlier jobs on the same
 // instance.
 func ScoreEstimates(estimates []CostEstimate, strategy bidding.SelectionStrategy) float64 {
-	w := strategy.Weights()
+	return ScoreEstimatesWithProfile(estimates, strategy.Profile())
+}
+
+func ScoreEstimatesWithProfile(estimates []CostEstimate, profile bidding.ScoreProfile) float64 {
+	w := profile.Weights()
 	totalCost := 0.0
 	totalCompletionTime := 0.0
 	hasAny := false
@@ -449,7 +501,7 @@ func ScoreEstimates(estimates []CostEstimate, strategy bidding.SelectionStrategy
 		}
 
 		timeHours := estimateTotalJobCompletionHours(est)
-		if strategy != bidding.StrategyFastest && est.SurvivalProb > 0 && est.SurvivalProb < 1 {
+		if !profile.UseHappyPathTime && est.SurvivalProb > 0 && est.SurvivalProb < 1 {
 			timeHours /= est.SurvivalProb
 		}
 
@@ -482,6 +534,20 @@ func BestCandidateForStrategy(
 	strategy bidding.SelectionStrategy,
 	minSurvival float64,
 ) CandidateResult {
+	return BestCandidateForProfile(database, candidates, predCfg, overheadModel, survivalModel, strategy.Profile(), minSurvival)
+}
+
+// BestCandidateForProfile selects the candidate grouping with the lowest
+// estimate-based weighted score for the given score profile.
+func BestCandidateForProfile(
+	database *sql.DB,
+	candidates []GroupingCandidate,
+	predCfg *predictor.Config,
+	overheadModel *estimate.OverheadModel,
+	survivalModel *bidding.SurvivalModel,
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+) CandidateResult {
 	bestScore := math.Inf(1)
 	var best CandidateResult
 	if len(candidates) == 0 {
@@ -491,9 +557,9 @@ func BestCandidateForStrategy(
 	setupFactory := OfferSetupOverheadFactory(database, overheadModel)
 	referenceDLPerf := medianDLPerfFromCandidates(candidates)
 	for i, cand := range candidates {
-		offers := RankGroupOffers(cand.Raw, survivalModel, 1.0, setupFactory, strategy, minSurvival)
+		offers := RankGroupOffersWithProfile(cand.Raw, survivalModel, 1.0, setupFactory, profile, minSurvival)
 		estimates := EstimateCosts(database, offers, predCfg, overheadModel, nil, survivalModel, referenceDLPerf, nil)
-		score := ScoreEstimates(estimates, strategy)
+		score := ScoreEstimatesWithProfile(estimates, profile)
 		if i == 0 || score < bestScore {
 			bestScore = score
 			best = CandidateResult{

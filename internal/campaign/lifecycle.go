@@ -42,9 +42,17 @@ type LaunchOpts struct {
 	NoDonor             bool                      // skip donor instance strategy
 	GracePeriodSeconds  int                       // grace period after job failure (0 = disabled)
 	Strategy            bidding.SelectionStrategy // "cheap" (default), "fast", or "fastest"
+	ScoreProfile        bidding.ScoreProfile      // optional explicit scoring profile for tradeoff selection
 	MinSurvival         float64                   // minimum survival probability; offers below this are skipped (0 = disabled)
 	SkipWorkdirDeletion bool                      // disable background workdir cleanup (for debugging)
 	GPUWarmup           bool                      // enable GPU warmup before first benchmark job
+}
+
+func (opts LaunchOpts) ScoringProfile() bidding.ScoreProfile {
+	if opts.ScoreProfile.Valid() {
+		return opts.ScoreProfile
+	}
+	return opts.Strategy.Profile()
 }
 
 // ApplyAutoBudget derives budget limits from estimates for any limits not already set.
@@ -675,14 +683,14 @@ func LaunchCampaign(
 
 			originalPrice := ofr.CostPerHour
 			replacementOffer := replacementOfferFunc(func(excludeOfferKeys map[string]struct{}) (*cloud.Offer, error) {
-				replacement := SearchBestOfferForGroup(
+				replacement := SearchBestOfferForGroupWithProfile(
 					[]cloud.Client{client},
 					group,
 					survivalModel,
 					jobDurationHrs,
 					bidding.ConstantSetup(setupOverheadHrs),
 					excludeOfferKeys,
-					opts.Strategy,
+					opts.ScoringProfile(),
 					opts.MinSurvival,
 				)
 				if replacement.Err != nil {

@@ -399,15 +399,24 @@ be re-queued, but it isn't because the job itself also failed.
 ## Advanced Placement Optimization
 
 The unified `Evaluate` function (Collect → Solve architecture) separates
-candidate collection from objective optimization. The current solver is three
-simple `min()` calls (cheap/fast/fastest). Future work:
+candidate collection from objective optimization. The current launch TUI now
+samples several concrete score profiles, computes plans for each, removes
+dominated points, and presents an approximate Pareto frontier instead of only
+the old `cheap`/`fast`/`fastest` presets. Time is scored as total job
+completion time, including setup and queueing behind earlier jobs on the same
+instance.
+
+Future work:
 
 - **Mixed-integer programming**: Minimize cost subject to a deadline constraint,
   or minimize time subject to a budget. Useful when the user says "I need this
   done by 5pm" or "spend at most $10."
-- **Pareto frontier**: Enumerate non-dominated solutions across (cost, time).
-  The TUI could display the frontier and let users pick a point on the
-  tradeoff curve.
+- **Exact Pareto frontier**: The current frontier is built from sampled score
+  profiles. A stronger solver would enumerate or search the full non-dominated
+  set instead of approximating it from a fixed profile grid.
+- **Constraint-aware frontier labels**: Surface budget or deadline constrained
+  picks ("best under $10", "fastest under 2h") alongside the generic frontier
+  labels.
 - **Stochastic optimization**: Monte Carlo over survival probability and
   contention uncertainty. Instead of point estimates, simulate thousands of
   scenarios to find the option with best expected value under uncertainty.
@@ -443,4 +452,3 @@ peak memory) to automatically discover "job types" without manual labeling.
   `weft retrain`
 - Store cluster assignments in the jobs database; expose via `weft jobs --cluster`
 - Use cluster centroids as priors in the predictor for unseen commands
-

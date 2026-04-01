@@ -372,7 +372,7 @@ type StrategySummaryRow struct {
 	Active    bool              // true if the active strategy is in this row
 	Disclosed bool              // true if detail rows should be shown below this row
 	NumGPUs   int               // GPU groups with valid offers
-	MaxTime   estimate.Estimate // max across groups (wall-clock parallel)
+	MaxTime   estimate.Estimate // primary time metric shown in the comparison UI
 	TotalRate float64           // sum of $/hr across groups
 	TotalCost float64           // sum of mean costs across groups
 	CostLower float64           // sum of lower cost bounds
@@ -418,6 +418,114 @@ func SummarizeForComparison(estimates []CostEstimate, selectedPerGroup []int) *S
 		}
 
 		// Sum cost and rate
+		row.TotalRate += est.Offer.Offer.CostPerHour
+		row.TotalCost += scaledCost
+		row.CostLower += lowerCost
+		row.CostUpper += upperCost
+	}
+	if !hasAny {
+		return nil
+	}
+	return row
+}
+
+func completionTimeEstimate(est CostEstimate, selectedJobs int) estimate.Estimate {
+	totalJobs := len(est.Group.Jobs)
+	if totalJobs <= 0 {
+		if est.Breakdown.Total.Zero() && est.TotalTime > 0 {
+			return estimate.Constant(est.TotalTime)
+		}
+		return est.Breakdown.Total
+	}
+	if selectedJobs <= 0 {
+		return estimate.Estimate{}
+	}
+	if selectedJobs > totalJobs {
+		selectedJobs = totalJobs
+	}
+
+	commonMean := estimateCommonCompletionTime(est)
+	commonLower := est.Breakdown.Total.Lower - est.Breakdown.Run.Lower - est.Breakdown.Upload.Lower
+	commonUpper := est.Breakdown.Total.Upper - est.Breakdown.Run.Upper - est.Breakdown.Upload.Upper
+	if commonLower < 0 {
+		commonLower = 0
+	}
+	if commonUpper < 0 {
+		commonUpper = 0
+	}
+
+	result := estimate.Estimate{
+		Mean:  time.Duration(selectedJobs) * commonMean,
+		Lower: time.Duration(selectedJobs) * commonLower,
+		Upper: time.Duration(selectedJobs) * commonUpper,
+	}
+
+	if len(est.JobDurations) > 0 {
+		runLowerScale := 1.0
+		runUpperScale := 1.0
+		if est.Breakdown.Run.Mean > 0 {
+			runLowerScale = float64(est.Breakdown.Run.Lower) / float64(est.Breakdown.Run.Mean)
+			runUpperScale = float64(est.Breakdown.Run.Upper) / float64(est.Breakdown.Run.Mean)
+		}
+
+		runFallback := time.Duration(0)
+		if totalJobs > 0 {
+			runFallback = time.Duration(float64(est.Breakdown.Run.Mean) / float64(totalJobs))
+		}
+
+		var cumulativeMean, cumulativeLower, cumulativeUpper time.Duration
+		for i := 0; i < selectedJobs && i < len(est.Group.Jobs); i++ {
+			job := est.Group.Jobs[i]
+			durMean, ok := est.JobDurations[job.ID]
+			if !ok {
+				durMean = runFallback
+			}
+			durLower := time.Duration(float64(durMean) * runLowerScale)
+			durUpper := time.Duration(float64(durMean) * runUpperScale)
+
+			cumulativeMean += durMean
+			cumulativeLower += durLower
+			cumulativeUpper += durUpper
+			result.Mean += cumulativeMean
+			result.Lower += cumulativeLower
+			result.Upper += cumulativeUpper
+		}
+		return result
+	}
+
+	runFactor := float64(selectedJobs+1) / 2
+	result.Mean += time.Duration(float64(est.Breakdown.Run.Mean) * runFactor)
+	result.Lower += time.Duration(float64(est.Breakdown.Run.Lower) * runFactor)
+	result.Upper += time.Duration(float64(est.Breakdown.Run.Upper) * runFactor)
+	return result
+}
+
+// SummarizeTradeoffComparison aggregates estimates into a comparison row using
+// total job completion time for the time term, including shared setup once per
+// selected job and waiting behind earlier jobs on the same instance.
+func SummarizeTradeoffComparison(estimates []CostEstimate, selectedPerGroup []int) *StrategySummaryRow {
+	row := &StrategySummaryRow{}
+	hasAny := false
+	for i, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+
+		totalJobs := len(est.Group.Jobs)
+		selected, scale := selectionScale(i, totalJobs, selectedPerGroup)
+		if selected == 0 {
+			continue
+		}
+
+		hasAny = true
+		row.NumGPUs++
+		row.MaxTime = row.MaxTime.Add(completionTimeEstimate(est, selected))
+
+		scaledTime := est.Breakdown.Total.Scale(scale)
+		scaledCost := est.TotalCost * scale
+		lowerCost := scaledTime.Lower.Hours() * est.Offer.Offer.CostPerHour
+		upperCost := scaledTime.Upper.Hours() * est.Offer.Offer.CostPerHour
+
 		row.TotalRate += est.Offer.Offer.CostPerHour
 		row.TotalCost += scaledCost
 		row.CostLower += lowerCost
@@ -487,7 +595,7 @@ func ApproximateEstimates(offers []GroupOffer) []CostEstimate {
 // and its groups differ from the split groups). Uses 1hr per job + 0.5hr setup
 // as baseline estimates.
 func SummarizeGroupOffers(offers []GroupOffer) *StrategySummaryRow {
-	return SummarizeExecutionEstimates(ApproximateEstimates(offers))
+	return SummarizeTradeoffExecutionEstimates(ApproximateEstimates(offers))
 }
 
 // SummarizeExecutionEstimates aggregates execution-unit estimates using
@@ -513,6 +621,31 @@ func SummarizeExecutionEstimates(estimates []CostEstimate) *StrategySummaryRow {
 			row.MaxTime.Upper = total.Upper
 		}
 
+		row.TotalRate += est.Offer.Offer.CostPerHour
+		row.TotalCost += est.TotalCost
+		row.CostLower += total.Lower.Hours() * est.Offer.Offer.CostPerHour
+		row.CostUpper += total.Upper.Hours() * est.Offer.Offer.CostPerHour
+	}
+	if !hasAny {
+		return nil
+	}
+	return row
+}
+
+// SummarizeTradeoffExecutionEstimates aggregates execution-unit estimates using
+// total job completion time for the time term and sum-cost semantics.
+func SummarizeTradeoffExecutionEstimates(estimates []CostEstimate) *StrategySummaryRow {
+	row := &StrategySummaryRow{}
+	hasAny := false
+	for _, est := range estimates {
+		if est.Offer.Offer == nil {
+			continue
+		}
+		hasAny = true
+		row.NumGPUs++
+		row.MaxTime = row.MaxTime.Add(completionTimeEstimate(est, len(est.Group.Jobs)))
+
+		total := est.Breakdown.Total
 		row.TotalRate += est.Offer.Offer.CostPerHour
 		row.TotalCost += est.TotalCost
 		row.CostLower += total.Lower.Hours() * est.Offer.Offer.CostPerHour

@@ -26,7 +26,7 @@ func prepareLaunchExecutionPlan(
 	providerErr error,
 	groups []campaign.InstanceGroup,
 	selected map[int64]bool,
-	strategy bidding.SelectionStrategy,
+	profile bidding.ScoreProfile,
 	minSurvival float64,
 	predCfg *predictor.Config,
 	overheadModel *estimate.OverheadModel,
@@ -45,7 +45,7 @@ func prepareLaunchExecutionPlan(
 		return plan, providerErr
 	}
 
-	plans, _ := campaign.BuildStrategyPlans(
+	plans, _ := campaign.BuildProfilePlans(
 		database,
 		clients,
 		selectedGroups,
@@ -53,12 +53,12 @@ func prepareLaunchExecutionPlan(
 		predCfg,
 		overheadModel,
 		survivalModel,
-		[]bidding.SelectionStrategy{strategy},
+		[]bidding.ScoreProfile{profile},
 		minSurvival,
 	)
-	strategyPlan, ok := plans[strategy]
+	strategyPlan, ok := plans[profile.ID]
 	if !ok {
-		return plan, fmt.Errorf("could not build launch plan for strategy %s", strategy)
+		return plan, fmt.Errorf("could not build launch plan for profile %s", profile.ID)
 	}
 	plan.StrategyPlan = strategyPlan
 	if strategyPlan.NewCandidate == nil {

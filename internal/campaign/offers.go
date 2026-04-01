@@ -91,6 +91,10 @@ func filterOffersByCUDACompat(offers []cloud.Offer, image string) ([]cloud.Offer
 
 // rankOffer selects the best offer from a slice and returns a GroupOffer.
 func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, strategy bidding.SelectionStrategy, minSurvival float64) GroupOffer {
+	return rankOfferWithProfile(group, offers, survivalModel, jobDurationHrs, setupOverhead, strategy.Profile(), minSurvival)
+}
+
+func rankOfferWithProfile(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupOverhead bidding.OfferSetupFunc, profile bidding.ScoreProfile, minSurvival float64) GroupOffer {
 	result := GroupOffer{Group: group}
 	if len(offers) == 0 {
 		return result
@@ -108,7 +112,7 @@ func rankOffer(group InstanceGroup, offers []cloud.Offer, survivalModel *bidding
 	if len(group.Jobs) > 1 {
 		totalJobDurationHrs *= float64(len(group.Jobs))
 	}
-	_, best := bidding.BestOfferForJobGroup(survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, strategy, group.MaxGPUMemGB)
+	_, best := bidding.BestOfferForJobGroupWithProfile(survivalModel, filtered, totalJobDurationHrs, len(group.Jobs), setupOverhead, profile, group.MaxGPUMemGB)
 	result.Offer = &best
 	if survivalModel != nil {
 		result.SurvivalProb = survivalModel.OfferSurvival(best)
@@ -128,6 +132,19 @@ func SearchBestOfferForGroup(
 	strategy bidding.SelectionStrategy,
 	minSurvival float64,
 ) GroupOffer {
+	return SearchBestOfferForGroupWithProfile(clients, group, survivalModel, jobDurationHrs, setupOverhead, excludeOfferIDs, strategy.Profile(), minSurvival)
+}
+
+func SearchBestOfferForGroupWithProfile(
+	clients []cloud.Client,
+	group InstanceGroup,
+	survivalModel *bidding.SurvivalModel,
+	jobDurationHrs float64,
+	setupOverhead bidding.OfferSetupFunc,
+	excludeOfferIDs map[string]struct{},
+	profile bidding.ScoreProfile,
+	minSurvival float64,
+) GroupOffer {
 	offers, err := cloud.SearchAllProviders(clients, offerConstraintsForGroup(group))
 	if err != nil {
 		return GroupOffer{Group: group, Err: err}
@@ -144,7 +161,7 @@ func SearchBestOfferForGroup(
 		offers = filtered
 	}
 
-	return rankOffer(group, offers, survivalModel, jobDurationHrs, setupOverhead, strategy, minSurvival)
+	return rankOfferWithProfile(group, offers, survivalModel, jobDurationHrs, setupOverhead, profile, minSurvival)
 }
 
 // GroupRawOffers pairs an instance group with all available cloud offers (unranked).
@@ -214,6 +231,10 @@ type SetupOverheadFactory func(group InstanceGroup) bidding.OfferSetupFunc
 // functions that account for datacenter download speed and group-specific
 // download sizes. If nil, a constant 0.5h fallback is used.
 func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, strategy bidding.SelectionStrategy, minSurvival float64) []GroupOffer {
+	return RankGroupOffersWithProfile(raw, survivalModel, jobDurationHrs, setupFactory, strategy.Profile(), minSurvival)
+}
+
+func RankGroupOffersWithProfile(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel, jobDurationHrs float64, setupFactory SetupOverheadFactory, profile bidding.ScoreProfile, minSurvival float64) []GroupOffer {
 	results := make([]GroupOffer, len(raw))
 	for i, r := range raw {
 		if r.Err != nil {
@@ -224,7 +245,7 @@ func RankGroupOffers(raw []GroupRawOffers, survivalModel *bidding.SurvivalModel,
 		if setupFactory != nil {
 			setupOverhead = setupFactory(r.Group)
 		}
-		results[i] = rankOffer(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverhead, strategy, minSurvival)
+		results[i] = rankOfferWithProfile(r.Group, r.Offers, survivalModel, jobDurationHrs, setupOverhead, profile, minSurvival)
 	}
 	return results
 }

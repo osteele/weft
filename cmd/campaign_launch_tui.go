@@ -75,7 +75,9 @@ type launchModel struct {
 	groups          []campaign.InstanceGroup
 	groupOffers     []campaign.GroupOffer
 	cachedRawOffers []campaign.GroupRawOffers // cached raw offers for the split (base) groups
-	strategyPlans   map[bidding.SelectionStrategy]campaign.StrategyPlan
+	strategyPlans   map[string]campaign.StrategyPlan
+	tradeoffOptions []campaign.TradeoffOption
+	activeTradeoff  string
 	costEstimates   []campaign.CostEstimate
 	estimateCache   map[string][]campaign.CostEstimate // offerIdentity → estimates
 	predConfig      *predictor.Config
@@ -92,14 +94,9 @@ type launchModel struct {
 
 	// Focus state for unified jobs+strategies navigation.
 	focusArea      launchFocusArea // which area has cursor focus
-	strategyCursor int             // index into dedupedStrategies (persists when in job area)
+	strategyCursor int             // index into tradeoffOptions (persists when in job area)
 
-	// dedupedStrategies is the list of visually distinct strategies (after
-	// merging those with identical offer sets). The 's' key cycles through
-	// this list. Rebuilt whenever offers are re-ranked.
-	dedupedStrategies []bidding.SelectionStrategy
-
-	// winningCandidate caches the best candidate result for the active strategy.
+	// winningCandidate caches the best candidate result for the active tradeoff.
 	// It drives the display; launchInstances recomputes a fresh execution plan.
 	winningCandidate *campaign.CandidateResult
 	reuseAssignments []campaign.ReuseAssignment
@@ -139,7 +136,7 @@ type launchModel struct {
 	reconciler              *campaign.Reconciler
 	reconcileDropped        int
 
-	// Cached strategy display data — recomputed only when strategyRowsDirty.
+	// Cached tradeoff display data — recomputed only when strategyRowsDirty.
 	cachedStrategyRows    []campaign.StrategySummaryRow
 	cachedActiveEstimates []campaign.CostEstimate
 	strategyRowsDirty     bool
@@ -156,7 +153,8 @@ type reconcileDoneMsg struct {
 
 type rawOffersLoadedMsg struct {
 	raw        []campaign.GroupRawOffers
-	plans      map[bidding.SelectionStrategy]campaign.StrategyPlan
+	plans      map[string]campaign.StrategyPlan
+	options    []campaign.TradeoffOption
 	err        error
 	background bool // true if this is a background refresh (don't show loading state)
 }
@@ -405,7 +403,8 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 			}
 			return rawOffersLoadedMsg{err: err}
 		}
-		plans, splitRaw := campaign.BuildStrategyPlans(
+		profiles := bidding.ParetoSamplingProfiles()
+		plans, splitRaw := campaign.BuildProfilePlans(
 			database,
 			clients,
 			groups,
@@ -413,10 +412,11 @@ func (m launchModel) fetchRawOffers(background bool) tea.Cmd {
 			predCfg,
 			overheadModel,
 			survivalModel,
-			allStrategies,
+			profiles,
 			m.launchOpts.MinSurvival,
 		)
-		return rawOffersLoadedMsg{raw: splitRaw, plans: plans, background: background}
+		options := campaign.BuildParetoTradeoffOptions(plans)
+		return rawOffersLoadedMsg{raw: splitRaw, plans: plans, options: options, background: background}
 	}
 }
 
@@ -430,20 +430,30 @@ func (m launchModel) prefetchHFSizes() tea.Cmd {
 	}
 }
 
-// rankCachedOffersForStrategy ranks cached raw offers with a specific strategy.
-// When candidate groupings are available, selects the best candidate and maps
-// its offers back to m.groups for display alignment.
-func (m launchModel) rankCachedOffersForStrategy(strategy bidding.SelectionStrategy) []campaign.GroupOffer {
-	if plan, ok := m.strategyPlanFor(strategy); ok {
+func (m launchModel) planForTradeoff(id string) (campaign.StrategyPlan, bool) {
+	if m.strategyPlans == nil || id == "" {
+		return campaign.StrategyPlan{}, false
+	}
+	plan, ok := m.strategyPlans[id]
+	return plan, ok
+}
+
+func (m launchModel) activeStrategyPlan() (campaign.StrategyPlan, bool) {
+	return m.planForTradeoff(m.activeTradeoff)
+}
+
+// rankCachedOffersForTradeoff returns display offers for a specific tradeoff option.
+func (m launchModel) rankCachedOffersForTradeoff(id string) []campaign.GroupOffer {
+	if plan, ok := m.planForTradeoff(id); ok {
 		return plan.DisplayOffers
 	}
 	return nil
 }
 
-// rankCachedOffers ranks cached raw offers with the current strategy and
+// rankCachedOffers ranks cached raw offers with the active tradeoff and
 // caches the winning candidate result for launch.
 func (m *launchModel) rankCachedOffers() []campaign.GroupOffer {
-	plan, ok := m.strategyPlanFor(m.launchOpts.Strategy)
+	plan, ok := m.activeStrategyPlan()
 	if !ok {
 		m.winningCandidate = nil
 		m.reuseAssignments = nil
@@ -459,12 +469,12 @@ func (m *launchModel) rankCachedOffers() []campaign.GroupOffer {
 	return plan.DisplayOffers
 }
 
-// activeStrategyEstimates returns the cost estimates for the active strategy.
+// activeStrategyEstimates returns the cost estimates for the active tradeoff.
 // When a non-split candidate wins (e.g. "parallel"), returns approximate
 // estimates built from the candidate's actual group offers, so the detail
 // rows reflect the winning grouping (per-instance breakdown).
 func (m launchModel) activeStrategyEstimates() []campaign.CostEstimate {
-	plan, ok := m.strategyPlanFor(m.launchOpts.Strategy)
+	plan, ok := m.activeStrategyPlan()
 	if !ok {
 		return nil
 	}
@@ -474,59 +484,69 @@ func (m launchModel) activeStrategyEstimates() []campaign.CostEstimate {
 	return plan.DisplayEstimates
 }
 
-func (m launchModel) strategyPlanFor(strategy bidding.SelectionStrategy) (campaign.StrategyPlan, bool) {
-	if m.strategyPlans == nil {
-		return campaign.StrategyPlan{}, false
+func (m launchModel) visibleStrategies() []campaign.TradeoffOption {
+	return m.tradeoffOptions
+}
+
+func tradeoffDisplayLabel(option campaign.TradeoffOption, index int) string {
+	if option.Label != "" {
+		return option.Label
 	}
-	plan, ok := m.strategyPlans[strategy]
-	return plan, ok
+	return fmt.Sprintf("tradeoff %d", index+1)
 }
 
-// allStrategies returns the three bidding strategies in cycle order.
-var allStrategies = []bidding.SelectionStrategy{
-	bidding.StrategyCheap,
-	bidding.StrategyFast,
-	bidding.StrategyFastest,
+func strategyMatchesTradeoffLabel(strategy bidding.SelectionStrategy, label string) bool {
+	if label == "" {
+		return false
+	}
+	if label == "cheap/fast/fastest" {
+		return true
+	}
+	switch strategy {
+	case bidding.StrategyCheap:
+		return label == "cheap"
+	case bidding.StrategyFast:
+		return label == "fast"
+	case bidding.StrategyFastest:
+		return label == "fastest"
+	default:
+		return false
+	}
 }
 
-// preflightOtherStrategies launches background estimate fetches for strategies
-// whose offer sets are not already in the cache.
-func (m launchModel) preflightOtherStrategies() []tea.Cmd {
-	return nil
-}
-
-// rebuildDedupedStrategies computes the list of visually distinct strategies by
-// deduplicating those that produce identical offer sets. The first strategy in
-// each group of duplicates is kept; later ones are dropped.
-func (m *launchModel) rebuildDedupedStrategies() {
-	if m.cachedRawOffers == nil {
-		m.dedupedStrategies = append([]bidding.SelectionStrategy(nil), allStrategies...)
+func (m *launchModel) adoptTradeoffOptions(options []campaign.TradeoffOption) {
+	m.tradeoffOptions = append([]campaign.TradeoffOption(nil), options...)
+	if len(m.tradeoffOptions) == 0 {
+		m.activeTradeoff = ""
+		m.strategyCursor = 0
 		return
 	}
-	seen := make(map[string]bool)
-	m.dedupedStrategies = m.dedupedStrategies[:0]
-	for _, strat := range allStrategies {
-		offers := m.rankCachedOffersForStrategy(strat)
-		key := offerIdentity(offers)
-		if seen[key] {
-			continue
+	if m.activeTradeoff != "" {
+		for i, option := range m.tradeoffOptions {
+			if option.ID == m.activeTradeoff {
+				m.strategyCursor = i
+				return
+			}
 		}
-		seen[key] = true
-		m.dedupedStrategies = append(m.dedupedStrategies, strat)
 	}
+	for i, option := range m.tradeoffOptions {
+		if strategyMatchesTradeoffLabel(m.launchOpts.Strategy, option.Label) {
+			m.activeTradeoff = option.ID
+			m.strategyCursor = i
+			return
+		}
+	}
+	if m.launchOpts.Strategy == bidding.StrategyFast && len(m.tradeoffOptions) > 0 {
+		m.strategyCursor = len(m.tradeoffOptions) / 2
+		m.activeTradeoff = m.tradeoffOptions[m.strategyCursor].ID
+		return
+	}
+	m.activeTradeoff = m.tradeoffOptions[0].ID
+	m.strategyCursor = 0
 }
 
-// visibleStrategies returns the list of strategies that are currently displayed.
-// This is the deduped list when available, otherwise the full list.
-func (m launchModel) visibleStrategies() []bidding.SelectionStrategy {
-	if len(m.dedupedStrategies) > 0 {
-		return m.dedupedStrategies
-	}
-	return allStrategies
-}
-
-// activateStrategyIfFocused sets the active strategy to the one under the
-// strategy cursor and re-ranks offers. No-op if focus is on jobs.
+// activateStrategyIfFocused sets the active tradeoff to the one under the
+// tradeoff cursor and re-ranks offers. No-op if focus is on jobs.
 func (m *launchModel) activateStrategyIfFocused() {
 	if m.focusArea != focusStrategies {
 		return
@@ -538,11 +558,11 @@ func (m *launchModel) activateStrategyIfFocused() {
 	if m.strategyCursor < 0 {
 		return
 	}
-	newStrategy := strategies[m.strategyCursor]
-	if newStrategy == m.launchOpts.Strategy {
+	newTradeoff := strategies[m.strategyCursor]
+	if newTradeoff.ID == m.activeTradeoff {
 		return
 	}
-	m.launchOpts.Strategy = newStrategy
+	m.activeTradeoff = newTradeoff.ID
 	m.strategyRowsDirty = true
 	if m.cachedRawOffers != nil {
 		m.groupOffers = m.rankCachedOffers()
@@ -554,7 +574,7 @@ func (m *launchModel) activateStrategyIfFocused() {
 }
 
 // fetchEstimatesIfNeeded returns a tea.Cmd that fetches cost estimates if the
-// current strategy's estimates aren't cached yet. Returns nil if estimates are
+// active tradeoff's estimates aren't cached yet. Returns nil if estimates are
 // already available or offers haven't loaded.
 func (m launchModel) fetchEstimatesIfNeeded() tea.Cmd {
 	if m.costEstimates != nil || m.groupOffers == nil {
@@ -567,34 +587,18 @@ func (m launchModel) fetchEstimatesIfNeeded() tea.Cmd {
 	return tea.Batch(m.fetchEstimates(), waitForProgress(m.progressCh))
 }
 
-// gatherStrategyRows builds a StrategySummaryRow for each strategy using cached estimates.
-// Strategies that resolve to the same offers are merged into a single row (e.g. "fast/fastest").
-//
-// When a non-split candidate wins (e.g. "parallel" or "merged"), the summary
-// is built from the candidate's actual group offers rather than the split-mapped
-// estimates, so instance counts and time/cost reflect the winning grouping.
+// gatherStrategyRows builds a StrategySummaryRow for each visible tradeoff
+// option using cached estimates. The time column uses total job completion
+// time so the frontier labels and the displayed comparison metric match.
 func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.StrategySummaryRow {
 	var rows []campaign.StrategySummaryRow
-	keyToIdx := make(map[string]int) // offerIdentity → index into rows
-
-	for _, strat := range allStrategies {
-		isActive := strat == m.launchOpts.Strategy
-		offers := m.rankCachedOffersForStrategy(strat)
-		key := offerIdentity(offers)
-		plan, havePlan := m.strategyPlanFor(strat)
-
-		// Check if we already have a row for the same offer set
-		if idx, ok := keyToIdx[key]; ok {
-			rows[idx].Label += "/" + string(strat)
-			if isActive {
-				rows[idx].Active = true
-				rows[idx].Disclosed = m.strategyDisclosed
-			}
-			continue
-		}
+	for i, option := range m.tradeoffOptions {
+		isActive := option.ID == m.activeTradeoff
+		plan, havePlan := m.planForTradeoff(option.ID)
+		label := tradeoffDisplayLabel(option, i)
 
 		row := campaign.StrategySummaryRow{
-			Label:     string(strat),
+			Label:     label,
 			Active:    isActive,
 			Disclosed: isActive && m.strategyDisclosed,
 			Loading:   true,
@@ -602,23 +606,26 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 
 		// Try detailed estimates first when the plan aligns with split groups.
 		if havePlan && !plan.HasComplexExecution() {
-			if summary := campaign.SummarizeForComparison(plan.DisplayEstimates, selectedPerGroup); summary != nil {
+			if summary := campaign.SummarizeTradeoffComparison(plan.DisplayEstimates, selectedPerGroup); summary != nil {
 				row = *summary
-				row.Label = string(strat)
+				row.Label = label
 				row.Active = isActive
 				row.Disclosed = isActive && m.strategyDisclosed
 			}
-		} else if cached, ok := m.estimateCache[key]; ok {
-			if summary := campaign.SummarizeForComparison(cached, selectedPerGroup); summary != nil {
-				row = *summary
-				row.Label = string(strat)
-				row.Active = isActive
-				row.Disclosed = isActive && m.strategyDisclosed
+		} else if havePlan {
+			key := offerIdentity(plan.DisplayOffers)
+			if cached, ok := m.estimateCache[key]; ok {
+				if summary := campaign.SummarizeTradeoffComparison(cached, selectedPerGroup); summary != nil {
+					row = *summary
+					row.Label = label
+					row.Active = isActive
+					row.Disclosed = isActive && m.strategyDisclosed
+				}
 			}
 		}
 
 		if havePlan && plan.HasComplexExecution() {
-			if summary := campaign.SummarizeExecutionEstimates(plan.ActualEstimates); summary != nil {
+			if summary := campaign.SummarizeTradeoffExecutionEstimates(plan.ActualEstimates); summary != nil {
 				summary.Label = row.Label
 				summary.Active = row.Active
 				summary.Disclosed = row.Disclosed
@@ -626,7 +633,6 @@ func (m launchModel) gatherStrategyRows(selectedPerGroup []int) []campaign.Strat
 			}
 		}
 
-		keyToIdx[key] = len(rows)
 		rows = append(rows, row)
 	}
 	return rows
@@ -830,9 +836,10 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.groupOffers = nil
 			m.cachedRawOffers = nil
 			m.strategyPlans = nil
+			m.tradeoffOptions = nil
+			m.activeTradeoff = ""
 			m.reuseAssignments = nil
 			m.winningCandidate = nil
-			m.dedupedStrategies = nil
 			m.costEstimates = nil
 			m.estimateCache = make(map[string][]campaign.CostEstimate)
 			m.strategyRowsDirty = true
@@ -849,6 +856,7 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cachedRawOffers = msg.raw
 		m.strategyPlans = msg.plans
+		m.adoptTradeoffOptions(msg.options)
 		for _, plan := range msg.plans {
 			if len(plan.DisplayOffers) == 0 {
 				continue
@@ -856,7 +864,6 @@ func (m launchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.estimateCache[offerIdentity(plan.DisplayOffers)] = plan.DisplayEstimates
 		}
 		m.strategyRowsDirty = true
-		m.rebuildDedupedStrategies()
 		oldOffers := m.groupOffers
 		m.groupOffers = m.rankCachedOffers()
 		if !msg.background {
@@ -1168,22 +1175,22 @@ func (m launchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "s":
-		// Switch to strategies area and cycle among them
+		// Switch to tradeoff options area and cycle among them.
 		strategies := m.visibleStrategies()
 		if len(strategies) == 0 {
 			return m, nil
 		}
 		if m.focusArea != focusStrategies {
-			// Enter strategies area at the current active strategy
+			// Enter the tradeoff area at the current active option.
 			m.focusArea = focusStrategies
-			for i, s := range strategies {
-				if s == m.launchOpts.Strategy {
+			for i, option := range strategies {
+				if option.ID == m.activeTradeoff {
 					m.strategyCursor = i
 					break
 				}
 			}
 		}
-		// Cycle to next strategy (with wrap)
+		// Cycle to next option (with wrap).
 		m.strategyCursor = (m.strategyCursor + 1) % len(strategies)
 		m.activateStrategyIfFocused()
 		return m, m.fetchEstimatesIfNeeded()
@@ -1333,6 +1340,11 @@ func (m launchModel) launchInstances() tea.Cmd {
 	providerErr := m.providerErr
 	cfg := m.appConfig
 	opts := m.launchOpts
+	profile := opts.ScoringProfile()
+	if plan, ok := m.activeStrategyPlan(); ok && plan.Profile.Valid() {
+		profile = plan.Profile
+		opts.ScoreProfile = plan.Profile
+	}
 	campaignCh := m.campaignCh
 	planCh := m.planCh
 	phaseCh := m.phaseCh
@@ -1386,7 +1398,7 @@ func (m launchModel) launchInstances() tea.Cmd {
 			providerErr,
 			m.groups,
 			m.selected,
-			opts.Strategy,
+			profile,
 			opts.MinSurvival,
 			predCfg,
 			overheadModel,
@@ -1646,8 +1658,8 @@ func (m launchModel) View() string {
 		if m.costEstimates != nil {
 			b.WriteString("\n")
 			if m.cachedRawOffers != nil && m.cachedStrategyRows != nil {
-				// Strategy comparison view
-				b.WriteString(launchDimStyle.Render("── Cost Estimate (s strategy  ←/→ details) ────────────"))
+				// Tradeoff comparison view
+				b.WriteString(launchDimStyle.Render("── Cost Estimate (s tradeoff  ←/→ details) ────────────"))
 				b.WriteString("\n")
 				rows := m.cachedStrategyRows
 				summaryTable := campaign.FormatStrategySummary(rows)
@@ -1664,7 +1676,7 @@ func (m launchModel) View() string {
 							// pass nil for selection (all jobs selected) since the
 							// estimates use the candidate's group indices.
 							detailSelected := selected
-							if plan, ok := m.strategyPlanFor(m.launchOpts.Strategy); ok && plan.HasComplexExecution() {
+							if plan, ok := m.activeStrategyPlan(); ok && plan.HasComplexExecution() {
 								detailSelected = nil
 							}
 							detailTable := campaign.FormatCostTableSelected(activeEstimates, detailSelected, summaryTable.TimeWidth, summaryTable.RateWidth)
@@ -1756,9 +1768,9 @@ func (m launchModel) View() string {
 	if m.showCostDetail {
 		help = "d back  q quit"
 	} else if selectedCount == 0 {
-		help = "↑/↓ navigate  space toggle  s strategy  j jump  ←/→ expand  d details  enter quit  q quit"
+		help = "↑/↓ navigate  space toggle  s tradeoff  j jump  ←/→ expand  d details  enter quit  q quit"
 	} else {
-		help = "↑/↓ navigate  space toggle  s strategy  j jump  ←/→ expand  d details  enter launch  q quit"
+		help = "↑/↓ navigate  space toggle  s tradeoff  j jump  ←/→ expand  d details  enter launch  q quit"
 	}
 	b.WriteString(launchDimStyle.Render(help))
 	b.WriteString("\n")

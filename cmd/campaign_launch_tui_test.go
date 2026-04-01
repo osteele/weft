@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/osteele/weft/internal/bidding"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
@@ -227,6 +228,25 @@ func TestLaunchModelUpdate_InlineWatchKeepsRunningWithPartialFailures(t *testing
 	}
 	if !strings.Contains(out, "Instance 42 — A40 — launching") {
 		t.Fatalf("expected watch view to remain visible, got:\n%s", out)
+	}
+}
+
+func TestLaunchModelAdoptTradeoffOptions_PrefersMiddleForFast(t *testing.T) {
+	m := launchModel{
+		launchOpts: campaign.LaunchOpts{Strategy: bidding.StrategyFast},
+	}
+
+	m.adoptTradeoffOptions([]campaign.TradeoffOption{
+		{ID: "cheap", Label: "cheap"},
+		{ID: "middle"},
+		{ID: "fastest", Label: "fastest"},
+	})
+
+	if m.activeTradeoff != "middle" {
+		t.Fatalf("activeTradeoff = %q, want middle", m.activeTradeoff)
+	}
+	if m.strategyCursor != 1 {
+		t.Fatalf("strategyCursor = %d, want 1", m.strategyCursor)
 	}
 }
 

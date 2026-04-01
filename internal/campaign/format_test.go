@@ -354,6 +354,58 @@ func TestSummarizeForComparison(t *testing.T) {
 	})
 }
 
+func TestSummarizeTradeoffComparison_UsesTotalCompletionTime(t *testing.T) {
+	estimates := []CostEstimate{
+		{
+			Group: InstanceGroup{
+				GPUClass: "A100",
+				GPUMemGB: 80,
+				Jobs: []*db.Job{
+					{ID: 1},
+					{ID: 2},
+				},
+			},
+			Offer: GroupOffer{Offer: &cloud.Offer{GPUName: "A100", CostPerHour: 1.50}},
+			Breakdown: estimate.Breakdown{
+				Run: estimate.Estimate{
+					Mean:  2 * time.Hour,
+					Lower: 90 * time.Minute,
+					Upper: 3 * time.Hour,
+				},
+				Total: estimate.Estimate{
+					Mean:  3 * time.Hour,
+					Lower: 2 * time.Hour,
+					Upper: 4 * time.Hour,
+				},
+			},
+			JobDurations: map[int64]time.Duration{
+				1: time.Hour,
+				2: time.Hour,
+			},
+			TotalCost: 4.50,
+		},
+	}
+
+	row := SummarizeTradeoffComparison(estimates, []int{2})
+	if row == nil {
+		t.Fatal("expected non-nil row")
+	}
+	if row.NumGPUs != 1 {
+		t.Fatalf("NumGPUs = %d, want 1", row.NumGPUs)
+	}
+	if row.MaxTime.Mean != 5*time.Hour {
+		t.Fatalf("MaxTime.Mean = %v, want 5h total completion time", row.MaxTime.Mean)
+	}
+
+	row = SummarizeTradeoffComparison(estimates, []int{1})
+	if row == nil {
+		t.Fatal("expected non-nil row for partial selection")
+	}
+	if row.MaxTime.Mean != 2*time.Hour {
+		t.Fatalf("MaxTime.Mean = %v, want 2h for one selected job", row.MaxTime.Mean)
+	}
+}
+
 func TestFormatStrategySummary(t *testing.T) {
 	rows := []StrategySummaryRow{
 		{
