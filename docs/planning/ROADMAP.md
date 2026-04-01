@@ -86,82 +86,19 @@ Add to `internal/campaign/`:
 Add `copy_source_id`, `copy_status`, `copy_duration_s` columns to
 `cloud_instances` table.
 
-## Future: Rename status/pending_status to outcome/intent
+## Extend derived-status model to on-prem jobs
 
-The `status` column conflates two concerns: what happened on the last attempt
-(outcome) and whether the job should be placed (intent). `pending_status` already
-serves as an intent override, but the column names don't reflect these roles.
+Cloud jobs now derive display status from attempt facts + instance lifecycle
+(no mutable status mutations). On-prem jobs still use the three-way merge
+(`status`/`pending_status`/`last_synced_status`).
 
-### Column mapping
+### Remaining work
 
-| Current | Proposed | Meaning |
-|---------|----------|---------|
-| `status` | `outcome` | What happened on the last attempt (`pending`, `running`, `starting`, `paused`, `completed`, `failed`, `dead`, `killed`) |
-| `pending_status` | `intent` | What the user wants next (`run`, `cancel`, `pause`, `draft`, `NULL` = accept current outcome) |
-| `last_synced_status` | `last_synced_outcome` | Three-way merge base |
-
-### New value sets
-
-**outcome**: Drop `queued`, `canceled`, `draft` (those are intents, not outcomes).
-Add `pending` for jobs that have never been attempted.
-
-**intent**: `run` (place/retry me), `cancel`, `pause`, `draft`, `NULL` (no action).
-
-### Placement query
-
-```sql
-WHERE intent = 'run' AND host = ''
-```
-
-### Display status (derived)
-
-| intent | outcome | Display |
-|--------|---------|---------|
-| `cancel` | any | "canceled" |
-| `draft` | any | "draft" |
-| `run` | `pending` | "queued" |
-| `run` | `failed` | "retry-pending" |
-| `NULL` | any | show outcome directly |
-
-### Migration sketch
-
-1. Add `outcome` and `intent` columns
-2. Backfill from existing data
-3. Audit and update all queries
-4. Drop old columns
-
-### Stronger variant: derive status entirely from attempts + intent
-
-Instead of renaming columns, make `job_status` a pure view with no mutable
-status column. The view computes display status from:
-
-1. **User intent** (`requested_status`): `queued`, `canceled`, `killed`, `draft`
-2. **Latest attempt** (if any): `start_time`, `end_time`, `exit_code`, `launch_id`
-3. **Instance status** (via `launches.status`): whether the instance is still alive
-
-```
-IF requested_status IN ('canceled','killed','draft') → show that
-IF no attempts → 'queued'
-IF latest attempt has end_time:
-  exit_code = 0 → 'completed'
-  exit_code != 0 → 'failed'
-  exit_code IS NULL AND launch terminal → 'orphaned'
-IF latest attempt has start_time but no end_time:
-  launch terminal → 'orphaned'
-  ELSE → 'running'
-IF latest attempt has no start_time → 'queued'
-```
-
-**Key design choice**: attempts only exist once a host/instance is assigned.
-No phantom "queued" attempts. Retry = set `requested_status = 'queued'` (a
-new attempt is created only when the scheduler places the job). This makes
-`attempt_number` count real execution attempts.
-
-This eliminates `ResetLaunchJobs`, `CloseLaunchAttempts`, `cloud_outcome`,
-and the many code paths that mutate job status during instance lifecycle
-events. The instance lifecycle only writes to `launches`; the job view
-automatically reflects the correct state.
-
-**Motivation**: repeated bugs where grace expiry, bootstrap timeout, and
-resubmit code paths each need to set the right combination of attempt
-status, cloud_outcome, and job status. Each new edge case is whack-a-mole.
+1. Derive on-prem job status from attempt facts the same way cloud jobs do
+2. Replace the three-way merge with a simpler model: the remote queue runner
+   writes `start_time`/`end_time`/`exit_code` directly, and the view derives
+   the display status
+3. Remove `pending_status` and `last_synced_status` once all paths use the
+   derived model
+4. Remove `cloud_outcome` column (no longer needed — the view derives
+   orphaned/failed/completed from attempt facts + instance status)

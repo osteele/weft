@@ -156,8 +156,8 @@ func TestWatchModelFinalRefreshUsesTerminalDBStateBeforeQuit(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 199 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	db.CreateAttempt(database, 199, "", &instanceID, db.StatusRunning)
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 199 AND end_time IS NULL`, time.Now().Unix())
 
 	m := watchModel{
 		instanceIDs: []int64{instanceID},

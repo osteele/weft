@@ -900,7 +900,7 @@ const statusNeedsRental = "needs_rental"
 // currentSchemaVersion is bumped whenever initSchema changes.
 // If the DB already has this version (via PRAGMA user_version), initSchema
 // is skipped entirely — no write lock needed.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 var dbPath string
 
@@ -934,6 +934,11 @@ func Open() (*sql.DB, error) {
 	if err := initSchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
+	}
+
+	if err := startupRepair(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("startup repair: %w", err)
 	}
 
 	return db, nil
@@ -1608,9 +1613,6 @@ func initSchema(db *sql.DB) error {
 	if err := createTrainingExamplesView(db); err != nil {
 		return err
 	}
-	if err := repairPlaceholderProjects(db); err != nil {
-		return err
-	}
 
 	// Migration: convert legacy needs_rental status to queued (host is already empty).
 	// These columns may already be removed on newer schemas, so ignore errors.
@@ -1667,36 +1669,8 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
-	// Clean up stale attempt data: close duplicate open attempts and
-	// ensure orphaned cloud jobs have fresh unplaced attempts.
-	if err := cleanupStaleAttempts(db); err != nil {
-		return err
-	}
-
-	// Repair completed attempts that lost their launch association (e.g.,
-	// after cleanupStaleAttempts created a blank replacement that was later
-	// completed by R2 sync without propagating launch_id).
-	if err := repairOrphanedCompletedAttempts(db); err != nil {
-		return err
-	}
-
-	// Create the job_status view (joins jobs with latest attempt)
-	if err := createJobStatusView(db); err != nil {
-		return err
-	}
-
-	// Recreate training_examples view (may have been dropped during table rebuild)
-	if err := createTrainingExamplesView(db); err != nil {
-		return err
-	}
-
-	// Sync triggers: mirror jobs writes to job_attempts
-	if err := createJobsToAttemptsSyncTrigger(db); err != nil {
-		return err
-	}
-	if err := createJobsInsertToAttemptsTrigger(db); err != nil {
-		return err
-	}
+	// NOTE: Cleanup, repair, views, and triggers have been moved to
+	// startupRepair() which runs on every Open(), not just during migration.
 
 	// Transfer bandwidth observations (used by internal/transferbw package).
 	// Defined here to avoid import cycle: db → transferbw → estimate → db.
@@ -1747,6 +1721,41 @@ func initSchema(db *sql.DB) error {
 		return err
 	}
 
+	// Migration: clean up hostless "queued" attempts and set requested_status
+	// on jobs so the derived-status view works correctly.
+	if _, err := db.Exec(`
+		UPDATE jobs SET requested_status = 'queued'
+		WHERE requested_status IS NULL
+		  AND id IN (
+			SELECT ja.job_id FROM job_attempts ja
+			WHERE ja.host = '' AND ja.launch_id IS NULL AND ja.start_time IS NULL AND ja.status = 'queued' AND ja.end_time IS NULL
+		  )
+		  AND id NOT IN (
+			SELECT ja2.job_id FROM job_attempts ja2 WHERE ja2.status IN ('completed','failed','dead','killed')
+		  )`); err != nil {
+		slog.Warn("failed to set requested_status for hostless queued jobs", "error", err)
+	}
+	// Delete hostless queued attempts (job status now derived from requested_status).
+	if _, err := db.Exec(`
+		DELETE FROM job_attempts
+		WHERE host = '' AND launch_id IS NULL AND start_time IS NULL AND status = 'queued' AND end_time IS NULL`); err != nil {
+		slog.Warn("failed to clean up hostless queued attempts", "error", err)
+	}
+	// Clear requested_status='queued' that was auto-set by old ResetLaunchJobs
+	// when the latest cloud attempt is already terminal (the user didn't request retry).
+	if _, err := db.Exec(`
+		UPDATE jobs SET requested_status = NULL
+		WHERE requested_status = 'queued'
+		  AND id IN (
+			SELECT ja.job_id FROM job_attempts ja
+			WHERE ja.launch_id IS NOT NULL AND ja.end_time IS NOT NULL
+			  AND ja.attempt_number = (
+				SELECT MAX(ja2.attempt_number) FROM job_attempts ja2 WHERE ja2.job_id = ja.job_id
+			  )
+		  )`); err != nil {
+		slog.Warn("failed to clear auto-set requested_status", "error", err)
+	}
+
 	// Host contention observations for placement estimation.
 	// Recorded during host probes and used to estimate queue drain / contention factors.
 	if _, err := db.Exec(`
@@ -1768,6 +1777,46 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", currentSchemaVersion)); err != nil {
 		return fmt.Errorf("set schema version: %w", err)
 	}
+	return nil
+}
+
+// startupRepair runs on every Open(), not just during schema migration.
+// It performs data cleanup, repairs, and recreates views/triggers.
+func startupRepair(db *sql.DB) error {
+	// Clean up stale attempt data: close duplicate open attempts and
+	// ensure orphaned cloud jobs have fresh unplaced attempts.
+	if err := cleanupStaleAttempts(db); err != nil {
+		return err
+	}
+
+	// Repair completed attempts that lost their launch association.
+	if err := repairOrphanedCompletedAttempts(db); err != nil {
+		return err
+	}
+
+	// Repair placeholder project values (e.g., ".") from older job submissions.
+	if err := repairPlaceholderProjects(db); err != nil {
+		return err
+	}
+
+	// Create/recreate the job_status view (joins jobs with latest attempt)
+	if err := createJobStatusView(db); err != nil {
+		return err
+	}
+
+	// Recreate training_examples view (may have been dropped during table rebuild)
+	if err := createTrainingExamplesView(db); err != nil {
+		return err
+	}
+
+	// Sync triggers: drop legacy triggers
+	if err := createJobsToAttemptsSyncTrigger(db); err != nil {
+		return err
+	}
+	if err := dropJobsInsertTrigger(db); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1928,11 +1977,11 @@ func RecordJobStarting(db *sql.DB, host, workingDir, command, description string
 		tx.Rollback()
 		return 0, err
 	}
-	// Update the auto-created attempt with execution state
+	// Create the attempt at placement time with execution state.
 	if _, err := tx.Exec(
-		`UPDATE job_attempts SET host = ?, start_time = ?, status = ?
-		 WHERE job_id = ? AND end_time IS NULL`,
-		host, now, StatusStarting, jobID,
+		`INSERT INTO job_attempts (job_id, attempt_number, host, status, queued_at, start_time)
+		 VALUES (?, 1, ?, ?, ?, ?)`,
+		jobID, host, StatusStarting, now, now,
 	); err != nil {
 		tx.Rollback()
 		return 0, err
@@ -2218,8 +2267,19 @@ func ClearQueueAssignment(db *sql.DB, id int64) error {
 
 // SetPendingStatus sets the pending (target) status for a job.
 // This represents what the user wants the job state to become.
-func SetPendingStatus(db *sql.DB, jobID int64, status string) error {
-	return SetAttemptPendingStatus(db, jobID, status)
+// For jobs without an attempt (unplaced), it sets requested_status directly
+// on the jobs table since there's no attempt row to hold pending_status.
+func SetPendingStatus(database *sql.DB, jobID int64, s string) error {
+	attemptID, err := GetLatestAttemptID(database, jobID)
+	if err != nil {
+		return err
+	}
+	if attemptID == 0 {
+		// No attempt exists: set requested_status directly on the job.
+		_, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, s, jobID)
+		return err
+	}
+	return SetAttemptPendingStatus(database, jobID, s)
 }
 
 // ClearPendingStatus clears the pending status after reconciliation succeeds.
@@ -2268,13 +2328,21 @@ func ClearPendingAndUpdateStatus(db *sql.DB, jobID int64, newStatus string) erro
 // Unlike MarkQueuedByID, this does NOT set last_synced_status to queued,
 // so the sync path will re-append the job to the remote queue if the immediate
 // append fails.
-func RequeueByID(db *sql.DB, id int64) error {
-	warnTransition(db, id, StatusQueued, false, status.SourceUserAction)
-	tx, err := db.Begin()
+func RequeueByID(database *sql.DB, id int64) error {
+	warnTransition(database, id, StatusQueued, false, status.SourceUserAction)
+
+	// Cloud jobs: close attempt and set requested_status='queued'.
+	var launchID sql.NullInt64
+	_ = database.QueryRow(`SELECT launch_id FROM job_attempts WHERE job_id = ? ORDER BY attempt_number DESC LIMIT 1`, id).Scan(&launchID)
+	if launchID.Valid {
+		return closeAttemptsAndRequeue(database, id, time.Now().Unix())
+	}
+
+	// On-prem jobs: close+recreate attempt with pending_status for three-way merge.
+	tx, err := database.Begin()
 	if err != nil {
 		return err
 	}
-	// Close current attempt + create new one with pending_status
 	now := time.Now().Unix()
 	if err := closeOpenAttempts(tx, id, now); err != nil {
 		tx.Rollback()
@@ -2285,7 +2353,6 @@ func RequeueByID(db *sql.DB, id int64) error {
 		tx.Rollback()
 		return err
 	}
-	// Set pending_status on the new attempt (requeue needs re-dispatch)
 	if _, err := tx.Exec(`UPDATE job_attempts SET pending_status = ? WHERE id = ?`, StatusQueued, attemptID); err != nil {
 		tx.Rollback()
 		return err
@@ -2339,31 +2406,18 @@ func (j *Job) HasTagHostConflict() bool {
 // ResetJobToUnplaced resets a single job to unplaced state (queued with empty host),
 // clearing cloud instance association and run metadata. Used when restarting cloud
 // jobs whose original instance is no longer available.
-func ResetJobToUnplaced(db *sql.DB, jobID int64) error {
-	// Get the current job state for placement reason message
-	job, _ := GetJobByID(db, jobID)
+func ResetJobToUnplaced(database *sql.DB, jobID int64) error {
+	job, _ := GetJobByID(database, jobID)
 
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	// Close current attempt + create new unplaced one
 	now := time.Now().Unix()
-	if err := closeOpenAttempts(tx, jobID, now); err != nil {
-		tx.Rollback()
+	if err := closeAttemptsAndRequeue(database, jobID, now); err != nil {
 		return err
 	}
-	if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
-		tx.Rollback()
-		return err
-	}
-	// Update placement_reasons on the job (spec column)
-	if _, err := tx.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
+	if _, err := database.Exec(`UPDATE jobs SET placement_reasons = ? WHERE id = ?`,
 		encodeStringSlice(resetJobPlacementReasons(job)), jobID); err != nil {
-		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func resetJobPlacementReasons(job *Job) []string {
@@ -2467,31 +2521,42 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 		return 0, err
 	}
 	now := time.Now().Unix()
+	// For unplaced jobs (no host), set requested_status='queued' so the view
+	// derives 'queued' without an attempt. For placed jobs (host provided),
+	// the attempt itself carries the status; requested_status is left NULL.
+	var requestedStatus any
+	if host == "" {
+		requestedStatus = StatusQueued
+	}
 	if explicitID {
 		_, err := db.Exec(
-			`INSERT INTO jobs (id, working_dir, command, description, created_at, queue_name, gpu, placement_host)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			`INSERT INTO jobs (id, working_dir, command, description, created_at, queue_name, gpu, placement_host, requested_status)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			 	working_dir = excluded.working_dir,
 			 	command = excluded.command,
 			 	description = excluded.description,
 			 	queue_name = excluded.queue_name,
 			 	gpu = excluded.gpu,
-			 	placement_host = excluded.placement_host`,
-			id, workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host,
+			 	placement_host = excluded.placement_host,
+			 	requested_status = excluded.requested_status`,
+			id, workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host, requestedStatus,
 		)
 		if err != nil {
 			return 0, err
 		}
-		// INSERT trigger auto-creates an attempt on fresh insert.
-		// On upsert (conflict), also sync the attempt's host and queued_at.
-		db.Exec(`UPDATE job_attempts SET host = ?, queued_at = ? WHERE job_id = ? AND end_time IS NULL`, host, now, id)
+		// On-prem jobs with a host: create an attempt so the sync path can track them.
+		if host != "" {
+			if _, err := createAttemptTx(db, id, host, nil, StatusQueued); err != nil {
+				return 0, err
+			}
+		}
 		return id, nil
 	}
 	result, err := db.Exec(
-		`INSERT INTO jobs (working_dir, command, description, created_at, queue_name, gpu, placement_host)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host,
+		`INSERT INTO jobs (working_dir, command, description, created_at, queue_name, gpu, placement_host, requested_status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		workingDir, command, description, now, queuefile.DefaultQueueName, gpu, host, requestedStatus,
 	)
 	if err != nil {
 		return 0, err
@@ -2500,8 +2565,12 @@ func recordQueuedWithGPU(db *sql.DB, id int64, host, workingDir, command, descri
 	if err != nil {
 		return 0, err
 	}
-	// Update the auto-created attempt with host and queued_at
-	db.Exec(`UPDATE job_attempts SET host = ?, queued_at = ? WHERE job_id = ? AND end_time IS NULL`, host, now, jobID)
+	// On-prem jobs with a host: create an attempt so the sync path can track them.
+	if host != "" {
+		if _, err := createAttemptTx(db, jobID, host, nil, StatusQueued); err != nil {
+			return 0, err
+		}
+	}
 	return jobID, nil
 }
 
@@ -2533,8 +2602,18 @@ func RecordDraftJob(db *sql.DB, host, workingDir, command, description, gpu, dep
 	if err != nil {
 		return 0, err
 	}
-	// Update auto-created attempt to draft status
-	db.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, StatusDraft, jobID)
+	// Create the attempt at draft status. Draft jobs with a host get an
+	// attempt so the reconcile path can track pending_status on them.
+	if host != "" {
+		if _, err := createAttemptTx(db, jobID, host, nil, StatusDraft); err != nil {
+			return 0, err
+		}
+	} else {
+		// For hostless draft jobs, set requested_status so the view derives 'draft'.
+		if _, err := db.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusDraft, jobID); err != nil {
+			return 0, err
+		}
+	}
 	return jobID, nil
 }
 

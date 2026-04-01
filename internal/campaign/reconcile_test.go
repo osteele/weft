@@ -30,12 +30,13 @@ func TestReconcileLaunches_DeadInstance(t *testing.T) {
 		t.Fatalf("set provider id: %v", err)
 	}
 
-	// Create a job associated with this instance
+	// Create a job and its attempt associated with this instance
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusQueued, instanceID)
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusQueued); err != nil {
+		t.Fatalf("create attempt: %v", err)
+	}
 
 	// Mock client that reports the instance as dead
 	mockClient := &cloud.MockClient{
@@ -148,8 +149,10 @@ func TestReconcileLaunches_GraceSyncsJobCompletions(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning); err != nil {
+		t.Fatalf("create attempt: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 1 AND end_time IS NULL`, time.Now().Unix())
 
 	mockClient := &cloud.MockClient{
 		ProviderVal: cloud.ProviderVastai,
@@ -219,8 +222,10 @@ func TestReconcileLaunches_TerminalTransitionSyncsJobCompletions(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (1, '/tmp', 'python train.py', 0)`); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning); err != nil {
+		t.Fatalf("create attempt: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 1 AND end_time IS NULL`, time.Now().Unix())
 
 	// Provider reports instance as exited (dead)
 	mockClient := &cloud.MockClient{
@@ -283,15 +288,20 @@ func TestReconcileLaunches_SyncFailureOrphansJob(t *testing.T) {
 	}
 
 	// Create two jobs: one completed, one still running
+	now := time.Now().Unix()
 	for _, id := range []int{1, 2} {
 		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, id); err != nil {
 			t.Fatalf("create job %d: %v", id, err)
 		}
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ?, end_time = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusCompleted, instanceID, time.Now().Unix())
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 2 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	if _, err := db.CreateAttempt(database, 1, "", &instanceID, db.StatusCompleted); err != nil {
+		t.Fatalf("create attempt 1: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET start_time = ?, end_time = ?, exit_code = 0 WHERE job_id = 1`, now-10, now)
+	if _, err := db.CreateAttempt(database, 2, "", &instanceID, db.StatusRunning); err != nil {
+		t.Fatalf("create attempt 2: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 2 AND end_time IS NULL`, now-10)
 
 	// Provider reports instance as exited (dead)
 	mockClient := &cloud.MockClient{
@@ -315,14 +325,16 @@ func TestReconcileLaunches_SyncFailureOrphansJob(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 
-	// Job 2 should be orphaned (reset to queued with orphaned outcome)
-	var jobStatus string
-	database.QueryRow(`SELECT status FROM job_attempts WHERE job_id = 2 ORDER BY id DESC LIMIT 1`).Scan(&jobStatus)
-	if jobStatus != string(db.StatusQueued) {
-		t.Errorf("job 2 status = %q, want %q (should be re-queued after orphaning)", jobStatus, db.StatusQueued)
+	// Job 2 should be orphaned (reset to queued via requested_status)
+	job2, err := db.GetJobByID(database, 2)
+	if err != nil {
+		t.Fatalf("get job 2: %v", err)
+	}
+	if job2.Status != db.StatusQueued {
+		t.Errorf("job 2 status = %q, want %q (should be re-queued after orphaning)", job2.Status, db.StatusQueued)
 	}
 
-	// Check the orphaned attempt outcome
+	// Check the orphaned attempt outcome on job 2's attempts
 	attempts, _ := db.GetLaunchAttempts(database, 2)
 	var hasOrphaned bool
 	for _, a := range attempts {
@@ -390,8 +402,9 @@ func TestReconcileLaunches_StaleHeartbeatWithoutAgentMarksFailed(t *testing.T) {
 		if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, jobID); err != nil {
 			t.Fatalf("create job %d: %v", jobID, err)
 		}
-		database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = ? AND end_time IS NULL`,
-			db.StatusQueued, instanceID, jobID)
+		if _, err := db.CreateAttempt(database, jobID, "", &instanceID, db.StatusQueued); err != nil {
+			t.Fatalf("create attempt for job %d: %v", jobID, err)
+		}
 	}
 
 	origFetchHeartbeat := fetchReconcileHeartbeat

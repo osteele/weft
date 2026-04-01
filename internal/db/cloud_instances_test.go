@@ -904,19 +904,24 @@ func TestSetJobLaunchID_NoOpenAttempt(t *testing.T) {
 		t.Fatalf("CreateLaunch: %v", err)
 	}
 
-	// Insert a job (creates an open attempt via trigger), then close the attempt.
+	// Insert a job, then close the attempt to simulate a previous failure.
 	insertTestJob(t, database, 1, "echo hello", "/tmp", StatusQueued)
 	if err := CloseAttempt(database, 1, StatusFailed, nil, 1000); err != nil {
 		t.Fatalf("CloseAttempt: %v", err)
 	}
 
-	// SetJobLaunchID should fail — no open attempt.
+	// SetJobLaunchID creates a fresh placement attempt even with no open attempt.
 	err = SetJobLaunchID(database, 1, instanceID)
-	if err == nil {
-		t.Fatal("expected error from SetJobLaunchID with no open attempt, got nil")
+	if err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	if !strings.Contains(err.Error(), "no open attempt") {
-		t.Fatalf("unexpected error: %v", err)
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
 	}
 }
 
@@ -935,12 +940,17 @@ func TestSetJobLaunchID_RunningAttempt(t *testing.T) {
 		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
 
-	// SetJobLaunchID should fail — attempt is running, not queued.
+	// SetJobLaunchID closes the running attempt and creates a new placement attempt.
 	err = SetJobLaunchID(database, 1, instanceID)
-	if err == nil {
-		t.Fatal("expected error from SetJobLaunchID with running attempt, got nil")
+	if err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
 	}
-	if !strings.Contains(err.Error(), "expected \"queued\"") {
-		t.Fatalf("unexpected error: %v", err)
+
+	job, err := GetJobByID(database, 1)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+	if job.Status != StatusQueued {
+		t.Fatalf("status = %q, want %q", job.Status, StatusQueued)
 	}
 }

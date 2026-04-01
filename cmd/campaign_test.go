@@ -211,8 +211,9 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert orphaned job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusQueued, providerFailedID)
+	if _, err := db.CreateAttempt(database, 1, "", &providerFailedID, db.StatusQueued); err != nil {
+		t.Fatalf("create attempt for job 1: %v", err)
+	}
 	if err := db.CloseLaunchAttempts(database, providerFailedID, db.AttemptOutcomeOrphaned); err != nil {
 		t.Fatalf("CloseLaunchAttempts(orphaned): %v", err)
 	}
@@ -244,8 +245,11 @@ func TestBuildCampaignDiagnosisReport(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert failed job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ?, failure_reason = ?, error_diagnosis = ? WHERE job_id = 2 AND end_time IS NULL`,
-		db.StatusFailed, jobFailureID, "gpu_oom", diagJSON)
+	if _, err := db.CreateAttempt(database, 2, "", &jobFailureID, db.StatusFailed); err != nil {
+		t.Fatalf("create attempt for job 2: %v", err)
+	}
+	database.Exec(`UPDATE job_attempts SET failure_reason = ?, error_diagnosis = ?, start_time = ?, end_time = ? WHERE job_id = 2`,
+		"gpu_oom", diagJSON, time.Now().Unix()-10, time.Now().Unix())
 
 	report, err := buildCampaignDiagnosisReport(database, campaignID)
 	if err != nil {

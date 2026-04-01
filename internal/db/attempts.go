@@ -12,6 +12,20 @@ type dbExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
+// closeAttemptsAndRequeue closes open attempts for a cloud job and sets
+// requested_status='queued' so the view derives "queued" without a hostless
+// attempt. Used by ResetLaunchJobs, RequeueByID, ResetJobToUnplaced, and
+// cleanupStaleAttempts.
+func closeAttemptsAndRequeue(db dbExecer, jobID int64, now int64) error {
+	if _, err := db.Exec(
+		`UPDATE job_attempts SET status = ?, end_time = COALESCE(end_time, ?) WHERE job_id = ? AND end_time IS NULL`,
+		StatusCanceled, now, jobID); err != nil {
+		return err
+	}
+	_, err := db.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusQueued, jobID)
+	return err
+}
+
 // createJobAttemptsTableSQL returns the DDL for the job_attempts table.
 func createJobAttemptsTableSQL() string {
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS job_attempts (
@@ -283,13 +297,8 @@ func cleanupStaleAttempts(db *sql.DB) error {
 	}
 
 	for _, o := range orphaned {
-		if _, err := db.Exec(`
-			UPDATE job_attempts SET status = 'canceled', end_time = ?
-			WHERE id = ?`, now, o.attemptID); err != nil {
-			return fmt.Errorf("close orphaned attempt %d: %w", o.attemptID, err)
-		}
-		if _, err := createAttemptTx(db, o.jobID, "", nil, StatusQueued); err != nil {
-			return fmt.Errorf("create fresh attempt for job %d: %w", o.jobID, err)
+		if err := closeAttemptsAndRequeue(db, o.jobID, now); err != nil {
+			return fmt.Errorf("requeue orphaned job %d: %w", o.jobID, err)
 		}
 	}
 
@@ -394,7 +403,8 @@ func createJobStatusView(db *sql.DB) error {
 		)
 		SELECT
 			j.id,
-			COALESCE(la.host, '') AS host,
+			CASE WHEN j.requested_status = 'queued' AND la.end_time IS NOT NULL
+			     THEN '' ELSE COALESCE(la.host, '') END AS host,
 			la.session_name,
 			j.working_dir,
 			j.command,
@@ -406,16 +416,43 @@ func createJobStatusView(db *sql.DB) error {
 			la.start_time,
 			la.end_time,
 			la.exit_code,
-			-- Raw status from attempt (preserves pending vs actual distinction)
 			CASE
+				-- User-level overrides always win
 				WHEN j.requested_status = 'canceled' THEN 'canceled'
+				WHEN j.requested_status = 'killed' THEN 'killed'
+				WHEN j.requested_status = 'draft' THEN 'draft'
+				-- No attempt: check if user wants to run or job is new
+				WHEN la.id IS NULL THEN
+					CASE WHEN j.requested_status = 'queued' THEN 'queued'
+					     WHEN j.requested_status IS NOT NULL THEN j.requested_status
+					     ELSE 'draft'
+					END
+				-- Cloud jobs: derive status from attempt facts + instance lifecycle
+				WHEN la.launch_id IS NOT NULL THEN
+					CASE
+						WHEN j.requested_status = 'queued'
+						     AND la.end_time IS NOT NULL THEN 'queued'
+						WHEN la.end_time IS NOT NULL THEN
+							CASE
+								WHEN la.exit_code = 0 THEN 'completed'
+								WHEN la.exit_code IS NOT NULL THEN 'failed'
+								WHEN l.termination_reason = 'job_failure' THEN 'failed'
+								WHEN l.status IN ('failed','canceled') THEN 'orphaned'
+								ELSE 'dead'
+							END
+						WHEN la.start_time IS NOT NULL THEN
+							CASE
+								WHEN l.status IN ('failed','canceled') THEN 'orphaned'
+								ELSE 'running'
+							END
+						-- Placed but not yet started
+						WHEN l.status IN ('failed','canceled') THEN 'orphaned'
+						ELSE 'queued'
+					END
+				-- On-prem jobs: existing three-way merge logic
 				WHEN j.requested_status = 'queued'
 				     AND la.status IN ('completed','failed','dead','killed','canceled')
 				     THEN 'queued'
-				WHEN la.id IS NULL THEN
-					CASE WHEN j.requested_status IS NOT NULL THEN j.requested_status
-					     ELSE 'draft'
-					END
 				ELSE la.status
 			END AS status,
 			la.error_message,
@@ -450,13 +487,16 @@ func createJobStatusView(db *sql.DB) error {
 			COALESCE(la.attempt_number - 1, 0) AS retry_count,
 			la.placement_meta,
 			j.placement_reasons,
-			la.launch_id,
+			CASE WHEN j.requested_status = 'queued' AND la.end_time IS NOT NULL
+			     THEN NULL ELSE la.launch_id END AS launch_id,
 			j.campaign_job_index,
 			la.id AS latest_run_id,
 			-- Target kind for placement queries.
 			-- Only count a launch as claiming if it is actively progressing;
 			-- planned/failed/cancelled launches do not block re-launch.
 			CASE
+				WHEN j.requested_status = 'queued' AND la.end_time IS NOT NULL
+				THEN 'unplaced'
 				WHEN la.launch_id IS NOT NULL
 				     AND l.status IN ('launching', 'running', 'grace', 'completed')
 				THEN 'rental_instance'
@@ -486,27 +526,11 @@ func createJobsToAttemptsSyncTrigger(db *sql.DB) error {
 	return err
 }
 
-// createJobsInsertToAttemptsTrigger creates a trigger that auto-creates an
-// attempt row when a new job is inserted.
-func createJobsInsertToAttemptsTrigger(db *sql.DB) error {
-	if _, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_insert_create_attempt`); err != nil {
-		return err
-	}
-	_, err := db.Exec(`
-		CREATE TRIGGER jobs_insert_create_attempt
-		AFTER INSERT ON jobs
-		FOR EACH ROW
-		BEGIN
-			INSERT INTO job_attempts (
-				job_id, attempt_number, status, queued_at
-			) VALUES (
-				NEW.id,
-				COALESCE((SELECT MAX(attempt_number) FROM job_attempts WHERE job_id = NEW.id), 0) + 1,
-				'queued',
-				strftime('%s', 'now')
-			);
-		END
-	`)
+// dropJobsInsertTrigger removes the legacy trigger that auto-created an
+// attempt row on job insert. Attempts are now only created when a job is
+// placed on a host/instance.
+func dropJobsInsertTrigger(db *sql.DB) error {
+	_, err := db.Exec(`DROP TRIGGER IF EXISTS jobs_insert_create_attempt`)
 	return err
 }
 

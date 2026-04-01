@@ -50,18 +50,26 @@ func insertTestJob(t *testing.T, db *sql.DB, id int64, command, workingDir, stat
 		command = "echo test"
 	}
 
-	// Insert into jobs (spec columns only). The trigger creates an attempt.
+	// Determine requested_status. The job_status view uses requested_status
+	// as the primary override for canceled/killed/draft status.
+	var requestedStatus *string
+	switch status {
+	case StatusCanceled, StatusKilled, StatusDraft:
+		requestedStatus = &status
+	}
+
+	// Insert into jobs (spec columns only).
 	if id > 0 {
 		if _, err := db.Exec(
-			`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, ?, ?, 0)`,
-			id, workingDir, command,
+			`INSERT INTO jobs (id, working_dir, command, tombstoned, requested_status) VALUES (?, ?, ?, 0, ?)`,
+			id, workingDir, command, requestedStatus,
 		); err != nil {
 			t.Fatalf("insertTestJob: insert jobs: %v", err)
 		}
 	} else {
 		result, err := db.Exec(
-			`INSERT INTO jobs (working_dir, command, tombstoned) VALUES (?, ?, 0)`,
-			workingDir, command,
+			`INSERT INTO jobs (working_dir, command, tombstoned, requested_status) VALUES (?, ?, 0, ?)`,
+			workingDir, command, requestedStatus,
 		)
 		if err != nil {
 			t.Fatalf("insertTestJob: insert jobs: %v", err)
@@ -70,17 +78,34 @@ func insertTestJob(t *testing.T, db *sql.DB, id int64, command, workingDir, stat
 		id = newID
 	}
 
-	// Update the auto-created attempt with execution state
-	setClauses := []string{fmt.Sprintf("status = '%s'", status)}
-	args := []any{}
-	if o.host != "" {
-		setClauses = append(setClauses, "host = ?")
-		args = append(args, o.host)
-	}
+	// Explicitly create an attempt for this job.
+	var cloudInstanceIDPtr *int64
 	if o.cloudInstanceID > 0 {
-		setClauses = append(setClauses, "launch_id = ?")
-		args = append(args, o.cloudInstanceID)
+		cloudInstanceIDPtr = &o.cloudInstanceID
 	}
+	now := time.Now().Unix()
+	result, err := db.Exec(
+		`INSERT INTO job_attempts (job_id, attempt_number, host, launch_id, status, queued_at)
+		 VALUES (?, 1, ?, ?, ?, ?)`,
+		id, o.host, cloudInstanceIDPtr, status, now,
+	)
+	if err != nil {
+		t.Fatalf("insertTestJob: create attempt: %v", err)
+	}
+	attemptID, _ := result.LastInsertId()
+
+	// Auto-set start_time/end_time based on status when not explicitly provided,
+	// so the job_status view can derive status from attempt facts for cloud jobs.
+	if o.startTime == 0 && (status == StatusRunning || IsTerminalStatus(status)) {
+		o.startTime = now - 10
+	}
+	if o.endTime == 0 && IsTerminalStatus(status) {
+		o.endTime = now
+	}
+
+	// Apply additional execution-state overrides to the attempt.
+	setClauses := []string{}
+	args := []any{}
 	if o.startTime > 0 {
 		setClauses = append(setClauses, "start_time = ?")
 		args = append(args, o.startTime)
@@ -101,11 +126,13 @@ func insertTestJob(t *testing.T, db *sql.DB, id int64, command, workingDir, stat
 		setClauses = append(setClauses, "failure_reason = ?")
 		args = append(args, o.failureReason)
 	}
-	args = append(args, id)
-	query := fmt.Sprintf("UPDATE job_attempts SET %s WHERE job_id = ? AND end_time IS NULL",
-		joinStrings(setClauses, ", "))
-	if _, err := db.Exec(query, args...); err != nil {
-		t.Fatalf("insertTestJob: update attempt: %v", err)
+	if len(setClauses) > 0 {
+		args = append(args, attemptID)
+		query := fmt.Sprintf("UPDATE job_attempts SET %s WHERE id = ?",
+			joinStrings(setClauses, ", "))
+		if _, err := db.Exec(query, args...); err != nil {
+			t.Fatalf("insertTestJob: update attempt: %v", err)
+		}
 	}
 }
 
@@ -229,13 +256,6 @@ func setupStatsTestDB(t *testing.T) *sql.DB {
 			observed_inputs TEXT,
 			cloud_outcome TEXT
 		)`,
-		`CREATE TRIGGER jobs_insert_create_attempt
-		AFTER INSERT ON jobs
-		FOR EACH ROW
-		BEGIN
-			INSERT INTO job_attempts (job_id, attempt_number, status, queued_at)
-			VALUES (NEW.id, 1, 'queued', strftime('%s', 'now'));
-		END`,
 		`CREATE TABLE job_phase_timings (
 			job_id INTEGER PRIMARY KEY,
 			wrapper_start INTEGER,

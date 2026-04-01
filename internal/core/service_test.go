@@ -8,13 +8,12 @@ import (
 )
 
 func TestKillJobUsesEffectiveStatusForHostlessRunning(t *testing.T) {
+	// In the new model, a hostless job has no attempt and shows as "queued"
+	// from requested_status. KillJob should still cancel it.
 	database := db.SetupTestDB(t)
 	jobID, err := db.RecordQueued(database, "", "/tmp", "sleep 100", "test")
 	if err != nil {
 		t.Fatalf("RecordQueued: %v", err)
-	}
-	if err := db.MarkQueuedJobRunning(database, jobID); err != nil {
-		t.Fatalf("MarkQueuedJobRunning: %v", err)
 	}
 
 	service := NewServiceWithDB(database)
@@ -32,8 +31,5 @@ func TestKillJobUsesEffectiveStatusForHostlessRunning(t *testing.T) {
 	}
 	if job.EffectiveStatus() != db.StatusCanceled {
 		t.Fatalf("effective status = %q, want %q", job.EffectiveStatus(), db.StatusCanceled)
-	}
-	if job.Status != db.StatusCanceled && (job.PendingStatus == nil || *job.PendingStatus != db.StatusCanceled) {
-		t.Fatalf("job status = %q pending = %v, want canceled or pending canceled", job.Status, job.PendingStatus)
 	}
 }

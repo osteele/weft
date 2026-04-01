@@ -544,28 +544,13 @@ func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 		return err
 	}
 
-	// Verify precondition: job must have an open queued attempt that is not
-	// already claimed by an active launch.
-	var status string
+	// Check if the job is already claimed by an active launch.
 	var currentLaunchID sql.NullInt64
-	err = tx.QueryRow(`
-		SELECT status, launch_id FROM job_attempts
+	_ = tx.QueryRow(`
+		SELECT launch_id FROM job_attempts
 		WHERE job_id = ? AND end_time IS NULL
 		ORDER BY attempt_number DESC LIMIT 1`, jobID,
-	).Scan(&status, &currentLaunchID)
-	if err == sql.ErrNoRows {
-		tx.Rollback()
-		return fmt.Errorf("job %d has no open attempt", jobID)
-	}
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	if status != StatusQueued {
-		tx.Rollback()
-		return fmt.Errorf("job %d has open attempt in status %q, expected %q", jobID, status, StatusQueued)
-	}
-	// Reject if another active launch already claims this job.
+	).Scan(&currentLaunchID)
 	if currentLaunchID.Valid {
 		var launchStatus string
 		err = tx.QueryRow(`SELECT status FROM launches WHERE id = ?`, currentLaunchID.Int64).Scan(&launchStatus)
@@ -573,16 +558,20 @@ func SetJobLaunchID(database *sql.DB, jobID, instanceID int64) error {
 			tx.Rollback()
 			return fmt.Errorf("job %d: %w", jobID, ErrJobAlreadyClaimed)
 		}
-		// Stale/terminal/missing launch — proceed to reclaim.
 	}
 
-	// Close the placeholder attempt and create a new one with launch_id.
+	// Close any existing open attempt and create the placement attempt.
 	now := time.Now().Unix()
 	if err := closeOpenAttempts(tx, jobID, now); err != nil {
 		tx.Rollback()
 		return err
 	}
 	if _, err := createAttemptTx(tx, jobID, "", &instanceID, StatusQueued); err != nil {
+		tx.Rollback()
+		return err
+	}
+	// Clear requested_status since the job is now placed.
+	if _, err := tx.Exec(`UPDATE jobs SET requested_status = NULL WHERE id = ?`, jobID); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -715,17 +704,30 @@ func AssignJobHost(database *sql.DB, jobID int64, host string) (bool, error) {
 	if effectiveStatus != StatusQueued || currentHost != "" {
 		return false, nil
 	}
-	// Update host on the attempt (may be closed if pending retry)
-	result, err := database.Exec(
-		`UPDATE job_attempts SET host = ?
-		 WHERE id = `+latestAttemptSubquery+` AND host = ''`,
-		host, jobID)
+
+	// Check if an attempt exists. If not, create one (unplaced jobs have no
+	// attempt until placement).
+	attemptID, err := GetLatestAttemptID(database, jobID)
 	if err != nil {
 		return false, err
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return false, nil
+	if attemptID == 0 {
+		if _, err := CreateAttempt(database, jobID, host, nil, StatusQueued); err != nil {
+			return false, err
+		}
+	} else {
+		// Update host on the existing attempt (may be closed if pending retry)
+		result, err := database.Exec(
+			`UPDATE job_attempts SET host = ?
+			 WHERE id = `+latestAttemptSubquery+` AND host = ''`,
+			host, jobID)
+		if err != nil {
+			return false, err
+		}
+		n, _ := result.RowsAffected()
+		if n == 0 {
+			return false, nil
+		}
 	}
 	if _, err := database.Exec(`UPDATE jobs SET placement_reasons = NULL WHERE id = ?`, jobID); err != nil {
 		return false, err
@@ -772,26 +774,20 @@ func ResetLaunchJobs(database *sql.DB, instanceID int64, outcome string) (int64,
 	}
 	jobFilter := strings.Join(placeholders, ", ")
 
-	// Close the old attempt (preserves cloud_instance_id as historical record)
-	// and create a fresh unplaced attempt for each reset job.
 	now := time.Now().Unix()
 	for _, jobID := range jobIDs {
-		if _, err := tx.Exec(`
-			UPDATE job_attempts SET status = ?, end_time = ?, cloud_outcome = ?
-			WHERE job_id = ? AND end_time IS NULL`,
-			StatusCanceled, now, outcome, jobID,
-		); err != nil {
+		if err := closeAttemptsAndRequeue(tx, jobID, now); err != nil {
 			tx.Rollback()
-			return 0, fmt.Errorf("close attempt for job %d: %w", jobID, err)
+			return 0, fmt.Errorf("requeue job %d: %w", jobID, err)
 		}
-		if _, err := createAttemptTx(tx, jobID, "", nil, StatusQueued); err != nil {
+		// Also record cloud_outcome on the closed attempt.
+		if _, err := tx.Exec(`UPDATE job_attempts SET cloud_outcome = ? WHERE job_id = ? AND end_time = ?`,
+			outcome, jobID, now); err != nil {
 			tx.Rollback()
-			return 0, fmt.Errorf("create fresh attempt for job %d: %w", jobID, err)
+			return 0, fmt.Errorf("set cloud_outcome for job %d: %w", jobID, err)
 		}
 	}
 
-	// Update spec columns on jobs (placement_reasons). Execution state is
-	// already handled by the attempt close+recreate above.
 	placementArgs := make([]any, 0, len(jobIDs)+1)
 	placementArgs = append(placementArgs, placementReasons)
 	for _, jobID := range jobIDs {
@@ -1210,10 +1206,11 @@ func CloseLaunchAttempts(database *sql.DB, instanceID int64, outcome string) err
 	case AttemptOutcomeCompleted:
 		attemptStatus = StatusCompleted
 	}
+	now := time.Now().Unix()
 	_, err := database.Exec(
-		`UPDATE job_attempts SET status = ?, cloud_outcome = ?
+		`UPDATE job_attempts SET status = ?, cloud_outcome = ?, end_time = COALESCE(end_time, ?)
 		 WHERE launch_id = ? AND end_time IS NULL`,
-		attemptStatus, outcome, instanceID,
+		attemptStatus, outcome, now, instanceID,
 	)
 	return err
 }

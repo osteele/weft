@@ -578,12 +578,21 @@ func TestAssignJobHost_FailedJob(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			database := SetupTestDB(t)
 
+			// Create an unplaced job, give it an attempt, then fail it.
 			jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "GPU training", "")
 			if err != nil {
 				t.Fatalf("record unplaced: %v", err)
 			}
-			if _, err := database.Exec(`UPDATE job_attempts SET status = ? WHERE job_id = ? AND end_time IS NULL`, StatusFailed, jobID); err != nil {
-				t.Fatalf("set failed: %v", err)
+			// Create an attempt and mark it failed.
+			if _, err := CreateAttempt(database, jobID, "", nil, StatusQueued); err != nil {
+				t.Fatalf("create attempt: %v", err)
+			}
+			if err := CloseAttempt(database, jobID, StatusFailed, nil, 1000); err != nil {
+				t.Fatalf("close attempt: %v", err)
+			}
+			// Clear requested_status so the view derives status from the attempt.
+			if _, err := database.Exec(`UPDATE jobs SET requested_status = NULL WHERE id = ?`, jobID); err != nil {
+				t.Fatalf("clear requested_status: %v", err)
 			}
 			if tt.pending != nil {
 				if err := SetPendingStatus(database, jobID, *tt.pending); err != nil {
@@ -1113,8 +1122,13 @@ func TestResetJobToUnplacedSetsReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create launch: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE job_attempts SET launch_id = ?, status = ?, start_time = ? WHERE job_id = ? AND end_time IS NULL`, launchID, StatusRunning, time.Now().Unix(), jobID); err != nil {
-		t.Fatalf("update job: %v", err)
+	// Place the job on the launch via SetJobLaunchID (creates the attempt).
+	if err := SetJobLaunchID(database, jobID, launchID); err != nil {
+		t.Fatalf("SetJobLaunchID: %v", err)
+	}
+	// Mark the attempt as running.
+	if err := UpdateAttemptRunning(database, jobID); err != nil {
+		t.Fatalf("UpdateAttemptRunning: %v", err)
 	}
 
 	if err := ResetJobToUnplaced(database, jobID); err != nil {
@@ -1306,6 +1320,9 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, StatusKilled, now-40, killedID); err != nil {
 		t.Fatalf("mark killed: %v", err)
 	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusKilled, killedID); err != nil {
+		t.Fatalf("set killed requested_status: %v", err)
+	}
 
 	canceledID, err := RecordQueued(database, "cool30", "/tmp/project-epsilon", "python canceled.py", "canceled")
 	if err != nil {
@@ -1313,6 +1330,9 @@ func TestListRecentTerminalJobsIncludesRequestedStatusesAndCutoff(t *testing.T) 
 	}
 	if _, err := database.Exec(`UPDATE job_attempts SET status = ?, end_time = ? WHERE job_id = ? AND end_time IS NULL`, StatusCanceled, now-50, canceledID); err != nil {
 		t.Fatalf("mark canceled: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE jobs SET requested_status = ? WHERE id = ?`, StatusCanceled, canceledID); err != nil {
+		t.Fatalf("set canceled requested_status: %v", err)
 	}
 
 	oldID, err := RecordJobStarting(database, "cool30", "/tmp/project-old", "python old.py", "old")
@@ -1669,7 +1689,8 @@ func TestJobStatusChecksRejectInvalidValues(t *testing.T) {
 	// The jobs table no longer has these columns.
 	database := SetupTestDB(t)
 
-	jobID, err := RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	// Create a job with a host so it gets an attempt.
+	jobID, err := RecordQueuedWithGPU(database, "cool30", "/tmp/project", "python train.py", "queued", "")
 	if err != nil {
 		t.Fatalf("RecordQueuedWithGPU: %v", err)
 	}
@@ -2930,7 +2951,7 @@ func TestRepairOrphanedCompletedAttempts(t *testing.T) {
 
 	database.Close()
 
-	// Re-open triggers repairOrphanedCompletedAttempts.
+	// Re-open triggers startupRepair which includes repairOrphanedCompletedAttempts.
 	database, err = Open()
 	if err != nil {
 		t.Fatal(err)

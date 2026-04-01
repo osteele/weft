@@ -28,8 +28,8 @@ func TestFinalizeStuckJobsWithR2Check_RecoverFromR2(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, 1); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning)
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 1 AND end_time IS NULL`, time.Now().Unix())
 
 	// Mock CheckAndSyncJobComplete to simulate R2 having the .complete marker.
 	origSync := reconcileCheckAndSyncJobComplete
@@ -75,8 +75,8 @@ func TestFinalizeStuckJobsWithR2Check_FallbackToDead(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, 1); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning)
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 1 AND end_time IS NULL`, time.Now().Unix())
 
 	// Mock CheckAndSyncJobComplete to simulate R2 NOT having the .complete marker.
 	origSync := reconcileCheckAndSyncJobComplete
@@ -119,8 +119,8 @@ func TestFinalizeStuckJobsWithR2Check_NilR2Client(t *testing.T) {
 	if _, err := database.Exec(`INSERT INTO jobs (id, working_dir, command, tombstoned) VALUES (?, '/tmp', 'python train.py', 0)`, 1); err != nil {
 		t.Fatalf("create job: %v", err)
 	}
-	database.Exec(`UPDATE job_attempts SET status = ?, launch_id = ? WHERE job_id = 1 AND end_time IS NULL`,
-		db.StatusRunning, instanceID)
+	db.CreateAttempt(database, 1, "", &instanceID, db.StatusRunning)
+	database.Exec(`UPDATE job_attempts SET start_time = ? WHERE job_id = 1 AND end_time IS NULL`, time.Now().Unix())
 
 	// With nil R2 client, should fall back to marking dead.
 	repaired, err := FinalizeStuckJobsWithR2Check(database, nil)
