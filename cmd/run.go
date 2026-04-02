@@ -369,6 +369,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("--needs: %w", err)
 		}
 	}
+	if len(runNeeds) > 0 {
+		resolvedHost, err := resolveArtifactNeedsHost(database, runNeeds, host)
+		if err != nil {
+			return fmt.Errorf("--needs: %w", err)
+		}
+		host = resolvedHost
+	}
 
 	gpu := extractGPUFromEnvVars(runEnvVars)
 	gpuClass := runGPUClass

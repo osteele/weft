@@ -2,12 +2,15 @@ package cloud
 
 // AgentJob describes a job for the campaign manifest, used by weft-agent run-campaign.
 type AgentJob struct {
-	ID      int64    `json:"id"`
-	RunID   int64    `json:"run_id,omitempty"`
-	Command string   `json:"cmd"`
-	Dir     string   `json:"dir,omitempty"`
-	Tags    []string `json:"tags,omitempty"`
-	UsesGPU bool     `json:"uses_gpu,omitempty"`
+	ID         int64    `json:"id"`
+	RunID      int64    `json:"run_id,omitempty"`
+	Command    string   `json:"cmd"`
+	Dir        string   `json:"dir,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	UsesGPU    bool     `json:"uses_gpu,omitempty"`
+	OutputDirs []string `json:"output_dirs,omitempty"`
+	Produces   []string `json:"produces,omitempty"`
+	Needs      []string `json:"needs,omitempty"`
 }
 
 // CampaignManifest is uploaded to R2 by the coordinator and read by weft-agent run-campaign.

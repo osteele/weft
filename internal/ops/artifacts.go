@@ -2,6 +2,9 @@ package ops
 
 import (
 	"database/sql"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/osteele/weft/internal/dataloc"
@@ -27,13 +30,14 @@ func RecordJobOutputs(database *sql.DB, job *db.Job) {
 	now := time.Now()
 	recorded := 0
 	for _, ref := range job.Outputs {
-		asset, ok := dataloc.ParseAssetRef(ref)
+		asset, outputPath, ok := parseRecordedOutputRef(job.ID, ref)
 		if !ok {
 			continue
 		}
 		entry := dataloc.HostDataEntry{
 			Host:     job.Host,
 			Asset:    asset,
+			Path:     outputPath,
 			LastSeen: now,
 		}
 		if err := dataloc.RecordAsset(database, entry); err != nil {
@@ -46,4 +50,23 @@ func RecordJobOutputs(database *sql.DB, job *db.Job) {
 		oplog.LogJob("job.record-outputs", job.ID, job.Host,
 			oplog.WithDetailf("%d/%d outputs recorded", recorded, len(job.Outputs)))
 	}
+}
+
+func parseRecordedOutputRef(jobID int64, ref string) (dataloc.DataAsset, string, bool) {
+	if asset, ok := dataloc.ParseAssetRef(ref); ok {
+		return asset, "", true
+	}
+	if !strings.HasPrefix(ref, "local:") {
+		return dataloc.DataAsset{}, "", false
+	}
+
+	relPath := filepath.Clean(strings.TrimSpace(strings.TrimPrefix(ref, "local:")))
+	if relPath == "" || relPath == "." {
+		return dataloc.DataAsset{}, "", false
+	}
+
+	return dataloc.DataAsset{
+		Kind: dataloc.AssetJobOutput,
+		ID:   fmt.Sprintf("%d/%s", jobID, relPath),
+	}, relPath, true
 }

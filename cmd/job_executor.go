@@ -9,6 +9,7 @@ import (
 	"github.com/osteele/weft/internal/config"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/ops"
+	"github.com/osteele/weft/internal/runner"
 	"github.com/osteele/weft/internal/session"
 )
 
@@ -244,4 +245,42 @@ func ensureSameHostDependency(database *sql.DB, depID int64, host string) error 
 		return fmt.Errorf("dependency job %d runs on host %s, target on %s: %w", depID, job.Host, host, errCrossHostDep)
 	}
 	return nil
+}
+
+func resolveArtifactNeedsHost(database *sql.DB, needs []string, host string) (string, error) {
+	resolvedHost := strings.TrimSpace(host)
+	seenJobs := make(map[int64]bool)
+
+	for _, spec := range needs {
+		parsed, err := runner.ParseNeedsSpec(spec)
+		if err != nil {
+			return "", err
+		}
+		if seenJobs[parsed.Version] {
+			continue
+		}
+		seenJobs[parsed.Version] = true
+
+		job, err := db.GetJobByID(database, parsed.Version)
+		if err != nil {
+			return "", fmt.Errorf("lookup artifact producer job %d: %w", parsed.Version, err)
+		}
+		if job == nil {
+			return "", fmt.Errorf("artifact producer job %d not found", parsed.Version)
+		}
+
+		producerHost := strings.TrimSpace(job.Host)
+		if producerHost == "" {
+			return "", fmt.Errorf("artifact dependency %q points to job %d, which is not assigned to a concrete host", spec, parsed.Version)
+		}
+		if resolvedHost == "" {
+			resolvedHost = producerHost
+			continue
+		}
+		if producerHost != resolvedHost {
+			return "", fmt.Errorf("artifact dependency %q is on host %s, but target host is %s", spec, producerHost, resolvedHost)
+		}
+	}
+
+	return resolvedHost, nil
 }

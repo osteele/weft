@@ -6,7 +6,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
+	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/runner"
 )
 
@@ -95,4 +97,39 @@ func TestHasOutputDirs(t *testing.T) {
 			}
 		})
 	})
+}
+
+func TestSingleJobConfigForAgentJobPreservesArtifactMetadata(t *testing.T) {
+	cfg := jobSequenceConfig{
+		R2Bucket:  "bucket",
+		PhaseKey:  "phase",
+		LogDir:    "/tmp/logs",
+		StartTime: time.Now(),
+	}
+	job := cloud.AgentJob{
+		ID:         42,
+		Command:    "python train.py",
+		Tags:       []string{"benchmark"},
+		OutputDirs: []string{"results/"},
+		Produces:   []string{"results/model.pt"},
+		Needs:      []string{"inputs/data.csv:41"},
+	}
+
+	got := singleJobConfigForAgentJob(job, cfg, "/tmp/work", 5*time.Minute)
+
+	if got.JobID != job.ID {
+		t.Fatalf("job id = %d, want %d", got.JobID, job.ID)
+	}
+	if got.Job.Cmd != job.Command {
+		t.Fatalf("command = %q, want %q", got.Job.Cmd, job.Command)
+	}
+	if !reflect.DeepEqual(got.Job.OutputDirs, job.OutputDirs) {
+		t.Fatalf("output dirs = %v, want %v", got.Job.OutputDirs, job.OutputDirs)
+	}
+	if !reflect.DeepEqual(got.Job.Produces, job.Produces) {
+		t.Fatalf("produces = %v, want %v", got.Job.Produces, job.Produces)
+	}
+	if !reflect.DeepEqual(got.Job.Needs, job.Needs) {
+		t.Fatalf("needs = %v, want %v", got.Job.Needs, job.Needs)
+	}
 }

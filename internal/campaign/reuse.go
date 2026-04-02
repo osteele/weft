@@ -381,13 +381,7 @@ func SubmitJobsToInstance(ctx context.Context, database *sql.DB, r2Client *r2.Cl
 		// Compute remote working directory under the synced project root.
 		remoteDir := path.Join(cloud.ProjectRootDir, path.Base(sourceDir))
 
-		payload.Jobs = append(payload.Jobs, cloud.AgentJob{
-			ID:      job.ID,
-			Command: job.EffectiveCommand(),
-			Dir:     remoteDir,
-			Tags:    append([]string(nil), job.Tags...),
-			UsesGPU: job.UsesGPU(),
-		})
+		payload.Jobs = append(payload.Jobs, newAgentJob(job, remoteDir))
 		payload.Sources[sourceDir] = sourceR2Key
 	}
 

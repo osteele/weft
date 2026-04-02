@@ -8,7 +8,13 @@ import (
 func TestCampaignManifest_RoundTrip(t *testing.T) {
 	m := CampaignManifest{
 		Jobs: []AgentJob{
-			{ID: 42, Command: "python train.py"},
+			{
+				ID:         42,
+				Command:    "python train.py",
+				OutputDirs: []string{"results/"},
+				Produces:   []string{"results/model.pt"},
+				Needs:      []string{"inputs/data.csv:41"},
+			},
 			{ID: 43, Command: "python eval.py", Dir: "/custom/dir"},
 		},
 		SelfDestructCmd: `vastai destroy instance "123"`,
@@ -31,6 +37,15 @@ func TestCampaignManifest_RoundTrip(t *testing.T) {
 	}
 	if got.Jobs[1].Dir != "/custom/dir" {
 		t.Errorf("expected job dir /custom/dir, got %s", got.Jobs[1].Dir)
+	}
+	if len(got.Jobs[0].OutputDirs) != 1 || got.Jobs[0].OutputDirs[0] != "results/" {
+		t.Errorf("unexpected output dirs: %v", got.Jobs[0].OutputDirs)
+	}
+	if len(got.Jobs[0].Produces) != 1 || got.Jobs[0].Produces[0] != "results/model.pt" {
+		t.Errorf("unexpected produces: %v", got.Jobs[0].Produces)
+	}
+	if len(got.Jobs[0].Needs) != 1 || got.Jobs[0].Needs[0] != "inputs/data.csv:41" {
+		t.Errorf("unexpected needs: %v", got.Jobs[0].Needs)
 	}
 	if got.SelfDestructCmd != `vastai destroy instance "123"` {
 		t.Errorf("unexpected self-destruct cmd: %s", got.SelfDestructCmd)

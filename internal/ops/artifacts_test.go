@@ -133,3 +133,32 @@ func TestRecordJobOutputs_KilledJob(t *testing.T) {
 		t.Errorf("killed job should not record outputs, got %d entries", len(entries))
 	}
 }
+
+func TestRecordJobOutputs_LocalOutput(t *testing.T) {
+	database := setupArtifactTestDB(t)
+
+	exitCode := 0
+	job := &db.Job{
+		ID:       46,
+		Host:     "host-beta",
+		Status:   db.StatusCompleted,
+		ExitCode: &exitCode,
+		Outputs:  []string{"local:cache/representations/"},
+	}
+
+	RecordJobOutputs(database, job)
+
+	entries, err := dataloc.ListHostAssets(database, "host-beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 recorded asset, got %d", len(entries))
+	}
+	if entries[0].Asset.Kind != dataloc.AssetJobOutput || entries[0].Asset.ID != "46/cache/representations" {
+		t.Fatalf("unexpected asset = %+v", entries[0].Asset)
+	}
+	if entries[0].Path != "cache/representations" {
+		t.Fatalf("path = %q, want %q", entries[0].Path, "cache/representations")
+	}
+}

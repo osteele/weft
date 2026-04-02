@@ -318,7 +318,7 @@ func runArtifactList(cmd *cobra.Command, args []string) error {
 		}
 
 		if artifactListSync {
-			if _, err := artifacts.SyncJob(database, job, NormalSyncTimeout); err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+			if err := syncArtifactsForJob(database, job, r2Client, NormalSyncTimeout); err != nil {
 				errorsList = append(errorsList, fmt.Sprintf("job %d: %v", jobID, err))
 				continue
 			}
@@ -960,10 +960,39 @@ func syncCloudJobOutputs(job *db.Job) error {
 	return r2Client.DownloadResults(ctx2, artifactsPrefix, localDir)
 }
 
+var (
+	syncLocalJobArtifacts     = artifacts.SyncJob
+	syncCloudJobArtifactsFunc = syncCloudJobArtifacts
+)
+
+func syncArtifactsForJob(database *sql.DB, job *db.Job, r2Client *r2.Client, timeout time.Duration) error {
+	if job.IsLaunchJob() {
+		_, err := syncCloudJobArtifactsFunc(database, r2Client, job)
+		if err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+			return err
+		}
+		return nil
+	}
+	_, err := syncLocalJobArtifacts(database, job, timeout)
+	if err != nil && !errors.Is(err, artifacts.ErrManifestMissing) {
+		return err
+	}
+	return nil
+}
+
 // syncCloudJobArtifacts fetches the artifact manifest from R2, downloads each
 // declared artifact into the local artifact store, and registers them in the DB.
 func syncCloudJobArtifacts(database *sql.DB, r2Client *r2.Client, job *db.Job) (artifacts.SyncResult, error) {
-	if r2Client == nil {
+	return syncCloudJobArtifactsWithStore(database, r2Client, job)
+}
+
+type cloudArtifactObjectStore interface {
+	GetObject(context.Context, string) ([]byte, error)
+	ListObjects(context.Context, string) ([]r2.ObjectInfo, error)
+}
+
+func syncCloudJobArtifactsWithStore(database *sql.DB, store cloudArtifactObjectStore, job *db.Job) (artifacts.SyncResult, error) {
+	if store == nil {
 		return artifacts.SyncResult{}, fmt.Errorf("R2 not configured; cannot fetch cloud job artifacts")
 	}
 
@@ -975,7 +1004,7 @@ func syncCloudJobArtifacts(database *sql.DB, r2Client *r2.Client, job *db.Job) (
 	manifestKey := r2keys.JobAttemptArtifactManifest(job.ID, runID)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	manifestData, err := r2Client.GetObject(ctx, manifestKey)
+	manifestData, err := store.GetObject(ctx, manifestKey)
 	if err != nil {
 		if r2.IsNotFound(err) {
 			return artifacts.SyncResult{}, artifacts.ErrManifestMissing
@@ -1005,24 +1034,10 @@ func syncCloudJobArtifacts(database *sql.DB, r2Client *r2.Client, job *db.Job) (
 		storedPath := artifacts.LocalStoredPath(job.ID, spec.Path)
 		localPath := filepath.Join(localRoot, storedPath)
 
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return result, err
+		size, sha, err := downloadCloudArtifact(store, filesPrefix, relPath, localPath)
+		if err != nil {
+			return result, fmt.Errorf("download artifact %s: %w", spec.Path, err)
 		}
-
-		r2Key := filesPrefix + relPath
-		dlCtx, dlCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		data, dlErr := r2Client.GetObject(dlCtx, r2Key)
-		dlCancel()
-		if dlErr != nil {
-			return result, fmt.Errorf("download artifact %s: %w", spec.Path, dlErr)
-		}
-
-		if err := os.WriteFile(localPath, data, 0o644); err != nil {
-			return result, err
-		}
-
-		size := int64(len(data))
-		sha := fmt.Sprintf("%x", sha256.Sum256(data))
 
 		if err := db.UpsertArtifact(database, db.Artifact{
 			JobID:      job.ID,
@@ -1037,6 +1052,77 @@ func syncCloudJobArtifacts(database *sql.DB, r2Client *r2.Client, job *db.Job) (
 		result.Added++
 	}
 	return result, nil
+}
+
+func downloadCloudArtifact(store cloudArtifactObjectStore, filesPrefix, relPath, localPath string) (int64, string, error) {
+	r2Key := filesPrefix + relPath
+	listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	objects, err := store.ListObjects(listCtx, r2Key)
+	listCancel()
+	if err != nil {
+		return 0, "", err
+	}
+
+	dirPrefix := r2Key + "/"
+	isFile := false
+	var childKeys []string
+	for _, obj := range objects {
+		switch {
+		case obj.Key == r2Key:
+			isFile = true
+		case strings.HasPrefix(obj.Key, dirPrefix):
+			childKeys = append(childKeys, obj.Key)
+		}
+	}
+
+	if isFile {
+		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+			return 0, "", err
+		}
+		dlCtx, dlCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		data, err := store.GetObject(dlCtx, r2Key)
+		dlCancel()
+		if err != nil {
+			return 0, "", err
+		}
+		if err := os.WriteFile(localPath, data, 0o644); err != nil {
+			return 0, "", err
+		}
+		return int64(len(data)), fmt.Sprintf("%x", sha256.Sum256(data)), nil
+	}
+
+	if len(childKeys) == 0 {
+		return 0, "", fmt.Errorf("artifact object %s not found", r2Key)
+	}
+
+	if err := os.MkdirAll(localPath, 0o755); err != nil {
+		return 0, "", err
+	}
+
+	var totalSize int64
+	for _, key := range childKeys {
+		relChild := strings.TrimPrefix(key, dirPrefix)
+		if relChild == "" {
+			continue
+		}
+		childPath := filepath.Join(localPath, relChild)
+		if err := os.MkdirAll(filepath.Dir(childPath), 0o755); err != nil {
+			return 0, "", err
+		}
+
+		dlCtx, dlCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		data, err := store.GetObject(dlCtx, key)
+		dlCancel()
+		if err != nil {
+			return 0, "", err
+		}
+		if err := os.WriteFile(childPath, data, 0o644); err != nil {
+			return 0, "", err
+		}
+		totalSize += int64(len(data))
+	}
+
+	return totalSize, "", nil
 }
 
 // listCloudJobOutputFiles lists output files for a cloud job by checking R2 for

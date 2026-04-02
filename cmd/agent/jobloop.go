@@ -85,17 +85,7 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 			jobMaxTime = cfg.MaxTime - time.Since(cfg.StartTime)
 		}
 
-		jobCfg := runner.SingleJobConfig{
-			JobID: job.ID,
-			Job: ops.CommandJob{
-				Cmd:  job.Command,
-				Tags: append([]string(nil), job.Tags...),
-			},
-			LogDir:     cfg.LogDir,
-			WorkingDir: workDir,
-			MaxTime:    jobMaxTime,
-			OnPhase:    phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
-		}
+		jobCfg := singleJobConfigForAgentJob(job, cfg, workDir, jobMaxTime)
 
 		ei, err := runJobWithProgress(cfg.R2Bucket, job.ID, job.RunID, cfg.InstanceID, cfg.LogDir, jobCfg)
 		if job.UsesGPU {
@@ -186,6 +176,23 @@ func runJobSequence(jobs []cloud.AgentJob, cfg jobSequenceConfig) jobSequenceRes
 	// Wait for remaining background work
 	bgm.Barrier()
 	return result
+}
+
+func singleJobConfigForAgentJob(job cloud.AgentJob, cfg jobSequenceConfig, workDir string, jobMaxTime time.Duration) runner.SingleJobConfig {
+	return runner.SingleJobConfig{
+		JobID: job.ID,
+		Job: ops.CommandJob{
+			Cmd:        job.Command,
+			Tags:       append([]string(nil), job.Tags...),
+			OutputDirs: append([]string(nil), job.OutputDirs...),
+			Produces:   append([]string(nil), job.Produces...),
+			Needs:      append([]string(nil), job.Needs...),
+		},
+		LogDir:     cfg.LogDir,
+		WorkingDir: workDir,
+		MaxTime:    jobMaxTime,
+		OnPhase:    phaseCallback(cfg.R2Bucket, cfg.PhaseKey, job.ID, cfg.OnPhase),
+	}
 }
 
 func patchCompletionUpload(logDir string, jobID int64, upload *runner.OutputUploadResult) {

@@ -27,7 +27,6 @@ import (
 	"github.com/osteele/weft/internal/r2keys"
 	weftsync "github.com/osteele/weft/internal/sync"
 	"github.com/osteele/weft/internal/vastai"
-	"github.com/osteele/weft/internal/workdir"
 )
 
 // Cloud rental instances are currently always linux/amd64 (Vast.ai, RunPod).
@@ -1161,23 +1160,7 @@ func LaunchInstance(
 
 	var agentJobs []cloud.AgentJob
 	for _, job := range group.Jobs {
-		remoteDir := ""
-		localDir := workdir.ResolveLocal(job.EffectiveWorkingDir())
-		if mapped, ok := localToRemote[localDir]; ok {
-			remoteDir = mapped
-		}
-		runID := int64(0)
-		if job.LatestRunID != nil {
-			runID = *job.LatestRunID
-		}
-		agentJobs = append(agentJobs, cloud.AgentJob{
-			ID:      job.ID,
-			RunID:   runID,
-			Command: job.EffectiveCommand(),
-			Dir:     remoteDir,
-			Tags:    append([]string(nil), job.Tags...),
-			UsesGPU: job.UsesGPU(),
-		})
+		agentJobs = append(agentJobs, newAgentJob(job, remoteDirForAgentJob(job, localToRemote)))
 	}
 
 	// Sort jobs by ID so the agent executes them in submission order

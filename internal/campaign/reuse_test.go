@@ -2,7 +2,9 @@ package campaign
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -392,5 +394,71 @@ func TestSubmitJobsToInstanceDoesNotAssociateJobsWithoutAck(t *testing.T) {
 	}
 	if reloaded.LaunchID != nil {
 		t.Fatalf("LaunchID = %v, want nil after failed submission", *reloaded.LaunchID)
+	}
+}
+
+func TestSubmitJobsToInstanceIncludesArtifactMetadata(t *testing.T) {
+	database := db.SetupTestDB(t)
+
+	instanceID, err := db.CreateLaunch(database, &db.Launch{
+		Status:   db.LaunchStatusRunning,
+		Provider: "vastai",
+		GPUSpec:  "RTX_3090",
+	})
+	if err != nil {
+		t.Fatalf("CreateLaunch: %v", err)
+	}
+
+	jobID, err := db.RecordQueuedWithGPU(database, "", "/tmp/project", "python train.py", "queued", "")
+	if err != nil {
+		t.Fatalf("RecordQueuedWithGPU: %v", err)
+	}
+	if err := db.SetJobOutputDirs(database, jobID, []string{"results/"}); err != nil {
+		t.Fatalf("SetJobOutputDirs: %v", err)
+	}
+	if err := db.SetJobProduces(database, jobID, []string{"results/model.pt"}); err != nil {
+		t.Fatalf("SetJobProduces: %v", err)
+	}
+	if err := db.SetJobNeeds(database, jobID, []string{"inputs/data.csv:41"}); err != nil {
+		t.Fatalf("SetJobNeeds: %v", err)
+	}
+	job, err := db.GetJobByID(database, jobID)
+	if err != nil {
+		t.Fatalf("GetJobByID: %v", err)
+	}
+
+	prevUpload := uploadSourceToR2
+	prevSend := sendGraceJobPayload
+	t.Cleanup(func() {
+		uploadSourceToR2 = prevUpload
+		sendGraceJobPayload = prevSend
+	})
+
+	uploadSourceToR2 = func(context.Context, *r2.Client, string) (string, error) {
+		return "sources/test.tar.gz", nil
+	}
+
+	var got GracePayload
+	sendGraceJobPayload = func(_ context.Context, _ controlplane.GraceStore, _ int64, payload []byte) (*controlplane.GraceCommandAck, error) {
+		if err := json.Unmarshal(payload, &got); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		return &controlplane.GraceCommandAck{RequestID: "cmd-1", Accepted: true}, nil
+	}
+
+	if err := SubmitJobsToInstance(context.Background(), database, nil, instanceID, []*db.Job{job}); err != nil {
+		t.Fatalf("SubmitJobsToInstance: %v", err)
+	}
+	if len(got.Jobs) != 1 {
+		t.Fatalf("jobs len = %d, want 1", len(got.Jobs))
+	}
+	if !reflect.DeepEqual(got.Jobs[0].OutputDirs, []string{"results/"}) {
+		t.Fatalf("output dirs = %v", got.Jobs[0].OutputDirs)
+	}
+	if !reflect.DeepEqual(got.Jobs[0].Produces, []string{"results/model.pt"}) {
+		t.Fatalf("produces = %v", got.Jobs[0].Produces)
+	}
+	if !reflect.DeepEqual(got.Jobs[0].Needs, []string{"inputs/data.csv:41"}) {
+		t.Fatalf("needs = %v", got.Jobs[0].Needs)
 	}
 }
