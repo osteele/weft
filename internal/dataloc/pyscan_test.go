@@ -191,8 +191,8 @@ func TestPyScanIsHFModelID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			if got := isHFModelID(tt.input); got != tt.want {
-				t.Fatalf("isHFModelID(%q) = %v, want %v", tt.input, got, tt.want)
+			if got := IsHFModelID(tt.input); got != tt.want {
+				t.Fatalf("IsHFModelID(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}

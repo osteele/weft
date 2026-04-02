@@ -537,6 +537,10 @@ func ensureHFInputsAvailable(database *sql.DB, host string, inputs []string, tim
 		if asset.Kind != dataloc.AssetHFModel && asset.Kind != dataloc.AssetHFDataset {
 			continue
 		}
+		if !dataloc.IsHFModelID(asset.ID) {
+			slog.Warn("skipping invalid HF input", "ref", ref, "host", host)
+			continue
+		}
 		hfInputs = append(hfInputs, asset)
 	}
 	if len(hfInputs) == 0 {

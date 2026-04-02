@@ -104,7 +104,7 @@ func scanPythonContent(content string, refs *[]string, seen map[string]struct{})
 func addModelMatches(content string, pattern *regexp.Regexp, refs *[]string, seen map[string]struct{}) {
 	for _, m := range pattern.FindAllStringSubmatch(content, -1) {
 		id := strings.TrimSpace(m[1])
-		if isHFModelID(id) {
+		if IsHFModelID(id) {
 			addRef(newAssetRef(AssetHFModel, id), refs, seen)
 		}
 	}
@@ -113,7 +113,7 @@ func addModelMatches(content string, pattern *regexp.Regexp, refs *[]string, see
 func addDatasetMatches(content string, pattern *regexp.Regexp, refs *[]string, seen map[string]struct{}) {
 	for _, m := range pattern.FindAllStringSubmatch(content, -1) {
 		id := strings.TrimSpace(m[1])
-		if isHFModelID(id) {
+		if IsHFModelID(id) {
 			addRef(newAssetRef(AssetHFDataset, id), refs, seen)
 		}
 	}
@@ -173,7 +173,7 @@ func addRef(ref string, refs *[]string, seen map[string]struct{}) {
 }
 
 func isLikelyHFModelArgDefault(s string) bool {
-	if !isHFModelID(s) {
+	if !IsHFModelID(s) {
 		return false
 	}
 	if strings.Contains(s, "/") {
@@ -224,7 +224,7 @@ func ScanCommandHFRefs(command string) []string {
 		if strings.Count(value, "/") != 1 {
 			continue
 		}
-		if isHFModelID(value) {
+		if IsHFModelID(value) {
 			addRef(newAssetRef(AssetHFModel, value), &refs, seen)
 		}
 	}
@@ -232,8 +232,10 @@ func ScanCommandHFRefs(command string) []string {
 	return refs
 }
 
-// isHFModelID returns true if s looks like a HuggingFace hub ID.
-func isHFModelID(s string) bool {
+// IsHFModelID returns true if s looks like a HuggingFace hub ID
+// (e.g., "gpt2", "meta-llama/Llama-3-8B"). It rejects MIME types,
+// file paths, and other strings that are unlikely to be valid HF repo IDs.
+func IsHFModelID(s string) bool {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return false
