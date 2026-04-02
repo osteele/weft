@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/osteele/weft/internal/bidding"
@@ -18,6 +19,8 @@ import (
 var resolvePredictBatch = predictor.ResolvePredictBatch
 var estimateJobDurations = estimate.EstimateJobDurations
 var estimateJobDuration = estimate.EstimateJobDuration
+var estimateJobDurationsDetailed = estimate.EstimateJobDurationsDetailed
+var estimateJobDurationDetailed = estimate.EstimateJobDurationDetailed
 
 // StrategyPlan combines reuse assignments with the best new-instance
 // candidate for a strategy. DisplayOffers/DisplayEstimates are aligned with the
@@ -305,9 +308,13 @@ func buildStrategyPlanForSplitRaw(
 }
 
 type offerRuntimePrediction struct {
-	totalRunHrs  float64
-	jobDurations []time.Duration
-	complete     bool
+	totalRunHrs          float64
+	adjustedRunHrs       float64
+	jobDurations         []time.Duration
+	adjustedJobDurations []time.Duration
+	metadata             []*predictor.RuntimeMetadata
+	feasible             bool
+	complete             bool
 }
 
 func rankGroupOffersForPlanning(
@@ -374,9 +381,12 @@ func neutralOfferRuntimePredictions(group InstanceGroup, offers []cloud.Offer) m
 	predicted := make(map[string]offerRuntimePrediction, len(offers))
 	for _, offer := range offers {
 		predicted[offerPredictionKey(offer)] = offerRuntimePrediction{
-			totalRunHrs:  totalRunHrs,
-			jobDurations: append([]time.Duration(nil), jobDurations...),
-			complete:     true,
+			totalRunHrs:          totalRunHrs,
+			adjustedRunHrs:       totalRunHrs,
+			jobDurations:         append([]time.Duration(nil), jobDurations...),
+			adjustedJobDurations: append([]time.Duration(nil), jobDurations...),
+			feasible:             true,
+			complete:             true,
 		}
 	}
 	return predicted
@@ -397,7 +407,9 @@ func predictOfferRuntimes(
 	}
 	type runtimeAccum struct {
 		jobDurations []time.Duration
+		metadata     []*predictor.RuntimeMetadata
 		count        int
+		feasible     bool
 	}
 
 	expected := make(map[int]map[string]int)
@@ -455,11 +467,17 @@ func predictOfferRuntimes(
 		if accum == nil {
 			accum = &runtimeAccum{
 				jobDurations: make([]time.Duration, expected[ref.groupIdx][ref.offerKey]),
+				metadata:     make([]*predictor.RuntimeMetadata, expected[ref.groupIdx][ref.offerKey]),
+				feasible:     true,
 			}
 			groupAccums[ref.offerKey] = accum
 		}
 
 		accum.jobDurations[ref.jobIdx] = time.Duration(result.DurationS.Mean * float64(time.Second))
+		accum.metadata[ref.jobIdx] = result.DurationMetadata
+		if result.DurationMetadata != nil && result.DurationMetadata.Feasible != nil && !*result.DurationMetadata.Feasible {
+			accum.feasible = false
+		}
 		accum.count++
 	}
 
@@ -481,12 +499,118 @@ func predictOfferRuntimes(
 			predicted[groupIdx][key] = offerRuntimePrediction{
 				totalRunHrs:  totalRunHrs,
 				jobDurations: append([]time.Duration(nil), accum.jobDurations...),
+				metadata:     append([]*predictor.RuntimeMetadata(nil), accum.metadata...),
+				feasible:     accum.feasible,
 				complete:     complete,
 			}
 		}
 	}
 
+	applyRuntimeMetadataAdjustments(predicted)
 	return predicted
+}
+
+func applyRuntimeMetadataAdjustments(predicted map[int]map[string]offerRuntimePrediction) {
+	for groupIdx, offerPredictions := range predicted {
+		jobCount := 0
+		for _, pred := range offerPredictions {
+			if len(pred.jobDurations) > jobCount {
+				jobCount = len(pred.jobDurations)
+			}
+		}
+		if jobCount == 0 {
+			continue
+		}
+
+		neutralByJob := make([]time.Duration, jobCount)
+		for jobIdx := 0; jobIdx < jobCount; jobIdx++ {
+			var samples []time.Duration
+			for _, pred := range offerPredictions {
+				if !pred.complete || !pred.feasible || jobIdx >= len(pred.jobDurations) {
+					continue
+				}
+				if pred.jobDurations[jobIdx] > 0 {
+					samples = append(samples, pred.jobDurations[jobIdx])
+				}
+			}
+			if len(samples) == 0 {
+				neutralByJob[jobIdx] = estimate.DefaultJobDuration.Mean
+				continue
+			}
+			neutralByJob[jobIdx] = medianDuration(samples)
+		}
+
+		for key, pred := range offerPredictions {
+			if !pred.complete || !pred.feasible {
+				offerPredictions[key] = pred
+				continue
+			}
+
+			adjusted := make([]time.Duration, len(pred.jobDurations))
+			totalAdjustedHrs := 0.0
+			for jobIdx, dur := range pred.jobDurations {
+				confidence := runtimePredictionConfidence(nil)
+				if jobIdx < len(pred.metadata) {
+					confidence = runtimePredictionConfidence(pred.metadata[jobIdx])
+				}
+				adjusted[jobIdx] = blendDuration(neutralByJob[jobIdx], dur, confidence)
+				totalAdjustedHrs += adjusted[jobIdx].Hours()
+			}
+			pred.adjustedJobDurations = adjusted
+			pred.adjustedRunHrs = totalAdjustedHrs
+			offerPredictions[key] = pred
+		}
+		predicted[groupIdx] = offerPredictions
+	}
+}
+
+func runtimePredictionConfidence(metadata *predictor.RuntimeMetadata) float64 {
+	if metadata == nil {
+		return 1
+	}
+	confidence := metadata.Confidence
+	if confidence < 0 {
+		confidence = 0
+	}
+	if confidence > 1 {
+		confidence = 1
+	}
+
+	switch metadata.Source {
+	case "empirical":
+		return 1.0
+	case "learned+analytical":
+		return confidence
+	case "learned":
+		return confidence * 0.5
+	default:
+		return confidence * 0.35
+	}
+}
+
+func blendDuration(neutral, predicted time.Duration, confidence float64) time.Duration {
+	if confidence <= 0 {
+		return neutral
+	}
+	if confidence >= 1 {
+		return predicted
+	}
+	neutralSeconds := neutral.Seconds()
+	predictedSeconds := predicted.Seconds()
+	return time.Duration((neutralSeconds + confidence*(predictedSeconds-neutralSeconds)) * float64(time.Second))
+}
+
+func medianDuration(durations []time.Duration) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	values := append([]time.Duration(nil), durations...)
+	slices.Sort(values)
+	mid := len(values) / 2
+	if len(values)%2 == 1 {
+		return values[mid]
+	}
+	return time.Duration((values[mid-1] + values[mid]) / 2)
 }
 
 func rankOfferWithPredictedRuntime(
@@ -521,7 +645,7 @@ func rankOfferWithPredictedRuntime(
 
 	for _, offer := range filtered {
 		runtime, ok := predicted[offerPredictionKey(offer)]
-		if !ok || !runtime.complete {
+		if !ok || !runtime.complete || !runtime.feasible {
 			continue
 		}
 
@@ -531,8 +655,17 @@ func rankOfferWithPredictedRuntime(
 			surv = survivalModel.OfferSurvival(offer)
 		}
 
-		cost := bidding.ExpectedCost(offer.CostPerHour, runtime.totalRunHrs, setup, surv)
-		completionHrs := predictedCompletionHours(runtime.jobDurations, setup)
+		runHrs := runtime.totalRunHrs
+		jobDurations := runtime.jobDurations
+		if runtime.adjustedRunHrs > 0 {
+			runHrs = runtime.adjustedRunHrs
+		}
+		if len(runtime.adjustedJobDurations) > 0 {
+			jobDurations = runtime.adjustedJobDurations
+		}
+
+		cost := bidding.ExpectedCost(offer.CostPerHour, runHrs, setup, surv)
+		completionHrs := predictedCompletionHours(jobDurations, setup)
 		if !profile.UseHappyPathTime && surv > 0 && surv < 1 {
 			completionHrs /= surv
 		}
@@ -712,14 +845,18 @@ func EstimateReuseGroup(
 
 	var runEst estimate.Estimate
 	jobDurations := make(map[int64]time.Duration, len(group.Jobs))
+	jobRuntimeMetadata := make(map[int64]predictor.RuntimeMetadata, len(group.Jobs))
 	gpuLabel := offer.GPUName
 	if gpuLabel == "" {
 		gpuLabel = inst.GPUClass
 	}
 	for _, job := range group.Jobs {
-		pred, _ := estimateJobDuration(predCfg, gpuLabel, job)
-		runEst = runEst.Add(pred)
-		jobDurations[job.ID] = pred.Mean
+		pred, _ := estimateJobDurationDetailed(predCfg, gpuLabel, job)
+		runEst = runEst.Add(pred.Estimate)
+		jobDurations[job.ID] = pred.Estimate.Mean
+		if pred.Metadata != nil {
+			jobRuntimeMetadata[job.ID] = *pred.Metadata
+		}
 	}
 
 	total := waitEst.Add(provision).Add(jobSetup).Add(runEst).Add(upload)
@@ -728,10 +865,11 @@ func EstimateReuseGroup(
 	setupHrs := waitEst.Mean.Hours() + provision.Mean.Hours() + jobSetup.Mean.Hours() + upload.Mean.Hours()
 
 	est := CostEstimate{
-		Group:        group,
-		Offer:        groupOffer,
-		Breakdown:    estimate.Breakdown{Provision: provision, JobSetup: jobSetup, Run: runEst, Upload: upload, Total: total},
-		JobDurations: jobDurations,
+		Group:              group,
+		Offer:              groupOffer,
+		Breakdown:          estimate.Breakdown{Provision: provision, JobSetup: jobSetup, Run: runEst, Upload: upload, Total: total},
+		JobDurations:       jobDurations,
+		JobRuntimeMetadata: jobRuntimeMetadata,
 		SetupOverhead: waitEst.Mean +
 			provision.Mean +
 			jobSetup.Mean +

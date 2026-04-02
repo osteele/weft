@@ -686,6 +686,14 @@ func (m launchModel) activeTradeoffEstimates() []campaign.CostEstimate {
 	return plan.DisplayEstimates
 }
 
+func (m launchModel) activeTradeoffPredictionHint(selected []int) string {
+	estimates := m.activeTradeoffEstimates()
+	if len(estimates) == 0 {
+		return ""
+	}
+	return campaign.SummarizeRuntimePredictions(estimates, selected).Hint()
+}
+
 func (m launchModel) visibleTradeoffs() []campaign.TradeoffOption {
 	return m.tradeoffOptions
 }
@@ -2545,12 +2553,20 @@ func (m launchModel) View() string {
 					b.WriteString("\n")
 					renderCostTable(&b, *sparkTable)
 				}
+				if hint := m.activeTradeoffPredictionHint(selected); hint != "" {
+					b.WriteString(launchDimStyle.Render(hint))
+					b.WriteString("\n")
+				}
 			} else {
 				// Fallback: single-strategy table
 				b.WriteString(costEstimateHeader(false))
 				b.WriteString("\n")
 				costTable := campaign.FormatCostTableSelected(m.costEstimates, selected, 0, 0)
 				renderCostTable(&b, costTable)
+				if hint := campaign.SummarizeRuntimePredictions(m.costEstimates, selected).Hint(); hint != "" {
+					b.WriteString(launchDimStyle.Render(hint))
+					b.WriteString("\n")
+				}
 			}
 		} else if m.fetchingOffers() {
 			b.WriteString("\n")

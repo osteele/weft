@@ -141,9 +141,11 @@ func TestScoreEstimates_UsesTotalJobCompletionTime(t *testing.T) {
 func TestBestCandidateForStrategy_UsesPredictorRuntimeAcrossGroupingCandidates(t *testing.T) {
 	originalPredictBatch := resolvePredictBatch
 	originalEstimateJobDurations := estimateJobDurations
+	originalEstimateJobDurationsDetailed := estimateJobDurationsDetailed
 	t.Cleanup(func() {
 		resolvePredictBatch = originalPredictBatch
 		estimateJobDurations = originalEstimateJobDurations
+		estimateJobDurationsDetailed = originalEstimateJobDurationsDetailed
 	})
 
 	stubPredict := func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
@@ -175,6 +177,23 @@ func TestBestCandidateForStrategy_UsesPredictorRuntimeAcrossGroupingCandidates(t
 				continue
 			}
 			estimates[id] = estimate.FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper)
+		}
+		return estimates
+	}
+	estimateJobDurationsDetailed = func(_ *predictor.Config, jobs []predictor.BatchJob) map[int64]estimate.DurationPrediction {
+		results, err := stubPredict(predictor.Config{}, jobs)
+		if err != nil {
+			return nil
+		}
+		estimates := make(map[int64]estimate.DurationPrediction, len(results))
+		for id, result := range results {
+			if result == nil || result.DurationS == nil {
+				continue
+			}
+			estimates[id] = estimate.DurationPrediction{
+				Estimate: estimate.FromSeconds(result.DurationS.Mean, result.DurationS.Lower, result.DurationS.Upper),
+				Metadata: result.DurationMetadata,
+			}
 		}
 		return estimates
 	}
@@ -281,6 +300,58 @@ func TestRankGroupOffersForPlanning_UsesPredictorDurationsToAvoidH200(t *testing
 	}
 	if offers[0].Offer.ProviderID != "rtx3090" {
 		t.Fatalf("expected predictor-backed ranking to avoid H200, got %s", offers[0].Offer.ProviderID)
+	}
+}
+
+func TestRankGroupOffersForPlanning_ShrinksLowConfidenceRuntimeDeltas(t *testing.T) {
+	original := resolvePredictBatch
+	t.Cleanup(func() { resolvePredictBatch = original })
+
+	resolvePredictBatch = func(_ predictor.Config, jobs []predictor.BatchJob) (map[int64]*predictor.Result, error) {
+		results := make(map[int64]*predictor.Result, len(jobs))
+		for _, job := range jobs {
+			mean := 7200.0
+			meta := &predictor.RuntimeMetadata{Source: "learned+analytical", Confidence: 1.0}
+			if job.GPUClass == "H200" {
+				mean = 6480.0
+				meta = &predictor.RuntimeMetadata{Source: "learned", Confidence: 0.1}
+			}
+			results[job.ID] = &predictor.Result{
+				DurationS: &predictor.Prediction{
+					Mean:  mean,
+					Lower: mean * 0.9,
+					Upper: mean * 1.1,
+				},
+				DurationMetadata: meta,
+			}
+		}
+		return results, nil
+	}
+
+	raw := []GroupRawOffers{{
+		Group: InstanceGroup{
+			GPUClass: "NVIDIA",
+			Jobs:     []*db.Job{{ID: 1, Command: "python train.py --epochs 1"}},
+		},
+		Offers: []cloud.Offer{
+			{ProviderID: "rtx3090", GPUName: "RTX 3090", CostPerHour: 0.30},
+			{ProviderID: "h200", GPUName: "H200", CostPerHour: 1.00},
+		},
+	}}
+
+	offers := rankGroupOffersForPlanning(
+		raw,
+		&predictor.Config{ProjectPath: "/tmp/job-estimator"},
+		nil,
+		nil,
+		bidding.StrategyFast.Profile(),
+		0,
+	)
+	if len(offers) != 1 || offers[0].Offer == nil {
+		t.Fatalf("expected ranked offer, got %#v", offers)
+	}
+	if offers[0].Offer.ProviderID != "rtx3090" {
+		t.Fatalf("expected low-confidence learned speedup to be shrunk away, got %s", offers[0].Offer.ProviderID)
 	}
 }
 

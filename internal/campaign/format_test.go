@@ -8,6 +8,7 @@ import (
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
 	"github.com/osteele/weft/internal/estimate"
+	"github.com/osteele/weft/internal/predictor"
 )
 
 func TestFormatResolvedGPU(t *testing.T) {
@@ -218,6 +219,44 @@ func TestFormatDurationWithBounds(t *testing.T) {
 				t.Errorf("formatDurationWithBounds = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRuntimePredictionSummaryHint(t *testing.T) {
+	confident := true
+	neutral := false
+	estimates := []CostEstimate{
+		{
+			Group: InstanceGroup{Jobs: []*db.Job{{ID: 1}, {ID: 2}}},
+			Offer: GroupOffer{Offer: &cloud.Offer{GPUName: "RTX 4090"}},
+			JobRuntimeMetadata: map[int64]predictor.RuntimeMetadata{
+				1: {
+					Source:                     "learned+analytical",
+					Confidence:                 0.8,
+					Bottleneck:                 "compute",
+					Feasible:                   &confident,
+					BenefitsFromAdditionalVRAM: &neutral,
+				},
+				2: {
+					Source:                     "learned+analytical",
+					Confidence:                 0.6,
+					Bottleneck:                 "compute",
+					Feasible:                   &confident,
+					BenefitsFromAdditionalVRAM: &neutral,
+				},
+			},
+		},
+	}
+
+	hint := SummarizeRuntimePredictions(estimates, []int{2}).Hint()
+	if !strings.Contains(hint, "learned + analytical") {
+		t.Fatalf("expected source in hint, got %q", hint)
+	}
+	if !strings.Contains(hint, "70% confidence") {
+		t.Fatalf("expected median confidence in hint, got %q", hint)
+	}
+	if !strings.Contains(hint, "surplus VRAM neutral") {
+		t.Fatalf("expected VRAM semantic in hint, got %q", hint)
 	}
 }
 

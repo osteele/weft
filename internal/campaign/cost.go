@@ -18,16 +18,17 @@ import (
 
 // CostEstimate holds the cost projection for one instance group.
 type CostEstimate struct {
-	Group         InstanceGroup
-	Offer         GroupOffer
-	Breakdown     estimate.Breakdown
-	JobDurations  map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
-	SetupOverhead time.Duration
-	DownloadBytes int64         // total bytes of HF model inputs to download
-	DownloadTime  time.Duration // estimated download time from offer bandwidth
-	UVSyncBytes   int64         // estimated cold uv sync download bytes
-	TotalTime     time.Duration
-	TotalCost     float64
+	Group              InstanceGroup
+	Offer              GroupOffer
+	Breakdown          estimate.Breakdown
+	JobDurations       map[int64]time.Duration // job ID → predicted duration (empty if unavailable)
+	JobRuntimeMetadata map[int64]predictor.RuntimeMetadata
+	SetupOverhead      time.Duration
+	DownloadBytes      int64         // total bytes of HF model inputs to download
+	DownloadTime       time.Duration // estimated download time from offer bandwidth
+	UVSyncBytes        int64         // estimated cold uv sync download bytes
+	TotalTime          time.Duration
+	TotalCost          float64
 
 	// Survival model fields (zero values if no model available)
 	SurvivalProb     float64 // 0-1, probability of completing without provider-side failure
@@ -79,7 +80,7 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	// Run three independent I/O-bound steps concurrently
 	var wg sync.WaitGroup
 	var allManifests map[string]*estimate.UVManifestRef
-	var allPredictions map[int64]estimate.Estimate
+	var allPredictions map[int64]estimate.DurationPrediction
 
 	// Step 1: HF model sizes (network calls to HuggingFace API)
 	var modelProgress func(resolved, total int)
@@ -106,7 +107,7 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		allPredictions = estimateJobDurations(predCfg, allBatchJobs)
+		allPredictions = estimateJobDurationsDetailed(predCfg, allBatchJobs)
 	}()
 
 	wg.Wait()
@@ -114,9 +115,10 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 
 	for i, go_ := range groupOffers {
 		est := CostEstimate{
-			Group:        go_.Group,
-			Offer:        go_,
-			JobDurations: make(map[int64]time.Duration),
+			Group:              go_.Group,
+			Offer:              go_,
+			JobDurations:       make(map[int64]time.Duration),
+			JobRuntimeMetadata: make(map[int64]predictor.RuntimeMetadata),
 		}
 
 		if go_.Offer == nil {
@@ -167,8 +169,11 @@ func EstimateCosts(database *sql.DB, groupOffers []GroupOffer, predCfg *predicto
 		var runEst estimate.Estimate
 		for _, job := range go_.Group.Jobs {
 			if pred, ok := allPredictions[job.ID]; ok {
-				est.JobDurations[job.ID] = pred.Mean
-				runEst = runEst.Add(pred)
+				est.JobDurations[job.ID] = pred.Estimate.Mean
+				runEst = runEst.Add(pred.Estimate)
+				if pred.Metadata != nil {
+					est.JobRuntimeMetadata[job.ID] = *pred.Metadata
+				}
 			} else {
 				runEst = runEst.Add(estimate.DefaultJobDuration)
 			}

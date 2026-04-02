@@ -43,11 +43,14 @@ type Prediction struct {
 
 // RuntimeMetadata describes how a duration prediction was produced.
 type RuntimeMetadata struct {
-	Source                  string  `json:"source,omitempty"`
-	Confidence              float64 `json:"confidence,omitempty"`
-	Feasible                *bool   `json:"feasible,omitempty"`
-	AnalyticalDurationS     float64 `json:"analytical_duration_s,omitempty"`
-	AnalyticalPeakMemoryMiB float64 `json:"analytical_peak_memory_mib,omitempty"`
+	Source                     string  `json:"source,omitempty"`
+	Confidence                 float64 `json:"confidence,omitempty"`
+	Feasible                   *bool   `json:"feasible,omitempty"`
+	Bottleneck                 string  `json:"bottleneck,omitempty"`
+	MemoryHeadroomMiB          float64 `json:"memory_headroom_mib,omitempty"`
+	BenefitsFromAdditionalVRAM *bool   `json:"benefits_from_additional_vram,omitempty"`
+	AnalyticalDurationS        float64 `json:"analytical_duration_s,omitempty"`
+	AnalyticalPeakMemoryMiB    float64 `json:"analytical_peak_memory_mib,omitempty"`
 }
 
 // Result holds predictions for all targets.

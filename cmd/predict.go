@@ -48,6 +48,29 @@ func runPredict(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Duration: %s\n", predictor.FormatDuration(result.DurationS))
+	if meta := result.DurationMetadata; meta != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Runtime:  %s (confidence %.0f%%)\n", formatRuntimeSource(meta.Source), meta.Confidence*100)
+		if meta.Bottleneck != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Bounded:  %s\n", meta.Bottleneck)
+		}
+		if meta.Feasible != nil {
+			if *meta.Feasible {
+				fmt.Fprintln(cmd.OutOrStdout(), "Fits GPU: yes")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "Fits GPU: no")
+			}
+		}
+		if meta.MemoryHeadroomMiB > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Headroom: ~%.1f GiB\n", meta.MemoryHeadroomMiB/1024.0)
+		}
+		if meta.BenefitsFromAdditionalVRAM != nil {
+			if *meta.BenefitsFromAdditionalVRAM {
+				fmt.Fprintln(cmd.OutOrStdout(), "VRAM:     more capacity could help")
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), "VRAM:     surplus capacity does not add speed")
+			}
+		}
+	}
 
 	if result.MaxGPUMemMiB != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "GPU mem:  %s\n", predictor.FormatMemory(result.MaxGPUMemMiB, "GiB"))
@@ -75,4 +98,20 @@ func buildPredictorConfig(cfg *config.Config) predictor.Config {
 		cfg.Predictor.RetrainInterval,
 		cfg.Predictor.DBPaths,
 	)
+}
+
+func formatRuntimeSource(source string) string {
+	switch source {
+	case "learned+analytical":
+		return "learned + analytical"
+	case "learned":
+		return "learned only"
+	case "empirical":
+		return "empirical"
+	default:
+		if source == "" {
+			return "unknown"
+		}
+		return source
+	}
 }
