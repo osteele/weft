@@ -138,6 +138,9 @@ func (m watchModel) handleUnplaceDone(msg watchUnplaceDoneMsg) (tea.Model, tea.C
 		m.refreshing = true
 		return m, tea.Batch(flashCmd, refreshWatchSystem(m.database, m.appConfig, m.cloudInstances))
 	}
+	if m.mode == watchModeProject {
+		return m, tea.Batch(m.flash.Set(msg.message, false), m.reloadProjectGroups())
+	}
 	// Instance-based mode: just refresh unplaced
 	return m, m.flash.Set(msg.message, false)
 }
@@ -537,7 +540,7 @@ func (m watchModel) handleProjectLoaded(msg watchProjectLoadedMsg) (tea.Model, t
 		return m, nil
 	}
 	m.projectGroups = msg.groups
-	m.projectLines = m.computeProjectLines()
+	m.projectLines, m.projectMeta = m.computeProjectLines()
 	if len(m.projectGroups) == 0 && m.projectStatus == "" {
 		m.projectStatus = "No project activity."
 	}

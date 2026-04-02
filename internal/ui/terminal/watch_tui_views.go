@@ -651,6 +651,9 @@ func (m watchModel) renderProjectView() string {
 	if m.width <= 0 || m.height <= 0 {
 		return "Loading..."
 	}
+	if m.projectHelp {
+		return m.renderProjectHelpView()
+	}
 
 	lines := m.projectLines
 	rows := m.projectPageSize()
@@ -703,8 +706,49 @@ func (m watchModel) projectFooterText() string {
 	if m.projectStatus != "" {
 		state += "  " + m.projectStatus
 	}
-	state += "  up/down move  space/b page  g/G top/bottom  r refresh  l launch  q quit  " + m.autoModeHint()
+	if detail := m.selectedProjectStatusDetail(); detail != "" {
+		state += "  " + truncate(detail, max(24, m.width-lipgloss.Width(state)-4))
+	}
+	state += "  up/down move  space/b page  g/G top/bottom  u unplace  r refresh  l launch  ? help  q quit  " + m.autoModeHint()
 	return state
+}
+
+func (m watchModel) renderProjectHelpView() string {
+	rows := max(1, m.height-1)
+	lines := []string{
+		"Project Watch Keybindings",
+		"",
+		"Navigation:",
+		"  up/down (or j/k) move selection",
+		"  space/b page down/up",
+		"  g/G jump top/bottom",
+		"",
+		"Actions:",
+		"  u unplace selected queued job",
+		"  r refresh",
+		"  l open launch planner",
+		"  a toggle auto-pilot",
+		"",
+		"Help:",
+		"  ? toggle this help",
+		"  q or Esc close help",
+	}
+
+	var b strings.Builder
+	title := watchTitleStyle.Render(truncateDisplayWidth(lines[0], m.width))
+	b.WriteString(title)
+	b.WriteString("\n")
+	for i := 1; i < rows; i++ {
+		idx := i
+		if idx >= len(lines) {
+			b.WriteString("\n")
+			continue
+		}
+		b.WriteString(watchDimStyle.Render(truncateDisplayWidth(lines[idx], m.width)))
+		b.WriteString("\n")
+	}
+	b.WriteString(watchDimStyle.Render(truncateDisplayWidth("? close help", m.width)))
+	return b.String()
 }
 
 func (m watchModel) projectEmptyStateText() string {

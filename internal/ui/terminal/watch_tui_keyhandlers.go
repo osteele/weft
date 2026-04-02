@@ -194,6 +194,15 @@ func (m watchModel) handleMovePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.projectHelp {
+		switch msg.String() {
+		case "?", "esc", "q", "enter":
+			m.projectHelp = false
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "q", "esc":
 		if m.dbWatcher != nil {
@@ -227,6 +236,22 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveCursor(-m.projectPageSize())
 		m.adjustProjectOffset()
 		return m, nil
+	case "u":
+		job, bucket := m.selectedProjectJob()
+		if job == nil {
+			return m, m.flash.Set("Select a queued job row to unplace", true)
+		}
+		if bucket != "queued" {
+			if bucket == "unplaced" {
+				return m, m.flash.Set(fmt.Sprintf("Job #%d is already unplaced", job.ID), true)
+			}
+			return m, m.flash.Set("Only queued job rows can be unplaced", true)
+		}
+		if job.EffectiveStatus() != db.StatusQueued {
+			return m, m.flash.Set("Only queued jobs can be unplaced", true)
+		}
+		flashCmd := m.flash.Set(m.spinner.View()+fmt.Sprintf(" Unplacing job #%d...", job.ID), false)
+		return m, tea.Batch(flashCmd, requestWatchJobUnplace(m.database, job.ID))
 	case "r":
 		if m.projectSyncing {
 			return m, nil
@@ -253,6 +278,9 @@ func (m watchModel) handleProjectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return switchToLaunchMsg{} }
 	case "a":
 		return m.handleToggleAutoPilot()
+	case "?":
+		m.projectHelp = true
+		return m, nil
 	}
 	return m, nil
 }

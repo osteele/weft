@@ -42,6 +42,11 @@ type initialInstanceInfo struct {
 	outcomes map[int64]string
 }
 
+type projectLineMeta struct {
+	job    *db.Job
+	bucket string
+}
+
 // watchModel is the unified TUI model for campaign, instance, and system watch.
 type watchModel struct {
 	mode      watchMode
@@ -99,6 +104,8 @@ type watchModel struct {
 	projectFilter  string
 	projectRecent  time.Duration
 	projectLines   []string // cached render lines
+	projectMeta    []projectLineMeta
+	projectHelp    bool
 	projectSyncing bool
 	projectStatus  string
 	projectOffset  int // top visible line (offset-based scroll)
@@ -409,7 +416,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		if m.mode == watchModeProject {
-			m.projectLines = m.computeProjectLines()
+			m.projectLines, m.projectMeta = m.computeProjectLines()
 			m.clampCursor()
 			m.adjustProjectOffset()
 		}

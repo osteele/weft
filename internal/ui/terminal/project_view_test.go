@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/osteele/weft/internal/campaign"
 	"github.com/osteele/weft/internal/cloud"
 	"github.com/osteele/weft/internal/db"
@@ -143,13 +144,248 @@ func TestProjectWatchModelViewShowsGroupedContent(t *testing.T) {
 		clients:        map[int64]cloud.Client{},
 		jobProgressHWM: map[int64]int{},
 	}
-	m.projectLines = m.computeProjectLines()
+	m.projectLines, m.projectMeta = m.computeProjectLines()
 
 	out := stripANSI(m.View())
 	for _, want := range []string{"Project Watch (1 projects)", "ALPHA", "Running", "Recent", "r refresh"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("view missing %q, got:\n%s", want, out)
 		}
+	}
+}
+
+func TestProjectWatchFooterShowsSelectedBlockedReason(t *testing.T) {
+	blocked := &db.Job{
+		ID:                 41,
+		Status:             db.StatusQueued,
+		Host:               "cool30",
+		WorkingDir:         "/tmp/project-alpha",
+		Description:        "blocked job",
+		QueueBlockedReason: "cpu gate: 80% + 40% > 90% target",
+	}
+	queued := &db.Job{
+		ID:          42,
+		Status:      db.StatusQueued,
+		Host:        "cool30",
+		WorkingDir:  "/tmp/project-alpha",
+		Description: "next job",
+	}
+	m := watchModel{
+		mode:          watchModeProject,
+		width:         180,
+		height:        12,
+		projectRecent: 24 * time.Hour,
+		projectGroups: []projectGroup{
+			{
+				Label:       "ALPHA",
+				Directories: []string{"/tmp/project-alpha"},
+				Queued:      []*db.Job{blocked, queued},
+			},
+		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines, m.projectMeta = m.computeProjectLines()
+	m.cursor = 3 // header + dir + "Queued" + first job row
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "#41 blocked: cpu gate: 80% + 40% > 90% target") {
+		t.Fatalf("footer missing blocked detail, got:\n%s", out)
+	}
+}
+
+func TestProjectWatchFooterOmitsBlockedReasonForNonBlockedSelection(t *testing.T) {
+	blocked := &db.Job{
+		ID:                 41,
+		Status:             db.StatusQueued,
+		Host:               "cool30",
+		WorkingDir:         "/tmp/project-alpha",
+		Description:        "blocked job",
+		QueueBlockedReason: "cpu gate: 80% + 40% > 90% target",
+	}
+	queued := &db.Job{
+		ID:          42,
+		Status:      db.StatusQueued,
+		Host:        "cool30",
+		WorkingDir:  "/tmp/project-alpha",
+		Description: "next job",
+	}
+	m := watchModel{
+		mode:          watchModeProject,
+		width:         180,
+		height:        12,
+		projectRecent: 24 * time.Hour,
+		projectGroups: []projectGroup{
+			{
+				Label:       "ALPHA",
+				Directories: []string{"/tmp/project-alpha"},
+				Queued:      []*db.Job{blocked, queued},
+			},
+		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines, m.projectMeta = m.computeProjectLines()
+	m.cursor = 4 // second queued row (not blocked)
+
+	out := stripANSI(m.View())
+	if strings.Contains(out, "#41 blocked:") {
+		t.Fatalf("footer should not show blocked detail for non-blocked selection, got:\n%s", out)
+	}
+}
+
+func TestProjectWatchFooterTruncatesBlockedReasonToWidth(t *testing.T) {
+	m := watchModel{
+		mode:          watchModeProject,
+		width:         100,
+		height:        12,
+		projectRecent: 24 * time.Hour,
+		projectGroups: []projectGroup{
+			{
+				Label:       "ALPHA",
+				Directories: []string{"/tmp/project-alpha"},
+				Queued: []*db.Job{
+					{
+						ID:                 41,
+						Status:             db.StatusQueued,
+						Host:               "cool30",
+						WorkingDir:         "/tmp/project-alpha",
+						Description:        "blocked job",
+						QueueBlockedReason: "gpu gate: waiting for requested GPU capacity on device set 0,1,2,3",
+					},
+				},
+			},
+		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines, m.projectMeta = m.computeProjectLines()
+	m.cursor = 3
+
+	out := stripANSI(m.View())
+	if !strings.Contains(out, "#41 blocked:") {
+		t.Fatalf("footer missing blocked prefix, got:\n%s", out)
+	}
+	if !strings.Contains(out, "…") {
+		t.Fatalf("footer should include ellipsis for truncated detail, got:\n%s", out)
+	}
+}
+
+func TestProjectWatchToggleHelpWithQuestionMark(t *testing.T) {
+	m := watchModel{
+		mode:          watchModeProject,
+		width:         120,
+		height:        12,
+		projectRecent: 24 * time.Hour,
+		projectGroups: []projectGroup{
+			{
+				Label:       "ALPHA",
+				Directories: []string{"/tmp/project-alpha"},
+			},
+		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines, m.projectMeta = m.computeProjectLines()
+
+	updatedModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	got := updatedModel.(watchModel)
+	if !got.projectHelp {
+		t.Fatalf("expected project help to be visible")
+	}
+	out := stripANSI(got.View())
+	if !strings.Contains(out, "Project Watch Keybindings") {
+		t.Fatalf("missing help title, got:\n%s", out)
+	}
+	if !strings.Contains(out, "u unplace selected queued job") {
+		t.Fatalf("missing unplace help text, got:\n%s", out)
+	}
+
+	updatedModel, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	got = updatedModel.(watchModel)
+	if got.projectHelp {
+		t.Fatalf("expected project help to close")
+	}
+}
+
+func TestProjectWatchKeyUUnplacesSelectedQueuedJob(t *testing.T) {
+	job := &db.Job{
+		ID:          41,
+		Status:      db.StatusQueued,
+		Host:        "cool30",
+		WorkingDir:  "/tmp/project-alpha",
+		Description: "queued job",
+	}
+	m := watchModel{
+		mode:          watchModeProject,
+		width:         120,
+		height:        12,
+		projectRecent: 24 * time.Hour,
+		projectGroups: []projectGroup{
+			{
+				Label:       "ALPHA",
+				Directories: []string{"/tmp/project-alpha"},
+				Queued:      []*db.Job{job},
+			},
+		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines, m.projectMeta = m.computeProjectLines()
+	m.cursor = 3
+
+	updatedModel, cmd := m.handleProjectKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	got := updatedModel.(watchModel)
+	if cmd == nil {
+		t.Fatalf("expected unplace command")
+	}
+	if !strings.Contains(got.flash.Message, "Unplacing job #41") {
+		t.Fatalf("expected unplace flash, got %q", got.flash.Message)
+	}
+}
+
+func TestProjectWatchKeyUOnUnplacedShowsMessage(t *testing.T) {
+	job := &db.Job{
+		ID:          41,
+		Status:      db.StatusQueued,
+		Host:        "",
+		WorkingDir:  "/tmp/project-alpha",
+		Description: "unplaced job",
+	}
+	m := watchModel{
+		mode:          watchModeProject,
+		width:         120,
+		height:        12,
+		projectRecent: 24 * time.Hour,
+		projectGroups: []projectGroup{
+			{
+				Label:       "ALPHA",
+				Directories: []string{"/tmp/project-alpha"},
+				Unplaced:    []*db.Job{job},
+			},
+		},
+		updates:        map[int64]campaign.InstanceUpdate{},
+		channels:       map[int64]<-chan campaign.InstanceUpdate{},
+		clients:        map[int64]cloud.Client{},
+		jobProgressHWM: map[int64]int{},
+	}
+	m.projectLines, m.projectMeta = m.computeProjectLines()
+	m.cursor = 3
+
+	updatedModel, _ := m.handleProjectKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	got := updatedModel.(watchModel)
+	if !strings.Contains(got.flash.Message, "already unplaced") {
+		t.Fatalf("expected already unplaced message, got %q", got.flash.Message)
 	}
 }
 
