@@ -498,6 +498,7 @@ func (m watchModel) handleSystemRefreshed(msg watchAllRefreshedMsg) (tea.Model, 
 	m.cloudInstances = snapshot.Launches
 	m.onPremHosts = msg.snapshot.OnPremHosts
 	m.unplacedJobs = msg.snapshot.UnplacedJobs
+	m.cloudReason = snapshot.CloudReason
 
 	// Update instanceIDs from discovered instances
 	m.instanceIDs = make([]int64, len(snapshot.Launches))

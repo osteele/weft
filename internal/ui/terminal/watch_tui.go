@@ -87,6 +87,7 @@ type watchModel struct {
 	cloudInstances []*db.Launch
 	onPremHosts    []onPremHostSummary
 	refreshing     bool
+	cloudReason    string
 
 	// --- DB watcher (project + instance modes) ---
 	dbWatcher        *fsnotify.Watcher
@@ -248,6 +249,7 @@ func newSystemWatchModel(database *sql.DB, cfg *config.Config, flashMessage stri
 	model.updates = snapshot.InstanceUpdates
 	model.onPremHosts = snapshot.OnPremHosts
 	model.unplacedJobs = snapshot.UnplacedJobs
+	model.cloudReason = snapshot.CloudReason
 
 	// Derive instanceIDs from discovered instances
 	model.instanceIDs = make([]int64, len(snapshot.Launches))

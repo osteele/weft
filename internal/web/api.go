@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/osteele/weft/internal/hostinfo"
 	"github.com/osteele/weft/internal/inventory"
@@ -55,9 +56,15 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, _ *http.Request) {
 
 	// Get live host data from monitor
 	var liveHosts []*hostinfo.Host
+	hostSyncTimes := make(map[string]time.Time)
 	if s.monitor != nil {
 		liveHosts = s.monitor.Hosts()
 	}
+	s.mu.RLock()
+	for host, ts := range s.hostSyncTimes {
+		hostSyncTimes[host] = ts
+	}
+	s.mu.RUnlock()
 	liveMap := make(map[string]*hostinfo.Host)
 	for _, h := range liveHosts {
 		if h != nil {
@@ -90,6 +97,9 @@ func (s *Server) handleAPIHosts(w http.ResponseWriter, _ *http.Request) {
 		// Merge live data from monitor
 		if live, ok := liveMap[spec.Name]; ok {
 			h.Status = statusLabel(live.Status)
+			if !isHostRecentlySynced(spec.Name, hostSyncTimes) {
+				h.Status = "stale"
+			}
 			if pct, ok := hostinfo.HostCPULoadPercent(live); ok {
 				h.CPULoad = fmt.Sprintf("%d%%", pct)
 			}

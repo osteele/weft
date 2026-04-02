@@ -85,7 +85,9 @@ const clusterTemplate = `<!doctype html>
         font-weight: 500;
       }
       .status-online { background: var(--accent-weak); color: var(--accent); }
+      .status-checking { background: #fff3e6; color: var(--warning); }
       .status-offline { background: #fde8e8; color: var(--danger); }
+      .status-stale { background: #f0ede6; color: var(--warning); }
       .status-unknown { background: #f0ede6; color: var(--muted); }
       .gpu-list { margin: 8px 0 0; }
       .gpu-item {
@@ -222,7 +224,9 @@ const clusterTemplate = `<!doctype html>
         hosts.forEach(function(h) {
           var statusClass = 'status-unknown';
           if (h.status === 'online') statusClass = 'status-online';
+          else if (h.status === 'checking') statusClass = 'status-checking';
           else if (h.status === 'offline') statusClass = 'status-offline';
+          else if (h.status === 'stale') statusClass = 'status-stale';
 
           var gpuHTML = '';
           if (h.gpus && h.gpus.length) {
@@ -417,6 +421,7 @@ const indexTemplate = `<!doctype html>
       .status-online { color: var(--accent); }
       .status-checking { color: var(--warning); }
       .status-offline { color: var(--danger); }
+      .status-stale { color: var(--warning); }
       .status-unknown { color: var(--muted); }
       .host-dimmed { opacity: 0.5; }
       /* Job status colors - high contrast for white background */

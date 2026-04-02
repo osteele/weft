@@ -402,7 +402,7 @@ func buildHostSummaries(hosts []*hostinfo.Host, hostSyncTimes map[string]time.Ti
 		statusClass := hostStatusClass(host.Status)
 		if !recentlySynced {
 			displayStatus = "stale"
-			statusClass = "status-unknown"
+			statusClass = "status-stale"
 		}
 
 		// Dim hosts that are offline or have stale data

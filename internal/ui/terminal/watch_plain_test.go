@@ -107,3 +107,22 @@ func TestIsActiveCloudLaunchStatus(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatWatchPlainSnapshot_ShowsCloudDegradedReason(t *testing.T) {
+	snapshot := watchSystemSnapshot{
+		CloudDegraded: true,
+		CloudReason:   "using last-known rental instances (degraded data)",
+	}
+
+	out := formatWatchPlainSnapshot(snapshot, time.Unix(0, 0))
+	if !strings.Contains(out, "note: using last-known rental instances (degraded data)") {
+		t.Fatalf("output missing degraded cloud reason, got:\n%s", out)
+	}
+}
+
+func TestLaunchIDs(t *testing.T) {
+	ids := launchIDs([]*db.Launch{{ID: 11}, nil, {ID: 42}})
+	if len(ids) != 2 || ids[0] != 11 || ids[1] != 42 {
+		t.Fatalf("launchIDs = %v, want [11 42]", ids)
+	}
+}

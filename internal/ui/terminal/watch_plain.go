@@ -28,19 +28,23 @@ type watchSystemSnapshot struct {
 	InstanceUpdates map[int64]campaign.InstanceUpdate
 	OnPremHosts     []onPremHostSummary
 	UnplacedJobs    []*db.Job
+	CloudDegraded   bool
+	CloudReason     string
 }
 
 func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	reconciler := campaign.NewReconciler()
+	var previousLaunchIDs []int64
 
 	for {
 		performFastSync(database, false)
-		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true, nil)
+		snapshot, err := loadWatchSystemSnapshot(database, cfg, reconciler, true, previousLaunchIDs)
 		if err != nil {
 			return err
 		}
+		previousLaunchIDs = launchIDs(snapshot.Launches)
 
 		fmt.Print(formatWatchPlainSnapshot(snapshot, time.Now()))
 
@@ -57,6 +61,8 @@ func watchAllPlain(database *sql.DB, cfg *config.Config, follow bool) error {
 }
 
 func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *campaign.Reconciler, refresh bool, previousLaunchIDs []int64) (watchSystemSnapshot, error) {
+	cloudDegraded := false
+	cloudReason := ""
 	if refresh {
 		syncCloudState(cfg, database, reconciler, false)
 	}
@@ -69,6 +75,10 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 		cloudInstances, err = reloadActiveLaunches(database, previousLaunchIDs)
 		if err != nil {
 			return watchSystemSnapshot{}, err
+		}
+		if len(cloudInstances) > 0 {
+			cloudDegraded = true
+			cloudReason = "using last-known rental instances (degraded data)"
 		}
 	}
 
@@ -105,7 +115,20 @@ func loadWatchSystemSnapshot(database *sql.DB, cfg *config.Config, reconciler *c
 		InstanceUpdates: instanceUpdates,
 		OnPremHosts:     groupOnPremHosts(onPremJobs),
 		UnplacedJobs:    unplacedJobs,
+		CloudDegraded:   cloudDegraded,
+		CloudReason:     cloudReason,
 	}, nil
+}
+
+func launchIDs(launches []*db.Launch) []int64 {
+	ids := make([]int64, 0, len(launches))
+	for _, launch := range launches {
+		if launch == nil {
+			continue
+		}
+		ids = append(ids, launch.ID)
+	}
+	return ids
 }
 
 func reloadActiveLaunches(database *sql.DB, launchIDs []int64) ([]*db.Launch, error) {
@@ -187,6 +210,9 @@ func formatWatchPlainSnapshot(snapshot watchSystemSnapshot, now time.Time) strin
 	b.WriteString(fmt.Sprintf("=== System Watch %s ===\n\n", now.Format("2006-01-02 15:04:05")))
 
 	b.WriteString(fmt.Sprintf("RENTAL INSTANCES (%d)\n", len(snapshot.Launches)))
+	if snapshot.CloudDegraded && snapshot.CloudReason != "" {
+		b.WriteString(fmt.Sprintf("  note: %s\n", snapshot.CloudReason))
+	}
 	if len(snapshot.Launches) == 0 {
 		b.WriteString("  none\n")
 	} else {

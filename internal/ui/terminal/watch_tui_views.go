@@ -243,6 +243,9 @@ func (m watchModel) renderSystemView() (string, int) {
 	addPlain("")
 
 	addHeader(fmt.Sprintf("Rental Instances (%d)", len(m.cloudInstances)))
+	if m.cloudReason != "" {
+		addPlain(watchDimStyle.Render("  note: " + m.cloudReason))
+	}
 	if len(m.cloudInstances) == 0 {
 		addPlain(watchDimStyle.Render("  no active rental instances"))
 	} else {

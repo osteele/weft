@@ -48,11 +48,13 @@ func TestSystemWatchModelViewShowsSectionsAndDirectoryTails(t *testing.T) {
 			{ID: 123, Status: db.StatusQueued, WorkingDir: "/tmp/project-gamma", Project: "GAMMA", Description: "benchmark", GPUClass: "A100"},
 		},
 		jobProgressHWM: map[int64]int{},
+		cloudReason:    "using last-known rental instances (degraded data)",
 	}
 
 	out := stripANSI(m.View())
 	for _, expected := range []string{
 		"Rental Instances (1)",
+		"note: using last-known rental instances (degraded data)",
 		"Inventory Hosts (1 active)",
 		"Unplaced Jobs (1)",
 		"[u] unplace",
