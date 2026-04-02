@@ -218,9 +218,11 @@ For external tools to get useful estimates, they need either:
    jobs), CLI startup overhead may matter. Should weft also expose an HTTP
    endpoint, or is a Unix socket / long-running process sufficient?
 
-2. **Stale models**: Weft retrains its predictor every 50 jobs. External tools
-   calling `weft estimate` get whatever model is currently trained. Should weft
-   expose model freshness metadata (last retrain date, training set size)?
+2. **Stale models**: Weft now rebuilds stale but schema-compatible predictor
+   models in the background and keeps serving the previous compatible model
+   until the swap completes. Schema-incompatible models are blocked until the
+   rebuild finishes. Should weft expose model freshness metadata (last retrain
+   date, training set size, rebuild-in-progress)?
 
 3. **Estimation without job history**: On a fresh install or for a SLURM cluster
    that doesn't use weft for job submission, the ML predictor has no training

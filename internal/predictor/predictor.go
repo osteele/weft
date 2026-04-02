@@ -4,6 +4,7 @@ package predictor
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -14,6 +15,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // Config controls how the predictor finds and invokes job-estimator.
@@ -81,14 +84,23 @@ type ModelSchemaStatus struct {
 
 var predictFunc = Predict
 var predictBatchFunc = PredictBatch
-var modelSchemaWarnOnce sync.Once
 var runPredictCLI = runPredictCLIImpl
 var runPredictBatchCLI = runPredictBatchCLIImpl
+var runTrainCLI = runTrainCLIImpl
+var countTrainingRows = countTrainingRowsImpl
+var backgroundRetrainCheckInterval = time.Minute
+var nowFunc = time.Now
 var predictionCache = struct {
 	mu      sync.RWMutex
 	entries map[predictionCacheKey]*Result
 }{
 	entries: make(map[predictionCacheKey]*Result),
+}
+var backgroundRetrains = struct {
+	mu     sync.Mutex
+	states map[string]*backgroundRetrainState
+}{
+	states: make(map[string]*backgroundRetrainState),
 }
 
 type predictionCacheKey struct {
@@ -97,6 +109,13 @@ type predictionCacheKey struct {
 	project  string
 	gpuClass string
 	command  string
+}
+
+type backgroundRetrainState struct {
+	useMu          sync.RWMutex
+	statusMu       sync.Mutex
+	running        bool
+	nextStaleCheck time.Time
 }
 
 // ResolvePredict routes prediction calls through the package test seam.
@@ -288,18 +307,17 @@ func cloneResult(result *Result) *Result {
 	}
 }
 
-func warnIfModelSchemaChanged(cfg Config) {
-	status := CheckModelSchema(cfg)
-	if !status.Changed {
-		return
+func backgroundState(cfg Config) *backgroundRetrainState {
+	modelDir := cfg.modelDir()
+	backgroundRetrains.mu.Lock()
+	defer backgroundRetrains.mu.Unlock()
+	state, ok := backgroundRetrains.states[modelDir]
+	if ok {
+		return state
 	}
-	modelSchemaWarnOnce.Do(func() {
-		slog.Warn(
-			"predictor models use an incompatible schema; rebuild them with `weft retrain --if-schema-changed` or `just build`",
-			"component", "predictor",
-			"reason", status.Reason,
-		)
-	})
+	state = &backgroundRetrainState{}
+	backgroundRetrains.states[modelDir] = state
+	return state
 }
 
 // NeedsRetrain returns true if models are stale or missing.
@@ -317,22 +335,32 @@ func Train(cfg Config) error {
 	if cfg.ProjectPath == "" {
 		return fmt.Errorf("predictor: project_path not configured")
 	}
+	modelDir := cfg.modelDir()
+	if modelDir == "" {
+		return fmt.Errorf("predictor: model_dir not configured")
+	}
+	parentDir := filepath.Dir(modelDir)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return fmt.Errorf("predictor: create model dir parent: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(parentDir, filepath.Base(modelDir)+".retrain-*")
+	if err != nil {
+		return fmt.Errorf("predictor: create temp model dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	if err := runTrainCLI(cfg, tempDir); err != nil {
+		return err
+	}
+
+	state := backgroundState(cfg)
+	state.useMu.Lock()
+	defer state.useMu.Unlock()
+	if err := swapModelDir(tempDir, modelDir); err != nil {
+		return err
+	}
 	clearPredictionCache()
-	if status := CheckModelSchema(cfg); status.Changed {
-		if err := removeModelArtifacts(cfg); err != nil {
-			return fmt.Errorf("predictor: remove incompatible models: %w", err)
-		}
-	}
-
-	args := []string{"run", "--project", cfg.ProjectPath, "job-estimator", "train"}
-	for _, db := range cfg.DBPaths {
-		args = append(args, "--db", db)
-	}
-	args = append(args, "--model-dir", cfg.modelDir())
-
-	cmd := exec.Command("uv", args...)
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return nil
 }
 
 // Predict shells out to job-estimator predict and parses the JSON result.
@@ -340,13 +368,18 @@ func Predict(cfg Config, host, project, gpuClass, command string) (*Result, erro
 	if cfg.ProjectPath == "" {
 		return nil, fmt.Errorf("predictor: project_path not configured")
 	}
-	warnIfModelSchemaChanged(cfg)
+	if err := preparePredictorForUse(cfg); err != nil {
+		return nil, err
+	}
 	key := predictionKey(cfg, host, project, gpuClass, command)
 	if result, ok := cachedPrediction(key); ok {
 		return result, nil
 	}
 
+	state := backgroundState(cfg)
+	state.useMu.RLock()
 	out, err := runPredictCLI(cfg, host, project, gpuClass, command)
+	state.useMu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +416,9 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 	if len(jobs) == 0 {
 		return nil, nil
 	}
-	warnIfModelSchemaChanged(cfg)
+	if err := preparePredictorForUse(cfg); err != nil {
+		return nil, err
+	}
 
 	results := make(map[int64]*Result, len(jobs))
 	missingJobs := make([]BatchJob, 0, len(jobs))
@@ -405,7 +440,10 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 		return results, nil
 	}
 
+	state := backgroundState(cfg)
+	state.useMu.RLock()
 	out, err := runPredictBatchCLI(cfg, missingJobs)
+	state.useMu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -427,6 +465,237 @@ func PredictBatch(cfg Config, jobs []BatchJob) (map[int64]*Result, error) {
 		}
 	}
 	return results, nil
+}
+
+func preparePredictorForUse(cfg Config) error {
+	if status := CheckModelSchema(cfg); status.Changed {
+		if err := rebuildSchemaMismatchSynchronously(cfg, status.Reason); err != nil {
+			blocked := GetStatus(cfg)
+			blocked.SchemaIncompatible = true
+			blocked.SchemaReason = status.Reason
+			return &UnavailableError{Status: blocked}
+		}
+		return nil
+	}
+	maybeScheduleBackgroundRetrain(cfg)
+	return nil
+}
+
+func rebuildSchemaMismatchSynchronously(cfg Config, reason string) error {
+	state := backgroundState(cfg)
+	rebuildReason := "schema changed: " + reason
+
+	for {
+		state.statusMu.Lock()
+		if !state.running {
+			state.cachedAt = time.Time{}
+			state.cachedStatus = Status{}
+			state.running = true
+			state.reason = rebuildReason
+			state.startedAt = nowFunc()
+			state.statusMu.Unlock()
+			break
+		}
+		state.statusMu.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
+		if status := CheckModelSchema(cfg); !status.Changed {
+			return nil
+		}
+	}
+
+	slog.Warn(
+		"predictor models use an incompatible schema; rebuilding synchronously before prediction",
+		"component", "predictor",
+		"model_dir", cfg.modelDir(),
+		"reason", reason,
+	)
+	err := Train(cfg)
+
+	state.statusMu.Lock()
+	state.running = false
+	state.reason = ""
+	state.startedAt = time.Time{}
+	state.nextStaleCheck = nowFunc().Add(backgroundRetrainCheckInterval)
+	state.cachedAt = time.Time{}
+	state.cachedStatus = Status{}
+	state.statusMu.Unlock()
+
+	if err != nil {
+		return fmt.Errorf("predictor: rebuild incompatible models: %w", err)
+	}
+	return nil
+}
+
+func maybeScheduleBackgroundRetrain(cfg Config) {
+	state := backgroundState(cfg)
+	now := nowFunc()
+
+	state.statusMu.Lock()
+	if state.running || (!state.nextStaleCheck.IsZero() && now.Before(state.nextStaleCheck)) {
+		state.statusMu.Unlock()
+		return
+	}
+	state.nextStaleCheck = now.Add(backgroundRetrainCheckInterval)
+	state.statusMu.Unlock()
+
+	currentJobCount, err := countTrainingRows(cfg)
+	if err != nil {
+		slog.Debug("predictor stale-check skipped", "component", "predictor", "error", err)
+		return
+	}
+	if !NeedsRetrain(cfg, currentJobCount) {
+		return
+	}
+
+	reason := "stale models"
+	if meta, err := ReadMeta(cfg); err == nil {
+		delta := currentJobCount - meta.JobCount
+		reason = fmt.Sprintf("%d new completed jobs since last training", delta)
+	}
+	maybeStartBackgroundRetrain(cfg, reason)
+}
+
+func maybeStartBackgroundRetrain(cfg Config, reason string) bool {
+	state := backgroundState(cfg)
+	state.statusMu.Lock()
+	if state.running {
+		state.statusMu.Unlock()
+		return false
+	}
+	state.running = true
+	state.statusMu.Unlock()
+
+	go func() {
+		slog.Info("starting predictor retrain in background", "component", "predictor", "model_dir", cfg.modelDir(), "reason", reason)
+		err := Train(cfg)
+		if err != nil {
+			slog.Warn("background predictor retrain failed", "component", "predictor", "model_dir", cfg.modelDir(), "reason", reason, "error", err)
+		} else {
+			slog.Info("background predictor retrain completed", "component", "predictor", "model_dir", cfg.modelDir(), "reason", reason)
+		}
+
+		state.statusMu.Lock()
+		state.running = false
+		state.nextStaleCheck = nowFunc().Add(backgroundRetrainCheckInterval)
+		state.statusMu.Unlock()
+	}()
+	return true
+}
+
+func countTrainingRowsImpl(cfg Config) (int, error) {
+	paths := slices.Clone(cfg.DBPaths)
+	if len(paths) == 0 {
+		return 0, fmt.Errorf("predictor: no training databases configured")
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	total := 0
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		count, err := countTrainingRowsInDB(path)
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	return total, nil
+}
+
+func countTrainingRowsInDB(path string) (int, error) {
+	if ext := filepath.Ext(path); ext != ".db" && ext != ".sqlite" && ext != ".sqlite3" && ext != "" {
+		return 0, fmt.Errorf("predictor: unsupported training data source for stale checks: %s", path)
+	}
+	connStr := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path)
+	db, err := sql.Open("sqlite", connStr)
+	if err != nil {
+		return 0, fmt.Errorf("predictor: open training db %s: %w", path, err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return 0, fmt.Errorf("predictor: open training db %s: %w", path, err)
+	}
+
+	queries := []string{
+		`SELECT COUNT(*) FROM training_examples
+		 WHERE duration_s > 5
+		   AND LOWER(TRIM(COALESCE(status, ''))) IN ('', 'completed')
+		   AND (exit_code IS NULL OR exit_code = 0)
+		   AND TRIM(COALESCE(failure_reason, '')) = ''`,
+		`SELECT COUNT(*) FROM job_attempts
+		 WHERE start_time IS NOT NULL
+		   AND end_time IS NOT NULL
+		   AND (end_time - start_time) > 5
+		   AND LOWER(TRIM(COALESCE(status, ''))) IN ('', 'completed')
+		   AND (exit_code IS NULL OR exit_code = 0)
+		   AND TRIM(COALESCE(failure_reason, '')) = ''`,
+		`SELECT COUNT(*) FROM jobs
+		 WHERE start_time IS NOT NULL
+		   AND end_time IS NOT NULL
+		   AND (end_time - start_time) > 5
+		   AND LOWER(TRIM(COALESCE(status, ''))) IN ('', 'completed')
+		   AND (exit_code IS NULL OR exit_code = 0)
+		   AND TRIM(COALESCE(failure_reason, '')) = ''`,
+	}
+
+	var lastErr error
+	for _, query := range queries {
+		var count int
+		if err := db.QueryRow(query).Scan(&count); err == nil {
+			return count, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return 0, fmt.Errorf("predictor: count training rows in %s: %w", path, lastErr)
+}
+
+func runTrainCLIImpl(cfg Config, modelDir string) error {
+	args := []string{"run", "--project", cfg.ProjectPath, "job-estimator", "train"}
+	for _, db := range cfg.DBPaths {
+		args = append(args, "--db", db)
+	}
+	args = append(args, "--model-dir", modelDir)
+
+	cmd := exec.Command("uv", args...)
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func swapModelDir(srcDir, dstDir string) error {
+	parentDir := filepath.Dir(dstDir)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return fmt.Errorf("predictor: create model dir parent: %w", err)
+	}
+
+	backupDir := filepath.Join(parentDir, filepath.Base(dstDir)+".backup")
+	_ = os.RemoveAll(backupDir)
+	if _, err := os.Stat(dstDir); err == nil {
+		if err := os.Rename(dstDir, backupDir); err != nil {
+			return fmt.Errorf("predictor: move current model dir aside: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("predictor: stat current model dir: %w", err)
+	}
+
+	if err := os.Rename(srcDir, dstDir); err != nil {
+		if _, backupErr := os.Stat(backupDir); backupErr == nil {
+			_ = os.Rename(backupDir, dstDir)
+		}
+		return fmt.Errorf("predictor: activate retrained models: %w", err)
+	}
+	if _, err := os.Stat(backupDir); err == nil {
+		if err := os.RemoveAll(backupDir); err != nil {
+			return fmt.Errorf("predictor: remove old model backup: %w", err)
+		}
+	}
+	return nil
 }
 
 func runPredictCLIImpl(cfg Config, host, project, gpuClass, command string) ([]byte, error) {
@@ -476,10 +745,12 @@ func runPredictBatchCLIImpl(cfg Config, jobs []BatchJob) ([]byte, error) {
 // EnsureAndPredict retrains if stale, then predicts.
 // Errors are non-fatal: returns nil result if prediction fails.
 func EnsureAndPredict(cfg Config, currentJobCount int, host, project, gpuClass, command string) *Result {
-	if NeedsRetrain(cfg, currentJobCount) {
-		if err := Train(cfg); err != nil {
+	if status := CheckModelSchema(cfg); status.Changed {
+		if err := rebuildSchemaMismatchSynchronously(cfg, status.Reason); err != nil {
 			return nil
 		}
+	} else if NeedsRetrain(cfg, currentJobCount) {
+		_ = maybeStartBackgroundRetrain(cfg, fmt.Sprintf("%d new completed jobs since last training", currentJobCount))
 	}
 	result, err := predictFunc(cfg, host, project, gpuClass, command)
 	if err != nil {

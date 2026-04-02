@@ -170,9 +170,16 @@ explicit memory-capacity signals.
 
 ### Retraining
 
-Models live in `~/.cache/weft/models/`. Weft checks the model metadata and
-re-trains when enough new completed jobs have accumulated, or immediately when
-you run:
+Models live in `~/.cache/weft/models/`. Weft checks the model metadata before
+prediction.
+
+When enough new completed jobs have accumulated, it starts a background retrain
+and keeps using the current compatible model until the rebuild finishes.
+
+If the stored model schema is incompatible with the current code, weft blocks
+prediction with that model and starts a background rebuild instead.
+
+You can also rebuild immediately with:
 
 ```bash
 weft retrain

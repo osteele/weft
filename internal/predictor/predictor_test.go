@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -319,6 +321,182 @@ func TestCheckModelSchema(t *testing.T) {
 			t.Fatalf("expected current schema to be compatible, got %q", status.Reason)
 		}
 	})
+}
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal(message)
+}
+
+func TestPredict_StartsBackgroundRetrainWhenStale(t *testing.T) {
+	clearPredictionCache()
+	backgroundRetrains.mu.Lock()
+	backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+	backgroundRetrains.mu.Unlock()
+
+	originalRunPredictCLI := runPredictCLI
+	originalRunTrainCLI := runTrainCLI
+	originalCountTrainingRows := countTrainingRows
+	originalInterval := backgroundRetrainCheckInterval
+	t.Cleanup(func() {
+		runPredictCLI = originalRunPredictCLI
+		runTrainCLI = originalRunTrainCLI
+		countTrainingRows = originalCountTrainingRows
+		backgroundRetrainCheckInterval = originalInterval
+		clearPredictionCache()
+		backgroundRetrains.mu.Lock()
+		backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+		backgroundRetrains.mu.Unlock()
+	})
+
+	modelDir := t.TempDir()
+	meta := Meta{
+		TrainedAt:     "2024-01-01T00:00:00Z",
+		JobCount:      50,
+		SchemaVersion: ExpectedModelSchemaVersion,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "meta.json"), data, 0644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	backgroundRetrainCheckInterval = 0
+	countTrainingRows = func(Config) (int, error) { return 120, nil }
+	runPredictCLI = func(_ Config, _, _, _, _ string) ([]byte, error) {
+		return []byte(`{"duration_s":{"mean":3600,"std":60,"lower":3500,"upper":3700}}`), nil
+	}
+
+	started := make(chan string, 1)
+	runTrainCLI = func(_ Config, trainModelDir string) error {
+		started <- trainModelDir
+		meta := Meta{
+			TrainedAt:     "2024-01-02T00:00:00Z",
+			JobCount:      120,
+			SchemaVersion: ExpectedModelSchemaVersion,
+		}
+		data, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(trainModelDir, "meta.json"), data, 0644); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir, RetrainInterval: 50}
+	result, err := Predict(cfg, "", "proj", "RTX 4090", "python train.py")
+	if err != nil {
+		t.Fatalf("Predict: %v", err)
+	}
+	if result == nil || result.DurationS == nil || result.DurationS.Mean != 3600 {
+		t.Fatalf("unexpected prediction: %#v", result)
+	}
+
+	select {
+	case trainModelDir := <-started:
+		if trainModelDir == modelDir {
+			t.Fatalf("expected background retrain to use a temp model dir, got %q", trainModelDir)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background retrain did not start")
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		retrainedMeta, err := ReadMeta(cfg)
+		return err == nil && retrainedMeta.JobCount == 120
+	}, "background retrain did not finish swapping models")
+}
+
+func TestPredict_BlocksCurrentModelWhenSchemaChanges(t *testing.T) {
+	clearPredictionCache()
+	backgroundRetrains.mu.Lock()
+	backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+	backgroundRetrains.mu.Unlock()
+
+	originalRunPredictCLI := runPredictCLI
+	originalRunTrainCLI := runTrainCLI
+	t.Cleanup(func() {
+		runPredictCLI = originalRunPredictCLI
+		runTrainCLI = originalRunTrainCLI
+		clearPredictionCache()
+		backgroundRetrains.mu.Lock()
+		backgroundRetrains.states = make(map[string]*backgroundRetrainState)
+		backgroundRetrains.mu.Unlock()
+	})
+
+	modelDir := t.TempDir()
+	meta := Meta{TrainedAt: "2024-01-01T00:00:00Z", JobCount: 50, SchemaVersion: ExpectedModelSchemaVersion - 1}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(modelDir, "meta.json"), data, 0644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+
+	var predictCalls atomic.Int32
+	runPredictCLI = func(_ Config, _, _, _, _ string) ([]byte, error) {
+		predictCalls.Add(1)
+		return []byte(`{"duration_s":{"mean":3600,"std":60,"lower":3500,"upper":3700}}`), nil
+	}
+
+	started := make(chan string, 1)
+	runTrainCLI = func(_ Config, trainModelDir string) error {
+		started <- trainModelDir
+		meta := Meta{
+			TrainedAt:     "2024-01-02T00:00:00Z",
+			JobCount:      50,
+			SchemaVersion: ExpectedModelSchemaVersion,
+		}
+		data, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(trainModelDir, "meta.json"), data, 0644); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	cfg := Config{ProjectPath: "/tmp/job-estimator", ModelDir: modelDir}
+	result, err := Predict(cfg, "", "proj", "RTX 4090", "python train.py")
+	if err == nil {
+		t.Fatal("expected schema-mismatch prediction to fail")
+	}
+	if result != nil {
+		t.Fatalf("expected nil result on schema mismatch, got %#v", result)
+	}
+	if !strings.Contains(err.Error(), "current model use is blocked") {
+		t.Fatalf("error = %q, want schema-block message", err)
+	}
+	if predictCalls.Load() != 0 {
+		t.Fatalf("runPredictCLI calls = %d, want 0", predictCalls.Load())
+	}
+
+	select {
+	case trainModelDir := <-started:
+		if trainModelDir == modelDir {
+			t.Fatalf("expected schema rebuild to use a temp model dir, got %q", trainModelDir)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background schema rebuild did not start")
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		retrainedMeta, err := ReadMeta(cfg)
+		return err == nil && retrainedMeta.SchemaVersion == ExpectedModelSchemaVersion
+	}, "background schema rebuild did not finish swapping models")
 }
 
 func TestPredictBatchCachesResultsAcrossCalls(t *testing.T) {

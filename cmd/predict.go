@@ -20,7 +20,9 @@ var predictCmd = &cobra.Command{
 	Long: `Predict how long a job will take and how much memory it will use.
 
 Uses trained machine learning models based on historical job data.
-Models are automatically retrained when enough new jobs have completed.
+When models become stale, weft starts a background retrain and continues using
+the current compatible model. If the on-disk model schema is incompatible with
+the current code, prediction is blocked until the model is rebuilt.
 
 Examples:
   weft predict --host cool30 'uv run python train.py --epochs 50'
